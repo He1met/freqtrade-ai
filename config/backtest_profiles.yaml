@@ -1,0 +1,55 @@
+profiles:
+  quick_filter:
+    # Fast screening profile planned for Phase 1; Phase 0 does not run backtests.
+    description: 快速初筛，用少量主流币和较短时间窗口快速淘汰明显无效策略
+    symbols:
+      - BTC/USDT:USDT
+      - ETH/USDT:USDT
+      - SOL/USDT:USDT
+    timeframes:
+      - 15m
+      - 1h
+    windows:
+      - name: recent_90d
+        type: rolling
+        duration_days: 90
+    max_parallel_tasks: 1
+    timeout_minutes: 30
+
+  long_validation:
+    # Longer validation profile planned for later MVP work.
+    description: 长期验证，用更长周期验证策略稳定性
+    symbols:
+      - BTC/USDT:USDT
+      - ETH/USDT:USDT
+      - SOL/USDT:USDT
+      - XRP/USDT:USDT
+      - DOGE/USDT:USDT
+    timeframes:
+      - 1h
+      - 4h
+    windows:
+      - name: recent_365d
+        type: rolling
+        duration_days: 365
+      - name: recent_730d
+        type: rolling
+        duration_days: 730
+    max_parallel_tasks: 1
+    timeout_minutes: 60
+
+  random_window:
+    # Random windows help reduce overfitting once backtest orchestration exists.
+    description: 随机窗口验证，用于降低过拟合风险
+    symbols:
+      - BTC/USDT:USDT
+      - ETH/USDT:USDT
+    timeframes:
+      - 1h
+    windows:
+      - name: random_90d
+        type: random
+        duration_days: 90
+        samples: 5
+    max_parallel_tasks: 1
+    timeout_minutes: 45

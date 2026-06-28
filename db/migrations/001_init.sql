@@ -1,0 +1,28 @@
+-- Phase 0 placeholder for the Phase 1 PostgreSQL schema.
+-- This file intentionally does not create production tables yet.
+-- Phase 1 will turn this plan into reviewed migrations through separate Issues.
+
+-- Planned Phase 1 core tables:
+-- 1. strategies
+--    Strategy identity, lifecycle status, source, tags, and current version pointer.
+-- 2. strategy_generation_runs
+--    One AI strategy generation batch, including model, prompt metadata, counts, and status.
+-- 3. strategy_versions
+--    Strategy JSON blueprint, generated code snapshot, validation state, and file path.
+-- 4. market_data_files
+--    Freqtrade market data file index only; do not store candle rows in PostgreSQL.
+-- 5. backtest_runs
+--    Backtest batch metadata, profile snapshot, aggregate task counts, and status.
+-- 6. backtest_tasks
+--    One Freqtrade backtest task for a strategy version, symbol, timeframe, and time window.
+-- 7. backtest_results
+--    Parsed summary metrics and raw Freqtrade result JSON; do not store trade-level details.
+-- 8. strategy_scores
+--    Scoring snapshot for leaderboard display and candidate comparison.
+
+-- Phase 0 / Phase 1 storage guardrails:
+-- - Do not store real API keys in PostgreSQL.
+-- - Do not store exchange secrets in PostgreSQL.
+-- - Do not store K-line details in PostgreSQL.
+-- - Do not create complex configuration tables in Phase 1.
+-- - Do not implement live trading or dry-run trading tables in Phase 1.

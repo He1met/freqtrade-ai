@@ -1,0 +1,33 @@
+app:
+  # Application identity for logs, API metadata, and local development.
+  name: freqtrade-ai
+  # Phase 0 default environment. Override with APP_ENV in .env when needed.
+  env: dev
+
+paths:
+  # Reuse Freqtrade user_data layout instead of changing Freqtrade source code.
+  freqtrade_user_data: ./user_data
+  # AI-generated strategy files will be placed here in later phases.
+  strategy_output_dir: ./user_data/strategies/generated
+  # Freqtrade-managed market data files live here; this app only indexes them.
+  market_data_dir: ./user_data/data
+  # Parsed and archived backtest outputs are stored outside the database.
+  backtest_result_dir: ./reports/backtests
+  # Local application logs. Runtime log files are ignored by git.
+  log_dir: ./logs
+  # Generated Freqtrade config snapshots; do not store secrets in these files.
+  tmp_freqtrade_config_dir: ./tmp/freqtrade_configs
+
+database:
+  # PostgreSQL is planned for Phase 1; Phase 0 only keeps the connection shape.
+  enabled: true
+
+worker:
+  # Keep Phase 0 conservative and single-process; no Redis, Celery, Kafka, or RabbitMQ.
+  max_parallel_backtests: 1
+  task_poll_interval_seconds: 5
+
+security:
+  # Hard safety gates. Phase 0 must not enable dry-run or live trading.
+  allow_live_trading: false
+  allow_dry_run_trading: false

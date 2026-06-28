@@ -1,0 +1,28 @@
+default_model: mimo_main
+
+models:
+  mimo_main:
+    # Provider metadata only. The real API key must come from ENV.
+    provider: mimo
+    model: mimo-2.5-pro
+    # Placeholder endpoint; replace locally through environment-specific config.
+    base_url: https://api.example.com/v1
+    api_key_env: MIMO_API_KEY
+    # Limits document intended request sizing; no calls are made in Phase 0.
+    max_context_tokens: 200000
+    max_input_tokens: 120000
+    max_output_tokens: 16000
+    temperature: 0.7
+    supports_json: true
+
+  openai_backup:
+    # Backup provider metadata only. Do not commit real OpenAI API keys.
+    provider: openai
+    model: gpt-4.1
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    max_context_tokens: 100000
+    max_input_tokens: 60000
+    max_output_tokens: 12000
+    temperature: 0.5
+    supports_json: true

@@ -1,0 +1,21 @@
+exchange:
+  # Exchange metadata for later Freqtrade config generation.
+  name: okx
+  # Phase 0 stores intent only; it does not call exchange APIs.
+  market_type: futures
+  trading_mode: futures
+  margin_mode: isolated
+
+safety:
+  # Phase 0 does not enable Freqtrade dry-run or live trading.
+  dry_run_enabled: false
+  # Sandbox marks intended future safety posture, not an active runtime.
+  sandbox: true
+  allow_dry_run_trading: false
+  allow_live_trading: false
+
+credentials:
+  # ENV variable names only. Never put real API keys in YAML.
+  api_key_env: OKX_DEMO_API_KEY
+  api_secret_env: OKX_DEMO_API_SECRET
+  api_passphrase_env: OKX_DEMO_API_PASSPHRASE
