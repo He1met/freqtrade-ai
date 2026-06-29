@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Optional
 import os
 
 import yaml
@@ -22,6 +23,7 @@ class Settings(BaseModel):
     tmp_freqtrade_config_dir: Path = Field(default=Path("./tmp/freqtrade_configs"))
     max_parallel_backtests: int = 1
     task_poll_interval_seconds: int = 5
+    frequi_url: Optional[str] = None
     allow_live_trading: bool = False
     allow_dry_run_trading: bool = False
 
@@ -54,6 +56,7 @@ def get_settings() -> Settings:
     paths_section = app_config.get("paths", {})
     database_section = app_config.get("database", {})
     worker_section = app_config.get("worker", {})
+    frequi_section = app_config.get("frequi", {})
     security_section = app_config.get("security", {})
 
     return Settings(
@@ -72,6 +75,7 @@ def get_settings() -> Settings:
         tmp_freqtrade_config_dir=Path(paths_section.get("tmp_freqtrade_config_dir", "./tmp/freqtrade_configs")),
         max_parallel_backtests=worker_section.get("max_parallel_backtests", 1),
         task_poll_interval_seconds=worker_section.get("task_poll_interval_seconds", 5),
+        frequi_url=os.getenv("FREQUI_URL", frequi_section.get("url") or None),
         allow_live_trading=security_section.get("allow_live_trading", False),
         allow_dry_run_trading=security_section.get("allow_dry_run_trading", False),
     )
