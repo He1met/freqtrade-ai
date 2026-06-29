@@ -87,6 +87,31 @@ class BacktestRepository:
         )
         return list(self.db.scalars(statement).all())
 
+    def claim_next_pending_task(self, run_id: int) -> Optional[BacktestTask]:
+        statement = (
+            select(BacktestTask)
+            .where(
+                BacktestTask.backtest_run_id == run_id,
+                BacktestTask.status == "pending",
+            )
+            .order_by(BacktestTask.created_at.asc(), BacktestTask.id.asc())
+            .limit(1)
+        )
+        task = self.db.scalars(statement).first()
+        if task is None:
+            return None
+
+        task.status = "running"
+        task.started_at = datetime.now(timezone.utc)
+        run = self.get_run(run_id)
+        if run is not None and run.status == "pending":
+            run.status = "running"
+            run.started_at = task.started_at
+
+        self.db.commit()
+        self.db.refresh(task)
+        return task
+
     def update_task_status(
         self,
         task_id: int,
