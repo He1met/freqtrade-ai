@@ -27,6 +27,10 @@ worker:
   max_parallel_backtests: 1
   task_poll_interval_seconds: 5
 
+frequi:
+  # Optional FreqUI URL. Keep empty to show the local placeholder in the frontend.
+  url: ""
+
 security:
   # Hard safety gates. Phase 0 must not enable dry-run or live trading.
   allow_live_trading: false
