@@ -102,6 +102,8 @@ a {
 }
 
 .metric,
+.overview-panel,
+.notice,
 .empty-state,
 .detail-list,
 .table-shell {
@@ -124,6 +126,33 @@ a {
   font-size: 30px;
 }
 
+.overview-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 14px;
+}
+
+.overview-panel,
+.notice {
+  padding: 18px;
+}
+
+.overview-panel h2 {
+  margin: 0 0 10px;
+  font-size: 17px;
+}
+
+.overview-panel p {
+  margin: 0;
+  color: #526159;
+}
+
+.notice {
+  margin-bottom: 14px;
+  color: #6f4d1f;
+}
+
 .table-shell {
   overflow-x: auto;
 }
@@ -139,6 +168,12 @@ td {
   padding: 13px 14px;
   text-align: left;
   white-space: nowrap;
+}
+
+td.path-cell {
+  max-width: 340px;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 th {
@@ -215,6 +250,10 @@ th {
 
   .metric-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .overview-grid {
+    grid-template-columns: 1fr;
   }
 }
 
