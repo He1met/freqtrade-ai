@@ -18,6 +18,11 @@ from app.schemas.strategy import (
     StrategyVersionCreate,
     StrategyVersionRead,
 )
+from app.schemas.strategy_blueprint import (
+    IndicatorBlueprint,
+    SignalRule,
+    StrategyBlueprint,
+)
 from app.schemas.strategy_generation_run import (
     GenerationRunStatus,
     StrategyGenerationRunCreate,
@@ -36,7 +41,10 @@ __all__ = [
     "BacktestTaskRead",
     "BacktestTaskStatusUpdate",
     "GenerationRunStatus",
+    "IndicatorBlueprint",
+    "SignalRule",
     "StrategyCreate",
+    "StrategyBlueprint",
     "StrategyGenerationRunCreate",
     "StrategyGenerationRunRead",
     "StrategyGenerationRunStatusUpdate",
