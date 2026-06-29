@@ -1,0 +1,46 @@
+from app.adapters.freqtrade.market_data_index import FreqtradeMarketDataIndex
+
+
+def test_indexes_supported_market_data_files(tmp_path) -> None:
+    exchange_dir = tmp_path / "okx"
+    nested_dir = exchange_dir / "futures"
+    nested_dir.mkdir(parents=True)
+    spot_file = exchange_dir / "ETH_USDT-1h.feather"
+    futures_file = nested_dir / "BTC_USDT_USDT-15m-futures.feather"
+    ignored_file = exchange_dir / "README.txt"
+    spot_file.write_bytes(b"spot")
+    futures_file.write_bytes(b"futures")
+    ignored_file.write_text("ignored")
+
+    files = FreqtradeMarketDataIndex(market_data_dir=tmp_path).list_files()
+
+    assert [(item.exchange, item.pair, item.timeframe, item.data_format) for item in files] == [
+        ("okx", "ETH/USDT", "1h", "feather"),
+        ("okx", "BTC/USDT:USDT", "15m", "feather"),
+    ]
+    assert files[0].relative_path.as_posix() == "okx/ETH_USDT-1h.feather"
+    assert files[0].file_size_bytes == 4
+
+
+def test_filters_by_exchange_and_missing_directory(tmp_path) -> None:
+    okx_dir = tmp_path / "okx"
+    binance_dir = tmp_path / "binance"
+    okx_dir.mkdir()
+    binance_dir.mkdir()
+    okx_dir.joinpath("BTC_USDT-5m.json.gz").write_text("{}")
+    binance_dir.joinpath("ETH_USDT-1h.parquet").write_text("data")
+
+    files = FreqtradeMarketDataIndex(market_data_dir=tmp_path).list_files(exchange="okx")
+
+    assert len(files) == 1
+    assert files[0].exchange == "okx"
+    assert files[0].data_format == "json.gz"
+    assert FreqtradeMarketDataIndex(market_data_dir=tmp_path / "missing").list_files() == []
+
+
+def test_skips_unparseable_filenames(tmp_path) -> None:
+    exchange_dir = tmp_path / "okx"
+    exchange_dir.mkdir()
+    exchange_dir.joinpath("BTC_USDT.feather").write_bytes(b"missing timeframe")
+
+    assert FreqtradeMarketDataIndex(market_data_dir=tmp_path).list_files() == []
