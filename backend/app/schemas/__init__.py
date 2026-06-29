@@ -29,6 +29,11 @@ from app.schemas.strategy_generation_run import (
     StrategyGenerationRunRead,
     StrategyGenerationRunStatusUpdate,
 )
+from app.schemas.strategy_score import (
+    StrategyRankingEntry,
+    StrategyScoreCreate,
+    StrategyScoreRead,
+)
 
 __all__ = [
     "BacktestResultCreate",
@@ -48,7 +53,10 @@ __all__ = [
     "StrategyGenerationRunCreate",
     "StrategyGenerationRunRead",
     "StrategyGenerationRunStatusUpdate",
+    "StrategyRankingEntry",
     "StrategyRead",
+    "StrategyScoreCreate",
+    "StrategyScoreRead",
     "StrategySource",
     "StrategyStatus",
     "StrategyValidationStatus",
