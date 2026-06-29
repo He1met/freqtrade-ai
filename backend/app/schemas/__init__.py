@@ -1,3 +1,14 @@
+from app.schemas.backtest import (
+    BacktestResultCreate,
+    BacktestResultRead,
+    BacktestRunCreate,
+    BacktestRunRead,
+    BacktestRunStatusUpdate,
+    BacktestStatus,
+    BacktestTaskCreate,
+    BacktestTaskRead,
+    BacktestTaskStatusUpdate,
+)
 from app.schemas.strategy import (
     StrategyCreate,
     StrategyRead,
@@ -15,6 +26,15 @@ from app.schemas.strategy_generation_run import (
 )
 
 __all__ = [
+    "BacktestResultCreate",
+    "BacktestResultRead",
+    "BacktestRunCreate",
+    "BacktestRunRead",
+    "BacktestRunStatusUpdate",
+    "BacktestStatus",
+    "BacktestTaskCreate",
+    "BacktestTaskRead",
+    "BacktestTaskStatusUpdate",
     "GenerationRunStatus",
     "StrategyCreate",
     "StrategyGenerationRunCreate",
