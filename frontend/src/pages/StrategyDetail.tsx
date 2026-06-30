@@ -6,6 +6,15 @@ export function StrategyDetail() {
   const { strategyId } = useParams();
   const { data, source, isLoading } = useMvpData();
   const strategy = data.strategies.find((item) => item.id === strategyId);
+  const currentVersionId = strategy?.currentVersion?.id;
+  const validationErrors = strategy?.currentVersion?.validationErrors ?? [];
+  const failureReasons = data.failureReasons.filter((reason) => {
+    if (reason.strategyId !== strategy?.id) {
+      return false;
+    }
+
+    return !currentVersionId || reason.strategyVersionId === currentVersionId;
+  });
 
   if (!strategy) {
     return (
@@ -57,6 +66,47 @@ export function StrategyDetail() {
           <dd>{strategy.tags.join(", ") || "none"}</dd>
         </div>
       </dl>
+      <section className="detail-section">
+        <div className="section-header">
+          <h2>Validation Errors</h2>
+          <span>{validationErrors.length}</span>
+        </div>
+        {validationErrors.length > 0 ? (
+          <ul className="issue-list">
+            {validationErrors.map((error) => (
+              <li key={`${error.field ?? "strategy"}-${error.code ?? error.message}`}>
+                <strong>{error.field ?? "strategy"}</strong>
+                <span>{error.message}</span>
+                {error.code ? <code>{error.code}</code> : null}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <div className="empty-state">No validation errors recorded for this version.</div>
+        )}
+      </section>
+      <section className="detail-section">
+        <div className="section-header">
+          <h2>Failure Reasons</h2>
+          <span>{failureReasons.length}</span>
+        </div>
+        {failureReasons.length > 0 ? (
+          <ul className="issue-list">
+            {failureReasons.map((reason) => (
+              <li key={reason.id}>
+                <div className="reason-heading">
+                  <strong>{reason.stage}</strong>
+                  <span className={`severity severity-${reason.severity}`}>{reason.severity}</span>
+                </div>
+                <span>{reason.message}</span>
+                <code>{reason.reasonType}</code>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <div className="empty-state">No failure reasons recorded for this version.</div>
+        )}
+      </section>
     </section>
   );
 }
