@@ -24,6 +24,8 @@ logs/*
 !logs/.gitkeep
 reports/backtests/*
 !reports/backtests/.gitkeep
+reports/spikes/*
+!reports/spikes/.gitkeep
 tmp/*
 !tmp/.gitkeep
 !tmp/freqtrade_configs/

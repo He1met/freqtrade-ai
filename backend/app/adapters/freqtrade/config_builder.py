@@ -66,9 +66,16 @@ class FreqtradeConfigBuilder:
                 "pair_whitelist": [pair],
                 "pair_blacklist": [],
             },
+            "pairlists": [{"method": "StaticPairList"}],
             "strategy": strategy,
             "user_data_dir": str(snapshot.get("user_data_dir", get_settings().freqtrade_user_data)),
             "datadir": str(snapshot.get("datadir", get_settings().market_data_dir)),
+            "bot_name": self._optional_text(
+                snapshot,
+                "bot_name",
+                "freqtrade_ai_backtest",
+            ),
+            "initial_state": "stopped",
             "internals": {"process_throttle_secs": 5},
         }
 
