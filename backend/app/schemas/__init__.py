@@ -23,6 +23,14 @@ from app.schemas.strategy_blueprint import (
     SignalRule,
     StrategyBlueprint,
 )
+from app.schemas.strategy_failure_reason import (
+    StrategyFailureReasonCreate,
+    StrategyFailureReasonFilter,
+    StrategyFailureReasonRead,
+    StrategyFailureReasonType,
+    StrategyFailureSeverity,
+    StrategyFailureStage,
+)
 from app.schemas.strategy_generation_run import (
     GenerationRunStatus,
     StrategyGenerationRunCreate,
@@ -50,6 +58,12 @@ __all__ = [
     "SignalRule",
     "StrategyCreate",
     "StrategyBlueprint",
+    "StrategyFailureReasonCreate",
+    "StrategyFailureReasonFilter",
+    "StrategyFailureReasonRead",
+    "StrategyFailureReasonType",
+    "StrategyFailureSeverity",
+    "StrategyFailureStage",
     "StrategyGenerationRunCreate",
     "StrategyGenerationRunRead",
     "StrategyGenerationRunStatusUpdate",
