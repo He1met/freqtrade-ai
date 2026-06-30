@@ -15,6 +15,34 @@
 - 回测结果解析测试。
 - PostgreSQL repository 测试。
 - 评分算法测试。
+- MVP smoke 验收命令：
+
+```bash
+python3 scripts/smoke_mvp.py --offline --tmp-dir /tmp/freqtrade-ai-smoke
+```
+
+该命令使用临时 SQLite、fake strategy provider、fixture backtest result 和现有解析/评分/排行榜实现，验证 AI 策略生成到前端构建的 Phase 1 MVP 闭环。命令会输出每个关键步骤的 `RUN` / `PASS` / `FAIL` 状态，并在失败时打印具体失败步骤。
+
+真实实现覆盖：
+
+- 策略蓝图持久化、策略版本写入和生成策略文件。
+- 回测任务生命周期、结果 JSON 解析和 `backtest_results` 入库。
+- 策略评分服务和排行榜排序。
+- 前端 TypeScript build。
+
+fixture / fake 覆盖：
+
+- 策略生成使用 `FakeStrategyBlueprintProvider`，不调用真实 LLM。
+- 回测使用 fixture runner 写入 Freqtrade 形状 JSON，不调用真实 Freqtrade CLI。
+- 数据库使用 `--tmp-dir` 下的临时 SQLite，不连接生产数据库。
+
+限制和禁止项：
+
+- 不连接真实交易所，不下载 K 线。
+- 不执行 dry-run、live trading 或真实下单。
+- 不读取或写入真实 API key。
+- 不引入 Redis、Celery、Kafka、RabbitMQ。
+- 不修改 Freqtrade 源码。
 
 ## 回归策略
 
