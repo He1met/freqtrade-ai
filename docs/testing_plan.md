@@ -5,7 +5,8 @@
 - 后端 `/health` 使用 pytest 验证。
 - YAML 配置必须能被解析。
 - 前端必须能通过 TypeScript 构建。
-- 禁止项扫描：不出现 Redis、Celery、Kafka、RabbitMQ、真实 API Key、实盘交易模块、模拟盘交易模块。
+- 禁止项扫描：不出现 Redis、Celery、Kafka、RabbitMQ、真实 API Key、实盘交易模块、
+  模拟盘交易模块。
 
 ## Phase 1
 
@@ -21,7 +22,9 @@
 python3 scripts/smoke_mvp.py --offline --tmp-dir /tmp/freqtrade-ai-smoke
 ```
 
-该命令使用临时 SQLite、fake strategy provider、fixture backtest result 和现有解析/评分/排行榜实现，验证 AI 策略生成到前端构建的 Phase 1 MVP 闭环。命令会输出每个关键步骤的 `RUN` / `PASS` / `FAIL` 状态，并在失败时打印具体失败步骤。
+该命令使用临时 SQLite、fake strategy provider、fixture backtest result 和现有解析/评分/
+排行榜实现，验证 AI 策略生成到前端构建的 Phase 1 MVP 闭环。命令会输出每个关键步骤的
+`RUN` / `PASS` / `FAIL` 状态，并在失败时打印具体失败步骤。
 
 真实实现覆盖：
 
@@ -47,3 +50,16 @@ fixture / fake 覆盖：
 ## 回归策略
 
 每个 PR 至少运行受影响模块测试。阶段门 PR 必须运行完整验证清单。
+
+## Phase 2 Real Freqtrade Spike
+
+Phase 2 的第一个 Spike 验证真实 Freqtrade CLI 是否能在本地已有数据上运行单策略
+backtesting：
+
+```bash
+python3 scripts/spike_real_freqtrade_backtest.py
+```
+
+该命令只使用本地已有 `user_data/data` 文件，不下载 K 线、不连接真实交易所、不执行
+dry-run 或 live trading。若本地缺少 `freqtrade` 命令或行情数据，命令会输出
+`BLOCKED` 并在 `reports/spikes/phase2_real_freqtrade_backtest_latest.md` 写入原因。

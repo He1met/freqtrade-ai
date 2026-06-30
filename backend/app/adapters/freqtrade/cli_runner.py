@@ -89,18 +89,21 @@ class FreqtradeCliRunner:
         return args
 
     def run(self, command: FreqtradeCommand) -> FreqtradeCommandResult:
-        args = self.build_args(command)
-        completed = self._executor(args, command.cwd, command.timeout_seconds)
-        result = FreqtradeCommandResult(
-            return_code=completed.returncode,
-            stdout=completed.stdout or "",
-            stderr=completed.stderr or "",
-        )
+        result = self.run_unchecked(command)
         if result.return_code != 0:
             raise FreqtradeCommandError(
                 f"Freqtrade command '{command.command}' exited with code {result.return_code}"
             )
         return result
+
+    def run_unchecked(self, command: FreqtradeCommand) -> FreqtradeCommandResult:
+        args = self.build_args(command)
+        completed = self._executor(args, command.cwd, command.timeout_seconds)
+        return FreqtradeCommandResult(
+            return_code=completed.returncode,
+            stdout=completed.stdout or "",
+            stderr=completed.stderr or "",
+        )
 
     def _validate_command(self, command: FreqtradeCommand) -> None:
         if command.command not in ALLOWED_COMMAND_OPTIONS:
