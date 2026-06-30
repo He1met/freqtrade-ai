@@ -17,6 +17,34 @@ Phase 0 只初始化项目治理与工程骨架：
 
 Phase 0 不做策略生成、不执行回测、不调用交易所 API、不做实盘或模拟盘交易、不引入 Redis / Celery / Kafka / RabbitMQ。
 
+## Phase 1 离线 MVP 状态
+
+Phase 1 离线 MVP 已完成验收。当前闭环可在本地离线模式完成：
+
+- fake provider 生成策略蓝图。
+- 受控目录写入生成策略文件。
+- fixture runner 生成 Freqtrade 形状的回测结果。
+- 后端解析回测摘要、保存结果、计算评分并输出排行榜。
+- 前端 MVP 页面可构建并展示核心数据。
+
+验收命令：
+
+```bash
+python3 scripts/smoke_mvp.py --offline --tmp-dir /tmp/freqtrade-ai-smoke
+```
+
+完整验收状态见 [phase1_acceptance.md](docs/phase1_acceptance.md)。
+
+当前限制：
+
+- 策略生成使用 fake provider，不调用真实 LLM。
+- 回测执行使用 fixture runner，不执行真实 Freqtrade CLI。
+- 验收数据库使用临时 SQLite，不连接生产数据库。
+- 不支持 dry-run / live trading。
+- 不连接真实交易所，不下载真实行情，不执行真实下单。
+- 不引入 Redis / Celery / Kafka / RabbitMQ。
+- 不修改 Freqtrade 源码。
+
 ## 启动后端
 
 ```bash

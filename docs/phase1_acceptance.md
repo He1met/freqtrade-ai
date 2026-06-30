@@ -1,5 +1,26 @@
 # Phase 1 验收说明
 
+## 当前状态
+
+Phase 1 离线 MVP 已完成验收。验收基于执行包 #67 和 PR #73 的 smoke 结果，并已在 #29 写入验收结论后关闭。
+
+验收结果：
+
+- smoke 命令：PASS
+- backend pytest：46 passed
+- frontend build：PASS
+- compileall：PASS
+- git diff check：PASS
+
+收口状态：
+
+- #62 / PR #71 覆盖策略评分与排行榜闭环，替代 #36、#48。
+- #63 / PR #68 覆盖策略生成最小闭环，替代 #37、#38、#39、#40、#41。
+- #64 / PR #69 覆盖 Freqtrade Adapter 与回测配置执行包 A，替代 #42、#43、#44。
+- #65 / PR #70 覆盖回测任务执行与结果解析包 B，替代 #45、#46、#47。
+- #66 / PR #72 覆盖前端 MVP 展示闭环，替代 #49、#50、#51、#52、#53。
+- #67 / PR #73 覆盖 MVP smoke 验收闭环，替代 #55、#29。
+
 ## MVP smoke 命令
 
 从仓库根目录运行离线 smoke：
@@ -27,6 +48,7 @@ python3 scripts/smoke_mvp.py --offline --tmp-dir /tmp/freqtrade-ai-smoke
 - 策略生成使用 fake provider，不调用真实 LLM。
 - 回测使用 fixture runner 写入 Freqtrade 形状 JSON，不调用真实 Freqtrade CLI。
 - 数据库使用 `--tmp-dir` 下的临时 SQLite，不连接生产数据库。
+- smoke 不连接真实交易所，不下载真实行情，不执行真实下单。
 
 ## 限制和禁止项
 
