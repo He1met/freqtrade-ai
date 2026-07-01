@@ -18,6 +18,9 @@ from app.services.strategy_generation import FakeStrategyBlueprintProvider
 from app.services.strategy_renderer import StrategyCodeRenderer
 
 
+# This module is a Phase 2 spike, not the production backtesting workflow. It
+# proves whether the current adapter boundaries can drive a real local
+# Freqtrade CLI run when the user's machine already has market data available.
 REQUIRED_METRIC_LABELS = {
     "profit_total": "total profit",
     "max_drawdown_pct": "max drawdown",
@@ -56,6 +59,8 @@ class SpikeReport:
 
 def find_freqtrade_binary(explicit_binary: Optional[str] = None) -> Optional[Path]:
     if explicit_binary:
+        # An explicit path is treated as a contract. If it is wrong, report a
+        # blocker instead of silently falling back to another freqtrade binary.
         candidate = Path(explicit_binary).expanduser()
         if candidate.exists() and candidate.is_file():
             return candidate.resolve()
@@ -137,6 +142,8 @@ def run_spike(config: SpikeConfig) -> SpikeReport:
     if binary is None:
         report.blockers.append("freqtrade command was not found")
 
+    # Local market data is a hard prerequisite. The spike must not download
+    # candles or connect to an exchange just to make the command pass.
     market_data_dir = resolve_repo_path(config.market_data_dir)
     market_data_file = select_market_data_file(market_data_dir)
     report.market_data_file = market_data_file
@@ -164,6 +171,8 @@ def run_spike(config: SpikeConfig) -> SpikeReport:
 
     datadir = market_data_dir / market_data_file.exchange
     snapshot = {
+        # The config snapshot intentionally contains only backtesting inputs
+        # that can be derived from local files and generated strategy metadata.
         "profile_name": "phase2_real_freqtrade_spike",
         "pair": market_data_file.pair,
         "timeframe": market_data_file.timeframe,
@@ -202,6 +211,8 @@ def run_spike(config: SpikeConfig) -> SpikeReport:
     report.result_path = execution.result_path
 
     if execution.command_result.return_code != 0:
+        # Non-zero exits are FAILED, not BLOCKED, because all local
+        # prerequisites were present and Freqtrade actually ran.
         report.status = "FAILED"
         report.failures.append(
             f"freqtrade backtesting exited with code {execution.command_result.return_code}"

@@ -12,6 +12,13 @@ SCORING_VERSION = "phase1-mvp-v1"
 
 
 class StrategyScoringService:
+    """Calculates the current MVP ranking score from parsed backtest metrics.
+
+    Phase 2 Issue #84 should introduce a new scoring version instead of
+    mutating this formula in place, so existing Phase 1 rankings remain
+    explainable and reproducible.
+    """
+
     def __init__(self, db: Session, scoring_version: str = SCORING_VERSION) -> None:
         self.db = db
         self.repository = StrategyScoreRepository(db)
@@ -49,6 +56,8 @@ class StrategyScoringService:
         )
 
     def calculate_component_scores(self, result: BacktestResult) -> dict[str, float]:
+        # Missing metrics score as zero instead of raising so ranking can stay
+        # available while parsers or fixture data are incomplete.
         profit_score = self._score_profit(result.profit_pct)
         risk_score = self._score_risk(result.max_drawdown_pct)
         stability_score = self._score_stability(result.win_rate)

@@ -21,6 +21,8 @@ from app.services.strategy_renderer import StrategyCodeRenderer
 
 
 class StrategyBlueprintProvider(Protocol):
+    """Stable boundary for fake, mock, and real LLM-backed blueprint providers."""
+
     provider_name: str
     model_name: str
 
@@ -38,6 +40,12 @@ class LLMProviderResponseError(RuntimeError):
 
 @dataclass(frozen=True)
 class LLMProviderConfig:
+    """ENV-only provider configuration.
+
+    The provider reads secret values from the environment at call time. Config
+    objects store environment variable names and public endpoint metadata only.
+    """
+
     provider_name: str
     model_name: str
     base_url: str
@@ -82,7 +90,11 @@ class LLMHTTPClient(Protocol):
 
 
 class OpenAICompatibleStrategyBlueprintProvider:
-    """Provider boundary for OpenAI-compatible chat completion APIs."""
+    """Provider boundary for OpenAI-compatible chat completion APIs.
+
+    This class intentionally owns the vendor-shaped HTTP payload and response
+    parsing so generation services do not depend on provider-specific fields.
+    """
 
     def __init__(self, config: LLMProviderConfig, http_client: Optional[LLMHTTPClient] = None) -> None:
         self.config = config
@@ -94,6 +106,9 @@ class OpenAICompatibleStrategyBlueprintProvider:
         if requested_count <= 0:
             return []
 
+        # Keep fail-closed behavior here: real providers may only run when the
+        # configured secret exists in ENV, and the secret is never copied into
+        # the payload, logs, database, or exception message.
         api_key = os.environ.get(self.config.api_key_env)
         if not api_key:
             raise LLMProviderConfigurationError(
@@ -132,6 +147,8 @@ class OpenAICompatibleStrategyBlueprintProvider:
         return f"{self.config.base_url.rstrip('/')}/{self.config.endpoint_path.lstrip('/')}"
 
     def _build_payload(self, prompt_summary: str, requested_count: int) -> dict[str, Any]:
+        # The prompt asks for a JSON object so validation can happen at the
+        # StrategyBlueprint schema boundary before any code is rendered.
         payload: dict[str, Any] = {
             "model": self.config.model_name,
             "messages": [
@@ -159,6 +176,8 @@ class OpenAICompatibleStrategyBlueprintProvider:
         return payload
 
     def _extract_blueprints(self, raw_response: dict[str, Any]) -> list[dict[str, Any]]:
+        """Accept the response shapes used by chat APIs and test doubles."""
+
         content: Any = raw_response
         choices = raw_response.get("choices")
         if isinstance(choices, list) and choices:
@@ -188,6 +207,8 @@ def _optional_int_from_env(name: str) -> Optional[int]:
 
 
 class FakeStrategyBlueprintProvider:
+    """Offline provider used by tests, smoke checks, and local fallback mode."""
+
     provider_name = "fake"
     model_name = "offline-fixture"
 
@@ -216,12 +237,16 @@ def build_strategy_blueprint_provider_from_env(
     http_client: Optional[LLMHTTPClient] = None,
 ) -> StrategyBlueprintProvider:
     config = LLMProviderConfig.from_env()
+    # The fake provider remains the default so local tests and smoke commands
+    # never require network access or a real LLM key.
     if config.provider_name == "fake":
         return FakeStrategyBlueprintProvider()
     return OpenAICompatibleStrategyBlueprintProvider(config=config, http_client=http_client)
 
 
 class StrategyGenerationService:
+    """Coordinates one generation run without embedding provider details."""
+
     def __init__(
         self,
         db: Session,
@@ -236,6 +261,8 @@ class StrategyGenerationService:
         self.file_manager = file_manager or StrategyFileManager()
 
     def run_once(self, prompt_summary: str, requested_count: int = 1) -> list[int]:
+        # Persist the run before provider execution so failures are visible to
+        # the UI and later quality-analysis tasks.
         run = self.run_repository.create(
             StrategyGenerationRunCreate(
                 provider=self.provider.provider_name,
@@ -282,6 +309,8 @@ class StrategyGenerationService:
     ) -> list[int]:
         version_ids: list[int] = []
         for index, blueprint in enumerate(blueprints, start=1):
+            # Rendering and file writes stay behind dedicated boundaries so the
+            # service can later insert validation/static-review steps here.
             code = self.renderer.render(blueprint)
             path = self.file_manager.write_strategy_file(
                 blueprint.class_name,

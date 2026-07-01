@@ -9,6 +9,9 @@ from app.schemas.strategy_static_review import (
     StrategyStaticReviewSeverity,
 )
 
+# Static review is a deterministic pre-flight check for generated strategy
+# code. It is not a sandbox and does not prove a strategy is safe to trade; it
+# blocks obvious policy violations before code reaches Freqtrade backtesting.
 
 FORBIDDEN_IMPORTS: dict[str, tuple[StrategyStaticReviewCategory, str]] = {
     "aiohttp": ("network_access", "Network clients are not allowed in generated strategies."),
@@ -49,6 +52,8 @@ FILE_CALL_SUFFIXES = (".read_text", ".write_text", ".read_bytes", ".write_bytes"
 
 
 class StrategyStaticReviewService:
+    """Runs AST-based policy checks and converts findings into failure reasons."""
+
     def review_code(
         self,
         code: str,
@@ -112,6 +117,12 @@ class StrategyStaticReviewService:
 
 
 class _StaticReviewVisitor(ast.NodeVisitor):
+    """Collects static findings from syntax tree nodes.
+
+    The visitor favors explicit, high-signal rules over broad string matching
+    so generated strategy code can be reviewed without executing it.
+    """
+
     def __init__(self) -> None:
         self.findings: list[StrategyStaticReviewFinding] = []
 
@@ -191,6 +202,8 @@ class _StaticReviewVisitor(ast.NodeVisitor):
         )
 
     def _record_network_call(self, call_name: str, node: ast.AST) -> None:
+        # Call detection complements forbidden imports because a strategy could
+        # receive a network client through another name in future extensions.
         if not call_name.startswith(NETWORK_CALL_PREFIXES):
             return
         if not call_name.endswith(NETWORK_CALL_SUFFIXES) and call_name not in NETWORK_CALL_PREFIXES:
@@ -218,6 +231,8 @@ class _StaticReviewVisitor(ast.NodeVisitor):
             )
 
     def _record_shift_lookahead(self, call_name: str, node: ast.Call) -> None:
+        # Negative shift is a common lookahead-bias pattern in dataframe-based
+        # strategies because it can reference future candles.
         if call_name != "shift" and not call_name.endswith(".shift"):
             return
         periods = _first_call_argument(node, "periods")
@@ -254,6 +269,8 @@ class _StaticReviewVisitor(ast.NodeVisitor):
 
 
 def _node_name(node: ast.AST) -> Optional[str]:
+    """Return a dotted name for simple Name/Attribute expressions."""
+
     if isinstance(node, ast.Name):
         return node.id
     if isinstance(node, ast.Attribute):
