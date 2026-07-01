@@ -24,7 +24,7 @@ function formatDiffValue(value: unknown) {
 
 export function StrategyDetail() {
   const { strategyId } = useParams();
-  const { data, source, isLoading } = useMvpData();
+  const { data, source, isLoading, error } = useMvpData();
   const strategy = data.strategies.find((item) => item.id === strategyId);
   const currentVersionId = strategy?.currentVersion?.id;
   const versionLineage = data.versionLineage
@@ -53,6 +53,7 @@ export function StrategyDetail() {
           <h1>Strategy Detail</h1>
           <span className="status-pill">{isLoading ? "Loading" : source}</span>
         </header>
+        {error ? <div className="notice">API data unavailable. Showing fallback data. {error}</div> : null}
         <div className="empty-state">Strategy not found.</div>
       </section>
     );
@@ -64,6 +65,7 @@ export function StrategyDetail() {
         <h1>{strategy.name}</h1>
         <span className="status-pill">{isLoading ? "Loading" : source}</span>
       </header>
+      {error ? <div className="notice">API data unavailable. Showing fallback data. {error}</div> : null}
       <dl className="detail-list">
         <div>
           <dt>ID</dt>
