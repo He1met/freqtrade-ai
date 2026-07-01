@@ -67,11 +67,34 @@ export type RankingEntry = {
   strategyName: string;
   versionNumber: number;
   filePath: string;
+  scoringVersion: string | null;
   totalScore: number;
+  rawTotalScore: number | null;
   profitScore: number | null;
   riskScore: number | null;
   stabilityScore: number | null;
   qualityScore: number | null;
+  scoreBreakdown: RankingScoreBreakdownItem[];
+  elimination: RankingEliminationSummary;
+  warnings: RankingSignalSummary[];
+};
+
+export type RankingScoreBreakdownItem = {
+  name: string;
+  score: number;
+  weight: number;
+  contribution: number;
+};
+
+export type RankingSignalSummary = {
+  code: string | null;
+  severity: string;
+  message: string;
+};
+
+export type RankingEliminationSummary = {
+  eliminated: boolean;
+  reasons: RankingSignalSummary[];
 };
 
 export type StrategyFailureReasonSummary = {

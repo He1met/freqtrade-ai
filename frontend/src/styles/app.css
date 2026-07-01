@@ -176,6 +176,90 @@ td.path-cell {
   white-space: normal;
 }
 
+td.breakdown-cell,
+td.reason-cell {
+  min-width: 240px;
+  white-space: normal;
+}
+
+.primary-cell {
+  font-weight: 700;
+}
+
+.secondary-cell {
+  color: #657269;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.score-cell {
+  font-size: 18px;
+  font-weight: 800;
+}
+
+.score-breakdown {
+  display: grid;
+  grid-template-columns: minmax(88px, 1fr) 52px 58px;
+  gap: 8px;
+  align-items: center;
+  max-width: 300px;
+  border-bottom: 1px solid #edf0eb;
+  padding: 4px 0;
+}
+
+.score-breakdown:last-child {
+  border-bottom: 0;
+}
+
+.score-breakdown span,
+.score-breakdown em {
+  color: #657269;
+  font-style: normal;
+}
+
+.score-breakdown strong,
+.score-breakdown em {
+  text-align: right;
+}
+
+.outcome-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  border-radius: 999px;
+  padding: 5px 10px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.outcome-pill.passed {
+  background: #e7f4ec;
+  color: #1d6238;
+}
+
+.outcome-pill.eliminated {
+  background: #fdebec;
+  color: #9d1f2d;
+}
+
+.reason-line {
+  max-width: 320px;
+  border-left: 3px solid #9ab09f;
+  color: #526159;
+  padding: 3px 0 3px 8px;
+  overflow-wrap: anywhere;
+}
+
+.reason-line.error {
+  border-color: #c93445;
+  color: #7f1d2d;
+}
+
+.reason-line.warning {
+  border-color: #d3a02f;
+  color: #6f4d1f;
+}
+
 th {
   color: #526159;
   font-size: 13px;

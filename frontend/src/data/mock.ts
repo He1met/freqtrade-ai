@@ -120,11 +120,30 @@ export const mockMvpData: MvpData = {
       strategyName: "AiRsiEma001",
       versionNumber: 3,
       filePath: "user_data/strategies/AiRsiEma001.py",
+      scoringVersion: "phase2-quality-v1",
       totalScore: 82.4,
+      rawTotalScore: 82.4,
       profitScore: 78,
       riskScore: 86,
       stabilityScore: 80,
       qualityScore: 85,
+      scoreBreakdown: [
+        { name: "profit_score", score: 78, weight: 0.35, contribution: 27.3 },
+        { name: "risk_score", score: 86, weight: 0.25, contribution: 21.5 },
+        { name: "stability_score", score: 80, weight: 0.15, contribution: 12 },
+        { name: "quality_score", score: 85, weight: 0.25, contribution: 21.25 },
+      ],
+      elimination: {
+        eliminated: false,
+        reasons: [],
+      },
+      warnings: [
+        {
+          code: "drawdown_warning",
+          severity: "warning",
+          message: "Maximum drawdown is elevated but below elimination threshold.",
+        },
+      ],
     },
     {
       rank: 2,
@@ -132,11 +151,30 @@ export const mockMvpData: MvpData = {
       strategyName: "AiBreakout001",
       versionNumber: 1,
       filePath: "user_data/strategies/AiBreakout001.py",
-      totalScore: 61.5,
+      scoringVersion: "phase2-quality-v1",
+      totalScore: 0,
+      rawTotalScore: 61.5,
       profitScore: 58,
       riskScore: 64,
       stabilityScore: 57,
       qualityScore: 67,
+      scoreBreakdown: [
+        { name: "profit_score", score: 58, weight: 0.35, contribution: 20.3 },
+        { name: "risk_score", score: 64, weight: 0.25, contribution: 16 },
+        { name: "stability_score", score: 57, weight: 0.15, contribution: 8.55 },
+        { name: "quality_score", score: 67, weight: 0.25, contribution: 16.75 },
+      ],
+      elimination: {
+        eliminated: true,
+        reasons: [
+          {
+            code: "recorded_failure_reasons",
+            severity: "error",
+            message: "Strategy version has recorded error-level failure reasons.",
+          },
+        ],
+      },
+      warnings: [],
     },
   ],
   failureReasons: [
