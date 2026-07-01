@@ -63,3 +63,43 @@ python3 scripts/spike_real_freqtrade_backtest.py
 该命令只使用本地已有 `user_data/data` 文件，不下载 K 线、不连接真实交易所、不执行
 dry-run 或 live trading。若本地缺少 `freqtrade` 命令或行情数据，命令会输出
 `BLOCKED` 并在 `reports/spikes/phase2_real_freqtrade_backtest_latest.md` 写入原因。
+
+## Phase 2 Strategy Research Smoke
+
+Phase 2 策略研发增强使用新的离线 smoke 覆盖 schema v2、静态检查、失败原因、
+版本 Diff / lineage、评分拆解和前端 build：
+
+```bash
+python3 scripts/smoke_phase2.py --offline --tmp-dir /tmp/freqtrade-ai-phase2-smoke
+```
+
+该命令默认只使用临时 SQLite、`FakeStrategyBlueprintProvider`、fixture backtest
+metrics 和本地前端 build。命令会输出每个关键步骤的 `RUN` / `PASS` / `FAIL`
+状态；任一步失败时会打印具体失败步骤和异常。
+
+覆盖范围：
+
+- 校验生成的 `StrategyBlueprint` 使用 schema v2。
+- 对生成策略代码执行静态审查，并验证违规 fixture 能被识别。
+- 创建带 parent 的策略子版本，并校验 Diff / lineage 查询结果。
+- 写入并查询 warning 级失败原因。
+- 使用 fixture backtest metrics 生成 Phase 2 评分拆解和排行榜记录。
+- 默认运行 `npm run build` 验证前端评分拆解展示仍可构建。
+
+限制和禁止项：
+
+- 不调用真实 LLM，不读取真实 LLM API key。
+- 不连接真实交易所，不下载 K 线。
+- 不调用真实 Freqtrade CLI，不执行 dry-run、live trading 或真实下单。
+- 不连接生产数据库，不写入运行产物到仓库。
+- 不引入 Redis、Celery、Kafka、RabbitMQ。
+- 不修改 Freqtrade 源码。
+
+Phase 2 开发 PR 仍需单独运行完整回归命令：
+
+```bash
+cd backend && . .venv/bin/activate && pytest
+python3 -m compileall backend/app backend/tests scripts
+cd frontend && npm run build
+git diff --check
+```
