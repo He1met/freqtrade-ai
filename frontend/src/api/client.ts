@@ -1,13 +1,38 @@
 import { mockMvpData } from "../data/mock";
-import type { MvpData } from "./types";
+import type { MvpData, StrategyFailureReasonSummary } from "./types";
 
 const DEFAULT_API_BASE_URL = "/api";
+
+type RawStrategyFailureReason = Partial<StrategyFailureReasonSummary> & {
+  strategy_id?: string | number;
+  strategy_version_id?: string | number;
+  reason_type?: string;
+  created_at?: string | null;
+};
 
 function getApiBaseUrl() {
   const env = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env;
   const configuredUrl = env?.VITE_API_BASE_URL?.trim();
 
   return (configuredUrl || DEFAULT_API_BASE_URL).replace(/\/$/, "");
+}
+
+function normalizeId(value: string | number | undefined): string {
+  return value === undefined ? "" : String(value);
+}
+
+function normalizeFailureReason(raw: RawStrategyFailureReason): StrategyFailureReasonSummary {
+  return {
+    id: normalizeId(raw.id),
+    strategyId: normalizeId(raw.strategyId ?? raw.strategy_id),
+    strategyVersionId: normalizeId(raw.strategyVersionId ?? raw.strategy_version_id),
+    stage: raw.stage ?? "unknown",
+    reasonType: raw.reasonType ?? raw.reason_type ?? "unknown",
+    severity: raw.severity ?? "error",
+    message: raw.message ?? "Failure reason was recorded without a message.",
+    details: raw.details ?? {},
+    createdAt: raw.createdAt ?? raw.created_at ?? null,
+  };
 }
 
 async function fetchJson<T>(path: string, signal?: AbortSignal): Promise<T> {
@@ -45,17 +70,23 @@ export async function loadMvpData(signal?: AbortSignal): Promise<{
   data: MvpData;
   usedFallback: boolean;
 }> {
-  const [strategies, generationRuns, backtestRuns, backtestTasks, ranking] = await Promise.all([
-    fetchList(["/strategies", "/mvp/strategies"], mockMvpData.strategies, signal),
-    fetchList(
-      ["/generation-runs", "/strategy-generation-runs", "/mvp/generation-runs"],
-      mockMvpData.generationRuns,
-      signal,
-    ),
-    fetchList(["/backtest-runs", "/mvp/backtest-runs"], mockMvpData.backtestRuns, signal),
-    fetchList(["/backtest-tasks", "/mvp/backtest-tasks"], mockMvpData.backtestTasks, signal),
-    fetchList(["/ranking", "/strategy-ranking", "/mvp/ranking"], mockMvpData.ranking, signal),
-  ]);
+  const [strategies, generationRuns, backtestRuns, backtestTasks, ranking, failureReasons] =
+    await Promise.all([
+      fetchList(["/strategies", "/mvp/strategies"], mockMvpData.strategies, signal),
+      fetchList(
+        ["/generation-runs", "/strategy-generation-runs", "/mvp/generation-runs"],
+        mockMvpData.generationRuns,
+        signal,
+      ),
+      fetchList(["/backtest-runs", "/mvp/backtest-runs"], mockMvpData.backtestRuns, signal),
+      fetchList(["/backtest-tasks", "/mvp/backtest-tasks"], mockMvpData.backtestTasks, signal),
+      fetchList(["/ranking", "/strategy-ranking", "/mvp/ranking"], mockMvpData.ranking, signal),
+      fetchList<RawStrategyFailureReason>(
+        ["/strategy-failure-reasons", "/mvp/strategy-failure-reasons"],
+        mockMvpData.failureReasons,
+        signal,
+      ),
+    ]);
 
   return {
     data: {
@@ -64,12 +95,14 @@ export async function loadMvpData(signal?: AbortSignal): Promise<{
       backtestRuns: backtestRuns.items,
       backtestTasks: backtestTasks.items,
       ranking: ranking.items,
+      failureReasons: failureReasons.items.map(normalizeFailureReason),
     },
     usedFallback:
       strategies.usedFallback ||
       generationRuns.usedFallback ||
       backtestRuns.usedFallback ||
       backtestTasks.usedFallback ||
-      ranking.usedFallback,
+      ranking.usedFallback ||
+      failureReasons.usedFallback,
   };
 }

@@ -15,6 +15,7 @@ export const mockMvpData: MvpData = {
         versionNumber: 3,
         filePath: "user_data/strategies/AiRsiEma001.py",
         validationStatus: "passed",
+        validationErrors: [],
       },
     },
     {
@@ -30,6 +31,13 @@ export const mockMvpData: MvpData = {
         versionNumber: 1,
         filePath: "user_data/strategies/AiBreakout001.py",
         validationStatus: "pending",
+        validationErrors: [
+          {
+            field: "populate_entry_trend",
+            message: "Entry signal method is missing from generated strategy code.",
+            code: "missing_required_method",
+          },
+        ],
       },
     },
   ],
@@ -129,6 +137,35 @@ export const mockMvpData: MvpData = {
       riskScore: 64,
       stabilityScore: 57,
       qualityScore: 67,
+    },
+  ],
+  failureReasons: [
+    {
+      id: "failure-001",
+      strategyId: "ai-breakout-001",
+      strategyVersionId: "version-102",
+      stage: "validation",
+      reasonType: "validation_error",
+      severity: "error",
+      message: "Generated strategy failed validation before backtest probing.",
+      details: {
+        field: "populate_entry_trend",
+        source: "offline-fixture",
+      },
+      createdAt: "2026-06-30T15:45:00Z",
+    },
+    {
+      id: "failure-002",
+      strategyId: "ai-breakout-001",
+      strategyVersionId: "version-102",
+      stage: "static_check",
+      reasonType: "static_policy_violation",
+      severity: "warning",
+      message: "Static review flagged missing explicit stoploss configuration.",
+      details: {
+        rule: "phase2-risk-guard",
+      },
+      createdAt: "2026-06-30T15:46:00Z",
     },
   ],
 };

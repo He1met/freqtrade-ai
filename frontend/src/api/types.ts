@@ -5,6 +5,13 @@ export type StrategyVersionSummary = {
   versionNumber: number;
   filePath: string;
   validationStatus: string;
+  validationErrors: ValidationErrorSummary[];
+};
+
+export type ValidationErrorSummary = {
+  field: string | null;
+  message: string;
+  code: string | null;
 };
 
 export type StrategySummary = {
@@ -67,12 +74,25 @@ export type RankingEntry = {
   qualityScore: number | null;
 };
 
+export type StrategyFailureReasonSummary = {
+  id: string;
+  strategyId: string;
+  strategyVersionId: string;
+  stage: string;
+  reasonType: string;
+  severity: "info" | "warning" | "error" | string;
+  message: string;
+  details: Record<string, unknown>;
+  createdAt: string | null;
+};
+
 export type MvpData = {
   strategies: StrategySummary[];
   generationRuns: GenerationRunSummary[];
   backtestRuns: BacktestRunSummary[];
   backtestTasks: BacktestTaskSummary[];
   ranking: RankingEntry[];
+  failureReasons: StrategyFailureReasonSummary[];
 };
 
 export type MvpDataState = {
