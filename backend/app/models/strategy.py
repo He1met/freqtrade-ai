@@ -101,6 +101,10 @@ class StrategyVersion(Base):
         BigInteger().with_variant(Integer, "sqlite"),
         ForeignKey("strategy_generation_runs.id", ondelete="SET NULL"),
     )
+    parent_version_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey("strategy_versions.id", ondelete="SET NULL"),
+    )
     version_number: Mapped[int] = mapped_column(Integer, nullable=False)
     blueprint: Mapped[dict] = mapped_column(JSON, nullable=False)
     generated_code: Mapped[str] = mapped_column(Text, nullable=False)
@@ -108,6 +112,8 @@ class StrategyVersion(Base):
     file_path: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     validation_status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
     validation_errors: Mapped[list[dict]] = mapped_column(JSON, nullable=False, default=list)
+    change_summary: Mapped[Optional[str]] = mapped_column(Text)
+    diff_snapshot: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -118,4 +124,9 @@ class StrategyVersion(Base):
         "Strategy",
         back_populates="versions",
         foreign_keys=[strategy_id],
+    )
+    parent_version: Mapped[Optional["StrategyVersion"]] = relationship(
+        "StrategyVersion",
+        remote_side=[id],
+        foreign_keys=[parent_version_id],
     )
