@@ -20,13 +20,28 @@
 
 Phase 1 不做 Redis、Celery、Kafka、RabbitMQ、实盘交易、模拟盘交易、复杂权限和复杂审计。
 
-## Phase 2: 策略稳健性验证
+## Phase 2: 策略研发增强
 
-增加数据质量检查、随机窗口验证、Walk-forward、Monte Carlo、市场状态分组、过拟合检测和更完整的评分体系。
+状态：已完成验收。详见 [phase2_acceptance.md](phase2_acceptance.md)。
 
-## Phase 3: 运行态准备
+Phase 2 已完成：
 
-在治理规则允许后，才考虑 Dry-run 管理、运行态监控和更严格的人工审批。
+- StrategyBlueprint schema v2 与严格校验。
+- 策略代码静态检查与安全审查。
+- 策略失败原因归档与查询。
+- 策略版本 Diff 与 lineage 记录。
+- 真实 LLM StrategyBlueprintProvider 边界。
+- 策略质量评分拆解与淘汰规则。
+- 前端失败原因、校验错误、版本 Diff 和 Ranking 评分拆解展示。
+- Phase 2 离线 smoke 验收脚本。
+
+Phase 2 不做 Hyperopt、dry-run、live trading、真实交易所连接或真实 K 线下载。
+
+## Phase 3: 规划后续增强
+
+Phase 2 完成后，可以进入 Phase 3 规划。Phase 3 具体范围必须另行创建
+Issue 和验收标准；不要把 Phase 2 验收直接扩大成 dry-run、live trading、
+Hyperopt 或生产运行。
 
 ## Phase 4: 生产交易治理
 

@@ -45,6 +45,38 @@ python3 scripts/smoke_mvp.py --offline --tmp-dir /tmp/freqtrade-ai-smoke
 - 不引入 Redis / Celery / Kafka / RabbitMQ。
 - 不修改 Freqtrade 源码。
 
+## Phase 2 策略研发增强状态
+
+Phase 2 策略研发增强已完成验收。当前已具备：
+
+- StrategyBlueprint schema v2 与严格校验。
+- 策略代码静态检查与安全审查。
+- 策略失败原因归档与查询。
+- 策略版本 Diff 与 lineage 记录。
+- ENV-only 的真实 LLM StrategyBlueprintProvider 边界，默认测试路径仍使用 fake/mock。
+- Phase 2 策略质量评分拆解与淘汰原因。
+- 前端展示失败原因、校验错误、版本 Diff 和 Ranking 评分拆解。
+- 离线 Phase 2 smoke 验收脚本。
+
+Phase 2 smoke 命令：
+
+```bash
+python3 scripts/smoke_phase2.py --offline --tmp-dir /tmp/freqtrade-ai-phase2-smoke
+```
+
+完整验收状态见 [phase2_acceptance.md](docs/phase2_acceptance.md)。
+
+当前限制：
+
+- 不支持 dry-run / live trading。
+- 不做 Hyperopt。
+- 不连接真实交易所，不下载真实 K 线，不执行真实下单。
+- 默认 smoke 不调用真实 LLM，不读取真实 LLM API key。
+- 真实 Freqtrade CLI spike 依赖本地已有 `user_data/data` 行情数据；缺少数据时应明确
+  输出 `BLOCKED`，不能伪造成功。
+- 不引入 Redis / Celery / Kafka / RabbitMQ。
+- 不修改 Freqtrade 源码。
+
 ## 启动后端
 
 ```bash
