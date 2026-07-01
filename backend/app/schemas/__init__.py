@@ -42,6 +42,12 @@ from app.schemas.strategy_score import (
     StrategyScoreCreate,
     StrategyScoreRead,
 )
+from app.schemas.strategy_static_review import (
+    StrategyStaticReviewCategory,
+    StrategyStaticReviewFinding,
+    StrategyStaticReviewResult,
+    StrategyStaticReviewSeverity,
+)
 
 __all__ = [
     "BacktestResultCreate",
@@ -72,6 +78,10 @@ __all__ = [
     "StrategyScoreCreate",
     "StrategyScoreRead",
     "StrategySource",
+    "StrategyStaticReviewCategory",
+    "StrategyStaticReviewFinding",
+    "StrategyStaticReviewResult",
+    "StrategyStaticReviewSeverity",
     "StrategyStatus",
     "StrategyValidationStatus",
     "StrategyVersionCreate",
