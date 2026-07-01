@@ -86,6 +86,17 @@ export type StrategyFailureReasonSummary = {
   createdAt: string | null;
 };
 
+export type StrategyVersionLineageEntry = {
+  id: string;
+  strategyId: string;
+  parentVersionId: string | null;
+  versionNumber: number;
+  changeSummary: string | null;
+  diffSnapshot: Record<string, unknown>;
+  hasParent: boolean;
+  createdAt: string | null;
+};
+
 export type MvpData = {
   strategies: StrategySummary[];
   generationRuns: GenerationRunSummary[];
@@ -93,6 +104,7 @@ export type MvpData = {
   backtestTasks: BacktestTaskSummary[];
   ranking: RankingEntry[];
   failureReasons: StrategyFailureReasonSummary[];
+  versionLineage: StrategyVersionLineageEntry[];
 };
 
 export type MvpDataState = {
