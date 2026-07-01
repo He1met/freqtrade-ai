@@ -23,7 +23,12 @@ SECRET_KEY_NAMES = frozenset(
 
 
 class FreqtradeConfigBuilder:
-    """Build temporary Freqtrade backtest config files without credentials."""
+    """Build temporary Freqtrade backtest config files without credentials.
+
+    This builder owns the narrow config shape used by the project. It does not
+    read user Freqtrade config files and rejects secret-looking keys before the
+    generated JSON is written.
+    """
 
     def __init__(self, default_output_dir: Path | None = None) -> None:
         configured_dir = default_output_dir or get_settings().tmp_freqtrade_config_dir
@@ -46,6 +51,8 @@ class FreqtradeConfigBuilder:
         return target_path
 
     def build_backtest_config_dict(self, snapshot: dict[str, Any]) -> dict[str, Any]:
+        # Keep the snapshot input small and explicit so callers cannot smuggle
+        # exchange credentials or unrelated runtime settings into backtesting.
         pair = self._required_text(snapshot, "pair")
         timeframe = self._required_text(snapshot, "timeframe")
         strategy = self._required_text(snapshot, "strategy")
@@ -123,6 +130,8 @@ class FreqtradeConfigBuilder:
         return "-".join("".join(characters).split("-")).strip("-") or "value"
 
     def _reject_secret_keys(self, value: Any) -> None:
+        """Recursively reject credential-shaped keys in generated config."""
+
         if isinstance(value, dict):
             for key, item in value.items():
                 normalized = str(key).lower().replace("-", "_")

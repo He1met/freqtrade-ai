@@ -3,6 +3,9 @@ import type { MvpData, StrategyFailureReasonSummary, StrategyVersionLineageEntry
 
 const DEFAULT_API_BASE_URL = "/api";
 
+// The frontend keeps a controlled fallback path while backend endpoints are
+// still being stabilized. The flag returned by loadMvpData makes that fallback
+// visible to pages instead of silently presenting mock data as live data.
 type RawStrategyFailureReason = Partial<StrategyFailureReasonSummary> & {
   strategy_id?: string | number;
   strategy_version_id?: string | number;
@@ -32,6 +35,8 @@ function normalizeId(value: string | number | undefined): string {
 }
 
 function normalizeFailureReason(raw: RawStrategyFailureReason): StrategyFailureReasonSummary {
+  // Backend responses may use snake_case while mock data uses camelCase.
+  // Normalize at the API boundary so page components can stay simple.
   return {
     id: normalizeId(raw.id),
     strategyId: normalizeId(raw.strategyId ?? raw.strategy_id),
@@ -46,6 +51,7 @@ function normalizeFailureReason(raw: RawStrategyFailureReason): StrategyFailureR
 }
 
 function normalizeLineageEntry(raw: RawStrategyVersionLineageEntry): StrategyVersionLineageEntry {
+  // Treat absent parent metadata as "no parent" rather than a rendering error.
   const parentVersionId = raw.parentVersionId ?? raw.parent_version_id ?? null;
   return {
     id: normalizeId(raw.id),
@@ -77,6 +83,8 @@ async function fetchList<T>(
   fallback: T[],
   signal?: AbortSignal,
 ): Promise<{ items: T[]; usedFallback: boolean }> {
+  // Try known endpoint candidates in order. This keeps the UI useful during
+  // backend iteration while still surfacing usedFallback to the caller.
   for (const path of paths) {
     try {
       return { items: await fetchJson<T[]>(path, signal), usedFallback: false };

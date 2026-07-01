@@ -9,7 +9,11 @@ from app.schemas.backtest import BacktestResultCreate
 
 
 class FreqtradeResultParser:
-    """Parses Freqtrade JSON reports into project-owned result DTOs."""
+    """Parses Freqtrade JSON reports into project-owned result DTOs.
+
+    Freqtrade result keys can vary across versions and export modes, so the
+    parser maps a small set of known aliases into the stable project schema.
+    """
 
     def parse_backtest_result(
         self,
@@ -68,6 +72,8 @@ class FreqtradeResultParser:
         payload: dict[str, Any],
         strategy_name: Optional[str],
     ) -> dict[str, Any]:
+        # Official backtesting exports usually nest metrics under "strategy".
+        # Some tests and fixtures use a flattened single-strategy shape.
         strategies = payload.get("strategy")
         if isinstance(strategies, dict) and strategies:
             if strategy_name is not None:
@@ -104,6 +110,7 @@ class FreqtradeResultParser:
         value = self._optional_float(metrics, *keys)
         if value is None:
             return None
+        # Accept both 0.05 and 5.0 representations for percentage-like fields.
         if abs(value) > 1:
             return value / 100
         return value

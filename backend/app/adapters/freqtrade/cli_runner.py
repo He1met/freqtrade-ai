@@ -65,7 +65,12 @@ class FreqtradeCommandResult:
 
 
 class FreqtradeCliRunner:
-    """Safe boundary for supported Freqtrade CLI commands."""
+    """Safe boundary for supported Freqtrade CLI commands.
+
+    The runner is intentionally allowlist-based. New Freqtrade commands or
+    options must be added here deliberately instead of being passed through
+    from arbitrary user or model output.
+    """
 
     def __init__(
         self,
@@ -97,6 +102,8 @@ class FreqtradeCliRunner:
         return result
 
     def run_unchecked(self, command: FreqtradeCommand) -> FreqtradeCommandResult:
+        # Spike and diagnostic workflows need stdout/stderr/return code even
+        # when Freqtrade exits non-zero, so this method never raises on status.
         args = self.build_args(command)
         completed = self._executor(args, command.cwd, command.timeout_seconds)
         return FreqtradeCommandResult(
