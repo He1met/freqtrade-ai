@@ -1,6 +1,6 @@
-import pytest
 from typing import Optional
 
+import pytest
 from sqlalchemy.orm import Session
 
 from app.adapters.freqtrade.strategy_file_manager import StrategyFileManager
@@ -15,6 +15,7 @@ from app.services.strategy_generation import (
     LLMProviderResponseError,
     OpenAICompatibleStrategyBlueprintProvider,
     StrategyGenerationService,
+    build_strategy_blueprint_provider_from_env,
 )
 
 
@@ -144,6 +145,28 @@ def test_real_llm_provider_requires_env_api_key(monkeypatch: pytest.MonkeyPatch)
     assert client.requests == []
 
 
+def test_provider_factory_defaults_to_fake_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("STRATEGY_BLUEPRINT_PROVIDER", raising=False)
+
+    provider = build_strategy_blueprint_provider_from_env()
+
+    assert isinstance(provider, FakeStrategyBlueprintProvider)
+
+
+def test_provider_factory_fail_closed_when_real_mode_has_no_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STRATEGY_BLUEPRINT_PROVIDER", "mimo")
+    monkeypatch.setenv("STRATEGY_BLUEPRINT_MODEL", "mimo-test")
+    monkeypatch.setenv("STRATEGY_BLUEPRINT_BASE_URL", "https://llm.example.test/v1")
+    monkeypatch.setenv("STRATEGY_BLUEPRINT_API_KEY_ENV", "TEST_LLM_API_KEY")
+    monkeypatch.delenv("TEST_LLM_API_KEY", raising=False)
+    provider = build_strategy_blueprint_provider_from_env(
+        http_client=MockLLMClient(MockLLMResponse({"blueprints": [blueprint_payload()]}))
+    )
+
+    with pytest.raises(LLMProviderConfigurationError, match="TEST_LLM_API_KEY"):
+        provider.generate("Generate one strategy.", requested_count=1)
+
+
 def test_real_llm_provider_uses_env_key_and_validates_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -187,6 +210,25 @@ def test_real_llm_provider_rejects_non_json_content_without_leaking_secret(
     with pytest.raises(LLMProviderResponseError) as exc_info:
         provider.generate("Generate one strategy.", requested_count=1)
 
+    assert "test-secret-value" not in str(exc_info.value)
+
+
+def test_real_llm_provider_rejects_invalid_blueprint_without_leaking_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TEST_LLM_API_KEY", "test-secret-value")
+    invalid_payload = blueprint_payload()
+    invalid_payload["slug"] = "Invalid Slug"
+    response = MockLLMResponse({"blueprints": [invalid_payload]})
+    provider = OpenAICompatibleStrategyBlueprintProvider(
+        provider_config(),
+        http_client=MockLLMClient(response),
+    )
+
+    with pytest.raises(LLMProviderResponseError) as exc_info:
+        provider.generate("Generate one strategy.", requested_count=1)
+
+    assert "invalid strategy blueprint" in str(exc_info.value)
     assert "test-secret-value" not in str(exc_info.value)
 
 

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Optional, Protocol
 
 import httpx
+from pydantic import ValidationError
 
 from sqlalchemy.orm import Session
 
@@ -45,6 +46,19 @@ class LLMProviderConfig:
     temperature: float = 0.2
     timeout_seconds: float = 30.0
     max_output_tokens: Optional[int] = None
+
+    @classmethod
+    def from_env(cls) -> "LLMProviderConfig":
+        provider_name = os.environ.get("STRATEGY_BLUEPRINT_PROVIDER", "fake").strip().lower()
+        return cls(
+            provider_name=provider_name or "fake",
+            model_name=os.environ.get("STRATEGY_BLUEPRINT_MODEL", "gpt-4.1-mini").strip() or "gpt-4.1-mini",
+            base_url=os.environ.get("STRATEGY_BLUEPRINT_BASE_URL", "https://api.openai.com/v1").strip(),
+            api_key_env=os.environ.get("STRATEGY_BLUEPRINT_API_KEY_ENV", "OPENAI_API_KEY").strip()
+            or "OPENAI_API_KEY",
+            timeout_seconds=float(os.environ.get("STRATEGY_BLUEPRINT_TIMEOUT_SECONDS", "30")),
+            max_output_tokens=_optional_int_from_env("STRATEGY_BLUEPRINT_MAX_OUTPUT_TOKENS"),
+        )
 
 
 class LLMHTTPResponse(Protocol):
@@ -103,7 +117,16 @@ class OpenAICompatibleStrategyBlueprintProvider:
             raise LLMProviderResponseError("LLM provider request failed") from exc
 
         raw_blueprints = self._extract_blueprints(raw_response)
-        return [StrategyBlueprint.model_validate(item) for item in raw_blueprints[:requested_count]]
+        if len(raw_blueprints) < requested_count:
+            raise LLMProviderResponseError("LLM provider returned fewer blueprints than requested")
+
+        blueprints: list[StrategyBlueprint] = []
+        for item in raw_blueprints[:requested_count]:
+            try:
+                blueprints.append(StrategyBlueprint.model_validate(item))
+            except ValidationError as exc:
+                raise LLMProviderResponseError("LLM provider returned an invalid strategy blueprint") from exc
+        return blueprints
 
     def _endpoint_url(self) -> str:
         return f"{self.config.base_url.rstrip('/')}/{self.config.endpoint_path.lstrip('/')}"
@@ -157,6 +180,13 @@ class OpenAICompatibleStrategyBlueprintProvider:
         raise LLMProviderResponseError("LLM provider response did not contain strategy blueprints")
 
 
+def _optional_int_from_env(name: str) -> Optional[int]:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return None
+    return int(value)
+
+
 class FakeStrategyBlueprintProvider:
     provider_name = "fake"
     model_name = "offline-fixture"
@@ -180,6 +210,15 @@ class FakeStrategyBlueprintProvider:
 
     def generate(self, prompt_summary: str, requested_count: int) -> list[StrategyBlueprint]:
         return self.blueprints[:requested_count]
+
+
+def build_strategy_blueprint_provider_from_env(
+    http_client: Optional[LLMHTTPClient] = None,
+) -> StrategyBlueprintProvider:
+    config = LLMProviderConfig.from_env()
+    if config.provider_name == "fake":
+        return FakeStrategyBlueprintProvider()
+    return OpenAICompatibleStrategyBlueprintProvider(config=config, http_client=http_client)
 
 
 class StrategyGenerationService:
