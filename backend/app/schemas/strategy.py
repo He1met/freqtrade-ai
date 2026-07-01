@@ -21,6 +21,7 @@ class StrategyCreate(BaseModel):
 class StrategyVersionCreate(BaseModel):
     strategy_id: int = Field(gt=0)
     generation_run_id: Optional[int] = Field(default=None, gt=0)
+    parent_version_id: Optional[int] = Field(default=None, gt=0)
     version_number: Optional[int] = Field(default=None, gt=0)
     blueprint: dict[str, Any]
     generated_code: str = Field(min_length=1)
@@ -28,6 +29,8 @@ class StrategyVersionCreate(BaseModel):
     file_path: str = Field(min_length=1)
     validation_status: StrategyValidationStatus = "pending"
     validation_errors: list[dict[str, Any]] = Field(default_factory=list)
+    change_summary: Optional[str] = None
+    diff_snapshot: dict[str, Any] = Field(default_factory=dict)
 
 
 class StrategyRead(BaseModel):
@@ -49,6 +52,7 @@ class StrategyVersionRead(BaseModel):
     id: int
     strategy_id: int
     generation_run_id: Optional[int]
+    parent_version_id: Optional[int]
     version_number: int
     blueprint: dict[str, Any]
     generated_code: str
@@ -56,6 +60,30 @@ class StrategyVersionRead(BaseModel):
     file_path: str
     validation_status: StrategyValidationStatus
     validation_errors: list[dict[str, Any]]
+    change_summary: Optional[str]
+    diff_snapshot: dict[str, Any]
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class StrategyVersionLineageEntry(BaseModel):
+    id: int
+    strategy_id: int
+    parent_version_id: Optional[int]
+    version_number: int
+    change_summary: Optional[str]
+    diff_snapshot: dict[str, Any]
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class StrategyVersionDiffRead(BaseModel):
+    id: int
+    strategy_id: int
+    parent_version_id: Optional[int]
+    version_number: int
+    change_summary: Optional[str]
+    diff_snapshot: dict[str, Any]
+    has_parent: bool

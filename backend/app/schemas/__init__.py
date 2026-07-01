@@ -16,6 +16,8 @@ from app.schemas.strategy import (
     StrategyStatus,
     StrategyValidationStatus,
     StrategyVersionCreate,
+    StrategyVersionDiffRead,
+    StrategyVersionLineageEntry,
     StrategyVersionRead,
 )
 from app.schemas.strategy_blueprint import (
@@ -85,5 +87,7 @@ __all__ = [
     "StrategyStatus",
     "StrategyValidationStatus",
     "StrategyVersionCreate",
+    "StrategyVersionDiffRead",
+    "StrategyVersionLineageEntry",
     "StrategyVersionRead",
 ]
