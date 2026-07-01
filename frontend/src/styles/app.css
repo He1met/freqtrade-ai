@@ -259,6 +259,80 @@ th {
   border-bottom: 0;
 }
 
+.lineage-list {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  border: 1px solid #d8ded7;
+  border-radius: 0 0 8px 8px;
+  background: #ffffff;
+  list-style: none;
+  padding: 0;
+}
+
+.lineage-item {
+  display: grid;
+  gap: 10px;
+  border-bottom: 1px solid #e4e8e3;
+  padding: 14px 16px;
+}
+
+.lineage-item:last-child {
+  border-bottom: 0;
+}
+
+.lineage-item-current {
+  border-left: 4px solid #1f6f4a;
+  padding-left: 12px;
+}
+
+.lineage-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.lineage-meta,
+.diff-grid {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.lineage-meta div,
+.diff-grid div {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  gap: 12px;
+}
+
+.lineage-meta dt,
+.diff-grid dt {
+  color: #657269;
+}
+
+.lineage-meta dd,
+.diff-grid dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.diff-panel {
+  display: grid;
+  gap: 14px;
+  border: 1px solid #d8ded7;
+  border-radius: 0 0 8px 8px;
+  background: #ffffff;
+  padding: 16px;
+}
+
+.diff-grid {
+  border-top: 1px solid #e4e8e3;
+  padding-top: 14px;
+}
+
 .issue-list code {
   overflow-wrap: anywhere;
 }
@@ -346,5 +420,11 @@ th {
   .detail-list div {
     grid-template-columns: 1fr;
     gap: 5px;
+  }
+
+  .lineage-meta div,
+  .diff-grid div {
+    grid-template-columns: 1fr;
+    gap: 4px;
   }
 }

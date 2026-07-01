@@ -1,5 +1,5 @@
 import { mockMvpData } from "../data/mock";
-import type { MvpData, StrategyFailureReasonSummary } from "./types";
+import type { MvpData, StrategyFailureReasonSummary, StrategyVersionLineageEntry } from "./types";
 
 const DEFAULT_API_BASE_URL = "/api";
 
@@ -7,6 +7,16 @@ type RawStrategyFailureReason = Partial<StrategyFailureReasonSummary> & {
   strategy_id?: string | number;
   strategy_version_id?: string | number;
   reason_type?: string;
+  created_at?: string | null;
+};
+
+type RawStrategyVersionLineageEntry = Partial<StrategyVersionLineageEntry> & {
+  strategy_id?: string | number;
+  parent_version_id?: string | number | null;
+  version_number?: number;
+  change_summary?: string | null;
+  diff_snapshot?: Record<string, unknown>;
+  has_parent?: boolean;
   created_at?: string | null;
 };
 
@@ -31,6 +41,20 @@ function normalizeFailureReason(raw: RawStrategyFailureReason): StrategyFailureR
     severity: raw.severity ?? "error",
     message: raw.message ?? "Failure reason was recorded without a message.",
     details: raw.details ?? {},
+    createdAt: raw.createdAt ?? raw.created_at ?? null,
+  };
+}
+
+function normalizeLineageEntry(raw: RawStrategyVersionLineageEntry): StrategyVersionLineageEntry {
+  const parentVersionId = raw.parentVersionId ?? raw.parent_version_id ?? null;
+  return {
+    id: normalizeId(raw.id),
+    strategyId: normalizeId(raw.strategyId ?? raw.strategy_id),
+    parentVersionId: parentVersionId === null ? null : normalizeId(parentVersionId),
+    versionNumber: raw.versionNumber ?? raw.version_number ?? 0,
+    changeSummary: raw.changeSummary ?? raw.change_summary ?? null,
+    diffSnapshot: raw.diffSnapshot ?? raw.diff_snapshot ?? {},
+    hasParent: raw.hasParent ?? raw.has_parent ?? parentVersionId !== null,
     createdAt: raw.createdAt ?? raw.created_at ?? null,
   };
 }
@@ -70,23 +94,35 @@ export async function loadMvpData(signal?: AbortSignal): Promise<{
   data: MvpData;
   usedFallback: boolean;
 }> {
-  const [strategies, generationRuns, backtestRuns, backtestTasks, ranking, failureReasons] =
-    await Promise.all([
-      fetchList(["/strategies", "/mvp/strategies"], mockMvpData.strategies, signal),
-      fetchList(
-        ["/generation-runs", "/strategy-generation-runs", "/mvp/generation-runs"],
-        mockMvpData.generationRuns,
-        signal,
-      ),
-      fetchList(["/backtest-runs", "/mvp/backtest-runs"], mockMvpData.backtestRuns, signal),
-      fetchList(["/backtest-tasks", "/mvp/backtest-tasks"], mockMvpData.backtestTasks, signal),
-      fetchList(["/ranking", "/strategy-ranking", "/mvp/ranking"], mockMvpData.ranking, signal),
-      fetchList<RawStrategyFailureReason>(
-        ["/strategy-failure-reasons", "/mvp/strategy-failure-reasons"],
-        mockMvpData.failureReasons,
-        signal,
-      ),
-    ]);
+  const [
+    strategies,
+    generationRuns,
+    backtestRuns,
+    backtestTasks,
+    ranking,
+    failureReasons,
+    versionLineage,
+  ] = await Promise.all([
+    fetchList(["/strategies", "/mvp/strategies"], mockMvpData.strategies, signal),
+    fetchList(
+      ["/generation-runs", "/strategy-generation-runs", "/mvp/generation-runs"],
+      mockMvpData.generationRuns,
+      signal,
+    ),
+    fetchList(["/backtest-runs", "/mvp/backtest-runs"], mockMvpData.backtestRuns, signal),
+    fetchList(["/backtest-tasks", "/mvp/backtest-tasks"], mockMvpData.backtestTasks, signal),
+    fetchList(["/ranking", "/strategy-ranking", "/mvp/ranking"], mockMvpData.ranking, signal),
+    fetchList<RawStrategyFailureReason>(
+      ["/strategy-failure-reasons", "/mvp/strategy-failure-reasons"],
+      mockMvpData.failureReasons,
+      signal,
+    ),
+    fetchList<RawStrategyVersionLineageEntry>(
+      ["/strategy-version-lineage", "/strategy-versions/lineage", "/mvp/strategy-version-lineage"],
+      mockMvpData.versionLineage,
+      signal,
+    ),
+  ]);
 
   return {
     data: {
@@ -96,6 +132,7 @@ export async function loadMvpData(signal?: AbortSignal): Promise<{
       backtestTasks: backtestTasks.items,
       ranking: ranking.items,
       failureReasons: failureReasons.items.map(normalizeFailureReason),
+      versionLineage: versionLineage.items.map(normalizeLineageEntry),
     },
     usedFallback:
       strategies.usedFallback ||
@@ -103,6 +140,7 @@ export async function loadMvpData(signal?: AbortSignal): Promise<{
       backtestRuns.usedFallback ||
       backtestTasks.usedFallback ||
       ranking.usedFallback ||
-      failureReasons.usedFallback,
+      failureReasons.usedFallback ||
+      versionLineage.usedFallback,
   };
 }
