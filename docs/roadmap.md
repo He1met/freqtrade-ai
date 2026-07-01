@@ -37,11 +37,26 @@ Phase 2 已完成：
 
 Phase 2 不做 Hyperopt、dry-run、live trading、真实交易所连接或真实 K 线下载。
 
-## Phase 3: 规划后续增强
+## Phase 3: 回测体系增强
 
-Phase 2 完成后，可以进入 Phase 3 规划。Phase 3 具体范围必须另行创建
-Issue 和验收标准；不要把 Phase 2 验收直接扩大成 dry-run、live trading、
-Hyperopt 或生产运行。
+状态：已完成规划，进入执行准备阶段。详见 [phase3_plan.md](phase3_plan.md)。
+
+Phase 3 目标是建立可重复、可审计、可解释的本地回测研究闭环：
+
+- 本地行情数据可用性检查和数据质量 catalog。
+- BacktestProfile Schema v2 与实验变量锁定。
+- 真实 Freqtrade backtesting artifact manifest。
+- 回测结果指标扩展和版本兼容解析。
+- 批量回测矩阵执行与 fail-closed 聚合。
+- baseline 对比和重复性检查。
+- 前端展示 BacktestRun artifact、增强指标和矩阵摘要。
+- Phase 3 smoke 验收脚本。
+
+Phase 3 只使用本地已有 `user_data/data` 行情数据。缺少数据时必须明确
+`BLOCKED`，不得下载数据或伪造成功。
+
+Phase 3 不做 Hyperopt、dry-run、live trading、真实交易所连接、真实 K 线下载或
+生产运行。
 
 ## Phase 4: 生产交易治理
 

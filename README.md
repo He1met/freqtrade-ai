@@ -77,6 +77,27 @@ python3 scripts/smoke_phase2.py --offline --tmp-dir /tmp/freqtrade-ai-phase2-smo
 - 不引入 Redis / Celery / Kafka / RabbitMQ。
 - 不修改 Freqtrade 源码。
 
+## Phase 3 回测体系增强状态
+
+Phase 3 已完成规划并进入执行准备阶段。目标是在本地研究边界内，把回测能力增强为
+可重复、可审计、可解释的研究闭环。
+
+Phase 3 的第一项开发任务是本地行情数据可用性与真实 Freqtrade 回测基线复核。后续
+任务按数据 catalog、BacktestProfile、artifact manifest、指标解析、批量矩阵、baseline
+复核、前端展示和 smoke 验收顺序推进。
+
+完整规划见 [phase3_plan.md](docs/phase3_plan.md)。
+
+当前限制：
+
+- 只使用本地已有 `user_data/data` 行情数据，缺少数据时必须明确 `BLOCKED`。
+- 不连接真实交易所，不下载真实 K 线，不执行真实下单。
+- 不支持 dry-run / live trading。
+- 不做 Hyperopt。
+- 不提交真实 API key、secret、passphrase。
+- 不引入 Redis / Celery / Kafka / RabbitMQ。
+- 不修改 Freqtrade 源码。
+
 ## 启动后端
 
 ```bash
