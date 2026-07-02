@@ -7,7 +7,11 @@ import shutil
 from typing import Optional
 
 from app.adapters.freqtrade.backtest_runner import FreqtradeBacktestRunner
-from app.adapters.freqtrade.cli_runner import FreqtradeCliRunner
+from app.adapters.freqtrade.cli_runner import (
+    FreqtradeCliRunner,
+    FreqtradeCommand,
+    FreqtradeCommandResult,
+)
 from app.adapters.freqtrade.config_builder import FreqtradeConfigBuilder
 from app.adapters.freqtrade.market_data_index import FreqtradeMarketDataIndex, MarketDataFile
 from app.adapters.freqtrade.result_parser import FreqtradeResultParser
@@ -36,6 +40,11 @@ class SpikeConfig:
     market_data_dir: Path = Path("user_data/data")
     freqtrade_binary: Optional[str] = None
     timeout_seconds: int = 300
+    report_title: str = "Phase 2 Real Freqtrade Backtest Spike Report"
+    profile_name: str = "phase2_real_freqtrade_spike"
+    bot_name: str = "freqtrade_ai_phase2_spike"
+    strategy_prompt: str = "Generate one Phase 2 real Freqtrade backtest spike strategy."
+    check_timerange: bool = True
 
 
 @dataclass
@@ -52,9 +61,14 @@ class SpikeReport:
     return_code: Optional[int] = None
     stdout: str = ""
     stderr: str = ""
+    list_data_args: list[str] = field(default_factory=list)
+    list_data_return_code: Optional[int] = None
+    list_data_stdout: str = ""
+    list_data_stderr: str = ""
     metrics: dict[str, object] = field(default_factory=dict)
     blockers: list[str] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
+    report_title: str = "Phase 2 Real Freqtrade Backtest Spike Report"
 
 
 def find_freqtrade_binary(explicit_binary: Optional[str] = None) -> Optional[Path]:
@@ -99,9 +113,9 @@ def select_market_data_file(market_data_dir: Path) -> Optional[MarketDataFile]:
     )[0]
 
 
-def prepare_strategy(strategy_dir: Path) -> tuple[str, Path]:
+def prepare_strategy(strategy_dir: Path, prompt: str) -> tuple[str, Path]:
     blueprint = FakeStrategyBlueprintProvider().generate(
-        "Generate one Phase 2 real Freqtrade backtest spike strategy.",
+        prompt,
         requested_count=1,
     )[0]
     code = StrategyCodeRenderer().render(blueprint)
@@ -131,8 +145,30 @@ def parse_required_metrics(result_path: Path, strategy_name: str) -> dict[str, o
     return metrics
 
 
+def run_timerange_check(
+    binary: Path,
+    market_data_dir: Path,
+    market_data_file: MarketDataFile,
+    timeout_seconds: int,
+) -> tuple[list[str], FreqtradeCommandResult]:
+    runner = FreqtradeCliRunner(binary=str(binary))
+    command = FreqtradeCommand(
+        command="list-data",
+        options={
+            "--datadir": market_data_dir / market_data_file.exchange,
+            "--exchange": market_data_file.exchange,
+            "--pairs": [market_data_file.pair],
+            "--show-timerange": True,
+            "--timeframes": [market_data_file.timeframe],
+        },
+        timeout_seconds=timeout_seconds,
+    )
+    return runner.build_args(command), runner.run_unchecked(command)
+
+
 def run_spike(config: SpikeConfig) -> SpikeReport:
     report = SpikeReport()
+    report.report_title = config.report_title
     tmp_dir = config.tmp_dir.expanduser().resolve()
     tmp_dir.mkdir(parents=True, exist_ok=True)
     report.report_path = resolve_repo_path(config.report_path)
@@ -154,7 +190,7 @@ def run_spike(config: SpikeConfig) -> SpikeReport:
     config_dir = tmp_dir / "freqtrade_configs"
     result_path = tmp_dir / "backtest-result.json"
     try:
-        strategy_name, strategy_file = prepare_strategy(strategy_dir)
+        strategy_name, strategy_file = prepare_strategy(strategy_dir, config.strategy_prompt)
         report.strategy_name = strategy_name
         report.strategy_file = strategy_file
     except Exception as exc:
@@ -169,11 +205,36 @@ def run_spike(config: SpikeConfig) -> SpikeReport:
     assert market_data_file is not None
     assert report.strategy_name is not None
 
+    if config.check_timerange:
+        try:
+            report.list_data_args, list_data_result = run_timerange_check(
+                binary,
+                market_data_dir,
+                market_data_file,
+                config.timeout_seconds,
+            )
+            report.list_data_return_code = list_data_result.return_code
+            report.list_data_stdout = list_data_result.stdout
+            report.list_data_stderr = list_data_result.stderr
+        except Exception as exc:
+            report.status = "FAILED"
+            report.failures.append(f"freqtrade list-data timerange check failed: {exc}")
+            write_report(report)
+            return report
+
+        if report.list_data_return_code != 0:
+            report.status = "FAILED"
+            report.failures.append(
+                f"freqtrade list-data timerange check exited with code {report.list_data_return_code}"
+            )
+            write_report(report)
+            return report
+
     datadir = market_data_dir / market_data_file.exchange
     snapshot = {
         # The config snapshot intentionally contains only backtesting inputs
         # that can be derived from local files and generated strategy metadata.
-        "profile_name": "phase2_real_freqtrade_spike",
+        "profile_name": config.profile_name,
         "pair": market_data_file.pair,
         "timeframe": market_data_file.timeframe,
         "strategy": report.strategy_name,
@@ -181,7 +242,7 @@ def run_spike(config: SpikeConfig) -> SpikeReport:
         "user_data_dir": str(tmp_dir / "user_data"),
         "datadir": str(datadir),
         "exchange": {"name": market_data_file.exchange},
-        "bot_name": "freqtrade_ai_phase2_spike",
+        "bot_name": config.bot_name,
     }
     try:
         report.config_path = FreqtradeConfigBuilder(
@@ -254,8 +315,18 @@ def render_report(report: SpikeReport) -> str:
     blocker_lines = [f"- {item}" for item in report.blockers] or ["- none"]
     failure_lines = [f"- {item}" for item in report.failures] or ["- none"]
 
+    market_data_lines = ["- none"]
+    if report.market_data_file is not None:
+        market_data_lines = [
+            f"- Exchange: {report.market_data_file.exchange}",
+            f"- Pair: {report.market_data_file.pair}",
+            f"- Timeframe: {report.market_data_file.timeframe}",
+            f"- Format: {report.market_data_file.data_format}",
+            f"- File size bytes: {report.market_data_file.file_size_bytes}",
+        ]
+
     lines = [
-        "# Phase 2 Real Freqtrade Backtest Spike Report",
+        f"# {report.report_title}",
         "",
         f"- Status: {report.status}",
         f"- Freqtrade command: {value(report.freqtrade_binary)}",
@@ -265,6 +336,30 @@ def render_report(report: SpikeReport) -> str:
         f"- Temporary config: {value(report.config_path)}",
         f"- Result JSON: {value(report.result_path)}",
         f"- Return code: {value(report.return_code)}",
+        "",
+        "## Local Data Availability",
+        "",
+        *market_data_lines,
+        "",
+        "## Timerange Check",
+        "",
+        f"- Return code: {value(report.list_data_return_code)}",
+        "",
+        "```text",
+        " ".join(report.list_data_args) if report.list_data_args else "not executed",
+        "```",
+        "",
+        "### Timerange Stdout Tail",
+        "",
+        "```text",
+        tail(report.list_data_stdout),
+        "```",
+        "",
+        "### Timerange Stderr Tail",
+        "",
+        "```text",
+        tail(report.list_data_stderr),
+        "```",
         "",
         "## Safety Boundary",
         "",
