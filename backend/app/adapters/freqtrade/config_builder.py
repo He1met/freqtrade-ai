@@ -7,6 +7,7 @@ from typing import Any
 from app.adapters.freqtrade.exceptions import FreqtradeConfigError
 from app.core.config import get_settings
 from app.core.paths import resolve_repo_path
+from app.schemas.backtest_profile import BacktestProfileV2
 
 
 SECRET_KEY_NAMES = frozenset(
@@ -36,9 +37,10 @@ class FreqtradeConfigBuilder:
 
     def build_backtest_config(
         self,
-        snapshot: dict[str, Any],
+        snapshot: BacktestProfileV2 | dict[str, Any],
         output_dir: Path | None = None,
     ) -> Path:
+        snapshot = self._normalize_snapshot(snapshot)
         config = self.build_backtest_config_dict(snapshot)
         target_dir = resolve_repo_path(output_dir or self._default_output_dir)
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -50,7 +52,8 @@ class FreqtradeConfigBuilder:
         )
         return target_path
 
-    def build_backtest_config_dict(self, snapshot: dict[str, Any]) -> dict[str, Any]:
+    def build_backtest_config_dict(self, snapshot: BacktestProfileV2 | dict[str, Any]) -> dict[str, Any]:
+        snapshot = self._normalize_snapshot(snapshot)
         # Keep the snapshot input small and explicit so callers cannot smuggle
         # exchange credentials or unrelated runtime settings into backtesting.
         pair = self._required_text(snapshot, "pair")
@@ -98,6 +101,13 @@ class FreqtradeConfigBuilder:
 
         self._reject_secret_keys(config)
         return config
+
+    def _normalize_snapshot(self, snapshot: BacktestProfileV2 | dict[str, Any]) -> dict[str, Any]:
+        if isinstance(snapshot, BacktestProfileV2):
+            return snapshot.to_config_snapshot()
+        if snapshot.get("schema_version") == "2":
+            return BacktestProfileV2.model_validate(snapshot).to_config_snapshot()
+        return snapshot
 
     def _required_text(self, snapshot: dict[str, Any], key: str) -> str:
         value = snapshot.get(key)

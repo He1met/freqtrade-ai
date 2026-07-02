@@ -9,6 +9,13 @@ from app.schemas.backtest import (
     BacktestTaskRead,
     BacktestTaskStatusUpdate,
 )
+from app.schemas.backtest_profile import (
+    BacktestProfileDataSource,
+    BacktestProfileSafety,
+    BacktestProfileStake,
+    BacktestProfileStrategy,
+    BacktestProfileV2,
+)
 from app.schemas.strategy import (
     StrategyCreate,
     StrategyRead,
@@ -61,6 +68,11 @@ __all__ = [
     "BacktestTaskCreate",
     "BacktestTaskRead",
     "BacktestTaskStatusUpdate",
+    "BacktestProfileDataSource",
+    "BacktestProfileSafety",
+    "BacktestProfileStake",
+    "BacktestProfileStrategy",
+    "BacktestProfileV2",
     "GenerationRunStatus",
     "IndicatorBlueprint",
     "SignalRule",
