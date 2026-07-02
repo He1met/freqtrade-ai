@@ -1,8 +1,16 @@
 import { useMvpData } from "../api/useMvpData";
-import { metricRows, reasonText, statusClassName } from "./backtestDisplay";
+import {
+  buildBacktestMatrixSummary,
+  formatNumber,
+  metricRows,
+  reasonText,
+  statusClassName,
+} from "./backtestDisplay";
 
 export function BacktestRuns() {
   const { data, source, isLoading } = useMvpData();
+  const matrixSummary = buildBacktestMatrixSummary(data.backtestRuns, data.backtestTasks);
+  const statusEntries = Object.entries(matrixSummary.statusCounts).filter(([, count]) => count > 0);
 
   return (
     <section className="page">
@@ -10,6 +18,51 @@ export function BacktestRuns() {
         <h1>Backtest Runs</h1>
         <span className="status-pill">{isLoading ? "Loading" : source}</span>
       </header>
+      <section className="matrix-summary" aria-label="Backtest Matrix summary">
+        <div className="matrix-overview">
+          <span className={`run-status ${statusClassName(matrixSummary.status)}`}>{matrixSummary.status}</span>
+          <div>
+            <strong>Backtest Matrix</strong>
+            <span>
+              {matrixSummary.completedTasks}/{matrixSummary.totalTasks} tasks completed across{" "}
+              {matrixSummary.profileCount} profiles and {matrixSummary.strategyCount} strategies
+            </span>
+          </div>
+        </div>
+        <div className="matrix-status-grid">
+          {statusEntries.map(([status, count]) => (
+            <div className="matrix-status-item" key={status}>
+              <span className={`run-status ${statusClassName(status)}`}>{status}</span>
+              <strong>{count}</strong>
+            </div>
+          ))}
+        </div>
+        <div className="matrix-range-grid">
+          {matrixSummary.metricRanges.map((range) => (
+            <div className="matrix-range-item" key={range.label}>
+              <span>{range.label}</span>
+              <strong>{formatNumber(range.avg, range.suffix)} avg</strong>
+              <em>
+                {formatNumber(range.min, range.suffix)} min / {formatNumber(range.max, range.suffix)} max
+              </em>
+            </div>
+          ))}
+        </div>
+        <div className="matrix-reasons">
+          {matrixSummary.reasons.length === 0 ? (
+            <span>No blocked or failed reasons.</span>
+          ) : (
+            matrixSummary.reasons.map((entry) => (
+              <div className="reason-line" key={`${entry.status}:${entry.reason}`}>
+                <strong>{entry.status}</strong>
+                <span>
+                  {entry.count}x {entry.reason}
+                </span>
+              </div>
+            ))
+          )}
+        </div>
+      </section>
       <div className="table-shell">
         <table>
           <thead>
