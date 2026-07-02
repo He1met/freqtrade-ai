@@ -103,3 +103,37 @@ python3 -m compileall backend/app backend/tests scripts
 cd frontend && npm run build
 git diff --check
 ```
+
+## Phase 3 Backtesting Smoke
+
+Phase 3 回测体系增强使用离线 smoke 覆盖 MarketDataCatalog、BacktestProfile v2、
+artifact manifest、结果指标解析、批量矩阵 fail-closed 聚合、baseline/reproducibility
+检查和前端 build：
+
+```bash
+python3 scripts/smoke_phase3.py --offline --tmp-dir /tmp/freqtrade-ai-phase3-smoke
+```
+
+该命令默认生成临时 fixture 行情数据并使用 fake backtest runner，不调用真实
+Freqtrade CLI、不连接真实交易所、不下载 K 线、不执行 dry-run/live trading/Hyperopt，
+也不连接生产数据库。命令会额外检查仓库 `user_data/data` 的真实回测 readiness；如果
+本地没有真实数据，只输出 `BLOCKED` readiness 信息，smoke 仍以 fixture/local-only
+路径验证 Phase 3 闭环。
+
+覆盖范围：
+
+- 扫描临时 `user_data/data` fixture 并校验 catalog 元数据。
+- 校验 BacktestProfile v2 的 local-only 安全边界。
+- 生成一个成功任务和一个缺数据 `BLOCKED` 任务，写入 artifact manifest 与矩阵摘要。
+- 解析 fixture Freqtrade result JSON 的核心指标和风险指标。
+- 生成 reproducibility fingerprint，并验证 stable 与 missing-baseline 状态。
+- 默认运行 `npm run build` 验证前端 Phase 3 展示仍可构建。
+
+限制和禁止项：
+
+- 不调用真实 Freqtrade CLI；真实路径只作为 readiness 检查，不伪造成功。
+- 不连接真实交易所，不下载 K 线。
+- 不执行 dry-run、live trading、Hyperopt 或真实下单。
+- 不读取或写入真实 API key。
+- 不引入 Redis、Celery、Kafka、RabbitMQ。
+- 不修改 Freqtrade 源码。
