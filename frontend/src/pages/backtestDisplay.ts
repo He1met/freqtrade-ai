@@ -1,4 +1,31 @@
-import type { BacktestMetricSummary } from "../api/types";
+import type { BacktestMetricSummary, BacktestRunSummary, BacktestTaskSummary } from "../api/types";
+
+type MatrixDisplayStatus = "SUCCESS" | "FAILED" | "BLOCKED" | "PENDING" | "EMPTY";
+
+export type BacktestMatrixMetricRange = {
+  label: string;
+  min: number | null;
+  max: number | null;
+  avg: number | null;
+  suffix: string;
+};
+
+export type BacktestMatrixReasonSummary = {
+  status: MatrixDisplayStatus;
+  reason: string;
+  count: number;
+};
+
+export type BacktestMatrixDisplaySummary = {
+  status: MatrixDisplayStatus;
+  totalTasks: number;
+  completedTasks: number;
+  strategyCount: number;
+  profileCount: number;
+  statusCounts: Record<MatrixDisplayStatus, number>;
+  metricRanges: BacktestMatrixMetricRange[];
+  reasons: BacktestMatrixReasonSummary[];
+};
 
 export function statusClassName(status: string): string {
   const normalized = status.toLowerCase();
@@ -45,4 +72,133 @@ export function metricRows(metrics: BacktestMetricSummary): Array<[string, strin
     ["Sortino", formatNumber(metrics.sortino)],
     ["Calmar", formatNumber(metrics.calmar)],
   ];
+}
+
+export function buildBacktestMatrixSummary(
+  runs: BacktestRunSummary[],
+  tasks: BacktestTaskSummary[],
+): BacktestMatrixDisplaySummary {
+  const rows = tasks.length > 0 ? tasks.map(rowFromTask) : runs.map(rowFromRun);
+  const statusCounts: Record<MatrixDisplayStatus, number> = {
+    SUCCESS: 0,
+    FAILED: 0,
+    BLOCKED: 0,
+    PENDING: 0,
+    EMPTY: 0,
+  };
+  const strategies = new Set<string>();
+  const profiles = new Set<string>();
+  const reasonCounts = new Map<string, BacktestMatrixReasonSummary>();
+
+  for (const row of rows) {
+    statusCounts[row.status] += 1;
+    strategies.add(row.strategyName);
+    profiles.add(row.profileName);
+
+    if (row.reason !== "none" && (row.status === "FAILED" || row.status === "BLOCKED")) {
+      const key = `${row.status}:${row.reason}`;
+      const existing = reasonCounts.get(key);
+      reasonCounts.set(key, {
+        status: row.status,
+        reason: row.reason,
+        count: (existing?.count ?? 0) + 1,
+      });
+    }
+  }
+
+  if (rows.length === 0) {
+    statusCounts.EMPTY = 1;
+  }
+
+  return {
+    status: matrixStatus(statusCounts, rows.length),
+    totalTasks: rows.length,
+    completedTasks: statusCounts.SUCCESS + statusCounts.FAILED + statusCounts.BLOCKED,
+    strategyCount: strategies.size,
+    profileCount: profiles.size,
+    statusCounts,
+    metricRanges: [
+      metricRange("Profit", rows.map((row) => row.metrics.profitPct), "%"),
+      metricRange("Drawdown", rows.map((row) => row.metrics.maxDrawdownPct), "%"),
+      metricRange(
+        "Win rate",
+        rows.map((row) => (row.metrics.winRate === null ? null : row.metrics.winRate * 100)),
+        "%",
+      ),
+      metricRange("Trades", rows.map((row) => row.metrics.totalTrades), ""),
+    ],
+    reasons: Array.from(reasonCounts.values()).sort((left, right) => right.count - left.count),
+  };
+}
+
+function rowFromTask(task: BacktestTaskSummary) {
+  const status = classifyMatrixStatus(task.artifactManifest?.status ?? task.status, task.blockedReason);
+  return {
+    status,
+    strategyName: task.strategyName,
+    profileName: `${task.pair} ${task.timeframe}`,
+    metrics: task.metrics,
+    reason: reasonText(task.blockedReason, task.failedReason, task.errorMessage),
+  };
+}
+
+function rowFromRun(run: BacktestRunSummary) {
+  const status = classifyMatrixStatus(run.artifactManifest?.status ?? run.status, run.blockedReason);
+  return {
+    status,
+    strategyName: run.strategyName,
+    profileName: run.profileName,
+    metrics: run.metrics,
+    reason: reasonText(run.blockedReason, run.failedReason),
+  };
+}
+
+function classifyMatrixStatus(status: string, blockedReason: string | null): MatrixDisplayStatus {
+  if (blockedReason) {
+    return "BLOCKED";
+  }
+
+  const normalized = status.toLowerCase();
+  if (normalized === "success" || normalized === "succeeded") {
+    return "SUCCESS";
+  }
+  if (normalized === "blocked") {
+    return "BLOCKED";
+  }
+  if (normalized === "failed" || normalized === "failure") {
+    return "FAILED";
+  }
+  return "PENDING";
+}
+
+function matrixStatus(statusCounts: Record<MatrixDisplayStatus, number>, rowCount: number): MatrixDisplayStatus {
+  if (rowCount === 0) {
+    return "EMPTY";
+  }
+  if (statusCounts.BLOCKED > 0) {
+    return "BLOCKED";
+  }
+  if (statusCounts.FAILED > 0) {
+    return "FAILED";
+  }
+  if (statusCounts.PENDING > 0) {
+    return "PENDING";
+  }
+  return "SUCCESS";
+}
+
+function metricRange(label: string, values: Array<number | null>, suffix: string): BacktestMatrixMetricRange {
+  const numericValues = values.filter((value): value is number => value !== null);
+  if (numericValues.length === 0) {
+    return { label, min: null, max: null, avg: null, suffix };
+  }
+
+  const total = numericValues.reduce((sum, value) => sum + value, 0);
+  return {
+    label,
+    min: Math.min(...numericValues),
+    max: Math.max(...numericValues),
+    avg: total / numericValues.length,
+    suffix,
+  };
 }

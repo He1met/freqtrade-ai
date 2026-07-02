@@ -157,6 +157,109 @@ a {
   overflow-x: auto;
 }
 
+.matrix-summary {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.1fr) minmax(220px, 0.9fr);
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.matrix-overview,
+.matrix-status-grid,
+.matrix-range-grid,
+.matrix-reasons {
+  border: 1px solid #d8ded7;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.matrix-overview {
+  display: flex;
+  min-height: 110px;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 18px;
+}
+
+.matrix-overview div {
+  display: grid;
+  gap: 8px;
+}
+
+.matrix-overview strong {
+  font-size: 18px;
+}
+
+.matrix-overview span:last-child {
+  color: #526159;
+  line-height: 1.45;
+}
+
+.matrix-status-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding: 14px;
+}
+
+.matrix-status-item {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.matrix-status-item strong {
+  font-size: 22px;
+}
+
+.matrix-range-grid {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0;
+}
+
+.matrix-range-item {
+  display: grid;
+  gap: 6px;
+  min-height: 96px;
+  border-right: 1px solid #e4e8e3;
+  padding: 16px;
+}
+
+.matrix-range-item:last-child {
+  border-right: 0;
+}
+
+.matrix-range-item span,
+.matrix-range-item em {
+  color: #657269;
+  font-style: normal;
+}
+
+.matrix-range-item strong {
+  font-size: 18px;
+}
+
+.matrix-reasons {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 10px;
+  padding: 14px 16px;
+}
+
+.matrix-reasons > span {
+  color: #526159;
+}
+
+.matrix-reasons .reason-line {
+  max-width: none;
+  display: grid;
+  gap: 4px;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
@@ -561,6 +664,20 @@ th {
   .overview-grid {
     grid-template-columns: 1fr;
   }
+
+  .matrix-summary,
+  .matrix-range-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .matrix-range-item {
+    border-right: 0;
+    border-bottom: 1px solid #e4e8e3;
+  }
+
+  .matrix-range-item:last-child {
+    border-bottom: 0;
+  }
 }
 
 @media (max-width: 520px) {
@@ -572,6 +689,10 @@ th {
   .detail-list div {
     grid-template-columns: 1fr;
     gap: 5px;
+  }
+
+  .matrix-status-grid {
+    grid-template-columns: 1fr;
   }
 
   .lineage-meta div,
