@@ -1,4 +1,5 @@
 import { useMvpData } from "../api/useMvpData";
+import { metricRows, reasonText, statusClassName, summarizeText } from "./backtestDisplay";
 
 export function BacktestTasks() {
   const { data, source, isLoading } = useMvpData();
@@ -19,27 +20,55 @@ export function BacktestTasks() {
               <th>Pair</th>
               <th>Timeframe</th>
               <th>Status</th>
-              <th>Profit %</th>
+              <th>Artifact</th>
+              <th>Metrics</th>
               <th>Config</th>
               <th>Result</th>
-              <th>Error</th>
+              <th>Reason</th>
+              <th>Stdout/Stderr</th>
             </tr>
           </thead>
           <tbody>
-            {data.backtestTasks.map((task) => (
-              <tr key={task.id}>
-                <td>{task.id}</td>
-                <td>{task.runId}</td>
-                <td>{task.strategyName}</td>
-                <td>{task.pair}</td>
-                <td>{task.timeframe}</td>
-                <td>{task.status}</td>
-                <td>{task.profitPct?.toFixed(2) ?? "none"}</td>
-                <td className="path-cell">{task.configPath ?? "none"}</td>
-                <td className="path-cell">{task.resultPath ?? "none"}</td>
-                <td className="path-cell">{task.errorMessage ?? "none"}</td>
-              </tr>
-            ))}
+            {data.backtestTasks.map((task) => {
+              const artifact = task.artifactManifest;
+              const artifactStatus = artifact?.status ?? task.status;
+              return (
+                <tr key={task.id}>
+                  <td>{task.id}</td>
+                  <td>{task.runId}</td>
+                  <td>{task.strategyName}</td>
+                  <td>{task.pair}</td>
+                  <td>{task.timeframe}</td>
+                  <td>
+                    <span className={`run-status ${statusClassName(task.status)}`}>{task.status}</span>
+                  </td>
+                  <td className="artifact-cell">
+                    <span className={`run-status ${statusClassName(artifactStatus)}`}>
+                      {artifactStatus}
+                    </span>
+                    <span>return: {artifact?.returnCode ?? "none"}</span>
+                    <span>manifest: {artifact?.manifestPath ?? "none"}</span>
+                  </td>
+                  <td className="metric-summary">
+                    {metricRows(task.metrics).map(([label, value]) => (
+                      <span key={label}>
+                        <strong>{label}</strong>
+                        {value}
+                      </span>
+                    ))}
+                  </td>
+                  <td className="path-cell">{task.configPath ?? "none"}</td>
+                  <td className="path-cell">{task.resultPath ?? artifact?.resultPath ?? "none"}</td>
+                  <td className="reason-cell">
+                    {reasonText(task.blockedReason, task.failedReason, task.errorMessage)}
+                  </td>
+                  <td className="log-cell">
+                    <span>stdout: {summarizeText(artifact?.stdout)}</span>
+                    <span>stderr: {summarizeText(artifact?.stderr)}</span>
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>

@@ -1,5 +1,9 @@
 import { mockMvpData } from "../data/mock";
 import type {
+  BacktestArtifactManifest,
+  BacktestMetricSummary,
+  BacktestRunSummary,
+  BacktestTaskSummary,
   MvpData,
   RankingEliminationSummary,
   RankingEntry,
@@ -29,6 +33,59 @@ type RawStrategyVersionLineageEntry = Partial<StrategyVersionLineageEntry> & {
   diff_snapshot?: Record<string, unknown>;
   has_parent?: boolean;
   created_at?: string | null;
+};
+
+type RawBacktestArtifactManifest = Partial<BacktestArtifactManifest> & {
+  manifest_version?: number | null;
+  config_path?: string | null;
+  strategy_name?: string | null;
+  result_path?: string | null;
+  manifest_path?: string | null;
+  command_args?: unknown;
+  return_code?: number | null;
+  blocked_reason?: string | null;
+  failed_reason?: string | null;
+  strategy_path?: string | null;
+};
+
+type RawBacktestMetricSummary = Partial<BacktestMetricSummary> & {
+  profit_total?: number | null;
+  profit_pct?: number | null;
+  max_drawdown_pct?: number | null;
+  win_rate?: number | null;
+  total_trades?: number | null;
+  metricsSnapshot?: Record<string, unknown>;
+  metrics_snapshot?: Record<string, unknown>;
+  normalized_metrics?: Record<string, unknown>;
+};
+
+type RawBacktestRunSummary = Partial<BacktestRunSummary> & {
+  strategy_name?: string;
+  profile_name?: string | null;
+  requested_task_count?: number;
+  completed_task_count?: number;
+  profit_pct?: number | null;
+  max_drawdown_pct?: number | null;
+  artifact_manifest?: RawBacktestArtifactManifest | null;
+  manifest?: RawBacktestArtifactManifest | null;
+  metrics_snapshot?: Record<string, unknown>;
+  blocked_reason?: string | null;
+  failed_reason?: string | null;
+};
+
+type RawBacktestTaskSummary = Partial<BacktestTaskSummary> & {
+  run_id?: string | number;
+  backtest_run_id?: string | number;
+  strategy_name?: string;
+  config_path?: string | null;
+  result_path?: string | null;
+  profit_pct?: number | null;
+  error_message?: string | null;
+  artifact_manifest?: RawBacktestArtifactManifest | null;
+  manifest?: RawBacktestArtifactManifest | null;
+  metrics_snapshot?: Record<string, unknown>;
+  blocked_reason?: string | null;
+  failed_reason?: string | null;
 };
 
 type RawRankingEntry = Partial<RankingEntry> & {
@@ -72,6 +129,59 @@ function asNumber(value: unknown, fallback = 0): number {
 
 function asOptionalNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function asOptionalString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function asStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.map((item) => String(item)) : [];
+}
+
+function normalizeMetrics(raw: RawBacktestMetricSummary | undefined): BacktestMetricSummary {
+  const source = raw ?? {};
+  const snapshot = source.metricsSnapshot ?? source.metrics_snapshot ?? {};
+  const normalized = asRecord(snapshot.normalized_metrics ?? source.normalized_metrics);
+  return {
+    profitTotal: asOptionalNumber(source.profitTotal ?? source.profit_total ?? normalized.profit_total),
+    profitPct: asOptionalNumber(source.profitPct ?? source.profit_pct ?? normalized.profit_pct),
+    maxDrawdownPct: asOptionalNumber(
+      source.maxDrawdownPct ?? source.max_drawdown_pct ?? normalized.max_drawdown_pct,
+    ),
+    winRate: asOptionalNumber(source.winRate ?? source.win_rate ?? normalized.win_rate),
+    totalTrades: asOptionalNumber(source.totalTrades ?? source.total_trades ?? normalized.total_trades),
+    timerange: asOptionalString(source.timerange ?? normalized.timerange),
+    sharpe: asOptionalNumber(source.sharpe ?? normalized.sharpe),
+    sortino: asOptionalNumber(source.sortino ?? normalized.sortino),
+    calmar: asOptionalNumber(source.calmar ?? normalized.calmar),
+  };
+}
+
+function normalizeArtifactManifest(
+  raw: RawBacktestArtifactManifest | null | undefined,
+): BacktestArtifactManifest | null {
+  if (!raw) {
+    return null;
+  }
+
+  return {
+    manifestVersion: asOptionalNumber(raw.manifestVersion ?? raw.manifest_version),
+    status: raw.status ?? "UNKNOWN",
+    configPath: raw.configPath ?? raw.config_path ?? null,
+    strategyName: raw.strategyName ?? raw.strategy_name ?? null,
+    resultPath: raw.resultPath ?? raw.result_path ?? null,
+    manifestPath: raw.manifestPath ?? raw.manifest_path ?? null,
+    commandArgs: asStringArray(raw.commandArgs ?? raw.command_args),
+    returnCode: asOptionalNumber(raw.returnCode ?? raw.return_code),
+    stdout: raw.stdout ?? "",
+    stderr: raw.stderr ?? "",
+    datadir: raw.datadir ?? null,
+    strategyPath: raw.strategyPath ?? raw.strategy_path ?? null,
+    userdir: raw.userdir ?? null,
+    blockedReason: raw.blockedReason ?? raw.blocked_reason ?? null,
+    failedReason: raw.failedReason ?? raw.failed_reason ?? null,
+  };
 }
 
 function normalizeRankingSignal(raw: unknown): RankingSignalSummary {
@@ -182,6 +292,46 @@ function normalizeLineageEntry(raw: RawStrategyVersionLineageEntry): StrategyVer
   };
 }
 
+function normalizeBacktestRun(raw: RawBacktestRunSummary): BacktestRunSummary {
+  const artifactManifest = normalizeArtifactManifest(raw.artifactManifest ?? raw.artifact_manifest ?? raw.manifest);
+  const metrics = normalizeMetrics(raw);
+  return {
+    id: normalizeId(raw.id),
+    strategyName: raw.strategyName ?? raw.strategy_name ?? artifactManifest?.strategyName ?? "Unknown strategy",
+    status: raw.status ?? artifactManifest?.status ?? "unknown",
+    profileName: raw.profileName ?? raw.profile_name ?? "default",
+    requestedTaskCount: raw.requestedTaskCount ?? raw.requested_task_count ?? 0,
+    completedTaskCount: raw.completedTaskCount ?? raw.completed_task_count ?? 0,
+    profitPct: raw.profitPct ?? raw.profit_pct ?? metrics.profitPct,
+    maxDrawdownPct: raw.maxDrawdownPct ?? raw.max_drawdown_pct ?? metrics.maxDrawdownPct,
+    artifactManifest,
+    metrics,
+    blockedReason: raw.blockedReason ?? raw.blocked_reason ?? artifactManifest?.blockedReason ?? null,
+    failedReason: raw.failedReason ?? raw.failed_reason ?? artifactManifest?.failedReason ?? null,
+  };
+}
+
+function normalizeBacktestTask(raw: RawBacktestTaskSummary): BacktestTaskSummary {
+  const artifactManifest = normalizeArtifactManifest(raw.artifactManifest ?? raw.artifact_manifest ?? raw.manifest);
+  const metrics = normalizeMetrics(raw);
+  return {
+    id: normalizeId(raw.id),
+    runId: normalizeId(raw.runId ?? raw.run_id ?? raw.backtest_run_id),
+    strategyName: raw.strategyName ?? raw.strategy_name ?? artifactManifest?.strategyName ?? "Unknown strategy",
+    pair: raw.pair ?? "unknown",
+    timeframe: raw.timeframe ?? "unknown",
+    status: raw.status ?? artifactManifest?.status ?? "unknown",
+    configPath: raw.configPath ?? raw.config_path ?? artifactManifest?.configPath ?? null,
+    resultPath: raw.resultPath ?? raw.result_path ?? artifactManifest?.resultPath ?? null,
+    profitPct: raw.profitPct ?? raw.profit_pct ?? metrics.profitPct,
+    errorMessage: raw.errorMessage ?? raw.error_message ?? null,
+    artifactManifest,
+    metrics,
+    blockedReason: raw.blockedReason ?? raw.blocked_reason ?? artifactManifest?.blockedReason ?? null,
+    failedReason: raw.failedReason ?? raw.failed_reason ?? artifactManifest?.failedReason ?? null,
+  };
+}
+
 async function fetchJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   const response = await fetch(`${getApiBaseUrl()}${path}`, {
     headers: { Accept: "application/json" },
@@ -234,8 +384,16 @@ export async function loadMvpData(signal?: AbortSignal): Promise<{
       mockMvpData.generationRuns,
       signal,
     ),
-    fetchList(["/backtest-runs", "/mvp/backtest-runs"], mockMvpData.backtestRuns, signal),
-    fetchList(["/backtest-tasks", "/mvp/backtest-tasks"], mockMvpData.backtestTasks, signal),
+    fetchList<RawBacktestRunSummary>(
+      ["/backtest-runs", "/mvp/backtest-runs"],
+      mockMvpData.backtestRuns,
+      signal,
+    ),
+    fetchList<RawBacktestTaskSummary>(
+      ["/backtest-tasks", "/mvp/backtest-tasks"],
+      mockMvpData.backtestTasks,
+      signal,
+    ),
     fetchList<RawRankingEntry>(
       ["/ranking", "/strategy-ranking", "/mvp/ranking"],
       mockMvpData.ranking,
@@ -257,8 +415,8 @@ export async function loadMvpData(signal?: AbortSignal): Promise<{
     data: {
       strategies: strategies.items,
       generationRuns: generationRuns.items,
-      backtestRuns: backtestRuns.items,
-      backtestTasks: backtestTasks.items,
+      backtestRuns: backtestRuns.items.map(normalizeBacktestRun),
+      backtestTasks: backtestTasks.items.map(normalizeBacktestTask),
       ranking: ranking.items.map(normalizeRankingEntry),
       failureReasons: failureReasons.items.map(normalizeFailureReason),
       versionLineage: versionLineage.items.map(normalizeLineageEntry),
