@@ -177,9 +177,77 @@ td.path-cell {
 }
 
 td.breakdown-cell,
-td.reason-cell {
+td.reason-cell,
+td.artifact-cell,
+td.metric-summary,
+td.log-cell {
   min-width: 240px;
   white-space: normal;
+}
+
+td.artifact-cell,
+td.log-cell {
+  color: #526159;
+}
+
+.metric-summary {
+  min-width: 320px;
+}
+
+.metric-summary span {
+  display: inline-grid;
+  min-width: 140px;
+  gap: 2px;
+  padding: 0 10px 7px 0;
+  color: #526159;
+}
+
+.artifact-cell span,
+.log-cell span {
+  display: block;
+  margin-bottom: 7px;
+}
+
+.artifact-cell span:last-child,
+.log-cell span:last-child {
+  margin-bottom: 0;
+}
+
+.metric-summary strong {
+  color: #17201b;
+  font-size: 12px;
+}
+
+.run-status {
+  display: inline-flex;
+  width: fit-content;
+  min-height: 26px;
+  align-items: center;
+  border-radius: 999px;
+  padding: 4px 9px;
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.status-success {
+  background: #e2f2ea;
+  color: #19623b;
+}
+
+.status-failed {
+  background: #ffe8e8;
+  color: #9d1c1c;
+}
+
+.status-blocked {
+  background: #fff1d6;
+  color: #79500f;
+}
+
+.status-neutral {
+  background: #e7edf4;
+  color: #244663;
 }
 
 .primary-cell {

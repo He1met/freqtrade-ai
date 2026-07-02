@@ -46,6 +46,10 @@ export type BacktestRunSummary = {
   completedTaskCount: number;
   profitPct: number | null;
   maxDrawdownPct: number | null;
+  artifactManifest: BacktestArtifactManifest | null;
+  metrics: BacktestMetricSummary;
+  blockedReason: string | null;
+  failedReason: string | null;
 };
 
 export type BacktestTaskSummary = {
@@ -59,6 +63,42 @@ export type BacktestTaskSummary = {
   resultPath: string | null;
   profitPct: number | null;
   errorMessage: string | null;
+  artifactManifest: BacktestArtifactManifest | null;
+  metrics: BacktestMetricSummary;
+  blockedReason: string | null;
+  failedReason: string | null;
+};
+
+export type BacktestArtifactStatus = "SUCCESS" | "FAILED" | "BLOCKED" | string;
+
+export type BacktestArtifactManifest = {
+  manifestVersion: number | null;
+  status: BacktestArtifactStatus;
+  configPath: string | null;
+  strategyName: string | null;
+  resultPath: string | null;
+  manifestPath: string | null;
+  commandArgs: string[];
+  returnCode: number | null;
+  stdout: string;
+  stderr: string;
+  datadir: string | null;
+  strategyPath: string | null;
+  userdir: string | null;
+  blockedReason: string | null;
+  failedReason: string | null;
+};
+
+export type BacktestMetricSummary = {
+  profitTotal: number | null;
+  profitPct: number | null;
+  maxDrawdownPct: number | null;
+  winRate: number | null;
+  totalTrades: number | null;
+  timerange: string | null;
+  sharpe: number | null;
+  sortino: number | null;
+  calmar: number | null;
 };
 
 export type RankingEntry = {
