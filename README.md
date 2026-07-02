@@ -79,14 +79,24 @@ python3 scripts/smoke_phase2.py --offline --tmp-dir /tmp/freqtrade-ai-phase2-smo
 
 ## Phase 3 回测体系增强状态
 
-Phase 3 已完成规划并进入执行准备阶段。目标是在本地研究边界内，把回测能力增强为
-可重复、可审计、可解释的研究闭环。
+Phase 3 回测体系增强已完成验收。当前已具备：
 
-Phase 3 的第一项开发任务是本地行情数据可用性与真实 Freqtrade 回测基线复核。后续
-任务按数据 catalog、BacktestProfile、artifact manifest、指标解析、批量矩阵、baseline
-复核、前端展示和 smoke 验收顺序推进。
+- 本地行情数据 catalog 与数据质量状态。
+- BacktestProfile schema v2 与实验变量锁定。
+- 真实 Freqtrade backtesting artifact manifest。
+- 回测结果指标扩展与版本兼容解析。
+- 批量回测矩阵执行与 fail-closed 聚合。
+- baseline 对比与重复性检查。
+- 前端展示 BacktestRun artifact、增强指标和 Backtest Matrix 摘要。
+- 离线 Phase 3 smoke 验收脚本。
 
-完整规划见 [phase3_plan.md](docs/phase3_plan.md)。
+Phase 3 smoke 命令：
+
+```bash
+python3 scripts/smoke_phase3.py --offline --tmp-dir /tmp/freqtrade-ai-phase3-smoke
+```
+
+完整验收状态见 [phase3_acceptance.md](docs/phase3_acceptance.md)。
 
 当前限制：
 
