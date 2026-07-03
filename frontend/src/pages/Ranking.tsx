@@ -1,15 +1,16 @@
 import { useMvpData } from "../api/useMvpData";
 import type { RankingScoreBreakdownItem } from "../api/types";
+import { NONE_TEXT, sourceLabel } from "./display";
 
 const SCORE_LABELS: Record<string, string> = {
-  profit_score: "Profit",
-  risk_score: "Risk",
-  stability_score: "Stability",
-  quality_score: "Quality",
+  profit_score: "收益",
+  risk_score: "风险",
+  stability_score: "稳定性",
+  quality_score: "质量",
 };
 
 function formatScore(value: number | null) {
-  return value === null ? "none" : value.toFixed(1);
+  return value === null ? NONE_TEXT : value.toFixed(1);
 }
 
 function formatBreakdownName(item: RankingScoreBreakdownItem) {
@@ -22,21 +23,21 @@ export function Ranking() {
   return (
     <section className="page">
       <header className="page-header">
-        <h1>Ranking</h1>
-        <span className="status-pill">{isLoading ? "Loading" : source}</span>
+        <h1>排行榜</h1>
+        <span className="status-pill">{sourceLabel(source, isLoading)}</span>
       </header>
       <div className="table-shell">
         <table>
           <thead>
             <tr>
-              <th>Rank</th>
-              <th>Strategy</th>
-              <th>Version</th>
-              <th>Total</th>
-              <th>Breakdown</th>
-              <th>Outcome</th>
-              <th>Reasons</th>
-              <th>File</th>
+              <th>排名</th>
+              <th>策略</th>
+              <th>版本</th>
+              <th>总分</th>
+              <th>拆分</th>
+              <th>结果</th>
+              <th>原因</th>
+              <th>文件</th>
             </tr>
           </thead>
           <tbody>
@@ -53,7 +54,7 @@ export function Ranking() {
                 <td>
                   <div className="score-cell">{entry.totalScore.toFixed(1)}</div>
                   {entry.rawTotalScore !== null && entry.rawTotalScore !== entry.totalScore ? (
-                    <div className="secondary-cell">raw {entry.rawTotalScore.toFixed(1)}</div>
+                    <div className="secondary-cell">原始分 {entry.rawTotalScore.toFixed(1)}</div>
                   ) : null}
                 </td>
                 <td className="breakdown-cell">
@@ -71,7 +72,7 @@ export function Ranking() {
                       entry.elimination.eliminated ? "outcome-pill eliminated" : "outcome-pill passed"
                     }
                   >
-                    {entry.elimination.eliminated ? "Eliminated" : "Ranked"}
+                    {entry.elimination.eliminated ? "已淘汰" : "已入榜"}
                   </span>
                 </td>
                 <td className="reason-cell">
@@ -82,7 +83,7 @@ export function Ranking() {
                       </div>
                     ))
                   ) : (
-                    <span className="secondary-cell">none</span>
+                    <span className="secondary-cell">{NONE_TEXT}</span>
                   )}
                 </td>
                 <td className="path-cell">{entry.filePath}</td>
@@ -91,7 +92,7 @@ export function Ranking() {
           </tbody>
         </table>
       </div>
-      {data.ranking.length === 0 ? <div className="empty-state">No scored strategies.</div> : null}
+      {data.ranking.length === 0 ? <div className="empty-state">暂无评分策略。</div> : null}
     </section>
   );
 }

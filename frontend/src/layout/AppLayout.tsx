@@ -1,12 +1,12 @@
 import { NavLink, Outlet } from "react-router-dom";
 
 const navItems = [
-  { to: "/", label: "Dashboard" },
-  { to: "/strategies", label: "Strategies" },
-  { to: "/generation-runs", label: "Generation Runs" },
-  { to: "/backtest-runs", label: "Backtest Runs" },
-  { to: "/backtest-tasks", label: "Backtest Tasks" },
-  { to: "/ranking", label: "Ranking" },
+  { to: "/", label: "总览" },
+  { to: "/strategies", label: "策略" },
+  { to: "/generation-runs", label: "生成批次" },
+  { to: "/backtest-runs", label: "回测批次" },
+  { to: "/backtest-tasks", label: "回测任务" },
+  { to: "/ranking", label: "排行榜" },
   { to: "/freq-ui", label: "FreqUI" },
 ];
 
@@ -18,7 +18,7 @@ export function AppLayout() {
           <span className="brand-mark">FA</span>
           <span>Freqtrade AI</span>
         </div>
-        <nav className="nav-list" aria-label="Primary">
+        <nav className="nav-list" aria-label="主导航">
           {navItems.map((item) => (
             <NavLink key={item.to} to={item.to} end={item.to === "/"}>
               {item.label}

@@ -16,7 +16,7 @@ export function FreqUILink() {
     <section className="page">
       <header className="page-header">
         <h1>FreqUI</h1>
-        <span className="status-pill">{isConfigured ? "Configured" : "Local placeholder"}</span>
+        <span className="status-pill">{isConfigured ? "已配置" : "本地占位"}</span>
       </header>
       <div className="detail-list frequi-panel">
         <div>
@@ -26,16 +26,16 @@ export function FreqUILink() {
           </dd>
         </div>
         <div>
-          <dt>Status</dt>
+          <dt>状态</dt>
           <dd>
             {isConfigured
-              ? "Using VITE_FREQUI_URL."
-              : "VITE_FREQUI_URL is not configured; using the local placeholder."}
+              ? "正在使用 VITE_FREQUI_URL。"
+              : "未配置 VITE_FREQUI_URL，当前使用本地占位地址。"}
           </dd>
         </div>
       </div>
       <a className="primary-link frequi-action" href={frequiUrl} target="_blank" rel="noreferrer">
-        Open FreqUI
+        打开 FreqUI
       </a>
     </section>
   );

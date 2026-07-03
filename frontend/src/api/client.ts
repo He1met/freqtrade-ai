@@ -13,8 +13,6 @@ import type {
   StrategyVersionLineageEntry,
 } from "./types";
 
-const DEFAULT_API_BASE_URL = "/api";
-
 // The frontend keeps a controlled fallback path while backend endpoints are
 // still being stabilized. The flag returned by loadMvpData makes that fallback
 // visible to pages instead of silently presenting mock data as live data.
@@ -110,7 +108,7 @@ function getApiBaseUrl() {
   const env = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env;
   const configuredUrl = env?.VITE_API_BASE_URL?.trim();
 
-  return (configuredUrl || DEFAULT_API_BASE_URL).replace(/\/$/, "");
+  return configuredUrl ? configuredUrl.replace(/\/$/, "") : null;
 }
 
 function normalizeId(value: string | number | undefined): string {
@@ -192,7 +190,7 @@ function normalizeRankingSignal(raw: unknown): RankingSignalSummary {
     message:
       typeof value.message === "string" && value.message.trim()
         ? value.message
-        : "Ranking signal was recorded without a message.",
+        : "排行榜信号未记录说明。",
   };
 }
 
@@ -242,7 +240,7 @@ function normalizeRankingEntry(raw: RawRankingEntry, index: number): RankingEntr
       raw.strategyName ??
       raw.strategy_name ??
       raw.strategy_slug ??
-      "Unknown strategy",
+      "未知策略",
     versionNumber: raw.versionNumber ?? raw.version_number ?? 0,
     filePath: raw.filePath ?? raw.file_path ?? "",
     scoringVersion: raw.scoringVersion ?? raw.scoring_version ?? null,
@@ -271,7 +269,7 @@ function normalizeFailureReason(raw: RawStrategyFailureReason): StrategyFailureR
     stage: raw.stage ?? "unknown",
     reasonType: raw.reasonType ?? raw.reason_type ?? "unknown",
     severity: raw.severity ?? "error",
-    message: raw.message ?? "Failure reason was recorded without a message.",
+    message: raw.message ?? "失败原因未记录说明。",
     details: raw.details ?? {},
     createdAt: raw.createdAt ?? raw.created_at ?? null,
   };
@@ -297,7 +295,7 @@ function normalizeBacktestRun(raw: RawBacktestRunSummary): BacktestRunSummary {
   const metrics = normalizeMetrics(raw);
   return {
     id: normalizeId(raw.id),
-    strategyName: raw.strategyName ?? raw.strategy_name ?? artifactManifest?.strategyName ?? "Unknown strategy",
+    strategyName: raw.strategyName ?? raw.strategy_name ?? artifactManifest?.strategyName ?? "未知策略",
     status: raw.status ?? artifactManifest?.status ?? "unknown",
     profileName: raw.profileName ?? raw.profile_name ?? "default",
     requestedTaskCount: raw.requestedTaskCount ?? raw.requested_task_count ?? 0,
@@ -317,7 +315,7 @@ function normalizeBacktestTask(raw: RawBacktestTaskSummary): BacktestTaskSummary
   return {
     id: normalizeId(raw.id),
     runId: normalizeId(raw.runId ?? raw.run_id ?? raw.backtest_run_id),
-    strategyName: raw.strategyName ?? raw.strategy_name ?? artifactManifest?.strategyName ?? "Unknown strategy",
+    strategyName: raw.strategyName ?? raw.strategy_name ?? artifactManifest?.strategyName ?? "未知策略",
     pair: raw.pair ?? "unknown",
     timeframe: raw.timeframe ?? "unknown",
     status: raw.status ?? artifactManifest?.status ?? "unknown",
@@ -332,8 +330,8 @@ function normalizeBacktestTask(raw: RawBacktestTaskSummary): BacktestTaskSummary
   };
 }
 
-async function fetchJson<T>(path: string, signal?: AbortSignal): Promise<T> {
-  const response = await fetch(`${getApiBaseUrl()}${path}`, {
+async function fetchJson<T>(apiBaseUrl: string, path: string, signal?: AbortSignal): Promise<T> {
+  const response = await fetch(`${apiBaseUrl}${path}`, {
     headers: { Accept: "application/json" },
     signal,
   });
@@ -350,11 +348,16 @@ async function fetchList<T>(
   fallback: T[],
   signal?: AbortSignal,
 ): Promise<{ items: T[]; usedFallback: boolean }> {
+  const apiBaseUrl = getApiBaseUrl();
+  if (!apiBaseUrl) {
+    return { items: fallback, usedFallback: true };
+  }
+
   // Try known endpoint candidates in order. This keeps the UI useful during
   // backend iteration while still surfacing usedFallback to the caller.
   for (const path of paths) {
     try {
-      return { items: await fetchJson<T[]>(path, signal), usedFallback: false };
+      return { items: await fetchJson<T[]>(apiBaseUrl, path, signal), usedFallback: false };
     } catch (error) {
       if (signal?.aborted) {
         throw error;

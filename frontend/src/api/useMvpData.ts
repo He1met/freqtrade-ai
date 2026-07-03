@@ -11,38 +11,66 @@ const initialState: MvpDataState = {
   error: null,
 };
 
-export function useMvpData(): MvpDataState {
-  const [state, setState] = useState<MvpDataState>(initialState);
+let cachedState: MvpDataState | null = null;
+let pendingLoad: Promise<MvpDataState> | null = null;
 
-  useEffect(() => {
-    const controller = new AbortController();
+function getMvpDataState(): Promise<MvpDataState> {
+  if (cachedState) {
+    return Promise.resolve(cachedState);
+  }
 
-    loadMvpData(controller.signal)
+  if (!pendingLoad) {
+    pendingLoad = loadMvpData()
       .then(({ data, usedFallback }) => {
-        setState({
+        cachedState = {
           data,
           source: usedFallback ? "fallback" : "api",
           isLoading: false,
           error: null,
-        });
+        };
+        return cachedState;
       })
       .catch((error: unknown) => {
-        if (controller.signal.aborted) {
-          return;
-        }
-
-        setState({
+        cachedState = {
           data: mockMvpData,
           source: "fallback",
           isLoading: false,
-          error: error instanceof Error ? error.message : "Unable to load MVP data.",
-        });
+          error:
+            error instanceof Error
+              ? error.message
+              : "无法加载 MVP 数据，已使用本地示例数据。",
+        };
+        return cachedState;
+      })
+      .finally(() => {
+        pendingLoad = null;
       });
+  }
+
+  return pendingLoad;
+}
+
+export function useMvpData(): MvpDataState {
+  const [state, setState] = useState<MvpDataState>(cachedState ?? initialState);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    getMvpDataState().then((nextState) => {
+      if (isMounted) {
+        setState(nextState);
+      }
+    });
 
     return () => {
-      controller.abort();
+      isMounted = false;
     };
   }, []);
 
   return state;
+}
+
+export function resetMvpDataCacheForTests() {
+  cachedState = null;
+  pendingLoad = null;
 }
