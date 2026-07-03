@@ -17,7 +17,7 @@ export function Dashboard() {
         <h1>总览</h1>
         <span className="status-pill">{sourceLabel(source, isLoading)}</span>
       </header>
-      {error ? <div className="notice">已使用本地示例数据：{error}</div> : null}
+      {error ? <div className="notice">本地运行数据不可用：{error}</div> : null}
       <div className="metric-grid">
         {summary.map((item) => (
           <article className="metric" key={item.label}>

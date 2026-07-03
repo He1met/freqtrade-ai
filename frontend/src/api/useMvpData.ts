@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
 
-import { mockMvpData } from "../data/mock";
 import { loadMvpData } from "./client";
+import { emptyMvpData } from "./emptyData";
 import type { MvpDataState } from "./types";
 
 const initialState: MvpDataState = {
-  data: mockMvpData,
+  data: emptyMvpData,
   source: "fallback",
   isLoading: true,
   error: null,
@@ -32,13 +32,13 @@ function getMvpDataState(): Promise<MvpDataState> {
       })
       .catch((error: unknown) => {
         cachedState = {
-          data: mockMvpData,
+          data: emptyMvpData,
           source: "fallback",
           isLoading: false,
           error:
             error instanceof Error
               ? error.message
-              : "无法加载 MVP 数据，已使用本地示例数据。",
+              : "无法加载本地运行数据。",
         };
         return cachedState;
       })

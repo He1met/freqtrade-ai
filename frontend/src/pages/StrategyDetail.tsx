@@ -60,7 +60,7 @@ export function StrategyDetail() {
           <h1>策略详情</h1>
           <span className="status-pill">{sourceLabel(source, isLoading)}</span>
         </header>
-        {error ? <div className="notice">接口数据不可用，已显示本地示例数据。{error}</div> : null}
+        {error ? <div className="notice">本地运行数据不可用：{error}</div> : null}
         <div className="empty-state">未找到策略。</div>
       </section>
     );
@@ -72,7 +72,7 @@ export function StrategyDetail() {
         <h1>{strategy.name}</h1>
         <span className="status-pill">{sourceLabel(source, isLoading)}</span>
       </header>
-      {error ? <div className="notice">接口数据不可用，已显示本地示例数据。{error}</div> : null}
+      {error ? <div className="notice">本地运行数据不可用：{error}</div> : null}
       <dl className="detail-list">
         <div>
           <dt>ID</dt>

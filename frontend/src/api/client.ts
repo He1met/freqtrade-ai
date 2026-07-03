@@ -1,21 +1,21 @@
-import { mockMvpData } from "../data/mock";
 import type {
   BacktestArtifactManifest,
   BacktestMetricSummary,
   BacktestRunSummary,
   BacktestTaskSummary,
+  GenerationRunSummary,
   MvpData,
   RankingEliminationSummary,
   RankingEntry,
   RankingScoreBreakdownItem,
   RankingSignalSummary,
+  StrategySummary,
   StrategyFailureReasonSummary,
   StrategyVersionLineageEntry,
 } from "./types";
 
-// The frontend keeps a controlled fallback path while backend endpoints are
-// still being stabilized. The flag returned by loadMvpData makes that fallback
-// visible to pages instead of silently presenting mock data as live data.
+const DEFAULT_API_BASE_URL = "/api";
+
 type RawStrategyFailureReason = Partial<StrategyFailureReasonSummary> & {
   strategy_id?: string | number;
   strategy_version_id?: string | number;
@@ -108,7 +108,7 @@ function getApiBaseUrl() {
   const env = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env;
   const configuredUrl = env?.VITE_API_BASE_URL?.trim();
 
-  return configuredUrl ? configuredUrl.replace(/\/$/, "") : null;
+  return configuredUrl ? configuredUrl.replace(/\/$/, "") : DEFAULT_API_BASE_URL;
 }
 
 function normalizeId(value: string | number | undefined): string {
@@ -345,27 +345,25 @@ async function fetchJson<T>(apiBaseUrl: string, path: string, signal?: AbortSign
 
 async function fetchList<T>(
   paths: string[],
-  fallback: T[],
   signal?: AbortSignal,
-): Promise<{ items: T[]; usedFallback: boolean }> {
+): Promise<T[]> {
   const apiBaseUrl = getApiBaseUrl();
-  if (!apiBaseUrl) {
-    return { items: fallback, usedFallback: true };
-  }
+  let lastError: unknown = null;
 
-  // Try known endpoint candidates in order. This keeps the UI useful during
-  // backend iteration while still surfacing usedFallback to the caller.
   for (const path of paths) {
     try {
-      return { items: await fetchJson<T[]>(apiBaseUrl, path, signal), usedFallback: false };
+      return await fetchJson<T[]>(apiBaseUrl, path, signal);
     } catch (error) {
       if (signal?.aborted) {
         throw error;
       }
+      lastError = error;
     }
   }
 
-  return { items: fallback, usedFallback: true };
+  throw lastError instanceof Error
+    ? lastError
+    : new Error(`Unable to load runtime data from ${apiBaseUrl}`);
 }
 
 export async function loadMvpData(signal?: AbortSignal): Promise<{
@@ -381,56 +379,43 @@ export async function loadMvpData(signal?: AbortSignal): Promise<{
     failureReasons,
     versionLineage,
   ] = await Promise.all([
-    fetchList(["/strategies", "/mvp/strategies"], mockMvpData.strategies, signal),
-    fetchList(
+    fetchList<StrategySummary>(["/strategies", "/mvp/strategies"], signal),
+    fetchList<GenerationRunSummary>(
       ["/generation-runs", "/strategy-generation-runs", "/mvp/generation-runs"],
-      mockMvpData.generationRuns,
       signal,
     ),
     fetchList<RawBacktestRunSummary>(
       ["/backtest-runs", "/mvp/backtest-runs"],
-      mockMvpData.backtestRuns,
       signal,
     ),
     fetchList<RawBacktestTaskSummary>(
       ["/backtest-tasks", "/mvp/backtest-tasks"],
-      mockMvpData.backtestTasks,
       signal,
     ),
     fetchList<RawRankingEntry>(
       ["/ranking", "/strategy-ranking", "/mvp/ranking"],
-      mockMvpData.ranking,
       signal,
     ),
     fetchList<RawStrategyFailureReason>(
       ["/strategy-failure-reasons", "/mvp/strategy-failure-reasons"],
-      mockMvpData.failureReasons,
       signal,
     ),
     fetchList<RawStrategyVersionLineageEntry>(
       ["/strategy-version-lineage", "/strategy-versions/lineage", "/mvp/strategy-version-lineage"],
-      mockMvpData.versionLineage,
       signal,
     ),
   ]);
 
   return {
     data: {
-      strategies: strategies.items,
-      generationRuns: generationRuns.items,
-      backtestRuns: backtestRuns.items.map(normalizeBacktestRun),
-      backtestTasks: backtestTasks.items.map(normalizeBacktestTask),
-      ranking: ranking.items.map(normalizeRankingEntry),
-      failureReasons: failureReasons.items.map(normalizeFailureReason),
-      versionLineage: versionLineage.items.map(normalizeLineageEntry),
+      strategies,
+      generationRuns,
+      backtestRuns: backtestRuns.map(normalizeBacktestRun),
+      backtestTasks: backtestTasks.map(normalizeBacktestTask),
+      ranking: ranking.map(normalizeRankingEntry),
+      failureReasons: failureReasons.map(normalizeFailureReason),
+      versionLineage: versionLineage.map(normalizeLineageEntry),
     },
-    usedFallback:
-      strategies.usedFallback ||
-      generationRuns.usedFallback ||
-      backtestRuns.usedFallback ||
-      backtestTasks.usedFallback ||
-      ranking.usedFallback ||
-      failureReasons.usedFallback ||
-      versionLineage.usedFallback,
+    usedFallback: false,
   };
 }

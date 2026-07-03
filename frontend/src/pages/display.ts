@@ -13,7 +13,7 @@ const STATUS_LABELS: Record<string, string> = {
   eliminated: "已淘汰",
   error: "错误",
   failed: "失败",
-  fallback: "示例数据",
+  fallback: "无运行数据",
   info: "信息",
   missing: "缺失",
   passed: "通过",
@@ -28,6 +28,7 @@ const STATUS_LABELS: Record<string, string> = {
 
 const STRATEGY_SOURCE_LABELS: Record<string, string> = {
   ai_generated: "AI 生成",
+  generated_local: "本地生成",
   imported: "导入",
   manual: "手工",
 };
@@ -43,7 +44,7 @@ export function sourceLabel(source: DataSource, isLoading: boolean): string {
   if (isLoading) {
     return "加载中";
   }
-  return source === "api" ? "接口数据" : "示例数据";
+  return source === "api" ? "本地运行数据" : "无运行数据";
 }
 
 export function statusLabel(status: string | null | undefined): string {

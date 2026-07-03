@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 
 from app.api.health import router as health_router
+from app.api.mvp_runtime import router as mvp_runtime_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 
@@ -15,3 +16,4 @@ app = FastAPI(
 )
 
 app.include_router(health_router)
+app.include_router(mvp_runtime_router)
