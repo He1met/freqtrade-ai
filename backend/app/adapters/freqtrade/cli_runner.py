@@ -24,6 +24,7 @@ ALLOWED_COMMAND_OPTIONS: dict[str, frozenset[str]] = {
     "backtesting": frozenset(
         {
             "--config",
+            "--backtest-directory",
             "--datadir",
             "--export",
             "--export-filename",
@@ -41,7 +42,7 @@ ALLOWED_COMMAND_OPTIONS: dict[str, frozenset[str]] = {
             "--exchange",
             "--pairs",
             "--show-timerange",
-            "--timeframes",
+            "--trading-mode",
             "--userdir",
         }
     ),

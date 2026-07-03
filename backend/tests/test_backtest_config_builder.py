@@ -44,6 +44,10 @@ def test_builds_sanitized_backtest_config_file(tmp_path) -> None:
     assert config["timerange"] == "20240101-20240201"
     assert config["trading_mode"] == "futures"
     assert config["margin_mode"] == "isolated"
+    assert config["entry_pricing"]["price_side"] == "same"
+    assert config["entry_pricing"]["order_book_top"] == 1
+    assert config["exit_pricing"]["price_side"] == "same"
+    assert config["exit_pricing"]["order_book_top"] == 1
     serialized = json.dumps(config).lower()
     assert "okx_demo_api" not in serialized
     assert "api_key" not in serialized

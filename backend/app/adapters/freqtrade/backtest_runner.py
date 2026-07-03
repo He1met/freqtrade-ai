@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Optional
+from zipfile import ZipFile
 
 from app.adapters.freqtrade.cli_runner import (
     FreqtradeCliRunner,
@@ -117,10 +118,14 @@ class FreqtradeBacktestRunner:
             strategy_path=strategy_path,
             userdir=userdir,
         )
+        command_args = self._cli_runner.build_args(command)
+        command_result = self._cli_runner.run_unchecked(command)
+        if command_result.return_code == 0 and not result_path.exists():
+            self._materialize_exported_result(result_path)
         return FreqtradeBacktestExecution(
             result_path=result_path,
-            command_args=self._cli_runner.build_args(command),
-            command_result=self._cli_runner.run_unchecked(command),
+            command_args=command_args,
+            command_result=command_result,
         )
 
     def run_backtest_with_artifact_manifest(
@@ -184,6 +189,9 @@ class FreqtradeBacktestRunner:
             )
 
         if not result_path.exists():
+            self._materialize_exported_result(result_path)
+
+        if not result_path.exists():
             return self._write_manifest(
                 status="FAILED",
                 config_path=config_path,
@@ -229,7 +237,7 @@ class FreqtradeBacktestRunner:
             "--config": config_path,
             "--strategy": strategy_name,
             "--export": "trades",
-            "--export-filename": result_path,
+            "--backtest-directory": result_path.parent,
         }
         if datadir is not None:
             options["--datadir"] = datadir
@@ -254,6 +262,62 @@ class FreqtradeBacktestRunner:
         if not any(self._is_supported_market_data_file(path) for path in datadir.rglob("*")):
             return f"no supported local market data files found under {datadir}"
         return None
+
+    def _materialize_exported_result(self, result_path: Path) -> None:
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        source_path = self._latest_backtest_result_path(result_path.parent)
+        if source_path is None:
+            return
+
+        if source_path.suffix == ".zip":
+            self._extract_result_json(source_path, result_path)
+            return
+
+        if source_path.suffix == ".json" and source_path != result_path:
+            result_path.write_text(source_path.read_text(encoding="utf-8"), encoding="utf-8")
+
+    def _latest_backtest_result_path(self, directory: Path) -> Optional[Path]:
+        last_result_path = directory / ".last_result.json"
+        if last_result_path.exists():
+            try:
+                latest_name = json.loads(last_result_path.read_text(encoding="utf-8")).get(
+                    "latest_backtest"
+                )
+            except json.JSONDecodeError:
+                latest_name = None
+            if isinstance(latest_name, str) and latest_name:
+                latest_path = directory / latest_name
+                if latest_path.exists():
+                    return latest_path
+
+        candidates = [
+            path
+            for path in directory.glob("backtest-result-*")
+            if path.suffix in {".json", ".zip"} and not path.name.endswith(".meta.json")
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda path: path.stat().st_mtime)
+
+    def _extract_result_json(self, archive_path: Path, result_path: Path) -> None:
+        expected_name = f"{archive_path.stem}.json"
+        with ZipFile(archive_path) as archive:
+            names = archive.namelist()
+            selected = expected_name if expected_name in names else None
+            if selected is None:
+                selected = next(
+                    (
+                        name
+                        for name in names
+                        if name.endswith(".json")
+                        and not name.endswith("_config.json")
+                        and not name.endswith(".meta.json")
+                    ),
+                    None,
+                )
+            if selected is None:
+                return
+            result_path.write_bytes(archive.read(selected))
 
     def _is_supported_market_data_file(self, path: Path) -> bool:
         if not path.is_file():

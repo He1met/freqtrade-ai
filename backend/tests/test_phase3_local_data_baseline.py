@@ -11,13 +11,21 @@ if [ "$1" = "list-data" ]; then
 fi
 if [ "$1" = "backtesting" ]; then
   result=""
+  result_dir=""
   while [ "$#" -gt 0 ]; do
     if [ "$1" = "--export-filename" ]; then
       shift
       result="$1"
     fi
+    if [ "$1" = "--backtest-directory" ]; then
+      shift
+      result_dir="$1"
+    fi
     shift
   done
+  if [ -z "$result" ] && [ -n "$result_dir" ]; then
+    result="$result_dir/backtest-result.json"
+  fi
   mkdir -p "$(dirname "$result")"
   cat > "$result" <<'JSON'
 {"strategy":{"MvpRsiStrategy":{"profit_total_abs":4.2,"max_drawdown_pct":2.0,"wins":3,"losses":1,"draws":0,"total_trades":4}}}
@@ -89,6 +97,13 @@ def test_phase3_baseline_records_timerange_backtest_artifacts_and_metrics(tmp_pa
 
     config = json.loads(Path(report.config_path).read_text(encoding="utf-8"))
     assert config["bot_name"] == "freqtrade_ai_phase3_baseline"
+    assert config["datadir"] == str(tmp_path / "work" / "market_data" / "okx")
+    assert config["trading_mode"] == "futures"
+    assert config["margin_mode"] == "isolated"
+    assert (Path(config["user_data_dir"]) / "backtest_results").is_dir()
+    assert "--trading-mode" in report.list_data_args
+    assert "futures" in report.list_data_args
+    assert "--timeframes" not in report.list_data_args
     assert "api_key" not in json.dumps(config).lower()
 
     report_text = report.report_path.read_text(encoding="utf-8")

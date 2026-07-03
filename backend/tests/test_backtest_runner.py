@@ -1,6 +1,7 @@
 import json
 import subprocess
 from pathlib import Path
+from zipfile import ZipFile
 
 import pytest
 
@@ -8,7 +9,7 @@ from app.adapters.freqtrade.backtest_runner import FreqtradeBacktestRunner
 from app.adapters.freqtrade.cli_runner import FreqtradeCliRunner
 
 
-def test_backtest_runner_invokes_safe_cli_with_export_file() -> None:
+def test_backtest_runner_invokes_safe_cli_with_backtest_directory() -> None:
     calls = []
 
     def fake_executor(args, cwd, timeout_seconds):
@@ -29,12 +30,12 @@ def test_backtest_runner_invokes_safe_cli_with_export_file() -> None:
             [
                 "freqtrade",
                 "backtesting",
+                "--backtest-directory",
+                "reports/backtests",
                 "--config",
                 "tmp/freqtrade_configs/backtest.json",
                 "--export",
                 "trades",
-                "--export-filename",
-                "reports/backtests/result.json",
                 "--strategy",
                 "MvpRsiStrategy",
             ],
@@ -59,7 +60,8 @@ def test_backtest_runner_writes_success_artifact_manifest(tmp_path) -> None:
 
     def fake_executor(args, cwd, timeout_seconds):
         calls.append((args, cwd, timeout_seconds))
-        result_path = Path(args[args.index("--export-filename") + 1])
+        result_dir = Path(args[args.index("--backtest-directory") + 1])
+        result_path = result_dir / "backtest-result.json"
         result_path.parent.mkdir(parents=True)
         result_path.write_text('{"strategy": {}}', encoding="utf-8")
         return subprocess.CompletedProcess(
@@ -97,6 +99,42 @@ def test_backtest_runner_writes_success_artifact_manifest(tmp_path) -> None:
     assert stored["stdout"] == "backtesting complete"
     assert stored["datadir"] == str(datadir)
     assert calls[0][2] == 60
+
+
+def test_backtest_runner_materializes_zip_export_to_result_path(tmp_path) -> None:
+    def fake_executor(args, cwd, timeout_seconds):
+        result_dir = Path(args[args.index("--backtest-directory") + 1])
+        result_dir.mkdir(parents=True)
+        archive_path = result_dir / "backtest-result-2026-07-03_20-46-36.zip"
+        with ZipFile(archive_path, "w") as archive:
+            archive.writestr(
+                "backtest-result-2026-07-03_20-46-36.json",
+                '{"strategy": {"MvpRsiStrategy": {"total_trades": 1}}}',
+            )
+            archive.writestr("backtest-result-2026-07-03_20-46-36_config.json", "{}")
+        (result_dir / ".last_result.json").write_text(
+            json.dumps({"latest_backtest": archive_path.name}),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(
+            args=list(args),
+            returncode=0,
+            stdout="backtesting complete",
+            stderr="",
+        )
+
+    result_path = tmp_path / "reports" / "backtest-result.json"
+    runner = FreqtradeBacktestRunner(FreqtradeCliRunner(executor=fake_executor))
+    execution = runner.run_backtest_with_output(
+        tmp_path / "config.json",
+        "MvpRsiStrategy",
+        result_path=result_path,
+    )
+
+    assert execution.command_result.return_code == 0
+    assert json.loads(result_path.read_text(encoding="utf-8")) == {
+        "strategy": {"MvpRsiStrategy": {"total_trades": 1}}
+    }
 
 
 def test_backtest_runner_writes_failed_manifest_with_stdout_stderr(tmp_path) -> None:

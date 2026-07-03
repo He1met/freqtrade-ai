@@ -77,6 +77,21 @@ class FreqtradeConfigBuilder:
                 "pair_blacklist": [],
             },
             "pairlists": [{"method": "StaticPairList"}],
+            "entry_pricing": {
+                "price_side": "same",
+                "use_order_book": True,
+                "order_book_top": 1,
+                "price_last_balance": 0.0,
+                "check_depth_of_market": {
+                    "enabled": False,
+                    "bids_to_ask_delta": 1,
+                },
+            },
+            "exit_pricing": {
+                "price_side": "same",
+                "use_order_book": True,
+                "order_book_top": 1,
+            },
             "strategy": strategy,
             "user_data_dir": str(snapshot.get("user_data_dir", get_settings().freqtrade_user_data)),
             "datadir": str(snapshot.get("datadir", get_settings().market_data_dir)),

@@ -145,6 +145,47 @@ def parse_required_metrics(result_path: Path, strategy_name: str) -> dict[str, o
     return metrics
 
 
+def prepare_freqtrade_userdir(userdir: Path) -> None:
+    userdir.mkdir(parents=True, exist_ok=True)
+    for relative_path in (
+        "backtest_results",
+        "data",
+        "freqaimodels",
+        "hyperopts",
+        "logs",
+        "notebooks",
+        "plot",
+        "strategies",
+    ):
+        (userdir / relative_path).mkdir(parents=True, exist_ok=True)
+
+
+def infer_trading_mode(market_data_file: MarketDataFile) -> Optional[str]:
+    if "futures" in market_data_file.relative_path.parts or ":" in market_data_file.pair:
+        return "futures"
+    return None
+
+
+def prepare_market_data_workspace(
+    source_root: Path,
+    market_data_file: MarketDataFile,
+    tmp_dir: Path,
+) -> Path:
+    workspace_root = tmp_dir / "market_data"
+    target_path = workspace_root / market_data_file.relative_path
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(market_data_file.path, target_path)
+
+    source_exchange_dir = source_root / market_data_file.exchange
+    target_exchange_dir = workspace_root / market_data_file.exchange
+    for cache_file in source_exchange_dir.glob("futures/leverage_tiers_*.json"):
+        cache_target = target_exchange_dir / cache_file.relative_to(source_exchange_dir)
+        cache_target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(cache_file, cache_target)
+
+    return workspace_root
+
+
 def run_timerange_check(
     binary: Path,
     market_data_dir: Path,
@@ -159,10 +200,18 @@ def run_timerange_check(
             "--exchange": market_data_file.exchange,
             "--pairs": [market_data_file.pair],
             "--show-timerange": True,
-            "--timeframes": [market_data_file.timeframe],
         },
         timeout_seconds=timeout_seconds,
     )
+    trading_mode = infer_trading_mode(market_data_file)
+    if trading_mode is not None:
+        command_options = dict(command.options or {})
+        command_options["--trading-mode"] = trading_mode
+        command = FreqtradeCommand(
+            command=command.command,
+            options=command_options,
+            timeout_seconds=command.timeout_seconds,
+        )
     return runner.build_args(command), runner.run_unchecked(command)
 
 
@@ -205,11 +254,19 @@ def run_spike(config: SpikeConfig) -> SpikeReport:
     assert market_data_file is not None
     assert report.strategy_name is not None
 
+    userdir = tmp_dir / "user_data"
+    prepare_freqtrade_userdir(userdir)
+    runtime_market_data_dir = prepare_market_data_workspace(
+        market_data_dir,
+        market_data_file,
+        tmp_dir,
+    )
+
     if config.check_timerange:
         try:
             report.list_data_args, list_data_result = run_timerange_check(
                 binary,
-                market_data_dir,
+                runtime_market_data_dir,
                 market_data_file,
                 config.timeout_seconds,
             )
@@ -230,7 +287,14 @@ def run_spike(config: SpikeConfig) -> SpikeReport:
             write_report(report)
             return report
 
-    datadir = market_data_dir / market_data_file.exchange
+    datadir = runtime_market_data_dir / market_data_file.exchange
+    trading_mode = infer_trading_mode(market_data_file)
+    exchange_snapshot: dict[str, str] = {"name": market_data_file.exchange}
+    if trading_mode is not None:
+        exchange_snapshot["trading_mode"] = trading_mode
+        if trading_mode == "futures":
+            exchange_snapshot["margin_mode"] = "isolated"
+
     snapshot = {
         # The config snapshot intentionally contains only backtesting inputs
         # that can be derived from local files and generated strategy metadata.
@@ -239,9 +303,9 @@ def run_spike(config: SpikeConfig) -> SpikeReport:
         "timeframe": market_data_file.timeframe,
         "strategy": report.strategy_name,
         "strategy_path": str(strategy_dir),
-        "user_data_dir": str(tmp_dir / "user_data"),
+        "user_data_dir": str(userdir),
         "datadir": str(datadir),
-        "exchange": {"name": market_data_file.exchange},
+        "exchange": exchange_snapshot,
         "bot_name": config.bot_name,
     }
     try:
@@ -263,7 +327,7 @@ def run_spike(config: SpikeConfig) -> SpikeReport:
         timeout_seconds=config.timeout_seconds,
         datadir=datadir,
         strategy_path=strategy_dir,
-        userdir=tmp_dir / "user_data",
+        userdir=userdir,
     )
     report.command_args = execution.command_args
     report.return_code = execution.command_result.return_code
