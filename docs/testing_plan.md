@@ -137,3 +137,47 @@ Freqtrade CLI、不连接真实交易所、不下载 K 线、不执行 dry-run/l
 - 不读取或写入真实 API key。
 - 不引入 Redis、Celery、Kafka、RabbitMQ。
 - 不修改 Freqtrade 源码。
+
+## Phase 4 Hyperopt Smoke
+
+Phase 4 Hyperopt 参数优化将使用离线 smoke 预留位覆盖 HyperoptProfile、
+Freqtrade hyperopt adapter 边界、artifact manifest、结果解析、优化后
+StrategyVersion 派生、before/after 对比和前端展示构建。
+
+计划命令：
+
+```bash
+python3 scripts/smoke_phase4.py --offline --tmp-dir /tmp/freqtrade-ai-phase4-smoke
+```
+
+该命令在 Phase 4 smoke 实现前只是预留验收入口。实现后必须默认使用 fixture /
+fake runner，不执行真实 Hyperopt，不连接真实交易所，不下载 K 线，不执行 dry-run /
+live trading，不连接生产数据库，也不读取或写入真实 API key。
+
+真实 Hyperopt 执行依赖本地已有 `user_data/data`。如果本地缺少目标 pair /
+timeframe / timerange 的数据，真实路径必须输出 `BLOCKED`，不得自动下载数据或
+伪造成功。
+
+计划覆盖范围：
+
+- 校验 `HyperoptProfile` schema 和实验变量锁定。
+- 通过 fake runner 生成 SUCCESS / FAILED / BLOCKED artifact manifest。
+- 解析 fixture Hyperopt result，提取 best params、loss、epoch 和 metrics snapshot。
+- 基于 best params 生成优化后 StrategyVersion fixture，并验证 parent lineage、
+  `change_summary`、`diff_snapshot` 和 optimized parameter metadata。
+- 使用 fixture 原始回测结果、Hyperopt best result、优化后回测结果生成 before/after
+  对比。
+- 覆盖 `missing_local_data`、`missing_freqtrade_binary`、`invalid_strategy`、
+  `hyperopt_command_failed`、`result_file_missing`、`result_parse_failed` 和
+  `no_useful_improvement` 分类。
+- 可选运行 `npm run build` 验证前端 Phase 4 展示仍可构建。
+
+限制和禁止项：
+
+- 不调用真实 Hyperopt。
+- 不连接真实交易所，不下载 K 线。
+- 不执行 dry-run、live trading 或真实下单。
+- 不读取或写入真实 API key、secret、passphrase。
+- 不引入 Redis、Celery、Kafka、RabbitMQ。
+- 不修改 Freqtrade 源码。
+- 不部署，不进入 Phase 5、Phase 6 或 Phase 7。
