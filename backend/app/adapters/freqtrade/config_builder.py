@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
+import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, Mapping
 
 from app.adapters.freqtrade.exceptions import FreqtradeConfigError
 from app.core.config import get_settings
 from app.core.paths import resolve_repo_path
 from app.schemas.backtest_profile import BacktestProfileV2
+from app.schemas.dry_run_profile import DryRunProfile
 
 
 SECRET_KEY_NAMES = frozenset(
@@ -21,6 +24,39 @@ SECRET_KEY_NAMES = frozenset(
         "token",
     }
 )
+DEFAULT_DRY_RUN_REQUIRED_ENV_VARS = (
+    "FREQTRADE_DRY_RUN_API_KEY",
+    "FREQTRADE_DRY_RUN_API_SECRET",
+)
+DEFAULT_DRY_RUN_OPTIONAL_ENV_VARS = ("FREQTRADE_DRY_RUN_API_PASSPHRASE",)
+ENV_NAME_PATTERN = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+
+
+@dataclass(frozen=True)
+class DryRunEnvPreflight:
+    status: Literal["READY", "BLOCKED"]
+    required_env_present: tuple[str, ...]
+    required_env_missing: tuple[str, ...]
+    optional_env_present: tuple[str, ...]
+    optional_env_missing: tuple[str, ...]
+    blocked_reason: str | None = None
+
+    def to_report(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "required_env_present": list(self.required_env_present),
+            "required_env_missing": list(self.required_env_missing),
+            "optional_env_present": list(self.optional_env_present),
+            "optional_env_missing": list(self.optional_env_missing),
+            "blocked_reason": self.blocked_reason,
+        }
+
+
+@dataclass(frozen=True)
+class DryRunConfigBuildResult:
+    config_path: Path
+    config: dict[str, Any]
+    env_preflight: DryRunEnvPreflight
 
 
 class FreqtradeConfigBuilder:
@@ -102,12 +138,106 @@ class FreqtradeConfigBuilder:
         self._reject_secret_keys(config)
         return config
 
+    def build_dry_run_config(
+        self,
+        profile: DryRunProfile | dict[str, Any],
+        output_dir: Path | None = None,
+        environ: Mapping[str, str] | None = None,
+        required_env_vars: tuple[str, ...] = DEFAULT_DRY_RUN_REQUIRED_ENV_VARS,
+        optional_env_vars: tuple[str, ...] = DEFAULT_DRY_RUN_OPTIONAL_ENV_VARS,
+    ) -> DryRunConfigBuildResult:
+        profile = self._normalize_dry_run_profile(profile)
+        env_preflight = self.check_dry_run_env(
+            environ=environ,
+            required_env_vars=required_env_vars,
+            optional_env_vars=optional_env_vars,
+        )
+        config = self.build_dry_run_config_dict(profile)
+        target_dir = self._resolve_dry_run_output_dir(output_dir)
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        target_path = target_dir / f"{self._dry_run_config_stem(profile)}.json"
+        target_path.write_text(
+            json.dumps(config, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        return DryRunConfigBuildResult(
+            config_path=target_path,
+            config=config,
+            env_preflight=env_preflight,
+        )
+
+    def build_dry_run_config_dict(self, profile: DryRunProfile | dict[str, Any]) -> dict[str, Any]:
+        profile = self._normalize_dry_run_profile(profile)
+        config: dict[str, Any] = {
+            "max_open_trades": profile.stake.max_open_trades,
+            "stake_currency": profile.stake.currency,
+            "stake_amount": profile.stake.amount,
+            "tradable_balance_ratio": profile.stake.tradable_balance_ratio,
+            "fiat_display_currency": "USD",
+            "timeframe": profile.timeframe,
+            "dry_run": True,
+            "exchange": {
+                "name": profile.exchange.name,
+                "pair_whitelist": [profile.pair],
+                "pair_blacklist": [],
+            },
+            "pairlists": [{"method": "StaticPairList"}],
+            "strategy": profile.strategy.name,
+            "user_data_dir": profile.command_options.user_data_dir,
+            "bot_name": f"freqtrade_ai_{self._safe_filename_part(profile.name)}",
+            "initial_state": "stopped",
+            "internals": {"process_throttle_secs": 5},
+        }
+
+        if profile.exchange.trading_mode:
+            config["trading_mode"] = profile.exchange.trading_mode
+        if profile.command_options.strategy_path:
+            config["strategy_path"] = profile.command_options.strategy_path
+
+        self._reject_secret_keys(config)
+        return config
+
+    def check_dry_run_env(
+        self,
+        environ: Mapping[str, str] | None = None,
+        required_env_vars: tuple[str, ...] = DEFAULT_DRY_RUN_REQUIRED_ENV_VARS,
+        optional_env_vars: tuple[str, ...] = DEFAULT_DRY_RUN_OPTIONAL_ENV_VARS,
+    ) -> DryRunEnvPreflight:
+        import os
+
+        self._validate_env_names(required_env_vars + optional_env_vars)
+        env = os.environ if environ is None else environ
+        required_present, required_missing = self._split_env_presence(required_env_vars, env)
+        optional_present, optional_missing = self._split_env_presence(optional_env_vars, env)
+        status: Literal["READY", "BLOCKED"] = "READY"
+        blocked_reason = None
+        if required_missing:
+            status = "BLOCKED"
+            blocked_reason = "required ENV variables are missing or empty: " + ", ".join(
+                required_missing
+            )
+
+        return DryRunEnvPreflight(
+            status=status,
+            required_env_present=required_present,
+            required_env_missing=required_missing,
+            optional_env_present=optional_present,
+            optional_env_missing=optional_missing,
+            blocked_reason=blocked_reason,
+        )
+
     def _normalize_snapshot(self, snapshot: BacktestProfileV2 | dict[str, Any]) -> dict[str, Any]:
         if isinstance(snapshot, BacktestProfileV2):
             return snapshot.to_config_snapshot()
         if snapshot.get("schema_version") == "2":
             return BacktestProfileV2.model_validate(snapshot).to_config_snapshot()
         return snapshot
+
+    def _normalize_dry_run_profile(self, profile: DryRunProfile | dict[str, Any]) -> DryRunProfile:
+        if isinstance(profile, DryRunProfile):
+            return profile
+        return DryRunProfile.model_validate(profile)
 
     def _required_text(self, snapshot: dict[str, Any], key: str) -> str:
         value = snapshot.get(key)
@@ -145,7 +275,12 @@ class FreqtradeConfigBuilder:
         if isinstance(value, dict):
             for key, item in value.items():
                 normalized = str(key).lower().replace("-", "_")
-                if normalized in SECRET_KEY_NAMES or normalized.endswith("_secret"):
+                if (
+                    normalized in SECRET_KEY_NAMES
+                    or normalized.endswith("_secret")
+                    or "api_key" in normalized
+                    or "api_secret" in normalized
+                ):
                     raise FreqtradeConfigError(
                         f"Generated config contains forbidden secret key: {key}"
                     )
@@ -155,3 +290,54 @@ class FreqtradeConfigBuilder:
         if isinstance(value, list):
             for item in value:
                 self._reject_secret_keys(item)
+
+    def _dry_run_config_stem(self, profile: DryRunProfile) -> str:
+        return "-".join(
+            [
+                self._safe_filename_part(profile.name),
+                self._safe_filename_part(profile.strategy.name),
+                self._safe_filename_part(profile.pair),
+                self._safe_filename_part(profile.timeframe),
+                "dry-run",
+            ]
+        )
+
+    def _resolve_dry_run_output_dir(self, output_dir: Path | None) -> Path:
+        target_dir = resolve_repo_path(output_dir or self._default_output_dir)
+        default_dir = self._default_output_dir.resolve()
+        tmp_dir = Path("/tmp").resolve()
+        if (
+            self._path_is_relative_to(target_dir, default_dir)
+            or self._path_is_relative_to(target_dir, tmp_dir)
+        ):
+            return target_dir
+        raise FreqtradeConfigError(
+            "Dry-run config output_dir must be under the controlled tmp config directory"
+        )
+
+    def _validate_env_names(self, names: tuple[str, ...]) -> None:
+        for name in names:
+            if not ENV_NAME_PATTERN.fullmatch(name):
+                raise FreqtradeConfigError(f"Invalid ENV variable name: {name}")
+
+    def _split_env_presence(
+        self,
+        names: tuple[str, ...],
+        env: Mapping[str, str],
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        present: list[str] = []
+        missing: list[str] = []
+        for name in names:
+            value = env.get(name)
+            if value is None or value.strip() == "":
+                missing.append(name)
+            else:
+                present.append(name)
+        return tuple(present), tuple(missing)
+
+    def _path_is_relative_to(self, path: Path, parent: Path) -> bool:
+        try:
+            path.resolve().relative_to(parent.resolve())
+        except ValueError:
+            return False
+        return True
