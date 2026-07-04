@@ -79,8 +79,12 @@ Kafka / RabbitMQ 队列基础设施。
 
 ## Phase 5: Dry-run / FreqUI 运行管理
 
-Phase 5 可以进入 planning。Phase 5 规划必须单独创建 Epic、执行包 Issue、
-验收标准和安全评审。
+状态：已进入 planning。详见 [phase5_plan.md](phase5_plan.md)。
+
+Phase 5 规划已创建 Epic #151 和子 Issue #152-#163。Phase 5 目标是在明确安全
+门禁下管理 dry-run readiness、DryRunProfile、受控 Freqtrade dry-run CLI 边界、
+ENV-only 密钥预检、artifact manifest、只读状态快照、FreqUI 入口、前端展示和
+offline smoke。
 
 Phase 5 planning 不等于授权 dry-run 实现。任何 dry-run / FreqUI 运行管理能力
 都必须通过单独 Issue、PR、安全边界、审计和人工确认。
