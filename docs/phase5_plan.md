@@ -94,6 +94,37 @@ from it only through separate Issues or small PRs:
 
 The cleanup decision remains: do not merge PR #127 directly.
 
+## Read-only Status Snapshot Contract
+
+#158 adds the backend-only read model for dry-run runtime status. It does not
+start dry-run, connect to an exchange, call FreqUI, or add trading controls.
+
+Stable DTOs:
+
+- `DryRunStatusSnapshot` records status, profile, strategy, exchange, pair,
+  timeframe, `dry_run`, balance summary, open trades summary, recent events,
+  fail-closed reasons, `last_updated`, and `artifact_manifest_path`.
+- `DryRunEvent` records timestamp, event type, severity, message, source, and
+  redacted details.
+
+Supported read-only sources:
+
+- controlled fixture JSON used by tests and later offline smoke coverage;
+- dry-run artifact manifests from #157, using the latest `status_snapshots`
+  entry when present;
+- controlled local JSON exported by local tooling or a future read-only adapter.
+
+Fail-closed behavior:
+
+- missing files return a `BLOCKED` snapshot;
+- malformed JSON returns a `FAILED` snapshot;
+- artifact manifests without `status_snapshots` return an explicit empty
+  `SKIPPED` snapshot unless the manifest itself is already `BLOCKED` or
+  `FAILED`;
+- `SUCCESS` or `RUNNING` status requires explicit `dry_run=true`;
+- `dry_run=false` always returns `FAILED`;
+- secret-shaped keys and log text are redacted before they enter DTO output.
+
 ## Validation Baseline
 
 Docs-only work:

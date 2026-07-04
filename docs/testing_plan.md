@@ -179,3 +179,28 @@ timeframe / timerange 的数据，真实路径必须输出 `BLOCKED`，不得自
 - 不引入 Redis、Celery、Kafka、RabbitMQ。
 - 不修改 Freqtrade 源码。
 - 不部署，不进入 Phase 5、Phase 6 或 Phase 7。
+
+## Phase 5 Dry-run / FreqUI Management
+
+Phase 5 的后端测试从 #158 开始覆盖 dry-run 只读状态解析。该路径只读取 fixture
+JSON、受控本地 JSON 或 #157 生成的 artifact manifest，不启动真实 dry-run、不连接
+交易所、不读取真实密钥。
+
+#158 覆盖范围：
+
+- `DryRunStatusSnapshot` / `DryRunEvent` DTO 校验。
+- 从 controlled local JSON 和 fixture JSON 解析 profile、strategy、exchange、
+  pair、timeframe、`dry_run`、balance summary、open trades summary 和 events。
+- 从 dry-run artifact manifest 读取最新 `status_snapshots`。
+- manifest 缺少 `status_snapshots` 时输出明确 empty / `SKIPPED` state。
+- 文件缺失输出 `BLOCKED`，JSON 损坏输出 `FAILED`。
+- `dry_run=false` 或 `RUNNING` / `SUCCESS` 缺少 `dry_run=true` 时 fail-closed。
+- event message、event details、manifest/status payload 中的 secret-shaped 内容必须脱敏。
+
+当前验收命令：
+
+```bash
+cd backend && . .venv/bin/activate && pytest
+python3 -m compileall backend/app backend/tests scripts
+git diff --check
+```

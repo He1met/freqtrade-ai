@@ -25,6 +25,14 @@ from app.schemas.dry_run_profile import (
     DryRunProfileStake,
     DryRunProfileStrategy,
 )
+from app.schemas.dry_run_status import (
+    DryRunBalanceSummary,
+    DryRunEvent,
+    DryRunEventSeverity,
+    DryRunOpenTradesSummary,
+    DryRunSnapshotStatus,
+    DryRunStatusSnapshot,
+)
 from app.schemas.hyperopt_profile import (
     HyperoptProfile,
     HyperoptProfileLocalDataSource,
@@ -95,6 +103,12 @@ __all__ = [
     "DryRunProfileSafety",
     "DryRunProfileStake",
     "DryRunProfileStrategy",
+    "DryRunBalanceSummary",
+    "DryRunEvent",
+    "DryRunEventSeverity",
+    "DryRunOpenTradesSummary",
+    "DryRunSnapshotStatus",
+    "DryRunStatusSnapshot",
     "GenerationRunStatus",
     "HyperoptProfile",
     "HyperoptProfileLocalDataSource",
