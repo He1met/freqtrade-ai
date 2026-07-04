@@ -21,6 +21,7 @@ a {
 .app-shell {
   display: grid;
   grid-template-columns: 248px minmax(0, 1fr);
+  min-width: 0;
   min-height: 100vh;
 }
 
@@ -67,11 +68,14 @@ a {
 }
 
 .main-panel {
+  min-width: 0;
   padding: 32px;
 }
 
 .page {
+  width: 100%;
   max-width: 1180px;
+  min-width: 0;
 }
 
 .page-header {
@@ -154,6 +158,8 @@ a {
 }
 
 .table-shell {
+  width: 100%;
+  max-width: 100%;
   overflow-x: auto;
 }
 
@@ -260,6 +266,19 @@ a {
   gap: 4px;
 }
 
+.hyperopt-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.status-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
@@ -282,6 +301,8 @@ td.path-cell {
 td.breakdown-cell,
 td.reason-cell,
 td.artifact-cell,
+td.params-cell,
+td.comparison-cell,
 td.metric-summary,
 td.log-cell {
   min-width: 240px;
@@ -295,6 +316,41 @@ td.log-cell {
 
 .metric-summary {
   min-width: 320px;
+}
+
+.params-cell,
+.comparison-cell {
+  min-width: 300px;
+}
+
+.params-cell span,
+.params-cell em,
+.comparison-cell span {
+  display: grid;
+  gap: 2px;
+  border-bottom: 1px solid #edf0eb;
+  color: #526159;
+  font-style: normal;
+  padding: 4px 0;
+  overflow-wrap: anywhere;
+}
+
+.params-cell span:last-child,
+.params-cell em:last-child,
+.comparison-cell span:last-child {
+  border-bottom: 0;
+}
+
+.params-cell strong,
+.comparison-cell strong {
+  color: #17201b;
+  font-size: 12px;
+}
+
+.comparison-cell em {
+  color: #33533f;
+  font-style: normal;
+  font-weight: 800;
 }
 
 .metric-summary span {
@@ -666,7 +722,8 @@ th {
   }
 
   .matrix-summary,
-  .matrix-range-grid {
+  .matrix-range-grid,
+  .hyperopt-summary {
     grid-template-columns: 1fr;
   }
 

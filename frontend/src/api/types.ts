@@ -101,6 +101,65 @@ export type BacktestMetricSummary = {
   calmar: number | null;
 };
 
+export type HyperoptArtifactStatus = "SUCCESS" | "FAILED" | "BLOCKED" | string;
+
+export type HyperoptArtifactManifest = {
+  manifestVersion: number | null;
+  status: HyperoptArtifactStatus;
+  configPath: string | null;
+  strategyName: string | null;
+  resultPath: string | null;
+  manifestPath: string | null;
+  commandArgs: string[];
+  returnCode: number | null;
+  stdout: string;
+  stderr: string;
+  datadir: string | null;
+  strategyPath: string | null;
+  userdir: string | null;
+  spaces: string[];
+  epochs: number | null;
+  hyperoptLoss: string | null;
+  blockedReason: string | null;
+  failedReason: string | null;
+};
+
+export type HyperoptMetricComparison = {
+  label: string;
+  before: number | null;
+  after: number | null;
+  delta: number | null;
+  suffix: string;
+};
+
+export type HyperoptComparisonSummary = {
+  parentVersionId: string | null;
+  optimizedVersionId: string | null;
+  status: "SUCCESS" | "FAILED" | "BLOCKED" | string;
+  metrics: HyperoptMetricComparison[];
+  warnings: RankingSignalSummary[];
+  blockedReason: string | null;
+  failedReason: string | null;
+};
+
+export type HyperoptRunSummary = {
+  id: string;
+  strategyName: string;
+  status: string;
+  profileName: string;
+  spaces: string[];
+  bestParams: Record<string, unknown>;
+  bestLoss: number | null;
+  score: number | null;
+  epoch: number | null;
+  artifactManifest: HyperoptArtifactManifest | null;
+  resultPath: string | null;
+  manifestPath: string | null;
+  blockedReason: string | null;
+  failedReason: string | null;
+  comparison: HyperoptComparisonSummary | null;
+};
+
 export type RankingEntry = {
   rank: number;
   strategyId: string;
@@ -165,6 +224,7 @@ export type MvpData = {
   generationRuns: GenerationRunSummary[];
   backtestRuns: BacktestRunSummary[];
   backtestTasks: BacktestTaskSummary[];
+  hyperoptRuns: HyperoptRunSummary[];
   ranking: RankingEntry[];
   failureReasons: StrategyFailureReasonSummary[];
   versionLineage: StrategyVersionLineageEntry[];

@@ -7,6 +7,7 @@ export function Dashboard() {
     { label: "Strategies", value: data.strategies.length },
     { label: "Generation Runs", value: data.generationRuns.length },
     { label: "Backtest Runs", value: data.backtestRuns.length },
+    { label: "Hyperopt Runs", value: data.hyperoptRuns.length },
     { label: "Ranked", value: data.ranking.length },
   ];
 
@@ -30,7 +31,8 @@ export function Dashboard() {
           <h2>MVP Data Flow</h2>
           <p>
             {data.generationRuns.length} generation runs, {data.backtestTasks.length} backtest tasks,
-            and {succeededBacktests} succeeded backtest runs are available for review.
+            {data.hyperoptRuns.length} hyperopt runs, and {succeededBacktests} succeeded backtest runs
+            are available for review.
           </p>
         </article>
         <article className="overview-panel">

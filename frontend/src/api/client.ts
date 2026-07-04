@@ -4,6 +4,10 @@ import type {
   BacktestMetricSummary,
   BacktestRunSummary,
   BacktestTaskSummary,
+  HyperoptArtifactManifest,
+  HyperoptComparisonSummary,
+  HyperoptMetricComparison,
+  HyperoptRunSummary,
   MvpData,
   RankingEliminationSummary,
   RankingEntry,
@@ -88,6 +92,46 @@ type RawBacktestTaskSummary = Partial<BacktestTaskSummary> & {
   failed_reason?: string | null;
 };
 
+type RawHyperoptArtifactManifest = Partial<HyperoptArtifactManifest> & {
+  manifest_version?: number | null;
+  config_path?: string | null;
+  strategy_name?: string | null;
+  result_path?: string | null;
+  manifest_path?: string | null;
+  command_args?: unknown;
+  return_code?: number | null;
+  strategy_path?: string | null;
+  hyperopt_loss?: string | null;
+  blocked_reason?: string | null;
+  failed_reason?: string | null;
+};
+
+type RawHyperoptMetricComparison = Partial<HyperoptMetricComparison> & {
+  metric?: string;
+  before_value?: number | null;
+  after_value?: number | null;
+};
+
+type RawHyperoptComparisonSummary = Partial<HyperoptComparisonSummary> & {
+  parent_version_id?: string | number | null;
+  optimized_version_id?: string | number | null;
+  blocked_reason?: string | null;
+  failed_reason?: string | null;
+};
+
+type RawHyperoptRunSummary = Partial<HyperoptRunSummary> & {
+  strategy_name?: string;
+  profile_name?: string;
+  best_params?: Record<string, unknown>;
+  best_loss?: number | null;
+  result_path?: string | null;
+  manifest_path?: string | null;
+  artifact_manifest?: RawHyperoptArtifactManifest | null;
+  manifest?: RawHyperoptArtifactManifest | null;
+  blocked_reason?: string | null;
+  failed_reason?: string | null;
+};
+
 type RawRankingEntry = Partial<RankingEntry> & {
   strategy_id?: string | number;
   strategy_name?: string;
@@ -115,6 +159,10 @@ function getApiBaseUrl() {
 
 function normalizeId(value: string | number | undefined): string {
   return value === undefined ? "" : String(value);
+}
+
+function normalizeOptionalId(value: string | number | null | undefined): string | null {
+  return value === null || value === undefined ? null : String(value);
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -179,6 +227,35 @@ function normalizeArtifactManifest(
     datadir: raw.datadir ?? null,
     strategyPath: raw.strategyPath ?? raw.strategy_path ?? null,
     userdir: raw.userdir ?? null,
+    blockedReason: raw.blockedReason ?? raw.blocked_reason ?? null,
+    failedReason: raw.failedReason ?? raw.failed_reason ?? null,
+  };
+}
+
+function normalizeHyperoptArtifactManifest(
+  raw: RawHyperoptArtifactManifest | null | undefined,
+): HyperoptArtifactManifest | null {
+  if (!raw) {
+    return null;
+  }
+
+  return {
+    manifestVersion: asOptionalNumber(raw.manifestVersion ?? raw.manifest_version),
+    status: raw.status ?? "UNKNOWN",
+    configPath: raw.configPath ?? raw.config_path ?? null,
+    strategyName: raw.strategyName ?? raw.strategy_name ?? null,
+    resultPath: raw.resultPath ?? raw.result_path ?? null,
+    manifestPath: raw.manifestPath ?? raw.manifest_path ?? null,
+    commandArgs: asStringArray(raw.commandArgs ?? raw.command_args),
+    returnCode: asOptionalNumber(raw.returnCode ?? raw.return_code),
+    stdout: raw.stdout ?? "",
+    stderr: raw.stderr ?? "",
+    datadir: raw.datadir ?? null,
+    strategyPath: raw.strategyPath ?? raw.strategy_path ?? null,
+    userdir: raw.userdir ?? null,
+    spaces: asStringArray(raw.spaces),
+    epochs: asOptionalNumber(raw.epochs),
+    hyperoptLoss: raw.hyperoptLoss ?? raw.hyperopt_loss ?? null,
     blockedReason: raw.blockedReason ?? raw.blocked_reason ?? null,
     failedReason: raw.failedReason ?? raw.failed_reason ?? null,
   };
@@ -332,6 +409,62 @@ function normalizeBacktestTask(raw: RawBacktestTaskSummary): BacktestTaskSummary
   };
 }
 
+function normalizeHyperoptMetricComparison(raw: RawHyperoptMetricComparison): HyperoptMetricComparison {
+  const before = asOptionalNumber(raw.before ?? raw.before_value);
+  const after = asOptionalNumber(raw.after ?? raw.after_value);
+  return {
+    label: raw.label ?? raw.metric ?? "metric",
+    before,
+    after,
+    delta: asOptionalNumber(raw.delta) ?? (before === null || after === null ? null : after - before),
+    suffix: raw.suffix ?? "",
+  };
+}
+
+function normalizeHyperoptComparison(
+  raw: RawHyperoptComparisonSummary | null | undefined,
+): HyperoptComparisonSummary | null {
+  if (!raw) {
+    return null;
+  }
+
+  const parentVersionId = raw.parentVersionId ?? raw.parent_version_id ?? null;
+  const optimizedVersionId = raw.optimizedVersionId ?? raw.optimized_version_id ?? null;
+
+  return {
+    parentVersionId: normalizeOptionalId(parentVersionId),
+    optimizedVersionId: normalizeOptionalId(optimizedVersionId),
+    status: raw.status ?? "UNKNOWN",
+    metrics: Array.isArray(raw.metrics) ? raw.metrics.map(normalizeHyperoptMetricComparison) : [],
+    warnings: Array.isArray(raw.warnings) ? raw.warnings.map(normalizeRankingSignal) : [],
+    blockedReason: raw.blockedReason ?? raw.blocked_reason ?? null,
+    failedReason: raw.failedReason ?? raw.failed_reason ?? null,
+  };
+}
+
+function normalizeHyperoptRun(raw: RawHyperoptRunSummary): HyperoptRunSummary {
+  const artifactManifest = normalizeHyperoptArtifactManifest(
+    raw.artifactManifest ?? raw.artifact_manifest ?? raw.manifest,
+  );
+  return {
+    id: normalizeId(raw.id),
+    strategyName: raw.strategyName ?? raw.strategy_name ?? artifactManifest?.strategyName ?? "Unknown strategy",
+    status: raw.status ?? artifactManifest?.status ?? "unknown",
+    profileName: raw.profileName ?? raw.profile_name ?? "default",
+    spaces: asStringArray(raw.spaces ?? artifactManifest?.spaces),
+    bestParams: raw.bestParams ?? raw.best_params ?? {},
+    bestLoss: asOptionalNumber(raw.bestLoss ?? raw.best_loss),
+    score: asOptionalNumber(raw.score),
+    epoch: asOptionalNumber(raw.epoch),
+    artifactManifest,
+    resultPath: raw.resultPath ?? raw.result_path ?? artifactManifest?.resultPath ?? null,
+    manifestPath: raw.manifestPath ?? raw.manifest_path ?? artifactManifest?.manifestPath ?? null,
+    blockedReason: raw.blockedReason ?? raw.blocked_reason ?? artifactManifest?.blockedReason ?? null,
+    failedReason: raw.failedReason ?? raw.failed_reason ?? artifactManifest?.failedReason ?? null,
+    comparison: normalizeHyperoptComparison(raw.comparison),
+  };
+}
+
 async function fetchJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   const response = await fetch(`${getApiBaseUrl()}${path}`, {
     headers: { Accept: "application/json" },
@@ -374,6 +507,7 @@ export async function loadMvpData(signal?: AbortSignal): Promise<{
     generationRuns,
     backtestRuns,
     backtestTasks,
+    hyperoptRuns,
     ranking,
     failureReasons,
     versionLineage,
@@ -392,6 +526,11 @@ export async function loadMvpData(signal?: AbortSignal): Promise<{
     fetchList<RawBacktestTaskSummary>(
       ["/backtest-tasks", "/mvp/backtest-tasks"],
       mockMvpData.backtestTasks,
+      signal,
+    ),
+    fetchList<RawHyperoptRunSummary>(
+      ["/hyperopt-runs", "/mvp/hyperopt-runs"],
+      mockMvpData.hyperoptRuns,
       signal,
     ),
     fetchList<RawRankingEntry>(
@@ -417,6 +556,7 @@ export async function loadMvpData(signal?: AbortSignal): Promise<{
       generationRuns: generationRuns.items,
       backtestRuns: backtestRuns.items.map(normalizeBacktestRun),
       backtestTasks: backtestTasks.items.map(normalizeBacktestTask),
+      hyperoptRuns: hyperoptRuns.items.map(normalizeHyperoptRun),
       ranking: ranking.items.map(normalizeRankingEntry),
       failureReasons: failureReasons.items.map(normalizeFailureReason),
       versionLineage: versionLineage.items.map(normalizeLineageEntry),
@@ -426,6 +566,7 @@ export async function loadMvpData(signal?: AbortSignal): Promise<{
       generationRuns.usedFallback ||
       backtestRuns.usedFallback ||
       backtestTasks.usedFallback ||
+      hyperoptRuns.usedFallback ||
       ranking.usedFallback ||
       failureReasons.usedFallback ||
       versionLineage.usedFallback,

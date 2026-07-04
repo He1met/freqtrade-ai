@@ -6,6 +6,7 @@ const navItems = [
   { to: "/generation-runs", label: "Generation Runs" },
   { to: "/backtest-runs", label: "Backtest Runs" },
   { to: "/backtest-tasks", label: "Backtest Tasks" },
+  { to: "/hyperopt-runs", label: "Hyperopt Runs" },
   { to: "/ranking", label: "Ranking" },
   { to: "/freq-ui", label: "FreqUI" },
 ];
