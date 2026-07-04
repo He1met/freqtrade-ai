@@ -16,6 +16,12 @@ from app.schemas.backtest_profile import (
     BacktestProfileStrategy,
     BacktestProfileV2,
 )
+from app.schemas.hyperopt_profile import (
+    HyperoptProfile,
+    HyperoptProfileLocalDataSource,
+    HyperoptProfileSafety,
+    HyperoptProfileStrategy,
+)
 from app.schemas.strategy import (
     StrategyCreate,
     StrategyRead,
@@ -74,6 +80,10 @@ __all__ = [
     "BacktestProfileStrategy",
     "BacktestProfileV2",
     "GenerationRunStatus",
+    "HyperoptProfile",
+    "HyperoptProfileLocalDataSource",
+    "HyperoptProfileSafety",
+    "HyperoptProfileStrategy",
     "IndicatorBlueprint",
     "SignalRule",
     "StrategyCreate",
