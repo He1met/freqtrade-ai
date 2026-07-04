@@ -16,6 +16,15 @@ from app.schemas.backtest_profile import (
     BacktestProfileStrategy,
     BacktestProfileV2,
 )
+from app.schemas.dry_run_profile import (
+    DryRunProfile,
+    DryRunProfileCommandOptions,
+    DryRunProfileExchange,
+    DryRunProfileFreqUILink,
+    DryRunProfileSafety,
+    DryRunProfileStake,
+    DryRunProfileStrategy,
+)
 from app.schemas.hyperopt_profile import (
     HyperoptProfile,
     HyperoptProfileLocalDataSource,
@@ -79,6 +88,13 @@ __all__ = [
     "BacktestProfileStake",
     "BacktestProfileStrategy",
     "BacktestProfileV2",
+    "DryRunProfile",
+    "DryRunProfileCommandOptions",
+    "DryRunProfileExchange",
+    "DryRunProfileFreqUILink",
+    "DryRunProfileSafety",
+    "DryRunProfileStake",
+    "DryRunProfileStrategy",
     "GenerationRunStatus",
     "HyperoptProfile",
     "HyperoptProfileLocalDataSource",
