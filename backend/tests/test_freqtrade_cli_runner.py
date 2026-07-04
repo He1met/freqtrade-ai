@@ -99,6 +99,41 @@ def test_builds_whitelisted_hyperopt_command_without_shell() -> None:
     ]
 
 
+def test_builds_whitelisted_dry_run_trade_command_without_shell() -> None:
+    runner = FreqtradeCliRunner(binary="freqtrade")
+
+    args = runner.build_args(
+        FreqtradeCommand(
+            command="trade",
+            options={
+                "--config": Path("tmp/freqtrade_configs/dry-run.json"),
+                "--dry-run": True,
+                "--loglevel": "INFO",
+                "--strategy": "DemoStrategy",
+                "--strategy-path": Path("user_data/strategies/generated"),
+                "--userdir": Path("user_data"),
+            },
+            timeout_seconds=30,
+        )
+    )
+
+    assert args == [
+        "freqtrade",
+        "trade",
+        "--config",
+        "tmp/freqtrade_configs/dry-run.json",
+        "--dry-run",
+        "--loglevel",
+        "INFO",
+        "--strategy",
+        "DemoStrategy",
+        "--strategy-path",
+        "user_data/strategies/generated",
+        "--userdir",
+        "user_data",
+    ]
+
+
 def test_rejects_unsupported_command_and_option() -> None:
     runner = FreqtradeCliRunner()
 
@@ -127,6 +162,66 @@ def test_rejects_unsafe_hyperopt_options(option: str) -> None:
 
     with pytest.raises(FreqtradeCommandValidationError):
         runner.build_args(FreqtradeCommand(command="hyperopt", options={option: "true"}))
+
+
+@pytest.mark.parametrize(
+    "option",
+    [
+        "--api-key",
+        "--download-data",
+        "--live",
+        "--real-orders",
+        "--webserver",
+    ],
+)
+def test_rejects_unsafe_dry_run_trade_options(option: str) -> None:
+    runner = FreqtradeCliRunner()
+
+    with pytest.raises(FreqtradeCommandValidationError):
+        runner.build_args(
+            FreqtradeCommand(
+                command="trade",
+                options={"--dry-run": True, option: "true"},
+            )
+        )
+
+
+def test_rejects_dry_run_trade_without_enabled_dry_run_flag() -> None:
+    runner = FreqtradeCliRunner()
+
+    with pytest.raises(FreqtradeCommandValidationError, match="requires --dry-run"):
+        runner.build_args(
+            FreqtradeCommand(
+                command="trade",
+                options={"--config": Path("tmp/freqtrade_configs/dry-run.json")},
+            )
+        )
+
+    with pytest.raises(FreqtradeCommandValidationError, match="requires --dry-run"):
+        runner.build_args(
+            FreqtradeCommand(
+                command="trade",
+                options={
+                    "--config": Path("tmp/freqtrade_configs/dry-run.json"),
+                    "--dry-run": False,
+                },
+            )
+        )
+
+
+def test_rejects_secret_shaped_command_values() -> None:
+    runner = FreqtradeCliRunner()
+
+    with pytest.raises(FreqtradeCommandValidationError, match="secret-shaped"):
+        runner.build_args(
+            FreqtradeCommand(
+                command="trade",
+                options={
+                    "--config": "tmp/freqtrade_configs/dry-run.json?api_key=real",
+                    "--dry-run": True,
+                },
+            )
+        )
 
 
 def test_rejects_multiline_values() -> None:

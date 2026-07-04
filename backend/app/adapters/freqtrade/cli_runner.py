@@ -4,6 +4,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import subprocess
 from pathlib import Path
+import re
 from typing import Callable, Optional, Union
 
 from app.adapters.freqtrade.exceptions import (
@@ -63,10 +64,33 @@ ALLOWED_COMMAND_OPTIONS: dict[str, frozenset[str]] = {
             "--userdir",
         }
     ),
+    "trade": frozenset(
+        {
+            "--config",
+            "--dry-run",
+            "--loglevel",
+            "--strategy",
+            "--strategy-path",
+            "--userdir",
+        }
+    ),
 }
 MULTI_VALUE_COMMAND_OPTIONS: frozenset[tuple[str, str]] = frozenset(
     {
         ("hyperopt", "--spaces"),
+    }
+)
+SECRET_PARAMETER_PATTERN = re.compile(
+    r"(?i)\b(api[_-]?key|api[_-]?secret|secret|password|passphrase|token)\s*[:=]"
+)
+SECRET_OPTION_NAMES = frozenset(
+    {
+        "--api-key",
+        "--api-secret",
+        "--password",
+        "--passphrase",
+        "--secret",
+        "--token",
     }
 )
 
@@ -141,13 +165,16 @@ class FreqtradeCliRunner:
                 f"Unsupported Freqtrade command: {command.command}"
             )
 
+        if command.command == "trade" and (command.options or {}).get("--dry-run") is not True:
+            raise FreqtradeCommandValidationError("Freqtrade trade command requires --dry-run")
+
         allowed_options = ALLOWED_COMMAND_OPTIONS[command.command]
         for option in command.options or {}:
+            self._validate_option_name(option)
             if option not in allowed_options:
                 raise FreqtradeCommandValidationError(
                     f"Unsupported option for '{command.command}': {option}"
                 )
-            self._validate_option_name(option)
 
     def _append_option(
         self,
@@ -180,11 +207,16 @@ class FreqtradeCliRunner:
     def _validate_option_name(self, option: str) -> None:
         if not option.startswith("--") or any(character.isspace() for character in option):
             raise FreqtradeCommandValidationError(f"Invalid option name: {option}")
+        normalized = option.strip().lower().replace("_", "-")
+        if normalized in SECRET_OPTION_NAMES:
+            raise FreqtradeCommandValidationError(f"Secret-shaped option is not allowed: {option}")
 
     def _validate_value(self, value: object) -> None:
         text = str(value)
         if "\x00" in text or "\n" in text or "\r" in text:
             raise FreqtradeCommandValidationError("Command values must be single-line strings")
+        if SECRET_PARAMETER_PATTERN.search(text):
+            raise FreqtradeCommandValidationError("Command values must not contain secret-shaped parameters")
 
     def _subprocess_executor(
         self,
