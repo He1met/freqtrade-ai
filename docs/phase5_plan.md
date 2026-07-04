@@ -94,6 +94,12 @@ from it only through separate Issues or small PRs:
 
 The cleanup decision remains: do not merge PR #127 directly.
 
+The Phase 5 split decision for #161 is recorded in
+[phase5_pr127_split_decision.md](phase5_pr127_split_decision.md). It keeps
+#157-#160 as the authoritative dry-run / FreqUI contracts and rejects carrying
+PR #127's runtime API, seed script, fallback replacement, localization, proxy,
+or adapter changes into Phase 5 as a bundled PR.
+
 ## Read-only Status Snapshot Contract
 
 #158 adds the backend-only read model for dry-run runtime status. It does not
