@@ -28,8 +28,10 @@ worker:
   task_poll_interval_seconds: 5
 
 frequi:
-  # Optional FreqUI URL. Keep empty to show the local placeholder in the frontend.
+  # Optional read-only FreqUI link metadata. Keep disabled until a local endpoint is configured.
+  enabled: false
   url: ""
+  environment_label: local-dry-run
 
 security:
   # Hard safety gates. Phase 0 must not enable dry-run or live trading.
