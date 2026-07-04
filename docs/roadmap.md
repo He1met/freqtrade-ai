@@ -58,6 +58,29 @@ Phase 3 只使用本地已有 `user_data/data` 行情数据。缺少数据时必
 Phase 3 不做 Hyperopt、dry-run、live trading、真实交易所连接、真实 K 线下载或
 生产运行。
 
-## Phase 4: 生产交易治理
+## Phase 4: Hyperopt 参数优化
 
-Live 交易必须单独评审。默认禁用，必须通过 Issue、Milestone、PR、审计和人工确认。
+状态：规划中。详见 [phase4_hyperopt_plan.md](phase4_hyperopt_plan.md)。
+
+Phase 4 只做 Freqtrade Hyperopt 参数优化能力的设计、封装、结果归档、
+结果解析、优化后 StrategyVersion 生成、优化前后表现对比和前端展示。
+
+Phase 4 必须复用 Freqtrade Hyperopt，不自研优化引擎。Phase 4 不做
+dry-run、live trading、真实交易所连接、真实 K 线下载、真实 API key /
+secret / passphrase 提交、Freqtrade 源码修改、Redis / Celery / Kafka /
+RabbitMQ 队列基础设施，也不进入 Phase 5、Phase 6 或 Phase 7 范围。
+
+## Phase 5: Dry-run / FreqUI 运行管理
+
+Phase 5 才允许规划 Freqtrade dry-run 和 FreqUI 运行管理能力。该阶段需要
+单独 Issue、PR、安全评审和人工确认。
+
+Phase 4 的任何任务不得提前实现 Phase 5 能力。
+
+## Phase 6: 实盘候选与部署管理
+
+Phase 6 才允许规划实盘候选、人工审批、风险检查、部署记录和回滚机制。
+Live 交易必须单独评审，默认禁用，必须通过 Issue、Milestone、PR、审计和
+人工确认。
+
+Phase 4 和 Phase 5 的任何任务不得提前实现 Phase 6 能力。
