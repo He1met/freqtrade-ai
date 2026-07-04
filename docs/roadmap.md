@@ -92,6 +92,44 @@ Phase 5 仍不是 live trading 授权。当前能力只覆盖本项目外层的 
 
 ## Phase 6: 实盘候选与部署管理
 
-Live 交易必须单独评审，默认禁用，必须通过 Issue、Milestone、PR、审计和人工确认。
+状态：planning。详见 [phase6_live_candidate_plan.md](phase6_live_candidate_plan.md)。
 
-Phase 6 才允许规划实盘候选、人工审批、风险检查、部署记录和回滚机制。
+Phase 6 = 实盘候选与部署治理。当前阶段只启动 planning 和 Issue 队列，
+不授权 live trading execution，不自动下单，不启动 live bot，不执行生产部署。
+
+Phase 6 planning 已创建：
+
+- [#176](https://github.com/He1met/freqtrade-ai/issues/176)
+  `[EPIC][Phase 6] 实盘候选与部署治理`
+- [#177](https://github.com/He1met/freqtrade-ai/issues/177)
+  `[Design][Phase 6] 实盘候选与部署治理设计方案`，Project 状态为 Ready
+- [#178](https://github.com/He1met/freqtrade-ai/issues/178)
+  `[Backend][Phase 6] LiveCandidateProfile schema 与准入条件锁定`
+- [#179](https://github.com/He1met/freqtrade-ai/issues/179)
+  `[Backend][Phase 6] 实盘候选风险检查清单与 fail-closed 预检`
+- [#180](https://github.com/He1met/freqtrade-ai/issues/180)
+  `[Backend][Phase 6] 人工审批记录与状态机`
+- [#181](https://github.com/He1met/freqtrade-ai/issues/181)
+  `[Backend][Phase 6] DeploymentRecord schema 与 rollback plan`
+- [#182](https://github.com/He1met/freqtrade-ai/issues/182)
+  `[Backend][Phase 6] 只读运行监控与告警摘要 DTO`
+- [#183](https://github.com/He1met/freqtrade-ai/issues/183)
+  `[Frontend][Phase 6] 实盘候选审批与部署记录只读页面`
+- [#184](https://github.com/He1met/freqtrade-ai/issues/184)
+  `[Test][Phase 6] Phase 6 offline governance smoke`
+- [#185](https://github.com/He1met/freqtrade-ai/issues/185)
+  `[Review][Phase 6] Phase 6 实盘候选与部署治理验收`
+
+除 #177 外，其他 Phase 6 Issue 均保持 Backlog，等待设计 Issue 完成后再进入实现。
+
+Phase 6 安全边界：
+
+- 不执行真实下单。
+- 不启动 live trading。
+- 不提交真实 API key、secret、passphrase。
+- 不把密钥写入代码、配置、数据库、日志或文档。
+- 不修改 Freqtrade 源码。
+- 不引入 Redis、Celery、Kafka、RabbitMQ，除非后续 Phase 7 明确允许。
+- 不做生产部署。
+- 不绕过人工审批。
+- 不实现自动启动 live bot。

@@ -170,6 +170,46 @@ python3 scripts/smoke_phase5.py --offline --tmp-dir /tmp/freqtrade-ai-phase5-smo
 - 不引入 Redis / Celery / Kafka / RabbitMQ 或部署基础设施。
 - Phase 6 实盘候选和部署管理必须另行规划，不能由 Phase 5 自动进入。
 
+## Phase 6 实盘候选与部署治理 planning 状态
+
+Phase 6 已启动 planning。当前定义为实盘候选与部署治理，不是直接 live
+trading，不是自动下单，不是自动启动 live bot，也不是生产部署执行。
+
+Phase 6 planning 已创建 Epic 和子 Issue：
+
+- [#176](https://github.com/He1met/freqtrade-ai/issues/176)
+  `[EPIC][Phase 6] 实盘候选与部署治理`
+- [#177](https://github.com/He1met/freqtrade-ai/issues/177)
+  `[Design][Phase 6] 实盘候选与部署治理设计方案`，当前为 Ready
+- [#178](https://github.com/He1met/freqtrade-ai/issues/178)
+  `[Backend][Phase 6] LiveCandidateProfile schema 与准入条件锁定`
+- [#179](https://github.com/He1met/freqtrade-ai/issues/179)
+  `[Backend][Phase 6] 实盘候选风险检查清单与 fail-closed 预检`
+- [#180](https://github.com/He1met/freqtrade-ai/issues/180)
+  `[Backend][Phase 6] 人工审批记录与状态机`
+- [#181](https://github.com/He1met/freqtrade-ai/issues/181)
+  `[Backend][Phase 6] DeploymentRecord schema 与 rollback plan`
+- [#182](https://github.com/He1met/freqtrade-ai/issues/182)
+  `[Backend][Phase 6] 只读运行监控与告警摘要 DTO`
+- [#183](https://github.com/He1met/freqtrade-ai/issues/183)
+  `[Frontend][Phase 6] 实盘候选审批与部署记录只读页面`
+- [#184](https://github.com/He1met/freqtrade-ai/issues/184)
+  `[Test][Phase 6] Phase 6 offline governance smoke`
+- [#185](https://github.com/He1met/freqtrade-ai/issues/185)
+  `[Review][Phase 6] Phase 6 实盘候选与部署治理验收`
+
+只有 #177 进入 Ready，其余 Phase 6 Issue 均保持 Backlog。完整计划见
+[phase6_live_candidate_plan.md](docs/phase6_live_candidate_plan.md)。
+
+当前限制：
+
+- 不执行真实下单，不启动 live trading。
+- 不提交真实 API key、secret、passphrase。
+- 不把密钥写入代码、配置、数据库、日志或文档。
+- 不修改 Freqtrade 源码。
+- 不引入 Redis / Celery / Kafka / RabbitMQ。
+- 不做生产部署，不绕过人工审批，不实现自动启动 live bot。
+
 ## 启动后端
 
 ```bash
