@@ -35,6 +35,24 @@ ALLOWED_COMMAND_OPTIONS: dict[str, frozenset[str]] = {
             "--userdir",
         }
     ),
+    "hyperopt": frozenset(
+        {
+            "--config",
+            "--datadir",
+            "--epochs",
+            "--export",
+            "--export-filename",
+            "--hyperopt-loss",
+            "--print-json",
+            "--random-state",
+            "--spaces",
+            "--strategy",
+            "--strategy-path",
+            "--timeframe",
+            "--timerange",
+            "--userdir",
+        }
+    ),
     "list-data": frozenset(
         {
             "--datadir",
@@ -46,6 +64,11 @@ ALLOWED_COMMAND_OPTIONS: dict[str, frozenset[str]] = {
         }
     ),
 }
+MULTI_VALUE_COMMAND_OPTIONS: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("hyperopt", "--spaces"),
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -85,7 +108,7 @@ class FreqtradeCliRunner:
         args = [self._binary, command.command]
 
         for option, value in sorted((command.options or {}).items()):
-            self._append_option(args, option, value)
+            self._append_option(args, command.command, option, value)
 
         for value in command.positional_args:
             self._validate_value(value)
@@ -126,13 +149,26 @@ class FreqtradeCliRunner:
                 )
             self._validate_option_name(option)
 
-    def _append_option(self, args: list[str], option: str, value: CommandOptionValue) -> None:
+    def _append_option(
+        self,
+        args: list[str],
+        command_name: str,
+        option: str,
+        value: CommandOptionValue,
+    ) -> None:
         if isinstance(value, bool):
             if value:
                 args.append(option)
             return
 
         if isinstance(value, Sequence) and not isinstance(value, (str, bytes, Path)):
+            if (command_name, option) in MULTI_VALUE_COMMAND_OPTIONS:
+                args.append(option)
+                for item in value:
+                    self._validate_value(item)
+                    args.append(str(item))
+                return
+
             for item in value:
                 self._validate_value(item)
                 args.extend([option, str(item)])
