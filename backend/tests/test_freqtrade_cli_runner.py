@@ -39,6 +39,66 @@ def test_builds_whitelisted_backtesting_command_without_shell() -> None:
     ]
 
 
+def test_builds_whitelisted_hyperopt_command_without_shell() -> None:
+    runner = FreqtradeCliRunner(binary="freqtrade")
+
+    args = runner.build_args(
+        FreqtradeCommand(
+            command="hyperopt",
+            options={
+                "--config": Path("tmp/freqtrade_configs/hyperopt.json"),
+                "--datadir": Path("user_data/data/okx"),
+                "--epochs": 25,
+                "--export": "trades",
+                "--export-filename": Path("tmp/hyperopt/result.json"),
+                "--hyperopt-loss": "SharpeHyperOptLoss",
+                "--print-json": True,
+                "--random-state": 42,
+                "--spaces": ["buy", "sell"],
+                "--strategy": "DemoStrategy",
+                "--strategy-path": Path("tmp/strategies"),
+                "--timeframe": "15m",
+                "--timerange": "20240101-20240131",
+                "--userdir": Path("tmp/user_data"),
+            },
+            timeout_seconds=30,
+        )
+    )
+
+    assert args == [
+        "freqtrade",
+        "hyperopt",
+        "--config",
+        "tmp/freqtrade_configs/hyperopt.json",
+        "--datadir",
+        "user_data/data/okx",
+        "--epochs",
+        "25",
+        "--export",
+        "trades",
+        "--export-filename",
+        "tmp/hyperopt/result.json",
+        "--hyperopt-loss",
+        "SharpeHyperOptLoss",
+        "--print-json",
+        "--random-state",
+        "42",
+        "--spaces",
+        "buy",
+        "sell",
+        "--strategy",
+        "DemoStrategy",
+        "--strategy-path",
+        "tmp/strategies",
+        "--timeframe",
+        "15m",
+        "--timerange",
+        "20240101-20240131",
+        "--userdir",
+        "tmp/user_data",
+    ]
+
+
 def test_rejects_unsupported_command_and_option() -> None:
     runner = FreqtradeCliRunner()
 
@@ -49,6 +109,24 @@ def test_rejects_unsupported_command_and_option() -> None:
         runner.build_args(
             FreqtradeCommand(command="backtesting", options={"--enable-proxy": "true"})
         )
+
+
+@pytest.mark.parametrize(
+    "option",
+    [
+        "--api-key",
+        "--download-data",
+        "--dry-run",
+        "--enable-proxy",
+        "--live",
+        "--webserver",
+    ],
+)
+def test_rejects_unsafe_hyperopt_options(option: str) -> None:
+    runner = FreqtradeCliRunner()
+
+    with pytest.raises(FreqtradeCommandValidationError):
+        runner.build_args(FreqtradeCommand(command="hyperopt", options={option: "true"}))
 
 
 def test_rejects_multiline_values() -> None:
