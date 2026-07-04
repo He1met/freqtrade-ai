@@ -4,6 +4,13 @@ import type {
   BacktestMetricSummary,
   BacktestRunSummary,
   BacktestTaskSummary,
+  DryRunArtifactManifest,
+  DryRunBalanceSummary,
+  DryRunEventSummary,
+  DryRunManagementSummary,
+  DryRunOpenTradesSummary,
+  DryRunStatusSnapshot,
+  FreqUILinkMetadata,
   HyperoptArtifactManifest,
   HyperoptComparisonSummary,
   HyperoptMetricComparison,
@@ -132,6 +139,69 @@ type RawHyperoptRunSummary = Partial<HyperoptRunSummary> & {
   failed_reason?: string | null;
 };
 
+type RawDryRunArtifactManifest = Partial<DryRunArtifactManifest> & {
+  manifest_version?: number | null;
+  profile_name?: string | null;
+  strategy_version_id?: number | null;
+  strategy_name?: string | null;
+  config_path?: string | null;
+  manifest_path?: string | null;
+  command_args?: unknown;
+  return_code?: number | null;
+  strategy_path?: string | null;
+  blocked_reason?: string | null;
+  failed_reason?: string | null;
+  skipped_reason?: string | null;
+};
+
+type RawDryRunBalanceSummary = Partial<DryRunBalanceSummary> & {
+  realized_profit?: number | null;
+  unrealized_profit?: number | null;
+};
+
+type RawDryRunOpenTradesSummary = Partial<DryRunOpenTradesSummary> & {
+  total_open_trades?: number;
+  pair_count?: number;
+  total_stake_amount?: number | null;
+  total_profit_abs?: number | null;
+  total_profit_pct?: number | null;
+};
+
+type RawDryRunEventSummary = Partial<DryRunEventSummary> & {
+  event_type?: string;
+};
+
+type RawDryRunStatusSnapshot = Partial<DryRunStatusSnapshot> & {
+  profile_name?: string | null;
+  strategy_version_id?: number | null;
+  strategy_name?: string | null;
+  dry_run?: boolean | null;
+  balance_summary?: RawDryRunBalanceSummary;
+  open_trades_summary?: RawDryRunOpenTradesSummary;
+  recent_events?: RawDryRunEventSummary[];
+  blocked_reason?: string | null;
+  failed_reason?: string | null;
+  skipped_reason?: string | null;
+  last_updated?: string | null;
+  artifact_manifest_path?: string | null;
+};
+
+type RawFreqUILinkMetadata = Partial<FreqUILinkMetadata> & {
+  base_url?: string | null;
+  environment_label?: string;
+  blocked_reason?: string | null;
+  access_mode?: string;
+};
+
+type RawDryRunManagementSummary = Partial<DryRunManagementSummary> & {
+  artifact_manifest?: RawDryRunArtifactManifest | null;
+  manifest?: RawDryRunArtifactManifest | null;
+  status_snapshot?: RawDryRunStatusSnapshot;
+  snapshot?: RawDryRunStatusSnapshot;
+  freq_ui_link?: RawFreqUILinkMetadata;
+  frequi_link?: RawFreqUILinkMetadata;
+};
+
 type RawRankingEntry = Partial<RankingEntry> & {
   strategy_id?: string | number;
   strategy_name?: string;
@@ -185,6 +255,15 @@ function asOptionalString(value: unknown): string | null {
 
 function asStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.map((item) => String(item)) : [];
+}
+
+function redactSensitiveText(value: string): string {
+  return value
+    .replace(
+      /\b(api[_-]?key|api[_-]?secret|secret|password|passphrase|token)(\s*[:=]\s*)([^\s,;]+)/gi,
+      "$1$2[REDACTED]",
+    )
+    .replace(/\bbearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [REDACTED]");
 }
 
 function normalizeMetrics(raw: RawBacktestMetricSummary | undefined): BacktestMetricSummary {
@@ -465,6 +544,110 @@ function normalizeHyperoptRun(raw: RawHyperoptRunSummary): HyperoptRunSummary {
   };
 }
 
+function normalizeDryRunManifest(raw: RawDryRunArtifactManifest | null | undefined): DryRunArtifactManifest | null {
+  if (!raw) {
+    return null;
+  }
+
+  return {
+    manifestVersion: asOptionalNumber(raw.manifestVersion ?? raw.manifest_version),
+    status: raw.status ?? "UNKNOWN",
+    profileName: raw.profileName ?? raw.profile_name ?? null,
+    strategyVersionId: asOptionalNumber(raw.strategyVersionId ?? raw.strategy_version_id),
+    strategyName: raw.strategyName ?? raw.strategy_name ?? null,
+    pair: raw.pair ?? null,
+    timeframe: raw.timeframe ?? null,
+    configPath: raw.configPath ?? raw.config_path ?? null,
+    manifestPath: raw.manifestPath ?? raw.manifest_path ?? null,
+    commandArgs: asStringArray(raw.commandArgs ?? raw.command_args).map(redactSensitiveText),
+    returnCode: asOptionalNumber(raw.returnCode ?? raw.return_code),
+    stdout: redactSensitiveText(raw.stdout ?? ""),
+    stderr: redactSensitiveText(raw.stderr ?? ""),
+    userdir: raw.userdir ?? null,
+    strategyPath: raw.strategyPath ?? raw.strategy_path ?? null,
+    blockedReason: raw.blockedReason ?? raw.blocked_reason ?? null,
+    failedReason: raw.failedReason ?? raw.failed_reason ?? null,
+    skippedReason: raw.skippedReason ?? raw.skipped_reason ?? null,
+  };
+}
+
+function normalizeDryRunBalance(raw: RawDryRunBalanceSummary | undefined): DryRunBalanceSummary {
+  const source = raw ?? {};
+  return {
+    currency: source.currency ?? null,
+    total: asOptionalNumber(source.total),
+    free: asOptionalNumber(source.free),
+    used: asOptionalNumber(source.used),
+    realizedProfit: asOptionalNumber(source.realizedProfit ?? source.realized_profit),
+    unrealizedProfit: asOptionalNumber(source.unrealizedProfit ?? source.unrealized_profit),
+  };
+}
+
+function normalizeDryRunOpenTrades(raw: RawDryRunOpenTradesSummary | undefined): DryRunOpenTradesSummary {
+  const source = raw ?? {};
+  return {
+    totalOpenTrades: source.totalOpenTrades ?? source.total_open_trades ?? 0,
+    pairCount: source.pairCount ?? source.pair_count ?? 0,
+    pairs: asStringArray(source.pairs),
+    totalStakeAmount: asOptionalNumber(source.totalStakeAmount ?? source.total_stake_amount),
+    totalProfitAbs: asOptionalNumber(source.totalProfitAbs ?? source.total_profit_abs),
+    totalProfitPct: asOptionalNumber(source.totalProfitPct ?? source.total_profit_pct),
+  };
+}
+
+function normalizeDryRunEvent(raw: RawDryRunEventSummary): DryRunEventSummary {
+  return {
+    timestamp: raw.timestamp ?? "",
+    eventType: raw.eventType ?? raw.event_type ?? "status_event",
+    severity: raw.severity ?? "INFO",
+    message: redactSensitiveText(raw.message ?? "Status event recorded."),
+    source: raw.source ?? "unknown",
+  };
+}
+
+function normalizeDryRunSnapshot(raw: RawDryRunStatusSnapshot | undefined): DryRunStatusSnapshot {
+  const source = raw ?? {};
+  return {
+    status: source.status ?? "BLOCKED",
+    profileName: source.profileName ?? source.profile_name ?? null,
+    strategyVersionId: asOptionalNumber(source.strategyVersionId ?? source.strategy_version_id),
+    strategyName: source.strategyName ?? source.strategy_name ?? null,
+    exchange: source.exchange ?? null,
+    pair: source.pair ?? null,
+    timeframe: source.timeframe ?? null,
+    dryRun: source.dryRun ?? source.dry_run ?? null,
+    balanceSummary: normalizeDryRunBalance(source.balanceSummary ?? source.balance_summary),
+    openTradesSummary: normalizeDryRunOpenTrades(source.openTradesSummary ?? source.open_trades_summary),
+    recentEvents: Array.isArray(source.recentEvents ?? source.recent_events)
+      ? (source.recentEvents ?? source.recent_events ?? []).map(normalizeDryRunEvent)
+      : [],
+    blockedReason: source.blockedReason ?? source.blocked_reason ?? null,
+    failedReason: source.failedReason ?? source.failed_reason ?? null,
+    skippedReason: source.skippedReason ?? source.skipped_reason ?? null,
+    lastUpdated: source.lastUpdated ?? source.last_updated ?? null,
+    artifactManifestPath: source.artifactManifestPath ?? source.artifact_manifest_path ?? null,
+  };
+}
+
+function normalizeFreqUILink(raw: RawFreqUILinkMetadata | undefined): FreqUILinkMetadata {
+  const source = raw ?? {};
+  return {
+    enabled: source.enabled === true,
+    baseUrl: source.baseUrl ?? source.base_url ?? null,
+    environmentLabel: source.environmentLabel ?? source.environment_label ?? "local-dry-run",
+    blockedReason: source.blockedReason ?? source.blocked_reason ?? "FreqUI link is not configured",
+    accessMode: source.accessMode ?? source.access_mode ?? "read-only-link",
+  };
+}
+
+function normalizeDryRunManagement(raw: RawDryRunManagementSummary): DryRunManagementSummary {
+  return {
+    manifest: normalizeDryRunManifest(raw.manifest ?? raw.artifact_manifest),
+    snapshot: normalizeDryRunSnapshot(raw.snapshot ?? raw.status_snapshot),
+    freqUiLink: normalizeFreqUILink(raw.freqUiLink ?? raw.freq_ui_link ?? raw.frequi_link),
+  };
+}
+
 async function fetchJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   const response = await fetch(`${getApiBaseUrl()}${path}`, {
     headers: { Accept: "application/json" },
@@ -498,6 +681,24 @@ async function fetchList<T>(
   return { items: fallback, usedFallback: true };
 }
 
+async function fetchValue<T>(
+  paths: string[],
+  fallback: T,
+  signal?: AbortSignal,
+): Promise<{ item: T; usedFallback: boolean }> {
+  for (const path of paths) {
+    try {
+      return { item: await fetchJson<T>(path, signal), usedFallback: false };
+    } catch (error) {
+      if (signal?.aborted) {
+        throw error;
+      }
+    }
+  }
+
+  return { item: fallback, usedFallback: true };
+}
+
 export async function loadMvpData(signal?: AbortSignal): Promise<{
   data: MvpData;
   usedFallback: boolean;
@@ -508,6 +709,7 @@ export async function loadMvpData(signal?: AbortSignal): Promise<{
     backtestRuns,
     backtestTasks,
     hyperoptRuns,
+    dryRun,
     ranking,
     failureReasons,
     versionLineage,
@@ -531,6 +733,11 @@ export async function loadMvpData(signal?: AbortSignal): Promise<{
     fetchList<RawHyperoptRunSummary>(
       ["/hyperopt-runs", "/mvp/hyperopt-runs"],
       mockMvpData.hyperoptRuns,
+      signal,
+    ),
+    fetchValue<RawDryRunManagementSummary>(
+      ["/dry-run/management", "/dry-run/status", "/mvp/dry-run"],
+      mockMvpData.dryRun,
       signal,
     ),
     fetchList<RawRankingEntry>(
@@ -557,6 +764,7 @@ export async function loadMvpData(signal?: AbortSignal): Promise<{
       backtestRuns: backtestRuns.items.map(normalizeBacktestRun),
       backtestTasks: backtestTasks.items.map(normalizeBacktestTask),
       hyperoptRuns: hyperoptRuns.items.map(normalizeHyperoptRun),
+      dryRun: normalizeDryRunManagement(dryRun.item),
       ranking: ranking.items.map(normalizeRankingEntry),
       failureReasons: failureReasons.items.map(normalizeFailureReason),
       versionLineage: versionLineage.items.map(normalizeLineageEntry),
@@ -567,6 +775,7 @@ export async function loadMvpData(signal?: AbortSignal): Promise<{
       backtestRuns.usedFallback ||
       backtestTasks.usedFallback ||
       hyperoptRuns.usedFallback ||
+      dryRun.usedFallback ||
       ranking.usedFallback ||
       failureReasons.usedFallback ||
       versionLineage.usedFallback,
