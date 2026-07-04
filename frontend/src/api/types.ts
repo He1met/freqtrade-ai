@@ -160,6 +160,88 @@ export type HyperoptRunSummary = {
   comparison: HyperoptComparisonSummary | null;
 };
 
+export type DryRunArtifactStatus = "SUCCESS" | "FAILED" | "BLOCKED" | "SKIPPED" | string;
+
+export type DryRunArtifactManifest = {
+  manifestVersion: number | null;
+  status: DryRunArtifactStatus;
+  profileName: string | null;
+  strategyVersionId: number | null;
+  strategyName: string | null;
+  pair: string | null;
+  timeframe: string | null;
+  configPath: string | null;
+  manifestPath: string | null;
+  commandArgs: string[];
+  returnCode: number | null;
+  stdout: string;
+  stderr: string;
+  userdir: string | null;
+  strategyPath: string | null;
+  blockedReason: string | null;
+  failedReason: string | null;
+  skippedReason: string | null;
+};
+
+export type DryRunBalanceSummary = {
+  currency: string | null;
+  total: number | null;
+  free: number | null;
+  used: number | null;
+  realizedProfit: number | null;
+  unrealizedProfit: number | null;
+};
+
+export type DryRunOpenTradesSummary = {
+  totalOpenTrades: number;
+  pairCount: number;
+  pairs: string[];
+  totalStakeAmount: number | null;
+  totalProfitAbs: number | null;
+  totalProfitPct: number | null;
+};
+
+export type DryRunEventSummary = {
+  timestamp: string;
+  eventType: string;
+  severity: "INFO" | "WARNING" | "ERROR" | "CRITICAL" | string;
+  message: string;
+  source: string;
+};
+
+export type DryRunStatusSnapshot = {
+  status: "SUCCESS" | "FAILED" | "BLOCKED" | "SKIPPED" | "RUNNING" | "STOPPED" | string;
+  profileName: string | null;
+  strategyVersionId: number | null;
+  strategyName: string | null;
+  exchange: string | null;
+  pair: string | null;
+  timeframe: string | null;
+  dryRun: boolean | null;
+  balanceSummary: DryRunBalanceSummary;
+  openTradesSummary: DryRunOpenTradesSummary;
+  recentEvents: DryRunEventSummary[];
+  blockedReason: string | null;
+  failedReason: string | null;
+  skippedReason: string | null;
+  lastUpdated: string | null;
+  artifactManifestPath: string | null;
+};
+
+export type FreqUILinkMetadata = {
+  enabled: boolean;
+  baseUrl: string | null;
+  environmentLabel: string;
+  blockedReason: string | null;
+  accessMode: "read-only-link" | string;
+};
+
+export type DryRunManagementSummary = {
+  manifest: DryRunArtifactManifest | null;
+  snapshot: DryRunStatusSnapshot;
+  freqUiLink: FreqUILinkMetadata;
+};
+
 export type RankingEntry = {
   rank: number;
   strategyId: string;
@@ -225,6 +307,7 @@ export type MvpData = {
   backtestRuns: BacktestRunSummary[];
   backtestTasks: BacktestTaskSummary[];
   hyperoptRuns: HyperoptRunSummary[];
+  dryRun: DryRunManagementSummary;
   ranking: RankingEntry[];
   failureReasons: StrategyFailureReasonSummary[];
   versionLineage: StrategyVersionLineageEntry[];
