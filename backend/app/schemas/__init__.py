@@ -33,6 +33,7 @@ from app.schemas.dry_run_status import (
     DryRunSnapshotStatus,
     DryRunStatusSnapshot,
 )
+from app.schemas.freq_ui import FreqUILinkConfig, FreqUILinkMetadata
 from app.schemas.hyperopt_profile import (
     HyperoptProfile,
     HyperoptProfileLocalDataSource,
@@ -109,6 +110,8 @@ __all__ = [
     "DryRunOpenTradesSummary",
     "DryRunSnapshotStatus",
     "DryRunStatusSnapshot",
+    "FreqUILinkConfig",
+    "FreqUILinkMetadata",
     "GenerationRunStatus",
     "HyperoptProfile",
     "HyperoptProfileLocalDataSource",
