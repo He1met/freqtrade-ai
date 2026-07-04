@@ -108,6 +108,68 @@ python3 scripts/smoke_phase3.py --offline --tmp-dir /tmp/freqtrade-ai-phase3-smo
 - 不引入 Redis / Celery / Kafka / RabbitMQ。
 - 不修改 Freqtrade 源码。
 
+## Phase 4 Hyperopt 参数优化状态
+
+Phase 4 Hyperopt 参数优化已完成验收。当前已具备：
+
+- HyperoptProfile schema 与优化变量锁定。
+- 受控 Freqtrade `hyperopt` CLI runner 边界。
+- Hyperopt artifact manifest 与 fail-closed 结果归档。
+- Freqtrade Hyperopt result JSON 解析。
+- 基于 best params 生成优化后 StrategyVersion。
+- 优化前后策略表现对比。
+- 前端展示 Hyperopt runs、best params 和 before/after 对比。
+- 离线 Phase 4 smoke 验收脚本。
+
+Phase 4 smoke 命令：
+
+```bash
+python3 scripts/smoke_phase4.py --offline --tmp-dir /tmp/freqtrade-ai-phase4-smoke
+```
+
+完整验收状态见 [phase4_acceptance.md](docs/phase4_acceptance.md)。
+
+当前限制：
+
+- 不支持 dry-run / live trading。
+- 不连接真实交易所，不下载真实 K 线，不执行真实下单。
+- 不提交真实 API key、secret、passphrase。
+- 不引入 Redis / Celery / Kafka / RabbitMQ。
+- 不修改 Freqtrade 源码。
+
+## Phase 5 Dry-run / FreqUI 运行管理状态
+
+Phase 5 Dry-run / FreqUI 运行管理已完成最终验收。当前已具备：
+
+- Dry-run / FreqUI 安全边界与执行计划。
+- Freqtrade dry-run 本地前置条件和风险预检。
+- DryRunProfile schema 与运行变量锁定。
+- 受控 Freqtrade dry-run CLI command 构造。
+- Dry-run 临时配置生成和 ENV-only 密钥预检。
+- Dry-run artifact manifest 与状态归档。
+- Dry-run 只读状态快照与事件解析。
+- FreqUI 入口配置与只读链接边界。
+- Dry-run / FreqUI 运行管理前端展示。
+- PR #127 runtime API 与 fallback 契约拆分决策。
+- 离线 Phase 5 smoke 验收脚本。
+
+Phase 5 smoke 命令：
+
+```bash
+python3 scripts/smoke_phase5.py --offline --tmp-dir /tmp/freqtrade-ai-phase5-smoke
+```
+
+完整验收状态见 [phase5_acceptance.md](docs/phase5_acceptance.md)。
+
+当前限制：
+
+- 不做 live trading，不执行真实下单。
+- 不连接真实交易所，不下载真实 K 线。
+- 真实密钥仅允许来自 ENV，且不得写入代码、YAML、数据库、日志、报告、Issue 或 PR。
+- 本项目只提供 FreqUI 只读链接和状态展示边界，不嵌入、不代理、不重写 FreqUI 控制面。
+- 不引入 Redis / Celery / Kafka / RabbitMQ 或部署基础设施。
+- Phase 6 实盘候选和部署管理必须另行规划，不能由 Phase 5 自动进入。
+
 ## 启动后端
 
 ```bash

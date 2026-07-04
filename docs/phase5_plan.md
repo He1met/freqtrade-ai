@@ -2,9 +2,8 @@
 
 ## Status
 
-Phase 5 planning is initialized. Phase 4 Hyperopt parameter optimization has
-passed final acceptance, and post-Phase-4 cleanup has closed stale planning
-state.
+Phase 5 has passed final acceptance. The completed scope is summarized in
+[phase5_acceptance.md](phase5_acceptance.md).
 
 Phase 5 is the first stage that approaches runtime operation. This plan does
 not authorize live trading, real order placement, production deployment, or
@@ -45,23 +44,24 @@ Phase 5 work must satisfy these gates before any PR can merge:
 
 ## Issue Sequence
 
-| Order | Issue | Purpose | Initial State |
+| Order | Issue | Purpose | Final State |
 | --- | --- | --- | --- |
-| 1 | #152 | Dry-run / FreqUI safety boundary and execution plan | In Progress |
-| 2 | #153 | Freqtrade dry-run local prerequisites and risk preflight | Backlog |
-| 3 | #154 | DryRunProfile schema and runtime variable lock | Backlog |
-| 4 | #155 | Controlled Freqtrade dry-run CLI command construction | Backlog |
-| 5 | #156 | Dry-run config generation and ENV-only secret preflight | Backlog |
-| 6 | #157 | Dry-run artifact manifest and status archive | Backlog |
-| 7 | #158 | Dry-run read-only status snapshots and event parsing | Backlog |
-| 8 | #159 | FreqUI entry configuration and read-only link boundary | Backlog |
-| 9 | #160 | Dry-run / FreqUI runtime management page | Backlog |
-| 10 | #161 | PR #127 runtime API and fallback contract split decision | Backlog |
-| 11 | #162 | Phase 5 offline smoke acceptance script | Backlog |
-| 12 | #163 | Phase 5 final acceptance review | Backlog |
+| 1 | #152 | Dry-run / FreqUI safety boundary and execution plan | Done |
+| 2 | #153 | Freqtrade dry-run local prerequisites and risk preflight | Done |
+| 3 | #154 | DryRunProfile schema and runtime variable lock | Done |
+| 4 | #155 | Controlled Freqtrade dry-run CLI command construction | Done |
+| 5 | #156 | Dry-run config generation and ENV-only secret preflight | Done |
+| 6 | #157 | Dry-run artifact manifest and status archive | Done |
+| 7 | #158 | Dry-run read-only status snapshots and event parsing | Done |
+| 8 | #159 | FreqUI entry configuration and read-only link boundary | Done |
+| 9 | #160 | Dry-run / FreqUI runtime management page | Done |
+| 10 | #161 | PR #127 runtime API and fallback contract split decision | Done |
+| 11 | #162 | Phase 5 offline smoke acceptance script | Done |
+| 12 | #163 | Phase 5 final acceptance review | Done |
 
 Epic #151 remains an XL aggregation issue and is not a direct development
-target. After #152 is merged, #153 should become the next Ready item.
+target. After #163 merges, #151 can be closed and marked Done as the Phase 5
+aggregation closeout.
 
 ## Dependency Rules
 
@@ -165,8 +165,8 @@ connect to an exchange, download K lines, or place orders.
 
 ## Phase 6 Readiness
 
-Phase 5 completion may allow Phase 6 planning only after final review. It must
-not silently widen into live trading or deployment.
+Phase 5 completion allows Phase 6 planning only after the final review and Epic
+closeout. It must not silently widen into live trading or deployment.
 
 Phase 6 planning must separately define human approval, risk checks, deployment
 records, rollback, monitoring, and live-candidate governance before any live

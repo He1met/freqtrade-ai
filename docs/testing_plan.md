@@ -182,25 +182,48 @@ timeframe / timerange 的数据，真实路径必须输出 `BLOCKED`，不得自
 
 ## Phase 5 Dry-run / FreqUI Management
 
-Phase 5 的后端测试从 #158 开始覆盖 dry-run 只读状态解析。该路径只读取 fixture
-JSON、受控本地 JSON 或 #157 生成的 artifact manifest，不启动真实 dry-run、不连接
-交易所、不读取真实密钥。
+Phase 5 Dry-run / FreqUI 运行管理使用离线 smoke 覆盖 DryRunProfile、ENV-only
+配置预检、受控 dry-run CLI command、fake runner、artifact manifest、只读状态快照、
+FreqUI 只读链接 metadata 和前端构建。
 
-#158 覆盖范围：
+验收命令：
 
-- `DryRunStatusSnapshot` / `DryRunEvent` DTO 校验。
-- 从 controlled local JSON 和 fixture JSON 解析 profile、strategy、exchange、
-  pair、timeframe、`dry_run`、balance summary、open trades summary 和 events。
-- 从 dry-run artifact manifest 读取最新 `status_snapshots`。
-- manifest 缺少 `status_snapshots` 时输出明确 empty / `SKIPPED` state。
-- 文件缺失输出 `BLOCKED`，JSON 损坏输出 `FAILED`。
-- `dry_run=false` 或 `RUNNING` / `SUCCESS` 缺少 `dry_run=true` 时 fail-closed。
-- event message、event details、manifest/status payload 中的 secret-shaped 内容必须脱敏。
+```bash
+python3 scripts/smoke_phase5.py --offline --tmp-dir /tmp/freqtrade-ai-phase5-smoke
+```
 
-当前验收命令：
+该命令默认使用临时目录、fixture profile、fixture strategy、fake Freqtrade trade
+executor 和本地前端 build。不启动真实 dry-run，不连接真实交易所，不下载 K 线，不执行
+live trading 或真实下单，也不读取或写入真实 API key、secret、passphrase。
+
+覆盖范围：
+
+- 校验 `DryRunProfile` schema、locked variables 和 `dry_run=true` 边界。
+- 生成临时 dry-run config，并验证真实密钥值不会写入配置。
+- 通过 fake runner 生成 SUCCESS / FAILED / BLOCKED artifact manifest。
+- 解析 `DryRunStatusSnapshot` / `DryRunEvent` 只读状态和事件。
+- 验证缺失文件、损坏 JSON、`dry_run=false`、secret-shaped 内容的 fail-closed /
+  redaction 行为。
+- 验证 FreqUI metadata 只提供 `read-only-link`，无配置时返回 disabled / blocked。
+- 写入 smoke summary，明确 safety flags 均保持为 false。
+- 默认运行 `npm run build` 验证前端 Phase 5 展示仍可构建。
+
+限制和禁止项：
+
+- 不启动真实 dry-run。
+- 不连接真实交易所，不下载 K 线。
+- 不执行 live trading 或真实下单。
+- 不读取或写入真实 API key、secret、passphrase。
+- 不嵌入、不代理、不重写 FreqUI 控制面。
+- 不引入 Redis、Celery、Kafka、RabbitMQ。
+- 不修改 Freqtrade 源码。
+- 不部署，不进入 Phase 6 或 Phase 7。
+
+Phase 5 最终验收还需要运行：
 
 ```bash
 cd backend && . .venv/bin/activate && pytest
 python3 -m compileall backend/app backend/tests scripts
+cd frontend && npm run build
 git diff --check
 ```
