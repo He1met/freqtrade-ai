@@ -164,7 +164,7 @@ def test_seeded_debug_api_marks_payloads_as_fixture_not_core_success(tmp_path) -
 
     app.dependency_overrides[get_db] = override_get_db
     try:
-        response = TestClient(app).get("/api/strategies")
+        response = TestClient(app).get("/api/mvp/strategies")
     finally:
         app.dependency_overrides.clear()
 

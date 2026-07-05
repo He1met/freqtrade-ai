@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from typing import Optional
 
 from sqlalchemy import func, select
@@ -36,6 +38,10 @@ class StrategyRepository:
     def get_by_slug(self, slug: str) -> Optional[Strategy]:
         statement = select(Strategy).where(Strategy.slug == slug)
         return self.db.scalars(statement).first()
+
+    def list(self, limit: int = 100) -> list[Strategy]:
+        statement = select(Strategy).order_by(Strategy.updated_at.desc(), Strategy.id.desc()).limit(limit)
+        return list(self.db.scalars(statement).all())
 
     def create_version(self, payload: StrategyVersionCreate) -> Optional[StrategyVersion]:
         strategy = self.get(payload.strategy_id)
@@ -79,6 +85,14 @@ class StrategyRepository:
 
     def get_version(self, version_id: int) -> Optional[StrategyVersion]:
         return self.db.get(StrategyVersion, version_id)
+
+    def list_versions(self, limit: int = 100) -> list[StrategyVersion]:
+        statement = (
+            select(StrategyVersion)
+            .order_by(StrategyVersion.created_at.desc(), StrategyVersion.id.desc())
+            .limit(limit)
+        )
+        return list(self.db.scalars(statement).all())
 
     def list_version_lineage(self, strategy_id: int) -> list[StrategyVersionLineageEntry]:
         statement = (

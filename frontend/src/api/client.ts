@@ -2,6 +2,7 @@ import { mockMvpData } from "../data/mock";
 import type {
   BacktestArtifactManifest,
   BacktestMetricSummary,
+  BacktestResultSummary,
   BacktestRunSummary,
   BacktestTaskSummary,
   DataSourceTraceSummary,
@@ -50,6 +51,8 @@ import type {
   StrategyGenerationStrategy,
   StrategyGenerationSubmitPayload,
   StrategyGenerationVersion,
+  StrategySummary,
+  StrategyVersionSummary,
   StrategyFailureReasonSummary,
   StrategyVersionLineageEntry,
   ValidationErrorSummary,
@@ -77,6 +80,19 @@ type RawStrategyVersionLineageEntry = Partial<StrategyVersionLineageEntry> & {
   created_at?: string | null;
 };
 
+type RawStrategySummary = Partial<StrategyGenerationStrategy> &
+  Partial<{
+    currentVersion: StrategyVersionSummary | null;
+    current_version_id: string | number | null;
+    data_source: RawDataSourceTrace;
+    description: string | null;
+    timeframe: string;
+    updated_at: string | null;
+  }> & {
+    id?: string | number;
+    tags?: unknown;
+  };
+
 type RawBacktestArtifactManifest = Partial<BacktestArtifactManifest> & {
   manifest_version?: number | null;
   config_path?: string | null;
@@ -102,6 +118,7 @@ type RawBacktestMetricSummary = Partial<BacktestMetricSummary> & {
 };
 
 type RawBacktestRunSummary = Partial<BacktestRunSummary> & {
+  strategy_version_id?: string | number | null;
   strategy_name?: string;
   profile_name?: string | null;
   requested_task_count?: number;
@@ -113,6 +130,7 @@ type RawBacktestRunSummary = Partial<BacktestRunSummary> & {
   metrics_snapshot?: Record<string, unknown>;
   blocked_reason?: string | null;
   failed_reason?: string | null;
+  data_source?: RawDataSourceTrace;
 };
 
 type RawBacktestTaskSummary = Partial<BacktestTaskSummary> & {
@@ -128,6 +146,22 @@ type RawBacktestTaskSummary = Partial<BacktestTaskSummary> & {
   metrics_snapshot?: Record<string, unknown>;
   blocked_reason?: string | null;
   failed_reason?: string | null;
+  data_source?: RawDataSourceTrace;
+};
+
+type RawBacktestResultSummary = Partial<BacktestResultSummary> & {
+  backtest_run_id?: string | number;
+  backtest_task_id?: string | number;
+  result_path?: string;
+  metrics_snapshot?: Record<string, unknown>;
+  profit_total?: number | null;
+  profit_pct?: number | null;
+  max_drawdown_pct?: number | null;
+  win_rate?: number | null;
+  total_trades?: number | null;
+  timerange?: string | null;
+  created_at?: string | null;
+  data_source?: RawDataSourceTrace;
 };
 
 type RawHyperoptArtifactManifest = Partial<HyperoptArtifactManifest> & {
@@ -425,7 +459,10 @@ type RawOperatorDashboardSummary = {
 };
 
 type RawRankingEntry = Partial<RankingEntry> & {
+  score_id?: string | number;
   strategy_id?: string | number;
+  strategy_version_id?: string | number;
+  backtest_result_id?: string | number | null;
   strategy_name?: string;
   strategy_slug?: string;
   version_number?: number;
@@ -440,6 +477,7 @@ type RawRankingEntry = Partial<RankingEntry> & {
   score_breakdown?: unknown;
   metricsSnapshot?: Record<string, unknown>;
   metrics_snapshot?: Record<string, unknown>;
+  data_source?: RawDataSourceTrace;
 };
 
 type RawDataSourceTrace = Partial<DataSourceTraceSummary> & {
@@ -751,7 +789,10 @@ function normalizeRankingEntry(raw: RawRankingEntry, index: number): RankingEntr
   const warningSignals = raw.warnings ?? metricsSnapshot.warnings;
   return {
     rank: raw.rank ?? index + 1,
+    scoreId: normalizeId(raw.scoreId ?? raw.score_id),
     strategyId: normalizeId(raw.strategyId ?? raw.strategy_id ?? raw.strategy_slug),
+    strategyVersionId: normalizeId(raw.strategyVersionId ?? raw.strategy_version_id),
+    backtestResultId: normalizeOptionalId(raw.backtestResultId ?? raw.backtest_result_id),
     strategyName:
       raw.strategyName ??
       raw.strategy_name ??
@@ -772,6 +813,10 @@ function normalizeRankingEntry(raw: RawRankingEntry, index: number): RankingEntr
     scoreBreakdown: breakdown.length > 0 ? breakdown : buildFallbackScoreBreakdown(raw),
     elimination: normalizeElimination(raw.elimination ?? metricsSnapshot.elimination),
     warnings: Array.isArray(warningSignals) ? warningSignals.map(normalizeRankingSignal) : [],
+    dataSource: normalizeDataSourceTrace(
+      raw.dataSource ?? raw.data_source,
+      "Strategy ranking source was not provided by the backend.",
+    ),
   };
 }
 
@@ -811,6 +856,7 @@ function normalizeBacktestRun(raw: RawBacktestRunSummary): BacktestRunSummary {
   const metrics = normalizeMetrics(raw);
   return {
     id: normalizeId(raw.id),
+    strategyVersionId: normalizeOptionalId(raw.strategyVersionId ?? raw.strategy_version_id),
     strategyName: raw.strategyName ?? raw.strategy_name ?? artifactManifest?.strategyName ?? "Unknown strategy",
     status: raw.status ?? artifactManifest?.status ?? "unknown",
     profileName: raw.profileName ?? raw.profile_name ?? "default",
@@ -822,6 +868,10 @@ function normalizeBacktestRun(raw: RawBacktestRunSummary): BacktestRunSummary {
     metrics,
     blockedReason: raw.blockedReason ?? raw.blocked_reason ?? artifactManifest?.blockedReason ?? null,
     failedReason: raw.failedReason ?? raw.failed_reason ?? artifactManifest?.failedReason ?? null,
+    dataSource: normalizeDataSourceTrace(
+      raw.dataSource ?? raw.data_source,
+      "Backtest run source was not provided by the backend.",
+    ),
   };
 }
 
@@ -843,6 +893,25 @@ function normalizeBacktestTask(raw: RawBacktestTaskSummary): BacktestTaskSummary
     metrics,
     blockedReason: raw.blockedReason ?? raw.blocked_reason ?? artifactManifest?.blockedReason ?? null,
     failedReason: raw.failedReason ?? raw.failed_reason ?? artifactManifest?.failedReason ?? null,
+    dataSource: normalizeDataSourceTrace(
+      raw.dataSource ?? raw.data_source,
+      "Backtest task source was not provided by the backend.",
+    ),
+  };
+}
+
+function normalizeBacktestResult(raw: RawBacktestResultSummary): BacktestResultSummary {
+  return {
+    id: normalizeId(raw.id),
+    runId: normalizeId(raw.runId ?? raw.backtest_run_id),
+    taskId: normalizeId(raw.taskId ?? raw.backtest_task_id),
+    resultPath: raw.resultPath ?? raw.result_path ?? "",
+    metrics: normalizeMetrics(raw),
+    createdAt: raw.createdAt ?? raw.created_at ?? null,
+    dataSource: normalizeDataSourceTrace(
+      raw.dataSource ?? raw.data_source,
+      "Backtest result source was not provided by the backend.",
+    ),
   };
 }
 
@@ -1473,6 +1542,40 @@ function normalizeStrategyGenerationVersion(raw: RawStrategyGenerationVersion): 
   };
 }
 
+function normalizeStrategySummary(
+  raw: RawStrategySummary,
+  versions: StrategyGenerationVersion[],
+): StrategySummary {
+  const currentVersionId = normalizeOptionalId(raw.currentVersionId ?? raw.current_version_id);
+  const currentVersion = currentVersionId
+    ? versions.find((version) => version.id === currentVersionId) ?? null
+    : null;
+
+  return {
+    id: normalizeId(raw.id),
+    name: raw.name ?? "Unknown strategy",
+    status: raw.status ?? "unknown",
+    timeframe: raw.timeframe ?? "unknown",
+    source: raw.source ?? "unknown",
+    description: raw.description ? redactSensitiveText(raw.description) : "",
+    tags: asStringArray(raw.tags),
+    currentVersionId,
+    currentVersion: currentVersion
+      ? {
+          id: currentVersion.id,
+          versionNumber: currentVersion.versionNumber,
+          filePath: currentVersion.filePath,
+          validationStatus: currentVersion.validationStatus,
+          validationErrors: currentVersion.validationErrors,
+        }
+      : (raw.currentVersion ?? null),
+    dataSource: normalizeDataSourceTrace(
+      raw.dataSource ?? raw.data_source,
+      "Strategy source was not provided by the backend.",
+    ),
+  };
+}
+
 function normalizeStrategyGenerationResponse(raw: RawStrategyGenerationApiResponse): StrategyGenerationApiResult {
   return {
     run: normalizeStrategyGenerationRun(raw.run),
@@ -1585,9 +1688,11 @@ export async function loadMvpData(signal?: AbortSignal): Promise<{
 }> {
   const [
     strategies,
+    strategyVersions,
     generationRuns,
     backtestRuns,
     backtestTasks,
+    backtestResults,
     hyperoptRuns,
     dryRun,
     liveCandidates,
@@ -1598,9 +1703,14 @@ export async function loadMvpData(signal?: AbortSignal): Promise<{
     failureReasons,
     versionLineage,
   ] = await Promise.all([
-    fetchList(["/strategies", "/mvp/strategies"], mockMvpData.strategies, signal),
-    fetchList(
-      ["/generation-runs", "/strategy-generation-runs", "/mvp/generation-runs"],
+    fetchList<RawStrategySummary>(["/strategies", "/mvp/strategies"], mockMvpData.strategies, signal),
+    fetchList<RawStrategyGenerationVersion>(
+      ["/strategy-versions"],
+      mockMvpData.strategyVersions,
+      signal,
+    ),
+    fetchList<RawStrategyGenerationRunDetail>(
+      ["/strategy-generation-runs", "/mvp/generation-runs"],
       mockMvpData.generationRuns,
       signal,
     ),
@@ -1612,6 +1722,11 @@ export async function loadMvpData(signal?: AbortSignal): Promise<{
     fetchList<RawBacktestTaskSummary>(
       ["/backtest-tasks", "/mvp/backtest-tasks"],
       mockMvpData.backtestTasks,
+      signal,
+    ),
+    fetchList<RawBacktestResultSummary>(
+      ["/backtest-results"],
+      mockMvpData.backtestResults,
       signal,
     ),
     fetchList<RawHyperoptRunSummary>(
@@ -1661,12 +1776,16 @@ export async function loadMvpData(signal?: AbortSignal): Promise<{
     ),
   ]);
 
+  const normalizedStrategyVersions = strategyVersions.items.map(normalizeStrategyGenerationVersion);
+
   return {
     data: {
-      strategies: strategies.items,
-      generationRuns: generationRuns.items,
+      strategies: strategies.items.map((strategy) => normalizeStrategySummary(strategy, normalizedStrategyVersions)),
+      strategyVersions: normalizedStrategyVersions,
+      generationRuns: generationRuns.items.map(normalizeStrategyGenerationRun),
       backtestRuns: backtestRuns.items.map(normalizeBacktestRun),
       backtestTasks: backtestTasks.items.map(normalizeBacktestTask),
+      backtestResults: backtestResults.items.map(normalizeBacktestResult),
       hyperoptRuns: hyperoptRuns.items.map(normalizeHyperoptRun),
       dryRun: normalizeDryRunManagement(dryRun.item),
       liveCandidates: normalizeLiveCandidateGovernance(liveCandidates.item),
@@ -1682,9 +1801,11 @@ export async function loadMvpData(signal?: AbortSignal): Promise<{
     },
     usedFallback:
       strategies.usedFallback ||
+      strategyVersions.usedFallback ||
       generationRuns.usedFallback ||
       backtestRuns.usedFallback ||
       backtestTasks.usedFallback ||
+      backtestResults.usedFallback ||
       hyperoptRuns.usedFallback ||
       dryRun.usedFallback ||
       liveCandidates.usedFallback ||

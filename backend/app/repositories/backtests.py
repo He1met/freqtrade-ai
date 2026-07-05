@@ -40,6 +40,14 @@ class BacktestRepository:
     def get_run(self, run_id: int) -> Optional[BacktestRun]:
         return self.db.get(BacktestRun, run_id)
 
+    def list_runs(self, limit: int = 50) -> list[BacktestRun]:
+        statement = (
+            select(BacktestRun)
+            .order_by(BacktestRun.created_at.desc(), BacktestRun.id.desc())
+            .limit(limit)
+        )
+        return list(self.db.scalars(statement).all())
+
     def update_run_status(
         self,
         run_id: int,
@@ -84,6 +92,14 @@ class BacktestRepository:
             select(BacktestTask)
             .where(BacktestTask.backtest_run_id == run_id)
             .order_by(BacktestTask.created_at.asc(), BacktestTask.id.asc())
+        )
+        return list(self.db.scalars(statement).all())
+
+    def list_all_tasks(self, limit: int = 100) -> list[BacktestTask]:
+        statement = (
+            select(BacktestTask)
+            .order_by(BacktestTask.created_at.desc(), BacktestTask.id.desc())
+            .limit(limit)
         )
         return list(self.db.scalars(statement).all())
 
@@ -172,5 +188,13 @@ class BacktestRepository:
             select(BacktestResult)
             .where(BacktestResult.backtest_run_id == run_id)
             .order_by(BacktestResult.created_at.asc(), BacktestResult.id.asc())
+        )
+        return list(self.db.scalars(statement).all())
+
+    def list_all_results(self, limit: int = 100) -> list[BacktestResult]:
+        statement = (
+            select(BacktestResult)
+            .order_by(BacktestResult.created_at.desc(), BacktestResult.id.desc())
+            .limit(limit)
         )
         return list(self.db.scalars(statement).all())

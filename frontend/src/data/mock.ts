@@ -10,6 +10,7 @@ export const mockMvpData: MvpData = {
       source: "ai_generated",
       description: "由 fake Phase 1 provider 生成的 RSI 与 EMA 交叉候选策略。",
       tags: ["momentum", "mean-reversion"],
+      currentVersionId: "version-101",
       currentVersion: {
         id: "version-101",
         versionNumber: 3,
@@ -26,6 +27,7 @@ export const mockMvpData: MvpData = {
       source: "ai_generated",
       description: "突破候选策略，等待 fixture 回测导入后的校验。",
       tags: ["breakout"],
+      currentVersionId: "version-102",
       currentVersion: {
         id: "version-102",
         versionNumber: 1,
@@ -38,6 +40,56 @@ export const mockMvpData: MvpData = {
             code: "missing_required_method",
           },
         ],
+      },
+    },
+  ],
+  strategyVersions: [
+    {
+      id: "version-101",
+      strategyId: "ai-rsi-ema-001",
+      generationRunId: "gen-run-001",
+      parentVersionId: null,
+      versionNumber: 3,
+      filePath: "user_data/strategies/AiRsiEma001.py",
+      validationStatus: "passed",
+      validationErrors: [],
+      changeSummary: "fixture strategy version",
+      createdAt: "2026-07-05T14:00:00Z",
+      dataSource: {
+        sourceType: "fixture",
+        sourceDetail: "frontend mock strategy version fixture; not core Phase 8 database success",
+        coreData: false,
+        databaseIds: {},
+        artifactRefs: { strategy_file_path: "user_data/strategies/AiRsiEma001.py" },
+        freshness: null,
+        blockedReason: "Mock strategy version is not backed by database rows.",
+      },
+    },
+    {
+      id: "version-102",
+      strategyId: "ai-breakout-001",
+      generationRunId: "gen-run-002",
+      parentVersionId: null,
+      versionNumber: 1,
+      filePath: "user_data/strategies/AiBreakout001.py",
+      validationStatus: "pending",
+      validationErrors: [
+        {
+          field: "populate_entry_trend",
+          message: "生成的策略代码缺少入场信号方法。",
+          code: "missing_required_method",
+        },
+      ],
+      changeSummary: "fixture strategy version with validation warning",
+      createdAt: "2026-07-05T14:00:00Z",
+      dataSource: {
+        sourceType: "fixture",
+        sourceDetail: "frontend mock strategy version fixture; not core Phase 8 database success",
+        coreData: false,
+        databaseIds: {},
+        artifactRefs: { strategy_file_path: "user_data/strategies/AiBreakout001.py" },
+        freshness: null,
+        blockedReason: "Mock strategy version is not backed by database rows.",
       },
     },
   ],
@@ -68,6 +120,7 @@ export const mockMvpData: MvpData = {
   backtestRuns: [
     {
       id: "backtest-run-001",
+      strategyVersionId: "version-101",
       strategyName: "AiRsiEma001",
       status: "succeeded",
       profileName: "offline-fixture",
@@ -108,6 +161,7 @@ export const mockMvpData: MvpData = {
     },
     {
       id: "backtest-run-002",
+      strategyVersionId: "version-102",
       strategyName: "AiBreakout001",
       status: "failed",
       profileName: "offline-fixture",
@@ -233,6 +287,7 @@ export const mockMvpData: MvpData = {
       failedReason: null,
     },
   ],
+  backtestResults: [],
   hyperoptRuns: [
     {
       id: "hyperopt-run-001",
@@ -874,7 +929,10 @@ export const mockMvpData: MvpData = {
   ranking: [
     {
       rank: 1,
+      scoreId: "fixture-score-001",
       strategyId: "ai-rsi-ema-001",
+      strategyVersionId: "version-101",
+      backtestResultId: "fixture-result-001",
       strategyName: "AiRsiEma001",
       versionNumber: 3,
       filePath: "user_data/strategies/AiRsiEma001.py",
@@ -902,10 +960,22 @@ export const mockMvpData: MvpData = {
           message: "最大回撤偏高，但仍低于淘汰阈值。",
         },
       ],
+      dataSource: {
+        sourceType: "fixture",
+        sourceDetail: "frontend mock ranking fixture; not core Phase 8 database success",
+        coreData: false,
+        databaseIds: {},
+        artifactRefs: {},
+        freshness: null,
+        blockedReason: "Mock ranking is not backed by database StrategyScore rows.",
+      },
     },
     {
       rank: 2,
+      scoreId: "fixture-score-002",
       strategyId: "ai-breakout-001",
+      strategyVersionId: "version-102",
+      backtestResultId: "fixture-result-002",
       strategyName: "AiBreakout001",
       versionNumber: 1,
       filePath: "user_data/strategies/AiBreakout001.py",
@@ -933,6 +1003,15 @@ export const mockMvpData: MvpData = {
         ],
       },
       warnings: [],
+      dataSource: {
+        sourceType: "fixture",
+        sourceDetail: "frontend mock ranking fixture; not core Phase 8 database success",
+        coreData: false,
+        databaseIds: {},
+        artifactRefs: {},
+        freshness: null,
+        blockedReason: "Mock ranking is not backed by database StrategyScore rows.",
+      },
     },
   ],
   failureReasons: [

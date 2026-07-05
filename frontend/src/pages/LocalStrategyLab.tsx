@@ -1,13 +1,21 @@
 import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import { StrategyGenerationApiError, createStrategyGenerationRun } from "../api/client";
+import { useMvpData } from "../api/useMvpData";
 import type {
+  BacktestResultSummary,
+  BacktestRunSummary,
+  BacktestTaskSummary,
   DataSourceTraceSummary,
+  MvpData,
+  RankingEntry,
   StrategyGenerationApiResult,
   StrategyGenerationStrategy,
   StrategyGenerationVersion,
 } from "../api/types";
-import { EMPTY_TEXT, displayBoolean, displayStatus, displayValue } from "./uiCopy";
+import { metricRows, reasonText } from "./backtestDisplay";
+import { FallbackNotice } from "./FallbackNotice";
+import { EMPTY_TEXT, displayBoolean, displayLoadState, displayStatus, displayValue } from "./uiCopy";
 
 type SubmissionState =
   | { kind: "idle" }
@@ -33,6 +41,31 @@ const DEFAULT_IDEA =
 function formatRecord(record: Record<string, number | string>): string {
   const entries = Object.entries(record);
   return entries.length > 0 ? entries.map(([key, value]) => `${key}: ${value}`).join(", ") : EMPTY_TEXT;
+}
+
+function sourceText(source: DataSourceTraceSummary | undefined): string {
+  if (!source) {
+    return "source: unknown";
+  }
+
+  const ids = formatRecord(source.databaseIds);
+  return `${source.sourceType}; core=${displayBoolean(source.coreData)}; ids=${ids}`;
+}
+
+function sourceIds(source: DataSourceTraceSummary | undefined): string {
+  return source ? formatRecord(source.databaseIds) : EMPTY_TEXT;
+}
+
+function sourceArtifacts(source: DataSourceTraceSummary | undefined): string {
+  return source ? formatRecord(source.artifactRefs) : EMPTY_TEXT;
+}
+
+function formatScore(value: number | null): string {
+  return value === null ? EMPTY_TEXT : value.toFixed(1);
+}
+
+function latest<T>(items: T[], count = 6): T[] {
+  return items.slice(0, count);
 }
 
 function isCoreSource(source: DataSourceTraceSummary, allowedTypes: string[]): boolean {
@@ -184,6 +217,294 @@ function DataSourceTable({ rows }: { rows: SourceRow[] }) {
   );
 }
 
+function StrategyVersionEvidence({
+  strategies,
+  versions,
+}: {
+  strategies: MvpData["strategies"];
+  versions: StrategyGenerationVersion[];
+}) {
+  const strategyById = new Map(strategies.map((strategy) => [strategy.id, strategy]));
+  const rows = latest(versions);
+
+  return (
+    <section className="lab-evidence-section" aria-label="持久策略版本">
+      <div className="section-header detail-section">
+        <h2>策略 / 版本 / 文件</h2>
+        <span>{versions.length} 条 API 版本记录</span>
+      </div>
+      <div className="table-shell lab-table-shell">
+        <table>
+          <thead>
+            <tr>
+              <th>strategy id</th>
+              <th>version id</th>
+              <th>名称</th>
+              <th>版本</th>
+              <th>验证</th>
+              <th>file path</th>
+              <th>DB trace</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((version) => {
+              const strategy = strategyById.get(version.strategyId);
+              return (
+                <tr key={version.id}>
+                  <td>{version.strategyId}</td>
+                  <td>{version.id}</td>
+                  <td>{strategy?.name ?? EMPTY_TEXT}</td>
+                  <td>{version.versionNumber}</td>
+                  <td>{displayStatus(version.validationStatus)}</td>
+                  <td className="path-cell">{version.filePath}</td>
+                  <td className="path-cell">{sourceText(version.dataSource)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {rows.length === 0 ? <div className="empty-state">暂无 API/DB strategy version 记录。</div> : null}
+    </section>
+  );
+}
+
+function GenerationRunEvidence({ runs }: { runs: MvpData["generationRuns"] }) {
+  const rows = latest(runs);
+
+  return (
+    <section className="lab-evidence-section" aria-label="持久生成批次">
+      <div className="section-header detail-section">
+        <h2>生成批次</h2>
+        <span>{runs.length} 条 API run 记录</span>
+      </div>
+      <div className="table-shell lab-table-shell">
+        <table>
+          <thead>
+            <tr>
+              <th>run id</th>
+              <th>状态</th>
+              <th>provider / model</th>
+              <th>计数</th>
+              <th>错误</th>
+              <th>DB trace</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((run) => (
+              <tr key={run.id}>
+                <td>{run.id}</td>
+                <td>
+                  <span className={`run-status ${statusClassName(run.status)}`}>{displayStatus(run.status)}</span>
+                </td>
+                <td>
+                  {run.provider} / {run.model}
+                </td>
+                <td>
+                  requested {run.requestedCount}, accepted {run.acceptedCount}, failed {run.failedCount}
+                </td>
+                <td className="reason-cell">{run.errorMessage ?? EMPTY_TEXT}</td>
+                <td className="path-cell">{sourceIds(run.dataSource)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {rows.length === 0 ? <div className="empty-state">暂无 API/DB generation run 记录。</div> : null}
+    </section>
+  );
+}
+
+function BacktestEvidence({
+  runs,
+  tasks,
+  results,
+}: {
+  runs: BacktestRunSummary[];
+  tasks: BacktestTaskSummary[];
+  results: BacktestResultSummary[];
+}) {
+  const runById = new Map(runs.map((run) => [run.id, run]));
+  const resultByTaskId = new Map(results.map((result) => [result.taskId, result]));
+  const rows = latest(tasks);
+
+  return (
+    <section className="lab-evidence-section" aria-label="持久回测任务和结果">
+      <div className="section-header detail-section">
+        <h2>回测任务 / 结果</h2>
+        <span>
+          {runs.length} 批次 / {tasks.length} 任务 / {results.length} 结果
+        </span>
+      </div>
+      <div className="table-shell lab-table-shell">
+        <table>
+          <thead>
+            <tr>
+              <th>task id</th>
+              <th>run / version</th>
+              <th>状态</th>
+              <th>pair</th>
+              <th>result id</th>
+              <th>指标</th>
+              <th>artifact</th>
+              <th>原因</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((task) => {
+              const run = runById.get(task.runId);
+              const result = resultByTaskId.get(task.id);
+              return (
+                <tr key={task.id}>
+                  <td>{task.id}</td>
+                  <td>
+                    <div>{task.runId}</div>
+                    <div className="secondary-cell">version {run?.strategyVersionId ?? EMPTY_TEXT}</div>
+                  </td>
+                  <td>
+                    <span className={`run-status ${statusClassName(task.status)}`}>
+                      {displayStatus(task.status)}
+                    </span>
+                  </td>
+                  <td>
+                    {task.pair} / {task.timeframe}
+                  </td>
+                  <td>{result?.id ?? EMPTY_TEXT}</td>
+                  <td className="metric-summary">
+                    {metricRows(result?.metrics ?? task.metrics).map(([label, value]) => (
+                      <span key={label}>
+                        <strong>{label}</strong>
+                        {value}
+                      </span>
+                    ))}
+                  </td>
+                  <td className="path-cell">
+                    {result?.resultPath ?? task.resultPath ?? EMPTY_TEXT}
+                    <div className="secondary-cell">{sourceArtifacts(result?.dataSource ?? task.dataSource)}</div>
+                  </td>
+                  <td className="reason-cell">{reasonText(task.blockedReason, task.failedReason, task.errorMessage)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {rows.length === 0 ? <div className="empty-state">暂无 API/DB backtest task 记录。</div> : null}
+    </section>
+  );
+}
+
+function RankingEvidence({ ranking }: { ranking: RankingEntry[] }) {
+  const rows = latest(ranking);
+
+  return (
+    <section className="lab-evidence-section" aria-label="持久评分和排行榜">
+      <div className="section-header detail-section">
+        <h2>评分 / 排行榜</h2>
+        <span>{ranking.length} 条 StrategyScore 记录</span>
+      </div>
+      <div className="table-shell lab-table-shell">
+        <table>
+          <thead>
+            <tr>
+              <th>rank</th>
+              <th>score id</th>
+              <th>strategy / version</th>
+              <th>backtest result</th>
+              <th>总分</th>
+              <th>状态</th>
+              <th>file path</th>
+              <th>DB trace</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((entry) => (
+              <tr key={`${entry.scoreId}-${entry.strategyVersionId}`}>
+                <td>{entry.rank}</td>
+                <td>{displayValue(entry.scoreId)}</td>
+                <td>
+                  <div>{entry.strategyId}</div>
+                  <div className="secondary-cell">version {entry.strategyVersionId}</div>
+                </td>
+                <td>{entry.backtestResultId ?? EMPTY_TEXT}</td>
+                <td className="score-cell">{formatScore(entry.totalScore)}</td>
+                <td>
+                  <span className={`run-status ${entry.elimination.eliminated ? "status-failed" : "status-success"}`}>
+                    {entry.elimination.eliminated ? "已淘汰" : "已入榜"}
+                  </span>
+                </td>
+                <td className="path-cell">{entry.filePath}</td>
+                <td className="path-cell">{sourceText(entry.dataSource)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {rows.length === 0 ? <div className="empty-state">暂无 API/DB StrategyScore 记录。</div> : null}
+    </section>
+  );
+}
+
+function PersistentEvidence({
+  data,
+  error,
+  isLoading,
+  onRefresh,
+  source,
+}: {
+  data: MvpData;
+  error: string | null;
+  isLoading: boolean;
+  onRefresh: () => void;
+  source: string;
+}) {
+  const coreRankingCount = data.ranking.filter((entry) => entry.dataSource.coreData).length;
+  const hasCoreEvidence =
+    data.strategyVersions.some((version) => version.dataSource.coreData) ||
+    data.backtestResults.some((result) => result.dataSource.coreData) ||
+    coreRankingCount > 0;
+  const evidenceSource = hasCoreEvidence ? "api" : source;
+  const evidenceError = hasCoreEvidence ? null : error;
+
+  return (
+    <section className="lab-results" aria-label="API 和数据库持久证据">
+      <div className="section-header">
+        <h2>API/DB 持久证据</h2>
+        <div className="lab-header-actions">
+          <span className="status-pill">{displayLoadState(isLoading, evidenceSource)}</span>
+          <button className="secondary-button" disabled={isLoading} onClick={onRefresh} type="button">
+            刷新
+          </button>
+        </div>
+      </div>
+      <FallbackNotice
+        context="Local Strategy Lab 的策略版本、生成批次、回测任务、回测结果和评分。"
+        error={evidenceError}
+        isLoading={isLoading}
+        source={evidenceSource}
+      />
+      <div className="lab-evidence-summary">
+        <div>
+          <span>strategy versions</span>
+          <strong>{data.strategyVersions.length}</strong>
+        </div>
+        <div>
+          <span>backtest results</span>
+          <strong>{data.backtestResults.length}</strong>
+        </div>
+        <div>
+          <span>core ranking</span>
+          <strong>{coreRankingCount}</strong>
+        </div>
+      </div>
+      <StrategyVersionEvidence strategies={data.strategies} versions={data.strategyVersions} />
+      <GenerationRunEvidence runs={data.generationRuns} />
+      <BacktestEvidence runs={data.backtestRuns} tasks={data.backtestTasks} results={data.backtestResults} />
+      <RankingEvidence ranking={data.ranking} />
+    </section>
+  );
+}
+
 function ResultDetails({ result }: { result: StrategyGenerationApiResult }) {
   const rows = buildSourceRows(result);
   const versions = versionRows(result);
@@ -267,6 +588,8 @@ export function LocalStrategyLab() {
   const [idea, setIdea] = useState(DEFAULT_IDEA);
   const [requestedCount, setRequestedCount] = useState(1);
   const [submission, setSubmission] = useState<SubmissionState>({ kind: "idle" });
+  const [snapshotRefreshToken, setSnapshotRefreshToken] = useState(0);
+  const snapshot = useMvpData(snapshotRefreshToken);
   const controllerRef = useRef<AbortController | null>(null);
   const isSubmitting = submission.kind === "submitting";
   const currentStatus = submissionStatus(submission);
@@ -326,6 +649,7 @@ export function LocalStrategyLab() {
 
       if (isCoreGenerationResult(result)) {
         setSubmission({ kind: "success", result });
+        setSnapshotRefreshToken((current) => current + 1);
         return;
       }
 
@@ -335,6 +659,7 @@ export function LocalStrategyLab() {
           "Backend 响应缺少可证明的 api_aggregate/database core_data、database_ids 或 strategy file path；未展示为核心成功。",
         result,
       });
+      setSnapshotRefreshToken((current) => current + 1);
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
         return;
@@ -436,6 +761,14 @@ export function LocalStrategyLab() {
           ) : null}
         </dl>
       </section>
+
+      <PersistentEvidence
+        data={snapshot.data}
+        error={snapshot.error}
+        isLoading={snapshot.isLoading}
+        onRefresh={() => setSnapshotRefreshToken((current) => current + 1)}
+        source={snapshot.source}
+      />
 
       {currentResult ? <ResultDetails result={currentResult} /> : null}
     </section>

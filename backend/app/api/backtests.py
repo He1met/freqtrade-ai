@@ -6,6 +6,7 @@ from app.repositories import BacktestRepository
 from app.schemas import (
     BacktestArtifactIngestRequest,
     BacktestArtifactIngestResponse,
+    BacktestResultRead,
     BacktestRunRead,
     BacktestTaskRead,
     LocalBacktestTriggerRequest,
@@ -46,6 +47,33 @@ def ingest_backtest_task_artifact(
     if result is None:
         raise HTTPException(status_code=404, detail="backtest task not found")
     return result
+
+
+@router.get("/backtest-runs", response_model=list[BacktestRunRead])
+def list_backtest_runs(
+    limit: int = 50,
+    db: Session = Depends(get_db),
+) -> list[BacktestRunRead]:
+    runs = BacktestRepository(db).list_runs(limit=limit)
+    return [BacktestRunRead.model_validate(run) for run in runs]
+
+
+@router.get("/backtest-tasks", response_model=list[BacktestTaskRead])
+def list_all_backtest_tasks(
+    limit: int = 100,
+    db: Session = Depends(get_db),
+) -> list[BacktestTaskRead]:
+    tasks = BacktestRepository(db).list_all_tasks(limit=limit)
+    return [BacktestTaskRead.model_validate(task) for task in tasks]
+
+
+@router.get("/backtest-results", response_model=list[BacktestResultRead])
+def list_backtest_results(
+    limit: int = 100,
+    db: Session = Depends(get_db),
+) -> list[BacktestResultRead]:
+    results = BacktestRepository(db).list_all_results(limit=limit)
+    return [BacktestResultRead.model_validate(result) for result in results]
 
 
 @router.get("/backtest-runs/{run_id}", response_model=BacktestRunRead)

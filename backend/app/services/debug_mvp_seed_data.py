@@ -5,14 +5,9 @@ from typing import Any, Optional
 
 
 FRONTEND_MVP_ENDPOINT_ALIASES: dict[str, str] = {
-    "/strategies": "strategies",
     "/mvp/strategies": "strategies",
-    "/generation-runs": "generation_runs",
-    "/strategy-generation-runs": "generation_runs",
     "/mvp/generation-runs": "generation_runs",
-    "/backtest-runs": "backtest_runs",
     "/mvp/backtest-runs": "backtest_runs",
-    "/backtest-tasks": "backtest_tasks",
     "/mvp/backtest-tasks": "backtest_tasks",
     "/hyperopt-runs": "hyperopt_runs",
     "/mvp/hyperopt-runs": "hyperopt_runs",
