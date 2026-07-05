@@ -74,6 +74,7 @@ class StrategyRankingEntry(BaseModel):
     score_id: int
     strategy_id: int
     strategy_version_id: int
+    backtest_result_id: int
     strategy_name: str
     strategy_slug: str
     version_number: int
@@ -96,6 +97,7 @@ class StrategyRankingEntry(BaseModel):
             "strategy_score_id": self.score_id,
             "strategy_id": self.strategy_id,
             "strategy_version_id": self.strategy_version_id,
+            "backtest_result_id": self.backtest_result_id,
         }
         local_test_source = phase8_local_test_source(
             "strategy_ranking_entry",

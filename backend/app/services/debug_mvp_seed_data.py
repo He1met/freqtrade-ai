@@ -29,7 +29,6 @@ FRONTEND_MVP_ENDPOINT_ALIASES: dict[str, str] = {
     "/governance-events": "governance_events",
     "/audit-log/governance-events": "governance_events",
     "/mvp/governance-events": "governance_events",
-    "/ranking": "ranking",
     "/strategy-ranking": "ranking",
     "/mvp/ranking": "ranking",
     "/strategy-failure-reasons": "strategy_failure_reasons",

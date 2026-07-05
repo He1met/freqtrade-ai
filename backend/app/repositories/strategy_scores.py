@@ -58,20 +58,23 @@ class StrategyScoreRepository:
             select(StrategyScore, Strategy, StrategyVersion)
             .join(Strategy, StrategyScore.strategy_id == Strategy.id)
             .join(StrategyVersion, StrategyScore.strategy_version_id == StrategyVersion.id)
+            .where(StrategyScore.backtest_result_id.is_not(None))
             .order_by(
                 StrategyScore.total_score.desc(),
                 StrategyScore.created_at.desc(),
                 StrategyScore.id.asc(),
             )
-            .limit(limit)
         )
         entries: list[StrategyRankingEntry] = []
         for score, strategy, version in self.db.execute(statement).all():
+            if not self._is_core_backtest_score(score):
+                continue
             entries.append(
                 StrategyRankingEntry(
                     score_id=score.id,
                     strategy_id=strategy.id,
                     strategy_version_id=version.id,
+                    backtest_result_id=score.backtest_result_id,
                     strategy_name=strategy.name,
                     strategy_slug=strategy.slug,
                     version_number=version.version_number,
@@ -86,4 +89,17 @@ class StrategyScoreRepository:
                     created_at=score.created_at,
                 )
             )
+            if len(entries) >= limit:
+                break
         return entries
+
+    def _is_core_backtest_score(self, score: StrategyScore) -> bool:
+        snapshot = score.metrics_snapshot or {}
+        if score.backtest_result_id is None:
+            return False
+        if snapshot.get("source") != "backtest_result":
+            return False
+        if snapshot.get("backtest_result_id") != score.backtest_result_id:
+            return False
+        missing_metrics = snapshot.get("missing_metrics")
+        return isinstance(missing_metrics, list) and not missing_metrics
