@@ -1,6 +1,7 @@
 import json
 import subprocess
 from pathlib import Path
+import zipfile
 
 import pytest
 
@@ -8,7 +9,7 @@ from app.adapters.freqtrade.backtest_runner import FreqtradeBacktestRunner
 from app.adapters.freqtrade.cli_runner import FreqtradeCliRunner
 
 
-def test_backtest_runner_invokes_safe_cli_with_export_file() -> None:
+def test_backtest_runner_invokes_safe_cli_with_backtest_directory() -> None:
     calls = []
 
     def fake_executor(args, cwd, timeout_seconds):
@@ -29,12 +30,12 @@ def test_backtest_runner_invokes_safe_cli_with_export_file() -> None:
             [
                 "freqtrade",
                 "backtesting",
+                "--backtest-directory",
+                "reports/backtests",
                 "--config",
                 "tmp/freqtrade_configs/backtest.json",
                 "--export",
                 "trades",
-                "--export-filename",
-                "reports/backtests/result.json",
                 "--strategy",
                 "MvpRsiStrategy",
             ],
@@ -59,9 +60,16 @@ def test_backtest_runner_writes_success_artifact_manifest(tmp_path) -> None:
 
     def fake_executor(args, cwd, timeout_seconds):
         calls.append((args, cwd, timeout_seconds))
-        result_path = Path(args[args.index("--export-filename") + 1])
-        result_path.parent.mkdir(parents=True)
-        result_path.write_text('{"strategy": {}}', encoding="utf-8")
+        result_dir = Path(args[args.index("--backtest-directory") + 1])
+        result_dir.mkdir(parents=True, exist_ok=True)
+        zip_path = result_dir / "backtest-result-2026-07-05_18-44-00.zip"
+        with zipfile.ZipFile(zip_path, "w") as archive:
+            archive.writestr("backtest-result-2026-07-05_18-44-00.json", '{"strategy": {}}')
+            archive.writestr("backtest-result-2026-07-05_18-44-00_config.json", "{}")
+        (result_dir / ".last_result.json").write_text(
+            json.dumps({"latest_backtest": zip_path.name}),
+            encoding="utf-8",
+        )
         return subprocess.CompletedProcess(
             args=list(args),
             returncode=0,
@@ -94,6 +102,7 @@ def test_backtest_runner_writes_success_artifact_manifest(tmp_path) -> None:
     assert manifest.failed_reason is None
     assert stored["status"] == "SUCCESS"
     assert stored["result_path"] == str(result_path)
+    assert result_path.exists()
     assert stored["stdout"] == "backtesting complete"
     assert stored["datadir"] == str(datadir)
     assert calls[0][2] == 60

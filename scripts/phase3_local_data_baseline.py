@@ -89,6 +89,8 @@ def main() -> int:
         print(f"[FAIL] {failure}")
     if report.result_path is not None:
         print(f"[INFO] result_json={report.result_path}")
+    if report.manifest_path is not None:
+        print(f"[INFO] manifest={report.manifest_path}")
     if report.config_path is not None:
         print(f"[INFO] config={report.config_path}")
     if report.strategy_file is not None:

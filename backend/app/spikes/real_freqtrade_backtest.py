@@ -6,7 +6,10 @@ from pathlib import Path
 import shutil
 from typing import Optional
 
-from app.adapters.freqtrade.backtest_runner import FreqtradeBacktestRunner
+from app.adapters.freqtrade.backtest_runner import (
+    FreqtradeBacktestArtifactManifest,
+    FreqtradeBacktestRunner,
+)
 from app.adapters.freqtrade.cli_runner import (
     FreqtradeCliRunner,
     FreqtradeCommand,
@@ -56,6 +59,7 @@ class SpikeReport:
     strategy_name: Optional[str] = None
     config_path: Optional[Path] = None
     result_path: Optional[Path] = None
+    manifest_path: Optional[Path] = None
     report_path: Optional[Path] = None
     command_args: list[str] = field(default_factory=list)
     return_code: Optional[int] = None
@@ -113,6 +117,15 @@ def select_market_data_file(market_data_dir: Path) -> Optional[MarketDataFile]:
     )[0]
 
 
+def infer_trading_mode(market_data_file: MarketDataFile) -> Optional[str]:
+    relative_path = market_data_file.relative_path.as_posix().lower()
+    if "futures" in relative_path:
+        return "futures"
+    if "spot" in relative_path:
+        return "spot"
+    return None
+
+
 def prepare_strategy(strategy_dir: Path, prompt: str) -> tuple[str, Path]:
     blueprint = FakeStrategyBlueprintProvider().generate(
         prompt,
@@ -152,15 +165,19 @@ def run_timerange_check(
     timeout_seconds: int,
 ) -> tuple[list[str], FreqtradeCommandResult]:
     runner = FreqtradeCliRunner(binary=str(binary))
+    options = {
+        "--datadir": market_data_dir / market_data_file.exchange,
+        "--exchange": market_data_file.exchange,
+        "--pairs": [market_data_file.pair],
+        "--show-timerange": True,
+    }
+    trading_mode = infer_trading_mode(market_data_file)
+    if trading_mode:
+        options["--trading-mode"] = trading_mode
+
     command = FreqtradeCommand(
         command="list-data",
-        options={
-            "--datadir": market_data_dir / market_data_file.exchange,
-            "--exchange": market_data_file.exchange,
-            "--pairs": [market_data_file.pair],
-            "--show-timerange": True,
-            "--timeframes": [market_data_file.timeframe],
-        },
+        options=options,
         timeout_seconds=timeout_seconds,
     )
     return runner.build_args(command), runner.run_unchecked(command)
@@ -188,7 +205,20 @@ def run_spike(config: SpikeConfig) -> SpikeReport:
 
     strategy_dir = tmp_dir / "strategies"
     config_dir = tmp_dir / "freqtrade_configs"
+    userdir = tmp_dir / "user_data"
     result_path = tmp_dir / "backtest-result.json"
+
+    def finish() -> SpikeReport:
+        return finalize_report(
+            report,
+            config=config,
+            tmp_dir=tmp_dir,
+            config_dir=config_dir,
+            result_path=result_path,
+            market_data_dir=market_data_dir,
+            strategy_dir=strategy_dir,
+        )
+
     try:
         strategy_name, strategy_file = prepare_strategy(strategy_dir, config.strategy_prompt)
         report.strategy_name = strategy_name
@@ -198,12 +228,12 @@ def run_spike(config: SpikeConfig) -> SpikeReport:
 
     if report.blockers or report.failures:
         report.status = "BLOCKED" if report.blockers else "FAILED"
-        write_report(report)
-        return report
+        return finish()
 
     assert binary is not None
     assert market_data_file is not None
     assert report.strategy_name is not None
+    userdir.mkdir(parents=True, exist_ok=True)
 
     if config.check_timerange:
         try:
@@ -219,18 +249,17 @@ def run_spike(config: SpikeConfig) -> SpikeReport:
         except Exception as exc:
             report.status = "FAILED"
             report.failures.append(f"freqtrade list-data timerange check failed: {exc}")
-            write_report(report)
-            return report
+            return finish()
 
         if report.list_data_return_code != 0:
             report.status = "FAILED"
             report.failures.append(
                 f"freqtrade list-data timerange check exited with code {report.list_data_return_code}"
             )
-            write_report(report)
-            return report
+            return finish()
 
     datadir = market_data_dir / market_data_file.exchange
+    trading_mode = infer_trading_mode(market_data_file)
     snapshot = {
         # The config snapshot intentionally contains only backtesting inputs
         # that can be derived from local files and generated strategy metadata.
@@ -239,11 +268,16 @@ def run_spike(config: SpikeConfig) -> SpikeReport:
         "timeframe": market_data_file.timeframe,
         "strategy": report.strategy_name,
         "strategy_path": str(strategy_dir),
-        "user_data_dir": str(tmp_dir / "user_data"),
+        "user_data_dir": str(userdir),
         "datadir": str(datadir),
         "exchange": {"name": market_data_file.exchange},
         "bot_name": config.bot_name,
     }
+    if trading_mode:
+        snapshot["trading_mode"] = trading_mode
+    if trading_mode == "futures":
+        snapshot["margin_mode"] = "isolated"
+
     try:
         report.config_path = FreqtradeConfigBuilder(
             default_output_dir=config_dir,
@@ -251,8 +285,7 @@ def run_spike(config: SpikeConfig) -> SpikeReport:
     except Exception as exc:
         report.status = "FAILED"
         report.failures.append(f"temporary Freqtrade config generation failed: {exc}")
-        write_report(report)
-        return report
+        return finish()
 
     execution = FreqtradeBacktestRunner(
         FreqtradeCliRunner(binary=str(binary)),
@@ -263,7 +296,7 @@ def run_spike(config: SpikeConfig) -> SpikeReport:
         timeout_seconds=config.timeout_seconds,
         datadir=datadir,
         strategy_path=strategy_dir,
-        userdir=tmp_dir / "user_data",
+        userdir=userdir,
     )
     report.command_args = execution.command_args
     report.return_code = execution.command_result.return_code
@@ -278,26 +311,83 @@ def run_spike(config: SpikeConfig) -> SpikeReport:
         report.failures.append(
             f"freqtrade backtesting exited with code {execution.command_result.return_code}"
         )
-        write_report(report)
-        return report
+        return finish()
 
     if not execution.result_path.exists():
         report.status = "FAILED"
         report.failures.append(f"result JSON was not generated: {execution.result_path}")
-        write_report(report)
-        return report
+        return finish()
 
     try:
         report.metrics = parse_required_metrics(execution.result_path, report.strategy_name)
     except Exception as exc:
         report.status = "FAILED"
         report.failures.append(f"result JSON parsing failed: {exc}")
-        write_report(report)
-        return report
+        return finish()
 
     report.status = "SUCCESS"
+    return finish()
+
+
+def finalize_report(
+    report: SpikeReport,
+    config: SpikeConfig,
+    tmp_dir: Path,
+    config_dir: Path,
+    result_path: Path,
+    market_data_dir: Path,
+    strategy_dir: Path,
+) -> SpikeReport:
+    write_artifact_manifest(
+        report,
+        config=config,
+        tmp_dir=tmp_dir,
+        config_dir=config_dir,
+        result_path=result_path,
+        market_data_dir=market_data_dir,
+        strategy_dir=strategy_dir,
+    )
     write_report(report)
     return report
+
+
+def write_artifact_manifest(
+    report: SpikeReport,
+    config: SpikeConfig,
+    tmp_dir: Path,
+    config_dir: Path,
+    result_path: Path,
+    market_data_dir: Path,
+    strategy_dir: Path,
+) -> Path:
+    if report.status not in {"SUCCESS", "FAILED", "BLOCKED"}:
+        raise ValueError(f"Cannot write artifact manifest for status: {report.status}")
+
+    datadir = market_data_dir
+    if report.market_data_file is not None:
+        datadir = market_data_dir / report.market_data_file.exchange
+
+    blocked_reason = "; ".join(report.blockers) if report.status == "BLOCKED" and report.blockers else None
+    failed_reason = "; ".join(report.failures) if report.status == "FAILED" and report.failures else None
+    manifest = FreqtradeBacktestArtifactManifest(
+        manifest_version=1,
+        status=report.status,
+        config_path=report.config_path or config_dir / "not-generated.json",
+        strategy_name=report.strategy_name or "not_available",
+        result_path=report.result_path or result_path,
+        manifest_path=tmp_dir / "backtest-artifact-manifest.json",
+        command_args=report.command_args or report.list_data_args,
+        return_code=report.return_code if report.return_code is not None else report.list_data_return_code,
+        stdout=report.stdout or report.list_data_stdout,
+        stderr=report.stderr or report.list_data_stderr,
+        datadir=datadir,
+        strategy_path=strategy_dir,
+        userdir=tmp_dir / "user_data",
+        blocked_reason=blocked_reason,
+        failed_reason=failed_reason,
+    )
+    report.manifest_path = manifest.write()
+    return report.manifest_path
 
 
 def write_report(report: SpikeReport) -> Path:
@@ -335,6 +425,7 @@ def render_report(report: SpikeReport) -> str:
         f"- Strategy file: {value(report.strategy_file)}",
         f"- Temporary config: {value(report.config_path)}",
         f"- Result JSON: {value(report.result_path)}",
+        f"- Artifact manifest: {value(report.manifest_path)}",
         f"- Return code: {value(report.return_code)}",
         "",
         "## Local Data Availability",
