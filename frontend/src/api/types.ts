@@ -145,6 +145,10 @@ export type DryRunReadinessReport = {
   safety: Record<string, boolean>;
 };
 
+export type DryRunControlPayload = DryRunReadinessPayload & {
+  manualApproval?: boolean;
+};
+
 export type BacktestRunSummary = {
   id: string;
   strategyVersionId: string | null;
@@ -361,6 +365,20 @@ export type DryRunManagementSummary = {
   manifest: DryRunArtifactManifest | null;
   snapshot: DryRunStatusSnapshot;
   freqUiLink: FreqUILinkMetadata;
+};
+
+export type DryRunControlReport = {
+  status: "SUCCESS" | "FAILED" | "BLOCKED" | "SKIPPED" | "STOPPED" | string;
+  generatedAt: string;
+  manifestPath: string | null;
+  configPath: string | null;
+  statusSnapshotPath: string;
+  readiness: DryRunReadinessReport | null;
+  statusSnapshot: DryRunStatusSnapshot;
+  blockedReasons: string[];
+  failedReason: string | null;
+  skippedReason: string | null;
+  safety: Record<string, boolean>;
 };
 
 export type LiveCandidateRiskCheckSummary = {

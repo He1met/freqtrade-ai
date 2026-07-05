@@ -21,7 +21,6 @@ app = FastAPI(
     description="Freqtrade AI phase 0 backend skeleton.",
 )
 
-app.include_router(debug_mvp_router)
 app.include_router(backtests_router)
 app.include_router(dry_run_router)
 app.include_router(health_router)
@@ -29,3 +28,4 @@ app.include_router(ranking_router)
 app.include_router(runtime_router)
 app.include_router(strategies_router)
 app.include_router(strategy_generation_router)
+app.include_router(debug_mvp_router)

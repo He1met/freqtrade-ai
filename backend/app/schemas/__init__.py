@@ -39,6 +39,12 @@ from app.schemas.dry_run_profile import (
     DryRunProfileStake,
     DryRunProfileStrategy,
 )
+from app.schemas.dry_run_control import (
+    DryRunControlReport,
+    DryRunControlStartRequest,
+    DryRunControlStatus,
+    DryRunControlStopRequest,
+)
 from app.schemas.dry_run_readiness import (
     DryRunReadinessCheck,
     DryRunReadinessReport,
@@ -180,6 +186,10 @@ __all__ = [
     "DryRunProfileSafety",
     "DryRunProfileStake",
     "DryRunProfileStrategy",
+    "DryRunControlReport",
+    "DryRunControlStartRequest",
+    "DryRunControlStatus",
+    "DryRunControlStopRequest",
     "DryRunReadinessCheck",
     "DryRunReadinessReport",
     "DryRunReadinessRequest",

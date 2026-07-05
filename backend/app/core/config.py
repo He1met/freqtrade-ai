@@ -28,6 +28,7 @@ class Settings(BaseModel):
     frequi_environment_label: str = "local-dry-run"
     allow_live_trading: bool = False
     allow_dry_run_trading: bool = False
+    allow_controlled_dry_run_process: bool = False
 
 
 def load_env_file(path: Path) -> None:
@@ -85,4 +86,5 @@ def get_settings() -> Settings:
         ),
         allow_live_trading=security_section.get("allow_live_trading", False),
         allow_dry_run_trading=security_section.get("allow_dry_run_trading", False),
+        allow_controlled_dry_run_process=security_section.get("allow_controlled_dry_run_process", False),
     )
