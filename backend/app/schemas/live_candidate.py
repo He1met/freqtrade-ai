@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 LIVE_CANDIDATE_PROFILE_SCHEMA_VERSION = "1"
+LIVE_CANDIDATE_PREFLIGHT_SCHEMA_VERSION = "1"
 REQUIRED_LOCKED_VARIABLES = frozenset(
     {
         "profile_name",
@@ -347,3 +348,39 @@ class LiveCandidateProfile(BaseModel):
             or "apikey" in normalized
             or bool(tokens & SECRET_VALUE_TOKENS)
         )
+
+
+LiveCandidateRiskCheckStatus = Literal["PASS", "BLOCKED", "FAILED"]
+LiveCandidatePreflightStatus = Literal["APPROVED_FOR_REVIEW", "BLOCKED", "FAILED"]
+
+
+class LiveCandidateRiskCheck(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    status: LiveCandidateRiskCheckStatus
+    summary: str = Field(min_length=1, max_length=500)
+    blockers: list[str] = Field(default_factory=list)
+    failures: list[str] = Field(default_factory=list)
+    details: dict[str, Any] = Field(default_factory=dict)
+
+    model_config = {"extra": "forbid"}
+
+
+class LiveCandidatePreflightResult(BaseModel):
+    schema_version: Literal["1"] = LIVE_CANDIDATE_PREFLIGHT_SCHEMA_VERSION
+    status: LiveCandidatePreflightStatus
+    profile_name: Optional[str] = None
+    profile_hash: Optional[str] = None
+    approval_scope: Literal["live-candidate-review"] = "live-candidate-review"
+    can_enter_human_approval: bool = False
+    summary: str = Field(min_length=1, max_length=800)
+    checks: list[LiveCandidateRiskCheck] = Field(default_factory=list)
+    blockers: list[str] = Field(default_factory=list)
+    failures: list[str] = Field(default_factory=list)
+    safety_boundary: str = (
+        "Governance preflight only; not live-trading, real-order, or deployment authorization."
+    )
+
+    model_config = {"extra": "forbid"}
+
+    def to_audit_summary(self) -> dict[str, Any]:
+        return self.model_dump(mode="json", exclude_none=True)
