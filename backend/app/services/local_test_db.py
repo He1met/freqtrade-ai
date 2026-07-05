@@ -29,14 +29,93 @@ from app.models import (
 from app.schemas.data_source import DataSourceTrace, fixture_source, unknown_source
 
 
-SAFE_ENVIRONMENT_LABELS = {"local", "dev", "test", "debug", "phase8", "local-test", "phase8-local"}
-SAFE_POSTGRES_TOKENS = ("local", "test", "debug", "phase8")
+SAFE_ENVIRONMENT_LABELS = {
+    "local",
+    "dev",
+    "test",
+    "debug",
+    "phase8",
+    "phase9",
+    "local-test",
+    "phase8-local",
+    "phase9-local",
+}
+SAFE_POSTGRES_TOKENS = ("local", "test", "debug", "phase8", "phase9")
 UNSAFE_DATABASE_TOKENS = ("prod", "production", "shared", "remote", "live")
 LOCAL_POSTGRES_HOSTS = {None, "", "localhost", "127.0.0.1", "::1"}
 SAFE_SQLITE_ROOT = Path("/tmp").resolve()
 SEED_VERSION = "phase8-local-test-db-v1"
 SOURCE_LABEL = "phase8-local-test-db"
 DEFAULT_SQLITE_PATH = Path("/tmp/freqtrade-ai-phase8-local-test.sqlite")
+OPERATIONAL_READINESS_SCENARIOS = {
+    "success": {
+        "category": "local-test fixture",
+        "expected_status": "succeeded",
+        "required_action": "Run the real Provider -> DB -> strategy file -> local backtest -> result -> score -> UI flow.",
+    },
+    "failed": {
+        "category": "failure fixture",
+        "expected_status": "failed",
+        "required_action": "Inspect failure rows and confirm the real flow records failure without claiming success.",
+    },
+    "blocked": {
+        "category": "blocked fixture",
+        "expected_status": "blocked",
+        "required_action": "Resolve the reported BLOCKED prerequisite before running the real flow.",
+    },
+    "unknown-source": {
+        "category": "unknown-source fixture",
+        "expected_status": "failed",
+        "required_action": "Fix missing data_source contract before accepting any row as real evidence.",
+    },
+    "missing-artifact": {
+        "category": "missing-artifact fixture",
+        "expected_status": "blocked",
+        "required_action": "Regenerate or restore the referenced artifact before accepting the flow.",
+    },
+    "partial-completion": {
+        "category": "partial-completion fixture",
+        "expected_status": "running",
+        "required_action": "Finish or fail pending work; partial local-test rows cannot close acceptance.",
+    },
+    "dirty-score-without-result": {
+        "category": "dirty-data fixture",
+        "expected_status": "dirty",
+        "required_action": "Repair the score/result relationship or keep the row excluded from acceptance.",
+    },
+    "dirty-stale-running-backtest": {
+        "category": "dirty-data fixture",
+        "expected_status": "dirty",
+        "required_action": "Detect and fail stale running state before accepting the run.",
+    },
+    "dirty-task-result-path-without-result-row": {
+        "category": "dirty-data fixture",
+        "expected_status": "dirty",
+        "required_action": "Parse and persist the result row or report the task as failed/BLOCKED.",
+    },
+}
+GUARD_REFUSAL_EXAMPLES = [
+    {
+        "name": "unsafe sqlite filename",
+        "database_url": "sqlite+pysqlite:////tmp/not-freqtrade.sqlite",
+        "environment_label": "local",
+    },
+    {
+        "name": "production environment label",
+        "database_url": "sqlite+pysqlite:////tmp/freqtrade-ai-phase9-local-test.sqlite",
+        "environment_label": "production",
+    },
+    {
+        "name": "remote postgres host",
+        "database_url": "postgresql+psycopg://freqtrade:placeholder@example.com:5432/freqtrade_ai_phase9_test",
+        "environment_label": "phase9",
+    },
+    {
+        "name": "prod-marked postgres database",
+        "database_url": "postgresql+psycopg://freqtrade:placeholder@localhost:5432/freqtrade_ai_prod",
+        "environment_label": "phase9",
+    },
+]
 
 
 @dataclass(frozen=True)
@@ -225,6 +304,117 @@ class Phase8LocalTestDbService:
                 )
             session.commit()
             return self.summarize_batch(batch.batch_key, session=session)
+
+    def seed_operational_readiness(self) -> dict[str, Any]:
+        reset_summary = self.reset_database()
+        baseline_summary = self.seed_baseline()
+        dirty_summary = self.seed_dirty_scenarios()
+        return self.operational_readiness_report(
+            reset_summary=reset_summary,
+            baseline_summary=baseline_summary,
+            dirty_summary=dirty_summary,
+        )
+
+    def operational_readiness_report(
+        self,
+        *,
+        reset_summary: Optional[dict[str, Any]] = None,
+        baseline_summary: Optional[dict[str, Any]] = None,
+        dirty_summary: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        target = self.validate_target()
+        summary = self.summarize_batches(limit=20)
+        scenario_index: dict[str, dict[str, Any]] = {}
+        for batch in summary["batches"]:
+            for event in batch["events"]:
+                scenario_name = event.get("scenario_name")
+                if scenario_name:
+                    scenario_index.setdefault(
+                        scenario_name,
+                        {
+                            "batch_key": batch["batch_key"],
+                            "source_kind": event["source_kind"],
+                            "details": event["details"],
+                        },
+                    )
+
+        coverage = []
+        for scenario_name, scenario_contract in OPERATIONAL_READINESS_SCENARIOS.items():
+            event = scenario_index.get(scenario_name)
+            blocked_reason = None
+            if event is not None:
+                data_source = event["details"].get("data_source")
+                if isinstance(data_source, dict):
+                    blocked_reason = data_source.get("blocked_reason")
+            coverage.append(
+                {
+                    "scenario": scenario_name,
+                    "category": scenario_contract["category"],
+                    "present": event is not None,
+                    "source_kind": event["source_kind"] if event else None,
+                    "batch_key": event["batch_key"] if event else None,
+                    "expected_status": scenario_contract["expected_status"],
+                    "can_accept_as_real_run": False,
+                    "blocked_reason": blocked_reason,
+                    "required_action": scenario_contract["required_action"],
+                }
+            )
+
+        all_present = all(item["present"] for item in coverage)
+        return {
+            "phase": "Phase 9",
+            "status": "ready_for_qa" if all_present else "missing_scenarios",
+            "database": target.redacted_url,
+            "environment_label": target.environment_label,
+            "guard": {
+                "allowed_target": {
+                    "dialect": target.dialect,
+                    "reason": target.reason,
+                    "database": target.redacted_url,
+                },
+                "refusal_examples": self.guard_refusal_examples(),
+            },
+            "data_source_policy": {
+                "local_test_source_type": "fixture/local-test",
+                "can_accept_as_real_run": False,
+                "real_acceptance_requires": [
+                    "Provider output sourced from environment-only credentials",
+                    "database or api_aggregate data_source with core_data=true",
+                    "stable database_ids across API and DB checks",
+                    "strategy file artifact exists and matches checksum",
+                    "local backtest result and strategy score are persisted",
+                    "UI SourceMarker shows core source without BLOCKED reason",
+                ],
+            },
+            "coverage": coverage,
+            "batch_keys": {
+                "reset": reset_summary["batch_key"] if reset_summary else None,
+                "baseline": baseline_summary["batch_key"] if baseline_summary else None,
+                "dirty": dirty_summary["batch_key"] if dirty_summary else None,
+            },
+            "summary": summary,
+        }
+
+    def guard_refusal_examples(self) -> list[dict[str, Any]]:
+        refusals: list[dict[str, Any]] = []
+        for example in GUARD_REFUSAL_EXAMPLES:
+            try:
+                self._guard.validate(example["database_url"], example["environment_label"])
+            except ConfigurationError as exc:
+                refusals.append(
+                    {
+                        "name": example["name"],
+                        "status": "refused",
+                        "database": redact_database_url(example["database_url"]),
+                        "environment_label": example["environment_label"],
+                        "reason": str(exc),
+                    }
+                )
+            else:
+                raise ConfigurationError(
+                    f"Local test DB guard unexpectedly allowed unsafe example: {example['name']}"
+                )
+        return refusals
 
     def summarize_batches(self, limit: int = 20) -> dict[str, Any]:
         self.ensure_schema()
@@ -478,6 +668,8 @@ class Phase8LocalTestDbService:
         scenario_name: str,
     ) -> BacktestTask:
         status = "succeeded" if scenario_name in {"success", "missing-artifact", "partial-completion"} else "failed"
+        if scenario_name == "blocked":
+            status = "blocked"
         if scenario_name == "dirty-stale-running-backtest":
             status = "running"
         task = BacktestTask(
@@ -652,6 +844,8 @@ class Phase8LocalTestDbService:
     def _backtest_run_status(self, scenario_name: str) -> str:
         if scenario_name in {"success", "missing-artifact"}:
             return "succeeded"
+        if scenario_name == "blocked":
+            return "blocked"
         if scenario_name in {"partial-completion", "dirty-stale-running-backtest"}:
             return "running"
         return "failed"

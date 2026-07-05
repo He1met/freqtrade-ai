@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reset, seed, and inspect Phase 8 local-only test databases."""
+"""Reset, seed, and inspect guarded local-only test databases."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ from app.services.local_test_db import Phase8LocalTestDbService, default_databas
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Guard, reset, seed, dirty-seed, and summarize a Phase 8 local/dev/test database. "
+            "Guard, reset, seed, dirty-seed, and summarize a Phase 8/9 local/dev/test database. "
             "The command refuses production/shared/remote/unknown targets."
         )
     )
@@ -48,7 +48,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--environment",
         default=os.environ.get("APP_ENV", "local"),
-        choices=["local", "dev", "test", "debug", "phase8", "local-test", "phase8-local"],
+        choices=[
+            "local",
+            "dev",
+            "test",
+            "debug",
+            "phase8",
+            "phase9",
+            "local-test",
+            "phase8-local",
+            "phase9-local",
+        ],
         help="Required safety label for destructive operations.",
     )
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
@@ -58,6 +68,11 @@ def parse_args() -> argparse.Namespace:
     subparsers.add_parser("reset", help="Drop and recreate all app tables in a guarded local/test DB.")
     subparsers.add_parser("seed-baseline", help="Insert success/failed/BLOCKED/unknown/missing/partial seed data.")
     subparsers.add_parser("dirty-scenario", help="Insert intentionally dirty QA scenarios.")
+    subparsers.add_parser(
+        "seed-operational-readiness",
+        help="Reset and seed Phase 9 success/failure/BLOCKED/dirty/unknown-source QA scenarios.",
+    )
+    subparsers.add_parser("acceptance-report", help="Print the Phase 9 local-test acceptance coverage report.")
     summary = subparsers.add_parser("summary", help="Print local-test batch summaries.")
     summary.add_argument("--limit", type=int, default=20, help="Maximum batch summaries to return.")
     return parser.parse_args()
@@ -83,6 +98,14 @@ def run_command(args: argparse.Namespace) -> dict[str, Any]:
         return {"status": "ok", "operation": "seed-baseline", "summary": service.seed_baseline()}
     if args.command == "dirty-scenario":
         return {"status": "ok", "operation": "dirty-scenario", "summary": service.seed_dirty_scenarios()}
+    if args.command == "seed-operational-readiness":
+        return {
+            "status": "ok",
+            "operation": "seed-operational-readiness",
+            "summary": service.seed_operational_readiness(),
+        }
+    if args.command == "acceptance-report":
+        return {"status": "ok", "operation": "acceptance-report", "summary": service.operational_readiness_report()}
     if args.command == "summary":
         return {"status": "ok", "operation": "summary", "summary": service.summarize_batches(limit=args.limit)}
     raise ConfigurationError(f"Unsupported command: {args.command}")

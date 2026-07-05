@@ -24,7 +24,10 @@ class LocalTestBatch(Base):
     __tablename__ = "local_test_batches"
     __table_args__ = (
         CheckConstraint(
-            "environment_label IN ('local', 'dev', 'test', 'debug', 'phase8', 'local-test', 'phase8-local')",
+            "environment_label IN ("
+            "'local', 'dev', 'test', 'debug', 'phase8', 'phase9', "
+            "'local-test', 'phase8-local', 'phase9-local'"
+            ")",
             name="local_test_batches_environment_check",
         ),
         UniqueConstraint("batch_key", name="local_test_batches_batch_key_unique"),

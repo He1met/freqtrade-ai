@@ -23,6 +23,8 @@ python3 scripts/phase8_local_test_db.py guard
 python3 scripts/phase8_local_test_db.py reset
 python3 scripts/phase8_local_test_db.py seed-baseline
 python3 scripts/phase8_local_test_db.py dirty-scenario
+python3 scripts/phase8_local_test_db.py seed-operational-readiness
+python3 scripts/phase8_local_test_db.py --json acceptance-report
 python3 scripts/phase8_local_test_db.py --json summary
 ```
 
@@ -57,6 +59,10 @@ python3 scripts/phase8_local_test_db.py \
 - score without a backtest result row
 - stale running backtest
 - task result path without a parsed result row
+
+`seed-operational-readiness` is the Phase 9 QA shortcut. It resets the guarded
+database, seeds baseline and dirty scenarios, and returns a machine-readable
+coverage report. See [phase9_local_test_db.md](phase9_local_test_db.md).
 
 Each seeded business row carries Phase 8 local-test metadata in JSON-capable
 fields such as `params_snapshot`, `blueprint`, `diff_snapshot`,
