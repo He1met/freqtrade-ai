@@ -12,6 +12,7 @@ The workflow runs:
 - `python -m compileall backend/app backend/tests scripts`
 - `cd frontend && npm ci && npm run build`
 - `git diff --check origin/<base>...HEAD`
+- `python scripts/scan_secrets.py`
 - `python scripts/smoke_phase6.py --offline --tmp-dir "$RUNNER_TEMP/freqtrade-ai-phase6-smoke"`
 
 The smoke command is intentionally limited to the existing offline fixture path
@@ -22,6 +23,12 @@ until the Phase 7 engineering smoke is added by issue `#204`.
 CI must not require API keys, exchange secrets, passphrases, production
 database URLs, or live operator credentials. The workflow does not configure
 secret environment variables.
+
+`python scripts/scan_secrets.py` is the Phase 7 repo-local secret scanning gate.
+It scans git-tracked code, config, docs, fixture, report, script, and workflow
+paths, and reports only path, line number, key name, and rule id. It never
+prints matched values. See `docs/phase7_secret_scanning.md` for placeholder,
+ENV reference, false-positive, and blocked-result handling.
 
 The CI smoke path must remain offline and fixture based:
 
@@ -36,6 +43,7 @@ The CI smoke path must remain offline and fixture based:
 
 ## Failure Handling
 
-Dependency installation, backend tests, frontend build, whitespace checks, and
-offline smoke failures are blocking CI failures. These failures should be
-reported directly in the pull request instead of being bypassed or hidden.
+Dependency installation, backend tests, frontend build, whitespace checks,
+secret scanning, and offline smoke failures are blocking CI failures. These
+failures should be reported directly in the pull request instead of being
+bypassed or hidden.

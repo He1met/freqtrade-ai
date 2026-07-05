@@ -66,6 +66,9 @@ jobs:
           git fetch --no-tags --prune origin "refs/heads/${base_ref}:refs/remotes/origin/${base_ref}"
           git diff --check "origin/$base_ref...HEAD"
 
+      - name: Run secret scan
+        run: python scripts/scan_secrets.py
+
       - name: Run offline fixture smoke
         run: |
           python scripts/smoke_phase6.py \

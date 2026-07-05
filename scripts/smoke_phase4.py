@@ -322,8 +322,8 @@ def run_failed_and_blocked_manifests(context: Phase4SmokeContext) -> None:
         return subprocess.CompletedProcess(
             args=list(args),
             returncode=2,
-            stdout="partial fixture output api_key=real-value",
-            stderr="fixture hyperopt failure passphrase: real-passphrase",
+            stdout="partial fixture output api_key=fixture-api-key-that-must-not-render",
+            stderr="fixture hyperopt failure passphrase: fixture-passphrase-that-must-not-render",
         )
 
     failed_manifest = FreqtradeHyperoptRunner(
@@ -339,7 +339,10 @@ def run_failed_and_blocked_manifests(context: Phase4SmokeContext) -> None:
     failed_text = failed_manifest.manifest_path.read_text(encoding="utf-8")
     if failed_manifest.status != "FAILED" or failed_manifest.return_code != 2:
         raise RuntimeError(f"Expected FAILED manifest, got {failed_manifest.to_dict()}")
-    if "real-value" in failed_text or "real-passphrase" in failed_text:
+    if (
+        "fixture-api-key-that-must-not-render" in failed_text
+        or "fixture-passphrase-that-must-not-render" in failed_text
+    ):
         raise RuntimeError("FAILED manifest leaked secret-shaped fixture values")
 
     blocked_calls: list[list[str]] = []
