@@ -1,10 +1,11 @@
 import { Link } from "react-router-dom";
 
 import { useMvpData } from "../api/useMvpData";
+import { FallbackNotice } from "./FallbackNotice";
 import { EMPTY_TEXT, displayLoadState, displayStatus } from "./uiCopy";
 
 export function Strategies() {
-  const { data, source, isLoading } = useMvpData();
+  const { data, source, isLoading, error } = useMvpData();
 
   return (
     <section className="page">
@@ -12,6 +13,12 @@ export function Strategies() {
         <h1>策略</h1>
         <span className="status-pill">{displayLoadState(isLoading, source)}</span>
       </header>
+      <FallbackNotice
+        context="策略列表、状态、timeframe、来源和版本文件路径。"
+        error={error}
+        isLoading={isLoading}
+        source={source}
+      />
       <div className="table-shell">
         <table>
           <thead>

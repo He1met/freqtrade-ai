@@ -1,9 +1,10 @@
 import { useMvpData } from "../api/useMvpData";
 import { metricRows, reasonText, statusClassName, summarizeText } from "./backtestDisplay";
+import { FallbackNotice } from "./FallbackNotice";
 import { EMPTY_TEXT, displayLoadState, displayStatus } from "./uiCopy";
 
 export function BacktestTasks() {
-  const { data, source, isLoading } = useMvpData();
+  const { data, source, isLoading, error } = useMvpData();
 
   return (
     <section className="page">
@@ -11,6 +12,12 @@ export function BacktestTasks() {
         <h1>回测任务</h1>
         <span className="status-pill">{displayLoadState(isLoading, source)}</span>
       </header>
+      <FallbackNotice
+        context="回测任务、artifact manifest、指标、Result 路径和 stdout/stderr 摘要。"
+        error={error}
+        isLoading={isLoading}
+        source={source}
+      />
       <div className="table-shell">
         <table>
           <thead>

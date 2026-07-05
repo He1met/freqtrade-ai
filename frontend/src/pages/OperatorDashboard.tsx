@@ -10,6 +10,7 @@ import type {
 } from "../api/types";
 import { useMvpData } from "../api/useMvpData";
 import { summarizeText } from "./backtestDisplay";
+import { FallbackNotice } from "./FallbackNotice";
 import { EMPTY_TEXT, displayBoolean, displayLoadState, displayStatus, displayValue } from "./uiCopy";
 
 function formatValue(value: string | number | boolean | null | undefined): string {
@@ -330,13 +331,13 @@ export function OperatorDashboard() {
         <h1>运维面板（Operator Dashboard）</h1>
         <span className="status-pill">{displayLoadState(isLoading, source)}</span>
       </header>
-      {error ? <div className="notice">当前使用 fallback 数据：{error}</div> : null}
-      {!isLoading && source === "fallback" && !error ? (
-        <div className="notice">
-          Backend API unavailable; showing controlled Phase 7 operator fallback data.（Backend API 不可用，当前显示受控
-          Phase 7 Operator Dashboard fallback 数据。）
-        </div>
-      ) : null}
+      <FallbackNotice
+        context="Operator Dashboard 运行证据、诊断检查、环境存在性和安全边界。"
+        error={error}
+        isLoading={isLoading}
+        note="Backend API unavailable; showing controlled Phase 7 operator fallback data."
+        source={source}
+      />
       <section className="operator-summary-grid" aria-label="Operator Dashboard 摘要">
         <article className="metric">
           <span>Runtime Contract</span>

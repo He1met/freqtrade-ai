@@ -1,4 +1,5 @@
 import { useMvpData } from "../api/useMvpData";
+import { FallbackNotice } from "./FallbackNotice";
 import { displayLoadState } from "./uiCopy";
 
 export function Dashboard() {
@@ -18,7 +19,12 @@ export function Dashboard() {
         <h1>总览</h1>
         <span className="status-pill">{displayLoadState(isLoading, source)}</span>
       </header>
-      {error ? <div className="notice">当前使用 fallback 数据：{error}</div> : null}
+      <FallbackNotice
+        context="Dashboard 总览指标、MVP 数据流和排行榜摘要。"
+        error={error}
+        isLoading={isLoading}
+        source={source}
+      />
       <div className="metric-grid">
         {summary.map((item) => (
           <article className="metric" key={item.label}>

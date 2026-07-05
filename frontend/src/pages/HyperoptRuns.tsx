@@ -1,6 +1,7 @@
 import type { HyperoptMetricComparison, HyperoptRunSummary } from "../api/types";
 import { useMvpData } from "../api/useMvpData";
 import { formatNumber, reasonText, statusClassName, summarizeText } from "./backtestDisplay";
+import { FallbackNotice } from "./FallbackNotice";
 import { EMPTY_TEXT, displayLoadState, displayStatus } from "./uiCopy";
 
 function paramsPreview(params: Record<string, unknown>): Array<[string, string]> {
@@ -42,10 +43,12 @@ export function HyperoptRuns() {
         <h1>Hyperopt 参数优化</h1>
         <span className="status-pill">{displayLoadState(isLoading, source)}</span>
       </header>
-      {error ? <div className="notice">当前使用 fallback 数据：{error}</div> : null}
-      {!isLoading && source === "fallback" && !error ? (
-        <div className="notice">Backend API 不可用，当前显示受控 fallback Hyperopt 数据。</div>
-      ) : null}
+      <FallbackNotice
+        context="Hyperopt 参数优化批次、best params、artifact 和优化前后指标。"
+        error={error}
+        isLoading={isLoading}
+        source={source}
+      />
       <section className="hyperopt-summary" aria-label="Hyperopt 参数优化摘要">
         <article className="overview-panel">
           <h2>批次状态</h2>

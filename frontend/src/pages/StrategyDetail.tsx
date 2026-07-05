@@ -1,6 +1,7 @@
 import { useParams } from "react-router-dom";
 
 import { useMvpData } from "../api/useMvpData";
+import { FallbackNotice } from "./FallbackNotice";
 import { EMPTY_TEXT, displayLoadState, displayStatus } from "./uiCopy";
 
 function formatDiffLabel(label: string) {
@@ -54,7 +55,12 @@ export function StrategyDetail() {
           <h1>策略详情</h1>
           <span className="status-pill">{displayLoadState(isLoading, source)}</span>
         </header>
-        {error ? <div className="notice">API 数据不可用，当前显示 fallback 数据。{error}</div> : null}
+        <FallbackNotice
+          context="策略详情查找、当前版本和失败原因。"
+          error={error}
+          isLoading={isLoading}
+          source={source}
+        />
         <div className="empty-state">未找到策略。</div>
       </section>
     );
@@ -66,7 +72,12 @@ export function StrategyDetail() {
         <h1>{strategy.name}</h1>
         <span className="status-pill">{displayLoadState(isLoading, source)}</span>
       </header>
-      {error ? <div className="notice">API 数据不可用，当前显示 fallback 数据。{error}</div> : null}
+      <FallbackNotice
+        context="策略详情、版本谱系、当前版本 diff 和失败原因。"
+        error={error}
+        isLoading={isLoading}
+        source={source}
+      />
       <dl className="detail-list">
         <div>
           <dt>ID</dt>
