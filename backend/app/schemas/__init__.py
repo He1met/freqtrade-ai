@@ -1,4 +1,6 @@
 from app.schemas.backtest import (
+    BacktestArtifactIngestRequest,
+    BacktestArtifactIngestResponse,
     BacktestResultCreate,
     BacktestResultRead,
     BacktestRunCreate,
@@ -160,6 +162,8 @@ __all__ = [
     "BacktestProfileStake",
     "BacktestProfileStrategy",
     "BacktestProfileV2",
+    "BacktestArtifactIngestRequest",
+    "BacktestArtifactIngestResponse",
     "api_aggregate_source",
     "attach_data_source_to_payload",
     "database_record_source",

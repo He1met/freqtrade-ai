@@ -151,6 +151,12 @@ class LocalBacktestTriggerResponse(BaseModel):
     execution_mode: Literal["preflight_only"] = "preflight_only"
 
 
+class BacktestArtifactIngestRequest(BaseModel):
+    manifest_path: Optional[str] = Field(default=None, min_length=1)
+    result_path: Optional[str] = Field(default=None, min_length=1)
+    strategy_name: Optional[str] = Field(default=None, min_length=1, max_length=120)
+
+
 class BacktestResultRead(BaseModel):
     id: int
     backtest_run_id: int
@@ -195,3 +201,15 @@ class BacktestResultRead(BaseModel):
             freshness=self.created_at,
         )
         return self
+
+
+class BacktestArtifactIngestResponse(BaseModel):
+    run: BacktestRunRead
+    task: BacktestTaskRead
+    result: Optional[BacktestResultRead] = None
+    ingest_status: Literal["succeeded", "failed", "blocked"]
+    reason: Optional[str] = None
+    manifest_path: Optional[str] = None
+    result_path: Optional[str] = None
+    parser_source: Literal["freqtrade_result_parser"] = "freqtrade_result_parser"
+    execution_mode: Literal["artifact_ingest_only"] = "artifact_ingest_only"

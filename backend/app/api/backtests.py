@@ -4,11 +4,14 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.repositories import BacktestRepository
 from app.schemas import (
+    BacktestArtifactIngestRequest,
+    BacktestArtifactIngestResponse,
     BacktestRunRead,
     BacktestTaskRead,
     LocalBacktestTriggerRequest,
     LocalBacktestTriggerResponse,
 )
+from app.services.backtest_artifact_ingest import BacktestArtifactIngestService
 from app.services.local_backtest_trigger import LocalBacktestTriggerService
 
 
@@ -27,6 +30,21 @@ def trigger_local_backtest(
     result = LocalBacktestTriggerService(db).trigger(payload)
     if result is None:
         raise HTTPException(status_code=404, detail="strategy version not found")
+    return result
+
+
+@router.post(
+    "/backtest-tasks/{task_id}/artifact-ingest",
+    response_model=BacktestArtifactIngestResponse,
+)
+def ingest_backtest_task_artifact(
+    task_id: int,
+    payload: BacktestArtifactIngestRequest,
+    db: Session = Depends(get_db),
+) -> BacktestArtifactIngestResponse:
+    result = BacktestArtifactIngestService(db).ingest_task_artifact(task_id, payload)
+    if result is None:
+        raise HTTPException(status_code=404, detail="backtest task not found")
     return result
 
 
