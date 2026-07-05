@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.db.session import create_database_engine, create_session_factory, get_db
 from app.main import app
 from app.models import Base
-from app.repositories import BacktestRepository, StrategyRepository
+from app.repositories import BacktestRepository, StrategyRepository, StrategyScoreRepository
 from app.schemas import (
     BacktestArtifactIngestRequest,
     BacktestRunCreate,
@@ -193,6 +193,9 @@ def test_api_ingests_success_manifest_and_persists_reconcilable_result(
         assert payload["result"]["backtest_run_id"] == run_id
         assert payload["result"]["backtest_task_id"] == task_id
         assert payload["result"]["result_path"] == str(result_path)
+        assert payload["score"]["backtest_result_id"] == payload["result"]["id"]
+        assert payload["score"]["strategy_version_id"] == strategy_version_id
+        assert payload["score"]["data_source"]["core_data"] is True
         assert payload["manifest_path"] == str(manifest_path)
         assert results[0].profit_total == 123.4
         assert results[0].profit_pct == 0.125
@@ -213,6 +216,11 @@ def test_api_ingests_success_manifest_and_persists_reconcilable_result(
         assert refreshed_task.result_path == str(result_path)
         assert refreshed_run is not None
         assert refreshed_run.status == "succeeded"
+        ranking = StrategyScoreRepository(verify_session).list_ranking()
+        assert len(ranking) == 1
+        assert ranking[0].backtest_result_id == payload["result"]["id"]
+        assert ranking[0].strategy_version_id == strategy_version_id
+        assert ranking[0].data_source.core_data is True
 
 
 def test_success_manifest_with_missing_result_path_blocks_without_result(
