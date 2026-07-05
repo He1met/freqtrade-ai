@@ -1,6 +1,7 @@
 import { Link } from "react-router-dom";
 
 import { useMvpData } from "../api/useMvpData";
+import { EMPTY_TEXT, displayLoadState, displayStatus } from "./uiCopy";
 
 export function Strategies() {
   const { data, source, isLoading } = useMvpData();
@@ -8,19 +9,19 @@ export function Strategies() {
   return (
     <section className="page">
       <header className="page-header">
-        <h1>Strategies</h1>
-        <span className="status-pill">{isLoading ? "Loading" : source}</span>
+        <h1>策略</h1>
+        <span className="status-pill">{displayLoadState(isLoading, source)}</span>
       </header>
       <div className="table-shell">
         <table>
           <thead>
             <tr>
-              <th>Name</th>
-              <th>Status</th>
+              <th>名称</th>
+              <th>状态</th>
               <th>Timeframe</th>
-              <th>Source</th>
-              <th>Version</th>
-              <th>File</th>
+              <th>来源</th>
+              <th>版本</th>
+              <th>文件</th>
             </tr>
           </thead>
           <tbody>
@@ -29,17 +30,17 @@ export function Strategies() {
                 <td>
                   <Link to={`/strategies/${strategy.id}`}>{strategy.name}</Link>
                 </td>
-                <td>{strategy.status}</td>
+                <td>{displayStatus(strategy.status)}</td>
                 <td>{strategy.timeframe}</td>
-                <td>{strategy.source}</td>
-                <td>{strategy.currentVersion?.versionNumber ?? "none"}</td>
-                <td className="path-cell">{strategy.currentVersion?.filePath ?? "none"}</td>
+                <td>{strategy.source === "ai_generated" ? "AI 生成" : strategy.source}</td>
+                <td>{strategy.currentVersion?.versionNumber ?? EMPTY_TEXT}</td>
+                <td className="path-cell">{strategy.currentVersion?.filePath ?? EMPTY_TEXT}</td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
-      {data.strategies.length === 0 ? <div className="empty-state">No strategies found.</div> : null}
+      {data.strategies.length === 0 ? <div className="empty-state">暂无策略。</div> : null}
     </section>
   );
 }

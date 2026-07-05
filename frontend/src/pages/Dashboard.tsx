@@ -1,23 +1,24 @@
 import { useMvpData } from "../api/useMvpData";
+import { displayLoadState } from "./uiCopy";
 
 export function Dashboard() {
   const { data, source, isLoading, error } = useMvpData();
   const succeededBacktests = data.backtestRuns.filter((run) => run.status === "succeeded").length;
   const summary = [
-    { label: "Strategies", value: data.strategies.length },
-    { label: "Generation Runs", value: data.generationRuns.length },
-    { label: "Backtest Runs", value: data.backtestRuns.length },
-    { label: "Hyperopt Runs", value: data.hyperoptRuns.length },
-    { label: "Ranked", value: data.ranking.length },
+    { label: "策略", value: data.strategies.length },
+    { label: "生成批次", value: data.generationRuns.length },
+    { label: "回测批次", value: data.backtestRuns.length },
+    { label: "Hyperopt 参数优化", value: data.hyperoptRuns.length },
+    { label: "已评分策略", value: data.ranking.length },
   ];
 
   return (
     <section className="page">
       <header className="page-header">
-        <h1>Dashboard</h1>
-        <span className="status-pill">{isLoading ? "Loading" : source}</span>
+        <h1>总览</h1>
+        <span className="status-pill">{displayLoadState(isLoading, source)}</span>
       </header>
-      {error ? <div className="notice">Using fallback data: {error}</div> : null}
+      {error ? <div className="notice">当前使用 fallback 数据：{error}</div> : null}
       <div className="metric-grid">
         {summary.map((item) => (
           <article className="metric" key={item.label}>
@@ -28,22 +29,20 @@ export function Dashboard() {
       </div>
       <div className="overview-grid">
         <article className="overview-panel">
-          <h2>MVP Data Flow</h2>
+          <h2>MVP 数据流</h2>
           <p>
-            {data.generationRuns.length} generation runs, {data.backtestTasks.length} backtest tasks,
-            {data.hyperoptRuns.length} hyperopt runs, and {succeededBacktests} succeeded backtest runs
-            are available for review.
+            当前有 {data.generationRuns.length} 个生成批次、{data.backtestTasks.length} 个回测任务、
+            {data.hyperoptRuns.length} 个 Hyperopt 参数优化批次，以及 {succeededBacktests} 个成功回测批次可供复核。
           </p>
         </article>
         <article className="overview-panel">
-          <h2>Ranking Leader</h2>
+          <h2>排行榜领先策略</h2>
           {data.ranking[0] ? (
             <p>
-              {data.ranking[0].strategyName} leads with total score{" "}
-              {data.ranking[0].totalScore.toFixed(1)}.
+              {data.ranking[0].strategyName} 当前总分最高：{data.ranking[0].totalScore.toFixed(1)}。
             </p>
           ) : (
-            <p>No ranked strategies are available.</p>
+            <p>暂无已评分策略。</p>
           )}
         </article>
       </div>

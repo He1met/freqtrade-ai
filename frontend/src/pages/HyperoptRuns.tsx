@@ -1,6 +1,7 @@
 import type { HyperoptMetricComparison, HyperoptRunSummary } from "../api/types";
 import { useMvpData } from "../api/useMvpData";
 import { formatNumber, reasonText, statusClassName, summarizeText } from "./backtestDisplay";
+import { EMPTY_TEXT, displayLoadState, displayStatus } from "./uiCopy";
 
 function paramsPreview(params: Record<string, unknown>): Array<[string, string]> {
   return Object.entries(params)
@@ -9,12 +10,12 @@ function paramsPreview(params: Record<string, unknown>): Array<[string, string]>
 }
 
 function metricValue(value: number | null, suffix: string): string {
-  return value === null ? "none" : `${value.toFixed(2)}${suffix}`;
+  return value === null ? EMPTY_TEXT : `${value.toFixed(2)}${suffix}`;
 }
 
 function metricDelta(metric: HyperoptMetricComparison): string {
   if (metric.delta === null) {
-    return "none";
+    return EMPTY_TEXT;
   }
 
   const prefix = metric.delta > 0 ? "+" : "";
@@ -38,45 +39,45 @@ export function HyperoptRuns() {
   return (
     <section className="page">
       <header className="page-header">
-        <h1>Hyperopt Runs</h1>
-        <span className="status-pill">{isLoading ? "Loading" : source}</span>
+        <h1>Hyperopt 参数优化</h1>
+        <span className="status-pill">{displayLoadState(isLoading, source)}</span>
       </header>
-      {error ? <div className="notice">Using fallback data: {error}</div> : null}
+      {error ? <div className="notice">当前使用 fallback 数据：{error}</div> : null}
       {!isLoading && source === "fallback" && !error ? (
-        <div className="notice">Backend API unavailable; showing controlled fallback Hyperopt data.</div>
+        <div className="notice">Backend API 不可用，当前显示受控 fallback Hyperopt 数据。</div>
       ) : null}
-      <section className="hyperopt-summary" aria-label="Hyperopt summary">
+      <section className="hyperopt-summary" aria-label="Hyperopt 参数优化摘要">
         <article className="overview-panel">
-          <h2>Run Status</h2>
+          <h2>批次状态</h2>
           <div className="status-counts">
             {Object.entries(statusCounts).length === 0 ? (
-              <span>No runs</span>
+              <span>暂无批次</span>
             ) : (
               Object.entries(statusCounts).map(([status, count]) => (
                 <span className={`run-status ${statusClassName(status)}`} key={status}>
-                  {status}: {count}
+                  {displayStatus(status)}：{count}
                 </span>
               ))
             )}
           </div>
         </article>
         <article className="overview-panel">
-          <h2>Best Result</h2>
+          <h2>最佳结果</h2>
           {bestRun ? (
             <p>
-              {bestRun.strategyName} epoch {bestRun.epoch ?? "none"} loss{" "}
-              {formatNumber(bestRun.bestLoss)} score {formatNumber(bestRun.score)}.
+              {bestRun.strategyName} epoch {bestRun.epoch ?? EMPTY_TEXT}，loss{" "}
+              {formatNumber(bestRun.bestLoss)}，score {formatNumber(bestRun.score)}。
             </p>
           ) : (
-            <p>No best result is available.</p>
+            <p>暂无最佳结果。</p>
           )}
         </article>
         <article className="overview-panel">
-          <h2>Blocked Review</h2>
+          <h2>阻塞复核</h2>
           <p>
             {blockedRuns.length === 0
-              ? "No blocked Hyperopt runs are present."
-              : `${blockedRuns.length} run(s) require local data or artifact review.`}
+              ? "暂无已阻塞的 Hyperopt 批次。"
+              : `${blockedRuns.length} 个批次需要本地数据或 artifact 复核。`}
           </p>
         </article>
       </section>
@@ -84,14 +85,14 @@ export function HyperoptRuns() {
         <table>
           <thead>
             <tr>
-              <th>Run</th>
-              <th>Strategy</th>
-              <th>Status</th>
+              <th>批次</th>
+              <th>策略</th>
+              <th>状态</th>
               <th>Best Params</th>
               <th>Artifact</th>
-              <th>Before / After</th>
-              <th>Warnings</th>
-              <th>Reason</th>
+              <th>优化前 / 后</th>
+              <th>警告</th>
+              <th>原因</th>
             </tr>
           </thead>
           <tbody>
@@ -110,12 +111,12 @@ export function HyperoptRuns() {
                   <td>{run.strategyName}</td>
                   <td>
                     <span className={`run-status ${statusClassName(artifact?.status ?? run.status)}`}>
-                      {artifact?.status ?? run.status}
+                      {displayStatus(artifact?.status ?? run.status)}
                     </span>
                   </td>
                   <td className="params-cell">
                     {paramRows.length === 0 ? (
-                      <span>none</span>
+                      <span>{EMPTY_TEXT}</span>
                     ) : (
                       paramRows.map(([key, value]) => (
                         <span key={key}>
@@ -124,27 +125,27 @@ export function HyperoptRuns() {
                         </span>
                       ))
                     )}
-                    <em>spaces: {run.spaces.length > 0 ? run.spaces.join(", ") : "none"}</em>
+                    <em>spaces：{run.spaces.length > 0 ? run.spaces.join(", ") : EMPTY_TEXT}</em>
                     <em>loss: {formatNumber(run.bestLoss)}</em>
                     <em>score: {formatNumber(run.score)}</em>
                   </td>
                   <td className="artifact-cell">
-                    <span>manifest: {run.manifestPath ?? artifact?.manifestPath ?? "none"}</span>
-                    <span>result: {run.resultPath ?? artifact?.resultPath ?? "none"}</span>
-                    <span>loss fn: {artifact?.hyperoptLoss ?? "none"}</span>
-                    <span>epochs: {artifact?.epochs ?? "none"}</span>
+                    <span>manifest：{run.manifestPath ?? artifact?.manifestPath ?? EMPTY_TEXT}</span>
+                    <span>result：{run.resultPath ?? artifact?.resultPath ?? EMPTY_TEXT}</span>
+                    <span>loss fn：{artifact?.hyperoptLoss ?? EMPTY_TEXT}</span>
+                    <span>epochs：{artifact?.epochs ?? EMPTY_TEXT}</span>
                   </td>
                   <td className="comparison-cell">
                     {comparison?.metrics.length ? (
                       comparison.metrics.map((metric) => (
                         <span key={metric.label}>
                           <strong>{metric.label}</strong>
-                          {metricValue(metric.before, metric.suffix)} to {metricValue(metric.after, metric.suffix)}
+                          {metricValue(metric.before, metric.suffix)} 至 {metricValue(metric.after, metric.suffix)}
                           <em>{metricDelta(metric)}</em>
                         </span>
                       ))
                     ) : (
-                      <span>none</span>
+                      <span>{EMPTY_TEXT}</span>
                     )}
                   </td>
                   <td className="reason-cell">
@@ -155,7 +156,7 @@ export function HyperoptRuns() {
                         </div>
                       ))
                     ) : (
-                      "none"
+                      EMPTY_TEXT
                     )}
                   </td>
                   <td className="reason-cell">{reason}</td>
@@ -165,7 +166,7 @@ export function HyperoptRuns() {
           </tbody>
         </table>
       </div>
-      {data.hyperoptRuns.length === 0 ? <div className="empty-state">No Hyperopt runs found.</div> : null}
+      {data.hyperoptRuns.length === 0 ? <div className="empty-state">暂无 Hyperopt 参数优化批次。</div> : null}
     </section>
   );
 }

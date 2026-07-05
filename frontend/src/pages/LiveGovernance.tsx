@@ -6,13 +6,14 @@ import type {
 } from "../api/types";
 import { useMvpData } from "../api/useMvpData";
 import { reasonText, statusClassName, summarizeText } from "./backtestDisplay";
+import { EMPTY_TEXT, displayBoolean, displayDataOrigin, displayLoadState, displayStatus, displayValue } from "./uiCopy";
 
 function formatValue(value: number | string | null | undefined): string {
-  return value === null || value === undefined || value === "" ? "none" : String(value);
+  return displayValue(value);
 }
 
 function boolValue(value: boolean): string {
-  return value ? "yes" : "no";
+  return displayBoolean(value);
 }
 
 function phase6StatusClassName(status: string): string {
@@ -30,7 +31,7 @@ function phase6StatusClassName(status: string): string {
 }
 
 function statusPill(status: string) {
-  return <span className={`run-status ${phase6StatusClassName(status)}`}>{status}</span>;
+  return <span className={`run-status ${phase6StatusClassName(status)}`}>{displayStatus(status)}</span>;
 }
 
 function countByStatus<T>(items: T[], getStatus: (item: T) => string): Record<string, number> {
@@ -46,7 +47,7 @@ function profileReason(profile: LiveCandidateProfileSummary): string {
 }
 
 function deploymentReason(deployment: LiveCandidateDeploymentRecordSummary): string {
-  return deployment.blockers[0] ?? "none";
+  return deployment.blockers[0] ?? EMPTY_TEXT;
 }
 
 function monitoringReason(snapshot: LiveCandidateMonitoringSnapshotSummary): string {
@@ -55,7 +56,7 @@ function monitoringReason(snapshot: LiveCandidateMonitoringSnapshotSummary): str
     snapshot.unavailableReason ??
     snapshot.staleReason ??
     snapshot.warnings[0] ??
-    "none"
+    EMPTY_TEXT
   );
 }
 
@@ -65,12 +66,12 @@ function CandidateTable({ profiles }: { profiles: LiveCandidateProfileSummary[] 
       <table>
         <thead>
           <tr>
-            <th>Candidate</th>
-            <th>Status</th>
-            <th>Scope</th>
-            <th>Evidence</th>
-            <th>Risk Checks</th>
-            <th>Reason</th>
+            <th>候选</th>
+            <th>状态</th>
+            <th>范围</th>
+            <th>证据</th>
+            <th>风险检查</th>
+            <th>原因</th>
           </tr>
         </thead>
         <tbody>
@@ -83,7 +84,7 @@ function CandidateTable({ profiles }: { profiles: LiveCandidateProfileSummary[] 
               <td>
                 {statusPill(profile.status)}
                 <span className="secondary-cell">
-                  human review: {boolValue(profile.canEnterHumanApproval)}
+                  人工复核：{boolValue(profile.canEnterHumanApproval)}
                 </span>
               </td>
               <td className="artifact-cell">
@@ -95,7 +96,7 @@ function CandidateTable({ profiles }: { profiles: LiveCandidateProfileSummary[] 
                 {profile.evidenceRefs.length ? (
                   profile.evidenceRefs.map((ref) => <span key={`${profile.id}:${ref}`}>{ref}</span>)
                 ) : (
-                  <span>none</span>
+                  <span>{EMPTY_TEXT}</span>
                 )}
               </td>
               <td className="comparison-cell">
@@ -108,7 +109,7 @@ function CandidateTable({ profiles }: { profiles: LiveCandidateProfileSummary[] 
                     </span>
                   ))
                 ) : (
-                  <span>none</span>
+                  <span>{EMPTY_TEXT}</span>
                 )}
               </td>
               <td className="reason-cell">{summarizeText(profileReason(profile))}</td>
@@ -116,7 +117,7 @@ function CandidateTable({ profiles }: { profiles: LiveCandidateProfileSummary[] 
           ))}
         </tbody>
       </table>
-      {profiles.length === 0 ? <div className="empty-state">No live-candidate profiles found.</div> : null}
+      {profiles.length === 0 ? <div className="empty-state">暂无实盘候选 profile。</div> : null}
     </div>
   );
 }
@@ -125,7 +126,7 @@ function ApprovalRecords({ approvals }: { approvals: LiveCandidateApprovalRecord
   return (
     <section className="detail-section">
       <div className="section-header">
-        <h2>Approval Records</h2>
+        <h2>审批记录</h2>
         <span>{approvals.length}</span>
       </div>
       {approvals.length ? (
@@ -142,21 +143,21 @@ function ApprovalRecords({ approvals }: { approvals: LiveCandidateApprovalRecord
                   <dd>{approval.profileName}</dd>
                 </div>
                 <div>
-                  <dt>Preflight</dt>
-                  <dd>{approval.preflightStatus}</dd>
+                  <dt>预检</dt>
+                  <dd>{displayStatus(approval.preflightStatus)}</dd>
                 </div>
                 <div>
-                  <dt>Approvals</dt>
+                  <dt>审批数</dt>
                   <dd>
                     {approval.completedApprovals} / {approval.requiredApprovals}
                   </dd>
                 </div>
                 <div>
-                  <dt>Next record</dt>
-                  <dd>{approval.canCreateDeploymentRecord ? "deployment-record allowed" : "blocked"}</dd>
+                  <dt>下一记录</dt>
+                  <dd>{approval.canCreateDeploymentRecord ? "允许创建 deployment record" : "已阻塞"}</dd>
                 </div>
                 <div>
-                  <dt>Risk summary</dt>
+                  <dt>风险摘要</dt>
                   <dd>{formatValue(approval.riskSummaryRef)}</dd>
                 </div>
               </dl>
@@ -173,7 +174,7 @@ function ApprovalRecords({ approvals }: { approvals: LiveCandidateApprovalRecord
                   ))}
                 </div>
               ) : (
-                <p className="phase6-muted">No manual approval decisions are recorded.</p>
+                <p className="phase6-muted">暂无人工审批决策记录。</p>
               )}
               {approval.blockers.length ? (
                 <p className="reason-line warning">{summarizeText(approval.blockers[0])}</p>
@@ -182,7 +183,7 @@ function ApprovalRecords({ approvals }: { approvals: LiveCandidateApprovalRecord
           ))}
         </ol>
       ) : (
-        <div className="empty-state">No approval records found.</div>
+        <div className="empty-state">暂无审批记录。</div>
       )}
     </section>
   );
@@ -192,21 +193,21 @@ function DeploymentRecords({ deployments }: { deployments: LiveCandidateDeployme
   return (
     <section className="detail-section">
       <div className="section-header">
-        <h2>Deployment Records</h2>
-        <span>read-only</span>
+        <h2>部署治理记录</h2>
+        <span>只读</span>
       </div>
       {deployments.length ? (
         <div className="table-shell">
           <table>
             <thead>
               <tr>
-                <th>Record</th>
-                <th>Status</th>
-                <th>Environment</th>
-                <th>Approval</th>
+                <th>记录</th>
+                <th>状态</th>
+                <th>环境</th>
+                <th>审批</th>
                 <th>Rollback Plan</th>
-                <th>Manual Result</th>
-                <th>Reason</th>
+                <th>人工结果</th>
+                <th>原因</th>
               </tr>
             </thead>
             <tbody>
@@ -223,8 +224,8 @@ function DeploymentRecords({ deployments }: { deployments: LiveCandidateDeployme
                     <span>{deployment.plannedBy}</span>
                   </td>
                   <td className="artifact-cell">
-                    <span>{deployment.approvalStatus}</span>
-                    <span>{deployment.preflightStatus}</span>
+                    <span>{displayStatus(deployment.approvalStatus)}</span>
+                    <span>{displayStatus(deployment.preflightStatus)}</span>
                   </td>
                   <td className="comparison-cell">
                     {deployment.rollbackPlan ? (
@@ -243,7 +244,7 @@ function DeploymentRecords({ deployments }: { deployments: LiveCandidateDeployme
                         ))}
                       </>
                     ) : (
-                      <span>unavailable</span>
+                      <span>不可用</span>
                     )}
                   </td>
                   <td className="artifact-cell">
@@ -257,7 +258,7 @@ function DeploymentRecords({ deployments }: { deployments: LiveCandidateDeployme
           </table>
         </div>
       ) : (
-        <div className="empty-state">No deployment records found.</div>
+        <div className="empty-state">暂无部署治理记录。</div>
       )}
     </section>
   );
@@ -267,7 +268,7 @@ function MonitoringSnapshots({ snapshots }: { snapshots: LiveCandidateMonitoring
   return (
     <section className="detail-section">
       <div className="section-header">
-        <h2>Monitoring Summary</h2>
+        <h2>监控摘要</h2>
         <span>{snapshots.length}</span>
       </div>
       {snapshots.length ? (
@@ -281,22 +282,22 @@ function MonitoringSnapshots({ snapshots }: { snapshots: LiveCandidateMonitoring
               </div>
               <dl className="compact-detail-list">
                 <div>
-                  <dt>Source</dt>
+                  <dt>来源</dt>
                   <dd>
                     {snapshot.source.source}: {snapshot.source.ref}
                   </dd>
                 </div>
                 <div>
-                  <dt>Deployment</dt>
-                  <dd>{formatValue(snapshot.deploymentStatus)}</dd>
+                  <dt>部署状态</dt>
+                  <dd>{snapshot.deploymentStatus ? displayStatus(snapshot.deploymentStatus) : EMPTY_TEXT}</dd>
                 </div>
                 <div>
-                  <dt>Approval</dt>
-                  <dd>{formatValue(snapshot.approvalStatus)}</dd>
+                  <dt>审批状态</dt>
+                  <dd>{snapshot.approvalStatus ? displayStatus(snapshot.approvalStatus) : EMPTY_TEXT}</dd>
                 </div>
                 <div>
-                  <dt>Preflight</dt>
-                  <dd>{formatValue(snapshot.preflightStatus)}</dd>
+                  <dt>预检状态</dt>
+                  <dd>{snapshot.preflightStatus ? displayStatus(snapshot.preflightStatus) : EMPTY_TEXT}</dd>
                 </div>
               </dl>
               <p>{summarizeText(monitoringReason(snapshot))}</p>
@@ -316,7 +317,7 @@ function MonitoringSnapshots({ snapshots }: { snapshots: LiveCandidateMonitoring
           ))}
         </ol>
       ) : (
-        <div className="empty-state">No monitoring snapshots found.</div>
+        <div className="empty-state">暂无监控快照。</div>
       )}
     </section>
   );
@@ -336,51 +337,51 @@ export function LiveGovernance() {
   return (
     <section className="page">
       <header className="page-header">
-        <h1>Live Governance</h1>
-        <span className="status-pill">{isLoading ? "Loading" : source}</span>
+        <h1>实盘候选治理</h1>
+        <span className="status-pill">{displayLoadState(isLoading, source)}</span>
       </header>
-      {error ? <div className="notice">Using fallback data: {error}</div> : null}
+      {error ? <div className="notice">当前使用 fallback 数据：{error}</div> : null}
       {!isLoading && source === "fallback" && !error ? (
-        <div className="notice">Backend API unavailable; showing controlled fallback Phase 6 governance data.</div>
+        <div className="notice">Backend API 不可用，当前显示受控 fallback Phase 6 治理数据。</div>
       ) : null}
-      <section className="phase6-summary" aria-label="Phase 6 governance summary">
+      <section className="phase6-summary" aria-label="Phase 6 治理摘要">
         <article className="overview-panel">
-          <h2>Source</h2>
+          <h2>来源</h2>
           <p>{formatValue(governance.sourceRef)}</p>
-          <span className="phase6-muted">{governance.readOnly ? "read-only" : "unknown mode"}</span>
+          <span className="phase6-muted">{governance.readOnly ? "只读" : "未知模式"}</span>
         </article>
         <article className="overview-panel">
-          <h2>Candidates</h2>
+          <h2>候选</h2>
           <div className="status-counts">
             {Object.entries(profileStatuses).map(([status, count]) => (
               <span className={`run-status ${phase6StatusClassName(status)}`} key={status}>
-                {status}: {count}
+                {displayStatus(status)}：{count}
               </span>
             ))}
-            {Object.keys(profileStatuses).length === 0 ? <span>No candidates</span> : null}
+            {Object.keys(profileStatuses).length === 0 ? <span>暂无候选</span> : null}
           </div>
         </article>
         <article className="overview-panel">
-          <h2>Deployment Records</h2>
+          <h2>部署治理记录</h2>
           <div className="status-counts">
             {Object.entries(deploymentStatuses).map(([status, count]) => (
               <span className={`run-status ${phase6StatusClassName(status)}`} key={status}>
-                {status}: {count}
+                {displayStatus(status)}：{count}
               </span>
             ))}
-            {Object.keys(deploymentStatuses).length === 0 ? <span>No records</span> : null}
+            {Object.keys(deploymentStatuses).length === 0 ? <span>暂无记录</span> : null}
           </div>
         </article>
         <article className="overview-panel">
-          <h2>Blocked / Alerts</h2>
+          <h2>阻塞 / 告警</h2>
           <p>
-            {blockedProfiles.length} blocked candidate(s), {alertCount} alert summary item(s).
+            {blockedProfiles.length} 个候选已阻塞，{alertCount} 条告警摘要。
           </p>
         </article>
       </section>
       <section className="detail-section">
         <div className="section-header">
-          <h2>Candidate Profiles</h2>
+          <h2>候选 Profile</h2>
           <span>{governance.profiles.length}</span>
         </div>
         <CandidateTable profiles={governance.profiles} />
@@ -390,25 +391,25 @@ export function LiveGovernance() {
       <MonitoringSnapshots snapshots={governance.monitoringSnapshots} />
       <section className="detail-section">
         <div className="section-header">
-          <h2>Safety State</h2>
-          <span>governance</span>
+          <h2>安全状态</h2>
+          <span>治理</span>
         </div>
         <dl className="detail-list">
           <div>
-            <dt>Boundary</dt>
+            <dt>边界</dt>
             <dd>{governance.safetyBoundary}</dd>
           </div>
           <div>
-            <dt>Execution controls</dt>
-            <dd>unavailable</dd>
+            <dt>执行控制</dt>
+            <dd>不可用</dd>
           </div>
           <div>
-            <dt>Credential values</dt>
-            <dd>not rendered</dd>
+            <dt>密钥值</dt>
+            <dd>不渲染</dd>
           </div>
           <div>
-            <dt>Data source</dt>
-            <dd>{source === "fallback" ? "controlled fixture" : "backend API"}</dd>
+            <dt>数据来源</dt>
+            <dd>{displayDataOrigin(source)}</dd>
           </div>
         </dl>
       </section>

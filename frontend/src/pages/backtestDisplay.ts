@@ -1,4 +1,5 @@
 import type { BacktestMetricSummary, BacktestRunSummary, BacktestTaskSummary } from "../api/types";
+import { EMPTY_TEXT } from "./uiCopy";
 
 type MatrixDisplayStatus = "SUCCESS" | "FAILED" | "BLOCKED" | "PENDING" | "EMPTY";
 
@@ -42,32 +43,32 @@ export function statusClassName(status: string): string {
 }
 
 export function formatNumber(value: number | null, suffix = ""): string {
-  return value === null ? "none" : `${value.toFixed(2)}${suffix}`;
+  return value === null ? EMPTY_TEXT : `${value.toFixed(2)}${suffix}`;
 }
 
 export function formatInteger(value: number | null): string {
-  return value === null ? "none" : String(value);
+  return value === null ? EMPTY_TEXT : String(value);
 }
 
 export function summarizeText(value: string | null | undefined): string {
   if (!value?.trim()) {
-    return "none";
+    return EMPTY_TEXT;
   }
   const normalized = value.trim().replace(/\s+/g, " ");
   return normalized.length > 180 ? `${normalized.slice(0, 177)}...` : normalized;
 }
 
 export function reasonText(blockedReason: string | null, failedReason: string | null, error?: string | null): string {
-  return blockedReason ?? failedReason ?? error ?? "none";
+  return blockedReason ?? failedReason ?? error ?? EMPTY_TEXT;
 }
 
 export function metricRows(metrics: BacktestMetricSummary): Array<[string, string]> {
   return [
-    ["Profit", formatNumber(metrics.profitPct, "%")],
-    ["Drawdown", formatNumber(metrics.maxDrawdownPct, "%")],
-    ["Win rate", formatNumber(metrics.winRate === null ? null : metrics.winRate * 100, "%")],
-    ["Trades", formatInteger(metrics.totalTrades)],
-    ["Timerange", metrics.timerange ?? "none"],
+    ["收益", formatNumber(metrics.profitPct, "%")],
+    ["回撤", formatNumber(metrics.maxDrawdownPct, "%")],
+    ["胜率", formatNumber(metrics.winRate === null ? null : metrics.winRate * 100, "%")],
+    ["交易数", formatInteger(metrics.totalTrades)],
+    ["时间范围", metrics.timerange ?? EMPTY_TEXT],
     ["Sharpe", formatNumber(metrics.sharpe)],
     ["Sortino", formatNumber(metrics.sortino)],
     ["Calmar", formatNumber(metrics.calmar)],
@@ -95,7 +96,7 @@ export function buildBacktestMatrixSummary(
     strategies.add(row.strategyName);
     profiles.add(row.profileName);
 
-    if (row.reason !== "none" && (row.status === "FAILED" || row.status === "BLOCKED")) {
+    if (row.reason !== EMPTY_TEXT && (row.status === "FAILED" || row.status === "BLOCKED")) {
       const key = `${row.status}:${row.reason}`;
       const existing = reasonCounts.get(key);
       reasonCounts.set(key, {
@@ -118,14 +119,14 @@ export function buildBacktestMatrixSummary(
     profileCount: profiles.size,
     statusCounts,
     metricRanges: [
-      metricRange("Profit", rows.map((row) => row.metrics.profitPct), "%"),
-      metricRange("Drawdown", rows.map((row) => row.metrics.maxDrawdownPct), "%"),
+      metricRange("收益", rows.map((row) => row.metrics.profitPct), "%"),
+      metricRange("回撤", rows.map((row) => row.metrics.maxDrawdownPct), "%"),
       metricRange(
-        "Win rate",
+        "胜率",
         rows.map((row) => (row.metrics.winRate === null ? null : row.metrics.winRate * 100)),
         "%",
       ),
-      metricRange("Trades", rows.map((row) => row.metrics.totalTrades), ""),
+      metricRange("交易数", rows.map((row) => row.metrics.totalTrades), ""),
     ],
     reasons: Array.from(reasonCounts.values()).sort((left, right) => right.count - left.count),
   };

@@ -10,9 +10,10 @@ import type {
 } from "../api/types";
 import { useMvpData } from "../api/useMvpData";
 import { summarizeText } from "./backtestDisplay";
+import { EMPTY_TEXT, displayBoolean, displayLoadState, displayStatus, displayValue } from "./uiCopy";
 
 function formatValue(value: string | number | boolean | null | undefined): string {
-  return value === null || value === undefined || value === "" ? "none" : String(value);
+  return displayValue(value);
 }
 
 function statusClassName(status: string): string {
@@ -30,15 +31,15 @@ function statusClassName(status: string): string {
 }
 
 function statusPill(status: string) {
-  return <span className={`run-status ${statusClassName(status)}`}>{status}</span>;
+  return <span className={`run-status ${statusClassName(status)}`}>{displayStatus(status)}</span>;
 }
 
 function firstReason(...values: Array<string | null | undefined>): string {
-  return values.find((value) => value?.trim()) ?? "none";
+  return values.find((value) => value?.trim()) ?? EMPTY_TEXT;
 }
 
 function reasonSummary(values: string[]): string {
-  return values.length > 0 ? summarizeText(values[0]) : "none";
+  return values.length > 0 ? summarizeText(values[0]) : EMPTY_TEXT;
 }
 
 function RuntimeStatusCard({ title, status }: { title: string; status: RuntimeStatusSummary }) {
@@ -65,34 +66,34 @@ function RuntimeContractPanel({ contract }: { contract: RuntimeReadOnlyContractS
         {statusPill(contract.status)}
       </div>
       <div className="operator-status-grid">
-        <RuntimeStatusCard title="System" status={contract.systemStatus} />
-        <RuntimeStatusCard title="Readiness" status={contract.runtimeReadiness} />
+        <RuntimeStatusCard title="系统" status={contract.systemStatus} />
+        <RuntimeStatusCard title="运行就绪" status={contract.runtimeReadiness} />
         <RuntimeStatusCard title="Smoke" status={contract.smokeStatus} />
         <article className="overview-panel operator-status-card">
           <div className="operator-card-heading">
             <h2>Fallback</h2>
             {statusPill(contract.fallbackStatus.status)}
           </div>
-          <p>{contract.fallbackStatus.active ? "Controlled fallback is active." : "Backend evidence is active."}</p>
-          <span className="phase6-muted">{contract.fallbackStatus.sources.join(", ") || "none"}</span>
+          <p>{contract.fallbackStatus.active ? "受控 fallback 已启用。" : "Backend 证据已启用。"}</p>
+          <span className="phase6-muted">{contract.fallbackStatus.sources.join(", ") || EMPTY_TEXT}</span>
           <span className="reason-line warning">{summarizeText(contract.fallbackStatus.reason)}</span>
         </article>
       </div>
       <dl className="detail-list operator-boundary-list">
         <div>
-          <dt>Generated</dt>
+          <dt>生成时间</dt>
           <dd>{formatValue(contract.generatedAt)}</dd>
         </div>
         <div>
-          <dt>Blocked</dt>
+          <dt>阻塞原因</dt>
           <dd>{reasonSummary(contract.blockedReasons)}</dd>
         </div>
         <div>
-          <dt>Unavailable</dt>
+          <dt>不可用原因</dt>
           <dd>{reasonSummary(contract.unavailableReasons)}</dd>
         </div>
         <div>
-          <dt>Safety boundary</dt>
+          <dt>安全边界</dt>
           <dd>{contract.safety.boundary}</dd>
         </div>
       </dl>
@@ -104,19 +105,19 @@ function DiagnosticTable({ checks }: { checks: OperatorDiagnosticCheck[] }) {
   return (
     <section className="detail-section">
       <div className="section-header">
-        <h2>Diagnostic Checks</h2>
+        <h2>诊断检查</h2>
         <span>{checks.length}</span>
       </div>
       <div className="table-shell">
         <table>
           <thead>
             <tr>
-              <th>Check</th>
-              <th>Status</th>
-              <th>Area</th>
-              <th>Source</th>
-              <th>Evidence</th>
-              <th>Reason</th>
+              <th>检查项</th>
+              <th>状态</th>
+              <th>区域</th>
+              <th>来源</th>
+              <th>证据</th>
+              <th>原因</th>
             </tr>
           </thead>
           <tbody>
@@ -124,14 +125,14 @@ function DiagnosticTable({ checks }: { checks: OperatorDiagnosticCheck[] }) {
               <tr key={`${check.area}:${check.name}`}>
                 <td>
                   <strong>{check.name}</strong>
-                  <span className="secondary-cell">{check.required ? "required" : "optional"}</span>
+                  <span className="secondary-cell">{check.required ? "必需" : "可选"}</span>
                 </td>
                 <td>{statusPill(check.status)}</td>
                 <td>{check.area}</td>
                 <td>{check.source}</td>
                 <td className="artifact-cell">
                   <span>{formatValue(check.path)}</span>
-                  <span>{check.exists === null ? "exists: unknown" : `exists: ${check.exists}`}</span>
+                  <span>{check.exists === null ? "存在状态：未知" : `存在：${displayBoolean(check.exists)}`}</span>
                 </td>
                 <td className="reason-cell">
                   {summarizeText(firstReason(check.blockedReason, check.unavailableReason, check.summary))}
@@ -140,7 +141,7 @@ function DiagnosticTable({ checks }: { checks: OperatorDiagnosticCheck[] }) {
             ))}
           </tbody>
         </table>
-        {checks.length === 0 ? <div className="empty-state">No operator checks found.</div> : null}
+        {checks.length === 0 ? <div className="empty-state">暂无运维检查项。</div> : null}
       </div>
     </section>
   );
@@ -168,12 +169,12 @@ function ArtifactTable({
         <table>
           <thead>
             <tr>
-              <th>Name</th>
-              <th>Status</th>
-              <th>Group</th>
-              <th>Source</th>
-              <th>Path</th>
-              <th>Exists</th>
+              <th>名称</th>
+              <th>状态</th>
+              <th>分组</th>
+              <th>来源</th>
+              <th>路径</th>
+              <th>存在</th>
             </tr>
           </thead>
           <tbody>
@@ -186,12 +187,12 @@ function ArtifactTable({
                 <td>{artifact.group}</td>
                 <td>{artifact.source}</td>
                 <td className="path-cell">{artifact.path}</td>
-                <td>{artifact.exists ? "yes" : "no"}</td>
+                <td>{displayBoolean(artifact.exists)}</td>
               </tr>
             ))}
           </tbody>
         </table>
-        {rows.length === 0 ? <div className="empty-state">No artifact links found.</div> : null}
+        {rows.length === 0 ? <div className="empty-state">暂无 artifact 链接。</div> : null}
       </div>
     </section>
   );
@@ -202,7 +203,7 @@ function EnvPresencePanel({ envPresence }: { envPresence: OperatorEnvPresence[] 
     <section className="detail-section">
       <div className="section-header">
         <h2>ENV Presence</h2>
-        <span>values hidden</span>
+        <span>值已隐藏</span>
       </div>
       <div className="operator-env-grid">
         {envPresence.map((item) => (
@@ -213,21 +214,21 @@ function EnvPresencePanel({ envPresence }: { envPresence: OperatorEnvPresence[] 
             </div>
             <dl className="compact-detail-list">
               <div>
-                <dt>Required</dt>
-                <dd>{item.required ? "yes" : "no"}</dd>
+                <dt>必需</dt>
+                <dd>{displayBoolean(item.required)}</dd>
               </div>
               <div>
-                <dt>Source</dt>
+                <dt>来源</dt>
                 <dd>{item.source}</dd>
               </div>
               <div>
-                <dt>Value</dt>
-                <dd>{item.valueRendered ? "invalid: rendered" : "hidden"}</dd>
+                <dt>值</dt>
+                <dd>{item.valueRendered ? "无效：已渲染" : "已隐藏"}</dd>
               </div>
             </dl>
           </article>
         ))}
-        {envPresence.length === 0 ? <div className="empty-state">No ENV presence checks found.</div> : null}
+        {envPresence.length === 0 ? <div className="empty-state">暂无 ENV presence 检查。</div> : null}
       </div>
     </section>
   );
@@ -237,7 +238,7 @@ function AuditEvents({ events }: { events: OperatorAuditEventSummary[] }) {
   return (
     <section className="detail-section">
       <div className="section-header">
-        <h2>Governance Events</h2>
+        <h2>治理事件</h2>
         <span>{events.length}</span>
       </div>
       <ol className="event-list">
@@ -256,11 +257,11 @@ function AuditEvents({ events }: { events: OperatorAuditEventSummary[] }) {
                 <dd>{event.actor}</dd>
               </div>
               <div>
-                <dt>Source</dt>
+                <dt>来源</dt>
                 <dd>{event.sourceName}</dd>
               </div>
               <div>
-                <dt>Reason</dt>
+                <dt>原因</dt>
                 <dd>{summarizeText(event.reason)}</dd>
               </div>
               <div>
@@ -268,14 +269,14 @@ function AuditEvents({ events }: { events: OperatorAuditEventSummary[] }) {
                 <dd>
                   {event.artifactLinks.length
                     ? event.artifactLinks.map((artifact) => artifact.path).join(", ")
-                    : "none"}
+                    : EMPTY_TEXT}
                 </dd>
               </div>
             </dl>
           </li>
         ))}
       </ol>
-      {events.length === 0 ? <div className="empty-state">No governance events found.</div> : null}
+      {events.length === 0 ? <div className="empty-state">暂无治理事件。</div> : null}
     </section>
   );
 }
@@ -288,19 +289,19 @@ function SafetyPanel({
   runtimeContract: RuntimeReadOnlyContractSummary;
 }) {
   const safetyRows = [
-    ["Dashboard mode", operatorStatus.safety.readOnly && runtimeContract.safety.readOnly ? "read-only" : "unknown"],
-    ["ENV values", operatorStatus.safety.reportsEnvValues ? "invalid: rendered" : "hidden"],
-    ["Live trading", runtimeContract.safety.allowLiveTrading ? "enabled" : "disabled"],
-    ["Exchange connection", runtimeContract.safety.allowExchangeConnection ? "enabled" : "disabled"],
-    ["Deploy control", runtimeContract.safety.allowDeployControl ? "enabled" : "disabled"],
-    ["Start / stop bot", runtimeContract.safety.canStartStopBot ? "enabled" : "disabled"],
+    ["Dashboard 模式", operatorStatus.safety.readOnly && runtimeContract.safety.readOnly ? "只读" : "未知"],
+    ["ENV 值", operatorStatus.safety.reportsEnvValues ? "无效：已渲染" : "已隐藏"],
+    ["Live trading", runtimeContract.safety.allowLiveTrading ? "已启用" : "已停用"],
+    ["交易所连接", runtimeContract.safety.allowExchangeConnection ? "已启用" : "已停用"],
+    ["部署控制", runtimeContract.safety.allowDeployControl ? "已启用" : "已停用"],
+    ["Start / stop bot", runtimeContract.safety.canStartStopBot ? "已启用" : "已停用"],
   ];
 
   return (
     <section className="detail-section">
       <div className="section-header">
-        <h2>Safety State</h2>
-        <span>read-only</span>
+        <h2>安全状态</h2>
+        <span>只读</span>
       </div>
       <dl className="detail-list">
         {safetyRows.map(([label, value]) => (
@@ -326,45 +327,48 @@ export function OperatorDashboard() {
   return (
     <section className="page">
       <header className="page-header">
-        <h1>Operator Dashboard</h1>
-        <span className="status-pill">{isLoading ? "Loading" : source}</span>
+        <h1>运维面板（Operator Dashboard）</h1>
+        <span className="status-pill">{displayLoadState(isLoading, source)}</span>
       </header>
-      {error ? <div className="notice">Using fallback data: {error}</div> : null}
+      {error ? <div className="notice">当前使用 fallback 数据：{error}</div> : null}
       {!isLoading && source === "fallback" && !error ? (
-        <div className="notice">Backend API unavailable; showing controlled Phase 7 operator fallback data.</div>
+        <div className="notice">
+          Backend API unavailable; showing controlled Phase 7 operator fallback data.（Backend API 不可用，当前显示受控
+          Phase 7 Operator Dashboard fallback 数据。）
+        </div>
       ) : null}
-      <section className="operator-summary-grid" aria-label="Operator dashboard summary">
+      <section className="operator-summary-grid" aria-label="Operator Dashboard 摘要">
         <article className="metric">
           <span>Runtime Contract</span>
-          <strong>{runtimeContract.status}</strong>
+          <strong>{displayStatus(runtimeContract.status)}</strong>
           {statusPill(runtimeContract.runtimeReadiness.status)}
         </article>
         <article className="metric">
-          <span>Operator Status</span>
-          <strong>{operatorStatus.status}</strong>
+          <span>Operator 状态</span>
+          <strong>{displayStatus(operatorStatus.status)}</strong>
           <span className="phase6-muted">
-            {blockedCount} blocked, {unavailableCount} unavailable
+            {blockedCount} 个阻塞，{unavailableCount} 个不可用
           </span>
         </article>
         <article className="metric">
-          <span>Smoke Status</span>
-          <strong>{runtimeContract.smokeStatus.status}</strong>
-          <span className="phase6-muted">{runtimeContract.artifactLinks.length} artifact link(s)</span>
+          <span>Smoke 状态</span>
+          <strong>{displayStatus(runtimeContract.smokeStatus.status)}</strong>
+          <span className="phase6-muted">{runtimeContract.artifactLinks.length} 个 artifact 链接</span>
         </article>
         <article className="metric">
-          <span>Audit Events</span>
+          <span>审计事件</span>
           <strong>{dashboard.auditEvents.length}</strong>
-          <span className="phase6-muted">{auditBlockedCount} blocked event(s)</span>
+          <span className="phase6-muted">{auditBlockedCount} 个阻塞事件</span>
         </article>
       </section>
       <section className="overview-grid">
         <article className="overview-panel">
-          <h2>Source</h2>
+          <h2>来源</h2>
           <p>{formatValue(dashboard.sourceRef)}</p>
-          <span className="phase6-muted">{dashboard.readOnly ? "read-only evidence" : "unknown mode"}</span>
+          <span className="phase6-muted">{dashboard.readOnly ? "只读证据" : "未知模式"}</span>
         </article>
         <article className="overview-panel">
-          <h2>Boundary</h2>
+          <h2>边界</h2>
           <p>{dashboard.safetyBoundary}</p>
         </article>
       </section>

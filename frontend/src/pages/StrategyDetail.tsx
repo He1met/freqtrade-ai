@@ -1,6 +1,7 @@
 import { useParams } from "react-router-dom";
 
 import { useMvpData } from "../api/useMvpData";
+import { EMPTY_TEXT, displayLoadState, displayStatus } from "./uiCopy";
 
 function formatDiffLabel(label: string) {
   return label.split("_").join(" ");
@@ -8,11 +9,11 @@ function formatDiffLabel(label: string) {
 
 function formatDiffValue(value: unknown) {
   if (Array.isArray(value)) {
-    return value.length > 0 ? value.map((item) => String(item)).join(", ") : "none";
+    return value.length > 0 ? value.map((item) => String(item)).join(", ") : EMPTY_TEXT;
   }
 
   if (value === null || value === undefined || value === "") {
-    return "none";
+    return EMPTY_TEXT;
   }
 
   if (typeof value === "object") {
@@ -33,9 +34,9 @@ export function StrategyDetail() {
   const currentLineage = versionLineage.find((entry) => entry.id === currentVersionId);
   const currentDiffStatus = currentLineage
     ? currentLineage.hasParent
-      ? "has parent"
-      : "no parent"
-    : "missing";
+      ? "有父版本"
+      : "无父版本"
+    : "缺失";
   const currentDiffEntries = Object.entries(currentLineage?.diffSnapshot ?? {});
   const validationErrors = strategy?.currentVersion?.validationErrors ?? [];
   const failureReasons = data.failureReasons.filter((reason) => {
@@ -50,11 +51,11 @@ export function StrategyDetail() {
     return (
       <section className="page">
         <header className="page-header">
-          <h1>Strategy Detail</h1>
-          <span className="status-pill">{isLoading ? "Loading" : source}</span>
+          <h1>策略详情</h1>
+          <span className="status-pill">{displayLoadState(isLoading, source)}</span>
         </header>
-        {error ? <div className="notice">API data unavailable. Showing fallback data. {error}</div> : null}
-        <div className="empty-state">Strategy not found.</div>
+        {error ? <div className="notice">API 数据不可用，当前显示 fallback 数据。{error}</div> : null}
+        <div className="empty-state">未找到策略。</div>
       </section>
     );
   }
@@ -63,44 +64,44 @@ export function StrategyDetail() {
     <section className="page">
       <header className="page-header">
         <h1>{strategy.name}</h1>
-        <span className="status-pill">{isLoading ? "Loading" : source}</span>
+        <span className="status-pill">{displayLoadState(isLoading, source)}</span>
       </header>
-      {error ? <div className="notice">API data unavailable. Showing fallback data. {error}</div> : null}
+      {error ? <div className="notice">API 数据不可用，当前显示 fallback 数据。{error}</div> : null}
       <dl className="detail-list">
         <div>
           <dt>ID</dt>
           <dd>{strategy.id}</dd>
         </div>
         <div>
-          <dt>Status</dt>
-          <dd>{strategy.status}</dd>
+          <dt>状态</dt>
+          <dd>{displayStatus(strategy.status)}</dd>
         </div>
         <div>
           <dt>Timeframe</dt>
           <dd>{strategy.timeframe}</dd>
         </div>
         <div>
-          <dt>Current Version</dt>
-          <dd>{strategy.currentVersion?.versionNumber ?? "none"}</dd>
+          <dt>当前版本</dt>
+          <dd>{strategy.currentVersion?.versionNumber ?? EMPTY_TEXT}</dd>
         </div>
         <div>
-          <dt>Strategy File</dt>
+          <dt>策略文件</dt>
           <dd>
-            <code>{strategy.currentVersion?.filePath ?? "none"}</code>
+            <code>{strategy.currentVersion?.filePath ?? EMPTY_TEXT}</code>
           </dd>
         </div>
         <div>
-          <dt>Description</dt>
+          <dt>说明</dt>
           <dd>{strategy.description}</dd>
         </div>
         <div>
-          <dt>Tags</dt>
-          <dd>{strategy.tags.join(", ") || "none"}</dd>
+          <dt>标签</dt>
+          <dd>{strategy.tags.join(", ") || EMPTY_TEXT}</dd>
         </div>
       </dl>
       <section className="detail-section">
         <div className="section-header">
-          <h2>Version Lineage</h2>
+          <h2>版本谱系</h2>
           <span>{versionLineage.length}</span>
         </div>
         {versionLineage.length > 0 ? (
@@ -115,43 +116,43 @@ export function StrategyDetail() {
                 key={entry.id}
               >
                 <div className="lineage-heading">
-                  <strong>Version {entry.versionNumber}</strong>
+                  <strong>版本 {entry.versionNumber}</strong>
                   {entry.id === currentVersionId ? (
-                    <span className="status-pill">current</span>
+                    <span className="status-pill">当前</span>
                   ) : null}
                 </div>
                 <dl className="lineage-meta">
                   <div>
-                    <dt>Parent</dt>
-                    <dd>{entry.parentVersionId ?? "none"}</dd>
+                    <dt>父版本</dt>
+                    <dd>{entry.parentVersionId ?? EMPTY_TEXT}</dd>
                   </div>
                   <div>
-                    <dt>Change</dt>
-                    <dd>{entry.changeSummary ?? "No change summary recorded."}</dd>
+                    <dt>变更</dt>
+                    <dd>{entry.changeSummary ?? "暂无变更摘要。"}</dd>
                   </div>
                 </dl>
               </li>
             ))}
           </ol>
         ) : (
-          <div className="empty-state">No version lineage recorded for this strategy.</div>
+          <div className="empty-state">该策略暂无版本谱系记录。</div>
         )}
       </section>
       <section className="detail-section">
         <div className="section-header">
-          <h2>Current Version Diff</h2>
+          <h2>当前版本 Diff</h2>
           <span>{currentDiffStatus}</span>
         </div>
         {currentLineage ? (
           <div className="diff-panel">
             <dl className="lineage-meta">
               <div>
-                <dt>Parent Version</dt>
-                <dd>{currentLineage.parentVersionId ?? "none"}</dd>
+                <dt>父版本</dt>
+                <dd>{currentLineage.parentVersionId ?? EMPTY_TEXT}</dd>
               </div>
               <div>
-                <dt>Summary</dt>
-                <dd>{currentLineage.changeSummary ?? "No diff summary recorded."}</dd>
+                <dt>摘要</dt>
+                <dd>{currentLineage.changeSummary ?? "暂无 Diff 摘要。"}</dd>
               </div>
             </dl>
             {currentDiffEntries.length > 0 ? (
@@ -164,35 +165,35 @@ export function StrategyDetail() {
                 ))}
               </dl>
             ) : (
-              <div className="empty-state">No diff snapshot recorded for this version.</div>
+              <div className="empty-state">该版本暂无 Diff 快照。</div>
             )}
           </div>
         ) : (
-          <div className="empty-state">No diff data recorded for the current version.</div>
+          <div className="empty-state">当前版本暂无 Diff 数据。</div>
         )}
       </section>
       <section className="detail-section">
         <div className="section-header">
-          <h2>Validation Errors</h2>
+          <h2>校验错误</h2>
           <span>{validationErrors.length}</span>
         </div>
         {validationErrors.length > 0 ? (
           <ul className="issue-list">
             {validationErrors.map((error) => (
               <li key={`${error.field ?? "strategy"}-${error.code ?? error.message}`}>
-                <strong>{error.field ?? "strategy"}</strong>
+                <strong>{error.field ?? "策略"}</strong>
                 <span>{error.message}</span>
                 {error.code ? <code>{error.code}</code> : null}
               </li>
             ))}
           </ul>
         ) : (
-          <div className="empty-state">No validation errors recorded for this version.</div>
+          <div className="empty-state">该版本暂无校验错误。</div>
         )}
       </section>
       <section className="detail-section">
         <div className="section-header">
-          <h2>Failure Reasons</h2>
+          <h2>失败原因</h2>
           <span>{failureReasons.length}</span>
         </div>
         {failureReasons.length > 0 ? (
@@ -201,7 +202,7 @@ export function StrategyDetail() {
               <li key={reason.id}>
                 <div className="reason-heading">
                   <strong>{reason.stage}</strong>
-                  <span className={`severity severity-${reason.severity}`}>{reason.severity}</span>
+                  <span className={`severity severity-${reason.severity}`}>{displayStatus(reason.severity)}</span>
                 </div>
                 <span>{reason.message}</span>
                 <code>{reason.reasonType}</code>
@@ -209,7 +210,7 @@ export function StrategyDetail() {
             ))}
           </ul>
         ) : (
-          <div className="empty-state">No failure reasons recorded for this version.</div>
+          <div className="empty-state">该版本暂无失败原因记录。</div>
         )}
       </section>
     </section>
