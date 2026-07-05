@@ -10,6 +10,7 @@ from app.schemas.data_source import (
     phase8_local_test_source,
     unknown_source,
 )
+from app.schemas.strategy_score import StrategyScoreRead
 
 
 BacktestStatus = Literal["pending", "running", "succeeded", "failed", "cancelled", "blocked"]
@@ -216,6 +217,7 @@ class BacktestArtifactIngestResponse(BaseModel):
     run: BacktestRunRead
     task: BacktestTaskRead
     result: Optional[BacktestResultRead] = None
+    score: Optional[StrategyScoreRead] = None
     ingest_status: Literal["succeeded", "failed", "blocked"]
     reason: Optional[str] = None
     manifest_path: Optional[str] = None

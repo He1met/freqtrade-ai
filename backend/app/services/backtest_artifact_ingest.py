@@ -11,6 +11,7 @@ from app.adapters.freqtrade.result_parser import FreqtradeResultParser
 from app.core.config import get_settings
 from app.core.paths import resolve_repo_path
 from app.models.backtest import BacktestResult, BacktestTask
+from app.models.strategy_score import StrategyScore
 from app.repositories import BacktestRepository
 from app.schemas import (
     BacktestArtifactIngestRequest,
@@ -21,8 +22,10 @@ from app.schemas import (
     BacktestRunStatusUpdate,
     BacktestTaskRead,
     BacktestTaskStatusUpdate,
+    StrategyScoreRead,
 )
 from app.schemas.dry_run_status import redact_dry_run_status_payload, redact_secret_text
+from app.services.strategy_scoring import StrategyScoringService
 
 
 class BacktestArtifactIngestService:
@@ -170,6 +173,16 @@ class BacktestArtifactIngestService:
                 strategy_name=strategy_name,
             ),
         )
+        if result is None:
+            raise RuntimeError(f"Backtest result was not saved during artifact ingest: {task.id}")
+        score = StrategyScoringService(self.repository.db).score_backtest_result(result.id)
+        if score is None:
+            return self._record_failed(
+                task,
+                "strategy score could not be generated from backtest result metrics",
+                manifest_path=manifest_path,
+                result_path=result_path,
+            )
         updated_task = self.repository.update_task_status(
             task.id,
             BacktestTaskStatusUpdate(
@@ -179,12 +192,13 @@ class BacktestArtifactIngestService:
             ),
         )
         self._refresh_run_status(task.backtest_run_id)
-        if result is None or updated_task is None:
+        if updated_task is None:
             raise RuntimeError(f"Backtest task disappeared during artifact ingest: {task.id}")
         return self._response(
             updated_task,
             status="succeeded",
             result=result,
+            score=score,
             reason=None,
             manifest_path=manifest_path,
             result_path=result_path,
@@ -339,6 +353,7 @@ class BacktestArtifactIngestService:
             updated_task,
             status=status,
             result=None,
+            score=None,
             reason=f"{prefix}: {safe_reason}",
             manifest_path=manifest_path,
             result_path=result_path,
@@ -371,6 +386,7 @@ class BacktestArtifactIngestService:
         *,
         status: str,
         result: Optional[BacktestResult],
+        score: Optional[StrategyScore],
         reason: Optional[str],
         manifest_path: Optional[Path],
         result_path: Optional[Path],
@@ -382,6 +398,7 @@ class BacktestArtifactIngestService:
             run=BacktestRunRead.model_validate(run),
             task=BacktestTaskRead.model_validate(task),
             result=BacktestResultRead.model_validate(result) if result is not None else None,
+            score=StrategyScoreRead.model_validate(score) if score is not None else None,
             ingest_status=status,  # type: ignore[arg-type]
             reason=reason,
             manifest_path=str(manifest_path) if manifest_path is not None else None,
