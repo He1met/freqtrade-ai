@@ -98,6 +98,10 @@ database rows is a Bug. Database rows that are not shown on the page are a Bug.
 DeepSeek is allowed as the first real provider candidate, but the default policy
 is to avoid real calls unless a specific validation issue requires one.
 
+The single-run entry point for `#277` is documented in
+[phase9_deepseek_single_e2e.md](phase9_deepseek_single_e2e.md). It defaults to
+fail-closed evidence and only sends a real request when explicitly authorized.
+
 Minimum-call rules:
 
 - Use `DEEPSEEK_API_KEY` or an equivalent local secure environment variable.
