@@ -121,6 +121,8 @@ from app.schemas.strategy_failure_reason import (
 )
 from app.schemas.strategy_generation_run import (
     GenerationRunStatus,
+    StrategyGenerationApiResponse,
+    StrategyGenerationRequest,
     StrategyGenerationRunCreate,
     StrategyGenerationRunRead,
     StrategyGenerationRunStatusUpdate,
@@ -230,6 +232,8 @@ __all__ = [
     "StrategyFailureReasonType",
     "StrategyFailureSeverity",
     "StrategyFailureStage",
+    "StrategyGenerationApiResponse",
+    "StrategyGenerationRequest",
     "StrategyGenerationRunCreate",
     "StrategyGenerationRunRead",
     "StrategyGenerationRunStatusUpdate",

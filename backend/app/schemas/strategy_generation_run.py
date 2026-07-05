@@ -1,7 +1,10 @@
 from datetime import datetime
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+from app.schemas.data_source import DataSourceTrace, api_aggregate_source, database_record_source, unknown_source
+from app.schemas.strategy import StrategyRead, StrategyVersionRead
 
 
 GenerationRunStatus = Literal["pending", "running", "succeeded", "failed", "cancelled"]
@@ -40,5 +43,49 @@ class StrategyGenerationRunRead(BaseModel):
     started_at: Optional[datetime]
     completed_at: Optional[datetime]
     created_at: datetime
+    data_source: DataSourceTrace = Field(
+        default_factory=lambda: unknown_source("unvalidated strategy generation run source")
+    )
 
     model_config = {"from_attributes": True}
+
+    @model_validator(mode="after")
+    def attach_database_source(self) -> "StrategyGenerationRunRead":
+        self.data_source = database_record_source(
+            "strategy_generation_run",
+            {"strategy_generation_run_id": self.id},
+            freshness=self.created_at,
+        )
+        return self
+
+
+class StrategyGenerationRequest(BaseModel):
+    prompt_summary: str = Field(min_length=1, max_length=4000)
+    requested_count: int = Field(default=1, ge=1, le=5)
+
+
+class StrategyGenerationApiResponse(BaseModel):
+    run: StrategyGenerationRunRead
+    strategies: list[StrategyRead]
+    strategy_versions: list[StrategyVersionRead]
+    data_source: DataSourceTrace = Field(
+        default_factory=lambda: unknown_source("unvalidated strategy generation API response")
+    )
+
+    @model_validator(mode="after")
+    def attach_api_aggregate_source(self) -> "StrategyGenerationApiResponse":
+        database_ids = {"strategy_generation_run_id": self.run.id}
+        if self.strategies:
+            database_ids["first_strategy_id"] = self.strategies[0].id
+        if self.strategy_versions:
+            database_ids["first_strategy_version_id"] = self.strategy_versions[0].id
+        self.data_source = api_aggregate_source(
+            "strategy_generation_api_response",
+            database_ids,
+            artifact_refs={
+                f"strategy_file_path_{item.id}": item.file_path
+                for item in self.strategy_versions
+            },
+            freshness=self.run.created_at,
+        )
+        return self
