@@ -2,10 +2,11 @@
 
 ## 后续功能入口
 
-Phase 1 到 Phase 7 已完成验收。后续任何新增功能必须先完成
+Phase 1 到 Phase 7 已完成验收。Phase 8 已通过单独 Epic / Issue 队列打开，
+但后续任何新增功能仍必须先完成
 [feature_intake.md](feature_intake.md)，再按
 [acceptance_checklist.md](acceptance_checklist.md) 定义验证命令、人工检查和安全边界。
-Feature Intake 不会自动启动 Phase 8，也不授权 live trading、真实下单、真实交易所连接、
+Feature Intake 不会自动启动 Phase 9，也不授权 live trading、真实下单、真实交易所连接、
 真实 K 线下载、生产部署、deployment executor、live bot start / stop / deploy controls、
 队列基础设施实现或 Freqtrade 源码修改。
 
@@ -217,5 +218,82 @@ Phase 7 安全边界：
 - 不提供 start / stop / deploy live 控制。
 - 不实现 deployment executor。
 
-Phase 7 验收不授权 Phase 8。Phase 8 必须通过新的规划 Issue、验收标准和安全审查
-单独启动。
+Phase 7 验收不自动授权 Phase 8。Phase 8 已通过新的 Epic / Issue 队列单独启动，
+详见 [phase8_local_strategy_lab_plan.md](phase8_local_strategy_lab_plan.md)。
+
+## Phase 8: Local Strategy Lab 本地真实运行验证
+
+状态：已创建 Epic 和 Issue 队列，尚未完成验收。详见
+[phase8_local_strategy_lab_plan.md](phase8_local_strategy_lab_plan.md)。
+
+Phase 8 的目标是把项目从 offline fixture / mock 展示升级为页面可操作、API 可调用、
+数据库可对账、文件和 artifact 可追踪的本地策略研发闭环。
+
+Phase 8 包括：
+
+- 页面输入策略想法并触发后端策略生成。
+- 策略、策略版本和生成记录真实落库。
+- 生成后的策略文件写入 approved local runnable directory，并记录文件状态。
+- 页面展示数据库-backed 的策略、版本、生成状态和文件状态。
+- 页面触发本地回测任务。
+- 回测任务、回测结果、artifact 引用和失败 / 阻塞原因真实落库。
+- 策略评分和排行榜基于数据库 `BacktestResult` / `StrategyVersion`。
+- 页面刷新后仍能从 API / 数据库读取核心记录。
+- 页面明确展示 database / API / fixture / fallback / unknown 来源。
+- QA 可以对账页面、API response 和数据库查询。
+- 在主链路跑通后进行本地 dry-run readiness 检查。
+- 仅在 readiness、安全和人工确认满足时，推进本地受控 dry-run 状态快照。
+
+Phase 8 已创建的 Issue 队列：
+
+- [#232](https://github.com/He1met/freqtrade-ai/issues/232)
+  `[EPIC][Phase 8] Local Strategy Lab 本地真实运行验证`
+- [#233](https://github.com/He1met/freqtrade-ai/issues/233)
+  `[Design][Phase 8] Local Strategy Lab 总体设计与验收口径`
+- [#234](https://github.com/He1met/freqtrade-ai/issues/234)
+  `[Backend][Phase 8] API/DB 数据真实性契约与来源标识`
+- [#235](https://github.com/He1met/freqtrade-ai/issues/235)
+  `[Test][Phase 8] 本地测试数据库 reset/seed/dirty-data 能力`
+- [#236](https://github.com/He1met/freqtrade-ai/issues/236)
+  `[Backend][Phase 8] 策略想法提交到生成记录与策略版本落库`
+- [#237](https://github.com/He1met/freqtrade-ai/issues/237)
+  `[Backend][Phase 8] 策略文件写入可运行目录与可运行性验证`
+- [#238](https://github.com/He1met/freqtrade-ai/issues/238)
+  `[Frontend][Phase 8] 页面提交策略想法并展示生成状态`
+- [#239](https://github.com/He1met/freqtrade-ai/issues/239)
+  `[Backend][Phase 8] 页面触发本地回测任务与 fail-closed 前置检查`
+- [#240](https://github.com/He1met/freqtrade-ai/issues/240)
+  `[Backend][Phase 8] 回测 artifact 解析入库与任务/策略版本追踪`
+- [#241](https://github.com/He1met/freqtrade-ai/issues/241)
+  `[Backend][Phase 8] 策略评分与排行榜真实数据库链路`
+- [#242](https://github.com/He1met/freqtrade-ai/issues/242)
+  `[Frontend][Phase 8] 策略/版本/回测/评分真实数据展示`
+- [#243](https://github.com/He1met/freqtrade-ai/issues/243)
+  `[Frontend][Phase 8] 数据来源标识与 fallback/fixture 防冒充`
+- [#244](https://github.com/He1met/freqtrade-ai/issues/244)
+  `[Test][Phase 8] 页面/API/数据库三方对账 E2E 验收`
+- [#245](https://github.com/He1met/freqtrade-ai/issues/245)
+  `[Security][Phase 8] 本地 dry-run readiness 预检与 BLOCKED 展示`
+- [#246](https://github.com/He1met/freqtrade-ai/issues/246)
+  `[DevOps][Phase 8] 本地受控 dry-run 启停边界与状态快照`
+- [#247](https://github.com/He1met/freqtrade-ai/issues/247)
+  `[Review][Phase 8] Local Strategy Lab 阶段验收与安全边界审查`
+
+Phase 8 安全边界：
+
+- 不执行真实下单。
+- 不启动 live trading。
+- 不连接真实交易所。
+- 不下载真实 K 线。
+- 不操作 production / shared / remote / unknown 数据库。
+- 不提交真实 API key、secret、passphrase 或 token。
+- 不把密钥写入代码、配置、数据库、日志、文档、Issue、PR、截图或测试数据。
+- 不修改 Freqtrade 源码。
+- 不实现 Redis、Celery、Kafka、RabbitMQ、worker pool 或生产 queue infrastructure。
+- 不实现 production deployment executor。
+- 不绕过人工确认。
+- 不提供 live bot start / stop / deploy 控制。
+- 不把 fixture、fallback 或 unknown-source 数据伪装成真实数据库成功。
+
+Phase 8 验收不授权 Phase 9、live trading、生产部署或真实下单。后续阶段必须通过新的
+规划 Issue、验收标准和安全审查单独启动。

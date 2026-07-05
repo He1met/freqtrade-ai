@@ -31,6 +31,11 @@ git diff --check
 | Phase 6 实盘候选与部署治理 | `python3 scripts/smoke_phase6.py --offline --tmp-dir /tmp/freqtrade-ai-phase6-smoke` |
 | Phase 7 工程化与只读运行可见性 | `python3 scripts/smoke_phase7.py --offline --tmp-dir /tmp/freqtrade-ai-phase7-smoke` |
 
+Phase 8 尚未有单一 canonical smoke。Phase 8 PR 必须按
+[phase8_local_strategy_lab_plan.md](phase8_local_strategy_lab_plan.md) 和对应 Issue
+验收标准记录 API、UI、数据库、artifact、source marker、fail-closed 和安全边界证据。
+`#244` 负责建立页面/API/数据库三方对账 E2E，`#247` 负责最终阶段验收。
+
 ## PR 验收清单
 
 - [ ] backend pytest：如涉及 backend、schema、repository、service、API 或 smoke，运行
@@ -47,12 +52,16 @@ git diff --check
   response shape 和 read-only / fail-closed 结果。
 - [ ] frontend manual check：如涉及 UI，记录页面路径、关键状态、fallback / mock 来源是否可见，
   以及是否没有展示 live trading、真实交易所连接或生产就绪误导。
+- [ ] DB/UI reconciliation check：如涉及数据库、seed、API DTO 或页面展示，记录数据库查询、
+  API response 和 UI 页面是否一致；不一致必须 `BLOCKED` 或创建缺陷 Issue。
 - [ ] artifact / manifest check：如涉及运行证据，确认 artifact / manifest 存在、字段完整、
   来源可追溯、脱敏生效，并且不会把 fixture 当成真实运行。
 - [ ] fail-closed check：验证缺少前置条件、缺少数据、缺少 ENV、风险超限或命令失败时返回
   `BLOCKED` / `FAILED`，不得伪造成功。
 - [ ] fallback/mock source visibility check：确认 API、前端、文档或 smoke 输出清楚标记
   fixture、fake runner、fallback、mock data 或 local-only 来源。
+- [ ] scope creep check：确认 PR 只覆盖已批准 Issue / Feature Intake 的范围，没有顺带新增阶段、
+  页面、API、数据库写入、交易控制、部署能力或队列基础设施。
 - [ ] docs / link check：如修改 README、roadmap、docs 或 Issue 模板，确认 Markdown 文件存在，
   相对链接有效，Issue template front matter 格式有效。
 
@@ -78,4 +87,4 @@ Docs-only PR 至少在描述中写明：
 - 修改范围仅限文档、Issue 模板或链接；
 - 未运行 backend pytest / compileall / frontend build / smoke 的原因；
 - 已运行的检查，例如 `git diff --check`、Issue template front matter 检查、文档链接检查；
-- 本 PR 不启动 Phase 8、不修改 Freqtrade 源码、不新增交易控制能力。
+- 本 PR 不启动 Phase 9、不修改 Freqtrade 源码、不新增 live trading 或生产交易控制能力。

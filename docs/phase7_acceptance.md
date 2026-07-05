@@ -134,6 +134,9 @@ new issue, explicit approval, and separate acceptance criteria.
 
 ## Next Phase Boundary
 
-Phase 7 is accepted and should pause here. The project must not automatically
-enter Phase 8. Any future phase requires separate planning, new issues,
-updated safety boundaries, and explicit human approval before development.
+Phase 7 is accepted. Phase 8 has now been opened separately through Epic
+`#232`, plan issue `#233`, and `docs/phase8_local_strategy_lab_plan.md`.
+That separate Phase 8 opening does not change the Phase 7 acceptance boundary:
+Phase 7 itself did not authorize live trading, real orders, production
+deployment, secret persistence, queue infrastructure implementation, or
+Freqtrade source-code modification.

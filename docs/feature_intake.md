@@ -3,11 +3,12 @@
 本项目后续任何新增功能、阶段扩展、运行能力、治理能力或前端展示变更，都必须先完成
 Feature Intake。Intake 的目的不是批准开发，而是先明确范围、风险、验收标准和安全边界，
 避免 Codex 或人工开发绕过阶段治理，把 fixture / fallback 误当成真实运行能力，或把
-Phase 7 验收扩展成 Phase 8、live trading、生产部署或交易控制能力。
+Phase 8 扩展成 Phase 9、live trading、生产部署或交易控制能力。
 
 Phase 7 已完成 runtime read-only API contract、operator status API、audit events、
-CI、secret scanning、Operator Dashboard 和 Phase 7 smoke。Phase 7 验收不授权 Phase 8、
-live trading、真实下单、交易所连接、真实 K 线下载、生产部署、deployment executor、
+CI、secret scanning、Operator Dashboard 和 Phase 7 smoke。Phase 8 已通过 Epic
+`#232` 和计划文档单独打开；Phase 8 仍不授权 live trading、真实下单、交易所连接、
+真实 K 线下载、生产部署、deployment executor、
 live bot start / stop / deploy controls、队列基础设施实现或 Freqtrade 源码修改。
 
 ## Intake 流程
@@ -26,7 +27,7 @@ live bot start / stop / deploy controls、队列基础设施实现或 Freqtrade 
 | --- | --- |
 | 功能背景 | 说明为什么需要该功能、来自哪个阶段或哪个已验收缺口。 |
 | 功能目标 | 用可验收语言描述最终产出。 |
-| 所属阶段 | 例如 Phase 7 maintenance、Future Phase planning；不得默认启动 Phase 8。 |
+| 所属阶段 | 例如 Phase 8、Phase 7 maintenance、Future Phase planning；不得默认启动 Phase 9。 |
 | 风险等级 | `safe` / `medium` / `high`，并说明理由。 |
 | 是否只读 | `yes` / `no`；如果不是只读，必须说明写入对象和 fail-closed 行为。 |
 | 是否涉及真实交易所 | `yes` / `no`；`yes` 必须单独审批。 |
