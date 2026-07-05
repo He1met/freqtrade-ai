@@ -91,6 +91,75 @@ def unknown_source(source_detail: str, *, blocked_reason: Optional[str] = None) 
     )
 
 
+def phase8_local_test_metadata_from_tags(tags: list[str]) -> Optional[dict[str, Any]]:
+    if "phase8-local-test" not in tags:
+        return None
+
+    parsed: dict[str, str] = {}
+    for tag in tags:
+        if ":" not in tag:
+            continue
+        key, value = tag.split(":", 1)
+        parsed[key] = value
+
+    return {
+        "phase8_local_test": True,
+        "test_batch": {
+            "batch_key": parsed.get("test-batch", "unknown"),
+            "scenario": parsed.get("scenario", "unknown"),
+            "source_kind": parsed.get("source-kind", "seed_generated"),
+        },
+        "not_core_success": True,
+    }
+
+
+def phase8_local_test_metadata_from_payload(*payloads: Any) -> Optional[dict[str, Any]]:
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        direct = payload.get("phase8_local_test")
+        if isinstance(direct, dict) and direct.get("phase8_local_test") is True:
+            return direct
+        if payload.get("phase8_local_test") is True:
+            return payload
+    return None
+
+
+def phase8_local_test_source(
+    record_type: str,
+    metadata: Optional[dict[str, Any]],
+    database_ids: dict[str, int],
+    *,
+    artifact_refs: Optional[dict[str, str]] = None,
+    freshness: Optional[datetime] = None,
+) -> Optional[DataSourceTrace]:
+    if not metadata or metadata.get("phase8_local_test") is not True:
+        return None
+
+    batch = metadata.get("test_batch") if isinstance(metadata.get("test_batch"), dict) else {}
+    scenario = batch.get("scenario", "unknown")
+    source_kind = batch.get("source_kind", "seed_generated")
+    batch_key = batch.get("batch_key", "unknown")
+    blocked_reason = metadata.get("blocked_reason")
+    source_payload = metadata.get("data_source") if isinstance(metadata.get("data_source"), dict) else {}
+    source_type = source_payload.get("source_type", "fixture")
+    if source_type not in {"fixture", "fallback", "unknown"}:
+        source_type = "fixture"
+
+    return DataSourceTrace(
+        source_type=source_type,
+        source_detail=(
+            f"Phase 8 local-test {record_type} row from {source_kind} "
+            f"scenario={scenario} batch={batch_key}; not core success."
+        ),
+        core_data=False,
+        database_ids=database_ids,
+        artifact_refs=artifact_refs or {},
+        freshness=freshness,
+        blocked_reason=blocked_reason,
+    )
+
+
 def attach_data_source_to_payload(payload: Any, data_source: DataSourceTrace) -> Any:
     """Return a copy of a JSON-like payload with source metadata on object nodes."""
 

@@ -3,7 +3,14 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
-from app.schemas.data_source import DataSourceTrace, database_record_source, unknown_source
+from app.schemas.data_source import (
+    DataSourceTrace,
+    database_record_source,
+    phase8_local_test_metadata_from_payload,
+    phase8_local_test_metadata_from_tags,
+    phase8_local_test_source,
+    unknown_source,
+)
 
 
 StrategyStatus = Literal["draft", "active", "archived"]
@@ -52,6 +59,16 @@ class StrategyRead(BaseModel):
 
     @model_validator(mode="after")
     def attach_database_source(self) -> "StrategyRead":
+        local_test_source = phase8_local_test_source(
+            "strategy",
+            phase8_local_test_metadata_from_tags(self.tags),
+            {"strategy_id": self.id},
+            freshness=self.updated_at,
+        )
+        if local_test_source is not None:
+            self.data_source = local_test_source
+            return self
+
         self.data_source = database_record_source(
             "strategy",
             {"strategy_id": self.id},
@@ -89,6 +106,17 @@ class StrategyVersionRead(BaseModel):
         }
         if self.generation_run_id is not None:
             database_ids["generation_run_id"] = self.generation_run_id
+        local_test_source = phase8_local_test_source(
+            "strategy_version",
+            phase8_local_test_metadata_from_payload(self.blueprint, self.diff_snapshot),
+            database_ids,
+            artifact_refs={"strategy_file_path": self.file_path},
+            freshness=self.created_at,
+        )
+        if local_test_source is not None:
+            self.data_source = local_test_source
+            return self
+
         self.data_source = database_record_source(
             "strategy_version",
             database_ids,

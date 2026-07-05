@@ -3,7 +3,13 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
-from app.schemas.data_source import DataSourceTrace, database_record_source, unknown_source
+from app.schemas.data_source import (
+    DataSourceTrace,
+    database_record_source,
+    phase8_local_test_metadata_from_payload,
+    phase8_local_test_source,
+    unknown_source,
+)
 
 
 BacktestStatus = Literal["pending", "running", "succeeded", "failed", "cancelled"]
@@ -58,12 +64,23 @@ class BacktestRunRead(BaseModel):
 
     @model_validator(mode="after")
     def attach_database_source(self) -> "BacktestRunRead":
+        database_ids = {
+            "backtest_run_id": self.id,
+            "strategy_version_id": self.strategy_version_id,
+        }
+        local_test_source = phase8_local_test_source(
+            "backtest_run",
+            phase8_local_test_metadata_from_payload(self.config_snapshot),
+            database_ids,
+            freshness=self.created_at,
+        )
+        if local_test_source is not None:
+            self.data_source = local_test_source
+            return self
+
         self.data_source = database_record_source(
             "backtest_run",
-            {
-                "backtest_run_id": self.id,
-                "strategy_version_id": self.strategy_version_id,
-            },
+            database_ids,
             freshness=self.created_at,
         )
         return self
@@ -94,6 +111,21 @@ class BacktestTaskRead(BaseModel):
             artifact_refs["config_path"] = self.config_path
         if self.result_path is not None:
             artifact_refs["result_path"] = self.result_path
+        if self.config_path is not None and "phase8-local-test" in self.config_path:
+            self.data_source = DataSourceTrace(
+                source_type="fixture",
+                source_detail="Phase 8 local-test backtest_task row from seed artifact paths; not core success.",
+                core_data=False,
+                database_ids={
+                    "backtest_task_id": self.id,
+                    "backtest_run_id": self.backtest_run_id,
+                },
+                artifact_refs=artifact_refs,
+                freshness=self.created_at,
+                blocked_reason=self.error_message,
+            )
+            return self
+
         self.data_source = database_record_source(
             "backtest_task",
             {
@@ -127,13 +159,25 @@ class BacktestResultRead(BaseModel):
 
     @model_validator(mode="after")
     def attach_database_source(self) -> "BacktestResultRead":
+        database_ids = {
+            "backtest_result_id": self.id,
+            "backtest_run_id": self.backtest_run_id,
+            "backtest_task_id": self.backtest_task_id,
+        }
+        local_test_source = phase8_local_test_source(
+            "backtest_result",
+            phase8_local_test_metadata_from_payload(self.metrics_snapshot),
+            database_ids,
+            artifact_refs={"result_path": self.result_path},
+            freshness=self.created_at,
+        )
+        if local_test_source is not None:
+            self.data_source = local_test_source
+            return self
+
         self.data_source = database_record_source(
             "backtest_result",
-            {
-                "backtest_result_id": self.id,
-                "backtest_run_id": self.backtest_run_id,
-                "backtest_task_id": self.backtest_task_id,
-            },
+            database_ids,
             artifact_refs={"result_path": self.result_path},
             freshness=self.created_at,
         )

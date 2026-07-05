@@ -99,6 +99,7 @@ Phase 8 should proceed in this order:
 1. Complete the Local Strategy Lab design and acceptance contract in `#233`.
 2. Implement API/database source and traceability contracts in `#234`.
 3. Add local database reset, seed, dirty-data, and test-batch support in `#235`.
+   QA usage is documented in `docs/phase8_local_test_db.md`.
 4. Persist strategy idea submission, generation runs, strategies, and versions
    in `#236`.
 5. Write and validate local runnable strategy files in `#237`.
