@@ -363,6 +363,149 @@ export type LiveCandidateGovernanceSummary = {
   monitoringSnapshots: LiveCandidateMonitoringSnapshotSummary[];
 };
 
+export type RuntimeReadOnlyStatus = "READY" | "WARNING" | "STALE" | "UNAVAILABLE" | "BLOCKED" | string;
+
+export type RuntimeStatusSummary = {
+  name: string;
+  status: RuntimeReadOnlyStatus;
+  summary: string;
+  source: string;
+  sourceRef: string | null;
+  lastUpdated: string | null;
+  blockedReason: string | null;
+  unavailableReason: string | null;
+  staleReason: string | null;
+  warnings: string[];
+};
+
+export type RuntimeFallbackStatus = {
+  active: boolean;
+  status: RuntimeReadOnlyStatus;
+  reason: string | null;
+  sources: string[];
+};
+
+export type RuntimeArtifactLink = {
+  name: string;
+  path: string;
+  source: string;
+  status: RuntimeReadOnlyStatus;
+  exists: boolean;
+};
+
+export type RuntimeSafetyBoundary = {
+  readOnly: boolean;
+  allowLiveTrading: boolean;
+  allowRealOrders: boolean;
+  allowExchangeConnection: boolean;
+  allowDeployControl: boolean;
+  canStartStopBot: boolean;
+  boundary: string;
+};
+
+export type RuntimeReadOnlyContractSummary = {
+  schemaVersion: string;
+  status: RuntimeReadOnlyStatus;
+  generatedAt: string | null;
+  systemStatus: RuntimeStatusSummary;
+  runtimeReadiness: RuntimeStatusSummary;
+  fallbackStatus: RuntimeFallbackStatus;
+  smokeStatus: RuntimeStatusSummary;
+  artifactLinks: RuntimeArtifactLink[];
+  blockedReasons: string[];
+  unavailableReasons: string[];
+  safety: RuntimeSafetyBoundary;
+};
+
+export type OperatorReadinessStatus = "READY" | "BLOCKED" | "UNAVAILABLE" | string;
+
+export type OperatorDiagnosticCheck = {
+  name: string;
+  area: string;
+  status: OperatorReadinessStatus;
+  source: string;
+  summary: string;
+  path: string | null;
+  exists: boolean | null;
+  required: boolean;
+  blockedReason: string | null;
+  unavailableReason: string | null;
+  warnings: string[];
+};
+
+export type OperatorArtifactStatus = {
+  name: string;
+  path: string;
+  status: OperatorReadinessStatus;
+  source: string;
+  exists: boolean;
+};
+
+export type OperatorEnvPresence = {
+  name: string;
+  present: boolean;
+  required: boolean;
+  source: "env" | string;
+  valueRendered: boolean;
+};
+
+export type OperatorRuntimeContractSummary = {
+  status: RuntimeReadOnlyStatus;
+  runtimeReadinessStatus: RuntimeReadOnlyStatus;
+  fallbackActive: boolean;
+  smokeStatus: RuntimeReadOnlyStatus;
+  artifactCount: number;
+  blockedReasons: string[];
+  unavailableReasons: string[];
+};
+
+export type OperatorSafetyBoundary = {
+  readOnly: boolean;
+  reportsEnvValues: boolean;
+  allowLiveTrading: boolean;
+  allowRealOrders: boolean;
+  allowExchangeConnection: boolean;
+  allowDeployControl: boolean;
+  canStartStopBot: boolean;
+  boundary: string;
+};
+
+export type OperatorStatusReportSummary = {
+  schemaVersion: string;
+  status: OperatorReadinessStatus;
+  generatedAt: string | null;
+  repoRoot: string;
+  checks: OperatorDiagnosticCheck[];
+  artifacts: OperatorArtifactStatus[];
+  envPresence: OperatorEnvPresence[];
+  runtimeContract: OperatorRuntimeContractSummary;
+  blockedReasons: string[];
+  unavailableReasons: string[];
+  warnings: string[];
+  safety: OperatorSafetyBoundary;
+};
+
+export type OperatorAuditEventSummary = {
+  eventId: string;
+  eventType: string;
+  status: "ACCEPTED" | "BLOCKED" | "FAILED" | string;
+  actor: string;
+  sourceName: string;
+  summary: string;
+  reason: string | null;
+  artifactLinks: RuntimeArtifactLink[];
+  createdAt: string | null;
+};
+
+export type OperatorDashboardSummary = {
+  sourceRef: string | null;
+  readOnly: boolean;
+  runtimeContract: RuntimeReadOnlyContractSummary;
+  operatorStatus: OperatorStatusReportSummary;
+  auditEvents: OperatorAuditEventSummary[];
+  safetyBoundary: string;
+};
+
 export type RankingEntry = {
   rank: number;
   strategyId: string;
@@ -430,6 +573,7 @@ export type MvpData = {
   hyperoptRuns: HyperoptRunSummary[];
   dryRun: DryRunManagementSummary;
   liveCandidates: LiveCandidateGovernanceSummary;
+  operatorDashboard: OperatorDashboardSummary;
   ranking: RankingEntry[];
   failureReasons: StrategyFailureReasonSummary[];
   versionLineage: StrategyVersionLineageEntry[];

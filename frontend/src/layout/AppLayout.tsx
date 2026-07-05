@@ -8,6 +8,7 @@ const navItems = [
   { to: "/backtest-tasks", label: "Backtest Tasks" },
   { to: "/hyperopt-runs", label: "Hyperopt Runs" },
   { to: "/live-governance", label: "Live Governance" },
+  { to: "/operator-dashboard", label: "Operator Dashboard" },
   { to: "/ranking", label: "Ranking" },
   { to: "/freq-ui", label: "Dry-run / FreqUI" },
 ];
