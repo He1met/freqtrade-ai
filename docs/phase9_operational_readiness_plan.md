@@ -55,6 +55,12 @@ evidence against real operational conditions:
 | Frontend core pages | API/fallback flows exist. | Which pages show real DB-backed data, and which still show fallback/fixture/mock? |
 | Phase 8 E2E smoke | Local fixture and DB reconciliation exists. | Can QA reconcile one real provider run end-to-end? |
 
+For Phase 9 local QA fixture setup, use
+[phase9_local_test_db.md](phase9_local_test_db.md). It covers reset, seed,
+dirty-data, failed, `BLOCKED`, missing artifact, partial completion, and
+unknown-source scenarios while keeping every local-test row non-acceptable as
+real Provider evidence.
+
 ## Priority Pages For Database-Backed Display
 
 Phase 9 should prioritize user-visible pages in this order:
