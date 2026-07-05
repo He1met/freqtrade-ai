@@ -203,7 +203,19 @@ def _optional_int_from_env(name: str) -> Optional[int]:
     value = os.environ.get(name)
     if value is None or not value.strip():
         return None
-    return int(value)
+        return int(value)
+
+
+@dataclass(frozen=True)
+class StrategyGenerationResult:
+    run_id: int
+    version_ids: list[int]
+
+
+class StrategyGenerationExecutionError(RuntimeError):
+    def __init__(self, message: str, run_id: int) -> None:
+        super().__init__(message)
+        self.run_id = run_id
 
 
 class FakeStrategyBlueprintProvider:
@@ -261,6 +273,13 @@ class StrategyGenerationService:
         self.file_manager = file_manager or StrategyFileManager()
 
     def run_once(self, prompt_summary: str, requested_count: int = 1) -> list[int]:
+        return self.run_once_with_result(prompt_summary, requested_count=requested_count).version_ids
+
+    def run_once_with_result(
+        self,
+        prompt_summary: str,
+        requested_count: int = 1,
+    ) -> StrategyGenerationResult:
         # Persist the run before provider execution so failures are visible to
         # the UI and later quality-analysis tasks.
         run = self.run_repository.create(
@@ -289,7 +308,7 @@ class StrategyGenerationService:
                     error_message=str(exc),
                 ),
             )
-            raise
+            raise StrategyGenerationExecutionError(str(exc), run.id) from exc
 
         self.run_repository.update_status(
             run.id,
@@ -300,7 +319,7 @@ class StrategyGenerationService:
                 failed_count=max(0, len(blueprints) - len(version_ids)),
             ),
         )
-        return version_ids
+        return StrategyGenerationResult(run_id=run.id, version_ids=version_ids)
 
     def _persist_blueprints(
         self,
