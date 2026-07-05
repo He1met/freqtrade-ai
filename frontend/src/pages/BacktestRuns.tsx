@@ -7,6 +7,7 @@ import {
   statusClassName,
 } from "./backtestDisplay";
 import { FallbackNotice } from "./FallbackNotice";
+import { SourceMarker } from "./SourceMarker";
 import { EMPTY_TEXT, displayLoadState, displayStatus } from "./uiCopy";
 
 export function BacktestRuns() {
@@ -94,6 +95,7 @@ export function BacktestRuns() {
               <th>Artifact</th>
               <th>指标</th>
               <th>Result JSON</th>
+              <th>数据来源</th>
               <th>原因</th>
             </tr>
           </thead>
@@ -138,6 +140,9 @@ export function BacktestRuns() {
                   <td className="path-cell" title={resultPath}>
                     {resultPath}
                   </td>
+                  <td className="source-cell">
+                    <SourceMarker source={run.dataSource ?? linkedTask?.dataSource} />
+                  </td>
                   <td className="reason-cell" title={reason}>
                     {reason}
                   </td>
@@ -148,7 +153,7 @@ export function BacktestRuns() {
         </table>
       </div>
       {data.backtestRuns.length === 0 ? (
-        <div className="empty-state">暂无回测批次。</div>
+        <div className="empty-state">暂无 database-backed 回测批次；fixture/fallback 不能作为真实验收。</div>
       ) : null}
     </section>
   );

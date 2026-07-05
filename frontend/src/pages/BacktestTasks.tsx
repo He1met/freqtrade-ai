@@ -1,6 +1,7 @@
 import { useMvpData } from "../api/useMvpData";
 import { metricRows, reasonText, statusClassName, summarizeText } from "./backtestDisplay";
 import { FallbackNotice } from "./FallbackNotice";
+import { SourceMarker } from "./SourceMarker";
 import { EMPTY_TEXT, displayLoadState, displayStatus } from "./uiCopy";
 
 export function BacktestTasks() {
@@ -32,6 +33,7 @@ export function BacktestTasks() {
               <th>指标</th>
               <th>Config</th>
               <th>Result</th>
+              <th>数据来源</th>
               <th>原因</th>
               <th>Stdout/Stderr</th>
             </tr>
@@ -75,6 +77,9 @@ export function BacktestTasks() {
                   <td className="path-cell" title={task.resultPath ?? artifact?.resultPath ?? EMPTY_TEXT}>
                     {task.resultPath ?? artifact?.resultPath ?? EMPTY_TEXT}
                   </td>
+                  <td className="source-cell">
+                    <SourceMarker source={task.dataSource} />
+                  </td>
                   <td
                     className="reason-cell"
                     title={reasonText(task.blockedReason, task.failedReason, task.errorMessage)}
@@ -92,7 +97,7 @@ export function BacktestTasks() {
         </table>
       </div>
       {data.backtestTasks.length === 0 ? (
-        <div className="empty-state">暂无回测任务。</div>
+        <div className="empty-state">暂无 database-backed 回测任务；缺少前置条件时应显示 BLOCKED 原因。</div>
       ) : null}
     </section>
   );

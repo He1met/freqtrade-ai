@@ -1,6 +1,7 @@
 import { useMvpData } from "../api/useMvpData";
 import type { RankingScoreBreakdownItem } from "../api/types";
 import { FallbackNotice } from "./FallbackNotice";
+import { SourceMarker } from "./SourceMarker";
 import { EMPTY_TEXT, displayLoadState } from "./uiCopy";
 
 const SCORE_LABELS: Record<string, string> = {
@@ -44,6 +45,7 @@ export function Ranking() {
               <th>拆解</th>
               <th>结果</th>
               <th>原因</th>
+              <th>数据来源</th>
               <th>文件</th>
             </tr>
           </thead>
@@ -93,13 +95,18 @@ export function Ranking() {
                     <span className="secondary-cell">{EMPTY_TEXT}</span>
                   )}
                 </td>
+                <td className="source-cell">
+                  <SourceMarker source={entry.dataSource} />
+                </td>
                 <td className="path-cell">{entry.filePath}</td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
-      {data.ranking.length === 0 ? <div className="empty-state">暂无已评分策略。</div> : null}
+      {data.ranking.length === 0 ? (
+        <div className="empty-state">暂无 database-backed 评分；fixture/fallback 排行榜不能作为真实验收。</div>
+      ) : null}
     </section>
   );
 }
