@@ -33,6 +33,17 @@ from app.schemas.dry_run_status import (
     DryRunSnapshotStatus,
     DryRunStatusSnapshot,
 )
+from app.schemas.audit_log import (
+    GovernanceArtifactKind,
+    GovernanceArtifactLink,
+    GovernanceEvent,
+    GovernanceEventActor,
+    GovernanceEventActorRole,
+    GovernanceEventSource,
+    GovernanceEventSourceType,
+    GovernanceEventStatus,
+    GovernanceEventType,
+)
 from app.schemas.freq_ui import FreqUILinkConfig, FreqUILinkMetadata
 from app.schemas.hyperopt_profile import (
     HyperoptProfile,
@@ -147,6 +158,15 @@ __all__ = [
     "FreqUILinkConfig",
     "FreqUILinkMetadata",
     "GenerationRunStatus",
+    "GovernanceArtifactKind",
+    "GovernanceArtifactLink",
+    "GovernanceEvent",
+    "GovernanceEventActor",
+    "GovernanceEventActorRole",
+    "GovernanceEventSource",
+    "GovernanceEventSourceType",
+    "GovernanceEventStatus",
+    "GovernanceEventType",
     "HyperoptProfile",
     "HyperoptProfileLocalDataSource",
     "HyperoptProfileSafety",
