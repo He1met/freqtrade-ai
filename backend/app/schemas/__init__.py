@@ -10,6 +10,7 @@ from app.schemas.backtest import (
     BacktestTaskCreate,
     BacktestTaskRead,
     BacktestTaskStatusUpdate,
+    LocalBacktestPreflightCheck,
     LocalBacktestTriggerRequest,
     LocalBacktestTriggerResponse,
 )

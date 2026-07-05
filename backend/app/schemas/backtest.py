@@ -53,6 +53,14 @@ class LocalBacktestTriggerRequest(BaseModel):
     profile: dict[str, Any] = Field(default_factory=dict)
 
 
+class LocalBacktestPreflightCheck(BaseModel):
+    name: str = Field(min_length=1)
+    status: Literal["READY", "BLOCKED"]
+    summary: str = Field(min_length=1)
+    blocked_reason: Optional[str] = None
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
 class BacktestRunRead(BaseModel):
     id: int
     strategy_version_id: int
@@ -148,6 +156,7 @@ class LocalBacktestTriggerResponse(BaseModel):
     tasks: list[BacktestTaskRead]
     preflight_status: Literal["ready", "blocked"]
     blocked_reasons: list[str] = Field(default_factory=list)
+    preflight_checks: list[LocalBacktestPreflightCheck] = Field(default_factory=list)
     execution_mode: Literal["preflight_only"] = "preflight_only"
 
 
