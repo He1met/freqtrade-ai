@@ -56,6 +56,7 @@ import type {
   StrategyGenerationSubmitPayload,
   StrategyGenerationVersion,
   StrategySummary,
+  StrategyVersionFileState,
   StrategyVersionSummary,
   StrategyFailureReasonSummary,
   StrategyVersionLineageEntry,
@@ -517,6 +518,14 @@ type RawStrategyGenerationStrategy = Partial<StrategyGenerationStrategy> & {
 
 type RawValidationErrorSummary = Partial<ValidationErrorSummary>;
 
+type RawStrategyVersionFileState = Partial<StrategyVersionFileState> & {
+  is_file?: boolean;
+  checksum_matches?: boolean | null;
+  class_name?: string | null;
+  blocked_reason?: string | null;
+  validation_errors?: RawValidationErrorSummary[];
+};
+
 type RawStrategyGenerationVersion = Partial<StrategyGenerationVersion> & {
   strategy_id?: string | number;
   generation_run_id?: string | number | null;
@@ -526,6 +535,7 @@ type RawStrategyGenerationVersion = Partial<StrategyGenerationVersion> & {
   validation_status?: string;
   validation_errors?: RawValidationErrorSummary[];
   change_summary?: string | null;
+  file_state?: RawStrategyVersionFileState;
   created_at?: string | null;
   data_source?: RawDataSourceTrace;
 };
@@ -1587,24 +1597,45 @@ function normalizeStrategyGenerationStrategy(
 
 function normalizeStrategyGenerationVersion(raw: RawStrategyGenerationVersion): StrategyGenerationVersion {
   const validationErrors = raw.validationErrors ?? raw.validation_errors ?? [];
+  const filePath = raw.filePath ?? raw.file_path ?? "";
   return {
     id: normalizeId(raw.id),
     strategyId: normalizeId(raw.strategyId ?? raw.strategy_id),
     generationRunId: normalizeOptionalId(raw.generationRunId ?? raw.generation_run_id),
     parentVersionId: normalizeOptionalId(raw.parentVersionId ?? raw.parent_version_id),
     versionNumber: raw.versionNumber ?? raw.version_number ?? 0,
-    filePath: raw.filePath ?? raw.file_path ?? "",
+    filePath,
     validationStatus: raw.validationStatus ?? raw.validation_status ?? "unknown",
     validationErrors: Array.isArray(validationErrors) ? validationErrors.map(normalizeValidationError) : [],
     changeSummary:
       raw.changeSummary || raw.change_summary
         ? redactSensitiveText(raw.changeSummary ?? raw.change_summary ?? "")
         : null,
+    fileState: normalizeStrategyVersionFileState(raw.fileState ?? raw.file_state, filePath),
     createdAt: raw.createdAt ?? raw.created_at ?? null,
     dataSource: normalizeDataSourceTrace(
       raw.dataSource ?? raw.data_source,
       "Strategy version source was not provided by the backend.",
     ),
+  };
+}
+
+function normalizeStrategyVersionFileState(
+  raw: RawStrategyVersionFileState | undefined,
+  fallbackPath: string,
+): StrategyVersionFileState {
+  const validationErrors = raw?.validationErrors ?? raw?.validation_errors ?? [];
+  const checksumMatches = raw?.checksumMatches ?? raw?.checksum_matches;
+  return {
+    status: raw?.status ?? "BLOCKED",
+    path: redactSensitiveText(raw?.path ?? fallbackPath),
+    exists: asBoolean(raw?.exists),
+    isFile: asBoolean(raw?.isFile ?? raw?.is_file),
+    checksum: raw?.checksum ?? null,
+    checksumMatches: typeof checksumMatches === "boolean" ? checksumMatches : null,
+    className: raw?.className ?? raw?.class_name ?? null,
+    blockedReason: redactOptionalSensitiveText(raw?.blockedReason ?? raw?.blocked_reason),
+    validationErrors: Array.isArray(validationErrors) ? validationErrors.map(normalizeValidationError) : [],
   };
 }
 

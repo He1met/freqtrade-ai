@@ -11,6 +11,7 @@ downloads market data, places orders, or writes secrets.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -209,6 +210,13 @@ def setup_database(context: Phase8SmokeContext) -> None:
 
 
 def create_core_flow(context: Phase8SmokeContext) -> None:
+    strategy_dir = context.tmp_dir / "strategies"
+    strategy_dir.mkdir(parents=True, exist_ok=True)
+    strategy_code = "class Phase8E2ECore:\n    pass\n"
+    strategy_file = strategy_dir / "phase8_e2e_core.py"
+    strategy_file.write_text(strategy_code, encoding="utf-8")
+    strategy_checksum = hashlib.sha256(strategy_code.encode("utf-8")).hexdigest()
+
     with context.session_factory() as session:
         generation_repo = StrategyGenerationRunRepository(session)
         generation_run = generation_repo.create(
@@ -237,11 +245,19 @@ def create_core_flow(context: Phase8SmokeContext) -> None:
                 strategy_id=strategy.id,
                 generation_run_id=generation_run.id,
                 blueprint={"class_name": "Phase8E2ECore"},
-                generated_code="class Phase8E2ECore: pass",
-                code_hash="phase8-e2e-core-hash",
-                file_path="user_data/strategies/generated/phase8_e2e_core.py",
+                generated_code=strategy_code,
+                code_hash=strategy_checksum,
+                file_path=str(strategy_file),
                 validation_status="passed",
                 change_summary="Phase 8 E2E database-backed core version",
+                diff_snapshot={
+                    "strategy_file_validation": {
+                        "approved_root": str(strategy_dir),
+                        "checksum": strategy_checksum,
+                        "validation_status": "passed",
+                        "write_status": "written",
+                    }
+                },
             )
         )
         if version is None:

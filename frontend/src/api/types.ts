@@ -106,8 +106,21 @@ export type StrategyGenerationVersion = {
   validationStatus: string;
   validationErrors: ValidationErrorSummary[];
   changeSummary: string | null;
+  fileState?: StrategyVersionFileState;
   createdAt: string | null;
   dataSource: DataSourceTraceSummary;
+};
+
+export type StrategyVersionFileState = {
+  status: string;
+  path: string;
+  exists: boolean;
+  isFile: boolean;
+  checksum: string | null;
+  checksumMatches: boolean | null;
+  className: string | null;
+  blockedReason: string | null;
+  validationErrors: ValidationErrorSummary[];
 };
 
 export type StrategyGenerationApiResult = {

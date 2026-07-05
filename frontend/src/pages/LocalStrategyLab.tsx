@@ -273,6 +273,7 @@ function StrategyVersionEvidence({
               <th>名称</th>
               <th>版本</th>
               <th>验证</th>
+              <th>file state</th>
               <th>file path</th>
               <th>DB trace</th>
             </tr>
@@ -280,6 +281,10 @@ function StrategyVersionEvidence({
           <tbody>
             {rows.map((version) => {
               const strategy = strategyById.get(version.strategyId);
+              const fileState = version.fileState ?? {
+                status: "BLOCKED",
+                blockedReason: "Backend did not provide strategy file state.",
+              };
               return (
                 <tr key={version.id}>
                   <td>{version.strategyId}</td>
@@ -287,6 +292,12 @@ function StrategyVersionEvidence({
                   <td>{strategy?.name ?? EMPTY_TEXT}</td>
                   <td>{version.versionNumber}</td>
                   <td>{displayStatus(version.validationStatus)}</td>
+                  <td>
+                    {displayStatus(fileState.status)}
+                    {fileState.blockedReason ? (
+                      <span className="inline-muted"> {fileState.blockedReason}</span>
+                    ) : null}
+                  </td>
                   <td className="path-cell">{version.filePath}</td>
                   <td className="source-cell">
                     <SourceMarker source={version.dataSource} />

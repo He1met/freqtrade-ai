@@ -548,6 +548,13 @@ td.path-cell {
   white-space: normal;
 }
 
+.inline-muted {
+  color: #657269;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: normal;
+}
+
 td.breakdown-cell,
 td.reason-cell,
 td.artifact-cell,
