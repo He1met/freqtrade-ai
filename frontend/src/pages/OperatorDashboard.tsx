@@ -332,7 +332,10 @@ export function OperatorDashboard() {
       </header>
       {error ? <div className="notice">当前使用 fallback 数据：{error}</div> : null}
       {!isLoading && source === "fallback" && !error ? (
-        <div className="notice">Backend API 不可用，当前显示受控 Phase 7 Operator Dashboard fallback 数据。</div>
+        <div className="notice">
+          Backend API unavailable; showing controlled Phase 7 operator fallback data.（Backend API 不可用，当前显示受控
+          Phase 7 Operator Dashboard fallback 数据。）
+        </div>
       ) : null}
       <section className="operator-summary-grid" aria-label="Operator Dashboard 摘要">
         <article className="metric">
