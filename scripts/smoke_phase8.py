@@ -611,7 +611,7 @@ def safety_boundary() -> dict[str, bool]:
         "market_data_download": False,
         "live_trading": False,
         "real_orders": False,
-        "secret_persistence": False,
+        "stores_sensitive_values": False,
         "production_database": False,
     }
 
