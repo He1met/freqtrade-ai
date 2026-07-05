@@ -7,6 +7,7 @@ import pytest
 from app.spikes.real_freqtrade_backtest import (
     SpikeConfig,
     find_freqtrade_binary,
+    infer_trading_mode,
     parse_required_metrics,
     run_spike,
     select_market_data_file,
@@ -35,8 +36,15 @@ def test_spike_blocks_when_market_data_is_missing(tmp_path) -> None:
 
     assert report.status == "BLOCKED"
     assert any("no local market data" in blocker for blocker in report.blockers)
+    assert report.manifest_path is not None
+    manifest = json.loads(report.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["status"] == "BLOCKED"
+    assert "no local market data" in manifest["blocked_reason"]
+    assert manifest["strategy_name"] == "MvpRsiStrategy"
     assert report.report_path is not None
-    assert "Status: BLOCKED" in report.report_path.read_text(encoding="utf-8")
+    report_text = report.report_path.read_text(encoding="utf-8")
+    assert "Status: BLOCKED" in report_text
+    assert "Artifact manifest:" in report_text
 
 
 def test_select_market_data_file_uses_existing_local_files(tmp_path) -> None:
@@ -50,6 +58,7 @@ def test_select_market_data_file_uses_existing_local_files(tmp_path) -> None:
     assert selected.exchange == "okx"
     assert selected.pair == "BTC/USDT:USDT"
     assert selected.timeframe == "15m"
+    assert infer_trading_mode(selected) == "futures"
 
 
 def test_parse_required_metrics_extracts_real_result_summary(tmp_path) -> None:

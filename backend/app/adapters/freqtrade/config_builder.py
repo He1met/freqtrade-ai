@@ -123,6 +123,27 @@ class FreqtradeConfigBuilder:
             ),
             "initial_state": "stopped",
             "internals": {"process_throttle_secs": 5},
+            "unfilledtimeout": {
+                "entry": 10,
+                "exit": 10,
+                "exit_timeout_count": 0,
+                "unit": "minutes",
+            },
+            "entry_pricing": {
+                "price_side": "same",
+                "use_order_book": True,
+                "order_book_top": 1,
+                "price_last_balance": 0.0,
+                "check_depth_of_market": {
+                    "enabled": False,
+                    "bids_to_ask_delta": 1,
+                },
+            },
+            "exit_pricing": {
+                "price_side": "same",
+                "use_order_book": True,
+                "order_book_top": 1,
+            },
         }
 
         for optional_key in ("timerange", "strategy_path"):

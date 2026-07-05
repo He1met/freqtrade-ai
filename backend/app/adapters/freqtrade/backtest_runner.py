@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Optional
@@ -107,6 +108,7 @@ class FreqtradeBacktestRunner:
     ) -> FreqtradeBacktestExecution:
         if result_path is None:
             raise ValueError("result_path is required for Phase 1 backtest execution")
+        result_path.parent.mkdir(parents=True, exist_ok=True)
 
         command = self._build_backtesting_command(
             config_path,
@@ -117,10 +119,14 @@ class FreqtradeBacktestRunner:
             strategy_path=strategy_path,
             userdir=userdir,
         )
+        command_result = self._cli_runner.run_unchecked(command)
+        if command_result.return_code == 0:
+            self._materialize_backtest_result_json(result_path)
+
         return FreqtradeBacktestExecution(
             result_path=result_path,
             command_args=self._cli_runner.build_args(command),
-            command_result=self._cli_runner.run_unchecked(command),
+            command_result=command_result,
         )
 
     def run_backtest_with_artifact_manifest(
@@ -163,6 +169,7 @@ class FreqtradeBacktestRunner:
                 blocked_reason=blocked_reason,
             )
 
+        result_path.parent.mkdir(parents=True, exist_ok=True)
         command_result = self._cli_runner.run_unchecked(command)
         if command_result.return_code != 0:
             return self._write_manifest(
@@ -183,6 +190,7 @@ class FreqtradeBacktestRunner:
                 ),
             )
 
+        self._materialize_backtest_result_json(result_path)
         if not result_path.exists():
             return self._write_manifest(
                 status="FAILED",
@@ -226,10 +234,10 @@ class FreqtradeBacktestRunner:
         userdir: Optional[Path] = None,
     ) -> FreqtradeCommand:
         options = {
+            "--backtest-directory": result_path.parent,
             "--config": config_path,
             "--strategy": strategy_name,
             "--export": "trades",
-            "--export-filename": result_path,
         }
         if datadir is not None:
             options["--datadir"] = datadir
@@ -260,6 +268,69 @@ class FreqtradeBacktestRunner:
             return False
         filename = path.name.lower()
         return any(filename.endswith(suffix) for suffix in SUPPORTED_DATA_SUFFIXES)
+
+    def _materialize_backtest_result_json(self, result_path: Path) -> Optional[Path]:
+        if result_path.exists():
+            return result_path
+
+        result_dir = result_path.parent
+        json_candidate = self._latest_unpacked_backtest_json(result_dir)
+        if json_candidate is not None:
+            result_path.write_bytes(json_candidate.read_bytes())
+            return result_path
+
+        zip_candidate = self._latest_backtest_zip(result_dir)
+        if zip_candidate is None:
+            return None
+
+        json_name = self._result_json_name_from_zip(zip_candidate)
+        if json_name is None:
+            return None
+
+        with zipfile.ZipFile(zip_candidate) as archive:
+            result_path.write_bytes(archive.read(json_name))
+        return result_path
+
+    def _latest_backtest_zip(self, result_dir: Path) -> Optional[Path]:
+        last_result_path = result_dir / ".last_result.json"
+        if last_result_path.exists():
+            try:
+                latest = json.loads(last_result_path.read_text(encoding="utf-8")).get(
+                    "latest_backtest"
+                )
+            except json.JSONDecodeError:
+                latest = None
+            if isinstance(latest, str):
+                candidate = result_dir / latest
+                if candidate.exists() and candidate.suffix == ".zip":
+                    return candidate
+
+        candidates = sorted(
+            result_dir.glob("backtest-result-*.zip"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        return candidates[0] if candidates else None
+
+    def _latest_unpacked_backtest_json(self, result_dir: Path) -> Optional[Path]:
+        candidates = [
+            path
+            for path in result_dir.glob("backtest-result-*.json")
+            if not path.name.endswith(".meta.json") and not path.name.endswith("_config.json")
+        ]
+        candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+        return candidates[0] if candidates else None
+
+    def _result_json_name_from_zip(self, zip_path: Path) -> Optional[str]:
+        with zipfile.ZipFile(zip_path) as archive:
+            candidates = [
+                name
+                for name in archive.namelist()
+                if name.endswith(".json")
+                and not name.endswith("_config.json")
+                and not name.endswith(".meta.json")
+            ]
+        return sorted(candidates)[0] if candidates else None
 
     def _write_manifest(
         self,
