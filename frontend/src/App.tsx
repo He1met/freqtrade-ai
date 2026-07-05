@@ -1,4 +1,4 @@
-import { Navigate, Route, Routes } from "react-router-dom";
+import { Route, Routes } from "react-router-dom";
 
 import { AppLayout } from "./layout/AppLayout";
 import { BacktestRuns } from "./pages/BacktestRuns";
@@ -9,6 +9,7 @@ import { GenerationRuns } from "./pages/GenerationRuns";
 import { HyperoptRuns } from "./pages/HyperoptRuns";
 import { LiveGovernance } from "./pages/LiveGovernance";
 import { LocalStrategyLab } from "./pages/LocalStrategyLab";
+import { NotFound } from "./pages/NotFound";
 import { OperatorDashboard } from "./pages/OperatorDashboard";
 import { Ranking } from "./pages/Ranking";
 import { Strategies } from "./pages/Strategies";
@@ -30,7 +31,7 @@ export function App() {
         <Route path="operator-dashboard" element={<OperatorDashboard />} />
         <Route path="ranking" element={<Ranking />} />
         <Route path="freq-ui" element={<FreqUILink />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
+        <Route path="*" element={<NotFound />} />
       </Route>
     </Routes>
   );

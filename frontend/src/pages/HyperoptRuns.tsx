@@ -52,13 +52,19 @@ export function HyperoptRuns() {
       <section className="hyperopt-summary" aria-label="Hyperopt 参数优化摘要">
         <article className="overview-panel">
           <h2>批次状态</h2>
-          <div className="status-counts">
+          <div className="status-counts" role="list">
             {Object.entries(statusCounts).length === 0 ? (
               <span>暂无批次</span>
             ) : (
-              Object.entries(statusCounts).map(([status, count]) => (
-                <span className={`run-status ${statusClassName(status)}`} key={status}>
+              Object.entries(statusCounts).map(([status, count], index, entries) => (
+                <span
+                  aria-label={`${displayStatus(status)}：${count} 个`}
+                  className={`run-status ${statusClassName(status)}`}
+                  key={status}
+                  role="listitem"
+                >
                   {displayStatus(status)}：{count}
+                  {index < entries.length - 1 ? <span className="status-text-gap"> </span> : null}
                 </span>
               ))
             )}

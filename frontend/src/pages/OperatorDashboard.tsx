@@ -32,7 +32,13 @@ function statusClassName(status: string): string {
 }
 
 function statusPill(status: string) {
-  return <span className={`run-status ${statusClassName(status)}`}>{displayStatus(status)}</span>;
+  return (
+    <span aria-label={`状态：${displayStatus(status)}`} className={`run-status ${statusClassName(status)}`}>
+      <span className="sr-only">状态：</span>
+      {displayStatus(status)}
+      <span className="sr-only">；</span>
+    </span>
+  );
 }
 
 function firstReason(...values: Array<string | null | undefined>): string {

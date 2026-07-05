@@ -18,7 +18,7 @@ export function BacktestTasks() {
         isLoading={isLoading}
         source={source}
       />
-      <div className="table-shell">
+      <div className="table-shell backtest-table-shell">
         <table>
           <thead>
             <tr>
@@ -57,7 +57,9 @@ export function BacktestTasks() {
                       {displayStatus(artifactStatus)}
                     </span>
                     <span>return：{artifact?.returnCode ?? EMPTY_TEXT}</span>
-                    <span>manifest：{artifact?.manifestPath ?? EMPTY_TEXT}</span>
+                    <span title={artifact?.manifestPath ?? EMPTY_TEXT}>
+                      manifest：{artifact?.manifestPath ?? EMPTY_TEXT}
+                    </span>
                   </td>
                   <td className="metric-summary">
                     {metricRows(task.metrics).map(([label, value]) => (
@@ -67,14 +69,21 @@ export function BacktestTasks() {
                       </span>
                     ))}
                   </td>
-                  <td className="path-cell">{task.configPath ?? EMPTY_TEXT}</td>
-                  <td className="path-cell">{task.resultPath ?? artifact?.resultPath ?? EMPTY_TEXT}</td>
-                  <td className="reason-cell">
+                  <td className="path-cell" title={task.configPath ?? EMPTY_TEXT}>
+                    {task.configPath ?? EMPTY_TEXT}
+                  </td>
+                  <td className="path-cell" title={task.resultPath ?? artifact?.resultPath ?? EMPTY_TEXT}>
+                    {task.resultPath ?? artifact?.resultPath ?? EMPTY_TEXT}
+                  </td>
+                  <td
+                    className="reason-cell"
+                    title={reasonText(task.blockedReason, task.failedReason, task.errorMessage)}
+                  >
                     {reasonText(task.blockedReason, task.failedReason, task.errorMessage)}
                   </td>
                   <td className="log-cell">
-                    <span>stdout: {summarizeText(artifact?.stdout)}</span>
-                    <span>stderr: {summarizeText(artifact?.stderr)}</span>
+                    <span title={artifact?.stdout ?? EMPTY_TEXT}>stdout: {summarizeText(artifact?.stdout)}</span>
+                    <span title={artifact?.stderr ?? EMPTY_TEXT}>stderr: {summarizeText(artifact?.stderr)}</span>
                   </td>
                 </tr>
               );

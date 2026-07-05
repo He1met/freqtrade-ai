@@ -19,7 +19,7 @@ export function AppLayout() {
   const currentItem =
     navItems.find((item) =>
       item.to === "/" ? pathname === "/" : pathname === item.to || pathname.startsWith(`${item.to}/`),
-    ) ?? navItems[0];
+    ) ?? { label: "未找到页面" };
 
   return (
     <div className="app-shell">
