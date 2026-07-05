@@ -8,6 +8,8 @@ from app.schemas.backtest import (
     BacktestTaskCreate,
     BacktestTaskRead,
     BacktestTaskStatusUpdate,
+    LocalBacktestTriggerRequest,
+    LocalBacktestTriggerResponse,
 )
 from app.schemas.backtest_profile import (
     BacktestProfileDataSource,
@@ -149,6 +151,8 @@ __all__ = [
     "BacktestTaskCreate",
     "BacktestTaskRead",
     "BacktestTaskStatusUpdate",
+    "LocalBacktestTriggerRequest",
+    "LocalBacktestTriggerResponse",
     "DataSourceTrace",
     "DataSourceType",
     "BacktestProfileDataSource",

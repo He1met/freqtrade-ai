@@ -1,0 +1,54 @@
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+from app.db.session import get_db
+from app.repositories import BacktestRepository
+from app.schemas import (
+    BacktestRunRead,
+    BacktestTaskRead,
+    LocalBacktestTriggerRequest,
+    LocalBacktestTriggerResponse,
+)
+from app.services.local_backtest_trigger import LocalBacktestTriggerService
+
+
+router = APIRouter(prefix="/api", tags=["backtests"])
+
+
+@router.post(
+    "/backtest-runs/local",
+    response_model=LocalBacktestTriggerResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def trigger_local_backtest(
+    payload: LocalBacktestTriggerRequest,
+    db: Session = Depends(get_db),
+) -> LocalBacktestTriggerResponse:
+    result = LocalBacktestTriggerService(db).trigger(payload)
+    if result is None:
+        raise HTTPException(status_code=404, detail="strategy version not found")
+    return result
+
+
+@router.get("/backtest-runs/{run_id}", response_model=BacktestRunRead)
+def get_backtest_run(run_id: int, db: Session = Depends(get_db)) -> BacktestRunRead:
+    run = BacktestRepository(db).get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="backtest run not found")
+    return BacktestRunRead.model_validate(run)
+
+
+@router.get("/backtest-runs/{run_id}/tasks", response_model=list[BacktestTaskRead])
+def list_backtest_tasks(run_id: int, db: Session = Depends(get_db)) -> list[BacktestTaskRead]:
+    repository = BacktestRepository(db)
+    if repository.get_run(run_id) is None:
+        raise HTTPException(status_code=404, detail="backtest run not found")
+    return [BacktestTaskRead.model_validate(task) for task in repository.list_tasks(run_id)]
+
+
+@router.get("/backtest-tasks/{task_id}", response_model=BacktestTaskRead)
+def get_backtest_task(task_id: int, db: Session = Depends(get_db)) -> BacktestTaskRead:
+    task = BacktestRepository(db).get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="backtest task not found")
+    return BacktestTaskRead.model_validate(task)

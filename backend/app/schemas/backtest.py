@@ -12,7 +12,7 @@ from app.schemas.data_source import (
 )
 
 
-BacktestStatus = Literal["pending", "running", "succeeded", "failed", "cancelled"]
+BacktestStatus = Literal["pending", "running", "succeeded", "failed", "cancelled", "blocked"]
 
 
 class BacktestRunCreate(BaseModel):
@@ -46,6 +46,11 @@ class BacktestResultCreate(BaseModel):
     win_rate: Optional[float] = Field(default=None, ge=0, le=1)
     total_trades: Optional[int] = Field(default=None, ge=0)
     timerange: Optional[str] = Field(default=None, max_length=80)
+
+
+class LocalBacktestTriggerRequest(BaseModel):
+    strategy_version_id: int = Field(gt=0)
+    profile: dict[str, Any] = Field(default_factory=dict)
 
 
 class BacktestRunRead(BaseModel):
@@ -136,6 +141,14 @@ class BacktestTaskRead(BaseModel):
             freshness=self.created_at,
         )
         return self
+
+
+class LocalBacktestTriggerResponse(BaseModel):
+    run: BacktestRunRead
+    tasks: list[BacktestTaskRead]
+    preflight_status: Literal["ready", "blocked"]
+    blocked_reasons: list[str] = Field(default_factory=list)
+    execution_mode: Literal["preflight_only"] = "preflight_only"
 
 
 class BacktestResultRead(BaseModel):

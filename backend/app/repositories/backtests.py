@@ -15,7 +15,7 @@ from app.schemas.backtest import (
 )
 
 
-TERMINAL_STATUSES = {"succeeded", "failed", "cancelled"}
+TERMINAL_STATUSES = {"succeeded", "failed", "cancelled", "blocked"}
 
 
 class BacktestRepository:

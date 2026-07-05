@@ -23,7 +23,7 @@ class BacktestRun(Base):
     __tablename__ = "backtest_runs"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled')",
+            "status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled', 'blocked')",
             name="backtest_runs_status_check",
         ),
     )
@@ -67,7 +67,7 @@ class BacktestTask(Base):
     __tablename__ = "backtest_tasks"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled')",
+            "status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled', 'blocked')",
             name="backtest_tasks_status_check",
         ),
         UniqueConstraint(
