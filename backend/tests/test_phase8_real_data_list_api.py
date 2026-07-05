@@ -1,4 +1,5 @@
 from collections.abc import Generator
+import hashlib
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -26,6 +27,12 @@ def test_phase8_real_data_list_apis_return_database_sources(tmp_path: Path) -> N
     engine = create_database_engine(f"sqlite+pysqlite:///{tmp_path / 'phase8-real-data.sqlite'}")
     Base.metadata.create_all(engine)
     session_factory = create_session_factory(engine)
+    strategy_dir = tmp_path / "strategies"
+    strategy_dir.mkdir()
+    strategy_code = "class Phase8RealData:\n    pass\n"
+    strategy_file = strategy_dir / "phase8_real_data.py"
+    strategy_file.write_text(strategy_code, encoding="utf-8")
+    strategy_checksum = hashlib.sha256(strategy_code.encode("utf-8")).hexdigest()
 
     with session_factory() as session:
         generation_run = StrategyGenerationRunRepository(session).create(
@@ -46,9 +53,18 @@ def test_phase8_real_data_list_apis_return_database_sources(tmp_path: Path) -> N
                 strategy_id=strategy.id,
                 generation_run_id=generation_run.id,
                 blueprint={"class_name": "Phase8RealData"},
-                generated_code="class Phase8RealData: pass",
-                file_path="user_data/strategies/generated/phase8_real_data.py",
+                generated_code=strategy_code,
+                code_hash=strategy_checksum,
+                file_path=str(strategy_file),
                 validation_status="passed",
+                diff_snapshot={
+                    "strategy_file_validation": {
+                        "approved_root": str(strategy_dir),
+                        "checksum": strategy_checksum,
+                        "validation_status": "passed",
+                        "write_status": "written",
+                    }
+                },
             )
         )
         assert version is not None
@@ -103,7 +119,9 @@ def test_phase8_real_data_list_apis_return_database_sources(tmp_path: Path) -> N
     assert strategies.json()[0]["data_source"]["core_data"] is True
     assert strategies.json()[0]["id"] == strategy_id
     assert versions.status_code == 200
-    assert versions.json()[0]["file_path"] == "user_data/strategies/generated/phase8_real_data.py"
+    assert versions.json()[0]["file_path"] == str(strategy_file)
+    assert versions.json()[0]["file_state"]["status"] == "READY"
+    assert versions.json()[0]["data_source"]["core_data"] is True
     assert versions.json()[0]["data_source"]["database_ids"]["strategy_version_id"] == version_id
     assert generation_runs.status_code == 200
     assert generation_runs.json()[0]["id"] == generation_run_id

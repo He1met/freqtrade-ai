@@ -1,3 +1,6 @@
+import hashlib
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
@@ -40,18 +43,47 @@ def db_session() -> Session:
         yield session
 
 
-def test_core_database_read_models_include_traceable_database_source(db_session: Session) -> None:
+def write_strategy_file(output_dir: Path, filename: str, code: str) -> tuple[Path, str]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    file_path = output_dir / filename
+    file_path.write_text(code, encoding="utf-8")
+    return file_path, hashlib.sha256(code.encode("utf-8")).hexdigest()
+
+
+def strategy_file_snapshot(output_dir: Path, checksum: str) -> dict:
+    return {
+        "strategy_file_validation": {
+            "approved_root": str(output_dir),
+            "checksum": checksum,
+            "validation_status": "passed",
+            "write_status": "written",
+        }
+    }
+
+
+def test_core_database_read_models_include_traceable_database_source(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
     strategy_repository = StrategyRepository(db_session)
     strategy = strategy_repository.create(
         StrategyCreate(name="Phase 8 Source Contract", slug="phase8-source-contract")
+    )
+    strategy_code = "class Phase8SourceContract:\n    pass\n"
+    strategy_file, checksum = write_strategy_file(
+        tmp_path / "generated",
+        "phase8_source_contract.py",
+        strategy_code,
     )
     version = strategy_repository.create_version(
         StrategyVersionCreate(
             strategy_id=strategy.id,
             blueprint={"class_name": "Phase8SourceContract"},
-            generated_code="class Phase8SourceContract: pass",
-            file_path="user_data/strategies/generated/phase8_source_contract.py",
+            generated_code=strategy_code,
+            code_hash=checksum,
+            file_path=str(strategy_file),
             validation_status="passed",
+            diff_snapshot=strategy_file_snapshot(strategy_file.parent, checksum),
         )
     )
     assert version is not None
@@ -64,10 +96,86 @@ def test_core_database_read_models_include_traceable_database_source(db_session:
     assert strategy_read.data_source.database_ids == {"strategy_id": strategy.id}
     assert version_read.data_source.database_ids["strategy_version_id"] == version.id
     assert version_read.data_source.database_ids["strategy_id"] == strategy.id
+    assert version_read.file_state.status == "READY"
+    assert version_read.file_state.checksum_matches is True
     assert (
         version_read.data_source.artifact_refs["strategy_file_path"]
-        == "user_data/strategies/generated/phase8_source_contract.py"
+        == str(strategy_file)
     )
+
+
+def test_strategy_version_read_marks_missing_file_as_non_core(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "generated"
+    output_dir.mkdir()
+    strategy_repository = StrategyRepository(db_session)
+    strategy = strategy_repository.create(
+        StrategyCreate(name="Missing File Source Contract", slug="missing-file-source-contract")
+    )
+    code = "class MissingFileSourceContract:\n    pass\n"
+    checksum = hashlib.sha256(code.encode("utf-8")).hexdigest()
+    missing_file = output_dir / "missing_file_source_contract.py"
+    version = strategy_repository.create_version(
+        StrategyVersionCreate(
+            strategy_id=strategy.id,
+            blueprint={"class_name": "MissingFileSourceContract"},
+            generated_code=code,
+            code_hash=checksum,
+            file_path=str(missing_file),
+            validation_status="passed",
+            diff_snapshot=strategy_file_snapshot(output_dir, checksum),
+        )
+    )
+    assert version is not None
+
+    version_read = StrategyVersionRead.model_validate(version)
+
+    assert version_read.file_state.status == "BLOCKED"
+    assert version_read.file_state.exists is False
+    assert "strategy file does not exist" in (version_read.file_state.blocked_reason or "")
+    assert version_read.data_source.source_type == "database"
+    assert version_read.data_source.core_data is False
+    assert "strategy file does not exist" in (version_read.data_source.blocked_reason or "")
+
+
+def test_strategy_version_read_marks_tampered_file_as_failed(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "generated"
+    original_code = "class TamperedFileSourceContract:\n    value = 1\n"
+    strategy_file, checksum = write_strategy_file(
+        output_dir,
+        "tampered_file_source_contract.py",
+        original_code,
+    )
+    strategy_repository = StrategyRepository(db_session)
+    strategy = strategy_repository.create(
+        StrategyCreate(name="Tampered File Source Contract", slug="tampered-file-source-contract")
+    )
+    version = strategy_repository.create_version(
+        StrategyVersionCreate(
+            strategy_id=strategy.id,
+            blueprint={"class_name": "TamperedFileSourceContract"},
+            generated_code=original_code,
+            code_hash=checksum,
+            file_path=str(strategy_file),
+            validation_status="passed",
+            diff_snapshot=strategy_file_snapshot(output_dir, checksum),
+        )
+    )
+    assert version is not None
+    strategy_file.write_text("class TamperedFileSourceContract:\n    value = 2\n", encoding="utf-8")
+
+    version_read = StrategyVersionRead.model_validate(version)
+
+    assert version_read.file_state.status == "FAILED"
+    assert version_read.file_state.checksum_matches is False
+    assert "checksum does not match" in (version_read.file_state.blocked_reason or "")
+    assert version_read.data_source.core_data is False
+    assert version_read.data_source.artifact_refs["strategy_file_state"] == "FAILED"
 
 
 def test_backtest_and_score_read_models_include_database_traceability(db_session: Session) -> None:
