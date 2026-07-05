@@ -4,6 +4,7 @@ import type {
   BacktestMetricSummary,
   BacktestRunSummary,
   BacktestTaskSummary,
+  DataSourceTraceSummary,
   DryRunArtifactManifest,
   DryRunBalanceSummary,
   DryRunEventSummary,
@@ -44,8 +45,14 @@ import type {
   RuntimeReadOnlyContractSummary,
   RuntimeSafetyBoundary,
   RuntimeStatusSummary,
+  StrategyGenerationApiResult,
+  StrategyGenerationRunDetail,
+  StrategyGenerationStrategy,
+  StrategyGenerationSubmitPayload,
+  StrategyGenerationVersion,
   StrategyFailureReasonSummary,
   StrategyVersionLineageEntry,
+  ValidationErrorSummary,
 } from "./types";
 
 const DEFAULT_API_BASE_URL = "/api";
@@ -435,6 +442,61 @@ type RawRankingEntry = Partial<RankingEntry> & {
   metrics_snapshot?: Record<string, unknown>;
 };
 
+type RawDataSourceTrace = Partial<DataSourceTraceSummary> & {
+  source_type?: string;
+  source_detail?: string;
+  core_data?: boolean;
+  database_ids?: Record<string, unknown>;
+  artifact_refs?: Record<string, unknown>;
+  blocked_reason?: string | null;
+};
+
+type RawStrategyGenerationRunDetail = Partial<StrategyGenerationRunDetail> & {
+  prompt_hash?: string | null;
+  prompt_summary?: string | null;
+  params_snapshot?: Record<string, unknown>;
+  requested_count?: number;
+  generated_count?: number;
+  accepted_count?: number;
+  failed_count?: number;
+  error_message?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  created_at?: string | null;
+  data_source?: RawDataSourceTrace;
+};
+
+type RawStrategyGenerationStrategy = Partial<StrategyGenerationStrategy> & {
+  current_version_id?: string | number | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  data_source?: RawDataSourceTrace;
+};
+
+type RawValidationErrorSummary = Partial<ValidationErrorSummary>;
+
+type RawStrategyGenerationVersion = Partial<StrategyGenerationVersion> & {
+  strategy_id?: string | number;
+  generation_run_id?: string | number | null;
+  parent_version_id?: string | number | null;
+  version_number?: number;
+  file_path?: string;
+  validation_status?: string;
+  validation_errors?: RawValidationErrorSummary[];
+  change_summary?: string | null;
+  created_at?: string | null;
+  data_source?: RawDataSourceTrace;
+};
+
+type RawStrategyGenerationApiResponse = {
+  run?: RawStrategyGenerationRunDetail;
+  strategies?: RawStrategyGenerationStrategy[];
+  strategy_versions?: RawStrategyGenerationVersion[];
+  strategyVersions?: RawStrategyGenerationVersion[];
+  data_source?: RawDataSourceTrace;
+  dataSource?: RawDataSourceTrace;
+};
+
 function getApiBaseUrl() {
   const env = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env;
   const configuredUrl = env?.VITE_API_BASE_URL?.trim();
@@ -472,6 +534,41 @@ function asStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.map((item) => String(item)) : [];
 }
 
+function asBoolean(value: unknown, fallback = false): boolean {
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function normalizeNumericRecord(value: unknown): Record<string, number> {
+  return Object.fromEntries(
+    Object.entries(asRecord(value))
+      .map(([key, rawValue]) => {
+        if (typeof rawValue === "number" && Number.isFinite(rawValue)) {
+          return [key, rawValue] as const;
+        }
+
+        if (typeof rawValue === "string") {
+          const numericValue = Number(rawValue);
+          if (Number.isFinite(numericValue)) {
+            return [key, numericValue] as const;
+          }
+        }
+
+        return null;
+      })
+      .filter((entry): entry is readonly [string, number] => entry !== null),
+  );
+}
+
+function normalizeStringRecord(value: unknown): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(asRecord(value))
+      .map(([key, rawValue]) =>
+        rawValue === null || rawValue === undefined ? null : ([key, String(rawValue)] as const),
+      )
+      .filter((entry): entry is readonly [string, string] => entry !== null),
+  );
+}
+
 function redactSensitiveText(value: string): string {
   return value
     .replace(
@@ -479,6 +576,52 @@ function redactSensitiveText(value: string): string {
       "$1$2[REDACTED]",
     )
     .replace(/\bbearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [REDACTED]");
+}
+
+function extractGenerationFailureDetail(detail: unknown): {
+  failedReason: string | null;
+  strategyGenerationRunId: string | null;
+} {
+  const value = asRecord(detail);
+  const nested = asRecord(value.detail ?? detail);
+
+  return {
+    failedReason: asOptionalString(nested.failed_reason ?? nested.failedReason),
+    strategyGenerationRunId: normalizeOptionalId(
+      (nested.strategy_generation_run_id ?? nested.strategyGenerationRunId) as string | number | null | undefined,
+    ),
+  };
+}
+
+function detailMessage(detail: unknown): string | null {
+  const value = asRecord(detail);
+  if (typeof value.detail === "string") {
+    return redactSensitiveText(value.detail);
+  }
+
+  const nested = asRecord(value.detail ?? detail);
+  const message = asOptionalString(nested.failed_reason ?? nested.failedReason ?? nested.message ?? nested.reason);
+  return message ? redactSensitiveText(message) : null;
+}
+
+export class StrategyGenerationApiError extends Error {
+  readonly detail: unknown;
+  readonly failedReason: string | null;
+  readonly status: number;
+  readonly statusText: string;
+  readonly strategyGenerationRunId: string | null;
+
+  constructor(response: Response, detail: unknown) {
+    const generationDetail = extractGenerationFailureDetail(detail);
+    const message = detailMessage(detail) ?? `${response.status} ${response.statusText}`;
+    super(message);
+    this.name = "StrategyGenerationApiError";
+    this.detail = detail;
+    this.failedReason = generationDetail.failedReason;
+    this.status = response.status;
+    this.statusText = response.statusText;
+    this.strategyGenerationRunId = generationDetail.strategyGenerationRunId;
+  }
 }
 
 function normalizeMetrics(raw: RawBacktestMetricSummary | undefined): BacktestMetricSummary {
@@ -1228,6 +1371,122 @@ function normalizeOperatorDashboard(raw: RawOperatorDashboardSummary): OperatorD
   };
 }
 
+function normalizeDataSourceTrace(
+  raw: RawDataSourceTrace | null | undefined,
+  fallbackDetail: string,
+): DataSourceTraceSummary {
+  const source = raw ?? {};
+  return {
+    sourceType: source.sourceType ?? source.source_type ?? "unknown",
+    sourceDetail: redactSensitiveText(source.sourceDetail ?? source.source_detail ?? fallbackDetail),
+    coreData: asBoolean(source.coreData ?? source.core_data),
+    databaseIds: normalizeNumericRecord(source.databaseIds ?? source.database_ids),
+    artifactRefs: normalizeStringRecord(source.artifactRefs ?? source.artifact_refs),
+    freshness: source.freshness ?? null,
+    blockedReason:
+      source.blockedReason || source.blocked_reason
+        ? redactSensitiveText(source.blockedReason ?? source.blocked_reason ?? "")
+        : null,
+  };
+}
+
+function normalizeValidationError(raw: RawValidationErrorSummary): ValidationErrorSummary {
+  return {
+    field: raw.field ?? null,
+    message: redactSensitiveText(raw.message ?? "Validation error was recorded without a message."),
+    code: raw.code ?? null,
+  };
+}
+
+function normalizeStrategyGenerationRun(raw: RawStrategyGenerationRunDetail | undefined): StrategyGenerationRunDetail {
+  const source = raw ?? {};
+  return {
+    id: normalizeId(source.id),
+    status: source.status ?? "unknown",
+    provider: source.provider ?? "unknown",
+    model: source.model ?? "unknown",
+    promptHash: source.promptHash ?? source.prompt_hash ?? null,
+    promptSummary:
+      source.promptSummary || source.prompt_summary
+        ? redactSensitiveText(source.promptSummary ?? source.prompt_summary ?? "")
+        : null,
+    paramsSnapshot: source.paramsSnapshot ?? source.params_snapshot ?? {},
+    requestedCount: source.requestedCount ?? source.requested_count ?? 0,
+    generatedCount: source.generatedCount ?? source.generated_count ?? 0,
+    acceptedCount: source.acceptedCount ?? source.accepted_count ?? 0,
+    failedCount: source.failedCount ?? source.failed_count ?? 0,
+    errorMessage:
+      source.errorMessage || source.error_message
+        ? redactSensitiveText(source.errorMessage ?? source.error_message ?? "")
+        : null,
+    startedAt: source.startedAt ?? source.started_at ?? null,
+    completedAt: source.completedAt ?? source.completed_at ?? null,
+    createdAt: source.createdAt ?? source.created_at ?? null,
+    dataSource: normalizeDataSourceTrace(
+      source.dataSource ?? source.data_source,
+      "Strategy generation run source was not provided by the backend.",
+    ),
+  };
+}
+
+function normalizeStrategyGenerationStrategy(
+  raw: RawStrategyGenerationStrategy,
+): StrategyGenerationStrategy {
+  return {
+    id: normalizeId(raw.id),
+    name: raw.name ?? "Unknown strategy",
+    slug: raw.slug ?? "unknown-strategy",
+    description: raw.description ? redactSensitiveText(raw.description) : null,
+    status: raw.status ?? "unknown",
+    source: raw.source ?? "unknown",
+    tags: asStringArray(raw.tags),
+    currentVersionId: normalizeOptionalId(raw.currentVersionId ?? raw.current_version_id),
+    createdAt: raw.createdAt ?? raw.created_at ?? null,
+    updatedAt: raw.updatedAt ?? raw.updated_at ?? null,
+    dataSource: normalizeDataSourceTrace(
+      raw.dataSource ?? raw.data_source,
+      "Strategy source was not provided by the backend.",
+    ),
+  };
+}
+
+function normalizeStrategyGenerationVersion(raw: RawStrategyGenerationVersion): StrategyGenerationVersion {
+  const validationErrors = raw.validationErrors ?? raw.validation_errors ?? [];
+  return {
+    id: normalizeId(raw.id),
+    strategyId: normalizeId(raw.strategyId ?? raw.strategy_id),
+    generationRunId: normalizeOptionalId(raw.generationRunId ?? raw.generation_run_id),
+    parentVersionId: normalizeOptionalId(raw.parentVersionId ?? raw.parent_version_id),
+    versionNumber: raw.versionNumber ?? raw.version_number ?? 0,
+    filePath: raw.filePath ?? raw.file_path ?? "",
+    validationStatus: raw.validationStatus ?? raw.validation_status ?? "unknown",
+    validationErrors: Array.isArray(validationErrors) ? validationErrors.map(normalizeValidationError) : [],
+    changeSummary:
+      raw.changeSummary || raw.change_summary
+        ? redactSensitiveText(raw.changeSummary ?? raw.change_summary ?? "")
+        : null,
+    createdAt: raw.createdAt ?? raw.created_at ?? null,
+    dataSource: normalizeDataSourceTrace(
+      raw.dataSource ?? raw.data_source,
+      "Strategy version source was not provided by the backend.",
+    ),
+  };
+}
+
+function normalizeStrategyGenerationResponse(raw: RawStrategyGenerationApiResponse): StrategyGenerationApiResult {
+  return {
+    run: normalizeStrategyGenerationRun(raw.run),
+    strategies: Array.isArray(raw.strategies) ? raw.strategies.map(normalizeStrategyGenerationStrategy) : [],
+    strategyVersions: Array.isArray(raw.strategyVersions ?? raw.strategy_versions)
+      ? (raw.strategyVersions ?? raw.strategy_versions ?? []).map(normalizeStrategyGenerationVersion)
+      : [],
+    dataSource: normalizeDataSourceTrace(
+      raw.dataSource ?? raw.data_source,
+      "Strategy generation API response source was not provided by the backend.",
+    ),
+  };
+}
+
 async function fetchJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   const response = await fetch(`${getApiBaseUrl()}${path}`, {
     headers: { Accept: "application/json" },
@@ -1236,6 +1495,31 @@ async function fetchJson<T>(path: string, signal?: AbortSignal): Promise<T> {
 
   if (!response.ok) {
     throw new Error(`${response.status} ${response.statusText}`);
+  }
+
+  return response.json() as Promise<T>;
+}
+
+async function postJson<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
+  const response = await fetch(`${getApiBaseUrl()}${path}`, {
+    body: JSON.stringify(body),
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    method: "POST",
+    signal,
+  });
+
+  if (!response.ok) {
+    let detail: unknown = null;
+    try {
+      detail = await response.json();
+    } catch {
+      detail = null;
+    }
+
+    throw new StrategyGenerationApiError(response, detail);
   }
 
   return response.json() as Promise<T>;
@@ -1277,6 +1561,22 @@ async function fetchValue<T>(
   }
 
   return { item: fallback, usedFallback: true };
+}
+
+export async function createStrategyGenerationRun(
+  payload: StrategyGenerationSubmitPayload,
+  signal?: AbortSignal,
+): Promise<StrategyGenerationApiResult> {
+  const raw = await postJson<RawStrategyGenerationApiResponse>(
+    "/strategy-generation-runs",
+    {
+      prompt_summary: payload.promptSummary,
+      requested_count: payload.requestedCount,
+    },
+    signal,
+  );
+
+  return normalizeStrategyGenerationResponse(raw);
 }
 
 export async function loadMvpData(signal?: AbortSignal): Promise<{
