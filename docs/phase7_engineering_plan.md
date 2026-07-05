@@ -118,6 +118,8 @@ Phase 7 should proceed in this order:
 ## Worker / Queue Boundary
 
 Worker / queue work is design-only at the start of Phase 7.
+The detailed design for issue `#202` lives in
+`docs/phase7_worker_queue_design.md`.
 
 Allowed:
 
