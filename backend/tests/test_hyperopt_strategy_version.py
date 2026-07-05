@@ -13,6 +13,7 @@ from app.services.hyperopt_strategy_version import (
     HyperoptStrategyVersionError,
     HyperoptStrategyVersionService,
 )
+from app.services.strategy_file_validation import StrategyFileValidationBlocked
 
 
 @pytest.fixture()
@@ -83,9 +84,11 @@ def test_creates_optimized_child_strategy_version_without_overwriting_parent(
     tmp_path,
 ) -> None:
     parent = create_parent_version(db_session)
+    output_dir = tmp_path / "strategies"
+    output_dir.mkdir()
     service = HyperoptStrategyVersionService(
         db_session,
-        file_manager=StrategyFileManager(output_dir=tmp_path / "strategies"),
+        file_manager=StrategyFileManager(output_dir=output_dir, approved_roots=[output_dir]),
     )
 
     result = service.create_optimized_version(
@@ -101,7 +104,11 @@ def test_creates_optimized_child_strategy_version_without_overwriting_parent(
     assert child.parent_version_id == parent.id
     assert child.version_number == 2
     assert child.file_path != parent.file_path
-    assert child.validation_status == "pending"
+    assert child.validation_status == "passed"
+    assert child.validation_errors == []
+    assert child.code_hash is not None
+    assert result.strategy_file.write_status == "written"
+    assert result.strategy_file.validation_status == "passed"
     assert child.change_summary == (
         f"Derived from StrategyVersion {parent.id} using Hyperopt run "
         "hyperopt-run-42 best epoch 42."
@@ -130,10 +137,18 @@ def test_creates_optimized_child_strategy_version_without_overwriting_parent(
         "hyperopt_derivation",
         "generated_code.HYPEROPT_DERIVATION",
         "file_path",
+        "code_hash",
+        "strategy_file_validation",
     ]
     assert child.diff_snapshot["before"]["file_path"] == parent.file_path
     assert child.diff_snapshot["after"]["parent_version_id"] == parent.id
     assert child.diff_snapshot["after"]["best_params"]["stoploss"] == -0.12
+    assert child.diff_snapshot["after"]["file_path"] == child.file_path
+    assert child.diff_snapshot["after"]["code_hash"] == child.code_hash
+    assert (
+        child.diff_snapshot["after"]["strategy_file_validation"]["checksum"]
+        == child.code_hash
+    )
 
     repository = StrategyRepository(db_session)
     reloaded_parent = repository.get_version(parent.id)
@@ -141,6 +156,30 @@ def test_creates_optimized_child_strategy_version_without_overwriting_parent(
     assert reloaded_parent.file_path == "user_data/strategies/generated/lineage_rsi_v1.py"
     assert "hyperopt_derivation" not in reloaded_parent.blueprint
     assert reloaded_parent.generated_code == "class LineageRsiStrategy: pass\n"
+
+
+def test_fails_closed_when_strategy_output_directory_is_missing(
+    db_session: Session,
+    tmp_path,
+) -> None:
+    parent = create_parent_version(db_session)
+    output_dir = tmp_path / "missing" / "strategies"
+    service = HyperoptStrategyVersionService(
+        db_session,
+        file_manager=StrategyFileManager(output_dir=output_dir, approved_roots=[output_dir]),
+    )
+
+    with pytest.raises(StrategyFileValidationBlocked) as exc_info:
+        service.create_optimized_version(
+            parent_version_id=parent.id,
+            hyperopt_run_id="hyperopt-run-42",
+            hyperopt_result=parsed_hyperopt_result(),
+        )
+
+    result = exc_info.value.result
+    assert result.write_status == "blocked"
+    assert "strategy output directory does not exist" in result.blocked_reasons
+    assert not output_dir.exists()
 
 
 def test_fails_closed_when_parent_strategy_version_is_missing(db_session: Session, tmp_path) -> None:

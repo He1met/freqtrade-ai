@@ -405,9 +405,14 @@ def create_optimized_strategy_version(context: Phase4SmokeContext) -> None:
         if context.success_manifest is not None
         else None
     )
+    optimized_strategy_dir = context.tmp_dir / "optimized_strategies"
+    optimized_strategy_dir.mkdir()
     result = HyperoptStrategyVersionService(
         context.db_session,
-        file_manager=StrategyFileManager(output_dir=context.tmp_dir / "optimized_strategies"),
+        file_manager=StrategyFileManager(
+            output_dir=optimized_strategy_dir,
+            approved_roots=[optimized_strategy_dir],
+        ),
     ).create_optimized_version(
         parent_version_id=context.parent_version_id,
         hyperopt_run_id="phase4-smoke-run-7",

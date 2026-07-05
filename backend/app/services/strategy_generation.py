@@ -17,6 +17,7 @@ from app.schemas import (
     StrategyVersionCreate,
 )
 from app.schemas.strategy_blueprint import StrategyBlueprint
+from app.services.strategy_file_validation import StrategyFileValidationService
 from app.services.strategy_renderer import StrategyCodeRenderer
 
 
@@ -203,7 +204,7 @@ def _optional_int_from_env(name: str) -> Optional[int]:
     value = os.environ.get(name)
     if value is None or not value.strip():
         return None
-        return int(value)
+    return int(value)
 
 
 @dataclass(frozen=True)
@@ -271,6 +272,7 @@ class StrategyGenerationService:
         self.provider = provider
         self.renderer = renderer or StrategyCodeRenderer()
         self.file_manager = file_manager or StrategyFileManager()
+        self.file_validation_service = StrategyFileValidationService(self.file_manager)
 
     def run_once(self, prompt_summary: str, requested_count: int = 1) -> list[int]:
         return self.run_once_with_result(prompt_summary, requested_count=requested_count).version_ids
@@ -328,12 +330,11 @@ class StrategyGenerationService:
     ) -> list[int]:
         version_ids: list[int] = []
         for index, blueprint in enumerate(blueprints, start=1):
-            # Rendering and file writes stay behind dedicated boundaries so the
-            # service can later insert validation/static-review steps here.
+            # Rendering and runnable-file validation stay behind dedicated boundaries.
             code = self.renderer.render(blueprint)
-            path = self.file_manager.write_strategy_file(
-                blueprint.class_name,
-                code,
+            file_result = self.file_validation_service.write_validated_strategy_file(
+                class_name=blueprint.class_name,
+                code=code,
                 file_stem=f"{blueprint.slug}_run_{run_id}_{index}",
             )
             strategy = self.strategy_repository.get_by_slug(blueprint.slug)
@@ -352,8 +353,11 @@ class StrategyGenerationService:
                     generation_run_id=run_id,
                     blueprint=blueprint.model_dump(),
                     generated_code=code,
-                    file_path=str(path),
-                    validation_status="passed",
+                    code_hash=file_result.code_hash,
+                    file_path=str(file_result.file_path),
+                    validation_status=file_result.validation_status,
+                    validation_errors=file_result.validation_errors,
+                    diff_snapshot={"strategy_file_validation": file_result.to_snapshot()},
                 )
             )
             if version is not None:
