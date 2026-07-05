@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 LIVE_CANDIDATE_PROFILE_SCHEMA_VERSION = "1"
 LIVE_CANDIDATE_PREFLIGHT_SCHEMA_VERSION = "1"
 LIVE_CANDIDATE_APPROVAL_SCHEMA_VERSION = "1"
+LIVE_CANDIDATE_DEPLOYMENT_SCHEMA_VERSION = "1"
 REQUIRED_LOCKED_VARIABLES = frozenset(
     {
         "profile_name",
@@ -364,6 +365,20 @@ LiveCandidateApprovalStatus = Literal[
 ]
 LiveCandidateApprovalDecisionType = Literal["APPROVE", "REJECT", "REVOKE", "EXPIRE"]
 LiveCandidateApprovalActorRole = Literal["maintainer", "operator", "risk-owner", "reviewer"]
+LiveCandidateDeploymentEnvironment = Literal["manual-review", "staging", "production-candidate"]
+LiveCandidateDeploymentStatus = Literal[
+    "PLANNED",
+    "BLOCKED",
+    "MANUAL_RESULT_RECORDED",
+    "ROLLBACK_RECORDED",
+    "CANCELLED",
+]
+LiveCandidateDeploymentResultStatus = Literal[
+    "MANUAL_SUCCESS",
+    "MANUAL_FAILED",
+    "ROLLBACK_RECORDED",
+    "CANCELLED",
+]
 
 
 class LiveCandidateRiskCheck(BaseModel):
@@ -567,3 +582,237 @@ class LiveCandidateApprovalRecord(BaseModel):
         summary = self.model_dump(mode="json", exclude_none=True)
         summary["can_create_deployment_record"] = self.can_create_deployment_record
         return summary
+
+
+class LiveCandidateRollbackStep(BaseModel):
+    order: int = Field(ge=1, le=100)
+    action: str = Field(min_length=1, max_length=500)
+    expected_outcome: str = Field(min_length=1, max_length=500)
+    verification_ref: Optional[str] = Field(default=None, min_length=1, max_length=500)
+
+    model_config = {"extra": "forbid"}
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_secrets_runtime_keys_and_secret_values(cls, value: Any) -> Any:
+        LiveCandidateProfile._reject_forbidden_input(value)
+        return value
+
+    @field_validator("action", "expected_outcome")
+    @classmethod
+    def validate_text(cls, value: str) -> str:
+        clean = value.strip()
+        if not clean:
+            raise ValueError("rollback step text must not be blank")
+        return clean
+
+    @field_validator("verification_ref")
+    @classmethod
+    def validate_verification_ref(cls, value: Optional[str]) -> Optional[str]:
+        return _validate_optional_repo_relative_ref(value, "verification_ref")
+
+
+class LiveCandidateRollbackPlan(BaseModel):
+    plan_id: str = Field(min_length=1, max_length=120)
+    summary: str = Field(min_length=1, max_length=1000)
+    owner: LiveCandidateApprovalActor
+    trigger_conditions: list[str] = Field(min_length=1)
+    steps: list[LiveCandidateRollbackStep] = Field(min_length=1)
+    verification_steps: list[str] = Field(min_length=1)
+    evidence_refs: list[str] = Field(default_factory=list)
+
+    model_config = {"extra": "forbid"}
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_secrets_runtime_keys_and_secret_values(cls, value: Any) -> Any:
+        LiveCandidateProfile._reject_forbidden_input(value)
+        return value
+
+    @field_validator("plan_id", "summary")
+    @classmethod
+    def validate_plan_text(cls, value: str) -> str:
+        clean = value.strip()
+        if not clean:
+            raise ValueError("rollback plan text fields must not be blank")
+        return clean
+
+    @field_validator("trigger_conditions", "verification_steps")
+    @classmethod
+    def validate_required_text_list(cls, value: list[str]) -> list[str]:
+        return _normalize_non_empty_text_list(value, "rollback plan text list")
+
+    @field_validator("evidence_refs")
+    @classmethod
+    def validate_evidence_refs(cls, value: list[str]) -> list[str]:
+        refs = _normalize_non_empty_text_list(value, "rollback plan evidence refs")
+        return [_validate_repo_relative_ref(ref, "evidence_refs") for ref in refs]
+
+    @model_validator(mode="after")
+    def validate_step_order(self) -> "LiveCandidateRollbackPlan":
+        orders = [step.order for step in self.steps]
+        if len(set(orders)) != len(orders):
+            raise ValueError("rollback plan step order values must be unique")
+        return self
+
+    def to_audit_summary(self) -> dict[str, Any]:
+        return self.model_dump(mode="json", exclude_none=True)
+
+
+class LiveCandidateDeploymentResult(BaseModel):
+    status: LiveCandidateDeploymentResultStatus
+    recorded_by: LiveCandidateApprovalActor
+    recorded_at: datetime
+    summary: str = Field(min_length=1, max_length=1000)
+    evidence_ref: Optional[str] = Field(default=None, min_length=1, max_length=500)
+    source: Literal["manual-record"] = "manual-record"
+
+    model_config = {"extra": "forbid"}
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_secrets_runtime_keys_and_secret_values(cls, value: Any) -> Any:
+        LiveCandidateProfile._reject_forbidden_input(value)
+        return value
+
+    @field_validator("recorded_at")
+    @classmethod
+    def validate_recorded_at_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("deployment result timestamps must include timezone")
+        return value
+
+    @field_validator("summary")
+    @classmethod
+    def validate_summary(cls, value: str) -> str:
+        clean = value.strip()
+        if not clean:
+            raise ValueError("deployment result summary must not be blank")
+        return clean
+
+    @field_validator("evidence_ref")
+    @classmethod
+    def validate_evidence_ref(cls, value: Optional[str]) -> Optional[str]:
+        return _validate_optional_repo_relative_ref(value, "evidence_ref")
+
+
+class LiveCandidateDeploymentRecord(BaseModel):
+    schema_version: Literal["1"] = LIVE_CANDIDATE_DEPLOYMENT_SCHEMA_VERSION
+    record_id: str = Field(min_length=1, max_length=120)
+    status: LiveCandidateDeploymentStatus
+    profile_name: str = Field(min_length=1, max_length=120)
+    profile_hash: str = Field(min_length=64, max_length=64)
+    approval_record_ref: str = Field(min_length=1, max_length=500)
+    approval_status: LiveCandidateApprovalStatus
+    preflight_status: LiveCandidatePreflightStatus
+    planned_environment: LiveCandidateDeploymentEnvironment
+    planned_by: LiveCandidateApprovalActor
+    planned_at: datetime
+    rollback_plan: LiveCandidateRollbackPlan
+    result: Optional[LiveCandidateDeploymentResult] = None
+    blockers: list[str] = Field(default_factory=list)
+    safety_boundary: str = (
+        "Deployment governance record only; does not execute deployment, live trading, "
+        "real orders, or live-bot control."
+    )
+
+    model_config = {"extra": "forbid"}
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_secrets_runtime_keys_and_secret_values(cls, value: Any) -> Any:
+        LiveCandidateProfile._reject_forbidden_input(value)
+        return value
+
+    @field_validator("record_id", "profile_name")
+    @classmethod
+    def validate_identity_text(cls, value: str) -> str:
+        clean = value.strip()
+        if not clean:
+            raise ValueError("deployment record identity fields must not be blank")
+        return clean
+
+    @field_validator("profile_hash")
+    @classmethod
+    def validate_profile_hash(cls, value: str) -> str:
+        clean = value.strip().lower()
+        if not re.fullmatch(r"[a-f0-9]{64}", clean):
+            raise ValueError("profile_hash must be a lowercase sha256 hex digest")
+        return clean
+
+    @field_validator("approval_record_ref")
+    @classmethod
+    def validate_approval_record_ref(cls, value: str) -> str:
+        return _validate_repo_relative_ref(value, "approval_record_ref")
+
+    @field_validator("planned_at")
+    @classmethod
+    def validate_planned_at_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("deployment plan timestamps must include timezone")
+        return value
+
+    @field_validator("blockers")
+    @classmethod
+    def validate_blockers(cls, value: list[str]) -> list[str]:
+        return _normalize_non_empty_text_list(value, "deployment record blockers")
+
+    @model_validator(mode="after")
+    def validate_deployment_state(self) -> "LiveCandidateDeploymentRecord":
+        if self.status != "BLOCKED" and self.approval_status != "APPROVED_FOR_DEPLOYMENT_RECORD":
+            raise ValueError("deployment records require completed human approval")
+        if self.approval_status == "APPROVED_FOR_DEPLOYMENT_RECORD" and self.preflight_status != "APPROVED_FOR_REVIEW":
+            raise ValueError("deployment records require passing preflight")
+        if self.status == "BLOCKED" and not self.blockers:
+            raise ValueError("blocked deployment records must include blockers")
+        if self.status == "PLANNED" and self.result is not None:
+            raise ValueError("planned deployment records must not include a result")
+        if self.status != "PLANNED" and self.status != "BLOCKED" and self.result is None:
+            raise ValueError("result status records must include a manual result")
+        if self.result is not None:
+            expected_statuses = {
+                "MANUAL_RESULT_RECORDED": {"MANUAL_SUCCESS", "MANUAL_FAILED"},
+                "ROLLBACK_RECORDED": {"ROLLBACK_RECORDED"},
+                "CANCELLED": {"CANCELLED"},
+            }
+            if self.result.status not in expected_statuses.get(self.status, set()):
+                raise ValueError("deployment record status must match manual result status")
+        return self
+
+    @property
+    def can_record_manual_result(self) -> bool:
+        return self.status == "PLANNED"
+
+    def to_audit_summary(self) -> dict[str, Any]:
+        summary = self.model_dump(mode="json", exclude_none=True)
+        summary["can_record_manual_result"] = self.can_record_manual_result
+        return summary
+
+
+def _normalize_non_empty_text_list(value: list[str], field_name: str) -> list[str]:
+    normalized: list[str] = []
+    for item in value:
+        clean = item.strip()
+        if not clean:
+            raise ValueError(f"{field_name} must not contain blank values")
+        normalized.append(clean)
+    return normalized
+
+
+def _validate_optional_repo_relative_ref(value: Optional[str], field_name: str) -> Optional[str]:
+    if value is None:
+        return value
+    return _validate_repo_relative_ref(value, field_name)
+
+
+def _validate_repo_relative_ref(value: str, field_name: str) -> str:
+    ref = value.strip()
+    if not ref:
+        raise ValueError(f"{field_name} must not be blank")
+    if ref.startswith(("http://", "https://")):
+        raise ValueError(f"{field_name} must not be a URL")
+    if ref.startswith("/"):
+        raise ValueError(f"{field_name} must be repository-relative")
+    if ".." in ref.split("/"):
+        raise ValueError(f"{field_name} must not contain parent traversal")
+    return ref
