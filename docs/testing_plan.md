@@ -227,3 +227,39 @@ python3 -m compileall backend/app backend/tests scripts
 cd frontend && npm run build
 git diff --check
 ```
+
+## Phase 6 Live-candidate Governance Smoke
+
+Phase 6 实盘候选与部署治理使用离线 smoke 覆盖 `LiveCandidateProfile`、
+risk preflight、人工审批记录、`DeploymentRecord`、rollback plan 和只读监控摘要。
+
+验收命令：
+
+```bash
+python3 scripts/smoke_phase6.py --offline --tmp-dir /tmp/freqtrade-ai-phase6-smoke
+```
+
+该命令默认只使用 fixture 和 `--tmp-dir` 下生成的临时治理记录。不启动 Freqtrade，
+不连接真实交易所，不下载 K 线，不读取真实密钥，不执行 live trading 或真实下单，
+也不执行生产部署。
+
+覆盖范围：
+
+- 校验 `LiveCandidateProfile` 和 offline evidence manifest。
+- 验证 passing preflight 只能进入人工审批，不代表部署许可。
+- 通过两个人工审批记录解锁 deployment governance record。
+- 验证 rollback plan 是创建部署记录的必需输入。
+- 解析只读 monitoring summary，确认不暴露控制动作。
+- 覆盖缺失风险证据、缺失人工审批、缺失 rollback plan 的 `BLOCKED` 路径。
+- 覆盖风险阈值超限的 `FAILED` 路径。
+- 写入 smoke summary，明确真实交易、真实连接、真实下单、密钥读取和生产部署均未发生。
+
+限制和禁止项：
+
+- 不启动 live trading。
+- 不连接真实交易所，不下载 K 线。
+- 不读取或写入真实 API key、secret、passphrase。
+- 不提供 start / stop / deploy live 控制。
+- 不引入 Redis、Celery、Kafka、RabbitMQ。
+- 不修改 Freqtrade 源码。
+- 不部署，不进入 Phase 7。
