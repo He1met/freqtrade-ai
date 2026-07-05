@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 
+from app.api.debug_mvp import router as debug_mvp_router
 from app.api.health import router as health_router
 from app.api.runtime import router as runtime_router
 from app.core.config import get_settings
@@ -15,5 +16,6 @@ app = FastAPI(
     description="Freqtrade AI phase 0 backend skeleton.",
 )
 
+app.include_router(debug_mvp_router)
 app.include_router(health_router)
 app.include_router(runtime_router)
