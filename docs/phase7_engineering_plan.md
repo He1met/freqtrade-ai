@@ -144,6 +144,7 @@ Phase 7 should keep the repository fail-closed and evidence-driven:
 - Python code changes run `python3 -m compileall backend/app backend/tests scripts`.
 - Frontend work runs `cd frontend && npm run build`.
 - All changes run `git diff --check`.
+- GitHub Actions CI scope and limits are recorded in `docs/phase7_ci.md`.
 - Once `#204` lands, review uses
   `python3 scripts/smoke_phase7.py --offline --tmp-dir /tmp/freqtrade-ai-phase7-smoke`.
 
@@ -167,4 +168,3 @@ Every Phase 7 issue must preserve these boundaries:
 - Do not bypass human approval.
 - Do not introduce Redis, Celery, Kafka, or RabbitMQ implementation in planning;
   design discussion only is allowed.
-
