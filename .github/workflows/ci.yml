@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+env:
+  FREQTRADE_AI_CI_OFFLINE: "1"
+
+jobs:
+  validate:
+    name: Backend, frontend, and offline smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r backend/requirements.txt
+
+      - name: Run backend pytest
+        working-directory: backend
+        run: pytest
+
+      - name: Compile Python modules
+        run: python -m compileall backend/app backend/tests scripts
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Check whitespace
+        run: |
+          base_ref="${{ github.base_ref || 'main' }}"
+          git fetch --no-tags --prune origin "refs/heads/${base_ref}:refs/remotes/origin/${base_ref}"
+          git diff --check "origin/$base_ref...HEAD"
+
+      - name: Run offline fixture smoke
+        run: |
+          python scripts/smoke_phase6.py \
+            --offline \
+            --tmp-dir "$RUNNER_TEMP/freqtrade-ai-phase6-smoke"
