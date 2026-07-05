@@ -11,6 +11,10 @@ from app.adapters.freqtrade.strategy_file_manager import StrategyFileManager
 from app.models.strategy import StrategyVersion
 from app.repositories import StrategyRepository
 from app.schemas import StrategyVersionCreate
+from app.services.strategy_file_validation import (
+    StrategyFileValidationResult,
+    StrategyFileValidationService,
+)
 
 
 FORBIDDEN_HYPEROPT_PARAM_KEY_FRAGMENTS = (
@@ -35,6 +39,7 @@ class HyperoptStrategyVersionResult:
     hyperopt_run_id: str
     best_params_snapshot: dict[str, Any]
     artifact_manifest_path: Optional[str]
+    strategy_file: StrategyFileValidationResult
 
 
 class HyperoptStrategyVersionService:
@@ -47,6 +52,7 @@ class HyperoptStrategyVersionService:
     ) -> None:
         self.repository = StrategyRepository(db)
         self.file_manager = file_manager or StrategyFileManager()
+        self.file_validation_service = StrategyFileValidationService(self.file_manager)
 
     def create_optimized_version(
         self,
@@ -76,7 +82,7 @@ class HyperoptStrategyVersionService:
         )
         blueprint = self._optimized_blueprint(parent.blueprint, derivation)
         generated_code = self._optimized_generated_code(parent.generated_code, derivation)
-        file_path = self._write_optimized_strategy_file(
+        file_result = self._write_optimized_strategy_file(
             parent=parent,
             generated_code=generated_code,
             hyperopt_run_id=hyperopt_run_id,
@@ -90,13 +96,15 @@ class HyperoptStrategyVersionService:
                 version_number=next_version_number,
                 blueprint=blueprint,
                 generated_code=generated_code,
-                file_path=str(file_path),
-                validation_status="pending",
+                code_hash=file_result.code_hash,
+                file_path=str(file_result.file_path),
+                validation_status=file_result.validation_status,
+                validation_errors=file_result.validation_errors,
                 change_summary=(
                     f"Derived from StrategyVersion {parent.id} using Hyperopt run "
                     f"{hyperopt_run_id} best epoch {hyperopt_result.best_epoch}."
                 ),
-                diff_snapshot=self._diff_snapshot(parent, derivation),
+                diff_snapshot=self._diff_snapshot(parent, derivation, file_result),
             )
         )
         if optimized_version is None:
@@ -110,6 +118,7 @@ class HyperoptStrategyVersionService:
             hyperopt_run_id=hyperopt_run_id,
             best_params_snapshot=best_params,
             artifact_manifest_path=artifact_manifest_path,
+            strategy_file=file_result,
         )
 
     def _next_version_number(self, parent: StrategyVersion) -> int:
@@ -186,13 +195,13 @@ class HyperoptStrategyVersionService:
         generated_code: str,
         hyperopt_run_id: str,
         next_version_number: int,
-    ) -> Path:
+    ) -> StrategyFileValidationResult:
         class_name = str(parent.blueprint.get("class_name") or "OptimizedStrategy")
         if not class_name.isidentifier():
             class_name = "OptimizedStrategy"
         parent_stem = Path(parent.file_path).stem or class_name
         run_stem = "".join(character if character.isalnum() else "_" for character in hyperopt_run_id)
-        return self.file_manager.write_strategy_file(
+        return self.file_validation_service.write_validated_strategy_file(
             class_name=class_name,
             code=generated_code,
             file_stem=f"{parent_stem}_hyperopt_{run_stem}_v{next_version_number}",
@@ -202,17 +211,21 @@ class HyperoptStrategyVersionService:
         self,
         parent: StrategyVersion,
         derivation: dict[str, Any],
+        file_result: StrategyFileValidationResult,
     ) -> dict[str, Any]:
         return {
             "changed_fields": [
                 "hyperopt_derivation",
                 "generated_code.HYPEROPT_DERIVATION",
                 "file_path",
+                "code_hash",
+                "strategy_file_validation",
             ],
             "before": {
                 "parent_version_id": parent.parent_version_id,
                 "version_number": parent.version_number,
                 "file_path": parent.file_path,
+                "code_hash": parent.code_hash,
             },
             "after": {
                 "parent_version_id": parent.id,
@@ -223,6 +236,9 @@ class HyperoptStrategyVersionService:
                 "spaces": derivation["spaces"],
                 "best_params": deepcopy(derivation["best_params"]),
                 "artifact_manifest_path": derivation["artifact_manifest_path"],
+                "file_path": file_result.file_path,
+                "code_hash": file_result.code_hash,
+                "strategy_file_validation": file_result.to_snapshot(),
             },
         }
 

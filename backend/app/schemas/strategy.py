@@ -106,11 +106,14 @@ class StrategyVersionRead(BaseModel):
         }
         if self.generation_run_id is not None:
             database_ids["generation_run_id"] = self.generation_run_id
+        artifact_refs = {"strategy_file_path": self.file_path}
+        if self.code_hash:
+            artifact_refs["strategy_file_checksum"] = self.code_hash
         local_test_source = phase8_local_test_source(
             "strategy_version",
             phase8_local_test_metadata_from_payload(self.blueprint, self.diff_snapshot),
             database_ids,
-            artifact_refs={"strategy_file_path": self.file_path},
+            artifact_refs=artifact_refs,
             freshness=self.created_at,
         )
         if local_test_source is not None:
@@ -120,7 +123,7 @@ class StrategyVersionRead(BaseModel):
         self.data_source = database_record_source(
             "strategy_version",
             database_ids,
-            artifact_refs={"strategy_file_path": self.file_path},
+            artifact_refs=artifact_refs,
             freshness=self.created_at,
         )
         return self

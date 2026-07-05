@@ -27,6 +27,7 @@ def client_with_generation_service(tmp_path: Path, provider: FakeStrategyBluepri
     Base.metadata.create_all(engine)
     session_factory = create_session_factory(engine)
     output_dir = tmp_path / "strategies"
+    output_dir.mkdir()
 
     def override_service() -> Generator[StrategyGenerationService, None, None]:
         db = session_factory()
@@ -34,7 +35,7 @@ def client_with_generation_service(tmp_path: Path, provider: FakeStrategyBluepri
             yield StrategyGenerationService(
                 db,
                 provider=provider,
-                file_manager=StrategyFileManager(output_dir=output_dir),
+                file_manager=StrategyFileManager(output_dir=output_dir, approved_roots=[output_dir]),
             )
         finally:
             db.close()
