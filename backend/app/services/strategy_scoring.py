@@ -40,6 +40,8 @@ class StrategyScoringService:
         result = self.db.get(BacktestResult, backtest_result_id)
         if result is None:
             return None
+        if self._missing_core_metrics(result):
+            return None
 
         strategy_version = result.run.strategy_version
         quality_context = self._quality_context(result)
@@ -75,8 +77,6 @@ class StrategyScoringService:
         result: BacktestResult,
         quality_context: Optional[dict[str, Any]] = None,
     ) -> dict[str, float]:
-        # Missing metrics score as zero instead of raising so ranking can stay
-        # available while parsers or fixture data are incomplete.
         quality_context = quality_context or self._quality_context(result)
         profit_score = self._score_profit(result.profit_pct)
         risk_score = self._score_risk(result.max_drawdown_pct)
@@ -432,6 +432,18 @@ class StrategyScoringService:
                 }
             )
         return warnings
+
+    def _missing_core_metrics(self, result: BacktestResult) -> list[str]:
+        return [
+            name
+            for name, value in (
+                ("profit_pct", result.profit_pct),
+                ("max_drawdown_pct", result.max_drawdown_pct),
+                ("win_rate", result.win_rate),
+                ("total_trades", result.total_trades),
+            )
+            if value is None
+        ]
 
     def _quality_signal_score(
         self,

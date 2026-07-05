@@ -192,7 +192,7 @@ def test_recorded_failure_reason_eliminates_strategy(db_session: Session) -> Non
     ]
 
 
-def test_missing_metrics_create_clear_zero_score_snapshot(db_session: Session) -> None:
+def test_missing_metrics_fail_closed_without_strategy_score(db_session: Session) -> None:
     result_id = create_backtest_result(
         db_session,
         slug="missing-metrics",
@@ -204,18 +204,8 @@ def test_missing_metrics_create_clear_zero_score_snapshot(db_session: Session) -
 
     score = StrategyScoringService(db_session).score_backtest_result(result_id)
 
-    assert score is not None
-    assert score.total_score == 0.0
-    assert score.metrics_snapshot["elimination"]["eliminated"] is True
-    assert score.metrics_snapshot["missing_metrics"] == [
-        "profit_pct",
-        "max_drawdown_pct",
-        "win_rate",
-        "total_trades",
-    ]
-    assert [reason["code"] for reason in score.metrics_snapshot["elimination"]["reasons"]] == [
-        "missing_backtest_metrics"
-    ]
+    assert score is None
+    assert StrategyScoreRepository(db_session).list_ranking() == []
 
 
 def test_scoring_updates_existing_version_score(db_session: Session) -> None:

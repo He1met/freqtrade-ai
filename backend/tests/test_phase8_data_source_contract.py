@@ -130,6 +130,7 @@ def test_backtest_and_score_read_models_include_database_traceability(db_session
     assert ranking[0].data_source.source_type == "api_aggregate"
     assert ranking[0].data_source.core_data is True
     assert ranking[0].data_source.database_ids["strategy_score_id"] == score.id
+    assert ranking[0].data_source.database_ids["backtest_result_id"] == result.id
 
 
 def test_fixture_fallback_and_unknown_sources_cannot_claim_core_success() -> None:
