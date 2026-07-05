@@ -1,7 +1,14 @@
 from datetime import datetime
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+from app.schemas.data_source import (
+    DataSourceTrace,
+    api_aggregate_source,
+    database_record_source,
+    unknown_source,
+)
 
 
 class StrategyScoreCreate(BaseModel):
@@ -30,8 +37,25 @@ class StrategyScoreRead(BaseModel):
     quality_score: Optional[float]
     metrics_snapshot: dict[str, Any]
     created_at: datetime
+    data_source: DataSourceTrace = Field(default_factory=lambda: unknown_source("unvalidated strategy score source"))
 
     model_config = {"from_attributes": True}
+
+    @model_validator(mode="after")
+    def attach_database_source(self) -> "StrategyScoreRead":
+        database_ids = {
+            "strategy_score_id": self.id,
+            "strategy_id": self.strategy_id,
+            "strategy_version_id": self.strategy_version_id,
+        }
+        if self.backtest_result_id is not None:
+            database_ids["backtest_result_id"] = self.backtest_result_id
+        self.data_source = database_record_source(
+            "strategy_score",
+            database_ids,
+            freshness=self.created_at,
+        )
+        return self
 
 
 class StrategyRankingEntry(BaseModel):
@@ -50,3 +74,20 @@ class StrategyRankingEntry(BaseModel):
     quality_score: Optional[float]
     metrics_snapshot: dict[str, Any]
     created_at: datetime
+    data_source: DataSourceTrace = Field(
+        default_factory=lambda: unknown_source("unvalidated strategy ranking source")
+    )
+
+    @model_validator(mode="after")
+    def attach_api_aggregate_source(self) -> "StrategyRankingEntry":
+        self.data_source = api_aggregate_source(
+            "strategy_ranking_entry",
+            {
+                "strategy_score_id": self.score_id,
+                "strategy_id": self.strategy_id,
+                "strategy_version_id": self.strategy_version_id,
+            },
+            artifact_refs={"strategy_file_path": self.file_path},
+            freshness=self.created_at,
+        )
+        return self

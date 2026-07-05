@@ -1,7 +1,9 @@
 from datetime import datetime
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+from app.schemas.data_source import DataSourceTrace, database_record_source, unknown_source
 
 
 StrategyStatus = Literal["draft", "active", "archived"]
@@ -44,8 +46,18 @@ class StrategyRead(BaseModel):
     current_version_id: Optional[int]
     created_at: datetime
     updated_at: datetime
+    data_source: DataSourceTrace = Field(default_factory=lambda: unknown_source("unvalidated strategy source"))
 
     model_config = {"from_attributes": True}
+
+    @model_validator(mode="after")
+    def attach_database_source(self) -> "StrategyRead":
+        self.data_source = database_record_source(
+            "strategy",
+            {"strategy_id": self.id},
+            freshness=self.updated_at,
+        )
+        return self
 
 
 class StrategyVersionRead(BaseModel):
@@ -63,8 +75,27 @@ class StrategyVersionRead(BaseModel):
     change_summary: Optional[str]
     diff_snapshot: dict[str, Any]
     created_at: datetime
+    data_source: DataSourceTrace = Field(
+        default_factory=lambda: unknown_source("unvalidated strategy version source")
+    )
 
     model_config = {"from_attributes": True}
+
+    @model_validator(mode="after")
+    def attach_database_source(self) -> "StrategyVersionRead":
+        database_ids = {
+            "strategy_version_id": self.id,
+            "strategy_id": self.strategy_id,
+        }
+        if self.generation_run_id is not None:
+            database_ids["generation_run_id"] = self.generation_run_id
+        self.data_source = database_record_source(
+            "strategy_version",
+            database_ids,
+            artifact_refs={"strategy_file_path": self.file_path},
+            freshness=self.created_at,
+        )
+        return self
 
 
 class StrategyVersionLineageEntry(BaseModel):
