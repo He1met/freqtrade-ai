@@ -123,7 +123,7 @@ CREATE TABLE backtest_runs (
     completed_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT backtest_runs_status_check
-        CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled')),
+        CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled', 'blocked')),
     CONSTRAINT backtest_runs_counts_check
         CHECK (
             total_tasks >= 0
@@ -152,7 +152,7 @@ CREATE TABLE backtest_tasks (
     completed_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT backtest_tasks_status_check
-        CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled')),
+        CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled', 'blocked')),
     CONSTRAINT backtest_tasks_identity_unique
         UNIQUE (
             backtest_run_id,

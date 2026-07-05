@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 
+from app.api.backtests import router as backtests_router
 from app.api.debug_mvp import router as debug_mvp_router
 from app.api.health import router as health_router
 from app.api.runtime import router as runtime_router
@@ -18,6 +19,7 @@ app = FastAPI(
 )
 
 app.include_router(debug_mvp_router)
+app.include_router(backtests_router)
 app.include_router(health_router)
 app.include_router(runtime_router)
 app.include_router(strategy_generation_router)
