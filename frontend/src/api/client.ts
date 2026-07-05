@@ -7,6 +7,8 @@ import type {
   BacktestTaskSummary,
   DataSourceTraceSummary,
   DryRunArtifactManifest,
+  DryRunReadinessPayload,
+  DryRunReadinessReport,
   DryRunBalanceSummary,
   DryRunEventSummary,
   DryRunManagementSummary,
@@ -535,6 +537,33 @@ type RawStrategyGenerationApiResponse = {
   dataSource?: RawDataSourceTrace;
 };
 
+type RawDryRunReadinessCheck = {
+  name?: string;
+  status?: string;
+  summary?: string;
+  blocked_reason?: string | null;
+  blockedReason?: string | null;
+  evidence?: Record<string, unknown>;
+};
+
+type RawDryRunReadinessReport = {
+  status?: string;
+  generated_at?: string;
+  generatedAt?: string;
+  strategy_version_id?: string | number;
+  strategyVersionId?: string | number;
+  profile_name?: string;
+  profileName?: string;
+  blocked_reasons?: unknown;
+  blockedReasons?: unknown;
+  checks?: RawDryRunReadinessCheck[];
+  env_preflight?: Record<string, unknown>;
+  envPreflight?: Record<string, unknown>;
+  config_preview?: Record<string, unknown>;
+  configPreview?: Record<string, unknown>;
+  safety?: Record<string, boolean>;
+};
+
 function getApiBaseUrl() {
   const env = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env;
   const configuredUrl = env?.VITE_API_BASE_URL?.trim();
@@ -614,6 +643,19 @@ function redactSensitiveText(value: string): string {
       "$1$2[REDACTED]",
     )
     .replace(/\bbearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [REDACTED]");
+}
+
+function redactOptionalSensitiveText(value: string | null | undefined): string | null {
+  return value ? redactSensitiveText(value) : null;
+}
+
+function redactSensitiveRecord(value: unknown): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(asRecord(value)).map(([key, item]) => [
+      key,
+      typeof item === "string" ? redactSensitiveText(item) : item,
+    ]),
+  );
 }
 
 function extractGenerationFailureDetail(detail: unknown): {
@@ -1590,6 +1632,30 @@ function normalizeStrategyGenerationResponse(raw: RawStrategyGenerationApiRespon
   };
 }
 
+function normalizeDryRunReadiness(raw: RawDryRunReadinessReport): DryRunReadinessReport {
+  return {
+    status: raw.status ?? "BLOCKED",
+    generatedAt: raw.generatedAt ?? raw.generated_at ?? "",
+    strategyVersionId: normalizeId(raw.strategyVersionId ?? raw.strategy_version_id),
+    profileName: raw.profileName ?? raw.profile_name ?? "",
+    blockedReasons: asStringArray(raw.blockedReasons ?? raw.blocked_reasons).map(redactSensitiveText),
+    checks: Array.isArray(raw.checks)
+      ? raw.checks.map((check) => ({
+          name: check.name ?? "unknown",
+          status: check.status ?? "BLOCKED",
+          summary: redactSensitiveText(check.summary ?? ""),
+          blockedReason: redactOptionalSensitiveText(check.blockedReason ?? check.blocked_reason),
+          evidence: redactSensitiveRecord(check.evidence),
+        }))
+      : [],
+    envPreflight: redactSensitiveRecord(raw.envPreflight ?? raw.env_preflight),
+    configPreview: redactSensitiveRecord(raw.configPreview ?? raw.config_preview),
+    safety: Object.fromEntries(
+      Object.entries(asRecord(raw.safety)).map(([key, value]) => [key, Boolean(value)]),
+    ),
+  };
+}
+
 async function fetchJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   const response = await fetch(`${getApiBaseUrl()}${path}`, {
     headers: { Accept: "application/json" },
@@ -1680,6 +1746,25 @@ export async function createStrategyGenerationRun(
   );
 
   return normalizeStrategyGenerationResponse(raw);
+}
+
+export async function checkDryRunReadiness(
+  payload: DryRunReadinessPayload,
+  signal?: AbortSignal,
+): Promise<DryRunReadinessReport> {
+  const raw = await postJson<RawDryRunReadinessReport>(
+    "/dry-run/readiness",
+    {
+      strategy_version_id: Number(payload.strategyVersionId),
+      strategy_name: payload.strategyName || undefined,
+      pair: payload.pair ?? "BTC/USDT:USDT",
+      timeframe: payload.timeframe ?? "15m",
+      exchange: payload.exchange ?? "okx",
+    },
+    signal,
+  );
+
+  return normalizeDryRunReadiness(raw);
 }
 
 export async function loadMvpData(signal?: AbortSignal): Promise<{
