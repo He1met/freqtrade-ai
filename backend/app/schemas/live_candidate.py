@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from datetime import datetime
 from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -10,6 +11,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 LIVE_CANDIDATE_PROFILE_SCHEMA_VERSION = "1"
 LIVE_CANDIDATE_PREFLIGHT_SCHEMA_VERSION = "1"
+LIVE_CANDIDATE_APPROVAL_SCHEMA_VERSION = "1"
 REQUIRED_LOCKED_VARIABLES = frozenset(
     {
         "profile_name",
@@ -352,6 +354,16 @@ class LiveCandidateProfile(BaseModel):
 
 LiveCandidateRiskCheckStatus = Literal["PASS", "BLOCKED", "FAILED"]
 LiveCandidatePreflightStatus = Literal["APPROVED_FOR_REVIEW", "BLOCKED", "FAILED"]
+LiveCandidateApprovalStatus = Literal[
+    "BLOCKED_BY_PREFLIGHT",
+    "PENDING_HUMAN_APPROVAL",
+    "APPROVED_FOR_DEPLOYMENT_RECORD",
+    "REJECTED",
+    "REVOKED",
+    "EXPIRED",
+]
+LiveCandidateApprovalDecisionType = Literal["APPROVE", "REJECT", "REVOKE", "EXPIRE"]
+LiveCandidateApprovalActorRole = Literal["maintainer", "operator", "risk-owner", "reviewer"]
 
 
 class LiveCandidateRiskCheck(BaseModel):
@@ -384,3 +396,174 @@ class LiveCandidatePreflightResult(BaseModel):
 
     def to_audit_summary(self) -> dict[str, Any]:
         return self.model_dump(mode="json", exclude_none=True)
+
+
+class LiveCandidateApprovalActor(BaseModel):
+    actor_id: str = Field(min_length=1, max_length=120)
+    display_name: Optional[str] = Field(default=None, min_length=1, max_length=120)
+    role: LiveCandidateApprovalActorRole = "reviewer"
+
+    model_config = {"extra": "forbid"}
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_secrets_runtime_keys_and_secret_values(cls, value: Any) -> Any:
+        LiveCandidateProfile._reject_forbidden_input(value)
+        return value
+
+    @field_validator("actor_id", "display_name")
+    @classmethod
+    def validate_actor_text(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        clean = value.strip()
+        if not clean:
+            raise ValueError("approval actor fields must not be blank")
+        return clean
+
+
+class LiveCandidateApprovalDecision(BaseModel):
+    decision: LiveCandidateApprovalDecisionType
+    actor: LiveCandidateApprovalActor
+    decided_at: datetime
+    basis: str = Field(min_length=1, max_length=1000)
+    revocation_reason: Optional[str] = Field(default=None, min_length=1, max_length=1000)
+
+    model_config = {"extra": "forbid"}
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_secrets_runtime_keys_and_secret_values(cls, value: Any) -> Any:
+        LiveCandidateProfile._reject_forbidden_input(value)
+        return value
+
+    @field_validator("decided_at")
+    @classmethod
+    def validate_decided_at_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("approval decision timestamps must include timezone")
+        return value
+
+    @field_validator("basis", "revocation_reason")
+    @classmethod
+    def validate_decision_text(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        clean = value.strip()
+        if not clean:
+            raise ValueError("approval decision text must not be blank")
+        return clean
+
+    @model_validator(mode="after")
+    def validate_revocation_reason(self) -> "LiveCandidateApprovalDecision":
+        if self.decision == "REVOKE" and not self.revocation_reason:
+            raise ValueError("revocation_reason is required for revoke decisions")
+        if self.decision != "REVOKE" and self.revocation_reason:
+            raise ValueError("revocation_reason is only allowed for revoke decisions")
+        return self
+
+
+class LiveCandidateApprovalRecord(BaseModel):
+    schema_version: Literal["1"] = LIVE_CANDIDATE_APPROVAL_SCHEMA_VERSION
+    status: LiveCandidateApprovalStatus
+    profile_name: str = Field(min_length=1, max_length=120)
+    profile_hash: str = Field(min_length=64, max_length=64)
+    approval_scope: Literal["live-candidate-review"] = "live-candidate-review"
+    risk_summary_ref: str = Field(min_length=1, max_length=500)
+    preflight_status: LiveCandidatePreflightStatus
+    submitted_by: LiveCandidateApprovalActor
+    submitted_at: datetime
+    required_approvals: int = Field(ge=1, le=10)
+    decisions: list[LiveCandidateApprovalDecision] = Field(default_factory=list)
+    blockers: list[str] = Field(default_factory=list)
+    failures: list[str] = Field(default_factory=list)
+    revocation_reason: Optional[str] = Field(default=None, min_length=1, max_length=1000)
+    safety_boundary: str = (
+        "Manual governance approval record only; not live-trading, real-order, "
+        "live-bot startup, or deployment execution authorization."
+    )
+
+    model_config = {"extra": "forbid"}
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_secrets_runtime_keys_and_secret_values(cls, value: Any) -> Any:
+        LiveCandidateProfile._reject_forbidden_input(value)
+        return value
+
+    @field_validator("profile_hash")
+    @classmethod
+    def validate_profile_hash(cls, value: str) -> str:
+        clean = value.strip().lower()
+        if not re.fullmatch(r"[a-f0-9]{64}", clean):
+            raise ValueError("profile_hash must be a lowercase sha256 hex digest")
+        return clean
+
+    @field_validator("risk_summary_ref")
+    @classmethod
+    def validate_risk_summary_ref(cls, value: str) -> str:
+        ref = value.strip()
+        if ref.startswith(("http://", "https://")):
+            raise ValueError("risk_summary_ref must not be a URL")
+        if ref.startswith("/"):
+            raise ValueError("risk_summary_ref must be repository-relative")
+        if ".." in ref.split("/"):
+            raise ValueError("risk_summary_ref must not contain parent traversal")
+        return ref
+
+    @field_validator("submitted_at")
+    @classmethod
+    def validate_submitted_at_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("approval submission timestamps must include timezone")
+        return value
+
+    @field_validator("blockers", "failures")
+    @classmethod
+    def validate_reason_lists(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for item in value:
+            clean = item.strip()
+            if not clean:
+                raise ValueError("approval record reasons must not be blank")
+            normalized.append(clean)
+        return normalized
+
+    @field_validator("revocation_reason")
+    @classmethod
+    def validate_record_revocation_reason(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        clean = value.strip()
+        if not clean:
+            raise ValueError("revocation_reason must not be blank")
+        return clean
+
+    @model_validator(mode="after")
+    def validate_state_invariants(self) -> "LiveCandidateApprovalRecord":
+        approval_actor_ids = {
+            decision.actor.actor_id
+            for decision in self.decisions
+            if decision.decision == "APPROVE"
+        }
+        if self.status == "APPROVED_FOR_DEPLOYMENT_RECORD" and (
+            self.preflight_status != "APPROVED_FOR_REVIEW"
+            or len(approval_actor_ids) < self.required_approvals
+        ):
+            raise ValueError("deployment-record approval requires passing preflight and human approvals")
+        if self.status == "BLOCKED_BY_PREFLIGHT" and self.preflight_status == "APPROVED_FOR_REVIEW":
+            raise ValueError("BLOCKED_BY_PREFLIGHT requires a non-passing preflight status")
+        if self.status == "REVOKED" and not self.revocation_reason:
+            raise ValueError("revocation_reason is required for revoked approval records")
+        if self.status != "REVOKED" and self.revocation_reason:
+            raise ValueError("revocation_reason is only allowed for revoked approval records")
+        return self
+
+    @property
+    def can_create_deployment_record(self) -> bool:
+        return self.status == "APPROVED_FOR_DEPLOYMENT_RECORD"
+
+    def to_audit_summary(self) -> dict[str, Any]:
+        summary = self.model_dump(mode="json", exclude_none=True)
+        summary["can_create_deployment_record"] = self.can_create_deployment_record
+        return summary
