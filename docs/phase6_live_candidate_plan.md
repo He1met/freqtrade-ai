@@ -2,7 +2,8 @@
 
 ## Status
 
-Phase 6 is in planning.
+Phase 6 has passed final acceptance. See `docs/phase6_acceptance.md` for the
+acceptance record and validation commands.
 
 Phase 6 means live-candidate and deployment governance. It does not authorize
 live trading execution, automatic order placement, automatic live bot startup,
@@ -67,19 +68,16 @@ new, narrowly scoped Issues with their own acceptance criteria and PRs.
 
 | Issue | Project status | Purpose |
 | --- | --- | --- |
-| [#176](https://github.com/He1met/freqtrade-ai/issues/176) | Backlog | Phase 6 Epic for live-candidate and deployment governance |
-| [#177](https://github.com/He1met/freqtrade-ai/issues/177) | Ready | Design plan for Phase 6 governance |
-| [#178](https://github.com/He1met/freqtrade-ai/issues/178) | Backlog | `LiveCandidateProfile` schema and entry-condition lock |
-| [#179](https://github.com/He1met/freqtrade-ai/issues/179) | Backlog | Live-candidate risk checklist and fail-closed preflight |
-| [#180](https://github.com/He1met/freqtrade-ai/issues/180) | Backlog | Human approval record and state machine |
-| [#181](https://github.com/He1met/freqtrade-ai/issues/181) | Backlog | `DeploymentRecord` schema and rollback plan |
-| [#182](https://github.com/He1met/freqtrade-ai/issues/182) | Backlog | Read-only runtime monitoring and alert summary DTOs |
-| [#183](https://github.com/He1met/freqtrade-ai/issues/183) | Backlog | Read-only frontend page for approvals and deployment records |
-| [#184](https://github.com/He1met/freqtrade-ai/issues/184) | Backlog | Phase 6 offline governance smoke |
-| [#185](https://github.com/He1met/freqtrade-ai/issues/185) | Backlog | Phase 6 acceptance review |
-
-Only #177 is Ready at planning start. All other Phase 6 Issues remain Backlog
-until the design Issue is completed and reviewed.
+| [#176](https://github.com/He1met/freqtrade-ai/issues/176) | Close after #185 | Phase 6 Epic for live-candidate and deployment governance |
+| [#177](https://github.com/He1met/freqtrade-ai/issues/177) | Done | Design plan for Phase 6 governance |
+| [#178](https://github.com/He1met/freqtrade-ai/issues/178) | Done | `LiveCandidateProfile` schema and entry-condition lock |
+| [#179](https://github.com/He1met/freqtrade-ai/issues/179) | Done | Live-candidate risk checklist and fail-closed preflight |
+| [#180](https://github.com/He1met/freqtrade-ai/issues/180) | Done | Human approval record and state machine |
+| [#181](https://github.com/He1met/freqtrade-ai/issues/181) | Done | `DeploymentRecord` schema and rollback plan |
+| [#182](https://github.com/He1met/freqtrade-ai/issues/182) | Done | Read-only runtime monitoring and alert summary DTOs |
+| [#183](https://github.com/He1met/freqtrade-ai/issues/183) | Done | Read-only frontend page for approvals and deployment records |
+| [#184](https://github.com/He1met/freqtrade-ai/issues/184) | Done | Phase 6 offline governance smoke |
+| [#185](https://github.com/He1met/freqtrade-ai/issues/185) | Review closeout | Phase 6 acceptance review |
 
 ## Intended Dependency Order
 
@@ -97,11 +95,12 @@ until the design Issue is completed and reviewed.
 
 Phase 6 can be considered complete only when:
 
-- all child Issues are completed through focused PRs;
-- the offline governance smoke passes;
-- backend tests pass for backend-affecting work;
-- frontend build passes for frontend-affecting work;
-- `git diff --check` passes;
+- all child Issues are completed through focused PRs: complete;
+- the offline governance smoke passes: complete;
+- backend tests pass for backend-affecting work: complete;
+- frontend build passes for frontend-affecting work: complete;
+- `git diff --check` passes: complete;
 - docs clearly state that Phase 6 governance does not authorize live trading
-  execution, automatic order placement, or production deployment;
-- Project #3 marks the Phase 6 child Issues and Epic as Done after review.
+  execution, automatic order placement, or production deployment: complete;
+- Project #3 marks the Phase 6 child Issues and Epic as Done after review:
+  pending final `#185` merge and Epic `#176` closeout.
