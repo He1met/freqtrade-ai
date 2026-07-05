@@ -16,6 +16,16 @@ from app.schemas.backtest_profile import (
     BacktestProfileStrategy,
     BacktestProfileV2,
 )
+from app.schemas.data_source import (
+    DataSourceTrace,
+    DataSourceType,
+    api_aggregate_source,
+    attach_data_source_to_payload,
+    database_record_source,
+    fallback_source,
+    fixture_source,
+    unknown_source,
+)
 from app.schemas.dry_run_profile import (
     DryRunProfile,
     DryRunProfileCommandOptions,
@@ -137,11 +147,16 @@ __all__ = [
     "BacktestTaskCreate",
     "BacktestTaskRead",
     "BacktestTaskStatusUpdate",
+    "DataSourceTrace",
+    "DataSourceType",
     "BacktestProfileDataSource",
     "BacktestProfileSafety",
     "BacktestProfileStake",
     "BacktestProfileStrategy",
     "BacktestProfileV2",
+    "api_aggregate_source",
+    "attach_data_source_to_payload",
+    "database_record_source",
     "DryRunProfile",
     "DryRunProfileCommandOptions",
     "DryRunProfileExchange",
@@ -157,6 +172,8 @@ __all__ = [
     "DryRunStatusSnapshot",
     "FreqUILinkConfig",
     "FreqUILinkMetadata",
+    "fallback_source",
+    "fixture_source",
     "GenerationRunStatus",
     "GovernanceArtifactKind",
     "GovernanceArtifactLink",
@@ -231,4 +248,5 @@ __all__ = [
     "StrategyVersionDiffRead",
     "StrategyVersionLineageEntry",
     "StrategyVersionRead",
+    "unknown_source",
 ]

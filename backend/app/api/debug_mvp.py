@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.repositories.debug_mvp_seed_data import DebugMvpSeedDataRepository
+from app.schemas.data_source import attach_data_source_to_payload, fixture_source
 from app.services.debug_mvp_seed_data import FRONTEND_MVP_ENDPOINT_ALIASES
 
 
@@ -24,7 +25,12 @@ def read_seeded_debug_mvp_payload(payload_key: str, db: Session) -> Any:
             ),
         )
 
-    return payload
+    return attach_data_source_to_payload(
+        payload,
+        fixture_source(
+            "backend-seeded-sqlite-debug fixture payload; not core Phase 8 database success"
+        ),
+    )
 
 
 def build_seeded_debug_mvp_endpoint(payload_key: str, route_name: str):
