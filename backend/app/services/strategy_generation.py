@@ -2,6 +2,7 @@ import json
 import os
 from dataclasses import dataclass
 from typing import Any, Optional, Protocol
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from pydantic import ValidationError
@@ -16,6 +17,7 @@ from app.schemas import (
     StrategyGenerationRunStatusUpdate,
     StrategyVersionCreate,
 )
+from app.schemas.dry_run_status import redact_secret_text
 from app.schemas.strategy_blueprint import StrategyBlueprint
 from app.services.strategy_file_validation import StrategyFileValidationService
 from app.services.strategy_renderer import StrategyCodeRenderer
@@ -28,6 +30,9 @@ class StrategyBlueprintProvider(Protocol):
     model_name: str
 
     def generate(self, prompt_summary: str, requested_count: int) -> list[StrategyBlueprint]:
+        ...
+
+    def metadata_snapshot(self) -> dict[str, Any]:
         ...
 
 
@@ -59,15 +64,32 @@ class LLMProviderConfig:
     @classmethod
     def from_env(cls) -> "LLMProviderConfig":
         provider_name = os.environ.get("STRATEGY_BLUEPRINT_PROVIDER", "fake").strip().lower()
+        defaults = _provider_defaults(provider_name)
         return cls(
             provider_name=provider_name or "fake",
-            model_name=os.environ.get("STRATEGY_BLUEPRINT_MODEL", "gpt-4.1-mini").strip() or "gpt-4.1-mini",
-            base_url=os.environ.get("STRATEGY_BLUEPRINT_BASE_URL", "https://api.openai.com/v1").strip(),
-            api_key_env=os.environ.get("STRATEGY_BLUEPRINT_API_KEY_ENV", "OPENAI_API_KEY").strip()
-            or "OPENAI_API_KEY",
+            model_name=os.environ.get("STRATEGY_BLUEPRINT_MODEL", defaults["model_name"]).strip()
+            or defaults["model_name"],
+            base_url=os.environ.get("STRATEGY_BLUEPRINT_BASE_URL", defaults["base_url"]).strip()
+            or defaults["base_url"],
+            api_key_env=os.environ.get("STRATEGY_BLUEPRINT_API_KEY_ENV", defaults["api_key_env"]).strip()
+            or defaults["api_key_env"],
             timeout_seconds=float(os.environ.get("STRATEGY_BLUEPRINT_TIMEOUT_SECONDS", "30")),
             max_output_tokens=_optional_int_from_env("STRATEGY_BLUEPRINT_MAX_OUTPUT_TOKENS"),
         )
+
+    def metadata_snapshot(self) -> dict[str, Any]:
+        return {
+            "mode": "real_provider",
+            "provider": self.provider_name,
+            "model": self.model_name,
+            "base_url": _redact_url_userinfo(self.base_url),
+            "endpoint_path": self.endpoint_path,
+            "api_key_env": self.api_key_env,
+            "temperature": self.temperature,
+            "timeout_seconds": self.timeout_seconds,
+            "max_output_tokens": self.max_output_tokens,
+            "real_provider": True,
+        }
 
 
 class LLMHTTPResponse(Protocol):
@@ -102,6 +124,9 @@ class OpenAICompatibleStrategyBlueprintProvider:
         self.provider_name = config.provider_name
         self.model_name = config.model_name
         self.http_client = http_client or httpx.Client()
+
+    def metadata_snapshot(self) -> dict[str, Any]:
+        return self.config.metadata_snapshot()
 
     def generate(self, prompt_summary: str, requested_count: int) -> list[StrategyBlueprint]:
         if requested_count <= 0:
@@ -207,6 +232,38 @@ def _optional_int_from_env(name: str) -> Optional[int]:
     return int(value)
 
 
+def _provider_defaults(provider_name: str) -> dict[str, str]:
+    normalized = (provider_name or "fake").strip().lower()
+    defaults = {
+        "model_name": "gpt-4.1-mini",
+        "base_url": "https://api.openai.com/v1",
+        "api_key_env": "OPENAI_API_KEY",
+    }
+    if normalized == "deepseek":
+        return {
+            "model_name": "deepseek-v4-pro",
+            "base_url": "https://api.deepseek.com",
+            "api_key_env": "DEEPSEEK_API_KEY",
+        }
+    if normalized == "mimo":
+        return {
+            "model_name": "mimo-2.5-pro",
+            "base_url": "https://api.example.com/v1",
+            "api_key_env": "MIMO_API_KEY",
+        }
+    return defaults
+
+
+def _redact_url_userinfo(url: str) -> str:
+    parsed = urlsplit(url)
+    if not parsed.username and not parsed.password:
+        return url
+    host = parsed.hostname or ""
+    if parsed.port is not None:
+        host = f"{host}:{parsed.port}"
+    return urlunsplit((parsed.scheme, f"[REDACTED]@{host}", parsed.path, parsed.query, parsed.fragment))
+
+
 @dataclass(frozen=True)
 class StrategyGenerationResult:
     run_id: int
@@ -244,6 +301,15 @@ class FakeStrategyBlueprintProvider:
 
     def generate(self, prompt_summary: str, requested_count: int) -> list[StrategyBlueprint]:
         return self.blueprints[:requested_count]
+
+    def metadata_snapshot(self) -> dict[str, Any]:
+        return {
+            "mode": "offline",
+            "provider": self.provider_name,
+            "model": self.model_name,
+            "source": "fixture",
+            "real_provider": False,
+        }
 
 
 def build_strategy_blueprint_provider_from_env(
@@ -289,7 +355,7 @@ class StrategyGenerationService:
                 provider=self.provider.provider_name,
                 model=self.provider.model_name,
                 prompt_summary=prompt_summary,
-                params_snapshot={"mode": "offline"},
+                params_snapshot=self._provider_params_snapshot(),
                 requested_count=requested_count,
             )
         )
@@ -302,15 +368,16 @@ class StrategyGenerationService:
             blueprints = self.provider.generate(prompt_summary, requested_count)
             version_ids = self._persist_blueprints(run.id, blueprints)
         except Exception as exc:
+            safe_error = self._redact_sensitive_error(str(exc))
             self.run_repository.update_status(
                 run.id,
                 StrategyGenerationRunStatusUpdate(
                     status="failed",
                     failed_count=requested_count,
-                    error_message=str(exc),
+                    error_message=safe_error,
                 ),
             )
-            raise StrategyGenerationExecutionError(str(exc), run.id) from exc
+            raise StrategyGenerationExecutionError(safe_error, run.id) from exc
 
         self.run_repository.update_status(
             run.id,
@@ -322,6 +389,27 @@ class StrategyGenerationService:
             ),
         )
         return StrategyGenerationResult(run_id=run.id, version_ids=version_ids)
+
+    def _provider_params_snapshot(self) -> dict[str, Any]:
+        metadata_getter = getattr(self.provider, "metadata_snapshot", None)
+        if callable(metadata_getter):
+            return metadata_getter()
+        return {
+            "mode": "unknown",
+            "provider": self.provider.provider_name,
+            "model": self.provider.model_name,
+            "real_provider": self.provider.provider_name != "fake",
+        }
+
+    def _redact_sensitive_error(self, message: str) -> str:
+        redacted = redact_secret_text(message)
+        config = getattr(self.provider, "config", None)
+        credential_env_name = getattr(config, "api_key_env", None)
+        if isinstance(credential_env_name, str):
+            secret_value = os.environ.get(credential_env_name)
+            if secret_value and len(secret_value) >= 4:
+                redacted = redacted.replace(secret_value, "[REDACTED]")
+        return redacted
 
     def _persist_blueprints(
         self,
