@@ -233,6 +233,11 @@ for at least the readiness and security boundaries.
 Phase 9 may design an hourly local controlled run, but should not implement a
 production scheduler by default.
 
+The detailed design is
+[phase9_hourly_local_controlled_run_design.md](phase9_hourly_local_controlled_run_design.md).
+It defines local-only state, pause/disable controls, failure semantics,
+single-flight lease expectations, and the Phase 10 queue boundary.
+
 Required design properties:
 
 - local-only operation;
