@@ -797,6 +797,78 @@ td.log-cell {
   gap: 0;
 }
 
+.source-cell {
+  min-width: 260px;
+}
+
+.source-marker {
+  display: grid;
+  gap: 8px;
+  max-width: 360px;
+  border: 1px solid #d8ded7;
+  border-left-width: 5px;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 10px;
+}
+
+.source-marker-core {
+  border-left-color: #1f6f4a;
+  background: #f5fbf7;
+}
+
+.source-marker-non-core {
+  border-left-color: #b66b13;
+  background: #fff8eb;
+}
+
+.source-marker-unknown {
+  border-left-color: #6d7882;
+  background: #f6f8fa;
+}
+
+.source-marker-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.source-marker-heading span,
+.source-marker-heading em {
+  color: #526159;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 800;
+}
+
+.source-marker-heading strong {
+  color: #17201b;
+}
+
+.source-marker dl {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+}
+
+.source-marker dl div {
+  display: grid;
+  grid-template-columns: 86px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.source-marker dt {
+  color: #657269;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.source-marker dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
 .score-cell {
   font-size: 18px;
   font-weight: 800;

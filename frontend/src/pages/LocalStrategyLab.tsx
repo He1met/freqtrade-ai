@@ -15,6 +15,7 @@ import type {
 } from "../api/types";
 import { metricRows, reasonText } from "./backtestDisplay";
 import { FallbackNotice } from "./FallbackNotice";
+import { isCoreDataSource, SourceMarker } from "./SourceMarker";
 import { EMPTY_TEXT, displayBoolean, displayLoadState, displayStatus, displayValue } from "./uiCopy";
 
 type SubmissionState =
@@ -41,23 +42,6 @@ const DEFAULT_IDEA =
 function formatRecord(record: Record<string, number | string>): string {
   const entries = Object.entries(record);
   return entries.length > 0 ? entries.map(([key, value]) => `${key}: ${value}`).join(", ") : EMPTY_TEXT;
-}
-
-function sourceText(source: DataSourceTraceSummary | undefined): string {
-  if (!source) {
-    return "source: unknown";
-  }
-
-  const ids = formatRecord(source.databaseIds);
-  return `${source.sourceType}; core=${displayBoolean(source.coreData)}; ids=${ids}`;
-}
-
-function sourceIds(source: DataSourceTraceSummary | undefined): string {
-  return source ? formatRecord(source.databaseIds) : EMPTY_TEXT;
-}
-
-function sourceArtifacts(source: DataSourceTraceSummary | undefined): string {
-  return source ? formatRecord(source.artifactRefs) : EMPTY_TEXT;
 }
 
 function formatScore(value: number | null): string {
@@ -257,7 +241,9 @@ function StrategyVersionEvidence({
                   <td>{version.versionNumber}</td>
                   <td>{displayStatus(version.validationStatus)}</td>
                   <td className="path-cell">{version.filePath}</td>
-                  <td className="path-cell">{sourceText(version.dataSource)}</td>
+                  <td className="source-cell">
+                    <SourceMarker source={version.dataSource} />
+                  </td>
                 </tr>
               );
             })}
@@ -304,7 +290,9 @@ function GenerationRunEvidence({ runs }: { runs: MvpData["generationRuns"] }) {
                   requested {run.requestedCount}, accepted {run.acceptedCount}, failed {run.failedCount}
                 </td>
                 <td className="reason-cell">{run.errorMessage ?? EMPTY_TEXT}</td>
-                <td className="path-cell">{sourceIds(run.dataSource)}</td>
+                <td className="source-cell">
+                  <SourceMarker source={run.dataSource} />
+                </td>
               </tr>
             ))}
           </tbody>
@@ -347,6 +335,7 @@ function BacktestEvidence({
               <th>result id</th>
               <th>指标</th>
               <th>artifact</th>
+              <th>source</th>
               <th>原因</th>
             </tr>
           </thead>
@@ -380,7 +369,9 @@ function BacktestEvidence({
                   </td>
                   <td className="path-cell">
                     {result?.resultPath ?? task.resultPath ?? EMPTY_TEXT}
-                    <div className="secondary-cell">{sourceArtifacts(result?.dataSource ?? task.dataSource)}</div>
+                  </td>
+                  <td className="source-cell">
+                    <SourceMarker source={result?.dataSource ?? task.dataSource} />
                   </td>
                   <td className="reason-cell">{reasonText(task.blockedReason, task.failedReason, task.errorMessage)}</td>
                 </tr>
@@ -434,7 +425,9 @@ function RankingEvidence({ ranking }: { ranking: RankingEntry[] }) {
                   </span>
                 </td>
                 <td className="path-cell">{entry.filePath}</td>
-                <td className="path-cell">{sourceText(entry.dataSource)}</td>
+                <td className="source-cell">
+                  <SourceMarker source={entry.dataSource} />
+                </td>
               </tr>
             ))}
           </tbody>
@@ -458,10 +451,10 @@ function PersistentEvidence({
   onRefresh: () => void;
   source: string;
 }) {
-  const coreRankingCount = data.ranking.filter((entry) => entry.dataSource.coreData).length;
+  const coreRankingCount = data.ranking.filter((entry) => isCoreDataSource(entry.dataSource)).length;
   const hasCoreEvidence =
-    data.strategyVersions.some((version) => version.dataSource.coreData) ||
-    data.backtestResults.some((result) => result.dataSource.coreData) ||
+    data.strategyVersions.some((version) => isCoreDataSource(version.dataSource)) ||
+    data.backtestResults.some((result) => isCoreDataSource(result.dataSource)) ||
     coreRankingCount > 0;
   const evidenceSource = hasCoreEvidence ? "api" : source;
   const evidenceError = hasCoreEvidence ? null : error;
