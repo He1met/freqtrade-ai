@@ -276,6 +276,10 @@ npm run dev
 
 默认访问 Vite 输出的本地地址，通常是 `http://127.0.0.1:5173`。
 
+若要验证前端是否正在读取 backend API 而不是受控 fallback 数据，可先 seed
+临时 SQLite 调试数据，再启动 backend 和 frontend。具体步骤见
+[local_debug_seeded_api.md](docs/local_debug_seeded_api.md)。
+
 ## 初始化数据库
 
 ```bash
