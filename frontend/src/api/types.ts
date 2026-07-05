@@ -32,7 +32,9 @@ export type StrategySummary = {
   source: string;
   description: string;
   tags: string[];
+  currentVersionId: string | null;
   currentVersion: StrategyVersionSummary | null;
+  dataSource?: DataSourceTraceSummary;
 };
 
 export type GenerationRunSummary = {
@@ -45,6 +47,7 @@ export type GenerationRunSummary = {
   acceptedCount: number;
   failedCount: number;
   errorMessage: string | null;
+  dataSource?: DataSourceTraceSummary;
 };
 
 export type StrategyGenerationRunStatus =
@@ -116,6 +119,7 @@ export type StrategyGenerationApiResult = {
 
 export type BacktestRunSummary = {
   id: string;
+  strategyVersionId: string | null;
   strategyName: string;
   status: string;
   profileName: string;
@@ -127,6 +131,7 @@ export type BacktestRunSummary = {
   metrics: BacktestMetricSummary;
   blockedReason: string | null;
   failedReason: string | null;
+  dataSource?: DataSourceTraceSummary;
 };
 
 export type BacktestTaskSummary = {
@@ -144,6 +149,17 @@ export type BacktestTaskSummary = {
   metrics: BacktestMetricSummary;
   blockedReason: string | null;
   failedReason: string | null;
+  dataSource?: DataSourceTraceSummary;
+};
+
+export type BacktestResultSummary = {
+  id: string;
+  runId: string;
+  taskId: string;
+  resultPath: string;
+  metrics: BacktestMetricSummary;
+  createdAt: string | null;
+  dataSource: DataSourceTraceSummary;
 };
 
 export type BacktestArtifactStatus = "SUCCESS" | "FAILED" | "BLOCKED" | string;
@@ -585,7 +601,10 @@ export type OperatorDashboardSummary = {
 
 export type RankingEntry = {
   rank: number;
+  scoreId: string;
   strategyId: string;
+  strategyVersionId: string;
+  backtestResultId: string | null;
   strategyName: string;
   versionNumber: number;
   filePath: string;
@@ -599,6 +618,7 @@ export type RankingEntry = {
   scoreBreakdown: RankingScoreBreakdownItem[];
   elimination: RankingEliminationSummary;
   warnings: RankingSignalSummary[];
+  dataSource: DataSourceTraceSummary;
 };
 
 export type RankingScoreBreakdownItem = {
@@ -644,9 +664,11 @@ export type StrategyVersionLineageEntry = {
 
 export type MvpData = {
   strategies: StrategySummary[];
+  strategyVersions: StrategyGenerationVersion[];
   generationRuns: GenerationRunSummary[];
   backtestRuns: BacktestRunSummary[];
   backtestTasks: BacktestTaskSummary[];
+  backtestResults: BacktestResultSummary[];
   hyperoptRuns: HyperoptRunSummary[];
   dryRun: DryRunManagementSummary;
   liveCandidates: LiveCandidateGovernanceSummary;

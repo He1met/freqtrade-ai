@@ -11,11 +11,16 @@ const initialState: MvpDataState = {
   error: null,
 };
 
-export function useMvpData(): MvpDataState {
+export function useMvpData(refreshToken = 0): MvpDataState {
   const [state, setState] = useState<MvpDataState>(initialState);
 
   useEffect(() => {
     const controller = new AbortController();
+    setState((current) => ({
+      ...current,
+      isLoading: true,
+      error: null,
+    }));
 
     loadMvpData(controller.signal)
       .then(({ data, usedFallback }) => {
@@ -42,7 +47,7 @@ export function useMvpData(): MvpDataState {
     return () => {
       controller.abort();
     };
-  }, []);
+  }, [refreshToken]);
 
   return state;
 }

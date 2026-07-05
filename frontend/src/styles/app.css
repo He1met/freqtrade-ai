@@ -710,6 +710,23 @@ td.log-cell {
   cursor: not-allowed;
 }
 
+.secondary-button {
+  min-height: 36px;
+  border: 1px solid #9ab09f;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #244936;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 800;
+  padding: 0 12px;
+}
+
+.secondary-button:disabled {
+  color: #7a867d;
+  cursor: not-allowed;
+}
+
 .lab-status-heading {
   display: flex;
   flex-wrap: wrap;
@@ -732,6 +749,52 @@ td.log-cell {
 
 .lab-table-shell {
   border-radius: 0 0 8px 8px;
+}
+
+.lab-header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.lab-evidence-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  border: 1px solid #d8ded7;
+  border-top: 0;
+  background: #ffffff;
+  padding: 14px 16px;
+}
+
+.lab-evidence-summary div {
+  display: grid;
+  gap: 4px;
+  border-right: 1px solid #e4e8e3;
+  padding-right: 10px;
+}
+
+.lab-evidence-summary div:last-child {
+  border-right: 0;
+  padding-right: 0;
+}
+
+.lab-evidence-summary span {
+  color: #657269;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.lab-evidence-summary strong {
+  color: #17201b;
+  font-size: 24px;
+}
+
+.lab-evidence-section {
+  display: grid;
+  gap: 0;
 }
 
 .score-cell {
@@ -1177,6 +1240,7 @@ th {
 
   .matrix-summary,
   .matrix-range-grid,
+  .lab-evidence-summary,
   .hyperopt-summary,
   .dry-run-summary,
   .dry-run-layout,
@@ -1206,6 +1270,18 @@ th {
 
   .matrix-range-item:last-child {
     border-bottom: 0;
+  }
+
+  .lab-evidence-summary div {
+    border-right: 0;
+    border-bottom: 1px solid #e4e8e3;
+    padding-right: 0;
+    padding-bottom: 10px;
+  }
+
+  .lab-evidence-summary div:last-child {
+    border-bottom: 0;
+    padding-bottom: 0;
   }
 }
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Iterable
+from typing import Iterable, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -9,6 +9,7 @@ from app.adapters.freqtrade.strategy_file_manager import StrategyFileManager
 from app.db.session import get_db
 from app.repositories import StrategyGenerationRunRepository, StrategyRepository
 from app.schemas import (
+    GenerationRunStatus,
     StrategyGenerationApiResponse,
     StrategyGenerationRequest,
     StrategyGenerationRunRead,
@@ -31,6 +32,15 @@ def get_strategy_generation_service(db: Session = Depends(get_db)) -> StrategyGe
         provider=build_strategy_blueprint_provider_from_env(),
         file_manager=StrategyFileManager(),
     )
+
+
+@router.get("/strategy-generation-runs", response_model=list[StrategyGenerationRunRead])
+def list_strategy_generation_runs(
+    status: Optional[GenerationRunStatus] = None,
+    db: Session = Depends(get_db),
+) -> list[StrategyGenerationRunRead]:
+    runs = StrategyGenerationRunRepository(db).list(status=status)
+    return [StrategyGenerationRunRead.model_validate(run) for run in runs]
 
 
 @router.post("/strategy-generation-runs", response_model=StrategyGenerationApiResponse)
