@@ -1,5 +1,6 @@
 import { useMvpData } from "../api/useMvpData";
 import { metricRows, reasonText, statusClassName, summarizeText } from "./backtestDisplay";
+import { EMPTY_TEXT, displayLoadState, displayStatus } from "./uiCopy";
 
 export function BacktestTasks() {
   const { data, source, isLoading } = useMvpData();
@@ -7,24 +8,24 @@ export function BacktestTasks() {
   return (
     <section className="page">
       <header className="page-header">
-        <h1>Backtest Tasks</h1>
-        <span className="status-pill">{isLoading ? "Loading" : source}</span>
+        <h1>回测任务</h1>
+        <span className="status-pill">{displayLoadState(isLoading, source)}</span>
       </header>
       <div className="table-shell">
         <table>
           <thead>
             <tr>
-              <th>Task</th>
-              <th>Run</th>
-              <th>Strategy</th>
+              <th>任务</th>
+              <th>批次</th>
+              <th>策略</th>
               <th>Pair</th>
               <th>Timeframe</th>
-              <th>Status</th>
+              <th>状态</th>
               <th>Artifact</th>
-              <th>Metrics</th>
+              <th>指标</th>
               <th>Config</th>
               <th>Result</th>
-              <th>Reason</th>
+              <th>原因</th>
               <th>Stdout/Stderr</th>
             </tr>
           </thead>
@@ -40,14 +41,16 @@ export function BacktestTasks() {
                   <td>{task.pair}</td>
                   <td>{task.timeframe}</td>
                   <td>
-                    <span className={`run-status ${statusClassName(task.status)}`}>{task.status}</span>
+                    <span className={`run-status ${statusClassName(task.status)}`}>
+                      {displayStatus(task.status)}
+                    </span>
                   </td>
                   <td className="artifact-cell">
                     <span className={`run-status ${statusClassName(artifactStatus)}`}>
-                      {artifactStatus}
+                      {displayStatus(artifactStatus)}
                     </span>
-                    <span>return: {artifact?.returnCode ?? "none"}</span>
-                    <span>manifest: {artifact?.manifestPath ?? "none"}</span>
+                    <span>return：{artifact?.returnCode ?? EMPTY_TEXT}</span>
+                    <span>manifest：{artifact?.manifestPath ?? EMPTY_TEXT}</span>
                   </td>
                   <td className="metric-summary">
                     {metricRows(task.metrics).map(([label, value]) => (
@@ -57,8 +60,8 @@ export function BacktestTasks() {
                       </span>
                     ))}
                   </td>
-                  <td className="path-cell">{task.configPath ?? "none"}</td>
-                  <td className="path-cell">{task.resultPath ?? artifact?.resultPath ?? "none"}</td>
+                  <td className="path-cell">{task.configPath ?? EMPTY_TEXT}</td>
+                  <td className="path-cell">{task.resultPath ?? artifact?.resultPath ?? EMPTY_TEXT}</td>
                   <td className="reason-cell">
                     {reasonText(task.blockedReason, task.failedReason, task.errorMessage)}
                   </td>
@@ -73,7 +76,7 @@ export function BacktestTasks() {
         </table>
       </div>
       {data.backtestTasks.length === 0 ? (
-        <div className="empty-state">No backtest tasks found.</div>
+        <div className="empty-state">暂无回测任务。</div>
       ) : null}
     </section>
   );

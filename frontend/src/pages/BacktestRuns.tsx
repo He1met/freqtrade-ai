@@ -6,6 +6,7 @@ import {
   reasonText,
   statusClassName,
 } from "./backtestDisplay";
+import { EMPTY_TEXT, displayLoadState, displayStatus } from "./uiCopy";
 
 export function BacktestRuns() {
   const { data, source, isLoading } = useMvpData();
@@ -15,24 +16,26 @@ export function BacktestRuns() {
   return (
     <section className="page">
       <header className="page-header">
-        <h1>Backtest Runs</h1>
-        <span className="status-pill">{isLoading ? "Loading" : source}</span>
+        <h1>回测批次</h1>
+        <span className="status-pill">{displayLoadState(isLoading, source)}</span>
       </header>
-      <section className="matrix-summary" aria-label="Backtest Matrix summary">
+      <section className="matrix-summary" aria-label="回测矩阵摘要">
         <div className="matrix-overview">
-          <span className={`run-status ${statusClassName(matrixSummary.status)}`}>{matrixSummary.status}</span>
+          <span className={`run-status ${statusClassName(matrixSummary.status)}`}>
+            {displayStatus(matrixSummary.status)}
+          </span>
           <div>
-            <strong>Backtest Matrix</strong>
+            <strong>回测矩阵</strong>
             <span>
-              {matrixSummary.completedTasks}/{matrixSummary.totalTasks} tasks completed across{" "}
-              {matrixSummary.profileCount} profiles and {matrixSummary.strategyCount} strategies
+              已完成 {matrixSummary.completedTasks}/{matrixSummary.totalTasks} 个任务，覆盖{" "}
+              {matrixSummary.profileCount} 个 profile 和 {matrixSummary.strategyCount} 个策略
             </span>
           </div>
         </div>
         <div className="matrix-status-grid">
           {statusEntries.map(([status, count]) => (
             <div className="matrix-status-item" key={status}>
-              <span className={`run-status ${statusClassName(status)}`}>{status}</span>
+              <span className={`run-status ${statusClassName(status)}`}>{displayStatus(status)}</span>
               <strong>{count}</strong>
             </div>
           ))}
@@ -41,22 +44,22 @@ export function BacktestRuns() {
           {matrixSummary.metricRanges.map((range) => (
             <div className="matrix-range-item" key={range.label}>
               <span>{range.label}</span>
-              <strong>{formatNumber(range.avg, range.suffix)} avg</strong>
+              <strong>{formatNumber(range.avg, range.suffix)} 平均</strong>
               <em>
-                {formatNumber(range.min, range.suffix)} min / {formatNumber(range.max, range.suffix)} max
+                {formatNumber(range.min, range.suffix)} 最小 / {formatNumber(range.max, range.suffix)} 最大
               </em>
             </div>
           ))}
         </div>
         <div className="matrix-reasons">
           {matrixSummary.reasons.length === 0 ? (
-            <span>No blocked or failed reasons.</span>
+            <span>暂无阻塞或失败原因。</span>
           ) : (
             matrixSummary.reasons.map((entry) => (
               <div className="reason-line" key={`${entry.status}:${entry.reason}`}>
-                <strong>{entry.status}</strong>
+                <strong>{displayStatus(entry.status)}</strong>
                 <span>
-                  {entry.count}x {entry.reason}
+                  {entry.count} 次：{entry.reason}
                 </span>
               </div>
             ))
@@ -67,23 +70,23 @@ export function BacktestRuns() {
         <table>
           <thead>
             <tr>
-              <th>Run</th>
-              <th>Strategy</th>
-              <th>Status</th>
+              <th>批次</th>
+              <th>策略</th>
+              <th>状态</th>
               <th>Profile</th>
-              <th>Tasks</th>
+              <th>任务</th>
               <th>Artifact</th>
-              <th>Metrics</th>
+              <th>指标</th>
               <th>Result JSON</th>
-              <th>Reason</th>
+              <th>原因</th>
             </tr>
           </thead>
           <tbody>
             {data.backtestRuns.map((run) => {
               const linkedTask = data.backtestTasks.find((task) => task.runId === run.id);
               const artifact = run.artifactManifest ?? linkedTask?.artifactManifest ?? null;
-              const resultPath = artifact?.resultPath ?? linkedTask?.resultPath ?? "none";
-              const manifestPath = artifact?.manifestPath ?? "none";
+              const resultPath = artifact?.resultPath ?? linkedTask?.resultPath ?? EMPTY_TEXT;
+              const manifestPath = artifact?.manifestPath ?? EMPTY_TEXT;
               const reason = reasonText(
                 run.blockedReason ?? linkedTask?.blockedReason ?? null,
                 run.failedReason ?? linkedTask?.failedReason ?? null,
@@ -94,7 +97,9 @@ export function BacktestRuns() {
                   <td>{run.id}</td>
                   <td>{run.strategyName}</td>
                   <td>
-                    <span className={`run-status ${statusClassName(run.status)}`}>{run.status}</span>
+                    <span className={`run-status ${statusClassName(run.status)}`}>
+                      {displayStatus(run.status)}
+                    </span>
                   </td>
                   <td>{run.profileName}</td>
                   <td>
@@ -102,9 +107,9 @@ export function BacktestRuns() {
                   </td>
                   <td className="artifact-cell">
                     <span className={`run-status ${statusClassName(artifact?.status ?? run.status)}`}>
-                      {artifact?.status ?? "none"}
+                      {displayStatus(artifact?.status ?? run.status)}
                     </span>
-                    <span>manifest: {manifestPath}</span>
+                    <span>manifest：{manifestPath}</span>
                   </td>
                   <td className="metric-summary">
                     {metricRows(run.metrics).map(([label, value]) => (
@@ -123,7 +128,7 @@ export function BacktestRuns() {
         </table>
       </div>
       {data.backtestRuns.length === 0 ? (
-        <div className="empty-state">No backtest runs found.</div>
+        <div className="empty-state">暂无回测批次。</div>
       ) : null}
     </section>
   );
