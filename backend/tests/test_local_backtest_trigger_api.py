@@ -1,8 +1,11 @@
 from collections.abc import Generator
 import hashlib
+import json
+import os
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+import pytest
 from sqlalchemy.orm import Session
 
 from app.db.session import create_database_engine, create_session_factory, get_db
@@ -66,6 +69,21 @@ def write_market_data(tmp_path: Path) -> Path:
     return datadir
 
 
+def install_fake_freqtrade(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    binary = bin_dir / "freqtrade"
+    binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    binary.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.delenv("FREQTRADE_BINARY", raising=False)
+    return binary
+
+
+def checks_by_name(payload: dict) -> dict[str, dict]:
+    return {check["name"]: check for check in payload["preflight_checks"]}
+
+
 def local_profile(datadir: Path, *, strategy_name: str = "PhaseEightStrategy") -> dict:
     return {
         "schema_version": "2",
@@ -89,7 +107,11 @@ def local_profile(datadir: Path, *, strategy_name: str = "PhaseEightStrategy") -
     }
 
 
-def test_local_backtest_trigger_creates_pending_records_and_reconciles_status(tmp_path: Path) -> None:
+def test_local_backtest_trigger_creates_pending_records_and_reconciles_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_fake_freqtrade(tmp_path, monkeypatch)
     client, session_factory = client_with_backtest_db(tmp_path)
     datadir = write_market_data(tmp_path)
     with session_factory() as db:
@@ -114,8 +136,18 @@ def test_local_backtest_trigger_creates_pending_records_and_reconciles_status(tm
     assert payload["preflight_status"] == "ready"
     assert payload["blocked_reasons"] == []
     assert payload["execution_mode"] == "preflight_only"
+    checks = checks_by_name(payload)
+    assert {check["status"] for check in checks.values()} == {"READY"}
+    assert checks["freqtrade_binary"]["evidence"]["resolved_path"].endswith("/freqtrade")
+    assert checks["backtest_config"]["evidence"]["config_path"]
     assert payload["run"]["status"] == "pending"
     assert payload["tasks"][0]["status"] == "pending"
+    assert payload["tasks"][0]["config_path"]
+    config = json.loads(Path(payload["tasks"][0]["config_path"]).read_text(encoding="utf-8"))
+    serialized_config = json.dumps(config, sort_keys=True).lower()
+    assert config["strategy"] == "PhaseEightStrategy"
+    assert "api_key" not in serialized_config
+    assert "api_secret" not in serialized_config
     assert payload["tasks"][0]["pair"] == "BTC/USDT"
     assert payload["tasks"][0]["timeframe"] == "5m"
     assert payload["run"]["config_snapshot"]["safety"] == {
@@ -141,10 +173,15 @@ def test_local_backtest_trigger_creates_pending_records_and_reconciles_status(tm
         assert task is not None
         assert run.status == "pending"
         assert task.status == "pending"
+        assert task.config_path == payload["tasks"][0]["config_path"]
         assert db.query(BacktestResult).count() == 0
 
 
-def test_local_backtest_trigger_blocks_when_local_data_is_missing(tmp_path: Path) -> None:
+def test_local_backtest_trigger_blocks_when_local_data_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_fake_freqtrade(tmp_path, monkeypatch)
     client, session_factory = client_with_backtest_db(tmp_path)
     missing_datadir = tmp_path / "missing-data"
     with session_factory() as db:
@@ -165,6 +202,9 @@ def test_local_backtest_trigger_blocks_when_local_data_is_missing(tmp_path: Path
     assert payload["tasks"][0]["status"] == "blocked"
     assert payload["tasks"][0]["error_message"].startswith("BLOCKED:")
     assert "market data directory does not exist" in payload["tasks"][0]["error_message"]
+    checks = checks_by_name(payload)
+    assert checks["local_market_data"]["status"] == "BLOCKED"
+    assert checks["freqtrade_binary"]["status"] == "READY"
 
     with session_factory() as db:
         run = db.get(BacktestRun, payload["run"]["id"])
@@ -176,7 +216,11 @@ def test_local_backtest_trigger_blocks_when_local_data_is_missing(tmp_path: Path
         assert task.completed_at is not None
 
 
-def test_local_backtest_trigger_blocks_when_strategy_file_is_missing(tmp_path: Path) -> None:
+def test_local_backtest_trigger_blocks_when_strategy_file_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_fake_freqtrade(tmp_path, monkeypatch)
     client, session_factory = client_with_backtest_db(tmp_path)
     datadir = write_market_data(tmp_path)
     with session_factory() as db:
@@ -195,6 +239,40 @@ def test_local_backtest_trigger_blocks_when_strategy_file_is_missing(tmp_path: P
     assert payload["preflight_status"] == "blocked"
     assert payload["run"]["status"] == "blocked"
     assert "strategy file does not exist" in payload["tasks"][0]["error_message"]
+    checks = checks_by_name(payload)
+    assert checks["strategy_file"]["status"] == "BLOCKED"
+    assert checks["local_market_data"]["status"] == "READY"
+
+
+def test_local_backtest_trigger_blocks_when_freqtrade_binary_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    empty_bin = tmp_path / "empty-bin"
+    empty_bin.mkdir()
+    monkeypatch.setenv("PATH", str(empty_bin))
+    monkeypatch.delenv("FREQTRADE_BINARY", raising=False)
+    client, session_factory = client_with_backtest_db(tmp_path)
+    datadir = write_market_data(tmp_path)
+    with session_factory() as db:
+        version_id = seed_strategy_version(db, tmp_path)
+
+    try:
+        response = client.post(
+            "/api/backtest-runs/local",
+            json={"strategy_version_id": version_id, "profile": local_profile(datadir)},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["preflight_status"] == "blocked"
+    assert payload["tasks"][0]["status"] == "blocked"
+    assert "freqtrade binary is not available" in payload["tasks"][0]["error_message"]
+    checks = checks_by_name(payload)
+    assert checks["freqtrade_binary"]["status"] == "BLOCKED"
+    assert checks["backtest_config"]["status"] == "READY"
 
 
 def test_local_backtest_trigger_persists_blocked_record_for_invalid_profile(tmp_path: Path) -> None:
