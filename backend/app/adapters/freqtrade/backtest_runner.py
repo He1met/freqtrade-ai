@@ -13,6 +13,7 @@ from app.adapters.freqtrade.cli_runner import (
 )
 from app.adapters.freqtrade.exceptions import FreqtradeCommandError
 from app.adapters.freqtrade.market_data_index import SUPPORTED_DATA_SUFFIXES
+from app.schemas.dry_run_status import redact_secret_text
 
 
 FreqtradeBacktestArtifactStatus = Literal["SUCCESS", "FAILED", "BLOCKED"]
@@ -356,10 +357,10 @@ class FreqtradeBacktestRunner:
             strategy_name=strategy_name,
             result_path=result_path,
             manifest_path=manifest_path,
-            command_args=command_args,
+            command_args=[redact_secret_text(arg) for arg in command_args],
             return_code=return_code,
-            stdout=stdout,
-            stderr=stderr,
+            stdout=_sanitize_and_tail(stdout),
+            stderr=_sanitize_and_tail(stderr),
             datadir=datadir,
             strategy_path=strategy_path,
             userdir=userdir,
@@ -368,3 +369,10 @@ class FreqtradeBacktestRunner:
         )
         manifest.write()
         return manifest
+
+
+def _sanitize_and_tail(text: str, max_length: int = 4000) -> str:
+    redacted = redact_secret_text(text)
+    if len(redacted) <= max_length:
+        return redacted
+    return redacted[-max_length:]
