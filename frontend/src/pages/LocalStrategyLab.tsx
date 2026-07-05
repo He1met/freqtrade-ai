@@ -1,12 +1,19 @@
 import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
-import { StrategyGenerationApiError, checkDryRunReadiness, createStrategyGenerationRun } from "../api/client";
+import {
+  StrategyGenerationApiError,
+  checkDryRunReadiness,
+  createStrategyGenerationRun,
+  startControlledDryRun,
+  stopControlledDryRun,
+} from "../api/client";
 import { useMvpData } from "../api/useMvpData";
 import type {
   BacktestResultSummary,
   BacktestRunSummary,
   BacktestTaskSummary,
   DataSourceTraceSummary,
+  DryRunControlReport,
   DryRunReadinessReport,
   MvpData,
   RankingEntry,
@@ -37,6 +44,13 @@ type ReadinessState =
   | { kind: "checking"; strategyVersionId: string }
   | { kind: "ready"; report: DryRunReadinessReport }
   | { kind: "blocked"; report: DryRunReadinessReport }
+  | { kind: "failed"; message: string };
+
+type ControlState =
+  | { kind: "idle" }
+  | { kind: "starting"; strategyVersionId: string }
+  | { kind: "stopping" }
+  | { kind: "complete"; report: DryRunControlReport }
   | { kind: "failed"; message: string };
 
 type SourceRow = {
@@ -595,6 +609,152 @@ function DryRunReadinessPanel({ data }: { data: MvpData }) {
   );
 }
 
+function ControlStatePanel({ data }: { data: MvpData }) {
+  const [control, setControl] = useState<ControlState>({ kind: "idle" });
+  const [manualApproval, setManualApproval] = useState(false);
+  const candidate = readinessCandidate(data);
+  const isBusy = control.kind === "starting" || control.kind === "stopping";
+  const report = control.kind === "complete" ? control.report : null;
+  const controlStatus =
+    control.kind === "starting"
+      ? "STARTING"
+      : control.kind === "stopping"
+        ? "STOPPING"
+        : report?.status ?? "未启动";
+
+  async function handleStart() {
+    if (!candidate) {
+      setControl({ kind: "failed", message: "没有可用于受控 dry-run 的核心 strategy version。" });
+      return;
+    }
+
+    setControl({ kind: "starting", strategyVersionId: candidate.strategyVersionId });
+    try {
+      const result = await startControlledDryRun({
+        manualApproval,
+        strategyName: candidate.strategyName,
+        strategyVersionId: candidate.strategyVersionId,
+      });
+      setControl({ kind: "complete", report: result });
+    } catch (error) {
+      const message =
+        error instanceof StrategyGenerationApiError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "受控 dry-run 启动边界请求失败";
+      setControl({ kind: "failed", message });
+    }
+  }
+
+  async function handleStop() {
+    setControl({ kind: "stopping" });
+    try {
+      const result = await stopControlledDryRun();
+      setControl({ kind: "complete", report: result });
+    } catch (error) {
+      const message =
+        error instanceof StrategyGenerationApiError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "受控 dry-run 停止请求失败";
+      setControl({ kind: "failed", message });
+    }
+  }
+
+  return (
+    <section className="lab-evidence-section" aria-label="本地受控 dry-run">
+      <div className="section-header detail-section">
+        <h2>Controlled dry-run</h2>
+        <div className="lab-header-actions">
+          <span className={`run-status ${statusClassName(controlStatus)}`}>{displayStatus(controlStatus)}</span>
+          <label className="inline-check">
+            <input
+              checked={manualApproval}
+              disabled={isBusy}
+              onChange={(event) => setManualApproval(event.target.checked)}
+              type="checkbox"
+            />
+            人工批准
+          </label>
+          <button className="secondary-button" disabled={isBusy || !candidate} onClick={handleStart} type="button">
+            启动
+          </button>
+          <button className="secondary-button" disabled={isBusy} onClick={handleStop} type="button">
+            停止
+          </button>
+        </div>
+      </div>
+      <dl className="detail-list lab-run-detail-list">
+        <div>
+          <dt>strategy_version</dt>
+          <dd>{candidate?.strategyVersionId ?? EMPTY_TEXT}</dd>
+        </div>
+        <div>
+          <dt>manifest</dt>
+          <dd className="path-cell">{report?.manifestPath ?? EMPTY_TEXT}</dd>
+        </div>
+        <div>
+          <dt>status_snapshot</dt>
+          <dd className="path-cell">{report?.statusSnapshotPath ?? EMPTY_TEXT}</dd>
+        </div>
+        <div>
+          <dt>snapshot_status</dt>
+          <dd>{report?.statusSnapshot.status ?? EMPTY_TEXT}</dd>
+        </div>
+        <div>
+          <dt>dry_run</dt>
+          <dd>{report ? displayBoolean(report.statusSnapshot.dryRun === true) : EMPTY_TEXT}</dd>
+        </div>
+        <div>
+          <dt>safety</dt>
+          <dd>{report ? formatEvidence(report.safety) : EMPTY_TEXT}</dd>
+        </div>
+      </dl>
+      {control.kind === "failed" ? <div className="empty-state">{control.message}</div> : null}
+      {report?.blockedReasons.length ? (
+        <div className="blocked-list">
+          {report.blockedReasons.map((reason) => (
+            <div key={reason}>{reason}</div>
+          ))}
+        </div>
+      ) : null}
+      {report?.failedReason ? <div className="blocked-list">{report.failedReason}</div> : null}
+      {report?.skippedReason ? <div className="blocked-list">{report.skippedReason}</div> : null}
+      {report ? (
+        <div className="table-shell lab-table-shell">
+          <table>
+            <thead>
+              <tr>
+                <th>event</th>
+                <th>severity</th>
+                <th>message</th>
+                <th>source</th>
+              </tr>
+            </thead>
+            <tbody>
+              {report.statusSnapshot.recentEvents.map((event) => (
+                <tr key={`${event.timestamp}:${event.eventType}`}>
+                  <td className="primary-cell">{event.eventType}</td>
+                  <td>
+                    <span className={`run-status ${statusClassName(event.severity)}`}>
+                      {displayStatus(event.severity)}
+                    </span>
+                  </td>
+                  <td>{event.message}</td>
+                  <td>{event.source}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+      {!candidate ? <div className="empty-state">暂无核心 strategy version，受控 dry-run 保持不可用。</div> : null}
+    </section>
+  );
+}
+
 function PersistentEvidence({
   data,
   error,
@@ -652,6 +812,7 @@ function PersistentEvidence({
       <BacktestEvidence runs={data.backtestRuns} tasks={data.backtestTasks} results={data.backtestResults} />
       <RankingEvidence ranking={data.ranking} />
       <DryRunReadinessPanel data={data} />
+      <ControlStatePanel data={data} />
     </section>
   );
 }

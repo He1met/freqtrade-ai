@@ -7,6 +7,8 @@ import type {
   BacktestTaskSummary,
   DataSourceTraceSummary,
   DryRunArtifactManifest,
+  DryRunControlPayload,
+  DryRunControlReport,
   DryRunReadinessPayload,
   DryRunReadinessReport,
   DryRunBalanceSummary,
@@ -564,6 +566,28 @@ type RawDryRunReadinessReport = {
   safety?: Record<string, boolean>;
 };
 
+type RawDryRunControlReport = {
+  status?: string;
+  generated_at?: string;
+  generatedAt?: string;
+  manifest_path?: string | null;
+  manifestPath?: string | null;
+  config_path?: string | null;
+  configPath?: string | null;
+  status_snapshot_path?: string;
+  statusSnapshotPath?: string;
+  readiness?: RawDryRunReadinessReport | null;
+  status_snapshot?: RawDryRunStatusSnapshot;
+  statusSnapshot?: RawDryRunStatusSnapshot;
+  blocked_reasons?: unknown;
+  blockedReasons?: unknown;
+  failed_reason?: string | null;
+  failedReason?: string | null;
+  skipped_reason?: string | null;
+  skippedReason?: string | null;
+  safety?: Record<string, unknown>;
+};
+
 function getApiBaseUrl() {
   const env = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env;
   const configuredUrl = env?.VITE_API_BASE_URL?.trim();
@@ -1034,9 +1058,9 @@ function normalizeDryRunManifest(raw: RawDryRunArtifactManifest | null | undefin
     stderr: redactSensitiveText(raw.stderr ?? ""),
     userdir: raw.userdir ?? null,
     strategyPath: raw.strategyPath ?? raw.strategy_path ?? null,
-    blockedReason: raw.blockedReason ?? raw.blocked_reason ?? null,
-    failedReason: raw.failedReason ?? raw.failed_reason ?? null,
-    skippedReason: raw.skippedReason ?? raw.skipped_reason ?? null,
+    blockedReason: redactOptionalSensitiveText(raw.blockedReason ?? raw.blocked_reason),
+    failedReason: redactOptionalSensitiveText(raw.failedReason ?? raw.failed_reason),
+    skippedReason: redactOptionalSensitiveText(raw.skippedReason ?? raw.skipped_reason),
   };
 }
 
@@ -1090,9 +1114,9 @@ function normalizeDryRunSnapshot(raw: RawDryRunStatusSnapshot | undefined): DryR
     recentEvents: Array.isArray(source.recentEvents ?? source.recent_events)
       ? (source.recentEvents ?? source.recent_events ?? []).map(normalizeDryRunEvent)
       : [],
-    blockedReason: source.blockedReason ?? source.blocked_reason ?? null,
-    failedReason: source.failedReason ?? source.failed_reason ?? null,
-    skippedReason: source.skippedReason ?? source.skipped_reason ?? null,
+    blockedReason: redactOptionalSensitiveText(source.blockedReason ?? source.blocked_reason),
+    failedReason: redactOptionalSensitiveText(source.failedReason ?? source.failed_reason),
+    skippedReason: redactOptionalSensitiveText(source.skippedReason ?? source.skipped_reason),
     lastUpdated: source.lastUpdated ?? source.last_updated ?? null,
     artifactManifestPath: source.artifactManifestPath ?? source.artifact_manifest_path ?? null,
   };
@@ -1656,6 +1680,24 @@ function normalizeDryRunReadiness(raw: RawDryRunReadinessReport): DryRunReadines
   };
 }
 
+function normalizeDryRunControl(raw: RawDryRunControlReport): DryRunControlReport {
+  return {
+    status: raw.status ?? "BLOCKED",
+    generatedAt: raw.generatedAt ?? raw.generated_at ?? "",
+    manifestPath: raw.manifestPath ?? raw.manifest_path ?? null,
+    configPath: raw.configPath ?? raw.config_path ?? null,
+    statusSnapshotPath: raw.statusSnapshotPath ?? raw.status_snapshot_path ?? "",
+    readiness: raw.readiness ? normalizeDryRunReadiness(raw.readiness) : null,
+    statusSnapshot: normalizeDryRunSnapshot(raw.statusSnapshot ?? raw.status_snapshot),
+    blockedReasons: asStringArray(raw.blockedReasons ?? raw.blocked_reasons).map(redactSensitiveText),
+    failedReason: redactOptionalSensitiveText(raw.failedReason ?? raw.failed_reason),
+    skippedReason: redactOptionalSensitiveText(raw.skippedReason ?? raw.skipped_reason),
+    safety: Object.fromEntries(
+      Object.entries(asRecord(raw.safety)).map(([key, value]) => [key, Boolean(value)]),
+    ),
+  };
+}
+
 async function fetchJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   const response = await fetch(`${getApiBaseUrl()}${path}`, {
     headers: { Accept: "application/json" },
@@ -1765,6 +1807,36 @@ export async function checkDryRunReadiness(
   );
 
   return normalizeDryRunReadiness(raw);
+}
+
+export async function startControlledDryRun(
+  payload: DryRunControlPayload,
+  signal?: AbortSignal,
+): Promise<DryRunControlReport> {
+  const raw = await postJson<RawDryRunControlReport>(
+    "/dry-run/control/start",
+    {
+      strategy_version_id: Number(payload.strategyVersionId),
+      strategy_name: payload.strategyName || undefined,
+      pair: payload.pair ?? "BTC/USDT:USDT",
+      timeframe: payload.timeframe ?? "15m",
+      exchange: payload.exchange ?? "okx",
+      manual_approval: payload.manualApproval === true,
+    },
+    signal,
+  );
+
+  return normalizeDryRunControl(raw);
+}
+
+export async function stopControlledDryRun(signal?: AbortSignal): Promise<DryRunControlReport> {
+  const raw = await postJson<RawDryRunControlReport>(
+    "/dry-run/control/stop",
+    { reason: "manual stop requested from Local Strategy Lab" },
+    signal,
+  );
+
+  return normalizeDryRunControl(raw);
 }
 
 export async function loadMvpData(signal?: AbortSignal): Promise<{

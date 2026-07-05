@@ -225,6 +225,30 @@ def test_dry_run_runner_writes_failed_artifact_manifest(tmp_path, monkeypatch) -
     assert "real-passphrase" not in manifest_path.read_text(encoding="utf-8")
 
 
+def test_dry_run_runner_writes_failed_manifest_on_timeout(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    def fake_executor(args, cwd, timeout_seconds):
+        raise subprocess.TimeoutExpired(cmd=list(args), timeout=timeout_seconds)
+
+    config_path, _, _ = write_manifest_prerequisites(tmp_path)
+    manifest_path = tmp_path / "dry-run-timeout-manifest.json"
+    profile = DryRunProfile.model_validate(valid_profile_payload())
+    runner = FreqtradeDryRunRunner(FreqtradeCliRunner(executor=fake_executor))
+
+    manifest = runner.run_dry_run_with_artifact_manifest(
+        profile=profile,
+        config_path=config_path,
+        manifest_path=manifest_path,
+        timeout_seconds=5,
+    )
+
+    stored = FreqtradeDryRunArtifactManifest.read(manifest_path)
+    assert manifest.status == "FAILED"
+    assert manifest.return_code is None
+    assert stored["failed_reason"] == "Freqtrade dry-run timed out"
+
+
 def test_dry_run_runner_writes_blocked_manifest_without_running_cli(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     calls = []

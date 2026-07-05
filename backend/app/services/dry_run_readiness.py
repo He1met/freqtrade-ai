@@ -156,6 +156,13 @@ class DryRunReadinessService:
         except ValidationError:
             return None
 
+    def build_profile(
+        self,
+        payload: DryRunReadinessRequest,
+        version: StrategyVersion,
+    ) -> Optional[DryRunProfile]:
+        return self._build_profile(payload, version)
+
     def _safety_check(self, payload: DryRunReadinessRequest) -> DryRunReadinessCheck:
         blockers: list[str] = []
         if not payload.dry_run:

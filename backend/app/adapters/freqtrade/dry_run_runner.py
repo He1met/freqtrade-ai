@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, Optional
 
@@ -249,6 +251,20 @@ class FreqtradeDryRunRunner:
                 status_snapshots=status_snapshots,
                 blocked_reason="freqtrade binary is not available",
             )
+        except subprocess.TimeoutExpired:
+            return self._write_manifest(
+                profile=profile,
+                plan=plan,
+                status="FAILED",
+                manifest_path=manifest_path,
+                command_args=command_args,
+                return_code=None,
+                stdout="",
+                stderr="",
+                env_preflight=env_preflight_report,
+                status_snapshots=status_snapshots,
+                failed_reason="Freqtrade dry-run timed out",
+            )
 
         if command_result.return_code != 0:
             return self._write_manifest(
@@ -392,6 +408,8 @@ def _sanitize_manifest_payload(value: Any) -> Any:
         return [_sanitize_manifest_payload(item) for item in value]
     if isinstance(value, Path):
         return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
     if isinstance(value, str):
         return _sanitize_and_tail(value)
     return value
