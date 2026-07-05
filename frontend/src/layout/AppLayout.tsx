@@ -4,6 +4,7 @@ const navItems = [
   { to: "/", label: "总览" },
   { to: "/strategies", label: "策略" },
   { to: "/generation-runs", label: "生成批次" },
+  { to: "/local-strategy-lab", label: "Local Strategy Lab" },
   { to: "/backtest-runs", label: "回测批次" },
   { to: "/backtest-tasks", label: "回测任务" },
   { to: "/hyperopt-runs", label: "Hyperopt 参数优化" },
