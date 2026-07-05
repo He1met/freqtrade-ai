@@ -117,6 +117,34 @@ export type StrategyGenerationApiResult = {
   dataSource: DataSourceTraceSummary;
 };
 
+export type DryRunReadinessPayload = {
+  strategyVersionId: string;
+  strategyName?: string | null;
+  pair?: string;
+  timeframe?: string;
+  exchange?: string;
+};
+
+export type DryRunReadinessCheck = {
+  name: string;
+  status: "READY" | "BLOCKED" | string;
+  summary: string;
+  blockedReason: string | null;
+  evidence: Record<string, unknown>;
+};
+
+export type DryRunReadinessReport = {
+  status: "READY" | "BLOCKED" | string;
+  generatedAt: string;
+  strategyVersionId: string;
+  profileName: string;
+  blockedReasons: string[];
+  checks: DryRunReadinessCheck[];
+  envPreflight: Record<string, unknown>;
+  configPreview: Record<string, unknown>;
+  safety: Record<string, boolean>;
+};
+
 export type BacktestRunSummary = {
   id: string;
   strategyVersionId: string | null;

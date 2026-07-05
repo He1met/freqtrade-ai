@@ -1,12 +1,13 @@
 import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
-import { StrategyGenerationApiError, createStrategyGenerationRun } from "../api/client";
+import { StrategyGenerationApiError, checkDryRunReadiness, createStrategyGenerationRun } from "../api/client";
 import { useMvpData } from "../api/useMvpData";
 import type {
   BacktestResultSummary,
   BacktestRunSummary,
   BacktestTaskSummary,
   DataSourceTraceSummary,
+  DryRunReadinessReport,
   MvpData,
   RankingEntry,
   StrategyGenerationApiResult,
@@ -31,6 +32,13 @@ type SubmissionState =
       statusText: string | null;
     };
 
+type ReadinessState =
+  | { kind: "idle" }
+  | { kind: "checking"; strategyVersionId: string }
+  | { kind: "ready"; report: DryRunReadinessReport }
+  | { kind: "blocked"; report: DryRunReadinessReport }
+  | { kind: "failed"; message: string };
+
 type SourceRow = {
   label: string;
   source: DataSourceTraceSummary;
@@ -46,6 +54,11 @@ function formatRecord(record: Record<string, number | string>): string {
 
 function formatScore(value: number | null): string {
   return value === null ? EMPTY_TEXT : value.toFixed(1);
+}
+
+function formatEvidence(value: Record<string, unknown>): string {
+  const entries = Object.entries(value);
+  return entries.length > 0 ? entries.map(([key, item]) => `${key}: ${String(item)}`).join(", ") : EMPTY_TEXT;
 }
 
 function latest<T>(items: T[], count = 6): T[] {
@@ -166,6 +179,26 @@ function submissionMessage(submission: SubmissionState): string {
     return `正在提交 ${submission.requestedCount} 个本地策略生成请求。`;
   }
   return "输入策略想法后提交，页面只接受 backend API/DB 可证明的核心结果。";
+}
+
+function readinessStatus(readiness: ReadinessState): {
+  className: string;
+  label: string;
+  title: string;
+} {
+  if (readiness.kind === "checking") {
+    return { className: "status-neutral", label: "检查中", title: "正在请求 readiness API" };
+  }
+  if (readiness.kind === "ready") {
+    return { className: "status-success", label: "READY", title: "本地 dry-run readiness 检查通过" };
+  }
+  if (readiness.kind === "blocked") {
+    return { className: "status-blocked", label: "BLOCKED", title: "本地 dry-run readiness 缺少条件" };
+  }
+  if (readiness.kind === "failed") {
+    return { className: "status-failed", label: "FAILED", title: "readiness API 请求失败" };
+  }
+  return { className: "status-neutral", label: "未检查", title: "尚未执行 readiness 检查" };
 }
 
 function DataSourceTable({ rows }: { rows: SourceRow[] }) {
@@ -438,6 +471,130 @@ function RankingEvidence({ ranking }: { ranking: RankingEntry[] }) {
   );
 }
 
+function readinessCandidate(data: MvpData): { strategyVersionId: string; strategyName: string | null } | null {
+  const ranked = data.ranking.find((entry) => isCoreDataSource(entry.dataSource));
+  if (ranked?.strategyVersionId) {
+    return {
+      strategyVersionId: ranked.strategyVersionId,
+      strategyName: ranked.strategyName,
+    };
+  }
+
+  const strategyById = new Map(data.strategies.map((strategy) => [strategy.id, strategy]));
+  const version = data.strategyVersions.find((item) => isCoreDataSource(item.dataSource));
+  if (!version) {
+    return null;
+  }
+
+  return {
+    strategyVersionId: version.id,
+    strategyName: strategyById.get(version.strategyId)?.name ?? null,
+  };
+}
+
+function DryRunReadinessPanel({ data }: { data: MvpData }) {
+  const [readiness, setReadiness] = useState<ReadinessState>({ kind: "idle" });
+  const candidate = readinessCandidate(data);
+  const status = readinessStatus(readiness);
+  const isChecking = readiness.kind === "checking";
+  const report = readiness.kind === "ready" || readiness.kind === "blocked" ? readiness.report : null;
+
+  async function handleCheck() {
+    if (!candidate) {
+      setReadiness({ kind: "failed", message: "没有可用于 readiness 检查的核心 strategy version。" });
+      return;
+    }
+
+    setReadiness({ kind: "checking", strategyVersionId: candidate.strategyVersionId });
+    try {
+      const result = await checkDryRunReadiness({
+        strategyName: candidate.strategyName,
+        strategyVersionId: candidate.strategyVersionId,
+      });
+      setReadiness(result.status === "READY" ? { kind: "ready", report: result } : { kind: "blocked", report: result });
+    } catch (error) {
+      const message =
+        error instanceof StrategyGenerationApiError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "readiness API 请求失败";
+      setReadiness({ kind: "failed", message });
+    }
+  }
+
+  return (
+    <section className="lab-evidence-section" aria-label="本地 dry-run readiness">
+      <div className="section-header detail-section">
+        <h2>Dry-run readiness</h2>
+        <div className="lab-header-actions">
+          <span className={`run-status ${status.className}`} title={status.title}>
+            {status.label}
+          </span>
+          <button className="secondary-button" disabled={isChecking || !candidate} onClick={handleCheck} type="button">
+            检查
+          </button>
+        </div>
+      </div>
+      <dl className="detail-list lab-run-detail-list">
+        <div>
+          <dt>strategy_version</dt>
+          <dd>{candidate?.strategyVersionId ?? EMPTY_TEXT}</dd>
+        </div>
+        <div>
+          <dt>strategy</dt>
+          <dd>{candidate?.strategyName ?? EMPTY_TEXT}</dd>
+        </div>
+        <div>
+          <dt>profile</dt>
+          <dd>{report?.profileName ?? EMPTY_TEXT}</dd>
+        </div>
+        <div>
+          <dt>generated_at</dt>
+          <dd>{report?.generatedAt ?? EMPTY_TEXT}</dd>
+        </div>
+      </dl>
+      {readiness.kind === "failed" ? <div className="empty-state">{readiness.message}</div> : null}
+      {report?.blockedReasons.length ? (
+        <div className="blocked-list">
+          {report.blockedReasons.map((reason) => (
+            <div key={reason}>{reason}</div>
+          ))}
+        </div>
+      ) : null}
+      {report ? (
+        <div className="table-shell lab-table-shell">
+          <table>
+            <thead>
+              <tr>
+                <th>check</th>
+                <th>status</th>
+                <th>summary</th>
+                <th>blocked_reason</th>
+                <th>evidence</th>
+              </tr>
+            </thead>
+            <tbody>
+              {report.checks.map((check) => (
+                <tr key={check.name}>
+                  <td className="primary-cell">{check.name}</td>
+                  <td>
+                    <span className={`run-status ${statusClassName(check.status)}`}>{check.status}</span>
+                  </td>
+                  <td>{check.summary}</td>
+                  <td className="reason-cell">{check.blockedReason ?? EMPTY_TEXT}</td>
+                  <td className="path-cell">{formatEvidence(check.evidence)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+      {!candidate ? <div className="empty-state">暂无核心 strategy version，readiness 保持不可用。</div> : null}
+    </section>
+  );
+}
+
 function PersistentEvidence({
   data,
   error,
@@ -494,6 +651,7 @@ function PersistentEvidence({
       <GenerationRunEvidence runs={data.generationRuns} />
       <BacktestEvidence runs={data.backtestRuns} tasks={data.backtestTasks} results={data.backtestResults} />
       <RankingEvidence ranking={data.ranking} />
+      <DryRunReadinessPanel data={data} />
     </section>
   );
 }

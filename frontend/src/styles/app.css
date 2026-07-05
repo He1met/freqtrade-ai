@@ -1000,6 +1000,15 @@ th {
   padding: 24px;
 }
 
+.blocked-list {
+  display: grid;
+  gap: 8px;
+  border: 1px solid #ead6b7;
+  background: #fff8eb;
+  color: #6f3f08;
+  padding: 12px 16px;
+}
+
 .detail-section {
   margin-top: 14px;
 }
