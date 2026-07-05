@@ -17,6 +17,31 @@
 | PR 触发回归任务 | QA Test Engineer + Release Manager | 每个 PR | 根据 diff 选择 pytest、compileall、frontend build、relevant smoke、API/UI/DB 对账和 secret scan。 | PR 验收清单、命令结果、跳过说明、scope creep 检查。 | 必需验证失败、docs-only 跳过原因缺失、安全边界不清或验收证据不完整时阻止合并。 |
 | 手动破坏性本地全链路验收 | QA Test Engineer + SRE / DevOps + Security / Risk | 人工触发 | 仅 local/dev/test；允许清空本地测试数据库、重跑 migration、构造坏数据、模拟失败、执行 UI/API 对账。 | 手动验收报告、破坏性操作范围、恢复步骤、风险结论。 | 目标不是 local/dev/test、可能触达 production/shared/remote、需要真实密钥、真实交易所或真实 dry-run/live 时不得执行。 |
 
+## Codex Automation 落地
+
+以下 Codex automation 已建立，用于把上面的治理任务落成实际周期运行。除手动破坏性验收模板外，
+所有任务均为 active，并在独立 worktree 环境中运行。
+
+| 文档任务 | Codex automation | 运行状态 | 运行节奏 |
+| --- | --- | --- | --- |
+| 每日 PM 需求范围巡检 | `freqtrade-ai-daily-pm-scope-review` | Active | 每日 09:00，Asia/Shanghai。 |
+| 每日 QA 本地 DB seed + UI E2E | `freqtrade-ai-daily-qa-local-db-ui-e2e` | Active | 每日 10:00，Asia/Shanghai。 |
+| 每日策略生成到回测闭环测试 | `freqtrade-ai-daily-strategy-backtest-loop` | Active | 每日 11:30，Asia/Shanghai。 |
+| 每日 SRE 运行健康检查 | `freqtrade-ai-daily-sre-health-check` | Active | 每日 14:00，Asia/Shanghai。 |
+| 每日 Security 安全边界扫描 | `freqtrade-ai-daily-security-boundary-scan` | Active | 每日 15:00，Asia/Shanghai。 |
+| 每周 Architect 架构审查 | `freqtrade-ai-weekly-architect-review` | Active | 每周一 09:30，Asia/Shanghai。 |
+| PR 触发回归任务 | `freqtrade-ai-pr-regression-monitor` | Active | 工作时段每小时巡检 open PR。 |
+| 手动破坏性本地全链路验收 | `freqtrade-ai-manual-destructive-local-e2e` | Paused | 默认暂停；仅在人工明确授权后启用。 |
+
+说明：
+
+- 当前 Codex automation 以 cron 方式运行，不提供 GitHub webhook 级别的 PR 事件触发。
+  因此 `PR 触发回归任务` 通过工作时段高频 PR 巡检落地；它只检查和评论，不自动合并 PR。
+- `freqtrade-ai-manual-destructive-local-e2e` 必须保持 paused，避免自动清理或污染本地开发数据。
+- 任何 automation 在执行 GitHub 写入、分支创建或文件编辑前，必须遵守本项目既有
+  `/Users/shenjianpeng/.codex/automations/freqtrade-ai-full-loop/run.lock` 并发守门。
+- 所有 automation 仍受本文件“不授权范围”和 [feature_intake.md](feature_intake.md) 约束。
+
 ## QA 数据库造数边界
 
 QA 任务明确允许以下操作，但只允许在 local、dev 或 test 数据库中执行：
