@@ -4,7 +4,7 @@
 
 `Freqtrade AI Roadmap`
 
-用途：管理 Freqtrade AI 从 Phase 0 到 Phase 7 的完整开发进度。
+用途：管理 Freqtrade AI 从 Phase 0 到 Phase 8 的完整开发进度。
 
 如果 GitHub Project API 或账号权限不足，按本文档手动创建 Project、字段、视图和 Issue 关联。
 
@@ -31,6 +31,7 @@ Project 的 `Status` 字段使用以下选项：
 - `Phase 5 - Dry-run / FreqUI 运行管理`
 - `Phase 6 - 实盘候选与部署管理`
 - `Phase 7 - 工程化升级与规模化运行`
+- `Phase 8 - Local Strategy Lab 本地真实运行验证`
 
 ### Type
 
@@ -88,6 +89,7 @@ Project 的 `Status` 字段使用以下选项：
 - `Phase 5 - Dry-run / FreqUI 运行管理`: 把候选策略放入 Freqtrade dry-run，复用 FreqUI 展示运行状态。
 - `Phase 6 - 实盘候选与部署管理`: 建立人工审批、风险检查、部署记录、回滚机制。
 - `Phase 7 - 工程化升级与规模化运行`: 引入 Redis / Worker / 权限 / 审计 / 监控 / CI/CD，让项目可以长期运行。
+- `Phase 8 - Local Strategy Lab 本地真实运行验证`: 证明页面、API、数据库、策略文件、回测 artifact 和 QA 对账可以跑通本地策略研发闭环。
 
 ## Labels
 
@@ -101,6 +103,7 @@ Project 的 `Status` 字段使用以下选项：
 - `phase-5`
 - `phase-6`
 - `phase-7`
+- `phase-8`
 
 ### 类型 Labels
 

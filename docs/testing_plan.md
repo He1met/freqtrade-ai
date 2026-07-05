@@ -263,3 +263,54 @@ python3 scripts/smoke_phase6.py --offline --tmp-dir /tmp/freqtrade-ai-phase6-smo
 - 不引入 Redis、Celery、Kafka、RabbitMQ。
 - 不修改 Freqtrade 源码。
 - 不部署，不进入 Phase 7。
+
+## Phase 8 Local Strategy Lab Acceptance
+
+Phase 8 没有在阶段启动时预设单一 offline smoke。Phase 8 的验收核心是证明页面、
+API 和数据库三方一致，而不是只证明 fixture runner 或 smoke 能通过。
+
+Phase 8 必须覆盖：
+
+- 本地后端可以启动。
+- 本地前端可以启动。
+- 前端可以访问后端 API。
+- 核心页面没有白屏。
+- 检查流程没有严重 console error。
+- 检查流程没有关键 API 404 / 500。
+- 页面可以提交策略想法并触发后端生成。
+- 策略、策略版本和生成批次写入数据库。
+- 生成策略文件写入 approved local runnable directory，并记录文件状态。
+- 页面刷新后仍能展示数据库-backed 的策略和版本。
+- 页面可以触发本地回测任务。
+- 回测任务、回测结果、artifact 引用、失败 / 阻塞原因写入数据库。
+- 策略评分和排行榜基于数据库 `BacktestResult` 与 `StrategyVersion`。
+- 页面、API response 和数据库查询可以对账。
+- fixture、fallback、mock 和 unknown-source 都明确标记，不能冒充核心成功。
+- dry-run readiness 基于真实本地检查返回 `READY` 或 `BLOCKED`。
+- 受控 dry-run 只能在 readiness、安全和人工确认满足后推进，并且必须保持
+  dry-run-only、local-only、secret-redacted。
+
+Phase 8 推荐验证顺序：
+
+1. `#233` 先定义 Local Strategy Lab 流程、状态机、source marker 和阶段验收口径。
+2. `#234` 到 `#235` 建立 API/DB 来源契约和 local/dev/test 造数能力。
+3. `#236` 到 `#241` 跑通策略生成、策略文件、回测、结果入库和评分主链路。
+4. `#242` 到 `#243` 验证页面真实数据展示和 fallback/fixture 防冒充。
+5. `#244` 建立页面/API/数据库三方对账 E2E。
+6. `#245` 到 `#246` 处理 dry-run readiness 和本地受控 dry-run。
+7. `#247` 汇总阶段验收、安全边界和剩余 blocker。
+
+Phase 8 限制和禁止项：
+
+- 不执行真实下单。
+- 不启动 live trading。
+- 不连接真实交易所。
+- 不下载真实 K 线。
+- 不操作 production、shared、remote 或 unknown 数据库。
+- 不读取、写入或持久化真实 API key、secret、passphrase 或 token。
+- 不把密钥写入代码、配置、数据库、日志、文档、Issue、PR、截图或测试数据。
+- 不修改 Freqtrade 源码。
+- 不实现 Redis、Celery、Kafka、RabbitMQ、worker pool 或生产 queue infrastructure。
+- 不实现 deployment executor。
+- 不提供 live bot start / stop / deploy 控制。
+- 不把 fixture、fallback、mock 或 unknown-source 数据展示成真实数据库成功。
