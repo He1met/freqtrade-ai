@@ -27,10 +27,23 @@ import type {
   LiveCandidateRollbackPlanSummary,
   LiveCandidateRollbackStepSummary,
   MvpData,
+  OperatorArtifactStatus,
+  OperatorAuditEventSummary,
+  OperatorDashboardSummary,
+  OperatorDiagnosticCheck,
+  OperatorEnvPresence,
+  OperatorRuntimeContractSummary,
+  OperatorSafetyBoundary,
+  OperatorStatusReportSummary,
   RankingEliminationSummary,
   RankingEntry,
   RankingScoreBreakdownItem,
   RankingSignalSummary,
+  RuntimeArtifactLink,
+  RuntimeFallbackStatus,
+  RuntimeReadOnlyContractSummary,
+  RuntimeSafetyBoundary,
+  RuntimeStatusSummary,
   StrategyFailureReasonSummary,
   StrategyVersionLineageEntry,
 } from "./types";
@@ -302,6 +315,106 @@ type RawLiveCandidateGovernanceSummary = Partial<LiveCandidateGovernanceSummary>
   read_only?: boolean;
   safety_boundary?: string;
   monitoring_snapshots?: RawLiveCandidateMonitoringSnapshotSummary[];
+};
+
+type RawRuntimeStatusSummary = Partial<RuntimeStatusSummary> & {
+  source_ref?: string | null;
+  last_updated?: string | null;
+  blocked_reason?: string | null;
+  unavailable_reason?: string | null;
+  stale_reason?: string | null;
+};
+
+type RawRuntimeFallbackStatus = Partial<RuntimeFallbackStatus> & {
+  active?: boolean;
+};
+
+type RawRuntimeArtifactLink = Partial<RuntimeArtifactLink>;
+
+type RawRuntimeSafetyBoundary = Partial<RuntimeSafetyBoundary> & {
+  read_only?: boolean;
+  allow_live_trading?: boolean;
+  allow_real_orders?: boolean;
+  allow_exchange_connection?: boolean;
+  allow_deploy_control?: boolean;
+  can_start_stop_bot?: boolean;
+};
+
+type RawRuntimeReadOnlyContractSummary = Partial<RuntimeReadOnlyContractSummary> & {
+  schema_version?: string;
+  generated_at?: string | null;
+  system_status?: RawRuntimeStatusSummary;
+  runtime_readiness?: RawRuntimeStatusSummary;
+  fallback_status?: RawRuntimeFallbackStatus;
+  smoke_status?: RawRuntimeStatusSummary;
+  artifact_links?: RawRuntimeArtifactLink[];
+  blocked_reasons?: unknown;
+  unavailable_reasons?: unknown;
+  safety?: RawRuntimeSafetyBoundary;
+};
+
+type RawOperatorDiagnosticCheck = Partial<OperatorDiagnosticCheck> & {
+  blocked_reason?: string | null;
+  unavailable_reason?: string | null;
+};
+
+type RawOperatorArtifactStatus = Partial<OperatorArtifactStatus>;
+
+type RawOperatorEnvPresence = Partial<OperatorEnvPresence> & {
+  value_rendered?: boolean;
+};
+
+type RawOperatorRuntimeContractSummary = Partial<OperatorRuntimeContractSummary> & {
+  runtime_readiness_status?: string;
+  fallback_active?: boolean;
+  smoke_status?: string;
+  artifact_count?: number;
+  blocked_reasons?: unknown;
+  unavailable_reasons?: unknown;
+};
+
+type RawOperatorSafetyBoundary = Partial<OperatorSafetyBoundary> & {
+  read_only?: boolean;
+  reports_env_values?: boolean;
+  allow_live_trading?: boolean;
+  allow_real_orders?: boolean;
+  allow_exchange_connection?: boolean;
+  allow_deploy_control?: boolean;
+  can_start_stop_bot?: boolean;
+};
+
+type RawOperatorStatusReportSummary = Partial<OperatorStatusReportSummary> & {
+  schema_version?: string;
+  generated_at?: string | null;
+  repo_root?: string;
+  env_presence?: RawOperatorEnvPresence[];
+  runtime_contract?: RawOperatorRuntimeContractSummary;
+  blocked_reasons?: unknown;
+  unavailable_reasons?: unknown;
+  safety?: RawOperatorSafetyBoundary;
+};
+
+type RawOperatorAuditEventSummary = Partial<OperatorAuditEventSummary> & {
+  event_id?: string | number;
+  event_type?: string;
+  source_name?: string;
+  artifact_links?: RawRuntimeArtifactLink[];
+  created_at?: string | null;
+};
+
+type RawOperatorDashboardSummary = {
+  sourceRef?: string | null;
+  source_ref?: string | null;
+  readOnly?: boolean;
+  read_only?: boolean;
+  runtimeContract?: RawRuntimeReadOnlyContractSummary;
+  runtime_contract?: RawRuntimeReadOnlyContractSummary;
+  operatorStatus?: RawOperatorStatusReportSummary;
+  operator_status?: RawOperatorStatusReportSummary;
+  auditEvents?: RawOperatorAuditEventSummary[];
+  audit_events?: RawOperatorAuditEventSummary[];
+  safetyBoundary?: string;
+  safety_boundary?: string;
 };
 
 type RawRankingEntry = Partial<RankingEntry> & {
@@ -920,6 +1033,201 @@ function normalizeLiveCandidateGovernance(
   };
 }
 
+function normalizeRuntimeStatusSummary(raw: RawRuntimeStatusSummary | undefined, name: string): RuntimeStatusSummary {
+  const source = raw ?? {};
+  return {
+    name: source.name ?? name,
+    status: source.status ?? "UNAVAILABLE",
+    summary: redactSensitiveText(source.summary ?? "Runtime status source is unavailable."),
+    source: source.source ?? "missing",
+    sourceRef: source.sourceRef ?? source.source_ref ?? null,
+    lastUpdated: source.lastUpdated ?? source.last_updated ?? null,
+    blockedReason: source.blockedReason ?? source.blocked_reason ?? null,
+    unavailableReason: source.unavailableReason ?? source.unavailable_reason ?? null,
+    staleReason: source.staleReason ?? source.stale_reason ?? null,
+    warnings: asStringArray(source.warnings).map(redactSensitiveText),
+  };
+}
+
+function normalizeRuntimeFallbackStatus(raw: RawRuntimeFallbackStatus | undefined): RuntimeFallbackStatus {
+  const source = raw ?? {};
+  return {
+    active: source.active === true,
+    status: source.status ?? "UNAVAILABLE",
+    reason: source.reason ? redactSensitiveText(source.reason) : null,
+    sources: asStringArray(source.sources),
+  };
+}
+
+function normalizeRuntimeArtifactLink(raw: RawRuntimeArtifactLink): RuntimeArtifactLink {
+  return {
+    name: raw.name ?? "runtime_artifact",
+    path: redactSensitiveText(raw.path ?? "unavailable"),
+    source: raw.source ?? "missing",
+    status: raw.status ?? "UNAVAILABLE",
+    exists: raw.exists === true,
+  };
+}
+
+function normalizeRuntimeSafety(raw: RawRuntimeSafetyBoundary | undefined): RuntimeSafetyBoundary {
+  const source = raw ?? {};
+  return {
+    readOnly: source.readOnly ?? source.read_only ?? true,
+    allowLiveTrading: source.allowLiveTrading ?? source.allow_live_trading ?? false,
+    allowRealOrders: source.allowRealOrders ?? source.allow_real_orders ?? false,
+    allowExchangeConnection: source.allowExchangeConnection ?? source.allow_exchange_connection ?? false,
+    allowDeployControl: source.allowDeployControl ?? source.allow_deploy_control ?? false,
+    canStartStopBot: source.canStartStopBot ?? source.can_start_stop_bot ?? false,
+    boundary: redactSensitiveText(
+      source.boundary ??
+        "Runtime contract is read-only status evidence only; it cannot start, stop, deploy, connect to exchanges, or place orders.",
+    ),
+  };
+}
+
+function normalizeRuntimeContract(raw: RawRuntimeReadOnlyContractSummary): RuntimeReadOnlyContractSummary {
+  return {
+    schemaVersion: raw.schemaVersion ?? raw.schema_version ?? "1",
+    status: raw.status ?? "UNAVAILABLE",
+    generatedAt: raw.generatedAt ?? raw.generated_at ?? null,
+    systemStatus: normalizeRuntimeStatusSummary(raw.systemStatus ?? raw.system_status, "system_status"),
+    runtimeReadiness: normalizeRuntimeStatusSummary(
+      raw.runtimeReadiness ?? raw.runtime_readiness,
+      "runtime_readiness",
+    ),
+    fallbackStatus: normalizeRuntimeFallbackStatus(raw.fallbackStatus ?? raw.fallback_status),
+    smokeStatus: normalizeRuntimeStatusSummary(raw.smokeStatus ?? raw.smoke_status, "phase7_smoke"),
+    artifactLinks: Array.isArray(raw.artifactLinks ?? raw.artifact_links)
+      ? (raw.artifactLinks ?? raw.artifact_links ?? []).map(normalizeRuntimeArtifactLink)
+      : [],
+    blockedReasons: asStringArray(raw.blockedReasons ?? raw.blocked_reasons).map(redactSensitiveText),
+    unavailableReasons: asStringArray(raw.unavailableReasons ?? raw.unavailable_reasons).map(redactSensitiveText),
+    safety: normalizeRuntimeSafety(raw.safety),
+  };
+}
+
+function normalizeOperatorDiagnosticCheck(raw: RawOperatorDiagnosticCheck): OperatorDiagnosticCheck {
+  return {
+    name: raw.name ?? "operator_check",
+    area: raw.area ?? "artifact",
+    status: raw.status ?? "UNAVAILABLE",
+    source: raw.source ?? "derived",
+    summary: redactSensitiveText(raw.summary ?? "Operator diagnostic check is unavailable."),
+    path: raw.path ? redactSensitiveText(raw.path) : null,
+    exists: raw.exists ?? null,
+    required: raw.required ?? true,
+    blockedReason: raw.blockedReason ?? raw.blocked_reason ?? null,
+    unavailableReason: raw.unavailableReason ?? raw.unavailable_reason ?? null,
+    warnings: asStringArray(raw.warnings).map(redactSensitiveText),
+  };
+}
+
+function normalizeOperatorArtifactStatus(raw: RawOperatorArtifactStatus): OperatorArtifactStatus {
+  return {
+    name: raw.name ?? "operator_artifact",
+    path: redactSensitiveText(raw.path ?? "unavailable"),
+    status: raw.status ?? "UNAVAILABLE",
+    source: raw.source ?? "artifact",
+    exists: raw.exists === true,
+  };
+}
+
+function normalizeOperatorEnvPresence(raw: RawOperatorEnvPresence): OperatorEnvPresence {
+  return {
+    name: raw.name ?? "ENV_VAR",
+    present: raw.present === true,
+    required: raw.required === true,
+    source: raw.source ?? "env",
+    valueRendered: raw.valueRendered ?? raw.value_rendered ?? false,
+  };
+}
+
+function normalizeOperatorRuntimeContract(
+  raw: RawOperatorRuntimeContractSummary | undefined,
+): OperatorRuntimeContractSummary {
+  const source = raw ?? {};
+  return {
+    status: source.status ?? "UNAVAILABLE",
+    runtimeReadinessStatus: source.runtimeReadinessStatus ?? source.runtime_readiness_status ?? "UNAVAILABLE",
+    fallbackActive: source.fallbackActive ?? source.fallback_active ?? true,
+    smokeStatus: source.smokeStatus ?? source.smoke_status ?? "UNAVAILABLE",
+    artifactCount: source.artifactCount ?? source.artifact_count ?? 0,
+    blockedReasons: asStringArray(source.blockedReasons ?? source.blocked_reasons).map(redactSensitiveText),
+    unavailableReasons: asStringArray(source.unavailableReasons ?? source.unavailable_reasons).map(
+      redactSensitiveText,
+    ),
+  };
+}
+
+function normalizeOperatorSafety(raw: RawOperatorSafetyBoundary | undefined): OperatorSafetyBoundary {
+  const source = raw ?? {};
+  return {
+    readOnly: source.readOnly ?? source.read_only ?? true,
+    reportsEnvValues: source.reportsEnvValues ?? source.reports_env_values ?? false,
+    allowLiveTrading: source.allowLiveTrading ?? source.allow_live_trading ?? false,
+    allowRealOrders: source.allowRealOrders ?? source.allow_real_orders ?? false,
+    allowExchangeConnection: source.allowExchangeConnection ?? source.allow_exchange_connection ?? false,
+    allowDeployControl: source.allowDeployControl ?? source.allow_deploy_control ?? false,
+    canStartStopBot: source.canStartStopBot ?? source.can_start_stop_bot ?? false,
+    boundary: redactSensitiveText(
+      source.boundary ??
+        "Operator status is local read-only diagnostics only; it cannot start bots, deploy runtime services, connect to exchanges, or reveal ENV values.",
+    ),
+  };
+}
+
+function normalizeOperatorStatus(raw: RawOperatorStatusReportSummary): OperatorStatusReportSummary {
+  return {
+    schemaVersion: raw.schemaVersion ?? raw.schema_version ?? "1",
+    status: raw.status ?? "UNAVAILABLE",
+    generatedAt: raw.generatedAt ?? raw.generated_at ?? null,
+    repoRoot: redactSensitiveText(raw.repoRoot ?? raw.repo_root ?? "unavailable"),
+    checks: Array.isArray(raw.checks) ? raw.checks.map(normalizeOperatorDiagnosticCheck) : [],
+    artifacts: Array.isArray(raw.artifacts) ? raw.artifacts.map(normalizeOperatorArtifactStatus) : [],
+    envPresence: Array.isArray(raw.envPresence ?? raw.env_presence)
+      ? (raw.envPresence ?? raw.env_presence ?? []).map(normalizeOperatorEnvPresence)
+      : [],
+    runtimeContract: normalizeOperatorRuntimeContract(raw.runtimeContract ?? raw.runtime_contract),
+    blockedReasons: asStringArray(raw.blockedReasons ?? raw.blocked_reasons).map(redactSensitiveText),
+    unavailableReasons: asStringArray(raw.unavailableReasons ?? raw.unavailable_reasons).map(redactSensitiveText),
+    warnings: asStringArray(raw.warnings).map(redactSensitiveText),
+    safety: normalizeOperatorSafety(raw.safety),
+  };
+}
+
+function normalizeAuditEvent(raw: RawOperatorAuditEventSummary): OperatorAuditEventSummary {
+  return {
+    eventId: normalizeId(raw.eventId ?? raw.event_id),
+    eventType: raw.eventType ?? raw.event_type ?? "governance_event",
+    status: raw.status ?? "UNAVAILABLE",
+    actor: redactSensitiveText(raw.actor ?? "local-operator"),
+    sourceName: raw.sourceName ?? raw.source_name ?? "phase7-operator-dashboard",
+    summary: redactSensitiveText(raw.summary ?? "Governance event summary is unavailable."),
+    reason: raw.reason ? redactSensitiveText(raw.reason) : null,
+    artifactLinks: Array.isArray(raw.artifactLinks ?? raw.artifact_links)
+      ? (raw.artifactLinks ?? raw.artifact_links ?? []).map(normalizeRuntimeArtifactLink)
+      : [],
+    createdAt: raw.createdAt ?? raw.created_at ?? null,
+  };
+}
+
+function normalizeOperatorDashboard(raw: RawOperatorDashboardSummary): OperatorDashboardSummary {
+  return {
+    sourceRef: raw.sourceRef ?? raw.source_ref ?? null,
+    readOnly: raw.readOnly ?? raw.read_only ?? true,
+    runtimeContract: normalizeRuntimeContract(raw.runtimeContract ?? raw.runtime_contract ?? {}),
+    operatorStatus: normalizeOperatorStatus(raw.operatorStatus ?? raw.operator_status ?? {}),
+    auditEvents: Array.isArray(raw.auditEvents ?? raw.audit_events)
+      ? (raw.auditEvents ?? raw.audit_events ?? []).map(normalizeAuditEvent)
+      : [],
+    safetyBoundary: redactSensitiveText(
+      raw.safetyBoundary ??
+        raw.safety_boundary ??
+        "Operator dashboard is read-only evidence and does not provide trading or deployment controls.",
+    ),
+  };
+}
+
 async function fetchJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   const response = await fetch(`${getApiBaseUrl()}${path}`, {
     headers: { Accept: "application/json" },
@@ -983,6 +1291,9 @@ export async function loadMvpData(signal?: AbortSignal): Promise<{
     hyperoptRuns,
     dryRun,
     liveCandidates,
+    runtimeContract,
+    operatorStatus,
+    auditEvents,
     ranking,
     failureReasons,
     versionLineage,
@@ -1018,6 +1329,21 @@ export async function loadMvpData(signal?: AbortSignal): Promise<{
       mockMvpData.liveCandidates,
       signal,
     ),
+    fetchValue<RawRuntimeReadOnlyContractSummary>(
+      ["/runtime/read-only", "/mvp/runtime/read-only"],
+      mockMvpData.operatorDashboard.runtimeContract,
+      signal,
+    ),
+    fetchValue<RawOperatorStatusReportSummary>(
+      ["/runtime/operator-status", "/mvp/runtime/operator-status"],
+      mockMvpData.operatorDashboard.operatorStatus,
+      signal,
+    ),
+    fetchList<RawOperatorAuditEventSummary>(
+      ["/governance-events", "/audit-log/governance-events", "/mvp/governance-events"],
+      mockMvpData.operatorDashboard.auditEvents,
+      signal,
+    ),
     fetchList<RawRankingEntry>(
       ["/ranking", "/strategy-ranking", "/mvp/ranking"],
       mockMvpData.ranking,
@@ -1044,6 +1370,12 @@ export async function loadMvpData(signal?: AbortSignal): Promise<{
       hyperoptRuns: hyperoptRuns.items.map(normalizeHyperoptRun),
       dryRun: normalizeDryRunManagement(dryRun.item),
       liveCandidates: normalizeLiveCandidateGovernance(liveCandidates.item),
+      operatorDashboard: normalizeOperatorDashboard({
+        ...mockMvpData.operatorDashboard,
+        runtimeContract: runtimeContract.item,
+        operatorStatus: operatorStatus.item,
+        auditEvents: auditEvents.items,
+      }),
       ranking: ranking.items.map(normalizeRankingEntry),
       failureReasons: failureReasons.items.map(normalizeFailureReason),
       versionLineage: versionLineage.items.map(normalizeLineageEntry),
@@ -1056,6 +1388,9 @@ export async function loadMvpData(signal?: AbortSignal): Promise<{
       hyperoptRuns.usedFallback ||
       dryRun.usedFallback ||
       liveCandidates.usedFallback ||
+      runtimeContract.usedFallback ||
+      operatorStatus.usedFallback ||
+      auditEvents.usedFallback ||
       ranking.usedFallback ||
       failureReasons.usedFallback ||
       versionLineage.usedFallback,

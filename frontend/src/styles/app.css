@@ -845,6 +845,51 @@ th {
   color: #526159;
 }
 
+.operator-summary-grid,
+.operator-status-grid,
+.operator-env-grid {
+  display: grid;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.operator-summary-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.operator-status-grid,
+.operator-env-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.operator-card-heading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.operator-card-heading h2 {
+  margin: 0;
+  font-size: 17px;
+}
+
+.operator-status-card {
+  display: grid;
+  gap: 8px;
+}
+
+.operator-status-card .reason-line {
+  max-width: none;
+}
+
+.operator-boundary-list {
+  border-radius: 0 0 8px 8px;
+  border-top: 0;
+}
+
 @media (max-width: 820px) {
   .app-shell {
     grid-template-columns: 1fr;
@@ -877,7 +922,10 @@ th {
   .dry-run-layout,
   .phase6-summary,
   .phase6-decision-grid,
-  .phase6-alert-grid {
+  .phase6-alert-grid,
+  .operator-summary-grid,
+  .operator-status-grid,
+  .operator-env-grid {
     grid-template-columns: 1fr;
   }
 
