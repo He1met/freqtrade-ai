@@ -6,6 +6,7 @@ import type {
 } from "../api/types";
 import { useMvpData } from "../api/useMvpData";
 import { reasonText, statusClassName, summarizeText } from "./backtestDisplay";
+import { FallbackNotice } from "./FallbackNotice";
 import { EMPTY_TEXT, displayBoolean, displayDataOrigin, displayLoadState, displayStatus, displayValue } from "./uiCopy";
 
 function formatValue(value: number | string | null | undefined): string {
@@ -340,10 +341,12 @@ export function LiveGovernance() {
         <h1>实盘候选治理</h1>
         <span className="status-pill">{displayLoadState(isLoading, source)}</span>
       </header>
-      {error ? <div className="notice">当前使用 fallback 数据：{error}</div> : null}
-      {!isLoading && source === "fallback" && !error ? (
-        <div className="notice">Backend API 不可用，当前显示受控 fallback Phase 6 治理数据。</div>
-      ) : null}
+      <FallbackNotice
+        context="Live Governance 实盘候选、审批、部署治理、回滚计划和监控快照。"
+        error={error}
+        isLoading={isLoading}
+        source={source}
+      />
       <section className="phase6-summary" aria-label="Phase 6 治理摘要">
         <article className="overview-panel">
           <h2>来源</h2>

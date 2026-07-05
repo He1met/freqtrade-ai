@@ -1,5 +1,6 @@
 import { useMvpData } from "../api/useMvpData";
 import type { RankingScoreBreakdownItem } from "../api/types";
+import { FallbackNotice } from "./FallbackNotice";
 import { EMPTY_TEXT, displayLoadState } from "./uiCopy";
 
 const SCORE_LABELS: Record<string, string> = {
@@ -18,7 +19,7 @@ function formatBreakdownName(item: RankingScoreBreakdownItem) {
 }
 
 export function Ranking() {
-  const { data, source, isLoading } = useMvpData();
+  const { data, source, isLoading, error } = useMvpData();
 
   return (
     <section className="page">
@@ -26,6 +27,12 @@ export function Ranking() {
         <h1>策略排行榜</h1>
         <span className="status-pill">{displayLoadState(isLoading, source)}</span>
       </header>
+      <FallbackNotice
+        context="策略排行榜、评分拆解、淘汰原因和策略文件路径。"
+        error={error}
+        isLoading={isLoading}
+        source={source}
+      />
       <div className="table-shell">
         <table>
           <thead>

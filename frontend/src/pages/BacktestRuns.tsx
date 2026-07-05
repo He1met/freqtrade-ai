@@ -6,10 +6,11 @@ import {
   reasonText,
   statusClassName,
 } from "./backtestDisplay";
+import { FallbackNotice } from "./FallbackNotice";
 import { EMPTY_TEXT, displayLoadState, displayStatus } from "./uiCopy";
 
 export function BacktestRuns() {
-  const { data, source, isLoading } = useMvpData();
+  const { data, source, isLoading, error } = useMvpData();
   const matrixSummary = buildBacktestMatrixSummary(data.backtestRuns, data.backtestTasks);
   const statusEntries = Object.entries(matrixSummary.statusCounts).filter(([, count]) => count > 0);
 
@@ -19,6 +20,12 @@ export function BacktestRuns() {
         <h1>回测批次</h1>
         <span className="status-pill">{displayLoadState(isLoading, source)}</span>
       </header>
+      <FallbackNotice
+        context="回测批次、artifact manifest、指标和失败原因摘要。"
+        error={error}
+        isLoading={isLoading}
+        source={source}
+      />
       <section className="matrix-summary" aria-label="回测矩阵摘要">
         <div className="matrix-overview">
           <span className={`run-status ${statusClassName(matrixSummary.status)}`}>

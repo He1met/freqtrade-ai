@@ -1,6 +1,7 @@
 import type { DryRunArtifactManifest, DryRunStatusSnapshot } from "../api/types";
 import { useMvpData } from "../api/useMvpData";
 import { formatNumber, reasonText, statusClassName, summarizeText } from "./backtestDisplay";
+import { FallbackNotice } from "./FallbackNotice";
 import { EMPTY_TEXT, displayDataOrigin, displayLoadState, displayStatus, displayValue } from "./uiCopy";
 
 function getConfiguredFreqUIUrl() {
@@ -45,10 +46,12 @@ export function FreqUILink() {
         <h1>Dry-run / FreqUI</h1>
         <span className="status-pill">{displayLoadState(isLoading, source)}</span>
       </header>
-      {error ? <div className="notice">当前使用 fallback 数据：{error}</div> : null}
-      {!isLoading && source === "fallback" && !error ? (
-        <div className="notice">Backend API 不可用，当前显示受控 fallback Dry-run 数据。</div>
-      ) : null}
+      <FallbackNotice
+        context="Dry-run / FreqUI 只读运行快照、manifest、余额和安全边界。"
+        error={error}
+        isLoading={isLoading}
+        source={source}
+      />
       <section className="dry-run-summary" aria-label="Dry-run 摘要">
         {summaryRows.map((row) => (
           <article className="metric" key={row.label}>
