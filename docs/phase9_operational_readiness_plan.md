@@ -254,6 +254,8 @@ Required design properties:
 
 ## Phase 9 Completion Definition
 
+Final acceptance is recorded in [phase9_acceptance.md](phase9_acceptance.md).
+
 Phase 9 is complete only when the review issue can prove:
 
 - every core page either displays database-backed data or explains why it cannot;
