@@ -619,6 +619,121 @@ td.log-cell {
   line-height: 1.5;
 }
 
+.local-strategy-lab {
+  display: grid;
+  gap: 14px;
+}
+
+.local-strategy-lab .page-header {
+  margin-bottom: 8px;
+}
+
+.lab-safety-notice {
+  border-color: #b7c4bb;
+  border-left: 6px solid #244936;
+  color: #33443a;
+}
+
+.lab-form,
+.lab-status-panel {
+  display: grid;
+  gap: 14px;
+  border: 1px solid #d8ded7;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 16px;
+}
+
+.field-group {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+  color: #526159;
+  font-weight: 700;
+}
+
+.field-group textarea,
+.field-group input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid #bac7bd;
+  border-radius: 8px;
+  background: #fbfcfa;
+  color: #17201b;
+  font: inherit;
+}
+
+.field-group textarea {
+  min-height: 168px;
+  resize: vertical;
+  padding: 12px;
+  line-height: 1.5;
+}
+
+.field-group input {
+  min-height: 42px;
+  padding: 8px 10px;
+}
+
+.field-group textarea:focus,
+.field-group input:focus {
+  border-color: #1f6f4a;
+  outline: 3px solid rgba(31, 111, 74, 0.16);
+}
+
+.lab-form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.compact-field {
+  width: min(220px, 100%);
+}
+
+.primary-button {
+  min-height: 42px;
+  border: 0;
+  border-radius: 8px;
+  background: #1f6f4a;
+  color: #ffffff;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 800;
+  padding: 0 16px;
+}
+
+.primary-button:disabled {
+  background: #7a867d;
+  cursor: not-allowed;
+}
+
+.lab-status-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.lab-status-heading strong {
+  color: #17201b;
+}
+
+.lab-results {
+  display: grid;
+  gap: 0;
+}
+
+.lab-run-detail-list {
+  border-radius: 0 0 8px 8px;
+}
+
+.lab-table-shell {
+  border-radius: 0 0 8px 8px;
+}
+
 .score-cell {
   font-size: 18px;
   font-weight: 800;
@@ -1072,6 +1187,16 @@ th {
   .operator-status-grid,
   .operator-env-grid {
     grid-template-columns: 1fr;
+  }
+
+  .lab-form-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .compact-field,
+  .primary-button {
+    width: 100%;
   }
 
   .matrix-range-item {

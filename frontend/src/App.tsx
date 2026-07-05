@@ -8,6 +8,7 @@ import { FreqUILink } from "./pages/FreqUILink";
 import { GenerationRuns } from "./pages/GenerationRuns";
 import { HyperoptRuns } from "./pages/HyperoptRuns";
 import { LiveGovernance } from "./pages/LiveGovernance";
+import { LocalStrategyLab } from "./pages/LocalStrategyLab";
 import { OperatorDashboard } from "./pages/OperatorDashboard";
 import { Ranking } from "./pages/Ranking";
 import { Strategies } from "./pages/Strategies";
@@ -21,6 +22,7 @@ export function App() {
         <Route path="strategies" element={<Strategies />} />
         <Route path="strategies/:strategyId" element={<StrategyDetail />} />
         <Route path="generation-runs" element={<GenerationRuns />} />
+        <Route path="local-strategy-lab" element={<LocalStrategyLab />} />
         <Route path="backtest-runs" element={<BacktestRuns />} />
         <Route path="backtest-tasks" element={<BacktestTasks />} />
         <Route path="hyperopt-runs" element={<HyperoptRuns />} />

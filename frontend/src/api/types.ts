@@ -1,5 +1,15 @@
 export type DataSource = "api" | "fallback";
 
+export type DataSourceTraceSummary = {
+  sourceType: string;
+  sourceDetail: string;
+  coreData: boolean;
+  databaseIds: Record<string, number>;
+  artifactRefs: Record<string, string>;
+  freshness: string | null;
+  blockedReason: string | null;
+};
+
 export type StrategyVersionSummary = {
   id: string;
   versionNumber: number;
@@ -35,6 +45,73 @@ export type GenerationRunSummary = {
   acceptedCount: number;
   failedCount: number;
   errorMessage: string | null;
+};
+
+export type StrategyGenerationRunStatus =
+  | "pending"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "cancelled"
+  | string;
+
+export type StrategyGenerationSubmitPayload = {
+  promptSummary: string;
+  requestedCount: number;
+};
+
+export type StrategyGenerationRunDetail = {
+  id: string;
+  status: StrategyGenerationRunStatus;
+  provider: string;
+  model: string;
+  promptHash: string | null;
+  promptSummary: string | null;
+  paramsSnapshot: Record<string, unknown>;
+  requestedCount: number;
+  generatedCount: number;
+  acceptedCount: number;
+  failedCount: number;
+  errorMessage: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  createdAt: string | null;
+  dataSource: DataSourceTraceSummary;
+};
+
+export type StrategyGenerationStrategy = {
+  id: string;
+  name: string;
+  slug: string;
+  description: string | null;
+  status: string;
+  source: string;
+  tags: string[];
+  currentVersionId: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+  dataSource: DataSourceTraceSummary;
+};
+
+export type StrategyGenerationVersion = {
+  id: string;
+  strategyId: string;
+  generationRunId: string | null;
+  parentVersionId: string | null;
+  versionNumber: number;
+  filePath: string;
+  validationStatus: string;
+  validationErrors: ValidationErrorSummary[];
+  changeSummary: string | null;
+  createdAt: string | null;
+  dataSource: DataSourceTraceSummary;
+};
+
+export type StrategyGenerationApiResult = {
+  run: StrategyGenerationRunDetail;
+  strategies: StrategyGenerationStrategy[];
+  strategyVersions: StrategyGenerationVersion[];
+  dataSource: DataSourceTraceSummary;
 };
 
 export type BacktestRunSummary = {
