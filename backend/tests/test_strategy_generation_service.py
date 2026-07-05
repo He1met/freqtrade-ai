@@ -46,6 +46,8 @@ def test_fake_provider_generation_creates_version_and_file(
     assert run.generated_count == 1
     assert run.accepted_count == 1
     assert run.failed_count == 0
+    assert run.params_snapshot["mode"] == "offline"
+    assert run.params_snapshot["real_provider"] is False
 
     assert len(version_ids) == 1
     strategy = StrategyRepository(db_session).get_by_slug("mvp-rsi-strategy")
@@ -69,6 +71,25 @@ class FailingProvider(FakeStrategyBlueprintProvider):
 
     def generate(self, prompt_summary: str, requested_count: int) -> list[StrategyBlueprint]:
         raise RuntimeError("provider unavailable")
+
+
+class LeakyDeepSeekProvider:
+    provider_name = "deepseek"
+    model_name = "deepseek-v4-pro"
+
+    def __init__(self) -> None:
+        self.config = LLMProviderConfig(
+            provider_name=self.provider_name,
+            model_name=self.model_name,
+            base_url="https://api.deepseek.com",
+            api_key_env="DEEPSEEK_API_KEY",
+        )
+
+    def generate(self, prompt_summary: str, requested_count: int) -> list[StrategyBlueprint]:
+        raise RuntimeError("provider failed api_key=test-deepseek-secret-value")
+
+    def metadata_snapshot(self) -> dict[str, object]:
+        return self.config.metadata_snapshot()
 
 
 def test_generation_failure_marks_run_failed_without_strategy_version(
@@ -171,12 +192,48 @@ def test_real_llm_provider_requires_env_api_key(monkeypatch: pytest.MonkeyPatch)
     assert client.requests == []
 
 
+def test_provider_metadata_redacts_base_url_userinfo() -> None:
+    config = LLMProviderConfig(
+        provider_name="deepseek",
+        model_name="deepseek-v4-pro",
+        base_url="https://user:secret@api.deepseek.com/v1",
+        api_key_env="DEEPSEEK_API_KEY",
+    )
+
+    metadata = config.metadata_snapshot()
+
+    assert metadata["base_url"] == "https://[REDACTED]@api.deepseek.com/v1"
+    assert "secret" not in str(metadata)
+
+
 def test_provider_factory_defaults_to_fake_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("STRATEGY_BLUEPRINT_PROVIDER", raising=False)
 
     provider = build_strategy_blueprint_provider_from_env()
 
     assert isinstance(provider, FakeStrategyBlueprintProvider)
+
+
+def test_provider_factory_uses_deepseek_env_only_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STRATEGY_BLUEPRINT_PROVIDER", "deepseek")
+    monkeypatch.delenv("STRATEGY_BLUEPRINT_MODEL", raising=False)
+    monkeypatch.delenv("STRATEGY_BLUEPRINT_BASE_URL", raising=False)
+    monkeypatch.delenv("STRATEGY_BLUEPRINT_API_KEY_ENV", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    client = MockLLMClient(MockLLMResponse({"blueprints": [blueprint_payload()]}))
+
+    provider = build_strategy_blueprint_provider_from_env(http_client=client)
+
+    assert isinstance(provider, OpenAICompatibleStrategyBlueprintProvider)
+    assert provider.provider_name == "deepseek"
+    assert provider.model_name == "deepseek-v4-pro"
+    assert provider.config.base_url == "https://api.deepseek.com"
+    assert provider.config.api_key_env == "DEEPSEEK_API_KEY"
+    assert provider.metadata_snapshot()["api_key_env"] == "DEEPSEEK_API_KEY"
+    assert "api_key" not in provider.metadata_snapshot()
+    with pytest.raises(LLMProviderConfigurationError, match="DEEPSEEK_API_KEY"):
+        provider.generate("Generate one strategy.", requested_count=1)
+    assert client.requests == []
 
 
 def test_provider_factory_fail_closed_when_real_mode_has_no_key(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -221,6 +278,7 @@ def test_real_llm_provider_uses_env_key_and_validates_response(
     assert client.requests[0]["headers"]["Authorization"] == "Bearer test-secret-value"
     assert client.requests[0]["json"]["model"] == "mimo-test"
     assert "test-secret-value" not in str(client.requests[0]["json"])
+    assert "test-secret-value" not in str(provider.metadata_snapshot())
 
 
 def test_real_llm_provider_rejects_non_json_content_without_leaking_secret(
@@ -281,5 +339,74 @@ def test_service_records_real_provider_metadata_with_mock_client(
     assert run.status == "succeeded"
     assert run.provider == "mimo"
     assert run.model == "mimo-test"
+    assert run.params_snapshot["mode"] == "real_provider"
+    assert run.params_snapshot["provider"] == "mimo"
+    assert run.params_snapshot["model"] == "mimo-test"
+    assert run.params_snapshot["api_key_env"] == "TEST_LLM_API_KEY"
+    assert "test-secret-value" not in str(run.params_snapshot)
     assert len(version_ids) == 1
     assert StrategyRepository(db_session).get_by_slug("service-mock-rsi") is not None
+
+
+def test_service_records_deepseek_success_with_mock_client(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("STRATEGY_BLUEPRINT_PROVIDER", "deepseek")
+    monkeypatch.delenv("STRATEGY_BLUEPRINT_MODEL", raising=False)
+    monkeypatch.delenv("STRATEGY_BLUEPRINT_BASE_URL", raising=False)
+    monkeypatch.delenv("STRATEGY_BLUEPRINT_API_KEY_ENV", raising=False)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek-secret-value")
+    response = MockLLMResponse({"blueprints": [blueprint_payload(slug="deepseek-mock-rsi")]})
+    client = MockLLMClient(response)
+    provider = build_strategy_blueprint_provider_from_env(http_client=client)
+    service = StrategyGenerationService(
+        db_session,
+        provider=provider,
+        file_manager=StrategyFileManager(output_dir=tmp_path, approved_roots=[tmp_path]),
+    )
+
+    version_ids = service.run_once("Generate one DeepSeek strategy.", requested_count=1)
+
+    run = StrategyGenerationRunRepository(db_session).list()[0]
+    assert run.status == "succeeded"
+    assert run.provider == "deepseek"
+    assert run.model == "deepseek-v4-pro"
+    assert run.params_snapshot["mode"] == "real_provider"
+    assert run.params_snapshot["base_url"] == "https://api.deepseek.com"
+    assert run.params_snapshot["api_key_env"] == "DEEPSEEK_API_KEY"
+    assert "test-deepseek-secret-value" not in str(run.params_snapshot)
+    assert client.requests[0]["url"] == "https://api.deepseek.com/chat/completions"
+    assert client.requests[0]["json"]["model"] == "deepseek-v4-pro"
+    assert "test-deepseek-secret-value" not in str(client.requests[0]["json"])
+    assert len(version_ids) == 1
+    assert StrategyRepository(db_session).get_by_slug("deepseek-mock-rsi") is not None
+
+
+def test_service_records_deepseek_failed_run_without_secret_leak(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek-secret-value")
+    service = StrategyGenerationService(
+        db_session,
+        provider=LeakyDeepSeekProvider(),
+        file_manager=StrategyFileManager(output_dir=tmp_path, approved_roots=[tmp_path]),
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        service.run_once("Generate one DeepSeek strategy.", requested_count=1)
+
+    run = StrategyGenerationRunRepository(db_session).list()[0]
+    assert run.status == "failed"
+    assert run.provider == "deepseek"
+    assert run.model == "deepseek-v4-pro"
+    assert run.failed_count == 1
+    assert run.params_snapshot["mode"] == "real_provider"
+    assert run.params_snapshot["api_key_env"] == "DEEPSEEK_API_KEY"
+    assert run.error_message == "provider failed api_key=[REDACTED]"
+    assert "test-deepseek-secret-value" not in str(exc_info.value)
+    assert "test-deepseek-secret-value" not in str(run.params_snapshot)
+    assert StrategyRepository(db_session).get_by_slug("mvp-rsi-strategy") is None
