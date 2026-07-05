@@ -39,11 +39,20 @@ export function BacktestRuns() {
             </span>
           </div>
         </div>
-        <div className="matrix-status-grid">
-          {statusEntries.map(([status, count]) => (
-            <div className="matrix-status-item" key={status}>
+        <div className="matrix-status-grid" role="list">
+          {statusEntries.map(([status, count], index) => (
+            <div
+              aria-label={`${displayStatus(status)}：${count} 个`}
+              className="matrix-status-item"
+              key={status}
+              role="listitem"
+            >
               <span className={`run-status ${statusClassName(status)}`}>{displayStatus(status)}</span>
+              <span className="status-count-separator" aria-hidden="true">
+                ：
+              </span>
               <strong>{count}</strong>
+              {index < statusEntries.length - 1 ? <span className="status-text-gap"> </span> : null}
             </div>
           ))}
         </div>
@@ -73,7 +82,7 @@ export function BacktestRuns() {
           )}
         </div>
       </section>
-      <div className="table-shell">
+      <div className="table-shell backtest-table-shell">
         <table>
           <thead>
             <tr>
@@ -116,7 +125,7 @@ export function BacktestRuns() {
                     <span className={`run-status ${statusClassName(artifact?.status ?? run.status)}`}>
                       {displayStatus(artifact?.status ?? run.status)}
                     </span>
-                    <span>manifest：{manifestPath}</span>
+                    <span title={manifestPath}>manifest：{manifestPath}</span>
                   </td>
                   <td className="metric-summary">
                     {metricRows(run.metrics).map(([label, value]) => (
@@ -126,8 +135,12 @@ export function BacktestRuns() {
                       </span>
                     ))}
                   </td>
-                  <td className="path-cell">{resultPath}</td>
-                  <td className="reason-cell">{reason}</td>
+                  <td className="path-cell" title={resultPath}>
+                    {resultPath}
+                  </td>
+                  <td className="reason-cell" title={reason}>
+                    {reason}
+                  </td>
                 </tr>
               );
             })}

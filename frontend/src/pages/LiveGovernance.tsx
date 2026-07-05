@@ -32,7 +32,13 @@ function phase6StatusClassName(status: string): string {
 }
 
 function statusPill(status: string) {
-  return <span className={`run-status ${phase6StatusClassName(status)}`}>{displayStatus(status)}</span>;
+  return (
+    <span aria-label={`状态：${displayStatus(status)}`} className={`run-status ${phase6StatusClassName(status)}`}>
+      <span className="sr-only">状态：</span>
+      {displayStatus(status)}
+      <span className="sr-only">；</span>
+    </span>
+  );
 }
 
 function countByStatus<T>(items: T[], getStatus: (item: T) => string): Record<string, number> {
@@ -355,10 +361,16 @@ export function LiveGovernance() {
         </article>
         <article className="overview-panel">
           <h2>候选</h2>
-          <div className="status-counts">
-            {Object.entries(profileStatuses).map(([status, count]) => (
-              <span className={`run-status ${phase6StatusClassName(status)}`} key={status}>
+          <div className="status-counts" role="list">
+            {Object.entries(profileStatuses).map(([status, count], index, entries) => (
+              <span
+                aria-label={`${displayStatus(status)}：${count} 个`}
+                className={`run-status ${phase6StatusClassName(status)}`}
+                key={status}
+                role="listitem"
+              >
                 {displayStatus(status)}：{count}
+                {index < entries.length - 1 ? <span className="status-text-gap"> </span> : null}
               </span>
             ))}
             {Object.keys(profileStatuses).length === 0 ? <span>暂无候选</span> : null}
@@ -366,10 +378,16 @@ export function LiveGovernance() {
         </article>
         <article className="overview-panel">
           <h2>部署治理记录</h2>
-          <div className="status-counts">
-            {Object.entries(deploymentStatuses).map(([status, count]) => (
-              <span className={`run-status ${phase6StatusClassName(status)}`} key={status}>
+          <div className="status-counts" role="list">
+            {Object.entries(deploymentStatuses).map(([status, count], index, entries) => (
+              <span
+                aria-label={`${displayStatus(status)}：${count} 个`}
+                className={`run-status ${phase6StatusClassName(status)}`}
+                key={status}
+                role="listitem"
+              >
                 {displayStatus(status)}：{count}
+                {index < entries.length - 1 ? <span className="status-text-gap"> </span> : null}
               </span>
             ))}
             {Object.keys(deploymentStatuses).length === 0 ? <span>暂无记录</span> : null}

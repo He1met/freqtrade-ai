@@ -35,7 +35,9 @@ export function Strategies() {
             {data.strategies.map((strategy) => (
               <tr key={strategy.id}>
                 <td>
-                  <Link to={`/strategies/${strategy.id}`}>{strategy.name}</Link>
+                  <Link className="table-link" to={`/strategies/${strategy.id}`}>
+                    {strategy.name}
+                  </Link>
                 </td>
                 <td>{displayStatus(strategy.status)}</td>
                 <td>{strategy.timeframe}</td>

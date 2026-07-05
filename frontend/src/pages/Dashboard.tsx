@@ -5,6 +5,11 @@ import { displayLoadState } from "./uiCopy";
 export function Dashboard() {
   const { data, source, isLoading, error } = useMvpData();
   const succeededBacktests = data.backtestRuns.filter((run) => run.status === "succeeded").length;
+  const flowItems = [
+    `${data.generationRuns.length} 个生成批次`,
+    `${data.backtestTasks.length} 个回测任务`,
+    `${data.hyperoptRuns.length} 个 Hyperopt 参数优化批次`,
+  ];
   const summary = [
     { label: "策略", value: data.strategies.length },
     { label: "生成批次", value: data.generationRuns.length },
@@ -37,8 +42,7 @@ export function Dashboard() {
         <article className="overview-panel">
           <h2>MVP 数据流</h2>
           <p>
-            当前有 {data.generationRuns.length} 个生成批次、{data.backtestTasks.length} 个回测任务、
-            {data.hyperoptRuns.length} 个 Hyperopt 参数优化批次，以及 {succeededBacktests} 个成功回测批次可供复核。
+            当前有 {flowItems.join("、")}，以及 {succeededBacktests} 个成功回测批次可供复核。
           </p>
         </article>
         <article className="overview-panel">
