@@ -1,4 +1,4 @@
-import { NavLink, Outlet } from "react-router-dom";
+import { NavLink, Outlet, useLocation } from "react-router-dom";
 
 const navItems = [
   { to: "/", label: "总览" },
@@ -14,6 +14,12 @@ const navItems = [
 ];
 
 export function AppLayout() {
+  const { pathname } = useLocation();
+  const currentItem =
+    navItems.find((item) =>
+      item.to === "/" ? pathname === "/" : pathname === item.to || pathname.startsWith(`${item.to}/`),
+    ) ?? navItems[0];
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -21,13 +27,33 @@ export function AppLayout() {
           <span className="brand-mark">FA</span>
           <span>Freqtrade AI</span>
         </div>
-        <nav className="nav-list" aria-label="主导航">
+        <nav className="nav-list desktop-nav" aria-label="主导航">
           {navItems.map((item) => (
             <NavLink key={item.to} to={item.to} end={item.to === "/"}>
               {item.label}
             </NavLink>
           ))}
         </nav>
+        <details className="mobile-nav">
+          <summary aria-label={`打开主导航，当前页面：${currentItem.label}`}>
+            <span className="mobile-nav-current">
+              <span>当前页面</span>
+              <strong>{currentItem.label}</strong>
+            </span>
+            <span className="mobile-nav-icon" aria-hidden="true">
+              <span />
+              <span />
+              <span />
+            </span>
+          </summary>
+          <nav className="mobile-nav-list" aria-label="移动端主导航">
+            {navItems.map((item) => (
+              <NavLink key={item.to} to={item.to} end={item.to === "/"}>
+                {item.label}
+              </NavLink>
+            ))}
+          </nav>
+        </details>
       </aside>
       <main className="main-panel">
         <Outlet />
