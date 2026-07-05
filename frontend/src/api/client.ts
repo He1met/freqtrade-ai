@@ -15,6 +15,17 @@ import type {
   HyperoptComparisonSummary,
   HyperoptMetricComparison,
   HyperoptRunSummary,
+  LiveCandidateAlertSummary,
+  LiveCandidateApprovalDecisionSummary,
+  LiveCandidateApprovalRecordSummary,
+  LiveCandidateDeploymentRecordSummary,
+  LiveCandidateGovernanceSummary,
+  LiveCandidateMonitoringSnapshotSummary,
+  LiveCandidateMonitoringSourceSummary,
+  LiveCandidateProfileSummary,
+  LiveCandidateRiskCheckSummary,
+  LiveCandidateRollbackPlanSummary,
+  LiveCandidateRollbackStepSummary,
   MvpData,
   RankingEliminationSummary,
   RankingEntry,
@@ -200,6 +211,97 @@ type RawDryRunManagementSummary = Partial<DryRunManagementSummary> & {
   snapshot?: RawDryRunStatusSnapshot;
   freq_ui_link?: RawFreqUILinkMetadata;
   frequi_link?: RawFreqUILinkMetadata;
+};
+
+type RawLiveCandidateRiskCheckSummary = Partial<LiveCandidateRiskCheckSummary> & {
+  evidence_ref?: string | null;
+  blocked_reason?: string | null;
+};
+
+type RawLiveCandidateProfileSummary = Partial<LiveCandidateProfileSummary> & {
+  id?: string | number;
+  profile_name?: string;
+  strategy_name?: string;
+  profile_hash?: string | null;
+  can_enter_human_approval?: boolean;
+  evidence_refs?: unknown;
+  source_ref?: string | null;
+  updated_at?: string | null;
+  risk_checks?: RawLiveCandidateRiskCheckSummary[];
+};
+
+type RawLiveCandidateApprovalDecisionSummary = Partial<LiveCandidateApprovalDecisionSummary> & {
+  actor_name?: string;
+  actor_role?: string;
+  decided_at?: string | null;
+};
+
+type RawLiveCandidateApprovalRecordSummary = Partial<LiveCandidateApprovalRecordSummary> & {
+  record_id?: string | number;
+  profile_name?: string;
+  profile_hash?: string | null;
+  preflight_status?: string;
+  required_approvals?: number;
+  completed_approvals?: number;
+  can_create_deployment_record?: boolean;
+  submitted_by?: string;
+  submitted_at?: string | null;
+  risk_summary_ref?: string | null;
+  decisions?: RawLiveCandidateApprovalDecisionSummary[];
+};
+
+type RawLiveCandidateRollbackStepSummary = Partial<LiveCandidateRollbackStepSummary> & {
+  step_order?: number;
+};
+
+type RawLiveCandidateRollbackPlanSummary = Partial<LiveCandidateRollbackPlanSummary> & {
+  plan_id?: string | number;
+  evidence_refs?: unknown;
+  steps?: RawLiveCandidateRollbackStepSummary[];
+};
+
+type RawLiveCandidateDeploymentRecordSummary = Partial<LiveCandidateDeploymentRecordSummary> & {
+  record_id?: string | number;
+  profile_name?: string;
+  planned_environment?: string;
+  approval_status?: string;
+  preflight_status?: string;
+  planned_by?: string;
+  planned_at?: string | null;
+  rollback_plan?: RawLiveCandidateRollbackPlanSummary | null;
+  result_status?: string | null;
+  result_recorded_at?: string | null;
+};
+
+type RawLiveCandidateMonitoringSourceSummary = Partial<LiveCandidateMonitoringSourceSummary> & {
+  collected_at?: string | null;
+};
+
+type RawLiveCandidateAlertSummary = Partial<LiveCandidateAlertSummary> & {
+  alert_id?: string | number;
+  evidence_ref?: string | null;
+};
+
+type RawLiveCandidateMonitoringSnapshotSummary = Partial<LiveCandidateMonitoringSnapshotSummary> & {
+  snapshot_id?: string | number;
+  profile_name?: string | null;
+  deployment_record_id?: string | null;
+  deployment_status?: string | null;
+  approval_status?: string | null;
+  preflight_status?: string | null;
+  source?: RawLiveCandidateMonitoringSourceSummary;
+  alerts?: RawLiveCandidateAlertSummary[];
+  unavailable_reason?: string | null;
+  stale_reason?: string | null;
+  safety_boundary?: string;
+  updated_at?: string | null;
+};
+
+type RawLiveCandidateGovernanceSummary = Partial<LiveCandidateGovernanceSummary> & {
+  source_ref?: string | null;
+  read_only?: boolean;
+  safety_boundary?: string;
+  monitoring_snapshots?: RawLiveCandidateMonitoringSnapshotSummary[];
 };
 
 type RawRankingEntry = Partial<RankingEntry> & {
@@ -648,6 +750,176 @@ function normalizeDryRunManagement(raw: RawDryRunManagementSummary): DryRunManag
   };
 }
 
+function normalizeRiskCheck(raw: RawLiveCandidateRiskCheckSummary): LiveCandidateRiskCheckSummary {
+  return {
+    name: raw.name ?? "governance_check",
+    status: raw.status ?? "UNKNOWN",
+    summary: redactSensitiveText(raw.summary ?? "Risk check did not include a summary."),
+    evidenceRef: raw.evidenceRef ?? raw.evidence_ref ?? null,
+    blockedReason: raw.blockedReason ?? raw.blocked_reason ?? null,
+  };
+}
+
+function normalizeLiveCandidateProfile(raw: RawLiveCandidateProfileSummary): LiveCandidateProfileSummary {
+  return {
+    id: normalizeId(raw.id ?? raw.profileName ?? raw.profile_name),
+    profileName: raw.profileName ?? raw.profile_name ?? "unknown-profile",
+    strategyName: raw.strategyName ?? raw.strategy_name ?? "Unknown strategy",
+    pair: raw.pair ?? "unknown",
+    timeframe: raw.timeframe ?? "unknown",
+    status: raw.status ?? "UNKNOWN",
+    profileHash: raw.profileHash ?? raw.profile_hash ?? null,
+    canEnterHumanApproval: raw.canEnterHumanApproval ?? raw.can_enter_human_approval ?? false,
+    evidenceRefs: asStringArray(raw.evidenceRefs ?? raw.evidence_refs),
+    blockers: asStringArray(raw.blockers).map(redactSensitiveText),
+    warnings: asStringArray(raw.warnings).map(redactSensitiveText),
+    riskChecks: Array.isArray(raw.riskChecks ?? raw.risk_checks)
+      ? (raw.riskChecks ?? raw.risk_checks ?? []).map(normalizeRiskCheck)
+      : [],
+    sourceRef: raw.sourceRef ?? raw.source_ref ?? null,
+    updatedAt: raw.updatedAt ?? raw.updated_at ?? null,
+  };
+}
+
+function normalizeApprovalDecision(
+  raw: RawLiveCandidateApprovalDecisionSummary,
+): LiveCandidateApprovalDecisionSummary {
+  return {
+    decision: raw.decision ?? "UNKNOWN",
+    actorName: redactSensitiveText(raw.actorName ?? raw.actor_name ?? "unknown"),
+    actorRole: raw.actorRole ?? raw.actor_role ?? "reviewer",
+    decidedAt: raw.decidedAt ?? raw.decided_at ?? null,
+    basis: raw.basis ? redactSensitiveText(raw.basis) : null,
+  };
+}
+
+function normalizeApprovalRecord(raw: RawLiveCandidateApprovalRecordSummary): LiveCandidateApprovalRecordSummary {
+  return {
+    recordId: normalizeId(raw.recordId ?? raw.record_id),
+    profileName: raw.profileName ?? raw.profile_name ?? "unknown-profile",
+    profileHash: raw.profileHash ?? raw.profile_hash ?? null,
+    status: raw.status ?? "UNKNOWN",
+    preflightStatus: raw.preflightStatus ?? raw.preflight_status ?? "UNKNOWN",
+    requiredApprovals: raw.requiredApprovals ?? raw.required_approvals ?? 0,
+    completedApprovals: raw.completedApprovals ?? raw.completed_approvals ?? 0,
+    canCreateDeploymentRecord: raw.canCreateDeploymentRecord ?? raw.can_create_deployment_record ?? false,
+    submittedBy: redactSensitiveText(raw.submittedBy ?? raw.submitted_by ?? "unknown"),
+    submittedAt: raw.submittedAt ?? raw.submitted_at ?? null,
+    riskSummaryRef: raw.riskSummaryRef ?? raw.risk_summary_ref ?? null,
+    decisions: Array.isArray(raw.decisions) ? raw.decisions.map(normalizeApprovalDecision) : [],
+    blockers: asStringArray(raw.blockers).map(redactSensitiveText),
+  };
+}
+
+function normalizeRollbackStep(raw: RawLiveCandidateRollbackStepSummary): LiveCandidateRollbackStepSummary {
+  return {
+    order: raw.order ?? raw.step_order ?? 0,
+    title: redactSensitiveText(raw.title ?? "Rollback step"),
+    owner: redactSensitiveText(raw.owner ?? "manual-operator"),
+    verification: redactSensitiveText(raw.verification ?? "Manual verification required."),
+  };
+}
+
+function normalizeRollbackPlan(
+  raw: RawLiveCandidateRollbackPlanSummary | null | undefined,
+): LiveCandidateRollbackPlanSummary | null {
+  if (!raw) {
+    return null;
+  }
+
+  return {
+    planId: normalizeId(raw.planId ?? raw.plan_id),
+    owner: redactSensitiveText(raw.owner ?? "manual-operator"),
+    summary: redactSensitiveText(raw.summary ?? "Rollback plan requires manual execution."),
+    evidenceRefs: asStringArray(raw.evidenceRefs ?? raw.evidence_refs),
+    steps: Array.isArray(raw.steps) ? raw.steps.map(normalizeRollbackStep) : [],
+  };
+}
+
+function normalizeDeploymentRecord(
+  raw: RawLiveCandidateDeploymentRecordSummary,
+): LiveCandidateDeploymentRecordSummary {
+  return {
+    recordId: normalizeId(raw.recordId ?? raw.record_id),
+    profileName: raw.profileName ?? raw.profile_name ?? "unknown-profile",
+    status: raw.status ?? "UNKNOWN",
+    plannedEnvironment: raw.plannedEnvironment ?? raw.planned_environment ?? "manual-review",
+    approvalStatus: raw.approvalStatus ?? raw.approval_status ?? "UNKNOWN",
+    preflightStatus: raw.preflightStatus ?? raw.preflight_status ?? "UNKNOWN",
+    plannedBy: redactSensitiveText(raw.plannedBy ?? raw.planned_by ?? "manual-operator"),
+    plannedAt: raw.plannedAt ?? raw.planned_at ?? null,
+    rollbackPlan: normalizeRollbackPlan(raw.rollbackPlan ?? raw.rollback_plan),
+    blockers: asStringArray(raw.blockers).map(redactSensitiveText),
+    resultStatus: raw.resultStatus ?? raw.result_status ?? null,
+    resultRecordedAt: raw.resultRecordedAt ?? raw.result_recorded_at ?? null,
+  };
+}
+
+function normalizeMonitoringSource(
+  raw: RawLiveCandidateMonitoringSourceSummary | undefined,
+): LiveCandidateMonitoringSourceSummary {
+  const source = raw ?? {};
+  return {
+    source: source.source ?? "fixture",
+    ref: source.ref ?? "fixtures/phase6/live_candidate_governance.json",
+    collectedAt: source.collectedAt ?? source.collected_at ?? null,
+  };
+}
+
+function normalizeAlert(raw: RawLiveCandidateAlertSummary): LiveCandidateAlertSummary {
+  return {
+    alertId: normalizeId(raw.alertId ?? raw.alert_id),
+    status: raw.status ?? "UNKNOWN",
+    severity: raw.severity ?? "INFO",
+    message: redactSensitiveText(raw.message ?? "Alert summary did not include a message."),
+    evidenceRef: raw.evidenceRef ?? raw.evidence_ref ?? null,
+  };
+}
+
+function normalizeMonitoringSnapshot(
+  raw: RawLiveCandidateMonitoringSnapshotSummary,
+): LiveCandidateMonitoringSnapshotSummary {
+  return {
+    snapshotId: normalizeId(raw.snapshotId ?? raw.snapshot_id),
+    status: raw.status ?? "UNAVAILABLE",
+    profileName: raw.profileName ?? raw.profile_name ?? null,
+    deploymentRecordId: raw.deploymentRecordId ?? raw.deployment_record_id ?? null,
+    deploymentStatus: raw.deploymentStatus ?? raw.deployment_status ?? null,
+    approvalStatus: raw.approvalStatus ?? raw.approval_status ?? null,
+    preflightStatus: raw.preflightStatus ?? raw.preflight_status ?? null,
+    source: normalizeMonitoringSource(raw.source),
+    alerts: Array.isArray(raw.alerts) ? raw.alerts.map(normalizeAlert) : [],
+    blockers: asStringArray(raw.blockers).map(redactSensitiveText),
+    warnings: asStringArray(raw.warnings).map(redactSensitiveText),
+    unavailableReason: raw.unavailableReason ?? raw.unavailable_reason ?? null,
+    staleReason: raw.staleReason ?? raw.stale_reason ?? null,
+    safetyBoundary:
+      raw.safetyBoundary ??
+      raw.safety_boundary ??
+      "Read-only live-candidate governance summary; manual review remains required.",
+    updatedAt: raw.updatedAt ?? raw.updated_at ?? null,
+  };
+}
+
+function normalizeLiveCandidateGovernance(
+  raw: RawLiveCandidateGovernanceSummary,
+): LiveCandidateGovernanceSummary {
+  return {
+    sourceRef: raw.sourceRef ?? raw.source_ref ?? null,
+    readOnly: raw.readOnly ?? raw.read_only ?? true,
+    safetyBoundary:
+      raw.safetyBoundary ??
+      raw.safety_boundary ??
+      "Phase 6 records are governance-only and do not grant execution authority.",
+    profiles: Array.isArray(raw.profiles) ? raw.profiles.map(normalizeLiveCandidateProfile) : [],
+    approvals: Array.isArray(raw.approvals) ? raw.approvals.map(normalizeApprovalRecord) : [],
+    deployments: Array.isArray(raw.deployments) ? raw.deployments.map(normalizeDeploymentRecord) : [],
+    monitoringSnapshots: Array.isArray(raw.monitoringSnapshots ?? raw.monitoring_snapshots)
+      ? (raw.monitoringSnapshots ?? raw.monitoring_snapshots ?? []).map(normalizeMonitoringSnapshot)
+      : [],
+  };
+}
+
 async function fetchJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   const response = await fetch(`${getApiBaseUrl()}${path}`, {
     headers: { Accept: "application/json" },
@@ -710,6 +982,7 @@ export async function loadMvpData(signal?: AbortSignal): Promise<{
     backtestTasks,
     hyperoptRuns,
     dryRun,
+    liveCandidates,
     ranking,
     failureReasons,
     versionLineage,
@@ -740,6 +1013,11 @@ export async function loadMvpData(signal?: AbortSignal): Promise<{
       mockMvpData.dryRun,
       signal,
     ),
+    fetchValue<RawLiveCandidateGovernanceSummary>(
+      ["/live-candidates/governance", "/live-candidates", "/mvp/live-candidates"],
+      mockMvpData.liveCandidates,
+      signal,
+    ),
     fetchList<RawRankingEntry>(
       ["/ranking", "/strategy-ranking", "/mvp/ranking"],
       mockMvpData.ranking,
@@ -765,6 +1043,7 @@ export async function loadMvpData(signal?: AbortSignal): Promise<{
       backtestTasks: backtestTasks.items.map(normalizeBacktestTask),
       hyperoptRuns: hyperoptRuns.items.map(normalizeHyperoptRun),
       dryRun: normalizeDryRunManagement(dryRun.item),
+      liveCandidates: normalizeLiveCandidateGovernance(liveCandidates.item),
       ranking: ranking.items.map(normalizeRankingEntry),
       failureReasons: failureReasons.items.map(normalizeFailureReason),
       versionLineage: versionLineage.items.map(normalizeLineageEntry),
@@ -776,6 +1055,7 @@ export async function loadMvpData(signal?: AbortSignal): Promise<{
       backtestTasks.usedFallback ||
       hyperoptRuns.usedFallback ||
       dryRun.usedFallback ||
+      liveCandidates.usedFallback ||
       ranking.usedFallback ||
       failureReasons.usedFallback ||
       versionLineage.usedFallback,

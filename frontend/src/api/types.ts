@@ -242,6 +242,127 @@ export type DryRunManagementSummary = {
   freqUiLink: FreqUILinkMetadata;
 };
 
+export type LiveCandidateRiskCheckSummary = {
+  name: string;
+  status: "PASS" | "BLOCKED" | "FAILED" | string;
+  summary: string;
+  evidenceRef: string | null;
+  blockedReason: string | null;
+};
+
+export type LiveCandidateProfileSummary = {
+  id: string;
+  profileName: string;
+  strategyName: string;
+  pair: string;
+  timeframe: string;
+  status: "APPROVED_FOR_REVIEW" | "BLOCKED" | "FAILED" | string;
+  profileHash: string | null;
+  canEnterHumanApproval: boolean;
+  evidenceRefs: string[];
+  blockers: string[];
+  warnings: string[];
+  riskChecks: LiveCandidateRiskCheckSummary[];
+  sourceRef: string | null;
+  updatedAt: string | null;
+};
+
+export type LiveCandidateApprovalDecisionSummary = {
+  decision: "APPROVE" | "REJECT" | "REVOKE" | "EXPIRE" | string;
+  actorName: string;
+  actorRole: string;
+  decidedAt: string | null;
+  basis: string | null;
+};
+
+export type LiveCandidateApprovalRecordSummary = {
+  recordId: string;
+  profileName: string;
+  profileHash: string | null;
+  status: string;
+  preflightStatus: string;
+  requiredApprovals: number;
+  completedApprovals: number;
+  canCreateDeploymentRecord: boolean;
+  submittedBy: string;
+  submittedAt: string | null;
+  riskSummaryRef: string | null;
+  decisions: LiveCandidateApprovalDecisionSummary[];
+  blockers: string[];
+};
+
+export type LiveCandidateRollbackStepSummary = {
+  order: number;
+  title: string;
+  owner: string;
+  verification: string;
+};
+
+export type LiveCandidateRollbackPlanSummary = {
+  planId: string;
+  owner: string;
+  summary: string;
+  evidenceRefs: string[];
+  steps: LiveCandidateRollbackStepSummary[];
+};
+
+export type LiveCandidateDeploymentRecordSummary = {
+  recordId: string;
+  profileName: string;
+  status: string;
+  plannedEnvironment: string;
+  approvalStatus: string;
+  preflightStatus: string;
+  plannedBy: string;
+  plannedAt: string | null;
+  rollbackPlan: LiveCandidateRollbackPlanSummary | null;
+  blockers: string[];
+  resultStatus: string | null;
+  resultRecordedAt: string | null;
+};
+
+export type LiveCandidateMonitoringSourceSummary = {
+  source: "fixture" | "artifact" | "controlled-local-json" | string;
+  ref: string;
+  collectedAt: string | null;
+};
+
+export type LiveCandidateAlertSummary = {
+  alertId: string;
+  status: string;
+  severity: "INFO" | "WARNING" | "ERROR" | "CRITICAL" | string;
+  message: string;
+  evidenceRef: string | null;
+};
+
+export type LiveCandidateMonitoringSnapshotSummary = {
+  snapshotId: string;
+  status: "OK" | "WARNING" | "BLOCKED" | "UNAVAILABLE" | "STALE" | string;
+  profileName: string | null;
+  deploymentRecordId: string | null;
+  deploymentStatus: string | null;
+  approvalStatus: string | null;
+  preflightStatus: string | null;
+  source: LiveCandidateMonitoringSourceSummary;
+  alerts: LiveCandidateAlertSummary[];
+  blockers: string[];
+  warnings: string[];
+  unavailableReason: string | null;
+  staleReason: string | null;
+  safetyBoundary: string;
+  updatedAt: string | null;
+};
+
+export type LiveCandidateGovernanceSummary = {
+  sourceRef: string | null;
+  readOnly: boolean;
+  safetyBoundary: string;
+  profiles: LiveCandidateProfileSummary[];
+  approvals: LiveCandidateApprovalRecordSummary[];
+  deployments: LiveCandidateDeploymentRecordSummary[];
+  monitoringSnapshots: LiveCandidateMonitoringSnapshotSummary[];
+};
+
 export type RankingEntry = {
   rank: number;
   strategyId: string;
@@ -308,6 +429,7 @@ export type MvpData = {
   backtestTasks: BacktestTaskSummary[];
   hyperoptRuns: HyperoptRunSummary[];
   dryRun: DryRunManagementSummary;
+  liveCandidates: LiveCandidateGovernanceSummary;
   ranking: RankingEntry[];
   failureReasons: StrategyFailureReasonSummary[];
   versionLineage: StrategyVersionLineageEntry[];
