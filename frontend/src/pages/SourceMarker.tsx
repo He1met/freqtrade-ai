@@ -11,7 +11,7 @@ function markerClass(source: DataSourceTraceSummary | undefined): string {
   if (source?.coreData && (sourceType === "database" || sourceType === "api_aggregate")) {
     return "source-marker source-marker-core";
   }
-  if (sourceType === "fixture" || sourceType === "fallback") {
+  if (sourceType === "fixture" || sourceType === "fallback" || sourceType === "mock") {
     return "source-marker source-marker-non-core";
   }
   return "source-marker source-marker-unknown";
@@ -25,6 +25,21 @@ export function isCoreDataSource(source: DataSourceTraceSummary | undefined): bo
   );
 }
 
+function requiredAction(source: DataSourceTraceSummary | undefined): string {
+  if (isCoreDataSource(source)) {
+    return "可用于核心验收；刷新后仍需保持相同 database_ids。";
+  }
+  if (source?.blockedReason) {
+    return `解除 BLOCKED：${source.blockedReason}`;
+  }
+
+  const sourceType = source?.sourceType ?? "unknown";
+  if (sourceType === "fixture" || sourceType === "fallback" || sourceType === "mock") {
+    return "运行真实本地流程并确认 API 返回 database/api_aggregate、core_data=true 和 database_ids。";
+  }
+  return "修复 API data_source contract，返回 source_type、core_data、database_ids 和解除条件。";
+}
+
 export function SourceMarker({
   label,
   source,
@@ -34,6 +49,7 @@ export function SourceMarker({
 }) {
   const sourceType = source?.sourceType ?? "unknown";
   const sourceDetail = source?.sourceDetail ?? "Source metadata was not provided.";
+  const canAccept = isCoreDataSource(source);
 
   return (
     <div className={markerClass(source)} data-core-source={source?.coreData === true ? "true" : "false"}>
@@ -46,6 +62,10 @@ export function SourceMarker({
         <div>
           <dt>core_data</dt>
           <dd>{displayBoolean(source?.coreData === true)}</dd>
+        </div>
+        <div>
+          <dt>can_accept</dt>
+          <dd>{displayBoolean(canAccept)}</dd>
         </div>
         <div>
           <dt>database_ids</dt>
@@ -65,6 +85,10 @@ export function SourceMarker({
             <dd>{source.blockedReason}</dd>
           </div>
         ) : null}
+        <div>
+          <dt>required</dt>
+          <dd>{requiredAction(source)}</dd>
+        </div>
       </dl>
     </div>
   );
