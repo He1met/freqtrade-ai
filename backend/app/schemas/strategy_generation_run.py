@@ -76,8 +76,10 @@ class StrategyGenerationApiResponse(BaseModel):
     def attach_api_aggregate_source(self) -> "StrategyGenerationApiResponse":
         database_ids = {"strategy_generation_run_id": self.run.id}
         if self.strategies:
+            database_ids["strategy_id"] = self.strategies[0].id
             database_ids["first_strategy_id"] = self.strategies[0].id
         if self.strategy_versions:
+            database_ids["strategy_version_id"] = self.strategy_versions[0].id
             database_ids["first_strategy_version_id"] = self.strategy_versions[0].id
         self.data_source = api_aggregate_source(
             "strategy_generation_api_response",
