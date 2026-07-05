@@ -3,8 +3,9 @@
 ## 后续功能入口
 
 Phase 1 到 Phase 7 已完成验收。后续任何新增功能必须先完成
-[feature_intake.md](feature_intake.md)，再按
-[acceptance_checklist.md](acceptance_checklist.md) 定义验证命令、人工检查和安全边界。
+[feature_intake.md](feature_intake.md)，按 [project_roles.md](project_roles.md)
+确认角色职责，按 [agent_task_schedule.md](agent_task_schedule.md) 执行周期性治理任务，
+再按 [acceptance_checklist.md](acceptance_checklist.md) 定义验证命令、人工检查和安全边界。
 Feature Intake 不会自动启动 Phase 8，也不授权 live trading、真实下单、真实交易所连接、
 真实 K 线下载、生产部署、deployment executor、live bot start / stop / deploy controls、
 队列基础设施实现或 Freqtrade 源码修改。

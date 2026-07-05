@@ -31,14 +31,14 @@ live bot start / stop / deploy controls、队列基础设施实现或 Freqtrade 
 | 是否只读 | `yes` / `no`；如果不是只读，必须说明写入对象和 fail-closed 行为。 |
 | 是否涉及真实交易所 | `yes` / `no`；`yes` 必须单独审批。 |
 | 是否涉及真实密钥 | `yes` / `no`；`yes` 必须说明 ENV-only、脱敏和禁止落盘边界。 |
-| 是否涉及 dry-run | `yes` / `no`；真实 dry-run execution 属于高风险。 |
-| 是否涉及 live trading | `yes` / `no`；`yes` 默认禁止，除非后续单独阶段明确批准。 |
-| 是否涉及部署 | `yes` / `no`；deployment executor 或生产操作属于高风险。 |
-| 是否涉及 worker / queue | `yes` / `no`；实现 queue infrastructure 属于高风险。 |
+| 是否涉及 dry-run / live | 分别填写 dry-run 和 live trading；真实 dry-run execution 属于高风险，live trading 默认禁止。 |
+| 是否涉及部署 / queue | 分别填写 deployment 和 worker / queue；deployment executor、生产操作或 queue infrastructure 属于高风险。 |
 | 是否需要人工审批 | `yes` / `no`；高风险必须为 `yes`。 |
 | 是否需要更新 smoke | `yes` / `no`；新增行为通常需要更新对应 offline smoke。 |
 | 是否需要更新前端 | `yes` / `no`；涉及 UI 时必须说明 fallback / fixture 可见性。 |
 | 是否需要更新文档 | `yes` / `no`；阶段边界、运行能力和验收标准变更必须更新文档。 |
+| 验收标准 | 列出必须运行的 pytest、compileall、frontend build、secret scan、relevant smoke、API/UI/DB 检查和人工验收项。 |
+| 不做范围 | 明确写出本 Issue / PR 不实现的能力、页面、数据库写入、交易控制、部署或后续阶段内容。 |
 
 ## 风险等级
 

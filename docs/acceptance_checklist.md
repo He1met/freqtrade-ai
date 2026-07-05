@@ -45,14 +45,18 @@ git diff --check
 - [ ] git diff check：运行 `git diff --check`，确认没有 whitespace error。
 - [ ] API endpoint check：如涉及 API，记录 endpoint、方法、fixture / fallback 来源、状态码、
   response shape 和 read-only / fail-closed 结果。
-- [ ] frontend manual check：如涉及 UI，记录页面路径、关键状态、fallback / mock 来源是否可见，
+- [ ] UI browser check：如涉及 UI，使用浏览器检查页面路径、关键状态、fallback / mock 来源是否可见，
   以及是否没有展示 live trading、真实交易所连接或生产就绪误导。
+- [ ] DB/UI reconciliation check：如涉及数据库、seed、migration、API DTO 或页面展示，记录数据库查询、
+  API response 和 UI 页面是否一致；不一致必须 `BLOCKED` 或创建缺陷 Issue。
 - [ ] artifact / manifest check：如涉及运行证据，确认 artifact / manifest 存在、字段完整、
   来源可追溯、脱敏生效，并且不会把 fixture 当成真实运行。
 - [ ] fail-closed check：验证缺少前置条件、缺少数据、缺少 ENV、风险超限或命令失败时返回
   `BLOCKED` / `FAILED`，不得伪造成功。
 - [ ] fallback/mock source visibility check：确认 API、前端、文档或 smoke 输出清楚标记
   fixture、fake runner、fallback、mock data 或 local-only 来源。
+- [ ] scope creep check：确认 PR 只覆盖已批准 Issue / Feature Intake 的范围，没有顺带新增阶段、
+  页面、API、数据库写入、交易控制、部署能力或队列基础设施。
 - [ ] docs / link check：如修改 README、roadmap、docs 或 Issue 模板，确认 Markdown 文件存在，
   相对链接有效，Issue template front matter 格式有效。
 

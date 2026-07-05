@@ -7,7 +7,9 @@ Freqtrade 继续负责行情数据下载、策略加载、回测执行、Hyperop
 ## 后续功能入口
 
 Phase 1 到 Phase 7 已完成验收。后续任何新增功能、阶段扩展、运行能力、治理能力或前端展示变更，
-必须先走 [feature_intake.md](docs/feature_intake.md)，并按
+必须先走 [feature_intake.md](docs/feature_intake.md)，按
+[project_roles.md](docs/project_roles.md) 明确角色职责，按
+[agent_task_schedule.md](docs/agent_task_schedule.md) 执行周期性治理任务，并按
 [acceptance_checklist.md](docs/acceptance_checklist.md) 明确验收标准。Feature Intake
 不授权 Phase 8、live trading、真实下单、真实交易所连接、真实 K 线下载、生产部署、
 deployment executor、live bot start / stop / deploy controls、队列基础设施实现或
