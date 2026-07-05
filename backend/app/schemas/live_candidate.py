@@ -13,6 +13,7 @@ LIVE_CANDIDATE_PROFILE_SCHEMA_VERSION = "1"
 LIVE_CANDIDATE_PREFLIGHT_SCHEMA_VERSION = "1"
 LIVE_CANDIDATE_APPROVAL_SCHEMA_VERSION = "1"
 LIVE_CANDIDATE_DEPLOYMENT_SCHEMA_VERSION = "1"
+LIVE_CANDIDATE_MONITORING_SCHEMA_VERSION = "1"
 REQUIRED_LOCKED_VARIABLES = frozenset(
     {
         "profile_name",
@@ -379,6 +380,32 @@ LiveCandidateDeploymentResultStatus = Literal[
     "ROLLBACK_RECORDED",
     "CANCELLED",
 ]
+LiveCandidateMonitoringStatus = Literal[
+    "OK",
+    "WARNING",
+    "STALE",
+    "UNAVAILABLE",
+    "BLOCKED",
+]
+LiveCandidateMonitoringSourceType = Literal["fixture", "artifact", "controlled-local-json"]
+LiveCandidateAlertSeverity = Literal["INFO", "WARNING", "ERROR", "CRITICAL"]
+
+MONITORING_FORBIDDEN_CONTROL_KEYS = frozenset(
+    {
+        "control_action",
+        "control_actions",
+        "control_url",
+        "deploy_live",
+        "freqtrade_live_rest",
+        "live_rest",
+        "start",
+        "start_bot",
+        "start_live",
+        "stop",
+        "stop_bot",
+        "stop_live",
+    }
+)
 
 
 class LiveCandidateRiskCheck(BaseModel):
@@ -789,6 +816,152 @@ class LiveCandidateDeploymentRecord(BaseModel):
         return summary
 
 
+class LiveCandidateMonitoringDataSource(BaseModel):
+    source: LiveCandidateMonitoringSourceType
+    ref: str = Field(min_length=1, max_length=1000)
+    generated_at: Optional[datetime] = None
+
+    model_config = {"extra": "forbid"}
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_secrets_runtime_keys_and_secret_values(cls, value: Any) -> Any:
+        _reject_forbidden_monitoring_input(value)
+        return value
+
+    @field_validator("ref")
+    @classmethod
+    def validate_ref(cls, value: str) -> str:
+        ref = value.strip()
+        if not ref:
+            raise ValueError("monitoring source ref must not be blank")
+        if ref.startswith(("http://", "https://")):
+            raise ValueError("monitoring source ref must not be a URL")
+        if ".." in ref.split("/"):
+            raise ValueError("monitoring source ref must not contain parent traversal")
+        return ref
+
+    @field_validator("generated_at")
+    @classmethod
+    def validate_generated_at(cls, value: Optional[datetime]) -> Optional[datetime]:
+        return _validate_optional_timezone(value, "monitoring source timestamps")
+
+
+class LiveCandidateAlertSummary(BaseModel):
+    alert_id: str = Field(min_length=1, max_length=120)
+    status: LiveCandidateMonitoringStatus
+    severity: LiveCandidateAlertSeverity = "INFO"
+    message: str = Field(min_length=1, max_length=1000)
+    source: LiveCandidateMonitoringDataSource
+    last_updated: datetime
+    evidence_ref: Optional[str] = Field(default=None, min_length=1, max_length=1000)
+    details: dict[str, Any] = Field(default_factory=dict)
+
+    model_config = {"extra": "forbid"}
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_secrets_runtime_keys_and_secret_values(cls, value: Any) -> Any:
+        _reject_forbidden_monitoring_input(value)
+        return value
+
+    @field_validator("last_updated")
+    @classmethod
+    def validate_last_updated(cls, value: datetime) -> datetime:
+        return _validate_timezone(value, "alert summary timestamps")
+
+    @field_validator("evidence_ref")
+    @classmethod
+    def validate_evidence_ref(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        ref = value.strip()
+        if not ref:
+            raise ValueError("alert evidence_ref must not be blank")
+        if ref.startswith(("http://", "https://")):
+            raise ValueError("alert evidence_ref must not be a URL")
+        if ".." in ref.split("/"):
+            raise ValueError("alert evidence_ref must not contain parent traversal")
+        return ref
+
+
+class LiveCandidateMonitoringSnapshot(BaseModel):
+    schema_version: Literal["1"] = LIVE_CANDIDATE_MONITORING_SCHEMA_VERSION
+    status: LiveCandidateMonitoringStatus
+    source: LiveCandidateMonitoringDataSource
+    last_updated: datetime
+    profile_name: Optional[str] = Field(default=None, min_length=1, max_length=120)
+    profile_hash: Optional[str] = Field(default=None, min_length=64, max_length=64)
+    deployment_record_id: Optional[str] = Field(default=None, min_length=1, max_length=120)
+    deployment_status: Optional[LiveCandidateDeploymentStatus] = None
+    approval_status: Optional[LiveCandidateApprovalStatus] = None
+    preflight_status: Optional[LiveCandidatePreflightStatus] = None
+    pair: Optional[str] = Field(default=None, min_length=1, max_length=80)
+    timeframe: Optional[str] = Field(default=None, min_length=1, max_length=32)
+    alerts: list[LiveCandidateAlertSummary] = Field(default_factory=list, max_length=100)
+    blockers: list[str] = Field(default_factory=list)
+    unavailable_reason: Optional[str] = Field(default=None, min_length=1, max_length=1000)
+    stale_reason: Optional[str] = Field(default=None, min_length=1, max_length=1000)
+    warnings: list[str] = Field(default_factory=list)
+    safety_boundary: str = (
+        "Read-only live-candidate governance summary; not live-trading, real-order, "
+        "live-bot control, Freqtrade live REST control, or production deployment execution."
+    )
+
+    model_config = {"extra": "forbid"}
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_secrets_runtime_keys_and_secret_values(cls, value: Any) -> Any:
+        _reject_forbidden_monitoring_input(value)
+        return value
+
+    @field_validator("last_updated")
+    @classmethod
+    def validate_last_updated(cls, value: datetime) -> datetime:
+        return _validate_timezone(value, "monitoring snapshot timestamps")
+
+    @field_validator("profile_hash")
+    @classmethod
+    def validate_profile_hash(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        clean = value.strip().lower()
+        if not re.fullmatch(r"[a-f0-9]{64}", clean):
+            raise ValueError("profile_hash must be a lowercase sha256 hex digest")
+        return clean
+
+    @field_validator("blockers", "warnings")
+    @classmethod
+    def validate_reason_lists(cls, value: list[str]) -> list[str]:
+        return _normalize_non_empty_text_list(value, "monitoring reason list")
+
+    @field_validator("unavailable_reason", "stale_reason")
+    @classmethod
+    def validate_optional_reason(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        clean = value.strip()
+        if not clean:
+            raise ValueError("monitoring reason must not be blank")
+        return clean
+
+    @model_validator(mode="after")
+    def validate_state_reasons(self) -> "LiveCandidateMonitoringSnapshot":
+        if self.status == "BLOCKED" and not self.blockers:
+            raise ValueError("blocked monitoring snapshots must include blockers")
+        if self.status == "UNAVAILABLE" and not self.unavailable_reason:
+            raise ValueError("unavailable monitoring snapshots must include unavailable_reason")
+        if self.status == "STALE" and not self.stale_reason:
+            raise ValueError("stale monitoring snapshots must include stale_reason")
+        if self.status == "WARNING" and not self.warnings and not _has_warning_alert(self.alerts):
+            raise ValueError("warning monitoring snapshots must include warnings or warning alerts")
+        return self
+
+    def to_readonly_summary(self) -> dict[str, Any]:
+        return self.model_dump(mode="json", exclude_none=True)
+
+
 def _normalize_non_empty_text_list(value: list[str], field_name: str) -> list[str]:
     normalized: list[str] = []
     for item in value:
@@ -816,3 +989,37 @@ def _validate_repo_relative_ref(value: str, field_name: str) -> str:
     if ".." in ref.split("/"):
         raise ValueError(f"{field_name} must not contain parent traversal")
     return ref
+
+
+def _reject_forbidden_monitoring_input(value: Any) -> None:
+    _reject_monitoring_control_keys(value)
+    LiveCandidateProfile._reject_forbidden_input(value)
+
+
+def _reject_monitoring_control_keys(value: Any) -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            normalized = str(key).lower().replace("-", "_")
+            if normalized in MONITORING_FORBIDDEN_CONTROL_KEYS:
+                raise ValueError(f"live candidate monitoring contains forbidden control key: {key}")
+            _reject_monitoring_control_keys(item)
+        return
+    if isinstance(value, list):
+        for item in value:
+            _reject_monitoring_control_keys(item)
+
+
+def _validate_optional_timezone(value: Optional[datetime], field_name: str) -> Optional[datetime]:
+    if value is None:
+        return value
+    return _validate_timezone(value, field_name)
+
+
+def _validate_timezone(value: datetime, field_name: str) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"{field_name} must include timezone")
+    return value
+
+
+def _has_warning_alert(alerts: list[LiveCandidateAlertSummary]) -> bool:
+    return any(alert.status == "WARNING" or alert.severity == "WARNING" for alert in alerts)
