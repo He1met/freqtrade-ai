@@ -204,6 +204,43 @@ python3 scripts/smoke_phase6.py --offline --tmp-dir /tmp/freqtrade-ai-phase6-smo
 - 不提供 start / stop / deploy live 控制，不实现 deployment executor。
 - Phase 7 必须另行规划，不能由 Phase 6 自动进入。
 
+## Phase 7 工程化升级与规模化运行状态
+
+Phase 7 工程化升级与规模化运行已完成最终验收。当前已具备：
+
+- Runtime read-only API contract。
+- Operator status API 与本地诊断入口。
+- Audit log schema 与 governance event 归档。
+- GitHub Actions CI 基线。
+- Secret scanning 与配置安全检查。
+- Worker / Queue 架构设计方案，仅设计，不实现队列基础设施。
+- Operator Dashboard 只读展示系统状态、fallback 状态、smoke 状态和
+  artifact 链接。
+- 离线 Phase 7 engineering smoke 验收脚本。
+
+Phase 7 smoke 命令：
+
+```bash
+python3 scripts/smoke_phase7.py --offline --tmp-dir /tmp/freqtrade-ai-phase7-smoke
+```
+
+完整验收状态见 [phase7_acceptance.md](docs/phase7_acceptance.md)，工程规划见
+[phase7_engineering_plan.md](docs/phase7_engineering_plan.md)，Worker / Queue 设计边界见
+[phase7_worker_queue_design.md](docs/phase7_worker_queue_design.md)。
+
+当前限制：
+
+- 不执行真实下单，不启动 live trading。
+- 不连接真实交易所，不下载真实 K 线。
+- 不提交真实 API key、secret、passphrase。
+- 不把密钥写入代码、配置、数据库、日志或文档。
+- 不修改 Freqtrade 源码。
+- 不实现 Redis / Celery / Kafka / RabbitMQ、worker pool 或生产 queue
+  infrastructure。
+- 不做生产部署，不绕过人工审批，不实现自动启动 live bot。
+- 不提供 start / stop / deploy live 控制，不实现 deployment executor。
+- Phase 8 必须另行规划，不能由 Phase 7 自动进入。
+
 ## 启动后端
 
 ```bash

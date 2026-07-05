@@ -146,3 +146,67 @@ Phase 6 安全边界：
 
 Phase 6 验收不授权 Phase 7。Phase 7 必须通过新的规划 Issue、验收标准和安全审查
 单独启动。
+
+## Phase 7: 工程化升级与规模化运行
+
+状态：已完成最终验收。详见 [phase7_acceptance.md](phase7_acceptance.md)、
+[phase7_engineering_plan.md](phase7_engineering_plan.md)、
+[phase7_ci.md](phase7_ci.md)、[phase7_secret_scanning.md](phase7_secret_scanning.md)
+和 [phase7_worker_queue_design.md](phase7_worker_queue_design.md)。
+
+Phase 7 已完成工程化升级与规模化运行基础：
+
+- Runtime read-only API contract。
+- Operator status API 与本地诊断入口。
+- Audit log schema 与 governance event 归档。
+- GitHub Actions CI 基线。
+- Secret scanning 与配置安全检查。
+- Worker / Queue 架构设计方案，仅设计，不实现队列基础设施。
+- Operator Dashboard 只读展示系统状态、fallback 状态、smoke 状态和
+  artifact 链接。
+- Phase 7 engineering smoke。
+
+Phase 7 已完成的 Issue 队列：
+
+- [#195](https://github.com/He1met/freqtrade-ai/issues/195)
+  `[EPIC][Phase 7] 工程化升级与规模化运行`
+- [#196](https://github.com/He1met/freqtrade-ai/issues/196)
+  `[Docs][Phase 7] Phase 1-6 收口清理与 Phase 7 工程化规划`
+- [#197](https://github.com/He1met/freqtrade-ai/issues/197)
+  `[Backend][Phase 7] Runtime Read-only API Contract`
+- [#198](https://github.com/He1met/freqtrade-ai/issues/198)
+  `[Backend][Phase 7] Operator Status API 与本地诊断入口`
+- [#199](https://github.com/He1met/freqtrade-ai/issues/199)
+  `[Backend][Phase 7] Audit Log schema 与 governance event 归档`
+- [#200](https://github.com/He1met/freqtrade-ai/issues/200)
+  `[DevOps][Phase 7] GitHub Actions CI：backend pytest / frontend build / smoke`
+- [#201](https://github.com/He1met/freqtrade-ai/issues/201)
+  `[Security][Phase 7] Secret scanning 与配置安全检查增强`
+- [#202](https://github.com/He1met/freqtrade-ai/issues/202)
+  `[Design][Phase 7] Worker / Queue 架构设计方案`
+- [#203](https://github.com/He1met/freqtrade-ai/issues/203)
+  `[Frontend][Phase 7] Operator Dashboard：系统状态、fallback 状态、smoke 状态、artifact 链接`
+- [#204](https://github.com/He1met/freqtrade-ai/issues/204)
+  `[Test][Phase 7] Phase 7 engineering smoke`
+- [#205](https://github.com/He1met/freqtrade-ai/issues/205)
+  `[Review][Phase 7] Phase 7 工程化验收`
+
+Phase 7 安全边界：
+
+- 不执行真实下单。
+- 不启动 live trading。
+- 不连接真实交易所。
+- 不下载真实 K 线。
+- 不提交真实 API key、secret、passphrase。
+- 不把密钥写入代码、配置、数据库、日志或文档。
+- 不修改 Freqtrade 源码。
+- 不实现 Redis、Celery、Kafka、RabbitMQ、worker pool 或生产 queue
+  infrastructure。
+- 不做生产部署。
+- 不绕过人工审批。
+- 不实现自动启动 live bot。
+- 不提供 start / stop / deploy live 控制。
+- 不实现 deployment executor。
+
+Phase 7 验收不授权 Phase 8。Phase 8 必须通过新的规划 Issue、验收标准和安全审查
+单独启动。
