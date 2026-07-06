@@ -62,6 +62,19 @@ class BacktestRun(Base):
         cascade="all, delete-orphan",
     )
 
+    @property
+    def strategy_name(self) -> Optional[str]:
+        strategy = self.strategy_version.strategy if self.strategy_version is not None else None
+        return None if strategy is None else strategy.name
+
+    @property
+    def completed_task_count(self) -> int:
+        return sum(
+            1
+            for task in self.tasks
+            if task.status in {"succeeded", "failed", "cancelled", "blocked"}
+        )
+
 
 class BacktestTask(Base):
     __tablename__ = "backtest_tasks"
@@ -109,6 +122,12 @@ class BacktestTask(Base):
         cascade="all, delete-orphan",
         uselist=False,
     )
+
+    @property
+    def strategy_name(self) -> Optional[str]:
+        strategy_version = self.run.strategy_version if self.run is not None else None
+        strategy = strategy_version.strategy if strategy_version is not None else None
+        return None if strategy is None else strategy.name
 
 
 class BacktestResult(Base):

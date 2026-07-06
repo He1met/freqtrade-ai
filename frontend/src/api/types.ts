@@ -33,6 +33,7 @@ export type StrategyVersionSummary = {
   filePath: string;
   validationStatus: string;
   validationErrors: ValidationErrorSummary[];
+  dataSource?: DataSourceTraceSummary;
 };
 
 export type ValidationErrorSummary = {

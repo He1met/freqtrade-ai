@@ -65,10 +65,12 @@ class LocalBacktestPreflightCheck(BaseModel):
 class BacktestRunRead(BaseModel):
     id: int
     strategy_version_id: int
+    strategy_name: Optional[str] = None
     profile_name: Optional[str]
     config_snapshot: dict[str, Any]
     status: BacktestStatus
     requested_task_count: int
+    completed_task_count: int = 0
     started_at: Optional[datetime]
     completed_at: Optional[datetime]
     created_at: datetime
@@ -103,6 +105,7 @@ class BacktestRunRead(BaseModel):
 class BacktestTaskRead(BaseModel):
     id: int
     backtest_run_id: int
+    strategy_name: Optional[str] = None
     pair: str
     timeframe: str
     status: BacktestStatus

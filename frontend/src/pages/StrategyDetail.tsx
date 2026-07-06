@@ -3,6 +3,7 @@ import { useParams } from "react-router-dom";
 import { combineDataSources } from "../api/sourceState";
 import { useMvpData } from "../api/useMvpData";
 import { FallbackNotice } from "./FallbackNotice";
+import { SourceMarker } from "./SourceMarker";
 import { EMPTY_TEXT, displayLoadState, displayStatus } from "./uiCopy";
 
 function formatDiffLabel(label: string) {
@@ -31,6 +32,9 @@ export function StrategyDetail() {
   const source = combineDataSources(sources, ["strategies", "failureReasons", "versionLineage"]);
   const strategy = data.strategies.find((item) => item.id === strategyId);
   const currentVersionId = strategy?.currentVersion?.id;
+  const currentVersionTrace =
+    data.strategyVersions.find((version) => version.id === currentVersionId)?.dataSource ??
+    strategy?.currentVersion?.dataSource;
   const versionLineage = data.versionLineage
     .filter((entry) => entry.strategyId === strategy?.id)
     .sort((left, right) => left.versionNumber - right.versionNumber);
@@ -112,6 +116,16 @@ export function StrategyDetail() {
           <dd>{strategy.tags.join(", ") || EMPTY_TEXT}</dd>
         </div>
       </dl>
+      <section className="detail-section">
+        <div className="section-header">
+          <h2>数据来源</h2>
+          <span>DB trace</span>
+        </div>
+        <div className="source-grid">
+          <SourceMarker label="strategy" source={strategy.dataSource} />
+          <SourceMarker label="current version" source={currentVersionTrace} />
+        </div>
+      </section>
       <section className="detail-section">
         <div className="section-header">
           <h2>版本谱系</h2>

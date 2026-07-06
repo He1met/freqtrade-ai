@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { combineDataSources } from "../api/sourceState";
 import { useMvpData } from "../api/useMvpData";
 import { FallbackNotice } from "./FallbackNotice";
+import { SourceMarker } from "./SourceMarker";
 import { EMPTY_TEXT, displayLoadState, displayStatus } from "./uiCopy";
 
 export function Strategies() {
@@ -31,6 +32,7 @@ export function Strategies() {
               <th>来源</th>
               <th>版本</th>
               <th>文件</th>
+              <th>数据来源</th>
             </tr>
           </thead>
           <tbody>
@@ -46,6 +48,9 @@ export function Strategies() {
                 <td>{strategy.source === "ai_generated" ? "AI 生成" : strategy.source}</td>
                 <td>{strategy.currentVersion?.versionNumber ?? EMPTY_TEXT}</td>
                 <td className="path-cell">{strategy.currentVersion?.filePath ?? EMPTY_TEXT}</td>
+                <td className="source-cell">
+                  <SourceMarker source={strategy.dataSource} />
+                </td>
               </tr>
             ))}
           </tbody>
