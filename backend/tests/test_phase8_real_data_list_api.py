@@ -17,6 +17,7 @@ from app.schemas import (
     BacktestResultCreate,
     BacktestRunCreate,
     BacktestTaskCreate,
+    BacktestTaskStatusUpdate,
     StrategyCreate,
     StrategyGenerationRunCreate,
     StrategyVersionCreate,
@@ -79,6 +80,14 @@ def test_phase8_real_data_list_apis_return_database_sources(tmp_path: Path) -> N
             BacktestTaskCreate(pair="BTC/USDT:USDT", timeframe="15m"),
         )
         assert task is not None
+        task = backtest_repository.update_task_status(
+            task.id,
+            BacktestTaskStatusUpdate(
+                status="succeeded",
+                result_path="reports/backtests/phase8-real-data.json",
+            ),
+        )
+        assert task is not None
         result = backtest_repository.save_result(
             task.id,
             BacktestResultCreate(
@@ -127,8 +136,11 @@ def test_phase8_real_data_list_apis_return_database_sources(tmp_path: Path) -> N
     assert generation_runs.json()[0]["id"] == generation_run_id
     assert backtest_runs.status_code == 200
     assert backtest_runs.json()[0]["strategy_version_id"] == version_id
+    assert backtest_runs.json()[0]["strategy_name"] == "Phase8 Real Data"
+    assert backtest_runs.json()[0]["completed_task_count"] == 1
     assert backtest_tasks.status_code == 200
     assert backtest_tasks.json()[0]["backtest_run_id"] == backtest_run_id
+    assert backtest_tasks.json()[0]["strategy_name"] == "Phase8 Real Data"
     assert backtest_results.status_code == 200
     assert backtest_results.json()[0]["backtest_task_id"] == backtest_task_id
     assert backtest_results.json()[0]["data_source"]["artifact_refs"]["result_path"] == (

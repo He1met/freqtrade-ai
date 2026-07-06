@@ -1133,7 +1133,14 @@ th {
 }
 
 .detail-list dd {
+  min-width: 0;
   margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.detail-list code {
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .empty-state {
@@ -1166,6 +1173,20 @@ th {
 
 .detail-section {
   margin-top: 14px;
+}
+
+.source-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  border: 1px solid #d8ded7;
+  border-radius: 0 0 8px 8px;
+  background: #ffffff;
+  padding: 14px;
+}
+
+.source-grid .source-marker {
+  max-width: none;
 }
 
 .section-header {
@@ -1560,5 +1581,9 @@ th {
   .fallback-notice-details div {
     grid-template-columns: 1fr;
     gap: 4px;
+  }
+
+  .source-grid {
+    grid-template-columns: 1fr;
   }
 }

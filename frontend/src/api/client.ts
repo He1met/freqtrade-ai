@@ -1665,6 +1665,7 @@ function normalizeStrategySummary(
           filePath: currentVersion.filePath,
           validationStatus: currentVersion.validationStatus,
           validationErrors: currentVersion.validationErrors,
+          dataSource: currentVersion.dataSource,
         }
       : (raw.currentVersion ?? null),
     dataSource: normalizeDataSourceTrace(
