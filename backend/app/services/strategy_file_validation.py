@@ -88,7 +88,9 @@ class StrategyFileValidationService:
                     checksum=checksum,
                     blocked_reasons=[unsafe_stem_reason],
                 )
-            candidate_path = self.file_manager.strategy_file_path(class_name, file_stem=file_stem)
+            candidate_path = self._available_strategy_file_path(
+                self.file_manager.strategy_file_path(class_name, file_stem=file_stem)
+            )
         except ValueError as exc:
             return self._blocked_result(
                 file_path=None,
@@ -172,6 +174,18 @@ class StrategyFileValidationService:
         if not blocked_reasons:
             return None
         return blocked_reasons, approved_root
+
+    def _available_strategy_file_path(self, candidate_path: Path) -> Path:
+        if not candidate_path.exists():
+            return candidate_path
+
+        for suffix in range(2, 101):
+            suffixed_path = candidate_path.with_name(
+                f"{candidate_path.stem}_{suffix}{candidate_path.suffix}"
+            )
+            if not suffixed_path.exists():
+                return suffixed_path
+        return candidate_path
 
     def _static_acceptance_errors(
         self,

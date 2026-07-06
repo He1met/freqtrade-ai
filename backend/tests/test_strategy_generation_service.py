@@ -67,6 +67,32 @@ def test_fake_provider_generation_creates_version_and_file(
     assert tmp_path.joinpath("mvp_rsi_strategy_run_1_1.py").exists()
 
 
+def test_generation_uses_collision_safe_strategy_file_path(
+    db_session: Session,
+    tmp_path,
+) -> None:
+    existing_path = tmp_path / "mvp_rsi_strategy_run_1_1.py"
+    existing_path.write_text("class ExistingStrategy:\n    pass\n", encoding="utf-8")
+    service = StrategyGenerationService(
+        db_session,
+        provider=FakeStrategyBlueprintProvider(),
+        file_manager=StrategyFileManager(output_dir=tmp_path, approved_roots=[tmp_path]),
+    )
+
+    version_ids = service.run_once("Generate one conservative RSI strategy.", requested_count=1)
+
+    run = StrategyGenerationRunRepository(db_session).list()[0]
+    strategy = StrategyRepository(db_session).get_by_slug("mvp-rsi-strategy")
+    assert run.status == "succeeded"
+    assert len(version_ids) == 1
+    assert strategy is not None
+    version = StrategyRepository(db_session).get_latest_version(strategy.id)
+    assert version is not None
+    assert version.file_path == str(tmp_path / "mvp_rsi_strategy_run_1_1_2.py")
+    assert existing_path.read_text(encoding="utf-8") == "class ExistingStrategy:\n    pass\n"
+    assert tmp_path.joinpath("mvp_rsi_strategy_run_1_1_2.py").exists()
+
+
 class FailingProvider(FakeStrategyBlueprintProvider):
     provider_name = "fake-failure"
 
