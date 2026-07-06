@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from dataclasses import dataclass
 from typing import Any, Optional, Protocol
 from urllib.parse import urlsplit, urlunsplit
@@ -184,7 +185,7 @@ class OpenAICompatibleStrategyBlueprintProvider:
         blueprints: list[StrategyBlueprint] = []
         for index, item in enumerate(raw_blueprints[:requested_count]):
             try:
-                blueprints.append(StrategyBlueprint.model_validate(item))
+                blueprints.append(StrategyBlueprint.model_validate(_normalize_blueprint_payload(item)))
             except ValidationError as exc:
                 raise LLMProviderResponseError(
                     "LLM provider returned an invalid strategy blueprint",
@@ -209,6 +210,9 @@ class OpenAICompatibleStrategyBlueprintProvider:
                         "top-level blueprints array. Every blueprint must satisfy schema_version 2. "
                         "Required fields per blueprint: schema_version, name, slug, class_name, "
                         "timeframe, stoploss, minimal_roi, indicators, entry_rules, exit_rules, tags. "
+                        "indicators, entry_rules, exit_rules, and tags must be JSON arrays even when "
+                        "there is only one item. Put indicator period at the indicator object top level, "
+                        "not inside params. Use rule fields indicator, operator, and value exactly. "
                         "Allowed indicator kind values: rsi, ema, sma. Allowed operators: <, <=, >, >=, ==. "
                         "Indicator names and rule references must be lowercase snake_case. "
                         "Do not wrap the JSON in markdown."
@@ -237,29 +241,89 @@ class OpenAICompatibleStrategyBlueprintProvider:
         choices = raw_response.get("choices")
         if isinstance(choices, list) and choices:
             message = choices[0].get("message", {})
-            content = message.get("content")
+            if isinstance(message, dict):
+                content = message.get("content")
+                if content is None:
+                    content = self._extract_tool_call_arguments(message)
 
-        if isinstance(content, str):
-            try:
-                content = json.loads(content)
-            except json.JSONDecodeError as exc:
-                raise LLMProviderResponseError(
-                    "LLM provider returned non-JSON blueprint content",
-                    failure_category="response_parse_error",
-                    details=[f"message.content: invalid JSON at char {exc.pos}"],
-                ) from exc
+        content = self._parse_provider_content(content)
+        blueprints = self._find_blueprint_payloads(content)
+        if blueprints:
+            return blueprints
 
-        if isinstance(content, dict) and isinstance(content.get("blueprints"), list):
-            return content["blueprints"]
-        if isinstance(content, list):
-            return content
-        if isinstance(content, dict) and content.get("schema_version") == "2":
-            return [content]
         raise LLMProviderResponseError(
             "LLM provider response did not contain strategy blueprints",
             failure_category="response_shape_error",
-            details=["expected top-level blueprints array or schema_version 2 object"],
+            details=[
+                "expected blueprints/strategy_blueprints/strategies array, "
+                "blueprint/strategy_blueprint object, schema_version 2 object, "
+                "or OpenAI tool-call arguments containing one of those shapes"
+            ],
         )
+
+    def _extract_tool_call_arguments(self, message: dict[str, Any]) -> Any:
+        tool_calls = message.get("tool_calls")
+        if not isinstance(tool_calls, list) or not tool_calls:
+            return None
+        first_call = tool_calls[0]
+        if not isinstance(first_call, dict):
+            return None
+        function_payload = first_call.get("function")
+        if not isinstance(function_payload, dict):
+            return None
+        return function_payload.get("arguments")
+
+    def _parse_provider_content(self, content: Any) -> Any:
+        if isinstance(content, str):
+            return self._parse_json_text(content, location="message.content")
+        if isinstance(content, list):
+            text_parts = [
+                part.get("text")
+                for part in content
+                if isinstance(part, dict) and isinstance(part.get("text"), str)
+            ]
+            if text_parts:
+                return self._parse_json_text("\n".join(text_parts), location="message.content[].text")
+        return content
+
+    def _parse_json_text(self, content: str, *, location: str) -> Any:
+        text = content.strip()
+        if text.startswith("```"):
+            lines = text.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            text = "\n".join(lines).strip()
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise LLMProviderResponseError(
+                "LLM provider returned non-JSON blueprint content",
+                failure_category="response_parse_error",
+                details=[f"{location}: invalid JSON at char {exc.pos}"],
+            ) from exc
+
+    def _find_blueprint_payloads(self, content: Any) -> list[dict[str, Any]]:
+        if isinstance(content, list):
+            return [item for item in content if isinstance(item, dict)]
+        if not isinstance(content, dict):
+            return []
+        if content.get("schema_version") in {"2", 2}:
+            return [content]
+
+        for key in ("blueprints", "strategy_blueprints", "strategies"):
+            value = content.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+
+        for key in ("blueprint", "strategy_blueprint", "strategy", "result", "data", "payload"):
+            nested = content.get(key)
+            found = self._find_blueprint_payloads(nested)
+            if found:
+                return found
+
+        return []
 
 
 def _optional_int_from_env(name: str) -> Optional[int]:
@@ -289,6 +353,67 @@ def _provider_defaults(provider_name: str) -> dict[str, str]:
             "api_key_env": "MIMO_API_KEY",
         }
     return defaults
+
+
+def _normalize_blueprint_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(payload)
+    if normalized.get("schema_version") == 2:
+        normalized["schema_version"] = "2"
+    if isinstance(normalized.get("slug"), str):
+        normalized["slug"] = _normalize_slug(normalized["slug"])
+    if isinstance(normalized.get("indicators"), list):
+        normalized["indicators"] = [
+            _normalize_indicator_payload(item) if isinstance(item, dict) else item
+            for item in normalized["indicators"]
+        ]
+    for rules_key in ("entry_rules", "exit_rules"):
+        if isinstance(normalized.get(rules_key), dict):
+            normalized[rules_key] = [normalized[rules_key]]
+        if isinstance(normalized.get(rules_key), list):
+            normalized[rules_key] = [
+                _normalize_rule_payload(item) if isinstance(item, dict) else item
+                for item in normalized[rules_key]
+            ]
+    return normalized
+
+
+def _normalize_slug(value: str) -> str:
+    slug = value.strip().lower()
+    slug = re.sub(r"[\s_]+", "-", slug)
+    slug = re.sub(r"[^a-z0-9-]+", "", slug)
+    slug = re.sub(r"-{2,}", "-", slug).strip("-")
+    return slug or value
+
+
+def _normalize_indicator_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(payload)
+    params = normalized.pop("params", None)
+    parameters = normalized.pop("parameters", None)
+    for source in (params, parameters):
+        if isinstance(source, dict) and "period" not in normalized and "period" in source:
+            normalized["period"] = source["period"]
+    if isinstance(normalized.get("period"), str) and normalized["period"].isdigit():
+        normalized["period"] = int(normalized["period"])
+    return normalized
+
+
+def _normalize_rule_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(payload)
+    aliases = (
+        ("indicator", "indicator_name"),
+        ("indicator", "indicatorName"),
+        ("operator", "comparison"),
+        ("operator", "condition"),
+        ("operator", "op"),
+        ("value", "threshold"),
+        ("value", "level"),
+    )
+    for target, source in aliases:
+        if target not in normalized and source in normalized:
+            normalized[target] = normalized[source]
+        if source in normalized:
+            normalized.pop(source)
+    return normalized
 
 
 def _redact_url_userinfo(url: str) -> str:
