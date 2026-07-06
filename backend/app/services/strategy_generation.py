@@ -41,7 +41,20 @@ class LLMProviderConfigurationError(RuntimeError):
 
 
 class LLMProviderResponseError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure_category: str = "provider_response_error",
+        details: Optional[list[str]] = None,
+    ) -> None:
+        self.message = message
+        self.failure_category = failure_category
+        self.details = details or []
+        rendered = f"{message} ({failure_category})"
+        if self.details:
+            rendered = f"{rendered}: {'; '.join(self.details)}"
+        super().__init__(rendered)
 
 
 @dataclass(frozen=True)
@@ -155,18 +168,29 @@ class OpenAICompatibleStrategyBlueprintProvider:
             response.raise_for_status()
             raw_response = response.json()
         except Exception as exc:
-            raise LLMProviderResponseError("LLM provider request failed") from exc
+            raise LLMProviderResponseError(
+                "LLM provider request failed",
+                failure_category="provider_request_error",
+            ) from exc
 
         raw_blueprints = self._extract_blueprints(raw_response)
         if len(raw_blueprints) < requested_count:
-            raise LLMProviderResponseError("LLM provider returned fewer blueprints than requested")
+            raise LLMProviderResponseError(
+                "LLM provider returned fewer blueprints than requested",
+                failure_category="response_shape_error",
+                details=[f"blueprints_count={len(raw_blueprints)} requested_count={requested_count}"],
+            )
 
         blueprints: list[StrategyBlueprint] = []
-        for item in raw_blueprints[:requested_count]:
+        for index, item in enumerate(raw_blueprints[:requested_count]):
             try:
                 blueprints.append(StrategyBlueprint.model_validate(item))
             except ValidationError as exc:
-                raise LLMProviderResponseError("LLM provider returned an invalid strategy blueprint") from exc
+                raise LLMProviderResponseError(
+                    "LLM provider returned an invalid strategy blueprint",
+                    failure_category="blueprint_schema_error",
+                    details=_validation_error_details(exc, blueprint_index=index),
+                ) from exc
         return blueprints
 
     def _endpoint_url(self) -> str:
@@ -182,7 +206,12 @@ class OpenAICompatibleStrategyBlueprintProvider:
                     "role": "system",
                     "content": (
                         "Generate Freqtrade strategy blueprints. Return only JSON with a "
-                        "top-level blueprints array. Every blueprint must satisfy schema_version 2."
+                        "top-level blueprints array. Every blueprint must satisfy schema_version 2. "
+                        "Required fields per blueprint: schema_version, name, slug, class_name, "
+                        "timeframe, stoploss, minimal_roi, indicators, entry_rules, exit_rules, tags. "
+                        "Allowed indicator kind values: rsi, ema, sma. Allowed operators: <, <=, >, >=, ==. "
+                        "Indicator names and rule references must be lowercase snake_case. "
+                        "Do not wrap the JSON in markdown."
                     ),
                 },
                 {
@@ -214,7 +243,11 @@ class OpenAICompatibleStrategyBlueprintProvider:
             try:
                 content = json.loads(content)
             except json.JSONDecodeError as exc:
-                raise LLMProviderResponseError("LLM provider returned non-JSON blueprint content") from exc
+                raise LLMProviderResponseError(
+                    "LLM provider returned non-JSON blueprint content",
+                    failure_category="response_parse_error",
+                    details=[f"message.content: invalid JSON at char {exc.pos}"],
+                ) from exc
 
         if isinstance(content, dict) and isinstance(content.get("blueprints"), list):
             return content["blueprints"]
@@ -222,7 +255,11 @@ class OpenAICompatibleStrategyBlueprintProvider:
             return content
         if isinstance(content, dict) and content.get("schema_version") == "2":
             return [content]
-        raise LLMProviderResponseError("LLM provider response did not contain strategy blueprints")
+        raise LLMProviderResponseError(
+            "LLM provider response did not contain strategy blueprints",
+            failure_category="response_shape_error",
+            details=["expected top-level blueprints array or schema_version 2 object"],
+        )
 
 
 def _optional_int_from_env(name: str) -> Optional[int]:
@@ -369,6 +406,12 @@ class StrategyGenerationService:
             version_ids = self._persist_blueprints(run.id, blueprints)
         except Exception as exc:
             safe_error = self._redact_sensitive_error(str(exc))
+            failure_diagnostics = self._provider_failure_diagnostics(exc)
+            if failure_diagnostics:
+                run.params_snapshot = {
+                    **(run.params_snapshot or {}),
+                    "provider_failure": failure_diagnostics,
+                }
             self.run_repository.update_status(
                 run.id,
                 StrategyGenerationRunStatusUpdate(
@@ -411,6 +454,15 @@ class StrategyGenerationService:
                 redacted = redacted.replace(secret_value, "[REDACTED]")
         return redacted
 
+    def _provider_failure_diagnostics(self, exc: Exception) -> Optional[dict[str, Any]]:
+        if not isinstance(exc, LLMProviderResponseError):
+            return None
+        return {
+            "category": exc.failure_category,
+            "message": self._redact_sensitive_error(exc.message),
+            "details": [self._redact_sensitive_error(item) for item in exc.details],
+        }
+
     def _persist_blueprints(
         self,
         run_id: int,
@@ -451,3 +503,23 @@ class StrategyGenerationService:
             if version is not None:
                 version_ids.append(version.id)
         return version_ids
+
+
+def _validation_error_details(exc: ValidationError, *, blueprint_index: int) -> list[str]:
+    details: list[str] = []
+    for item in exc.errors(include_input=False, include_url=False):
+        location = _format_validation_location(item.get("loc", ()), blueprint_index=blueprint_index)
+        message = str(item.get("msg", "validation error"))
+        error_type = str(item.get("type", "validation_error"))
+        details.append(f"{location}: {message} ({error_type})")
+    return details[:8]
+
+
+def _format_validation_location(location: Any, *, blueprint_index: int) -> str:
+    parts = [f"blueprints[{blueprint_index}]"]
+    for part in location or ():
+        if isinstance(part, int):
+            parts[-1] = f"{parts[-1]}[{part}]"
+        else:
+            parts.append(str(part))
+    return ".".join(parts)
