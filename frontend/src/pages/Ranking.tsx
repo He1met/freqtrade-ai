@@ -1,4 +1,5 @@
 import { useMvpData } from "../api/useMvpData";
+import { combineDataSources } from "../api/sourceState";
 import type { RankingScoreBreakdownItem } from "../api/types";
 import { FallbackNotice } from "./FallbackNotice";
 import { SourceMarker } from "./SourceMarker";
@@ -20,7 +21,8 @@ function formatBreakdownName(item: RankingScoreBreakdownItem) {
 }
 
 export function Ranking() {
-  const { data, source, isLoading, error } = useMvpData();
+  const { data, sources, isLoading, error } = useMvpData();
+  const source = combineDataSources(sources, ["ranking"]);
 
   return (
     <section className="page">

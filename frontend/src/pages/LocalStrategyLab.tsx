@@ -7,6 +7,7 @@ import {
   startControlledDryRun,
   stopControlledDryRun,
 } from "../api/client";
+import { combineDataSources } from "../api/sourceState";
 import { useMvpData } from "../api/useMvpData";
 import type {
   BacktestResultSummary,
@@ -1090,7 +1091,13 @@ export function LocalStrategyLab() {
         error={snapshot.error}
         isLoading={snapshot.isLoading}
         onRefresh={() => setSnapshotRefreshToken((current) => current + 1)}
-        source={snapshot.source}
+        source={combineDataSources(snapshot.sources, [
+          "strategyVersions",
+          "generationRuns",
+          "backtestTasks",
+          "backtestResults",
+          "ranking",
+        ])}
       />
 
       {currentResult ? <ResultDetails result={currentResult} /> : null}

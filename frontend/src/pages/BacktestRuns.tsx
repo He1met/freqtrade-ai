@@ -1,3 +1,4 @@
+import { combineDataSources } from "../api/sourceState";
 import { useMvpData } from "../api/useMvpData";
 import {
   buildBacktestMatrixSummary,
@@ -11,7 +12,8 @@ import { SourceMarker } from "./SourceMarker";
 import { EMPTY_TEXT, displayLoadState, displayStatus } from "./uiCopy";
 
 export function BacktestRuns() {
-  const { data, source, isLoading, error } = useMvpData();
+  const { data, sources, isLoading, error } = useMvpData();
+  const source = combineDataSources(sources, ["backtestRuns", "backtestTasks"]);
   const matrixSummary = buildBacktestMatrixSummary(data.backtestRuns, data.backtestTasks);
   const statusEntries = Object.entries(matrixSummary.statusCounts).filter(([, count]) => count > 0);
 

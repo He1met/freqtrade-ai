@@ -1,3 +1,4 @@
+import { combineDataSources } from "../api/sourceState";
 import { useMvpData } from "../api/useMvpData";
 import { metricRows, reasonText, statusClassName, summarizeText } from "./backtestDisplay";
 import { FallbackNotice } from "./FallbackNotice";
@@ -5,7 +6,8 @@ import { SourceMarker } from "./SourceMarker";
 import { EMPTY_TEXT, displayLoadState, displayStatus } from "./uiCopy";
 
 export function BacktestTasks() {
-  const { data, source, isLoading, error } = useMvpData();
+  const { data, sources, isLoading, error } = useMvpData();
+  const source = combineDataSources(sources, ["backtestTasks", "backtestResults"]);
 
   return (
     <section className="page">

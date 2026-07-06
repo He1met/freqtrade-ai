@@ -1,5 +1,22 @@
 export type DataSource = "api" | "fallback";
 
+export type MvpDataSetKey =
+  | "strategies"
+  | "strategyVersions"
+  | "generationRuns"
+  | "backtestRuns"
+  | "backtestTasks"
+  | "backtestResults"
+  | "hyperoptRuns"
+  | "dryRun"
+  | "liveCandidates"
+  | "operatorDashboard"
+  | "ranking"
+  | "failureReasons"
+  | "versionLineage";
+
+export type MvpDataSources = Record<MvpDataSetKey, DataSource>;
+
 export type DataSourceTraceSummary = {
   sourceType: string;
   sourceDetail: string;
@@ -740,6 +757,7 @@ export type MvpData = {
 export type MvpDataState = {
   data: MvpData;
   source: DataSource;
+  sources: MvpDataSources;
   isLoading: boolean;
   error: string | null;
 };

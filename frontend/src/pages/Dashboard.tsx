@@ -1,9 +1,18 @@
 import { useMvpData } from "../api/useMvpData";
+import { combineDataSources } from "../api/sourceState";
 import { FallbackNotice } from "./FallbackNotice";
 import { displayLoadState } from "./uiCopy";
 
 export function Dashboard() {
-  const { data, source, isLoading, error } = useMvpData();
+  const { data, sources, isLoading, error } = useMvpData();
+  const source = combineDataSources(sources, [
+    "strategies",
+    "generationRuns",
+    "backtestRuns",
+    "backtestTasks",
+    "hyperoptRuns",
+    "ranking",
+  ]);
   const succeededBacktests = data.backtestRuns.filter((run) => run.status === "succeeded").length;
   const flowItems = [
     `${data.generationRuns.length} 个生成批次`,

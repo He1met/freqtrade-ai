@@ -1,4 +1,5 @@
 import type { DryRunArtifactManifest, DryRunStatusSnapshot } from "../api/types";
+import { combineDataSources } from "../api/sourceState";
 import { useMvpData } from "../api/useMvpData";
 import { formatNumber, reasonText, statusClassName, summarizeText } from "./backtestDisplay";
 import { FallbackNotice } from "./FallbackNotice";
@@ -23,7 +24,8 @@ function snapshotReason(snapshot: DryRunStatusSnapshot, manifest: DryRunArtifact
 }
 
 export function FreqUILink() {
-  const { data, source, isLoading, error } = useMvpData();
+  const { data, sources, isLoading, error } = useMvpData();
+  const source = combineDataSources(sources, ["dryRun"]);
   const { manifest, snapshot, freqUiLink } = data.dryRun;
   const configuredFreqUiUrl = getConfiguredFreqUIUrl();
   const frequiUrl = freqUiLink.baseUrl ?? configuredFreqUiUrl;

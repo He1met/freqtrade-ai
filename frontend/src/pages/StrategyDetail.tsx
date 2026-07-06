@@ -1,5 +1,6 @@
 import { useParams } from "react-router-dom";
 
+import { combineDataSources } from "../api/sourceState";
 import { useMvpData } from "../api/useMvpData";
 import { FallbackNotice } from "./FallbackNotice";
 import { EMPTY_TEXT, displayLoadState, displayStatus } from "./uiCopy";
@@ -26,7 +27,8 @@ function formatDiffValue(value: unknown) {
 
 export function StrategyDetail() {
   const { strategyId } = useParams();
-  const { data, source, isLoading, error } = useMvpData();
+  const { data, sources, isLoading, error } = useMvpData();
+  const source = combineDataSources(sources, ["strategies", "failureReasons", "versionLineage"]);
   const strategy = data.strategies.find((item) => item.id === strategyId);
   const currentVersionId = strategy?.currentVersion?.id;
   const versionLineage = data.versionLineage

@@ -4,6 +4,7 @@ from app.api.backtests import router as backtests_router
 from app.api.debug_mvp import router as debug_mvp_router
 from app.api.dry_run import router as dry_run_router
 from app.api.health import router as health_router
+from app.api.operational_readiness import router as operational_readiness_router
 from app.api.ranking import router as ranking_router
 from app.api.runtime import router as runtime_router
 from app.api.strategies import router as strategies_router
@@ -26,6 +27,8 @@ app.include_router(dry_run_router)
 app.include_router(health_router)
 app.include_router(ranking_router)
 app.include_router(runtime_router)
+app.include_router(runtime_router, prefix="/api")
+app.include_router(operational_readiness_router)
 app.include_router(strategies_router)
 app.include_router(strategy_generation_router)
 app.include_router(debug_mvp_router)

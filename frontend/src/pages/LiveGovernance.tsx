@@ -4,6 +4,7 @@ import type {
   LiveCandidateMonitoringSnapshotSummary,
   LiveCandidateProfileSummary,
 } from "../api/types";
+import { combineDataSources } from "../api/sourceState";
 import { useMvpData } from "../api/useMvpData";
 import { reasonText, statusClassName, summarizeText } from "./backtestDisplay";
 import { FallbackNotice } from "./FallbackNotice";
@@ -331,7 +332,8 @@ function MonitoringSnapshots({ snapshots }: { snapshots: LiveCandidateMonitoring
 }
 
 export function LiveGovernance() {
-  const { data, source, isLoading, error } = useMvpData();
+  const { data, sources, isLoading, error } = useMvpData();
+  const source = combineDataSources(sources, ["liveCandidates"]);
   const governance = data.liveCandidates;
   const profileStatuses = countByStatus(governance.profiles, (profile) => profile.status);
   const deploymentStatuses = countByStatus(governance.deployments, (deployment) => deployment.status);

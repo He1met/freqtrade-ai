@@ -1,4 +1,5 @@
 import type { HyperoptMetricComparison, HyperoptRunSummary } from "../api/types";
+import { combineDataSources } from "../api/sourceState";
 import { useMvpData } from "../api/useMvpData";
 import { formatNumber, reasonText, statusClassName, summarizeText } from "./backtestDisplay";
 import { FallbackNotice } from "./FallbackNotice";
@@ -28,7 +29,8 @@ function runReason(run: HyperoptRunSummary): string {
 }
 
 export function HyperoptRuns() {
-  const { data, source, isLoading, error } = useMvpData();
+  const { data, sources, isLoading, error } = useMvpData();
+  const source = combineDataSources(sources, ["hyperoptRuns"]);
   const statusCounts = data.hyperoptRuns.reduce<Record<string, number>>((counts, run) => {
     const status = run.artifactManifest?.status ?? run.status;
     counts[status] = (counts[status] ?? 0) + 1;

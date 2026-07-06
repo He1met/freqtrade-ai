@@ -8,6 +8,7 @@ import type {
   RuntimeReadOnlyContractSummary,
   RuntimeStatusSummary,
 } from "../api/types";
+import { combineDataSources } from "../api/sourceState";
 import { useMvpData } from "../api/useMvpData";
 import { summarizeText } from "./backtestDisplay";
 import { FallbackNotice } from "./FallbackNotice";
@@ -323,7 +324,8 @@ function SafetyPanel({
 }
 
 export function OperatorDashboard() {
-  const { data, source, isLoading, error } = useMvpData();
+  const { data, sources, isLoading, error } = useMvpData();
+  const source = combineDataSources(sources, ["operatorDashboard"]);
   const dashboard = data.operatorDashboard;
   const runtimeContract = dashboard.runtimeContract;
   const operatorStatus = dashboard.operatorStatus;

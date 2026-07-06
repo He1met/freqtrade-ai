@@ -1,11 +1,13 @@
 import { Link } from "react-router-dom";
 
+import { combineDataSources } from "../api/sourceState";
 import { useMvpData } from "../api/useMvpData";
 import { FallbackNotice } from "./FallbackNotice";
 import { EMPTY_TEXT, displayLoadState, displayStatus } from "./uiCopy";
 
 export function Strategies() {
-  const { data, source, isLoading, error } = useMvpData();
+  const { data, sources, isLoading, error } = useMvpData();
+  const source = combineDataSources(sources, ["strategies", "strategyVersions"]);
 
   return (
     <section className="page">
