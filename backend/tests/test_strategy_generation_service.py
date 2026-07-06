@@ -295,6 +295,7 @@ def test_real_llm_provider_rejects_non_json_content_without_leaking_secret(
         provider.generate("Generate one strategy.", requested_count=1)
 
     assert "test-secret-value" not in str(exc_info.value)
+    assert exc_info.value.failure_category == "response_parse_error"
 
 
 def test_real_llm_provider_rejects_invalid_blueprint_without_leaking_secret(
@@ -313,7 +314,50 @@ def test_real_llm_provider_rejects_invalid_blueprint_without_leaking_secret(
         provider.generate("Generate one strategy.", requested_count=1)
 
     assert "invalid strategy blueprint" in str(exc_info.value)
+    assert "blueprint_schema_error" in str(exc_info.value)
+    assert "blueprints[0].slug" in str(exc_info.value)
     assert "test-secret-value" not in str(exc_info.value)
+    assert exc_info.value.failure_category == "blueprint_schema_error"
+    assert any("blueprints[0].slug" in item for item in exc_info.value.details)
+
+
+def test_service_records_blueprint_schema_failure_diagnostics_without_secret_leak(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("TEST_LLM_API_KEY", "test-secret-value")
+    invalid_payload = blueprint_payload()
+    invalid_payload["entry_rules"] = [{"indicator": "missing_rsi", "operator": "<", "value": 31}]
+    response = MockLLMResponse({"blueprints": [invalid_payload]})
+    provider = OpenAICompatibleStrategyBlueprintProvider(
+        provider_config(),
+        http_client=MockLLMClient(response),
+    )
+    service = StrategyGenerationService(
+        db_session,
+        provider=provider,
+        file_manager=StrategyFileManager(output_dir=tmp_path, approved_roots=[tmp_path]),
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        service.run_once("Generate one strategy.", requested_count=1)
+
+    run = StrategyGenerationRunRepository(db_session).list()[0]
+    assert run.status == "failed"
+    assert run.failed_count == 1
+    assert "blueprint_schema_error" in (run.error_message or "")
+    assert "test-secret-value" not in str(exc_info.value)
+    assert "test-secret-value" not in str(run.params_snapshot)
+    assert run.params_snapshot["provider_failure"]["category"] == "blueprint_schema_error"
+    assert run.params_snapshot["provider_failure"]["message"] == (
+        "LLM provider returned an invalid strategy blueprint"
+    )
+    assert any(
+        "blueprints[0]" in item and "rule indicator is not defined" in item
+        for item in run.params_snapshot["provider_failure"]["details"]
+    )
+    assert StrategyRepository(db_session).get_by_slug("mock-rsi-strategy") is None
 
 
 def test_service_records_real_provider_metadata_with_mock_client(
