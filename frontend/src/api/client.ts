@@ -61,6 +61,7 @@ import type {
   StrategyFailureReasonSummary,
   StrategyVersionLineageEntry,
   ValidationErrorSummary,
+  MvpDataSources,
 } from "./types";
 
 const DEFAULT_API_BASE_URL = "/api";
@@ -1872,6 +1873,7 @@ export async function stopControlledDryRun(signal?: AbortSignal): Promise<DryRun
 
 export async function loadMvpData(signal?: AbortSignal): Promise<{
   data: MvpData;
+  sources: MvpDataSources;
   usedFallback: boolean;
 }> {
   const [
@@ -1965,6 +1967,24 @@ export async function loadMvpData(signal?: AbortSignal): Promise<{
   ]);
 
   const normalizedStrategyVersions = strategyVersions.items.map(normalizeStrategyGenerationVersion);
+  const sources: MvpDataSources = {
+    strategies: strategies.usedFallback ? "fallback" : "api",
+    strategyVersions: strategyVersions.usedFallback ? "fallback" : "api",
+    generationRuns: generationRuns.usedFallback ? "fallback" : "api",
+    backtestRuns: backtestRuns.usedFallback ? "fallback" : "api",
+    backtestTasks: backtestTasks.usedFallback ? "fallback" : "api",
+    backtestResults: backtestResults.usedFallback ? "fallback" : "api",
+    hyperoptRuns: hyperoptRuns.usedFallback ? "fallback" : "api",
+    dryRun: dryRun.usedFallback ? "fallback" : "api",
+    liveCandidates: liveCandidates.usedFallback ? "fallback" : "api",
+    operatorDashboard:
+      runtimeContract.usedFallback || operatorStatus.usedFallback || auditEvents.usedFallback
+        ? "fallback"
+        : "api",
+    ranking: ranking.usedFallback ? "fallback" : "api",
+    failureReasons: failureReasons.usedFallback ? "fallback" : "api",
+    versionLineage: versionLineage.usedFallback ? "fallback" : "api",
+  };
 
   return {
     data: {
@@ -1987,21 +2007,7 @@ export async function loadMvpData(signal?: AbortSignal): Promise<{
       failureReasons: failureReasons.items.map(normalizeFailureReason),
       versionLineage: versionLineage.items.map(normalizeLineageEntry),
     },
-    usedFallback:
-      strategies.usedFallback ||
-      strategyVersions.usedFallback ||
-      generationRuns.usedFallback ||
-      backtestRuns.usedFallback ||
-      backtestTasks.usedFallback ||
-      backtestResults.usedFallback ||
-      hyperoptRuns.usedFallback ||
-      dryRun.usedFallback ||
-      liveCandidates.usedFallback ||
-      runtimeContract.usedFallback ||
-      operatorStatus.usedFallback ||
-      auditEvents.usedFallback ||
-      ranking.usedFallback ||
-      failureReasons.usedFallback ||
-      versionLineage.usedFallback,
+    sources,
+    usedFallback: Object.values(sources).some((source) => source === "fallback"),
   };
 }

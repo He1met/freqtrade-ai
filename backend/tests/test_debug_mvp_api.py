@@ -39,7 +39,7 @@ def test_seeded_debug_payloads_are_returned_from_api(tmp_path: Path) -> None:
     client = client_with_seeded_database(tmp_path)
     try:
         strategies = client.get("/api/mvp/strategies")
-        runtime_contract = client.get("/api/runtime/read-only")
+        runtime_contract = client.get("/api/mvp/runtime/read-only")
         ranking = client.get("/api/mvp/ranking")
 
         assert strategies.status_code == 200

@@ -1,9 +1,11 @@
+import { combineDataSources } from "../api/sourceState";
 import { useMvpData } from "../api/useMvpData";
 import { FallbackNotice } from "./FallbackNotice";
 import { EMPTY_TEXT, displayLoadState, displayStatus } from "./uiCopy";
 
 export function GenerationRuns() {
-  const { data, source, isLoading, error } = useMvpData();
+  const { data, sources, isLoading, error } = useMvpData();
+  const source = combineDataSources(sources, ["generationRuns"]);
 
   return (
     <section className="page">
