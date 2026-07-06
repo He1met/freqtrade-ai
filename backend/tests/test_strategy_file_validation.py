@@ -53,6 +53,27 @@ def test_validated_strategy_file_write_records_traceable_status(tmp_path) -> Non
     assert expected_path.read_text(encoding="utf-8") == code
 
 
+def test_validated_strategy_file_write_uses_collision_safe_suffix(tmp_path) -> None:
+    output_dir = tmp_path / "user_data" / "strategies" / "generated"
+    output_dir.mkdir(parents=True)
+    existing_path = output_dir / "safe_strategy_run_1.py"
+    existing_path.write_text("class ExistingStrategy:\n    pass\n", encoding="utf-8")
+    code = runnable_strategy_code()
+
+    result = validation_service(output_dir, [output_dir]).write_validated_strategy_file(
+        class_name="SafeStrategy",
+        code=code,
+        file_stem="safe_strategy_run_1",
+    )
+
+    expected_path = output_dir / "safe_strategy_run_1_2.py"
+    assert result.file_path == str(expected_path)
+    assert result.write_status == "written"
+    assert result.validation_status == "passed"
+    assert existing_path.read_text(encoding="utf-8") == "class ExistingStrategy:\n    pass\n"
+    assert expected_path.read_text(encoding="utf-8") == code
+
+
 def test_blocks_missing_strategy_directory_without_creating_it(tmp_path) -> None:
     output_dir = tmp_path / "missing" / "generated"
 
