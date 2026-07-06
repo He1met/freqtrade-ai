@@ -1,3 +1,4 @@
+import json
 from typing import Optional
 
 import pytest
@@ -281,6 +282,105 @@ def test_real_llm_provider_uses_env_key_and_validates_response(
     assert "test-secret-value" not in str(provider.metadata_snapshot())
 
 
+def test_real_llm_provider_accepts_wrapped_strategy_blueprint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TEST_LLM_API_KEY", "test-secret-value")
+    response = MockLLMResponse(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "strategy_blueprint": blueprint_payload(
+                                    slug="wrapped-deepseek-rsi"
+                                )
+                            }
+                        )
+                    }
+                }
+            ]
+        }
+    )
+    provider = OpenAICompatibleStrategyBlueprintProvider(
+        provider_config(),
+        http_client=MockLLMClient(response),
+    )
+
+    blueprints = provider.generate("Generate one conservative RSI strategy.", requested_count=1)
+
+    assert len(blueprints) == 1
+    assert blueprints[0].slug == "wrapped-deepseek-rsi"
+
+
+def test_real_llm_provider_accepts_tool_call_arguments_blueprints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TEST_LLM_API_KEY", "test-secret-value")
+    response = MockLLMResponse(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "arguments": json.dumps(
+                                        {
+                                            "strategies": [
+                                                blueprint_payload(slug="tool-call-rsi")
+                                            ]
+                                        }
+                                    )
+                                }
+                            }
+                        ],
+                    }
+                }
+            ]
+        }
+    )
+    provider = OpenAICompatibleStrategyBlueprintProvider(
+        provider_config(),
+        http_client=MockLLMClient(response),
+    )
+
+    blueprints = provider.generate("Generate one conservative RSI strategy.", requested_count=1)
+
+    assert len(blueprints) == 1
+    assert blueprints[0].slug == "tool-call-rsi"
+
+
+def test_real_llm_provider_normalizes_convertible_blueprint_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TEST_LLM_API_KEY", "test-secret-value")
+    convertible = blueprint_payload(slug="DeepSeek_RSI_Strategy")
+    convertible["schema_version"] = 2
+    convertible["indicators"] = [
+        {"name": "rsi", "kind": "rsi", "params": {"period": "14"}},
+        {"name": "ema_fast", "kind": "ema", "params": {"period": 12}},
+    ]
+    convertible["entry_rules"] = {"indicator_name": "rsi", "condition": "<", "threshold": 31}
+    convertible["exit_rules"] = {"indicatorName": "rsi", "comparison": ">", "level": 69}
+    response = MockLLMResponse({"strategy_blueprint": convertible})
+    provider = OpenAICompatibleStrategyBlueprintProvider(
+        provider_config(),
+        http_client=MockLLMClient(response),
+    )
+
+    blueprints = provider.generate("Generate one conservative RSI strategy.", requested_count=1)
+
+    assert len(blueprints) == 1
+    assert blueprints[0].schema_version == "2"
+    assert blueprints[0].slug == "deepseek-rsi-strategy"
+    assert blueprints[0].indicators[0].period == 14
+    assert blueprints[0].entry_rules[0].indicator == "rsi"
+    assert blueprints[0].entry_rules[0].operator == "<"
+
+
 def test_real_llm_provider_rejects_non_json_content_without_leaking_secret(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -303,7 +403,7 @@ def test_real_llm_provider_rejects_invalid_blueprint_without_leaking_secret(
 ) -> None:
     monkeypatch.setenv("TEST_LLM_API_KEY", "test-secret-value")
     invalid_payload = blueprint_payload()
-    invalid_payload["slug"] = "Invalid Slug"
+    invalid_payload["class_name"] = "invalid class"
     response = MockLLMResponse({"blueprints": [invalid_payload]})
     provider = OpenAICompatibleStrategyBlueprintProvider(
         provider_config(),
@@ -315,10 +415,10 @@ def test_real_llm_provider_rejects_invalid_blueprint_without_leaking_secret(
 
     assert "invalid strategy blueprint" in str(exc_info.value)
     assert "blueprint_schema_error" in str(exc_info.value)
-    assert "blueprints[0].slug" in str(exc_info.value)
+    assert "blueprints[0].class_name" in str(exc_info.value)
     assert "test-secret-value" not in str(exc_info.value)
     assert exc_info.value.failure_category == "blueprint_schema_error"
-    assert any("blueprints[0].slug" in item for item in exc_info.value.details)
+    assert any("blueprints[0].class_name" in item for item in exc_info.value.details)
 
 
 def test_service_records_blueprint_schema_failure_diagnostics_without_secret_leak(
