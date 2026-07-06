@@ -58,6 +58,20 @@ def test_backtest_profile_v2_validates_and_exports_snapshots() -> None:
     }
 
 
+def test_backtest_profile_v2_exports_local_futures_runtime_options() -> None:
+    payload = valid_profile_payload()
+    payload["data_source"]["trading_mode"] = "futures"
+    payload["data_source"]["margin_mode"] = "isolated"
+
+    config_snapshot = BacktestProfileV2.model_validate(payload).to_config_snapshot()
+
+    assert config_snapshot["exchange"] == {
+        "name": "okx",
+        "trading_mode": "futures",
+        "margin_mode": "isolated",
+    }
+
+
 @pytest.mark.parametrize("missing_key", ["profile_name", "pair", "timeframe", "timerange", "strategy"])
 def test_backtest_profile_v2_requires_core_fields(missing_key: str) -> None:
     payload = valid_profile_payload()

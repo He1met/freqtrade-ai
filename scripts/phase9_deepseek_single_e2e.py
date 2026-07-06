@@ -369,21 +369,29 @@ def default_backtest_profile(version: StrategyVersion) -> dict[str, Any]:
     class_name = "GeneratedStrategy"
     if isinstance(version.blueprint, dict) and isinstance(version.blueprint.get("class_name"), str):
         class_name = version.blueprint["class_name"]
+    data_source: dict[str, Any] = {
+        "kind": "local",
+        "exchange": os.environ.get("PHASE9_E2E_EXCHANGE", "okx"),
+        "datadir": os.environ.get("PHASE9_E2E_MARKET_DATA_DIR", "user_data/data"),
+    }
+    trading_mode = os.environ.get("PHASE9_E2E_TRADING_MODE", "futures").strip()
+    margin_mode = os.environ.get("PHASE9_E2E_MARGIN_MODE", "isolated").strip()
+    if trading_mode:
+        data_source["trading_mode"] = trading_mode
+    if margin_mode:
+        data_source["margin_mode"] = margin_mode
+
     return {
         "schema_version": "2",
         "profile_name": "phase9-deepseek-single-e2e",
-        "pair": "BTC/USDT",
-        "timeframe": "15m",
-        "timerange": "20240101-20240201",
+        "pair": os.environ.get("PHASE9_E2E_PAIR", "BTC/USDT:USDT"),
+        "timeframe": os.environ.get("PHASE9_E2E_TIMEFRAME", "15m"),
+        "timerange": os.environ.get("PHASE9_E2E_TIMERANGE", "20240101-20240201"),
         "strategy": {
             "name": class_name,
             "path": version.file_path,
         },
-        "data_source": {
-            "kind": "local",
-            "exchange": os.environ.get("PHASE9_E2E_EXCHANGE", "okx"),
-            "datadir": os.environ.get("PHASE9_E2E_MARKET_DATA_DIR", "user_data/data"),
-        },
+        "data_source": data_source,
         "safety": {
             "allow_download": False,
             "allow_exchange_connection": False,

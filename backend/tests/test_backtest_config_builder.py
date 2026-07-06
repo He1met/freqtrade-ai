@@ -103,6 +103,8 @@ def test_builds_config_from_backtest_profile_v2(tmp_path) -> None:
                 "kind": "local",
                 "exchange": "okx",
                 "datadir": "user_data/data/okx",
+                "trading_mode": "futures",
+                "margin_mode": "isolated",
             },
         }
     )
@@ -114,6 +116,8 @@ def test_builds_config_from_backtest_profile_v2(tmp_path) -> None:
     assert config["strategy_path"] == "user_data/strategies/generated"
     assert config["exchange"]["name"] == "okx"
     assert config["exchange"]["pair_whitelist"] == ["BTC/USDT:USDT"]
+    assert config["trading_mode"] == "futures"
+    assert config["margin_mode"] == "isolated"
     assert config["datadir"] == "user_data/data/okx"
     assert config["stake_currency"] == "USDT"
     assert config["stake_amount"] == 125
