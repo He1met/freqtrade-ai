@@ -276,10 +276,12 @@ class LocalBacktestTriggerService:
                 f"{profile.data_source.exchange} {profile.pair} {profile.timeframe}"
             ]
 
-        exact_timerange = [
-            entry for entry in matching_pair_timeframe if entry.timerange == profile.timerange
+        usable_timerange = [
+            entry
+            for entry in matching_pair_timeframe
+            if entry.timerange is None or entry.timerange == profile.timerange
         ]
-        if not exact_timerange:
+        if not usable_timerange:
             return [
                 "no local market data file matches "
                 f"{profile.data_source.exchange} {profile.pair} {profile.timeframe} {profile.timerange}"

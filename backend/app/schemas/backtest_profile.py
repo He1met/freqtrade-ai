@@ -52,6 +52,8 @@ class BacktestProfileDataSource(BaseModel):
     exchange: str = Field(default="okx", min_length=1, max_length=80)
     datadir: str = Field(default="user_data/data", min_length=1, max_length=500)
     data_format: Optional[str] = Field(default=None, min_length=1, max_length=32)
+    trading_mode: Optional[Literal["spot", "futures", "margin"]] = None
+    margin_mode: Optional[Literal["isolated", "cross"]] = None
 
     model_config = {"extra": "forbid"}
 
@@ -119,13 +121,19 @@ class BacktestProfileV2(BaseModel):
         return self.model_dump(mode="json", exclude_none=True)
 
     def to_config_snapshot(self) -> dict[str, Any]:
+        exchange_snapshot: dict[str, Any] = {"name": self.data_source.exchange}
+        if self.data_source.trading_mode:
+            exchange_snapshot["trading_mode"] = self.data_source.trading_mode
+        if self.data_source.margin_mode:
+            exchange_snapshot["margin_mode"] = self.data_source.margin_mode
+
         snapshot: dict[str, Any] = {
             "profile_name": self.profile_name,
             "pair": self.pair,
             "timeframe": self.timeframe,
             "timerange": self.timerange,
             "strategy": self.strategy.name,
-            "exchange": {"name": self.data_source.exchange},
+            "exchange": exchange_snapshot,
             "datadir": self.data_source.datadir,
             "stake_currency": self.stake.currency,
             "stake_amount": self.stake.amount,

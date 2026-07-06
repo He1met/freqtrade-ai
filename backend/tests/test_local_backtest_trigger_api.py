@@ -177,6 +177,44 @@ def test_local_backtest_trigger_creates_pending_records_and_reconciles_status(
         assert db.query(BacktestResult).count() == 0
 
 
+def test_local_backtest_trigger_accepts_futures_data_without_filename_timerange(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_fake_freqtrade(tmp_path, monkeypatch)
+    client, session_factory = client_with_backtest_db(tmp_path)
+    datadir = tmp_path / "user_data" / "data"
+    futures_dir = datadir / "okx" / "futures"
+    futures_dir.mkdir(parents=True)
+    futures_dir.joinpath("BTC_USDT_USDT-15m-futures.feather").write_bytes(b"local futures candles")
+    with session_factory() as db:
+        version_id = seed_strategy_version(db, tmp_path)
+
+    profile = local_profile(datadir)
+    profile["pair"] = "BTC/USDT:USDT"
+    profile["timeframe"] = "15m"
+    profile["data_source"]["trading_mode"] = "futures"
+    profile["data_source"]["margin_mode"] = "isolated"
+
+    try:
+        response = client.post(
+            "/api/backtest-runs/local",
+            json={"strategy_version_id": version_id, "profile": profile},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["preflight_status"] == "ready"
+    checks = checks_by_name(payload)
+    assert checks["local_market_data"]["status"] == "READY"
+    config = json.loads(Path(payload["tasks"][0]["config_path"]).read_text(encoding="utf-8"))
+    assert config["exchange"]["pair_whitelist"] == ["BTC/USDT:USDT"]
+    assert config["trading_mode"] == "futures"
+    assert config["margin_mode"] == "isolated"
+
+
 def test_local_backtest_trigger_blocks_when_local_data_is_missing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
