@@ -76,6 +76,43 @@ function formatEvidence(value: Record<string, unknown>): string {
   return entries.length > 0 ? entries.map(([key, item]) => `${key}: ${String(item)}`).join(", ") : EMPTY_TEXT;
 }
 
+function compactSourceDetail(source: DataSourceTraceSummary | undefined): string {
+  if (!source) {
+    return EMPTY_TEXT;
+  }
+  const databaseIds = formatRecord(source.databaseIds);
+  const artifactRefs = formatRecord(source.artifactRefs);
+  const detail = source.sourceDetail || EMPTY_TEXT;
+  return [detail, databaseIds, artifactRefs, source.blockedReason ?? ""].filter(Boolean).join(" | ");
+}
+
+function CompactText({ className = "", value }: { className?: string; value: string | null | undefined }) {
+  const text = displayValue(value);
+  return (
+    <span className={`lab-compact-text ${className}`} title={text}>
+      {text}
+    </span>
+  );
+}
+
+function LabSourceSummary({ source }: { source: DataSourceTraceSummary | undefined }) {
+  const sourceType = source?.sourceType ?? "unknown";
+  const databaseIds = source ? formatRecord(source.databaseIds) : EMPTY_TEXT;
+  const artifactRefs = source ? formatRecord(source.artifactRefs) : EMPTY_TEXT;
+  const detail = compactSourceDetail(source);
+
+  return (
+    <div className="lab-source-summary" data-core-source={source?.coreData === true ? "true" : "false"} title={detail}>
+      <div className="lab-source-summary-heading">
+        <strong>{sourceType}</strong>
+        <span>{source?.coreData ? "core" : "non-core"}</span>
+      </div>
+      <div className="lab-source-summary-meta">{databaseIds}</div>
+      <div className="lab-source-summary-detail">{artifactRefs !== EMPTY_TEXT ? artifactRefs : source?.sourceDetail}</div>
+    </div>
+  );
+}
+
 function latest<T>(items: T[], count = 6): T[] {
   return items.slice(0, count);
 }
@@ -236,11 +273,19 @@ function DataSourceTable({ rows }: { rows: SourceRow[] }) {
             <tr key={row.label}>
               <td className="primary-cell">{row.label}</td>
               <td>{row.source.sourceType}</td>
-              <td className="path-cell">{row.source.sourceDetail}</td>
+              <td className="path-cell">
+                <CompactText value={row.source.sourceDetail} />
+              </td>
               <td>{displayBoolean(row.source.coreData)}</td>
-              <td className="path-cell">{formatRecord(row.source.databaseIds)}</td>
-              <td className="path-cell">{formatRecord(row.source.artifactRefs)}</td>
-              <td className="path-cell">{row.source.blockedReason ?? EMPTY_TEXT}</td>
+              <td className="path-cell">
+                <CompactText value={formatRecord(row.source.databaseIds)} />
+              </td>
+              <td className="path-cell">
+                <CompactText value={formatRecord(row.source.artifactRefs)} />
+              </td>
+              <td className="path-cell">
+                <CompactText value={row.source.blockedReason ?? EMPTY_TEXT} />
+              </td>
             </tr>
           ))}
         </tbody>
@@ -269,14 +314,14 @@ function StrategyVersionEvidence({
         <table>
           <thead>
             <tr>
-              <th>strategy id</th>
-              <th>version id</th>
-              <th>名称</th>
-              <th>版本</th>
-              <th>验证</th>
-              <th>file state</th>
-              <th>file path</th>
-              <th>DB trace</th>
+              <th className="lab-col-id">strategy id</th>
+              <th className="lab-col-id">version id</th>
+              <th className="lab-col-name">名称</th>
+              <th className="lab-col-tight">版本</th>
+              <th className="lab-col-tight">验证</th>
+              <th className="lab-col-status">file state</th>
+              <th className="lab-col-path">file path</th>
+              <th className="lab-col-source">DB trace</th>
             </tr>
           </thead>
           <tbody>
@@ -288,9 +333,15 @@ function StrategyVersionEvidence({
               };
               return (
                 <tr key={version.id}>
-                  <td>{version.strategyId}</td>
-                  <td>{version.id}</td>
-                  <td>{strategy?.name ?? EMPTY_TEXT}</td>
+                  <td>
+                    <CompactText value={version.strategyId} />
+                  </td>
+                  <td>
+                    <CompactText value={version.id} />
+                  </td>
+                  <td>
+                    <CompactText value={strategy?.name ?? EMPTY_TEXT} />
+                  </td>
                   <td>{version.versionNumber}</td>
                   <td>{displayStatus(version.validationStatus)}</td>
                   <td>
@@ -299,9 +350,11 @@ function StrategyVersionEvidence({
                       <span className="inline-muted"> {fileState.blockedReason}</span>
                     ) : null}
                   </td>
-                  <td className="path-cell">{version.filePath}</td>
+                  <td className="path-cell">
+                    <CompactText value={version.filePath} />
+                  </td>
                   <td className="source-cell">
-                    <SourceMarker source={version.dataSource} />
+                    <LabSourceSummary source={version.dataSource} />
                   </td>
                 </tr>
               );
@@ -327,30 +380,34 @@ function GenerationRunEvidence({ runs }: { runs: MvpData["generationRuns"] }) {
         <table>
           <thead>
             <tr>
-              <th>run id</th>
-              <th>状态</th>
-              <th>provider / model</th>
-              <th>计数</th>
-              <th>错误</th>
-              <th>DB trace</th>
+              <th className="lab-col-id">run id</th>
+              <th className="lab-col-status">状态</th>
+              <th className="lab-col-name">provider / model</th>
+              <th className="lab-col-count">计数</th>
+              <th className="lab-col-reason">错误</th>
+              <th className="lab-col-source">DB trace</th>
             </tr>
           </thead>
           <tbody>
             {rows.map((run) => (
               <tr key={run.id}>
-                <td>{run.id}</td>
+                <td>
+                  <CompactText value={run.id} />
+                </td>
                 <td>
                   <span className={`run-status ${statusClassName(run.status)}`}>{displayStatus(run.status)}</span>
                 </td>
                 <td>
-                  {run.provider} / {run.model}
+                  <CompactText value={`${run.provider} / ${run.model}`} />
                 </td>
                 <td>
                   requested {run.requestedCount}, accepted {run.acceptedCount}, failed {run.failedCount}
                 </td>
-                <td className="reason-cell">{run.errorMessage ?? EMPTY_TEXT}</td>
+                <td className="reason-cell">
+                  <CompactText value={run.errorMessage ?? EMPTY_TEXT} />
+                </td>
                 <td className="source-cell">
-                  <SourceMarker source={run.dataSource} />
+                  <LabSourceSummary source={run.dataSource} />
                 </td>
               </tr>
             ))}
@@ -387,15 +444,15 @@ function BacktestEvidence({
         <table>
           <thead>
             <tr>
-              <th>task id</th>
-              <th>run / version</th>
-              <th>状态</th>
-              <th>pair</th>
-              <th>result id</th>
-              <th>指标</th>
-              <th>artifact</th>
-              <th>source</th>
-              <th>原因</th>
+              <th className="lab-col-id">task id</th>
+              <th className="lab-col-id">run / version</th>
+              <th className="lab-col-status">状态</th>
+              <th className="lab-col-tight">pair</th>
+              <th className="lab-col-id">result id</th>
+              <th className="lab-col-metrics">指标</th>
+              <th className="lab-col-path">artifact</th>
+              <th className="lab-col-source">source</th>
+              <th className="lab-col-reason">原因</th>
             </tr>
           </thead>
           <tbody>
@@ -404,9 +461,11 @@ function BacktestEvidence({
               const result = resultByTaskId.get(task.id);
               return (
                 <tr key={task.id}>
-                  <td>{task.id}</td>
                   <td>
-                    <div>{task.runId}</div>
+                    <CompactText value={task.id} />
+                  </td>
+                  <td>
+                    <CompactText value={task.runId} />
                     <div className="secondary-cell">version {run?.strategyVersionId ?? EMPTY_TEXT}</div>
                   </td>
                   <td>
@@ -417,7 +476,9 @@ function BacktestEvidence({
                   <td>
                     {task.pair} / {task.timeframe}
                   </td>
-                  <td>{result?.id ?? EMPTY_TEXT}</td>
+                  <td>
+                    <CompactText value={result?.id ?? EMPTY_TEXT} />
+                  </td>
                   <td className="metric-summary">
                     {metricRows(result?.metrics ?? task.metrics).map(([label, value]) => (
                       <span key={label}>
@@ -427,12 +488,14 @@ function BacktestEvidence({
                     ))}
                   </td>
                   <td className="path-cell">
-                    {result?.resultPath ?? task.resultPath ?? EMPTY_TEXT}
+                    <CompactText value={result?.resultPath ?? task.resultPath ?? EMPTY_TEXT} />
                   </td>
                   <td className="source-cell">
-                    <SourceMarker source={result?.dataSource ?? task.dataSource} />
+                    <LabSourceSummary source={result?.dataSource ?? task.dataSource} />
                   </td>
-                  <td className="reason-cell">{reasonText(task.blockedReason, task.failedReason, task.errorMessage)}</td>
+                  <td className="reason-cell">
+                    <CompactText value={reasonText(task.blockedReason, task.failedReason, task.errorMessage)} />
+                  </td>
                 </tr>
               );
             })}
@@ -457,35 +520,41 @@ function RankingEvidence({ ranking }: { ranking: RankingEntry[] }) {
         <table>
           <thead>
             <tr>
-              <th>rank</th>
-              <th>score id</th>
-              <th>strategy / version</th>
-              <th>backtest result</th>
-              <th>总分</th>
-              <th>状态</th>
-              <th>file path</th>
-              <th>DB trace</th>
+              <th className="lab-col-tight">rank</th>
+              <th className="lab-col-id">score id</th>
+              <th className="lab-col-id">strategy / version</th>
+              <th className="lab-col-id">backtest result</th>
+              <th className="lab-col-tight">总分</th>
+              <th className="lab-col-status">状态</th>
+              <th className="lab-col-path">file path</th>
+              <th className="lab-col-source">DB trace</th>
             </tr>
           </thead>
           <tbody>
             {rows.map((entry) => (
               <tr key={`${entry.scoreId}-${entry.strategyVersionId}`}>
                 <td>{entry.rank}</td>
-                <td>{displayValue(entry.scoreId)}</td>
                 <td>
-                  <div>{entry.strategyId}</div>
+                  <CompactText value={displayValue(entry.scoreId)} />
+                </td>
+                <td>
+                  <CompactText value={entry.strategyId} />
                   <div className="secondary-cell">version {entry.strategyVersionId}</div>
                 </td>
-                <td>{entry.backtestResultId ?? EMPTY_TEXT}</td>
+                <td>
+                  <CompactText value={entry.backtestResultId ?? EMPTY_TEXT} />
+                </td>
                 <td className="score-cell">{formatScore(entry.totalScore)}</td>
                 <td>
                   <span className={`run-status ${entry.elimination.eliminated ? "status-failed" : "status-success"}`}>
                     {entry.elimination.eliminated ? "已淘汰" : "已入榜"}
                   </span>
                 </td>
-                <td className="path-cell">{entry.filePath}</td>
+                <td className="path-cell">
+                  <CompactText value={entry.filePath} />
+                </td>
                 <td className="source-cell">
-                  <SourceMarker source={entry.dataSource} />
+                  <LabSourceSummary source={entry.dataSource} />
                 </td>
               </tr>
             ))}
@@ -608,8 +677,12 @@ function DryRunReadinessPanel({ data }: { data: MvpData }) {
                     <span className={`run-status ${statusClassName(check.status)}`}>{check.status}</span>
                   </td>
                   <td>{check.summary}</td>
-                  <td className="reason-cell">{check.blockedReason ?? EMPTY_TEXT}</td>
-                  <td className="path-cell">{formatEvidence(check.evidence)}</td>
+                  <td className="reason-cell">
+                    <CompactText value={check.blockedReason ?? EMPTY_TEXT} />
+                  </td>
+                  <td className="path-cell">
+                    <CompactText value={formatEvidence(check.evidence)} />
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -705,11 +778,15 @@ function ControlStatePanel({ data }: { data: MvpData }) {
         </div>
         <div>
           <dt>manifest</dt>
-          <dd className="path-cell">{report?.manifestPath ?? EMPTY_TEXT}</dd>
+          <dd className="path-cell">
+            <CompactText value={report?.manifestPath ?? EMPTY_TEXT} />
+          </dd>
         </div>
         <div>
           <dt>status_snapshot</dt>
-          <dd className="path-cell">{report?.statusSnapshotPath ?? EMPTY_TEXT}</dd>
+          <dd className="path-cell">
+            <CompactText value={report?.statusSnapshotPath ?? EMPTY_TEXT} />
+          </dd>
         </div>
         <div>
           <dt>snapshot_status</dt>

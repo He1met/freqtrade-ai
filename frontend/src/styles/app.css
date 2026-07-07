@@ -997,6 +997,134 @@ td.log-cell {
 
 .lab-table-shell {
   border-radius: 0 0 8px 8px;
+  overflow-x: hidden;
+}
+
+.lab-table-shell table {
+  table-layout: fixed;
+}
+
+.lab-table-shell th,
+.lab-table-shell td {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}
+
+.lab-table-shell td.path-cell,
+.lab-table-shell td.reason-cell {
+  max-width: none;
+  white-space: nowrap;
+}
+
+.lab-table-shell td.source-cell,
+.lab-table-shell td.metric-summary {
+  white-space: normal;
+}
+
+.lab-table-shell td.metric-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 8px;
+  min-width: 0;
+}
+
+.lab-table-shell .metric-summary span {
+  display: flex;
+  min-width: 0;
+  gap: 4px;
+  align-items: baseline;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lab-compact-text {
+  display: block;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lab-source-summary {
+  display: grid;
+  max-width: 100%;
+  min-width: 0;
+  gap: 4px;
+  border-left: 4px solid #6d7882;
+  padding-left: 8px;
+}
+
+.lab-source-summary[data-core-source="true"] {
+  border-left-color: #1f6f4a;
+}
+
+.lab-source-summary-heading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.lab-source-summary-heading strong,
+.lab-source-summary-meta,
+.lab-source-summary-detail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lab-source-summary-heading strong {
+  min-width: 0;
+  color: #17201b;
+}
+
+.lab-source-summary-heading span {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: #edf0eb;
+  color: #526159;
+  padding: 2px 6px;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.lab-source-summary-meta,
+.lab-source-summary-detail {
+  color: #526159;
+  font-size: 12px;
+}
+
+.lab-col-tight {
+  width: 7%;
+}
+
+.lab-col-status {
+  width: 10%;
+}
+
+.lab-col-count {
+  width: 14%;
+}
+
+.lab-col-id {
+  width: 13%;
+}
+
+.lab-col-name {
+  width: 15%;
+}
+
+.lab-col-path,
+.lab-col-reason,
+.lab-col-source {
+  width: 18%;
+}
+
+.lab-col-metrics {
+  width: 16%;
 }
 
 .lab-header-actions {
