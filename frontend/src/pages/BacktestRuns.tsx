@@ -1,4 +1,5 @@
 import { combineDataSources } from "../api/sourceState";
+import type { DataSourceTraceSummary } from "../api/types";
 import { useMvpData } from "../api/useMvpData";
 import {
   buildBacktestMatrixSummary,
@@ -8,8 +9,58 @@ import {
   statusClassName,
 } from "./backtestDisplay";
 import { FallbackNotice } from "./FallbackNotice";
-import { SourceMarker } from "./SourceMarker";
 import { EMPTY_TEXT, displayLoadState, displayStatus } from "./uiCopy";
+
+function formatRecord(record: Record<string, number | string> | undefined): string {
+  const entries = Object.entries(record ?? {});
+  return entries.length > 0 ? entries.map(([key, value]) => `${key}: ${value}`).join(", ") : EMPTY_TEXT;
+}
+
+function compactSourceTitle(source: DataSourceTraceSummary | undefined): string {
+  if (!source) {
+    return "Source metadata was not provided.";
+  }
+  return [
+    `source_type: ${source.sourceType}`,
+    `core_data: ${source.coreData}`,
+    `database_ids: ${formatRecord(source.databaseIds)}`,
+    `artifact_refs: ${formatRecord(source.artifactRefs)}`,
+    `detail: ${source.sourceDetail}`,
+    source.blockedReason ? `blocked: ${source.blockedReason}` : null,
+  ]
+    .filter(Boolean)
+    .join(" | ");
+}
+
+function BacktestSourceSummary({ source }: { source: DataSourceTraceSummary | undefined }) {
+  const databaseCount = Object.keys(source?.databaseIds ?? {}).length;
+  const artifactCount = Object.keys(source?.artifactRefs ?? {}).length;
+  return (
+    <div
+      className="backtest-source-summary"
+      data-core-source={source?.coreData === true ? "true" : "false"}
+      title={compactSourceTitle(source)}
+    >
+      <div className="backtest-source-heading">
+        <strong>{source?.sourceType ?? "unknown"}</strong>
+        <span>{source?.coreData ? "core" : "non-core"}</span>
+      </div>
+      <span>{source?.blockedReason ?? source?.sourceDetail ?? "Source metadata was not provided."}</span>
+      <em>
+        db {databaseCount} / artifacts {artifactCount}
+      </em>
+    </div>
+  );
+}
+
+function CompactPath({ label, value }: { label?: string; value: string }) {
+  return (
+    <span className="compact-path" title={value}>
+      {label ? `${label}: ` : ""}
+      {value}
+    </span>
+  );
+}
 
 export function BacktestRuns() {
   const { data, sources, isLoading, error } = useMvpData();
@@ -87,6 +138,18 @@ export function BacktestRuns() {
       </section>
       <div className="table-shell backtest-table-shell">
         <table>
+          <colgroup>
+            <col className="backtest-col-id" />
+            <col className="backtest-col-strategy" />
+            <col className="backtest-col-status" />
+            <col className="backtest-col-profile" />
+            <col className="backtest-col-count" />
+            <col className="backtest-col-artifact" />
+            <col className="backtest-col-metrics" />
+            <col className="backtest-col-path" />
+            <col className="backtest-col-source" />
+            <col className="backtest-col-reason" />
+          </colgroup>
           <thead>
             <tr>
               <th>批次</th>
@@ -129,7 +192,7 @@ export function BacktestRuns() {
                     <span className={`run-status ${statusClassName(artifact?.status ?? run.status)}`}>
                       {displayStatus(artifact?.status ?? run.status)}
                     </span>
-                    <span title={manifestPath}>manifest：{manifestPath}</span>
+                    <CompactPath label="manifest" value={manifestPath} />
                   </td>
                   <td className="metric-summary">
                     {metricRows(run.metrics).map(([label, value]) => (
@@ -140,10 +203,10 @@ export function BacktestRuns() {
                     ))}
                   </td>
                   <td className="path-cell" title={resultPath}>
-                    {resultPath}
+                    <CompactPath value={resultPath} />
                   </td>
                   <td className="source-cell">
-                    <SourceMarker source={run.dataSource ?? linkedTask?.dataSource} />
+                    <BacktestSourceSummary source={run.dataSource ?? linkedTask?.dataSource} />
                   </td>
                   <td className="reason-cell" title={reason}>
                     {reason}

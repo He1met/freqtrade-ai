@@ -796,9 +796,55 @@ td.log-cell {
   padding-bottom: 9px;
 }
 
+.backtest-table-shell table {
+  table-layout: fixed;
+}
+
+.backtest-col-id {
+  width: 7%;
+}
+
+.backtest-col-strategy {
+  width: 12%;
+}
+
+.backtest-col-status,
+.backtest-col-timeframe,
+.backtest-col-count {
+  width: 7%;
+}
+
+.backtest-col-profile,
+.backtest-col-pair {
+  width: 8%;
+}
+
+.backtest-col-artifact,
+.backtest-col-metrics {
+  width: 13%;
+}
+
+.backtest-col-path,
+.backtest-col-source {
+  width: 10%;
+}
+
+.backtest-col-reason,
+.backtest-col-log {
+  width: 8%;
+}
+
+.backtest-table-shell th,
+.backtest-table-shell td {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}
+
 .backtest-table-shell td.path-cell,
 .backtest-table-shell td.reason-cell {
-  max-width: 280px;
+  max-width: none;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -806,22 +852,31 @@ td.log-cell {
 
 .backtest-table-shell td.artifact-cell,
 .backtest-table-shell td.log-cell {
-  max-width: 300px;
-  min-width: 220px;
+  max-width: none;
+  min-width: 0;
 }
 
 .backtest-table-shell td.metric-summary {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 4px 10px;
-  min-width: 280px;
-  max-width: 320px;
+  min-width: 0;
+  max-width: none;
 }
 
 .backtest-table-shell .artifact-cell span,
 .backtest-table-shell .log-cell span {
-  max-width: 260px;
+  display: block;
+  max-width: 100%;
   margin-bottom: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backtest-table-shell .compact-path {
+  display: block;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -835,6 +890,66 @@ td.log-cell {
   padding: 0;
   line-height: 1.3;
   white-space: nowrap;
+}
+
+.backtest-table-shell .metric-summary strong,
+.backtest-table-shell .metric-summary span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.backtest-table-shell td.source-cell {
+  min-width: 0;
+  white-space: normal;
+}
+
+.backtest-source-summary {
+  display: grid;
+  max-width: 100%;
+  gap: 4px;
+  border-left: 4px solid #6d7882;
+  padding-left: 8px;
+}
+
+.backtest-source-summary[data-core-source="true"] {
+  border-left-color: #1f6f4a;
+}
+
+.backtest-source-heading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.backtest-source-heading strong,
+.backtest-source-summary span,
+.backtest-source-summary em {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backtest-source-heading strong {
+  min-width: 0;
+  color: #17201b;
+}
+
+.backtest-source-heading span {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: #edf0eb;
+  color: #526159;
+  padding: 2px 6px;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.backtest-source-summary span,
+.backtest-source-summary em {
+  color: #526159;
+  font-size: 12px;
+  font-style: normal;
 }
 
 .status-success {
