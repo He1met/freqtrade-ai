@@ -1,9 +1,60 @@
 import { combineDataSources } from "../api/sourceState";
+import type { DataSourceTraceSummary } from "../api/types";
 import { useMvpData } from "../api/useMvpData";
 import { metricRows, reasonText, statusClassName, summarizeText } from "./backtestDisplay";
 import { FallbackNotice } from "./FallbackNotice";
-import { SourceMarker } from "./SourceMarker";
 import { EMPTY_TEXT, displayLoadState, displayStatus } from "./uiCopy";
+
+function formatRecord(record: Record<string, number | string> | undefined): string {
+  const entries = Object.entries(record ?? {});
+  return entries.length > 0 ? entries.map(([key, value]) => `${key}: ${value}`).join(", ") : EMPTY_TEXT;
+}
+
+function compactSourceTitle(source: DataSourceTraceSummary | undefined): string {
+  if (!source) {
+    return "Source metadata was not provided.";
+  }
+  return [
+    `source_type: ${source.sourceType}`,
+    `core_data: ${source.coreData}`,
+    `database_ids: ${formatRecord(source.databaseIds)}`,
+    `artifact_refs: ${formatRecord(source.artifactRefs)}`,
+    `detail: ${source.sourceDetail}`,
+    source.blockedReason ? `blocked: ${source.blockedReason}` : null,
+  ]
+    .filter(Boolean)
+    .join(" | ");
+}
+
+function BacktestSourceSummary({ source }: { source: DataSourceTraceSummary | undefined }) {
+  const databaseCount = Object.keys(source?.databaseIds ?? {}).length;
+  const artifactCount = Object.keys(source?.artifactRefs ?? {}).length;
+  return (
+    <div
+      className="backtest-source-summary"
+      data-core-source={source?.coreData === true ? "true" : "false"}
+      title={compactSourceTitle(source)}
+    >
+      <div className="backtest-source-heading">
+        <strong>{source?.sourceType ?? "unknown"}</strong>
+        <span>{source?.coreData ? "core" : "non-core"}</span>
+      </div>
+      <span>{source?.blockedReason ?? source?.sourceDetail ?? "Source metadata was not provided."}</span>
+      <em>
+        db {databaseCount} / artifacts {artifactCount}
+      </em>
+    </div>
+  );
+}
+
+function CompactPath({ label, value }: { label?: string; value: string }) {
+  return (
+    <span className="compact-path" title={value}>
+      {label ? `${label}: ` : ""}
+      {value}
+    </span>
+  );
+}
 
 export function BacktestTasks() {
   const { data, sources, isLoading, error } = useMvpData();
@@ -23,6 +74,21 @@ export function BacktestTasks() {
       />
       <div className="table-shell backtest-table-shell">
         <table>
+          <colgroup>
+            <col className="backtest-col-id" />
+            <col className="backtest-col-id" />
+            <col className="backtest-col-strategy" />
+            <col className="backtest-col-pair" />
+            <col className="backtest-col-timeframe" />
+            <col className="backtest-col-status" />
+            <col className="backtest-col-artifact" />
+            <col className="backtest-col-metrics" />
+            <col className="backtest-col-path" />
+            <col className="backtest-col-path" />
+            <col className="backtest-col-source" />
+            <col className="backtest-col-reason" />
+            <col className="backtest-col-log" />
+          </colgroup>
           <thead>
             <tr>
               <th>任务</th>
@@ -61,9 +127,7 @@ export function BacktestTasks() {
                       {displayStatus(artifactStatus)}
                     </span>
                     <span>return：{artifact?.returnCode ?? EMPTY_TEXT}</span>
-                    <span title={artifact?.manifestPath ?? EMPTY_TEXT}>
-                      manifest：{artifact?.manifestPath ?? EMPTY_TEXT}
-                    </span>
+                    <CompactPath label="manifest" value={artifact?.manifestPath ?? EMPTY_TEXT} />
                   </td>
                   <td className="metric-summary">
                     {metricRows(task.metrics).map(([label, value]) => (
@@ -74,13 +138,13 @@ export function BacktestTasks() {
                     ))}
                   </td>
                   <td className="path-cell" title={task.configPath ?? EMPTY_TEXT}>
-                    {task.configPath ?? EMPTY_TEXT}
+                    <CompactPath value={task.configPath ?? EMPTY_TEXT} />
                   </td>
                   <td className="path-cell" title={task.resultPath ?? artifact?.resultPath ?? EMPTY_TEXT}>
-                    {task.resultPath ?? artifact?.resultPath ?? EMPTY_TEXT}
+                    <CompactPath value={task.resultPath ?? artifact?.resultPath ?? EMPTY_TEXT} />
                   </td>
                   <td className="source-cell">
-                    <SourceMarker source={task.dataSource} />
+                    <BacktestSourceSummary source={task.dataSource} />
                   </td>
                   <td
                     className="reason-cell"
