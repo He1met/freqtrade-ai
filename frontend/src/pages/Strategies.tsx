@@ -1,10 +1,76 @@
 import { Link } from "react-router-dom";
 
 import { combineDataSources } from "../api/sourceState";
+import type { DataSourceTraceSummary } from "../api/types";
 import { useMvpData } from "../api/useMvpData";
 import { FallbackNotice } from "./FallbackNotice";
-import { SourceMarker } from "./SourceMarker";
-import { EMPTY_TEXT, displayLoadState, displayStatus } from "./uiCopy";
+import { EMPTY_TEXT, displayBoolean, displayLoadState, displayStatus, displayValue } from "./uiCopy";
+
+function compactPath(path: string | null | undefined): string {
+  if (!path) {
+    return EMPTY_TEXT;
+  }
+
+  const normalized = path.replace(/\\/g, "/");
+  const parts = normalized.split("/").filter(Boolean);
+  if (parts.length <= 3) {
+    return normalized;
+  }
+  return `.../${parts.slice(-3).join("/")}`;
+}
+
+function formatRecordSummary(record: Record<string, number | string>): string {
+  const entries = Object.entries(record);
+  if (entries.length === 0) {
+    return EMPTY_TEXT;
+  }
+
+  return entries
+    .slice(0, 2)
+    .map(([key, value]) => `${key}: ${value}`)
+    .join(", ");
+}
+
+function describeSourceTrace(source: DataSourceTraceSummary | undefined): string {
+  if (!source) {
+    return "source_type: unknown";
+  }
+
+  return [
+    `source_type: ${source.sourceType}`,
+    `core_data: ${displayBoolean(source.coreData)}`,
+    `database_ids: ${formatRecordSummary(source.databaseIds)}`,
+    `artifact_refs: ${formatRecordSummary(source.artifactRefs)}`,
+    `detail: ${source.sourceDetail}`,
+    source.blockedReason ? `blocked: ${source.blockedReason}` : null,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function SourceTraceSummary({ source }: { source: DataSourceTraceSummary | undefined }) {
+  const sourceType = source?.sourceType ?? "unknown";
+  const databaseCount = source ? Object.keys(source.databaseIds).length : 0;
+  const artifactCount = source ? Object.keys(source.artifactRefs).length : 0;
+  const detail = source?.blockedReason ?? source?.sourceDetail ?? "Source metadata was not provided.";
+
+  return (
+    <div
+      className="strategy-source-summary"
+      data-core-source={source?.coreData === true ? "true" : "false"}
+      title={describeSourceTrace(source)}
+    >
+      <div className="strategy-source-summary-heading">
+        <strong>{sourceType}</strong>
+        <span>{source?.coreData ? "core" : "non-core"}</span>
+      </div>
+      <span className="strategy-source-summary-detail">{detail}</span>
+      <span className="strategy-source-summary-meta">
+        db {databaseCount} / artifacts {artifactCount}
+      </span>
+    </div>
+  );
+}
 
 export function Strategies() {
   const { data, sources, isLoading, error } = useMvpData();
@@ -22,8 +88,17 @@ export function Strategies() {
         isLoading={isLoading}
         source={source}
       />
-      <div className="table-shell">
+      <div className="table-shell strategies-table-shell">
         <table>
+          <colgroup>
+            <col className="strategies-col-name" />
+            <col className="strategies-col-status" />
+            <col className="strategies-col-timeframe" />
+            <col className="strategies-col-origin" />
+            <col className="strategies-col-version" />
+            <col className="strategies-col-file" />
+            <col className="strategies-col-source" />
+          </colgroup>
           <thead>
             <tr>
               <th>名称</th>
@@ -44,12 +119,14 @@ export function Strategies() {
                   </Link>
                 </td>
                 <td>{displayStatus(strategy.status)}</td>
-                <td>{strategy.timeframe}</td>
-                <td>{strategy.source === "ai_generated" ? "AI 生成" : strategy.source}</td>
+                <td>{displayValue(strategy.timeframe)}</td>
+                <td>{strategy.source === "ai_generated" ? "AI 生成" : displayValue(strategy.source)}</td>
                 <td>{strategy.currentVersion?.versionNumber ?? EMPTY_TEXT}</td>
-                <td className="path-cell">{strategy.currentVersion?.filePath ?? EMPTY_TEXT}</td>
-                <td className="source-cell">
-                  <SourceMarker source={strategy.dataSource} />
+                <td className="strategy-path-cell" title={strategy.currentVersion?.filePath ?? EMPTY_TEXT}>
+                  {compactPath(strategy.currentVersion?.filePath)}
+                </td>
+                <td className="strategy-source-cell">
+                  <SourceTraceSummary source={strategy.dataSource} />
                 </td>
               </tr>
             ))}
