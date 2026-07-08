@@ -1,14 +1,17 @@
 # Roadmap
 
-## 后续功能入口
+## 当前运行入口
 
-Phase 1 到 Phase 7 已完成验收。Phase 8 已通过单独 Epic / Issue 队列打开，
-但后续任何新增功能仍必须先完成
-[feature_intake.md](feature_intake.md)，再按
+当前运行、验证和文档入口见 [index.md](index.md)。Phase 1 到 Phase 9 已完成阶段性
+验收；当前工作是 Phase 9 之后的 refactor/runtime 收紧队列，重点是让页面默认使用
+真实数据库 / backend API 证据，并让 fixture、fallback、mock、unknown 永远不能冒充
+真实运行成功。
+
+后续任何新增功能仍必须先完成 [feature_intake.md](feature_intake.md)，再按
 [acceptance_checklist.md](acceptance_checklist.md) 定义验证命令、人工检查和安全边界。
-Feature Intake 不会自动启动 Phase 9，也不授权 live trading、真实下单、真实交易所连接、
-真实 K 线下载、生产部署、deployment executor、live bot start / stop / deploy controls、
-队列基础设施实现或 Freqtrade 源码修改。
+Feature Intake 不授权 live trading、真实下单、真实交易所连接、真实 K 线下载、生产部署、
+deployment executor、live bot start / stop / deploy controls、生产队列基础设施实现或
+Freqtrade 源码修改。
 
 ## Phase 0: 项目治理与工程骨架
 
@@ -223,7 +226,7 @@ Phase 7 验收不自动授权 Phase 8。Phase 8 已通过新的 Epic / Issue 队
 
 ## Phase 8: Local Strategy Lab 本地真实运行验证
 
-状态：已创建 Epic 和 Issue 队列，尚未完成验收。详见
+状态：已完成验收。详见 [phase8_acceptance.md](phase8_acceptance.md) 和
 [phase8_local_strategy_lab_plan.md](phase8_local_strategy_lab_plan.md)。
 
 Phase 8 的目标是把项目从 offline fixture / mock 展示升级为页面可操作、API 可调用、
@@ -295,5 +298,18 @@ Phase 8 安全边界：
 - 不提供 live bot start / stop / deploy 控制。
 - 不把 fixture、fallback 或 unknown-source 数据伪装成真实数据库成功。
 
-Phase 8 验收不授权 Phase 9、live trading、生产部署或真实下单。后续阶段必须通过新的
-规划 Issue、验收标准和安全审查单独启动。
+Phase 8 验收不授权 live trading、生产部署或真实下单。后续阶段必须通过新的规划 Issue、
+验收标准和安全审查单独启动。
+
+## Phase 9: Operational Readiness / 真实运行打通
+
+状态：已完成本地 Operational Readiness 阶段验收。详见
+[phase9_acceptance.md](phase9_acceptance.md) 和
+[phase9_operational_readiness_plan.md](phase9_operational_readiness_plan.md)。
+
+Phase 9 已证明本地 DB/API/UI 证据路径、DeepSeek ENV-only Provider 边界、回测/评分
+fail-closed 链路、Bug intake 规则和安全边界。Phase 9 之后的当前 refactor/runtime
+队列见 [index.md](index.md)。
+
+Phase 9 不授权 live trading、真实下单、生产部署、生产级队列、自动实盘调度或
+Freqtrade 源码修改。
