@@ -47,7 +47,7 @@ export function displaySource(source: string): string {
     return "fallback 数据";
   }
   if (source === "api") {
-    return "API 数据";
+    return "backend API 数据";
   }
   return source;
 }
