@@ -1,8 +1,7 @@
 import { useMvpData } from "../api/useMvpData";
 import { combineDataSources } from "../api/sourceState";
-import type { RankingScoreBreakdownItem } from "../api/types";
+import type { DataSourceTraceSummary, RankingScoreBreakdownItem } from "../api/types";
 import { FallbackNotice } from "./FallbackNotice";
-import { SourceMarker } from "./SourceMarker";
 import { EMPTY_TEXT, displayLoadState } from "./uiCopy";
 
 const SCORE_LABELS: Record<string, string> = {
@@ -18,6 +17,60 @@ function formatScore(value: number | null) {
 
 function formatBreakdownName(item: RankingScoreBreakdownItem) {
   return SCORE_LABELS[item.name] ?? item.name.replace(/_/g, " ");
+}
+
+function formatRecord(record: Record<string, number | string>): string {
+  const entries = Object.entries(record);
+  return entries.length > 0 ? entries.map(([key, value]) => `${key}: ${value}`).join(", ") : EMPTY_TEXT;
+}
+
+function describeSourceTrace(source: DataSourceTraceSummary | undefined): string {
+  if (!source) {
+    return "source_type: unknown";
+  }
+  return [
+    `source_type: ${source.sourceType}`,
+    `core_data: ${source.coreData}`,
+    `database_ids: ${formatRecord(source.databaseIds)}`,
+    `artifact_refs: ${formatRecord(source.artifactRefs)}`,
+    `detail: ${source.sourceDetail}`,
+    source.blockedReason ? `blocked: ${source.blockedReason}` : null,
+  ]
+    .filter(Boolean)
+    .join(" | ");
+}
+
+function compactPath(path: string | null | undefined): string {
+  if (!path) {
+    return EMPTY_TEXT;
+  }
+  const normalized = path.replace(/\\/g, "/");
+  const segments = normalized.split("/").filter(Boolean);
+  if (segments.length <= 3) {
+    return normalized;
+  }
+  return `.../${segments.slice(-3).join("/")}`;
+}
+
+function RankingSourceSummary({ source }: { source: DataSourceTraceSummary | undefined }) {
+  const sourceType = source?.sourceType ?? "unknown";
+  const idSummary = source ? formatRecord(source.databaseIds) : EMPTY_TEXT;
+  const detail = source?.blockedReason ?? source?.sourceDetail ?? "Source metadata was not provided.";
+
+  return (
+    <div
+      className="ranking-source-summary"
+      data-core-source={source?.coreData === true ? "true" : "false"}
+      title={describeSourceTrace(source)}
+    >
+      <div className="ranking-source-heading">
+        <strong>{sourceType}</strong>
+        <span>{source?.coreData ? "core" : "non-core"}</span>
+      </div>
+      <span>{idSummary}</span>
+      <em>{detail}</em>
+    </div>
+  );
 }
 
 export function Ranking() {
@@ -36,8 +89,19 @@ export function Ranking() {
         isLoading={isLoading}
         source={source}
       />
-      <div className="table-shell">
+      <div className="table-shell ranking-table-shell">
         <table>
+          <colgroup>
+            <col className="ranking-col-rank" />
+            <col className="ranking-col-strategy" />
+            <col className="ranking-col-version" />
+            <col className="ranking-col-score" />
+            <col className="ranking-col-breakdown" />
+            <col className="ranking-col-result" />
+            <col className="ranking-col-reason" />
+            <col className="ranking-col-source" />
+            <col className="ranking-col-file" />
+          </colgroup>
           <thead>
             <tr>
               <th>排名</th>
@@ -89,7 +153,11 @@ export function Ranking() {
                 <td className="reason-cell">
                   {[...entry.elimination.reasons, ...entry.warnings].length > 0 ? (
                     [...entry.elimination.reasons, ...entry.warnings].map((reason) => (
-                      <div className={`reason-line ${reason.severity}`} key={`${reason.code}-${reason.message}`}>
+                      <div
+                        className={`reason-line ${reason.severity}`}
+                        key={`${reason.code}-${reason.message}`}
+                        title={reason.message}
+                      >
                         {reason.message}
                       </div>
                     ))
@@ -98,9 +166,11 @@ export function Ranking() {
                   )}
                 </td>
                 <td className="source-cell">
-                  <SourceMarker source={entry.dataSource} />
+                  <RankingSourceSummary source={entry.dataSource} />
                 </td>
-                <td className="path-cell">{entry.filePath}</td>
+                <td className="path-cell" title={entry.filePath}>
+                  {compactPath(entry.filePath)}
+                </td>
               </tr>
             ))}
           </tbody>

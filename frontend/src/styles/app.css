@@ -1390,6 +1390,141 @@ td.log-cell {
   text-align: right;
 }
 
+.ranking-table-shell {
+  overflow-x: hidden;
+}
+
+.ranking-table-shell table {
+  table-layout: fixed;
+}
+
+.ranking-col-rank {
+  width: 7%;
+}
+
+.ranking-col-strategy {
+  width: 17%;
+}
+
+.ranking-col-version {
+  width: 7%;
+}
+
+.ranking-col-score {
+  width: 8%;
+}
+
+.ranking-col-breakdown {
+  width: 18%;
+}
+
+.ranking-col-result {
+  width: 9%;
+}
+
+.ranking-col-reason {
+  width: 14%;
+}
+
+.ranking-col-source {
+  width: 12%;
+}
+
+.ranking-col-file {
+  width: 8%;
+}
+
+.ranking-table-shell th,
+.ranking-table-shell td {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}
+
+.ranking-table-shell td.breakdown-cell,
+.ranking-table-shell td.reason-cell,
+.ranking-table-shell td.source-cell,
+.ranking-table-shell td.path-cell {
+  min-width: 0;
+  white-space: normal;
+}
+
+.ranking-table-shell td.path-cell {
+  max-width: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ranking-table-shell .score-breakdown {
+  grid-template-columns: minmax(0, 1fr) 44px 48px;
+  max-width: 100%;
+  gap: 6px;
+}
+
+.ranking-table-shell .score-breakdown span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ranking-table-shell .reason-line {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ranking-source-summary {
+  display: grid;
+  max-width: 100%;
+  gap: 4px;
+  border-left: 4px solid #6d7882;
+  padding-left: 8px;
+}
+
+.ranking-source-summary[data-core-source="true"] {
+  border-left-color: #1f6f4a;
+}
+
+.ranking-source-heading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.ranking-source-heading strong,
+.ranking-source-summary span,
+.ranking-source-summary em {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ranking-source-heading strong {
+  min-width: 0;
+  color: #17201b;
+}
+
+.ranking-source-heading span {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: #edf0eb;
+  color: #526159;
+  padding: 2px 6px;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.ranking-source-summary span,
+.ranking-source-summary em {
+  color: #526159;
+  font-size: 12px;
+  font-style: normal;
+}
+
 .outcome-pill {
   display: inline-flex;
   align-items: center;
