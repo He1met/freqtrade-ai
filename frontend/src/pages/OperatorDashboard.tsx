@@ -50,6 +50,38 @@ function reasonSummary(values: string[]): string {
   return values.length > 0 ? summarizeText(values[0]) : EMPTY_TEXT;
 }
 
+function compactDisplay(value: string | number | boolean | null | undefined): string {
+  return summarizeText(formatValue(value));
+}
+
+function CompactDetail({
+  label,
+  value,
+  className,
+}: {
+  label: string;
+  value: string | number | boolean | null | undefined;
+  className?: string;
+}) {
+  const formattedValue = formatValue(value);
+  const summarizedValue = summarizeText(formattedValue);
+  const shouldShowDetails = formattedValue !== EMPTY_TEXT && formattedValue !== summarizedValue;
+
+  return (
+    <span className="operator-compact-cell">
+      <span className={className ?? "operator-compact-line"} title={formattedValue}>
+        {summarizedValue}
+      </span>
+      {shouldShowDetails ? (
+        <details className="operator-cell-details">
+          <summary>{label}</summary>
+          <code>{formattedValue}</code>
+        </details>
+      ) : null}
+    </span>
+  );
+}
+
 function RuntimeStatusCard({ title, status }: { title: string; status: RuntimeStatusSummary }) {
   return (
     <article className="overview-panel operator-status-card">
@@ -116,8 +148,16 @@ function DiagnosticTable({ checks }: { checks: OperatorDiagnosticCheck[] }) {
         <h2>诊断检查</h2>
         <span>{checks.length}</span>
       </div>
-      <div className="table-shell">
+      <div className="table-shell operator-table-shell operator-diagnostics-table-shell">
         <table>
+          <colgroup>
+            <col className="operator-col-check" />
+            <col className="operator-col-status" />
+            <col className="operator-col-area" />
+            <col className="operator-col-source" />
+            <col className="operator-col-evidence" />
+            <col className="operator-col-reason" />
+          </colgroup>
           <thead>
             <tr>
               <th>检查项</th>
@@ -132,18 +172,21 @@ function DiagnosticTable({ checks }: { checks: OperatorDiagnosticCheck[] }) {
             {checks.map((check) => (
               <tr key={`${check.area}:${check.name}`}>
                 <td>
-                  <strong>{check.name}</strong>
+                  <strong title={check.name}>{compactDisplay(check.name)}</strong>
                   <span className="secondary-cell">{check.required ? "必需" : "可选"}</span>
                 </td>
                 <td>{statusPill(check.status)}</td>
-                <td>{check.area}</td>
-                <td>{check.source}</td>
-                <td className="artifact-cell">
-                  <span>{formatValue(check.path)}</span>
+                <td title={check.area}>{compactDisplay(check.area)}</td>
+                <td title={check.source}>{compactDisplay(check.source)}</td>
+                <td className="operator-evidence-cell">
+                  <CompactDetail className="operator-compact-line operator-path-line" label="路径" value={check.path} />
                   <span>{check.exists === null ? "存在状态：未知" : `存在：${displayBoolean(check.exists)}`}</span>
                 </td>
-                <td className="reason-cell">
-                  {summarizeText(firstReason(check.blockedReason, check.unavailableReason, check.summary))}
+                <td className="operator-reason-cell">
+                  <CompactDetail
+                    label="原因"
+                    value={firstReason(check.blockedReason, check.unavailableReason, check.summary)}
+                  />
                 </td>
               </tr>
             ))}
@@ -173,8 +216,16 @@ function ArtifactTable({
         <h2>Artifacts</h2>
         <span>{rows.length}</span>
       </div>
-      <div className="table-shell">
+      <div className="table-shell operator-table-shell operator-artifact-table-shell">
         <table>
+          <colgroup>
+            <col className="operator-col-artifact-name" />
+            <col className="operator-col-status" />
+            <col className="operator-col-group" />
+            <col className="operator-col-source" />
+            <col className="operator-col-artifact-path" />
+            <col className="operator-col-exists" />
+          </colgroup>
           <thead>
             <tr>
               <th>名称</th>
@@ -189,12 +240,14 @@ function ArtifactTable({
             {rows.map((artifact) => (
               <tr key={`${artifact.group}:${artifact.name}:${artifact.path}`}>
                 <td>
-                  <strong>{artifact.name}</strong>
+                  <strong title={artifact.name}>{compactDisplay(artifact.name)}</strong>
                 </td>
                 <td>{statusPill(artifact.status)}</td>
-                <td>{artifact.group}</td>
-                <td>{artifact.source}</td>
-                <td className="path-cell">{artifact.path}</td>
+                <td title={artifact.group}>{compactDisplay(artifact.group)}</td>
+                <td title={artifact.source}>{compactDisplay(artifact.source)}</td>
+                <td className="operator-evidence-cell">
+                  <CompactDetail className="operator-compact-line operator-path-line" label="路径" value={artifact.path} />
+                </td>
                 <td>{displayBoolean(artifact.exists)}</td>
               </tr>
             ))}
