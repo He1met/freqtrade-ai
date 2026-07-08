@@ -266,8 +266,12 @@ python3 scripts/smoke_phase6.py --offline --tmp-dir /tmp/freqtrade-ai-phase6-smo
 
 ## Phase 8 Local Strategy Lab Acceptance
 
-Phase 8 没有在阶段启动时预设单一 offline smoke。Phase 8 的验收核心是证明页面、
-API 和数据库三方一致，而不是只证明 fixture runner 或 smoke 能通过。
+Phase 8 的验收核心是证明页面、API 和数据库三方一致，而不是只证明 fixture runner
+或 smoke 能通过。当前本地 QA 入口是：
+
+```bash
+python3 scripts/smoke_phase8.py --offline --tmp-dir /tmp/freqtrade-ai-phase8-smoke
+```
 
 Phase 8 必须覆盖：
 
@@ -314,3 +318,39 @@ Phase 8 限制和禁止项：
 - 不实现 deployment executor。
 - 不提供 live bot start / stop / deploy 控制。
 - 不把 fixture、fallback、mock 或 unknown-source 数据展示成真实数据库成功。
+
+## Phase 9 Operational Readiness
+
+Phase 9 验收核心是证明本地 real-run 证据链不会被 fake、fixture、fallback 或 mock
+掩盖。安全默认入口是：
+
+```bash
+python3 scripts/phase9_deepseek_single_e2e.py --json
+```
+
+该命令默认不调用真实 DeepSeek。它用于检查 ENV-only provider 边界、缺 key fail-closed、
+数据库/API/UI evidence shape、source marker 和下一步提示。
+
+真实 DeepSeek 单次调用只能在本地 operator 明确授权并提供本地 ENV key 时运行：
+
+```bash
+python3 scripts/phase9_deepseek_single_e2e.py --allow-real-call --json
+```
+
+Phase 9 和当前 refactor/runtime PR 必须覆盖：
+
+- `generation_run`、`strategy`、`strategy_version`、策略文件、回测、评分和页面展示链路。
+- 页面、API response 和数据库查询可以对账。
+- `database` / `api_aggregate` 只有在包含 `database_ids` 时才能作为核心验收数据。
+- `fixture`、`fallback`、`mock`、`unknown` 必须显示为非核心。
+- 缺少 key、缺少本地行情、缺少 artifact 或解析失败时返回 `FAILED` / `BLOCKED`，不得伪造成功。
+- 核心按钮必须留下 success / failed / BLOCKED 证据，而不是只依赖 console 或短暂 toast。
+
+Phase 9 限制和禁止项：
+
+- 不启动 live trading。
+- 不执行真实下单。
+- 不连接真实交易所或生产环境。
+- 不把真实 key/token/passphrase 写入代码、配置、数据库、日志、页面、报告、Issue 或 PR。
+- 不修改 Freqtrade 源码。
+- 不实现生产队列、worker pool、deployment executor 或自动实盘调度。

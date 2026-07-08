@@ -30,11 +30,13 @@ git diff --check
 | Phase 5 Dry-run / FreqUI 管理 | `python3 scripts/smoke_phase5.py --offline --tmp-dir /tmp/freqtrade-ai-phase5-smoke` |
 | Phase 6 实盘候选与部署治理 | `python3 scripts/smoke_phase6.py --offline --tmp-dir /tmp/freqtrade-ai-phase6-smoke` |
 | Phase 7 工程化与只读运行可见性 | `python3 scripts/smoke_phase7.py --offline --tmp-dir /tmp/freqtrade-ai-phase7-smoke` |
+| Phase 8 Local Strategy Lab / DB-API-UI 对账 | `python3 scripts/smoke_phase8.py --offline --tmp-dir /tmp/freqtrade-ai-phase8-smoke` |
+| Phase 9 DeepSeek 单次 E2E 安全默认路径 | `python3 scripts/phase9_deepseek_single_e2e.py --json` |
 
-Phase 8 尚未有单一 canonical smoke。Phase 8 PR 必须按
-[phase8_local_strategy_lab_plan.md](phase8_local_strategy_lab_plan.md) 和对应 Issue
-验收标准记录 API、UI、数据库、artifact、source marker、fail-closed 和安全边界证据。
-`#244` 负责建立页面/API/数据库三方对账 E2E，`#247` 负责最终阶段验收。
+Phase 8 / Phase 9 和当前 refactor/runtime PR 必须记录 API、UI、数据库、artifact、
+source marker、fail-closed 和安全边界证据。真实 DeepSeek 调用只允许在本地 operator
+明确授权后运行 `python3 scripts/phase9_deepseek_single_e2e.py --allow-real-call --json`；
+默认 PR 验证不得泄露或持久化真实 key。
 
 ## PR 验收清单
 
@@ -87,4 +89,4 @@ Docs-only PR 至少在描述中写明：
 - 修改范围仅限文档、Issue 模板或链接；
 - 未运行 backend pytest / compileall / frontend build / smoke 的原因；
 - 已运行的检查，例如 `git diff --check`、Issue template front matter 检查、文档链接检查；
-- 本 PR 不启动 Phase 9、不修改 Freqtrade 源码、不新增 live trading 或生产交易控制能力。
+- 本 PR 不修改 Freqtrade 源码、不新增 live trading、真实下单、生产部署或生产交易控制能力。
