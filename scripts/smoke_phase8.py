@@ -46,7 +46,7 @@ if (
 if str(BACKEND_PATH) not in sys.path:
     sys.path.insert(0, str(BACKEND_PATH))
 
-from sqlalchemy import select  # noqa: E402
+from sqlalchemy import select, text  # noqa: E402
 
 from app.db.session import create_database_engine, create_session_factory, get_db  # noqa: E402
 from app.models import Base  # noqa: E402
@@ -84,6 +84,49 @@ KEY_API_PATHS = (
     "/api/backtest-tasks",
     "/api/backtest-results",
     "/api/ranking",
+)
+
+TABLE_RECONCILIATION = {
+    "strategies": ("strategy_id", "SELECT * FROM strategies WHERE id = :strategy_id;"),
+    "strategy_generation_runs": (
+        "strategy_generation_run_id",
+        "SELECT * FROM strategy_generation_runs WHERE id = :strategy_generation_run_id;",
+    ),
+    "strategy_versions": (
+        "strategy_version_id",
+        "SELECT * FROM strategy_versions WHERE id = :strategy_version_id;",
+    ),
+    "backtest_runs": ("backtest_run_id", "SELECT * FROM backtest_runs WHERE id = :backtest_run_id;"),
+    "backtest_tasks": ("backtest_task_id", "SELECT * FROM backtest_tasks WHERE id = :backtest_task_id;"),
+    "backtest_results": (
+        "backtest_result_id",
+        "SELECT * FROM backtest_results WHERE id = :backtest_result_id;",
+    ),
+    "strategy_scores": (
+        "strategy_score_id",
+        "SELECT * FROM strategy_scores WHERE id = :strategy_score_id;",
+    ),
+}
+
+PAGE_EVIDENCE_POINTS = (
+    {
+        "route": "/local-strategy-lab",
+        "section": "generation and strategy version",
+        "api_paths": ["/api/strategy-generation-runs", "/api/strategies", "/api/strategy-versions"],
+        "required_ids": ["strategy_generation_run_id", "strategy_id", "strategy_version_id"],
+    },
+    {
+        "route": "/local-strategy-lab",
+        "section": "backtest run, task, and result",
+        "api_paths": ["/api/backtest-runs", "/api/backtest-tasks", "/api/backtest-results"],
+        "required_ids": ["backtest_run_id", "backtest_task_id", "backtest_result_id"],
+    },
+    {
+        "route": "/local-strategy-lab",
+        "section": "ranking and score",
+        "api_paths": ["/api/ranking"],
+        "required_ids": ["strategy_score_id", "backtest_result_id"],
+    },
 )
 
 
@@ -337,6 +380,22 @@ def is_non_core_source(source: Any) -> bool:
 
 def reconcile_database(context: Phase8SmokeContext) -> None:
     with context.session_factory() as session:
+        table_queries: dict[str, Any] = {}
+        for table, (id_field, sql) in TABLE_RECONCILIATION.items():
+            rows = session.execute(text(sql), context.core_ids).mappings().all()
+            expected_id = context.core_ids[id_field]
+            if len(rows) != 1 or rows[0].get("id") != expected_id:
+                raise RuntimeError(
+                    f"{table} reconciliation expected one id={expected_id} row, got {len(rows)}"
+                )
+            table_queries[table] = {
+                "status": "PASS",
+                "id_field": id_field,
+                "expected_id": expected_id,
+                "row_count": len(rows),
+                "sql": sql,
+            }
+
         version = session.get(StrategyVersion, context.core_ids["strategy_version_id"])
         result = session.get(BacktestResult, context.core_ids["backtest_result_id"])
         if version is None or result is None:
@@ -397,6 +456,12 @@ def reconcile_database(context: Phase8SmokeContext) -> None:
         context.checks["database_reconciliation"] = {
             "status": "PASS",
             "core_ids": context.core_ids,
+            "table_queries": table_queries,
+            "source_contract": {
+                "strategy_version": version_read.data_source.model_dump(mode="json"),
+                "backtest_result": result_read.data_source.model_dump(mode="json"),
+                "ranking": rank_entry.data_source.model_dump(mode="json"),
+            },
             "ranking_entries": len(ranking),
             "source_counts": source_counts,
             "non_core_strategy_versions": len(non_core_versions),
@@ -477,6 +542,36 @@ def assert_api_payload(context: Phase8SmokeContext, payloads: dict[str, Any]) ->
         raise RuntimeError("Expected fixture/fallback/unknown API rows to remain non-core")
 
 
+def core_api_snapshot(context: Phase8SmokeContext, payloads: dict[str, Any]) -> dict[str, Any]:
+    selectors = {
+        "strategy": ("/api/strategies", "id", "strategy_id"),
+        "generation_run": ("/api/strategy-generation-runs", "id", "strategy_generation_run_id"),
+        "strategy_version": ("/api/strategy-versions", "id", "strategy_version_id"),
+        "backtest_run": ("/api/backtest-runs", "id", "backtest_run_id"),
+        "backtest_task": ("/api/backtest-tasks", "id", "backtest_task_id"),
+        "backtest_result": ("/api/backtest-results", "id", "backtest_result_id"),
+        "ranking": ("/api/ranking", "score_id", "strategy_score_id"),
+    }
+    snapshot: dict[str, Any] = {}
+    for label, (path, payload_id, core_id) in selectors.items():
+        expected_id = context.core_ids[core_id]
+        item = next((row for row in payloads[path] if row.get(payload_id) == expected_id), None)
+        if item is None:
+            raise RuntimeError(f"{path} did not contain {payload_id}={expected_id}")
+        source = item.get("data_source") or {}
+        snapshot[label] = {
+            "api_path": path,
+            "payload_id": expected_id,
+            "database_ids": source.get("database_ids") or {},
+            "artifact_refs": source.get("artifact_refs") or {},
+            "data_source": {
+                "source_type": source.get("source_type"),
+                "core_data": source.get("core_data"),
+            },
+        }
+    return snapshot
+
+
 def probe_api(context: Phase8SmokeContext, fetcher: Callable[[str], tuple[int, Any]]) -> None:
     payloads: dict[str, Any] = {}
     statuses: dict[str, int] = {}
@@ -490,10 +585,41 @@ def probe_api(context: Phase8SmokeContext, fetcher: Callable[[str], tuple[int, A
         counts[path] = len(payload) if isinstance(payload, list) else 1
 
     assert_api_payload(context, payloads)
+    before_refresh = core_api_snapshot(context, payloads)
+
+    refreshed_payloads: dict[str, Any] = {}
+    for path in KEY_API_PATHS:
+        status, payload = fetcher(path)
+        if status >= 400:
+            raise RuntimeError(f"Refresh of key API {path} returned HTTP {status}")
+        refreshed_payloads[path] = payload
+    assert_api_payload(context, refreshed_payloads)
+    after_refresh = core_api_snapshot(context, refreshed_payloads)
+    if before_refresh != after_refresh:
+        raise RuntimeError("Core database_ids, artifact_refs, or data_source changed after refresh")
+
+    db_sources = context.checks["database_reconciliation"]["source_contract"]
+    for label in ("strategy_version", "backtest_result", "ranking"):
+        api_item = before_refresh[label]
+        db_source = db_sources[label]
+        if api_item["database_ids"] != db_source["database_ids"]:
+            raise RuntimeError(f"{label} database_ids differ between DB schema and API")
+        if api_item["artifact_refs"] != db_source["artifact_refs"]:
+            raise RuntimeError(f"{label} artifact_refs differ between DB schema and API")
+        if api_item["data_source"] != {
+            "source_type": db_source["source_type"],
+            "core_data": db_source["core_data"],
+        }:
+            raise RuntimeError(f"{label} data_source differs between DB schema and API")
+
     context.checks["api_reconciliation"] = {
         "status": "PASS",
         "http_statuses": statuses,
         "item_counts": counts,
+        "core_snapshot_before_refresh": before_refresh,
+        "core_snapshot_after_refresh": after_refresh,
+        "refresh_stable": True,
+        "db_api_source_contract_match": True,
     }
     log(f"  api_reconciliation=PASS key_paths={len(KEY_API_PATHS)}")
 
@@ -632,15 +758,44 @@ def safety_boundary() -> dict[str, bool]:
     }
 
 
-def write_evidence(context: Phase8SmokeContext, *, frontend_checked: bool) -> None:
+def write_evidence(
+    context: Phase8SmokeContext,
+    *,
+    frontend_checked: bool,
+    outcome: Optional[str] = None,
+    outcome_reason: Optional[str] = None,
+) -> None:
+    required_checks = ["database_reconciliation", "api_reconciliation"]
+    if frontend_checked:
+        required_checks.append("frontend_page")
+    failed_checks = [name for name in required_checks if context.checks.get(name, {}).get("status") != "PASS"]
+    acceptance_status = outcome or ("PASS" if not failed_checks else "FAILED")
     payload = {
-        "status": "PASS",
+        "status": acceptance_status,
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "phase": "Phase 8",
         "scope": "page/api/database reconciliation",
         "core_ids": context.core_ids,
         "local_test_summary": context.local_test_summary,
         "checks": context.checks,
+        "page_evidence_points": list(PAGE_EVIDENCE_POINTS),
+        "acceptance": {
+            "status": acceptance_status,
+            "acceptance_ready": acceptance_status == "PASS",
+            "required_checks": required_checks,
+            "failed_checks": failed_checks,
+            "blocked_reason": outcome_reason if acceptance_status == "BLOCKED" else None,
+            "failed_reason": outcome_reason if acceptance_status == "FAILED" else None,
+            "next_action": (
+                "Restore the missing local capability and rerun the smoke."
+                if acceptance_status == "BLOCKED"
+                else "Fix the failed reconciliation and rerun the smoke."
+                if acceptance_status == "FAILED"
+                else "Attach browser screenshots for the listed page evidence points."
+                if not frontend_checked
+                else None
+            ),
+        },
         "frontend_checked": frontend_checked,
         "safety": safety_boundary(),
     }
@@ -654,9 +809,24 @@ def stop_processes(context: Phase8SmokeContext) -> None:
         managed.stop()
 
 
+def classify_failure(exc: Exception) -> str:
+    message = str(exc).lower()
+    environment_markers = (
+        "refusing unsafe",
+        "refusing local test db operation",
+        "database target",
+        "could not connect",
+        "connection refused",
+        "timed out waiting",
+        "no such file or directory",
+    )
+    return "BLOCKED" if any(marker in message for marker in environment_markers) else "FAILED"
+
+
 def main() -> int:
     args = parse_args()
     context = create_context(args)
+    exit_code = 0
     try:
         run_step("prepare local evidence directory", lambda: prepare_tmp_dir(context.tmp_dir))
         run_step("guard, reset, and seed Phase 8 database", lambda: setup_database(context))
@@ -670,11 +840,27 @@ def main() -> int:
             if not args.skip_frontend:
                 run_step("check Local Strategy Lab page delivery", lambda: probe_frontend(context, args.timeout_seconds))
         run_step("write QA evidence", lambda: write_evidence(context, frontend_checked=(not args.offline and not args.skip_frontend)))
+    except Exception as exc:
+        outcome = classify_failure(exc)
+        exit_code = 2 if outcome == "BLOCKED" else 1
+        try:
+            prepare_tmp_dir(context.tmp_dir)
+            write_evidence(
+                context,
+                frontend_checked=(not args.offline and not args.skip_frontend),
+                outcome=outcome,
+                outcome_reason=str(exc),
+            )
+        except Exception as evidence_exc:
+            log(f"[FAIL] unable to write failure evidence: {evidence_exc}")
     finally:
         stop_processes(context)
 
-    if args.json:
+    if args.json and context.evidence_path.exists():
         print(context.evidence_path.read_text(encoding="utf-8"), end="")
+    if exit_code:
+        log(f"[{('BLOCKED' if exit_code == 2 else 'FAILED')}] Phase 8 E2E reconciliation incomplete")
+        return exit_code
     log("[PASS] Phase 8 E2E reconciliation completed")
     return 0
 
