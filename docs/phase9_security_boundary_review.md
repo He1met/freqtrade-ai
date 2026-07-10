@@ -105,7 +105,7 @@ states, and URLs. They did not print bodies or candidate values.
 | `#273` Backtest result and score DB | Artifacts and metrics must not include secret values; result success requires DB IDs. |
 | `#274` and `#275` Frontend display | Pages must show source type and blockers; never show secret values or fake real success. |
 | `#277` Single DeepSeek E2E | At most one narrow real call unless explicitly approved; record redacted provider metadata and DB/API/UI evidence. |
-| `#278` Hourly local design | Design only; no production scheduler, live trading, real orders, or queue infrastructure. |
+| `#330` Hourly local design | Design only; no production scheduler, live trading, real orders, or queue infrastructure. Require pause/cancel controls, a single-use lease, no concurrent attempts, and fail-closed preflight before any Provider call. |
 
 ## Bug Triggers
 

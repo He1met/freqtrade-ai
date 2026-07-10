@@ -218,7 +218,7 @@ Use the following split for Phase 9 issue triage:
 | 11 | `#275` | Source markers and no-real-data explanations. | Backlog |
 | 12 | `#276` | Local test DB data and failure-state QA support. | Backlog |
 | 13 | `#277` | Single controlled DeepSeek real-run E2E. | Backlog |
-| 14 | `#278` | Hourly local controlled run design. | Backlog |
+| 14 | `#330` | Hourly local controlled run design. | Backlog |
 | 15 | `#279` | Structured Bug issue flow. | Backlog |
 | 16 | `#281` | Deferred Phase 10 / productionization boundary. | Backlog |
 | 17 | `#282` | Phase 9 review and Project closeout. | Blocked |
@@ -236,13 +236,16 @@ production scheduler by default.
 The detailed design is
 [phase9_hourly_local_controlled_run_design.md](phase9_hourly_local_controlled_run_design.md).
 It defines local-only state, pause/disable controls, failure semantics,
-single-flight lease expectations, and the Phase 10 queue boundary.
+single-flight single-use lease expectations, pre-implementation acceptance
+gates, and the Phase 10 queue boundary.
 
 Required design properties:
 
 - local-only operation;
 - at most one generated strategy per hour;
 - explicit pause/disable control;
+- fail-closed preflight before lease claim or Provider call;
+- one single-use lease per attempt with no concurrent manual/scheduled overlap;
 - durable run records;
 - failed run records;
 - strategy file and backtest task linkage;

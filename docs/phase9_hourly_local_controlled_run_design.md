@@ -16,6 +16,11 @@ The default product state is `DISABLED`. A future implementation must require
 an explicit local enable switch and must provide a visible pause/stop control
 before any periodic run can start.
 
+Pause is part of the core safety boundary, not a convenience feature. A future
+implementation must let the operator pause before the next scheduled window,
+pause while an attempt is waiting to claim work, and cancel a currently running
+attempt into a durable terminal state instead of silently continuing.
+
 ## Implementation Gate
 
 Issue `#330` authorizes design and acceptance criteria only. Implementation of
@@ -37,6 +42,11 @@ missing DeepSeek credential, unavailable Provider network, missing Freqtrade
 binary, missing market data, unsafe DB target, or unwritable artifact path
 keeps implementation `BLOCKED`; it does not justify enabling a partial hourly
 loop.
+
+The gate also requires prior acceptance evidence from the single-run issues
+that prove the chain in isolation. The hourly issue must not be used to
+"finish" missing Provider, file, backtest, scoring, or reconciliation work
+that should already be accepted elsewhere.
 
 ## Required Inputs
 
@@ -74,11 +84,31 @@ store a local lease owner, start timestamp, heartbeat timestamp, and expiry
 deadline. If the heartbeat expires, the attempt becomes `STALE`; it must not be
 silently retried as success.
 
+## Lease Contract
+
+The hourly runner needs a single-use local lease with fail-closed semantics:
+
+- exactly one active lease may exist across scheduled and manual entry points;
+- a lease is created only after preflight decides the run is eligible to start;
+- each lease may authorize only one generation-plus-backtest attempt;
+- lease renewal must be explicit and heartbeat-based, never inferred from stale
+  process state;
+- pause, cancel, or expiry must revoke the lease before any new attempt can
+  start;
+- loss of lease ownership must stop downstream steps and persist `STALE` or
+  `CANCELLED`, never `COMPLETED`.
+
+The design must forbid overlapping leases from scheduler ticks, "run now"
+clicks, restarted local processes, or duplicated browser tabs. Any ambiguity in
+lease ownership is a fail-closed condition.
+
 ## Cadence Rules
 
 - At most one attempt per wall-clock hour.
 - No catch-up storm after downtime; missed hours are skipped.
 - Manual "run now" is allowed only if no active lease exists.
+- Manual "run now" must consume the same single-use lease path as the scheduled
+  trigger; it cannot bypass cadence, pause, or concurrency guards.
 - Backoff after `FAILED` or repeated `BLOCKED` results is recorded in DB and
   visible in the UI.
 - A pause takes effect before the next attempt and should also allow cancelling
@@ -94,20 +124,29 @@ parallel paths:
 3. Validate Provider config, credential presence, DB guard, local data,
    Freqtrade binary, strategy output directory, artifact directory, and safety
    flags.
-4. If any preflight check is blocked, persist `BLOCKED` and stop.
-5. If preflight is ready, make exactly one Provider request for one strategy.
-6. Persist `strategy_generation_run`, `strategy`, and `strategy_version`.
-7. Write and validate the strategy file in the approved local directory.
-8. Create a local backtest run/task through the existing local backtest
+4. If any preflight check is blocked, persist `BLOCKED` and stop without
+   claiming a runnable lease.
+5. If preflight is ready, claim one single-use lease for one attempt.
+6. Re-check paused/cancelled state immediately after the lease claim; if the
+   operator stopped the run, persist `CANCELLED` and release the lease.
+7. Make exactly one Provider request for one strategy.
+8. Persist `strategy_generation_run`, `strategy`, and `strategy_version`.
+9. Write and validate the strategy file in the approved local directory.
+10. Create a local backtest run/task through the existing local backtest
    preflight service.
-9. Execute or ingest only local backtest artifacts allowed by a later
+11. Execute or ingest only local backtest artifacts allowed by a later
    implementation issue.
-10. Persist `backtest_result` and `strategy_score`.
-11. Expose browser/API/DB evidence and mark the attempt `COMPLETED` only when
+12. Persist `backtest_result` and `strategy_score`.
+13. Expose browser/API/DB evidence and mark the attempt `COMPLETED` only when
     all core data sources are traceable.
+14. Release the lease on every terminal path.
 
 Any fake, fixture, fallback, mock, unknown, missing-artifact, parser-failed, or
 score-missing path must remain `BLOCKED` or `FAILED`.
+
+No step may downgrade a previously detected blocker into a warning just to keep
+the hourly chain moving. The design stays fail-closed from first preflight
+check through final evidence reconciliation.
 
 ## Data And Evidence
 
@@ -140,6 +179,7 @@ Future API endpoints should support:
 The UI must show:
 
 - current state and next eligible time;
+- whether a lease is active, stale, cancelled, or blocked from renewal;
 - whether the latest attempt can be accepted as real evidence;
 - linked database IDs and artifact refs;
 - `BLOCKED` or `FAILED` reasons and required actions;
@@ -152,6 +192,9 @@ No page may display fixture/fallback/mock rows as hourly success.
 | Failure | Required Result |
 | --- | --- |
 | Missing provider credential | `BLOCKED`, no provider request. |
+| Pause requested before lease claim | `PAUSED`, no lease claim and no provider request. |
+| Pause or cancel requested after lease claim | `CANCELLED`, lease released, no silent resume. |
+| Duplicate trigger while lease is active | `BLOCKED` or rejected control action, no second run. |
 | Provider request failure | `FAILED`, durable generation run with redacted error. |
 | Provider returns invalid blueprint | `FAILED`, durable generation run and validation reason. |
 | Strategy file missing or checksum mismatch | `BLOCKED` or `FAILED`, no accepted backtest. |
@@ -179,10 +222,14 @@ later approved Phase 10 or productionization issue.
 
 QA should accept the design only if it answers:
 
+- Which earlier accepted issues prove the Provider path and the minimum
+  generation-to-backtest chain before hourly work starts?
 - How is the runner disabled by default?
 - How can an operator pause, resume, cancel, or run once?
 - How does it prevent more than one attempt per hour?
 - How does it prevent concurrent attempts?
+- How does the single-use lease behave on pause, cancel, duplicate trigger, and
+  expiry?
 - Where are `BLOCKED`, `FAILED`, `STALE`, and `COMPLETED` persisted?
 - Which existing tables prove Provider, strategy, file, backtest, result, and
   score evidence?
@@ -203,8 +250,8 @@ If any answer is missing, the future implementation issue should remain blocked.
 | --- | --- |
 | At most one strategy and backtest per hour | Cadence allows at most one attempt per wall-clock hour and skips missed hours. |
 | Wait for the single DeepSeek and minimum chain | The implementation gate requires real, refreshable Provider, DB, file, backtest, result, score, and manifest evidence. |
-| Pause and shutdown | Default is `DISABLED`; API/UI must support disable, pause/resume, and cancellation. |
-| No concurrency | A single local lease permits only one `RUNNING` attempt and records stale lease expiry. |
+| Pause and shutdown | Default is `DISABLED`; API/UI must support disable, pause/resume, cancellation, and visible lease revocation. |
+| No concurrency | A single-use local lease permits only one `RUNNING` attempt and records stale lease expiry. |
 | Run and failure records | State, linked database IDs, artifact refs, and redacted reasons are durable and visible through DB/API/UI. |
 | Page history and actionable empty states | UI lists recent attempts and shows acceptance state, missing conditions, next action, and Gap classification instead of fake success. |
 | QA-verifiable safety boundary | Real data sources are reconcilable after refresh; mock/fallback data cannot complete a run. |
