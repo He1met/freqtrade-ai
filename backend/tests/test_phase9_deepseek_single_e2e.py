@@ -53,7 +53,7 @@ def test_deepseek_single_e2e_blocks_without_explicit_real_call() -> None:
         payload = json.loads(result.stdout)
 
         assert payload["status"] == "BLOCKED"
-        assert payload["issue"] == "#326"
+        assert payload["issue"] == "#334"
         assert payload["evidence"]["status"] == "BLOCKED"
         assert payload["evidence"]["ids"]["strategy_generation_run_id"] > 0
         assert payload["evidence"]["acceptance_ready"] is False
