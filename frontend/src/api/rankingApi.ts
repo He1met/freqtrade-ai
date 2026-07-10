@@ -6,19 +6,13 @@ import type {
 } from "./normalizers";
 
 export function loadRankingCollections(
-  fallback: {
-    ranking: RawRankingEntry[];
-    failureReasons: RawStrategyFailureReason[];
-    versionLineage: RawStrategyVersionLineageEntry[];
-  },
   signal?: AbortSignal,
 ) {
   return Promise.all([
-    fetchList(["/ranking", "/strategy-ranking", "/mvp/ranking"], fallback.ranking, signal),
-    fetchList(["/strategy-failure-reasons", "/mvp/strategy-failure-reasons"], fallback.failureReasons, signal),
-    fetchList(
+    fetchList<RawRankingEntry>(["/ranking", "/strategy-ranking", "/mvp/ranking"], signal),
+    fetchList<RawStrategyFailureReason>(["/strategy-failure-reasons", "/mvp/strategy-failure-reasons"], signal),
+    fetchList<RawStrategyVersionLineageEntry>(
       ["/strategy-version-lineage", "/strategy-versions/lineage", "/mvp/strategy-version-lineage"],
-      fallback.versionLineage,
       signal,
     ),
   ]);

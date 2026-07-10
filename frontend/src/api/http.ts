@@ -73,18 +73,33 @@ export async function postJson<T>(path: string, body: unknown, signal?: AbortSig
   return response.json() as Promise<T>;
 }
 
-export async function fetchList<T>(paths: string[], fallback: T[], signal?: AbortSignal) {
-  for (const path of paths) {
-    try { return { items: await fetchJson<T[]>(path, signal), usedFallback: false }; }
-    catch (error) { if (signal?.aborted) throw error; }
-  }
-  return { items: fallback, usedFallback: true };
+function requestFailure(paths: string[], errors: unknown[]): Error {
+  const detail = errors
+    .map((error) => error instanceof Error ? error.message : String(error))
+    .join("; ");
+  return new Error(`Backend API request failed for ${paths.join(" or ")}: ${detail}`);
 }
 
-export async function fetchValue<T>(paths: string[], fallback: T, signal?: AbortSignal) {
+export async function fetchList<T>(paths: string[], signal?: AbortSignal) {
+  const errors: unknown[] = [];
+  for (const path of paths) {
+    try { return { items: await fetchJson<T[]>(path, signal), usedFallback: false }; }
+    catch (error) {
+      if (signal?.aborted) throw error;
+      errors.push(error);
+    }
+  }
+  throw requestFailure(paths, errors);
+}
+
+export async function fetchValue<T>(paths: string[], signal?: AbortSignal) {
+  const errors: unknown[] = [];
   for (const path of paths) {
     try { return { item: await fetchJson<T>(path, signal), usedFallback: false }; }
-    catch (error) { if (signal?.aborted) throw error; }
+    catch (error) {
+      if (signal?.aborted) throw error;
+      errors.push(error);
+    }
   }
-  return { item: fallback, usedFallback: true };
+  throw requestFailure(paths, errors);
 }

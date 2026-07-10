@@ -30,7 +30,7 @@ export const MVP_DATA_SET_KEYS: MvpDataSetKey[] = [
 ];
 
 export function fallbackMvpDataSources(): MvpDataSources {
-  return Object.fromEntries(MVP_DATA_SET_KEYS.map((key) => [key, "fallback"])) as MvpDataSources;
+  return Object.fromEntries(MVP_DATA_SET_KEYS.map((key) => [key, "failed"])) as MvpDataSources;
 }
 
 export function combineDataSources(
@@ -38,9 +38,11 @@ export function combineDataSources(
   keys: MvpDataSetKey[],
 ): DataSource {
   if (keys.length === 0) {
-    return "fallback";
+    return "failed";
   }
-  return keys.every((key) => sources[key] === "api") ? "api" : "fallback";
+  if (keys.every((key) => sources[key] === "api")) return "api";
+  if (keys.some((key) => sources[key] === "failed")) return "failed";
+  return "fixture";
 }
 
 export function hasDatabaseIds(source: DataSourceTraceSummary | undefined): boolean {

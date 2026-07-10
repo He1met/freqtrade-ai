@@ -1,4 +1,4 @@
-export type DataSource = "api" | "fallback";
+export type DataSource = "api" | "fixture" | "failed";
 
 export type MvpDataSetKey =
   | "strategies"
