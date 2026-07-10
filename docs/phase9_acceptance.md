@@ -30,7 +30,7 @@ the review and Epic items that this acceptance PR closes:
 | `#275` source marker explanations | Closed / Done |
 | `#276` local test DB seed/reset/dirty/failure states | Closed / Done |
 | `#277` single DeepSeek E2E evidence runner | Closed / Done |
-| `#278` hourly local controlled run design | Closed / Done |
+| `#330` hourly local controlled run design | Closed / Done |
 | `#279` Bug issue flow | Closed / Done |
 | `#280` security boundary review | Closed / Done |
 | `#281` deferred Phase 10 boundary | Closed / Done |
