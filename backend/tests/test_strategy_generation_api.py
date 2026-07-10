@@ -114,6 +114,10 @@ def test_strategy_generation_api_persists_run_strategy_and_version(tmp_path: Pat
     assert payload["strategy_versions"][0]["generation_run_id"] == payload["run"]["id"]
     assert payload["strategy_versions"][0]["data_source"]["database_ids"]["strategy_version_id"]
     assert payload["data_source"]["source_type"] == "api_aggregate"
+    assert payload["evidence"]["status"] == "SUCCESS"
+    assert payload["evidence"]["acceptance_ready"] is True
+    assert payload["evidence"]["ids"]["strategy_generation_run_id"] == payload["run"]["id"]
+    assert payload["evidence"]["ids"]["strategy_version_id"] == payload["strategy_versions"][0]["id"]
     assert payload["data_source"]["core_data"] is True
     assert payload["data_source"]["database_ids"]["strategy_id"] == payload["strategies"][0]["id"]
     assert payload["data_source"]["database_ids"]["strategy_version_id"] == payload["strategy_versions"][0]["id"]
@@ -225,6 +229,9 @@ def test_strategy_generation_api_failure_persists_failed_run(tmp_path: Path) -> 
     detail = response.json()["detail"]
     assert detail["strategy_generation_run_id"]
     assert "provider unavailable" in detail["failed_reason"]
+    assert detail["evidence"]["status"] == "FAILED"
+    assert detail["evidence"]["acceptance_ready"] is False
+    assert detail["evidence"]["ids"]["strategy_generation_run_id"] > 0
 
     with session_factory() as db:
         run = StrategyGenerationRunRepository(db).get(detail["strategy_generation_run_id"])

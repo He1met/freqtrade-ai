@@ -4,6 +4,7 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, Field, model_validator
 
 from app.schemas.data_source import DataSourceTrace, api_aggregate_source, database_record_source, unknown_source
+from app.schemas.operation_evidence import OperationEvidence
 from app.schemas.strategy import StrategyRead, StrategyVersionRead
 
 
@@ -71,6 +72,7 @@ class StrategyGenerationApiResponse(BaseModel):
     data_source: DataSourceTrace = Field(
         default_factory=lambda: unknown_source("unvalidated strategy generation API response")
     )
+    evidence: Optional[OperationEvidence] = None
 
     @model_validator(mode="after")
     def attach_api_aggregate_source(self) -> "StrategyGenerationApiResponse":
@@ -89,5 +91,13 @@ class StrategyGenerationApiResponse(BaseModel):
                 for item in self.strategy_versions
             },
             freshness=self.run.created_at,
+        )
+        self.evidence = OperationEvidence(
+            status="SUCCESS",
+            ids=dict(self.data_source.database_ids),
+            artifact_refs=dict(self.data_source.artifact_refs),
+            data_source=self.data_source,
+            next_action="Refresh generation, strategy, and strategy-version APIs to reconcile persisted records.",
+            acceptance_ready=True,
         )
         return self

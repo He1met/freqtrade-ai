@@ -15,6 +15,7 @@ from app.schemas import (
     StrategyGenerationRunRead,
     StrategyRead,
     StrategyVersionRead,
+    operation_error_evidence,
 )
 from app.services.strategy_generation import (
     StrategyGenerationExecutionError,
@@ -60,6 +61,12 @@ def create_strategy_generation_run(
                 "message": "strategy generation failed after creating a database run record",
                 "strategy_generation_run_id": exc.run_id,
                 "failed_reason": str(exc),
+                "evidence": operation_error_evidence(
+                    status="FAILED",
+                    reason=str(exc),
+                    next_action="Inspect the persisted generation run, correct provider or validation errors, and retry.",
+                    ids={"strategy_generation_run_id": exc.run_id},
+                ).model_dump(mode="json"),
             },
         ) from exc
 

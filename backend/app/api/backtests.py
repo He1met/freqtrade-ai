@@ -11,6 +11,7 @@ from app.schemas import (
     BacktestTaskRead,
     LocalBacktestTriggerRequest,
     LocalBacktestTriggerResponse,
+    operation_error_evidence,
 )
 from app.services.backtest_artifact_ingest import BacktestArtifactIngestService
 from app.services.local_backtest_trigger import LocalBacktestTriggerService
@@ -30,7 +31,18 @@ def trigger_local_backtest(
 ) -> LocalBacktestTriggerResponse:
     result = LocalBacktestTriggerService(db).trigger(payload)
     if result is None:
-        raise HTTPException(status_code=404, detail="strategy version not found")
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "message": "strategy version not found",
+                "evidence": operation_error_evidence(
+                    status="BLOCKED",
+                    reason="strategy version not found",
+                    next_action="Create or select a persisted strategy version before triggering a backtest.",
+                    ids={"strategy_version_id": payload.strategy_version_id},
+                ).model_dump(mode="json"),
+            },
+        )
     return result
 
 
@@ -45,7 +57,18 @@ def ingest_backtest_task_artifact(
 ) -> BacktestArtifactIngestResponse:
     result = BacktestArtifactIngestService(db).ingest_task_artifact(task_id, payload)
     if result is None:
-        raise HTTPException(status_code=404, detail="backtest task not found")
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "message": "backtest task not found",
+                "evidence": operation_error_evidence(
+                    status="BLOCKED",
+                    reason="backtest task not found",
+                    next_action="Create or select a persisted backtest task before ingesting artifacts.",
+                    ids={"backtest_task_id": task_id},
+                ).model_dump(mode="json"),
+            },
+        )
     return result
 
 
