@@ -2,7 +2,36 @@
 
 Phase 9 的 Bug Issue 用于把页面、API、数据库、Provider、回测、数据来源和安全边界中发现的问题，转成单一、可复现、可验收的 GitHub Issue。Bug 不应停留在聊天记录、测试报告、QA 截图或 PR 评论里。
 
-本流程只定义 Bug 创建规则、字段模板和触发清单；不创建真实 Bug Issue，不修复具体 Bug，不授权 live trading、真实下单、生产部署或修改 Freqtrade 源码。
+本流程定义 Bug 创建规则、字段模板、触发清单，以及从一次真实运行 evidence 生成可审查草稿的离线入口；默认不创建真实 Bug Issue，不修复具体 Bug，不授权 live trading、真实下单、生产部署或修改 Freqtrade 源码。
+
+## Evidence 转 Issue 草稿
+
+使用 `scripts/phase9_bug_issue_draft.py` 将一次页面、API、数据库或运行失败转换为结构化草稿。脚本只读取本地 JSON，并输出 Markdown 或 JSON；它没有 GitHub 写入能力，输出固定包含 `publish_allowed=false` 和 `review_required=true`。草稿必须由人工审查、确认单一问题边界后，才能通过独立的 GitHub 工作流发布。
+
+输入至少包含：
+
+- `title`、`environment`、`current_behavior`、`expected_behavior`
+- 非空的 `reproduction_steps` 和 `evidence`
+- `data_source`：`database`、`api_aggregate`、`fixture`、`fallback`、`mock` 或 `unknown`
+- 可选 `status`、`missing_prerequisites`、`blocked_reason`、`next_action`、`impact`、`security`
+
+示例：
+
+```bash
+python3 scripts/phase9_bug_issue_draft.py \
+  /tmp/phase9-runtime-failure.json \
+  --output /tmp/phase9-issue-draft.json \
+  --json
+```
+
+分类规则：
+
+- 已观察到产品行为与期望不一致：`Bug`。
+- 未证明产品行为错误、仅缺测试或验收证据：`Test Gap`。
+- 状态为 `BLOCKED` 且声明缺少 key、binary、行情、配置或权限等前置条件：`Config Gap`。
+- evidence 可显式指定上述三种分类，但无法通过必填字段校验时不得生成草稿。
+
+脚本会递归脱敏名称包含 `api_key`、`authorization`、`cookie`、`credential`、`passphrase`、`password`、`secret` 或 `token` 的字段，并处理文本中的常见赋值和 Bearer 值。脱敏不能替代人工审查；不得把原始 secret 写入 evidence 文件。
 
 ## 创建规则
 
