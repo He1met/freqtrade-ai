@@ -124,6 +124,7 @@ def create_context(tmp_dir: Path) -> SmokeContext:
 
 def generate_strategy(context: SmokeContext) -> None:
     strategy_output_dir = context.tmp_dir / "strategies"
+    strategy_output_dir.mkdir(parents=True, exist_ok=True)
     service = StrategyGenerationService(
         context.db_session,
         provider=FakeStrategyBlueprintProvider(),

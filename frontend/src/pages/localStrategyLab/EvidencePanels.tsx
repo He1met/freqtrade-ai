@@ -563,9 +563,10 @@ function RankingEvidence({ ranking }: { ranking: RankingEntry[] }) {
 function readinessCandidate(data: MvpData): { strategyVersionId: string; strategyName: string | null } | null {
   const ranked = data.ranking.find((entry) => isCoreDataSource(entry.dataSource));
   if (ranked?.strategyVersionId) {
+    const rankedVersion = data.strategyVersions.find((version) => version.id === ranked.strategyVersionId);
     return {
       strategyVersionId: ranked.strategyVersionId,
-      strategyName: ranked.strategyName,
+      strategyName: rankedVersion?.fileState?.className ?? ranked.strategyName,
     };
   }
 
@@ -577,7 +578,7 @@ function readinessCandidate(data: MvpData): { strategyVersionId: string; strateg
 
   return {
     strategyVersionId: version.id,
-    strategyName: strategyById.get(version.strategyId)?.name ?? null,
+    strategyName: version.fileState?.className ?? strategyById.get(version.strategyId)?.name ?? null,
   };
 }
 

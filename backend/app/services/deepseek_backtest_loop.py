@@ -208,7 +208,10 @@ class DeepSeekBacktestLoopService:
             result_path=execution_paths.result_path,
             manifest_path=execution_paths.manifest_path,
             timeout_seconds=payload.timeout_seconds,
-            datadir=resolve_repo_path(profile.data_source.datadir),
+            datadir=(
+                resolve_repo_path(profile.data_source.datadir)
+                / profile.data_source.exchange
+            ),
             strategy_path=resolve_repo_path(version.file_path).parent,
             userdir=resolve_repo_path(get_settings().freqtrade_user_data),
         )

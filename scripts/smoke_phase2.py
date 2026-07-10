@@ -97,10 +97,12 @@ def create_context(tmp_dir: Path) -> Phase2SmokeContext:
 
 
 def generate_schema_v2_strategy(context: Phase2SmokeContext) -> None:
+    strategy_output_dir = context.tmp_dir / "strategies"
+    strategy_output_dir.mkdir(parents=True, exist_ok=True)
     service = StrategyGenerationService(
         context.db_session,
         provider=FakeStrategyBlueprintProvider(),
-        file_manager=StrategyFileManager(output_dir=context.tmp_dir / "strategies"),
+        file_manager=StrategyFileManager(output_dir=strategy_output_dir),
     )
     version_ids = service.run_once(
         "Generate one offline Phase 2 smoke strategy blueprint.",

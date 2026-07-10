@@ -16,7 +16,9 @@ class StrategyFileManager:
         settings = get_settings()
         configured_dir = output_dir or settings.strategy_output_dir
         configured_approved_roots = (
-            approved_roots if approved_roots is not None else [settings.strategy_output_dir]
+            approved_roots
+            if approved_roots is not None
+            else [configured_dir]
         )
         self.output_dir = resolve_repo_path(configured_dir).resolve(strict=False)
         self.approved_roots = [

@@ -26,7 +26,7 @@ if str(BACKEND_PATH) not in sys.path:
     sys.path.insert(0, str(BACKEND_PATH))
 
 from app.db.session import create_database_engine, create_session_factory, redact_database_url  # noqa: E402
-from app.models.debug_mvp_seed import DebugMvpSeedPayload  # noqa: E402
+from app.models import Base  # noqa: E402
 from app.repositories.debug_mvp_seed_data import DebugMvpSeedDataRepository  # noqa: E402
 from app.services.debug_mvp_seed_data import build_debug_mvp_seed_payloads  # noqa: E402
 
@@ -55,7 +55,7 @@ def parse_args() -> argparse.Namespace:
 
 def seed_database(database_url: str) -> int:
     engine = create_database_engine(database_url)
-    DebugMvpSeedPayload.__table__.create(bind=engine, checkfirst=True)
+    Base.metadata.create_all(bind=engine)
     session_factory = create_session_factory(engine)
     with session_factory() as session:
         return DebugMvpSeedDataRepository(session).upsert_payloads(build_debug_mvp_seed_payloads())

@@ -224,8 +224,10 @@ def test_deepseek_backtest_loop_succeeds_with_mock_provider_and_fake_freqtrade_e
     datadir = write_market_data(tmp_path)
     install_fake_freqtrade(tmp_path, monkeypatch)
     http_client = MockLLMClient(MockLLMResponse({"blueprints": [blueprint_payload()]}))
+    observed_args = []
 
     def fake_executor(args, cwd, timeout_seconds):
+        observed_args.extend(args)
         result_dir = Path(args[args.index("--backtest-directory") + 1])
         result_dir.mkdir(parents=True, exist_ok=True)
         zip_path = result_dir / "backtest-result-2026-07-11_12-00-00.zip"
@@ -300,6 +302,7 @@ def test_deepseek_backtest_loop_succeeds_with_mock_provider_and_fake_freqtrade_e
     assert len(http_client.requests) == 1
     assert http_client.requests[0]["url"] == "https://api.deepseek.com/chat/completions"
     assert "test-secret-value" not in json.dumps(payload)
+    assert observed_args[observed_args.index("--datadir") + 1] == str(datadir / "okx")
 
     with session_factory() as db:
         assert db.query(StrategyGenerationRun).count() == 1
