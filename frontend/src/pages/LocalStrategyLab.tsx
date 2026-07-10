@@ -13,6 +13,7 @@ import {
   submissionMessage,
   submissionStatus,
 } from "./localStrategyLab/EvidencePanels";
+import { SubmissionStatusPanel } from "./localStrategyLab/SubmissionStatusPanel";
 
 const DEFAULT_IDEA =
   "Build a local dry-run only RSI mean reversion strategy with conservative risk checks and no live trading assumptions.";
@@ -27,7 +28,7 @@ export function LocalStrategyLab() {
   const currentStatus = submissionStatus(submission);
   const currentResult = submission.kind === "success" || submission.kind === "blocked" ? submission.result : undefined;
 
-  const statusRows = useMemo(
+  const statusRows = useMemo<Array<[string, string]>>(
     () => [
       ["状态", currentStatus.title],
       ["核心成功", submission.kind === "success" ? "是" : "否"],
@@ -171,28 +172,12 @@ export function LocalStrategyLab() {
         </div>
       </form>
 
-      <section className="lab-status-panel" aria-live="polite">
-        <div className="lab-status-heading">
-          <span className={`run-status ${currentStatus.className}`}>{currentStatus.label}</span>
-          <strong>{submissionMessage(submission)}</strong>
-        </div>
-        <dl className="compact-detail-list">
-          {statusRows.map(([label, value]) => (
-            <div key={label}>
-              <dt>{label}</dt>
-              <dd>{value}</dd>
-            </div>
-          ))}
-          {submission.kind === "failed" ? (
-            <div>
-              <dt>HTTP</dt>
-              <dd>
-                {submission.statusCode ?? EMPTY_TEXT} {submission.statusText ?? ""}
-              </dd>
-            </div>
-          ) : null}
-        </dl>
-      </section>
+      <SubmissionStatusPanel
+        message={submissionMessage(submission)}
+        rows={statusRows}
+        status={currentStatus}
+        submission={submission}
+      />
 
       <PersistentEvidence
         data={snapshot.data}
