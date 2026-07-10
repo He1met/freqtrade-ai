@@ -53,6 +53,21 @@ def test_validated_strategy_file_write_records_traceable_status(tmp_path) -> Non
     assert expected_path.read_text(encoding="utf-8") == code
 
 
+def test_custom_output_dir_is_the_default_approved_root(tmp_path) -> None:
+    output_dir = tmp_path / "smoke" / "strategies"
+    output_dir.mkdir(parents=True)
+    service = StrategyFileValidationService(StrategyFileManager(output_dir=output_dir))
+
+    result = service.write_validated_strategy_file(
+        class_name="SafeStrategy",
+        code=runnable_strategy_code(),
+        file_stem="safe_strategy",
+    )
+
+    assert result.write_status == "written"
+    assert result.approved_root == str(output_dir.resolve())
+
+
 def test_validated_strategy_file_write_uses_collision_safe_suffix(tmp_path) -> None:
     output_dir = tmp_path / "user_data" / "strategies" / "generated"
     output_dir.mkdir(parents=True)
