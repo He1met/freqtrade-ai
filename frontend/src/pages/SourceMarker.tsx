@@ -1,5 +1,6 @@
 import { getDataSourceAcceptance, isCoreDataSourceTrace, isNonCoreDataSourceTrace } from "../api/sourceState";
 import type { DataSourceTraceSummary } from "../api/types";
+import { AcceptanceState } from "./AcceptanceState";
 import { EMPTY_TEXT, displayBoolean } from "./uiCopy";
 
 function formatRecord(record: Record<string, number | string>): string {
@@ -49,6 +50,12 @@ export function SourceMarker({
           <dd>{displayBoolean(acceptance.canAccept)}</dd>
         </div>
         <div>
+          <dt>acceptance_state</dt>
+          <dd>
+            <AcceptanceState summary={acceptance} />
+          </dd>
+        </div>
+        <div>
           <dt>database_ids</dt>
           <dd>{source ? formatRecord(source.databaseIds) : EMPTY_TEXT}</dd>
         </div>
@@ -67,12 +74,12 @@ export function SourceMarker({
           </div>
         ) : null}
         <div>
-          <dt>required</dt>
-          <dd>{acceptance.requiredAction}</dd>
+          <dt>acceptance_reason</dt>
+          <dd>{acceptance.reason}</dd>
         </div>
         <div>
-          <dt>reason</dt>
-          <dd>{acceptance.reason}</dd>
+          <dt>next_action</dt>
+          <dd>{acceptance.nextAction}</dd>
         </div>
       </dl>
     </div>

@@ -1,5 +1,15 @@
 export type DataSource = "api" | "fixture" | "failed";
 
+export type AcceptanceState = "ACCEPTABLE" | "NOT_ACCEPTABLE" | "BLOCKED" | "FAILED" | "NOT_RUN" | "API_GAP";
+
+export type AcceptanceStateSummary = {
+  state: AcceptanceState;
+  canAccept: boolean;
+  sourceType: string;
+  reason: string;
+  nextAction: string;
+};
+
 export type MvpDataSetKey =
   | "strategies"
   | "strategyVersions"
