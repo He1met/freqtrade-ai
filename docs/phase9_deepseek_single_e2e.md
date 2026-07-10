@@ -1,7 +1,7 @@
 # Phase 9 Single DeepSeek E2E
 
-This runbook is for issue `#326`: one controlled DeepSeek validation, or a
-durable fail-closed evidence package when prerequisites are missing.
+This runbook supports issue `#334`: one controlled DeepSeek validation, or a
+durable fail-closed acceptance report when prerequisites are missing.
 
 The default path does not call DeepSeek. A real request is sent only when
 `--allow-real-call` is passed and `DEEPSEEK_API_KEY` exists in the local
@@ -27,10 +27,12 @@ Expected default result:
   `status=failed`
 - `real_call_attempted=false`
 - no strategy, backtest, result, or score rows
-- evidence JSON under `/tmp/freqtrade-ai-phase9-deepseek-e2e/`
+- evidence JSON and Markdown acceptance report under
+  `/tmp/freqtrade-ai-phase9-deepseek-e2e/`
 
 This proves the project fails closed when the real call has not been explicitly
-authorized.
+authorized, and gives QA a report that can stay `BLOCKED` without inventing a
+successful DeepSeek or Freqtrade run.
 
 ## One Real Provider Attempt
 
@@ -44,7 +46,8 @@ python3 scripts/phase9_deepseek_single_e2e.py \
 ```
 
 The script requests exactly one strategy blueprint. It records provider/model
-metadata and database IDs, but never records the key value.
+metadata, database IDs, missing conditions, reproduction commands, and next
+steps, but never records the key value.
 
 If generation succeeds but local market data, Freqtrade binary, or artifacts
 are missing, the report remains `BLOCKED` with durable DB evidence and required
@@ -75,6 +78,25 @@ python3 scripts/phase9_deepseek_single_e2e.py \
 Any missing key, missing explicit authorization, provider failure, local
 preflight blocker, missing artifact, parse failure, or scoring failure keeps the
 report non-acceptable and explains the next required action.
+
+## Acceptance Report Output
+
+Every run writes two redacted artifacts:
+
+- `phase9-deepseek-single-e2e-evidence.json`
+- `phase9-deepseek-single-e2e-acceptance.md`
+
+The Markdown report is intended for QA and review. It includes:
+
+- final verdict (`READY_FOR_REVIEW`, `BLOCKED`, or `FAILED`);
+- missing conditions such as missing approval, missing `DEEPSEEK_API_KEY`,
+  missing `freqtrade` binary, blocked local data preflight, or missing real
+  backtest artifacts;
+- exact rerun commands;
+- next-step guidance; and
+- database/API/UI evidence IDs when available.
+
+No report path or field may contain an API key value.
 
 ## Safety Boundary
 

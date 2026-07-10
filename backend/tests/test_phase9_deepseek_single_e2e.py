@@ -53,7 +53,7 @@ def test_deepseek_single_e2e_blocks_without_explicit_real_call() -> None:
         payload = json.loads(result.stdout)
 
         assert payload["status"] == "BLOCKED"
-        assert payload["issue"] == "#326"
+        assert payload["issue"] == "#334"
         assert payload["evidence"]["status"] == "BLOCKED"
         assert payload["evidence"]["ids"]["strategy_generation_run_id"] > 0
         assert payload["evidence"]["acceptance_ready"] is False
@@ -78,7 +78,21 @@ def test_deepseek_single_e2e_blocks_without_explicit_real_call() -> None:
             "strategy_scores": 0,
         }
         assert Path(payload["report_path"]).exists()
+        assert Path(payload["report_markdown_path"]).exists()
         assert test_secret not in Path(payload["report_path"]).read_text(encoding="utf-8")
+        markdown_report = Path(payload["report_markdown_path"]).read_text(encoding="utf-8")
+        assert test_secret not in markdown_report
+        assert "- Verdict: `BLOCKED`" in markdown_report
+        assert "Missing explicit operator approval" in markdown_report
+        assert "python3 scripts/phase9_deepseek_single_e2e.py --allow-real-call --json" in markdown_report
+        assert "No API key values were recorded in this report." in markdown_report
+        assert payload["issue"] == "#334"
+        assert payload["missing_conditions"] == [
+            "Missing explicit operator approval: rerun with --allow-real-call to authorize one DeepSeek request."
+        ]
+        assert payload["next_steps"] == [
+            "Obtain explicit approval for one real DeepSeek request, then rerun with --allow-real-call."
+        ]
 
         engine = create_database_engine(database_url)
         session_factory = create_session_factory(engine)

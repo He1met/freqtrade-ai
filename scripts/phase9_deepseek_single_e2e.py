@@ -89,7 +89,7 @@ def parse_args() -> argparse.Namespace:
         "--tmp-dir",
         type=Path,
         default=DEFAULT_TMP_DIR,
-        help="Local directory for the evidence JSON report.",
+        help="Local directory for the evidence JSON and Markdown acceptance reports.",
     )
     parser.add_argument(
         "--prompt-summary",
@@ -440,9 +440,17 @@ def build_report(
         and ingest_response.get("score", {}).get("data_source", {}).get("core_data") is True
     )
 
+    next_commands = recommended_commands()
+    missing_conditions = collect_missing_conditions(
+        status=status,
+        allow_real_call=allow_real_call,
+        key_present=key_present,
+        backtest_response=backtest_response,
+        ingest_response=ingest_response,
+    )
     return {
         "phase": "Phase 9",
-        "issue": "#326",
+        "issue": "#334",
         "status": status,
         "can_accept_as_real_run": can_accept,
         "reason": redact_secret_text(reason),
@@ -489,6 +497,19 @@ def build_report(
             "/backtest-tasks",
             "/ranking",
         ],
+        "missing_conditions": missing_conditions,
+        "commands": {
+            "safe_default": next_commands["safe_default"],
+            "authorized_real_call": next_commands["authorized_real_call"],
+            "authorized_with_artifacts": next_commands["authorized_with_artifacts"],
+        },
+        "next_steps": next_steps_for_status(
+            status=status,
+            allow_real_call=allow_real_call,
+            key_present=key_present,
+            backtest_response=backtest_response,
+            ingest_response=ingest_response,
+        ),
         "required_action": required_action(status),
         "evidence": operation_error_evidence(
             status="BLOCKED" if status == "BLOCKED" else "FAILED",
@@ -514,12 +535,77 @@ def required_action(status: str) -> str:
     return "Inspect the durable failed generation/backtest records and open a Bug if the failure is unexpected."
 
 
+def recommended_commands() -> dict[str, str]:
+    script = "python3 scripts/phase9_deepseek_single_e2e.py"
+    return {
+        "safe_default": f"{script} --json",
+        "authorized_real_call": f"{script} --allow-real-call --json",
+        "authorized_with_artifacts": (
+            f"{script} --allow-real-call "
+            "--manifest-path /absolute/path/to/manifest.json "
+            "--result-path /absolute/path/to/result.json "
+            "--json"
+        ),
+    }
+
+
+def collect_missing_conditions(
+    *,
+    status: str,
+    allow_real_call: bool,
+    key_present: bool,
+    backtest_response: Optional[dict[str, Any]],
+    ingest_response: Optional[dict[str, Any]],
+) -> list[str]:
+    missing: list[str] = []
+    if not allow_real_call:
+        missing.append("Missing explicit operator approval: rerun with --allow-real-call to authorize one DeepSeek request.")
+    if allow_real_call and not key_present:
+        missing.append("Missing local DEEPSEEK_API_KEY in the shell environment.")
+    if backtest_response is not None and backtest_response.get("preflight_status") == "blocked":
+        for reason in backtest_response.get("blocked_reasons", []):
+            missing.append(redact_secret_text(f"Backtest preflight blocker: {reason}"))
+    if allow_real_call and backtest_response is not None and ingest_response is None and status == "BLOCKED":
+        if not any("manifest" in item.lower() for item in missing):
+            missing.append("Missing real local backtest manifest/result artifacts for ingestion.")
+    return missing
+
+
+def next_steps_for_status(
+    *,
+    status: str,
+    allow_real_call: bool,
+    key_present: bool,
+    backtest_response: Optional[dict[str, Any]],
+    ingest_response: Optional[dict[str, Any]],
+) -> list[str]:
+    steps: list[str] = []
+    if status == "READY_FOR_REVIEW":
+        return [
+            "Refresh the listed UI routes and confirm the persisted database IDs remain visible after reload.",
+            "Cross-check the JSON and Markdown reports with the database rows before review sign-off.",
+        ]
+    if not allow_real_call:
+        steps.append("Obtain explicit approval for one real DeepSeek request, then rerun with --allow-real-call.")
+    if allow_real_call and not key_present:
+        steps.append("Export DEEPSEEK_API_KEY only in the local shell before retrying.")
+    if backtest_response is not None and backtest_response.get("preflight_status") == "blocked":
+        steps.append("Satisfy every listed local backtest preflight blocker before treating the run as acceptance evidence.")
+    if allow_real_call and backtest_response is not None and ingest_response is None and status == "BLOCKED":
+        steps.append("When preflight becomes READY, supply real --manifest-path and --result-path artifacts from the local backtest.")
+    if status == "FAILED":
+        steps.append("Inspect the persisted failed generation/backtest record and open a Bug if the failure is not environmental.")
+    return steps
+
+
 def write_report(tmp_dir: Path, report: dict[str, Any]) -> dict[str, Any]:
     report_path = tmp_dir / "phase9-deepseek-single-e2e-evidence.json"
+    markdown_path = tmp_dir / "phase9-deepseek-single-e2e-acceptance.md"
     safe_report = json.loads(json.dumps(report, sort_keys=True))
-    report_path.write_text(json.dumps(safe_report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     safe_report["report_path"] = str(report_path)
+    safe_report["report_markdown_path"] = str(markdown_path)
     report_path.write_text(json.dumps(safe_report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    markdown_path.write_text(render_markdown_report(safe_report), encoding="utf-8")
     return safe_report
 
 
@@ -528,6 +614,91 @@ def print_human_report(report: dict[str, Any]) -> None:
     print(f"Can accept as real run: {report['can_accept_as_real_run']}")
     print(f"Reason: {report['reason']}")
     print(f"Report: {report['report_path']}")
+
+
+def render_markdown_report(report: dict[str, Any]) -> str:
+    artifact_ingest = report.get("artifact_ingest")
+    result_payload = artifact_ingest.get("result") if isinstance(artifact_ingest, dict) else None
+    score_payload = artifact_ingest.get("score") if isinstance(artifact_ingest, dict) else None
+    lines = [
+        "# DeepSeek Single E2E Acceptance Report",
+        "",
+        f"- Issue: `{report['issue']}`",
+        f"- Phase: `{report['phase']}`",
+        f"- Verdict: `{report['status']}`",
+        f"- Acceptable as real run: `{str(report['can_accept_as_real_run']).lower()}`",
+        f"- Database: `{report['database']}`",
+        f"- Environment: `{report['environment_label']}`",
+        "",
+        "## Summary",
+        "",
+        redact_secret_text(report["reason"]),
+        "",
+        "## Missing Conditions",
+        "",
+    ]
+    missing_conditions = report.get("missing_conditions") or ["None."]
+    lines.extend([f"- {item}" for item in missing_conditions])
+    lines.extend(
+        [
+            "",
+            "## Commands",
+            "",
+            "```bash",
+            report["commands"]["safe_default"],
+            report["commands"]["authorized_real_call"],
+            report["commands"]["authorized_with_artifacts"],
+            "```",
+            "",
+            "## Next Steps",
+            "",
+        ]
+    )
+    next_steps = report.get("next_steps") or ["Review the report artifacts."]
+    lines.extend([f"- {item}" for item in next_steps])
+    lines.extend(
+        [
+            "",
+            "## Evidence Snapshot",
+            "",
+            f"- `generation_run_id`: `{nested_id(report.get('generation_run'), 'id')}`",
+            f"- `strategy_id`: `{nested_id(report.get('strategy_version'), 'strategy_id')}`",
+            f"- `strategy_version_id`: `{nested_id(report.get('strategy_version'), 'id')}`",
+            f"- `backtest_run_id`: `{nested_id(report.get('backtest'), 'backtest_run_id')}`",
+            f"- `backtest_task_id`: `{first_backtest_task_id(report.get('backtest'))}`",
+            f"- `backtest_result_id`: `{nested_id(result_payload, 'id')}`",
+            f"- `strategy_score_id`: `{nested_id(score_payload, 'id')}`",
+            f"- `json_report_path`: `{report['report_path']}`",
+            "",
+            "## UI Routes To Verify",
+            "",
+        ]
+    )
+    lines.extend([f"- `{route}`" for route in report.get("ui_routes_to_verify", [])])
+    lines.append("")
+    lines.append("No API key values were recorded in this report.")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def nested_id(payload: Optional[dict[str, Any]], key: str) -> str:
+    if not isinstance(payload, dict):
+        return "n/a"
+    value = payload.get(key)
+    return str(value) if value is not None else "n/a"
+
+
+def first_backtest_task_id(payload: Optional[dict[str, Any]]) -> str:
+    if not isinstance(payload, dict):
+        return "n/a"
+    tasks = payload.get("tasks")
+    if not isinstance(tasks, list) or not tasks:
+        return "n/a"
+    first = tasks[0]
+    if not isinstance(first, dict):
+        return "n/a"
+    value = first.get("id")
+    return str(value) if value is not None else "n/a"
 
 
 if __name__ == "__main__":
