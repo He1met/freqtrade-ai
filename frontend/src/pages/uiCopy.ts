@@ -43,8 +43,11 @@ export function displayStatus(status: string | null | undefined): string {
 }
 
 export function displaySource(source: string): string {
-  if (source === "fallback") {
-    return "fallback 数据";
+  if (source === "failed") {
+    return "真实数据加载失败";
+  }
+  if (source === "fixture") {
+    return "开发 fixture";
   }
   if (source === "api") {
     return "backend API 数据";
@@ -61,7 +64,9 @@ export function displayBoolean(value: boolean): string {
 }
 
 export function displayDataOrigin(source: string): string {
-  return source === "fallback" ? "受控 fixture" : "backend API";
+  if (source === "fixture") return "显式开发 fixture";
+  if (source === "failed") return "真实数据不可用";
+  return "backend API";
 }
 
 export function displayValue(value: number | string | boolean | null | undefined): string {

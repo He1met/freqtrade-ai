@@ -1,13 +1,13 @@
 import { useEffect, useState } from "react";
 
-import { mockMvpData } from "../data/mock";
 import { loadMvpData } from "./client";
+import { emptyMvpData } from "./mvpApi";
 import { fallbackMvpDataSources } from "./sourceState";
 import type { MvpDataState } from "./types";
 
 const initialState: MvpDataState = {
-  data: mockMvpData,
-  source: "fallback",
+  data: emptyMvpData(),
+  source: "failed",
   sources: fallbackMvpDataSources(),
   isLoading: true,
   error: null,
@@ -28,7 +28,7 @@ export function useMvpData(refreshToken = 0): MvpDataState {
       .then(({ data, sources, usedFallback }) => {
         setState({
           data,
-          source: usedFallback ? "fallback" : "api",
+          source: usedFallback ? "fixture" : "api",
           sources,
           isLoading: false,
           error: null,
@@ -40,8 +40,8 @@ export function useMvpData(refreshToken = 0): MvpDataState {
         }
 
         setState({
-          data: mockMvpData,
-          source: "fallback",
+          data: emptyMvpData(),
+          source: "failed",
           sources: fallbackMvpDataSources(),
           isLoading: false,
           error: error instanceof Error ? error.message : "Unable to load MVP data.",
