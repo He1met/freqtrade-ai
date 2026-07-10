@@ -134,6 +134,11 @@ def test_local_backtest_trigger_creates_pending_records_and_reconciles_status(
         app.dependency_overrides.clear()
 
     assert payload["preflight_status"] == "ready"
+    assert payload["evidence"]["status"] == "SUCCESS"
+    assert payload["evidence"]["acceptance_ready"] is False
+    assert payload["evidence"]["ids"]["backtest_run_id"] == run_id
+    assert payload["evidence"]["ids"]["backtest_task_id"] == task_id
+    assert payload["evidence"]["ids"]["strategy_version_id"] == version_id
     assert payload["blocked_reasons"] == []
     assert payload["execution_mode"] == "preflight_only"
     checks = checks_by_name(payload)
@@ -238,6 +243,9 @@ def test_local_backtest_trigger_blocks_when_local_data_is_missing(
     assert payload["preflight_status"] == "blocked"
     assert payload["run"]["status"] == "blocked"
     assert payload["tasks"][0]["status"] == "blocked"
+    assert payload["evidence"]["status"] == "BLOCKED"
+    assert payload["evidence"]["blocked_reason"]
+    assert payload["evidence"]["acceptance_ready"] is False
     assert payload["tasks"][0]["error_message"].startswith("BLOCKED:")
     assert "market data directory does not exist" in payload["tasks"][0]["error_message"]
     checks = checks_by_name(payload)

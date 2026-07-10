@@ -5,12 +5,14 @@ from pydantic import BaseModel, Field, model_validator
 
 from app.schemas.data_source import (
     DataSourceTrace,
+    api_aggregate_source,
     database_record_source,
     phase8_local_test_metadata_from_payload,
     phase8_local_test_source,
     unknown_source,
 )
 from app.schemas.strategy_score import StrategyScoreRead
+from app.schemas.operation_evidence import OperationEvidence
 
 
 BacktestStatus = Literal["pending", "running", "succeeded", "failed", "cancelled", "blocked"]
@@ -162,6 +164,42 @@ class LocalBacktestTriggerResponse(BaseModel):
     blocked_reasons: list[str] = Field(default_factory=list)
     preflight_checks: list[LocalBacktestPreflightCheck] = Field(default_factory=list)
     execution_mode: Literal["preflight_only"] = "preflight_only"
+    evidence: Optional[OperationEvidence] = None
+
+    @model_validator(mode="after")
+    def attach_operation_evidence(self) -> "LocalBacktestTriggerResponse":
+        ids = {
+            "backtest_run_id": self.run.id,
+            "strategy_version_id": self.run.strategy_version_id,
+        }
+        if self.tasks:
+            ids["backtest_task_id"] = self.tasks[0].id
+        artifact_refs = {
+            f"backtest_config_path_{task.id}": task.config_path
+            for task in self.tasks
+            if task.config_path
+        }
+        source = api_aggregate_source(
+            "local_backtest_preflight",
+            ids,
+            artifact_refs=artifact_refs,
+            freshness=self.run.created_at,
+        )
+        blocked_reason = "; ".join(self.blocked_reasons) or None
+        self.evidence = OperationEvidence(
+            status="BLOCKED" if blocked_reason else "SUCCESS",
+            ids=ids,
+            artifact_refs=artifact_refs,
+            data_source=source,
+            blocked_reason=blocked_reason,
+            next_action=(
+                "Resolve all blocked preflight checks and submit a new local backtest run."
+                if blocked_reason
+                else "Execute the persisted backtest task, then ingest its artifact manifest."
+            ),
+            acceptance_ready=False,
+        )
+        return self
 
 
 class BacktestArtifactIngestRequest(BaseModel):
@@ -227,3 +265,44 @@ class BacktestArtifactIngestResponse(BaseModel):
     result_path: Optional[str] = None
     parser_source: Literal["freqtrade_result_parser"] = "freqtrade_result_parser"
     execution_mode: Literal["artifact_ingest_only"] = "artifact_ingest_only"
+    evidence: Optional[OperationEvidence] = None
+
+    @model_validator(mode="after")
+    def attach_operation_evidence(self) -> "BacktestArtifactIngestResponse":
+        ids = {
+            "backtest_run_id": self.run.id,
+            "backtest_task_id": self.task.id,
+            "strategy_version_id": self.run.strategy_version_id,
+        }
+        if self.result is not None:
+            ids["backtest_result_id"] = self.result.id
+        if self.score is not None:
+            ids["strategy_score_id"] = self.score.id
+            ids["strategy_id"] = self.score.strategy_id
+        artifact_refs = {}
+        if self.manifest_path:
+            artifact_refs["artifact_manifest_path"] = self.manifest_path
+        if self.result_path:
+            artifact_refs["backtest_result_path"] = self.result_path
+        source = api_aggregate_source(
+            "backtest_artifact_ingest",
+            ids,
+            artifact_refs=artifact_refs,
+            freshness=self.run.created_at,
+        )
+        status = {"succeeded": "SUCCESS", "failed": "FAILED", "blocked": "BLOCKED"}[self.ingest_status]
+        self.evidence = OperationEvidence(
+            status=status,  # type: ignore[arg-type]
+            ids=ids,
+            artifact_refs=artifact_refs,
+            data_source=source,
+            blocked_reason=self.reason if status == "BLOCKED" else None,
+            failed_reason=self.reason if status == "FAILED" else None,
+            next_action=(
+                "Refresh backtest results and ranking APIs to reconcile the persisted result and score."
+                if status == "SUCCESS"
+                else "Correct the reported artifact or runtime condition and retry artifact ingest."
+            ),
+            acceptance_ready=status == "SUCCESS" and self.result is not None and self.score is not None,
+        )
+        return self

@@ -197,6 +197,11 @@ def test_api_ingests_success_manifest_and_persists_reconcilable_result(
         assert payload["score"]["strategy_version_id"] == strategy_version_id
         assert payload["score"]["data_source"]["core_data"] is True
         assert payload["manifest_path"] == str(manifest_path)
+        assert payload["evidence"]["status"] == "SUCCESS"
+        assert payload["evidence"]["acceptance_ready"] is True
+        assert payload["evidence"]["ids"]["backtest_result_id"] == payload["result"]["id"]
+        assert payload["evidence"]["ids"]["strategy_score_id"] == payload["score"]["id"]
+        assert payload["evidence"]["artifact_refs"]["artifact_manifest_path"] == str(manifest_path)
         assert results[0].profit_total == 123.4
         assert results[0].profit_pct == 0.125
         parser_metadata = results[0].metrics_snapshot["parser_metadata"]
@@ -241,6 +246,9 @@ def test_success_manifest_with_missing_result_path_blocks_without_result(
 
     assert response is not None
     assert response.ingest_status == "blocked"
+    assert response.evidence is not None
+    assert response.evidence.status == "BLOCKED"
+    assert response.evidence.blocked_reason
     assert "does not exist" in (response.reason or "")
     assert repository.list_results(run_id) == []
     assert repository.get_task(task_id).status == "blocked"  # type: ignore[union-attr]

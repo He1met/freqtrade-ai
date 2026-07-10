@@ -31,6 +31,7 @@ from app.schemas.data_source import (
     fixture_source,
     unknown_source,
 )
+from app.schemas.operation_evidence import OperationEvidence, OperationStatus, operation_error_evidence
 from app.schemas.dry_run_profile import (
     DryRunProfile,
     DryRunProfileCommandOptions,
@@ -170,6 +171,9 @@ __all__ = [
     "LocalBacktestTriggerResponse",
     "DataSourceTrace",
     "DataSourceType",
+    "OperationEvidence",
+    "OperationStatus",
+    "operation_error_evidence",
     "BacktestProfileDataSource",
     "BacktestProfileSafety",
     "BacktestProfileStake",

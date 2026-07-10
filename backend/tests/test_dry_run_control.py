@@ -121,6 +121,9 @@ def test_control_start_blocks_without_manual_approval_and_never_runs_cli(tmp_pat
 
     assert report is not None
     assert report.status == "BLOCKED"
+    assert report.evidence is not None
+    assert report.evidence.status == "BLOCKED"
+    assert report.evidence.ids["strategy_version_id"] == version_id
     assert any("manual approval is required" in reason for reason in report.blocked_reasons)
     assert report.status_snapshot.status == "BLOCKED"
     assert calls == []
@@ -191,6 +194,10 @@ def test_control_start_runs_fake_executor_only_after_readiness_manual_and_backen
 
     assert report is not None
     assert report.status == "SUCCESS"
+    assert report.evidence is not None
+    assert report.evidence.status == "SUCCESS"
+    assert report.evidence.acceptance_ready is True
+    assert report.evidence.artifact_refs["artifact_manifest_path"] == report.manifest_path
     assert report.status_snapshot.status == "STOPPED"
     assert report.status_snapshot.dry_run is True
     assert report.safety["starts_live_trading"] is False
@@ -262,6 +269,9 @@ def test_control_stop_records_stopped_snapshot_without_process_kill(tmp_path: Pa
 
     assert start_report is not None
     assert stop_report.status == "STOPPED"
+    assert stop_report.evidence is not None
+    assert stop_report.evidence.status == "SUCCESS"
+    assert stop_report.evidence.ids["strategy_version_id"] == version_id
     assert stop_report.status_snapshot.status == "STOPPED"
     assert stop_report.safety["kills_external_process"] is False
     assert Path(stop_report.status_snapshot_path).exists()
