@@ -1,6 +1,6 @@
 # Phase 9 Hourly Local Controlled Run Design
 
-This document scopes issue `#278`: a future local hourly run that can generate
+This document scopes issue `#330`: a future local hourly run that can generate
 at most one strategy, preflight a local backtest, ingest a result, and expose
 evidence. It is design only. It does not implement a scheduler, start a loop,
 start live trading, place orders, deploy production services, or introduce
@@ -15,6 +15,28 @@ does not authorize always-on execution.
 The default product state is `DISABLED`. A future implementation must require
 an explicit local enable switch and must provide a visible pause/stop control
 before any periodic run can start.
+
+## Implementation Gate
+
+Issue `#330` authorizes design and acceptance criteria only. Implementation of
+the hourly runner must remain blocked until both of these single-run paths have
+passed against real local evidence:
+
+1. The single DeepSeek entry point completes with a real Provider response,
+   persists the generation, strategy, and strategy-version records, writes a
+   validated strategy file, and exposes redacted evidence.
+2. The minimum generation-to-backtest chain completes with local market data
+   and Freqtrade, then persists the backtest run, task, parsed result, score,
+   and artifact manifest.
+
+The gate is not satisfied by mock HTTP responses, fake providers, fixtures,
+fallback data, preflight-only runs, or manually supplied artifacts from an
+unrelated run. QA must be able to refresh the API and UI and reconcile the
+reported IDs and artifact refs with the local database and filesystem. A
+missing DeepSeek credential, unavailable Provider network, missing Freqtrade
+binary, missing market data, unsafe DB target, or unwritable artifact path
+keeps implementation `BLOCKED`; it does not justify enabling a partial hourly
+loop.
 
 ## Required Inputs
 
@@ -169,5 +191,21 @@ QA should accept the design only if it answers:
 - Why can fixture/fallback/mock/unknown data never complete an hourly run?
 - Why are live trading, real orders, production deploy, and production queues
   still out of scope?
+- Which durable evidence proves that the single real DeepSeek run and the
+  minimum generation-to-backtest chain passed before hourly implementation was
+  enabled?
 
 If any answer is missing, the future implementation issue should remain blocked.
+
+## Issue #330 Acceptance Mapping
+
+| Issue requirement | Design decision |
+| --- | --- |
+| At most one strategy and backtest per hour | Cadence allows at most one attempt per wall-clock hour and skips missed hours. |
+| Wait for the single DeepSeek and minimum chain | The implementation gate requires real, refreshable Provider, DB, file, backtest, result, score, and manifest evidence. |
+| Pause and shutdown | Default is `DISABLED`; API/UI must support disable, pause/resume, and cancellation. |
+| No concurrency | A single local lease permits only one `RUNNING` attempt and records stale lease expiry. |
+| Run and failure records | State, linked database IDs, artifact refs, and redacted reasons are durable and visible through DB/API/UI. |
+| Page history and actionable empty states | UI lists recent attempts and shows acceptance state, missing conditions, next action, and Gap classification instead of fake success. |
+| QA-verifiable safety boundary | Real data sources are reconcilable after refresh; mock/fallback data cannot complete a run. |
+| No production runtime expansion | No Redis/Celery/Kafka/RabbitMQ, managed queue, worker pool, background silent execution, production deployment, live trading, or real orders. |
