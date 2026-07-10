@@ -32,6 +32,7 @@ git diff --check
 | Phase 7 工程化与只读运行可见性 | `python3 scripts/smoke_phase7.py --offline --tmp-dir /tmp/freqtrade-ai-phase7-smoke` |
 | Phase 8 Local Strategy Lab / DB-API-UI 对账 | `python3 scripts/smoke_phase8.py --offline --tmp-dir /tmp/freqtrade-ai-phase8-smoke` |
 | Phase 9 DeepSeek 单次 E2E 安全默认路径 | `python3 scripts/phase9_deepseek_single_e2e.py --json` |
+| Phase 9 DeepSeek 生成到回测最小闭环 API | `(cd backend && . .venv/bin/activate && pytest backend/tests/test_deepseek_backtest_loop_api.py)` |
 
 Phase 8 / Phase 9 和当前 refactor/runtime PR 必须记录 API、UI、数据库、artifact、
 source marker、fail-closed 和安全边界证据。真实 DeepSeek 调用只允许在本地 operator

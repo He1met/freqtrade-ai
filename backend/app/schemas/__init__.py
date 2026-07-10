@@ -145,6 +145,12 @@ from app.schemas.strategy_generation_run import (
     StrategyGenerationRunRead,
     StrategyGenerationRunStatusUpdate,
 )
+from app.schemas.deepseek_backtest_loop import (
+    DeepSeekBacktestExecutionRead,
+    DeepSeekBacktestLoopRequest,
+    DeepSeekBacktestLoopResponse,
+    DeepSeekBacktestLoopStatus,
+)
 from app.schemas.strategy_score import (
     StrategyRankingEntry,
     StrategyScoreCreate,
@@ -210,6 +216,10 @@ __all__ = [
     "fallback_source",
     "fixture_source",
     "GenerationRunStatus",
+    "DeepSeekBacktestExecutionRead",
+    "DeepSeekBacktestLoopRequest",
+    "DeepSeekBacktestLoopResponse",
+    "DeepSeekBacktestLoopStatus",
     "GovernanceArtifactKind",
     "GovernanceArtifactLink",
     "GovernanceEvent",
