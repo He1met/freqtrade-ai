@@ -20,8 +20,10 @@ from app.schemas import (
 from app.services.strategy_generation import (
     StrategyGenerationExecutionError,
     StrategyGenerationService,
+    build_deepseek_single_provider_from_env,
     build_strategy_blueprint_provider_from_env,
 )
+from app.schemas.strategy_generation_run import DeepSeekSingleGenerationRequest
 
 
 router = APIRouter(prefix="/api", tags=["strategy-generation"])
@@ -31,6 +33,14 @@ def get_strategy_generation_service(db: Session = Depends(get_db)) -> StrategyGe
     return StrategyGenerationService(
         db,
         provider=build_strategy_blueprint_provider_from_env(),
+        file_manager=StrategyFileManager(),
+    )
+
+
+def get_deepseek_single_generation_service(db: Session = Depends(get_db)) -> StrategyGenerationService:
+    return StrategyGenerationService(
+        db,
+        provider=build_deepseek_single_provider_from_env(),
         file_manager=StrategyFileManager(),
     )
 
@@ -70,16 +80,109 @@ def create_strategy_generation_run(
             },
         ) from exc
 
+    return _build_generation_response(service, result.run_id, result.version_ids)
+
+
+@router.post("/strategy-generation-runs/deepseek-single", response_model=StrategyGenerationApiResponse)
+def create_deepseek_single_generation_run(
+    payload: DeepSeekSingleGenerationRequest,
+    service: StrategyGenerationService = Depends(get_deepseek_single_generation_service),
+) -> StrategyGenerationApiResponse:
+    if service.provider.provider_name != "deepseek":
+        raise HTTPException(status_code=500, detail="DeepSeek single-run provider boundary is misconfigured")
+
+    if not payload.allow_real_call:
+        reason = "Real DeepSeek call requires explicit single-run authorization."
+        run_id = service.record_blocked_once(
+            payload.prompt_summary,
+            reason,
+            real_call_authorized=False,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "DeepSeek single run was blocked before provider execution",
+                "strategy_generation_run_id": run_id,
+                "evidence": operation_error_evidence(
+                    status="BLOCKED",
+                    reason=reason,
+                    next_action="Set the key in ENV and retry once with allow_real_call=true.",
+                    ids={"strategy_generation_run_id": run_id},
+                ).model_dump(mode="json"),
+            },
+        )
+
+    if not service.has_provider_credential():
+        reason = "Missing configured DeepSeek API key environment variable."
+        run_id = service.record_blocked_once(
+            payload.prompt_summary,
+            reason,
+            real_call_authorized=True,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "DeepSeek single run was blocked before provider execution",
+                "strategy_generation_run_id": run_id,
+                "evidence": operation_error_evidence(
+                    status="BLOCKED",
+                    reason=reason,
+                    next_action="Set the configured DeepSeek key in ENV and retry once.",
+                    ids={"strategy_generation_run_id": run_id},
+                ).model_dump(mode="json"),
+            },
+        )
+
+    try:
+        result = service.run_once_with_result(
+            payload.prompt_summary,
+            requested_count=1,
+            execution_metadata={
+                "real_call_authorized": True,
+                "real_call_attempted": True,
+                "credential_env_present": True,
+                "credential_values_recorded": False,
+            },
+        )
+    except StrategyGenerationExecutionError as exc:
+        is_missing_key = "missing LLM API key environment variable" in str(exc)
+        status = "BLOCKED" if is_missing_key else "FAILED"
+        raise HTTPException(
+            status_code=409 if is_missing_key else 502,
+            detail={
+                "message": "DeepSeek single run did not produce an accepted strategy",
+                "strategy_generation_run_id": exc.run_id,
+                "evidence": operation_error_evidence(
+                    status=status,
+                    reason=str(exc),
+                    next_action=(
+                        "Set the configured DeepSeek key in ENV and retry once."
+                        if is_missing_key
+                        else "Inspect the persisted provider diagnostics and retry only after correcting the failure."
+                    ),
+                    ids={"strategy_generation_run_id": exc.run_id},
+                ).model_dump(mode="json"),
+            },
+        ) from exc
+
+    return _build_generation_response(service, result.run_id, result.version_ids)
+
+
+def _build_generation_response(
+    service: StrategyGenerationService,
+    run_id: int,
+    version_ids: Iterable[int],
+) -> StrategyGenerationApiResponse:
     run_repository = service.run_repository
     strategy_repository = service.strategy_repository
-    run = run_repository.get(result.run_id)
+    run = run_repository.get(run_id)
     if run is None or run.status != "succeeded":
         raise HTTPException(
             status_code=500,
             detail="strategy generation API could not verify the persisted generation run",
         )
 
-    versions = _load_versions(strategy_repository, result.version_ids, result.run_id)
+    versions = _load_versions(strategy_repository, version_ids, run_id)
     strategies = _load_strategies(strategy_repository, [version.strategy_id for version in versions])
     if not versions or run.accepted_count != len(versions):
         raise HTTPException(

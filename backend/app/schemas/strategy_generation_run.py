@@ -65,6 +65,11 @@ class StrategyGenerationRequest(BaseModel):
     requested_count: int = Field(default=1, ge=1, le=5)
 
 
+class DeepSeekSingleGenerationRequest(BaseModel):
+    prompt_summary: str = Field(min_length=1, max_length=4000)
+    allow_real_call: bool = False
+
+
 class StrategyGenerationApiResponse(BaseModel):
     run: StrategyGenerationRunRead
     strategies: list[StrategyRead]

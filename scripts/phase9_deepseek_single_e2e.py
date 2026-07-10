@@ -45,6 +45,7 @@ from app.schemas import (  # noqa: E402
     StrategyGenerationRunRead,
     StrategyGenerationRunStatusUpdate,
     StrategyVersionRead,
+    operation_error_evidence,
 )
 from app.schemas.dry_run_status import redact_secret_text  # noqa: E402
 from app.services.backtest_artifact_ingest import BacktestArtifactIngestService  # noqa: E402
@@ -117,17 +118,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def deepseek_config_from_env() -> LLMProviderConfig:
-    return LLMProviderConfig(
-        provider_name="deepseek",
-        model_name=os.environ.get("STRATEGY_BLUEPRINT_MODEL", "deepseek-v4-pro").strip()
-        or "deepseek-v4-pro",
-        base_url=os.environ.get("STRATEGY_BLUEPRINT_BASE_URL", "https://api.deepseek.com").strip()
-        or "https://api.deepseek.com",
-        api_key_env=os.environ.get("STRATEGY_BLUEPRINT_API_KEY_ENV", "DEEPSEEK_API_KEY").strip()
-        or "DEEPSEEK_API_KEY",
-        timeout_seconds=float(os.environ.get("STRATEGY_BLUEPRINT_TIMEOUT_SECONDS", "30")),
-        max_output_tokens=_optional_int_from_env("STRATEGY_BLUEPRINT_MAX_OUTPUT_TOKENS"),
-    )
+    return LLMProviderConfig.deepseek_from_env()
 
 
 def _optional_int_from_env(name: str) -> Optional[int]:
@@ -451,7 +442,7 @@ def build_report(
 
     return {
         "phase": "Phase 9",
-        "issue": "#277",
+        "issue": "#326",
         "status": status,
         "can_accept_as_real_run": can_accept,
         "reason": redact_secret_text(reason),
@@ -499,6 +490,16 @@ def build_report(
             "/ranking",
         ],
         "required_action": required_action(status),
+        "evidence": operation_error_evidence(
+            status="BLOCKED" if status == "BLOCKED" else "FAILED",
+            reason=redact_secret_text(reason),
+            next_action=required_action(status),
+            ids=(
+                {"strategy_generation_run_id": generation_run.id}
+                if generation_run is not None
+                else {}
+            ),
+        ).model_dump(mode="json") if status != "READY_FOR_REVIEW" else None,
     }
 
 
