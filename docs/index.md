@@ -46,6 +46,7 @@ operable:
 - [phase9_operational_readiness_plan.md](phase9_operational_readiness_plan.md)
 - [phase9_acceptance.md](phase9_acceptance.md)
 - [phase9_deepseek_single_e2e.md](phase9_deepseek_single_e2e.md)
+- [phase9_deepseek_backtest_loop.md](phase9_deepseek_backtest_loop.md)
 - [phase9_local_test_db.md](phase9_local_test_db.md)
 - [phase9_page_data_source_audit.md](phase9_page_data_source_audit.md)
 - [phase9_bug_issue_flow.md](phase9_bug_issue_flow.md)
