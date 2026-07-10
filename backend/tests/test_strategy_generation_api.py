@@ -18,7 +18,10 @@ from app.services.strategy_generation import (
     StrategyBlueprintProvider,
     StrategyGenerationService,
 )
-from app.api.strategy_generation import get_strategy_generation_service
+from app.api.strategy_generation import (
+    get_deepseek_single_generation_service,
+    get_strategy_generation_service,
+)
 
 
 class FailingProvider(FakeStrategyBlueprintProvider):
@@ -51,6 +54,11 @@ class MockLLMResponse:
 
     def json(self) -> dict:
         return self.body
+
+
+class FailingMockLLMResponse(MockLLMResponse):
+    def raise_for_status(self) -> None:
+        raise RuntimeError("test provider failure")
 
 
 class MockLLMClient:
@@ -91,6 +99,29 @@ def client_with_generation_service(tmp_path: Path, provider: StrategyBlueprintPr
     app.dependency_overrides[get_strategy_generation_service] = override_service
     app.dependency_overrides[get_db] = override_db
     return TestClient(app), session_factory
+
+
+def client_with_deepseek_single_service(
+    tmp_path: Path,
+    provider: StrategyBlueprintProvider,
+) -> tuple[TestClient, object]:
+    client, session_factory = client_with_generation_service(tmp_path, provider)
+
+    def override_service() -> Generator[StrategyGenerationService, None, None]:
+        db = session_factory()
+        output_dir = tmp_path / "deepseek-strategies"
+        output_dir.mkdir(exist_ok=True)
+        try:
+            yield StrategyGenerationService(
+                db,
+                provider=provider,
+                file_manager=StrategyFileManager(output_dir=output_dir, approved_roots=[output_dir]),
+            )
+        finally:
+            db.close()
+
+    app.dependency_overrides[get_deepseek_single_generation_service] = override_service
+    return client, session_factory
 
 
 def test_strategy_generation_api_persists_run_strategy_and_version(tmp_path: Path) -> None:
@@ -253,3 +284,162 @@ def test_strategy_generation_api_rejects_empty_prompt(tmp_path: Path) -> None:
         app.dependency_overrides.clear()
 
     assert response.status_code == 422
+
+
+def test_deepseek_single_api_defaults_to_persisted_blocked_without_provider_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TEST_LLM_API_KEY", "test-secret-value")
+    http_client = MockLLMClient(MockLLMResponse({"blueprints": [blueprint_payload()]}))
+    provider = OpenAICompatibleStrategyBlueprintProvider(
+        LLMProviderConfig(
+            provider_name="deepseek",
+            model_name="deepseek-v4-pro",
+            base_url="https://api.deepseek.com",
+            api_key_env="TEST_LLM_API_KEY",
+        ),
+        http_client=http_client,
+    )
+    client, session_factory = client_with_deepseek_single_service(tmp_path, provider)
+    try:
+        response = client.post(
+            "/api/strategy-generation-runs/deepseek-single",
+            json={"prompt_summary": "Generate exactly one strategy."},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["evidence"]["status"] == "BLOCKED"
+    assert detail["evidence"]["acceptance_ready"] is False
+    assert http_client.requests == []
+    with session_factory() as db:
+        run = StrategyGenerationRunRepository(db).get(detail["strategy_generation_run_id"])
+        assert run is not None
+        assert run.status == "failed"
+        assert run.params_snapshot["provider_kind"] == "real"
+        assert run.params_snapshot["operation_status"] == "BLOCKED"
+        assert run.params_snapshot["real_call_authorized"] is False
+        assert run.params_snapshot["real_call_attempted"] is False
+        assert "test-secret-value" not in str(run.params_snapshot)
+
+
+def test_deepseek_single_api_blocks_missing_env_key_before_provider_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("TEST_LLM_API_KEY", raising=False)
+    http_client = MockLLMClient(MockLLMResponse({"blueprints": [blueprint_payload()]}))
+    provider = OpenAICompatibleStrategyBlueprintProvider(
+        LLMProviderConfig(
+            provider_name="deepseek",
+            model_name="deepseek-v4-pro",
+            base_url="https://api.deepseek.com",
+            api_key_env="TEST_LLM_API_KEY",
+        ),
+        http_client=http_client,
+    )
+    client, session_factory = client_with_deepseek_single_service(tmp_path, provider)
+    try:
+        response = client.post(
+            "/api/strategy-generation-runs/deepseek-single",
+            json={"prompt_summary": "Generate exactly one strategy.", "allow_real_call": True},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["evidence"]["status"] == "BLOCKED"
+    assert http_client.requests == []
+    with session_factory() as db:
+        run = StrategyGenerationRunRepository(db).get(detail["strategy_generation_run_id"])
+        assert run is not None
+        assert run.params_snapshot["real_call_authorized"] is True
+        assert run.params_snapshot["real_call_attempted"] is False
+        assert run.params_snapshot["credential_env_present"] is False
+
+
+def test_deepseek_single_api_authorized_success_uses_one_mock_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    test_secret = "test-secret-value"
+    monkeypatch.setenv("TEST_LLM_API_KEY", test_secret)
+    http_client = MockLLMClient(MockLLMResponse({"blueprints": [blueprint_payload("single-deepseek")]}))
+    provider = OpenAICompatibleStrategyBlueprintProvider(
+        LLMProviderConfig(
+            provider_name="deepseek",
+            model_name="deepseek-v4-pro",
+            base_url="https://api.deepseek.com",
+            api_key_env="TEST_LLM_API_KEY",
+        ),
+        http_client=http_client,
+    )
+    client, session_factory = client_with_deepseek_single_service(tmp_path, provider)
+    try:
+        response = client.post(
+            "/api/strategy-generation-runs/deepseek-single",
+            json={"prompt_summary": "Generate exactly one strategy.", "allow_real_call": True},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["evidence"]["status"] == "SUCCESS"
+    assert payload["evidence"]["acceptance_ready"] is True
+    assert len(http_client.requests) == 1
+    assert http_client.requests[0]["json"]["model"] == "deepseek-v4-pro"
+    assert test_secret not in str(payload)
+    with session_factory() as db:
+        run = StrategyGenerationRunRepository(db).get(payload["run"]["id"])
+        assert run is not None
+        assert run.requested_count == 1
+        assert run.params_snapshot["provider_kind"] == "real"
+        assert run.params_snapshot["real_call_authorized"] is True
+        assert run.params_snapshot["real_call_attempted"] is True
+        assert run.params_snapshot["operation_status"] == "SUCCESS"
+        assert test_secret not in str(run.params_snapshot)
+
+
+def test_deepseek_single_api_provider_failure_persists_failed_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    test_secret = "test-secret-value"
+    monkeypatch.setenv("TEST_LLM_API_KEY", test_secret)
+    http_client = MockLLMClient(FailingMockLLMResponse({}))
+    provider = OpenAICompatibleStrategyBlueprintProvider(
+        LLMProviderConfig(
+            provider_name="deepseek",
+            model_name="deepseek-v4-pro",
+            base_url="https://api.deepseek.com",
+            api_key_env="TEST_LLM_API_KEY",
+        ),
+        http_client=http_client,
+    )
+    client, session_factory = client_with_deepseek_single_service(tmp_path, provider)
+    try:
+        response = client.post(
+            "/api/strategy-generation-runs/deepseek-single",
+            json={"prompt_summary": "Generate exactly one strategy.", "allow_real_call": True},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 502
+    detail = response.json()["detail"]
+    assert detail["evidence"]["status"] == "FAILED"
+    assert detail["evidence"]["acceptance_ready"] is False
+    assert len(http_client.requests) == 1
+    assert test_secret not in str(detail)
+    with session_factory() as db:
+        run = StrategyGenerationRunRepository(db).get(detail["strategy_generation_run_id"])
+        assert run is not None
+        assert run.status == "failed"
+        assert run.params_snapshot["operation_status"] == "FAILED"
+        assert run.params_snapshot["provider_failure"]["category"] == "provider_request_error"
+        assert test_secret not in str(run.params_snapshot)

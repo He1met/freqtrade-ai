@@ -1,11 +1,17 @@
 # Phase 9 Single DeepSeek E2E
 
-This runbook is for issue `#277`: one controlled DeepSeek validation, or a
+This runbook is for issue `#326`: one controlled DeepSeek validation, or a
 durable fail-closed evidence package when prerequisites are missing.
 
 The default path does not call DeepSeek. A real request is sent only when
 `--allow-real-call` is passed and `DEEPSEEK_API_KEY` exists in the local
 environment.
+
+The formal API entry is `POST /api/strategy-generation-runs/deepseek-single`.
+It fixes the request count at one and requires `allow_real_call=true`. Without
+that flag it persists a `BLOCKED` operation evidence record and never invokes
+the Provider. Fake and fixture providers use the existing generation endpoint
+and cannot satisfy this acceptance path.
 
 ## Safe Default
 

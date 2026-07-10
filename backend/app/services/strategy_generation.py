@@ -91,6 +91,21 @@ class LLMProviderConfig:
             max_output_tokens=_optional_int_from_env("STRATEGY_BLUEPRINT_MAX_OUTPUT_TOKENS"),
         )
 
+    @classmethod
+    def deepseek_from_env(cls) -> "LLMProviderConfig":
+        """Build the one-shot DeepSeek boundary without reading a secret value."""
+        return cls(
+            provider_name="deepseek",
+            model_name=os.environ.get("STRATEGY_BLUEPRINT_MODEL", "deepseek-v4-pro").strip()
+            or "deepseek-v4-pro",
+            base_url=os.environ.get("STRATEGY_BLUEPRINT_BASE_URL", "https://api.deepseek.com").strip()
+            or "https://api.deepseek.com",
+            api_key_env=os.environ.get("STRATEGY_BLUEPRINT_API_KEY_ENV", "DEEPSEEK_API_KEY").strip()
+            or "DEEPSEEK_API_KEY",
+            timeout_seconds=float(os.environ.get("STRATEGY_BLUEPRINT_TIMEOUT_SECONDS", "30")),
+            max_output_tokens=_optional_int_from_env("STRATEGY_BLUEPRINT_MAX_OUTPUT_TOKENS"),
+        )
+
     def metadata_snapshot(self) -> dict[str, Any]:
         return {
             "mode": "real_provider",
@@ -103,6 +118,8 @@ class LLMProviderConfig:
             "timeout_seconds": self.timeout_seconds,
             "max_output_tokens": self.max_output_tokens,
             "real_provider": True,
+            "provider_kind": "real",
+            "credential_values_recorded": False,
         }
 
 
@@ -471,6 +488,7 @@ class FakeStrategyBlueprintProvider:
             "model": self.model_name,
             "source": "fixture",
             "real_provider": False,
+            "provider_kind": "fake",
         }
 
 
@@ -483,6 +501,15 @@ def build_strategy_blueprint_provider_from_env(
     if config.provider_name == "fake":
         return FakeStrategyBlueprintProvider()
     return OpenAICompatibleStrategyBlueprintProvider(config=config, http_client=http_client)
+
+
+def build_deepseek_single_provider_from_env(
+    http_client: Optional[LLMHTTPClient] = None,
+) -> OpenAICompatibleStrategyBlueprintProvider:
+    return OpenAICompatibleStrategyBlueprintProvider(
+        config=LLMProviderConfig.deepseek_from_env(),
+        http_client=http_client,
+    )
 
 
 class StrategyGenerationService:
@@ -509,6 +536,7 @@ class StrategyGenerationService:
         self,
         prompt_summary: str,
         requested_count: int = 1,
+        execution_metadata: Optional[dict[str, Any]] = None,
     ) -> StrategyGenerationResult:
         # Persist the run before provider execution so failures are visible to
         # the UI and later quality-analysis tasks.
@@ -517,7 +545,10 @@ class StrategyGenerationService:
                 provider=self.provider.provider_name,
                 model=self.provider.model_name,
                 prompt_summary=prompt_summary,
-                params_snapshot=self._provider_params_snapshot(),
+                params_snapshot={
+                    **self._provider_params_snapshot(),
+                    **(execution_metadata or {}),
+                },
                 requested_count=requested_count,
             )
         )
@@ -532,11 +563,15 @@ class StrategyGenerationService:
         except Exception as exc:
             safe_error = self._redact_sensitive_error(str(exc))
             failure_diagnostics = self._provider_failure_diagnostics(exc)
-            if failure_diagnostics:
-                run.params_snapshot = {
-                    **(run.params_snapshot or {}),
-                    "provider_failure": failure_diagnostics,
-                }
+            run.params_snapshot = {
+                **(run.params_snapshot or {}),
+                "operation_status": "FAILED",
+                **(
+                    {"provider_failure": failure_diagnostics}
+                    if failure_diagnostics
+                    else {}
+                ),
+            }
             self.run_repository.update_status(
                 run.id,
                 StrategyGenerationRunStatusUpdate(
@@ -547,6 +582,10 @@ class StrategyGenerationService:
             )
             raise StrategyGenerationExecutionError(safe_error, run.id) from exc
 
+        run.params_snapshot = {
+            **(run.params_snapshot or {}),
+            "operation_status": "SUCCESS",
+        }
         self.run_repository.update_status(
             run.id,
             StrategyGenerationRunStatusUpdate(
@@ -557,6 +596,53 @@ class StrategyGenerationService:
             ),
         )
         return StrategyGenerationResult(run_id=run.id, version_ids=version_ids)
+
+    def has_provider_credential(self) -> bool:
+        config = getattr(self.provider, "config", None)
+        credential_env_name = getattr(config, "api_key_env", None)
+        return bool(
+            os.environ.get(credential_env_name)
+            if isinstance(credential_env_name, str)
+            else False
+        )
+
+    def record_blocked_once(
+        self,
+        prompt_summary: str,
+        reason: str,
+        *,
+        real_call_authorized: bool,
+    ) -> int:
+        """Persist a fail-closed one-shot attempt without invoking the provider."""
+        config = getattr(self.provider, "config", None)
+        credential_env_name = getattr(config, "api_key_env", None)
+        key_present = self.has_provider_credential()
+        run = self.run_repository.create(
+            StrategyGenerationRunCreate(
+                provider=self.provider.provider_name,
+                model=self.provider.model_name,
+                prompt_summary=prompt_summary,
+                params_snapshot={
+                    **self._provider_params_snapshot(),
+                    "mode": "blocked_preflight",
+                    "operation_status": "BLOCKED",
+                    "real_call_authorized": real_call_authorized,
+                    "real_call_attempted": False,
+                    "credential_env_present": key_present,
+                    "credential_values_recorded": False,
+                },
+                requested_count=1,
+            )
+        )
+        self.run_repository.update_status(
+            run.id,
+            StrategyGenerationRunStatusUpdate(
+                status="failed",
+                failed_count=1,
+                error_message=self._redact_sensitive_error(reason),
+            ),
+        )
+        return run.id
 
     def _provider_params_snapshot(self) -> dict[str, Any]:
         metadata_getter = getattr(self.provider, "metadata_snapshot", None)

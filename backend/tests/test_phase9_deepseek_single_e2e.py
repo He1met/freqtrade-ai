@@ -53,6 +53,10 @@ def test_deepseek_single_e2e_blocks_without_explicit_real_call() -> None:
         payload = json.loads(result.stdout)
 
         assert payload["status"] == "BLOCKED"
+        assert payload["issue"] == "#326"
+        assert payload["evidence"]["status"] == "BLOCKED"
+        assert payload["evidence"]["ids"]["strategy_generation_run_id"] > 0
+        assert payload["evidence"]["acceptance_ready"] is False
         assert payload["can_accept_as_real_run"] is False
         assert payload["provider"]["name"] == "deepseek"
         assert payload["provider"]["credential_env"] == "DEEPSEEK_API_KEY"
