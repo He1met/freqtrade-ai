@@ -26,7 +26,7 @@ class StrategyScoreRepository:
         )
         return self.db.scalars(statement).first()
 
-    def save(self, payload: StrategyScoreCreate) -> Optional[StrategyScore]:
+    def save(self, payload: StrategyScoreCreate, *, commit: bool = True) -> Optional[StrategyScore]:
         strategy = self.db.get(Strategy, payload.strategy_id)
         version = self.db.get(StrategyVersion, payload.strategy_version_id)
         if strategy is None or version is None or version.strategy_id != strategy.id:
@@ -49,8 +49,9 @@ class StrategyScoreRepository:
         score.quality_score = payload.quality_score
         score.metrics_snapshot = payload.metrics_snapshot
 
-        self.db.commit()
-        self.db.refresh(score)
+        if commit:
+            self.db.commit()
+            self.db.refresh(score)
         return score
 
     def list_ranking(self, limit: int = 20) -> list[StrategyRankingEntry]:

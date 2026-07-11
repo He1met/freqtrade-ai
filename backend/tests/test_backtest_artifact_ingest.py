@@ -1,7 +1,9 @@
 import json
+import hashlib
 import shutil
 from collections.abc import Generator
 from pathlib import Path
+from typing import Optional
 from uuid import uuid4
 
 import pytest
@@ -49,7 +51,7 @@ def safe_artifact_dir() -> Generator[Path, None, None]:
 
 def _create_strategy_version(db_session: Session) -> int:
     repository = StrategyRepository(db_session)
-    strategy = repository.create(StrategyCreate(name="Artifact Ingest", slug="artifact-ingest"))
+    strategy = repository.create(StrategyCreate(name="MvpRsiStrategy", slug="artifact-ingest"))
     version = repository.create_version(
         StrategyVersionCreate(
             strategy_id=strategy.id,
@@ -113,14 +115,19 @@ def _write_manifest(
     status: str = "SUCCESS",
     stdout: str = "backtesting complete",
     stderr: str = "",
+    run_id: Optional[int] = None,
+    task_id: Optional[int] = None,
+    strategy_version_id: Optional[int] = None,
+    strategy_path: Optional[Path] = None,
+    config_path: Optional[Path] = None,
 ) -> None:
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(
         json.dumps(
             {
-                "manifest_version": 1,
+                "manifest_version": 2 if run_id is not None else 1,
                 "status": status,
-                "config_path": "tmp/freqtrade_configs/backtest.json",
+                "config_path": str(config_path) if config_path is not None else "tmp/freqtrade_configs/backtest.json",
                 "strategy_name": "MvpRsiStrategy",
                 "result_path": str(result_path),
                 "manifest_path": str(manifest_path),
@@ -136,6 +143,19 @@ def _write_manifest(
                 "stderr": stderr,
                 "blocked_reason": "missing data" if status == "BLOCKED" else None,
                 "failed_reason": "freqtrade failure" if status == "FAILED" else None,
+                "run_id": run_id,
+                "task_id": task_id,
+                "strategy_version_id": strategy_version_id,
+                "execution_id": f"test-run-{run_id}-task-{task_id}" if run_id is not None else None,
+                "strategy_path": str(strategy_path) if strategy_path is not None else None,
+                "checksums": (
+                    {
+                        "config": hashlib.sha256(config_path.read_bytes()).hexdigest(),
+                        "result": hashlib.sha256(result_path.read_bytes()).hexdigest(),
+                        "strategy": hashlib.sha256(strategy_path.read_bytes()).hexdigest(),
+                    }
+                    if run_id is not None and config_path is not None and strategy_path is not None else None
+                ),
             }
         ),
         encoding="utf-8",
@@ -152,6 +172,16 @@ def test_api_ingests_success_manifest_and_persists_reconcilable_result(
     with session_factory() as setup_session:
         strategy_version_id = _create_strategy_version(setup_session)
         run_id, task_id = _create_task(setup_session, strategy_version_id)
+        config_path = safe_artifact_dir / "backtest-config.json"
+        strategy_path = safe_artifact_dir / "strategy.py"
+        config_path.write_text("{}", encoding="utf-8")
+        strategy_path.write_text("class MvpRsiStrategy: pass\n", encoding="utf-8")
+        task = BacktestRepository(setup_session).get_task(task_id)
+        version = StrategyRepository(setup_session).get_version(strategy_version_id)
+        assert task is not None and version is not None
+        task.config_path = str(config_path)
+        version.file_path = str(strategy_path)
+        setup_session.commit()
 
     result_path = safe_artifact_dir / "backtest-result.json"
     manifest_path = safe_artifact_dir / "backtest-manifest.json"
@@ -161,6 +191,11 @@ def test_api_ingests_success_manifest_and_persists_reconcilable_result(
         result_path,
         stdout="backtesting complete api_key=real-value",
         stderr="Bearer token-value",
+        run_id=run_id,
+        task_id=task_id,
+        strategy_version_id=strategy_version_id,
+        strategy_path=strategy_path,
+        config_path=config_path,
     )
 
     def override_get_db():
@@ -249,7 +284,7 @@ def test_success_manifest_with_missing_result_path_blocks_without_result(
     assert response.evidence is not None
     assert response.evidence.status == "BLOCKED"
     assert response.evidence.blocked_reason
-    assert "does not exist" in (response.reason or "")
+    assert "provenance version 2" in (response.reason or "")
     assert repository.list_results(run_id) == []
     assert repository.get_task(task_id).status == "blocked"  # type: ignore[union-attr]
     assert repository.get_run(run_id).status == "blocked"  # type: ignore[union-attr]
@@ -273,11 +308,11 @@ def test_malformed_backtest_result_fails_without_creating_result(
     repository = BacktestRepository(db_session)
 
     assert response is not None
-    assert response.ingest_status == "failed"
-    assert "parse failed" in (response.reason or "")
+    assert response.ingest_status == "blocked"
+    assert "provenance version 2" in (response.reason or "")
     assert repository.list_results(run_id) == []
-    assert repository.get_task(task_id).status == "failed"  # type: ignore[union-attr]
-    assert repository.get_run(run_id).status == "failed"  # type: ignore[union-attr]
+    assert repository.get_task(task_id).status == "blocked"  # type: ignore[union-attr]
+    assert repository.get_run(run_id).status == "blocked"  # type: ignore[union-attr]
 
 
 def test_secret_shaped_result_path_is_blocked_without_persisting_secret_value(

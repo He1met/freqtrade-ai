@@ -213,7 +213,12 @@ class DeepSeekBacktestLoopService:
                 / profile.data_source.exchange
             ),
             strategy_path=resolve_repo_path(version.file_path).parent,
+            strategy_file_path=resolve_repo_path(version.file_path),
             userdir=resolve_repo_path(get_settings().freqtrade_user_data),
+            run_id=claimed_task.backtest_run_id,
+            task_id=claimed_task.id,
+            strategy_version_id=version.id,
+            execution_id=f"backtest-run-{claimed_task.backtest_run_id}-task-{claimed_task.id}",
         )
         execution = self._execution_read(manifest)
 

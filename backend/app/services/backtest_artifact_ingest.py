@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 from typing import Any, Optional
 
@@ -139,6 +140,14 @@ class BacktestArtifactIngestService:
                     manifest_path=manifest_path,
                     result_path=result_path,
                 )
+            provenance_error = self._validate_success_provenance(task, manifest, manifest_path, result_path)
+            if provenance_error is not None:
+                return self._record_blocked(
+                    task,
+                    provenance_error,
+                    manifest_path=manifest_path,
+                    result_path=result_path,
+                )
 
         if not result_path.exists() or not result_path.is_file():
             return self._record_blocked(
@@ -162,38 +171,36 @@ class BacktestArtifactIngestService:
                 result_path=result_path,
             )
 
-        result = self.repository.save_result(
-            task.id,
-            self._result_with_ingest_metadata(
-                parsed_result,
-                task,
-                manifest=manifest,
-                manifest_path=manifest_path,
-                result_path=result_path,
-                strategy_name=strategy_name,
-            ),
-        )
-        if result is None:
-            raise RuntimeError(f"Backtest result was not saved during artifact ingest: {task.id}")
-        score = StrategyScoringService(self.repository.db).score_backtest_result(result.id)
-        if score is None:
-            return self._record_failed(
-                task,
-                "strategy score could not be generated from backtest result metrics",
-                manifest_path=manifest_path,
-                result_path=result_path,
+        try:
+            result = self.repository.save_result(
+                task.id,
+                self._result_with_ingest_metadata(
+                    parsed_result, task, manifest=manifest, manifest_path=manifest_path,
+                    result_path=result_path, strategy_name=strategy_name,
+                ),
+                commit=False,
             )
-        updated_task = self.repository.update_task_status(
-            task.id,
-            BacktestTaskStatusUpdate(
-                status="succeeded",
-                result_path=str(result_path),
-                error_message=self._artifact_note("SUCCEEDED", None, manifest_path, result_path),
-            ),
-        )
-        self._refresh_run_status(task.backtest_run_id)
-        if updated_task is None:
-            raise RuntimeError(f"Backtest task disappeared during artifact ingest: {task.id}")
+            if result is None:
+                raise RuntimeError("backtest result was not saved")
+            self.repository.db.flush()
+            score = StrategyScoringService(self.repository.db).score_backtest_result(result.id, commit=False)
+            if score is None:
+                raise RuntimeError("strategy score could not be generated from backtest result metrics")
+            updated_task = self.repository.update_task_status(
+                task.id,
+                BacktestTaskStatusUpdate(status="succeeded", result_path=str(result_path), error_message=self._artifact_note("SUCCEEDED", None, manifest_path, result_path)),
+                commit=False,
+            )
+            self._refresh_run_status(task.backtest_run_id, commit=False)
+            if updated_task is None:
+                raise RuntimeError("backtest task disappeared during artifact ingest")
+            self.repository.db.commit()
+            self.repository.db.refresh(result)
+            self.repository.db.refresh(score)
+            self.repository.db.refresh(updated_task)
+        except Exception as exc:
+            self.repository.db.rollback()
+            return self._record_failed(task, f"artifact ingest transaction failed: {exc.__class__.__name__}", manifest_path=manifest_path, result_path=result_path)
         return self._response(
             updated_task,
             status="succeeded",
@@ -246,6 +253,52 @@ class BacktestArtifactIngestService:
         if isinstance(value, str) and value.strip():
             return self._path_from_text(value)
         return None
+
+    def _validate_success_provenance(
+        self,
+        task: BacktestTask,
+        manifest: dict[str, Any],
+        manifest_path: Path,
+        result_path: Optional[Path],
+    ) -> Optional[str]:
+        """Fail closed unless a SUCCESS artifact is bound to this persisted task."""
+        expected = {
+            "run_id": task.backtest_run_id,
+            "task_id": task.id,
+            "strategy_version_id": task.run.strategy_version_id,
+        }
+        if manifest.get("manifest_version") != 2:
+            return "SUCCESS artifact manifest must use provenance version 2"
+        for key, value in expected.items():
+            if manifest.get(key) != value:
+                return f"artifact manifest {key} does not match the persisted backtest task"
+        if not isinstance(manifest.get("execution_id"), str) or not manifest["execution_id"].strip():
+            return "artifact manifest is missing execution_id"
+        blueprint = task.run.strategy_version.blueprint or {}
+        expected_strategy_names = {task.strategy_name, blueprint.get("class_name")}
+        if manifest.get("strategy_name") not in expected_strategy_names:
+            return "artifact manifest strategy_name does not match the persisted strategy"
+        if result_path is None or self._path_from_text(manifest.get("result_path")) != result_path:
+            return "artifact manifest result_path does not match the ingest request"
+        if self._path_from_text(manifest.get("manifest_path")) != manifest_path:
+            return "artifact manifest self path does not match the server-selected manifest path"
+        checksums = manifest.get("checksums")
+        if not isinstance(checksums, dict):
+            return "artifact manifest is missing checksums"
+        for key, path in (("config", self._path_from_text(manifest.get("config_path"))), ("result", result_path), ("strategy", self._path_from_text(manifest.get("strategy_path")))):
+            if path is None or not path.is_file() or not isinstance(checksums.get(key), str):
+                return f"artifact manifest is missing a verifiable {key} checksum"
+            if checksums[key] != self._sha256(path):
+                return f"artifact {key} checksum does not match"
+        if task.config_path is None or self._path_from_text(task.config_path) != self._path_from_text(manifest.get("config_path")):
+            return "artifact manifest config_path does not match the persisted backtest task"
+        strategy_path = self._path_from_text(manifest.get("strategy_path"))
+        if strategy_path != self._path_from_text(task.run.strategy_version.file_path):
+            return "artifact manifest strategy_path does not match the persisted strategy version"
+        return None
+
+    def _sha256(self, path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
 
     def _result_with_ingest_metadata(
         self,
@@ -359,26 +412,26 @@ class BacktestArtifactIngestService:
             result_path=result_path,
         )
 
-    def _refresh_run_status(self, run_id: int) -> None:
+    def _refresh_run_status(self, run_id: int, *, commit: bool = True) -> None:
         tasks = self.repository.list_tasks(run_id)
         if not tasks:
             return
         statuses = {task.status for task in tasks}
         if "running" in statuses:
-            self.repository.update_run_status(run_id, BacktestRunStatusUpdate(status="running"))
+            self.repository.update_run_status(run_id, BacktestRunStatusUpdate(status="running"), commit=commit)
             return
         if "pending" in statuses:
             return
         if "failed" in statuses:
-            self.repository.update_run_status(run_id, BacktestRunStatusUpdate(status="failed"))
+            self.repository.update_run_status(run_id, BacktestRunStatusUpdate(status="failed"), commit=commit)
             return
         if "blocked" in statuses:
-            self.repository.update_run_status(run_id, BacktestRunStatusUpdate(status="blocked"))
+            self.repository.update_run_status(run_id, BacktestRunStatusUpdate(status="blocked"), commit=commit)
             return
         if statuses == {"cancelled"}:
-            self.repository.update_run_status(run_id, BacktestRunStatusUpdate(status="cancelled"))
+            self.repository.update_run_status(run_id, BacktestRunStatusUpdate(status="cancelled"), commit=commit)
             return
-        self.repository.update_run_status(run_id, BacktestRunStatusUpdate(status="succeeded"))
+        self.repository.update_run_status(run_id, BacktestRunStatusUpdate(status="succeeded"), commit=commit)
 
     def _response(
         self,

@@ -52,6 +52,7 @@ class BacktestRepository:
         self,
         run_id: int,
         payload: BacktestRunStatusUpdate,
+        *, commit: bool = True,
     ) -> Optional[BacktestRun]:
         run = self.get_run(run_id)
         if run is None:
@@ -63,8 +64,9 @@ class BacktestRepository:
         if payload.status in TERMINAL_STATUSES:
             run.completed_at = datetime.now(timezone.utc)
 
-        self.db.commit()
-        self.db.refresh(run)
+        if commit:
+            self.db.commit()
+            self.db.refresh(run)
         return run
 
     def create_task(self, run_id: int, payload: BacktestTaskCreate) -> Optional[BacktestTask]:
@@ -132,6 +134,7 @@ class BacktestRepository:
         self,
         task_id: int,
         payload: BacktestTaskStatusUpdate,
+        *, commit: bool = True,
     ) -> Optional[BacktestTask]:
         task = self.get_task(task_id)
         if task is None:
@@ -147,14 +150,16 @@ class BacktestRepository:
         if payload.error_message is not None:
             task.error_message = payload.error_message
 
-        self.db.commit()
-        self.db.refresh(task)
+        if commit:
+            self.db.commit()
+            self.db.refresh(task)
         return task
 
     def save_result(
         self,
         task_id: int,
         payload: BacktestResultCreate,
+        *, commit: bool = True,
     ) -> Optional[BacktestResult]:
         task = self.get_task(task_id)
         if task is None:
@@ -179,8 +184,9 @@ class BacktestRepository:
         result.timerange = payload.timerange
         task.result_path = payload.result_path
 
-        self.db.commit()
-        self.db.refresh(result)
+        if commit:
+            self.db.commit()
+            self.db.refresh(result)
         return result
 
     def list_results(self, run_id: int) -> list[BacktestResult]:
