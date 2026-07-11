@@ -36,7 +36,9 @@ class StrategyScoringService:
         self.repository = StrategyScoreRepository(db)
         self.scoring_version = scoring_version
 
-    def score_backtest_result(self, backtest_result_id: int) -> Optional[StrategyScore]:
+    def score_backtest_result(
+        self, backtest_result_id: int, *, commit: bool = True
+    ) -> Optional[StrategyScore]:
         result = self.db.get(BacktestResult, backtest_result_id)
         if result is None:
             return None
@@ -69,7 +71,8 @@ class StrategyScoringService:
                 stability_score=component_scores["stability_score"],
                 quality_score=component_scores["quality_score"],
                 metrics_snapshot=metrics_snapshot,
-            )
+            ),
+            commit=commit,
         )
 
     def calculate_component_scores(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,6 +44,11 @@ class FreqtradeBacktestArtifactManifest:
     userdir: Optional[Path] = None
     blocked_reason: Optional[str] = None
     failed_reason: Optional[str] = None
+    run_id: Optional[int] = None
+    task_id: Optional[int] = None
+    strategy_version_id: Optional[int] = None
+    execution_id: Optional[str] = None
+    checksums: Optional[dict[str, str]] = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -61,6 +67,11 @@ class FreqtradeBacktestArtifactManifest:
             "userdir": str(self.userdir) if self.userdir is not None else None,
             "blocked_reason": self.blocked_reason,
             "failed_reason": self.failed_reason,
+            "run_id": self.run_id,
+            "task_id": self.task_id,
+            "strategy_version_id": self.strategy_version_id,
+            "execution_id": self.execution_id,
+            "checksums": self.checksums,
         }
 
     def write(self) -> Path:
@@ -105,6 +116,7 @@ class FreqtradeBacktestRunner:
         timeout_seconds: Optional[int] = None,
         datadir: Optional[Path] = None,
         strategy_path: Optional[Path] = None,
+        strategy_file_path: Optional[Path] = None,
         userdir: Optional[Path] = None,
     ) -> FreqtradeBacktestExecution:
         if result_path is None:
@@ -139,7 +151,12 @@ class FreqtradeBacktestRunner:
         timeout_seconds: Optional[int] = None,
         datadir: Optional[Path] = None,
         strategy_path: Optional[Path] = None,
+        strategy_file_path: Optional[Path] = None,
         userdir: Optional[Path] = None,
+        run_id: Optional[int] = None,
+        task_id: Optional[int] = None,
+        strategy_version_id: Optional[int] = None,
+        execution_id: Optional[str] = None,
     ) -> FreqtradeBacktestArtifactManifest:
         command = self._build_backtesting_command(
             config_path,
@@ -166,8 +183,11 @@ class FreqtradeBacktestRunner:
                 stderr="",
                 datadir=datadir,
                 strategy_path=strategy_path,
+                strategy_file_path=strategy_file_path,
                 userdir=userdir,
                 blocked_reason=blocked_reason,
+                run_id=run_id, task_id=task_id, strategy_version_id=strategy_version_id,
+                execution_id=execution_id,
             )
 
         result_path.parent.mkdir(parents=True, exist_ok=True)
@@ -185,10 +205,13 @@ class FreqtradeBacktestRunner:
                 stderr=command_result.stderr,
                 datadir=datadir,
                 strategy_path=strategy_path,
+                strategy_file_path=strategy_file_path,
                 userdir=userdir,
                 failed_reason=(
                     f"Freqtrade backtesting exited with code {command_result.return_code}"
                 ),
+                run_id=run_id, task_id=task_id, strategy_version_id=strategy_version_id,
+                execution_id=execution_id,
             )
 
         self._materialize_backtest_result_json(result_path)
@@ -205,8 +228,11 @@ class FreqtradeBacktestRunner:
                 stderr=command_result.stderr,
                 datadir=datadir,
                 strategy_path=strategy_path,
+                strategy_file_path=strategy_file_path,
                 userdir=userdir,
                 failed_reason=f"Freqtrade result JSON was not generated: {result_path}",
+                run_id=run_id, task_id=task_id, strategy_version_id=strategy_version_id,
+                execution_id=execution_id,
             )
 
         return self._write_manifest(
@@ -221,7 +247,10 @@ class FreqtradeBacktestRunner:
             stderr=command_result.stderr,
             datadir=datadir,
             strategy_path=strategy_path,
+            strategy_file_path=strategy_file_path,
             userdir=userdir,
+            run_id=run_id, task_id=task_id, strategy_version_id=strategy_version_id,
+            execution_id=execution_id,
         )
 
     def _build_backtesting_command(
@@ -232,6 +261,7 @@ class FreqtradeBacktestRunner:
         timeout_seconds: Optional[int] = None,
         datadir: Optional[Path] = None,
         strategy_path: Optional[Path] = None,
+        strategy_file_path: Optional[Path] = None,
         userdir: Optional[Path] = None,
     ) -> FreqtradeCommand:
         options = {
@@ -346,12 +376,17 @@ class FreqtradeBacktestRunner:
         stderr: str,
         datadir: Optional[Path] = None,
         strategy_path: Optional[Path] = None,
+        strategy_file_path: Optional[Path] = None,
         userdir: Optional[Path] = None,
         blocked_reason: Optional[str] = None,
         failed_reason: Optional[str] = None,
+        run_id: Optional[int] = None,
+        task_id: Optional[int] = None,
+        strategy_version_id: Optional[int] = None,
+        execution_id: Optional[str] = None,
     ) -> FreqtradeBacktestArtifactManifest:
         manifest = FreqtradeBacktestArtifactManifest(
-            manifest_version=1,
+            manifest_version=2,
             status=status,
             config_path=config_path,
             strategy_name=strategy_name,
@@ -362,10 +397,16 @@ class FreqtradeBacktestRunner:
             stdout=_sanitize_and_tail(stdout),
             stderr=_sanitize_and_tail(stderr),
             datadir=datadir,
-            strategy_path=strategy_path,
+            strategy_path=strategy_file_path or strategy_path,
             userdir=userdir,
             blocked_reason=blocked_reason,
             failed_reason=failed_reason,
+            run_id=run_id,
+            task_id=task_id,
+            strategy_version_id=strategy_version_id,
+            execution_id=execution_id,
+            checksums=_artifact_checksums(config_path, result_path, strategy_file_path or strategy_path)
+            if status == "SUCCESS" else None,
         )
         manifest.write()
         return manifest
@@ -376,3 +417,14 @@ def _sanitize_and_tail(text: str, max_length: int = 4000) -> str:
     if len(redacted) <= max_length:
         return redacted
     return redacted[-max_length:]
+
+
+def _artifact_checksums(config_path: Path, result_path: Path, strategy_path: Optional[Path]) -> dict[str, str]:
+    """Return byte-level evidence only for artifacts that must exist on SUCCESS."""
+    paths = {"config": config_path, "result": result_path, "strategy": strategy_path}
+    checksums: dict[str, str] = {}
+    for name, path in paths.items():
+        if path is None or not path.is_file():
+            continue
+        checksums[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return checksums
