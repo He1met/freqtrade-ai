@@ -149,9 +149,19 @@ LIMIT 1
 FOR UPDATE SKIP LOCKED;
 ```
 
-## 迁移文件
+## 迁移与 schema 版本
 
-初始化 SQL 位于 `db/migrations/001_init.sql`。
+当前基线由 `backend/app/db/migrations.py` 的 `SCHEMA_VERSION` 管理，执行
+`make db-init` 迁移，执行 `make db-verify` 验证。迁移只接受 PostgreSQL SQLAlchemy
+URL，例如 `postgresql+psycopg://user:password@host:5432/database`；不要把该 URL 直接
+传给 `psql`，因为 `psql` 不理解 SQLAlchemy driver 名。需要人工检查时，可在 backend
+虚拟环境中调用 `app.db.migrations.psql_database_url()` 生成不含密码的 libpq URL，并通过
+`PGPASSWORD` 或 `.pgpass` 提供认证。
+
+新库会从当前 SQLAlchemy ORM 创建全部表、外键、unique/check constraint，并写入
+`freqtrade_ai_schema_migrations`。旧的非版本化 schema 仅在所有受管表为空时可原子重建；
+只要检测到数据就会在改动前 BLOCKED。迁移 DDL 运行在 PostgreSQL transaction 中，失败
+会回滚；本地开发库仍应先执行 `make db-backup`。
 
 ## 索引策略
 
