@@ -288,10 +288,17 @@ npm run dev
 
 ```bash
 docker compose up -d postgres
-psql "postgresql://freqtrade:change_me@localhost:5432/freqtrade_ai" -f db/migrations/001_init.sql
+export DATABASE_URL='postgresql+psycopg://freqtrade:change_me@localhost:5432/freqtrade_ai'
+make db-init
+make db-verify
+curl -i http://127.0.0.1:8000/readyz
 ```
 
-生产或共享环境请先设置真实 `.env`，不要提交真实密钥。
+`DATABASE_URL` 是 SQLAlchemy URL，只能传给 backend migration 命令，不能直接传给
+`psql` 或 `pg_dump`。迁移会将 schema version、所有 ORM 表/列、外键、unique/check
+constraint 一并核对；`/readyz` 在 PostgreSQL 不可用、schema 不匹配或版本缺失时返回
+`503`。已有本地开发库先执行 `make db-backup`，非空旧 schema 会明确 BLOCKED，不会
+尝试猜测或静默改写数据。生产或共享环境不在本项目迁移范围内，也不要提交真实密钥。
 
 ## 存储原则
 
