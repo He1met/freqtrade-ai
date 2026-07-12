@@ -1,10 +1,13 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import {
   StrategyGenerationApiError,
   checkDryRunReadiness,
+  ingestBacktestArtifact,
+  runDeepSeekSingle,
   startControlledDryRun,
   stopControlledDryRun,
+  triggerLocalBacktest,
 } from "../../api/client";
 import type {
   BacktestResultSummary,
@@ -34,6 +37,12 @@ import { FallbackNotice } from "../FallbackNotice";
 import { isCoreDataSource } from "../SourceMarker";
 import { isCoreDataSourceTrace } from "../../api/sourceState";
 import { EMPTY_TEXT, displayBoolean, displayLoadState, displayStatus, displayValue } from "../uiCopy";
+import {
+  actionStatusClassName,
+  actionStatusMessage,
+  createActionEvidence,
+  type ActionEvidence,
+} from "./actionEvidence";
 
 export type SubmissionState =
   | { kind: "idle" }
@@ -75,6 +84,36 @@ type SourceRow = {
   source: DataSourceTraceSummary;
 };
 
+type RecordActionEvidence = (entry: ActionEvidence) => void;
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function responseId(value: unknown): string | null {
+  const id = asRecord(value).id;
+  return id === null || id === undefined ? null : String(id);
+}
+
+function responseText(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function apiErrorMessage(error: unknown, fallback: string): string {
+  return error instanceof StrategyGenerationApiError
+    ? error.message
+    : error instanceof Error
+      ? error.message
+      : fallback;
+}
+
+function apiErrorStatus(error: unknown): "UNAUTHORIZED" | "BLOCKED" | "FAILED" {
+  if (error instanceof StrategyGenerationApiError) {
+    return error.operationStatus ?? (error.status === 401 || error.status === 403 ? "UNAUTHORIZED" : "FAILED");
+  }
+  return "FAILED";
+}
+
 function formatRecord(record: Record<string, number | string>): string {
   const entries = Object.entries(record);
   return entries.length > 0 ? entries.map(([key, value]) => `${key}: ${value}`).join(", ") : EMPTY_TEXT;
@@ -105,6 +144,49 @@ function CompactText({ className = "", value }: { className?: string; value: str
     <span className={`lab-compact-text ${className}`} title={text}>
       {text}
     </span>
+  );
+}
+
+function ActionEvidenceHistory({ history }: { history: ActionEvidence[] }) {
+  return (
+    <section className="lab-evidence-section" aria-label="核心操作反馈记录">
+      <div className="section-header detail-section">
+        <h2>核心操作反馈记录</h2>
+        <span>本浏览器保留，API/DB 证据为准</span>
+      </div>
+      {history.length === 0 ? (
+        <div className="empty-state">尚未发起核心操作。每次请求的状态、ID、artifact 和下一步会保留在这里。</div>
+      ) : (
+        <div className="table-shell lab-table-shell">
+          <table>
+            <thead>
+              <tr>
+                <th>操作</th>
+                <th>状态</th>
+                <th>database IDs</th>
+                <th>artifact paths</th>
+                <th>原因 / 结果</th>
+                <th>下一步</th>
+                <th>Bug 建议</th>
+              </tr>
+            </thead>
+            <tbody>
+              {history.map((entry) => (
+                <tr key={entry.action}>
+                  <td className="primary-cell">{entry.action}</td>
+                  <td><span className={`run-status ${actionStatusClassName(entry.status)}`}>{entry.status}</span></td>
+                  <td className="path-cell"><CompactText value={formatRecord(entry.databaseIds)} /></td>
+                  <td className="path-cell"><CompactText value={entry.artifactPaths.join(", ") || EMPTY_TEXT} /></td>
+                  <td className="reason-cell"><CompactText value={`${entry.message}（${entry.updatedAt}）`} /></td>
+                  <td className="reason-cell"><CompactText value={entry.nextAction} /></td>
+                  <td>{entry.recommendBug ? "建议创建 Bug Issue" : "否"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -609,7 +691,7 @@ function readinessCandidate(data: MvpData): { strategyVersionId: string; strateg
   };
 }
 
-function DryRunReadinessPanel({ data }: { data: MvpData }) {
+function DryRunReadinessPanel({ data, recordAction }: { data: MvpData; recordAction: RecordActionEvidence }) {
   const [readiness, setReadiness] = useState<ReadinessState>({ kind: "idle" });
   const candidate = readinessCandidate(data);
   const status = readinessStatus(readiness);
@@ -618,25 +700,43 @@ function DryRunReadinessPanel({ data }: { data: MvpData }) {
 
   async function handleCheck() {
     if (!candidate) {
-      setReadiness({ kind: "failed", message: "没有可用于 readiness 检查的核心 strategy version。" });
+      const message = "没有可用于 readiness 检查的核心 strategy version。";
+      setReadiness({ kind: "failed", message });
+      recordAction(createActionEvidence({
+        action: "检查 Dry-run readiness", status: "BLOCKED", message,
+        nextAction: "先生成并验证包含 database_ids 的核心 strategy version。", recommendBug: false,
+        updatedAt: new Date().toISOString(),
+      }));
       return;
     }
 
     setReadiness({ kind: "checking", strategyVersionId: candidate.strategyVersionId });
+    recordAction(createActionEvidence({
+      action: "检查 Dry-run readiness", status: "RUNNING", message: actionStatusMessage("RUNNING"),
+      nextAction: "等待 backend readiness report。", recommendBug: false,
+      databaseIds: { strategy_version_id: candidate.strategyVersionId }, updatedAt: new Date().toISOString(),
+    }));
     try {
       const result = await checkDryRunReadiness({
         strategyName: candidate.strategyName,
         strategyVersionId: candidate.strategyVersionId,
       });
       setReadiness(result.status === "READY" ? { kind: "ready", report: result } : { kind: "blocked", report: result });
+      const blocked = result.status !== "READY";
+      recordAction(createActionEvidence({
+        action: "检查 Dry-run readiness", status: blocked ? "BLOCKED" : "SUCCESS",
+        message: blocked ? result.blockedReasons.join("；") || "readiness 未通过。" : "readiness report 已返回。",
+        nextAction: blocked ? "按 report 的 blocked_reason 补齐前置条件后重试。" : "仅在人工批准后考虑受控 dry-run；不会启动 live trading。",
+        recommendBug: false, databaseIds: { strategy_version_id: result.strategyVersionId }, updatedAt: new Date().toISOString(),
+      }));
     } catch (error) {
-      const message =
-        error instanceof StrategyGenerationApiError
-          ? error.message
-          : error instanceof Error
-            ? error.message
-            : "readiness API 请求失败";
+      const message = apiErrorMessage(error, "readiness API 请求失败");
       setReadiness({ kind: "failed", message });
+      recordAction(createActionEvidence({
+        action: "检查 Dry-run readiness", status: apiErrorStatus(error), message,
+        nextAction: "检查 API、策略版本和服务日志；若可稳定复现，创建 Bug Issue。", recommendBug: true,
+        databaseIds: { strategy_version_id: candidate.strategyVersionId }, updatedAt: new Date().toISOString(),
+      }));
     }
   }
 
@@ -835,7 +935,15 @@ function EvidenceConclusion({ summary }: { summary: LocalStrategyLabEvidenceSumm
   );
 }
 
-function ControlStatePanel({ data, operatorToken }: { data: MvpData; operatorToken: string }) {
+function ControlStatePanel({
+  data,
+  operatorToken,
+  recordAction,
+}: {
+  data: MvpData;
+  operatorToken: string;
+  recordAction: RecordActionEvidence;
+}) {
   const [control, setControl] = useState<ControlState>({ kind: "idle" });
   const [manualApproval, setManualApproval] = useState(false);
   const candidate = readinessCandidate(data);
@@ -850,11 +958,21 @@ function ControlStatePanel({ data, operatorToken }: { data: MvpData; operatorTok
 
   async function handleStart() {
     if (!candidate) {
-      setControl({ kind: "failed", message: "没有可用于受控 dry-run 的核心 strategy version。" });
+      const message = "没有可用于受控 dry-run 的核心 strategy version。";
+      setControl({ kind: "failed", message });
+      recordAction(createActionEvidence({
+        action: "启动 controlled dry-run", status: "BLOCKED", message,
+        nextAction: "先生成并验证核心 strategy version。", recommendBug: false, updatedAt: new Date().toISOString(),
+      }));
       return;
     }
 
     setControl({ kind: "starting", strategyVersionId: candidate.strategyVersionId });
+    recordAction(createActionEvidence({
+      action: "启动 controlled dry-run", status: "RUNNING", message: actionStatusMessage("RUNNING"),
+      nextAction: "等待受控 dry-run 报告。", recommendBug: false,
+      databaseIds: { strategy_version_id: candidate.strategyVersionId }, updatedAt: new Date().toISOString(),
+    }));
     try {
       const result = await startControlledDryRun({
         manualApproval,
@@ -862,30 +980,49 @@ function ControlStatePanel({ data, operatorToken }: { data: MvpData; operatorTok
         strategyVersionId: candidate.strategyVersionId,
       }, operatorToken);
       setControl({ kind: "complete", report: result });
+      const status = result.status === "SUCCESS" ? "SUCCESS" : result.status === "BLOCKED" ? "BLOCKED" : "FAILED";
+      recordAction(createActionEvidence({
+        action: "启动 controlled dry-run", status,
+        message: result.failedReason ?? (result.blockedReasons.join("；") || `受控 dry-run 返回 ${result.status}。`),
+        nextAction: status === "SUCCESS" ? "通过 status_snapshot 对账；停止前不允许切换到 live。" : "按报告的原因修复后重试；不要绕过安全边界。",
+        recommendBug: status === "FAILED", databaseIds: { strategy_version_id: candidate.strategyVersionId },
+        artifactPaths: [result.manifestPath, result.statusSnapshotPath], updatedAt: new Date().toISOString(),
+      }));
     } catch (error) {
-      const message =
-        error instanceof StrategyGenerationApiError
-          ? error.message
-          : error instanceof Error
-            ? error.message
-            : "受控 dry-run 启动边界请求失败";
+      const message = apiErrorMessage(error, "受控 dry-run 启动边界请求失败");
       setControl({ kind: "failed", message });
+      recordAction(createActionEvidence({
+        action: "启动 controlled dry-run", status: apiErrorStatus(error), message,
+        nextAction: "检查本地授权与 dry-run report；若可稳定复现，创建 Bug Issue。", recommendBug: true,
+        databaseIds: { strategy_version_id: candidate.strategyVersionId }, updatedAt: new Date().toISOString(),
+      }));
     }
   }
 
   async function handleStop() {
     setControl({ kind: "stopping" });
+    recordAction(createActionEvidence({
+      action: "停止 controlled dry-run", status: "RUNNING", message: actionStatusMessage("RUNNING"),
+      nextAction: "等待停止报告。", recommendBug: false, updatedAt: new Date().toISOString(),
+    }));
     try {
       const result = await stopControlledDryRun(operatorToken);
       setControl({ kind: "complete", report: result });
+      const status = result.status === "STOPPED" || result.status === "SUCCESS" ? "SUCCESS" : result.status === "BLOCKED" ? "BLOCKED" : "FAILED";
+      recordAction(createActionEvidence({
+        action: "停止 controlled dry-run", status,
+        message: result.failedReason ?? (result.blockedReasons.join("；") || `停止请求返回 ${result.status}。`),
+        nextAction: "通过 status_snapshot 复核已停止，且不会进入 live trading。", recommendBug: status === "FAILED",
+        artifactPaths: [result.manifestPath, result.statusSnapshotPath], updatedAt: new Date().toISOString(),
+      }));
     } catch (error) {
-      const message =
-        error instanceof StrategyGenerationApiError
-          ? error.message
-          : error instanceof Error
-            ? error.message
-            : "受控 dry-run 停止请求失败";
+      const message = apiErrorMessage(error, "受控 dry-run 停止请求失败");
       setControl({ kind: "failed", message });
+      recordAction(createActionEvidence({
+        action: "停止 controlled dry-run", status: apiErrorStatus(error), message,
+        nextAction: "检查本地授权和受控 runtime 状态；若可稳定复现，创建 Bug Issue。", recommendBug: true,
+        updatedAt: new Date().toISOString(),
+      }));
     }
   }
 
@@ -985,21 +1122,185 @@ function ControlStatePanel({ data, operatorToken }: { data: MvpData; operatorTok
   );
 }
 
+function WorkflowActionsPanel({
+  data,
+  operatorToken,
+  promptSummary,
+  recordAction,
+  onRefresh,
+}: {
+  data: MvpData;
+  operatorToken: string;
+  promptSummary: string;
+  recordAction: RecordActionEvidence;
+  onRefresh: () => void;
+}) {
+  const [activeAction, setActiveAction] = useState<string | null>(null);
+  const [allowDeepSeek, setAllowDeepSeek] = useState(false);
+  const candidate = readinessCandidate(data);
+  const ingestTask = data.backtestTasks.find((task) => task.artifactManifest?.manifestPath || task.resultPath);
+  const busy = activeAction !== null;
+  const missingToken = !operatorToken;
+
+  function start(action: string, ids: Record<string, string> = {}) {
+    setActiveAction(action);
+    recordAction(createActionEvidence({
+      action, status: "RUNNING", message: actionStatusMessage("RUNNING"), nextAction: "等待 backend API 响应。",
+      recommendBug: false, databaseIds: ids, updatedAt: new Date().toISOString(),
+    }));
+  }
+
+  async function handleBacktest() {
+    if (!candidate) return;
+    const action = "触发本地回测";
+    start(action, { strategy_version_id: candidate.strategyVersionId });
+    try {
+      const result = await triggerLocalBacktest(candidate.strategyVersionId, operatorToken);
+      const run = asRecord(result.run);
+      const blocked = result.preflight_status === "blocked";
+      const runId = responseId(run);
+      recordAction(createActionEvidence({
+        action, status: blocked ? "BLOCKED" : runId ? "SUCCESS" : "API_GAP",
+        message: blocked
+          ? (Array.isArray(result.blocked_reasons) ? result.blocked_reasons.join("；") : "本地回测 preflight 被阻止。")
+          : "已创建 preflight-only backtest run；未执行真实交易或下单。",
+        nextAction: blocked ? "补齐 preflight 条件后重试。" : "检查 Backtest Runs/Tasks 的持久记录和 artifact 状态。",
+        recommendBug: false,
+        databaseIds: { strategy_version_id: candidate.strategyVersionId, backtest_run_id: runId },
+        updatedAt: new Date().toISOString(),
+      }));
+      onRefresh();
+    } catch (error) {
+      recordAction(createActionEvidence({
+        action, status: apiErrorStatus(error), message: apiErrorMessage(error, "本地回测请求失败。"),
+        nextAction: "检查持久 run/task 和 API 错误；若可稳定复现，创建 Bug Issue。", recommendBug: true,
+        databaseIds: { strategy_version_id: candidate.strategyVersionId }, updatedAt: new Date().toISOString(),
+      }));
+    } finally {
+      setActiveAction(null);
+    }
+  }
+
+  async function handleIngest() {
+    if (!ingestTask) return;
+    const action = "导入回测结果并计算评分";
+    start(action, { backtest_task_id: ingestTask.id });
+    try {
+      const result = await ingestBacktestArtifact(ingestTask.id, {
+        manifestPath: ingestTask.artifactManifest?.manifestPath,
+        resultPath: ingestTask.resultPath,
+        strategyName: ingestTask.strategyName,
+      }, operatorToken);
+      const task = asRecord(result.task);
+      const run = asRecord(result.run);
+      const parsedResult = asRecord(result.result);
+      const score = asRecord(result.score);
+      const ingestStatus = responseText(result.ingest_status) ?? "failed";
+      const resultId = responseId(parsedResult);
+      const scoreId = responseId(score);
+      const blocked = ingestStatus === "blocked";
+      const succeeded = ingestStatus === "succeeded" && resultId && scoreId;
+      recordAction(createActionEvidence({
+        action, status: succeeded ? "SUCCESS" : blocked ? "BLOCKED" : ingestStatus === "succeeded" ? "API_GAP" : "FAILED",
+        message: responseText(result.reason) ?? (succeeded ? "回测结果和 StrategyScore 已写入数据库。" : `artifact ingest 返回 ${ingestStatus}。`),
+        nextAction: succeeded ? "刷新并核对 BacktestResult、StrategyScore 与 artifact path。" : "检查 artifact、任务状态和失败原因；不要将不完整结果当作成功。",
+        recommendBug: !blocked && !succeeded,
+        databaseIds: {
+          backtest_run_id: responseId(run), backtest_task_id: responseId(task) ?? ingestTask.id,
+          backtest_result_id: resultId, strategy_score_id: scoreId,
+        },
+        artifactPaths: [ingestTask.artifactManifest?.manifestPath, ingestTask.resultPath], updatedAt: new Date().toISOString(),
+      }));
+      onRefresh();
+    } catch (error) {
+      recordAction(createActionEvidence({
+        action, status: apiErrorStatus(error), message: apiErrorMessage(error, "artifact ingest 请求失败。"),
+        nextAction: "检查 artifact path、持久任务和 API 错误；若可稳定复现，创建 Bug Issue。", recommendBug: true,
+        databaseIds: { backtest_task_id: ingestTask.id },
+        artifactPaths: [ingestTask.artifactManifest?.manifestPath, ingestTask.resultPath], updatedAt: new Date().toISOString(),
+      }));
+    } finally {
+      setActiveAction(null);
+    }
+  }
+
+  async function handleDeepSeekSingle() {
+    const action = "运行 DeepSeek 单次 E2E";
+    start(action);
+    try {
+      const result = await runDeepSeekSingle(promptSummary, operatorToken, allowDeepSeek);
+      const success = isCoreGenerationResult(result);
+      recordAction(createActionEvidence({
+        action, status: success ? "SUCCESS" : "BLOCKED",
+        message: success ? "DeepSeek 单次结果已返回可追踪的 API/DB 证据。" : "响应没有完整核心证据，未展示为成功。",
+        nextAction: success ? "刷新并核对 generation run、策略文件和后续回测证据。" : "检查 provider、database_ids 和策略文件；不要将其视为核心成功。",
+        recommendBug: false, databaseIds: { strategy_generation_run_id: result.run.id },
+        artifactPaths: result.strategyVersions.map((version) => version.filePath), updatedAt: new Date().toISOString(),
+      }));
+      onRefresh();
+    } catch (error) {
+      recordAction(createActionEvidence({
+        action, status: apiErrorStatus(error), message: apiErrorMessage(error, "DeepSeek 单次请求失败。"),
+        nextAction: "确认一次性授权与本地 ENV；不要在页面、日志或 Issue 中记录密钥。", recommendBug: apiErrorStatus(error) === "FAILED",
+        updatedAt: new Date().toISOString(),
+      }));
+    } finally {
+      setActiveAction(null);
+    }
+  }
+
+  return (
+    <section className="lab-evidence-section" aria-label="核心工作流操作">
+      <div className="section-header detail-section">
+        <h2>核心工作流操作</h2>
+        <span>所有动作保留结果摘要；不执行 live trading</span>
+      </div>
+      <div className="lab-header-actions">
+        <button className="secondary-button" disabled={busy || missingToken || !candidate} onClick={handleBacktest} type="button">
+          {activeAction === "触发本地回测" ? "触发中" : "触发本地回测"}
+        </button>
+        <button className="secondary-button" disabled={busy || missingToken || !ingestTask} onClick={handleIngest} type="button">
+          {activeAction === "导入回测结果并计算评分" ? "导入中" : "导入结果并评分"}
+        </button>
+        <label className="inline-check">
+          <input checked={allowDeepSeek} disabled={busy} onChange={(event) => setAllowDeepSeek(event.target.checked)} type="checkbox" />
+          显式授权一次 DeepSeek 调用
+        </label>
+        <button className="secondary-button" disabled={busy || missingToken || !promptSummary || !allowDeepSeek} onClick={handleDeepSeekSingle} type="button">
+          {activeAction === "运行 DeepSeek 单次 E2E" ? "运行中" : "运行 DeepSeek 单次 E2E"}
+        </button>
+      </div>
+      <div className="compact-detail-list">
+        <div><dt>本地回测</dt><dd>{candidate ? `候选 strategy_version=${candidate.strategyVersionId}` : "BLOCKED：缺少核心 strategy version。"}</dd></div>
+        <div><dt>artifact 导入 / 评分</dt><dd>{ingestTask ? `候选 task=${ingestTask.id}` : "BLOCKED：没有带 artifact path 的核心回测任务。"}</dd></div>
+        <div><dt>DeepSeek 单次</dt><dd>默认不调用；必须输入 operator token 并勾选一次性显式授权。</dd></div>
+      </div>
+    </section>
+  );
+}
+
 export function PersistentEvidence({
   data,
   error,
+  history,
   isLoading,
   onRefresh,
   operatorToken,
+  promptSummary,
+  recordAction,
   source,
 }: {
   data: MvpData;
   error: string | null;
+  history: ActionEvidence[];
   isLoading: boolean;
   onRefresh: () => void;
   operatorToken: string;
+  promptSummary: string;
+  recordAction: RecordActionEvidence;
   source: string;
 }) {
+  const [refreshPending, setRefreshPending] = useState(false);
   const coreRankingCount = data.ranking.filter((entry) => isCoreDataSource(entry.dataSource)).length;
   const hasCoreEvidence =
     data.strategyVersions.some((version) => isCoreDataSource(version.dataSource)) ||
@@ -1008,13 +1309,33 @@ export function PersistentEvidence({
   const evidenceSource = hasCoreEvidence ? "api" : source;
   const evidenceError = hasCoreEvidence ? null : error;
 
+  useEffect(() => {
+    if (!refreshPending || isLoading) return;
+    recordAction(createActionEvidence({
+      action: "刷新数据", status: error ? "FAILED" : "SUCCESS",
+      message: error ?? "已重新请求页面使用的 API/DB 数据。",
+      nextAction: error ? "检查 API 可用性和数据来源；若可稳定复现，创建 Bug Issue。" : "核对下方核心证据与最新 action feedback。",
+      recommendBug: Boolean(error), updatedAt: new Date().toISOString(),
+    }));
+    setRefreshPending(false);
+  }, [error, isLoading, recordAction, refreshPending]);
+
+  function handleRefresh() {
+    setRefreshPending(true);
+    recordAction(createActionEvidence({
+      action: "刷新数据", status: "RUNNING", message: actionStatusMessage("RUNNING"),
+      nextAction: "等待 API/DB 快照完成加载。", recommendBug: false, updatedAt: new Date().toISOString(),
+    }));
+    onRefresh();
+  }
+
   return (
     <section className="lab-results" aria-label="API 和数据库持久证据">
       <div className="section-header">
         <h2>API/DB 持久证据</h2>
         <div className="lab-header-actions">
           <span className="status-pill">{displayLoadState(isLoading, evidenceSource)}</span>
-          <button className="secondary-button" disabled={isLoading} onClick={onRefresh} type="button">
+          <button className="secondary-button" disabled={isLoading} onClick={handleRefresh} type="button">
             刷新
           </button>
         </div>
@@ -1039,14 +1360,22 @@ export function PersistentEvidence({
           <strong>{coreRankingCount}</strong>
         </div>
       </div>
+      <ActionEvidenceHistory history={history} />
+      <WorkflowActionsPanel
+        data={data}
+        onRefresh={handleRefresh}
+        operatorToken={operatorToken}
+        promptSummary={promptSummary}
+        recordAction={recordAction}
+      />
       <EvidenceConclusion summary={data.localStrategyLabEvidence} />
       <StrategyVersionEvidence strategies={data.strategies} versions={data.strategyVersions} />
       <GenerationRunEvidence runs={data.generationRuns} />
       <BacktestEvidence runs={data.backtestRuns} tasks={data.backtestTasks} results={data.backtestResults} />
       <RankingEvidence ranking={data.ranking} />
       <ReadinessDomainPanel data={data} />
-      <DryRunReadinessPanel data={data} />
-      <ControlStatePanel data={data} operatorToken={operatorToken} />
+      <DryRunReadinessPanel data={data} recordAction={recordAction} />
+      <ControlStatePanel data={data} operatorToken={operatorToken} recordAction={recordAction} />
     </section>
   );
 }
