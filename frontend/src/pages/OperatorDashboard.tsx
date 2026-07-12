@@ -107,7 +107,9 @@ function RuntimeContractPanel({ contract }: { contract: RuntimeReadOnlyContractS
       </div>
       <div className="operator-status-grid">
         <RuntimeStatusCard title="系统" status={contract.systemStatus} />
-        <RuntimeStatusCard title="运行就绪" status={contract.runtimeReadiness} />
+        <RuntimeStatusCard title="研究就绪" status={contract.researchReadiness} />
+        <RuntimeStatusCard title="Dry-run 就绪" status={contract.dryRunReadiness} />
+        <RuntimeStatusCard title="Live 就绪（禁用）" status={contract.liveReadiness} />
         <RuntimeStatusCard title="Smoke" status={contract.smokeStatus} />
         <article className="overview-panel operator-status-card">
           <div className="operator-card-heading">
@@ -396,14 +398,18 @@ export function OperatorDashboard() {
         context="Operator Dashboard 运行证据、诊断检查、环境存在性和安全边界。"
         error={error}
         isLoading={isLoading}
-        note="Backend API unavailable; showing controlled Phase 7 operator fallback data."
+        note={
+          source === "api"
+            ? "Backend API 已连接；下方状态来自只读运行契约。"
+            : "Backend API unavailable; showing controlled Phase 7 operator fallback data."
+        }
         source={source}
       />
       <section className="operator-summary-grid" aria-label="Operator Dashboard 摘要">
         <article className="metric">
           <span>Runtime Contract</span>
           <strong>{displayStatus(runtimeContract.status)}</strong>
-          {statusPill(runtimeContract.runtimeReadiness.status)}
+          {statusPill(runtimeContract.researchReadiness.status)}
         </article>
         <article className="metric">
           <span>Operator 状态</span>

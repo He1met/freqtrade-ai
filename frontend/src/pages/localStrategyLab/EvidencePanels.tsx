@@ -18,6 +18,7 @@ import type {
   StrategyGenerationApiResult,
   StrategyGenerationStrategy,
   StrategyGenerationVersion,
+  RuntimeStatusSummary,
 } from "../../api/types";
 import {
   metricRows,
@@ -714,6 +715,34 @@ function DryRunReadinessPanel({ data }: { data: MvpData }) {
   );
 }
 
+function ReadinessDomainPanel({ data }: { data: MvpData }) {
+  const contract = data.operatorDashboard.runtimeContract;
+  const domains: Array<[string, RuntimeStatusSummary]> = [
+    ["Research readiness", contract.researchReadiness],
+    ["Dry-run readiness", contract.dryRunReadiness],
+    ["Live readiness (disabled)", contract.liveReadiness],
+  ];
+  return (
+    <section className="lab-evidence-section" aria-label="运行域就绪状态">
+      <div className="section-header detail-section">
+        <h2>运行域就绪状态</h2>
+        <span>只读证据</span>
+      </div>
+      <div className="lab-evidence-summary">
+        {domains.map(([label, readiness]) => (
+          <div key={label}>
+            <span>{label}</span>
+            <strong className={statusClassName(readiness.status)}>{displayStatus(readiness.status)}</strong>
+            <small title={readiness.blockedReason ?? readiness.unavailableReason ?? readiness.staleReason ?? readiness.summary}>
+              {readiness.summary}
+            </small>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function ControlStatePanel({ data, operatorToken }: { data: MvpData; operatorToken: string }) {
   const [control, setControl] = useState<ControlState>({ kind: "idle" });
   const [manualApproval, setManualApproval] = useState(false);
@@ -922,6 +951,7 @@ export function PersistentEvidence({
       <GenerationRunEvidence runs={data.generationRuns} />
       <BacktestEvidence runs={data.backtestRuns} tasks={data.backtestTasks} results={data.backtestResults} />
       <RankingEvidence ranking={data.ranking} />
+      <ReadinessDomainPanel data={data} />
       <DryRunReadinessPanel data={data} />
       <ControlStatePanel data={data} operatorToken={operatorToken} />
     </section>

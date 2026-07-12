@@ -390,6 +390,9 @@ export type RawRuntimeReadOnlyContractSummary = Partial<RuntimeReadOnlyContractS
   generated_at?: string | null;
   system_status?: RawRuntimeStatusSummary;
   runtime_readiness?: RawRuntimeStatusSummary;
+  research_readiness?: RawRuntimeStatusSummary;
+  dry_run_readiness?: RawRuntimeStatusSummary;
+  live_readiness?: RawRuntimeStatusSummary;
   fallback_status?: RawRuntimeFallbackStatus;
   smoke_status?: RawRuntimeStatusSummary;
   artifact_links?: RawRuntimeArtifactLink[];
@@ -1321,15 +1324,22 @@ export function normalizeRuntimeSafety(raw: RawRuntimeSafetyBoundary | undefined
 }
 
 export function normalizeRuntimeContract(raw: RawRuntimeReadOnlyContractSummary): RuntimeReadOnlyContractSummary {
+  const legacyReadiness = raw.runtimeReadiness ?? raw.runtime_readiness;
   return {
     schemaVersion: raw.schemaVersion ?? raw.schema_version ?? "1",
     status: raw.status ?? "UNAVAILABLE",
     generatedAt: raw.generatedAt ?? raw.generated_at ?? null,
     systemStatus: normalizeRuntimeStatusSummary(raw.systemStatus ?? raw.system_status, "system_status"),
-    runtimeReadiness: normalizeRuntimeStatusSummary(
-      raw.runtimeReadiness ?? raw.runtime_readiness,
-      "runtime_readiness",
+    runtimeReadiness: normalizeRuntimeStatusSummary(legacyReadiness, "runtime_readiness"),
+    researchReadiness: normalizeRuntimeStatusSummary(
+      raw.researchReadiness ?? raw.research_readiness ?? legacyReadiness,
+      "research_readiness",
     ),
+    dryRunReadiness: normalizeRuntimeStatusSummary(
+      raw.dryRunReadiness ?? raw.dry_run_readiness,
+      "dry_run_readiness",
+    ),
+    liveReadiness: normalizeRuntimeStatusSummary(raw.liveReadiness ?? raw.live_readiness, "live_readiness"),
     fallbackStatus: normalizeRuntimeFallbackStatus(raw.fallbackStatus ?? raw.fallback_status),
     smokeStatus: normalizeRuntimeStatusSummary(raw.smokeStatus ?? raw.smoke_status, "phase7_smoke"),
     artifactLinks: Array.isArray(raw.artifactLinks ?? raw.artifact_links)

@@ -42,11 +42,24 @@ from app.repositories.audit_log import GovernanceEventArchiveRepository  # noqa:
 from app.services.audit_log import GovernanceAuditLogService  # noqa: E402
 from app.services.operator_status import OperatorStatusService  # noqa: E402
 from app.services.runtime_contract import RuntimeReadOnlyContractService  # noqa: E402
+from app.schemas.runtime_contract import RuntimeStatusSummary  # noqa: E402
 from app.services.secret_scanning import scan_repo_for_secrets  # noqa: E402
 
 
 FIXED_NOW = datetime(2026, 7, 5, 15, 30, tzinfo=timezone.utc)
 PHASE7_SUMMARY_REF = "reports/runtime/phase7-smoke-summary.json"
+
+
+class OfflineResearchReadiness:
+    """The Phase 7 offline smoke owns only fixture evidence, never real readiness."""
+
+    def build(self) -> RuntimeStatusSummary:
+        return RuntimeStatusSummary(
+            name="research_readiness",
+            status="READY",
+            source="fixture",
+            summary="Offline Phase 7 fixture provides complete research evidence.",
+        )
 
 
 @dataclass
@@ -216,7 +229,10 @@ def write_runtime_artifacts(context: Phase7SmokeContext) -> None:
 
 
 def runtime_contract_service() -> RuntimeReadOnlyContractService:
-    return RuntimeReadOnlyContractService(now_provider=lambda: FIXED_NOW)
+    return RuntimeReadOnlyContractService(
+        now_provider=lambda: FIXED_NOW,
+        research_service=OfflineResearchReadiness(),
+    )
 
 
 def operator_status_service(environ: Optional[dict[str, str]] = None) -> OperatorStatusService:

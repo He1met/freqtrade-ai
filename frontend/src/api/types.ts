@@ -594,6 +594,9 @@ export type RuntimeReadOnlyContractSummary = {
   generatedAt: string | null;
   systemStatus: RuntimeStatusSummary;
   runtimeReadiness: RuntimeStatusSummary;
+  researchReadiness: RuntimeStatusSummary;
+  dryRunReadiness: RuntimeStatusSummary;
+  liveReadiness: RuntimeStatusSummary;
   fallbackStatus: RuntimeFallbackStatus;
   smokeStatus: RuntimeStatusSummary;
   artifactLinks: RuntimeArtifactLink[];
