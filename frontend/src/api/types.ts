@@ -757,6 +757,36 @@ export type StrategyVersionLineageEntry = {
   createdAt: string | null;
 };
 
+export type LocalStrategyLabEvidenceRecord = {
+  id: string;
+  parentId: string | null;
+  status: string;
+  provider: string | null;
+  model: string | null;
+  artifactPath: string | null;
+  source: DataSourceTraceSummary;
+};
+
+export type LocalStrategyLabEvidenceStage = {
+  key: "generation" | "strategy_file" | "backtest" | "score";
+  label: string;
+  state: AcceptanceState;
+  canAccept: boolean;
+  reason: string;
+  nextAction: string;
+  observedCount: number;
+  coreCount: number;
+  records: LocalStrategyLabEvidenceRecord[];
+};
+
+export type LocalStrategyLabEvidenceSummary = {
+  state: AcceptanceState;
+  canAccept: boolean;
+  reason: string;
+  nextAction: string;
+  stages: LocalStrategyLabEvidenceStage[];
+};
+
 export type MvpData = {
   strategies: StrategySummary[];
   strategyVersions: StrategyGenerationVersion[];
@@ -771,6 +801,7 @@ export type MvpData = {
   ranking: RankingEntry[];
   failureReasons: StrategyFailureReasonSummary[];
   versionLineage: StrategyVersionLineageEntry[];
+  localStrategyLabEvidence?: LocalStrategyLabEvidenceSummary;
 };
 
 export type MvpDataState = {

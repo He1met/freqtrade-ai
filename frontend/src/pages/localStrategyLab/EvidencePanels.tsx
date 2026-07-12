@@ -13,6 +13,7 @@ import type {
   DataSourceTraceSummary,
   DryRunControlReport,
   DryRunReadinessReport,
+  LocalStrategyLabEvidenceSummary,
   MvpData,
   RankingEntry,
   StrategyGenerationApiResult,
@@ -152,7 +153,7 @@ export function isCoreGenerationResult(result: StrategyGenerationApiResult): boo
 
 function statusClassName(status: string): string {
   const normalized = status.toLowerCase();
-  if (normalized === "succeeded" || normalized === "success") {
+  if (normalized === "succeeded" || normalized === "success" || normalized === "acceptable" || normalized === "ready") {
     return "status-success";
   }
   if (normalized === "failed" || normalized === "cancelled") {
@@ -743,6 +744,97 @@ function ReadinessDomainPanel({ data }: { data: MvpData }) {
   );
 }
 
+function EvidenceConclusion({ summary }: { summary: LocalStrategyLabEvidenceSummary | undefined }) {
+  if (!summary) {
+    return null;
+  }
+
+  const diagnosticRecords = summary.stages.flatMap((stage) =>
+    stage.records
+      .filter((record) => !isCoreDataSourceTrace(record.source))
+      .map((record) => ({ ...record, stage: stage.label })),
+  );
+
+  return (
+    <section className="lab-evidence-section" aria-label="真实运行链路结论">
+      <div className="section-header detail-section">
+        <h2>真实运行链路结论</h2>
+        <span className={`run-status ${statusClassName(summary.state)}`}>{summary.state}</span>
+      </div>
+      <dl className="detail-list lab-run-detail-list">
+        <div>
+          <dt>可验收</dt>
+          <dd>{displayBoolean(summary.canAccept)}</dd>
+        </div>
+        <div>
+          <dt>原因</dt>
+          <dd>{summary.reason}</dd>
+        </div>
+        <div>
+          <dt>下一步</dt>
+          <dd>{summary.nextAction}</dd>
+        </div>
+      </dl>
+      <div className="table-shell lab-table-shell">
+        <table>
+          <thead>
+            <tr>
+              <th>阶段</th>
+              <th>状态</th>
+              <th>核心 / 已观察</th>
+              <th>原因</th>
+              <th>下一步</th>
+            </tr>
+          </thead>
+          <tbody>
+            {summary.stages.map((stage) => (
+              <tr key={stage.key}>
+                <td className="primary-cell">{stage.label}</td>
+                <td><span className={`run-status ${statusClassName(stage.state)}`}>{stage.state}</span></td>
+                <td>{stage.coreCount} / {stage.observedCount}</td>
+                <td className="reason-cell"><CompactText value={stage.reason} /></td>
+                <td className="reason-cell"><CompactText value={stage.nextAction} /></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {diagnosticRecords.length ? (
+        <div className="lab-non-core-diagnostics" aria-label="非核心诊断记录">
+          <h3>非核心诊断记录（不可验收）</h3>
+          <p>这些记录只用于解释为什么链路未通过；不会进入核心策略、回测或评分面板。</p>
+          <div className="table-shell lab-table-shell">
+            <table>
+              <thead>
+                <tr>
+                  <th>阶段</th>
+                  <th>id / parent id</th>
+                  <th>status</th>
+                  <th>provider / model</th>
+                  <th>artifact path</th>
+                  <th>data source</th>
+                </tr>
+              </thead>
+              <tbody>
+                {diagnosticRecords.slice(0, 12).map((record) => (
+                  <tr key={`${record.stage}-${record.id}`}>
+                    <td>{record.stage}</td>
+                    <td>{record.id}{record.parentId ? ` / ${record.parentId}` : ""}</td>
+                    <td>{displayStatus(record.status)}</td>
+                    <td><CompactText value={record.provider ? `${record.provider} / ${record.model ?? EMPTY_TEXT}` : EMPTY_TEXT} /></td>
+                    <td><CompactText value={record.artifactPath ?? EMPTY_TEXT} /></td>
+                    <td><LabSourceSummary source={record.source} /></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 function ControlStatePanel({ data, operatorToken }: { data: MvpData; operatorToken: string }) {
   const [control, setControl] = useState<ControlState>({ kind: "idle" });
   const [manualApproval, setManualApproval] = useState(false);
@@ -947,6 +1039,7 @@ export function PersistentEvidence({
           <strong>{coreRankingCount}</strong>
         </div>
       </div>
+      <EvidenceConclusion summary={data.localStrategyLabEvidence} />
       <StrategyVersionEvidence strategies={data.strategies} versions={data.strategyVersions} />
       <GenerationRunEvidence runs={data.generationRuns} />
       <BacktestEvidence runs={data.backtestRuns} tasks={data.backtestTasks} results={data.backtestResults} />

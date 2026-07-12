@@ -5,6 +5,7 @@ import * as N from "./normalizers";
 import {
   applyGenerationRunProviderProvenance,
   applyGenerationVersionProviderProvenance,
+  buildLocalStrategyLabEvidenceSummary,
   applyStrategyProviderProvenance,
   isCoreDataSourceTrace,
   MVP_DATA_SET_KEYS,
@@ -137,6 +138,8 @@ export async function loadMvpData(signal?: AbortSignal): Promise<{
         ? allStrategyVersions.find((version) => version.id === strategy.currentVersionId) ?? null
         : null,
     ));
+  const normalizedBacktestResults = backtestResults.items.map(N.normalizeBacktestResult);
+  const normalizedRanking = ranking.items.map(N.normalizeRankingEntry);
   const sources = Object.fromEntries(MVP_DATA_SET_KEYS.map((key) => [key, "api"])) as MvpDataSources;
 
   return {
@@ -147,7 +150,7 @@ export async function loadMvpData(signal?: AbortSignal): Promise<{
       generationRuns: normalizedGenerationRuns.filter((item) => isCoreDataSourceTrace(item.dataSource)),
       backtestRuns: backtestRuns.items.map(N.normalizeBacktestRun).filter((item) => isCoreDataSourceTrace(item.dataSource)),
       backtestTasks: backtestTasks.items.map(N.normalizeBacktestTask).filter((item) => isCoreDataSourceTrace(item.dataSource)),
-      backtestResults: backtestResults.items.map(N.normalizeBacktestResult).filter((item) => isCoreDataSourceTrace(item.dataSource)),
+      backtestResults: normalizedBacktestResults.filter((item) => isCoreDataSourceTrace(item.dataSource)),
       hyperoptRuns: hyperoptRuns.items.map(N.normalizeHyperoptRun),
       dryRun: N.normalizeDryRunManagement(dryRun.item),
       liveCandidates: N.normalizeLiveCandidateGovernance(liveCandidates.item),
@@ -156,9 +159,15 @@ export async function loadMvpData(signal?: AbortSignal): Promise<{
         operatorStatus: operatorStatus.item,
         auditEvents: auditEvents.items,
       }),
-      ranking: ranking.items.map(N.normalizeRankingEntry).filter((item) => isCoreDataSourceTrace(item.dataSource)),
+      ranking: normalizedRanking.filter((item) => isCoreDataSourceTrace(item.dataSource)),
       failureReasons: failureReasons.items.map(N.normalizeFailureReason),
       versionLineage: versionLineage.items.map(N.normalizeLineageEntry),
+      localStrategyLabEvidence: buildLocalStrategyLabEvidenceSummary({
+        generationRuns: normalizedGenerationRuns,
+        strategyVersions: allStrategyVersions,
+        backtestResults: normalizedBacktestResults,
+        ranking: normalizedRanking,
+      }),
     },
     sources,
     usedFallback: false,
