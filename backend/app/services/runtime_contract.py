@@ -19,6 +19,7 @@ from app.schemas.runtime_contract import (
 )
 from app.services.dry_run_status import DryRunStatusSnapshotService
 from app.services.live_candidate_monitoring import LiveCandidateMonitoringSnapshotService
+from app.services.research_readiness import ResearchReadinessService
 
 
 DEFAULT_RUNTIME_REPORT_DIR = REPO_ROOT / "reports" / "runtime"
@@ -38,10 +39,12 @@ class RuntimeReadOnlyContractService:
         self,
         dry_run_service: Optional[DryRunStatusSnapshotService] = None,
         monitoring_service: Optional[LiveCandidateMonitoringSnapshotService] = None,
+        research_service: Optional[ResearchReadinessService] = None,
         now_provider: Optional[Callable[[], datetime]] = None,
     ) -> None:
         self._dry_run_service = dry_run_service or DryRunStatusSnapshotService()
         self._monitoring_service = monitoring_service or LiveCandidateMonitoringSnapshotService()
+        self._research_service = research_service or ResearchReadinessService()
         self._now_provider = now_provider
 
     def build_contract(
@@ -74,24 +77,27 @@ class RuntimeReadOnlyContractService:
         )
         smoke_summary = self._smoke_summary(phase7_smoke_summary_path)
         system_status = self._system_status(generated_at)
+        research_readiness = self._research_service.build()
+        dry_run_readiness = self._dry_run_readiness(dry_run_summary)
+        live_readiness = self._live_readiness(generated_at)
         runtime_readiness = self._runtime_readiness(
             generated_at=generated_at,
-            components=[dry_run_summary, monitoring_summary, smoke_summary, system_status],
+            components=[research_readiness, system_status],
         )
         fallback_status = self._fallback_status(
-            [dry_run_summary, monitoring_summary, smoke_summary, system_status]
+            [research_readiness, system_status]
         )
         blocked_reasons = self._blocked_reasons(
-            [runtime_readiness, system_status, dry_run_summary, monitoring_summary, smoke_summary],
+            [runtime_readiness, research_readiness, dry_run_readiness, live_readiness, system_status],
             dry_run_snapshot=dry_run_snapshot,
             monitoring_snapshot=monitoring_snapshot,
         )
         unavailable_reasons = self._unavailable_reasons(
-            [runtime_readiness, system_status, dry_run_summary, monitoring_summary, smoke_summary],
+            [runtime_readiness, research_readiness, dry_run_readiness, live_readiness, system_status],
             monitoring_snapshot=monitoring_snapshot,
         )
         status = self._overall_status(
-            [runtime_readiness, system_status, dry_run_summary, monitoring_summary, smoke_summary]
+            [runtime_readiness, research_readiness, system_status]
         )
 
         return RuntimeReadOnlyContract(
@@ -99,6 +105,9 @@ class RuntimeReadOnlyContractService:
             generated_at=generated_at,
             system_status=system_status,
             runtime_readiness=runtime_readiness,
+            research_readiness=research_readiness,
+            dry_run_readiness=dry_run_readiness,
+            live_readiness=live_readiness,
             fallback_status=fallback_status,
             smoke_status=smoke_summary,
             dry_run_status=dry_run_snapshot,
@@ -297,6 +306,36 @@ class RuntimeReadOnlyContractService:
             unavailable_reason=unavailable,
             stale_reason=stale,
             warnings=warnings,
+        )
+
+    def _dry_run_readiness(self, dry_run_summary: RuntimeStatusSummary) -> RuntimeStatusSummary:
+        """Expose dry-run evidence without allowing it to mask research readiness."""
+        status = dry_run_summary.status
+        return RuntimeStatusSummary(
+            name="dry_run_readiness",
+            status=status,
+            source=dry_run_summary.source,
+            source_ref=dry_run_summary.source_ref,
+            last_updated=dry_run_summary.last_updated,
+            summary=(
+                "Dry-run readiness is independent from research and requires explicit local authorization."
+                if status in {"BLOCKED", "UNAVAILABLE"}
+                else "Dry-run readiness has local read-only evidence."
+            ),
+            blocked_reason=dry_run_summary.blocked_reason,
+            unavailable_reason=dry_run_summary.unavailable_reason,
+            stale_reason=dry_run_summary.stale_reason,
+            warnings=dry_run_summary.warnings,
+        )
+
+    def _live_readiness(self, generated_at: datetime) -> RuntimeStatusSummary:
+        return RuntimeStatusSummary(
+            name="live_readiness",
+            status="BLOCKED",
+            source="derived",
+            last_updated=generated_at,
+            summary="Live readiness is disabled by policy and has no start control.",
+            blocked_reason="live trading is disabled pending a future separately authorized issue",
         )
 
     def _fallback_status(self, components: list[RuntimeStatusSummary]) -> RuntimeFallbackStatus:

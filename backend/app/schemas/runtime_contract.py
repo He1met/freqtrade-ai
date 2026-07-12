@@ -9,7 +9,7 @@ from app.schemas.dry_run_status import DryRunStatusSnapshot
 from app.schemas.live_candidate import LiveCandidateMonitoringSnapshot
 
 
-RUNTIME_READ_ONLY_CONTRACT_SCHEMA_VERSION = "1"
+RUNTIME_READ_ONLY_CONTRACT_SCHEMA_VERSION = "2"
 
 RuntimeReadOnlyStatus = Literal["READY", "WARNING", "STALE", "UNAVAILABLE", "BLOCKED"]
 RuntimeReadOnlySource = Literal[
@@ -95,11 +95,14 @@ class RuntimeSafetyBoundary(BaseModel):
 
 
 class RuntimeReadOnlyContract(BaseModel):
-    schema_version: Literal["1"] = RUNTIME_READ_ONLY_CONTRACT_SCHEMA_VERSION
+    schema_version: Literal["2"] = RUNTIME_READ_ONLY_CONTRACT_SCHEMA_VERSION
     status: RuntimeReadOnlyStatus
     generated_at: datetime
     system_status: RuntimeStatusSummary
     runtime_readiness: RuntimeStatusSummary
+    research_readiness: RuntimeStatusSummary
+    dry_run_readiness: RuntimeStatusSummary
+    live_readiness: RuntimeStatusSummary
     fallback_status: RuntimeFallbackStatus
     smoke_status: RuntimeStatusSummary
     dry_run_status: DryRunStatusSnapshot

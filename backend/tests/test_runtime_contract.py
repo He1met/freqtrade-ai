@@ -4,14 +4,33 @@ from datetime import datetime, timezone
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.schemas.runtime_contract import RuntimeStatusSummary
 from app.services.runtime_contract import RuntimeReadOnlyContractService
 
 
 FIXED_NOW = datetime(2026, 7, 5, 13, 0, tzinfo=timezone.utc)
 
 
-def service() -> RuntimeReadOnlyContractService:
-    return RuntimeReadOnlyContractService(now_provider=lambda: FIXED_NOW)
+class FixedResearchReadiness:
+    def __init__(self, status: str = "READY") -> None:
+        self.status = status
+
+    def build(self) -> RuntimeStatusSummary:
+        return RuntimeStatusSummary(
+            name="research_readiness",
+            status=self.status,
+            source="derived",
+            summary="fixed research evidence",
+            blocked_reason="research evidence blocked" if self.status == "BLOCKED" else None,
+            unavailable_reason="research evidence unavailable" if self.status == "UNAVAILABLE" else None,
+        )
+
+
+def service(research_status: str = "READY") -> RuntimeReadOnlyContractService:
+    return RuntimeReadOnlyContractService(
+        now_provider=lambda: FIXED_NOW,
+        research_service=FixedResearchReadiness(research_status),
+    )
 
 
 def dry_run_payload(status: str = "running") -> dict:
@@ -57,11 +76,13 @@ def test_contract_reports_missing_runtime_sources_as_fallback_state(tmp_path) ->
 
     rendered = contract.model_dump_json()
 
-    assert contract.schema_version == "1"
-    assert contract.status == "BLOCKED"
-    assert contract.runtime_readiness.status == "BLOCKED"
-    assert contract.fallback_status.active is True
-    assert "dry-run status JSON file does not exist" in contract.blocked_reasons[0]
+    assert contract.schema_version == "2"
+    assert contract.status == "READY"
+    assert contract.research_readiness.status == "READY"
+    assert contract.dry_run_readiness.status == "BLOCKED"
+    assert contract.live_readiness.status == "BLOCKED"
+    assert contract.fallback_status.active is False
+    assert any("dry-run status JSON file does not exist" in reason for reason in contract.blocked_reasons)
     assert contract.smoke_status.status == "UNAVAILABLE"
     assert contract.safety.read_only is True
     assert contract.safety.allow_live_trading is False
@@ -98,6 +119,9 @@ def test_contract_combines_existing_read_only_runtime_fixtures(tmp_path) -> None
 
     assert contract.status == "READY"
     assert contract.runtime_readiness.status == "READY"
+    assert contract.research_readiness.status == "READY"
+    assert contract.dry_run_readiness.status == "READY"
+    assert contract.live_readiness.status == "BLOCKED"
     assert contract.fallback_status.active is False
     assert contract.dry_run_status.status == "RUNNING"
     assert contract.live_candidate_monitoring.status == "OK"
@@ -146,7 +170,7 @@ def test_contract_redacts_or_blocks_secret_shaped_runtime_payloads(tmp_path) -> 
     )
     rendered = contract.model_dump_json()
 
-    assert contract.status == "BLOCKED"
+    assert contract.status == "READY"
     assert "live-candidate monitoring sensitive input was rejected" in contract.blocked_reasons
     assert "fixture-sensitive-value" not in rendered
     assert "api_secret=[REDACTED]" in rendered
@@ -160,12 +184,15 @@ def test_runtime_read_only_endpoint_returns_stable_contract_shape() -> None:
     assert response.status_code == 200
     payload = response.json()
     rendered = json.dumps(payload, sort_keys=True)
-    assert payload["schema_version"] == "1"
+    assert payload["schema_version"] == "2"
     assert payload["safety"]["read_only"] is True
     assert payload["safety"]["allow_live_trading"] is False
     assert payload["safety"]["allow_exchange_connection"] is False
     assert payload["system_status"]["name"] == "system_status"
     assert payload["runtime_readiness"]["name"] == "runtime_readiness"
+    assert payload["research_readiness"]["name"] == "research_readiness"
+    assert payload["dry_run_readiness"]["name"] == "dry_run_readiness"
+    assert payload["live_readiness"]["status"] == "BLOCKED"
     assert payload["smoke_status"]["name"] == "phase7_smoke"
     assert "artifact_links" in payload
     assert "start_live" not in rendered

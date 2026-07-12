@@ -6,14 +6,34 @@ from fastapi.testclient import TestClient
 
 from app.core.config import Settings
 from app.main import app
+from app.schemas.runtime_contract import RuntimeStatusSummary
 from app.services.operator_status import OperatorStatusService
+from app.services.runtime_contract import RuntimeReadOnlyContractService
 
 
 FIXED_NOW = datetime(2026, 7, 5, 14, 0, tzinfo=timezone.utc)
 
 
+class FixedResearchReadiness:
+    def build(self) -> RuntimeStatusSummary:
+        return RuntimeStatusSummary(
+            name="research_readiness",
+            status="READY",
+            source="fixture",
+            summary="Offline test fixture supplies complete research evidence.",
+        )
+
+
 def service(environ=None) -> OperatorStatusService:
-    return OperatorStatusService(now_provider=lambda: FIXED_NOW, environ=environ or {})
+    runtime_contract = RuntimeReadOnlyContractService(
+        now_provider=lambda: FIXED_NOW,
+        research_service=FixedResearchReadiness(),
+    )
+    return OperatorStatusService(
+        runtime_contract_service=runtime_contract,
+        now_provider=lambda: FIXED_NOW,
+        environ=environ or {},
+    )
 
 
 def settings_for() -> Settings:
