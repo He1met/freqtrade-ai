@@ -2,8 +2,13 @@ import type {
   AcceptanceStateSummary,
   DataSource,
   DataSourceTraceSummary,
+  BacktestResultSummary,
+  LocalStrategyLabEvidenceRecord,
+  LocalStrategyLabEvidenceStage,
+  LocalStrategyLabEvidenceSummary,
   MvpDataSetKey,
   MvpDataSources,
+  RankingEntry,
   StrategyGenerationApiResult,
   StrategyGenerationRunDetail,
   StrategyGenerationVersion,
@@ -318,4 +323,137 @@ export function getDataSourceAcceptance(source: DataSourceTraceSummary | undefin
     reason: "Source metadata is missing or incomplete.",
     nextAction: "修复 API data_source contract，返回 source_type、core_data、database_ids 和解除条件。",
   };
+}
+
+type LabEvidenceStageInput = {
+  key: LocalStrategyLabEvidenceStage["key"];
+  label: string;
+  records: LocalStrategyLabEvidenceRecord[];
+  isSuccess: (record: LocalStrategyLabEvidenceRecord) => boolean;
+  emptyReason: string;
+  emptyNextAction: string;
+};
+
+function normalizeLabEvidenceStatus(status: string): string {
+  return status.trim().toLowerCase();
+}
+
+function labEvidenceFailed(status: string): boolean {
+  return ["failed", "failure", "cancelled", "error"].includes(normalizeLabEvidenceStatus(status));
+}
+
+function labEvidenceBlocked(status: string): boolean {
+  return ["blocked", "stale", "unavailable"].includes(normalizeLabEvidenceStatus(status));
+}
+
+function summarizeLabEvidenceStage(input: LabEvidenceStageInput): LocalStrategyLabEvidenceStage {
+  const coreRecords = input.records.filter((record) => isCoreDataSourceTrace(record.source));
+  if (coreRecords.find(input.isSuccess)) {
+    return {
+      key: input.key, label: input.label, state: "ACCEPTABLE", canAccept: true,
+      reason: "已保留可复核的核心 database/api_aggregate 记录及 database_ids。",
+      nextAction: "刷新后确认 ID、artifact path 和 data_source 仍保持一致。",
+      observedCount: input.records.length, coreCount: coreRecords.length, records: input.records,
+    };
+  }
+  const blocked = input.records.find((record) => record.source.blockedReason || labEvidenceBlocked(record.status));
+  if (blocked) {
+    const acceptance = getDataSourceAcceptance(blocked.source);
+    return {
+      key: input.key, label: input.label, state: "BLOCKED", canAccept: false,
+      reason: blocked.source.blockedReason ?? acceptance.reason, nextAction: acceptance.nextAction,
+      observedCount: input.records.length, coreCount: coreRecords.length, records: input.records,
+    };
+  }
+  const failed = input.records.find((record) => labEvidenceFailed(record.status));
+  if (failed) {
+    const acceptance = getDataSourceAcceptance(failed.source);
+    return {
+      key: input.key, label: input.label, state: "FAILED", canAccept: false,
+      reason: acceptance.reason, nextAction: acceptance.nextAction,
+      observedCount: input.records.length, coreCount: coreRecords.length, records: input.records,
+    };
+  }
+  const nonCore = input.records.find((record) => !isCoreDataSourceTrace(record.source));
+  if (nonCore) {
+    const acceptance = getDataSourceAcceptance(nonCore.source);
+    const providerDetail = nonCore.provider ? `Provider ${nonCore.provider}/${nonCore.model ?? "unknown"}：` : "";
+    return {
+      key: input.key, label: input.label,
+      state: acceptance.state === "API_GAP" ? "API_GAP" : "NOT_ACCEPTABLE", canAccept: false,
+      reason: `${providerDetail}${acceptance.reason}`, nextAction: acceptance.nextAction,
+      observedCount: input.records.length, coreCount: coreRecords.length, records: input.records,
+    };
+  }
+  return {
+    key: input.key, label: input.label, state: "NOT_RUN", canAccept: false,
+    reason: input.emptyReason, nextAction: input.emptyNextAction,
+    observedCount: 0, coreCount: 0, records: [],
+  };
+}
+
+function labEvidenceRecord(
+  id: string,
+  status: string,
+  source: DataSourceTraceSummary,
+  options: Partial<Omit<LocalStrategyLabEvidenceRecord, "id" | "status" | "source">> = {},
+): LocalStrategyLabEvidenceRecord {
+  return {
+    id, status, source, parentId: options.parentId ?? null, provider: options.provider ?? null,
+    model: options.model ?? null, artifactPath: options.artifactPath ?? null,
+  };
+}
+
+export function buildLocalStrategyLabEvidenceSummary(input: {
+  generationRuns: StrategyGenerationRunDetail[];
+  strategyVersions: StrategyGenerationVersion[];
+  backtestResults: BacktestResultSummary[];
+  ranking: RankingEntry[];
+}): LocalStrategyLabEvidenceSummary {
+  const stages = [
+    summarizeLabEvidenceStage({
+      key: "generation", label: "Provider / 策略生成",
+      records: input.generationRuns.map((run) => labEvidenceRecord(run.id, run.status, run.dataSource, { provider: run.provider, model: run.model })),
+      isSuccess: (record) => ["succeeded", "success"].includes(normalizeLabEvidenceStatus(record.status)),
+      emptyReason: "尚未观察到真实 Provider 策略生成记录。",
+      emptyNextAction: "完成本地 operator 授权和单次真实 Provider 调用后刷新；不要把 fixture 当作成功。",
+    }),
+    summarizeLabEvidenceStage({
+      key: "strategy_file", label: "策略版本 / 文件",
+      records: input.strategyVersions.map((version) => labEvidenceRecord(
+        version.id, version.fileState?.status ?? version.validationStatus, version.dataSource,
+        { parentId: version.strategyId, artifactPath: version.filePath },
+      )),
+      isSuccess: (record) => !labEvidenceFailed(record.status) && !labEvidenceBlocked(record.status),
+      emptyReason: "尚未观察到有可复核文件路径的核心策略版本。",
+      emptyNextAction: "先完成真实策略生成并确认 strategy_version_id、strategy_file_path 和 file state。",
+    }),
+    summarizeLabEvidenceStage({
+      key: "backtest", label: "回测结果 / artifact",
+      records: input.backtestResults.map((result) => labEvidenceRecord(
+        result.id, "SUCCESS", result.dataSource, { parentId: result.taskId, artifactPath: result.resultPath },
+      )),
+      isSuccess: (record) => Boolean(record.artifactPath),
+      emptyReason: "尚未观察到有 database ID 和 artifact path 的核心回测结果。",
+      emptyNextAction: "在本地受控回测完成后刷新，并核对 backtest_run_id、backtest_task_id、backtest_result_id 和 artifact path。",
+    }),
+    summarizeLabEvidenceStage({
+      key: "score", label: "评分 / 排行榜",
+      records: input.ranking.map((entry) => labEvidenceRecord(
+        entry.scoreId, "SUCCESS", entry.dataSource, { parentId: entry.backtestResultId, artifactPath: entry.filePath },
+      )),
+      isSuccess: (record) => Boolean(record.parentId),
+      emptyReason: "尚未观察到关联核心回测结果的评分记录。",
+      emptyNextAction: "回测结果入库并完成评分后刷新，确认 strategy_score_id 与 backtest_result_id。",
+    }),
+  ];
+  const incomplete = stages.find((stage) => !stage.canAccept);
+  return incomplete
+    ? { state: incomplete.state, canAccept: false, reason: `${incomplete.label}：${incomplete.reason}`, nextAction: incomplete.nextAction, stages }
+    : {
+      state: "ACCEPTABLE", canAccept: true,
+      reason: "Provider、策略文件、回测结果和评分均有核心 API/DB 证据。",
+      nextAction: "刷新并复核各阶段的 database IDs、artifact paths 和 data_source；仍不代表可进行 live trading。",
+      stages,
+    };
 }
