@@ -19,7 +19,15 @@ import type {
   StrategyGenerationStrategy,
   StrategyGenerationVersion,
 } from "../../api/types";
-import { metricRows, reasonText } from "../backtestDisplay";
+import {
+  metricRows,
+  reasonText,
+} from "../backtestDisplay";
+import {
+  emptyBacktestMetrics,
+  findBacktestResultForTask,
+  missingBacktestResultReason,
+} from "../backtestResultLookup";
 import { FallbackNotice } from "../FallbackNotice";
 import { isCoreDataSource } from "../SourceMarker";
 import { isCoreDataSourceTrace } from "../../api/sourceState";
@@ -439,7 +447,6 @@ function BacktestEvidence({
   results: BacktestResultSummary[];
 }) {
   const runById = new Map(runs.map((run) => [run.id, run]));
-  const resultByTaskId = new Map(results.map((result) => [result.taskId, result]));
   const rows = latest(tasks);
 
   return (
@@ -468,7 +475,9 @@ function BacktestEvidence({
           <tbody>
             {rows.map((task) => {
               const run = runById.get(task.runId);
-              const result = resultByTaskId.get(task.id);
+              const result = findBacktestResultForTask(results, task.id);
+              const recordedReason = reasonText(task.blockedReason, task.failedReason, task.errorMessage);
+              const reason = recordedReason === EMPTY_TEXT && !result ? missingBacktestResultReason("任务") : recordedReason;
               return (
                 <tr key={task.id}>
                   <td>
@@ -490,7 +499,7 @@ function BacktestEvidence({
                     <CompactText value={result?.id ?? EMPTY_TEXT} />
                   </td>
                   <td className="metric-summary">
-                    {metricRows(result?.metrics ?? task.metrics).map(([label, value]) => (
+                    {metricRows(result?.metrics ?? emptyBacktestMetrics()).map(([label, value]) => (
                       <span key={label}>
                         <strong>{label}</strong>
                         {value}
@@ -504,7 +513,7 @@ function BacktestEvidence({
                     <LabSourceSummary source={result?.dataSource ?? task.dataSource} />
                   </td>
                   <td className="reason-cell">
-                    <CompactText value={reasonText(task.blockedReason, task.failedReason, task.errorMessage)} />
+                    <CompactText value={reason} />
                   </td>
                 </tr>
               );

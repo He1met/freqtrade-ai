@@ -1,7 +1,17 @@
 import { combineDataSources } from "../api/sourceState";
 import type { DataSourceTraceSummary } from "../api/types";
 import { useMvpData } from "../api/useMvpData";
-import { metricRows, reasonText, statusClassName, summarizeText } from "./backtestDisplay";
+import {
+  metricRows,
+  reasonText,
+  statusClassName,
+  summarizeText,
+} from "./backtestDisplay";
+import {
+  emptyBacktestMetrics,
+  findBacktestResultForTask,
+  missingBacktestResultReason,
+} from "./backtestResultLookup";
 import { FallbackNotice } from "./FallbackNotice";
 import { EMPTY_TEXT, displayLoadState, displayStatus } from "./uiCopy";
 
@@ -110,6 +120,9 @@ export function BacktestTasks() {
             {data.backtestTasks.map((task) => {
               const artifact = task.artifactManifest;
               const artifactStatus = artifact?.status ?? task.status;
+              const result = findBacktestResultForTask(data.backtestResults, task.id);
+              const recordedReason = reasonText(task.blockedReason, task.failedReason, task.errorMessage);
+              const reason = recordedReason === EMPTY_TEXT && !result ? missingBacktestResultReason("任务") : recordedReason;
               return (
                 <tr key={task.id}>
                   <td>{task.id}</td>
@@ -130,7 +143,11 @@ export function BacktestTasks() {
                     <CompactPath label="manifest" value={artifact?.manifestPath ?? EMPTY_TEXT} />
                   </td>
                   <td className="metric-summary">
-                    {metricRows(task.metrics).map(([label, value]) => (
+                    <span>
+                      <strong>结果</strong>
+                      {result?.id ?? EMPTY_TEXT}
+                    </span>
+                    {metricRows(result?.metrics ?? emptyBacktestMetrics()).map(([label, value]) => (
                       <span key={label}>
                         <strong>{label}</strong>
                         {value}
@@ -141,16 +158,13 @@ export function BacktestTasks() {
                     <CompactPath value={task.configPath ?? EMPTY_TEXT} />
                   </td>
                   <td className="path-cell" title={task.resultPath ?? artifact?.resultPath ?? EMPTY_TEXT}>
-                    <CompactPath value={task.resultPath ?? artifact?.resultPath ?? EMPTY_TEXT} />
+                    <CompactPath value={result?.resultPath ?? task.resultPath ?? artifact?.resultPath ?? EMPTY_TEXT} />
                   </td>
                   <td className="source-cell">
-                    <BacktestSourceSummary source={task.dataSource} />
+                    <BacktestSourceSummary source={result?.dataSource ?? task.dataSource} />
                   </td>
-                  <td
-                    className="reason-cell"
-                    title={reasonText(task.blockedReason, task.failedReason, task.errorMessage)}
-                  >
-                    {reasonText(task.blockedReason, task.failedReason, task.errorMessage)}
+                  <td className="reason-cell" title={reason}>
+                    {reason}
                   </td>
                   <td className="log-cell">
                     <span title={artifact?.stdout ?? EMPTY_TEXT}>stdout: {summarizeText(artifact?.stdout)}</span>
