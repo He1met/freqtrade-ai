@@ -410,14 +410,18 @@ def validate_secret_scanning(context: Phase7SmokeContext) -> None:
 
 def validate_dashboard_fallback(context: Phase7SmokeContext) -> None:
     dashboard_path = REPO_ROOT / "frontend" / "src" / "pages" / "OperatorDashboard.tsx"
+    notice_path = REPO_ROOT / "frontend" / "src" / "pages" / "operatorDashboardNotice.ts"
     mock_path = REPO_ROOT / "frontend" / "src" / "data" / "mock.ts"
     client_path = REPO_ROOT / "frontend" / "src" / "api" / "client.ts"
     dashboard_text = dashboard_path.read_text(encoding="utf-8")
+    notice_text = notice_path.read_text(encoding="utf-8")
     mock_text = mock_path.read_text(encoding="utf-8")
     client_text = client_path.read_text(encoding="utf-8")
 
     required_fragments = (
-        "Backend API unavailable; showing controlled Phase 7 operator fallback data.",
+        "operatorDashboardNotice",
+        "Backend API 已连接；下方状态来自只读运行契约。",
+        "未使用 Backend API 数据，不能作为运行验收依据。",
         "runtimeContract",
         "operatorStatus",
         "auditEvents",
@@ -427,10 +431,14 @@ def validate_dashboard_fallback(context: Phase7SmokeContext) -> None:
         "allowExchangeConnection",
         "canStartStopBot",
     )
-    combined = "\n".join((dashboard_text, mock_text, client_text))
+    combined = "\n".join((dashboard_text, notice_text, mock_text, client_text))
     missing = [fragment for fragment in required_fragments if fragment not in combined]
     if missing:
         raise RuntimeError(f"Operator Dashboard fallback contract is missing: {missing}")
+
+    retired_notice = "Backend API unavailable; showing controlled Phase 7 operator fallback data."
+    if retired_notice in "\n".join((dashboard_text, notice_text)):
+        raise RuntimeError("Operator Dashboard must not claim fallback data while its source is unknown or failed")
 
     forbidden_fragments = ("start_live", "stop_live", "deploy_command", "place_order", "<button")
     present_forbidden = [fragment for fragment in forbidden_fragments if fragment in dashboard_text]

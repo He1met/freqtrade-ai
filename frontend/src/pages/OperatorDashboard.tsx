@@ -12,6 +12,7 @@ import { combineDataSources } from "../api/sourceState";
 import { useMvpData } from "../api/useMvpData";
 import { summarizeText } from "./backtestDisplay";
 import { FallbackNotice } from "./FallbackNotice";
+import { operatorDashboardNotice } from "./operatorDashboardNotice";
 import { EMPTY_TEXT, displayBoolean, displayLoadState, displayStatus, displayValue } from "./uiCopy";
 
 function formatValue(value: string | number | boolean | null | undefined): string {
@@ -398,11 +399,7 @@ export function OperatorDashboard() {
         context="Operator Dashboard 运行证据、诊断检查、环境存在性和安全边界。"
         error={error}
         isLoading={isLoading}
-        note={
-          source === "api"
-            ? "Backend API 已连接；下方状态来自只读运行契约。"
-            : "Backend API unavailable; showing controlled Phase 7 operator fallback data."
-        }
+        note={operatorDashboardNotice(source)}
         source={source}
       />
       <section className="operator-summary-grid" aria-label="Operator Dashboard 摘要">
