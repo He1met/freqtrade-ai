@@ -14,6 +14,8 @@ import {
   submissionStatus,
 } from "./localStrategyLab/EvidencePanels";
 import { SubmissionStatusPanel } from "./localStrategyLab/SubmissionStatusPanel";
+import { createActionEvidence } from "./localStrategyLab/actionEvidence";
+import { useActionEvidence } from "./localStrategyLab/useActionEvidence";
 
 const DEFAULT_IDEA =
   "Build a local dry-run only RSI mean reversion strategy with conservative risk checks and no live trading assumptions.";
@@ -25,6 +27,7 @@ export function LocalStrategyLab() {
   const [submission, setSubmission] = useState<SubmissionState>({ kind: "idle" });
   const [snapshotRefreshToken, setSnapshotRefreshToken] = useState(0);
   const snapshot = useMvpData(snapshotRefreshToken);
+  const { history, record: recordAction } = useActionEvidence();
   const controllerRef = useRef<AbortController | null>(null);
   const isSubmitting = submission.kind === "submitting";
   const currentStatus = submissionStatus(submission);
@@ -65,19 +68,30 @@ export function LocalStrategyLab() {
     const promptSummary = idea.trim();
 
     if (!promptSummary) {
+      const message = "Strategy idea 不能为空；未提交 API 请求。";
       setSubmission({
         kind: "blocked",
-        message: "Strategy idea 不能为空；未提交 API 请求。",
+        message,
       });
+      recordAction(createActionEvidence({
+        action: "生成策略", status: "BLOCKED", message,
+        nextAction: "输入本地策略想法后重试。", recommendBug: false, updatedAt: new Date().toISOString(),
+      }));
       return;
     }
     if (!operatorToken) {
+      const message = "请输入本地 operator token；token 只用于本次请求，不会写入页面存储。";
       setSubmission({
         kind: "unauthorized",
-        message: "请输入本地 operator token；token 只用于本次请求，不会写入页面存储。",
+        message,
         statusCode: null,
         statusText: null,
       });
+      recordAction(createActionEvidence({
+        action: "生成策略", status: "UNAUTHORIZED", message,
+        nextAction: "提供本地 operator token 后重试；不要在页面或日志中保存 token。", recommendBug: false,
+        updatedAt: new Date().toISOString(),
+      }));
       return;
     }
 
@@ -85,6 +99,10 @@ export function LocalStrategyLab() {
     controllerRef.current?.abort();
     controllerRef.current = controller;
     setSubmission({ kind: "submitting", promptSummary, requestedCount });
+    recordAction(createActionEvidence({
+      action: "生成策略", status: "RUNNING", message: "正在提交本地策略生成请求。",
+      nextAction: "等待 backend API/DB 响应。", recommendBug: false, updatedAt: new Date().toISOString(),
+    }));
 
     try {
       const result = await createStrategyGenerationRun(
@@ -99,6 +117,12 @@ export function LocalStrategyLab() {
 
       if (isCoreGenerationResult(result)) {
         setSubmission({ kind: "success", result });
+        recordAction(createActionEvidence({
+          action: "生成策略", status: "SUCCESS", message: "生成记录、策略版本和文件路径均已由 API/DB 返回。",
+          nextAction: "刷新并核对 generation run、strategy version 与后续回测证据。", recommendBug: false,
+          databaseIds: { strategy_generation_run_id: result.run.id },
+          artifactPaths: result.strategyVersions.map((version) => version.filePath), updatedAt: new Date().toISOString(),
+        }));
         setSnapshotRefreshToken((current) => current + 1);
         return;
       }
@@ -109,6 +133,12 @@ export function LocalStrategyLab() {
           "Backend 响应缺少可证明的 api_aggregate/database core_data、database_ids 或 strategy file path；未展示为核心成功。",
         result,
       });
+      recordAction(createActionEvidence({
+        action: "生成策略", status: "BLOCKED",
+        message: "Backend 响应缺少可证明的核心 API/DB 证据或策略文件路径。",
+        nextAction: "检查 data_source、database_ids 和策略文件；不要将其视为核心成功。", recommendBug: false,
+        databaseIds: { strategy_generation_run_id: result.run.id }, updatedAt: new Date().toISOString(),
+      }));
       setSnapshotRefreshToken((current) => current + 1);
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
@@ -123,6 +153,10 @@ export function LocalStrategyLab() {
             statusCode: error.status,
             statusText: error.statusText,
           });
+          recordAction(createActionEvidence({
+            action: "生成策略", status: "UNAUTHORIZED", message: error.message,
+            nextAction: "核对本地 operator authorization 后重试。", recommendBug: false, updatedAt: new Date().toISOString(),
+          }));
           return;
         }
         if (error.operationStatus === "BLOCKED") {
@@ -133,6 +167,11 @@ export function LocalStrategyLab() {
             statusCode: error.status,
             statusText: error.statusText,
           });
+          recordAction(createActionEvidence({
+            action: "生成策略", status: "BLOCKED", message: error.message,
+            nextAction: "按持久 run 的 BLOCKED 原因补齐前置条件后重试。", recommendBug: false,
+            databaseIds: { strategy_generation_run_id: error.strategyGenerationRunId }, updatedAt: new Date().toISOString(),
+          }));
           return;
         }
         const hasPersistedFailedRun = Boolean(error.strategyGenerationRunId || error.failedReason);
@@ -144,6 +183,11 @@ export function LocalStrategyLab() {
             statusCode: error.status,
             statusText: error.statusText,
           });
+          recordAction(createActionEvidence({
+            action: "生成策略", status: "FAILED", message: error.failedReason ?? error.message,
+            nextAction: "检查持久 generation run 和 Provider/验证错误；若可稳定复现，创建 Bug Issue。", recommendBug: true,
+            databaseIds: { strategy_generation_run_id: error.strategyGenerationRunId }, updatedAt: new Date().toISOString(),
+          }));
           return;
         }
 
@@ -151,13 +195,22 @@ export function LocalStrategyLab() {
           kind: "blocked",
           message: `Strategy generation API 不可用或返回非核心响应：${error.message}`,
         });
+        recordAction(createActionEvidence({
+          action: "生成策略", status: "BLOCKED", message: `Strategy generation API 不可用或返回非核心响应：${error.message}`,
+          nextAction: "恢复 API 或补齐核心证据后重试。", recommendBug: true, updatedAt: new Date().toISOString(),
+        }));
         return;
       }
 
+      const message = error instanceof Error ? error.message : "Strategy generation API 请求失败。";
       setSubmission({
         kind: "blocked",
-        message: error instanceof Error ? error.message : "Strategy generation API 请求失败。",
+        message,
       });
+      recordAction(createActionEvidence({
+        action: "生成策略", status: "FAILED", message,
+        nextAction: "检查 API 与网络错误；若可稳定复现，创建 Bug Issue。", recommendBug: true, updatedAt: new Date().toISOString(),
+      }));
     }
   }
 
@@ -233,9 +286,12 @@ export function LocalStrategyLab() {
       <PersistentEvidence
         data={snapshot.data}
         error={snapshot.error}
+        history={history}
         isLoading={snapshot.isLoading}
         onRefresh={() => setSnapshotRefreshToken((current) => current + 1)}
         operatorToken={operatorToken}
+        promptSummary={idea.trim()}
+        recordAction={recordAction}
         source={combineDataSources(snapshot.sources, [
           "strategyVersions",
           "generationRuns",
