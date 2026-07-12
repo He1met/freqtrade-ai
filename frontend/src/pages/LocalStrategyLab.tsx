@@ -19,7 +19,9 @@ const DEFAULT_IDEA =
   "Build a local dry-run only RSI mean reversion strategy with conservative risk checks and no live trading assumptions.";
 export function LocalStrategyLab() {
   const [idea, setIdea] = useState(DEFAULT_IDEA);
-  const [requestedCount, setRequestedCount] = useState(1);
+  const requestedCount = 1 as const;
+  const [operatorToken, setOperatorToken] = useState("");
+  const [authorizeRealProvider, setAuthorizeRealProvider] = useState(false);
   const [submission, setSubmission] = useState<SubmissionState>({ kind: "idle" });
   const [snapshotRefreshToken, setSnapshotRefreshToken] = useState(0);
   const snapshot = useMvpData(snapshotRefreshToken);
@@ -34,15 +36,19 @@ export function LocalStrategyLab() {
       ["核心成功", submission.kind === "success" ? "是" : "否"],
       [
         "run id",
-        submission.kind === "success" || submission.kind === "blocked"
-          ? submission.result?.run.id ?? EMPTY_TEXT
+        submission.kind === "success"
+          ? submission.result.run.id
+          : submission.kind === "blocked"
+            ? submission.result?.run.id ?? submission.runId ?? EMPTY_TEXT
           : submission.kind === "failed"
             ? submission.runId ?? EMPTY_TEXT
             : EMPTY_TEXT,
       ],
       [
         "错误 / 阻塞原因",
-        submission.kind === "failed" || submission.kind === "blocked" ? submission.message : EMPTY_TEXT,
+        submission.kind === "failed" || submission.kind === "blocked" || submission.kind === "unauthorized"
+          ? submission.message
+          : EMPTY_TEXT,
       ],
     ],
     [currentStatus.title, submission],
@@ -65,6 +71,15 @@ export function LocalStrategyLab() {
       });
       return;
     }
+    if (!operatorToken) {
+      setSubmission({
+        kind: "unauthorized",
+        message: "请输入本地 operator token；token 只用于本次请求，不会写入页面存储。",
+        statusCode: null,
+        statusText: null,
+      });
+      return;
+    }
 
     const controller = new AbortController();
     controllerRef.current?.abort();
@@ -76,6 +91,8 @@ export function LocalStrategyLab() {
         {
           promptSummary,
           requestedCount,
+          operatorToken,
+          authorizeRealProvider,
         },
         controller.signal,
       );
@@ -99,6 +116,25 @@ export function LocalStrategyLab() {
       }
 
       if (error instanceof StrategyGenerationApiError) {
+        if (error.operationStatus === "UNAUTHORIZED") {
+          setSubmission({
+            kind: "unauthorized",
+            message: error.message,
+            statusCode: error.status,
+            statusText: error.statusText,
+          });
+          return;
+        }
+        if (error.operationStatus === "BLOCKED") {
+          setSubmission({
+            kind: "blocked",
+            message: error.message,
+            runId: error.strategyGenerationRunId,
+            statusCode: error.status,
+            statusText: error.statusText,
+          });
+          return;
+        }
         const hasPersistedFailedRun = Boolean(error.strategyGenerationRunId || error.failedReason);
         if (hasPersistedFailedRun) {
           setSubmission({
@@ -153,20 +189,35 @@ export function LocalStrategyLab() {
           <label className="field-group compact-field" htmlFor="requested-count">
             <span>requested_count</span>
             <input
+              disabled
               id="requested-count"
-              max={5}
+              max={1}
               min={1}
-              onChange={(event) => {
-                const nextValue = Number(event.currentTarget.value);
-                if (Number.isFinite(nextValue)) {
-                  setRequestedCount(Math.min(5, Math.max(1, Math.trunc(nextValue))));
-                }
-              }}
               type="number"
               value={requestedCount}
             />
           </label>
-          <button className="primary-button" disabled={isSubmitting || !idea.trim()} type="submit">
+          <label className="field-group compact-field" htmlFor="operator-token">
+            <span>operator token</span>
+            <input
+              autoComplete="off"
+              id="operator-token"
+              onChange={(event) => setOperatorToken(event.currentTarget.value)}
+              required
+              type="password"
+              value={operatorToken}
+            />
+          </label>
+          <label className="inline-check" htmlFor="provider-authorization">
+            <input
+              checked={authorizeRealProvider}
+              id="provider-authorization"
+              onChange={(event) => setAuthorizeRealProvider(event.currentTarget.checked)}
+              type="checkbox"
+            />
+            <span>仅授权一次真实 Provider 尝试</span>
+          </label>
+          <button className="primary-button" disabled={isSubmitting || !idea.trim() || !operatorToken} type="submit">
             {isSubmitting ? "提交中" : "提交生成"}
           </button>
         </div>
@@ -184,6 +235,7 @@ export function LocalStrategyLab() {
         error={snapshot.error}
         isLoading={snapshot.isLoading}
         onRefresh={() => setSnapshotRefreshToken((current) => current + 1)}
+        operatorToken={operatorToken}
         source={combineDataSources(snapshot.sources, [
           "strategyVersions",
           "generationRuns",

@@ -30,6 +30,7 @@ export class StrategyGenerationApiError extends Error {
   readonly status: number;
   readonly statusText: string;
   readonly strategyGenerationRunId: string | null;
+  readonly operationStatus: "UNAUTHORIZED" | "BLOCKED" | "FAILED" | null;
 
   constructor(response: Response, detail: unknown) {
     const value = asRecord(detail);
@@ -44,6 +45,11 @@ export class StrategyGenerationApiError extends Error {
     this.failedReason = failedReason ? redact(failedReason) : null;
     this.status = response.status;
     this.statusText = response.statusText;
+    const evidence = asRecord(nested.evidence);
+    const operationStatus = optionalString(nested.operation_status ?? nested.operationStatus ?? evidence.status);
+    this.operationStatus = operationStatus === "UNAUTHORIZED" || operationStatus === "BLOCKED" || operationStatus === "FAILED"
+      ? operationStatus
+      : null;
     const runId = nested.strategy_generation_run_id ?? nested.strategyGenerationRunId;
     this.strategyGenerationRunId = runId === null || runId === undefined ? null : String(runId);
   }
@@ -58,12 +64,30 @@ export async function fetchJson<T>(path: string, signal?: AbortSignal): Promise<
   return response.json() as Promise<T>;
 }
 
-export async function postJson<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
+type OperatorRequestOptions = {
+  idempotencyKey?: string;
+  operatorToken?: string;
+  providerAuthorization?: "once";
+  signal?: AbortSignal;
+};
+
+export async function postJson<T>(
+  path: string,
+  body: unknown,
+  options: OperatorRequestOptions = {},
+): Promise<T> {
+  const headers: Record<string, string> = {
+    Accept: "application/json",
+    "Content-Type": "application/json",
+  };
+  if (options.operatorToken) headers["X-Operator-Token"] = options.operatorToken;
+  if (options.idempotencyKey) headers["Idempotency-Key"] = options.idempotencyKey;
+  if (options.providerAuthorization) headers["X-Provider-Authorization"] = options.providerAuthorization;
   const response = await fetch(`${apiBaseUrl()}${path}`, {
     body: JSON.stringify(body),
-    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    headers,
     method: "POST",
-    signal,
+    signal: options.signal,
   });
   if (!response.ok) {
     let detail: unknown = null;

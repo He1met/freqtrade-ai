@@ -337,6 +337,11 @@ python3 scripts/phase9_deepseek_single_e2e.py --json
 python3 scripts/phase9_deepseek_single_e2e.py --allow-real-call --json
 ```
 
+HTTP 写入口还要求本地 ENV 中存在 `FREQTRADE_AI_OPERATOR_TOKEN`，并由本次请求通过
+`X-Operator-Token` 提交；每次请求必须使用新的 `Idempotency-Key`。真实 Provider 尝试还必须
+显式把 `X-Provider-Authorization` header 设置为单次许可值 `once`，且单次最多生成一个策略。token/key 值不得进入
+数据库、日志、API response、报告或浏览器存储。
+
 Phase 9 和当前 refactor/runtime PR 必须覆盖：
 
 - `generation_run`、`strategy`、`strategy_version`、策略文件、回测、评分和页面展示链路。

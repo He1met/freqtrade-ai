@@ -62,7 +62,7 @@ class StrategyGenerationRunRead(BaseModel):
 
 class StrategyGenerationRequest(BaseModel):
     prompt_summary: str = Field(min_length=1, max_length=4000)
-    requested_count: int = Field(default=1, ge=1, le=5)
+    requested_count: int = Field(default=1, ge=1, le=1)
 
 
 class DeepSeekSingleGenerationRequest(BaseModel):

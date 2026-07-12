@@ -25,7 +25,13 @@ def client_with_db(tmp_path: Path) -> tuple[TestClient, object]:
             db.close()
 
     app.dependency_overrides[get_db] = override_db
-    return TestClient(app), session_factory
+    return TestClient(
+        app,
+        headers={
+            "X-Operator-Token": "synthetic-test-operator-token",
+            "Idempotency-Key": "dry-run-control-test",
+        },
+    ), session_factory
 
 
 def seed_strategy_version(

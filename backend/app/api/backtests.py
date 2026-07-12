@@ -15,6 +15,11 @@ from app.schemas import (
 )
 from app.services.backtest_artifact_ingest import BacktestArtifactIngestService
 from app.services.local_backtest_trigger import LocalBacktestTriggerService
+from app.services.operator_authorization import (
+    OperatorRequestHeaders,
+    operator_request_coordinator,
+    operator_request_headers,
+)
 
 
 router = APIRouter(prefix="/api", tags=["backtests"])
@@ -28,22 +33,32 @@ router = APIRouter(prefix="/api", tags=["backtests"])
 def trigger_local_backtest(
     payload: LocalBacktestTriggerRequest,
     db: Session = Depends(get_db),
+    operator_headers: OperatorRequestHeaders = Depends(operator_request_headers),
 ) -> LocalBacktestTriggerResponse:
-    result = LocalBacktestTriggerService(db).trigger(payload)
-    if result is None:
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "message": "strategy version not found",
-                "evidence": operation_error_evidence(
-                    status="BLOCKED",
-                    reason="strategy version not found",
-                    next_action="Create or select a persisted strategy version before triggering a backtest.",
-                    ids={"strategy_version_id": payload.strategy_version_id},
-                ).model_dump(mode="json"),
-            },
-        )
-    return result
+    def execute() -> LocalBacktestTriggerResponse:
+        result = LocalBacktestTriggerService(db).trigger(payload)
+        if result is None:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "message": "strategy version not found",
+                    "evidence": operation_error_evidence(
+                        status="BLOCKED",
+                        reason="strategy version not found",
+                        next_action="Create or select a persisted strategy version before triggering a backtest.",
+                        ids={"strategy_version_id": payload.strategy_version_id},
+                    ).model_dump(mode="json"),
+                },
+            )
+        return result
+
+    return operator_request_coordinator.execute(
+        operator_headers,
+        operation="backtest.trigger_local",
+        provider_call=False,
+        request_payload=payload.model_dump(mode="json"),
+        handler=execute,
+    )
 
 
 @router.post(
@@ -54,22 +69,32 @@ def ingest_backtest_task_artifact(
     task_id: int,
     payload: BacktestArtifactIngestRequest,
     db: Session = Depends(get_db),
+    operator_headers: OperatorRequestHeaders = Depends(operator_request_headers),
 ) -> BacktestArtifactIngestResponse:
-    result = BacktestArtifactIngestService(db).ingest_task_artifact(task_id, payload)
-    if result is None:
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "message": "backtest task not found",
-                "evidence": operation_error_evidence(
-                    status="BLOCKED",
-                    reason="backtest task not found",
-                    next_action="Create or select a persisted backtest task before ingesting artifacts.",
-                    ids={"backtest_task_id": task_id},
-                ).model_dump(mode="json"),
-            },
-        )
-    return result
+    def execute() -> BacktestArtifactIngestResponse:
+        result = BacktestArtifactIngestService(db).ingest_task_artifact(task_id, payload)
+        if result is None:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "message": "backtest task not found",
+                    "evidence": operation_error_evidence(
+                        status="BLOCKED",
+                        reason="backtest task not found",
+                        next_action="Create or select a persisted backtest task before ingesting artifacts.",
+                        ids={"backtest_task_id": task_id},
+                    ).model_dump(mode="json"),
+                },
+            )
+        return result
+
+    return operator_request_coordinator.execute(
+        operator_headers,
+        operation="backtest.artifact_ingest",
+        provider_call=False,
+        request_payload={"task_id": task_id, **payload.model_dump(mode="json")},
+        handler=execute,
+    )
 
 
 @router.get("/backtest-runs", response_model=list[BacktestRunRead])
