@@ -2,7 +2,13 @@ import { mockMvpData } from "../data/mock";
 import type { MvpData, MvpDataSources } from "./types";
 import { fetchList, fetchValue } from "./http";
 import * as N from "./normalizers";
-import { isCoreDataSourceTrace, MVP_DATA_SET_KEYS } from "./sourceState";
+import {
+  applyGenerationRunProviderProvenance,
+  applyGenerationVersionProviderProvenance,
+  applyStrategyProviderProvenance,
+  isCoreDataSourceTrace,
+  MVP_DATA_SET_KEYS,
+} from "./sourceState";
 
 function fixtureModeEnabled(): boolean {
   const env = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env;
@@ -112,18 +118,33 @@ export async function loadMvpData(signal?: AbortSignal): Promise<{
     ),
   ]);
 
-  const normalizedStrategyVersions = strategyVersions.items
+  const normalizedGenerationRuns = generationRuns.items
+    .map(N.normalizeStrategyGenerationRun)
+    .map(applyGenerationRunProviderProvenance);
+  const generationRunById = new Map(normalizedGenerationRuns.map((run) => [run.id, run]));
+  const allStrategyVersions = strategyVersions.items
     .map(N.normalizeStrategyGenerationVersion)
-    .filter((item) => isCoreDataSourceTrace(item.dataSource));
+    .map((version) => applyGenerationVersionProviderProvenance(
+      version,
+      version.generationRunId ? generationRunById.get(version.generationRunId) : undefined,
+    ));
+  const normalizedStrategyVersions = allStrategyVersions.filter((item) => isCoreDataSourceTrace(item.dataSource));
+  const normalizedStrategies = strategies.items
+    .map((strategy) => N.normalizeStrategySummary(strategy, allStrategyVersions))
+    .map((strategy) => applyStrategyProviderProvenance(
+      strategy,
+      strategy.currentVersionId
+        ? allStrategyVersions.find((version) => version.id === strategy.currentVersionId) ?? null
+        : null,
+    ));
   const sources = Object.fromEntries(MVP_DATA_SET_KEYS.map((key) => [key, "api"])) as MvpDataSources;
 
   return {
     data: {
-      strategies: strategies.items
-        .map((strategy) => N.normalizeStrategySummary(strategy, normalizedStrategyVersions))
+      strategies: normalizedStrategies
         .filter((item) => isCoreDataSourceTrace(item.dataSource)),
       strategyVersions: normalizedStrategyVersions,
-      generationRuns: generationRuns.items.map(N.normalizeStrategyGenerationRun).filter((item) => isCoreDataSourceTrace(item.dataSource)),
+      generationRuns: normalizedGenerationRuns.filter((item) => isCoreDataSourceTrace(item.dataSource)),
       backtestRuns: backtestRuns.items.map(N.normalizeBacktestRun).filter((item) => isCoreDataSourceTrace(item.dataSource)),
       backtestTasks: backtestTasks.items.map(N.normalizeBacktestTask).filter((item) => isCoreDataSourceTrace(item.dataSource)),
       backtestResults: backtestResults.items.map(N.normalizeBacktestResult).filter((item) => isCoreDataSourceTrace(item.dataSource)),

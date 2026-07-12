@@ -35,6 +35,9 @@ export type DataSourceTraceSummary = {
   artifactRefs: Record<string, string>;
   freshness: string | null;
   blockedReason: string | null;
+  providerProvenance?: "real" | "non-core" | "unknown";
+  providerName?: string;
+  providerModel?: string;
 };
 
 export type StrategyVersionSummary = {
