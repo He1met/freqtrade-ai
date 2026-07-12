@@ -14,7 +14,7 @@ def headers(key: str, *, token: str = "synthetic-test-operator-token", provider:
     return OperatorRequestHeaders(
         operator_token=token,
         idempotency_key=key,
-        provider_authorization="once" if provider else None,
+        provider_consent="once" if provider else None,
     )
 
 

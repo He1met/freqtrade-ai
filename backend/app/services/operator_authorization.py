@@ -24,7 +24,7 @@ _IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
 class OperatorRequestHeaders:
     operator_token: Optional[str]
     idempotency_key: Optional[str]
-    provider_authorization: Optional[str]
+    provider_consent: Optional[str]
 
 
 @dataclass(frozen=True)
@@ -37,7 +37,7 @@ class _CachedOutcome:
 def operator_request_headers(
     operator_token: Optional[str] = Header(default=None, alias="X-Operator-Token"),
     idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
-    provider_authorization: Optional[str] = Header(
+    provider_consent_header: Optional[str] = Header(
         default=None,
         alias="X-Provider-Authorization",
     ),
@@ -45,7 +45,7 @@ def operator_request_headers(
     return OperatorRequestHeaders(
         operator_token=operator_token,
         idempotency_key=idempotency_key,
-        provider_authorization=provider_authorization,
+        provider_consent=provider_consent_header,
     )
 
 
@@ -196,13 +196,13 @@ class OperatorRequestCoordinator:
                 None,
             )
 
-        if provider_call and (headers.provider_authorization or "").strip().lower() != "once":
+        if provider_call and (headers.provider_consent or "").strip().lower() != "once":
             digest = _idempotency_digest(key)
             self._audit(operation, "BLOCKED", digest, provider_call, reason="provider_authorization_missing")
             raise _operator_http_error(
                 409,
                 "BLOCKED",
-                "A real Provider attempt requires X-Provider-Authorization: once.",
+                "A real Provider attempt requires the X-Provider-Authorization header with a single-use consent.",
                 operation,
                 digest,
             )
