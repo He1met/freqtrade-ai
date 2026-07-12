@@ -4,6 +4,10 @@ import type {
   DataSourceTraceSummary,
   MvpDataSetKey,
   MvpDataSources,
+  StrategyGenerationApiResult,
+  StrategyGenerationRunDetail,
+  StrategyGenerationVersion,
+  StrategySummary,
 } from "./types";
 
 export type CoreDataSourceType = "database" | "api_aggregate";
@@ -22,6 +26,109 @@ export const NON_CORE_DATA_SOURCE_TYPES: NonCoreDataSourceType[] = ["fixture", "
 const DEFAULT_SOURCE_DETAIL = "Source metadata was not provided.";
 const NOT_RUN_PATTERNS = [/not run/i, /not been run/i, /no run/i, /未运行/, /尚未运行/, /未触发/, /等待首次运行/];
 const FAILURE_PATTERNS = [/failed/i, /failure/i, /error/i, /exception/i, /crash/i, /退出码/i, /失败/];
+const NON_CORE_PROVIDER_PATTERNS = [/fake/i, /fixture/i, /offline/i, /mock/i];
+
+export type ProviderProvenance = "real" | "non-core" | "unknown";
+
+export function classifyGenerationProvider(provider: string | null | undefined, model: string | null | undefined): ProviderProvenance {
+  const providerName = provider?.trim().toLowerCase() ?? "";
+  const modelName = model?.trim().toLowerCase() ?? "";
+
+  if (!providerName || providerName === "unknown" || !modelName || modelName === "unknown") {
+    return "unknown";
+  }
+  if (NON_CORE_PROVIDER_PATTERNS.some((pattern) => pattern.test(providerName) || pattern.test(modelName))) {
+    return "non-core";
+  }
+  return providerName === "deepseek" ? "real" : "unknown";
+}
+
+function providerProvenanceDetail(
+  provider: string,
+  model: string,
+  provenance: Exclude<ProviderProvenance, "real">,
+): string {
+  if (provenance === "non-core") {
+    return `Provider ${provider}/${model} is fake, fixture, offline, or mock data; database persistence cannot prove a real Provider run.`;
+  }
+  return `Provider provenance for ${provider}/${model} is unknown; database persistence cannot prove a real Provider run.`;
+}
+
+function applyProviderProvenance(
+  source: DataSourceTraceSummary,
+  provider: string,
+  model: string,
+): DataSourceTraceSummary {
+  const providerProvenance = classifyGenerationProvider(provider, model);
+  if (providerProvenance === "real") {
+    return { ...source, providerProvenance, providerName: provider, providerModel: model };
+  }
+
+  const detail = providerProvenanceDetail(provider, model, providerProvenance);
+  return {
+    ...source,
+    coreData: false,
+    sourceDetail: source.sourceDetail.includes(detail) ? source.sourceDetail : `${source.sourceDetail} ${detail}`,
+    providerProvenance,
+    providerName: provider,
+    providerModel: model,
+  };
+}
+
+export function applyGenerationRunProviderProvenance(run: StrategyGenerationRunDetail): StrategyGenerationRunDetail {
+  return { ...run, dataSource: applyProviderProvenance(run.dataSource, run.provider, run.model) };
+}
+
+export function applyGenerationVersionProviderProvenance(
+  version: StrategyGenerationVersion,
+  run: StrategyGenerationRunDetail | undefined,
+): StrategyGenerationVersion {
+  if (version.generationRunId === null) {
+    return version;
+  }
+  return {
+    ...version,
+    dataSource: applyProviderProvenance(
+      version.dataSource,
+      run?.provider ?? "unknown",
+      run?.model ?? "unknown",
+    ),
+  };
+}
+
+export function applyStrategyProviderProvenance(
+  strategy: StrategySummary,
+  currentVersion: StrategyGenerationVersion | null,
+): StrategySummary {
+  if (!currentVersion || currentVersion.generationRunId === null) {
+    return strategy;
+  }
+  return { ...strategy, dataSource: { ...currentVersion.dataSource } };
+}
+
+export function applyGenerationResponseProviderProvenance(
+  result: StrategyGenerationApiResult,
+): StrategyGenerationApiResult {
+  const run = applyGenerationRunProviderProvenance(result.run);
+  const strategyVersions = result.strategyVersions.map((version) =>
+    applyGenerationVersionProviderProvenance(version, run),
+  );
+  const versionByStrategyId = new Map(strategyVersions.map((version) => [version.strategyId, version]));
+  const strategies = result.strategies.map((strategy) => {
+    const version = versionByStrategyId.get(strategy.id) ?? null;
+    if (!version) {
+      return strategy;
+    }
+    return { ...strategy, dataSource: { ...version.dataSource } };
+  });
+  return {
+    ...result,
+    run,
+    strategies,
+    strategyVersions,
+    dataSource: applyProviderProvenance(result.dataSource, run.provider, run.model),
+  };
+}
 
 export const MVP_DATA_SET_KEYS: MvpDataSetKey[] = [
   "strategies",
@@ -62,6 +169,8 @@ export function hasDatabaseIds(source: DataSourceTraceSummary | undefined): bool
 export function isCoreDataSourceTrace(source: DataSourceTraceSummary | undefined): boolean {
   return Boolean(
     source?.coreData &&
+      source.providerProvenance !== "non-core" &&
+      source.providerProvenance !== "unknown" &&
       CORE_DATA_SOURCE_TYPES.includes(source.sourceType as CoreDataSourceType) &&
       hasDatabaseIds(source),
   );
@@ -121,6 +230,16 @@ function getApiGapReason(source: DataSourceTraceSummary | undefined, sourceType:
 
 export function getDataSourceAcceptance(source: DataSourceTraceSummary | undefined): DataSourceAcceptance {
   const sourceType = source?.sourceType ?? "unknown";
+
+  if (source?.providerProvenance === "non-core" || source?.providerProvenance === "unknown") {
+    return {
+      state: "NOT_ACCEPTABLE",
+      canAccept: false,
+      sourceType,
+      reason: source.sourceDetail,
+      nextAction: "使用明确的真实 DeepSeek Provider 运行后，刷新并确认 provider/model、database_ids 与 artifact_refs。",
+    };
+  }
 
   if (isCoreDataSourceTrace(source)) {
     return {

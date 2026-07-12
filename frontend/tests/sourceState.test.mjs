@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { getDataSourceAcceptance, isCoreDataSourceTrace } from "../src/api/sourceState.ts";
+import {
+  applyGenerationResponseProviderProvenance,
+  classifyGenerationProvider,
+  getDataSourceAcceptance,
+  isCoreDataSourceTrace,
+} from "../src/api/sourceState.ts";
 
 test("database source with database_ids is ACCEPTABLE", () => {
   const source = {
@@ -48,6 +53,59 @@ test("fixture source is NOT_ACCEPTABLE", () => {
   });
 
   assert.equal(acceptance.state, "NOT_ACCEPTABLE");
+});
+
+test("fake offline-fixture Provider remains non-core after database persistence", () => {
+  const result = applyGenerationResponseProviderProvenance({
+    run: {
+      id: "15",
+      status: "succeeded",
+      provider: "fake",
+      model: "offline-fixture",
+      promptHash: null,
+      promptSummary: null,
+      paramsSnapshot: {},
+      requestedCount: 1,
+      generatedCount: 1,
+      acceptedCount: 1,
+      failedCount: 0,
+      errorMessage: null,
+      startedAt: null,
+      completedAt: null,
+      createdAt: null,
+      dataSource: {
+        sourceType: "database",
+        sourceDetail: "Persisted generation run.",
+        coreData: true,
+        databaseIds: { strategy_generation_run_id: 15 },
+        artifactRefs: {},
+        freshness: null,
+        blockedReason: null,
+      },
+    },
+    strategies: [],
+    strategyVersions: [],
+    dataSource: {
+      sourceType: "api_aggregate",
+      sourceDetail: "Persisted generation response.",
+      coreData: true,
+      databaseIds: { strategy_generation_run_id: 15 },
+      artifactRefs: {},
+      freshness: null,
+      blockedReason: null,
+    },
+  });
+
+  assert.equal(result.run.dataSource.providerProvenance, "non-core");
+  assert.equal(result.run.dataSource.coreData, false);
+  assert.equal(isCoreDataSourceTrace(result.run.dataSource), false);
+  assert.equal(getDataSourceAcceptance(result.dataSource).state, "NOT_ACCEPTABLE");
+});
+
+test("only explicit DeepSeek provenance can be real", () => {
+  assert.equal(classifyGenerationProvider("deepseek", "deepseek-chat"), "real");
+  assert.equal(classifyGenerationProvider("deepseek", "offline-fixture"), "non-core");
+  assert.equal(classifyGenerationProvider("unknown", "unknown"), "unknown");
 });
 
 test("blocked source is BLOCKED", () => {

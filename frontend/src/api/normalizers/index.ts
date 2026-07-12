@@ -62,6 +62,7 @@ import type {
   ValidationErrorSummary,
   MvpDataSources,
 } from "../types";
+import { applyGenerationResponseProviderProvenance } from "../sourceState";
 
 // The frontend keeps a controlled fallback path while backend endpoints are
 // still being stabilized. The flag returned by loadMvpData makes that fallback
@@ -1621,7 +1622,7 @@ export function normalizeStrategySummary(
 }
 
 export function normalizeStrategyGenerationResponse(raw: RawStrategyGenerationApiResponse): StrategyGenerationApiResult {
-  return {
+  return applyGenerationResponseProviderProvenance({
     run: normalizeStrategyGenerationRun(raw.run),
     strategies: Array.isArray(raw.strategies) ? raw.strategies.map(normalizeStrategyGenerationStrategy) : [],
     strategyVersions: Array.isArray(raw.strategyVersions ?? raw.strategy_versions)
@@ -1631,7 +1632,7 @@ export function normalizeStrategyGenerationResponse(raw: RawStrategyGenerationAp
       raw.dataSource ?? raw.data_source,
       "Strategy generation API response source was not provided by the backend.",
     ),
-  };
+  });
 }
 
 export function normalizeDryRunReadiness(raw: RawDryRunReadinessReport): DryRunReadinessReport {

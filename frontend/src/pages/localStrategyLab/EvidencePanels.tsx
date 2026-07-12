@@ -22,6 +22,7 @@ import type {
 import { metricRows, reasonText } from "../backtestDisplay";
 import { FallbackNotice } from "../FallbackNotice";
 import { isCoreDataSource } from "../SourceMarker";
+import { isCoreDataSourceTrace } from "../../api/sourceState";
 import { EMPTY_TEXT, displayBoolean, displayLoadState, displayStatus, displayValue } from "../uiCopy";
 
 export type SubmissionState =
@@ -120,7 +121,7 @@ function latest<T>(items: T[], count = 6): T[] {
 }
 
 function isCoreSource(source: DataSourceTraceSummary, allowedTypes: string[]): boolean {
-  return source.coreData && allowedTypes.includes(source.sourceType) && Object.keys(source.databaseIds).length > 0;
+  return isCoreDataSourceTrace(source) && allowedTypes.includes(source.sourceType);
 }
 
 export function isCoreGenerationResult(result: StrategyGenerationApiResult): boolean {
