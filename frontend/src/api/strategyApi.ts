@@ -12,7 +12,12 @@ export async function createStrategyGenerationRun(
   const raw = await postJson<RawStrategyGenerationApiResponse>(
     "/strategy-generation-runs",
     { prompt_summary: payload.promptSummary, requested_count: payload.requestedCount },
-    signal,
+    {
+      idempotencyKey: `strategy-generation-${crypto.randomUUID()}`,
+      operatorToken: payload.operatorToken,
+      providerAuthorization: payload.authorizeRealProvider ? "once" : undefined,
+      signal,
+    },
   );
   return normalizeStrategyGenerationResponse(raw);
 }

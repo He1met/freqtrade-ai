@@ -28,6 +28,12 @@ from app.services.strategy_generation import (
     build_strategy_blueprint_provider_from_env,
 )
 from app.services.deepseek_backtest_loop import DeepSeekBacktestLoopService
+from app.services.operator_authorization import (
+    OperatorRequestHeaders,
+    operator_request_coordinator,
+    operator_request_headers,
+    provider_is_real,
+)
 from app.schemas.strategy_generation_run import DeepSeekSingleGenerationRequest
 
 
@@ -77,39 +83,90 @@ def list_strategy_generation_runs(
 def create_strategy_generation_run(
     payload: StrategyGenerationRequest,
     service: StrategyGenerationService = Depends(get_strategy_generation_service),
+    operator_headers: OperatorRequestHeaders = Depends(operator_request_headers),
 ) -> StrategyGenerationApiResponse:
-    try:
-        result = service.run_once_with_result(
-            payload.prompt_summary,
-            requested_count=payload.requested_count,
-        )
-    except StrategyGenerationExecutionError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail={
-                "message": "strategy generation failed after creating a database run record",
-                "strategy_generation_run_id": exc.run_id,
-                "failed_reason": str(exc),
-                "evidence": operation_error_evidence(
-                    status="FAILED",
-                    reason=str(exc),
-                    next_action="Inspect the persisted generation run, correct provider or validation errors, and retry.",
-                    ids={"strategy_generation_run_id": exc.run_id},
-                ).model_dump(mode="json"),
-            },
-        ) from exc
+    real_provider = provider_is_real(service.provider)
 
-    return _build_generation_response(service, result.run_id, result.version_ids)
+    def execute() -> StrategyGenerationApiResponse:
+        if real_provider and not service.has_provider_credential():
+            reason = "Missing configured Provider API key environment variable."
+            run_id = service.record_blocked_once(
+                payload.prompt_summary,
+                reason,
+                real_call_authorized=True,
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "Strategy generation was blocked before Provider execution",
+                    "strategy_generation_run_id": run_id,
+                    "operation_status": "BLOCKED",
+                    "evidence": operation_error_evidence(
+                        status="BLOCKED",
+                        reason=reason,
+                        next_action="Set the configured Provider key in ENV and retry with a new idempotency key.",
+                        ids={"strategy_generation_run_id": run_id},
+                    ).model_dump(mode="json"),
+                },
+            )
+        try:
+            result = service.run_once_with_result(
+                payload.prompt_summary,
+                requested_count=payload.requested_count,
+            )
+        except StrategyGenerationExecutionError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "message": "strategy generation failed after creating a database run record",
+                    "strategy_generation_run_id": exc.run_id,
+                    "failed_reason": str(exc),
+                    "operation_status": "FAILED",
+                    "evidence": operation_error_evidence(
+                        status="FAILED",
+                        reason=str(exc),
+                        next_action="Inspect the persisted generation run, correct provider or validation errors, and retry.",
+                        ids={"strategy_generation_run_id": exc.run_id},
+                    ).model_dump(mode="json"),
+                },
+            ) from exc
+
+        return _build_generation_response(service, result.run_id, result.version_ids)
+
+    return operator_request_coordinator.execute(
+        operator_headers,
+        operation="strategy_generation.create",
+        provider_call=real_provider,
+        request_payload=payload.model_dump(mode="json"),
+        handler=execute,
+    )
 
 
 @router.post("/strategy-generation-runs/deepseek-single", response_model=StrategyGenerationApiResponse)
 def create_deepseek_single_generation_run(
     payload: DeepSeekSingleGenerationRequest,
     service: StrategyGenerationService = Depends(get_deepseek_single_generation_service),
+    operator_headers: OperatorRequestHeaders = Depends(operator_request_headers),
 ) -> StrategyGenerationApiResponse:
     if service.provider.provider_name != "deepseek":
         raise HTTPException(status_code=500, detail="DeepSeek single-run provider boundary is misconfigured")
 
+    def execute() -> StrategyGenerationApiResponse:
+        return _execute_deepseek_single_generation(payload, service)
+
+    return operator_request_coordinator.execute(
+        operator_headers,
+        operation="strategy_generation.deepseek_single",
+        provider_call=payload.allow_real_call,
+        request_payload=payload.model_dump(mode="json"),
+        handler=execute,
+    )
+
+
+def _execute_deepseek_single_generation(
+    payload: DeepSeekSingleGenerationRequest,
+    service: StrategyGenerationService,
+) -> StrategyGenerationApiResponse:
     if not payload.allow_real_call:
         reason = "Real DeepSeek call requires explicit single-run authorization."
         run_id = service.record_blocked_once(
@@ -194,8 +251,15 @@ def create_deepseek_single_generation_run(
 def run_deepseek_backtest_loop(
     payload: DeepSeekBacktestLoopRequest,
     service: DeepSeekBacktestLoopService = Depends(get_deepseek_backtest_loop_service),
+    operator_headers: OperatorRequestHeaders = Depends(operator_request_headers),
 ) -> DeepSeekBacktestLoopResponse:
-    return service.run(payload)
+    return operator_request_coordinator.execute(
+        operator_headers,
+        operation="strategy_generation.deepseek_backtest_loop",
+        provider_call=payload.allow_real_call,
+        request_payload=payload.model_dump(mode="json"),
+        handler=lambda: service.run(payload),
+    )
 
 
 def _build_generation_response(

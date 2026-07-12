@@ -28,7 +28,15 @@ export type SubmissionState =
   | { kind: "idle" }
   | { kind: "submitting"; promptSummary: string; requestedCount: number }
   | { kind: "success"; result: StrategyGenerationApiResult }
-  | { kind: "blocked"; message: string; result?: StrategyGenerationApiResult }
+  | { kind: "unauthorized"; message: string; statusCode: number | null; statusText: string | null }
+  | {
+      kind: "blocked";
+      message: string;
+      result?: StrategyGenerationApiResult;
+      runId?: string | null;
+      statusCode?: number | null;
+      statusText?: string | null;
+    }
   | {
       kind: "failed";
       message: string;
@@ -165,6 +173,13 @@ export function submissionStatus(submission: SubmissionState): {
       title: "backend API/DB 已返回可追踪生成记录",
     };
   }
+  if (submission.kind === "unauthorized") {
+    return {
+      className: "status-blocked",
+      label: "UNAUTHORIZED",
+      title: "本地 operator 授权被拒绝",
+    };
+  }
   if (submission.kind === "failed") {
     return {
       className: "status-failed",
@@ -215,7 +230,7 @@ export function submissionMessage(submission: SubmissionState): string {
   if (submission.kind === "success") {
     return "生成请求已由 backend API 写入数据库；仍需后续验证、回测和人工复核。";
   }
-  if (submission.kind === "failed") {
+  if (submission.kind === "failed" || submission.kind === "unauthorized") {
     return submission.message;
   }
   if (submission.kind === "blocked") {
@@ -689,7 +704,7 @@ function DryRunReadinessPanel({ data }: { data: MvpData }) {
   );
 }
 
-function ControlStatePanel({ data }: { data: MvpData }) {
+function ControlStatePanel({ data, operatorToken }: { data: MvpData; operatorToken: string }) {
   const [control, setControl] = useState<ControlState>({ kind: "idle" });
   const [manualApproval, setManualApproval] = useState(false);
   const candidate = readinessCandidate(data);
@@ -714,7 +729,7 @@ function ControlStatePanel({ data }: { data: MvpData }) {
         manualApproval,
         strategyName: candidate.strategyName,
         strategyVersionId: candidate.strategyVersionId,
-      });
+      }, operatorToken);
       setControl({ kind: "complete", report: result });
     } catch (error) {
       const message =
@@ -730,7 +745,7 @@ function ControlStatePanel({ data }: { data: MvpData }) {
   async function handleStop() {
     setControl({ kind: "stopping" });
     try {
-      const result = await stopControlledDryRun();
+      const result = await stopControlledDryRun(operatorToken);
       setControl({ kind: "complete", report: result });
     } catch (error) {
       const message =
@@ -758,10 +773,10 @@ function ControlStatePanel({ data }: { data: MvpData }) {
             />
             人工批准
           </label>
-          <button className="secondary-button" disabled={isBusy || !candidate} onClick={handleStart} type="button">
+          <button className="secondary-button" disabled={isBusy || !candidate || !operatorToken} onClick={handleStart} type="button">
             启动
           </button>
-          <button className="secondary-button" disabled={isBusy} onClick={handleStop} type="button">
+          <button className="secondary-button" disabled={isBusy || !operatorToken} onClick={handleStop} type="button">
             停止
           </button>
         </div>
@@ -844,12 +859,14 @@ export function PersistentEvidence({
   error,
   isLoading,
   onRefresh,
+  operatorToken,
   source,
 }: {
   data: MvpData;
   error: string | null;
   isLoading: boolean;
   onRefresh: () => void;
+  operatorToken: string;
   source: string;
 }) {
   const coreRankingCount = data.ranking.filter((entry) => isCoreDataSource(entry.dataSource)).length;
@@ -896,7 +913,7 @@ export function PersistentEvidence({
       <BacktestEvidence runs={data.backtestRuns} tasks={data.backtestTasks} results={data.backtestResults} />
       <RankingEvidence ranking={data.ranking} />
       <DryRunReadinessPanel data={data} />
-      <ControlStatePanel data={data} />
+      <ControlStatePanel data={data} operatorToken={operatorToken} />
     </section>
   );
 }

@@ -170,7 +170,14 @@ def client_with_loop_service(
             service.db.close()
 
     app.dependency_overrides[get_deepseek_backtest_loop_service] = override_service
-    return TestClient(app), session_factory
+    return TestClient(
+        app,
+        headers={
+            "X-Operator-Token": "synthetic-test-operator-token",
+            "Idempotency-Key": "deepseek-loop-test",
+            "X-Provider-Authorization": "once",
+        },
+    ), session_factory
 
 
 def test_deepseek_backtest_loop_blocks_without_explicit_real_call(
@@ -267,20 +274,27 @@ def test_deepseek_backtest_loop_succeeds_with_mock_provider_and_fake_freqtrade_e
         fake_executor=fake_executor,
     )
     try:
+        request_payload = {
+            "prompt_summary": "Generate one DeepSeek strategy and run the local backtest loop.",
+            "allow_real_call": True,
+            "backtest_profile": local_profile(datadir),
+            "timeout_seconds": 60,
+        }
         response = client.post(
             "/api/strategy-generation-runs/deepseek-single/backtest-loop",
-            json={
-                "prompt_summary": "Generate one DeepSeek strategy and run the local backtest loop.",
-                "allow_real_call": True,
-                "backtest_profile": local_profile(datadir),
-                "timeout_seconds": 60,
-            },
+            json=request_payload,
+        )
+        replay_response = client.post(
+            "/api/strategy-generation-runs/deepseek-single/backtest-loop",
+            json=request_payload,
         )
     finally:
         app.dependency_overrides.clear()
 
     assert response.status_code == 200
     payload = response.json()
+    assert replay_response.status_code == 200
+    assert replay_response.json() == payload
     assert payload["overall_status"] == "succeeded"
     assert payload["generation_run"]["provider"] == "deepseek"
     assert payload["generation"]["run"]["status"] == "succeeded"

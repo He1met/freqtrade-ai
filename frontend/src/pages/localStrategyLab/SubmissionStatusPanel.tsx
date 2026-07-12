@@ -26,7 +26,8 @@ export function SubmissionStatusPanel({ message, rows, status, submission }: Pro
             <dd>{value}</dd>
           </div>
         ))}
-        {submission.kind === "failed" ? (
+        {submission.kind === "failed" || submission.kind === "unauthorized" ||
+        (submission.kind === "blocked" && submission.statusCode) ? (
           <div>
             <dt>HTTP</dt>
             <dd>

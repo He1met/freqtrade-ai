@@ -98,7 +98,14 @@ def client_with_generation_service(tmp_path: Path, provider: StrategyBlueprintPr
 
     app.dependency_overrides[get_strategy_generation_service] = override_service
     app.dependency_overrides[get_db] = override_db
-    return TestClient(app), session_factory
+    return TestClient(
+        app,
+        headers={
+            "X-Operator-Token": "synthetic-test-operator-token",
+            "Idempotency-Key": "strategy-generation-test",
+            "X-Provider-Authorization": "once",
+        },
+    ), session_factory
 
 
 def client_with_deepseek_single_service(
@@ -163,6 +170,47 @@ def test_strategy_generation_api_persists_run_strategy_and_version(tmp_path: Pat
         assert version is not None
         assert version.generation_run_id == run.id
         assert Path(version.file_path).exists()
+
+
+def test_strategy_generation_api_rejects_invalid_operator_token_before_provider_or_database(
+    tmp_path: Path,
+) -> None:
+    provider = FakeStrategyBlueprintProvider()
+    client, session_factory = client_with_generation_service(tmp_path, provider)
+    try:
+        response = client.post(
+            "/api/strategy-generation-runs",
+            headers={"X-Operator-Token": "wrong-synthetic-token"},
+            json={
+                "prompt_summary": "This request must not reach the provider.",
+                "requested_count": 1,
+            },
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 401
+    assert response.json()["detail"]["operation_status"] == "UNAUTHORIZED"
+    assert "wrong-synthetic-token" not in response.text
+    with session_factory() as db:
+        assert StrategyGenerationRunRepository(db).list() == []
+
+
+def test_strategy_generation_api_rejects_more_than_one_strategy_per_request(
+    tmp_path: Path,
+) -> None:
+    client, session_factory = client_with_generation_service(tmp_path, FakeStrategyBlueprintProvider())
+    try:
+        response = client.post(
+            "/api/strategy-generation-runs",
+            json={"prompt_summary": "Do not generate a batch.", "requested_count": 2},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 422
+    with session_factory() as db:
+        assert StrategyGenerationRunRepository(db).list() == []
 
 
 def test_strategy_generation_api_persists_real_provider_database_chain_with_mock_client(
@@ -241,6 +289,40 @@ def test_strategy_generation_api_persists_real_provider_database_chain_with_mock
         assert version.generation_run_id == run_id
         assert version.validation_status == "passed"
         assert Path(version.file_path).exists()
+
+
+def test_strategy_generation_api_blocks_real_provider_without_credential_before_http_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("TEST_LLM_API_KEY", raising=False)
+    http_client = MockLLMClient(MockLLMResponse({"blueprints": [blueprint_payload()]}))
+    provider = OpenAICompatibleStrategyBlueprintProvider(
+        LLMProviderConfig(
+            provider_name="deepseek",
+            model_name="deepseek-v4-pro",
+            base_url="https://api.deepseek.com",
+            api_key_env="TEST_LLM_API_KEY",
+        ),
+        http_client=http_client,
+    )
+    client, session_factory = client_with_generation_service(tmp_path, provider)
+    try:
+        response = client.post(
+            "/api/strategy-generation-runs",
+            json={"prompt_summary": "Do not call the real Provider.", "requested_count": 1},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["operation_status"] == "BLOCKED"
+    assert http_client.requests == []
+    with session_factory() as db:
+        runs = StrategyGenerationRunRepository(db).list()
+        assert len(runs) == 1
+        assert runs[0].status == "failed"
+        assert runs[0].params_snapshot["credential_values_recorded"] is False
 
 
 def test_strategy_generation_api_failure_persists_failed_run(tmp_path: Path) -> None:

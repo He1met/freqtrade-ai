@@ -207,7 +207,13 @@ def test_api_ingests_success_manifest_and_persists_reconcilable_result(
 
     app.dependency_overrides[get_db] = override_get_db
     try:
-        response = TestClient(app).post(
+        response = TestClient(
+            app,
+            headers={
+                "X-Operator-Token": "synthetic-test-operator-token",
+                "Idempotency-Key": "artifact-ingest-test",
+            },
+        ).post(
             f"/api/backtest-tasks/{task_id}/artifact-ingest",
             json={"manifest_path": str(manifest_path)},
         )

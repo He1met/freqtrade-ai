@@ -88,7 +88,9 @@ export type StrategyGenerationRunStatus =
 
 export type StrategyGenerationSubmitPayload = {
   promptSummary: string;
-  requestedCount: number;
+  requestedCount: 1;
+  operatorToken: string;
+  authorizeRealProvider: boolean;
 };
 
 export type StrategyGenerationRunDetail = {
