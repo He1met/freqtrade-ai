@@ -8,6 +8,11 @@ import {
   reasonText,
   statusClassName,
 } from "./backtestDisplay";
+import {
+  emptyBacktestMetrics,
+  findBacktestResultForRun,
+  missingBacktestResultReason,
+} from "./backtestResultLookup";
 import { FallbackNotice } from "./FallbackNotice";
 import { EMPTY_TEXT, displayLoadState, displayStatus } from "./uiCopy";
 
@@ -167,13 +172,15 @@ export function BacktestRuns() {
           <tbody>
             {data.backtestRuns.map((run) => {
               const linkedTask = data.backtestTasks.find((task) => task.runId === run.id);
+              const result = findBacktestResultForRun(data.backtestResults, run.id);
               const artifact = run.artifactManifest ?? linkedTask?.artifactManifest ?? null;
-              const resultPath = artifact?.resultPath ?? linkedTask?.resultPath ?? EMPTY_TEXT;
+              const resultPath = result?.resultPath ?? artifact?.resultPath ?? linkedTask?.resultPath ?? EMPTY_TEXT;
               const manifestPath = artifact?.manifestPath ?? EMPTY_TEXT;
-              const reason = reasonText(
+              const recordedReason = reasonText(
                 run.blockedReason ?? linkedTask?.blockedReason ?? null,
                 run.failedReason ?? linkedTask?.failedReason ?? null,
               );
+              const reason = recordedReason === EMPTY_TEXT && !result ? missingBacktestResultReason("批次") : recordedReason;
 
               return (
                 <tr key={run.id}>
@@ -195,7 +202,11 @@ export function BacktestRuns() {
                     <CompactPath label="manifest" value={manifestPath} />
                   </td>
                   <td className="metric-summary">
-                    {metricRows(run.metrics).map(([label, value]) => (
+                    <span>
+                      <strong>结果</strong>
+                      {result?.id ?? EMPTY_TEXT}
+                    </span>
+                    {metricRows(result?.metrics ?? emptyBacktestMetrics()).map(([label, value]) => (
                       <span key={label}>
                         <strong>{label}</strong>
                         {value}
@@ -206,7 +217,7 @@ export function BacktestRuns() {
                     <CompactPath value={resultPath} />
                   </td>
                   <td className="source-cell">
-                    <BacktestSourceSummary source={run.dataSource ?? linkedTask?.dataSource} />
+                    <BacktestSourceSummary source={result?.dataSource ?? run.dataSource ?? linkedTask?.dataSource} />
                   </td>
                   <td className="reason-cell" title={reason}>
                     {reason}
