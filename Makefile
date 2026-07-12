@@ -1,4 +1,35 @@
-.PHONY: backend-install backend-dev frontend-install frontend-dev db-up db-down db-backup db-init db-verify test
+.PHONY: help bootstrap doctor demo-up dev-up status down logs verify backend-install backend-dev frontend-install frontend-dev db-up db-down db-backup db-init db-verify test
+
+MODE ?= demo
+
+help:
+	@python3 scripts/local_runtime.py doctor --mode demo --json >/dev/null || true
+	@printf '%s\n' 'Local runtime: make bootstrap | doctor | demo-up | dev-up | status | logs | verify | down'
+	@printf '%s\n' 'demo uses .freqtrade-ai/runtime/demo.sqlite3; dev requires FREQTRADE_AI_DEV_DATABASE_URL.'
+
+bootstrap:
+	python3 scripts/local_runtime.py bootstrap
+
+doctor:
+	python3 scripts/local_runtime.py doctor --mode "$(MODE)"
+
+demo-up:
+	python3 scripts/local_runtime.py demo-up
+
+dev-up:
+	python3 scripts/local_runtime.py dev-up --mode dev
+
+status:
+	python3 scripts/local_runtime.py status --mode "$(MODE)"
+
+down:
+	python3 scripts/local_runtime.py down
+
+logs:
+	python3 scripts/local_runtime.py logs
+
+verify:
+	python3 scripts/local_runtime.py verify --mode "$(MODE)"
 
 backend-install:
 	cd backend && python3 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt

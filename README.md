@@ -254,7 +254,43 @@ python3 scripts/smoke_phase7.py --offline --tmp-dir /tmp/freqtrade-ai-phase7-smo
 - 不提供 start / stop / deploy live 控制，不实现 deployment executor。
 - Phase 8 必须另行规划，不能由 Phase 7 自动进入。
 
-## 启动后端
+## 本地 demo / dev 运行入口
+
+运行入口统一为 `make`，不会启动 Freqtrade、dry-run、live trading、真实下单、交易所连接或
+Provider 调用。受管状态只写入仓库内被忽略的 `.freqtrade-ai/runtime/`，默认不会使用 `/tmp`
+作为持久 runtime DB。
+
+```bash
+make bootstrap
+make doctor
+make demo-up
+make status
+make verify
+make down
+```
+
+`demo` 是受控的非生产 SQLite 模式，数据库固定为
+`.freqtrade-ai/runtime/demo.sqlite3`；启动会创建应用表、输出脱敏 DB identity，并记录后端/
+前端 PID 与日志。重启后使用同一数据库，`make down` 仅停止受管的本地前后端进程，不删除数据。
+
+`dev` 只接受显式的本地 PostgreSQL URL，故不会继承 shell 中残留的 `DATABASE_URL`：
+
+```bash
+export FREQTRADE_AI_DEV_DATABASE_URL='postgresql+psycopg://freqtrade:change_me@127.0.0.1:5432/freqtrade_ai'
+make dev-up
+make status MODE=dev
+```
+
+在运行 `make dev-up` 前，选择且只选择一种 PostgreSQL 前置条件：本机 Homebrew 服务或
+`docker compose up -d postgres`。命令不会替你静默启动 Docker 或混用两者；它会先执行 schema
+verify，迁移缺失或不匹配时以 `BLOCKED` 退出且不启动进程。需要首次建库时，按下方的
+“初始化数据库”步骤执行 `make db-init`，然后再运行 `make dev-up`。
+
+`make doctor` 同时报告 Python/Node、依赖、端口、DB identity、Freqtrade binary 和行情目录。
+后二者仅供后续本地研究准备度判断，不是本 Issue 启动前后端的借口；缺失会如实显示，绝不伪造
+回测或交易成功。`make logs` 会读取受管日志并脱敏 secret-shaped 值。
+
+## 旧的手动启动方式
 
 ```bash
 cd backend

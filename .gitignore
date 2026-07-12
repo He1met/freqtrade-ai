@@ -19,6 +19,7 @@ node_modules/
 dist/
 coverage/
 .vite/
+.freqtrade-ai/
 
 logs/*
 !logs/.gitkeep
