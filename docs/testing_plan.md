@@ -359,3 +359,17 @@ Phase 9 限制和禁止项：
 - 不把真实 key/token/passphrase 写入代码、配置、数据库、日志、页面、报告、Issue 或 PR。
 - 不修改 Freqtrade 源码。
 - 不实现生产队列、worker pool、deployment executor 或自动实盘调度。
+
+### Phase 9 CI Gate
+
+GitHub Actions 的 `Backend, frontend, and offline smoke` 是当前 hosted merge gate。它使用两个隔离的
+PostgreSQL 16 数据库：一个只验证 fresh migration/schema 不漂移，另一个运行 Phase 8 API/DB reconciliation
+与 Local Strategy Lab 浏览器契约，避免测试 reset 破坏 migration version。
+
+后端完整 pytest 覆盖 artifact existence、checksum 与 DB ID reconciliation；前端 Node tests 覆盖
+source-state、non-core Provider 与稳定 `NOT_RUN` 空态；Playwright 在桌面和移动视口验证确定性 Provider seed
+只能进入 non-core diagnostics，同时 PostgreSQL backtest/result/ranking 的核心 database/API 证据仍可见。
+完全空 API 必须显示“没有可证明的核心成功结果”，不得宣称核心成功。
+
+CI 同时运行 Phase 7/8 offline smoke。所有 smoke 只使用 CI service、临时目录或受控 fixture；不调用真实
+DeepSeek、交易所、Freqtrade live/dry-run、真实订单或生产部署。

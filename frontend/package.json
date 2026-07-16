@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc && vite build",
+    "test": "node --experimental-strip-types --test tests/sourceState.test.mjs tests/backtestDisplay.test.mjs tests/localStrategyLabEvidence.test.mjs tests/actionEvidence.test.mjs tests/operatorDashboardNotice.test.mjs",
+    "test:e2e": "playwright test",
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
@@ -14,6 +16,7 @@
     "react-router-dom": "^7.1.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.55.0",
     "@types/react": "^19.0.2",
     "@types/react-dom": "^19.0.2",
     "@vitejs/plugin-react": "^4.3.4",

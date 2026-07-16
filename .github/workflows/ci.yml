@@ -13,12 +13,27 @@ permissions:
 
 env:
   FREQTRADE_AI_CI_OFFLINE: "1"
+  POSTGRES_MIGRATION_URL: postgresql+psycopg://postgres@127.0.0.1:5432/freqtrade_ai_ci_test
+  POSTGRES_PHASE8_URL: postgresql+psycopg://postgres@127.0.0.1:5432/freqtrade_ai_phase8_test
 
 jobs:
   validate:
     name: Backend, frontend, and offline smoke
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
 
     steps:
       - name: Check out repository
@@ -38,7 +53,23 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r backend/requirements.txt
 
-      - name: Run backend pytest
+      - name: Create isolated PostgreSQL test databases
+        run: |
+          python - <<'PY'
+          import psycopg
+
+          with psycopg.connect("postgresql://postgres@127.0.0.1:5432/postgres", autocommit=True) as connection:
+              for database_name in ("freqtrade_ai_ci_test", "freqtrade_ai_phase8_test"):
+                  connection.execute(f'CREATE DATABASE "{database_name}"')
+          PY
+
+      - name: Migrate and verify fresh PostgreSQL schema
+        working-directory: backend
+        run: |
+          python -m app.db.migrate upgrade --database-url "$POSTGRES_MIGRATION_URL"
+          python -m app.db.migrate verify --database-url "$POSTGRES_MIGRATION_URL"
+
+      - name: Run backend pytest and artifact reconciliation coverage
         working-directory: backend
         run: pytest
 
@@ -59,6 +90,39 @@ jobs:
       - name: Build frontend
         working-directory: frontend
         run: npm run build
+
+      - name: Run frontend source-state and evidence-contract tests
+        working-directory: frontend
+        run: npm test
+
+      - name: Install Chromium for browser E2E
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Phase 7 offline smoke
+        run: |
+          python scripts/smoke_phase7.py \
+            --offline \
+            --skip-frontend-build \
+            --tmp-dir "$RUNNER_TEMP/freqtrade-ai-phase7-smoke"
+
+      - name: Reconcile Phase 8 PostgreSQL database and API
+        run: |
+          python scripts/smoke_phase8.py \
+            --offline \
+            --skip-frontend \
+            --database-url "$POSTGRES_PHASE8_URL" \
+            --tmp-dir "$RUNNER_TEMP/freqtrade-ai-phase8-postgres"
+
+      - name: Verify Local Strategy Lab browser evidence contract
+        working-directory: frontend
+        env:
+          DATABASE_URL: ${{ env.POSTGRES_PHASE8_URL }}
+        run: npm run test:e2e
+
+      - name: Re-verify migration database after integration gates
+        working-directory: backend
+        run: python -m app.db.migrate verify --database-url "$POSTGRES_MIGRATION_URL"
 
       - name: Check whitespace
         run: |

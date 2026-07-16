@@ -43,3 +43,17 @@ test("a complete core provider-to-score chain is acceptable", () => {
   assert.equal(summary.canAccept, true);
   assert.equal(summary.stages.every((stage) => stage.canAccept), true);
 });
+
+test("an empty API snapshot has a stable NOT_RUN evidence contract", () => {
+  const summary = buildLocalStrategyLabEvidenceSummary({
+    generationRuns: [],
+    strategyVersions: [],
+    backtestResults: [],
+    ranking: [],
+  });
+
+  assert.equal(summary.state, "NOT_RUN");
+  assert.equal(summary.canAccept, false);
+  assert.equal(summary.stages.every((stage) => stage.state === "NOT_RUN"), true);
+  assert.match(summary.reason, /尚未观察到真实 Provider/);
+});

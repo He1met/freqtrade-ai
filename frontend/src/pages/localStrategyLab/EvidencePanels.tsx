@@ -856,10 +856,17 @@ function EvidenceConclusion({ summary }: { summary: LocalStrategyLabEvidenceSumm
   );
 
   return (
-    <section className="lab-evidence-section" aria-label="真实运行链路结论">
+    <section
+      className="lab-evidence-section"
+      aria-label="真实运行链路结论"
+      data-testid="lab-evidence-conclusion"
+      data-state={summary.state}
+    >
       <div className="section-header detail-section">
         <h2>真实运行链路结论</h2>
-        <span className={`run-status ${statusClassName(summary.state)}`}>{summary.state}</span>
+        <span className={`run-status ${statusClassName(summary.state)}`} data-testid="lab-evidence-status">
+          {summary.state}
+        </span>
       </div>
       <dl className="detail-list lab-run-detail-list">
         <div>
@@ -875,6 +882,11 @@ function EvidenceConclusion({ summary }: { summary: LocalStrategyLabEvidenceSumm
           <dd>{summary.nextAction}</dd>
         </div>
       </dl>
+      {!summary.canAccept ? (
+        <div className="empty-state" data-testid="lab-core-evidence-rejection">
+          没有可证明的核心成功结果。请按上方原因和下一步补齐真实 Provider、数据库 ID 与 artifact 证据。
+        </div>
+      ) : null}
       <div className="table-shell lab-table-shell">
         <table>
           <thead>
@@ -1347,15 +1359,15 @@ export function PersistentEvidence({
         source={evidenceSource}
       />
       <div className="lab-evidence-summary">
-        <div>
+        <div data-testid="lab-strategy-version-count">
           <span>strategy versions</span>
           <strong>{data.strategyVersions.length}</strong>
         </div>
-        <div>
+        <div data-testid="lab-backtest-result-count">
           <span>backtest results</span>
           <strong>{data.backtestResults.length}</strong>
         </div>
-        <div>
+        <div data-testid="lab-core-ranking-count">
           <span>core ranking</span>
           <strong>{coreRankingCount}</strong>
         </div>
