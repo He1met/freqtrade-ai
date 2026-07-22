@@ -5,14 +5,10 @@ from typing import Iterable, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.adapters.freqtrade.backtest_runner import FreqtradeBacktestRunner
-from app.adapters.freqtrade.cli_runner import FreqtradeCliRunner
 from app.adapters.freqtrade.strategy_file_manager import StrategyFileManager
 from app.db.session import get_db
 from app.repositories import StrategyGenerationRunRepository, StrategyRepository
 from app.schemas import (
-    DeepSeekBacktestLoopRequest,
-    DeepSeekBacktestLoopResponse,
     GenerationRunStatus,
     StrategyGenerationApiResponse,
     StrategyGenerationRequest,
@@ -27,7 +23,6 @@ from app.services.strategy_generation import (
     build_deepseek_single_provider_from_env,
     build_strategy_blueprint_provider_from_env,
 )
-from app.services.deepseek_backtest_loop import DeepSeekBacktestLoopService
 from app.services.operator_authorization import (
     OperatorRequestHeaders,
     operator_request_coordinator,
@@ -53,20 +48,6 @@ def get_deepseek_single_generation_service(db: Session = Depends(get_db)) -> Str
         db,
         provider=build_deepseek_single_provider_from_env(),
         file_manager=StrategyFileManager(),
-    )
-
-
-def get_deepseek_backtest_loop_service(
-    db: Session = Depends(get_db),
-) -> DeepSeekBacktestLoopService:
-    return DeepSeekBacktestLoopService(
-        db,
-        generation_service=StrategyGenerationService(
-            db,
-            provider=build_deepseek_single_provider_from_env(),
-            file_manager=StrategyFileManager(),
-        ),
-        backtest_runner=FreqtradeBacktestRunner(FreqtradeCliRunner()),
     )
 
 
@@ -242,24 +223,6 @@ def _execute_deepseek_single_generation(
         ) from exc
 
     return _build_generation_response(service, result.run_id, result.version_ids)
-
-
-@router.post(
-    "/strategy-generation-runs/deepseek-single/backtest-loop",
-    response_model=DeepSeekBacktestLoopResponse,
-)
-def run_deepseek_backtest_loop(
-    payload: DeepSeekBacktestLoopRequest,
-    service: DeepSeekBacktestLoopService = Depends(get_deepseek_backtest_loop_service),
-    operator_headers: OperatorRequestHeaders = Depends(operator_request_headers),
-) -> DeepSeekBacktestLoopResponse:
-    return operator_request_coordinator.execute(
-        operator_headers,
-        operation="strategy_generation.deepseek_backtest_loop",
-        provider_call=payload.allow_real_call,
-        request_payload=payload.model_dump(mode="json"),
-        handler=lambda: service.run(payload),
-    )
 
 
 def _build_generation_response(

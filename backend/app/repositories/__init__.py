@@ -1,6 +1,7 @@
 from app.repositories.audit_log import GovernanceEventArchiveRepository
 from app.repositories.backtests import BacktestRepository
 from app.repositories.debug_mvp_seed_data import DebugMvpSeedDataRepository
+from app.repositories.research_jobs import ResearchJobRepository
 from app.repositories.strategy_failure_reasons import StrategyFailureReasonRepository
 from app.repositories.strategy_scores import StrategyScoreRepository
 from app.repositories.strategies import StrategyRepository
@@ -10,6 +11,7 @@ __all__ = [
     "BacktestRepository",
     "DebugMvpSeedDataRepository",
     "GovernanceEventArchiveRepository",
+    "ResearchJobRepository",
     "StrategyFailureReasonRepository",
     "StrategyGenerationRunRepository",
     "StrategyRepository",

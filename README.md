@@ -256,9 +256,12 @@ python3 scripts/smoke_phase7.py --offline --tmp-dir /tmp/freqtrade-ai-phase7-smo
 
 ## 本地 demo / dev 运行入口
 
-运行入口统一为 `make`，不会启动 Freqtrade、dry-run、live trading、真实下单、交易所连接或
-Provider 调用。受管状态只写入仓库内被忽略的 `.freqtrade-ai/runtime/`，默认不会使用 `/tmp`
-作为持久 runtime DB。
+运行入口统一为 `make`。`demo-up` / `dev-up` 会启动后端、前端和一个单机 DB-backed research
+worker；worker 只处理由 API 显式创建的 DeepSeek → 本地回测 research job，不会自行创建周期
+任务。启动 runtime 不会凭空创建或调度任务；但数据库中若已有经操作者显式授权的 `PENDING`
+job，worker 启动后会领取它，并可能按 job 合同调用 Provider 和执行本地 Freqtrade 回测。runtime
+不会启动 dry-run / live trading、连接交易所或执行真实下单。受管状态只写入仓库内被忽略的
+`.freqtrade-ai/runtime/`，默认不会使用 `/tmp` 作为持久 runtime DB。
 
 ```bash
 make bootstrap
@@ -270,8 +273,9 @@ make down
 ```
 
 `demo` 是受控的非生产 SQLite 模式，数据库固定为
-`.freqtrade-ai/runtime/demo.sqlite3`；启动会创建应用表、输出脱敏 DB identity，并记录后端/
-前端 PID 与日志。重启后使用同一数据库，`make down` 仅停止受管的本地前后端进程，不删除数据。
+`.freqtrade-ai/runtime/demo.sqlite3`；启动会创建应用表、输出脱敏 DB identity，并记录后端、
+前端和 worker 的 PID 与日志。重启后使用同一数据库，job、幂等记录、pause/cancel 状态和终态
+证据不会因进程重启消失。`make down` 先停止受管 worker，再停止前后端，不删除数据库或 job。
 
 `dev` 只接受显式的本地 PostgreSQL URL，故不会继承 shell 中残留的 `DATABASE_URL`：
 
@@ -287,8 +291,20 @@ verify，迁移缺失或不匹配时以 `BLOCKED` 退出且不启动进程。需
 “初始化数据库”步骤执行 `make db-init`，然后再运行 `make dev-up`。
 
 `make doctor` 同时报告 Python/Node、依赖、端口、DB identity、Freqtrade binary 和行情目录。
-后二者仅供后续本地研究准备度判断，不是本 Issue 启动前后端的借口；缺失会如实显示，绝不伪造
-回测或交易成功。`make logs` 会读取受管日志并脱敏 secret-shaped 值。
+后二者仅供后续本地研究准备度判断，不是启动前后端或 worker 的借口；缺失会如实显示，job 会
+进入 `BLOCKED`，绝不伪造回测或交易成功。`make status`、`make logs` 和 `make verify` 均包含
+worker；日志会脱敏 secret-shaped 值。worker 的 API、状态机、lease、pause/cancel 和重启边界
+见 [phase9_db_backed_worker.md](docs/phase9_db_backed_worker.md)。
+
+worker 也可在 backend venv 中以 `--once` 运行，最多领取一个 job 后退出，便于确定性验收：
+
+```bash
+cd backend
+.venv/bin/python -m app.workers.deepseek_backtest_worker --once
+```
+
+这是单机 local-only worker，不是 scheduler 或 worker pool。禁止将它扩展为小时/cron 自动创建
+任务、Redis / Celery / Kafka / RabbitMQ 队列、生产部署或交易控制面。
 
 ## 旧的手动启动方式
 

@@ -15,6 +15,7 @@ env:
   FREQTRADE_AI_CI_OFFLINE: "1"
   POSTGRES_MIGRATION_URL: postgresql+psycopg://postgres@127.0.0.1:5432/freqtrade_ai_ci_test
   POSTGRES_PHASE8_URL: postgresql+psycopg://postgres@127.0.0.1:5432/freqtrade_ai_phase8_test
+  POSTGRES_WORKER_URL: postgresql+psycopg://postgres@127.0.0.1:5432/freqtrade_ai_worker_test
 
 jobs:
   validate:
@@ -59,7 +60,11 @@ jobs:
           import psycopg
 
           with psycopg.connect("postgresql://postgres@127.0.0.1:5432/postgres", autocommit=True) as connection:
-              for database_name in ("freqtrade_ai_ci_test", "freqtrade_ai_phase8_test"):
+              for database_name in (
+                  "freqtrade_ai_ci_test",
+                  "freqtrade_ai_phase8_test",
+                  "freqtrade_ai_worker_test",
+              ):
                   connection.execute(f'CREATE DATABASE "{database_name}"')
           PY
 
@@ -68,6 +73,10 @@ jobs:
         run: |
           python -m app.db.migrate upgrade --database-url "$POSTGRES_MIGRATION_URL"
           python -m app.db.migrate verify --database-url "$POSTGRES_MIGRATION_URL"
+
+      - name: Verify PostgreSQL worker migration and atomic lease gate
+        working-directory: backend
+        run: pytest -q tests/test_research_job_postgresql.py
 
       - name: Run backend pytest and artifact reconciliation coverage
         working-directory: backend
@@ -122,7 +131,9 @@ jobs:
 
       - name: Re-verify migration database after integration gates
         working-directory: backend
-        run: python -m app.db.migrate verify --database-url "$POSTGRES_MIGRATION_URL"
+        run: |
+          python -m app.db.migrate verify --database-url "$POSTGRES_MIGRATION_URL"
+          python -m app.db.migrate verify --database-url "$POSTGRES_WORKER_URL"
 
       - name: Check whitespace
         run: |
