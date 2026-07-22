@@ -1,10 +1,11 @@
-.PHONY: help bootstrap doctor demo-up dev-up status down logs verify backend-install backend-dev frontend-install frontend-dev db-up db-down db-backup db-init db-verify test
+.PHONY: help bootstrap doctor demo-up dev-up status down logs verify backend-install backend-dev worker-dev frontend-install frontend-dev db-up db-down db-backup db-init db-verify test
 
 MODE ?= demo
 
 help:
 	@python3 scripts/local_runtime.py doctor --mode demo --json >/dev/null || true
 	@printf '%s\n' 'Local runtime: make bootstrap | doctor | demo-up | dev-up | status | logs | verify | down'
+	@printf '%s\n' 'demo-up/dev-up manage backend, DB-backed worker, and frontend together.'
 	@printf '%s\n' 'demo uses .freqtrade-ai/runtime/demo.sqlite3; dev requires FREQTRADE_AI_DEV_DATABASE_URL.'
 
 bootstrap:
@@ -36,6 +37,9 @@ backend-install:
 
 backend-dev:
 	cd backend && . .venv/bin/activate && uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+
+worker-dev:
+	cd backend && . .venv/bin/activate && python -m app.workers.deepseek_backtest_worker
 
 frontend-install:
 	cd frontend && npm install

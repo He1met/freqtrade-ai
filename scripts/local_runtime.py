@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Safe, repeatable local demo/dev runtime manager for Freqtrade AI.
 
-This command manages only the FastAPI and Vite development processes.  It
-never invokes Freqtrade, connects to an exchange, starts dry-run/live trading,
-or reads provider credentials.  Runtime state stays in ``.freqtrade-ai/`` so
-the demo SQLite database is persistent and never defaults to ``/tmp``.
+This command manages the FastAPI, DB-backed worker, and Vite development
+processes.  The worker may execute explicitly authorized queued research jobs,
+but this runtime manager never connects to an exchange, starts dry-run/live
+trading, or reads provider credentials.  Runtime state stays in
+``.freqtrade-ai/`` so the demo SQLite database is persistent and never defaults
+to ``/tmp``.
 """
 
 from __future__ import annotations
@@ -31,8 +33,26 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RUNTIME_DIR = REPO_ROOT / ".freqtrade-ai" / "runtime"
 BACKEND_PORT = 8000
 FRONTEND_PORT = 5173
-PID_FILES = {"backend": "backend.pid", "frontend": "frontend.pid"}
-LOG_FILES = {"backend": "backend.log", "frontend": "frontend.log"}
+PID_FILES = {
+    "backend": "backend.pid",
+    "worker": "worker.pid",
+    "frontend": "frontend.pid",
+}
+LOG_FILES = {
+    "backend": "backend.log",
+    "worker": "worker.log",
+    "frontend": "frontend.log",
+}
+SERVICE_PROCESS_MARKERS = {
+    "backend": "uvicorn",
+    "worker": "app.workers.deepseek_backtest_worker",
+    "frontend": "vite",
+}
+SERVICE_WORKING_DIRECTORIES = {
+    "backend": REPO_ROOT / "backend",
+    "worker": REPO_ROOT / "backend",
+    "frontend": REPO_ROOT / "frontend",
+}
 SECRET_LINE = re.compile(
     r"(?i)(api[_-]?key|token|secret|password|passphrase)\s*([=:])\s*([^\s,;]+)"
 )
@@ -141,7 +161,7 @@ def is_managed_process(pid: int, service: str) -> bool:
     except OSError:
         return False
     command = completed.stdout.strip()
-    expected = "uvicorn" if service == "backend" else "vite"
+    expected = SERVICE_PROCESS_MARKERS[service]
     if expected not in command:
         return False
     try:
@@ -153,7 +173,7 @@ def is_managed_process(pid: int, service: str) -> bool:
         )
     except OSError:
         return False
-    expected_cwd = REPO_ROOT / ("backend" if service == "backend" else "frontend")
+    expected_cwd = SERVICE_WORKING_DIRECTORIES[service]
     return "n{}".format(expected_cwd) in cwd_result.stdout
 
 
@@ -317,6 +337,17 @@ def wait_for_url(url: str, description: str, timeout_seconds: int = 20) -> None:
     raise RuntimeBlocked("{} did not become reachable within {} seconds".format(description, timeout_seconds))
 
 
+def wait_for_process(state_dir: Path, service: str, timeout_seconds: float = 2.0) -> None:
+    """Fail startup when a managed process exits immediately after launch."""
+
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        status = process_status(state_dir, service)
+        if not status["running"]:
+            raise RuntimeBlocked("{} exited during startup; inspect {}".format(service, LOG_FILES[service]))
+        time.sleep(0.1)
+
+
 def stop_service(state_dir: Path, service: str) -> Dict[str, Any]:
     pid_path = state_dir / PID_FILES[service]
     pid = read_pid(pid_path)
@@ -346,7 +377,12 @@ def stop_service(state_dir: Path, service: str) -> Dict[str, Any]:
 
 
 def stop_all(state_dir: Path) -> Dict[str, Any]:
-    return {"services": [stop_service(state_dir, service) for service in ("frontend", "backend")]}
+    return {
+        "services": [
+            stop_service(state_dir, service)
+            for service in ("worker", "frontend", "backend")
+        ]
+    }
 
 
 def start(mode: str, state_dir: Path) -> Dict[str, Any]:
@@ -374,6 +410,18 @@ def start(mode: str, state_dir: Path) -> Dict[str, Any]:
         )
         wait_for_url("http://127.0.0.1:{}/health".format(BACKEND_PORT), "backend")
         start_service(
+            "worker",
+            [
+                str(backend_python()),
+                "-m",
+                "app.workers.deepseek_backtest_worker",
+            ],
+            cwd=REPO_ROOT / "backend",
+            environment=environment,
+            state_dir=state_dir,
+        )
+        wait_for_process(state_dir, "worker")
+        start_service(
             "frontend",
             [str(frontend_vite()), "--host", "127.0.0.1", "--port", str(FRONTEND_PORT)],
             cwd=REPO_ROOT / "frontend",
@@ -398,7 +446,10 @@ def current_status(mode: str, state_dir: Path) -> Dict[str, Any]:
     result: Dict[str, Any] = {
         "mode": mode,
         "runtime_dir": str(state_dir),
-        "services": [process_status(state_dir, service) for service in ("backend", "frontend")],
+        "services": [
+            process_status(state_dir, service)
+            for service in ("backend", "worker", "frontend")
+        ],
         "trading": {"live": False, "dry_run": False, "real_orders": False},
     }
     try:
@@ -473,7 +524,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             else:
                 ensure_dev_schema(dev_database_url())
             if not running:
-                raise RuntimeBlocked("backend and frontend must both be running before verification")
+                raise RuntimeBlocked(
+                    "backend, worker, and frontend must all be running before verification"
+                )
             wait_for_url("http://127.0.0.1:{}/health".format(BACKEND_PORT), "backend")
             wait_for_url("http://127.0.0.1:{}/".format(FRONTEND_PORT), "frontend")
             payload = {"status": "VERIFIED", **status}

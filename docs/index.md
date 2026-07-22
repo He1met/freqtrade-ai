@@ -1,15 +1,18 @@
 # Freqtrade AI Current Run Docs
 
-Last updated: 2026-07-08
+Last updated: 2026-07-22
 
 This is the current documentation entry point for local real-run validation,
 runtime evidence, refactor work, and safety boundaries.
 
 ## Current Objective
 
-The active work is the Phase 9 refactor/runtime queue. The goal is not to add a
-new trading capability. The goal is to make the local product more truthful and
-operable:
+The final Phase 9 refactor/runtime implementation item is Issue `#369`, a
+single-process DB-backed local worker with durable idempotency, lease,
+heartbeat, expiry, pause, cancel, and restart-safe evidence. The goal is not to
+add a new trading capability or scheduler. The goal is to move the existing
+DeepSeek-to-backtest chain out of a long HTTP request while keeping browser,
+API, database, and artifact evidence reconcilable:
 
 - core pages prefer real database / backend API evidence;
 - `fixture`, `fallback`, `mock`, and `unknown` data stay visibly non-core;
@@ -19,27 +22,14 @@ operable:
 
 ## Current Issue Queue
 
-| Issue | Purpose | Status on 2026-07-08 |
+| Issue | Purpose | Status on 2026-07-22 |
 | --- | --- | --- |
-| [#323](https://github.com/He1met/freqtrade-ai/issues/323) | Real-data-first runtime policy | Open |
-| [#324](https://github.com/He1met/freqtrade-ai/issues/324) | Pages show only real DB/API data or explain absence | Open |
-| [#325](https://github.com/He1met/freqtrade-ai/issues/325) | Core action button feedback | Open |
-| [#326](https://github.com/He1met/freqtrade-ai/issues/326) | DeepSeek single real-provider entry | Open |
-| [#327](https://github.com/He1met/freqtrade-ai/issues/327) | DeepSeek-to-backtest minimal loop | Open |
-| [#328](https://github.com/He1met/freqtrade-ai/issues/328) | Local Strategy Lab real-run chain display | Open |
-| [#329](https://github.com/He1met/freqtrade-ai/issues/329) | Browser/API/database reconciliation | Open |
-| [#330](https://github.com/He1met/freqtrade-ai/issues/330) | Hourly local controlled-run design | Open / deferred |
-| [#331](https://github.com/He1met/freqtrade-ai/issues/331) | Runtime failure to Bug Issue flow | Open |
-| [#332](https://github.com/He1met/freqtrade-ai/issues/332) | Page acceptance status marker | Open |
-| [#333](https://github.com/He1met/freqtrade-ai/issues/333) | Backend operation evidence structure | Open |
-| [#334](https://github.com/He1met/freqtrade-ai/issues/334) | DeepSeek single E2E QA report | Open |
-| [#335](https://github.com/He1met/freqtrade-ai/issues/335) | Refactor/runtime audit | Done |
-| [#336](https://github.com/He1met/freqtrade-ai/issues/336) | Split frontend API client and source helpers | Open |
-| [#337](https://github.com/He1met/freqtrade-ai/issues/337) | Split Local Strategy Lab evidence panels | Open |
-| [#338](https://github.com/He1met/freqtrade-ai/issues/338) | Unified data-source acceptance helper | Done |
-| [#339](https://github.com/He1met/freqtrade-ai/issues/339) | Current docs entry and historical archive index | This PR |
-| [#340](https://github.com/He1met/freqtrade-ai/issues/340) | Legacy draft PR cleanup | Done |
-| [#341](https://github.com/He1met/freqtrade-ai/issues/341) | Refactor regression QA | Open |
+| [#369](https://github.com/He1met/freqtrade-ai/issues/369) | Single-process DB-backed worker, lease, and failure recovery | Delivered by this change; live status remains in Project #3 |
+| [#362](https://github.com/He1met/freqtrade-ai/issues/362) | Phase 9 runtime/refactor Epic closeout | Tracked separately after #369 acceptance |
+
+All other child dependencies for `#369` are complete. The historical queue
+snapshots remain available through the phase acceptance and planning documents;
+they are not a current source of work status.
 
 ## Primary Runtime Docs
 
@@ -47,6 +37,7 @@ operable:
 - [phase9_acceptance.md](phase9_acceptance.md)
 - [phase9_deepseek_single_e2e.md](phase9_deepseek_single_e2e.md)
 - [phase9_deepseek_backtest_loop.md](phase9_deepseek_backtest_loop.md)
+- [phase9_db_backed_worker.md](phase9_db_backed_worker.md)
 - [phase9_local_test_db.md](phase9_local_test_db.md)
 - [phase9_page_data_source_audit.md](phase9_page_data_source_audit.md)
 - [phase9_bug_issue_flow.md](phase9_bug_issue_flow.md)
@@ -63,6 +54,7 @@ also include `git diff --check` and `python3 scripts/scan_secrets.py`.
 | Surface | Command |
 | --- | --- |
 | Backend | `(cd backend && . .venv/bin/activate && pytest)` |
+| DB-backed worker, at most one job | `(cd backend && .venv/bin/python -m app.workers.deepseek_backtest_worker --once)` |
 | Python syntax | `python3 -m compileall backend/app backend/tests scripts` |
 | Frontend | `(cd frontend && npm run build)` |
 | Phase 8 local QA | `python3 scripts/smoke_phase8.py --offline --tmp-dir /tmp/freqtrade-ai-phase8-smoke` |
@@ -80,6 +72,7 @@ or PR text.
 Allowed local work:
 
 - local DeepSeek API validation with explicit authorization;
+- one local DB-backed research worker for the explicitly queued job;
 - local database read/write and local test DB reset/seed;
 - local strategy file writes in approved directories;
 - local backtest and local controlled dry-run readiness checks;
@@ -92,8 +85,8 @@ Forbidden work:
 - start/stop/deploy live controls;
 - modifying Freqtrade source;
 - committing or reporting real secrets;
-- adding Redis, Celery, Kafka, RabbitMQ, production queues, or worker pools
-  without a separate approved Issue.
+- adding hourly or recurring scheduling, Redis, Celery, Kafka, RabbitMQ,
+  production queues, distributed workers, or worker pools.
 
 ## Historical Phase Archive
 

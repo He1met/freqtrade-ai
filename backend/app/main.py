@@ -6,6 +6,7 @@ from app.api.dry_run import router as dry_run_router
 from app.api.health import router as health_router
 from app.api.operational_readiness import router as operational_readiness_router
 from app.api.ranking import router as ranking_router
+from app.api.research_jobs import router as research_jobs_router
 from app.api.runtime import router as runtime_router
 from app.api.strategies import router as strategies_router
 from app.api.strategy_generation import router as strategy_generation_router
@@ -26,6 +27,7 @@ app.include_router(backtests_router)
 app.include_router(dry_run_router)
 app.include_router(health_router)
 app.include_router(ranking_router)
+app.include_router(research_jobs_router)
 app.include_router(runtime_router)
 app.include_router(runtime_router, prefix="/api")
 app.include_router(operational_readiness_router)

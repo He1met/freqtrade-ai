@@ -21,7 +21,8 @@ from app.core.exceptions import ConfigurationError
 from app.models.base import Base
 
 
-SCHEMA_VERSION = "20260712_01"
+PREVIOUS_SCHEMA_VERSION = "20260712_01"
+SCHEMA_VERSION = "20260722_01"
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 
 
@@ -172,7 +173,10 @@ def _create_version_table(connection: Connection) -> None:
 
 def _current_version(connection: Connection) -> Optional[str]:
     return connection.execute(
-        text(f"SELECT version FROM {VERSION_TABLE} ORDER BY applied_at DESC LIMIT 1")
+        text(
+            f"SELECT version FROM {VERSION_TABLE} "
+            "ORDER BY applied_at DESC, version DESC LIMIT 1"
+        )
     ).scalar_one_or_none()
 
 
@@ -215,6 +219,23 @@ def upgrade_database(engine: Engine) -> str:
                         "Recorded schema version does not match ORM metadata: " + "; ".join(problems)
                     )
                 return current_version
+            if current_version == PREVIOUS_SCHEMA_VERSION:
+                # #369 adds only new application-owned tables. ``create_all`` is
+                # deliberately used here as a narrow, data-preserving migration:
+                # every pre-existing table remains untouched and the full ORM
+                # contract is verified before the new version is recorded.
+                Base.metadata.create_all(bind=connection)
+                problems = schema_problems(connection)
+                if problems:
+                    raise SchemaMigrationBlocked(
+                        "Incremental schema upgrade does not match ORM metadata: "
+                        + "; ".join(problems)
+                    )
+                connection.execute(
+                    text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+                    {"version": SCHEMA_VERSION},
+                )
+                return SCHEMA_VERSION
             if current_version is not None:
                 raise SchemaMigrationBlocked(
                     f"Unsupported schema version {current_version!r}; expected {SCHEMA_VERSION!r}."
