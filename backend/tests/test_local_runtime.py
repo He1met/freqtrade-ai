@@ -65,6 +65,20 @@ def test_doctor_reports_missing_demo_schema_as_blocked():
     assert payload["schema"]["status"] == "BLOCKED"
 
 
+def test_doctor_uses_explicit_freqtrade_binary(monkeypatch, tmp_path):
+    runtime = load_runtime_module()
+    binary = tmp_path / "freqtrade"
+    binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    binary.chmod(0o755)
+    monkeypatch.setenv("FREQTRADE_BINARY", str(binary))
+
+    payload = runtime.doctor("demo", REPO_ROOT / ".freqtrade-ai" / "runtime-not-created")
+
+    assert payload["checks"]["freqtrade_binary"] is True
+    assert payload["freqtrade"]["status"] == "READY"
+    assert payload["freqtrade"]["resolved_path"] == str(binary.resolve())
+
+
 def test_worker_has_dedicated_pid_log_and_backend_working_directory():
     runtime = load_runtime_module()
 

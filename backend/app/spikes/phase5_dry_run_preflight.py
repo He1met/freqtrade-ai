@@ -4,10 +4,10 @@ from dataclasses import dataclass, field
 import json
 from pathlib import Path
 import re
-import shutil
 import subprocess
 from typing import Mapping, Optional
 
+from app.adapters.freqtrade.binary import resolve_freqtrade_binary
 from app.core.config import REPO_ROOT
 from app.core.paths import resolve_repo_path
 
@@ -94,28 +94,9 @@ class DryRunPreflightReport:
 
 
 def find_freqtrade_binary(explicit_binary: Optional[str] = None) -> Optional[Path]:
-    if explicit_binary:
-        candidate = Path(explicit_binary).expanduser()
-        if candidate.exists() and candidate.is_file():
-            return candidate.resolve()
-        return None
-
-    candidates = []
-    discovered = shutil.which("freqtrade")
-    if discovered:
-        candidates.append(Path(discovered))
-
-    candidates.extend(
-        [
-            REPO_ROOT / "backend" / ".venv" / "bin" / "freqtrade",
-            Path.home() / "freqtrade_venv" / "bin" / "freqtrade",
-        ]
-    )
-
-    for candidate in candidates:
-        if candidate.exists() and candidate.is_file():
-            return candidate.resolve()
-    return None
+    environ = {"FREQTRADE_BINARY": explicit_binary} if explicit_binary else None
+    resolution = resolve_freqtrade_binary(environ=environ)
+    return resolution.resolved_path if resolution.ready else None
 
 
 def run_preflight(

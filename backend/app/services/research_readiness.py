@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import os
 import json
-import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Mapping, Optional
 
 from app.core.config import Settings, get_settings
+from app.adapters.freqtrade.binary import resolve_freqtrade_binary
 from app.core.paths import resolve_repo_path
 from app.db.migrations import verify_schema
 from app.db.session import create_database_engine
@@ -31,7 +31,7 @@ class ResearchReadinessService:
         self._settings = settings or get_settings()
         self._environ = environ if environ is not None else os.environ
         self._now_provider = now_provider or (lambda: datetime.now(timezone.utc))
-        self._which = which or shutil.which
+        self._which = which
 
     def build(self) -> RuntimeStatusSummary:
         checks = [
@@ -86,9 +86,18 @@ class ResearchReadinessService:
         return self._ready(name, f"local evidence exists under: {path}")
 
     def _binary_check(self) -> RuntimeStatusSummary:
-        if self._which("freqtrade"):
-            return self._ready("freqtrade_binary", "Freqtrade binary is available on PATH.")
-        return self._unavailable("freqtrade_binary", "Freqtrade binary is not available on PATH.")
+        resolution = resolve_freqtrade_binary(environ=self._environ, which=self._which)
+        if resolution.ready:
+            return self._ready(
+                "freqtrade_binary",
+                "Freqtrade binary is available from the configured runtime resolver.",
+                source="derived",
+                source_ref=str(resolution.resolved_path),
+            )
+        return self._unavailable(
+            "freqtrade_binary",
+            resolution.blocked_reason or "Freqtrade binary is unavailable.",
+        )
 
     def _market_data_check(self) -> RuntimeStatusSummary:
         path = resolve_repo_path(self._settings.market_data_dir)

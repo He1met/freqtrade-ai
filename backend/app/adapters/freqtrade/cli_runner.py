@@ -11,6 +11,7 @@ from app.adapters.freqtrade.exceptions import (
     FreqtradeCommandError,
     FreqtradeCommandValidationError,
 )
+from app.adapters.freqtrade.binary import resolve_freqtrade_binary
 
 
 CommandScalarValue = Union[str, int, float, Path]
@@ -122,15 +123,18 @@ class FreqtradeCliRunner:
 
     def __init__(
         self,
-        binary: str = "freqtrade",
+        binary: Optional[str] = None,
         executor: CommandExecutor | None = None,
     ) -> None:
-        self._binary = binary
+        # Injected executors are test/diagnostic boundaries and do not launch a
+        # process. Real subprocess execution always resolves the shared runtime
+        # binary contract when no explicit binary is supplied.
+        self._binary = binary if binary is not None else ("freqtrade" if executor else None)
         self._executor = executor or self._subprocess_executor
 
     def build_args(self, command: FreqtradeCommand) -> list[str]:
         self._validate_command(command)
-        args = [self._binary, command.command]
+        args = [command.command]
 
         for option, value in sorted((command.options or {}).items()):
             self._append_option(args, command.command, option, value)
@@ -139,6 +143,18 @@ class FreqtradeCliRunner:
             self._validate_value(value)
             args.append(str(value))
 
+        # Resolve the executable only after the full untrusted command payload
+        # has passed validation. Safety errors must not depend on whether the
+        # current machine happens to have Freqtrade installed.
+        binary = self._binary
+        if binary is None:
+            resolution = resolve_freqtrade_binary()
+            if not resolution.ready or resolution.resolved_path is None:
+                raise FreqtradeCommandError(
+                    resolution.blocked_reason or "freqtrade binary is not available"
+                )
+            binary = str(resolution.resolved_path)
+        args.insert(0, binary)
         return args
 
     def run(self, command: FreqtradeCommand) -> FreqtradeCommandResult:
