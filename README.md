@@ -274,6 +274,38 @@ make verify
 make down
 ```
 
+macOS 登录后自动启动与持续恢复使用唯一 LaunchAgent：
+
+```bash
+make autostart-install
+make autostart-status
+make autostart-logs
+make autostart-restart
+make autostart-uninstall
+```
+
+`autostart-install` 会安装
+`~/Library/LaunchAgents/com.he1met.freqtrade-ai.runtime.plist`，使用 `RunAtLoad` 和
+`KeepAlive` 保持一个 supervisor。supervisor 每 30 秒执行一次 `verify`；若 backend、worker
+或 frontend 未运行，会先通过受管 `down` 清理残留，再调用唯一 `up` 恢复。它不会创建研究
+任务、启动 dry-run/live trading 或读取 Provider key。数据库、schema、worker queue、binary
+和 localhost 安全检查仍完全由 `local_runtime.py` 执行。日志位于
+`.freqtrade-ai/launchd/`。
+
+长期运行选择器写入被 Git 忽略的 `.freqtrade-ai/runtime.env`，只允许以下两项：
+
+```bash
+DATABASE_URL=postgresql+psycopg://freqtrade:change_me@localhost:5432/freqtrade_ai
+FREQTRADE_BINARY=/absolute/path/to/freqtrade_venv/bin/freqtrade
+```
+
+禁止在该文件写入 Provider key、交易所 key、token、secret 或其他配置。当前 shell 的同名
+环境变量优先，手工命令和 LaunchAgent 最终仍经过同一个 runtime/binary resolver。
+
+这是当前 macOS 用户登录会话的 LaunchAgent：Mac 重启并登录该用户后自动启动；不是需要
+root 权限、登录前运行的 LaunchDaemon。卸载会停止 supervisor 和本地服务，但不会删除
+PostgreSQL、行情、策略或回测数据。
+
 唯一数据库 URL 必须是 localhost 上的 `freqtrade_ai`：
 
 ```bash

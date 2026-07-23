@@ -808,7 +808,7 @@ export const mockMvpData: MvpData = {
       schemaVersion: "1",
       status: "BLOCKED",
       generatedAt: "2026-07-05T14:00:00Z",
-      repoRoot: "/Users/shenjianpeng/Documents/Freqtrade Ai",
+      repoRoot: "/Users/local/Developer/Freqtrade Ai",
       checks: [
         {
           name: "repo_root",
@@ -816,7 +816,7 @@ export const mockMvpData: MvpData = {
           status: "READY",
           source: "filesystem",
           summary: "仓库根目录存在。",
-          path: "/Users/shenjianpeng/Documents/Freqtrade Ai",
+          path: "/Users/local/Developer/Freqtrade Ai",
           exists: true,
           required: true,
           blockedReason: null,
