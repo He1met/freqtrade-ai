@@ -30,7 +30,7 @@ verify:
 
 db-backup:
 	mkdir -p .freqtrade-ai/backups
-	cd backend && . .venv/bin/activate && DATABASE_URL="$(DATABASE_URL)" psql_url=$$(python -c 'import os; from app.db.migrations import psql_database_url; print(psql_database_url(os.environ["DATABASE_URL"]))'); pg_dump "$$psql_url" > "../.freqtrade-ai/backups/freqtrade-ai-$$(date +%Y%m%d%H%M%S).sql"
+	cd backend && . .venv/bin/activate && export DATABASE_URL="$(DATABASE_URL)"; psql_url=$$(python -c 'import os; from app.db.migrations import psql_database_url; print(psql_database_url(os.environ["DATABASE_URL"]))'); backup="../.freqtrade-ai/backups/freqtrade-ai-$$(date +%Y%m%d%H%M%S).sql"; pg_dump "$$psql_url" > "$$backup.tmp" && mv "$$backup.tmp" "$$backup"
 
 db-init:
 	cd backend && . .venv/bin/activate && python -m app.db.migrate upgrade --database-url "$(DATABASE_URL)"

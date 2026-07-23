@@ -21,8 +21,9 @@ from app.core.exceptions import ConfigurationError
 from app.models.base import Base
 
 
-PREVIOUS_SCHEMA_VERSION = "20260712_01"
-SCHEMA_VERSION = "20260722_01"
+LEGACY_SCHEMA_VERSION = "20260712_01"
+PREVIOUS_SCHEMA_VERSION = "20260722_01"
+SCHEMA_VERSION = "20260723_01"
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 
 
@@ -198,6 +199,19 @@ def _drop_empty_legacy_tables(connection: Connection, table_names: Iterable[str]
         connection.execute(text(f'DROP TABLE IF EXISTS "{table_name}" CASCADE'))
 
 
+def _drop_retired_debug_table(connection: Connection) -> None:
+    table_name = "debug_mvp_seed_payloads"
+    schema_name = connection.execute(text("SELECT current_schema()")).scalar_one()
+    if table_name not in inspect(connection).get_table_names(schema=schema_name):
+        return
+    if _nonempty_tables(connection, (table_name,)):
+        raise SchemaMigrationBlocked(
+            "Retired debug_mvp_seed_payloads contains rows. Reconcile and remove fixture data "
+            "before upgrading; no changes were applied."
+        )
+    connection.execute(text(f'DROP TABLE "{table_name}"'))
+
+
 def upgrade_database(engine: Engine) -> str:
     """Upgrade a local PostgreSQL database atomically to ``SCHEMA_VERSION``.
 
@@ -219,11 +233,11 @@ def upgrade_database(engine: Engine) -> str:
                         "Recorded schema version does not match ORM metadata: " + "; ".join(problems)
                     )
                 return current_version
-            if current_version == PREVIOUS_SCHEMA_VERSION:
-                # #369 adds only new application-owned tables. ``create_all`` is
-                # deliberately used here as a narrow, data-preserving migration:
-                # every pre-existing table remains untouched and the full ORM
-                # contract is verified before the new version is recorded.
+            if current_version in {LEGACY_SCHEMA_VERSION, PREVIOUS_SCHEMA_VERSION}:
+                # The migration preserves runtime tables, adds any missing managed
+                # tables, and removes only the retired debug table after proving it
+                # is empty.
+                _drop_retired_debug_table(connection)
                 Base.metadata.create_all(bind=connection)
                 problems = schema_problems(connection)
                 if problems:
