@@ -24,6 +24,32 @@ def test_runtime_database_defaults_to_one_canonical_postgres(monkeypatch):
     assert runtime.runtime_database_url() == runtime.DEFAULT_DATABASE_URL
 
 
+def test_runtime_environment_file_loads_only_non_secret_selectors(monkeypatch, tmp_path):
+    runtime = load_runtime_module()
+    config = tmp_path / "runtime.env"
+    config.write_text(
+        "DATABASE_URL=postgresql+psycopg://freqtrade:change_me@localhost:5432/freqtrade_ai\n"
+        "FREQTRADE_BINARY=/Users/local/freqtrade_venv/bin/freqtrade\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("FREQTRADE_BINARY", raising=False)
+
+    runtime.load_runtime_environment(config)
+
+    assert runtime.os.environ["DATABASE_URL"].endswith("/freqtrade_ai")
+    assert runtime.os.environ["FREQTRADE_BINARY"].endswith("/bin/freqtrade")
+
+
+def test_runtime_environment_file_rejects_secret_or_unknown_keys(tmp_path):
+    runtime = load_runtime_module()
+    config = tmp_path / "runtime.env"
+    config.write_text("DEEPSEEK_API_KEY=not-allowed\n", encoding="utf-8")
+
+    with pytest.raises(runtime.RuntimeBlocked, match="not allowed"):
+        runtime.load_runtime_environment(config)
+
+
 def test_runtime_rejects_remote_or_noncanonical_database(monkeypatch):
     runtime = load_runtime_module()
     monkeypatch.setenv(

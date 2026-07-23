@@ -1,10 +1,11 @@
-.PHONY: help bootstrap doctor up status down logs verify db-backup db-init db-verify test
+.PHONY: help bootstrap doctor up status down logs verify autostart-install autostart-status autostart-logs autostart-restart autostart-uninstall db-backup db-init db-verify test
 
 DATABASE_URL ?= postgresql+psycopg://freqtrade:change_me@localhost:5432/freqtrade_ai
 
 help:
 	@python3 scripts/local_runtime.py doctor --json >/dev/null || true
 	@printf '%s\n' 'Local runtime: make bootstrap | doctor | up | status | logs | verify | down'
+	@printf '%s\n' 'macOS autostart: make autostart-install | autostart-status | autostart-logs | autostart-restart | autostart-uninstall'
 	@printf '%s\n' 'The managed runtime uses only local PostgreSQL database freqtrade_ai.'
 
 bootstrap:
@@ -27,6 +28,21 @@ logs:
 
 verify:
 	python3 scripts/local_runtime.py verify
+
+autostart-install:
+	backend/.venv/bin/python scripts/macos_launch_agent.py install
+
+autostart-status:
+	backend/.venv/bin/python scripts/macos_launch_agent.py status
+
+autostart-logs:
+	backend/.venv/bin/python scripts/macos_launch_agent.py logs
+
+autostart-restart:
+	backend/.venv/bin/python scripts/macos_launch_agent.py restart
+
+autostart-uninstall:
+	backend/.venv/bin/python scripts/macos_launch_agent.py uninstall
 
 db-backup:
 	mkdir -p .freqtrade-ai/backups

@@ -34,6 +34,8 @@ sys.path.insert(0, str(REPO_ROOT / "backend"))
 from app.adapters.freqtrade.binary import resolve_freqtrade_binary
 
 DEFAULT_RUNTIME_DIR = REPO_ROOT / ".freqtrade-ai" / "runtime"
+DEFAULT_RUNTIME_ENV_FILE = REPO_ROOT / ".freqtrade-ai" / "runtime.env"
+RUNTIME_ENV_KEYS = frozenset({"DATABASE_URL", "FREQTRADE_BINARY"})
 DEFAULT_DATABASE_URL = (
     "postgresql+psycopg://freqtrade:change_me@localhost:5432/freqtrade_ai"
 )
@@ -66,6 +68,37 @@ SECRET_LINE = re.compile(
 
 class RuntimeBlocked(Exception):
     """A local prerequisite is absent or unsafe; nothing was started."""
+
+
+def load_runtime_environment(path: Optional[Path] = None) -> None:
+    """Load the two non-secret runtime selectors from one repo-local file."""
+
+    config_path = path or DEFAULT_RUNTIME_ENV_FILE
+    if not config_path.exists():
+        return
+    seen = set()
+    for line_number, raw_line in enumerate(
+        config_path.read_text(encoding="utf-8").splitlines(),
+        start=1,
+    ):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            raise RuntimeBlocked(
+                "invalid runtime.env line {}: expected KEY=VALUE".format(line_number)
+            )
+        key, value = (part.strip() for part in line.split("=", 1))
+        if key not in RUNTIME_ENV_KEYS:
+            raise RuntimeBlocked(
+                "runtime.env key is not allowed: {}".format(key or "<empty>")
+            )
+        if key in seen:
+            raise RuntimeBlocked("runtime.env key is duplicated: {}".format(key))
+        if not value:
+            raise RuntimeBlocked("runtime.env value is empty: {}".format(key))
+        seen.add(key)
+        os.environ.setdefault(key, value)
 
 
 def runtime_dir(raw_path: Optional[str]) -> Path:
@@ -502,6 +535,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     try:
+        load_runtime_environment()
         state_dir = runtime_dir(args.runtime_dir)
         if args.command == "doctor":
             payload = doctor(state_dir)
