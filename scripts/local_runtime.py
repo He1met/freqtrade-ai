@@ -30,6 +30,10 @@ from urllib.request import urlopen
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "backend"))
+
+from app.adapters.freqtrade.binary import resolve_freqtrade_binary
+
 DEFAULT_RUNTIME_DIR = REPO_ROOT / ".freqtrade-ai" / "runtime"
 BACKEND_PORT = 8000
 FRONTEND_PORT = 5173
@@ -238,6 +242,7 @@ def verify_demo_database(state_dir: Path) -> Dict[str, Any]:
 
 
 def doctor(mode: str, state_dir: Path) -> Dict[str, Any]:
+    freqtrade_resolution = resolve_freqtrade_binary()
     checks = {
         "python3": command_exists("python3"),
         "node": command_exists("node"),
@@ -246,12 +251,22 @@ def doctor(mode: str, state_dir: Path) -> Dict[str, Any]:
         "frontend_dependencies": (REPO_ROOT / "frontend" / "node_modules" / ".bin" / "vite").is_file(),
         "backend_port_available": port_available(BACKEND_PORT),
         "frontend_port_available": port_available(FRONTEND_PORT),
-        "freqtrade_binary": command_exists("freqtrade"),
+        "freqtrade_binary": freqtrade_resolution.ready,
         "market_data_directory": (REPO_ROOT / "user_data" / "data").is_dir(),
         "live_trading": False,
         "dry_run_trading": False,
     }
     result: Dict[str, Any] = {"mode": mode, "runtime_dir": str(state_dir), "checks": checks}
+    result["freqtrade"] = {
+        "source": freqtrade_resolution.source,
+        "resolved_path": (
+            str(freqtrade_resolution.resolved_path)
+            if freqtrade_resolution.resolved_path is not None
+            else None
+        ),
+        "status": "READY" if freqtrade_resolution.ready else "BLOCKED",
+        "reason": freqtrade_resolution.blocked_reason,
+    }
     if mode == "demo":
         result["database"] = {"kind": "sqlite", "identity": redact_database_url(demo_database_url(state_dir))}
         try:

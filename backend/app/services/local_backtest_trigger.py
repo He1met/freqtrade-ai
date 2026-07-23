@@ -4,13 +4,13 @@ import ast
 import hashlib
 import os
 from pathlib import Path
-import shutil
 from typing import Any, Optional
 
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.adapters.freqtrade.config_builder import FreqtradeConfigBuilder
+from app.adapters.freqtrade.binary import resolve_freqtrade_binary
 from app.adapters.freqtrade.exceptions import FreqtradeConfigError
 from app.adapters.freqtrade.market_data_catalog import MarketDataCatalog
 from app.core.config import get_settings
@@ -310,45 +310,20 @@ class LocalBacktestTriggerService:
         return blockers
 
     def _freqtrade_binary_check(self) -> LocalBacktestPreflightCheck:
-        binary = os.environ.get("FREQTRADE_BINARY", "freqtrade").strip()
+        resolution = resolve_freqtrade_binary()
         evidence: dict[str, Any] = {
-            "binary": binary or "freqtrade",
-            "source": "FREQTRADE_BINARY" if os.environ.get("FREQTRADE_BINARY") else "default",
+            "binary": resolution.configured,
+            "source": resolution.source,
         }
-        blockers: list[str] = []
-        if not binary:
-            blockers.append("freqtrade binary is not configured")
-            return self._check(
-                "freqtrade_binary",
-                blockers,
-                ready_summary="Freqtrade binary is available.",
-                evidence=evidence,
-            )
-
-        binary_path = self._resolve_binary_path(binary)
-        if binary_path is None:
-            blockers.append(f"freqtrade binary is not available: {binary}")
-        else:
-            evidence["resolved_path"] = str(binary_path)
-            if not binary_path.exists():
-                blockers.append(f"freqtrade binary does not exist: {binary_path}")
-            elif not binary_path.is_file():
-                blockers.append(f"freqtrade binary path is not a file: {binary_path}")
-            elif not os.access(binary_path, os.X_OK):
-                blockers.append(f"freqtrade binary is not executable: {binary_path}")
+        if resolution.resolved_path is not None:
+            evidence["resolved_path"] = str(resolution.resolved_path)
 
         return self._check(
             "freqtrade_binary",
-            blockers,
+            [resolution.blocked_reason] if resolution.blocked_reason else [],
             ready_summary="Freqtrade binary is available.",
             evidence=evidence,
         )
-
-    def _resolve_binary_path(self, binary: str) -> Optional[Path]:
-        if Path(binary).is_absolute() or "/" in binary or "\\" in binary:
-            return resolve_repo_path(binary)
-        resolved = shutil.which(binary)
-        return Path(resolved) if resolved else None
 
     def _build_backtest_config(self, profile: BacktestProfileV2) -> tuple[Optional[Path], list[str]]:
         try:

@@ -31,14 +31,22 @@ def ready_schema(*_args) -> SchemaReadiness:
     return SchemaReadiness("postgresql://localhost/research", "20260712_01", True, ())
 
 
+def install_freqtrade(tmp_path):
+    binary = tmp_path / "freqtrade"
+    binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    binary.chmod(0o755)
+    return str(binary)
+
+
 def test_research_readiness_is_ready_only_with_all_local_evidence(tmp_path, monkeypatch) -> None:
     settings = make_settings(tmp_path)
+    binary = install_freqtrade(tmp_path)
     monkeypatch.setattr("app.services.research_readiness.verify_schema", ready_schema)
     service = ResearchReadinessService(
         settings=settings,
         environ={"DEEPSEEK_API_KEY": "present-only-not-rendered"},
         now_provider=lambda: FIXED_NOW,
-        which=lambda name: "/opt/local/bin/freqtrade" if name == "freqtrade" else None,
+        which=lambda name: binary if name == "freqtrade" else None,
     )
 
     report = service.build()
@@ -49,6 +57,7 @@ def test_research_readiness_is_ready_only_with_all_local_evidence(tmp_path, monk
 
 def test_research_readiness_reports_stale_data_without_dry_run_or_live_inputs(tmp_path, monkeypatch) -> None:
     settings = make_settings(tmp_path)
+    binary = install_freqtrade(tmp_path)
     stale_file = settings.market_data_dir / "BTC_USDT-15m.json"
     stale_timestamp = (FIXED_NOW - timedelta(days=8)).timestamp()
     utime(stale_file, (stale_timestamp, stale_timestamp))
@@ -57,7 +66,7 @@ def test_research_readiness_reports_stale_data_without_dry_run_or_live_inputs(tm
         settings=settings,
         environ={"DEEPSEEK_API_KEY": "present"},
         now_provider=lambda: FIXED_NOW,
-        which=lambda _name: "/opt/local/bin/freqtrade",
+        which=lambda _name: binary,
     ).build()
 
     assert report.status == "STALE"
@@ -66,6 +75,7 @@ def test_research_readiness_reports_stale_data_without_dry_run_or_live_inputs(tm
 
 def test_research_readiness_blocks_no_trading_and_marks_missing_artifact_unavailable(tmp_path, monkeypatch) -> None:
     settings = make_settings(tmp_path)
+    binary = install_freqtrade(tmp_path)
     for artifact in settings.backtest_result_dir.iterdir():
         artifact.unlink()
     monkeypatch.setattr("app.services.research_readiness.verify_schema", ready_schema)
@@ -73,7 +83,7 @@ def test_research_readiness_blocks_no_trading_and_marks_missing_artifact_unavail
         settings=settings,
         environ={"DEEPSEEK_API_KEY": "present"},
         now_provider=lambda: FIXED_NOW,
-        which=lambda _name: "/opt/local/bin/freqtrade",
+        which=lambda _name: binary,
     ).build()
 
     assert report.status == "UNAVAILABLE"
@@ -82,13 +92,14 @@ def test_research_readiness_blocks_no_trading_and_marks_missing_artifact_unavail
 
 def test_research_readiness_blocks_corrupt_artifact(tmp_path, monkeypatch) -> None:
     settings = make_settings(tmp_path)
+    binary = install_freqtrade(tmp_path)
     (settings.backtest_result_dir / "result.json").write_text("not-json", encoding="utf-8")
     monkeypatch.setattr("app.services.research_readiness.verify_schema", ready_schema)
     report = ResearchReadinessService(
         settings=settings,
         environ={"DEEPSEEK_API_KEY": "present"},
         now_provider=lambda: FIXED_NOW,
-        which=lambda _name: "/opt/local/bin/freqtrade",
+        which=lambda _name: binary,
     ).build()
 
     assert report.status == "BLOCKED"
