@@ -2,6 +2,7 @@ import pytest
 
 from app.core.exceptions import ConfigurationError
 from app.db.migrations import (
+    LEGACY_SCHEMA_VERSION,
     PREVIOUS_SCHEMA_VERSION,
     SCHEMA_VERSION,
     psql_database_url,
@@ -37,5 +38,6 @@ def test_schema_verification_fails_closed_for_sqlite() -> None:
 
 
 def test_schema_version_is_explicit_and_stable() -> None:
-    assert PREVIOUS_SCHEMA_VERSION == "20260712_01"
-    assert SCHEMA_VERSION == "20260722_01"
+    assert LEGACY_SCHEMA_VERSION == "20260712_01"
+    assert PREVIOUS_SCHEMA_VERSION == "20260722_01"
+    assert SCHEMA_VERSION == "20260723_01"

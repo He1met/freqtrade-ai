@@ -1,6 +1,5 @@
 from app.models.base import Base
 from app.models.backtest import BacktestResult, BacktestRun, BacktestTask
-from app.models.debug_mvp_seed import DebugMvpSeedPayload
 from app.models.local_test_db import LocalTestBatch, LocalTestDbEvent
 from app.models.research_job import ResearchJob, ResearchWorkerControl
 from app.models.strategy import Strategy, StrategyVersion
@@ -13,7 +12,6 @@ __all__ = [
     "BacktestRun",
     "BacktestTask",
     "Base",
-    "DebugMvpSeedPayload",
     "LocalTestBatch",
     "LocalTestDbEvent",
     "ResearchJob",

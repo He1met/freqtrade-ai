@@ -21,7 +21,7 @@ check constraint；任一不匹配都会 fail closed。
 ## 旧数据库处理
 
 旧 `001_init.sql` 的 `backtest_runs`、`backtest_tasks`、`backtest_results` 与当前 ORM
-不一致，并且遗漏 `debug_mvp_seed_payloads` 等表。升级器只会重建**所有受管表为空**的旧
+不一致，并且遗漏部分受管表。升级器只会重建**所有受管表为空**的旧
 本地 schema。若发现任何受管表有数据，它会在 DDL 前退出为 BLOCKED；先用 `db-backup`
 保存本地副本，再为实际数据制定显式、可审计的数据迁移，不得手工删列或伪造成功。
 

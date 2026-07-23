@@ -2,16 +2,12 @@ import hashlib
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
-from app.db.session import create_database_engine, create_session_factory, get_db
-from app.main import app
+from app.db.session import create_database_engine, create_session_factory
 from app.models import Base
-from app.models.debug_mvp_seed import DebugMvpSeedPayload
 from app.repositories import BacktestRepository, StrategyRepository, StrategyScoreRepository
-from app.repositories.debug_mvp_seed_data import DebugMvpSeedDataRepository
 from app.schemas import (
     BacktestResultCreate,
     BacktestResultRead,
@@ -29,7 +25,6 @@ from app.schemas import (
     fixture_source,
     unknown_source,
 )
-from app.services.debug_mvp_seed_data import build_debug_mvp_seed_payloads
 from app.services.strategy_scoring import StrategyScoringService
 
 
@@ -252,33 +247,3 @@ def test_fixture_fallback_and_unknown_sources_cannot_claim_core_success() -> Non
             source_detail="frontend fallback",
             core_data=True,
         )
-
-
-def test_seeded_debug_api_marks_payloads_as_fixture_not_core_success(tmp_path) -> None:
-    database_url = f"sqlite+pysqlite:///{tmp_path / 'debug-seed.sqlite'}"
-    engine = create_database_engine(database_url)
-    DebugMvpSeedPayload.__table__.create(bind=engine, checkfirst=True)
-    session_factory = create_session_factory(engine)
-
-    with session_factory() as session:
-        DebugMvpSeedDataRepository(session).upsert_payloads(build_debug_mvp_seed_payloads())
-
-    def override_get_db():
-        db = session_factory()
-        try:
-            yield db
-        finally:
-            db.close()
-
-    app.dependency_overrides[get_db] = override_get_db
-    try:
-        response = TestClient(app).get("/api/mvp/strategies")
-    finally:
-        app.dependency_overrides.clear()
-
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload[0]["name"] == "SeededBackendRsi001"
-    assert payload[0]["data_source"]["source_type"] == "fixture"
-    assert payload[0]["data_source"]["core_data"] is False
-    assert "backend-seeded-sqlite-debug" in payload[0]["data_source"]["source_detail"]

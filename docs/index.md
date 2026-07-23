@@ -38,7 +38,6 @@ they are not a current source of work status.
 - [phase9_deepseek_single_e2e.md](phase9_deepseek_single_e2e.md)
 - [phase9_deepseek_backtest_loop.md](phase9_deepseek_backtest_loop.md)
 - [phase9_db_backed_worker.md](phase9_db_backed_worker.md)
-- [phase9_local_test_db.md](phase9_local_test_db.md)
 - [phase9_page_data_source_audit.md](phase9_page_data_source_audit.md)
 - [phase9_bug_issue_flow.md](phase9_bug_issue_flow.md)
 - [phase9_security_boundary_review.md](phase9_security_boundary_review.md)

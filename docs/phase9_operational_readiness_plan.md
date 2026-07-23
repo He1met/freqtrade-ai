@@ -56,7 +56,7 @@ evidence against real operational conditions:
 | Phase 8 E2E smoke | Local fixture and DB reconciliation exists. | Can QA reconcile one real provider run end-to-end? |
 
 For Phase 9 local QA fixture setup, use
-[phase9_local_test_db.md](phase9_local_test_db.md). It covers reset, seed,
+[CI-only Phase 8 integration coverage](../scripts/smoke_phase8.py). It covers reset, seed,
 dirty-data, failed, `BLOCKED`, missing artifact, partial completion, and
 unknown-source scenarios while keeping every local-test row non-acceptable as
 real Provider evidence.

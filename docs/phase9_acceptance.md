@@ -90,11 +90,9 @@ Primary Phase 9 docs and tools:
 - [phase9_security_boundary_review.md](phase9_security_boundary_review.md)
 - [phase9_bug_issue_flow.md](phase9_bug_issue_flow.md)
 - [phase9_deferred_scope.md](phase9_deferred_scope.md)
-- [phase9_local_test_db.md](phase9_local_test_db.md)
 - [phase9_deepseek_single_e2e.md](phase9_deepseek_single_e2e.md)
 - [phase9_hourly_local_controlled_run_design.md](phase9_hourly_local_controlled_run_design.md)
 - [../scripts/phase9_deepseek_single_e2e.py](../scripts/phase9_deepseek_single_e2e.py)
-- [../scripts/phase8_local_test_db.py](../scripts/phase8_local_test_db.py)
 
 ## Validation Evidence
 

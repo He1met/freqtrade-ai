@@ -5,6 +5,7 @@ import pytest
 from sqlalchemy import inspect, text
 
 from app.db.migrations import (
+    LEGACY_SCHEMA_VERSION,
     PREVIOUS_SCHEMA_VERSION,
     SCHEMA_VERSION,
     VERSION_TABLE,
@@ -58,7 +59,7 @@ def test_incremental_worker_migration_preserves_existing_runtime_rows(postgres_e
         )
         connection.execute(
             text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
-            {"version": PREVIOUS_SCHEMA_VERSION},
+            {"version": LEGACY_SCHEMA_VERSION},
         )
 
     session_factory = create_session_factory(postgres_engine)
@@ -79,6 +80,27 @@ def test_incremental_worker_migration_preserves_existing_runtime_rows(postgres_e
         preserved = db.get(Strategy, strategy_id)
         assert preserved is not None
         assert preserved.slug == "preserved-migration-strategy"
+
+
+def test_cleanup_migration_drops_only_empty_retired_debug_table(postgres_engine) -> None:
+    Base.metadata.create_all(postgres_engine)
+    with postgres_engine.begin() as connection:
+        connection.execute(text('CREATE TABLE debug_mvp_seed_payloads (endpoint_key VARCHAR(120) PRIMARY KEY)'))
+        connection.execute(
+            text(
+                f"CREATE TABLE {VERSION_TABLE} ("
+                "version VARCHAR(64) PRIMARY KEY, "
+                "applied_at TIMESTAMPTZ NOT NULL DEFAULT now())"
+            )
+        )
+        connection.execute(
+            text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+            {"version": PREVIOUS_SCHEMA_VERSION},
+        )
+
+    assert upgrade_database(postgres_engine) == SCHEMA_VERSION
+    assert "debug_mvp_seed_payloads" not in inspect(postgres_engine).get_table_names()
+    assert verify_schema(postgres_engine).ready is True
 
 
 def test_postgresql_two_workers_claim_only_one_global_job(postgres_engine) -> None:
