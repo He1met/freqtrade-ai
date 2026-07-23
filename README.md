@@ -254,41 +254,37 @@ python3 scripts/smoke_phase7.py --offline --tmp-dir /tmp/freqtrade-ai-phase7-smo
 - 不提供 start / stop / deploy live 控制，不实现 deployment executor。
 - Phase 8 必须另行规划，不能由 Phase 7 自动进入。
 
-## 本地 demo / dev 运行入口
+## 唯一本地运行入口
 
-运行入口统一为 `make`。`demo-up` / `dev-up` 会启动后端、前端和一个单机 DB-backed research
-worker；worker 只处理由 API 显式创建的 DeepSeek → 本地回测 research job，不会自行创建周期
-任务。启动 runtime 不会凭空创建或调度任务；但数据库中若已有经操作者显式授权的 `PENDING`
-job，worker 启动后会领取它，并可能按 job 合同调用 Provider 和执行本地 Freqtrade 回测。runtime
-不会启动 dry-run / live trading、连接交易所或执行真实下单。受管状态只写入仓库内被忽略的
-`.freqtrade-ai/runtime/`，默认不会使用 `/tmp` 作为持久 runtime DB。
+项目只支持一套受管本地环境：Homebrew PostgreSQL 的 `freqtrade_ai` 数据库、仓库内
+`backend/.venv`、本机唯一 Freqtrade venv/binary，以及 `frontend/node_modules`。SQLite 仅可
+用于 pytest 临时测试，不是产品运行模式或真实验收数据源。
+
+`make up` 会启动后端、前端和一个单机 DB-backed research worker。启动前会校验当前 schema、
+唯一 Freqtrade binary 和 worker 队列；若数据库中存在 `PENDING` / `RUNNING` job，则 fail closed，
+避免启动时意外调用 Provider 或执行回测。runtime 不会启动 dry-run / live trading、连接交易所
+或执行真实下单。PID 和脱敏日志写入 `.freqtrade-ai/runtime/`，业务数据只写 PostgreSQL。
 
 ```bash
 make bootstrap
 make doctor
-make demo-up
+make up
 make status
 make verify
 make down
 ```
 
-`demo` 是受控的非生产 SQLite 模式，数据库固定为
-`.freqtrade-ai/runtime/demo.sqlite3`；启动会创建应用表、输出脱敏 DB identity，并记录后端、
-前端和 worker 的 PID 与日志。重启后使用同一数据库，job、幂等记录、pause/cancel 状态和终态
-证据不会因进程重启消失。`make down` 先停止受管 worker，再停止前后端，不删除数据库或 job。
-
-`dev` 只接受显式的本地 PostgreSQL URL，故不会继承 shell 中残留的 `DATABASE_URL`：
+唯一数据库 URL 必须是 localhost 上的 `freqtrade_ai`：
 
 ```bash
-export FREQTRADE_AI_DEV_DATABASE_URL='postgresql+psycopg://freqtrade:change_me@127.0.0.1:5432/freqtrade_ai'
-make dev-up
-make status MODE=dev
+export DATABASE_URL='postgresql+psycopg://freqtrade:change_me@127.0.0.1:5432/freqtrade_ai'
+export FREQTRADE_BINARY='/absolute/path/to/freqtrade_venv/bin/freqtrade'
+make up
 ```
 
-在运行 `make dev-up` 前，选择且只选择一种 PostgreSQL 前置条件：本机 Homebrew 服务或
-`docker compose up -d postgres`。命令不会替你静默启动 Docker 或混用两者；它会先执行 schema
-verify，迁移缺失或不匹配时以 `BLOCKED` 退出且不启动进程。需要首次建库时，按下方的
-“初始化数据库”步骤执行 `make db-init`，然后再运行 `make dev-up`。
+本项目个人开发机只使用 Homebrew PostgreSQL，不再提供 Docker Compose、demo/dev 双模式或
+分散的 backend/worker/frontend 启动替代入口。缺少 schema、binary、端口或安全前置时，
+`make up` 以 `BLOCKED` 退出。
 
 `make doctor` 同时报告 Python/Node、依赖、端口、DB identity、Freqtrade binary 和行情目录。
 后二者仅供后续本地研究准备度判断，不是启动前后端或 worker 的借口；缺失会如实显示，job 会
@@ -306,40 +302,18 @@ cd backend
 这是单机 local-only worker，不是 scheduler 或 worker pool。禁止将它扩展为小时/cron 自动创建
 任务、Redis / Celery / Kafka / RabbitMQ 队列、生产部署或交易控制面。
 
-## 旧的手动启动方式
+正式 readiness 检查：
 
 ```bash
-cd backend
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
-```
-
-健康检查：
-
-```bash
-curl http://127.0.0.1:8000/health
-```
-
-## 启动前端
-
-```bash
-cd frontend
-npm install
-npm run dev
+curl http://127.0.0.1:8000/readyz
 ```
 
 默认访问 Vite 输出的本地地址，通常是 `http://127.0.0.1:5173`。
 
-若要验证前端是否正在读取 backend API 而不是受控 fallback 数据，可先 seed
-临时 SQLite 调试数据，再启动 backend 和 frontend。具体步骤见
-[local_debug_seeded_api.md](docs/local_debug_seeded_api.md)。
-
 ## 初始化数据库
 
 ```bash
-docker compose up -d postgres
+brew services start postgresql@16
 export DATABASE_URL='postgresql+psycopg://freqtrade:change_me@localhost:5432/freqtrade_ai'
 make db-init
 make db-verify

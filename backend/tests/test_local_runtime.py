@@ -17,34 +17,28 @@ def load_runtime_module():
     return module
 
 
-def test_demo_database_is_persistent_inside_repository():
+def test_runtime_database_defaults_to_one_canonical_postgres(monkeypatch):
     runtime = load_runtime_module()
+    monkeypatch.delenv("DATABASE_URL", raising=False)
 
-    state_dir = runtime.runtime_dir(None)
-
-    assert state_dir == REPO_ROOT / ".freqtrade-ai" / "runtime"
-    assert str(runtime.demo_database_url(state_dir)).endswith(".freqtrade-ai/runtime/demo.sqlite3")
-    assert "/tmp/" not in runtime.demo_database_url(state_dir)
+    assert runtime.runtime_database_url() == runtime.DEFAULT_DATABASE_URL
 
 
-def test_dev_mode_ignores_inherited_database_url(monkeypatch):
-    runtime = load_runtime_module()
-    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://unsafe:secret@example.com:5432/prod")
-    monkeypatch.delenv("FREQTRADE_AI_DEV_DATABASE_URL", raising=False)
-
-    with pytest.raises(runtime.RuntimeBlocked, match="inherited DATABASE_URL is ignored"):
-        runtime.dev_database_url()
-
-
-def test_dev_mode_rejects_remote_postgres(monkeypatch):
+def test_runtime_rejects_remote_or_noncanonical_database(monkeypatch):
     runtime = load_runtime_module()
     monkeypatch.setenv(
-        "FREQTRADE_AI_DEV_DATABASE_URL",
+        "DATABASE_URL",
         "postgresql+psycopg://freqtrade:change_me@example.com:5432/freqtrade_ai",
     )
-
     with pytest.raises(runtime.RuntimeBlocked, match="localhost PostgreSQL"):
-        runtime.dev_database_url()
+        runtime.runtime_database_url()
+
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+psycopg://freqtrade:change_me@localhost:5432/another_database",
+    )
+    with pytest.raises(runtime.RuntimeBlocked, match="canonical freqtrade_ai"):
+        runtime.runtime_database_url()
 
 
 def test_log_redaction_does_not_echo_secret_values():
@@ -57,14 +51,6 @@ def test_log_redaction_does_not_echo_secret_values():
     assert redacted.count("***") == 2
 
 
-def test_doctor_reports_missing_demo_schema_as_blocked():
-    runtime = load_runtime_module()
-
-    payload = runtime.doctor("demo", REPO_ROOT / ".freqtrade-ai" / "runtime-not-created")
-
-    assert payload["schema"]["status"] == "BLOCKED"
-
-
 def test_doctor_uses_explicit_freqtrade_binary(monkeypatch, tmp_path):
     runtime = load_runtime_module()
     binary = tmp_path / "freqtrade"
@@ -72,9 +58,12 @@ def test_doctor_uses_explicit_freqtrade_binary(monkeypatch, tmp_path):
     binary.chmod(0o755)
     monkeypatch.setenv("FREQTRADE_BINARY", str(binary))
 
-    payload = runtime.doctor("demo", REPO_ROOT / ".freqtrade-ai" / "runtime-not-created")
+    monkeypatch.setattr(runtime, "ensure_schema", lambda _url: None)
+    payload = runtime.doctor(REPO_ROOT / ".freqtrade-ai" / "runtime-not-created")
 
     assert payload["checks"]["freqtrade_binary"] is True
+    assert payload["database"]["kind"] == "postgresql"
+    assert payload["schema"]["status"] == "READY"
     assert payload["freqtrade"]["status"] == "READY"
     assert payload["freqtrade"]["resolved_path"] == str(binary.resolve())
 
@@ -139,9 +128,9 @@ def test_status_includes_backend_worker_and_frontend(monkeypatch, tmp_path):
         "process_status",
         lambda state_dir, service: {"service": service, "running": True},
     )
-    monkeypatch.setattr(runtime, "verify_demo_database", lambda state_dir: {"tables": 1})
+    monkeypatch.setattr(runtime, "ensure_schema", lambda _url: None)
 
-    payload = runtime.current_status("demo", tmp_path)
+    payload = runtime.current_status(tmp_path)
 
     assert [service["service"] for service in payload["services"]] == [
         "backend",
@@ -156,8 +145,8 @@ def test_start_launches_worker_with_expected_module(monkeypatch, tmp_path):
     monkeypatch.setattr(runtime, "backend_python", lambda: Path("/venv/bin/python"))
     monkeypatch.setattr(runtime, "frontend_vite", lambda: Path("/frontend/vite"))
     monkeypatch.setattr(runtime, "port_available", lambda port: True)
-    monkeypatch.setattr(runtime, "initialise_demo_database", lambda state_dir: None)
-    monkeypatch.setattr(runtime, "verify_demo_database", lambda state_dir: {"tables": 1})
+    monkeypatch.setattr(runtime, "ensure_schema", lambda _url: None)
+    monkeypatch.setattr(runtime, "ensure_worker_queue_idle", lambda _url: None)
     monkeypatch.setattr(runtime, "wait_for_url", lambda *args, **kwargs: None)
     monkeypatch.setattr(runtime, "wait_for_process", lambda *args, **kwargs: None)
 
@@ -166,7 +155,7 @@ def test_start_launches_worker_with_expected_module(monkeypatch, tmp_path):
 
     monkeypatch.setattr(runtime, "start_service", fake_start_service)
 
-    runtime.start("demo", tmp_path)
+    runtime.start(tmp_path)
 
     worker = next(item for item in observed if item[0] == "worker")
     assert worker[1] == [
@@ -182,8 +171,8 @@ def test_verify_fails_closed_when_worker_is_not_running(monkeypatch, capsys):
     monkeypatch.setattr(
         runtime,
         "current_status",
-        lambda mode, state_dir: {
-            "mode": mode,
+        lambda state_dir: {
+            "environment": "local",
             "services": [
                 {"service": "backend", "running": True},
                 {"service": "worker", "running": False},
@@ -191,9 +180,22 @@ def test_verify_fails_closed_when_worker_is_not_running(monkeypatch, capsys):
             ],
         },
     )
-    monkeypatch.setattr(runtime, "verify_demo_database", lambda state_dir: {"tables": 1})
+    monkeypatch.setattr(runtime, "ensure_schema", lambda _url: None)
 
-    exit_code = runtime.main(["verify", "--mode", "demo"])
+    exit_code = runtime.main(["verify"])
 
     assert exit_code == 2
     assert "backend, worker, and frontend must all be running" in capsys.readouterr().out
+
+
+def test_worker_queue_must_be_idle(monkeypatch):
+    runtime = load_runtime_module()
+    monkeypatch.setattr(runtime, "backend_python", lambda: Path("/venv/bin/python"))
+    monkeypatch.setattr(
+        runtime.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=3),
+    )
+
+    with pytest.raises(runtime.RuntimeBlocked, match="worker queue is not idle"):
+        runtime.ensure_worker_queue_idle(runtime.DEFAULT_DATABASE_URL)

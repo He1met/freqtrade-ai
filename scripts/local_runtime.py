@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Safe, repeatable local demo/dev runtime manager for Freqtrade AI.
+"""Safe, repeatable single-environment runtime manager for Freqtrade AI.
 
 This command manages the FastAPI, DB-backed worker, and Vite development
 processes.  The worker may execute explicitly authorized queued research jobs,
 but this runtime manager never connects to an exchange, starts dry-run/live
 trading, or reads provider credentials.  Runtime state stays in
-``.freqtrade-ai/`` so the demo SQLite database is persistent and never defaults
-to ``/tmp``.
+``.freqtrade-ai/`` and the only application database is local PostgreSQL
+``freqtrade_ai``.
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ import re
 import shutil
 import signal
 import socket
-import sqlite3
 import subprocess
 import sys
 import time
@@ -35,6 +34,9 @@ sys.path.insert(0, str(REPO_ROOT / "backend"))
 from app.adapters.freqtrade.binary import resolve_freqtrade_binary
 
 DEFAULT_RUNTIME_DIR = REPO_ROOT / ".freqtrade-ai" / "runtime"
+DEFAULT_DATABASE_URL = (
+    "postgresql+psycopg://freqtrade:change_me@localhost:5432/freqtrade_ai"
+)
 BACKEND_PORT = 8000
 FRONTEND_PORT = 5173
 PID_FILES = {
@@ -76,10 +78,6 @@ def runtime_dir(raw_path: Optional[str]) -> Path:
     return resolved
 
 
-def demo_database_url(state_dir: Path) -> str:
-    return "sqlite+pysqlite:///{}".format(state_dir / "demo.sqlite3")
-
-
 def redact_database_url(value: str) -> str:
     try:
         parsed = urlsplit(value)
@@ -98,19 +96,17 @@ def redact_database_url(value: str) -> str:
     return "{}://{}{}".format(parsed.scheme, netloc, parsed.path)
 
 
-def dev_database_url() -> str:
-    """Read only the explicit dev variable, never an inherited DATABASE_URL."""
+def runtime_database_url() -> str:
+    """Return the one supported localhost PostgreSQL application database."""
 
-    value = os.environ.get("FREQTRADE_AI_DEV_DATABASE_URL", "").strip()
-    if not value:
-        raise RuntimeBlocked(
-            "FREQTRADE_AI_DEV_DATABASE_URL is required for dev mode; inherited DATABASE_URL is ignored"
-        )
+    value = os.environ.get("DATABASE_URL", "").strip() or DEFAULT_DATABASE_URL
     parsed = urlsplit(value)
     if not parsed.scheme.startswith("postgresql") or not parsed.hostname:
-        raise RuntimeBlocked("FREQTRADE_AI_DEV_DATABASE_URL must be a PostgreSQL SQLAlchemy URL")
+        raise RuntimeBlocked("DATABASE_URL must be a PostgreSQL SQLAlchemy URL")
     if parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
-        raise RuntimeBlocked("dev mode only accepts a localhost PostgreSQL target")
+        raise RuntimeBlocked("runtime only accepts a localhost PostgreSQL target")
+    if parsed.path != "/freqtrade_ai":
+        raise RuntimeBlocked("runtime only accepts the canonical freqtrade_ai database")
     return value
 
 
@@ -181,14 +177,12 @@ def is_managed_process(pid: int, service: str) -> bool:
     return "n{}".format(expected_cwd) in cwd_result.stdout
 
 
-def clean_environment(database_url: str, mode: str) -> Dict[str, str]:
+def clean_environment(database_url: str) -> Dict[str, str]:
     environment = os.environ.copy()
-    # The selected mode owns its DB target; a shell's DATABASE_URL cannot leak in.
-    environment.pop("DATABASE_URL", None)
     environment.update(
         {
             "DATABASE_URL": database_url,
-            "APP_ENV": mode,
+            "APP_ENV": "local",
             "VITE_ENABLE_DEV_FIXTURES": "false",
             "VITE_FREQUI_URL": "",
         }
@@ -216,33 +210,9 @@ def run_checked(command: Sequence[str], *, cwd: Path, environment: Optional[Dict
         raise RuntimeBlocked("command failed (exit {}): {}".format(completed.returncode, command[0]))
 
 
-def initialise_demo_database(state_dir: Path) -> None:
-    state_dir.mkdir(parents=True, exist_ok=True)
-    database_url = demo_database_url(state_dir)
-    code = "from app.models import Base; from app.db.session import create_database_engine; Base.metadata.create_all(create_database_engine())"
-    environment = clean_environment(database_url, "demo")
-    environment["PYTHONPATH"] = str(REPO_ROOT / "backend")
-    run_checked([str(backend_python()), "-c", code], cwd=REPO_ROOT, environment=environment)
-
-
-def verify_demo_database(state_dir: Path) -> Dict[str, Any]:
-    database_path = state_dir / "demo.sqlite3"
-    if not database_path.is_file():
-        raise RuntimeBlocked("demo database is missing; run `make demo-up`")
-    try:
-        with sqlite3.connect(str(database_path)) as connection:
-            table_count = connection.execute(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
-            ).fetchone()[0]
-    except sqlite3.Error as exc:
-        raise RuntimeBlocked("demo database is unreadable: {}".format(exc.__class__.__name__)) from exc
-    if not table_count:
-        raise RuntimeBlocked("demo database has no application tables; run `make demo-up`")
-    return {"path": str(database_path), "tables": table_count}
-
-
-def doctor(mode: str, state_dir: Path) -> Dict[str, Any]:
+def doctor(state_dir: Path) -> Dict[str, Any]:
     freqtrade_resolution = resolve_freqtrade_binary()
+    database_url = runtime_database_url()
     checks = {
         "python3": command_exists("python3"),
         "node": command_exists("node"),
@@ -256,7 +226,11 @@ def doctor(mode: str, state_dir: Path) -> Dict[str, Any]:
         "live_trading": False,
         "dry_run_trading": False,
     }
-    result: Dict[str, Any] = {"mode": mode, "runtime_dir": str(state_dir), "checks": checks}
+    result: Dict[str, Any] = {
+        "environment": "local",
+        "runtime_dir": str(state_dir),
+        "checks": checks,
+    }
     result["freqtrade"] = {
         "source": freqtrade_resolution.source,
         "resolved_path": (
@@ -267,23 +241,12 @@ def doctor(mode: str, state_dir: Path) -> Dict[str, Any]:
         "status": "READY" if freqtrade_resolution.ready else "BLOCKED",
         "reason": freqtrade_resolution.blocked_reason,
     }
-    if mode == "demo":
-        result["database"] = {"kind": "sqlite", "identity": redact_database_url(demo_database_url(state_dir))}
-        try:
-            result["schema"] = {"status": "READY", **verify_demo_database(state_dir)}
-        except RuntimeBlocked as exc:
-            result["schema"] = {"status": "BLOCKED", "reason": str(exc)}
-    else:
-        try:
-            database_url = dev_database_url()
-            result["database"] = {"kind": "postgresql", "identity": redact_database_url(database_url)}
-            try:
-                ensure_dev_schema(database_url)
-                result["schema"] = {"status": "READY"}
-            except RuntimeBlocked as exc:
-                result["schema"] = {"status": "BLOCKED", "reason": str(exc)}
-        except RuntimeBlocked as exc:
-            result["database"] = {"kind": "postgresql", "status": "BLOCKED", "reason": str(exc)}
+    result["database"] = {"kind": "postgresql", "identity": redact_database_url(database_url)}
+    try:
+        ensure_schema(database_url)
+        result["schema"] = {"status": "READY"}
+    except RuntimeBlocked as exc:
+        result["schema"] = {"status": "BLOCKED", "reason": str(exc)}
     return result
 
 
@@ -297,8 +260,8 @@ def bootstrap() -> Dict[str, Any]:
     return {"status": "READY", "backend_virtualenv": True, "frontend_dependencies": True}
 
 
-def ensure_dev_schema(database_url: str) -> None:
-    environment = clean_environment(database_url, "dev")
+def ensure_schema(database_url: str) -> None:
+    environment = clean_environment(database_url)
     completed = subprocess.run(
         [str(backend_python()), "-m", "app.db.migrate", "verify", "--database-url", database_url],
         cwd=str(REPO_ROOT / "backend"),
@@ -309,7 +272,32 @@ def ensure_dev_schema(database_url: str) -> None:
     )
     if completed.returncode:
         raise RuntimeBlocked(
-            "PostgreSQL schema verification failed; run `make db-init` on the explicit local dev database"
+            "PostgreSQL schema verification failed; run `make db-init` on the canonical database"
+        )
+
+
+def ensure_worker_queue_idle(database_url: str) -> None:
+    code = (
+        "from sqlalchemy import create_engine, text; "
+        "engine=create_engine(__import__('os').environ['DATABASE_URL']); "
+        "connection=engine.connect(); "
+        "count=connection.execute(text("
+        "\"SELECT count(*) FROM research_jobs WHERE status IN ('pending','running')\""
+        ")).scalar_one(); "
+        "connection.close(); "
+        "raise SystemExit(0 if count == 0 else 3)"
+    )
+    completed = subprocess.run(
+        [str(backend_python()), "-c", code],
+        cwd=str(REPO_ROOT / "backend"),
+        env=clean_environment(database_url),
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if completed.returncode:
+        raise RuntimeBlocked(
+            "research worker queue is not idle; resolve pending/running jobs before `make up`"
         )
 
 
@@ -400,21 +388,17 @@ def stop_all(state_dir: Path) -> Dict[str, Any]:
     }
 
 
-def start(mode: str, state_dir: Path) -> Dict[str, Any]:
+def start(state_dir: Path) -> Dict[str, Any]:
     state_dir.mkdir(parents=True, exist_ok=True)
     backend_python()
     frontend_vite()
     if not port_available(BACKEND_PORT) or not port_available(FRONTEND_PORT):
         raise RuntimeBlocked("port 8000 or 5173 is already in use; run `make status` before starting")
-    if mode == "demo":
-        initialise_demo_database(state_dir)
-        database_url = demo_database_url(state_dir)
-        database = verify_demo_database(state_dir)
-    else:
-        database_url = dev_database_url()
-        ensure_dev_schema(database_url)
-        database = {"identity": redact_database_url(database_url), "schema": "verified"}
-    environment = clean_environment(database_url, mode)
+    database_url = runtime_database_url()
+    ensure_schema(database_url)
+    ensure_worker_queue_idle(database_url)
+    database = {"identity": redact_database_url(database_url), "schema": "verified"}
+    environment = clean_environment(database_url)
     try:
         start_service(
             "backend",
@@ -423,7 +407,7 @@ def start(mode: str, state_dir: Path) -> Dict[str, Any]:
             environment=environment,
             state_dir=state_dir,
         )
-        wait_for_url("http://127.0.0.1:{}/health".format(BACKEND_PORT), "backend")
+        wait_for_url("http://127.0.0.1:{}/readyz".format(BACKEND_PORT), "backend readiness")
         start_service(
             "worker",
             [
@@ -449,7 +433,7 @@ def start(mode: str, state_dir: Path) -> Dict[str, Any]:
         raise
     return {
         "status": "RUNNING",
-        "mode": mode,
+        "environment": "local",
         "database": database,
         "backend_url": "http://127.0.0.1:{}".format(BACKEND_PORT),
         "frontend_url": "http://127.0.0.1:{}".format(FRONTEND_PORT),
@@ -457,9 +441,9 @@ def start(mode: str, state_dir: Path) -> Dict[str, Any]:
     }
 
 
-def current_status(mode: str, state_dir: Path) -> Dict[str, Any]:
+def current_status(state_dir: Path) -> Dict[str, Any]:
     result: Dict[str, Any] = {
-        "mode": mode,
+        "environment": "local",
         "runtime_dir": str(state_dir),
         "services": [
             process_status(state_dir, service)
@@ -468,10 +452,13 @@ def current_status(mode: str, state_dir: Path) -> Dict[str, Any]:
         "trading": {"live": False, "dry_run": False, "real_orders": False},
     }
     try:
-        if mode == "demo":
-            result["database"] = {"kind": "sqlite", **verify_demo_database(state_dir)}
-        else:
-            result["database"] = {"kind": "postgresql", "identity": redact_database_url(dev_database_url())}
+        database_url = runtime_database_url()
+        ensure_schema(database_url)
+        result["database"] = {
+            "kind": "postgresql",
+            "identity": redact_database_url(database_url),
+            "schema": "verified",
+        }
     except RuntimeBlocked as exc:
         result["database"] = {"status": "BLOCKED", "reason": str(exc)}
     return result
@@ -505,8 +492,7 @@ def emit(payload: Dict[str, Any], as_json: bool) -> None:
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("doctor", "bootstrap", "demo-up", "dev-up", "status", "down", "logs", "verify"))
-    parser.add_argument("--mode", choices=("demo", "dev"), default="demo")
+    parser.add_argument("command", choices=("doctor", "bootstrap", "up", "status", "down", "logs", "verify"))
     parser.add_argument("--runtime-dir")
     parser.add_argument("--lines", type=int, default=80)
     parser.add_argument("--json", action="store_true")
@@ -518,31 +504,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         state_dir = runtime_dir(args.runtime_dir)
         if args.command == "doctor":
-            payload = doctor(args.mode, state_dir)
+            payload = doctor(state_dir)
         elif args.command == "bootstrap":
             payload = bootstrap()
-        elif args.command == "demo-up":
-            payload = start("demo", state_dir)
-        elif args.command == "dev-up":
-            payload = start("dev", state_dir)
+        elif args.command == "up":
+            payload = start(state_dir)
         elif args.command == "status":
-            payload = current_status(args.mode, state_dir)
+            payload = current_status(state_dir)
         elif args.command == "down":
             payload = stop_all(state_dir)
         elif args.command == "logs":
             payload = recent_logs(state_dir, max(1, args.lines))
         else:
-            status = current_status(args.mode, state_dir)
+            status = current_status(state_dir)
             running = all(service["running"] for service in status["services"])
-            if args.mode == "demo":
-                verify_demo_database(state_dir)
-            else:
-                ensure_dev_schema(dev_database_url())
+            ensure_schema(runtime_database_url())
             if not running:
                 raise RuntimeBlocked(
                     "backend, worker, and frontend must all be running before verification"
                 )
-            wait_for_url("http://127.0.0.1:{}/health".format(BACKEND_PORT), "backend")
+            wait_for_url("http://127.0.0.1:{}/readyz".format(BACKEND_PORT), "backend readiness")
             wait_for_url("http://127.0.0.1:{}/".format(FRONTEND_PORT), "frontend")
             payload = {"status": "VERIFIED", **status}
         emit(payload, args.json)

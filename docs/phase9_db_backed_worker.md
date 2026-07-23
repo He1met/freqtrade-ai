@@ -179,18 +179,18 @@ single active lease.
 The managed runtime starts and stops the worker with the backend and frontend:
 
 ```bash
-make demo-up
+make up
 make status
 make logs
 make verify
 make down
 ```
 
-`demo` uses the durable repository-local SQLite database. `dev` uses only the
-explicit localhost PostgreSQL URL documented in the README. Runtime status,
-logs, PID validation, and shutdown include the worker. Shutdown stops the
-worker before the API process; it never marks unfinished work as successful or
-deletes persisted jobs.
+The managed runtime uses only the local PostgreSQL `freqtrade_ai` database
+documented in the README. Runtime status, logs, PID validation, and shutdown
+include the worker. Startup refuses a non-idle queue; shutdown stops the worker
+before the API process and never marks unfinished work as successful or deletes
+persisted jobs.
 
 ## Verification
 
