@@ -6,7 +6,7 @@
 ## 使用方式
 
 ```bash
-docker compose up -d postgres
+brew services start postgresql@16
 export DATABASE_URL='postgresql+psycopg://freqtrade:change_me@localhost:5432/freqtrade_ai'
 make db-backup   # 已有本地开发库时先执行
 make db-init
