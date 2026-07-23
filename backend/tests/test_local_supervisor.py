@@ -109,6 +109,8 @@ def test_launch_agent_install_is_idempotent(monkeypatch, tmp_path):
     monkeypatch.setattr(agent, "resolve_freqtrade_binary", lambda: binary)
     monkeypatch.setattr(agent, "write_plist", lambda payload: calls.append(("write", payload)))
     monkeypatch.setattr(agent, "bootout", lambda: calls.append(("bootout",)))
+    monkeypatch.setattr(agent, "wait_until_unloaded", lambda: True)
+    monkeypatch.setattr(agent, "bootstrap_with_retry", lambda: calls.append(("bootstrap",)))
     monkeypatch.setattr(agent, "wait_until_running", lambda: True)
     monkeypatch.setattr(
         agent,
@@ -125,7 +127,55 @@ def test_launch_agent_install_is_idempotent(monkeypatch, tmp_path):
     assert calls[0][0] == "write"
     assert calls[1] == ("bootout",)
     assert ("launchctl", "enable", agent.launchd_target()) in calls
-    assert ("launchctl", "bootstrap", agent.launchd_domain(), str(agent.PLIST_PATH)) in calls
+    assert ("bootstrap",) in calls
+
+
+def test_launch_agent_waits_until_old_job_is_unloaded(monkeypatch):
+    agent = load_module(LAUNCH_AGENT_PATH, "macos_launch_agent_wait_unloaded")
+    responses = iter(
+        (
+            SimpleNamespace(returncode=0, stdout="state = SIGTERMed", stderr=""),
+            SimpleNamespace(returncode=0, stdout="state = SIGTERMed", stderr=""),
+            SimpleNamespace(returncode=3, stdout="", stderr="not found"),
+        )
+    )
+    sleeps = []
+    monkeypatch.setattr(agent, "run", lambda *args, **kwargs: next(responses))
+    monkeypatch.setattr(agent.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    assert agent.wait_until_unloaded() is True
+    assert sleeps == [0.25, 0.25]
+
+
+def test_launch_agent_bootstrap_retries_transient_unload_race(monkeypatch):
+    agent = load_module(LAUNCH_AGENT_PATH, "macos_launch_agent_bootstrap_retry")
+    responses = iter(
+        (
+            SimpleNamespace(returncode=5, stdout="", stderr="Input/output error"),
+            SimpleNamespace(returncode=0, stdout="", stderr=""),
+        )
+    )
+    calls = []
+    monkeypatch.setattr(
+        agent,
+        "run",
+        lambda command, **kwargs: calls.append(tuple(command)) or next(responses),
+    )
+    monkeypatch.setattr(agent.time, "sleep", lambda seconds: calls.append(("sleep", seconds)))
+
+    agent.bootstrap_with_retry()
+
+    bootstrap_command = (
+        "launchctl",
+        "bootstrap",
+        agent.launchd_domain(),
+        str(agent.PLIST_PATH),
+    )
+    assert calls == [
+        bootstrap_command,
+        ("sleep", agent.BOOTSTRAP_RETRY_SECONDS),
+        bootstrap_command,
+    ]
 
 
 def test_launch_agent_resolves_binary_through_backend_contract(monkeypatch, tmp_path):

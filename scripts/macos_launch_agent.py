@@ -17,6 +17,8 @@ from typing import Any, Dict, Optional, Sequence
 
 
 LABEL = "com.he1met.freqtrade-ai.runtime"
+BOOTSTRAP_ATTEMPTS = 3
+BOOTSTRAP_RETRY_SECONDS = 1.0
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BACKEND_PYTHON = REPO_ROOT / "backend" / ".venv" / "bin" / "python"
 SUPERVISOR_SCRIPT = REPO_ROOT / "scripts" / "local_supervisor.py"
@@ -132,6 +134,16 @@ def bootout() -> None:
     run(["launchctl", "bootout", launchd_target()])
 
 
+def wait_until_unloaded(timeout_seconds: float = 15.0) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        completed = run(["launchctl", "print", launchd_target()])
+        if completed.returncode != 0:
+            return True
+        time.sleep(0.25)
+    return False
+
+
 def wait_until_running(timeout_seconds: float = 8.0) -> bool:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
@@ -142,6 +154,20 @@ def wait_until_running(timeout_seconds: float = 8.0) -> bool:
     return False
 
 
+def bootstrap_with_retry() -> None:
+    last_error = "launchctl bootstrap failed"
+    for attempt in range(1, BOOTSTRAP_ATTEMPTS + 1):
+        completed = run(
+            ["launchctl", "bootstrap", launchd_domain(), str(PLIST_PATH)]
+        )
+        if completed.returncode == 0:
+            return
+        last_error = completed.stderr.strip() or last_error
+        if attempt < BOOTSTRAP_ATTEMPTS:
+            time.sleep(BOOTSTRAP_RETRY_SECONDS)
+    raise LaunchAgentBlocked(last_error)
+
+
 def install() -> Dict[str, Any]:
     if sys.platform != "darwin" or shutil.which("launchctl") is None:
         raise LaunchAgentBlocked("macOS launchctl is required")
@@ -150,14 +176,10 @@ def install() -> Dict[str, Any]:
     binary = resolve_freqtrade_binary()
     write_plist(plist_payload(binary))
     bootout()
+    if not wait_until_unloaded():
+        raise LaunchAgentBlocked("existing LaunchAgent did not finish unloading")
     run(["launchctl", "enable", launchd_target()])
-    completed = run(
-        ["launchctl", "bootstrap", launchd_domain(), str(PLIST_PATH)]
-    )
-    if completed.returncode:
-        raise LaunchAgentBlocked(
-            completed.stderr.strip() or "launchctl bootstrap failed"
-        )
+    bootstrap_with_retry()
     if not wait_until_running():
         bootout()
         error_tail = ""
