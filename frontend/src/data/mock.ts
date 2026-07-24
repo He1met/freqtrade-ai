@@ -104,6 +104,9 @@ export const mockMvpData: MvpData = {
       acceptedCount: 2,
       failedCount: 0,
       errorMessage: null,
+      startedAt: "2026-07-05T14:01:00Z",
+      completedAt: "2026-07-05T14:02:00Z",
+      createdAt: "2026-07-05T14:00:00Z",
     },
     {
       id: "gen-run-002",
@@ -115,6 +118,9 @@ export const mockMvpData: MvpData = {
       acceptedCount: 0,
       failedCount: 1,
       errorMessage: "策略校验失败：缺少 populate_entry_trend。",
+      startedAt: "2026-07-05T15:01:00Z",
+      completedAt: "2026-07-05T15:02:00Z",
+      createdAt: "2026-07-05T15:00:00Z",
     },
   ],
   backtestRuns: [
