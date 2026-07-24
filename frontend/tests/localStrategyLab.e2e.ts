@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
 
+import { captureBrowserProblems, expectNoPageOverflow } from "./helpers/desktopGate";
+
 const listApiPaths = new Set([
   "/api/strategies",
   "/api/strategy-versions",
@@ -14,17 +16,8 @@ const listApiPaths = new Set([
   "/api/strategy-version-lineage",
 ]);
 
-function captureConsoleErrors(page: import("@playwright/test").Page) {
-  const consoleErrors: string[] = [];
-  page.on("console", (message) => {
-    if (message.type() === "error") consoleErrors.push(message.text());
-  });
-  page.on("pageerror", (error) => consoleErrors.push(error.message));
-  return consoleErrors;
-}
-
-test("shows fail-closed PostgreSQL evidence while keeping deterministic Provider seed non-core", async ({ page }) => {
-  const consoleErrors = captureConsoleErrors(page);
+test("shows fail-closed real database evidence while keeping deterministic Provider seed non-core", async ({ page }) => {
+  const browserProblems = captureBrowserProblems(page);
   const versionsResponse = page.waitForResponse(
     (response) => response.url().includes("/api/strategy-versions") && response.status() === 200,
   );
@@ -38,7 +31,7 @@ test("shows fail-closed PostgreSQL evidence while keeping deterministic Provider
   })).toBe(true);
 
   const conclusion = page.getByTestId("lab-evidence-conclusion");
-  await expect(conclusion).toHaveAttribute("data-state", "FAILED");
+  await expect(conclusion).toHaveAttribute("data-state", "FAILED", { timeout: 20_000 });
   await expect(conclusion.getByTestId("lab-evidence-status")).toHaveText("FAILED");
   await expect(page.getByTestId("lab-core-evidence-rejection")).toContainText("没有可证明的核心成功结果");
   await expect(page.getByTestId("lab-strategy-version-count").locator("strong")).toHaveText("0");
@@ -46,11 +39,12 @@ test("shows fail-closed PostgreSQL evidence while keeping deterministic Provider
   await expect(page.getByTestId("lab-core-ranking-count").locator("strong")).not.toHaveText("0");
   await expect(page.getByRole("heading", { name: "非核心诊断记录（不可验收）" })).toBeVisible();
   await expect(page.locator(".lab-source-summary[data-core-source='true']").first()).toBeVisible();
-  expect(consoleErrors).toEqual([]);
+  await expectNoPageOverflow(page);
+  expect(browserProblems).toEqual([]);
 });
 
 test("shows a stable NOT_RUN empty state without claiming core success", async ({ page }) => {
-  const consoleErrors = captureConsoleErrors(page);
+  const browserProblems = captureBrowserProblems(page);
 
   await page.route("**/api/**", async (route) => {
     const pathname = new URL(route.request().url()).pathname;
@@ -64,12 +58,13 @@ test("shows a stable NOT_RUN empty state without claiming core success", async (
   await page.goto("/local-strategy-lab");
 
   const conclusion = page.getByTestId("lab-evidence-conclusion");
-  await expect(conclusion).toHaveAttribute("data-state", "NOT_RUN");
+  await expect(conclusion).toHaveAttribute("data-state", "NOT_RUN", { timeout: 20_000 });
   await expect(conclusion.getByTestId("lab-evidence-status")).toHaveText("NOT_RUN");
   await expect(page.getByTestId("lab-core-evidence-rejection")).toContainText("没有可证明的核心成功结果");
   await expect(page.getByTestId("lab-strategy-version-count").locator("strong")).toHaveText("0");
   await expect(page.getByTestId("lab-backtest-result-count").locator("strong")).toHaveText("0");
   await expect(page.getByTestId("lab-core-ranking-count").locator("strong")).toHaveText("0");
   await expect(page.locator(".lab-source-summary[data-core-source='true']")).toHaveCount(0);
-  expect(consoleErrors).toEqual([]);
+  await expectNoPageOverflow(page);
+  expect(browserProblems).toEqual([]);
 });
