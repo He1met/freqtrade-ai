@@ -3,72 +3,58 @@ import { Link } from "react-router-dom";
 import { combineDataSources } from "../api/sourceState";
 import type { DataSourceTraceSummary } from "../api/types";
 import { useMvpData } from "../api/useMvpData";
+import {
+  CompactText,
+  CopyableValue,
+  EmptyState,
+  ExpandableText,
+  PageHeader,
+  StatusBadge,
+} from "../components/DisplayPrimitives";
+import "../styles/strategies.css";
 import { FallbackNotice } from "./FallbackNotice";
-import { EMPTY_TEXT, displayBoolean, displayLoadState, displayStatus, displayValue } from "./uiCopy";
+import { formatSourceTrace, formatTraceRecord, strategyAvailability } from "./strategyDisplay";
+import { EMPTY_TEXT, displayLoadState, displayValue } from "./uiCopy";
 
-function compactPath(path: string | null | undefined): string {
-  if (!path) {
-    return EMPTY_TEXT;
-  }
-
-  const normalized = path.replace(/\\/g, "/");
-  const parts = normalized.split("/").filter(Boolean);
-  if (parts.length <= 3) {
-    return normalized;
-  }
-  return `.../${parts.slice(-3).join("/")}`;
-}
-
-function formatRecordSummary(record: Record<string, number | string>): string {
-  const entries = Object.entries(record);
-  if (entries.length === 0) {
-    return EMPTY_TEXT;
-  }
-
-  return entries
-    .slice(0, 2)
-    .map(([key, value]) => `${key}: ${value}`)
-    .join(", ");
-}
-
-function describeSourceTrace(source: DataSourceTraceSummary | undefined): string {
-  if (!source) {
-    return "source_type: unknown";
-  }
-
-  return [
-    `source_type: ${source.sourceType}`,
-    `core_data: ${displayBoolean(source.coreData)}`,
-    `database_ids: ${formatRecordSummary(source.databaseIds)}`,
-    `artifact_refs: ${formatRecordSummary(source.artifactRefs)}`,
-    `detail: ${source.sourceDetail}`,
-    source.blockedReason ? `blocked: ${source.blockedReason}` : null,
-  ]
-    .filter(Boolean)
-    .join("\n");
-}
-
-function SourceTraceSummary({ source }: { source: DataSourceTraceSummary | undefined }) {
+function StrategyTechnicalDetails({
+  id,
+  path,
+  source,
+}: {
+  id: string;
+  path: string | null | undefined;
+  source: DataSourceTraceSummary | undefined;
+}) {
   const sourceType = source?.sourceType ?? "unknown";
-  const databaseCount = source ? Object.keys(source.databaseIds).length : 0;
-  const artifactCount = source ? Object.keys(source.artifactRefs).length : 0;
-  const detail = source?.blockedReason ?? source?.sourceDetail ?? "Source metadata was not provided.";
 
   return (
-    <div
-      className="strategy-source-summary"
-      data-core-source={source?.coreData === true ? "true" : "false"}
-      title={describeSourceTrace(source)}
-    >
-      <div className="strategy-source-summary-heading">
-        <strong>{sourceType}</strong>
-        <span>{source?.coreData ? "core" : "non-core"}</span>
-      </div>
-      <span className="strategy-source-summary-detail">{detail}</span>
-      <span className="strategy-source-summary-meta">
-        db {databaseCount} / artifacts {artifactCount}
-      </span>
-    </div>
+    <details className="strategy-technical-details">
+      <summary>
+        <span>{sourceType}</span>
+        <StatusBadge
+          label={source?.coreData ? "核心数据" : "非核心数据"}
+          status={source?.coreData ? "ACCEPTABLE" : "NOT_ACCEPTABLE"}
+        />
+      </summary>
+      <dl>
+        <div>
+          <dt>策略 ID</dt>
+          <dd><CopyableValue label="策略 ID" value={id} /></dd>
+        </div>
+        <div>
+          <dt>策略文件</dt>
+          <dd><CopyableValue label="策略文件路径" value={path} /></dd>
+        </div>
+        <div>
+          <dt>数据库 ID</dt>
+          <dd><CopyableValue label="数据库 ID" value={formatTraceRecord(source?.databaseIds)} /></dd>
+        </div>
+        <div>
+          <dt>来源详情</dt>
+          <dd><ExpandableText summary="查看完整来源" value={formatSourceTrace(source)} /></dd>
+        </div>
+      </dl>
+    </details>
   );
 }
 
@@ -77,63 +63,110 @@ export function Strategies() {
   const source = combineDataSources(sources, ["strategies", "strategyVersions"]);
 
   return (
-    <section className="page">
-      <header className="page-header">
-        <h1>策略</h1>
-        <span className="status-pill">{displayLoadState(isLoading, source)}</span>
-      </header>
+    <section className="page strategy-page">
+      <PageHeader
+        title="策略"
+        description="优先查看策略状态、当前版本和 Timeframe；路径与来源追踪按需展开。"
+        status={<StatusBadge label={displayLoadState(isLoading, source)} status={isLoading ? "RUNNING" : source} />}
+      />
       <FallbackNotice
         context="策略列表、状态、timeframe、来源和版本文件路径。"
         error={error}
         isLoading={isLoading}
         source={source}
       />
-      <div className="table-shell strategies-table-shell">
-        <table>
+      <div className="table-shell strategy-list-table-shell">
+        <table className="strategy-list-table">
           <colgroup>
             <col className="strategies-col-name" />
             <col className="strategies-col-status" />
-            <col className="strategies-col-timeframe" />
-            <col className="strategies-col-origin" />
             <col className="strategies-col-version" />
-            <col className="strategies-col-file" />
-            <col className="strategies-col-source" />
+            <col className="strategies-col-timeframe" />
+            <col className="strategies-col-technical" />
           </colgroup>
           <thead>
             <tr>
               <th>名称</th>
               <th>状态</th>
+              <th>当前版本</th>
               <th>Timeframe</th>
-              <th>来源</th>
-              <th>版本</th>
-              <th>文件</th>
-              <th>数据来源</th>
+              <th>路径与来源</th>
             </tr>
           </thead>
           <tbody>
-            {data.strategies.map((strategy) => (
-              <tr key={strategy.id}>
-                <td>
-                  <Link className="table-link" to={`/strategies/${strategy.id}`}>
-                    {strategy.name}
-                  </Link>
-                </td>
-                <td>{displayStatus(strategy.status)}</td>
-                <td>{displayValue(strategy.timeframe)}</td>
-                <td>{strategy.source === "ai_generated" ? "AI 生成" : displayValue(strategy.source)}</td>
-                <td>{strategy.currentVersion?.versionNumber ?? EMPTY_TEXT}</td>
-                <td className="strategy-path-cell" title={strategy.currentVersion?.filePath ?? EMPTY_TEXT}>
-                  {compactPath(strategy.currentVersion?.filePath)}
-                </td>
-                <td className="strategy-source-cell">
-                  <SourceTraceSummary source={strategy.dataSource} />
-                </td>
-              </tr>
-            ))}
+            {data.strategies.map((strategy) => {
+              const availability = strategyAvailability(strategy);
+              const firstValidationError = strategy.currentVersion?.validationErrors[0]?.message;
+              return (
+                <tr data-problem={availability.isProblem ? "true" : "false"} key={strategy.id}>
+                  <td>
+                    <Link
+                      aria-label={`查看策略：${strategy.name}`}
+                      className="table-link strategy-name-link"
+                      to={`/strategies/${strategy.id}`}
+                    >
+                      {strategy.name}
+                    </Link>
+                    <CompactText
+                      className="strategy-name-secondary"
+                      label="策略说明"
+                      value={strategy.description}
+                    />
+                    <CompactText
+                      className="strategy-name-secondary"
+                      label="策略标签"
+                      value={strategy.tags.join(", ") || EMPTY_TEXT}
+                    />
+                  </td>
+                  <td>
+                    <div className="strategy-status-stack">
+                      <StatusBadge showRaw status={strategy.status} />
+                      {availability.isProblem ? (
+                        <CompactText
+                          className="strategy-inline-problem"
+                          label="当前不可用原因"
+                          value={availability.reason}
+                        />
+                      ) : null}
+                    </div>
+                  </td>
+                  <td>
+                    {strategy.currentVersion ? (
+                      <div className="strategy-version-stack">
+                        <strong>v{strategy.currentVersion.versionNumber}</strong>
+                        <StatusBadge showRaw status={strategy.currentVersion.validationStatus} />
+                        {firstValidationError ? (
+                          <CompactText
+                            className="strategy-inline-problem"
+                            label="校验错误"
+                            value={firstValidationError}
+                          />
+                        ) : null}
+                      </div>
+                    ) : (
+                      <StatusBadge label="无当前版本" status="MISSING" />
+                    )}
+                  </td>
+                  <td><strong>{displayValue(strategy.timeframe)}</strong></td>
+                  <td>
+                    <StrategyTechnicalDetails
+                      id={strategy.id}
+                      path={strategy.currentVersion?.filePath}
+                      source={strategy.dataSource}
+                    />
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
-      {data.strategies.length === 0 ? <div className="empty-state">暂无策略。</div> : null}
+      {!isLoading && data.strategies.length === 0 ? (
+        <EmptyState
+          description="当前没有可展示的真实核心策略记录；空结果不代表策略生成成功。"
+          title="暂无真实策略"
+        />
+      ) : null}
     </section>
   );
 }

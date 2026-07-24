@@ -1,29 +1,65 @@
 import { useParams } from "react-router-dom";
 
 import { combineDataSources } from "../api/sourceState";
+import type { DataSourceTraceSummary } from "../api/types";
 import { useMvpData } from "../api/useMvpData";
+import {
+  CompactText,
+  CopyableValue,
+  EmptyState,
+  ExpandableText,
+  PageHeader,
+  StatusBadge,
+} from "../components/DisplayPrimitives";
+import "../styles/strategies.css";
 import { FallbackNotice } from "./FallbackNotice";
-import { SourceMarker } from "./SourceMarker";
-import { EMPTY_TEXT, displayLoadState, displayStatus } from "./uiCopy";
+import {
+  formatDiffLabel,
+  formatDiffValue,
+  formatSourceTrace,
+  formatTraceRecord,
+  strategyAvailability,
+} from "./strategyDisplay";
+import { EMPTY_TEXT, displayLoadState, displayValue } from "./uiCopy";
 
-function formatDiffLabel(label: string) {
-  return label.split("_").join(" ");
-}
-
-function formatDiffValue(value: unknown) {
-  if (Array.isArray(value)) {
-    return value.length > 0 ? value.map((item) => String(item)).join(", ") : EMPTY_TEXT;
-  }
-
-  if (value === null || value === undefined || value === "") {
-    return EMPTY_TEXT;
-  }
-
-  if (typeof value === "object") {
-    return JSON.stringify(value);
-  }
-
-  return String(value);
+function SourceTraceCard({
+  label,
+  source,
+}: {
+  label: string;
+  source: DataSourceTraceSummary | undefined;
+}) {
+  return (
+    <article className="strategy-trace-card" data-core-source={source?.coreData === true ? "true" : "false"}>
+      <div className="strategy-card-heading">
+        <div>
+          <span>{label}</span>
+          <strong>{source?.sourceType ?? "unknown"}</strong>
+        </div>
+        <StatusBadge
+          label={source?.coreData ? "核心数据" : "非核心数据"}
+          status={source?.coreData ? "ACCEPTABLE" : "NOT_ACCEPTABLE"}
+        />
+      </div>
+      {source?.blockedReason ? (
+        <div className="strategy-problem-line" role="alert">
+          <StatusBadge status="BLOCKED" />
+          <CompactText label="来源阻塞原因" value={source.blockedReason} />
+        </div>
+      ) : null}
+      <dl className="strategy-trace-list">
+        <div>
+          <dt>数据库 ID</dt>
+          <dd><CopyableValue label="数据库 ID" value={formatTraceRecord(source?.databaseIds)} /></dd>
+        </div>
+        <div>
+          <dt>Artifact 引用</dt>
+          <dd><CopyableValue label="Artifact 引用" value={formatTraceRecord(source?.artifactRefs)} /></dd>
+        </div>
+      </dl>
+      <ExpandableText summary="查看完整来源追踪" value={formatSourceTrace(source)} />
+    </article>
+  );
 }
 
 export function StrategyDetail() {
@@ -56,75 +92,113 @@ export function StrategyDetail() {
 
   if (!strategy) {
     return (
-      <section className="page">
-        <header className="page-header">
-          <h1>策略详情</h1>
-          <span className="status-pill">{displayLoadState(isLoading, source)}</span>
-        </header>
+      <section className="page strategy-page">
+        <PageHeader
+          title="策略详情"
+          description="查看策略概要、当前版本和可追溯技术证据。"
+          status={<StatusBadge label={displayLoadState(isLoading, source)} status={isLoading ? "RUNNING" : source} />}
+        />
         <FallbackNotice
           context="策略详情查找、当前版本和失败原因。"
           error={error}
           isLoading={isLoading}
           source={source}
         />
-        <div className="empty-state">未找到策略。</div>
+        {isLoading ? (
+          <EmptyState description="正在读取策略与版本信息。" title="正在加载策略" />
+        ) : error ? (
+          <EmptyState description="数据加载失败，当前无法确认该策略是否存在。" title="无法确认策略" />
+        ) : (
+          <EmptyState
+            description={`没有找到 ID 为 ${strategyId ?? EMPTY_TEXT} 的真实核心策略记录。`}
+            title="未找到策略"
+          />
+        )}
       </section>
     );
   }
 
+  const availability = strategyAvailability(strategy);
+  const problemCount = validationErrors.length + failureReasons.length + (strategy.dataSource?.blockedReason ? 1 : 0);
+
   return (
-    <section className="page">
-      <header className="page-header">
-        <h1>{strategy.name}</h1>
-        <span className="status-pill">{displayLoadState(isLoading, source)}</span>
-      </header>
+    <section className="page strategy-page">
+      <PageHeader
+        eyebrow="策略详情"
+        title={strategy.name}
+        description="概要与当前版本优先；来源、谱系和 Diff 可按需审计。"
+        status={
+          <>
+            <StatusBadge showRaw status={strategy.status} />
+            <StatusBadge label={displayLoadState(isLoading, source)} status={isLoading ? "RUNNING" : source} />
+          </>
+        }
+      />
       <FallbackNotice
         context="策略详情、版本谱系、当前版本 diff 和失败原因。"
         error={error}
         isLoading={isLoading}
         source={source}
       />
-      <dl className="detail-list">
+      <section className="strategy-detail-overview" aria-label="策略与当前版本概要">
+        <article className={availability.isProblem ? "strategy-overview-card strategy-overview-problem" : "strategy-overview-card"}>
+          <span>当前是否可用</span>
+          <StatusBadge showRaw status={availability.status} />
+          <p>{availability.reason ?? "当前版本未发现阻塞或校验失败。"}</p>
+        </article>
+        <article className="strategy-overview-card">
+          <span>当前版本</span>
+          {strategy.currentVersion ? (
+            <>
+              <strong>v{strategy.currentVersion.versionNumber}</strong>
+              <StatusBadge showRaw status={strategy.currentVersion.validationStatus} />
+              <CopyableValue label="策略文件路径" value={strategy.currentVersion.filePath} />
+            </>
+          ) : (
+            <>
+              <StatusBadge label="无当前版本" status="MISSING" />
+              <p>尚无可审计的当前版本与策略文件。</p>
+            </>
+          )}
+        </article>
+        <article className="strategy-overview-card">
+          <span>策略概要</span>
+          <strong>{displayValue(strategy.timeframe)}</strong>
+          <p>{strategy.source === "ai_generated" ? "AI 生成" : displayValue(strategy.source)}</p>
+          <CompactText label="策略标签" value={strategy.tags.join(", ") || EMPTY_TEXT} />
+        </article>
+      </section>
+
+      <section className="strategy-description-panel">
         <div>
-          <dt>ID</dt>
-          <dd>{strategy.id}</dd>
+          <span>策略说明</span>
+          <p>{displayValue(strategy.description)}</p>
         </div>
-        <div>
-          <dt>状态</dt>
-          <dd>{displayStatus(strategy.status)}</dd>
-        </div>
-        <div>
-          <dt>Timeframe</dt>
-          <dd>{strategy.timeframe}</dd>
-        </div>
-        <div>
-          <dt>当前版本</dt>
-          <dd>{strategy.currentVersion?.versionNumber ?? EMPTY_TEXT}</dd>
-        </div>
-        <div>
-          <dt>策略文件</dt>
-          <dd>
-            <code>{strategy.currentVersion?.filePath ?? EMPTY_TEXT}</code>
-          </dd>
-        </div>
-        <div>
-          <dt>说明</dt>
-          <dd>{strategy.description}</dd>
-        </div>
-        <div>
-          <dt>标签</dt>
-          <dd>{strategy.tags.join(", ") || EMPTY_TEXT}</dd>
-        </div>
-      </dl>
+        <CopyableValue label="策略 ID" value={strategy.id} />
+      </section>
+
+      {problemCount > 0 ? (
+        <aside className="strategy-problem-banner" role="alert">
+          <StatusBadge status={availability.isProblem ? availability.status : "FAILED"} />
+          <div>
+            <strong>当前版本存在 {problemCount} 项阻塞或失败证据</strong>
+            <p>{availability.reason ?? validationErrors[0]?.message ?? failureReasons[0]?.message}</p>
+          </div>
+        </aside>
+      ) : null}
+
       <section className="detail-section">
         <div className="section-header">
           <h2>数据来源</h2>
-          <span>DB trace</span>
+          <span>按需审计</span>
         </div>
-        <div className="source-grid">
-          <SourceMarker label="strategy" source={strategy.dataSource} />
-          <SourceMarker label="current version" source={currentVersionTrace} />
-        </div>
+        <details className="strategy-section-disclosure">
+          <summary>查看策略与当前版本的来源追踪</summary>
+          <div className="strategy-trace-grid">
+            <SourceTraceCard label="策略" source={strategy.dataSource} />
+            <SourceTraceCard label="当前版本" source={currentVersionTrace} />
+          </div>
+        </details>
       </section>
       <section className="detail-section">
         <div className="section-header">
@@ -132,37 +206,38 @@ export function StrategyDetail() {
           <span>{versionLineage.length}</span>
         </div>
         {versionLineage.length > 0 ? (
-          <ol className="lineage-list">
+          <ol className="strategy-lineage-list">
             {versionLineage.map((entry) => (
               <li
-                className={
-                  entry.id === currentVersionId
-                    ? "lineage-item lineage-item-current"
-                    : "lineage-item"
-                }
+                className={entry.id === currentVersionId ? "strategy-lineage-current" : undefined}
                 key={entry.id}
               >
-                <div className="lineage-heading">
-                  <strong>版本 {entry.versionNumber}</strong>
-                  {entry.id === currentVersionId ? (
-                    <span className="status-pill">当前</span>
-                  ) : null}
-                </div>
-                <dl className="lineage-meta">
-                  <div>
-                    <dt>父版本</dt>
-                    <dd>{entry.parentVersionId ?? EMPTY_TEXT}</dd>
-                  </div>
-                  <div>
-                    <dt>变更</dt>
-                    <dd>{entry.changeSummary ?? "暂无变更摘要。"}</dd>
-                  </div>
-                </dl>
+                <details>
+                  <summary>
+                    <strong>版本 {entry.versionNumber}</strong>
+                    {entry.id === currentVersionId ? <StatusBadge label="当前版本" status="READY" /> : null}
+                    <CompactText label="版本变更摘要" value={entry.changeSummary ?? "暂无变更摘要。"} />
+                  </summary>
+                  <dl className="strategy-lineage-meta">
+                    <div>
+                      <dt>版本 ID</dt>
+                      <dd><CopyableValue label="版本 ID" value={entry.id} /></dd>
+                    </div>
+                    <div>
+                      <dt>父版本 ID</dt>
+                      <dd><CopyableValue label="父版本 ID" value={entry.parentVersionId} /></dd>
+                    </div>
+                    <div>
+                      <dt>完整变更摘要</dt>
+                      <dd><ExpandableText value={entry.changeSummary ?? "暂无变更摘要。"} /></dd>
+                    </div>
+                  </dl>
+                </details>
               </li>
             ))}
           </ol>
         ) : (
-          <div className="empty-state">该策略暂无版本谱系记录。</div>
+          <EmptyState description="该策略尚无可追溯的版本关系。" title="暂无版本谱系" />
         )}
       </section>
       <section className="detail-section">
@@ -171,32 +246,41 @@ export function StrategyDetail() {
           <span>{currentDiffStatus}</span>
         </div>
         {currentLineage ? (
-          <div className="diff-panel">
-            <dl className="lineage-meta">
-              <div>
-                <dt>父版本</dt>
-                <dd>{currentLineage.parentVersionId ?? EMPTY_TEXT}</dd>
-              </div>
-              <div>
-                <dt>摘要</dt>
-                <dd>{currentLineage.changeSummary ?? "暂无 Diff 摘要。"}</dd>
-              </div>
-            </dl>
-            {currentDiffEntries.length > 0 ? (
-              <dl className="diff-grid">
-                {currentDiffEntries.map(([key, value]) => (
-                  <div key={key}>
-                    <dt>{formatDiffLabel(key)}</dt>
-                    <dd>{formatDiffValue(value)}</dd>
-                  </div>
-                ))}
+          <details className="strategy-section-disclosure">
+            <summary>查看当前版本 Diff 与完整变更值</summary>
+            <div className="strategy-diff-panel">
+              <dl className="strategy-lineage-meta">
+                <div>
+                  <dt>父版本 ID</dt>
+                  <dd><CopyableValue label="父版本 ID" value={currentLineage.parentVersionId} /></dd>
+                </div>
+                <div>
+                  <dt>摘要</dt>
+                  <dd><ExpandableText value={currentLineage.changeSummary ?? "暂无 Diff 摘要。"} /></dd>
+                </div>
               </dl>
-            ) : (
-              <div className="empty-state">该版本暂无 Diff 快照。</div>
-            )}
-          </div>
+              {currentDiffEntries.length > 0 ? (
+                <dl className="strategy-diff-grid">
+                  {currentDiffEntries.map(([key, value]) => (
+                    <div key={key}>
+                      <dt>{formatDiffLabel(key)}</dt>
+                      <dd>
+                        <ExpandableText
+                          mono
+                          summary="查看完整变更"
+                          value={formatDiffValue(value)}
+                        />
+                      </dd>
+                    </div>
+                  ))}
+                </dl>
+              ) : (
+                <EmptyState description="当前版本没有记录字段级 Diff。" title="暂无 Diff 快照" />
+              )}
+            </div>
+          </details>
         ) : (
-          <div className="empty-state">当前版本暂无 Diff 数据。</div>
+          <EmptyState description="当前版本没有对应的谱系记录，无法展示 Diff。" title="暂无 Diff 数据" />
         )}
       </section>
       <section className="detail-section">
@@ -205,17 +289,21 @@ export function StrategyDetail() {
           <span>{validationErrors.length}</span>
         </div>
         {validationErrors.length > 0 ? (
-          <ul className="issue-list">
+          <ul className="strategy-issue-list">
             {validationErrors.map((error) => (
               <li key={`${error.field ?? "strategy"}-${error.code ?? error.message}`}>
-                <strong>{error.field ?? "策略"}</strong>
-                <span>{error.message}</span>
-                {error.code ? <code>{error.code}</code> : null}
+                <div className="strategy-card-heading">
+                  <strong>{error.field ?? "策略"}</strong>
+                  <StatusBadge status="FAILED" />
+                </div>
+                <CompactText label="校验错误" value={error.message} />
+                {error.code ? <CopyableValue label="错误代码" value={error.code} /> : null}
+                <ExpandableText summary="查看完整错误" value={error.message} />
               </li>
             ))}
           </ul>
         ) : (
-          <div className="empty-state">该版本暂无校验错误。</div>
+          <EmptyState description="当前版本没有记录校验错误。" title="暂无校验错误" />
         )}
       </section>
       <section className="detail-section">
@@ -224,20 +312,21 @@ export function StrategyDetail() {
           <span>{failureReasons.length}</span>
         </div>
         {failureReasons.length > 0 ? (
-          <ul className="issue-list">
+          <ul className="strategy-issue-list">
             {failureReasons.map((reason) => (
               <li key={reason.id}>
-                <div className="reason-heading">
+                <div className="strategy-card-heading">
                   <strong>{reason.stage}</strong>
-                  <span className={`severity severity-${reason.severity}`}>{displayStatus(reason.severity)}</span>
+                  <StatusBadge showRaw status={reason.severity} />
                 </div>
-                <span>{reason.message}</span>
-                <code>{reason.reasonType}</code>
+                <CompactText label="失败原因" value={reason.message} />
+                <CopyableValue label="原因类型" value={reason.reasonType} />
+                <ExpandableText summary="查看完整失败原因" value={reason.message} />
               </li>
             ))}
           </ul>
         ) : (
-          <div className="empty-state">该版本暂无失败原因记录。</div>
+          <EmptyState description="当前版本没有持久化失败原因。" title="暂无失败原因" />
         )}
       </section>
     </section>
