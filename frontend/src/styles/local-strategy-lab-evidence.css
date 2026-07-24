@@ -1,0 +1,239 @@
+.local-strategy-lab .lab-chain-conclusion {
+  display: grid;
+  gap: 12px;
+  border: 1px solid #cbd8ce;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 16px;
+}
+
+.local-strategy-lab .lab-chain-conclusion__heading {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.local-strategy-lab .lab-chain-conclusion__heading > div {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.local-strategy-lab .lab-chain-conclusion__heading h2 {
+  margin: 0;
+  color: #17201b;
+  font-size: 19px;
+}
+
+.local-strategy-lab .lab-chain-conclusion__eyebrow {
+  color: #52705e;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.local-strategy-lab .lab-chain-conclusion__result {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.local-strategy-lab .lab-chain-conclusion__result > div {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+  border-radius: 7px;
+  background: #f5f8f4;
+  padding: 10px 12px;
+}
+
+.local-strategy-lab .lab-chain-conclusion__result span {
+  color: #657269;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.local-strategy-lab .lab-chain-conclusion__result strong {
+  color: #26342d;
+  line-height: 1.45;
+}
+
+.local-strategy-lab .lab-chain-stages {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+  list-style: none;
+  padding: 0;
+}
+
+.local-strategy-lab .lab-chain-stages > li {
+  display: grid;
+  min-width: 0;
+  align-content: start;
+  gap: 8px;
+  border: 1px solid #d8ded7;
+  border-top: 4px solid #a6b2aa;
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.local-strategy-lab .lab-chain-stages > li[data-acceptable="true"] {
+  border-top-color: #1f6f4a;
+}
+
+.local-strategy-lab .lab-chain-stage__index {
+  display: inline-grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: 50%;
+  background: #edf0eb;
+  color: #526159;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.local-strategy-lab .lab-chain-stages li > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.local-strategy-lab .lab-chain-stages li > div > span {
+  color: #657269;
+  font-size: 11px;
+}
+
+.local-strategy-lab .lab-core-evidence-count {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  border-left: 4px solid #1f6f4a;
+  background: #f5fbf7;
+  padding: 8px 10px;
+}
+
+.local-strategy-lab .lab-core-evidence-count strong {
+  color: #19623b;
+  font-size: 20px;
+}
+
+.local-strategy-lab .lab-core-evidence-count span {
+  color: #526159;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.local-strategy-lab .lab-non-core-diagnostics {
+  min-width: 0;
+  border: 1px solid #e5c37e;
+  border-radius: 8px;
+  background: #fffaf0;
+  padding: 10px;
+}
+
+.local-strategy-lab .lab-non-core-diagnostics > summary,
+.local-strategy-lab .lab-technical-matrix > summary,
+.local-strategy-lab .lab-source-trace > summary {
+  width: fit-content;
+  border-radius: 4px;
+  color: #315a46;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.local-strategy-lab .lab-non-core-diagnostics > summary:focus-visible,
+.local-strategy-lab .lab-technical-matrix > summary:focus-visible,
+.local-strategy-lab .lab-source-trace > summary:focus-visible {
+  outline: 3px solid rgba(31, 111, 74, 0.2);
+  outline-offset: 2px;
+}
+
+.local-strategy-lab .lab-non-core-diagnostics > p {
+  margin: 8px 0;
+  color: #6f4d1f;
+  font-size: 12px;
+}
+
+.local-strategy-lab .lab-source-trace {
+  min-width: 0;
+}
+
+.local-strategy-lab .lab-source-trace > summary {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.local-strategy-lab .lab-source-trace > summary span {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: #fff1d6;
+  color: #79500f;
+  padding: 2px 6px;
+  font-size: 10px;
+}
+
+.local-strategy-lab .lab-source-trace[data-core-source="true"] > summary span {
+  background: #e2f2ea;
+  color: #19623b;
+}
+
+.local-strategy-lab .lab-source-trace > summary strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #26342d;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.local-strategy-lab .lab-source-trace > dl {
+  display: grid;
+  width: min(520px, calc(100vw - 380px));
+  gap: 7px;
+  margin: 8px 0 0;
+  border: 1px solid #d8ded7;
+  border-radius: 7px;
+  background: #f8faf7;
+  padding: 9px;
+}
+
+.local-strategy-lab .lab-source-trace > dl > div {
+  display: grid;
+  grid-template-columns: 104px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.local-strategy-lab .lab-source-trace dt {
+  color: #657269;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.local-strategy-lab .lab-source-trace dd {
+  min-width: 0;
+  margin: 0;
+}
+
+.local-strategy-lab .lab-trace-values {
+  display: grid;
+  gap: 5px;
+}
+
+.local-strategy-lab .lab-technical-matrix {
+  min-width: 0;
+  border: 1px solid #d8ded7;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 10px;
+}
+
+.local-strategy-lab .lab-technical-matrix[open] > summary {
+  margin-bottom: 9px;
+}
