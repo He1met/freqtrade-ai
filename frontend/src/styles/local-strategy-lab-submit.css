@@ -1,0 +1,128 @@
+.local-strategy-lab .lab-form .field-group small {
+  color: #657269;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.45;
+}
+
+.local-strategy-lab .lab-form .inline-check {
+  align-items: flex-start;
+}
+
+.local-strategy-lab .lab-form .inline-check > span {
+  display: grid;
+  gap: 3px;
+}
+
+.local-strategy-lab .lab-form .inline-check small {
+  color: #657269;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.local-strategy-lab .lab-submit-timeout-note {
+  margin: 0;
+  border-left: 3px solid #9ab09f;
+  color: #526159;
+  font-size: 12px;
+  line-height: 1.5;
+  padding-left: 9px;
+}
+
+.local-strategy-lab .lab-submit-status {
+  gap: 12px;
+}
+
+.local-strategy-lab .lab-submit-status__heading {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+}
+
+.local-strategy-lab .lab-submit-status__heading > div {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.local-strategy-lab .lab-submit-status__heading p {
+  margin: 0;
+  color: #526159;
+  line-height: 1.5;
+}
+
+.local-strategy-lab .lab-submit-status__summary {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.7fr) minmax(130px, 0.6fr) minmax(300px, 1.7fr);
+  gap: 8px;
+  margin: 0;
+}
+
+.local-strategy-lab .lab-submit-status__summary > div {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+  border: 1px solid #e4e8e3;
+  border-radius: 7px;
+  background: #f8faf7;
+  padding: 10px;
+}
+
+.local-strategy-lab .lab-submit-status__summary dt {
+  color: #657269;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.local-strategy-lab .lab-submit-status__summary dd {
+  margin: 0;
+  color: #26342d;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.local-strategy-lab .lab-submit-status__details {
+  min-width: 0;
+  border-top: 1px solid #e4e8e3;
+  padding-top: 9px;
+}
+
+.local-strategy-lab .lab-submit-status__details > summary {
+  width: fit-content;
+  border-radius: 4px;
+  color: #1f6f4a;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.local-strategy-lab .lab-submit-status__details > summary:focus-visible {
+  outline: 3px solid rgba(31, 111, 74, 0.2);
+  outline-offset: 2px;
+}
+
+.local-strategy-lab .lab-submit-status__details > dl {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0 0;
+}
+
+.local-strategy-lab .lab-submit-status__details > dl > div {
+  display: grid;
+  grid-template-columns: 130px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.local-strategy-lab .lab-submit-status__details dt {
+  color: #657269;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.local-strategy-lab .lab-submit-status__details dd {
+  min-width: 0;
+  margin: 0;
+}

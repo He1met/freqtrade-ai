@@ -1,24 +1,24 @@
-import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 
 import { StrategyGenerationApiError, createStrategyGenerationRun } from "../api/client";
 import { combineDataSources } from "../api/sourceState";
 import { useMvpData } from "../api/useMvpData";
 import type { StrategyGenerationApiResult } from "../api/types";
-import { EMPTY_TEXT } from "./uiCopy";
+import { PageHeader, StatusBadge } from "../components/DisplayPrimitives";
+import "../styles/local-strategy-lab-submit.css";
 import {
   type SubmissionState,
   isCoreGenerationResult,
   PersistentEvidence,
   ResultDetails,
-  submissionMessage,
-  submissionStatus,
 } from "./localStrategyLab/EvidencePanels";
 import { SubmissionStatusPanel } from "./localStrategyLab/SubmissionStatusPanel";
 import { createActionEvidence } from "./localStrategyLab/actionEvidence";
+import { submissionDisplayModel } from "./localStrategyLab/submissionDisplay";
 import { useActionEvidence } from "./localStrategyLab/useActionEvidence";
 
 const DEFAULT_IDEA =
-  "Build a local dry-run only RSI mean reversion strategy with conservative risk checks and no live trading assumptions.";
+  "构建一个仅用于本地 Dry-run 的 RSI 均值回归策略，包含保守风险检查，不假设或启用实盘交易。";
 export function LocalStrategyLab() {
   const [idea, setIdea] = useState(DEFAULT_IDEA);
   const requestedCount = 1 as const;
@@ -30,32 +30,8 @@ export function LocalStrategyLab() {
   const { history, record: recordAction } = useActionEvidence();
   const controllerRef = useRef<AbortController | null>(null);
   const isSubmitting = submission.kind === "submitting";
-  const currentStatus = submissionStatus(submission);
+  const submissionDisplay = submissionDisplayModel(submission);
   const currentResult = submission.kind === "success" || submission.kind === "blocked" ? submission.result : undefined;
-
-  const statusRows = useMemo<Array<[string, string]>>(
-    () => [
-      ["状态", currentStatus.title],
-      ["核心成功", submission.kind === "success" ? "是" : "否"],
-      [
-        "run id",
-        submission.kind === "success"
-          ? submission.result.run.id
-          : submission.kind === "blocked"
-            ? submission.result?.run.id ?? submission.runId ?? EMPTY_TEXT
-          : submission.kind === "failed"
-            ? submission.runId ?? EMPTY_TEXT
-            : EMPTY_TEXT,
-      ],
-      [
-        "错误 / 阻塞原因",
-        submission.kind === "failed" || submission.kind === "blocked" || submission.kind === "unauthorized"
-          ? submission.message
-          : EMPTY_TEXT,
-      ],
-    ],
-    [currentStatus.title, submission],
-  );
 
   useEffect(() => {
     return () => {
@@ -99,6 +75,8 @@ export function LocalStrategyLab() {
     controllerRef.current?.abort();
     controllerRef.current = controller;
     setSubmission({ kind: "submitting", promptSummary, requestedCount });
+    const authorizeThisRequest = authorizeRealProvider;
+    setAuthorizeRealProvider(false);
     recordAction(createActionEvidence({
       action: "生成策略", status: "RUNNING", message: "正在提交本地策略生成请求。",
       nextAction: "等待 backend API/DB 响应。", recommendBug: false, updatedAt: new Date().toISOString(),
@@ -110,7 +88,7 @@ export function LocalStrategyLab() {
           promptSummary,
           requestedCount,
           operatorToken,
-          authorizeRealProvider,
+          authorizeRealProvider: authorizeThisRequest,
         },
         controller.signal,
       );
@@ -214,12 +192,35 @@ export function LocalStrategyLab() {
     }
   }
 
+  function handleCancel() {
+    controllerRef.current?.abort();
+    controllerRef.current = null;
+    const message = "已取消等待本次请求；尚未确认是否存在持久生成记录。";
+    setSubmission({ kind: "blocked", message });
+    recordAction(createActionEvidence({
+      action: "生成策略",
+      status: "BLOCKED",
+      message,
+      nextAction: "刷新下方持久证据；确认没有进行中的记录后再决定是否重试。",
+      recommendBug: false,
+      updatedAt: new Date().toISOString(),
+    }));
+  }
+
   return (
     <section className="page local-strategy-lab">
-      <header className="page-header">
-        <h1>Local Strategy Lab</h1>
-        <span className={`run-status ${currentStatus.className}`}>{currentStatus.label}</span>
-      </header>
+      <PageHeader
+        description="输入策略约束并提交本地生成请求；只有完整 API/DB 持久证据才会显示为成功。"
+        status={
+          <StatusBadge
+            label={submissionDisplay.label}
+            showRaw
+            status={submissionDisplay.status}
+            tone={submissionDisplay.tone}
+          />
+        }
+        title="本地策略实验室（Local Strategy Lab）"
+      />
 
       <aside className="notice lab-safety-notice" role="status">
         本页只提交本地策略生成请求；不连接交易所、不启动 live trading、不下真实订单，也不表示生产就绪。
@@ -227,7 +228,8 @@ export function LocalStrategyLab() {
 
       <form className="lab-form" onSubmit={handleSubmit}>
         <label className="field-group" htmlFor="strategy-idea">
-          <span>Strategy idea</span>
+          <span>策略构想（Strategy idea）</span>
+          <small>描述入场、退出、风险和运行边界；不要粘贴 API key、token 或其他凭据。</small>
           <textarea
             id="strategy-idea"
             maxLength={4000}
@@ -240,7 +242,8 @@ export function LocalStrategyLab() {
         </label>
         <div className="lab-form-actions">
           <label className="field-group compact-field" htmlFor="requested-count">
-            <span>requested_count</span>
+            <span>请求数量（requested_count）</span>
+            <small>当前单次固定生成 1 个策略。</small>
             <input
               disabled
               id="requested-count"
@@ -251,7 +254,8 @@ export function LocalStrategyLab() {
             />
           </label>
           <label className="field-group compact-field" htmlFor="operator-token">
-            <span>operator token</span>
+            <span>操作授权令牌（operator token）</span>
+            <small>仅用于本地请求；页面不回显，也不写入浏览器存储。</small>
             <input
               autoComplete="off"
               id="operator-token"
@@ -268,20 +272,31 @@ export function LocalStrategyLab() {
               onChange={(event) => setAuthorizeRealProvider(event.currentTarget.checked)}
               type="checkbox"
             />
-            <span>仅授权一次真实 Provider 尝试</span>
+            <span>
+              授权本次请求尝试真实 Provider
+              <small>提交后自动取消勾选；不授权交易、Dry-run 或实盘操作。</small>
+            </span>
           </label>
-          <button className="primary-button" disabled={isSubmitting || !idea.trim() || !operatorToken} type="submit">
+          <button
+            aria-busy={isSubmitting}
+            className="primary-button"
+            disabled={isSubmitting || !idea.trim() || !operatorToken}
+            type="submit"
+          >
             {isSubmitting ? "提交中" : "提交生成"}
           </button>
+          {isSubmitting ? (
+            <button className="secondary-button" onClick={handleCancel} type="button">
+              取消等待
+            </button>
+          ) : null}
         </div>
+        <p className="lab-submit-timeout-note">
+          请求取消或网络超时不会显示为成功；请刷新下方证据区核对是否已经产生持久记录。
+        </p>
       </form>
 
-      <SubmissionStatusPanel
-        message={submissionMessage(submission)}
-        rows={statusRows}
-        status={currentStatus}
-        submission={submission}
-      />
+      <SubmissionStatusPanel submission={submission} />
 
       <PersistentEvidence
         data={snapshot.data}
