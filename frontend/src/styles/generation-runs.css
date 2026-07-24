@@ -1,0 +1,119 @@
+.generation-runs-page .generation-runs-table-shell {
+  overflow-x: hidden;
+}
+
+.generation-runs-page .generation-runs-table-shell table {
+  width: 100%;
+  table-layout: fixed;
+}
+
+.generation-runs-page .generation-runs-col-status {
+  width: 24%;
+}
+
+.generation-runs-page .generation-runs-col-model {
+  width: 17%;
+}
+
+.generation-runs-page .generation-runs-col-output {
+  width: 22%;
+}
+
+.generation-runs-page .generation-runs-col-time {
+  width: 15%;
+}
+
+.generation-runs-page .generation-runs-col-detail {
+  width: 22%;
+}
+
+.generation-runs-page .generation-runs-table-shell th,
+.generation-runs-page .generation-runs-table-shell td {
+  min-width: 0;
+  overflow: visible;
+  vertical-align: middle;
+  white-space: normal;
+}
+
+.generation-runs-page .generation-runs-status-cell,
+.generation-runs-page .generation-runs-model,
+.generation-runs-page .generation-runs-detail,
+.generation-runs-page .generation-runs-time {
+  display: grid;
+  min-width: 0;
+  gap: 7px;
+}
+
+.generation-runs-page .generation-runs-conclusion {
+  max-width: 100%;
+  color: #526159;
+  font-size: 12px;
+}
+
+.generation-runs-page .generation-runs-model strong,
+.generation-runs-page .generation-runs-model span {
+  min-width: 0;
+}
+
+.generation-runs-page .generation-runs-model span {
+  color: #657269;
+  font-size: 12px;
+}
+
+.generation-runs-page .generation-runs-counts {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 5px;
+  margin: 0;
+}
+
+.generation-runs-page .generation-runs-counts div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  border-radius: 6px;
+  background: #f2f5f1;
+  padding: 6px 4px;
+  text-align: center;
+}
+
+.generation-runs-page .generation-runs-counts div[data-count-alert="true"] {
+  background: #ffe8e8;
+  color: #941b1b;
+}
+
+.generation-runs-page .generation-runs-counts dt {
+  color: #657269;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.generation-runs-page .generation-runs-counts dd {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 800;
+}
+
+.generation-runs-page .generation-runs-time span,
+.generation-runs-page .generation-runs-no-error {
+  color: #657269;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.generation-runs-page .generation-runs-time strong {
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.generation-runs-page .generation-runs-detail .copyable-value {
+  width: 100%;
+}
+
+.generation-runs-page .generation-runs-error summary {
+  color: #9d1c1c;
+}
+
+.generation-runs-page .generation-runs-error .expandable-text-content {
+  width: min(520px, calc(100vw - 380px));
+}
