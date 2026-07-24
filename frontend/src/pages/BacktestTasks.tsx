@@ -1,183 +1,117 @@
 import { combineDataSources } from "../api/sourceState";
-import type { DataSourceTraceSummary } from "../api/types";
 import { useMvpData } from "../api/useMvpData";
 import {
-  metricRows,
-  reasonText,
-  statusClassName,
-  summarizeText,
-} from "./backtestDisplay";
+  EmptyState,
+  PageHeader,
+  StatusBadge,
+} from "../components/DisplayPrimitives";
+import "../styles/backtests.css";
+import { reasonText } from "./backtestDisplay";
 import {
-  emptyBacktestMetrics,
   findBacktestResultForTask,
   missingBacktestResultReason,
 } from "./backtestResultLookup";
+import {
+  BacktestResultMetrics,
+  BacktestTechnicalDetails,
+} from "./BacktestViewParts";
 import { FallbackNotice } from "./FallbackNotice";
-import { EMPTY_TEXT, displayLoadState, displayStatus } from "./uiCopy";
-
-function formatRecord(record: Record<string, number | string> | undefined): string {
-  const entries = Object.entries(record ?? {});
-  return entries.length > 0 ? entries.map(([key, value]) => `${key}: ${value}`).join(", ") : EMPTY_TEXT;
-}
-
-function compactSourceTitle(source: DataSourceTraceSummary | undefined): string {
-  if (!source) {
-    return "Source metadata was not provided.";
-  }
-  return [
-    `source_type: ${source.sourceType}`,
-    `core_data: ${source.coreData}`,
-    `database_ids: ${formatRecord(source.databaseIds)}`,
-    `artifact_refs: ${formatRecord(source.artifactRefs)}`,
-    `detail: ${source.sourceDetail}`,
-    source.blockedReason ? `blocked: ${source.blockedReason}` : null,
-  ]
-    .filter(Boolean)
-    .join(" | ");
-}
-
-function BacktestSourceSummary({ source }: { source: DataSourceTraceSummary | undefined }) {
-  const databaseCount = Object.keys(source?.databaseIds ?? {}).length;
-  const artifactCount = Object.keys(source?.artifactRefs ?? {}).length;
-  return (
-    <div
-      className="backtest-source-summary"
-      data-core-source={source?.coreData === true ? "true" : "false"}
-      title={compactSourceTitle(source)}
-    >
-      <div className="backtest-source-heading">
-        <strong>{source?.sourceType ?? "unknown"}</strong>
-        <span>{source?.coreData ? "core" : "non-core"}</span>
-      </div>
-      <span>{source?.blockedReason ?? source?.sourceDetail ?? "Source metadata was not provided."}</span>
-      <em>
-        db {databaseCount} / artifacts {artifactCount}
-      </em>
-    </div>
-  );
-}
-
-function CompactPath({ label, value }: { label?: string; value: string }) {
-  return (
-    <span className="compact-path" title={value}>
-      {label ? `${label}: ` : ""}
-      {value}
-    </span>
-  );
-}
+import { EMPTY_TEXT, displayLoadState } from "./uiCopy";
 
 export function BacktestTasks() {
   const { data, sources, isLoading, error } = useMvpData();
   const source = combineDataSources(sources, ["backtestTasks", "backtestResults"]);
 
   return (
-    <section className="page">
-      <header className="page-header">
-        <h1>回测任务</h1>
-        <span className="status-pill">{displayLoadState(isLoading, source)}</span>
-      </header>
+    <section className="page backtest-page">
+      <PageHeader
+        description="按任务核对交易参数、执行状态与真实持久化结果。"
+        eyebrow="研究与验证"
+        status={<StatusBadge label={displayLoadState(isLoading, source)} status={isLoading ? "running" : source} />}
+        title="回测任务"
+      />
       <FallbackNotice
         context="回测任务、artifact manifest、指标、Result 路径和 stdout/stderr 摘要。"
         error={error}
         isLoading={isLoading}
         source={source}
       />
-      <div className="table-shell backtest-table-shell">
-        <table>
-          <colgroup>
-            <col className="backtest-col-id" />
-            <col className="backtest-col-id" />
-            <col className="backtest-col-strategy" />
-            <col className="backtest-col-pair" />
-            <col className="backtest-col-timeframe" />
-            <col className="backtest-col-status" />
-            <col className="backtest-col-artifact" />
-            <col className="backtest-col-metrics" />
-            <col className="backtest-col-path" />
-            <col className="backtest-col-path" />
-            <col className="backtest-col-source" />
-            <col className="backtest-col-reason" />
-            <col className="backtest-col-log" />
-          </colgroup>
-          <thead>
-            <tr>
-              <th>任务</th>
-              <th>批次</th>
-              <th>策略</th>
-              <th>Pair</th>
-              <th>Timeframe</th>
-              <th>状态</th>
-              <th>Artifact</th>
-              <th>指标</th>
-              <th>Config</th>
-              <th>Result</th>
-              <th>数据来源</th>
-              <th>原因</th>
-              <th>Stdout/Stderr</th>
-            </tr>
-          </thead>
-          <tbody>
-            {data.backtestTasks.map((task) => {
-              const artifact = task.artifactManifest;
-              const artifactStatus = artifact?.status ?? task.status;
-              const result = findBacktestResultForTask(data.backtestResults, task.id);
-              const recordedReason = reasonText(task.blockedReason, task.failedReason, task.errorMessage);
-              const reason = recordedReason === EMPTY_TEXT && !result ? missingBacktestResultReason("任务") : recordedReason;
-              return (
-                <tr key={task.id}>
-                  <td>{task.id}</td>
-                  <td>{task.runId}</td>
-                  <td>{task.strategyName}</td>
-                  <td>{task.pair}</td>
-                  <td>{task.timeframe}</td>
-                  <td>
-                    <span className={`run-status ${statusClassName(task.status)}`}>
-                      {displayStatus(task.status)}
-                    </span>
-                  </td>
-                  <td className="artifact-cell">
-                    <span className={`run-status ${statusClassName(artifactStatus)}`}>
-                      {displayStatus(artifactStatus)}
-                    </span>
-                    <span>return：{artifact?.returnCode ?? EMPTY_TEXT}</span>
-                    <CompactPath label="manifest" value={artifact?.manifestPath ?? EMPTY_TEXT} />
-                  </td>
-                  <td className="metric-summary">
-                    <span>
-                      <strong>结果</strong>
-                      {result?.id ?? EMPTY_TEXT}
-                    </span>
-                    {metricRows(result?.metrics ?? emptyBacktestMetrics()).map(([label, value]) => (
-                      <span key={label}>
-                        <strong>{label}</strong>
-                        {value}
+
+      {!isLoading && data.backtestTasks.length > 0 ? (
+        <div className="table-shell">
+          <table className="backtest-desktop-table">
+            <colgroup>
+              <col className="backtest-col-status-main" />
+              <col className="backtest-col-strategy-main" />
+              <col className="backtest-col-market-main" />
+              <col className="backtest-col-profile-main" />
+              <col className="backtest-col-result-main" />
+              <col className="backtest-col-details-main" />
+            </colgroup>
+            <thead>
+              <tr>
+                <th>状态</th>
+                <th>策略</th>
+                <th>Pair / Timeframe</th>
+                <th>Profile</th>
+                <th>真实 BacktestResult 指标</th>
+                <th>技术详情</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.backtestTasks.map((task) => {
+                const run = data.backtestRuns.find((item) => item.id === task.runId);
+                const result = findBacktestResultForTask(data.backtestResults, task.id);
+                const reason = reasonText(task.blockedReason, task.failedReason, task.errorMessage);
+                const visibleReason =
+                  reason === EMPTY_TEXT && !result
+                    ? missingBacktestResultReason("任务")
+                    : reason;
+
+                return (
+                  <tr key={task.id}>
+                    <td><StatusBadge showRaw status={task.status} /></td>
+                    <td>
+                      <span className="backtest-primary-value" title={task.strategyName}>
+                        {task.strategyName}
                       </span>
-                    ))}
-                  </td>
-                  <td className="path-cell" title={task.configPath ?? EMPTY_TEXT}>
-                    <CompactPath value={task.configPath ?? EMPTY_TEXT} />
-                  </td>
-                  <td className="path-cell" title={task.resultPath ?? artifact?.resultPath ?? EMPTY_TEXT}>
-                    <CompactPath value={result?.resultPath ?? task.resultPath ?? artifact?.resultPath ?? EMPTY_TEXT} />
-                  </td>
-                  <td className="source-cell">
-                    <BacktestSourceSummary source={result?.dataSource ?? task.dataSource} />
-                  </td>
-                  <td className="reason-cell" title={reason}>
-                    {reason}
-                  </td>
-                  <td className="log-cell">
-                    <span title={artifact?.stdout ?? EMPTY_TEXT}>stdout: {summarizeText(artifact?.stdout)}</span>
-                    <span title={artifact?.stderr ?? EMPTY_TEXT}>stderr: {summarizeText(artifact?.stderr)}</span>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-      {data.backtestTasks.length === 0 ? (
-        <div className="empty-state">暂无 database-backed 回测任务；缺少前置条件时应显示 BLOCKED 原因。</div>
+                      <span className="backtest-secondary-value">任务 #{task.id}</span>
+                    </td>
+                    <td>
+                      <span className="backtest-primary-value">{task.pair}</span>
+                      <span className="backtest-secondary-value">{task.timeframe}</span>
+                    </td>
+                    <td>{run?.profileName ?? EMPTY_TEXT}</td>
+                    <td>
+                      <BacktestResultMetrics
+                        result={result}
+                        status={task.artifactManifest?.status ?? task.status}
+                      />
+                    </td>
+                    <td>
+                      <BacktestTechnicalDetails
+                        artifact={task.artifactManifest}
+                        configPath={task.configPath}
+                        id={task.id}
+                        reason={visibleReason}
+                        resultPath={result?.resultPath ?? task.resultPath ?? task.artifactManifest?.resultPath ?? null}
+                        source={result?.dataSource ?? task.dataSource}
+                        status={task.status}
+                      />
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+
+      {!isLoading && data.backtestTasks.length === 0 ? (
+        <EmptyState
+          description="当前没有来自数据库的核心回测任务。缺少前置条件时应先处理 BLOCKED 原因。"
+          title="暂无真实回测任务"
+        />
       ) : null}
     </section>
   );
