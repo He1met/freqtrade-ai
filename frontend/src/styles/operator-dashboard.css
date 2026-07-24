@@ -1,0 +1,330 @@
+.operator-dashboard-page {
+  gap: 18px;
+}
+
+.operator-dashboard-page .display-page-header {
+  align-items: flex-end;
+}
+
+.operator-conclusion {
+  align-items: center;
+  background: linear-gradient(115deg, rgba(33, 163, 111, 0.16), rgba(15, 23, 42, 0.94));
+  border: 1px solid rgba(65, 214, 154, 0.34);
+  border-radius: 18px;
+  display: flex;
+  justify-content: space-between;
+  padding: 20px 22px;
+}
+
+.operator-conclusion.is-problem {
+  background: linear-gradient(115deg, rgba(194, 65, 65, 0.22), rgba(15, 23, 42, 0.96));
+  border-color: rgba(247, 112, 112, 0.48);
+}
+
+.operator-conclusion-label,
+.operator-summary-card > span:first-child,
+.operator-boundary-banner > div > span:first-child {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.operator-conclusion h2 {
+  font-size: 1.45rem;
+  margin: 5px 0;
+}
+
+.operator-conclusion p,
+.operator-boundary-banner p {
+  color: var(--muted);
+  margin: 0;
+}
+
+.operator-summary-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.operator-summary-card {
+  background: rgba(15, 23, 42, 0.76);
+  border: 1px solid var(--border);
+  border-radius: 15px;
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 15px 16px;
+}
+
+.operator-summary-card.is-problem {
+  border-color: rgba(247, 112, 112, 0.42);
+}
+
+.operator-summary-card > strong {
+  font-size: 1.3rem;
+}
+
+.operator-secondary {
+  color: var(--muted);
+  display: block;
+  font-size: 0.78rem;
+  margin-top: 5px;
+}
+
+.operator-boundary-banner {
+  align-items: center;
+  background: rgba(28, 83, 67, 0.22);
+  border: 1px solid rgba(65, 214, 154, 0.28);
+  border-radius: 15px;
+  display: flex;
+  gap: 24px;
+  justify-content: space-between;
+  padding: 15px 18px;
+}
+
+.operator-boundary-banner.is-problem,
+.operator-primary-blocker,
+.operator-inline-alert {
+  background: rgba(142, 41, 41, 0.19);
+  border-color: rgba(247, 112, 112, 0.45);
+}
+
+.operator-boundary-banner strong {
+  display: block;
+  margin: 4px 0;
+}
+
+.operator-boundary-source {
+  align-items: flex-end;
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 310px;
+  gap: 6px;
+  min-width: 0;
+}
+
+.operator-primary-blocker,
+.operator-inline-alert {
+  align-items: flex-start;
+  border: 1px solid rgba(247, 112, 112, 0.45);
+  border-radius: 13px;
+  display: flex;
+  gap: 12px;
+  padding: 13px 15px;
+}
+
+.operator-primary-blocker p,
+.operator-inline-alert span {
+  color: var(--muted);
+  margin: 4px 0 0;
+}
+
+.operator-section,
+.operator-detail-group {
+  background: rgba(15, 23, 42, 0.66);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+}
+
+.operator-section {
+  padding: 18px;
+}
+
+.operator-section-heading {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 13px;
+}
+
+.operator-section-heading h2,
+.operator-section-heading p {
+  margin: 0;
+}
+
+.operator-section-heading p,
+.operator-detail-group summary small {
+  color: var(--muted);
+  display: block;
+  font-size: 0.78rem;
+  font-weight: 400;
+  margin-top: 3px;
+}
+
+.operator-detail-group > summary {
+  align-items: center;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  list-style-position: inside;
+  padding: 15px 18px;
+}
+
+.operator-detail-content {
+  border-top: 1px solid var(--border);
+  display: grid;
+  gap: 14px;
+  padding: 16px 18px 18px;
+}
+
+.operator-runtime-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.operator-runtime-card {
+  background: rgba(30, 41, 59, 0.56);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 13px;
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 13px;
+}
+
+.operator-runtime-card.is-problem,
+.operator-problem-row td {
+  background: rgba(125, 40, 40, 0.12);
+}
+
+.operator-runtime-card.is-problem {
+  border-color: rgba(247, 112, 112, 0.32);
+}
+
+.operator-card-heading,
+.operator-event-heading {
+  align-items: center;
+  display: flex;
+  gap: 9px;
+  justify-content: space-between;
+}
+
+.operator-card-heading h3,
+.operator-runtime-card p {
+  margin: 0;
+}
+
+.operator-card-reason,
+.operator-problem-reason {
+  color: #ffb7b7;
+}
+
+.operator-source-ref {
+  color: var(--muted);
+}
+
+.operator-contract-facts,
+.operator-safety-list {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0;
+}
+
+.operator-contract-facts > div,
+.operator-safety-list > div {
+  background: rgba(30, 41, 59, 0.48);
+  border-radius: 10px;
+  min-width: 0;
+  padding: 10px 12px;
+}
+
+.operator-contract-facts dt,
+.operator-safety-list dt {
+  color: var(--muted);
+  font-size: 0.75rem;
+  margin-bottom: 5px;
+}
+
+.operator-contract-facts dd,
+.operator-safety-list dd {
+  margin: 0;
+}
+
+.operator-diagnostic-table-shell table,
+.operator-artifact-table-shell table {
+  table-layout: fixed;
+  width: 100%;
+}
+
+.operator-diagnostic-table-shell th,
+.operator-diagnostic-table-shell td,
+.operator-artifact-table-shell th,
+.operator-artifact-table-shell td {
+  padding: 11px 10px;
+  vertical-align: top;
+}
+
+.operator-col-check {
+  width: 19%;
+}
+
+.operator-col-status {
+  width: 14%;
+}
+
+.operator-col-source {
+  width: 16%;
+}
+
+.operator-col-evidence {
+  width: 23%;
+}
+
+.operator-col-reason {
+  width: 28%;
+}
+
+.operator-healthy-copy {
+  color: var(--muted);
+}
+
+.operator-env-list {
+  display: grid;
+  gap: 8px;
+}
+
+.operator-env-row {
+  align-items: center;
+  background: rgba(30, 41, 59, 0.48);
+  border-radius: 10px;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(230px, 1.4fr) minmax(140px, 0.8fr) 70px minmax(130px, 0.8fr);
+  padding: 10px 12px;
+}
+
+.operator-event-list {
+  display: grid;
+  gap: 10px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.operator-event-list > li {
+  background: rgba(30, 41, 59, 0.48);
+  border: 1px solid transparent;
+  border-radius: 12px;
+  display: grid;
+  gap: 8px;
+  padding: 13px;
+}
+
+.operator-event-list > li.is-problem {
+  border-color: rgba(247, 112, 112, 0.35);
+}
+
+.operator-event-list p {
+  margin: 0;
+}
+
+.operator-event-meta {
+  color: var(--muted);
+  display: flex;
+  gap: 24px;
+  font-size: 0.8rem;
+}
