@@ -1,0 +1,181 @@
+/* Issue #396: desktop-only shell and dashboard refinements. */
+
+.desktop-nav {
+  gap: 1.15rem;
+}
+
+.desktop-nav-section {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.desktop-nav-section h2 {
+  margin: 0;
+  padding: 0 0.75rem;
+  color: #94a3b8;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  line-height: 1.4;
+  text-transform: uppercase;
+}
+
+.desktop-nav-links {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.desktop-nav-links a {
+  position: relative;
+}
+
+.desktop-nav-links a.active::before {
+  position: absolute;
+  top: 50%;
+  left: 0.25rem;
+  width: 3px;
+  height: 1.1rem;
+  border-radius: 999px;
+  background: #67e8f9;
+  content: "";
+  transform: translateY(-50%);
+}
+
+.desktop-nav-links a:focus-visible {
+  outline: 3px solid rgba(103, 232, 249, 0.48);
+  outline-offset: 2px;
+}
+
+.dashboard-page {
+  gap: 1.35rem;
+}
+
+.dashboard-state-panel {
+  min-height: 10rem;
+}
+
+.dashboard-loading-state {
+  border-color: #bae6fd;
+  background: linear-gradient(135deg, #f0f9ff, #ffffff);
+}
+
+.dashboard-failed-state {
+  border-color: #fecaca;
+  background: linear-gradient(135deg, #fef2f2, #ffffff);
+}
+
+.dashboard-section-heading {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 1.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.dashboard-section-heading div {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.dashboard-section-heading span,
+.dashboard-panel-label {
+  color: #64748b;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.dashboard-section-heading h2,
+.dashboard-section-heading p,
+.dashboard-panel-label {
+  margin: 0;
+}
+
+.dashboard-section-heading h2 {
+  color: #0f172a;
+  font-size: 1.05rem;
+}
+
+.dashboard-section-heading p {
+  color: #64748b;
+  font-size: 0.8rem;
+}
+
+.dashboard-metric-grid .metric {
+  position: relative;
+  overflow: hidden;
+}
+
+.dashboard-metric-grid .metric::after {
+  position: absolute;
+  right: -1.5rem;
+  bottom: -2rem;
+  width: 5rem;
+  height: 5rem;
+  border-radius: 999px;
+  background: rgba(14, 165, 233, 0.08);
+  content: "";
+}
+
+.dashboard-overview-grid {
+  align-items: stretch;
+}
+
+.dashboard-overview-grid .overview-panel {
+  display: grid;
+  align-content: start;
+  gap: 0.5rem;
+}
+
+.dashboard-primary-panel {
+  border-color: #bae6fd;
+  background: linear-gradient(135deg, #f0f9ff, #ffffff 70%);
+}
+
+.dashboard-overview-grid .overview-panel strong {
+  color: #0f172a;
+}
+
+.not-found-page {
+  gap: 1.25rem;
+}
+
+.not-found-panel {
+  align-items: start;
+  justify-items: start;
+  min-height: 20rem;
+  padding: 2.5rem;
+  background:
+    radial-gradient(circle at top right, rgba(14, 165, 233, 0.12), transparent 34%),
+    #ffffff;
+}
+
+.not-found-code {
+  color: #0284c7;
+  font-size: 3.5rem;
+  font-weight: 800;
+  letter-spacing: -0.06em;
+  line-height: 1;
+}
+
+.not-found-panel h2 {
+  margin: 0;
+  color: #0f172a;
+  font-size: 1.45rem;
+}
+
+.not-found-path {
+  display: grid;
+  gap: 0.35rem;
+  width: min(100%, 36rem);
+  padding: 0.8rem 1rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.7rem;
+  background: #f8fafc;
+}
+
+.not-found-path > span:first-child {
+  color: #64748b;
+  font-size: 0.72rem;
+  font-weight: 700;
+}

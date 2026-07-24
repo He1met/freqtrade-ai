@@ -1,25 +1,15 @@
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 
-const navItems = [
-  { to: "/", label: "总览" },
-  { to: "/strategies", label: "策略" },
-  { to: "/generation-runs", label: "生成批次" },
-  { to: "/local-strategy-lab", label: "Local Strategy Lab" },
-  { to: "/backtest-runs", label: "回测批次" },
-  { to: "/backtest-tasks", label: "回测任务" },
-  { to: "/hyperopt-runs", label: "Hyperopt 参数优化" },
-  { to: "/live-governance", label: "实盘候选治理" },
-  { to: "/operator-dashboard", label: "运维面板" },
-  { to: "/ranking", label: "策略排行榜" },
-  { to: "/freq-ui", label: "Dry-run / FreqUI" },
-];
+import "./../styles/dashboard-shell.css";
+import {
+  navigationItems,
+  navigationLabelForPath,
+  navigationSections,
+} from "./navigation";
 
 export function AppLayout() {
   const { pathname } = useLocation();
-  const currentItem =
-    navItems.find((item) =>
-      item.to === "/" ? pathname === "/" : pathname === item.to || pathname.startsWith(`${item.to}/`),
-    ) ?? { label: "未找到页面" };
+  const currentLabel = navigationLabelForPath(pathname);
 
   return (
     <div className="app-shell">
@@ -29,17 +19,24 @@ export function AppLayout() {
           <span>Freqtrade AI</span>
         </div>
         <nav className="nav-list desktop-nav" aria-label="主导航">
-          {navItems.map((item) => (
-            <NavLink key={item.to} to={item.to} end={item.to === "/"}>
-              {item.label}
-            </NavLink>
+          {navigationSections.map((section) => (
+            <section className="desktop-nav-section" key={section.label}>
+              <h2>{section.label}</h2>
+              <div className="desktop-nav-links">
+                {section.items.map((item) => (
+                  <NavLink key={item.to} to={item.to} end={item.to === "/"}>
+                    {item.label}
+                  </NavLink>
+                ))}
+              </div>
+            </section>
           ))}
         </nav>
         <details className="mobile-nav">
-          <summary aria-label={`打开主导航，当前页面：${currentItem.label}`}>
+          <summary aria-label={`打开主导航，当前页面：${currentLabel}`}>
             <span className="mobile-nav-current">
               <span>当前页面</span>
-              <strong>{currentItem.label}</strong>
+              <strong>{currentLabel}</strong>
             </span>
             <span className="mobile-nav-icon" aria-hidden="true">
               <span />
@@ -48,7 +45,7 @@ export function AppLayout() {
             </span>
           </summary>
           <nav className="mobile-nav-list" aria-label="移动端主导航">
-            {navItems.map((item) => (
+            {navigationItems.map((item) => (
               <NavLink key={item.to} to={item.to} end={item.to === "/"}>
                 {item.label}
               </NavLink>
