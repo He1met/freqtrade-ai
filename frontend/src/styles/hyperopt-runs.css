@@ -1,0 +1,332 @@
+.hyperopt-page {
+  padding-bottom: 32px;
+}
+
+.hyperopt-overview {
+  display: grid;
+  grid-template-columns: minmax(190px, 0.8fr) minmax(330px, 1.45fr) minmax(210px, 0.9fr);
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.hyperopt-overview-card {
+  display: grid;
+  min-width: 0;
+  align-content: start;
+  justify-items: start;
+  gap: 10px;
+  border: 1px solid #d8ded7;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 17px;
+}
+
+.hyperopt-overview-card > span:first-child {
+  color: #657269;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.hyperopt-overview-card > strong {
+  font-size: 28px;
+}
+
+.hyperopt-overview-card p {
+  margin: 0;
+  color: #526159;
+  line-height: 1.5;
+}
+
+.hyperopt-best-card {
+  border-left: 5px solid #1f6f4a;
+  background: #f5fbf7;
+}
+
+.hyperopt-problem-card {
+  border-left: 5px solid #b72b2b;
+  background: #fff5f5;
+}
+
+.hyperopt-status-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.hyperopt-status-counts > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.hyperopt-status-counts > span > strong {
+  font-size: 18px;
+}
+
+.hyperopt-best-heading {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.hyperopt-best-heading > strong {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 17px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hyperopt-best-metrics {
+  display: grid;
+  width: 100%;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.hyperopt-best-metrics > div {
+  display: grid;
+  gap: 3px;
+}
+
+.hyperopt-best-metrics dt {
+  color: #657269;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.hyperopt-best-metrics dd {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 800;
+}
+
+.hyperopt-param-preview,
+.hyperopt-inline-params {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.hyperopt-param-preview > span,
+.hyperopt-inline-params > span {
+  display: inline-grid;
+  max-width: 100%;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 5px;
+  border-radius: 6px;
+  background: #e2f2ea;
+  color: #244936;
+  padding: 4px 7px;
+  font-size: 12px;
+}
+
+.hyperopt-no-result {
+  display: grid;
+  gap: 9px;
+}
+
+.hyperopt-table-shell {
+  overflow: visible;
+}
+
+.hyperopt-table {
+  table-layout: fixed;
+}
+
+.hyperopt-col-run {
+  width: 19%;
+}
+
+.hyperopt-col-status {
+  width: 18%;
+}
+
+.hyperopt-col-result {
+  width: 22%;
+}
+
+.hyperopt-col-comparison {
+  width: 23%;
+}
+
+.hyperopt-col-details {
+  width: 18%;
+}
+
+.hyperopt-table th,
+.hyperopt-table td {
+  min-width: 0;
+  overflow: visible;
+  vertical-align: middle;
+  white-space: normal;
+}
+
+.hyperopt-table tr[data-problem="true"] td {
+  background: #fffaf2;
+}
+
+.hyperopt-table tr[data-problem="true"] td:first-child {
+  box-shadow: inset 4px 0 #d3a02f, 1px 0 0 #d8ded7;
+}
+
+.hyperopt-strategy-name,
+.hyperopt-profile-name {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hyperopt-profile-name {
+  margin: 4px 0 8px;
+  color: #657269;
+  font-size: 12px;
+}
+
+.hyperopt-status-cell,
+.hyperopt-result-cell,
+.hyperopt-comparison-cell {
+  display: grid;
+  min-width: 0;
+  justify-items: start;
+  gap: 7px;
+}
+
+.hyperopt-problem-text {
+  color: #8a2d22;
+  font-size: 12px;
+}
+
+.hyperopt-result-cell > strong {
+  font-size: 16px;
+}
+
+.hyperopt-result-cell > span:not(.display-status-badge),
+.hyperopt-muted {
+  color: #657269;
+  font-size: 12px;
+}
+
+.hyperopt-comparison-cell > span:not(.display-status-badge, .compact-text) {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  grid-template-columns: minmax(52px, 0.7fr) minmax(0, 1.5fr) auto;
+  gap: 5px;
+  border-top: 1px solid #edf0eb;
+  padding-top: 5px;
+  font-size: 12px;
+}
+
+.hyperopt-comparison-cell em {
+  color: #526159;
+  font-style: normal;
+  font-weight: 800;
+}
+
+.hyperopt-technical-details {
+  position: relative;
+  min-width: 0;
+}
+
+.hyperopt-technical-details > summary {
+  border-radius: 5px;
+  color: #315a46;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.hyperopt-technical-details > summary:focus-visible {
+  outline: 3px solid rgba(31, 111, 74, 0.2);
+  outline-offset: 2px;
+}
+
+.hyperopt-technical-details[open] {
+  z-index: 30;
+}
+
+.hyperopt-technical-panel {
+  position: absolute;
+  z-index: 35;
+  top: calc(100% + 8px);
+  right: 0;
+  width: min(640px, calc(100vw - 340px));
+  max-height: 480px;
+  overflow: auto;
+  border: 1px solid #9ab09f;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 12px 32px rgba(16, 36, 27, 0.22);
+  padding: 14px;
+}
+
+.hyperopt-technical-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  min-width: 0;
+  gap: 12px;
+}
+
+.hyperopt-technical-grid section,
+.hyperopt-warning-section {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+}
+
+.hyperopt-technical-grid h3,
+.hyperopt-warning-section h3 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.hyperopt-technical-grid dl {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+}
+
+.hyperopt-technical-grid dl > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.hyperopt-technical-grid dt {
+  color: #657269;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.hyperopt-technical-grid dd {
+  min-width: 0;
+  margin: 0;
+}
+
+.hyperopt-warning-section {
+  margin-top: 12px;
+}
+
+.hyperopt-warning-list {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+}
+
+.hyperopt-warning-list > div {
+  display: grid;
+  min-width: 0;
+  justify-items: start;
+  gap: 6px;
+  border-left: 3px solid #d3a02f;
+  padding-left: 8px;
+}
