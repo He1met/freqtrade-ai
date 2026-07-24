@@ -7,6 +7,18 @@ import {
   getDataSourceAcceptance,
   isCoreDataSourceTrace,
 } from "../src/api/sourceState.ts";
+import {
+  EMPTY_TEXT,
+  displayBoolean,
+  displayDateTime,
+  displayNumber,
+  displayPercent,
+  displaySource,
+  displayStatus,
+  displayStatusWithRaw,
+  displayValue,
+  statusTone,
+} from "../src/pages/uiCopy.ts";
 
 test("database source with database_ids is ACCEPTABLE", () => {
   const source = {
@@ -154,4 +166,31 @@ test("unknown source with not-run detail is NOT_RUN", () => {
 test("missing source metadata is API_GAP", () => {
   const acceptance = getDataSourceAcceptance(undefined);
   assert.equal(acceptance.state, "API_GAP");
+});
+
+test("UI copy centralizes localized status labels while preserving raw traceability", () => {
+  assert.equal(displayStatus("BLOCKED-BY-PREFLIGHT"), "预检阻塞");
+  assert.equal(displayStatus("NOT_RUN"), "尚未运行");
+  assert.equal(displayStatus("NOT_ACCEPTABLE"), "不可验收");
+  assert.equal(displayStatus("EXPIRED"), "已过期");
+  assert.equal(displayStatusWithRaw("succeeded"), "成功（succeeded）");
+  assert.equal(displayStatus("custom_runtime_state"), "custom_runtime_state");
+  assert.equal(statusTone("failed"), "danger");
+  assert.equal(statusTone("custom_runtime_state"), "neutral");
+});
+
+test("UI copy formats empty, boolean, source, number, percent, and time consistently", () => {
+  assert.equal(displayValue(null), EMPTY_TEXT);
+  assert.equal(displayValue(false), "否");
+  assert.equal(displayBoolean(undefined), EMPTY_TEXT);
+  assert.equal(displaySource("api_aggregate"), "API 聚合数据");
+  assert.equal(displayNumber(12345.678), "12,345.68");
+  assert.equal(displayNumber(Number.NaN), EMPTY_TEXT);
+  assert.equal(displayPercent(0.1234), "12.34%");
+  assert.equal(displayPercent(12.34, { input: "percent", maximumFractionDigits: 1 }), "12.3%");
+  assert.equal(
+    displayDateTime("2026-07-24T01:02:03Z", { includeSeconds: true, timeZone: "UTC" }),
+    "2026/07/24 01:02:03",
+  );
+  assert.equal(displayDateTime("invalid"), EMPTY_TEXT);
 });
