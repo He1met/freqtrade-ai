@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc && vite build",
-    "test": "node --experimental-strip-types --test tests/sourceState.test.mjs tests/sourceNoticeState.test.mjs tests/generationRunDisplay.test.mjs tests/submissionDisplay.test.mjs tests/backtestDisplay.test.mjs tests/localStrategyLabEvidence.test.mjs tests/liveGovernanceDisplay.test.mjs tests/actionEvidence.test.mjs tests/operatorDashboardNotice.test.mjs tests/operatorDashboardDisplay.test.mjs tests/desktopShell.test.mjs tests/strategyDisplay.test.mjs tests/hyperoptDisplay.test.mjs",
+    "test": "node --experimental-strip-types --test tests/sourceState.test.mjs tests/sourceNoticeState.test.mjs tests/generationRunDisplay.test.mjs tests/submissionDisplay.test.mjs tests/backtestDisplay.test.mjs tests/localStrategyLabEvidence.test.mjs tests/readinessControlDisplay.test.mjs tests/liveGovernanceDisplay.test.mjs tests/actionEvidence.test.mjs tests/operatorDashboardNotice.test.mjs tests/operatorDashboardDisplay.test.mjs tests/desktopShell.test.mjs tests/strategyDisplay.test.mjs tests/hyperoptDisplay.test.mjs",
     "test:e2e": "playwright test",
     "preview": "vite preview --host 127.0.0.1"
   },
