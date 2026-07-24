@@ -2,11 +2,11 @@ import type { DataSource } from "../api/types";
 
 export function operatorDashboardNotice(source: DataSource): string | undefined {
   if (source === "api") {
-    return "Backend API 已连接；下方状态来自只读运行契约。";
+    return "只读运行契约来自 Backend API；API 已连接不等于运行流程成功。";
   }
 
   if (source === "fixture") {
-    return "已显式启用开发 fixture；未使用 Backend API 数据，不能作为运行验收依据。";
+    return "运维状态来自显式开发 fixture，不能作为真实运行验收依据。";
   }
 
   return undefined;

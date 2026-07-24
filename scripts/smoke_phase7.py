@@ -411,17 +411,25 @@ def validate_secret_scanning(context: Phase7SmokeContext) -> None:
 def validate_dashboard_fallback(context: Phase7SmokeContext) -> None:
     dashboard_path = REPO_ROOT / "frontend" / "src" / "pages" / "OperatorDashboard.tsx"
     notice_path = REPO_ROOT / "frontend" / "src" / "pages" / "operatorDashboardNotice.ts"
+    source_notice_path = REPO_ROOT / "frontend" / "src" / "pages" / "sourceNoticeState.ts"
+    fallback_notice_path = REPO_ROOT / "frontend" / "src" / "pages" / "FallbackNotice.tsx"
     mock_path = REPO_ROOT / "frontend" / "src" / "data" / "mock.ts"
     client_path = REPO_ROOT / "frontend" / "src" / "api" / "client.ts"
     dashboard_text = dashboard_path.read_text(encoding="utf-8")
     notice_text = notice_path.read_text(encoding="utf-8")
+    source_notice_text = source_notice_path.read_text(encoding="utf-8")
+    fallback_notice_text = fallback_notice_path.read_text(encoding="utf-8")
     mock_text = mock_path.read_text(encoding="utf-8")
     client_text = client_path.read_text(encoding="utf-8")
 
     required_fragments = (
         "operatorDashboardNotice",
-        "Backend API 已连接；下方状态来自只读运行契约。",
-        "未使用 Backend API 数据，不能作为运行验收依据。",
+        "只读运行契约来自 Backend API；API 已连接不等于运行流程成功。",
+        "运维状态来自显式开发 fixture，不能作为真实运行验收依据。",
+        "暂无记录时仅表示暂无真实记录，不代表运行成功。",
+        "当前只能确认 API 数据不可用，现有页面状态无法诊断更具体原因。",
+        'notice.kind === "healthy"',
+        'role="alert"',
         "runtimeContract",
         "operatorStatus",
         "auditEvents",
@@ -431,7 +439,16 @@ def validate_dashboard_fallback(context: Phase7SmokeContext) -> None:
         "allowExchangeConnection",
         "canStartStopBot",
     )
-    combined = "\n".join((dashboard_text, notice_text, mock_text, client_text))
+    combined = "\n".join(
+        (
+            dashboard_text,
+            notice_text,
+            source_notice_text,
+            fallback_notice_text,
+            mock_text,
+            client_text,
+        )
+    )
     missing = [fragment for fragment in required_fragments if fragment not in combined]
     if missing:
         raise RuntimeError(f"Operator Dashboard fallback contract is missing: {missing}")
@@ -439,6 +456,19 @@ def validate_dashboard_fallback(context: Phase7SmokeContext) -> None:
     retired_notice = "Backend API unavailable; showing controlled Phase 7 operator fallback data."
     if retired_notice in "\n".join((dashboard_text, notice_text)):
         raise RuntimeError("Operator Dashboard must not claim fallback data while its source is unknown or failed")
+
+    retired_source_claims = (
+        "空结果、被过滤记录和缺失 ID 均不可验收。",
+        "若 API 记录被过滤，补齐 data_source 和 database_ids 后刷新。",
+    )
+    present_retired_claims = [
+        fragment for fragment in retired_source_claims if fragment in fallback_notice_text
+    ]
+    if present_retired_claims:
+        raise RuntimeError(
+            "Source notice must not invent unavailable per-record diagnostics: "
+            f"{present_retired_claims}"
+        )
 
     forbidden_fragments = ("start_live", "stop_live", "deploy_command", "place_order", "<button")
     present_forbidden = [fragment for fragment in forbidden_fragments if fragment in dashboard_text]

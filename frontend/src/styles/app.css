@@ -531,59 +531,6 @@ a {
   color: #6f4d1f;
 }
 
-.fallback-notice {
-  display: grid;
-  gap: 14px;
-  border-color: #d6a12b;
-  border-left: 6px solid #d6a12b;
-  background: #fff8e8;
-  color: #3f3524;
-  box-shadow: 0 1px 0 rgba(117, 83, 20, 0.08);
-}
-
-.fallback-notice-heading {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.fallback-notice-heading strong {
-  font-size: 17px;
-}
-
-.fallback-notice-heading span {
-  border-radius: 999px;
-  background: #79500f;
-  color: #fffaf0;
-  padding: 5px 9px;
-  font-size: 12px;
-  font-weight: 800;
-}
-
-.fallback-notice-details {
-  display: grid;
-  gap: 8px;
-  margin: 0;
-}
-
-.fallback-notice-details div {
-  display: grid;
-  grid-template-columns: 104px minmax(0, 1fr);
-  gap: 12px;
-}
-
-.fallback-notice-details dt {
-  color: #79500f;
-  font-weight: 800;
-}
-
-.fallback-notice-details dd {
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-
 .table-shell {
   width: 100%;
   max-width: 100%;
@@ -2480,8 +2427,7 @@ th {
 
   .lineage-meta div,
   .diff-grid div,
-  .compact-detail-list div,
-  .fallback-notice-details div {
+  .compact-detail-list div {
     grid-template-columns: 1fr;
     gap: 4px;
   }
