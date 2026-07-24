@@ -1,0 +1,284 @@
+/* Issue #402: desktop backtest hierarchy. No responsive overrides. */
+
+.backtest-page {
+  gap: 1.25rem;
+}
+
+.backtest-matrix-summary {
+  display: grid;
+  gap: 1rem;
+  padding: 1rem 1.15rem;
+  border: 1px solid #dbeafe;
+  border-radius: 0.85rem;
+  background: linear-gradient(135deg, #f8fbff, #ffffff 72%);
+}
+
+.backtest-matrix-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.backtest-matrix-heading > div {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.backtest-matrix-heading h2,
+.backtest-matrix-heading p {
+  margin: 0;
+}
+
+.backtest-matrix-heading h2 {
+  color: #0f172a;
+  font-size: 1rem;
+}
+
+.backtest-matrix-heading p {
+  color: #64748b;
+  font-size: 0.8rem;
+}
+
+.backtest-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+
+.backtest-summary-card {
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.75rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.65rem;
+  background: #ffffff;
+}
+
+.backtest-summary-card span,
+.backtest-summary-card em {
+  color: #64748b;
+  font-size: 0.72rem;
+  font-style: normal;
+}
+
+.backtest-summary-card strong {
+  color: #0f172a;
+  font-size: 1rem;
+}
+
+.backtest-status-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.backtest-reason-summary {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.backtest-reason-summary > div {
+  display: flex;
+  align-items: start;
+  gap: 0.5rem;
+  color: #475569;
+  font-size: 0.8rem;
+}
+
+.backtest-desktop-table {
+  width: 100%;
+  table-layout: fixed;
+}
+
+.backtest-desktop-table th,
+.backtest-desktop-table td {
+  box-sizing: border-box;
+  padding-right: 0.5rem;
+  padding-left: 0.5rem;
+  vertical-align: top;
+}
+
+.backtest-desktop-table th {
+  color: #475569;
+  font-size: 0.72rem;
+  letter-spacing: 0.02em;
+}
+
+.backtest-col-status-main {
+  width: 10%;
+}
+
+.backtest-col-strategy-main {
+  width: 15%;
+}
+
+.backtest-col-market-main {
+  width: 12%;
+}
+
+.backtest-col-profile-main {
+  width: 12%;
+}
+
+.backtest-col-progress-main {
+  width: 9%;
+}
+
+.backtest-col-result-main {
+  width: 32%;
+}
+
+.backtest-col-details-main {
+  width: 10%;
+}
+
+.backtest-primary-value {
+  display: block;
+  overflow: hidden;
+  color: #0f172a;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backtest-secondary-value {
+  display: block;
+  margin-top: 0.25rem;
+  color: #64748b;
+  font-size: 0.72rem;
+}
+
+.backtest-result-summary {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.backtest-result-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  color: #64748b;
+  font-size: 0.7rem;
+}
+
+.backtest-result-missing {
+  padding: 0.65rem;
+  border: 1px solid #fed7aa;
+  border-radius: 0.6rem;
+  background: #fff7ed;
+  color: #9a3412;
+  font-size: 0.76rem;
+}
+
+.backtest-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.4rem;
+  margin: 0;
+}
+
+.backtest-metric-grid div {
+  min-width: 0;
+}
+
+.backtest-metric-grid dt {
+  color: #64748b;
+  font-size: 0.66rem;
+}
+
+.backtest-metric-grid dd {
+  overflow: hidden;
+  margin: 0.1rem 0 0;
+  color: #0f172a;
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backtest-technical-details {
+  min-width: 0;
+}
+
+.backtest-technical-details > summary {
+  color: #0369a1;
+  cursor: pointer;
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
+.backtest-technical-details > summary:focus-visible {
+  border-radius: 0.3rem;
+  outline: 3px solid rgba(14, 165, 233, 0.3);
+  outline-offset: 3px;
+}
+
+.backtest-technical-content {
+  display: grid;
+  gap: 0.8rem;
+  width: min(40rem, calc(100vw - 22rem));
+  margin-top: 0.75rem;
+  padding: 0.85rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.65rem;
+  background: #f8fafc;
+  transform: translateX(calc(-100% + 6rem));
+}
+
+.backtest-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem;
+  margin: 0;
+}
+
+.backtest-detail-grid > div {
+  min-width: 0;
+}
+
+.backtest-detail-grid dt {
+  color: #64748b;
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.backtest-detail-grid dd {
+  min-width: 0;
+  margin: 0.2rem 0 0;
+  color: #334155;
+  font-size: 0.76rem;
+}
+
+.backtest-detail-section,
+.backtest-log-grid {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.backtest-detail-section h3,
+.backtest-log-grid h3 {
+  margin: 0;
+  color: #475569;
+  font-size: 0.72rem;
+}
+
+.backtest-log-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.backtest-log-grid > div {
+  display: grid;
+  min-width: 0;
+  gap: 0.35rem;
+}
+
+.backtest-log-grid span {
+  overflow: hidden;
+  color: #64748b;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.7rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
