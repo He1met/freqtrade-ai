@@ -274,28 +274,61 @@ def account_fingerprint_pin_exists() -> bool:
     )
 
 
-def write_account_fingerprint_pin(fingerprint: str) -> None:
-    """Write the digest through stdin so it never appears in process argv."""
-
-    if sys.platform != "darwin":
-        raise OkxDemoPreflightBlocked("macOS Keychain is required for account pinning")
-    account = pwd.getpwuid(os.getuid()).pw_name
+def _delete_account_fingerprint_pin(account: str) -> bool:
+    command = [
+        "/usr/bin/security",
+        "delete-generic-password",
+        "-a",
+        account,
+        "-s",
+        OKX_DEMO_ACCOUNT_FINGERPRINT_KEYCHAIN_SERVICE,
+    ]
     try:
         completed = subprocess.run(
-            [
-                "/usr/bin/security",
-                "add-generic-password",
-                "-a",
-                account,
-                "-s",
-                OKX_DEMO_ACCOUNT_FINGERPRINT_KEYCHAIN_SERVICE,
-                "-w",
-            ],
+            command,
             check=False,
             capture_output=True,
             text=True,
             timeout=KEYCHAIN_TIMEOUT_SECONDS,
-            input=fingerprint + "\n",
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0
+
+
+def write_account_fingerprint_pin(
+    fingerprint: str,
+) -> None:
+    """Write and verify the digest without placing it in process argv."""
+
+    if sys.platform != "darwin":
+        raise OkxDemoPreflightBlocked("macOS Keychain is required for account pinning")
+    if (
+        len(fingerprint) != 64
+        or any(character not in "0123456789abcdef" for character in fingerprint)
+    ):
+        raise OkxDemoPreflightBlocked(
+            "OKX Demo account fingerprint Keychain write failed"
+        )
+    account = pwd.getpwuid(os.getuid()).pw_name
+    add_command = [
+        "/usr/bin/security",
+        "add-generic-password",
+        "-a",
+        account,
+        "-s",
+        OKX_DEMO_ACCOUNT_FINGERPRINT_KEYCHAIN_SERVICE,
+        "-w",
+    ]
+    try:
+        completed = subprocess.run(
+            add_command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=KEYCHAIN_TIMEOUT_SECONDS,
+            input=fingerprint + "\n" + fingerprint + "\n",
         )
     except (OSError, subprocess.TimeoutExpired):
         raise OkxDemoPreflightBlocked(
@@ -305,6 +338,42 @@ def write_account_fingerprint_pin(fingerprint: str) -> None:
         raise OkxDemoPreflightBlocked(
             "OKX Demo account fingerprint Keychain write failed"
         )
+
+    read_command = [
+        "/usr/bin/security",
+        "find-generic-password",
+        "-a",
+        account,
+        "-s",
+        OKX_DEMO_ACCOUNT_FINGERPRINT_KEYCHAIN_SERVICE,
+        "-w",
+    ]
+    readback: Optional[str] = None
+    try:
+        verified = subprocess.run(
+            read_command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=KEYCHAIN_TIMEOUT_SECONDS,
+            stdin=subprocess.DEVNULL,
+        )
+        candidate = verified.stdout.rstrip("\r\n")
+        if (
+            verified.returncode == 0
+            and len(candidate) == 64
+            and not any(character in candidate for character in ("\x00", "\r", "\n"))
+        ):
+            readback = candidate
+    except (OSError, subprocess.TimeoutExpired):
+        readback = None
+    if readback is not None and hmac.compare_digest(readback, fingerprint):
+        return
+
+    _delete_account_fingerprint_pin(account)
+    raise OkxDemoPreflightBlocked(
+        "OKX Demo account fingerprint Keychain verification failed"
+    )
 
 
 def run_account_pin(
