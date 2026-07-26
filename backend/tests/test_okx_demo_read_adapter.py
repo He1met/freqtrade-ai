@@ -18,6 +18,11 @@ from app.adapters.okx_demo import (
 from app.adapters.okx_demo import credential_preflight as preflight
 from app.adapters.okx_demo import credentials as credential_boundary
 from app.adapters.okx_demo import read_adapter as read_boundary
+from app.adapters.okx_demo.write_transport import (
+    UrllibOkxDemoWriteTransport,
+    _create_attested_writer_credential_bridge,
+    _create_production_write_transport,
+)
 
 
 NOW = datetime(2026, 7, 27, 8, 0, tzinfo=timezone.utc)
@@ -233,6 +238,19 @@ def test_attested_provider_reuses_443_get_only_signature_boundary(
         == "0PFbuXrPz3ectz3yPA0AU6UgyJn7YQwrxkz6ZW7DhCs="
     )
     assert headers["x-simulated-trading"] == "1"
+
+
+def test_real_attested_factory_result_builds_writer_bridge(monkeypatch) -> None:
+    account = attested_account()
+    environment = ephemeral_environment(account)
+    install_attestation(monkeypatch, account)
+    monkeypatch.setattr(read_boundary, "_utc_now", lambda: NOW)
+
+    read_client = create_attested_okx_demo_read_adapter(environment)
+    bridge = _create_attested_writer_credential_bridge(read_client)
+    transport = _create_production_write_transport(bridge)
+
+    assert type(transport) is UrllibOkxDemoWriteTransport
 
 
 @pytest.mark.parametrize(

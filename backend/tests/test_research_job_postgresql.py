@@ -218,6 +218,8 @@ def test_incremental_worker_migration_preserves_existing_runtime_rows(postgres_e
             "exchange_orders",
             "exchange_positions",
             "execution_manifests",
+            "okx_order_write_attempts",
+            "okx_order_writer_leases",
             "reconciliation_runs",
             "research_job_attempts",
             "research_jobs",

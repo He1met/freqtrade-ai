@@ -28,6 +28,13 @@ from app.adapters.okx_demo.credential_preflight import (
     REST_URL_ENV,
     validate_account_config,
 )
+from app.adapters.okx_demo.write_semantics import (
+    CLIENT_ORDER_ID_PATTERN,
+    OkxDemoRecoveryRequired,
+    OkxDemoTransportError,
+    OkxDemoWriteRejected,
+    validate_write_item,
+)
 
 
 ALLOW_DEMO_ORDER_ENV = "FREQTRADE_AI_ALLOW_DEMO_ORDER"
@@ -36,7 +43,6 @@ ALLOWED_INSTRUMENTS = frozenset({DEFAULT_INSTRUMENT})
 SIMULATED_TRADING_HEADER = ("x-simulated-trading", "1")
 REQUEST_TIMEOUT_SECONDS = 10
 MAX_NOTIONAL_USDT = Decimal("2000")
-CLIENT_ORDER_ID_PATTERN = re.compile(r"^[A-Za-z0-9]{1,32}$")
 ARTIFACT_ROOT = (
     Path(__file__).resolve().parents[4]
     / ".freqtrade-ai"
@@ -47,22 +53,6 @@ ARTIFACT_ROOT = (
 
 class OkxDemoCanaryBlocked(RuntimeError):
     """A prerequisite or reconciliation result is unsafe or unknown."""
-
-
-class OkxDemoRecoveryRequired(RuntimeError):
-    """A write may have happened and must be reconciled before another canary."""
-
-
-class OkxDemoWriteRejected(OkxDemoCanaryBlocked):
-    """The exchange explicitly rejected a single write."""
-
-
-class OkxDemoTransportError(RuntimeError):
-    """A sanitized transport failure."""
-
-    def __init__(self, *, unknown_write_outcome: bool) -> None:
-        super().__init__("OKX Demo transport failed")
-        self.unknown_write_outcome = unknown_write_outcome
 
 
 class CanaryTransport(Protocol):
@@ -230,28 +220,11 @@ def _write_item(
     expected_cl_ord_id: str,
     reason: str,
 ) -> Mapping[str, Any]:
-    if not isinstance(payload, dict) or "code" not in payload:
-        raise OkxDemoRecoveryRequired(reason + "_OUTCOME_UNKNOWN")
-    if str(payload.get("code")) != "0":
-        raise OkxDemoWriteRejected(reason)
-    data = payload.get("data")
-    if (
-        not isinstance(data, list)
-        or len(data) != 1
-        or not isinstance(data[0], dict)
-    ):
-        raise OkxDemoRecoveryRequired(reason + "_OUTCOME_UNKNOWN")
-    item = data[0]
-    if "sCode" not in item:
-        raise OkxDemoRecoveryRequired(reason + "_OUTCOME_UNKNOWN")
-    if str(item.get("sCode")) != "0":
-        raise OkxDemoWriteRejected(reason)
-    if item.get("clOrdId") != expected_cl_ord_id:
-        raise OkxDemoRecoveryRequired(reason + "_OUTCOME_UNKNOWN")
-    order_id = item.get("ordId")
-    if not isinstance(order_id, str) or not order_id:
-        raise OkxDemoRecoveryRequired(reason + "_OUTCOME_UNKNOWN")
-    return item
+    return validate_write_item(
+        payload,
+        expected_client_order_id=expected_cl_ord_id,
+        reason=reason,
+    )
 
 
 def _query_order(
@@ -498,7 +471,11 @@ def _cleanup_unexpected_position(
     except OkxDemoTransportError as exc:
         if not exc.unknown_write_outcome:
             return False
-    except (OkxDemoCanaryBlocked, OkxDemoRecoveryRequired):
+    except (
+        OkxDemoCanaryBlocked,
+        OkxDemoRecoveryRequired,
+        OkxDemoWriteRejected,
+    ):
         return False
     try:
         cleanup_order = _query_cleanup_order(
@@ -860,6 +837,7 @@ def _recover_nonterminal_canary(
             except (
                 OkxDemoCanaryBlocked,
                 OkxDemoRecoveryRequired,
+                OkxDemoWriteRejected,
                 OkxDemoTransportError,
             ):
                 _append_sequence_once(sequence, "cancel_reconciliation_uncertain")
@@ -935,6 +913,7 @@ def _recover_nonterminal_canary(
         OkxDemoCanaryBlocked,
         OkxDemoPreflightBlocked,
         OkxDemoRecoveryRequired,
+        OkxDemoWriteRejected,
         OkxDemoTransportError,
     ):
         return _persist_result(
@@ -1159,6 +1138,7 @@ def _execute_canary(
                 except (
                     OkxDemoCanaryBlocked,
                     OkxDemoRecoveryRequired,
+                    OkxDemoWriteRejected,
                     OkxDemoTransportError,
                 ):
                     sequence.append("cancel_reconciliation_uncertain")

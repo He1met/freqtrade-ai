@@ -17,6 +17,7 @@ from app.models.execution_lineage import (
     TradeIntent,
 )
 from app.models.local_test_db import LocalTestBatch, LocalTestDbEvent
+from app.models.order_writer import OkxOrderWriteAttempt, OkxOrderWriterLease
 from app.models.research_job import ResearchJob, ResearchWorkerControl
 from app.models.strategy import Strategy, StrategyVersion
 from app.models.strategy_failure_reason import StrategyFailureReason
@@ -39,6 +40,8 @@ __all__ = [
     "OkxDemoTrustedSnapshot",
     "LocalTestBatch",
     "LocalTestDbEvent",
+    "OkxOrderWriteAttempt",
+    "OkxOrderWriterLease",
     "ResearchJob",
     "ResearchJobAttempt",
     "ResearchWorkerControl",

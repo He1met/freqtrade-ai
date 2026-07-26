@@ -34,7 +34,8 @@ TRUSTED_SNAPSHOT_BASE_VERSION = "20260727_04"
 ATTESTED_SESSION_BASE_VERSION = "20260727_05"
 HMAC_ATTESTATION_BASE_VERSION = "20260727_06"
 ATTESTATION_ACL_BASE_VERSION = "20260727_07"
-SCHEMA_VERSION = "20260727_08"
+ORDER_WRITER_BASE_VERSION = "20260727_08"
+SCHEMA_VERSION = "20260727_09"
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 ATTESTATION_PROOF_KEY_ENV = "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"
 
@@ -289,6 +290,33 @@ def _normalized_sql_definition(value: object) -> Optional[str]:
     return rendered
 
 
+def _normalized_index_definition(value: object) -> Optional[str]:
+    rendered = _normalized_sql_definition(value)
+    if rendered is None:
+        return None
+    rendered = re.sub(r"\(([a-z_][a-z0-9_]*)\)", r"\1", rendered)
+    rendered = re.sub(
+        r"([a-z_][a-z0-9_]*)=any\(\(?array\[(.*?)\]\)?\)",
+        r"\1in(\2)",
+        rendered,
+    )
+    while rendered.startswith("(") and rendered.endswith(")"):
+        depth = 0
+        closes_at_end = True
+        for index, character in enumerate(rendered):
+            if character == "(":
+                depth += 1
+            elif character == ")":
+                depth -= 1
+                if depth == 0 and index != len(rendered) - 1:
+                    closes_at_end = False
+                    break
+        if not closes_at_end or depth != 0:
+            break
+        rendered = rendered[1:-1]
+    return rendered
+
+
 def _canonical_function_body(value: object, schema_name: str) -> str:
     """Normalize a PL/pgSQL body while retaining every security-relevant token."""
 
@@ -303,7 +331,7 @@ def _metadata_index_signature(index: Index) -> tuple[tuple[str, ...], bool, Opti
     return (
         tuple(column.name for column in index.columns),
         bool(index.unique),
-        _normalized_sql_definition(predicate),
+        _normalized_index_definition(predicate),
     )
 
 
@@ -312,7 +340,7 @@ def _inspected_index_signature(index: dict) -> tuple[tuple[str, ...], bool, Opti
     return (
         tuple(index.get("column_names") or ()),
         bool(index.get("unique", False)),
-        _normalized_sql_definition(dialect_options.get("postgresql_where")),
+        _normalized_index_definition(dialect_options.get("postgresql_where")),
     )
 
 
@@ -360,6 +388,16 @@ CRITICAL_CHECK_DEFINITIONS = {
     "okx_demo_trusted_snapshots_digest_format_check",
     "okx_demo_trusted_snapshots_fingerprint_format_check",
     "okx_demo_trusted_snapshots_time_check",
+    "okx_order_writer_leases_target_check",
+    "okx_order_writer_leases_digest_check",
+    "okx_order_writer_leases_generation_check",
+    "okx_order_writer_leases_time_check",
+    "okx_order_write_attempts_target_check",
+    "okx_order_write_attempts_operation_check",
+    "okx_order_write_attempts_state_check",
+    "okx_order_write_attempts_single_post_check",
+    "okx_order_write_attempts_fencing_sequence_check",
+    "okx_order_write_attempts_digest_check",
     "exchange_orders_okx_demo_target_check",
     "exchange_orders_client_order_id_format_check",
     "exchange_fills_okx_demo_target_check",
@@ -409,8 +447,13 @@ def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
         expected_fks = {
             (
                 tuple(element.parent.name for element in constraint.elements),
+                constraint.elements[0].column.table.schema or schema_name,
                 constraint.elements[0].column.table.name,
                 tuple(element.column.name for element in constraint.elements),
+                (constraint.ondelete or "NO ACTION").upper(),
+                (constraint.onupdate or "NO ACTION").upper(),
+                bool(constraint.deferrable),
+                (constraint.initially or "").upper() or None,
             )
             for constraint in table.constraints
             if isinstance(constraint, ForeignKeyConstraint)
@@ -418,16 +461,50 @@ def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
         actual_fks = {
             (
                 tuple(foreign_key["constrained_columns"]),
+                foreign_key.get("referred_schema") or schema_name,
                 foreign_key["referred_table"],
                 tuple(foreign_key["referred_columns"]),
+                (
+                    (foreign_key.get("options") or {}).get("ondelete")
+                    or "NO ACTION"
+                ).upper(),
+                (
+                    (foreign_key.get("options") or {}).get("onupdate")
+                    or "NO ACTION"
+                ).upper(),
+                bool(
+                    (foreign_key.get("options") or {}).get(
+                        "deferrable",
+                        False,
+                    )
+                ),
+                (
+                    (foreign_key.get("options") or {}).get("initially")
+                    or ""
+                ).upper()
+                or None,
             )
             for foreign_key in inspector.get_foreign_keys(name, schema=schema_name)
         }
-        for foreign_key in sorted(expected_fks - actual_fks):
+        for foreign_key in sorted(expected_fks - actual_fks, key=str):
             problems.append(
                 "missing foreign key: "
                 f"{name}.({','.join(foreign_key[0])}) -> "
-                f"{foreign_key[1]}.({','.join(foreign_key[2])})"
+                f"{foreign_key[1]}.{foreign_key[2]}"
+                f".({','.join(foreign_key[3])}) "
+                f"ondelete={foreign_key[4]} onupdate={foreign_key[5]} "
+                f"deferrable={foreign_key[6]} "
+                f"initially={foreign_key[7] or '<none>'}"
+            )
+        for foreign_key in sorted(actual_fks - expected_fks, key=str):
+            problems.append(
+                "unexpected foreign key: "
+                f"{name}.({','.join(foreign_key[0])}) -> "
+                f"{foreign_key[1]}.{foreign_key[2]}"
+                f".({','.join(foreign_key[3])}) "
+                f"ondelete={foreign_key[4]} onupdate={foreign_key[5]} "
+                f"deferrable={foreign_key[6]} "
+                f"initially={foreign_key[7] or '<none>'}"
             )
 
         actual_unique = {
@@ -624,6 +701,110 @@ def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
             problems.append(
                 "attestor role membership reaches a privileged role"
             )
+        delegated_roles = bind.execute(
+            text(
+                """
+                WITH RECURSIVE delegated(root_role, member, visited) AS (
+                    SELECT owner.rolname, membership.member,
+                           ARRAY[membership.roleid, membership.member]::oid[]
+                    FROM pg_auth_members AS membership
+                    JOIN pg_roles AS owner ON owner.oid = membership.roleid
+                    WHERE owner.rolname IN (
+                        'freqtrade', 'freqtrade_ai_attestor'
+                    )
+                    UNION ALL
+                    SELECT delegated.root_role, membership.member,
+                           delegated.visited || membership.member
+                    FROM pg_auth_members AS membership
+                    JOIN delegated ON membership.roleid = delegated.member
+                    WHERE NOT membership.member = ANY(delegated.visited)
+                )
+                SELECT delegated.root_role, member.rolname
+                FROM delegated
+                JOIN pg_roles AS member ON member.oid = delegated.member
+                ORDER BY delegated.root_role, member.rolname
+                """
+            )
+        ).all()
+        for root_role, member_role in delegated_roles:
+            problems.append(
+                "protected role has delegated member: {} -> {}".format(
+                    member_role,
+                    root_role,
+                )
+            )
+        schema_security = bind.execute(
+            text(
+                """
+                SELECT owner.rolname,
+                       has_schema_privilege(
+                           'freqtrade', namespace.oid, 'USAGE'
+                       ),
+                       has_schema_privilege(
+                           'freqtrade', namespace.oid, 'CREATE'
+                       ),
+                       EXISTS (
+                           SELECT 1
+                           FROM aclexplode(
+                               COALESCE(
+                                   namespace.nspacl,
+                                   acldefault('n', namespace.nspowner)
+                               )
+                           ) AS acl
+                           WHERE acl.grantee = 0
+                             AND acl.privilege_type = 'CREATE'
+                       ),
+                       EXISTS (
+                           SELECT 1
+                           FROM aclexplode(
+                               COALESCE(
+                                   namespace.nspacl,
+                                   acldefault('n', namespace.nspowner)
+                               )
+                           ) AS acl
+                           WHERE acl.grantee NOT IN (
+                               0,
+                               namespace.nspowner
+                           )
+                             AND acl.privilege_type = 'CREATE'
+                       )
+                FROM pg_namespace AS namespace
+                JOIN pg_roles AS owner ON owner.oid = namespace.nspowner
+                WHERE namespace.nspname = :schema_name
+                """
+            ),
+            {"schema_name": schema_name},
+        ).first()
+        if schema_security is None:
+            problems.append("active writer schema is missing")
+        else:
+            (
+                _schema_owner,
+                runtime_schema_usage,
+                runtime_schema_create,
+                public_schema_create,
+                unexpected_schema_create,
+            ) = schema_security
+            if _schema_owner != "freqtrade_ai_attestor":
+                problems.append(
+                    "writer schema owner mismatch: owner={}".format(
+                        _schema_owner
+                    )
+                )
+            if not runtime_schema_usage:
+                problems.append("runtime writer schema USAGE privilege missing")
+            if runtime_schema_create:
+                problems.append(
+                    "runtime writer has CREATE on writer schema"
+                )
+            if public_schema_create:
+                problems.append(
+                    "PUBLIC CREATE privilege is not revoked on writer schema"
+                )
+            if unexpected_schema_create:
+                problems.append(
+                    "unexpected role has CREATE on writer schema"
+                )
         column_security = bind.execute(
             text(
                 """
@@ -710,6 +891,10 @@ def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
         )
         unsafe_table_privileges = (
             "INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER"
+            + (",MAINTAIN" if server_version_num >= 170000 else "")
+        )
+        writer_unsafe_table_privileges = (
+            "DELETE,TRUNCATE,REFERENCES,TRIGGER"
             + (",MAINTAIN" if server_version_num >= 170000 else "")
         )
         table_security = bind.execute(
@@ -813,6 +998,282 @@ def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
                 problems.append(
                     "runtime attestation read privilege missing: {}".format(table_name)
                 )
+        writer_table_rows = bind.execute(
+            text(
+                """
+                SELECT relation.relname, owner.rolname,
+                       has_table_privilege(
+                           'freqtrade', relation.oid, 'SELECT'
+                       ),
+                       has_table_privilege(
+                           'freqtrade', relation.oid, 'INSERT'
+                       ),
+                       has_table_privilege(
+                           'freqtrade', relation.oid, 'UPDATE'
+                       ),
+                       has_table_privilege(
+                           'freqtrade', relation.oid,
+                           :writer_unsafe_privileges
+                       ),
+                       EXISTS (
+                           SELECT 1
+                           FROM aclexplode(
+                               COALESCE(
+                                   relation.relacl,
+                                   acldefault('r', relation.relowner)
+                               )
+                           ) AS acl
+                           WHERE acl.grantee = 0
+                             AND acl.privilege_type IN (
+                                 'SELECT', 'INSERT', 'UPDATE', 'DELETE',
+                                 'TRUNCATE', 'REFERENCES', 'TRIGGER',
+                                 'MAINTAIN'
+                             )
+                       ),
+                       EXISTS (
+                           SELECT 1
+                           FROM aclexplode(
+                               COALESCE(
+                                   relation.relacl,
+                                   acldefault('r', relation.relowner)
+                               )
+                           ) AS acl
+                           WHERE acl.grantee NOT IN (
+                               0,
+                               relation.relowner,
+                               (SELECT oid FROM pg_roles
+                                WHERE rolname = 'freqtrade')
+                           )
+                             AND acl.privilege_type IN (
+                                 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE',
+                                 'REFERENCES', 'TRIGGER', 'MAINTAIN'
+                             )
+                       )
+                FROM pg_class AS relation
+                JOIN pg_namespace AS namespace
+                  ON namespace.oid = relation.relnamespace
+                JOIN pg_roles AS owner ON owner.oid = relation.relowner
+                WHERE namespace.nspname = :schema_name
+                  AND relation.relname IN (
+                      'okx_order_writer_leases',
+                      'okx_order_write_attempts'
+                  )
+                ORDER BY relation.relname
+                """
+            ),
+            {
+                "schema_name": schema_name,
+                "writer_unsafe_privileges": writer_unsafe_table_privileges,
+            },
+        ).all()
+        writer_tables = {
+            row[0]: tuple(row[1:])
+            for row in writer_table_rows
+        }
+        for table_name in (
+            "okx_order_writer_leases",
+            "okx_order_write_attempts",
+        ):
+            (
+                owner,
+                can_select,
+                can_insert,
+                can_update,
+                can_use_unsafe_dml,
+                public_privilege,
+                unexpected_writer,
+            ) = writer_tables.get(
+                table_name,
+                (None, False, False, False, True, True, True),
+            )
+            if owner != "freqtrade_ai_attestor":
+                problems.append(
+                    "writer table owner mismatch: {} owner={}".format(
+                        table_name,
+                        owner or "<missing>",
+                    )
+                )
+            if not (can_select and can_insert and can_update):
+                problems.append(
+                    "runtime writer DML privilege missing: {}".format(
+                        table_name
+                    )
+                )
+            if can_use_unsafe_dml:
+                problems.append(
+                    "runtime writer has unsafe DML privilege: {}".format(
+                        table_name
+                    )
+                )
+            if public_privilege:
+                problems.append(
+                    "PUBLIC writer table privilege is not revoked: {}".format(
+                        table_name
+                    )
+                )
+            if unexpected_writer:
+                problems.append(
+                    "unexpected role has writer table DML: {}".format(
+                        table_name
+                    )
+                )
+        writer_column_rows = bind.execute(
+            text(
+                """
+                SELECT relation.relname, attribute.attname,
+                       EXISTS (
+                           SELECT 1
+                           FROM aclexplode(attribute.attacl) AS acl
+                           WHERE acl.grantee = (
+                               SELECT oid FROM pg_roles
+                               WHERE rolname = 'freqtrade'
+                           )
+                             AND acl.privilege_type IN (
+                                 'INSERT', 'UPDATE', 'REFERENCES'
+                             )
+                       ),
+                       EXISTS (
+                           SELECT 1
+                           FROM aclexplode(attribute.attacl) AS acl
+                           WHERE acl.grantee = 0
+                             AND acl.privilege_type IN (
+                                 'INSERT', 'UPDATE', 'REFERENCES'
+                             )
+                       ),
+                       EXISTS (
+                           SELECT 1
+                           FROM aclexplode(attribute.attacl) AS acl
+                           WHERE acl.grantee NOT IN (
+                               0,
+                               relation.relowner,
+                               (SELECT oid FROM pg_roles
+                                WHERE rolname = 'freqtrade')
+                           )
+                             AND acl.privilege_type IN (
+                                 'INSERT', 'UPDATE', 'REFERENCES'
+                             )
+                       )
+                FROM pg_class AS relation
+                JOIN pg_namespace AS namespace
+                  ON namespace.oid = relation.relnamespace
+                JOIN pg_attribute AS attribute
+                  ON attribute.attrelid = relation.oid
+                 AND attribute.attnum > 0
+                 AND NOT attribute.attisdropped
+                WHERE namespace.nspname = :schema_name
+                  AND relation.relname IN (
+                      'okx_order_writer_leases',
+                      'okx_order_write_attempts'
+                  )
+                """
+            ),
+            {"schema_name": schema_name},
+        ).all()
+        for (
+            table_name,
+            column_name,
+            runtime_column_dml,
+            public_column_dml,
+            unexpected_column_dml,
+        ) in writer_column_rows:
+            if runtime_column_dml:
+                problems.append(
+                    "runtime writer column DML is not revoked: {}.{}".format(
+                        table_name,
+                        column_name,
+                    )
+                )
+            if public_column_dml:
+                problems.append(
+                    "PUBLIC writer column DML is not revoked: {}.{}".format(
+                        table_name,
+                        column_name,
+                    )
+                )
+            if unexpected_column_dml:
+                problems.append(
+                    "unexpected role has writer column DML: {}.{}".format(
+                        table_name,
+                        column_name,
+                    )
+                )
+        writer_sequence = bind.execute(
+            text(
+                """
+                SELECT relation.relname, owner.rolname,
+                       has_sequence_privilege(
+                           'freqtrade', relation.oid, 'USAGE'
+                       ),
+                       has_sequence_privilege(
+                           'freqtrade', relation.oid, 'SELECT'
+                       ),
+                       has_sequence_privilege(
+                           'freqtrade', relation.oid, 'UPDATE'
+                       ),
+                       EXISTS (
+                           SELECT 1
+                           FROM aclexplode(
+                               COALESCE(
+                                   relation.relacl,
+                                   acldefault('S', relation.relowner)
+                               )
+                           ) AS acl
+                           WHERE acl.grantee = 0
+                       ),
+                       EXISTS (
+                           SELECT 1
+                           FROM aclexplode(
+                               COALESCE(
+                                   relation.relacl,
+                                   acldefault('S', relation.relowner)
+                               )
+                           ) AS acl
+                           WHERE acl.grantee NOT IN (
+                               0,
+                               relation.relowner,
+                               (SELECT oid FROM pg_roles
+                                WHERE rolname = 'freqtrade')
+                           )
+                       )
+                FROM pg_class AS relation
+                JOIN pg_namespace AS namespace
+                  ON namespace.oid = relation.relnamespace
+                JOIN pg_roles AS owner ON owner.oid = relation.relowner
+                WHERE namespace.nspname = :schema_name
+                  AND relation.relkind = 'S'
+                  AND relation.relname =
+                      'okx_order_write_attempts_id_seq'
+                """
+            ),
+            {"schema_name": schema_name},
+        ).first()
+        (
+            sequence_name,
+            sequence_owner,
+            sequence_usage,
+            sequence_select,
+            sequence_update,
+            sequence_public,
+            sequence_unexpected,
+        ) = writer_sequence or (
+            None,
+            None,
+            False,
+            False,
+            True,
+            True,
+            True,
+        )
+        if (
+            sequence_name is None
+            or sequence_owner != "freqtrade_ai_attestor"
+            or not sequence_usage
+            or not sequence_select
+            or sequence_update
+            or sequence_public
+            or sequence_unexpected
+        ):
+            problems.append("writer attempt sequence ACL mismatch")
         secured_functions = bind.execute(
             text(
                 """
@@ -1622,22 +2083,54 @@ def _require_attestation_admin(connection: Connection) -> None:
 
 def _revoke_runtime_attestor_membership(connection: Connection) -> None:
     _require_attestation_admin(connection)
-    existing_roles = set(
-        connection.execute(
+    role_rows = {
+        row.rolname: row
+        for row in connection.execute(
             text(
-                "SELECT rolname FROM pg_roles "
-                "WHERE rolname IN ('freqtrade', 'freqtrade_ai_attestor')"
-            )
-        ).scalars()
-    )
-    if existing_roles == {"freqtrade", "freqtrade_ai_attestor"}:
-        connection.execute(
-            text(
-                "ALTER ROLE freqtrade_ai_attestor "
-                "NOLOGIN NOINHERIT NOSUPERUSER NOCREATEROLE "
-                "NOCREATEDB NOREPLICATION NOBYPASSRLS"
+                """
+                SELECT rolname, rolcanlogin, rolinherit, rolsuper,
+                       rolcreaterole, rolcreatedb, rolreplication, rolbypassrls
+                FROM pg_roles
+                WHERE rolname IN ('freqtrade', 'freqtrade_ai_attestor')
+                """
             )
         )
+    }
+    if set(role_rows) == {"freqtrade", "freqtrade_ai_attestor"}:
+        attestor = role_rows["freqtrade_ai_attestor"]
+        if (
+            attestor.rolcanlogin
+            or attestor.rolinherit
+            or attestor.rolsuper
+            or attestor.rolcreaterole
+            or attestor.rolcreatedb
+            or attestor.rolreplication
+            or attestor.rolbypassrls
+        ):
+            connection.execute(
+                text(
+                    "ALTER ROLE freqtrade_ai_attestor "
+                    "NOLOGIN NOINHERIT NOSUPERUSER NOCREATEROLE "
+                    "NOCREATEDB NOREPLICATION NOBYPASSRLS"
+                )
+            )
+    has_membership = connection.execute(
+        text(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM pg_auth_members AS membership
+                JOIN pg_roles AS granted
+                  ON granted.oid = membership.roleid
+                JOIN pg_roles AS member
+                  ON member.oid = membership.member
+                WHERE granted.rolname = 'freqtrade_ai_attestor'
+                  AND member.rolname = 'freqtrade'
+            )
+            """
+        )
+    ).scalar_one()
+    if has_membership:
         connection.execute(
             text("REVOKE freqtrade_ai_attestor FROM freqtrade")
         )
@@ -1825,10 +2318,6 @@ def _add_attested_session_boundary(connection: Connection) -> None:
                     SELECT 1 FROM pg_roles WHERE rolname = 'freqtrade_ai_attestor'
                 ) THEN
                     CREATE ROLE freqtrade_ai_attestor
-                        NOLOGIN NOINHERIT NOSUPERUSER NOCREATEROLE
-                        NOCREATEDB NOREPLICATION NOBYPASSRLS;
-                ELSE
-                    ALTER ROLE freqtrade_ai_attestor
                         NOLOGIN NOINHERIT NOSUPERUSER NOCREATEROLE
                         NOCREATEDB NOREPLICATION NOBYPASSRLS;
                 END IF;
@@ -2045,6 +2534,138 @@ def _add_attested_session_boundary(connection: Connection) -> None:
     )
 
 
+def _add_order_writer(connection: Connection) -> None:
+    """Add the #447 single-writer lease and durable write-attempt journal."""
+
+    schema_name, effective_schemas = connection.execute(
+        text("SELECT current_schema(), current_schemas(false)")
+    ).one()
+    if not schema_name or list(effective_schemas or ()) != [schema_name]:
+        raise SchemaMigrationBlocked(
+            "Order-writer migration requires exactly one effective schema"
+        )
+    quote = connection.dialect.identifier_preparer.quote
+    for table_name in ("okx_order_write_attempts", "okx_order_writer_leases"):
+        qualified_table = "{}.{}".format(quote(schema_name), quote(table_name))
+        exists = connection.execute(
+            text("SELECT to_regclass(:table_name) IS NOT NULL"),
+            {"table_name": qualified_table},
+        ).scalar_one()
+        if exists:
+            row_count = connection.execute(
+                text("SELECT count(*) FROM {}".format(qualified_table))
+            ).scalar_one()
+            if row_count:
+                raise SchemaMigrationBlocked(
+                    "Refusing to replace non-empty pre-release writer table: "
+                    + table_name
+                )
+            try:
+                connection.execute(text("DROP TABLE {}".format(qualified_table)))
+            except SQLAlchemyError as exc:
+                raise SchemaMigrationBlocked(
+                    "Refusing to drop pre-release writer table with dependencies: "
+                    + table_name
+                ) from exc
+    # Legacy worker-only schemas do not contain the #442 exchange-order parent
+    # yet.  Create it before the writer journal so PostgreSQL can resolve the
+    # journal's foreign key during the same atomic upgrade.
+    Base.metadata.tables["exchange_orders"].create(
+        bind=connection,
+        checkfirst=True,
+    )
+    Base.metadata.tables["okx_order_writer_leases"].create(
+        bind=connection,
+        checkfirst=True,
+    )
+    Base.metadata.tables["okx_order_write_attempts"].create(
+        bind=connection,
+        checkfirst=True,
+    )
+    quoted_schema = quote(schema_name)
+    connection.execute(
+        text(
+            "ALTER SCHEMA {} OWNER TO freqtrade_ai_attestor; "
+            "REVOKE CREATE ON SCHEMA {} "
+            "FROM PUBLIC, freqtrade, freqtrade_ai_attestor; "
+            "GRANT USAGE ON SCHEMA {} "
+            "TO freqtrade, freqtrade_ai_attestor".format(
+                quoted_schema,
+                quoted_schema,
+                quoted_schema,
+            )
+        )
+    )
+    qualified_version_table = "{}.{}".format(
+        quoted_schema,
+        quote(VERSION_TABLE),
+    )
+    connection.execute(
+        text(
+            "REVOKE ALL ON TABLE {} FROM PUBLIC, freqtrade; "
+            "GRANT SELECT ON TABLE {} TO freqtrade".format(
+                qualified_version_table,
+                qualified_version_table,
+            )
+        )
+    )
+    for table_name in ("okx_order_writer_leases", "okx_order_write_attempts"):
+        qualified_table = "{}.{}".format(quoted_schema, quote(table_name))
+        quoted_columns = ", ".join(
+            quote(column.name)
+            for column in Base.metadata.tables[table_name].columns
+        )
+        connection.execute(
+            text(
+                "ALTER TABLE {} OWNER TO freqtrade_ai_attestor; "
+                "REVOKE ALL ({}) ON {} FROM PUBLIC, freqtrade; "
+                "REVOKE ALL ON TABLE {} FROM PUBLIC, freqtrade; "
+                "GRANT SELECT, INSERT, UPDATE ON TABLE {} TO freqtrade".format(
+                    qualified_table,
+                    quoted_columns,
+                    qualified_table,
+                    qualified_table,
+                    qualified_table,
+                )
+            )
+        )
+    sequence_identity = connection.execute(
+        text(
+            "SELECT namespace.nspname, relation.relname "
+            "FROM pg_class AS relation "
+            "JOIN pg_namespace AS namespace "
+            "ON namespace.oid = relation.relnamespace "
+            "WHERE relation.oid = pg_get_serial_sequence("
+            ":qualified_table, 'id')::regclass"
+        ),
+        {
+            "qualified_table": "{}.{}".format(
+                schema_name,
+                "okx_order_write_attempts",
+            )
+        },
+    ).first()
+    if sequence_identity is None:
+        raise SchemaMigrationBlocked(
+            "Order-writer attempt sequence is missing"
+        )
+    sequence_name = "{}.{}".format(
+        quote(sequence_identity[0]),
+        quote(sequence_identity[1]),
+    )
+    connection.execute(
+        text(
+            "ALTER SEQUENCE {} OWNER TO freqtrade_ai_attestor; "
+            "REVOKE ALL ON SEQUENCE {} FROM PUBLIC, freqtrade; "
+            "GRANT USAGE, SELECT ON SEQUENCE {} TO freqtrade".format(
+                sequence_name,
+                sequence_name,
+                sequence_name,
+            )
+        )
+    )
+
+
 def upgrade_database(engine: Engine) -> str:
     """Upgrade a local PostgreSQL database atomically to ``SCHEMA_VERSION``.
 
@@ -2086,6 +2707,7 @@ def upgrade_database(engine: Engine) -> str:
                 _harden_risk_chain(connection)
                 _add_trusted_snapshot_boundary(connection)
                 _add_attested_session_boundary(connection)
+                _add_order_writer(connection)
                 Base.metadata.create_all(bind=connection)
                 problems = schema_problems(connection)
                 if problems:
@@ -2104,6 +2726,7 @@ def upgrade_database(engine: Engine) -> str:
                 _harden_risk_chain(connection)
                 _add_trusted_snapshot_boundary(connection)
                 _add_attested_session_boundary(connection)
+                _add_order_writer(connection)
                 Base.metadata.create_all(bind=connection)
                 problems = schema_problems(connection)
                 if problems:
@@ -2121,6 +2744,7 @@ def upgrade_database(engine: Engine) -> str:
                 _harden_risk_chain(connection)
                 _add_trusted_snapshot_boundary(connection)
                 _add_attested_session_boundary(connection)
+                _add_order_writer(connection)
                 Base.metadata.create_all(bind=connection)
                 problems = schema_problems(connection)
                 if problems:
@@ -2137,6 +2761,7 @@ def upgrade_database(engine: Engine) -> str:
                 _harden_risk_chain(connection)
                 _add_trusted_snapshot_boundary(connection)
                 _add_attested_session_boundary(connection)
+                _add_order_writer(connection)
                 Base.metadata.create_all(bind=connection)
                 problems = schema_problems(connection)
                 if problems:
@@ -2152,6 +2777,7 @@ def upgrade_database(engine: Engine) -> str:
             if current_version == TRUSTED_SNAPSHOT_BASE_VERSION:
                 _add_trusted_snapshot_boundary(connection)
                 _add_attested_session_boundary(connection)
+                _add_order_writer(connection)
                 Base.metadata.create_all(bind=connection)
                 problems = schema_problems(connection)
                 if problems:
@@ -2166,6 +2792,7 @@ def upgrade_database(engine: Engine) -> str:
                 return SCHEMA_VERSION
             if current_version == ATTESTED_SESSION_BASE_VERSION:
                 _add_attested_session_boundary(connection)
+                _add_order_writer(connection)
                 Base.metadata.create_all(bind=connection)
                 problems = schema_problems(connection)
                 if problems:
@@ -2180,6 +2807,7 @@ def upgrade_database(engine: Engine) -> str:
                 return SCHEMA_VERSION
             if current_version == HMAC_ATTESTATION_BASE_VERSION:
                 _add_attested_session_boundary(connection)
+                _add_order_writer(connection)
                 Base.metadata.create_all(bind=connection)
                 problems = schema_problems(connection)
                 if problems:
@@ -2194,11 +2822,25 @@ def upgrade_database(engine: Engine) -> str:
                 return SCHEMA_VERSION
             if current_version == ATTESTATION_ACL_BASE_VERSION:
                 _add_approved_snapshot_lineage(connection)
+                _add_order_writer(connection)
                 Base.metadata.create_all(bind=connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
                         "Approval snapshot lineage upgrade does not match ORM metadata: "
+                        + "; ".join(problems)
+                    )
+                connection.execute(
+                    text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+                    {"version": SCHEMA_VERSION},
+                )
+                return SCHEMA_VERSION
+            if current_version == ORDER_WRITER_BASE_VERSION:
+                _add_order_writer(connection)
+                problems = schema_problems(connection)
+                if problems:
+                    raise SchemaMigrationBlocked(
+                        "Order-writer schema upgrade does not match ORM metadata: "
                         + "; ".join(problems)
                     )
                 connection.execute(
@@ -2228,6 +2870,7 @@ def upgrade_database(engine: Engine) -> str:
             Base.metadata.create_all(bind=connection)
             _add_trusted_snapshot_boundary(connection)
             _add_attested_session_boundary(connection)
+            _add_order_writer(connection)
             problems = schema_problems(connection)
             if problems:
                 raise SchemaMigrationBlocked(
@@ -2244,21 +2887,90 @@ def upgrade_database(engine: Engine) -> str:
     return SCHEMA_VERSION
 
 
-def verify_schema(engine: Engine) -> SchemaReadiness:
-    """Return a non-secret readiness result; callers decide the HTTP/CLI failure mode."""
+def _verify_connection_schema(
+    connection: Connection,
+    *,
+    require_runtime_role: bool,
+) -> SchemaReadiness:
+    """Verify one exact connection and its active writer schema."""
 
-    identity = database_identity(engine)
-    if engine.dialect.name != "postgresql":
+    identity = database_identity(connection.engine)
+    if connection.dialect.name != "postgresql":
         return SchemaReadiness(identity, None, False, ("database dialect is not PostgreSQL",))
     try:
-        with engine.connect() as connection:
-            schema_name = connection.execute(text("SELECT current_schema()")).scalar_one()
-            if VERSION_TABLE not in inspect(connection).get_table_names(schema=schema_name):
-                return SchemaReadiness(identity, None, False, ("migration version table is missing",))
-            version = _current_version(connection)
-            problems = schema_problems(connection)
+        (
+            database_name,
+            schema_name,
+            search_path,
+            effective_schemas,
+            current_role,
+        ) = connection.execute(
+            text(
+                "SELECT current_database(), current_schema(), "
+                "current_setting('search_path'), current_schemas(false), "
+                "current_user"
+            )
+        ).one()
+        problems = []
+        if require_runtime_role and current_role != "freqtrade":
+            problems.append(
+                "writer connection role mismatch: expected freqtrade got {}".format(
+                    current_role
+                )
+            )
+        expected_database = connection.engine.url.database
+        if expected_database and database_name != expected_database:
+            problems.append(
+                "connection database identity mismatch: expected {} got {}".format(
+                    expected_database,
+                    database_name,
+                )
+            )
+        if list(effective_schemas or ()) != [schema_name]:
+            problems.append(
+                "active search_path is not single-schema: {}".format(search_path)
+            )
+        if VERSION_TABLE not in inspect(connection).get_table_names(schema=schema_name):
+            problems.append("migration version table is missing")
+            return SchemaReadiness(identity, None, False, tuple(problems))
+        version = _current_version(connection)
+        problems.extend(schema_problems(connection))
     except SQLAlchemyError as exc:
         return SchemaReadiness(identity, None, False, (f"database query failed: {exc.__class__.__name__}",))
     if version != SCHEMA_VERSION:
         problems.append(f"schema version is {version or '<missing>'}, expected {SCHEMA_VERSION}")
     return SchemaReadiness(identity, version, not problems, tuple(problems))
+
+
+def verify_connection_schema(connection: Connection) -> SchemaReadiness:
+    """Verify the exact runtime connection used by a writer Session."""
+
+    return _verify_connection_schema(
+        connection,
+        require_runtime_role=True,
+    )
+
+
+def verify_schema(engine: Engine) -> SchemaReadiness:
+    """Return a non-secret readiness result; callers decide the HTTP/CLI failure mode."""
+
+    if engine.dialect.name != "postgresql":
+        return SchemaReadiness(
+            database_identity(engine),
+            None,
+            False,
+            ("database dialect is not PostgreSQL",),
+        )
+    try:
+        with engine.connect() as connection:
+            return _verify_connection_schema(
+                connection,
+                require_runtime_role=False,
+            )
+    except SQLAlchemyError as exc:
+        return SchemaReadiness(
+            database_identity(engine),
+            None,
+            False,
+            (f"database query failed: {exc.__class__.__name__}",),
+        )
