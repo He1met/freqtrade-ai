@@ -12,6 +12,7 @@ from app.adapters.okx_demo.models import (
     SnapshotMetadata,
 )
 from app.adapters.okx_demo.read_adapter import (
+    OkxDemoReadClient,
     OkxDemoReadAdapter,
     create_attested_okx_demo_read_adapter,
 )
@@ -27,6 +28,7 @@ __all__ = [
     "OkxDemoCredentialProvider",
     "OkxDemoCredentialsUnavailable",
     "OkxDemoReadAdapter",
+    "OkxDemoReadClient",
     "OkxReadAdapterError",
     "OkxReadHttpResponse",
     "OkxReadSnapshot",
