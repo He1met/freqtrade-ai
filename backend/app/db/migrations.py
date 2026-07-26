@@ -1782,6 +1782,30 @@ def _add_execution_target_lineage(connection: Connection) -> None:
             """
         )
     )
+    actual_scope_catalog = {
+        tuple(row)
+        for row in connection.execute(
+            text(
+                """
+                SELECT scope_id, scope_kind, exchange_capable, executable,
+                       exchange_writes, order_submission_authorized
+                FROM execution_scopes
+                WHERE scope_id IN (
+                    'OKX_DEMO', 'LOCAL_DRY_RUN', 'UNKNOWN_LEGACY'
+                )
+                """
+            )
+        ).all()
+    }
+    expected_scope_catalog = {
+        ("OKX_DEMO", "EXCHANGE_TARGET", True, False, False, False),
+        ("LOCAL_DRY_RUN", "NON_EXCHANGE", False, True, False, False),
+        ("UNKNOWN_LEGACY", "LEGACY", False, False, False, False),
+    }
+    if actual_scope_catalog != expected_scope_catalog:
+        raise SchemaMigrationBlocked(
+            "Execution scope catalog is missing or contract-mismatched"
+        )
 
     schema_name = connection.execute(text("SELECT current_schema()")).scalar_one()
     table_names = set(inspect(connection).get_table_names(schema=schema_name))
@@ -3016,6 +3040,12 @@ def _add_okx_demo_reconciliation(connection: Connection) -> None:
         )
     quote = connection.dialect.identifier_preparer.quote
     quoted_schema = quote(schema_name)
+    # Incremental schemas can predate #448 entirely. Create the lineage parent
+    # before any state/grant child table that references reconciliation_runs.
+    Base.metadata.tables["reconciliation_runs"].create(
+        bind=connection,
+        checkfirst=True,
+    )
     connection.execute(
         text(
             """
