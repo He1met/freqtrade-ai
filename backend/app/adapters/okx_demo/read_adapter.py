@@ -12,7 +12,18 @@ from app.adapters.okx_demo.credentials import (
     OkxDemoCredentialProvider,
     OkxDemoCredentialsUnavailable,
     UnavailableOkxDemoCredentialProvider,
-    _is_attested_okx_demo_credential_provider,
+)
+from app.adapters.okx_demo.credential_preflight import (
+    ALLOW_REAL_FUNDS_ENV,
+    EXECUTION_TARGET_ENV,
+    OKX_DEMO_ACCOUNT_FINGERPRINT_ENV,
+    OKX_DEMO_CREDENTIAL_ENV_NAMES,
+    REST_URL_ENV,
+    OkxDemoPreflightBlocked,
+    _build_demo_authorization_headers,
+    require_pinned_account_fingerprint,
+    run_preflight,
+    validate_account_config,
 )
 from app.adapters.okx_demo.errors import OkxReadAdapterError
 from app.adapters.okx_demo.models import (
@@ -56,6 +67,12 @@ DEFAULT_TTLS = {
     "fees": 3600,
     "order": 15,
 }
+ATTESTATION_TTL_SECONDS = 60
+FUTURE_SKEW_SECONDS = 5
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class OkxDemoReadAdapter:
@@ -77,27 +94,19 @@ class OkxDemoReadAdapter:
                 status="BLOCKED",
                 message="OKX read adapter permits only execution_target=OKX_DEMO",
             )
-        resolved_transport = transport or UrllibOkxReadTransport()
-        resolved_provider = (
-            credential_provider or UnavailableOkxDemoCredentialProvider()
-        )
-        if (
-            isinstance(resolved_transport, UrllibOkxReadTransport)
-            and not isinstance(
-                resolved_provider,
-                UnavailableOkxDemoCredentialProvider,
-            )
-            and not _is_attested_okx_demo_credential_provider(resolved_provider)
-        ):
+        if transport is None or isinstance(transport, UrllibOkxReadTransport):
             raise OkxReadAdapterError(
                 kind="UNAUTHORIZED",
                 status="BLOCKED",
-                message=(
-                    "OKX real read transport requires the attested credential factory"
-                ),
+                message="real OKX transport requires the attested adapter factory",
             )
+        resolved_transport = transport
+        resolved_provider = (
+            credential_provider or UnavailableOkxDemoCredentialProvider()
+        )
         self._transport = resolved_transport
         self._credential_provider = resolved_provider
+        self._account_config_validator = None
         self._timeout_seconds = timeout_seconds
         self._now_provider = now_provider or (lambda: datetime.now(timezone.utc))
         self._ttls = {**DEFAULT_TTLS, **dict(ttl_seconds or {})}
@@ -413,6 +422,15 @@ class OkxDemoReadAdapter:
             ) from exc
 
         self._validate_http_status(response.status_code)
+        if resource == "account_config" and self._account_config_validator is not None:
+            try:
+                self._account_config_validator(response.payload)
+            except OkxDemoPreflightBlocked:
+                raise OkxReadAdapterError(
+                    kind="IDENTITY_DRIFT",
+                    status="BLOCKED",
+                    message="OKX Demo account identity no longer matches attestation",
+                ) from None
         data = self._validate_envelope(response.payload, allow_empty=allow_empty)
         try:
             normalized = list(parser(data))
@@ -429,8 +447,22 @@ class OkxDemoReadAdapter:
                 message=f"OKX {resource} response contained no records",
             )
 
+        now = self._now()
+        received_at = self._aware_utc_timestamp(response.received_at)
         exchange_timestamp = self._latest_timestamp(normalized)
-        freshness_anchor = exchange_timestamp or response.received_at
+        if (
+            received_at > now + timedelta(seconds=FUTURE_SKEW_SECONDS)
+            or (
+                exchange_timestamp is not None
+                and exchange_timestamp > now + timedelta(seconds=FUTURE_SKEW_SECONDS)
+            )
+        ):
+            raise OkxReadAdapterError(
+                kind="INVALID_RESPONSE",
+                status="BLOCKED",
+                message=f"OKX {resource} snapshot timestamp is in the future",
+            )
+        freshness_anchor = exchange_timestamp or received_at
         expires_at = freshness_anchor + timedelta(seconds=self._ttls[resource])
         stale = self._now() > expires_at
         if stale:
@@ -442,7 +474,7 @@ class OkxDemoReadAdapter:
         return OkxReadSnapshot(
             metadata=SnapshotMetadata(
                 resource=resource,
-                fetched_at=response.received_at,
+                fetched_at=received_at,
                 exchange_timestamp=exchange_timestamp,
                 expires_at=expires_at,
                 stale=False,
@@ -522,15 +554,35 @@ class OkxDemoReadAdapter:
     def _instrument(item: Mapping[str, Any]) -> InstrumentSpec:
         if item["instType"] != "SWAP":
             raise ValueError("instrument is not SWAP")
+        contract_type = item.get("ctType")
+        base_ccy = item["baseCcy"]
+        quote_ccy = item["quoteCcy"]
+        settle_ccy = item["settleCcy"]
+        contract_value_ccy = item["ctValCcy"]
+        consistent = (
+            contract_type == "linear"
+            and contract_value_ccy == base_ccy
+            and settle_ccy == quote_ccy
+        ) or (
+            contract_type == "inverse"
+            and contract_value_ccy == quote_ccy
+            and settle_ccy == base_ccy
+        )
+        if not consistent:
+            raise OkxReadAdapterError(
+                kind="INVALID_RESPONSE",
+                status="BLOCKED",
+                message="OKX instrument contract metadata is inconsistent",
+            )
         return InstrumentSpec(
             inst_id=item["instId"],
             inst_type=item["instType"],
-            base_ccy=item["baseCcy"],
-            quote_ccy=item["quoteCcy"],
-            settle_ccy=item["settleCcy"],
-            contract_type=item.get("ctType", ""),
+            base_ccy=base_ccy,
+            quote_ccy=quote_ccy,
+            settle_ccy=settle_ccy,
+            contract_type=contract_type,
             contract_value=Decimal(item["ctVal"]),
-            contract_value_ccy=item["ctValCcy"],
+            contract_value_ccy=contract_value_ccy,
             lot_size=Decimal(item["lotSz"]),
             min_size=Decimal(item["minSz"]),
             tick_size=Decimal(item["tickSz"]),
@@ -760,7 +812,99 @@ class OkxDemoReadAdapter:
 
     def _now(self) -> datetime:
         value = self._now_provider()
-        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        if not isinstance(value, datetime) or value.tzinfo is None:
+            raise OkxReadAdapterError(
+                kind="INVALID_CLOCK",
+                status="BLOCKED",
+                message="OKX read clock must be timezone-aware",
+            )
+        return value.astimezone(timezone.utc)
+
+    @staticmethod
+    def _aware_utc_timestamp(value: Any) -> datetime:
+        if not isinstance(value, datetime) or value.tzinfo is None:
+            raise OkxReadAdapterError(
+                kind="INVALID_RESPONSE",
+                status="BLOCKED",
+                message="OKX response received_at must be timezone-aware",
+            )
+        return value.astimezone(timezone.utc)
+
+
+def create_attested_okx_demo_read_adapter(
+    environment: Mapping[str, str],
+) -> OkxDemoReadAdapter:
+    """Create the only production adapter after attesting one frozen bundle."""
+
+    names = (
+        EXECUTION_TARGET_ENV,
+        ALLOW_REAL_FUNDS_ENV,
+        REST_URL_ENV,
+        *OKX_DEMO_CREDENTIAL_ENV_NAMES,
+        OKX_DEMO_ACCOUNT_FINGERPRINT_ENV,
+    )
+    snapshot = {name: environment.get(name, "") for name in names}
+    try:
+        run_preflight(snapshot)
+        expected_fingerprint = require_pinned_account_fingerprint(snapshot)
+        attested_at = _utc_now()
+        if attested_at.tzinfo is None:
+            raise OkxDemoPreflightBlocked("attestation clock is not timezone-aware")
+        attested_at = attested_at.astimezone(timezone.utc)
+        expires_at = attested_at + timedelta(seconds=ATTESTATION_TTL_SECONDS)
+
+        class AttestedSession:
+            def __init__(self) -> None:
+                self.attested_at = attested_at
+                self.expires_at = expires_at
+                self._environment = dict(snapshot)
+
+            def authorization_headers(
+                self,
+                *,
+                method: str,
+                request_path: str,
+                body: str,
+            ) -> Mapping[str, str]:
+                now = _utc_now()
+                if (
+                    not isinstance(now, datetime)
+                    or now.tzinfo is None
+                    or now.astimezone(timezone.utc) >= self.expires_at
+                ):
+                    raise OkxDemoCredentialsUnavailable(
+                        "OKX_DEMO account attestation expired"
+                    )
+                try:
+                    return _build_demo_authorization_headers(
+                        self._environment,
+                        method=method,
+                        request_path=request_path,
+                        body=body,
+                    )
+                except OkxDemoPreflightBlocked:
+                    raise OkxDemoCredentialsUnavailable(
+                        "OKX_DEMO credential provider is unavailable"
+                    ) from None
+
+        session = AttestedSession()
+        adapter = object.__new__(OkxDemoReadAdapter)
+        adapter._transport = UrllibOkxReadTransport()
+        adapter._credential_provider = session
+        adapter._timeout_seconds = 10.0
+        adapter._now_provider = _utc_now
+        adapter._ttls = dict(DEFAULT_TTLS)
+        adapter._account_config_validator = lambda payload: validate_account_config(
+            payload,
+            expected_fingerprint=expected_fingerprint,
+        )
+        return adapter
+    except OkxDemoPreflightBlocked:
+        raise OkxDemoCredentialsUnavailable(
+            "OKX_DEMO credential provider account attestation failed"
+        ) from None
+    finally:
+        snapshot.clear()
 
 
 def _millis(value: Any) -> datetime:
