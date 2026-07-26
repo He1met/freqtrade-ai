@@ -1,0 +1,17 @@
+{
+  "allow_real_funds": false,
+  "business_ws_url": "wss://wspap.okx.com:8443/ws/v5/business",
+  "exchange": "okx",
+  "execution_target": "OKX_DEMO",
+  "instrument_type": "SWAP",
+  "margin_mode": "isolated",
+  "position_mode": "net_mode",
+  "private_rest_headers": {
+    "x-simulated-trading": "1"
+  },
+  "private_ws_url": "wss://wspap.okx.com:8443/ws/v5/private",
+  "public_ws_url": "wss://wspap.okx.com:8443/ws/v5/public",
+  "rest_url": "https://openapi.okx.com",
+  "simulated_trading": true,
+  "trading_mode": "futures"
+}
