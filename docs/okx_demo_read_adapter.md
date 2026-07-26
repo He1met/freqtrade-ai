@@ -47,13 +47,19 @@ below the exchange minimum. No contract size is hard-coded.
 ## Credential provider boundary
 
 The adapter depends on the narrow `OkxDemoCredentialProvider` protocol.
-The only public production factory, `attest_okx_demo_credential_provider`,
+The only public production entry point, `create_attested_okx_demo_read_adapter`,
 freezes the allowlisted environment and first runs #443's authenticated
 `/account/config` preflight against that same credential snapshot. It returns a
-signing session only after the account fingerprint, exact permissions, Futures
+real-network adapter only after the account fingerprint, exact permissions, Futures
 account level, and `net_mode` all match. A stale pin paired with another Demo
 key therefore blocks before any target private read. The session signs only
 `GET` with an empty body and cannot select another target or REST origin.
+
+Ordinary `OkxDemoReadAdapter` construction accepts only injected non-production
+transports and can never select `UrllibOkxReadTransport`. The attested session
+is closure-local, expires after 60 seconds, and revalidates every
+`account_config` response against the original fingerprint and account-safety
+contract. Other private reads are allowed only inside that TTL.
 
 The factory is used only inside the short-lived OKX adapter child. It does not
 read Keychain, dotenv, or inherited shell credentials itself. Authorization
