@@ -35,8 +35,13 @@ from app.models.execution_lineage import (
     RiskDecision,
     TradeIntent,
 )
+from app.models.okx_demo_reconciliation import OkxDemoReconciliationState
 from app.models.order_writer import OkxOrderWriteAttempt, OkxOrderWriterLease
 from app.services.risk_chain import RiskChainBlocked, RiskChainService, canonical_digest
+from app.services.okx_demo_reconciliation import (
+    OkxDemoReconciliationBlocked,
+    OkxDemoReconciliationService,
+)
 
 
 OKX_DEMO = "OKX_DEMO"
@@ -119,6 +124,31 @@ class SqlAlchemyOrderWriterStore:
         except Exception:
             self.db.rollback()
             raise
+
+    def claim_recovery_grant(
+        self,
+        grant_database_id: int,
+        *,
+        action: str,
+        quantity: Decimal = Decimal("0"),
+        now: Optional[datetime] = None,
+    ) -> Mapping[str, Any]:
+        """Consume a run-bound cancel/reduce-only grant without reviving approval."""
+
+        try:
+            claim = OkxDemoReconciliationService(self.db).claim_recovery_grant(
+                grant_database_id,
+                action=action,
+                quantity=quantity,
+                now=now or self._now(),
+            )
+            self.db.commit()
+            return claim
+        except OkxDemoReconciliationBlocked as exc:
+            self.db.rollback()
+            raise OkxDemoWriteBlocked(
+                "recovery grant could not authorize the risk-reducing action"
+            ) from exc
 
     def acquire_lease(
         self,
@@ -257,6 +287,7 @@ class SqlAlchemyOrderWriterStore:
     ) -> tuple[ManagedOrder, WriteAttemptRecord]:
         self._require_lease()
         try:
+            self._require_reconciliation_allows(operation)
             approved, intent, decision = self._approval_lineage(
                 command.approval_id,
                 for_update=True,
@@ -324,6 +355,7 @@ class SqlAlchemyOrderWriterStore:
     ) -> WriteAttemptRecord:
         self._require_lease()
         try:
+            self._require_reconciliation_allows(operation)
             row = self.db.get(ExchangeOrder, order.exchange_order_row_id)
             approved, intent, decision = self._approval_lineage(
                 order.approval_id,
@@ -571,7 +603,7 @@ class SqlAlchemyOrderWriterStore:
             .join(RiskDecision, RiskDecision.id == ApprovedExecution.risk_decision_id)
             .where(ApprovedExecution.id == approval_id)
         )
-        if for_update:
+        if for_update and self.db.get_bind().dialect.name != "postgresql":
             statement = statement.with_for_update()
         row = self.db.execute(statement).first()
         if row is None:
@@ -579,18 +611,45 @@ class SqlAlchemyOrderWriterStore:
         return row[0], row[1], row[2]
 
     def _claim_active_approval(self, approval_id: int, *, now: datetime) -> None:
-        try:
-            claimed = RiskChainService(self.db).claim_active_approval(
-                approval_id,
-                now=now,
+        if self.db.get_bind().dialect.name != "postgresql":
+            try:
+                claimed = RiskChainService(self.db).claim_active_approval(
+                    approval_id,
+                    now=now,
+                )
+            except RiskChainBlocked as exc:
+                raise OkxDemoWriteBlocked(
+                    "approved execution claim could not be verified"
+                ) from exc
+            if claimed is None:
+                raise OkxDemoWriteBlocked(
+                    "approved execution claim is no longer active"
+                )
+            return
+        approved, intent, decision = self._approval_lineage(
+            approval_id,
+            for_update=False,
+        )
+        self._validate_approval(
+            approved,
+            intent,
+            decision,
+            now=now,
+        )
+
+    def _require_reconciliation_allows(self, operation: WriterOperation) -> None:
+        state = self.db.scalars(
+            select(OkxDemoReconciliationState).where(
+                OkxDemoReconciliationState.execution_target_id == OKX_DEMO
             )
-        except RiskChainBlocked as exc:
+        ).first()
+        if (
+            state is not None
+            and state.opening_frozen
+            and operation not in {"CANCEL", "CLOSE"}
+        ):
             raise OkxDemoWriteBlocked(
-                "approved execution claim could not be verified"
-            ) from exc
-        if claimed is None:
-            raise OkxDemoWriteBlocked(
-                "approved execution claim is no longer active"
+                "reconciliation gate freezes opening-risk operations"
             )
 
     def _validate_approval(
