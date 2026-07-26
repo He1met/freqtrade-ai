@@ -35,6 +35,7 @@ they are not a current source of work status.
 
 - [ADR-0010: OKX Demo SWAP compatibility and single order writer](adr/0010-okx-demo-order-writer-compatibility.md)
 - [OKX Demo Keychain credential boundary](okx_demo_credentials.md)
+- [OKX Demo minimal order canary](okx_demo_canary.md)
 - [execution_target.md](execution_target.md)
 - [execution_target_lineage.md](execution_target_lineage.md)
 - [okx_demo_read_adapter.md](okx_demo_read_adapter.md)
