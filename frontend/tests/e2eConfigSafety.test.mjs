@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
 import test from "node:test";
 
 import {
@@ -20,5 +22,8 @@ test("E2E paths reject command substitution and backticks before shell construct
 });
 
 test("E2E path validation accepts a real absolute directory", () => {
-  assert.equal(safeAbsoluteDirectory("E2E_TMP_PARENT", "/private/tmp"), "/private/tmp");
+  assert.equal(
+    safeAbsoluteDirectory("E2E_TMP_PARENT", tmpdir()),
+    realpathSync(tmpdir()),
+  );
 });
