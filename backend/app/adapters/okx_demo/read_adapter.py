@@ -73,6 +73,9 @@ DEFAULT_TTLS = {
     "leverage": 60,
     "fees": 3600,
     "order": 15,
+    "pending_orders": 15,
+    "orders_history": 30,
+    "fills_history": 30,
 }
 ATTESTATION_TTL_SECONDS = 60
 FUTURE_SKEW_SECONDS = 5
@@ -136,6 +139,30 @@ class OkxDemoReadClient(Protocol):
         *,
         order_id: Optional[str] = None,
         client_order_id: Optional[str] = None,
+    ) -> OkxReadSnapshot: ...
+    def pending_orders(
+        self,
+        inst_id: Optional[str] = None,
+        *,
+        after: Optional[str] = None,
+        before: Optional[str] = None,
+        limit: int = 100,
+    ) -> OkxReadSnapshot: ...
+    def fills_history(
+        self,
+        inst_id: Optional[str] = None,
+        *,
+        after: Optional[str] = None,
+        before: Optional[str] = None,
+        limit: int = 100,
+    ) -> OkxReadSnapshot: ...
+    def orders_history(
+        self,
+        inst_id: Optional[str] = None,
+        *,
+        after: Optional[str] = None,
+        before: Optional[str] = None,
+        limit: int = 100,
     ) -> OkxReadSnapshot: ...
 
 
@@ -405,6 +432,75 @@ class OkxDemoReadAdapter:
                 )
                 for item in data
             ],
+        )
+
+    def pending_orders(
+        self,
+        inst_id: Optional[str] = None,
+        *,
+        after: Optional[str] = None,
+        before: Optional[str] = None,
+        limit: int = 100,
+    ) -> OkxReadSnapshot:
+        query = self._history_query(
+            inst_id=inst_id,
+            after=after,
+            before=before,
+            limit=limit,
+        )
+        return self._request(
+            resource="pending_orders",
+            path="/api/v5/trade/orders-pending",
+            query=query,
+            authenticated=True,
+            parser=lambda data: [self._order(item) for item in data],
+            allow_empty=True,
+        )
+
+    def fills_history(
+        self,
+        inst_id: Optional[str] = None,
+        *,
+        after: Optional[str] = None,
+        before: Optional[str] = None,
+        limit: int = 100,
+    ) -> OkxReadSnapshot:
+        query = self._history_query(
+            inst_id=inst_id,
+            after=after,
+            before=before,
+            limit=limit,
+        )
+        return self._request(
+            resource="fills_history",
+            path="/api/v5/trade/fills-history",
+            query=query,
+            authenticated=True,
+            parser=lambda data: [self._fill(item) for item in data],
+            allow_empty=True,
+        )
+
+    def orders_history(
+        self,
+        inst_id: Optional[str] = None,
+        *,
+        after: Optional[str] = None,
+        before: Optional[str] = None,
+        limit: int = 100,
+    ) -> OkxReadSnapshot:
+        query = self._history_query(
+            inst_id=inst_id,
+            after=after,
+            before=before,
+            limit=limit,
+        )
+        return self._request(
+            resource="orders_history",
+            path="/api/v5/trade/orders-history-archive",
+            query=query,
+            authenticated=True,
+            parser=lambda data: [self._order(item) for item in data],
+            allow_empty=True,
         )
 
     def _request(
@@ -870,6 +966,44 @@ class OkxDemoReadAdapter:
             created_at=_millis(item["cTime"]),
             updated_at=_millis(item["uTime"]),
         )
+
+    @staticmethod
+    def _fill(item: Mapping[str, Any]):
+        from app.adapters.okx_demo.models import FillQuery
+
+        return FillQuery(
+            fill_id=item["fillId"],
+            order_id=item["ordId"],
+            inst_id=item["instId"],
+            price=Decimal(item["fillPx"]),
+            size=Decimal(item["fillSz"]),
+            fee=_optional_decimal(item.get("fee")),
+            timestamp=_millis(item["ts"]),
+        )
+
+    @classmethod
+    def _history_query(
+        cls,
+        *,
+        inst_id: Optional[str],
+        after: Optional[str],
+        before: Optional[str],
+        limit: int,
+    ) -> dict[str, str]:
+        if limit < 1 or limit > 100:
+            cls._invalid_request("history limit must be between 1 and 100")
+        if after is not None and not str(after).isdigit():
+            cls._invalid_request("history after cursor must be numeric")
+        if before is not None and not str(before).isdigit():
+            cls._invalid_request("history before cursor must be numeric")
+        query = {"instType": "SWAP", "limit": str(limit)}
+        if inst_id is not None:
+            query["instId"] = cls._swap_id(inst_id)
+        if after is not None:
+            query["after"] = str(after)
+        if before is not None:
+            query["before"] = str(before)
+        return query
 
     @staticmethod
     def _latest_timestamp(items: Sequence[BaseModel]) -> Optional[datetime]:
