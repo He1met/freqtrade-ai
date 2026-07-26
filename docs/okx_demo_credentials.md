@@ -32,9 +32,12 @@ the fixed Demo `GET /api/v5/account/config`, validates the response,
 computes the canonical account fingerprint in memory.
 
 The fingerprint is written to the fixed fourth Keychain item through controlled
-stdin, never argv. Credentials, `uid`, `mainUid`, and the fingerprint are not
-written to stdout, stderr, or logs. An existing pin is rejected before any
-network request and is never overwritten; there is no `--replace` mode.
+stdin with both macOS confirmation lines, never argv. The command then reads the
+fixed account/service back and uses a constant-time comparison. An empty,
+mismatched, or unreadable value causes immediate deletion of the newly created
+item and returns `BLOCKED`. Credentials, `uid`, `mainUid`, and the fingerprint
+are not written to stdout, stderr, or logs. An existing pin is rejected before
+any network request and is never overwritten; there is no `--replace` mode.
 Switching Demo accounts therefore requires the operator to explicitly delete
 the old fingerprint item before running onboarding again.
 
