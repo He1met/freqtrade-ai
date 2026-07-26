@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from app.services.secret_scanning import (
     format_secret_scan_report,
     scan_repo_for_secrets,
@@ -77,6 +79,138 @@ in local examples. Do not paste values into docs.
     report = scan_repo_for_secrets(tmp_path, scan_paths=["docs"], tracked_only=False)
 
     assert report.status == "PASS"
+
+
+def test_secret_scan_allows_only_safe_authorization_metadata_values(
+    tmp_path,
+) -> None:
+    write_file(
+        tmp_path / "config" / "authorization.yaml",
+        """
+authorization_schema_version: RISK_V1
+authorization_status: BLOCKED
+authorization_contract: OKX_DEMO_RISK_V1
+authorization_schema_version: LEGACY
+authorization_status: ACTIVE
+authorization_status: APPROVED
+authorization_status: CONSUMED
+authorization_status: EXPIRED
+authorization_status: PENDING_RISK
+authorization_status: REVOKED
+authorization_status: UNKNOWN_LEGACY
+authorization_contract: RISK_V1
+authorization_contract: LEGACY
+secret_id: ACTIVE
+""".strip(),
+    )
+
+    report = scan_repo_for_secrets(
+        tmp_path,
+        scan_paths=["config"],
+        tracked_only=False,
+    )
+
+    assert report.status == "PASS"
+
+
+def test_secret_scan_blocks_secret_shaped_authorization_metadata_values(
+    tmp_path,
+) -> None:
+    write_file(
+        tmp_path / "config" / "authorization.yaml",
+        """
+authorization_schema_version: sk-live-schema-secret
+authorization_status: sk-live-status-secret
+authorization_contract: sk-live-contract-secret
+secret_id: sk-live-secret-record
+""".strip(),
+    )
+
+    report = scan_repo_for_secrets(
+        tmp_path,
+        scan_paths=["config"],
+        tracked_only=False,
+    )
+
+    assert report.status == "BLOCKED"
+    assert [finding.key for finding in report.findings] == [
+        "authorization_schema_version",
+        "authorization_status",
+        "authorization_contract",
+        "secret_id",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("line", "expected_keys"),
+    [
+        (
+            "secret_id = 'ACTIVE' OR hmac_key=sk-live-hidden",
+            ["secret_id", "hmac_key"],
+        ),
+        (
+            "secret_id = 'ACTIVE' AND api_secret=sk-live-hidden",
+            ["secret_id", "api_secret"],
+        ),
+        (
+            "secret_id: ACTIVE # api_secret: sk-live-hidden",
+            ["secret_id", "api_secret"],
+        ),
+        (
+            "api_secret: Mapped[str] = "
+            "mapped_column(default='sk-live-hidden')",
+            ["api_secret"],
+        ),
+        (
+            "secret_id: Mapped[str] = "
+            "mapped_column(default='sk-live-hidden')",
+            ["secret_id"],
+        ),
+        (
+            "api_secret: Mapped[str] = mapped_column('sk-live-hidden')",
+            ["api_secret"],
+        ),
+    ],
+)
+def test_secret_scan_does_not_hide_chained_or_annotated_secrets(
+    tmp_path,
+    line,
+    expected_keys,
+) -> None:
+    write_file(tmp_path / "config" / "unsafe.py", line)
+    report = scan_repo_for_secrets(
+        tmp_path,
+        scan_paths=["config"],
+        tracked_only=False,
+    )
+    assert report.status == "BLOCKED"
+    assert [finding.key for finding in report.findings] == expected_keys
+
+
+def test_secret_scan_does_not_apply_generic_test_exemptions_to_authorization_metadata(
+    tmp_path,
+) -> None:
+    write_file(
+        tmp_path / "config" / "authorization.yaml",
+        """
+authorization_schema_version: TEST_FAKE_SCHEMA
+authorization_status: MOCK_AUTHORIZATION
+authorization_contract: DUMMY_CONTRACT
+""".strip(),
+    )
+
+    report = scan_repo_for_secrets(
+        tmp_path,
+        scan_paths=["config"],
+        tracked_only=False,
+    )
+
+    assert report.status == "BLOCKED"
+    assert [finding.key for finding in report.findings] == [
+        "authorization_schema_version",
+        "authorization_status",
+        "authorization_contract",
+    ]
 
 
 def test_secret_scan_covers_fixture_and_report_paths(tmp_path) -> None:
