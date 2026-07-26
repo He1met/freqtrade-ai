@@ -1,0 +1,165 @@
+.local-strategy-lab .lab-action-timeline {
+  display: grid;
+  gap: 9px;
+  border: 1px solid #dce5de;
+  border-radius: 10px;
+  background: #f8faf8;
+  padding: 11px;
+}
+
+.local-strategy-lab .lab-latest-action-feedback {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.8fr) auto minmax(210px, 1fr) minmax(280px, 1.4fr);
+  align-items: center;
+  gap: 10px;
+  border: 1px solid #dce5de;
+  border-radius: 8px;
+  background: #f8faf8;
+  padding: 9px 10px;
+}
+
+.local-strategy-lab .lab-latest-action-feedback > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.local-strategy-lab .lab-latest-action-feedback span,
+.local-strategy-lab .lab-latest-action-feedback small {
+  color: #657269;
+  font-size: 11px;
+}
+
+.local-strategy-lab .lab-latest-action-feedback strong {
+  overflow: hidden;
+  font-size: 13px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.local-strategy-lab .lab-action-timeline__notice {
+  margin: 0;
+  border-left: 3px solid #9eab9f;
+  color: #56635b;
+  font-size: 12px;
+  line-height: 1.45;
+  padding-left: 8px;
+}
+
+.local-strategy-lab .lab-action-timeline__history {
+  border-top: 1px solid #e0e7e2;
+  padding-top: 8px;
+}
+
+.local-strategy-lab .lab-action-timeline__history > summary {
+  cursor: pointer;
+  color: #1f6f4a;
+  font-size: 13px;
+  font-weight: 850;
+}
+
+.local-strategy-lab .lab-action-timeline__history > ol {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.local-strategy-lab .lab-action-timeline__entry {
+  border: 1px solid #e0e7e2;
+  border-radius: 8px;
+  background: #fff;
+  padding: 9px;
+}
+
+.local-strategy-lab .lab-action-timeline__entry-main {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
+}
+
+.local-strategy-lab .lab-action-timeline__dot {
+  width: 9px;
+  height: 9px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: #87948b;
+}
+
+.local-strategy-lab .lab-action-timeline__entry[data-status="SUCCESS"] .lab-action-timeline__dot {
+  background: #268553;
+}
+
+.local-strategy-lab .lab-action-timeline__entry[data-status="FAILED"] .lab-action-timeline__dot {
+  background: #b43f3f;
+}
+
+.local-strategy-lab .lab-action-timeline__entry[data-status="BLOCKED"] .lab-action-timeline__dot,
+.local-strategy-lab .lab-action-timeline__entry[data-status="UNAUTHORIZED"] .lab-action-timeline__dot,
+.local-strategy-lab .lab-action-timeline__entry[data-status="API_GAP"] .lab-action-timeline__dot {
+  background: #a06e19;
+}
+
+.local-strategy-lab .lab-action-timeline__entry-title {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.local-strategy-lab .lab-action-timeline__entry-title span,
+.local-strategy-lab .lab-action-timeline__entry-main small {
+  color: #6a766e;
+  font-size: 11px;
+}
+
+.local-strategy-lab .lab-action-timeline__entry-main p {
+  overflow: hidden;
+  margin: 3px 0 0;
+  color: #4f5d54;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.local-strategy-lab .lab-action-timeline__entry > details {
+  margin: 7px 0 0 17px;
+}
+
+.local-strategy-lab .lab-action-timeline__entry > details > summary {
+  cursor: pointer;
+  color: #536158;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.local-strategy-lab .lab-action-timeline__entry dl {
+  display: grid;
+  gap: 7px;
+  margin: 8px 0 0;
+}
+
+.local-strategy-lab .lab-action-timeline__entry dl > div {
+  display: grid;
+  grid-template-columns: 140px minmax(0, 1fr);
+  gap: 10px;
+}
+
+.local-strategy-lab .lab-action-timeline__entry dt {
+  color: #67746c;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.local-strategy-lab .lab-action-timeline__entry dd {
+  min-width: 0;
+  margin: 0;
+}
+
+.local-strategy-lab .lab-action-timeline__values {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}

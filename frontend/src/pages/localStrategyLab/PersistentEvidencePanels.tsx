@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   CompactText as DisplayCompactText,
@@ -45,11 +45,15 @@ import { isCoreDataSource } from "../SourceMarker";
 import { isCoreDataSourceTrace } from "../../api/sourceState";
 import { EMPTY_TEXT, displayBoolean, displayLoadState, displayStatus, displayValue } from "../uiCopy";
 import {
-  actionStatusClassName,
   actionStatusMessage,
   createActionEvidence,
+  createActionLifecycleId,
+  latestActionEnvironmentScope,
   type ActionEvidence,
+  type ActionEvidenceEnvironmentScope,
+  type ActionEvidenceHistoryState,
 } from "./actionEvidence";
+import { ActionTimeline, LatestActionFeedback } from "./ActionTimeline";
 import {
   evidenceStateDisplay,
   formatTraceEntries,
@@ -137,11 +141,6 @@ function apiErrorStatus(error: unknown): "UNAUTHORIZED" | "BLOCKED" | "FAILED" {
   return "FAILED";
 }
 
-function formatRecord(record: Record<string, number | string>): string {
-  const entries = Object.entries(record);
-  return entries.length > 0 ? entries.map(([key, value]) => `${key}: ${value}`).join(", ") : EMPTY_TEXT;
-}
-
 function formatScore(value: number | null): string {
   return value === null ? EMPTY_TEXT : value.toFixed(1);
 }
@@ -158,49 +157,6 @@ function CompactText({ className = "", value }: { className?: string; value: str
       label="完整内容"
       value={value}
     />
-  );
-}
-
-function ActionEvidenceHistory({ history }: { history: ActionEvidence[] }) {
-  return (
-    <section className="lab-evidence-section" aria-label="核心操作反馈记录">
-      <div className="section-header detail-section">
-        <h2>核心操作反馈记录</h2>
-        <span>本浏览器保留，API/DB 证据为准</span>
-      </div>
-      {history.length === 0 ? (
-        <div className="empty-state">尚未发起核心操作。每次请求的状态、ID、artifact 和下一步会保留在这里。</div>
-      ) : (
-        <div className="table-shell lab-table-shell">
-          <table>
-            <thead>
-              <tr>
-                <th>操作</th>
-                <th>状态</th>
-                <th>database IDs</th>
-                <th>artifact paths</th>
-                <th>原因 / 结果</th>
-                <th>下一步</th>
-                <th>Bug 建议</th>
-              </tr>
-            </thead>
-            <tbody>
-              {history.map((entry) => (
-                <tr key={entry.action}>
-                  <td className="primary-cell">{entry.action}</td>
-                  <td><span className={`run-status ${actionStatusClassName(entry.status)}`}>{entry.status}</span></td>
-                  <td className="path-cell"><CompactText value={formatRecord(entry.databaseIds)} /></td>
-                  <td className="path-cell"><CompactText value={entry.artifactPaths.join(", ") || EMPTY_TEXT} /></td>
-                  <td className="reason-cell"><CompactText value={`${entry.message}（${entry.updatedAt}）`} /></td>
-                  <td className="reason-cell"><CompactText value={entry.nextAction} /></td>
-                  <td>{entry.recommendBug ? "建议创建 Bug Issue" : "否"}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </section>
   );
 }
 
@@ -735,14 +691,42 @@ function RankingEvidence({ ranking }: { ranking: RankingEntry[] }) {
   );
 }
 
-function readinessCandidate(data: MvpData): { strategyVersionId: string; strategyName: string | null } | null {
+type ReadinessCandidate = {
+  environmentScope: ActionEvidenceEnvironmentScope;
+  strategyVersionId: string;
+  strategyName: string | null;
+};
+
+function sourceEnvironmentScope(source: DataSourceTraceSummary | undefined): ActionEvidenceEnvironmentScope {
+  return source?.environment?.scope ?? "unknown";
+}
+
+function feedbackEnvironmentScope(sources: Array<DataSourceTraceSummary | undefined>): ActionEvidenceEnvironmentScope {
+  const scopes = sources.map(sourceEnvironmentScope);
+  if (scopes.includes("current")) return "current";
+  if (scopes.includes("historical")) return "historical";
+  return "unknown";
+}
+
+function strategyFeedbackEnvironment(data: MvpData, candidate: ReadinessCandidate | null): ActionEvidenceEnvironmentScope {
+  if (candidate) return candidate.environmentScope;
+  return feedbackEnvironmentScope([
+    ...data.ranking.map((entry) => entry.dataSource),
+    ...data.strategyVersions.map((version) => version.dataSource),
+  ]);
+}
+
+function readinessCandidate(data: MvpData): ReadinessCandidate | null {
   const ranked = data.ranking.find((entry) => isCoreDataSource(entry.dataSource));
   if (ranked?.strategyVersionId) {
     const rankedVersion = data.strategyVersions.find((version) => version.id === ranked.strategyVersionId);
-    return {
-      strategyVersionId: ranked.strategyVersionId,
-      strategyName: rankedVersion?.fileState?.className ?? ranked.strategyName,
-    };
+    if (rankedVersion && isCoreDataSource(rankedVersion.dataSource)) {
+      return {
+        environmentScope: sourceEnvironmentScope(rankedVersion.dataSource),
+        strategyVersionId: ranked.strategyVersionId,
+        strategyName: rankedVersion.fileState?.className ?? ranked.strategyName,
+      };
+    }
   }
 
   const strategyById = new Map(data.strategies.map((strategy) => [strategy.id, strategy]));
@@ -752,6 +736,7 @@ function readinessCandidate(data: MvpData): { strategyVersionId: string; strateg
   }
 
   return {
+    environmentScope: sourceEnvironmentScope(version.dataSource),
     strategyVersionId: version.id,
     strategyName: version.fileState?.className ?? strategyById.get(version.strategyId)?.name ?? null,
   };
@@ -873,7 +858,15 @@ function ReadinessControlOverview({ data }: { data: MvpData }) {
   );
 }
 
-function DryRunReadinessPanel({ data, recordAction }: { data: MvpData; recordAction: RecordActionEvidence }) {
+function DryRunReadinessPanel({
+  data,
+  history,
+  recordAction,
+}: {
+  data: MvpData;
+  history: ActionEvidence[];
+  recordAction: RecordActionEvidence;
+}) {
   const [readiness, setReadiness] = useState<ReadinessState>({ kind: "idle" });
   const candidate = readinessCandidate(data);
   const status = readinessStatus(readiness);
@@ -893,8 +886,9 @@ function DryRunReadinessPanel({ data, recordAction }: { data: MvpData; recordAct
     }
 
     setReadiness({ kind: "checking", strategyVersionId: candidate.strategyVersionId });
+    const lifecycleId = createActionLifecycleId("dry-run");
     recordAction(createActionEvidence({
-      action: "检查 Dry-run readiness", status: "RUNNING", message: actionStatusMessage("RUNNING"),
+      action: "检查 Dry-run readiness", lifecycleId, status: "RUNNING", message: actionStatusMessage("RUNNING"),
       nextAction: "等待 backend readiness report。", recommendBug: false,
       databaseIds: { strategy_version_id: candidate.strategyVersionId }, updatedAt: new Date().toISOString(),
     }));
@@ -910,7 +904,7 @@ function DryRunReadinessPanel({ data, recordAction }: { data: MvpData; recordAct
       );
       const blocked = result.status !== "READY";
       recordAction(createActionEvidence({
-        action: "检查 Dry-run readiness", status: blocked ? "BLOCKED" : "SUCCESS",
+        action: "检查 Dry-run readiness", lifecycleId, status: blocked ? "BLOCKED" : "SUCCESS",
         message: blocked ? result.blockedReasons.join("；") || "readiness 未通过。" : "readiness report 已返回。",
         nextAction: blocked ? "按 report 的 blocked_reason 补齐前置条件后重试。" : "仅在人工批准后考虑受控 dry-run；不会启动 live trading。",
         recommendBug: false, databaseIds: { strategy_version_id: result.strategyVersionId }, updatedAt: new Date().toISOString(),
@@ -919,7 +913,7 @@ function DryRunReadinessPanel({ data, recordAction }: { data: MvpData; recordAct
       const message = apiErrorMessage(error, "readiness API 请求失败");
       setReadiness({ kind: "failed", message });
       recordAction(createActionEvidence({
-        action: "检查 Dry-run readiness", status: apiErrorStatus(error), message,
+        action: "检查 Dry-run readiness", lifecycleId, status: apiErrorStatus(error), message,
         nextAction: "检查 API、策略版本和服务日志；若可稳定复现，创建 Bug Issue。", recommendBug: true,
         databaseIds: { strategy_version_id: candidate.strategyVersionId }, updatedAt: new Date().toISOString(),
       }));
@@ -979,6 +973,13 @@ function DryRunReadinessPanel({ data, recordAction }: { data: MvpData; recordAct
       <aside className="lab-control-safety" role="note">
         Readiness 通过不等于 live ready。本操作不会启动 live trading、连接真实交易执行链路或提交真实订单。
       </aside>
+      <LatestActionFeedback
+        actions={["检查 Dry-run readiness"]}
+        environmentScope={strategyFeedbackEnvironment(data, candidate)}
+        expectedEntityIds={{ strategy_version_id: candidate?.strategyVersionId }}
+        history={history}
+        phase="dry-run"
+      />
       {report?.blockedReasons.length ? (
         <ul className="lab-readiness-blockers">
           {report.blockedReasons.map((reason) => (
@@ -1188,10 +1189,12 @@ function EvidenceConclusion({ summary }: { summary: LocalStrategyLabEvidenceSumm
 
 function ControlStatePanel({
   data,
+  history,
   operatorToken,
   recordAction,
 }: {
   data: MvpData;
+  history: ActionEvidence[];
   operatorToken: string;
   recordAction: RecordActionEvidence;
 }) {
@@ -1234,8 +1237,9 @@ function ControlStatePanel({
     }
 
     setControl({ kind: "starting", strategyVersionId: candidate.strategyVersionId });
+    const lifecycleId = createActionLifecycleId("dry-run");
     recordAction(createActionEvidence({
-      action: "启动 controlled dry-run", status: "RUNNING", message: actionStatusMessage("RUNNING"),
+      action: "启动 controlled dry-run", lifecycleId, status: "RUNNING", message: actionStatusMessage("RUNNING"),
       nextAction: "等待受控 dry-run 报告。", recommendBug: false,
       databaseIds: { strategy_version_id: candidate.strategyVersionId }, updatedAt: new Date().toISOString(),
     }));
@@ -1248,7 +1252,7 @@ function ControlStatePanel({
       setControl({ kind: "complete", report: result });
       const status = result.status === "SUCCESS" ? "SUCCESS" : result.status === "BLOCKED" ? "BLOCKED" : "FAILED";
       recordAction(createActionEvidence({
-        action: "启动 controlled dry-run", status,
+        action: "启动 controlled dry-run", lifecycleId, status,
         message: result.failedReason ?? (result.blockedReasons.join("；") || `受控 dry-run 返回 ${result.status}。`),
         nextAction: status === "SUCCESS" ? "通过 status_snapshot 对账；停止前不允许切换到 live。" : "按报告的原因修复后重试；不要绕过安全边界。",
         recommendBug: status === "FAILED", databaseIds: { strategy_version_id: candidate.strategyVersionId },
@@ -1258,7 +1262,7 @@ function ControlStatePanel({
       const message = apiErrorMessage(error, "受控 dry-run 启动边界请求失败");
       setControl({ kind: "failed", message });
       recordAction(createActionEvidence({
-        action: "启动 controlled dry-run", status: apiErrorStatus(error), message,
+        action: "启动 controlled dry-run", lifecycleId, status: apiErrorStatus(error), message,
         nextAction: "检查本地授权与 dry-run report；若可稳定复现，创建 Bug Issue。", recommendBug: true,
         databaseIds: { strategy_version_id: candidate.strategyVersionId }, updatedAt: new Date().toISOString(),
       }));
@@ -1267,8 +1271,9 @@ function ControlStatePanel({
 
   async function handleStop() {
     setControl({ kind: "stopping" });
+    const lifecycleId = createActionLifecycleId("dry-run");
     recordAction(createActionEvidence({
-      action: "停止 controlled dry-run", status: "RUNNING", message: actionStatusMessage("RUNNING"),
+      action: "停止 controlled dry-run", lifecycleId, status: "RUNNING", message: actionStatusMessage("RUNNING"),
       nextAction: "等待停止报告。", recommendBug: false, updatedAt: new Date().toISOString(),
     }));
     try {
@@ -1276,7 +1281,7 @@ function ControlStatePanel({
       setControl({ kind: "complete", report: result });
       const status = result.status === "STOPPED" || result.status === "SUCCESS" ? "SUCCESS" : result.status === "BLOCKED" ? "BLOCKED" : "FAILED";
       recordAction(createActionEvidence({
-        action: "停止 controlled dry-run", status,
+        action: "停止 controlled dry-run", lifecycleId, status,
         message: result.failedReason ?? (result.blockedReasons.join("；") || `停止请求返回 ${result.status}。`),
         nextAction: "通过 status_snapshot 复核已停止，且不会进入 live trading。", recommendBug: status === "FAILED",
         artifactPaths: [result.manifestPath, result.statusSnapshotPath], updatedAt: new Date().toISOString(),
@@ -1285,7 +1290,7 @@ function ControlStatePanel({
       const message = apiErrorMessage(error, "受控 dry-run 停止请求失败");
       setControl({ kind: "failed", message });
       recordAction(createActionEvidence({
-        action: "停止 controlled dry-run", status: apiErrorStatus(error), message,
+        action: "停止 controlled dry-run", lifecycleId, status: apiErrorStatus(error), message,
         nextAction: "检查本地授权和受控 runtime 状态；若可稳定复现，创建 Bug Issue。", recommendBug: true,
         updatedAt: new Date().toISOString(),
       }));
@@ -1370,6 +1375,23 @@ function ControlStatePanel({
         </div>
         <small className="inline-muted">人工批准只适用于本次本地 dry-run，不会授予 live trading 或真实订单权限。</small>
       </div>
+      <LatestActionFeedback
+        actions={["启动 controlled dry-run"]}
+        environmentScope={strategyFeedbackEnvironment(data, candidate)}
+        expectedEntityIds={{ strategy_version_id: candidate?.strategyVersionId }}
+        history={history}
+        phase="dry-run"
+      />
+      <LatestActionFeedback
+        actions={["停止 controlled dry-run"]}
+        environmentScope={latestActionEnvironmentScope({
+          actions: ["停止 controlled dry-run"],
+          history,
+          phase: "dry-run",
+        })}
+        history={history}
+        phase="dry-run"
+      />
 
       <details className="lab-readiness-details">
         <summary>展开 snapshot、manifest 和安全证据</summary>
@@ -1441,6 +1463,7 @@ function ControlStatePanel({
 function WorkflowActionsPanel({
   activeStage,
   data,
+  history,
   operatorToken,
   promptSummary,
   recordAction,
@@ -1448,6 +1471,7 @@ function WorkflowActionsPanel({
 }: {
   activeStage: Exclude<LabPhase, "dry-run">;
   data: MvpData;
+  history: ActionEvidence[];
   operatorToken: string;
   promptSummary: string;
   recordAction: RecordActionEvidence;
@@ -1456,29 +1480,38 @@ function WorkflowActionsPanel({
   const [activeAction, setActiveAction] = useState<string | null>(null);
   const [allowDeepSeek, setAllowDeepSeek] = useState(false);
   const candidate = readinessCandidate(data);
-  const ingestTask = data.backtestTasks.find((task) => task.artifactManifest?.manifestPath || task.resultPath);
+  const ingestTask = data.backtestTasks.find(
+    (task) =>
+      (task.artifactManifest?.manifestPath || task.resultPath) &&
+      isCoreDataSource(task.dataSource),
+  );
+  const ingestFeedbackSource = ingestTask?.dataSource ?? data.backtestTasks.find(
+    (task) => task.artifactManifest?.manifestPath || task.resultPath,
+  )?.dataSource;
   const busy = activeAction !== null;
   const missingToken = !operatorToken;
 
   function start(action: string, ids: Record<string, string> = {}) {
+    const lifecycleId = createActionLifecycleId(activeStage);
     setActiveAction(action);
     recordAction(createActionEvidence({
-      action, status: "RUNNING", message: actionStatusMessage("RUNNING"), nextAction: "等待 backend API 响应。",
+      action, lifecycleId, status: "RUNNING", message: actionStatusMessage("RUNNING"), nextAction: "等待 backend API 响应。",
       recommendBug: false, databaseIds: ids, updatedAt: new Date().toISOString(),
     }));
+    return lifecycleId;
   }
 
   async function handleBacktest() {
     if (!candidate) return;
     const action = "触发本地回测";
-    start(action, { strategy_version_id: candidate.strategyVersionId });
+    const lifecycleId = start(action, { strategy_version_id: candidate.strategyVersionId });
     try {
       const result = await triggerLocalBacktest(candidate.strategyVersionId, operatorToken);
       const run = asRecord(result.run);
       const blocked = result.preflight_status === "blocked";
       const runId = responseId(run);
       recordAction(createActionEvidence({
-        action, status: blocked ? "BLOCKED" : runId ? "SUCCESS" : "API_GAP",
+        action, lifecycleId, status: blocked ? "BLOCKED" : runId ? "SUCCESS" : "API_GAP",
         message: blocked
           ? (Array.isArray(result.blocked_reasons) ? result.blocked_reasons.join("；") : "本地回测 preflight 被阻止。")
           : "已创建 preflight-only backtest run；未执行真实交易或下单。",
@@ -1490,7 +1523,7 @@ function WorkflowActionsPanel({
       onRefresh();
     } catch (error) {
       recordAction(createActionEvidence({
-        action, status: apiErrorStatus(error), message: apiErrorMessage(error, "本地回测请求失败。"),
+        action, lifecycleId, status: apiErrorStatus(error), message: apiErrorMessage(error, "本地回测请求失败。"),
         nextAction: "检查持久 run/task 和 API 错误；若可稳定复现，创建 Bug Issue。", recommendBug: true,
         databaseIds: { strategy_version_id: candidate.strategyVersionId }, updatedAt: new Date().toISOString(),
       }));
@@ -1502,7 +1535,7 @@ function WorkflowActionsPanel({
   async function handleIngest() {
     if (!ingestTask) return;
     const action = "导入回测结果并计算评分";
-    start(action, { backtest_task_id: ingestTask.id });
+    const lifecycleId = start(action, { backtest_task_id: ingestTask.id });
     try {
       const result = await ingestBacktestArtifact(ingestTask.id, {
         manifestPath: ingestTask.artifactManifest?.manifestPath,
@@ -1519,7 +1552,7 @@ function WorkflowActionsPanel({
       const blocked = ingestStatus === "blocked";
       const succeeded = ingestStatus === "succeeded" && resultId && scoreId;
       recordAction(createActionEvidence({
-        action, status: succeeded ? "SUCCESS" : blocked ? "BLOCKED" : ingestStatus === "succeeded" ? "API_GAP" : "FAILED",
+        action, lifecycleId, status: succeeded ? "SUCCESS" : blocked ? "BLOCKED" : ingestStatus === "succeeded" ? "API_GAP" : "FAILED",
         message: responseText(result.reason) ?? (succeeded ? "回测结果和 StrategyScore 已写入数据库。" : `artifact ingest 返回 ${ingestStatus}。`),
         nextAction: succeeded ? "刷新并核对 BacktestResult、StrategyScore 与 artifact path。" : "检查 artifact、任务状态和失败原因；不要将不完整结果当作成功。",
         recommendBug: !blocked && !succeeded,
@@ -1532,7 +1565,7 @@ function WorkflowActionsPanel({
       onRefresh();
     } catch (error) {
       recordAction(createActionEvidence({
-        action, status: apiErrorStatus(error), message: apiErrorMessage(error, "artifact ingest 请求失败。"),
+        action, lifecycleId, status: apiErrorStatus(error), message: apiErrorMessage(error, "artifact ingest 请求失败。"),
         nextAction: "检查 artifact path、持久任务和 API 错误；若可稳定复现，创建 Bug Issue。", recommendBug: true,
         databaseIds: { backtest_task_id: ingestTask.id },
         artifactPaths: [ingestTask.artifactManifest?.manifestPath, ingestTask.resultPath], updatedAt: new Date().toISOString(),
@@ -1544,12 +1577,12 @@ function WorkflowActionsPanel({
 
   async function handleDeepSeekSingle() {
     const action = "运行 DeepSeek 单次 E2E";
-    start(action);
+    const lifecycleId = start(action);
     try {
       const result = await runDeepSeekSingle(promptSummary, operatorToken, allowDeepSeek);
       const success = isCoreGenerationResult(result);
       recordAction(createActionEvidence({
-        action, status: success ? "SUCCESS" : "BLOCKED",
+        action, lifecycleId, status: success ? "SUCCESS" : "BLOCKED",
         message: success ? "DeepSeek 单次结果已返回可追踪的 API/DB 证据。" : "响应没有完整核心证据，未展示为成功。",
         nextAction: success ? "刷新并核对 generation run、策略文件和后续回测证据。" : "检查 provider、database_ids 和策略文件；不要将其视为核心成功。",
         recommendBug: false, databaseIds: { strategy_generation_run_id: result.run.id },
@@ -1558,7 +1591,7 @@ function WorkflowActionsPanel({
       onRefresh();
     } catch (error) {
       recordAction(createActionEvidence({
-        action, status: apiErrorStatus(error), message: apiErrorMessage(error, "DeepSeek 单次请求失败。"),
+        action, lifecycleId, status: apiErrorStatus(error), message: apiErrorMessage(error, "DeepSeek 单次请求失败。"),
         nextAction: "确认一次性授权与本地 ENV；不要在页面、日志或 Issue 中记录密钥。", recommendBug: apiErrorStatus(error) === "FAILED",
         updatedAt: new Date().toISOString(),
       }));
@@ -1607,6 +1640,31 @@ function WorkflowActionsPanel({
           <div><dt>DeepSeek 单次</dt><dd>默认不调用；必须输入 operator token 并勾选一次性显式授权。</dd></div>
         ) : null}
       </div>
+      <LatestActionFeedback
+        actions={
+          activeStage === "generation"
+            ? ["运行 DeepSeek 单次 E2E"]
+            : activeStage === "backtest"
+              ? ["触发本地回测"]
+              : ["导入回测结果并计算评分"]
+        }
+        environmentScope={
+          activeStage === "backtest"
+            ? strategyFeedbackEnvironment(data, candidate)
+            : activeStage === "score"
+              ? sourceEnvironmentScope(ingestFeedbackSource)
+              : feedbackEnvironmentScope(data.generationRuns.map((run) => run.dataSource))
+        }
+        expectedEntityIds={
+          activeStage === "backtest"
+            ? { strategy_version_id: candidate?.strategyVersionId }
+            : activeStage === "score"
+              ? { backtest_task_id: ingestTask?.id }
+              : {}
+        }
+        history={history}
+        phase={activeStage}
+      />
     </section>
   );
 }
@@ -1615,6 +1673,7 @@ export function PersistentEvidence({
   data,
   error,
   history,
+  historyState,
   inspectedPhase,
   isLoading,
   onRefresh,
@@ -1626,6 +1685,7 @@ export function PersistentEvidence({
   data: MvpData;
   error: string | null;
   history: ActionEvidence[];
+  historyState: ActionEvidenceHistoryState;
   inspectedPhase: LabPhase;
   isLoading: boolean;
   onRefresh: () => void;
@@ -1635,6 +1695,7 @@ export function PersistentEvidence({
   source: string;
 }) {
   const [refreshPending, setRefreshPending] = useState(false);
+  const refreshLifecycleRef = useRef<string | null>(null);
   const coreRankingCount = data.ranking.filter((entry) => isCoreDataSource(entry.dataSource)).length;
   const hasCoreEvidence =
     data.strategyVersions.some((version) => isCoreDataSource(version.dataSource)) ||
@@ -1646,18 +1707,23 @@ export function PersistentEvidence({
   useEffect(() => {
     if (!refreshPending || isLoading) return;
     recordAction(createActionEvidence({
-      action: "刷新数据", status: error ? "FAILED" : "SUCCESS",
+      action: "刷新数据",
+      lifecycleId: refreshLifecycleRef.current ?? createActionLifecycleId("system"),
+      status: error ? "FAILED" : "SUCCESS",
       message: error ?? "已重新请求页面使用的 API/DB 数据。",
       nextAction: error ? "检查 API 可用性和数据来源；若可稳定复现，创建 Bug Issue。" : "核对下方核心证据与最新 action feedback。",
       recommendBug: Boolean(error), updatedAt: new Date().toISOString(),
     }));
+    refreshLifecycleRef.current = null;
     setRefreshPending(false);
   }, [error, isLoading, recordAction, refreshPending]);
 
   function handleRefresh() {
+    const lifecycleId = createActionLifecycleId("system");
+    refreshLifecycleRef.current = lifecycleId;
     setRefreshPending(true);
     recordAction(createActionEvidence({
-      action: "刷新数据", status: "RUNNING", message: actionStatusMessage("RUNNING"),
+      action: "刷新数据", lifecycleId, status: "RUNNING", message: actionStatusMessage("RUNNING"),
       nextAction: "等待 API/DB 快照完成加载。", recommendBug: false, updatedAt: new Date().toISOString(),
     }));
     onRefresh();
@@ -1692,6 +1758,10 @@ export function PersistentEvidence({
                 : "受控 Dry-run"
         }</strong>
       </div>
+      <ActionTimeline
+        history={history}
+        historyState={historyState}
+      />
       {inspectedPhase === "generation" ? (
         <>
           <EvidenceConclusion summary={data.localStrategyLabEvidence} />
@@ -1720,16 +1790,16 @@ export function PersistentEvidence({
       {inspectedPhase === "dry-run" ? (
         <>
           <ReadinessControlOverview data={data} />
-          <DryRunReadinessPanel data={data} recordAction={recordAction} />
-          <ControlStatePanel data={data} operatorToken={operatorToken} recordAction={recordAction} />
+          <DryRunReadinessPanel data={data} history={history} recordAction={recordAction} />
+          <ControlStatePanel data={data} history={history} operatorToken={operatorToken} recordAction={recordAction} />
           <ReadinessDomainPanel data={data} />
         </>
       ) : null}
-      <ActionEvidenceHistory history={history} />
       {inspectedPhase !== "dry-run" ? (
         <WorkflowActionsPanel
           activeStage={inspectedPhase}
           data={data}
+          history={history}
           onRefresh={handleRefresh}
           operatorToken={operatorToken}
           promptSummary={promptSummary}

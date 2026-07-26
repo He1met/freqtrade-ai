@@ -14,7 +14,11 @@ import {
   ResultDetails,
 } from "./localStrategyLab/EvidencePanels";
 import { SubmissionStatusPanel } from "./localStrategyLab/SubmissionStatusPanel";
-import { createActionEvidence } from "./localStrategyLab/actionEvidence";
+import { LatestActionFeedback } from "./localStrategyLab/ActionTimeline";
+import {
+  createActionEvidence,
+  createActionLifecycleId,
+} from "./localStrategyLab/actionEvidence";
 import { submissionDisplayModel } from "./localStrategyLab/submissionDisplay";
 import { useActionEvidence } from "./localStrategyLab/useActionEvidence";
 import { WorkflowNavigator } from "./localStrategyLab/WorkflowNavigator";
@@ -31,8 +35,9 @@ export function LocalStrategyLab() {
   const [snapshotRefreshToken, setSnapshotRefreshToken] = useState(0);
   const [inspectedPhase, setInspectedPhase] = useState<LabPhase>("generation");
   const snapshot = useMvpData(snapshotRefreshToken);
-  const { history, record: recordAction } = useActionEvidence();
+  const { history, historyState, record: recordAction } = useActionEvidence();
   const controllerRef = useRef<AbortController | null>(null);
+  const generationLifecycleRef = useRef<string | null>(null);
   const isSubmitting = submission.kind === "submitting";
   const submissionDisplay = submissionDisplayModel(submission);
   const currentResult = submission.kind === "success" || submission.kind === "blocked" ? submission.result : undefined;
@@ -76,13 +81,15 @@ export function LocalStrategyLab() {
     }
 
     const controller = new AbortController();
+    const lifecycleId = createActionLifecycleId("generation");
     controllerRef.current?.abort();
     controllerRef.current = controller;
+    generationLifecycleRef.current = lifecycleId;
     setSubmission({ kind: "submitting", promptSummary, requestedCount });
     const authorizeThisRequest = authorizeRealProvider;
     setAuthorizeRealProvider(false);
     recordAction(createActionEvidence({
-      action: "生成策略", status: "RUNNING", message: "正在提交本地策略生成请求。",
+      action: "生成策略", lifecycleId, status: "RUNNING", message: "正在提交本地策略生成请求。",
       nextAction: "等待 backend API/DB 响应。", recommendBug: false, updatedAt: new Date().toISOString(),
     }));
 
@@ -100,7 +107,7 @@ export function LocalStrategyLab() {
       if (isCoreGenerationResult(result)) {
         setSubmission({ kind: "success", result });
         recordAction(createActionEvidence({
-          action: "生成策略", status: "SUCCESS", message: "生成记录、策略版本和文件路径均已由 API/DB 返回。",
+          action: "生成策略", lifecycleId, status: "SUCCESS", message: "生成记录、策略版本和文件路径均已由 API/DB 返回。",
           nextAction: "刷新并核对 generation run、strategy version 与后续回测证据。", recommendBug: false,
           databaseIds: { strategy_generation_run_id: result.run.id },
           artifactPaths: result.strategyVersions.map((version) => version.filePath), updatedAt: new Date().toISOString(),
@@ -116,7 +123,7 @@ export function LocalStrategyLab() {
         result,
       });
       recordAction(createActionEvidence({
-        action: "生成策略", status: "BLOCKED",
+        action: "生成策略", lifecycleId, status: "BLOCKED",
         message: "Backend 响应缺少可证明的核心 API/DB 证据或策略文件路径。",
         nextAction: "检查 data_source、database_ids 和策略文件；不要将其视为核心成功。", recommendBug: false,
         databaseIds: { strategy_generation_run_id: result.run.id }, updatedAt: new Date().toISOString(),
@@ -136,7 +143,7 @@ export function LocalStrategyLab() {
             statusText: error.statusText,
           });
           recordAction(createActionEvidence({
-            action: "生成策略", status: "UNAUTHORIZED", message: error.message,
+            action: "生成策略", lifecycleId, status: "UNAUTHORIZED", message: error.message,
             nextAction: "核对本地 operator authorization 后重试。", recommendBug: false, updatedAt: new Date().toISOString(),
           }));
           return;
@@ -150,7 +157,7 @@ export function LocalStrategyLab() {
             statusText: error.statusText,
           });
           recordAction(createActionEvidence({
-            action: "生成策略", status: "BLOCKED", message: error.message,
+            action: "生成策略", lifecycleId, status: "BLOCKED", message: error.message,
             nextAction: "按持久 run 的 BLOCKED 原因补齐前置条件后重试。", recommendBug: false,
             databaseIds: { strategy_generation_run_id: error.strategyGenerationRunId }, updatedAt: new Date().toISOString(),
           }));
@@ -166,7 +173,7 @@ export function LocalStrategyLab() {
             statusText: error.statusText,
           });
           recordAction(createActionEvidence({
-            action: "生成策略", status: "FAILED", message: error.failedReason ?? error.message,
+            action: "生成策略", lifecycleId, status: "FAILED", message: error.failedReason ?? error.message,
             nextAction: "检查持久 generation run 和 Provider/验证错误；若可稳定复现，创建 Bug Issue。", recommendBug: true,
             databaseIds: { strategy_generation_run_id: error.strategyGenerationRunId }, updatedAt: new Date().toISOString(),
           }));
@@ -178,7 +185,7 @@ export function LocalStrategyLab() {
           message: `Strategy generation API 不可用或返回非核心响应：${error.message}`,
         });
         recordAction(createActionEvidence({
-          action: "生成策略", status: "BLOCKED", message: `Strategy generation API 不可用或返回非核心响应：${error.message}`,
+          action: "生成策略", lifecycleId, status: "BLOCKED", message: `Strategy generation API 不可用或返回非核心响应：${error.message}`,
           nextAction: "恢复 API 或补齐核心证据后重试。", recommendBug: true, updatedAt: new Date().toISOString(),
         }));
         return;
@@ -190,19 +197,26 @@ export function LocalStrategyLab() {
         message,
       });
       recordAction(createActionEvidence({
-        action: "生成策略", status: "FAILED", message,
+        action: "生成策略", lifecycleId, status: "FAILED", message,
         nextAction: "检查 API 与网络错误；若可稳定复现，创建 Bug Issue。", recommendBug: true, updatedAt: new Date().toISOString(),
       }));
+    } finally {
+      if (generationLifecycleRef.current === lifecycleId) {
+        generationLifecycleRef.current = null;
+      }
     }
   }
 
   function handleCancel() {
     controllerRef.current?.abort();
     controllerRef.current = null;
+    const lifecycleId = generationLifecycleRef.current ?? createActionLifecycleId("generation");
+    generationLifecycleRef.current = null;
     const message = "已取消等待本次请求；尚未确认是否存在持久生成记录。";
     setSubmission({ kind: "blocked", message });
     recordAction(createActionEvidence({
       action: "生成策略",
+      lifecycleId,
       status: "BLOCKED",
       message,
       nextAction: "刷新下方持久证据；确认没有进行中的记录后再决定是否重试。",
@@ -308,6 +322,19 @@ export function LocalStrategyLab() {
           </form>
 
           <SubmissionStatusPanel submission={submission} />
+          <LatestActionFeedback
+            actions={["生成策略"]}
+            environmentScope={
+              currentResult?.dataSource.environment.scope ??
+              currentResult?.run.dataSource.environment.scope ??
+              "unknown"
+            }
+            expectedEntityIds={{
+              strategy_generation_run_id: currentResult?.run.id,
+            }}
+            history={history}
+            phase="generation"
+          />
         </div>
       ) : null}
 
@@ -315,6 +342,7 @@ export function LocalStrategyLab() {
         data={snapshot.data}
         error={snapshot.error}
         history={history}
+        historyState={historyState}
         inspectedPhase={inspectedPhase}
         isLoading={snapshot.isLoading}
         onRefresh={() => setSnapshotRefreshToken((current) => current + 1)}
