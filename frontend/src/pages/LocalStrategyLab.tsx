@@ -309,6 +309,7 @@ export function LocalStrategyLab() {
         inspectedPhase={inspectedPhase}
         isLoading={snapshot.isLoading}
         onRefresh={() => setSnapshotRefreshToken((current) => current + 1)}
+        operatorDashboardSource={snapshot.sources.operatorDashboard}
         operatorToken={operatorToken}
         promptSummary={idea.trim()}
         recordAction={recordAction}

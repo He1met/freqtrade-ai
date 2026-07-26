@@ -130,6 +130,7 @@ export type RawBacktestRunSummary = Partial<BacktestRunSummary> & {
   strategy_version_id?: string | number | null;
   strategy_name?: string;
   profile_name?: string | null;
+  config_snapshot?: Record<string, unknown>;
   requested_task_count?: number;
   completed_task_count?: number;
   profit_pct?: number | null;
@@ -896,6 +897,7 @@ export function normalizeBacktestRun(raw: RawBacktestRunSummary): BacktestRunSum
     strategyName: raw.strategyName ?? raw.strategy_name ?? artifactManifest?.strategyName ?? "Unknown strategy",
     status: raw.status ?? artifactManifest?.status ?? "unknown",
     profileName: raw.profileName ?? raw.profile_name ?? "default",
+    configSnapshot: raw.configSnapshot ?? raw.config_snapshot ?? {},
     requestedTaskCount: raw.requestedTaskCount ?? raw.requested_task_count ?? 0,
     completedTaskCount: raw.completedTaskCount ?? raw.completed_task_count ?? 0,
     profitPct: raw.profitPct ?? raw.profit_pct ?? metrics.profitPct,

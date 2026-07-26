@@ -105,6 +105,11 @@ test("real Provider authorization is separate, optional and one-request scoped",
   await expect(form).toContainText("Provider 凭据已就绪");
   await expect(submit).toBeEnabled();
 
+  const advancedPanel = page.getByText("高级 / 受控：DeepSeek 单次 E2E");
+  await advancedPanel.click();
+  await page.getByLabel("显式授权一次 DeepSeek 调用").check();
+  await expect(page.getByRole("button", { name: "运行 DeepSeek 单次 E2E" })).toBeEnabled();
+
   await submit.click();
   await expect(submit).toHaveText("提交中");
   await expect(providerAuthorization).not.toBeChecked();
@@ -127,6 +132,36 @@ test("real Provider authorization is separate, optional and one-request scoped",
   expect(persistedValues).not.toContain(secret);
   await expect(page.locator("body")).not.toContainText(secret);
   await expectNoPageOverflow(page);
+});
+
+test("Advanced DeepSeek fails closed when Operator Dashboard source is not API", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop-1280x720", "One desktop project is sufficient for the source gate.");
+  await page.route("**/api/**operator-status", async (route) => {
+    await route.fulfill({
+      body: JSON.stringify({
+        env_presence: [
+          {
+            name: "DEEPSEEK_API_KEY",
+            present: true,
+            required: false,
+            source: "env",
+            value_rendered: false,
+          },
+        ],
+        safety: { reports_env_values: false },
+      }),
+      contentType: "application/json",
+      status: 503,
+    });
+  });
+  await page.goto("/local-strategy-lab");
+
+  await page.getByLabel("本地操作授权（operator token）").fill("issue-428-source-gate-token");
+  await page.getByText("高级 / 受控：DeepSeek 单次 E2E").click();
+  await page.getByLabel("显式授权一次 DeepSeek 调用").check();
+
+  await expect(page.getByRole("button", { name: "运行 DeepSeek 单次 E2E" })).toBeDisabled();
+  await expect(page.locator("body")).toContainText("未由真实 API 确认");
 });
 
 test("unconfirmed Provider readiness cannot be bypassed by direct form submission", async ({ page }, testInfo) => {

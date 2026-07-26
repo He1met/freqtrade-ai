@@ -32,16 +32,19 @@ test("Provider readiness only trusts presence metadata from the real API", () =>
   assert.match(present.detail, /仅确认凭据存在/);
   assert.doesNotMatch(present.detail, /sk-[A-Za-z0-9]/);
 
-  const fixture = deriveProviderCredentialReadiness(
-    dashboardWithCredential({
-      name: "DEEPSEEK_API_KEY",
-      present: true,
-      source: "env",
-      valueRendered: false,
-    }),
-    "fixture",
-  );
-  assert.equal(fixture.state, "unknown");
+  for (const source of ["fixture", "failed"]) {
+    const fallback = deriveProviderCredentialReadiness(
+      dashboardWithCredential({
+        name: "DEEPSEEK_API_KEY",
+        present: true,
+        source: "env",
+        valueRendered: false,
+      }),
+      source,
+    );
+    assert.equal(fallback.state, "unknown");
+    assert.match(fallback.label, /未由真实 API 确认/);
+  }
 
   const leaked = deriveProviderCredentialReadiness(
     dashboardWithCredential({
