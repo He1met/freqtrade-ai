@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import FastAPI
 
 from app.api.backtests import router as backtests_router
@@ -15,6 +17,15 @@ from app.core.logging import configure_logging
 
 configure_logging()
 settings = get_settings()
+logging.getLogger(__name__).info(
+    "execution target configured target_id=%s account_mode=%s simulated_trading=%s "
+    "allow_real_funds=%s order_submission_enabled=%s",
+    settings.execution_target_manifest.active_target_id,
+    settings.execution_target_manifest.active_target.account_mode,
+    settings.execution_target_manifest.active_target.simulated_trading,
+    settings.execution_target_manifest.active_target.allow_real_funds,
+    settings.execution_target_manifest.active_target.order_submission_enabled,
+)
 
 app = FastAPI(
     title=settings.app_name,

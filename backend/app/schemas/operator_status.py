@@ -112,6 +112,7 @@ class OperatorEnvPresence(BaseModel):
 
 
 class OperatorRuntimeContractSummary(BaseModel):
+    execution_target_id: Literal["OKX_DEMO"]
     status: RuntimeReadOnlyStatus
     runtime_readiness_status: RuntimeReadOnlyStatus
     fallback_active: bool

@@ -38,6 +38,7 @@ if str(BACKEND_PATH) not in sys.path:
     sys.path.insert(0, str(BACKEND_PATH))
 
 from app.core.config import Settings  # noqa: E402
+from app.core.execution_target import okx_demo_execution_target_manifest  # noqa: E402
 from app.repositories.audit_log import GovernanceEventArchiveRepository  # noqa: E402
 from app.services.audit_log import GovernanceAuditLogService  # noqa: E402
 from app.services.operator_status import OperatorStatusService  # noqa: E402
@@ -114,6 +115,7 @@ def create_context(tmp_dir: Path) -> Phase7SmokeContext:
         runtime_dir=repo_fixture / "reports" / "runtime",
         governance_dir=repo_fixture / "reports" / "governance",
         settings=Settings(
+            execution_target_manifest=okx_demo_execution_target_manifest(),
             freqtrade_user_data=Path("user_data"),
             strategy_output_dir=Path("user_data/strategies/generated"),
             market_data_dir=Path("user_data/data"),

@@ -6,6 +6,11 @@ import os
 import yaml
 from pydantic import BaseModel, Field
 
+from app.core.execution_target import (
+    ExecutionTargetManifest,
+    parse_execution_target_manifest,
+)
+
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 TEST_DISABLE_ENV_FILE_ENV = "FREQTRADE_AI_TEST_DISABLE_ENV_FILE"
@@ -32,6 +37,7 @@ class Settings(BaseModel):
     allow_live_trading: bool = False
     allow_dry_run_trading: bool = False
     allow_controlled_dry_run_process: bool = False
+    execution_target_manifest: ExecutionTargetManifest
 
 
 def load_env_file(path: Path) -> None:
@@ -65,6 +71,7 @@ def get_settings() -> Settings:
     worker_section = app_config.get("worker", {})
     frequi_section = app_config.get("frequi", {})
     security_section = app_config.get("security", {})
+    execution_section = app_config.get("execution")
 
     return Settings(
         app_name=app_section.get("name", "freqtrade-ai"),
@@ -102,4 +109,5 @@ def get_settings() -> Settings:
         allow_live_trading=security_section.get("allow_live_trading", False),
         allow_dry_run_trading=security_section.get("allow_dry_run_trading", False),
         allow_controlled_dry_run_process=security_section.get("allow_controlled_dry_run_process", False),
+        execution_target_manifest=parse_execution_target_manifest(execution_section),
     )

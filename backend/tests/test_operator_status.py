@@ -5,6 +5,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from app.core.config import Settings
+from app.core.execution_target import okx_demo_execution_target_manifest
 from app.main import app
 from app.schemas.runtime_contract import RuntimeStatusSummary
 from app.services.operator_status import OperatorStatusService
@@ -38,6 +39,7 @@ def service(environ=None) -> OperatorStatusService:
 
 def settings_for() -> Settings:
     return Settings(
+        execution_target_manifest=okx_demo_execution_target_manifest(),
         freqtrade_user_data=Path("user_data"),
         strategy_output_dir=Path("user_data/strategies/generated"),
         market_data_dir=Path("user_data/data"),

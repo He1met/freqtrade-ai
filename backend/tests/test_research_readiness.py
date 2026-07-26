@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from os import utime
 
 from app.core.config import Settings
+from app.core.execution_target import okx_demo_execution_target_manifest
 from app.db.migrations import SchemaReadiness
 from app.services.research_readiness import ResearchReadinessService
 
@@ -20,6 +21,7 @@ def make_settings(tmp_path) -> Settings:
     (market_dir / "BTC_USDT-15m.json").write_text("{}", encoding="utf-8")
     (artifact_dir / "result.json").write_text("{}", encoding="utf-8")
     return Settings(
+        execution_target_manifest=okx_demo_execution_target_manifest(),
         database_url="postgresql+psycopg://research@localhost:5432/research",
         strategy_output_dir=strategy_dir,
         market_data_dir=str(market_dir),

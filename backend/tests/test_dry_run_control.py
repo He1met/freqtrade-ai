@@ -12,6 +12,7 @@ from app.adapters.freqtrade.dry_run_runner import (
     FreqtradeDryRunRunner,
 )
 from app.core.config import Settings
+from app.core.execution_target import okx_demo_execution_target_manifest
 from app.db.session import create_database_engine, create_session_factory
 from app.models import Base
 from app.repositories import StrategyRepository
@@ -71,6 +72,7 @@ def control_payload(strategy_version_id: int, market_data_dir: Path, **overrides
 
 def settings(tmp_path: Path, *, allow_controlled: bool) -> Settings:
     return Settings(
+        execution_target_manifest=okx_demo_execution_target_manifest(),
         database_url=f"sqlite+pysqlite:///{tmp_path / 'control.sqlite'}",
         tmp_freqtrade_config_dir=tmp_path / "tmp" / "freqtrade_configs",
         market_data_dir=tmp_path / "user_data" / "data",

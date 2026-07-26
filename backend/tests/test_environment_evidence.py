@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from app.core.config import Settings
+from app.core.execution_target import okx_demo_execution_target_manifest
 from app.schemas import (
     EnvironmentIdentity,
     StrategyVersionRead,
@@ -138,6 +139,7 @@ def test_configured_identity_resolves_relative_and_repo_external_roots(
     external_backtests = tmp_path / "external-backtests"
     identity = configured_environment_identity(
         Settings(
+            execution_target_manifest=okx_demo_execution_target_manifest(),
             canonical_repo_root=canonical_repo,
             strategy_output_dir=Path("generated"),
             backtest_result_dir=external_backtests,

@@ -4,6 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.core.config import Settings
+from app.core.execution_target import okx_demo_execution_target_manifest
 from app.schemas.freq_ui import FreqUILinkConfig
 from app.services.freq_ui_link import FreqUILinkMetadataService
 
@@ -36,6 +37,7 @@ def test_enabled_metadata_is_generated_from_safe_config() -> None:
 
 def test_metadata_can_be_generated_from_settings() -> None:
     settings = Settings(
+        execution_target_manifest=okx_demo_execution_target_manifest(),
         frequi_enabled=True,
         frequi_url="http://localhost:8080",
         frequi_environment_label="local-settings",

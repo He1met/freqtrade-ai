@@ -104,6 +104,7 @@ class OperatorStatusService:
             phase7_smoke_summary_path=phase7_smoke_summary_path,
         )
         runtime_summary = OperatorRuntimeContractSummary(
+            execution_target_id=runtime_contract.execution_target_manifest.active_target_id,
             status=runtime_contract.status,
             runtime_readiness_status=runtime_contract.runtime_readiness.status,
             fallback_active=runtime_contract.fallback_status.active,
