@@ -181,6 +181,7 @@ def ephemeral_environment(
         preflight.OKX_DEMO_ACCOUNT_FINGERPRINT_ENV: preflight.account_fingerprint(
             account
         ),
+        "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY": "74" * 32,
     }
 
 
@@ -245,6 +246,12 @@ def test_attested_provider_reuses_443_get_only_signature_boundary(
         ),
         lambda environment: environment.update(
             {preflight.OKX_DEMO_ACCOUNT_FINGERPRINT_ENV: "not-a-sha256"}
+        ),
+        lambda environment: environment.pop(
+            "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"
+        ),
+        lambda environment: environment.update(
+            {"FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY": "not-a-key"}
         ),
     ],
 )
