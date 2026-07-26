@@ -102,15 +102,24 @@ class HeaderCredentialProvider:
 
 
 def adapter(payloads, *, credentials=None, status_code=200, ttl_seconds=None):
-    transport = RecordedTransport(payloads, status_code=status_code)
+    responses = [
+        payload
+        if isinstance(payload, BaseException)
+        else OkxReadHttpResponse(
+            status_code=status_code,
+            payload=payload,
+            received_at=NOW,
+        )
+        for payload in payloads
+    ]
     instance = OkxDemoReadAdapter(
         execution_target="OKX_DEMO",
-        transport=transport,
+        recorded_responses=responses,
         credential_provider=credentials,
         now_provider=lambda: NOW,
         ttl_seconds=ttl_seconds,
     )
-    return instance, transport
+    return instance, instance._transport
 
 
 def envelope(data, code="0"):
@@ -333,6 +342,11 @@ def test_account_config_revalidates_identity_and_permissions(
     assert blocked.value.kind == "IDENTITY_DRIFT"
     assert blocked.value.status == "BLOCKED"
     assert len(target_transport.calls) == 1
+    with pytest.raises(OkxReadAdapterError) as revoked:
+        instance.balance("USDT")
+    assert revoked.value.kind == "UNAUTHORIZED"
+    assert revoked.value.status == "BLOCKED"
+    assert len(target_transport.calls) == 1
 
 
 def test_common_import_and_constructor_paths_cannot_create_real_session() -> None:
@@ -341,10 +355,14 @@ def test_common_import_and_constructor_paths_cannot_create_real_session() -> Non
     assert tuple(
         inspect.signature(create_attested_okx_demo_read_adapter).parameters
     ) == ("environment",)
-    with pytest.raises(OkxReadAdapterError):
+    class WrappedRealTransport:
+        def __init__(self) -> None:
+            self.inner = UrllibOkxReadTransport()
+
+    with pytest.raises(TypeError):
         OkxDemoReadAdapter(
             execution_target="OKX_DEMO",
-            transport=UrllibOkxReadTransport(),
+            transport=WrappedRealTransport(),
             credential_provider=RecordedCredentialProvider(),
         )
 
@@ -357,15 +375,13 @@ def test_adapter_rejects_every_target_except_okx_demo() -> None:
     assert exc_info.value.status == "BLOCKED"
 
 
-def test_real_transport_rejects_an_unattested_injected_provider() -> None:
-    with pytest.raises(OkxReadAdapterError) as exc_info:
+def test_normalizer_constructor_has_no_transport_injection_parameter() -> None:
+    with pytest.raises(TypeError):
         OkxDemoReadAdapter(
             execution_target="OKX_DEMO",
+            transport=UrllibOkxReadTransport(),
             credential_provider=RecordedCredentialProvider(),
         )
-
-    assert exc_info.value.kind == "UNAUTHORIZED"
-    assert exc_info.value.status == "BLOCKED"
 
 
 def test_real_transport_rejects_an_alternate_credential_origin() -> None:
@@ -384,6 +400,8 @@ def test_instrument_schema_and_contract_conversion_use_exchange_metadata() -> No
                     {
                         "instId": "BTC-USDT-SWAP",
                         "instType": "SWAP",
+                        "uly": "BTC-USDT",
+                        "instFamily": "BTC-USDT",
                         "baseCcy": "BTC",
                         "quoteCcy": "USDT",
                         "settleCcy": "USDT",
@@ -425,6 +443,8 @@ def test_instrument_schema_and_contract_conversion_use_exchange_metadata() -> No
         lambda item: item.update(ctValCcy="USDT"),
         lambda item: item.update(
             instId="BTC-USD-SWAP",
+            uly="BTC-USD",
+            instFamily="BTC-USD",
             quoteCcy="USD",
             settleCcy="USD",
             ctType="inverse",
@@ -438,6 +458,8 @@ def test_inconsistent_linear_or_inverse_contract_metadata_blocks(
     item = {
         "instId": "BTC-USDT-SWAP",
         "instType": "SWAP",
+        "uly": "BTC-USDT",
+        "instFamily": "BTC-USDT",
         "baseCcy": "BTC",
         "quoteCcy": "USDT",
         "settleCcy": "USDT",
@@ -457,6 +479,53 @@ def test_inconsistent_linear_or_inverse_contract_metadata_blocks(
 
     assert blocked.value.kind == "INVALID_RESPONSE"
     assert blocked.value.status == "BLOCKED"
+
+
+@pytest.mark.parametrize(
+    (
+        "inst_id",
+        "contract_type",
+        "settle_ccy",
+        "contract_value_ccy",
+        "expected_base",
+        "expected_quote",
+    ),
+    [
+        ("BTC-USDT-SWAP", "linear", "USDT", "BTC", "BTC", "USDT"),
+        ("BTC-USD-SWAP", "inverse", "BTC", "USD", "BTC", "USD"),
+    ],
+)
+def test_real_okx_empty_base_quote_are_derived_from_swap_identity(
+    inst_id: str,
+    contract_type: str,
+    settle_ccy: str,
+    contract_value_ccy: str,
+    expected_base: str,
+    expected_quote: str,
+) -> None:
+    family = inst_id.removesuffix("-SWAP")
+    item = {
+        "instId": inst_id,
+        "instType": "SWAP",
+        "uly": family,
+        "instFamily": family,
+        "baseCcy": "",
+        "quoteCcy": "",
+        "settleCcy": settle_ccy,
+        "ctType": contract_type,
+        "ctVal": "1",
+        "ctValCcy": contract_value_ccy,
+        "lotSz": "1",
+        "minSz": "1",
+        "tickSz": "0.1",
+        "state": "live",
+    }
+    instance, _ = adapter([envelope([item])])
+
+    snapshot = instance.instruments(inst_id)
+
+    assert snapshot.items[0]["base_ccy"] == expected_base
+    assert snapshot.items[0]["quote_ccy"] == expected_quote
 
 
 def test_public_market_resources_have_stable_normalized_schemas() -> None:
@@ -842,6 +911,61 @@ def test_future_exchange_timestamp_is_blocked_as_invalid_response() -> None:
     assert blocked.value.status == "BLOCKED"
 
 
+def test_funding_schedule_uses_received_at_for_freshness() -> None:
+    planned = str(int(NOW.timestamp() * 1000) + 8 * 60 * 60 * 1000)
+    instance, _ = adapter(
+        [
+            envelope(
+                [
+                    {
+                        "instId": "BTC-USDT-SWAP",
+                        "fundingRate": "0.0001",
+                        "fundingTime": planned,
+                    }
+                ]
+            )
+        ]
+    )
+
+    snapshot = instance.funding_rate("BTC-USDT-SWAP")
+
+    assert snapshot.metadata.exchange_timestamp is None
+    assert snapshot.metadata.expires_at == NOW + timedelta(seconds=300)
+
+
+@pytest.mark.parametrize(
+    ("funding_time", "next_funding_time"),
+    [
+        (
+            str(int(datetime(2100, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)),
+            None,
+        ),
+        (
+            str(int(NOW.timestamp() * 1000) + 8 * 60 * 60 * 1000),
+            str(int(NOW.timestamp() * 1000) + 60 * 60 * 1000),
+        ),
+    ],
+)
+def test_impossible_funding_schedule_is_blocked(
+    funding_time: str,
+    next_funding_time: Optional[str],
+) -> None:
+    item = {
+        "instId": "BTC-USDT-SWAP",
+        "fundingRate": "0.0001",
+        "fundingTime": funding_time,
+    }
+    if next_funding_time is not None:
+        item["nextFundingTime"] = next_funding_time
+    instance, _ = adapter([envelope([item])])
+
+    with pytest.raises(OkxReadAdapterError) as blocked:
+        instance.funding_rate("BTC-USDT-SWAP")
+
+    assert blocked.value.kind == "INVALID_RESPONSE"
+    assert blocked.value.status == "BLOCKED"
+
+
 @pytest.mark.parametrize("naive_source", ["received_at", "now"])
 def test_freshness_requires_timezone_aware_received_at_and_now(
     naive_source: str,
@@ -855,7 +979,13 @@ def test_freshness_requires_timezone_aware_received_at_and_now(
     )
     instance = OkxDemoReadAdapter(
         execution_target="OKX_DEMO",
-        transport=transport,
+        recorded_responses=[
+            OkxReadHttpResponse(
+                status_code=200,
+                payload=payload,
+                received_at=transport.received_at,
+            )
+        ],
         credential_provider=RecordedCredentialProvider(),
         now_provider=(
             (lambda: NOW.replace(tzinfo=None))
@@ -924,6 +1054,8 @@ def mismatch_cases():
             {
                 "instId": "ETH-USDT-SWAP",
                 "instType": "SWAP",
+                "uly": "ETH-USDT",
+                "instFamily": "ETH-USDT",
                 "baseCcy": "ETH",
                 "quoteCcy": "USDT",
                 "settleCcy": "USDT",
