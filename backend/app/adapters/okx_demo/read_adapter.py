@@ -88,21 +88,31 @@ class OkxDemoReadAdapter:
         query = {"instType": "SWAP"}
         if inst_id is not None:
             query["instId"] = self._swap_id(inst_id)
+        expected_inst_id = query.get("instId")
         return self._request(
             resource="instruments",
             path="/api/v5/public/instruments",
             query=query,
             authenticated=False,
-            parser=lambda data: [self._instrument(item) for item in data],
+            parser=lambda data: [
+                self._instrument(
+                    self._require_identity(item, "instId", expected_inst_id)
+                )
+                for item in data
+            ],
         )
 
     def ticker(self, inst_id: str) -> OkxReadSnapshot:
+        inst_id = self._swap_id(inst_id)
         return self._request(
             resource="ticker",
             path="/api/v5/market/ticker",
-            query={"instId": self._swap_id(inst_id)},
+            query={"instId": inst_id},
             authenticated=False,
-            parser=lambda data: [self._ticker(item) for item in data],
+            parser=lambda data: [
+                self._ticker(self._require_identity(item, "instId", inst_id))
+                for item in data
+            ],
         )
 
     def candles(
@@ -139,12 +149,18 @@ class OkxDemoReadAdapter:
         )
 
     def mark_price(self, inst_id: str) -> OkxReadSnapshot:
+        inst_id = self._swap_id(inst_id)
         return self._request(
             resource="mark_price",
             path="/api/v5/public/mark-price",
-            query={"instType": "SWAP", "instId": self._swap_id(inst_id)},
+            query={"instType": "SWAP", "instId": inst_id},
             authenticated=False,
-            parser=lambda data: [self._reference_price(item, "mark") for item in data],
+            parser=lambda data: [
+                self._reference_price(
+                    self._require_identity(item, "instId", inst_id), "mark"
+                )
+                for item in data
+            ],
         )
 
     def index_price(self, index_id: str) -> OkxReadSnapshot:
@@ -155,25 +171,42 @@ class OkxDemoReadAdapter:
             path="/api/v5/market/index-tickers",
             query={"instId": index_id},
             authenticated=False,
-            parser=lambda data: [self._reference_price(item, "index") for item in data],
+            parser=lambda data: [
+                self._reference_price(
+                    self._require_identity(item, "instId", index_id), "index"
+                )
+                for item in data
+            ],
         )
 
     def funding_rate(self, inst_id: str) -> OkxReadSnapshot:
+        inst_id = self._swap_id(inst_id)
         return self._request(
             resource="funding_rate",
             path="/api/v5/public/funding-rate",
-            query={"instId": self._swap_id(inst_id)},
+            query={"instId": inst_id},
             authenticated=False,
-            parser=lambda data: [self._funding_rate(item) for item in data],
+            parser=lambda data: [
+                self._funding_rate(
+                    self._require_identity(item, "instId", inst_id)
+                )
+                for item in data
+            ],
         )
 
     def open_interest(self, inst_id: str) -> OkxReadSnapshot:
+        inst_id = self._swap_id(inst_id)
         return self._request(
             resource="open_interest",
             path="/api/v5/public/open-interest",
-            query={"instType": "SWAP", "instId": self._swap_id(inst_id)},
+            query={"instType": "SWAP", "instId": inst_id},
             authenticated=False,
-            parser=lambda data: [self._open_interest(item) for item in data],
+            parser=lambda data: [
+                self._open_interest(
+                    self._require_identity(item, "instId", inst_id)
+                )
+                for item in data
+            ],
         )
 
     def account_config(self) -> OkxReadSnapshot:
@@ -204,34 +237,48 @@ class OkxDemoReadAdapter:
         query = {"instType": "SWAP"}
         if inst_id is not None:
             query["instId"] = self._swap_id(inst_id)
+        expected_inst_id = query.get("instId")
         return self._request(
             resource="positions",
             path="/api/v5/account/positions",
             query=query,
             authenticated=True,
-            parser=lambda data: [self._position(item) for item in data],
+            parser=lambda data: [
+                self._position(
+                    self._require_identity(item, "instId", expected_inst_id)
+                )
+                for item in data
+            ],
             allow_empty=True,
         )
 
     def leverage(self, inst_id: str) -> OkxReadSnapshot:
+        inst_id = self._swap_id(inst_id)
         return self._request(
             resource="leverage",
             path="/api/v5/account/leverage-info",
-            query={"instId": self._swap_id(inst_id), "mgnMode": "isolated"},
+            query={"instId": inst_id, "mgnMode": "isolated"},
             authenticated=True,
-            parser=lambda data: [self._leverage(item) for item in data],
+            parser=lambda data: [
+                self._leverage(self._require_identity(item, "instId", inst_id))
+                for item in data
+            ],
         )
 
     def fees(self, inst_id: Optional[str] = None) -> OkxReadSnapshot:
         query = {"instType": "SWAP"}
         if inst_id is not None:
             query["instId"] = self._swap_id(inst_id)
+        expected_inst_id = query.get("instId")
         return self._request(
             resource="fees",
             path="/api/v5/account/trade-fee",
             query=query,
             authenticated=True,
-            parser=lambda data: [self._fee(item) for item in data],
+            parser=lambda data: [
+                self._fee(self._require_identity(item, "instId", expected_inst_id))
+                for item in data
+            ],
         )
 
     def order(
@@ -254,12 +301,23 @@ class OkxDemoReadAdapter:
             ):
                 self._invalid_request("client_order_id is invalid")
             query["clOrdId"] = client_order_id
+        expected_order_id = query.get("ordId")
+        expected_client_order_id = query.get("clOrdId")
         return self._request(
             resource="order",
             path="/api/v5/trade/order",
             query=query,
             authenticated=True,
-            parser=lambda data: [self._order(item) for item in data],
+            parser=lambda data: [
+                self._order(
+                    self._require_order_identity(
+                        self._require_identity(item, "instId", query["instId"]),
+                        order_id=expected_order_id,
+                        client_order_id=expected_client_order_id,
+                    )
+                )
+                for item in data
+            ],
         )
 
     def _request(
@@ -297,11 +355,18 @@ class OkxDemoReadAdapter:
                 "OK-ACCESS-TIMESTAMP",
                 "OK-ACCESS-PASSPHRASE",
             }
-            if not required.issubset(auth_headers):
+            if set(auth_headers) != required or any(
+                not isinstance(value, str)
+                or not value.strip()
+                or re.search(r"[\x00-\x1f\x7f]", value)
+                for value in auth_headers.values()
+            ):
                 raise OkxReadAdapterError(
                     kind="UNAUTHORIZED",
                     status="BLOCKED",
-                    message="OKX_DEMO credential provider returned incomplete authorization",
+                    message=(
+                        "OKX_DEMO credential provider returned invalid authorization headers"
+                    ),
                 )
             headers.update(auth_headers)
             headers["x-simulated-trading"] = "1"
@@ -631,6 +696,31 @@ class OkxDemoReadAdapter:
                 if isinstance(value, datetime):
                     timestamps.append(value)
         return max(timestamps) if timestamps else None
+
+    @staticmethod
+    def _require_identity(
+        item: Any,
+        field: str,
+        expected: Optional[str],
+    ) -> Mapping[str, Any]:
+        if not isinstance(item, Mapping):
+            raise ValueError("OKX item must be an object")
+        if expected is not None and item.get(field) != expected:
+            raise ValueError(f"OKX response {field} does not match the request")
+        return item
+
+    @staticmethod
+    def _require_order_identity(
+        item: Mapping[str, Any],
+        *,
+        order_id: Optional[str],
+        client_order_id: Optional[str],
+    ) -> Mapping[str, Any]:
+        if order_id is not None and item.get("ordId") != order_id:
+            raise ValueError("OKX response ordId does not match the request")
+        if client_order_id is not None and item.get("clOrdId") != client_order_id:
+            raise ValueError("OKX response clOrdId does not match the request")
+        return item
 
     @staticmethod
     def _swap_id(inst_id: str) -> str:

@@ -72,6 +72,21 @@ class RecordedCredentialProvider:
         }
 
 
+class HeaderCredentialProvider:
+    def __init__(self, headers) -> None:
+        self.headers = headers
+
+    def authorization_headers(
+        self,
+        *,
+        method: str,
+        request_path: str,
+        body: str,
+    ) -> Mapping[str, str]:
+        del method, request_path, body
+        return self.headers
+
+
 def adapter(payloads, *, credentials=None, status_code=200, ttl_seconds=None):
     transport = RecordedTransport(payloads, status_code=status_code)
     instance = OkxDemoReadAdapter(
@@ -353,6 +368,57 @@ def test_private_read_is_blocked_until_credential_provider_is_available() -> Non
 
 
 @pytest.mark.parametrize(
+    "headers",
+    [
+        {
+            "OK-ACCESS-KEY": "value",
+            "OK-ACCESS-SIGN": "value",
+            "OK-ACCESS-TIMESTAMP": "value",
+            "OK-ACCESS-PASSPHRASE": "value",
+            "x-simulated-trading": "0",
+        },
+        {
+            "OK-ACCESS-KEY": "value",
+            "ok-access-key": "value",
+            "OK-ACCESS-SIGN": "value",
+            "OK-ACCESS-TIMESTAMP": "value",
+            "OK-ACCESS-PASSPHRASE": "value",
+        },
+        {
+            "OK-ACCESS-KEY": "",
+            "OK-ACCESS-SIGN": "value",
+            "OK-ACCESS-TIMESTAMP": "value",
+            "OK-ACCESS-PASSPHRASE": "value",
+        },
+        {
+            "OK-ACCESS-KEY": "   ",
+            "OK-ACCESS-SIGN": "value",
+            "OK-ACCESS-TIMESTAMP": "value",
+            "OK-ACCESS-PASSPHRASE": "value",
+        },
+        {
+            "OK-ACCESS-KEY": "value\nforged",
+            "OK-ACCESS-SIGN": "value",
+            "OK-ACCESS-TIMESTAMP": "value",
+            "OK-ACCESS-PASSPHRASE": "value",
+        },
+    ],
+)
+def test_private_auth_headers_are_exact_nonempty_and_adapter_owned(headers) -> None:
+    instance, transport = adapter(
+        [],
+        credentials=HeaderCredentialProvider(headers),
+    )
+
+    with pytest.raises(OkxReadAdapterError) as exc_info:
+        instance.account_config()
+
+    assert exc_info.value.kind == "UNAUTHORIZED"
+    assert exc_info.value.status == "BLOCKED"
+    assert transport.calls == []
+
+
+@pytest.mark.parametrize(
     ("status_code", "kind", "retryable"),
     [
         (401, "UNAUTHORIZED", False),
@@ -474,3 +540,161 @@ def test_invalid_inputs_block_before_transport_and_no_write_surface_exists() -> 
     assert not hasattr(instance, "place_order")
     assert not hasattr(instance, "cancel_order")
     assert not hasattr(instance, "set_leverage")
+
+
+def mismatch_cases():
+    ticker = {
+        "instId": "ETH-USDT-SWAP",
+        "last": "100",
+        "bidPx": "99",
+        "askPx": "101",
+        "open24h": "90",
+        "high24h": "110",
+        "low24h": "80",
+        "vol24h": "20",
+        "volCcy24h": "2",
+        "ts": FRESH_TS,
+    }
+    return [
+        (
+            lambda adapter: adapter.instruments("BTC-USDT-SWAP"),
+            {
+                "instId": "ETH-USDT-SWAP",
+                "instType": "SWAP",
+                "baseCcy": "ETH",
+                "quoteCcy": "USDT",
+                "settleCcy": "USDT",
+                "ctType": "linear",
+                "ctVal": "0.1",
+                "ctValCcy": "ETH",
+                "lotSz": "1",
+                "minSz": "1",
+                "tickSz": "0.01",
+                "state": "live",
+            },
+            False,
+        ),
+        (lambda adapter: adapter.ticker("BTC-USDT-SWAP"), ticker, False),
+        (
+            lambda adapter: adapter.mark_price("BTC-USDT-SWAP"),
+            {"instId": "ETH-USDT-SWAP", "markPx": "100", "ts": FRESH_TS},
+            False,
+        ),
+        (
+            lambda adapter: adapter.index_price("BTC-USDT"),
+            {"instId": "ETH-USDT", "idxPx": "100", "ts": FRESH_TS},
+            False,
+        ),
+        (
+            lambda adapter: adapter.funding_rate("BTC-USDT-SWAP"),
+            {
+                "instId": "ETH-USDT-SWAP",
+                "fundingRate": "0.0001",
+                "fundingTime": FRESH_TS,
+            },
+            False,
+        ),
+        (
+            lambda adapter: adapter.open_interest("BTC-USDT-SWAP"),
+            {
+                "instId": "ETH-USDT-SWAP",
+                "oi": "100",
+                "oiCcy": "10",
+                "ts": FRESH_TS,
+            },
+            False,
+        ),
+        (
+            lambda adapter: adapter.positions("BTC-USDT-SWAP"),
+            {
+                "instId": "ETH-USDT-SWAP",
+                "mgnMode": "isolated",
+                "posSide": "net",
+                "pos": "0",
+                "availPos": "0",
+                "uTime": FRESH_TS,
+            },
+            True,
+        ),
+        (
+            lambda adapter: adapter.leverage("BTC-USDT-SWAP"),
+            {
+                "instId": "ETH-USDT-SWAP",
+                "mgnMode": "isolated",
+                "posSide": "net",
+                "lever": "3",
+            },
+            True,
+        ),
+        (
+            lambda adapter: adapter.fees("BTC-USDT-SWAP"),
+            {
+                "instId": "ETH-USDT-SWAP",
+                "maker": "-0.0002",
+                "taker": "0.0005",
+            },
+            True,
+        ),
+        (
+            lambda adapter: adapter.order("BTC-USDT-SWAP", order_id="123"),
+            {
+                "instId": "BTC-USDT-SWAP",
+                "ordId": "999",
+                "clOrdId": "client999",
+                "state": "live",
+                "side": "buy",
+                "posSide": "net",
+                "ordType": "limit",
+                "px": "90",
+                "sz": "2",
+                "accFillSz": "0",
+                "cTime": FRESH_TS,
+                "uTime": FRESH_TS,
+            },
+            True,
+        ),
+        (
+            lambda adapter: adapter.order(
+                "BTC-USDT-SWAP",
+                client_order_id="client123",
+            ),
+            {
+                "instId": "BTC-USDT-SWAP",
+                "ordId": "123",
+                "clOrdId": "client999",
+                "state": "live",
+                "side": "buy",
+                "posSide": "net",
+                "ordType": "limit",
+                "px": "90",
+                "sz": "2",
+                "accFillSz": "0",
+                "cTime": FRESH_TS,
+                "uTime": FRESH_TS,
+            },
+            True,
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("caller", "response_item", "authenticated"),
+    mismatch_cases(),
+)
+def test_exact_queries_reject_mismatched_response_identity(
+    caller,
+    response_item,
+    authenticated,
+) -> None:
+    credentials = RecordedCredentialProvider() if authenticated else None
+    instance, transport = adapter(
+        [envelope([response_item])],
+        credentials=credentials,
+    )
+
+    with pytest.raises(OkxReadAdapterError) as exc_info:
+        caller(instance)
+
+    assert exc_info.value.kind == "INVALID_RESPONSE"
+    assert exc_info.value.status == "FAILED"
+    assert len(transport.calls) == 1

@@ -51,6 +51,16 @@ Authenticated methods are blocked until #443 supplies the Keychain-backed
 implementation. Authorization headers are passed directly to the injected
 transport and never enter snapshots or errors.
 
+The provider must return exactly the four OKX authorization headers, using
+their canonical case, with non-empty values and no control characters. Any
+extra header, alternate casing, provider-supplied Demo header, or invalid value
+is blocked before transport. The adapter is the sole owner of
+`x-simulated-trading: 1`.
+
+Exact instrument and order queries also reconcile response identity before
+normalization. A mismatched `instId`, `ordId`, or `clOrdId` is
+`FAILED/INVALID_RESPONSE`, never `READY`.
+
 ## Current acceptance state
 
 The offline adapter, constructed response coverage, normalization, redaction,
