@@ -43,3 +43,26 @@ security:
   # Hard safety gates. Phase 0 must not enable dry-run or live trading.
   allow_live_trading: false
   allow_dry_run_trading: false
+
+execution:
+  # One codebase, one runtime, one PostgreSQL, and one unambiguous exchange
+  # order destination. This contract does not connect to OKX or submit orders.
+  implicit_fallback: false
+  targets:
+    - target_id: OKX_DEMO
+      status: ACTIVE
+      exchange: okx
+      product_type: SWAP
+      margin_mode: isolated
+      account_mode: demo
+      simulated_trading: true
+      credential_source: macos_keychain
+      write_policy: SOLE_EXCHANGE_ORDER_TARGET
+      # Remains disabled until the dedicated OKX_DEMO writer is implemented.
+      order_submission_enabled: false
+      allow_real_funds: false
+  non_exchange_scopes:
+    - scope_id: LOCAL_DRY_RUN
+      scope_type: local_simulation
+      exchange_order_execution: false
+      write_policy: NO_EXCHANGE_WRITES

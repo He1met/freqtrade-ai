@@ -11,3 +11,4 @@ def test_health_endpoint() -> None:
     assert response.json()["status"] == "ok"
     assert response.json()["allow_live_trading"] is False
     assert response.json()["allow_dry_run_trading"] is False
+    assert response.json()["execution_target_id"] == "OKX_DEMO"

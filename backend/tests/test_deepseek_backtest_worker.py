@@ -11,6 +11,7 @@ from app.adapters.freqtrade.backtest_runner import FreqtradeBacktestRunner
 from app.adapters.freqtrade.cli_runner import FreqtradeCliRunner
 from app.adapters.freqtrade.strategy_file_manager import StrategyFileManager
 from app.core.config import Settings
+from app.core.execution_target import okx_demo_execution_target_manifest
 from app.db.session import create_database_engine, create_session_factory
 from app.models import (
     BacktestResult,
@@ -243,6 +244,7 @@ def test_worker_runs_controlled_service_chain_and_reconciles_all_database_ids(
     install_fake_freqtrade(tmp_path, monkeypatch)
     monkeypatch.setenv("TEST_LLM_API_KEY", "synthetic-worker-test-value")
     settings = Settings(
+        execution_target_manifest=okx_demo_execution_target_manifest(),
         freqtrade_user_data=tmp_path / "user_data",
         strategy_output_dir=tmp_path / "strategies",
         market_data_dir=datadir,

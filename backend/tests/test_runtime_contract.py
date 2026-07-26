@@ -76,7 +76,9 @@ def test_contract_reports_missing_runtime_sources_as_fallback_state(tmp_path) ->
 
     rendered = contract.model_dump_json()
 
-    assert contract.schema_version == "2"
+    assert contract.schema_version == "3"
+    assert contract.execution_target_manifest.active_target_id == "OKX_DEMO"
+    assert contract.execution_target_manifest.implicit_fallback is False
     assert contract.status == "READY"
     assert contract.research_readiness.status == "READY"
     assert contract.dry_run_readiness.status == "BLOCKED"
@@ -184,7 +186,8 @@ def test_runtime_read_only_endpoint_returns_stable_contract_shape() -> None:
     assert response.status_code == 200
     payload = response.json()
     rendered = json.dumps(payload, sort_keys=True)
-    assert payload["schema_version"] == "2"
+    assert payload["schema_version"] == "3"
+    assert payload["execution_target_manifest"]["targets"][0]["target_id"] == "OKX_DEMO"
     assert payload["safety"]["read_only"] is True
     assert payload["safety"]["allow_live_trading"] is False
     assert payload["safety"]["allow_exchange_connection"] is False

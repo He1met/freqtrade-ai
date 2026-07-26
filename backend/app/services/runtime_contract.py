@@ -103,6 +103,7 @@ class RuntimeReadOnlyContractService:
         return RuntimeReadOnlyContract(
             status=status,
             generated_at=generated_at,
+            execution_target_manifest=get_settings().execution_target_manifest,
             system_status=system_status,
             runtime_readiness=runtime_readiness,
             research_readiness=research_readiness,

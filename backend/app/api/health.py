@@ -18,6 +18,7 @@ def health() -> dict[str, object]:
         "database_enabled": settings.database_enabled,
         "allow_live_trading": settings.allow_live_trading,
         "allow_dry_run_trading": settings.allow_dry_run_trading,
+        "execution_target_id": settings.execution_target_manifest.active_target_id,
     }
 
 

@@ -5,11 +5,12 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
+from app.core.execution_target import ExecutionTargetManifest
 from app.schemas.dry_run_status import DryRunStatusSnapshot
 from app.schemas.live_candidate import LiveCandidateMonitoringSnapshot
 
 
-RUNTIME_READ_ONLY_CONTRACT_SCHEMA_VERSION = "2"
+RUNTIME_READ_ONLY_CONTRACT_SCHEMA_VERSION = "3"
 
 RuntimeReadOnlyStatus = Literal["READY", "WARNING", "STALE", "UNAVAILABLE", "BLOCKED"]
 RuntimeReadOnlySource = Literal[
@@ -95,9 +96,10 @@ class RuntimeSafetyBoundary(BaseModel):
 
 
 class RuntimeReadOnlyContract(BaseModel):
-    schema_version: Literal["2"] = RUNTIME_READ_ONLY_CONTRACT_SCHEMA_VERSION
+    schema_version: Literal["3"] = RUNTIME_READ_ONLY_CONTRACT_SCHEMA_VERSION
     status: RuntimeReadOnlyStatus
     generated_at: datetime
+    execution_target_manifest: ExecutionTargetManifest
     system_status: RuntimeStatusSummary
     runtime_readiness: RuntimeStatusSummary
     research_readiness: RuntimeStatusSummary
