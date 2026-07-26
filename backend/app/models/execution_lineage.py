@@ -809,6 +809,14 @@ class ReconciliationRun(Base):
             "execution_target_id = 'OKX_DEMO'",
             name="reconciliation_runs_okx_demo_target_check",
         ),
+        CheckConstraint(
+            "status IN ('RECONCILED', 'DRIFTED', 'STALE', 'UNKNOWN', 'RECOVERED')",
+            name="reconciliation_runs_status_check",
+        ),
+        CheckConstraint(
+            "artifact_status IN ('PENDING', 'READY')",
+            name="reconciliation_runs_artifact_status_check",
+        ),
         Index("reconciliation_runs_target_created_idx", "execution_target_id", "created_at"),
     )
 
@@ -820,6 +828,19 @@ class ReconciliationRun(Base):
     )
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     summary_snapshot: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    database_ids: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    artifact_path: Mapped[Optional[str]] = mapped_column(Text)
+    artifact_sha256: Mapped[Optional[str]] = mapped_column(String(64))
+    artifact_status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="PENDING"
+    )
+    authoritative_observed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True)
+    )
+    source_type: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="api_aggregate"
+    )
+    core_data: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
