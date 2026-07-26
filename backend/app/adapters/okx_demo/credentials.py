@@ -16,7 +16,7 @@ class OkxDemoCredentialProvider(Protocol):
         request_path: str,
         body: str,
     ) -> Mapping[str, str]:
-        """Return ephemeral OKX auth headers for one read-only request."""
+        """Return ephemeral OKX auth headers for one attested Demo request."""
 
 
 class UnavailableOkxDemoCredentialProvider:
