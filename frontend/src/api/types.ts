@@ -801,6 +801,15 @@ export type LocalStrategyLabEvidenceSummary = {
   stages: LocalStrategyLabEvidenceStage[];
 };
 
+export type LocalStrategyLabEvidenceData = {
+  generationRuns: GenerationRunSummary[];
+  strategyVersions: StrategyGenerationVersion[];
+  backtestRuns: BacktestRunSummary[];
+  backtestTasks: BacktestTaskSummary[];
+  backtestResults: BacktestResultSummary[];
+  ranking: RankingEntry[];
+};
+
 export type MvpData = {
   strategies: StrategySummary[];
   strategyVersions: StrategyGenerationVersion[];
@@ -816,6 +825,7 @@ export type MvpData = {
   failureReasons: StrategyFailureReasonSummary[];
   versionLineage: StrategyVersionLineageEntry[];
   localStrategyLabEvidence?: LocalStrategyLabEvidenceSummary;
+  localStrategyLabEvidenceData?: LocalStrategyLabEvidenceData;
 };
 
 export type MvpDataState = {

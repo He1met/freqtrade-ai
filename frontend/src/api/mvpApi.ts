@@ -139,6 +139,8 @@ export async function loadMvpData(signal?: AbortSignal): Promise<{
         : null,
     ));
   const normalizedBacktestResults = backtestResults.items.map(N.normalizeBacktestResult);
+  const normalizedBacktestRuns = backtestRuns.items.map(N.normalizeBacktestRun);
+  const normalizedBacktestTasks = backtestTasks.items.map(N.normalizeBacktestTask);
   const normalizedRanking = ranking.items.map(N.normalizeRankingEntry);
   const sources = Object.fromEntries(MVP_DATA_SET_KEYS.map((key) => [key, "api"])) as MvpDataSources;
 
@@ -148,8 +150,8 @@ export async function loadMvpData(signal?: AbortSignal): Promise<{
         .filter((item) => isCoreDataSourceTrace(item.dataSource)),
       strategyVersions: normalizedStrategyVersions,
       generationRuns: normalizedGenerationRuns.filter((item) => isCoreDataSourceTrace(item.dataSource)),
-      backtestRuns: backtestRuns.items.map(N.normalizeBacktestRun).filter((item) => isCoreDataSourceTrace(item.dataSource)),
-      backtestTasks: backtestTasks.items.map(N.normalizeBacktestTask).filter((item) => isCoreDataSourceTrace(item.dataSource)),
+      backtestRuns: normalizedBacktestRuns.filter((item) => isCoreDataSourceTrace(item.dataSource)),
+      backtestTasks: normalizedBacktestTasks.filter((item) => isCoreDataSourceTrace(item.dataSource)),
       backtestResults: normalizedBacktestResults.filter((item) => isCoreDataSourceTrace(item.dataSource)),
       hyperoptRuns: hyperoptRuns.items.map(N.normalizeHyperoptRun),
       dryRun: N.normalizeDryRunManagement(dryRun.item),
@@ -168,6 +170,14 @@ export async function loadMvpData(signal?: AbortSignal): Promise<{
         backtestResults: normalizedBacktestResults,
         ranking: normalizedRanking,
       }),
+      localStrategyLabEvidenceData: {
+        generationRuns: normalizedGenerationRuns,
+        strategyVersions: allStrategyVersions,
+        backtestRuns: normalizedBacktestRuns,
+        backtestTasks: normalizedBacktestTasks,
+        backtestResults: normalizedBacktestResults,
+        ranking: normalizedRanking,
+      },
     },
     sources,
     usedFallback: false,

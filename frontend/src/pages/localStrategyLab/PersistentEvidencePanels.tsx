@@ -12,27 +12,14 @@ import {
   runDeepSeekSingle,
 } from "../../api/client";
 import type {
-  BacktestResultSummary,
-  BacktestRunSummary,
-  BacktestTaskSummary,
   DataSource,
   DataSourceTraceSummary,
   LocalStrategyLabEvidenceSummary,
   MvpData,
-  RankingEntry,
   StrategyGenerationApiResult,
   StrategyGenerationStrategy,
   StrategyGenerationVersion,
 } from "../../api/types";
-import {
-  metricRows,
-  reasonText,
-} from "../backtestDisplay";
-import {
-  emptyBacktestMetrics,
-  findBacktestResultForTask,
-  missingBacktestResultReason,
-} from "../backtestResultLookup";
 import { FallbackNotice } from "../FallbackNotice";
 import { isCoreDataSource } from "../SourceMarker";
 import { isCoreDataSourceTrace } from "../../api/sourceState";
@@ -47,6 +34,7 @@ import {
 } from "./actionEvidence";
 import { ActionTimeline, LatestActionFeedback } from "./ActionTimeline";
 import { CandidateWorkbench } from "./CandidateWorkbench";
+import { EvidenceBrowser } from "./EvidenceBrowser";
 import { useLabSelection } from "./useLabSelection";
 import {
   evidenceStateDisplay,
@@ -99,10 +87,6 @@ function apiErrorStatus(error: unknown): "UNAUTHORIZED" | "BLOCKED" | "FAILED" {
     return error.operationStatus ?? (error.status === 401 || error.status === 403 ? "UNAUTHORIZED" : "FAILED");
   }
   return "FAILED";
-}
-
-function formatScore(value: number | null): string {
-  return value === null ? EMPTY_TEXT : value.toFixed(1);
 }
 
 function formatEvidence(value: Record<string, unknown>): string {
@@ -178,10 +162,6 @@ function LabSourceSummary({ source }: { source: DataSourceTraceSummary | undefin
       </dl>
     </details>
   );
-}
-
-function latest<T>(items: T[], count = 6): T[] {
-  return items.slice(0, count);
 }
 
 function isCoreSource(source: DataSourceTraceSummary, allowedTypes: string[]): boolean {
@@ -348,286 +328,6 @@ function DataSourceTable({ rows }: { rows: SourceRow[] }) {
         </table>
       </div>
     </details>
-  );
-}
-
-function StrategyVersionEvidence({
-  strategies,
-  versions,
-}: {
-  strategies: MvpData["strategies"];
-  versions: StrategyGenerationVersion[];
-}) {
-  const strategyById = new Map(strategies.map((strategy) => [strategy.id, strategy]));
-  const rows = latest(versions);
-
-  return (
-    <section className="lab-evidence-section" aria-label="持久策略版本">
-      <div className="section-header detail-section">
-        <h2>策略 / 版本 / 文件</h2>
-        <span>{versions.length} 条 API 版本记录</span>
-      </div>
-      <div className="table-shell lab-table-shell">
-        <table>
-          <thead>
-            <tr>
-              <th className="lab-col-id">strategy id</th>
-              <th className="lab-col-id">version id</th>
-              <th className="lab-col-name">名称</th>
-              <th className="lab-col-tight">版本</th>
-              <th className="lab-col-tight">验证</th>
-              <th className="lab-col-status">file state</th>
-              <th className="lab-col-path">file path</th>
-              <th className="lab-col-source">DB trace</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((version) => {
-              const strategy = strategyById.get(version.strategyId);
-              const fileState = version.fileState ?? {
-                status: "BLOCKED",
-                blockedReason: "Backend did not provide strategy file state.",
-              };
-              return (
-                <tr key={version.id}>
-                  <td>
-                    <CopyableValue label="策略 ID" value={version.strategyId} />
-                  </td>
-                  <td>
-                    <CopyableValue label="版本 ID" value={version.id} />
-                  </td>
-                  <td>
-                    <CompactText value={strategy?.name ?? EMPTY_TEXT} />
-                  </td>
-                  <td>{version.versionNumber}</td>
-                  <td>{displayStatus(version.validationStatus)}</td>
-                  <td>
-                    {displayStatus(fileState.status)}
-                    {fileState.blockedReason ? (
-                      <span className="inline-muted"> {fileState.blockedReason}</span>
-                    ) : null}
-                  </td>
-                  <td className="path-cell">
-                    <CopyableValue label="策略文件路径" value={version.filePath} />
-                  </td>
-                  <td className="source-cell">
-                    <LabSourceSummary source={version.dataSource} />
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-      {rows.length === 0 ? <div className="empty-state">暂无 API/DB strategy version 记录。</div> : null}
-    </section>
-  );
-}
-
-function GenerationRunEvidence({ runs }: { runs: MvpData["generationRuns"] }) {
-  const rows = latest(runs);
-
-  return (
-    <section className="lab-evidence-section" aria-label="持久生成批次">
-      <div className="section-header detail-section">
-        <h2>生成批次</h2>
-        <span>{runs.length} 条 API run 记录</span>
-      </div>
-      <div className="table-shell lab-table-shell">
-        <table>
-          <thead>
-            <tr>
-              <th className="lab-col-id">run id</th>
-              <th className="lab-col-status">状态</th>
-              <th className="lab-col-name">provider / model</th>
-              <th className="lab-col-count">计数</th>
-              <th className="lab-col-reason">错误</th>
-              <th className="lab-col-source">DB trace</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((run) => (
-              <tr key={run.id}>
-                <td>
-                  <CopyableValue label="生成记录 ID" value={run.id} />
-                </td>
-                <td>
-                  <span className={`run-status ${statusClassName(run.status)}`}>{displayStatus(run.status)}</span>
-                </td>
-                <td>
-                  <CompactText value={`${run.provider} / ${run.model}`} />
-                </td>
-                <td>
-                  requested {run.requestedCount}, accepted {run.acceptedCount}, failed {run.failedCount}
-                </td>
-                <td className="reason-cell">
-                  {run.errorMessage ? (
-                    <ExpandableText summary="查看完整错误" value={run.errorMessage} />
-                  ) : (
-                    <span className="inline-muted">未记录错误</span>
-                  )}
-                </td>
-                <td className="source-cell">
-                  <LabSourceSummary source={run.dataSource} />
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      {rows.length === 0 ? <div className="empty-state">暂无 API/DB generation run 记录。</div> : null}
-    </section>
-  );
-}
-
-function BacktestEvidence({
-  runs,
-  tasks,
-  results,
-}: {
-  runs: BacktestRunSummary[];
-  tasks: BacktestTaskSummary[];
-  results: BacktestResultSummary[];
-}) {
-  const runById = new Map(runs.map((run) => [run.id, run]));
-  const rows = latest(tasks);
-
-  return (
-    <section className="lab-evidence-section" aria-label="持久回测任务和结果">
-      <div className="section-header detail-section">
-        <h2>回测任务 / 结果</h2>
-        <span>
-          {runs.length} 批次 / {tasks.length} 任务 / {results.length} 结果
-        </span>
-      </div>
-      <div className="table-shell lab-table-shell">
-        <table>
-          <thead>
-            <tr>
-              <th className="lab-col-id">task id</th>
-              <th className="lab-col-id">run / version</th>
-              <th className="lab-col-status">状态</th>
-              <th className="lab-col-tight">pair</th>
-              <th className="lab-col-id">result id</th>
-              <th className="lab-col-metrics">指标</th>
-              <th className="lab-col-path">artifact</th>
-              <th className="lab-col-source">source</th>
-              <th className="lab-col-reason">原因</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((task) => {
-              const run = runById.get(task.runId);
-              const result = findBacktestResultForTask(results, task.id);
-              const recordedReason = reasonText(task.blockedReason, task.failedReason, task.errorMessage);
-              const reason = recordedReason === EMPTY_TEXT && !result ? missingBacktestResultReason("任务") : recordedReason;
-              return (
-                <tr key={task.id}>
-                  <td>
-                    <CopyableValue label="回测任务 ID" value={task.id} />
-                  </td>
-                  <td>
-                    <CopyableValue label="回测批次 ID" value={task.runId} />
-                    <div className="secondary-cell">version {run?.strategyVersionId ?? EMPTY_TEXT}</div>
-                  </td>
-                  <td>
-                    <span className={`run-status ${statusClassName(task.status)}`}>
-                      {displayStatus(task.status)}
-                    </span>
-                  </td>
-                  <td>
-                    {task.pair} / {task.timeframe}
-                  </td>
-                  <td>
-                    <CopyableValue label="回测结果 ID" value={result?.id ?? EMPTY_TEXT} />
-                  </td>
-                  <td className="metric-summary">
-                    {metricRows(result?.metrics ?? emptyBacktestMetrics()).map(([label, value]) => (
-                      <span key={label}>
-                        <strong>{label}</strong>
-                        {value}
-                      </span>
-                    ))}
-                  </td>
-                  <td className="path-cell">
-                    <CopyableValue
-                      label="回测 Artifact 路径"
-                      value={result?.resultPath ?? task.resultPath ?? EMPTY_TEXT}
-                    />
-                  </td>
-                  <td className="source-cell">
-                    <LabSourceSummary source={result?.dataSource ?? task.dataSource} />
-                  </td>
-                  <td className="reason-cell">
-                    <CompactText value={reason} />
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-      {rows.length === 0 ? <div className="empty-state">暂无 API/DB backtest task 记录。</div> : null}
-    </section>
-  );
-}
-
-function RankingEvidence({ ranking }: { ranking: RankingEntry[] }) {
-  const rows = latest(ranking);
-
-  return (
-    <section className="lab-evidence-section" aria-label="持久评分和排行榜">
-      <div className="section-header detail-section">
-        <h2>评分 / 排行榜</h2>
-        <span>{ranking.length} 条 StrategyScore 记录</span>
-      </div>
-      <div className="table-shell lab-table-shell">
-        <table>
-          <thead>
-            <tr>
-              <th className="lab-col-tight">rank</th>
-              <th className="lab-col-id">score id</th>
-              <th className="lab-col-id">strategy / version</th>
-              <th className="lab-col-id">backtest result</th>
-              <th className="lab-col-tight">总分</th>
-              <th className="lab-col-status">状态</th>
-              <th className="lab-col-path">file path</th>
-              <th className="lab-col-source">DB trace</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((entry) => (
-              <tr key={`${entry.scoreId}-${entry.strategyVersionId}`}>
-                <td>{entry.rank}</td>
-                <td>
-                  <CopyableValue label="评分 ID" value={displayValue(entry.scoreId)} />
-                </td>
-                <td>
-                  <CopyableValue label="策略 ID" value={entry.strategyId} />
-                  <div className="secondary-cell">version {entry.strategyVersionId}</div>
-                </td>
-                <td>
-                  <CopyableValue label="回测结果 ID" value={entry.backtestResultId ?? EMPTY_TEXT} />
-                </td>
-                <td className="score-cell">{formatScore(entry.totalScore)}</td>
-                <td>
-                  <span className={`run-status ${entry.elimination.eliminated ? "status-failed" : "status-success"}`}>
-                    {entry.elimination.eliminated ? "已淘汰" : "已入榜"}
-                  </span>
-                </td>
-                <td className="path-cell">
-                  <CopyableValue label="策略文件路径" value={entry.filePath} />
-                </td>
-                <td className="source-cell">
-                  <LabSourceSummary source={entry.dataSource} />
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      {rows.length === 0 ? <div className="empty-state">暂无 API/DB StrategyScore 记录。</div> : null}
-    </section>
   );
 }
 
@@ -971,14 +671,9 @@ export function PersistentEvidence({
               <strong>{coreRankingCount}</strong>
             </div>
           </div>
-          <GenerationRunEvidence runs={data.generationRuns} />
-          <StrategyVersionEvidence strategies={data.strategies} versions={data.strategyVersions} />
         </>
       ) : null}
-      {inspectedPhase === "backtest" ? (
-        <BacktestEvidence runs={data.backtestRuns} tasks={data.backtestTasks} results={data.backtestResults} />
-      ) : null}
-      {inspectedPhase === "score" ? <RankingEvidence ranking={data.ranking} /> : null}
+      {inspectedPhase !== "dry-run" ? <EvidenceBrowser data={data} select={select} /> : null}
       {inspectedPhase === "dry-run" ? (
         <DryRunDecisionPanel
           data={data}
