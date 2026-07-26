@@ -35,6 +35,7 @@ export function LocalStrategyLab() {
   const [submission, setSubmission] = useState<SubmissionState>({ kind: "idle" });
   const [snapshotRefreshToken, setSnapshotRefreshToken] = useState(0);
   const [inspectedPhase, setInspectedPhase] = useState<LabPhase>("generation");
+  const [preserveDryRunInspection, setPreserveDryRunInspection] = useState(false);
   const snapshot = useMvpData(snapshotRefreshToken);
   const { history, historyState, record: recordAction } = useActionEvidence();
   const controllerRef = useRef<AbortController | null>(null);
@@ -268,6 +269,7 @@ export function LocalStrategyLab() {
         inspectedPhase={inspectedPhase}
         isLoading={snapshot.isLoading}
         onInspectedPhaseChange={setInspectedPhase}
+        preserveDryRunInspection={preserveDryRunInspection}
       />
 
       {inspectedPhase === "generation" ? (
@@ -303,11 +305,14 @@ export function LocalStrategyLab() {
 
       <PersistentEvidence
         data={snapshot.data}
+        dryRunSource={snapshot.sources.dryRun}
         error={snapshot.error}
         history={history}
         historyState={historyState}
         inspectedPhase={inspectedPhase}
         isLoading={snapshot.isLoading}
+        onOperatorTokenChange={setOperatorToken}
+        onReconciliationChange={setPreserveDryRunInspection}
         onRefresh={() => setSnapshotRefreshToken((current) => current + 1)}
         operatorDashboardSource={snapshot.sources.operatorDashboard}
         operatorToken={operatorToken}

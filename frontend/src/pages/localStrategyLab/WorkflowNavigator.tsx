@@ -15,6 +15,7 @@ export function WorkflowNavigator({
   inspectedPhase,
   isLoading,
   onInspectedPhaseChange,
+  preserveDryRunInspection,
 }: {
   data: MvpData;
   dryRunSource: DataSource;
@@ -22,6 +23,7 @@ export function WorkflowNavigator({
   inspectedPhase: LabPhase;
   isLoading: boolean;
   onInspectedPhaseChange: (stage: LabPhase) => void;
+  preserveDryRunInspection: boolean;
 }) {
   const workflow = deriveLabWorkflow(data, { dryRunSource, error, isLoading });
   const currentStage = workflow.stages.find((stage) => stage.id === workflow.currentPhase)!;
@@ -29,8 +31,10 @@ export function WorkflowNavigator({
   const isReviewing = inspectedStage.id !== currentStage.id;
 
   useEffect(() => {
-    onInspectedPhaseChange(workflow.currentPhase);
-  }, [onInspectedPhaseChange, workflow.currentPhase]);
+    if (!isLoading && !(preserveDryRunInspection && inspectedPhase === "dry-run")) {
+      onInspectedPhaseChange(workflow.currentPhase);
+    }
+  }, [isLoading, onInspectedPhaseChange, preserveDryRunInspection, workflow.currentPhase]);
 
   function inspectPhase(stageId: LabPhase) {
     onInspectedPhaseChange(stageId);
