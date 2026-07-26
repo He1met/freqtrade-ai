@@ -129,6 +129,18 @@ def test_explicit_or_existing_root_and_database_are_rejected(tmp_path: Path) -> 
     assert database_url.startswith("sqlite+pysqlite:///")
 
 
+def test_create_seed_removes_allocated_root_when_seeding_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_after_allocation(_root: Path, _profile: str) -> dict:
+        raise RuntimeError("injected seed failure")
+
+    monkeypatch.setattr(SEED, "seed_profile", fail_after_allocation)
+    with pytest.raises(RuntimeError, match="injected seed failure"):
+        SEED.create_seed(tmp_path, "empty")
+    assert list(tmp_path.glob("freqtrade-ai-issue-433-*")) == []
+
+
 def test_symlink_component_cannot_write_outside_root(tmp_path: Path) -> None:
     root = SEED.allocate_root(tmp_path)
     outside = tmp_path / "outside"
@@ -405,6 +417,66 @@ raise SystemExit(wrapper.run_server(
 
     process.send_signal(signal.SIGTERM)
     stdout, stderr = process.communicate(timeout=20)
+    assert process.returncode == 128 + signal.SIGTERM, (stdout, stderr)
+    assert not root.exists()
+    assert not registry.exists()
+    with pytest.raises((OSError, urllib.error.URLError)):
+        urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=0.5)
+
+
+def test_repeated_sigterm_during_cleanup_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "acceptance"
+    parent.mkdir()
+    marker = tmp_path / "cleanup-started"
+    registry = parent / "freqtrade-ai-issue-433-registry-repeat-signal.json"
+    port = _free_port()
+    code = f"""
+import sys
+import time
+from pathlib import Path
+sys.path.insert(0, {str(REPO_ROOT / "scripts")!r})
+import run_local_strategy_lab_acceptance_server as wrapper
+original = wrapper.cleanup_seed_root
+def delayed_cleanup(manifest, parent):
+    Path({str(marker)!r}).write_text("started", encoding="utf-8")
+    time.sleep(0.75)
+    return original(manifest, parent)
+wrapper.cleanup_seed_root = delayed_cleanup
+raise SystemExit(wrapper.run_server(
+    parent=Path({str(parent)!r}),
+    host="127.0.0.1",
+    port={port},
+    profile="empty",
+    registry=Path({str(registry)!r}),
+))
+"""
+    process = subprocess.Popen(
+        [sys.executable, "-c", code],
+        cwd=REPO_ROOT / "backend",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        _wait_for_json(f"http://127.0.0.1:{port}/health")
+        manifest = json.loads(registry.read_text(encoding="utf-8"))
+        root = Path(manifest["canonical_root"])
+
+        process.send_signal(signal.SIGTERM)
+        deadline = time.monotonic() + 20
+        while not marker.exists() and time.monotonic() < deadline:
+            if process.poll() is not None:
+                break
+            time.sleep(0.02)
+        assert marker.exists()
+        process.send_signal(signal.SIGTERM)
+        stdout, stderr = process.communicate(timeout=20)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=5)
     assert process.returncode == 128 + signal.SIGTERM, (stdout, stderr)
     assert not root.exists()
     assert not registry.exists()

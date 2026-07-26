@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import stat
 import sys
 import tempfile
@@ -333,7 +334,13 @@ def seed_profile(root: Path, profile: SeedProfile) -> dict[str, Any]:
 
 def create_seed(parent: Path, profile: SeedProfile) -> dict[str, Any]:
     root = allocate_root(parent)
-    return seed_profile(root, profile)
+    try:
+        return seed_profile(root, profile)
+    except BaseException:
+        # Allocation ownership starts here, before a manifest exists.  The
+        # wrapper cannot clean a root that create_seed never returned.
+        shutil.rmtree(root)
+        raise
 
 
 def main() -> int:

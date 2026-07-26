@@ -1,5 +1,6 @@
 import { defineConfig } from "@playwright/test";
 import { randomBytes, randomInt } from "node:crypto";
+import { tmpdir } from "node:os";
 import { safeAbsoluteDirectory, safePythonBinary } from "./tests/helpers/e2eConfigSafety";
 
 const host = "127.0.0.1";
@@ -27,7 +28,10 @@ if (backendPort === frontendPort) {
 if (process.env.E2E_DATABASE_URL) {
   throw new Error("E2E_DATABASE_URL is forbidden; the acceptance wrapper allocates a new SQLite database.");
 }
-const acceptanceParent = safeAbsoluteDirectory("E2E_TMP_PARENT", process.env.E2E_TMP_PARENT ?? "/private/tmp");
+const acceptanceParent = safeAbsoluteDirectory(
+  "E2E_TMP_PARENT",
+  process.env.E2E_TMP_PARENT ?? tmpdir(),
+);
 process.env.E2E_TMP_PARENT = acceptanceParent;
 process.env.E2E_ACCEPTANCE_REGISTRY ??=
   `${acceptanceParent}/freqtrade-ai-issue-433-registry-${randomBytes(12).toString("hex")}.json`;

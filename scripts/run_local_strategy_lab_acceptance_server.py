@@ -169,22 +169,26 @@ def run_server(
             return 128 + stop_signal
         return child_returncode
     finally:
-        if child is not None and child.poll() is None:
-            child.terminate()
-            try:
-                child.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                child.kill()
-                child.wait(timeout=5)
-        for signum, handler in previous_handlers.items():
-            signal.signal(signum, handler)
-        if manifest is not None:
-            cleanup_seed_root(manifest, parent)
-        if registry is not None:
-            try:
-                registry.unlink()
-            except FileNotFoundError:
-                pass
+        try:
+            if child is not None and child.poll() is None:
+                child.terminate()
+                try:
+                    child.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait(timeout=5)
+            if manifest is not None:
+                cleanup_seed_root(manifest, parent)
+            if registry is not None:
+                try:
+                    registry.unlink()
+                except FileNotFoundError:
+                    pass
+        finally:
+            # Keep the idempotent handlers installed for the complete cleanup
+            # window. A supervisor may repeat SIGTERM before shutdown finishes.
+            for signum, handler in previous_handlers.items():
+                signal.signal(signum, handler)
 
 
 def main() -> int:

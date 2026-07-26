@@ -1,11 +1,12 @@
 import { lstatSync, readFileSync, realpathSync, rmSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { basename, dirname, resolve } from "node:path";
 
 export default function globalTeardown(): void {
   const registryValue = process.env.E2E_ACCEPTANCE_REGISTRY;
   if (!registryValue) return;
   const registry = resolve(registryValue);
-  const parent = realpathSync(process.env.E2E_TMP_PARENT ?? "/private/tmp");
+  const parent = realpathSync(process.env.E2E_TMP_PARENT ?? tmpdir());
   if (
     dirname(registry) !== parent ||
     !basename(registry).startsWith("freqtrade-ai-issue-433-registry-") ||
