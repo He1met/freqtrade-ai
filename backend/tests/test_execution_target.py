@@ -88,6 +88,28 @@ def test_settings_loader_refuses_to_start_without_execution_target(
         get_settings.cache_clear()
 
 
+def test_managed_runtime_disable_flag_prevents_dotenv_secret_reload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    get_settings.cache_clear()
+    sentinel = "dotenv-okx-secret-must-not-load"
+    (tmp_path / ".env").write_text(
+        "OKX_DEMO_API_KEY={}\n".format(sentinel),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("OKX_DEMO_API_KEY", raising=False)
+    monkeypatch.setattr(config, "REPO_ROOT", tmp_path)
+    monkeypatch.setenv(config.DISABLE_ENV_FILE_ENV, "1")
+    real_config = load_app_yaml(REPO_ROOT / "config" / "app.yaml")
+    monkeypatch.setattr(config, "load_app_yaml", lambda _path: real_config)
+    try:
+        assert get_settings().execution_target_manifest.active_target_id == "OKX_DEMO"
+        assert config.os.environ.get("OKX_DEMO_API_KEY") is None
+    finally:
+        get_settings.cache_clear()
+
+
 def test_direct_settings_construction_cannot_implicitly_fallback() -> None:
     with pytest.raises(ValidationError, match="execution_target_manifest"):
         config.Settings()

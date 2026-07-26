@@ -33,27 +33,73 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "backend"))
 
 from app.adapters.freqtrade.binary import resolve_freqtrade_binary
+from app.adapters.okx_demo.credential_preflight import (
+    ALLOW_REAL_FUNDS_ENV,
+    EXECUTION_TARGET_ENV,
+    OKX_DEMO_CREDENTIAL_ENV_NAMES,
+    OKX_DEMO_REST_URL,
+    REST_URL_ENV,
+)
+from app.core.config import load_app_yaml
+from app.core.execution_target import (
+    ExecutionTargetConfigurationError,
+    parse_execution_target_manifest,
+)
 
 DEFAULT_RUNTIME_DIR = REPO_ROOT / ".freqtrade-ai" / "runtime"
 DEFAULT_RUNTIME_ENV_FILE = REPO_ROOT / ".freqtrade-ai" / "runtime.env"
 RUNTIME_ENV_KEYS = frozenset({"DATABASE_URL", "FREQTRADE_BINARY"})
 DEEPSEEK_API_KEY_ENV = "DEEPSEEK_API_KEY"
 DEEPSEEK_KEYCHAIN_SERVICE = "freqtrade-ai/deepseek-api-key"
+DISABLE_ENV_FILE_ENV = "FREQTRADE_AI_DISABLE_ENV_FILE"
+OPERATOR_TOKEN_ENV = "FREQTRADE_AI_OPERATOR_TOKEN"
+OKX_DEMO_KEYCHAIN_SERVICES = dict(
+    zip(
+        OKX_DEMO_CREDENTIAL_ENV_NAMES,
+        (
+            "freqtrade-ai/okx-demo-api-key",
+            "freqtrade-ai/okx-demo-api-secret",
+            "freqtrade-ai/okx-demo-api-passphrase",
+        ),
+    )
+)
 KEYCHAIN_TIMEOUT_SECONDS = 5
-BACKEND_SECRET_ENV_KEYS = frozenset(
+SAFE_INHERITED_ENV_KEYS = frozenset(
     {
-        DEEPSEEK_API_KEY_ENV,
-        "FREQTRADE_AI_OPERATOR_TOKEN",
-        "BINANCE_API_KEY",
-        "BINANCE_API_SECRET",
-        "OKX_API_KEY",
-        "OKX_API_SECRET",
-        "OKX_API_PASSPHRASE",
-        "OKX_DEMO_API_KEY",
-        "OKX_DEMO_API_SECRET",
-        "OKX_DEMO_API_PASSPHRASE",
-        "MIMO_API_KEY",
-        "OPENAI_API_KEY",
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "TMPDIR",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TZ",
+        "PYTHONUNBUFFERED",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "REQUESTS_CA_BUNDLE",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+        "FREQTRADE_BINARY",
+        "FREQTRADE_AI_CANONICAL_REPO_ROOT",
+    }
+)
+SAFE_DOTENV_CONFIG_KEYS = frozenset(
+    {
+        "STRATEGY_BLUEPRINT_PROVIDER",
+        "STRATEGY_BLUEPRINT_MODEL",
+        "STRATEGY_BLUEPRINT_BASE_URL",
+        "STRATEGY_BLUEPRINT_API_KEY_ENV",
+        "STRATEGY_BLUEPRINT_TIMEOUT_SECONDS",
+        "STRATEGY_BLUEPRINT_MAX_OUTPUT_TOKENS",
     }
 )
 DEFAULT_DATABASE_URL = (
@@ -231,18 +277,45 @@ def is_managed_process(pid: int, service: str) -> bool:
 
 
 def base_service_environment() -> Dict[str, str]:
-    environment = os.environ.copy()
-    environment.pop("DATABASE_URL", None)
-    for key in BACKEND_SECRET_ENV_KEYS:
-        environment.pop(key, None)
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key in SAFE_INHERITED_ENV_KEYS
+    }
+    environment.update(read_safe_dotenv_environment())
     environment.update(
         {
             "APP_ENV": "local",
+            DISABLE_ENV_FILE_ENV: "1",
             "VITE_ENABLE_DEV_FIXTURES": "false",
             "VITE_FREQUI_URL": "",
         }
     )
     return environment
+
+
+def read_safe_dotenv_environment(path: Optional[Path] = None) -> Dict[str, str]:
+    """Read only explicitly non-secret provider selectors from repo dotenv."""
+
+    config_path = path or REPO_ROOT / ".env"
+    if not config_path.is_file():
+        return {}
+    result: Dict[str, str] = {}
+    for raw_line in config_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, raw_value = (part.strip() for part in line.split("=", 1))
+        if key not in SAFE_DOTENV_CONFIG_KEYS:
+            continue
+        value = raw_value.strip('"').strip("'")
+        if (
+            value
+            and len(value) <= 4096
+            and not any(character in value for character in ("\x00", "\r", "\n"))
+        ):
+            result[key] = value
+    return result
 
 
 def clean_environment(database_url: str) -> Dict[str, str]:
@@ -322,23 +395,126 @@ def read_deepseek_api_key() -> Tuple[Optional[str], Dict[str, Any]]:
     }
 
 
+def validate_okx_demo_execution_target() -> None:
+    raw_config = load_app_yaml(REPO_ROOT / "config" / "app.yaml")
+    try:
+        manifest = parse_execution_target_manifest(raw_config.get("execution"))
+    except ExecutionTargetConfigurationError as exc:
+        raise RuntimeBlocked("OKX Demo execution target is BLOCKED") from exc
+    target = manifest.active_target
+    if (
+        target.target_id != "OKX_DEMO"
+        or target.credential_source != "macos_keychain"
+        or target.simulated_trading is not True
+        or target.allow_real_funds is not False
+        or target.order_submission_enabled is not False
+    ):
+        raise RuntimeBlocked("OKX Demo execution target is BLOCKED")
+
+
+def _read_macos_keychain_item(service: str) -> Optional[str]:
+    if sys.platform != "darwin":
+        return None
+    security = Path("/usr/bin/security")
+    if not security.is_file():
+        return None
+    account = pwd.getpwuid(os.getuid()).pw_name
+    try:
+        completed = subprocess.run(
+            [
+                str(security),
+                "find-generic-password",
+                "-a",
+                account,
+                "-s",
+                service,
+                "-w",
+            ],
+            cwd=str(REPO_ROOT),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=KEYCHAIN_TIMEOUT_SECONDS,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    value = completed.stdout.rstrip("\r\n")
+    if (
+        completed.returncode != 0
+        or not value
+        or len(value) > 16384
+        or any(character in value for character in ("\x00", "\r", "\n"))
+    ):
+        return None
+    return value
+
+
+def read_okx_demo_credentials() -> Tuple[Optional[Dict[str, str]], Dict[str, Any]]:
+    """Read the complete Demo bundle without accepting shell or dotenv fallback."""
+
+    validate_okx_demo_execution_target()
+    if sys.platform != "darwin":
+        return None, {
+            "status": "BLOCKED",
+            "configured": False,
+            "source": "keychain",
+            "reason": "macOS Keychain is required for OKX Demo credentials",
+        }
+
+    credentials: Dict[str, str] = {}
+    for environment_name in OKX_DEMO_CREDENTIAL_ENV_NAMES:
+        service = OKX_DEMO_KEYCHAIN_SERVICES[environment_name]
+        value = _read_macos_keychain_item(service)
+        if value is None:
+            credentials.clear()
+            return None, {
+                "status": "BLOCKED",
+                "configured": False,
+                "source": "keychain",
+                "reason": "OKX Demo Keychain credential bundle is incomplete or inaccessible",
+            }
+        credentials[environment_name] = value
+    return credentials, {
+        "status": "READY",
+        "configured": True,
+        "source": "keychain",
+    }
+
+
 def service_environment(
     service: str,
     database_url: str,
     deepseek_api_key: Optional[str],
+    okx_demo_credentials: Optional[Dict[str, str]] = None,
 ) -> Dict[str, str]:
     """Give each managed service only the credentials it needs."""
 
+    if service not in {"backend", "worker", "frontend", "okx_adapter"}:
+        raise RuntimeBlocked("unknown managed service environment")
     environment = base_service_environment()
     if service in {"backend", "worker"}:
         environment["DATABASE_URL"] = database_url
     if service == "backend":
-        for key in BACKEND_SECRET_ENV_KEYS - {DEEPSEEK_API_KEY_ENV}:
-            value = os.environ.get(key, "")
-            if value:
-                environment[key] = value
+        operator_token = os.environ.get(OPERATOR_TOKEN_ENV, "")
+        if operator_token:
+            environment[OPERATOR_TOKEN_ENV] = operator_token
     if service in {"backend", "worker"} and deepseek_api_key:
         environment[DEEPSEEK_API_KEY_ENV] = deepseek_api_key
+    if service == "okx_adapter":
+        validate_okx_demo_execution_target()
+        if not okx_demo_credentials or set(okx_demo_credentials) != set(
+            OKX_DEMO_CREDENTIAL_ENV_NAMES
+        ):
+            raise RuntimeBlocked("OKX Demo credential bundle is incomplete")
+        environment.update(okx_demo_credentials)
+        environment.update(
+            {
+                EXECUTION_TARGET_ENV: "OKX_DEMO",
+                ALLOW_REAL_FUNDS_ENV: "false",
+                REST_URL_ENV: OKX_DEMO_REST_URL,
+            }
+        )
     return environment
 
 
@@ -451,6 +627,101 @@ def ensure_worker_queue_idle(database_url: str) -> None:
         raise RuntimeBlocked(
             "research worker queue is not idle; resolve pending/running jobs before `make up`"
         )
+
+
+def run_okx_demo_preflight() -> Dict[str, Any]:
+    """Run authenticated read-only attestation in the sole credential-bearing child."""
+
+    credentials, credential_status = read_okx_demo_credentials()
+    if credentials is None:
+        return {
+            "status": "BLOCKED",
+            "execution_target": "OKX_DEMO",
+            "credentials": credential_status,
+            "reason": credential_status["reason"],
+        }
+
+    try:
+        completed = subprocess.run(
+            [
+                str(backend_python()),
+                "-m",
+                "app.adapters.okx_demo.credential_preflight",
+            ],
+            cwd=str(REPO_ROOT / "backend"),
+            env=service_environment(
+                "okx_adapter",
+                runtime_database_url(),
+                None,
+                credentials,
+            ),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return {
+            "status": "BLOCKED",
+            "execution_target": "OKX_DEMO",
+            "credentials": credential_status,
+            "reason": "OKX Demo account attestation process failed",
+        }
+    finally:
+        credentials.clear()
+
+    try:
+        payload = json.loads(completed.stdout)
+    except (TypeError, json.JSONDecodeError):
+        payload = {}
+    if (
+        completed.returncode != 0
+        or payload.get("status") != "READY"
+        or payload.get("execution_target") != "OKX_DEMO"
+        or payload.get("simulated_trading") is not True
+        or payload.get("identity_verified") is not True
+        or payload.get("permissions")
+        != {"read": True, "trade": True, "withdraw": False}
+        or payload.get("account_contract")
+        != {
+            "account_level": "2",
+            "position_mode": "net_mode",
+            "product_type": "SWAP",
+            "margin_mode": "isolated",
+        }
+        or payload.get("request_contract")
+        != {
+            "method": "GET",
+            "path": "/api/v5/account/config",
+            "simulated_trading_header": True,
+        }
+    ):
+        return {
+            "status": "BLOCKED",
+            "execution_target": "OKX_DEMO",
+            "credentials": credential_status,
+            "reason": "OKX Demo account identity or permissions could not be attested",
+        }
+    return {
+        "status": "READY",
+        "execution_target": "OKX_DEMO",
+        "simulated_trading": True,
+        "identity_verified": True,
+        "permissions": {"read": True, "trade": True, "withdraw": False},
+        "account_contract": {
+            "account_level": "2",
+            "position_mode": "net_mode",
+            "product_type": "SWAP",
+            "margin_mode": "isolated",
+        },
+        "request_contract": {
+            "method": "GET",
+            "path": "/api/v5/account/config",
+            "simulated_trading_header": True,
+        },
+        "credentials": credential_status,
+    }
 
 
 def start_service(
@@ -645,7 +916,19 @@ def emit(payload: Dict[str, Any], as_json: bool) -> None:
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("doctor", "bootstrap", "up", "status", "down", "logs", "verify"))
+    parser.add_argument(
+        "command",
+        choices=(
+            "doctor",
+            "bootstrap",
+            "up",
+            "status",
+            "down",
+            "logs",
+            "verify",
+            "okx-preflight",
+        ),
+    )
     parser.add_argument("--runtime-dir")
     parser.add_argument("--lines", type=int, default=80)
     parser.add_argument("--json", action="store_true")
@@ -669,6 +952,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             payload = stop_all(state_dir)
         elif args.command == "logs":
             payload = recent_logs(state_dir, max(1, args.lines))
+        elif args.command == "okx-preflight":
+            payload = run_okx_demo_preflight()
+            if payload["status"] != "READY":
+                raise RuntimeBlocked(str(payload["reason"]))
         else:
             status = current_status(state_dir)
             running = all(service["running"] for service in status["services"])

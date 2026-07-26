@@ -1,4 +1,5 @@
 import importlib.util
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -191,6 +192,7 @@ def test_service_environment_limits_credentials_to_required_services(monkeypatch
         "OKX_DEMO_API_PASSPHRASE": "okx-demo-passphrase",
         "MIMO_API_KEY": "mimo-key",
         "OPENAI_API_KEY": "openai-key",
+        "UNRELATED_SECRET_TOKEN": "unknown-secret-must-not-inherit",
     }
     for key, value in inherited_secrets.items():
         monkeypatch.setenv(key, value)
@@ -203,9 +205,11 @@ def test_service_environment_limits_credentials_to_required_services(monkeypatch
 
     assert backend["DATABASE_URL"] == database_url
     assert backend["DEEPSEEK_API_KEY"] == sentinel
-    for key, value in inherited_secrets.items():
-        if key != "DEEPSEEK_API_KEY":
-            assert backend[key] == value
+    assert backend["FREQTRADE_AI_OPERATOR_TOKEN"] == "operator-token"
+    assert not (
+        set(inherited_secrets)
+        - {"DEEPSEEK_API_KEY", "FREQTRADE_AI_OPERATOR_TOKEN"}
+    ) & set(backend)
 
     assert worker["DATABASE_URL"] == database_url
     assert worker["DEEPSEEK_API_KEY"] == sentinel
@@ -217,7 +221,278 @@ def test_service_environment_limits_credentials_to_required_services(monkeypatch
     assert frontend["VITE_ENABLE_DEV_FIXTURES"] == "false"
     assert frontend["VITE_FREQUI_URL"] == ""
     assert frontend["PATH"] == "/safe/path"
+    assert all(
+        environment["FREQTRADE_AI_DISABLE_ENV_FILE"] == "1"
+        for environment in (backend, worker, frontend)
+    )
     assert runtime.os.environ["DEEPSEEK_API_KEY"] == "stale-shell-key"
+
+
+def test_safe_dotenv_reader_cannot_reload_okx_or_other_secret_values(tmp_path):
+    runtime = load_runtime_module()
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(
+        "STRATEGY_BLUEPRINT_PROVIDER=deepseek\n"
+        "STRATEGY_BLUEPRINT_MODEL=deepseek-v4-pro\n"
+        "OKX_DEMO_API_KEY=must-not-load\n"
+        "OKX_DEMO_API_SECRET=must-not-load\n"
+        "OKX_DEMO_API_PASSPHRASE=must-not-load\n"
+        "DEEPSEEK_API_KEY=must-not-load\n"
+        "DATABASE_URL=postgresql://must-not-load\n",
+        encoding="utf-8",
+    )
+
+    environment = runtime.read_safe_dotenv_environment(dotenv)
+
+    assert environment == {
+        "STRATEGY_BLUEPRINT_PROVIDER": "deepseek",
+        "STRATEGY_BLUEPRINT_MODEL": "deepseek-v4-pro",
+    }
+    assert "must-not-load" not in str(environment)
+
+
+def test_okx_adapter_is_the_only_environment_receiving_complete_bundle(monkeypatch):
+    runtime = load_runtime_module()
+    bundle = {
+        "OKX_DEMO_API_KEY": "adapter-key",
+        "OKX_DEMO_API_SECRET": "adapter-secret",
+        "OKX_DEMO_API_PASSPHRASE": "adapter-passphrase",
+    }
+    for key, value in bundle.items():
+        monkeypatch.setenv(key, "stale-" + value)
+
+    adapter = runtime.service_environment(
+        "okx_adapter",
+        runtime.DEFAULT_DATABASE_URL,
+        None,
+        bundle,
+    )
+    backend = runtime.service_environment(
+        "backend",
+        runtime.DEFAULT_DATABASE_URL,
+        None,
+        bundle,
+    )
+
+    assert {name: adapter[name] for name in bundle} == bundle
+    assert adapter["FREQTRADE_AI_EXECUTION_TARGET"] == "OKX_DEMO"
+    assert adapter["FREQTRADE_AI_ALLOW_REAL_FUNDS"] == "false"
+    assert adapter["FREQTRADE_AI_OKX_DEMO_REST_URL"] == "https://openapi.okx.com"
+    assert "DATABASE_URL" not in adapter
+    assert not set(bundle) & set(backend)
+
+
+@pytest.mark.parametrize(
+    "bundle",
+    [
+        None,
+        {"OKX_DEMO_API_KEY": "key"},
+        {
+            "OKX_DEMO_API_KEY": "key",
+            "OKX_DEMO_API_SECRET": "secret",
+            "OKX_DEMO_API_PASSPHRASE": "passphrase",
+            "OKX_API_KEY": "unexpected",
+        },
+    ],
+)
+def test_okx_adapter_environment_rejects_non_exact_bundle(bundle):
+    runtime = load_runtime_module()
+
+    with pytest.raises(runtime.RuntimeBlocked, match="bundle is incomplete"):
+        runtime.service_environment(
+            "okx_adapter",
+            runtime.DEFAULT_DATABASE_URL,
+            None,
+            bundle,
+        )
+
+
+def test_read_okx_demo_credentials_uses_three_fixed_keychain_items(monkeypatch):
+    runtime = load_runtime_module()
+    observed_services = []
+    values = {
+        service: "value-{}".format(index)
+        for index, service in enumerate(
+            runtime.OKX_DEMO_KEYCHAIN_SERVICES.values(),
+            start=1,
+        )
+    }
+    monkeypatch.setattr(runtime.sys, "platform", "darwin")
+    monkeypatch.setattr(runtime, "validate_okx_demo_execution_target", lambda: None)
+
+    def fake_read(service):
+        observed_services.append(service)
+        return values[service]
+
+    monkeypatch.setattr(runtime, "_read_macos_keychain_item", fake_read)
+
+    credentials, metadata = runtime.read_okx_demo_credentials()
+
+    assert observed_services == list(runtime.OKX_DEMO_KEYCHAIN_SERVICES.values())
+    assert credentials == {
+        name: values[service]
+        for name, service in runtime.OKX_DEMO_KEYCHAIN_SERVICES.items()
+    }
+    assert metadata == {
+        "status": "READY",
+        "configured": True,
+        "source": "keychain",
+    }
+    assert not any(value in str(metadata) for value in values.values())
+
+
+def test_read_okx_demo_credentials_fails_atomically_without_env_fallback(monkeypatch):
+    runtime = load_runtime_module()
+    sentinels = {
+        "OKX_DEMO_API_KEY": "shell-key-must-be-ignored",
+        "OKX_DEMO_API_SECRET": "shell-secret-must-be-ignored",
+        "OKX_DEMO_API_PASSPHRASE": "shell-passphrase-must-be-ignored",
+    }
+    for name, value in sentinels.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(runtime.sys, "platform", "darwin")
+    monkeypatch.setattr(runtime, "validate_okx_demo_execution_target", lambda: None)
+    responses = iter(("keychain-key", None))
+    monkeypatch.setattr(
+        runtime,
+        "_read_macos_keychain_item",
+        lambda _service: next(responses),
+    )
+
+    credentials, metadata = runtime.read_okx_demo_credentials()
+
+    assert credentials is None
+    assert metadata["status"] == "BLOCKED"
+    assert metadata["configured"] is False
+    assert not any(value in str(metadata) for value in sentinels.values())
+
+
+def test_macos_keychain_reader_uses_service_without_rendering_errors(monkeypatch):
+    runtime = load_runtime_module()
+    sentinel = "keychain-value-not-for-output"
+    observed = {}
+    monkeypatch.setattr(runtime.sys, "platform", "darwin")
+    monkeypatch.setattr(runtime.Path, "is_file", lambda _path: True)
+    monkeypatch.setattr(runtime.os, "getuid", lambda: 501)
+    monkeypatch.setattr(
+        runtime.pwd,
+        "getpwuid",
+        lambda uid: SimpleNamespace(pw_name="local-user") if uid == 501 else None,
+    )
+
+    def fake_run(command, **kwargs):
+        observed["command"] = list(command)
+        observed["kwargs"] = kwargs
+        return SimpleNamespace(returncode=0, stdout=sentinel + "\n", stderr="")
+
+    monkeypatch.setattr(runtime.subprocess, "run", fake_run)
+
+    value = runtime._read_macos_keychain_item(
+        runtime.OKX_DEMO_KEYCHAIN_SERVICES["OKX_DEMO_API_KEY"]
+    )
+
+    assert value == sentinel
+    assert observed["command"] == [
+        "/usr/bin/security",
+        "find-generic-password",
+        "-a",
+        "local-user",
+        "-s",
+        "freqtrade-ai/okx-demo-api-key",
+        "-w",
+    ]
+    assert observed["kwargs"]["timeout"] == runtime.KEYCHAIN_TIMEOUT_SECONDS
+    assert observed["kwargs"]["stdin"] is runtime.subprocess.DEVNULL
+
+
+def test_okx_preflight_child_receives_bundle_and_parent_returns_only_attestation(
+    monkeypatch,
+):
+    runtime = load_runtime_module()
+    sentinels = {
+        "OKX_DEMO_API_KEY": "child-key",
+        "OKX_DEMO_API_SECRET": "child-secret",
+        "OKX_DEMO_API_PASSPHRASE": "child-passphrase",
+    }
+    captured = {}
+    ready = {
+        "status": "READY",
+        "execution_target": "OKX_DEMO",
+        "simulated_trading": True,
+        "identity_verified": True,
+        "permissions": {"read": True, "trade": True, "withdraw": False},
+        "account_contract": {
+            "account_level": "2",
+            "position_mode": "net_mode",
+            "product_type": "SWAP",
+            "margin_mode": "isolated",
+        },
+        "request_contract": {
+            "method": "GET",
+            "path": "/api/v5/account/config",
+            "simulated_trading_header": True,
+        },
+        "unexpected_remote_field": "child-output-must-not-be-forwarded",
+    }
+    monkeypatch.setattr(
+        runtime,
+        "read_okx_demo_credentials",
+        lambda: (
+            dict(sentinels),
+            {"status": "READY", "configured": True, "source": "keychain"},
+        ),
+    )
+    monkeypatch.setattr(runtime, "backend_python", lambda: Path("/venv/bin/python"))
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured["environment"] = dict(kwargs["env"])
+        return SimpleNamespace(returncode=0, stdout=json.dumps(ready), stderr="")
+
+    monkeypatch.setattr(runtime.subprocess, "run", fake_run)
+
+    payload = runtime.run_okx_demo_preflight()
+
+    assert captured["command"] == [
+        "/venv/bin/python",
+        "-m",
+        "app.adapters.okx_demo.credential_preflight",
+    ]
+    assert {
+        name: captured["environment"][name]
+        for name in runtime.OKX_DEMO_CREDENTIAL_ENV_NAMES
+    } == sentinels
+    assert payload["status"] == "READY"
+    assert payload["credentials"]["source"] == "keychain"
+    assert not any(value in str(payload) for value in sentinels.values())
+    assert "child-output-must-not-be-forwarded" not in str(payload)
+
+
+def test_okx_preflight_does_not_spawn_when_keychain_bundle_is_missing(monkeypatch):
+    runtime = load_runtime_module()
+    monkeypatch.setattr(
+        runtime,
+        "read_okx_demo_credentials",
+        lambda: (
+            None,
+            {
+                "status": "BLOCKED",
+                "configured": False,
+                "source": "keychain",
+                "reason": "bundle unavailable",
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        runtime.subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("preflight child must not start"),
+    )
+
+    payload = runtime.run_okx_demo_preflight()
+
+    assert payload["status"] == "BLOCKED"
+    assert payload["credentials"]["configured"] is False
 
 
 def test_doctor_uses_explicit_freqtrade_binary(monkeypatch, tmp_path):
