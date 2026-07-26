@@ -1,4 +1,7 @@
 import json
+import shlex
+import subprocess
+import sys
 
 import pytest
 
@@ -264,7 +267,7 @@ def test_account_pin_never_writes_after_remote_validation_failure(mutation) -> N
 
 def test_keychain_pin_write_uses_stdin_and_never_argv(monkeypatch) -> None:
     fingerprint = "d" * 64
-    observed = {}
+    observed = []
     monkeypatch.setattr(preflight.sys, "platform", "darwin")
     monkeypatch.setattr(preflight.os, "getuid", lambda: 501)
     monkeypatch.setattr(
@@ -274,15 +277,15 @@ def test_keychain_pin_write_uses_stdin_and_never_argv(monkeypatch) -> None:
     )
 
     def fake_run(command, **kwargs):
-        observed["command"] = command
-        observed["kwargs"] = kwargs
+        observed.append((command, kwargs))
+        stdout = fingerprint + "\n" if "find-generic-password" in command else ""
         return type(
             "Completed",
             (),
             {
                 "returncode": 0,
-                "stdout": "untrusted-output-" + fingerprint,
-                "stderr": "untrusted-error-" + fingerprint,
+                "stdout": stdout,
+                "stderr": "untrusted-keychain-error",
             },
         )()
 
@@ -290,10 +293,134 @@ def test_keychain_pin_write_uses_stdin_and_never_argv(monkeypatch) -> None:
 
     preflight.write_account_fingerprint_pin(fingerprint)
 
-    assert fingerprint not in observed["command"]
-    assert observed["command"][-1] == "-w"
-    assert observed["kwargs"]["input"] == fingerprint + "\n"
-    assert observed["kwargs"]["capture_output"] is True
+    assert len(observed) == 2
+    assert all(fingerprint not in command for command, _kwargs in observed)
+    add_command, add_kwargs = observed[0]
+    read_command, read_kwargs = observed[1]
+    assert "add-generic-password" in add_command
+    assert add_command[-1] == "-w"
+    assert add_kwargs["input"] == fingerprint + "\n" + fingerprint + "\n"
+    assert add_kwargs["capture_output"] is True
+    assert "find-generic-password" in read_command
+    assert read_kwargs["stdin"] is preflight.subprocess.DEVNULL
+
+
+@pytest.mark.parametrize(
+    ("read_returncode", "read_stdout"),
+    [
+        (0, ""),
+        (0, "e" * 64 + "\n"),
+        (1, "d" * 64 + "\n"),
+    ],
+)
+def test_keychain_pin_verification_failure_deletes_new_item_and_blocks(
+    monkeypatch,
+    read_returncode: int,
+    read_stdout: str,
+) -> None:
+    fingerprint = "d" * 64
+    observed = []
+    monkeypatch.setattr(preflight.sys, "platform", "darwin")
+    monkeypatch.setattr(preflight.os, "getuid", lambda: 501)
+    monkeypatch.setattr(
+        preflight.pwd,
+        "getpwuid",
+        lambda uid: type("Account", (), {"pw_name": "local-user"})(),
+    )
+
+    def fake_run(command, **kwargs):
+        observed.append((command, kwargs))
+        if "add-generic-password" in command:
+            return type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        if "find-generic-password" in command:
+            return type(
+                "Completed",
+                (),
+                {
+                    "returncode": read_returncode,
+                    "stdout": read_stdout,
+                    "stderr": "untrusted-read-error",
+                },
+            )()
+        assert "delete-generic-password" in command
+        return type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(preflight.subprocess, "run", fake_run)
+
+    with pytest.raises(
+        preflight.OkxDemoPreflightBlocked,
+        match="verification failed",
+    ) as blocked:
+        preflight.write_account_fingerprint_pin(fingerprint)
+
+    assert len(observed) == 3
+    assert "delete-generic-password" in observed[-1][0]
+    assert all(fingerprint not in command for command, _kwargs in observed)
+    assert fingerprint not in str(blocked.value)
+
+
+def test_keychain_pin_read_exception_deletes_new_item_and_blocks(monkeypatch) -> None:
+    fingerprint = "d" * 64
+    observed = []
+    monkeypatch.setattr(preflight.sys, "platform", "darwin")
+    monkeypatch.setattr(preflight.os, "getuid", lambda: 501)
+    monkeypatch.setattr(
+        preflight.pwd,
+        "getpwuid",
+        lambda uid: type("Account", (), {"pw_name": "local-user"})(),
+    )
+
+    def fake_run(command, **kwargs):
+        observed.append((command, kwargs))
+        if "add-generic-password" in command:
+            return type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        if "find-generic-password" in command:
+            raise OSError("untrusted-read-failure")
+        return type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(preflight.subprocess, "run", fake_run)
+
+    with pytest.raises(
+        preflight.OkxDemoPreflightBlocked,
+        match="verification failed",
+    ) as blocked:
+        preflight.write_account_fingerprint_pin(fingerprint)
+
+    assert "delete-generic-password" in observed[-1][0]
+    assert "untrusted-read-failure" not in str(blocked.value)
+    assert all(fingerprint not in command for command, _kwargs in observed)
+
+
+def test_keychain_pin_add_failure_does_not_delete_possible_existing_item(
+    monkeypatch,
+) -> None:
+    observed = []
+    monkeypatch.setattr(preflight.sys, "platform", "darwin")
+    monkeypatch.setattr(preflight.os, "getuid", lambda: 501)
+    monkeypatch.setattr(
+        preflight.pwd,
+        "getpwuid",
+        lambda uid: type("Account", (), {"pw_name": "local-user"})(),
+    )
+
+    def fake_run(command, **kwargs):
+        observed.append(command)
+        return type(
+            "Completed",
+            (),
+            {"returncode": 45, "stdout": "", "stderr": "duplicate item"},
+        )()
+
+    monkeypatch.setattr(preflight.subprocess, "run", fake_run)
+
+    with pytest.raises(
+        preflight.OkxDemoPreflightBlocked,
+        match="write failed",
+    ):
+        preflight.write_account_fingerprint_pin("d" * 64)
+
+    assert len(observed) == 1
+    assert "add-generic-password" in observed[0]
 
 
 @pytest.mark.parametrize(
@@ -362,6 +489,132 @@ def test_keychain_pin_existence_check_fails_closed_on_ambiguous_error(
         preflight.account_fingerprint_pin_exists()
 
     assert "sensitive-error" not in str(blocked.value)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="requires macOS security")
+def test_macos_temporary_keychain_account_pin_contract(tmp_path, capsys) -> None:
+    security = "/usr/bin/security"
+    keychain_path = tmp_path / "okx-pin-contract.keychain-db"
+    temporary_unlock = "temporary-test-keychain"
+    fingerprint = "d" * 64
+    original_default = subprocess.run(
+        [security, "default-keychain", "-d", "user"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    original_search = subprocess.run(
+        [security, "list-keychains", "-d", "user"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    default_paths = shlex.split(original_default.stdout)
+    search_paths = shlex.split(original_search.stdout)
+    assert default_paths
+    try:
+        subprocess.run(
+            [security, "create-keychain", "-p", temporary_unlock, str(keychain_path)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            [security, "unlock-keychain", "-p", temporary_unlock, str(keychain_path)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            [
+                security,
+                "list-keychains",
+                "-d",
+                "user",
+                "-s",
+                str(keychain_path),
+                *search_paths,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            [security, "default-keychain", "-d", "user", "-s", str(keychain_path)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        preflight.write_account_fingerprint_pin(fingerprint)
+        emitted = capsys.readouterr()
+        assert fingerprint not in emitted.out
+        assert fingerprint not in emitted.err
+
+        stored = subprocess.run(
+            [
+                security,
+                "find-generic-password",
+                "-a",
+                preflight.pwd.getpwuid(preflight.os.getuid()).pw_name,
+                "-s",
+                preflight.OKX_DEMO_ACCOUNT_FINGERPRINT_KEYCHAIN_SERVICE,
+                "-w",
+                str(keychain_path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert stored.stdout.rstrip("\r\n") == fingerprint
+    finally:
+        subprocess.run(
+            [security, "default-keychain", "-d", "user", "-s", default_paths[0]],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            [security, "list-keychains", "-d", "user", "-s", *search_paths],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            [
+                security,
+                "delete-generic-password",
+                "-a",
+                preflight.pwd.getpwuid(preflight.os.getuid()).pw_name,
+                "-s",
+                preflight.OKX_DEMO_ACCOUNT_FINGERPRINT_KEYCHAIN_SERVICE,
+                str(keychain_path),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            [security, "delete-keychain", str(keychain_path)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    restored_default = subprocess.run(
+        [security, "default-keychain", "-d", "user"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    restored_search = subprocess.run(
+        [security, "list-keychains", "-d", "user"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert shlex.split(restored_default.stdout) == default_paths
+    assert shlex.split(restored_search.stdout) == search_paths
+    assert not keychain_path.exists()
 
 
 def test_transport_and_invalid_json_fail_without_echoing_remote_content() -> None:
