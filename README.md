@@ -408,6 +408,8 @@ make okx-demo-pin-account
 `GET /api/v5/account/config`，先验证 Demo 响应、`read_only,trade` 权限、Futures mode
 和 `net_mode`，再在内存中计算指纹，并通过受控 stdin 写入固定第四项 Keychain。
 credential、`uid`、`mainUid` 和 fingerprint 都不会进入 argv、stdout、stderr 或日志。
+macOS 的交互确认会接收两次相同指纹；写入后必须从固定 account/service 读回并做常量
+时间比较。空值、不匹配或读回异常都会立即删除本次新建项并返回 `BLOCKED`。
 若第四项已经存在，命令会在网络请求前拒绝覆盖；当前不提供 `--replace`。如确需切换
 Demo 账户，必须由操作者先显式删除旧 fingerprint 项，再重新执行 onboarding。
 
