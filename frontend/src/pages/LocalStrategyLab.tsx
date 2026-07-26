@@ -13,12 +13,13 @@ import {
   PersistentEvidence,
   ResultDetails,
 } from "./localStrategyLab/EvidencePanels";
-import { SubmissionStatusPanel } from "./localStrategyLab/SubmissionStatusPanel";
 import { LatestActionFeedback } from "./localStrategyLab/ActionTimeline";
+import { GenerationStage } from "./localStrategyLab/GenerationStage";
 import {
   createActionEvidence,
   createActionLifecycleId,
 } from "./localStrategyLab/actionEvidence";
+import { deriveProviderCredentialReadiness } from "./localStrategyLab/generationFormModel";
 import { submissionDisplayModel } from "./localStrategyLab/submissionDisplay";
 import { useActionEvidence } from "./localStrategyLab/useActionEvidence";
 import { WorkflowNavigator } from "./localStrategyLab/WorkflowNavigator";
@@ -41,6 +42,10 @@ export function LocalStrategyLab() {
   const isSubmitting = submission.kind === "submitting";
   const submissionDisplay = submissionDisplayModel(submission);
   const currentResult = submission.kind === "success" || submission.kind === "blocked" ? submission.result : undefined;
+  const providerReadiness = deriveProviderCredentialReadiness(
+    snapshot.data.operatorDashboard,
+    snapshot.sources.operatorDashboard,
+  );
 
   useEffect(() => {
     return () => {
@@ -50,6 +55,9 @@ export function LocalStrategyLab() {
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (controllerRef.current || isSubmitting) {
+      return;
+    }
     const promptSummary = idea.trim();
 
     if (!promptSummary) {
@@ -79,10 +87,20 @@ export function LocalStrategyLab() {
       }));
       return;
     }
+    if (authorizeRealProvider && providerReadiness.state !== "ready") {
+      const message =
+        "真实 Provider readiness 尚未由 API 确认为就绪；未提交生成请求，也未消耗一次性授权。";
+      setSubmission({ kind: "blocked", message });
+      recordAction(createActionEvidence({
+        action: "生成策略", status: "BLOCKED", message,
+        nextAction: "恢复 Operator Status API 的凭据 presence 结果后刷新；不要在页面中粘贴 Provider 密钥。",
+        recommendBug: false, updatedAt: new Date().toISOString(),
+      }));
+      return;
+    }
 
     const controller = new AbortController();
     const lifecycleId = createActionLifecycleId("generation");
-    controllerRef.current?.abort();
     controllerRef.current = controller;
     generationLifecycleRef.current = lifecycleId;
     setSubmission({ kind: "submitting", promptSummary, requestedCount });
@@ -201,6 +219,9 @@ export function LocalStrategyLab() {
         nextAction: "检查 API 与网络错误；若可稳定复现，创建 Bug Issue。", recommendBug: true, updatedAt: new Date().toISOString(),
       }));
     } finally {
+      if (controllerRef.current === controller) {
+        controllerRef.current = null;
+      }
       if (generationLifecycleRef.current === lifecycleId) {
         generationLifecycleRef.current = null;
       }
@@ -251,77 +272,19 @@ export function LocalStrategyLab() {
 
       {inspectedPhase === "generation" ? (
         <div className="lab-workflow__content" data-stage="generation">
-          <form className="lab-form" onSubmit={handleSubmit}>
-            <label className="field-group" htmlFor="strategy-idea">
-              <span>策略构想（Strategy idea）</span>
-              <small>描述入场、退出、风险和运行边界；不要粘贴 API key、token 或其他凭据。</small>
-              <textarea
-                id="strategy-idea"
-                maxLength={4000}
-                minLength={1}
-                onChange={(event) => setIdea(event.currentTarget.value)}
-                required
-                rows={7}
-                value={idea}
-              />
-            </label>
-            <div className="lab-form-actions">
-              <label className="field-group compact-field" htmlFor="requested-count">
-                <span>请求数量（requested_count）</span>
-                <small>当前单次固定生成 1 个策略。</small>
-                <input
-                  disabled
-                  id="requested-count"
-                  max={1}
-                  min={1}
-                  type="number"
-                  value={requestedCount}
-                />
-              </label>
-              <label className="field-group compact-field" htmlFor="operator-token">
-                <span>操作授权令牌（operator token）</span>
-                <small>仅用于本地请求；页面不回显，也不写入浏览器存储。</small>
-                <input
-                  autoComplete="off"
-                  id="operator-token"
-                  onChange={(event) => setOperatorToken(event.currentTarget.value)}
-                  required
-                  type="password"
-                  value={operatorToken}
-                />
-              </label>
-              <label className="inline-check" htmlFor="provider-authorization">
-                <input
-                  checked={authorizeRealProvider}
-                  id="provider-authorization"
-                  onChange={(event) => setAuthorizeRealProvider(event.currentTarget.checked)}
-                  type="checkbox"
-                />
-                <span>
-                  授权本次请求尝试真实 Provider
-                  <small>提交后自动取消勾选；不授权交易、Dry-run 或实盘操作。</small>
-                </span>
-              </label>
-              <button
-                aria-busy={isSubmitting}
-                className="primary-button"
-                disabled={isSubmitting || !idea.trim() || !operatorToken}
-                type="submit"
-              >
-                {isSubmitting ? "提交中" : "提交生成"}
-              </button>
-              {isSubmitting ? (
-                <button className="secondary-button" onClick={handleCancel} type="button">
-                  取消等待
-                </button>
-              ) : null}
-            </div>
-            <p className="lab-submit-timeout-note">
-              请求取消或网络超时不会显示为成功；请刷新下方证据区核对是否已经产生持久记录。
-            </p>
-          </form>
-
-          <SubmissionStatusPanel submission={submission} />
+          <GenerationStage
+            authorizeRealProvider={authorizeRealProvider}
+            idea={idea}
+            isSubmitting={isSubmitting}
+            onAuthorizeRealProviderChange={setAuthorizeRealProvider}
+            onCancel={handleCancel}
+            onIdeaChange={setIdea}
+            onOperatorTokenChange={setOperatorToken}
+            onSubmit={handleSubmit}
+            operatorTokenPresent={Boolean(operatorToken)}
+            providerReadiness={providerReadiness}
+            submission={submission}
+          />
           <LatestActionFeedback
             actions={["生成策略"]}
             environmentScope={

@@ -63,6 +63,11 @@ import type {
   MvpDataSources,
 } from "../types";
 import { applyGenerationResponseProviderProvenance } from "../sourceState";
+import {
+  normalizePresenceSource,
+  normalizeReportsEnvValues,
+  normalizeValueRendered,
+} from "../operatorPresenceContract";
 
 // The frontend keeps a controlled fallback path while backend endpoints are
 // still being stabilized. The flag returned by loadMvpData makes that fallback
@@ -1387,8 +1392,8 @@ export function normalizeOperatorEnvPresence(raw: RawOperatorEnvPresence): Opera
     name: raw.name ?? "ENV_VAR",
     present: raw.present === true,
     required: raw.required === true,
-    source: raw.source ?? "env",
-    valueRendered: raw.valueRendered ?? raw.value_rendered ?? false,
+    source: normalizePresenceSource(raw.source),
+    valueRendered: normalizeValueRendered(raw.valueRendered, raw.value_rendered),
   };
 }
 
@@ -1413,7 +1418,10 @@ export function normalizeOperatorSafety(raw: RawOperatorSafetyBoundary | undefin
   const source = raw ?? {};
   return {
     readOnly: source.readOnly ?? source.read_only ?? true,
-    reportsEnvValues: source.reportsEnvValues ?? source.reports_env_values ?? false,
+    reportsEnvValues: normalizeReportsEnvValues(
+      source.reportsEnvValues,
+      source.reports_env_values,
+    ),
     allowLiveTrading: source.allowLiveTrading ?? source.allow_live_trading ?? false,
     allowRealOrders: source.allowRealOrders ?? source.allow_real_orders ?? false,
     allowExchangeConnection: source.allowExchangeConnection ?? source.allow_exchange_connection ?? false,

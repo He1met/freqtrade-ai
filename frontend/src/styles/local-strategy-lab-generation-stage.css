@@ -1,0 +1,212 @@
+.local-strategy-lab .generation-stage {
+  display: grid;
+  gap: 10px;
+}
+
+.local-strategy-lab .generation-stage__form {
+  display: grid;
+  gap: 9px;
+  border: 1px solid #d8ded7;
+  border-radius: 10px;
+  background: #fff;
+  padding: 12px;
+}
+
+.local-strategy-lab .generation-stage__heading {
+  display: grid;
+  grid-template-columns: minmax(190px, auto) minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
+.local-strategy-lab .generation-stage__heading > div {
+  display: grid;
+  gap: 1px;
+}
+
+.local-strategy-lab .generation-stage__heading span,
+.local-strategy-lab .generation-stage__idea > span,
+.local-strategy-lab .generation-stage__token > span,
+.local-strategy-lab .generation-stage__readiness span {
+  color: #435249;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.local-strategy-lab .generation-stage__heading > div > span {
+  color: #657269;
+  font-size: 10px;
+}
+
+.local-strategy-lab .generation-stage__heading p,
+.local-strategy-lab .generation-stage__timeout {
+  margin: 0;
+  color: #59675f;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.local-strategy-lab .generation-stage__grid {
+  display: grid;
+  grid-template-columns: minmax(340px, 1.1fr) minmax(390px, 1fr);
+  align-items: stretch;
+  gap: 10px;
+}
+
+.local-strategy-lab .generation-stage__idea,
+.local-strategy-lab .generation-stage__token {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.local-strategy-lab .generation-stage__idea small,
+.local-strategy-lab .generation-stage__token small,
+.local-strategy-lab .generation-stage__readiness small,
+.local-strategy-lab .generation-stage__provider-call small {
+  color: #657269;
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.35;
+}
+
+.local-strategy-lab .generation-stage__idea textarea,
+.local-strategy-lab .generation-stage__token input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid #bac7bd;
+  border-radius: 7px;
+  background: #fbfcfa;
+  color: #17201b;
+  font: inherit;
+}
+
+.local-strategy-lab .generation-stage__idea textarea {
+  min-height: 62px;
+  padding: 8px 9px;
+  resize: vertical;
+  line-height: 1.4;
+}
+
+.local-strategy-lab .generation-stage__token input {
+  min-height: 34px;
+  padding: 6px 8px;
+}
+
+.local-strategy-lab .generation-stage__idea textarea:focus,
+.local-strategy-lab .generation-stage__token input:focus {
+  border-color: #1f6f4a;
+  outline: 3px solid rgba(31, 111, 74, 0.16);
+}
+
+.local-strategy-lab .generation-stage__hints {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.local-strategy-lab .generation-stage__hints li {
+  border-radius: 999px;
+  background: #edf4ef;
+  color: #375544;
+  padding: 2px 7px;
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.local-strategy-lab .generation-stage__prerequisites {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: stretch;
+  gap: 6px;
+}
+
+.local-strategy-lab .generation-stage__token,
+.local-strategy-lab .generation-stage__readiness,
+.local-strategy-lab .generation-stage__provider-call {
+  border: 1px solid #e0e6e1;
+  border-radius: 7px;
+  background: #f8faf8;
+  padding: 7px 8px;
+}
+
+.local-strategy-lab .generation-stage__token strong,
+.local-strategy-lab .generation-stage__provider-call strong {
+  color: #536159;
+  font-size: 10px;
+}
+
+.local-strategy-lab .generation-stage__readiness {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.local-strategy-lab .generation-stage__readiness > div {
+  display: contents;
+}
+
+.local-strategy-lab .generation-stage__readiness > div > small {
+  grid-column: 1 / -1;
+}
+
+.local-strategy-lab .generation-stage__provider-call {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 6px;
+}
+
+.local-strategy-lab .generation-stage__provider-call > span {
+  display: grid;
+  gap: 2px;
+  color: #33443a;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.local-strategy-lab .generation-stage__provider-call > strong {
+  grid-column: 2;
+}
+
+.local-strategy-lab .generation-stage__submit {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.local-strategy-lab .generation-stage__submit-reasons {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 8px;
+  border-left: 3px solid #9ab09f;
+  padding-left: 8px;
+  color: #526159;
+  font-size: 11px;
+}
+
+.local-strategy-lab .generation-stage__submit-reasons > strong {
+  flex: 0 0 auto;
+  color: #34483c;
+}
+
+.local-strategy-lab .generation-stage__submit-reasons ul {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 2px 16px;
+  margin: 0;
+  padding-left: 17px;
+}
+
+.local-strategy-lab .generation-stage__timeout {
+  border-left: 3px solid #9ab09f;
+  padding-left: 8px;
+}
