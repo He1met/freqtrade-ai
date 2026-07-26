@@ -1,0 +1,130 @@
+.local-strategy-lab .lab-workflow {
+  display: grid;
+  gap: 12px;
+  border: 1px solid #dbe4dc;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #ffffff 0%, #f4f8f4 100%);
+  padding: 14px;
+}
+
+.local-strategy-lab .lab-workflow__steps {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.local-strategy-lab .lab-workflow__step button {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 72px;
+  border: 1px solid #dce4dd;
+  border-radius: 9px;
+  background: #fff;
+  color: #26342d;
+  padding: 9px;
+  text-align: left;
+}
+
+.local-strategy-lab .lab-workflow__step button:not(:disabled) {
+  cursor: pointer;
+}
+
+.local-strategy-lab .lab-workflow__step button[aria-current="step"] {
+  border-color: #24714e;
+}
+
+.local-strategy-lab .lab-workflow__step button[aria-pressed="true"] {
+  box-shadow: 0 0 0 2px rgba(36, 113, 78, 0.12);
+}
+
+.local-strategy-lab .lab-workflow__step.is-locked button {
+  background: #f5f6f4;
+  color: #69736d;
+}
+
+.local-strategy-lab .lab-workflow__step button > span:nth-child(2) {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.local-strategy-lab .lab-workflow__step small {
+  color: #68756d;
+  font-size: 11px;
+}
+
+.local-strategy-lab .lab-workflow__index {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: #e8f1eb;
+  color: #1f6f4a;
+  font-weight: 900;
+}
+
+.local-strategy-lab .lab-workflow__step .display-status-badge {
+  grid-column: 1 / -1;
+  width: fit-content;
+}
+
+.local-strategy-lab .lab-workflow__decision {
+  display: grid;
+  grid-template-columns: minmax(130px, 0.55fr) minmax(260px, 1.35fr) minmax(300px, 1.6fr);
+  gap: 8px;
+}
+
+.local-strategy-lab .lab-workflow__decision > div {
+  display: grid;
+  gap: 4px;
+  border-left: 3px solid #24714e;
+  background: #fff;
+  padding: 9px 11px;
+}
+
+.local-strategy-lab .lab-workflow__decision span,
+.local-strategy-lab .lab-workflow__review span,
+.local-strategy-lab .lab-workflow__stage-heading span {
+  color: #66736b;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.local-strategy-lab .lab-workflow__decision strong {
+  line-height: 1.4;
+}
+
+.local-strategy-lab .lab-workflow__review {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #d8e2da;
+  border-radius: 8px;
+  background: #fff;
+  padding: 8px 10px;
+}
+
+.local-strategy-lab .lab-workflow__stage-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.local-strategy-lab .lab-workflow__safety {
+  color: #665326;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.local-strategy-lab .lab-workflow__content {
+  display: grid;
+  gap: 12px;
+}
