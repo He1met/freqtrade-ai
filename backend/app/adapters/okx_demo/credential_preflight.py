@@ -12,7 +12,9 @@ import sys
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Mapping, Optional
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request
+
+from app.adapters.okx_demo.secure_http import build_direct_no_redirect_opener
 
 
 EXECUTION_TARGET_ENV = "FREQTRADE_AI_EXECUTION_TARGET"
@@ -275,10 +277,11 @@ def _ready_attestation() -> Dict[str, Any]:
 def _fetch_account_config(
     request: Request,
     *,
-    opener: Callable[..., Any],
+    opener: Optional[Callable[..., Any]],
 ) -> Any:
+    active_opener = opener or build_direct_no_redirect_opener().open
     try:
-        with opener(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+        with active_opener(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
             if response.status < 200 or response.status >= 300:
                 raise OkxDemoPreflightBlocked(
                     "OKX Demo account attestation transport failed"
@@ -299,7 +302,7 @@ def _fetch_account_config(
 def run_preflight(
     environment: Optional[Mapping[str, str]] = None,
     *,
-    opener: Callable[..., Any] = urlopen,
+    opener: Optional[Callable[..., Any]] = None,
 ) -> Dict[str, Any]:
     active_environment = os.environ if environment is None else environment
     request = build_account_config_request(active_environment)
@@ -449,7 +452,7 @@ def write_account_fingerprint_pin(
 def run_account_pin(
     environment: Optional[Mapping[str, str]] = None,
     *,
-    opener: Callable[..., Any] = urlopen,
+    opener: Optional[Callable[..., Any]] = None,
     pin_exists: Callable[[], bool] = account_fingerprint_pin_exists,
     pin_writer: Callable[[str], None] = write_account_fingerprint_pin,
 ) -> Dict[str, Any]:
