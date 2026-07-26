@@ -6,15 +6,22 @@ from threading import Barrier
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.adapters.okx_demo.write_semantics import OkxDemoWriteBlocked
+from app.adapters.okx_demo.models import InstrumentSpec
+from app.adapters.okx_demo.writer_models import (
+    OrderSubmissionAuthorization,
+    normalize_order_command,
+)
 from app.adapters.okx_demo.writer_repository import SqlAlchemyOrderWriterStore
+from app.adapters.okx_demo.writer_state import WriteEvent
 from app.db.migrations import (
     ORDER_WRITER_BASE_VERSION,
+    RECONCILIATION_BASE_VERSION,
     SCHEMA_VERSION,
     SchemaMigrationBlocked,
     VERSION_TABLE,
@@ -27,16 +34,26 @@ from app.db.migrations import (
 from app.models.execution_lineage import (
     ApprovedExecution,
     ExchangeOrder,
+    ReconciliationRun,
     RiskDecision,
     TradeIntent,
 )
 from app.models.order_writer import OkxOrderWriteAttempt
+from app.models.okx_demo_reconciliation import (
+    OkxDemoExchangeEvent,
+    OkxDemoReconciliationState,
+)
 from app.repositories.execution_lineage import ensure_execution_scope_catalog
 from app.services.risk_chain import (
     _issue_attested_session_capability,
     _normalize_attested_snapshot,
     _write_attested_snapshot,
     canonical_digest,
+)
+from app.services.okx_demo_reconciliation import (
+    OkxDemoReconciliationBlocked,
+    OkxDemoReconciliationService,
+    SCHEMA_VERSION as RECONCILIATION_EVENT_SCHEMA_VERSION,
 )
 
 
@@ -206,7 +223,11 @@ def postgres_writer_engine():
             admin.dispose()
 
 
-def _seed_approved_order(session: Session) -> tuple[int, int]:
+def _seed_approved_order(
+    session: Session,
+    *,
+    create_order: bool = True,
+) -> tuple[int, int]:
     ensure_execution_scope_catalog(session)
     capability = _issue_attested_session_capability(
         attestation_hmac_key=b"t" * 32,
@@ -343,17 +364,19 @@ def _seed_approved_order(session: Session) -> tuple[int, int]:
     )
     session.add(approval)
     session.flush()
-    order = ExchangeOrder(
-        execution_target_id="OKX_DEMO",
-        trade_intent_id=intent.id,
-        client_order_id=intent.client_order_id,
-        status="PREPARED",
-        request_snapshot={},
-        response_snapshot={},
-    )
-    session.add(order)
+    order = None
+    if create_order:
+        order = ExchangeOrder(
+            execution_target_id="OKX_DEMO",
+            trade_intent_id=intent.id,
+            client_order_id=intent.client_order_id,
+            status="PREPARED",
+            request_snapshot={},
+            response_snapshot={},
+        )
+        session.add(order)
     session.commit()
-    return approval.id, order.id
+    return approval.id, order.id if order is not None else 0
 
 
 def test_postgresql_fresh_schema_and_any_predicate_verify(
@@ -364,6 +387,86 @@ def test_postgresql_fresh_schema_and_any_predicate_verify(
 
     assert readiness.ready is True
     assert readiness.problems == ()
+
+
+def test_postgresql_upgrade_from_09_installs_fail_closed_reconciliation(
+    postgres_writer_engine,
+) -> None:
+    assert upgrade_database(postgres_writer_engine) == SCHEMA_VERSION
+    with postgres_writer_engine.begin() as connection:
+        for table_name in (
+            "okx_demo_recovery_grants",
+            "okx_demo_order_snapshots",
+            "okx_demo_fill_snapshots",
+            "okx_demo_position_snapshots",
+            "okx_demo_account_snapshots",
+            "okx_demo_exchange_events",
+            "okx_demo_reconciliation_states",
+            "okx_demo_recovery_batches",
+        ):
+            connection.execute(
+                text("DROP TABLE {} CASCADE".format(table_name))
+            )
+        connection.execute(
+            text(
+                "ALTER TABLE reconciliation_runs "
+                "DROP CONSTRAINT reconciliation_runs_status_check, "
+                "DROP CONSTRAINT reconciliation_runs_artifact_status_check, "
+                "DROP COLUMN database_ids, DROP COLUMN artifact_path, "
+                "DROP COLUMN artifact_sha256, DROP COLUMN artifact_status, "
+                "DROP COLUMN authoritative_observed_at, "
+                "DROP COLUMN source_type, DROP COLUMN core_data"
+            )
+        )
+        connection.execute(text("DELETE FROM {}".format(VERSION_TABLE)))
+        connection.execute(
+            text(
+                "INSERT INTO {} (version) VALUES (:version)".format(
+                    VERSION_TABLE
+                )
+            ),
+            {"version": RECONCILIATION_BASE_VERSION},
+        )
+    assert upgrade_database(postgres_writer_engine) == SCHEMA_VERSION
+    assert schema_problems(postgres_writer_engine) == []
+    with Session(postgres_writer_engine) as db:
+        state = db.query(OkxDemoReconciliationState).one()
+        assert state.execution_target_id == "OKX_DEMO"
+        assert state.status == "UNKNOWN"
+        assert state.opening_frozen is True
+
+
+def test_postgresql_reconciliation_acl_and_fk_tamper_fail_readiness(
+    postgres_writer_engine,
+) -> None:
+    assert upgrade_database(postgres_writer_engine) == SCHEMA_VERSION
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(
+            text(
+                "GRANT DELETE ON okx_demo_position_snapshots TO freqtrade"
+            )
+        )
+    assert any(
+        "runtime writer has unsafe DML privilege: "
+        "okx_demo_position_snapshots" in problem
+        for problem in schema_problems(postgres_writer_engine)
+    )
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(
+            text(
+                "REVOKE DELETE ON okx_demo_position_snapshots FROM freqtrade"
+            )
+        )
+        connection.execute(
+            text(
+                "ALTER TABLE okx_demo_order_snapshots DROP CONSTRAINT "
+                "okx_demo_order_snapshots_event_database_id_fkey"
+            )
+        )
+    assert any(
+        "missing foreign key: okx_demo_order_snapshots" in problem
+        for problem in schema_problems(postgres_writer_engine)
+    )
 
 
 def test_connection_schema_requires_exact_runtime_role(
@@ -849,3 +952,497 @@ def test_postgresql_concurrent_lease_has_one_winner(
         )
 
     assert sorted(results) == ["ACQUIRED", "BLOCKED"]
+
+
+def _postgres_position_event(quantity: str, sequence: int) -> dict:
+    return {
+        "schema_version": RECONCILIATION_EVENT_SCHEMA_VERSION,
+        "execution_target": "OKX_DEMO",
+        "source": "WS",
+        "entity_kind": "POSITION",
+        "entity_key": "BTC-USDT-SWAP:net",
+        "source_sequence": sequence,
+        "stream_generation": 1,
+        "observed_at": NOW.isoformat(),
+        "received_at": (NOW + timedelta(seconds=1)).isoformat(),
+        "payload": {
+            "instId": "BTC-USDT-SWAP",
+            "posSide": "net",
+            "pos": quantity,
+            "avgPx": "50000" if quantity != "0" else "",
+        },
+    }
+
+
+def test_postgresql_concurrent_same_timestamp_different_digest_has_one_winner(
+    postgres_writer_engine,
+) -> None:
+    upgrade_database(postgres_writer_engine)
+    barrier = Barrier(2)
+
+    def ingest(quantity: str, sequence: int) -> str:
+        with Session(postgres_writer_engine) as session:
+            service = OkxDemoReconciliationService(session)
+            barrier.wait()
+            try:
+                service.ingest_event(
+                    _postgres_position_event(quantity, sequence)
+                )
+                session.commit()
+                return "PERSISTED"
+            except OkxDemoReconciliationBlocked:
+                session.commit()
+                return "BLOCKED"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(ingest, "0", 1),
+            executor.submit(ingest, "1", 2),
+        ]
+        results = [future.result(timeout=20) for future in futures]
+
+    assert sorted(results) == ["BLOCKED", "PERSISTED"]
+    with Session(postgres_writer_engine) as session:
+        rows = session.scalars(select(OkxDemoExchangeEvent)).all()
+        assert len(rows) == 1
+        assert rows[0].payload["pos"] in {"0", "1"}
+
+
+def test_postgresql_rejects_ws_null_sequence_at_database_boundary(
+    postgres_writer_engine,
+) -> None:
+    upgrade_database(postgres_writer_engine)
+    with pytest.raises(IntegrityError):
+        with postgres_writer_engine.begin() as connection:
+            connection.execute(text("SET LOCAL ROLE freqtrade"))
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO okx_demo_exchange_events (
+                        execution_target_id, event_key, source, entity_kind,
+                        entity_key, source_sequence, stream_generation,
+                        payload, payload_digest, observed_at, received_at
+                    ) VALUES (
+                        'OKX_DEMO', :event_key, 'WS', 'ACCOUNT', 'account',
+                        NULL, 1, '{}'::jsonb, :payload_digest, :observed_at,
+                        :received_at
+                    )
+                    """
+                ),
+                {
+                    "event_key": "a" * 64,
+                    "payload_digest": "b" * 64,
+                    "observed_at": NOW,
+                    "received_at": NOW,
+                },
+            )
+
+
+def test_postgresql_reconciliation_evidence_is_append_only_for_runtime_role(
+    postgres_writer_engine,
+) -> None:
+    upgrade_database(postgres_writer_engine)
+    with Session(postgres_writer_engine) as session:
+        event = OkxDemoReconciliationService(session).ingest_event(
+            _postgres_position_event("0", 1)
+        )
+        session.commit()
+        event_database_id = event.database_id
+
+    with postgres_writer_engine.connect() as connection:
+        assert connection.execute(
+            text(
+                "SELECT has_table_privilege("
+                "'freqtrade', 'okx_demo_exchange_events', 'UPDATE')"
+            )
+        ).scalar_one() is False
+        assert connection.execute(
+            text(
+                "SELECT has_table_privilege("
+                "'freqtrade', 'okx_demo_position_snapshots', 'DELETE')"
+            )
+        ).scalar_one() is False
+
+    with pytest.raises(SQLAlchemyError):
+        with postgres_writer_engine.begin() as connection:
+            connection.execute(text("SET LOCAL ROLE freqtrade"))
+            connection.execute(
+                text(
+                    "UPDATE okx_demo_exchange_events "
+                    "SET entity_key = 'tampered' "
+                    "WHERE database_id = :database_id"
+                ),
+                {"database_id": event_database_id},
+            )
+
+    with pytest.raises(SQLAlchemyError):
+        with postgres_writer_engine.begin() as connection:
+            connection.execute(text("SET LOCAL ROLE freqtrade"))
+            connection.execute(
+                text(
+                    "DELETE FROM okx_demo_position_snapshots "
+                    "WHERE event_database_id = :database_id"
+                ),
+                {"database_id": event_database_id},
+            )
+
+    with Session(postgres_writer_engine) as session:
+        row = session.get(OkxDemoExchangeEvent, event_database_id)
+        assert row is not None
+        assert row.entity_key == "BTC-USDT-SWAP:net"
+
+
+def test_postgresql_runtime_cannot_bypass_controlled_gate_or_run_provenance(
+    postgres_writer_engine,
+    tmp_path,
+) -> None:
+    upgrade_database(postgres_writer_engine)
+    now = datetime.now(timezone.utc)
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(text("SET LOCAL ROLE freqtrade"))
+        assert connection.execute(
+            text(
+                "SELECT count(*) FROM execution_scopes "
+                "WHERE scope_id IN "
+                "('OKX_DEMO', 'LOCAL_DRY_RUN', 'UNKNOWN_LEGACY')"
+            )
+        ).scalar_one() == 3
+        for table_name in (
+            "exchange_orders",
+            "exchange_fills",
+            "exchange_positions",
+        ):
+            assert connection.execute(
+                text(
+                    "SELECT has_table_privilege("
+                    "'freqtrade', :table_name, 'SELECT')"
+                ),
+                {"table_name": table_name},
+            ).scalar_one() is True
+            assert connection.execute(
+                text(
+                    "SELECT has_table_privilege("
+                    "'freqtrade', :table_name, 'INSERT') "
+                    "OR has_table_privilege("
+                    "'freqtrade', :table_name, 'UPDATE') "
+                    "OR has_table_privilege("
+                    "'freqtrade', :table_name, 'DELETE')"
+                ),
+                {"table_name": table_name},
+            ).scalar_one() is False
+    for statement in (
+        "INSERT INTO execution_scopes ("
+        "scope_id, scope_kind, exchange_capable, executable, "
+        "exchange_writes, order_submission_authorized"
+        ") VALUES ('FORGED', 'LEGACY', FALSE, FALSE, FALSE, FALSE)",
+        "UPDATE execution_scopes SET executable = TRUE "
+        "WHERE scope_id = 'OKX_DEMO'",
+        "DELETE FROM execution_scopes WHERE scope_id = 'OKX_DEMO'",
+        "UPDATE exchange_orders SET client_order_id = 'tampered' WHERE FALSE",
+        "DELETE FROM exchange_fills WHERE FALSE",
+        "INSERT INTO exchange_positions ("
+        "execution_target_id, instrument_id, position_side, quantity, "
+        "snapshot, observed_at"
+        ") VALUES ('OKX_DEMO', 'BTC-USDT-SWAP', 'net', 0, "
+        "'{}'::jsonb, CURRENT_TIMESTAMP)",
+    ):
+        with pytest.raises(SQLAlchemyError):
+            with postgres_writer_engine.begin() as connection:
+                connection.execute(text("SET LOCAL ROLE freqtrade"))
+                connection.execute(text(statement))
+    position_event = {
+        **_postgres_position_event("0", 1),
+        "source": "REST",
+        "observed_at": now.isoformat(),
+        "received_at": now.isoformat(),
+    }
+    account_event = {
+        "schema_version": RECONCILIATION_EVENT_SCHEMA_VERSION,
+        "execution_target": "OKX_DEMO",
+        "source": "REST",
+        "entity_kind": "ACCOUNT",
+        "entity_key": "account",
+        "source_sequence": 2,
+        "stream_generation": 1,
+        "observed_at": now.isoformat(),
+        "received_at": now.isoformat(),
+        "payload": {
+            "accountFingerprint": "a" * 64,
+            "equity": "10000",
+            "availableBalance": "9000",
+            "marginBalance": "1000",
+        },
+    }
+    with Session(postgres_writer_engine) as session:
+        session.execute(text("SET LOCAL ROLE freqtrade"))
+        service = OkxDemoReconciliationService(
+            session,
+            evidence_root=tmp_path / "managed" / "reconciliation",
+            allowed_evidence_root=tmp_path / "managed",
+        )
+        service.ingest_recovery_batch(
+            [position_event, account_event],
+            recovery_batch_id="runtime-controlled-gate",
+            high_watermarks={
+                "ORDER": "orders-end",
+                "FILL": "fills-end",
+                "POSITION": "positions-end",
+                "ACCOUNT": "account-end",
+            },
+            overlap_started_at=now - timedelta(seconds=5),
+            observed_at=now,
+            completed_at=now,
+        )
+        result = service.reconcile(now=now)
+        session.commit()
+        assert result.status == "RECONCILED"
+        assert result.opening_frozen is False
+        ready_run_id = result.reconciliation_run_database_id
+
+    with Session(postgres_writer_engine) as session:
+        state = session.query(OkxDemoReconciliationState).one()
+        ready_run = session.get(ReconciliationRun, ready_run_id)
+        assert state.status == "RECONCILED"
+        assert state.opening_frozen is False
+        assert ready_run.artifact_status == "READY"
+        ready_digest = ready_run.artifact_sha256
+
+    for statement in (
+        "UPDATE okx_demo_reconciliation_states "
+        "SET status = 'RECONCILED', opening_frozen = FALSE",
+        "UPDATE reconciliation_runs SET status = 'RECONCILED', "
+        "artifact_sha256 = repeat('0', 64) WHERE id = {}".format(
+            ready_run_id
+        ),
+    ):
+        with pytest.raises(SQLAlchemyError):
+            with postgres_writer_engine.begin() as connection:
+                connection.execute(text("SET LOCAL ROLE freqtrade"))
+                connection.execute(text(statement))
+
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(text("SET LOCAL ROLE freqtrade"))
+        pending_run_id = connection.execute(
+            text(
+                """
+                INSERT INTO reconciliation_runs (
+                    execution_target_id, status, summary_snapshot,
+                    database_ids, artifact_status,
+                    authoritative_observed_at, source_type, core_data,
+                    started_at, completed_at
+                ) VALUES (
+                    'OKX_DEMO', 'UNKNOWN', '{}'::jsonb, '{}'::jsonb,
+                    'PENDING', :now, 'api_aggregate', TRUE, :now, :now
+                ) RETURNING id
+                """
+            ),
+            {"now": now},
+        ).scalar_one()
+
+    with pytest.raises(SQLAlchemyError):
+        with postgres_writer_engine.begin() as connection:
+            connection.execute(text("SET LOCAL ROLE freqtrade"))
+            connection.execute(
+                text(
+                    "SELECT apply_okx_demo_reconciliation_gate(:run_id)"
+                ),
+                {"run_id": pending_run_id},
+            )
+
+    with pytest.raises(SQLAlchemyError):
+        with postgres_writer_engine.begin() as connection:
+            connection.execute(text("SET LOCAL ROLE freqtrade"))
+            connection.execute(
+                text(
+                    """
+                    SELECT finalize_okx_demo_reconciliation_run(
+                        :run_id, '{}'::jsonb, '{}'::jsonb,
+                        '/tmp/forged.json', :digest
+                    )
+                    """
+                ),
+                {"run_id": pending_run_id, "digest": "0" * 64},
+            )
+
+    with pytest.raises(SQLAlchemyError):
+        with postgres_writer_engine.begin() as connection:
+            connection.execute(text("SET LOCAL ROLE freqtrade"))
+            connection.execute(
+                text(
+                    """
+                    SELECT finalize_okx_demo_reconciliation_run(
+                        :run_id, '{}'::jsonb, '{}'::jsonb,
+                        '/tmp/forged.json', :digest
+                    )
+                    """
+                ),
+                {"run_id": ready_run_id, "digest": "0" * 64},
+            )
+
+    with Session(postgres_writer_engine) as session:
+        state = session.query(OkxDemoReconciliationState).one()
+        ready_run = session.execute(
+            text(
+                "SELECT status, artifact_status, artifact_sha256 "
+                "FROM reconciliation_runs WHERE id = :run_id"
+            ),
+            {"run_id": ready_run_id},
+        ).one()
+        assert state.status == "RECONCILED"
+        assert state.opening_frozen is False
+        assert tuple(ready_run) == ("RECONCILED", "READY", ready_digest)
+
+
+def test_postgresql_runtime_role_completes_real_writer_happy_lifecycle(
+    postgres_writer_engine,
+) -> None:
+    upgrade_database(postgres_writer_engine)
+    with Session(postgres_writer_engine) as admin_session:
+        approval_id, _ = _seed_approved_order(
+            admin_session,
+            create_order=False,
+        )
+        approval = admin_session.get(ApprovedExecution, approval_id)
+        identity = {
+            "canonical_hash": approval.canonical_hash,
+            "policy_digest": approval.policy_digest,
+            "approved_payload_hash": approval.approved_payload_hash,
+        }
+        admin_session.execute(
+            text(
+                "UPDATE okx_demo_reconciliation_states "
+                "SET status = 'RECONCILED', opening_frozen = FALSE, "
+                "block_reason = NULL"
+            )
+        )
+        admin_session.commit()
+
+    instrument = InstrumentSpec(
+        inst_id="BTC-USDT-SWAP",
+        inst_type="SWAP",
+        base_ccy="BTC",
+        quote_ccy="USDT",
+        settle_ccy="USDT",
+        contract_type="linear",
+        contract_value="1",
+        contract_value_ccy="BTC",
+        lot_size="1",
+        min_size="1",
+        tick_size="0.1",
+        state="live",
+    )
+    with Session(postgres_writer_engine) as session:
+        store = SqlAlchemyOrderWriterStore(
+            session,
+            now_provider=lambda: NOW,
+        )
+        session.execute(text("SET LOCAL ROLE freqtrade"))
+        claimed = store.load_approved_execution(approval_id)
+        authorization = OrderSubmissionAuthorization(
+            execution_target_id="OKX_DEMO",
+            authorization_schema_version="RISK_V1",
+            canonical_hash=claimed.canonical_hash,
+            policy_digest=claimed.policy_digest,
+            approved_payload_hash=claimed.approved_payload_hash,
+            allow_real_funds=False,
+            simulated_trading=True,
+            order_submission_enabled=True,
+            writer_instance_id="PgRuntimeWriter01",
+            approval_id=approval_id,
+            expires_at=NOW + timedelta(minutes=1),
+        )
+        command = normalize_order_command(
+            claimed,
+            submission_grant=authorization,
+            instrument=instrument,
+            now=NOW,
+        )
+
+        session.execute(text("SET LOCAL ROLE freqtrade"))
+        store.acquire_lease(
+            writer_instance_id="PgRuntimeWriter01",
+            approval_id=approval_id,
+            now=NOW,
+            expires_at=NOW + timedelta(minutes=1),
+            **identity,
+        )
+        session.execute(text("SET LOCAL ROLE freqtrade"))
+        assert store.unresolved() is None
+
+        session.execute(text("SET LOCAL ROLE freqtrade"))
+        order, prepared = store.prepare_place(
+            command,
+            operation="PLACE",
+            operation_id=command.client_order_id,
+            request_digest="a" * 64,
+            safe_request_snapshot=command.request_body,
+        )
+        assert order.exchange_order_row_id > 0
+        session.execute(text("SET LOCAL ROLE freqtrade"))
+        acknowledged = store.transition(
+            prepared,
+            event=WriteEvent.ACKNOWLEDGE,
+            exchange_order_id="okx-demo-order-1001",
+        )
+        session.execute(text("SET LOCAL ROLE freqtrade"))
+        reconciled = store.transition(
+            acknowledged,
+            event=WriteEvent.RECONCILE,
+            order_state="live",
+            safe_response_snapshot={
+                "order_id": "okx-demo-order-1001",
+                "state": "live",
+            },
+        )
+        assert reconciled.state.value == "RECONCILED"
+
+    with Session(postgres_writer_engine) as session:
+        order = session.scalar(
+            select(ExchangeOrder).where(
+                ExchangeOrder.client_order_id == "PgWriterOrder001"
+            )
+        )
+        assert order is not None
+        assert order.execution_target_id == "OKX_DEMO"
+        assert order.exchange_order_id == "okx-demo-order-1001"
+        assert order.status == "live"
+        order_id = order.id
+
+    for statement, parameters in (
+        (
+            "UPDATE exchange_orders SET status = 'FORGED' "
+            "WHERE id = :order_id",
+            {"order_id": order_id},
+        ),
+        (
+            "UPDATE exchange_orders "
+            "SET exchange_order_id = 'replacement-order-id' "
+            "WHERE id = :order_id",
+            {"order_id": order_id},
+        ),
+    ):
+        with pytest.raises(SQLAlchemyError):
+            with postgres_writer_engine.begin() as connection:
+                connection.execute(text("SET LOCAL ROLE freqtrade"))
+                connection.execute(text(statement), parameters)
+
+    with pytest.raises(SQLAlchemyError):
+        with postgres_writer_engine.begin() as connection:
+            connection.execute(text("SET LOCAL ROLE freqtrade"))
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO exchange_orders (
+                        execution_target_id, trade_intent_id,
+                        client_order_id, exchange_order_id, status,
+                        request_snapshot, response_snapshot
+                    )
+                    SELECT 'OKX_DEMO', trade_intent_id,
+                           'PgForgedOrder001', 'prebound-order',
+                           'PREPARED', '{}'::json, '{}'::json
+                    FROM approved_executions
+                    WHERE id = :approval_id
+                    """
+                ),
+                {"approval_id": approval_id},
+            )
