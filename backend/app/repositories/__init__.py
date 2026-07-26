@@ -6,7 +6,7 @@ from app.repositories.execution_lineage import (
     list_execution_manifests,
     record_execution_manifest,
 )
-from app.repositories.research_jobs import ResearchJobRepository
+from app.repositories.research_jobs import ResearchJobLinkageBlocked, ResearchJobRepository
 from app.repositories.strategy_failure_reasons import StrategyFailureReasonRepository
 from app.repositories.strategy_scores import StrategyScoreRepository
 from app.repositories.strategies import StrategyRepository
@@ -17,6 +17,7 @@ __all__ = [
     "ExecutionLineageRepository",
     "GovernanceEventArchiveRepository",
     "ResearchJobRepository",
+    "ResearchJobLinkageBlocked",
     "StrategyFailureReasonRepository",
     "StrategyGenerationRunRepository",
     "StrategyRepository",

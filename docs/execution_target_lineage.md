@@ -33,7 +33,10 @@ validated against ADR-0010: 1-32 case-sensitive alphanumeric characters.
 
 Queries for runs, jobs, orders, and manifests require or carry an explicit
 scope. `UNKNOWN_LEGACY` repositories are read-only; workers cannot claim those
-records.
+records or mutate their state. Research-job completion validates every linked
+generation run, backtest run, task, result, strategy version, and score before
+writing any link or terminal status. Missing, cross-scope, or inconsistent
+chains are rolled back as `BLOCKED`.
 
 ## Migration and acceptance
 

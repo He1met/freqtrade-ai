@@ -71,6 +71,7 @@ class BacktestRepository:
         payload: BacktestRunStatusUpdate,
         *, commit: bool = True,
     ) -> Optional[BacktestRun]:
+        self._require_executable_scope()
         run = self.get_run(run_id)
         if run is None:
             return None
@@ -87,6 +88,7 @@ class BacktestRepository:
         return run
 
     def create_task(self, run_id: int, payload: BacktestTaskCreate) -> Optional[BacktestTask]:
+        self._require_executable_scope()
         run = self.get_run(run_id)
         if run is None:
             return None
@@ -168,6 +170,7 @@ class BacktestRepository:
         payload: BacktestTaskStatusUpdate,
         *, commit: bool = True,
     ) -> Optional[BacktestTask]:
+        self._require_executable_scope()
         task = self.get_task(task_id)
         if task is None:
             return None
@@ -193,6 +196,7 @@ class BacktestRepository:
         payload: BacktestResultCreate,
         *, commit: bool = True,
     ) -> Optional[BacktestResult]:
+        self._require_executable_scope()
         task = self.get_task(task_id)
         if task is None:
             return None

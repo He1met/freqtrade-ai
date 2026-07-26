@@ -233,12 +233,11 @@ def record_execution_manifest(
     executable_evidence: bool,
 ) -> ExecutionManifest:
     ensure_execution_scope_catalog(db)
-    if execution_scope_id == UNKNOWN_LEGACY_SCOPE_ID and executable_evidence:
-        raise ValueError("UNKNOWN_LEGACY cannot be executable evidence")
+    if execution_scope_id == UNKNOWN_LEGACY_SCOPE_ID:
+        raise ValueError("UNKNOWN_LEGACY manifest scope is read-only")
     if execution_scope_id not in {
         OKX_DEMO_TARGET_ID,
         LOCAL_DRY_RUN_SCOPE_ID,
-        UNKNOWN_LEGACY_SCOPE_ID,
     }:
         raise ValueError("unknown execution scope")
     manifest = ExecutionManifest(

@@ -24,9 +24,11 @@ from app.models.execution_lineage import (
 from app.repositories import (
     BacktestRepository,
     ExecutionLineageRepository,
+    ResearchJobLinkageBlocked,
     ResearchJobRepository,
     StrategyGenerationRunRepository,
     StrategyRepository,
+    ensure_execution_scope_catalog,
 )
 from app.schemas import BacktestRunCreate, StrategyCreate, StrategyVersionCreate
 from app.schemas.strategy_generation_run import StrategyGenerationRunCreate
@@ -274,3 +276,63 @@ def test_postgresql_trade_intent_client_order_id_is_unique_per_target(
                 quantity=Decimal("1"),
             )
         db.rollback()
+
+
+def test_postgresql_legacy_mutations_and_cross_scope_completion_are_blocked(
+    postgres_engine,
+) -> None:
+    assert upgrade_database(postgres_engine) == SCHEMA_VERSION
+    session_factory = create_session_factory(postgres_engine)
+    with session_factory() as db:
+        ensure_execution_scope_catalog(db)
+        legacy_job = ResearchJob(
+            execution_scope_id=UNKNOWN_LEGACY_SCOPE_ID,
+            job_type="historical",
+            operation="historical",
+            idempotency_key_digest="historical",
+            request_hash="historical",
+            request_payload={},
+            status="PENDING",
+        )
+        legacy_generation = StrategyGenerationRun(
+            execution_scope_id=UNKNOWN_LEGACY_SCOPE_ID,
+            provider="historical",
+            model="unknown",
+            params_snapshot={},
+        )
+        db.add_all((legacy_job, legacy_generation))
+        db.commit()
+        legacy_repository = ResearchJobRepository(
+            db, execution_scope_id=UNKNOWN_LEGACY_SCOPE_ID
+        )
+        with pytest.raises(ValueError, match="read-only"):
+            legacy_repository.cancel(legacy_job.id, "must not mutate")
+        db.expire_all()
+        assert db.get(ResearchJob, legacy_job.id).status == "PENDING"
+
+        repository = ResearchJobRepository(db)
+        job = repository.create(
+            job_type="deepseek_backtest",
+            operation="postgres-linkage",
+            idempotency_key_digest="postgres-linkage",
+            request_hash="postgres-linkage",
+            request_payload={},
+        )
+        claimed = repository.claim_next(owner="postgres-worker", lease_seconds=60)
+        assert claimed is not None and claimed.lease_token is not None
+        with pytest.raises(ResearchJobLinkageBlocked, match="BLOCKED"):
+            repository.complete(
+                job.id,
+                claimed.lease_token,
+                status="SUCCESS",
+                stage="COMPLETED",
+                links={"strategy_generation_run_id": legacy_generation.id},
+                evidence_snapshot={"status": "SUCCESS"},
+                error_message=None,
+                provider_completed=False,
+            )
+        db.expire_all()
+        persisted = db.get(ResearchJob, job.id)
+        assert persisted is not None
+        assert persisted.status == "RUNNING"
+        assert persisted.strategy_generation_run_id is None

@@ -7,7 +7,15 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.models import Base, StrategyGenerationRun
+from app.models import (
+    BacktestResult,
+    BacktestRun,
+    BacktestTask,
+    Base,
+    ResearchJob,
+    ResearchWorkerControl,
+    StrategyGenerationRun,
+)
 from app.models.execution_lineage import (
     LOCAL_DRY_RUN_SCOPE_ID,
     OKX_DEMO_TARGET_ID,
@@ -16,14 +24,29 @@ from app.models.execution_lineage import (
     ResearchJobAttempt,
 )
 from app.repositories import (
+    BacktestRepository,
     ExecutionLineageRepository,
+    ResearchJobLinkageBlocked,
     ResearchJobRepository,
     StrategyGenerationRunRepository,
+    StrategyRepository,
     ensure_execution_scope_catalog,
     list_execution_manifests,
     record_execution_manifest,
 )
-from app.schemas.strategy_generation_run import StrategyGenerationRunCreate
+from app.schemas import (
+    BacktestResultCreate,
+    BacktestRunCreate,
+    BacktestRunStatusUpdate,
+    BacktestTaskCreate,
+    BacktestTaskStatusUpdate,
+    StrategyCreate,
+    StrategyVersionCreate,
+)
+from app.schemas.strategy_generation_run import (
+    StrategyGenerationRunCreate,
+    StrategyGenerationRunStatusUpdate,
+)
 
 
 @pytest.fixture()
@@ -98,6 +121,278 @@ def test_unknown_legacy_research_scope_is_read_only(db) -> None:
         )
     with pytest.raises(ValueError, match="read-only"):
         repository.claim_next(owner="worker", lease_seconds=60)
+
+
+def test_unknown_legacy_is_read_only_for_every_repository_mutation(db) -> None:
+    ensure_execution_scope_catalog(db)
+    strategy_repository = StrategyRepository(db)
+    strategy = strategy_repository.create(
+        StrategyCreate(name="Legacy mutation gate", slug="legacy-mutation-gate")
+    )
+    version = strategy_repository.create_version(
+        StrategyVersionCreate(
+            strategy_id=strategy.id,
+            blueprint={},
+            generated_code="class LegacyMutationGate: pass",
+            file_path="/tmp/legacy-mutation-gate.py",
+        )
+    )
+    assert version is not None
+    generation = StrategyGenerationRun(
+        execution_scope_id=UNKNOWN_LEGACY_SCOPE_ID,
+        provider="historical",
+        model="unknown",
+        params_snapshot={},
+        status="pending",
+    )
+    db.add(generation)
+    db.flush()
+    run = BacktestRun(
+        execution_scope_id=UNKNOWN_LEGACY_SCOPE_ID,
+        strategy_version_id=version.id,
+        config_snapshot={},
+        status="pending",
+    )
+    db.add(run)
+    db.flush()
+    task = BacktestTask(
+        backtest_run_id=run.id,
+        pair="BTC/USDT:USDT",
+        timeframe="15m",
+        status="pending",
+    )
+    db.add(task)
+    db.flush()
+    result = BacktestResult(
+        backtest_run_id=run.id,
+        backtest_task_id=task.id,
+        result_path="/historical/result.json",
+        metrics_snapshot={},
+    )
+    db.add(result)
+    job = ResearchJob(
+        execution_scope_id=UNKNOWN_LEGACY_SCOPE_ID,
+        job_type="deepseek_backtest",
+        operation="historical",
+        idempotency_key_digest="legacy-digest",
+        request_hash="legacy-hash",
+        request_payload={},
+        status="RUNNING",
+        stage="GENERATION",
+        lease_owner="legacy-worker",
+        lease_token="legacy-token",
+        lease_expires_at=datetime.now(timezone.utc),
+    )
+    db.add(job)
+    db.commit()
+
+    generation_repository = StrategyGenerationRunRepository(
+        db, execution_scope_id=UNKNOWN_LEGACY_SCOPE_ID
+    )
+    backtest_repository = BacktestRepository(
+        db, execution_scope_id=UNKNOWN_LEGACY_SCOPE_ID
+    )
+    job_repository = ResearchJobRepository(
+        db, execution_scope_id=UNKNOWN_LEGACY_SCOPE_ID
+    )
+    blocked_calls = (
+        lambda: generation_repository.create(
+            StrategyGenerationRunCreate(provider="new", model="new")
+        ),
+        lambda: generation_repository.update_status(
+            generation.id,
+            StrategyGenerationRunStatusUpdate(status="running"),
+        ),
+        lambda: backtest_repository.create_run(
+            BacktestRunCreate(strategy_version_id=version.id)
+        ),
+        lambda: backtest_repository.update_run_status(
+            run.id, BacktestRunStatusUpdate(status="running")
+        ),
+        lambda: backtest_repository.create_task(
+            run.id, BacktestTaskCreate(pair="ETH/USDT:USDT", timeframe="15m")
+        ),
+        lambda: backtest_repository.claim_next_pending_task(run.id),
+        lambda: backtest_repository.update_task_status(
+            task.id, BacktestTaskStatusUpdate(status="running")
+        ),
+        lambda: backtest_repository.save_result(
+            task.id,
+            BacktestResultCreate(
+                result_path="/tmp/new.json",
+                metrics_snapshot={},
+            ),
+        ),
+        lambda: job_repository.create(
+            job_type="new",
+            operation="new",
+            idempotency_key_digest="new",
+            request_hash="new",
+            request_payload={},
+        ),
+        lambda: job_repository.create_or_get(
+            job_type="new",
+            operation="new-or-get",
+            idempotency_key_digest="new-or-get",
+            request_hash="new-or-get",
+            request_payload={},
+        ),
+        lambda: job_repository.get_control(),
+        lambda: job_repository.set_paused(True, "must not mutate"),
+        lambda: job_repository.claim_next(owner="worker", lease_seconds=60),
+        lambda: job_repository.heartbeat(
+            job.id, "legacy-token", lease_seconds=60
+        ),
+        lambda: job_repository.mark_provider_attempt(job.id, "legacy-token"),
+        lambda: job_repository.complete(
+            job.id,
+            "legacy-token",
+            status="SUCCESS",
+            stage="COMPLETED",
+            links={},
+            evidence_snapshot={},
+            error_message=None,
+            provider_completed=False,
+        ),
+        lambda: job_repository.cancel(job.id, "must not mutate"),
+        lambda: job_repository.cancel_at_checkpoint(job.id, "legacy-token"),
+        lambda: job_repository.expire_stale(),
+    )
+    for blocked_call in blocked_calls:
+        with pytest.raises(ValueError, match="read-only"):
+            blocked_call()
+
+    db.expire_all()
+    persisted_generation = db.get(StrategyGenerationRun, generation.id)
+    persisted_run = db.get(BacktestRun, run.id)
+    persisted_task = db.get(BacktestTask, task.id)
+    persisted_result = db.get(BacktestResult, result.id)
+    persisted_job = db.get(ResearchJob, job.id)
+    assert persisted_generation is not None and persisted_generation.status == "pending"
+    assert persisted_run is not None and persisted_run.status == "pending"
+    assert persisted_run.requested_task_count == 0
+    assert persisted_task is not None and persisted_task.status == "pending"
+    assert persisted_task.result_path is None
+    assert persisted_result is not None
+    assert persisted_result.result_path == "/historical/result.json"
+    assert persisted_job is not None and persisted_job.status == "RUNNING"
+    assert persisted_job.strategy_generation_run_id is None
+    assert db.get(ResearchWorkerControl, 1) is None
+    assert db.query(ResearchJobAttempt).count() == 0
+
+
+def _create_local_completion_chain(db, suffix: str):
+    generation = StrategyGenerationRunRepository(db).create(
+        StrategyGenerationRunCreate(provider="deepseek", model=f"model-{suffix}")
+    )
+    strategy_repository = StrategyRepository(db)
+    strategy = strategy_repository.create(
+        StrategyCreate(name=f"Completion {suffix}", slug=f"completion-{suffix}")
+    )
+    version = strategy_repository.create_version(
+        StrategyVersionCreate(
+            strategy_id=strategy.id,
+            generation_run_id=generation.id,
+            blueprint={},
+            generated_code=f"class Completion{suffix}: pass",
+            file_path=f"/tmp/completion-{suffix}.py",
+        )
+    )
+    assert version is not None
+    backtests = BacktestRepository(db)
+    run = backtests.create_run(BacktestRunCreate(strategy_version_id=version.id))
+    assert run is not None
+    task = backtests.create_task(
+        run.id,
+        BacktestTaskCreate(pair="BTC/USDT:USDT", timeframe="15m"),
+    )
+    assert task is not None
+    result = backtests.save_result(
+        task.id,
+        BacktestResultCreate(
+            result_path=f"/tmp/completion-{suffix}.json",
+            metrics_snapshot={},
+        ),
+    )
+    assert result is not None
+    return generation, strategy, version, run, task, result
+
+
+def test_research_completion_rejects_missing_legacy_and_inconsistent_links_atomically(
+    db,
+) -> None:
+    job_repository = ResearchJobRepository(db)
+    job = job_repository.create(
+        job_type="deepseek_backtest",
+        operation="completion-validation",
+        idempotency_key_digest="completion-validation",
+        request_hash="completion-validation",
+        request_payload={},
+    )
+    claimed = job_repository.claim_next(owner="worker", lease_seconds=60)
+    assert claimed is not None and claimed.lease_token is not None
+    lease_token = claimed.lease_token
+    first = _create_local_completion_chain(db, "one")
+    second = _create_local_completion_chain(db, "two")
+    ensure_execution_scope_catalog(db)
+    legacy_generation = StrategyGenerationRun(
+        execution_scope_id=UNKNOWN_LEGACY_SCOPE_ID,
+        provider="historical",
+        model="unknown",
+        params_snapshot={},
+    )
+    db.add(legacy_generation)
+    db.commit()
+
+    invalid_links = (
+        {"strategy_generation_run_id": 999999},
+        {"strategy_generation_run_id": legacy_generation.id},
+        {"backtest_run_id": first[3].id, "backtest_task_id": second[4].id},
+        {
+            "backtest_run_id": first[3].id,
+            "backtest_task_id": first[4].id,
+            "backtest_result_id": second[5].id,
+        },
+    )
+    for links in invalid_links:
+        with pytest.raises(ResearchJobLinkageBlocked, match="BLOCKED"):
+            job_repository.complete(
+                job.id,
+                lease_token,
+                status="SUCCESS",
+                stage="COMPLETED",
+                links=links,
+                evidence_snapshot={"status": "SUCCESS"},
+                error_message=None,
+                provider_completed=False,
+            )
+        db.expire_all()
+        persisted = db.get(ResearchJob, job.id)
+        assert persisted is not None and persisted.status == "RUNNING"
+        assert persisted.strategy_generation_run_id is None
+        assert persisted.backtest_run_id is None
+        assert persisted.backtest_task_id is None
+        assert persisted.backtest_result_id is None
+
+    completed = job_repository.complete(
+        job.id,
+        lease_token,
+        status="SUCCESS",
+        stage="COMPLETED",
+        links={
+            "strategy_generation_run_id": first[0].id,
+            "strategy_id": first[1].id,
+            "strategy_version_id": first[2].id,
+            "backtest_run_id": first[3].id,
+            "backtest_task_id": first[4].id,
+            "backtest_result_id": first[5].id,
+        },
+        evidence_snapshot={"status": "SUCCESS"},
+        error_message=None,
+        provider_completed=False,
+    )
+    assert completed is not None and completed.status == "SUCCESS"
+    assert completed.backtest_result_id == first[5].id
 
 
 def test_exchange_repository_rejects_every_non_okx_target(db) -> None:
@@ -210,7 +505,7 @@ def test_order_queries_are_bound_to_the_repository_target(db) -> None:
 
 
 def test_unknown_legacy_manifest_cannot_be_executable(db) -> None:
-    with pytest.raises(ValueError, match="cannot be executable"):
+    with pytest.raises(ValueError, match="read-only"):
         record_execution_manifest(
             db,
             execution_scope_id=UNKNOWN_LEGACY_SCOPE_ID,
@@ -250,8 +545,8 @@ def test_manifest_queries_require_explicit_scope(db) -> None:
         database_ids={"backtest_run_id": 1},
         executable_evidence=True,
     )
-    legacy = record_execution_manifest(
-        db,
+    ensure_execution_scope_catalog(db)
+    legacy = ExecutionManifest(
         execution_scope_id=UNKNOWN_LEGACY_SCOPE_ID,
         manifest_kind="backtest",
         schema_version="1",
@@ -260,6 +555,8 @@ def test_manifest_queries_require_explicit_scope(db) -> None:
         database_ids={},
         executable_evidence=False,
     )
+    db.add(legacy)
+    db.commit()
 
     assert [row.id for row in list_execution_manifests(
         db, execution_scope_id=LOCAL_DRY_RUN_SCOPE_ID
