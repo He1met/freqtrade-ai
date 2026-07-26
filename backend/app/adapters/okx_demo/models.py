@@ -208,7 +208,9 @@ class OrderQuery(StableModel):
     state: str
     side: str
     position_side: str
+    margin_mode: Optional[str] = None
     order_type: str
+    reduce_only: Optional[bool] = None
     price: Optional[Decimal] = None
     size: Decimal
     accumulated_fill_size: Decimal
