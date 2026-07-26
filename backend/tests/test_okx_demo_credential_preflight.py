@@ -54,6 +54,49 @@ def test_request_is_signed_for_fixed_demo_account_config_contract() -> None:
     assert headers["ok-access-sign"]
 
 
+def test_shared_signature_boundary_is_get_only_and_signs_the_exact_query_path() -> None:
+    headers = preflight._build_demo_authorization_headers(
+        valid_environment(),
+        method="GET",
+        request_path="/api/v5/account/balance?ccy=USDT",
+        body="",
+        timestamp="2026-07-27T01:02:03.004Z",
+    )
+
+    assert set(headers) == {
+        "OK-ACCESS-KEY",
+        "OK-ACCESS-SIGN",
+        "OK-ACCESS-TIMESTAMP",
+        "OK-ACCESS-PASSPHRASE",
+    }
+    assert headers["OK-ACCESS-KEY"] == "test-api-key"
+    assert headers["OK-ACCESS-PASSPHRASE"] == "test-passphrase"
+    assert "x-simulated-trading" not in headers
+
+
+@pytest.mark.parametrize(
+    ("method", "request_path", "body"),
+    [
+        ("POST", "/api/v5/trade/order", ""),
+        ("GET", "/api/v5/account/balance", "{}"),
+        ("GET", "https://example.invalid/api/v5/account/balance", ""),
+        ("GET", "/api/v5/account/balance\nInjected: value", ""),
+    ],
+)
+def test_shared_signature_boundary_rejects_write_or_untrusted_request_contract(
+    method: str,
+    request_path: str,
+    body: str,
+) -> None:
+    with pytest.raises(preflight.OkxDemoPreflightBlocked):
+        preflight._build_demo_authorization_headers(
+            valid_environment(),
+            method=method,
+            request_path=request_path,
+            body=body,
+        )
+
+
 @pytest.mark.parametrize(
     ("name", "value", "message"),
     [
