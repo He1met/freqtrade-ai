@@ -2567,6 +2567,13 @@ def _add_order_writer(connection: Connection) -> None:
                     "Refusing to drop pre-release writer table with dependencies: "
                     + table_name
                 ) from exc
+    # Legacy worker-only schemas do not contain the #442 exchange-order parent
+    # yet.  Create it before the writer journal so PostgreSQL can resolve the
+    # journal's foreign key during the same atomic upgrade.
+    Base.metadata.tables["exchange_orders"].create(
+        bind=connection,
+        checkfirst=True,
+    )
     Base.metadata.tables["okx_order_writer_leases"].create(
         bind=connection,
         checkfirst=True,
