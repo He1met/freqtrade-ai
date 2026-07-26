@@ -168,6 +168,28 @@ def bootstrap_with_retry() -> None:
     raise LaunchAgentBlocked(last_error)
 
 
+def stop_managed_runtime() -> None:
+    """Stop all managed services before changing their inherited environment."""
+
+    completed = run(
+        [str(BACKEND_PYTHON), str(RUNTIME_SCRIPT), "down", "--json"]
+    )
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise LaunchAgentBlocked(
+            "runtime down returned invalid JSON"
+        ) from exc
+    blocked = any(
+        service.get("status") == "BLOCKED"
+        for service in payload.get("services", [])
+    )
+    if completed.returncode != 0 or blocked:
+        raise LaunchAgentBlocked(
+            str(payload.get("reason") or "managed runtime could not be stopped safely")
+        )
+
+
 def install() -> Dict[str, Any]:
     if sys.platform != "darwin" or shutil.which("launchctl") is None:
         raise LaunchAgentBlocked("macOS launchctl is required")
@@ -178,6 +200,7 @@ def install() -> Dict[str, Any]:
     bootout()
     if not wait_until_unloaded():
         raise LaunchAgentBlocked("existing LaunchAgent did not finish unloading")
+    stop_managed_runtime()
     run(["launchctl", "enable", launchd_target()])
     bootstrap_with_retry()
     if not wait_until_running():
@@ -222,9 +245,16 @@ def status() -> Dict[str, Any]:
 
 
 def restart() -> Dict[str, Any]:
-    completed = run(["launchctl", "kickstart", "-k", launchd_target()])
-    if completed.returncode:
-        raise LaunchAgentBlocked(completed.stderr.strip() or "launchctl kickstart failed")
+    if not PLIST_PATH.is_file():
+        raise LaunchAgentBlocked("LaunchAgent plist is missing; run `make autostart-install`")
+    bootout()
+    if not wait_until_unloaded():
+        raise LaunchAgentBlocked("existing LaunchAgent did not finish unloading")
+    stop_managed_runtime()
+    run(["launchctl", "enable", launchd_target()])
+    bootstrap_with_retry()
+    if not wait_until_running():
+        raise LaunchAgentBlocked("LaunchAgent did not stay running after restart")
     return {"status": "RESTARTED", "label": LABEL}
 
 

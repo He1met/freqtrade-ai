@@ -288,9 +288,12 @@ make autostart-uninstall
 `~/Library/LaunchAgents/com.he1met.freqtrade-ai.runtime.plist`，使用 `RunAtLoad` 和
 `KeepAlive` 保持一个 supervisor。supervisor 每 30 秒执行一次 `verify`；若 backend、worker
 或 frontend 未运行，会先通过受管 `down` 清理残留，再调用唯一 `up` 恢复。它不会创建研究
-任务、启动 dry-run/live trading 或读取 Provider key。数据库、schema、worker queue、binary
-和 localhost 安全检查仍完全由 `local_runtime.py` 执行。日志位于
-`.freqtrade-ai/launchd/`。
+任务或启动 dry-run/live trading。数据库、schema、worker queue、binary 和 localhost 安全
+检查仍完全由 `local_runtime.py` 执行。日志位于 `.freqtrade-ai/launchd/`。
+
+这是当前 macOS 用户登录会话的 LaunchAgent：Mac 重启并登录该用户、登录钥匙串可用后自动
+启动；不是需要 root 权限、登录前运行的 LaunchDaemon。卸载会停止 supervisor 和本地服务，
+但不会删除 PostgreSQL、行情、策略、回测数据或钥匙串条目。
 
 长期运行选择器写入被 Git 忽略的 `.freqtrade-ai/runtime.env`，只允许以下两项：
 
@@ -300,11 +303,74 @@ FREQTRADE_BINARY=/absolute/path/to/freqtrade_venv/bin/freqtrade
 ```
 
 禁止在该文件写入 Provider key、交易所 key、token、secret 或其他配置。当前 shell 的同名
-环境变量优先，手工命令和 LaunchAgent 最终仍经过同一个 runtime/binary resolver。
+环境变量优先，手工命令和 LaunchAgent 最终仍经过同一个 runtime/binary resolver。创建或
+修改后应限制为当前用户可读：
 
-这是当前 macOS 用户登录会话的 LaunchAgent：Mac 重启并登录该用户后自动启动；不是需要
-root 权限、登录前运行的 LaunchDaemon。卸载会停止 supervisor 和本地服务，但不会删除
-PostgreSQL、行情、策略或回测数据。
+```bash
+chmod 600 .freqtrade-ai/runtime.env
+```
+
+### macOS 长期 DeepSeek 凭据
+
+长期运行只从当前用户的 macOS 登录钥匙串读取 DeepSeek key。固定 service 为
+`freqtrade-ai/deepseek-api-key`，account 为当前 macOS 用户名。key 不得进入 Git、`.env`、
+`.freqtrade-ai/runtime.env`、LaunchAgent plist、命令参数、日志、页面、数据库、Issue 或 PR。
+plist 只保留启动路径、`FREQTRADE_BINARY` 和 supervisor 的非敏感运行参数。
+
+首次配置时使用交互式提示；`-w` 必须放在命令最后，避免 key 出现在 shell history：
+
+```bash
+/usr/bin/security add-generic-password \
+  -a "$USER" \
+  -s 'freqtrade-ai/deepseek-api-key' \
+  -U \
+  -w
+make autostart-restart
+```
+
+在提示中粘贴 key。不要改成 `-w "$DEEPSEEK_API_KEY"`，也不要使用
+`launchctl setenv DEEPSEEK_API_KEY ...`。`autostart-restart` 会先停止旧的受管
+backend/worker/frontend，再由 supervisor 重新启动，确保进程不会继续使用旧凭据。
+
+运行时按最小权限拆分环境：
+
+- backend 获得本地数据库配置、operator/provider 所需环境变量和 Keychain 中的
+  `DEEPSEEK_API_KEY`；
+- DB-backed worker 只获得本地数据库配置和 Keychain 中的 `DEEPSEEK_API_KEY`；
+- frontend 不获得数据库 URL、DeepSeek key、operator token 或任何 Provider/交易所凭据；
+- Keychain 条目缺失或不可访问时，本地页面仍可运行，但真实 DeepSeek 路径必须保持
+  `BLOCKED`，不得回退为 fake 成功。
+
+轮换 key 使用同一条交互式 `add-generic-password -U -w` 命令，并立即执行
+`make autostart-restart`。删除 key 时也必须重启受管服务，避免旧进程继续持有旧值：
+
+```bash
+/usr/bin/security delete-generic-password \
+  -a "$USER" \
+  -s 'freqtrade-ai/deepseek-api-key'
+make autostart-restart
+```
+
+配置或轮换后的验收顺序如下；所有命令只显示状态或 key 名称，不显示 key 值：
+
+```bash
+/usr/bin/security find-generic-password \
+  -a "$USER" \
+  -s 'freqtrade-ai/deepseek-api-key' \
+  >/dev/null
+make autostart-status
+make verify
+make autostart-logs
+backend/.venv/bin/python -m pytest \
+  backend/tests/test_local_runtime.py \
+  backend/tests/test_local_supervisor.py
+python3 scripts/scan_secrets.py --include-untracked
+```
+
+验收必须同时满足：LaunchAgent 为 `LOADED` 且 `state=running`，`make verify` 为
+`VERIFIED`，backend/worker/frontend 均来自唯一仓库，测试证明 key 只进入 backend 和
+worker、不会进入 frontend，日志和扫描结果不包含 secret-shaped 值。仅有 Keychain 条目、
+仅有 LaunchAgent `LOADED` 或仅有端口可访问，都不能单独证明长期运行环境可验收。
 
 唯一数据库 URL 必须是 localhost 上的 `freqtrade_ai`：
 
