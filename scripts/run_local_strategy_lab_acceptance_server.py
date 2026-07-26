@@ -18,6 +18,7 @@ from seed_local_strategy_lab_acceptance import create_seed
 
 
 SAFE_INHERITED_ENV = ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TZ")
+TEST_DISABLE_ENV_FILE_ENV = "FREQTRADE_AI_TEST_DISABLE_ENV_FILE"
 FORBIDDEN_ENV_MARKERS = (
     "KEY",
     "SECRET",
@@ -49,6 +50,7 @@ def build_backend_env(
             "DATABASE_URL": str(manifest["database_url"]),
             "FREQTRADE_AI_CANONICAL_REPO_ROOT": str(manifest["canonical_root"]),
             "E2E_ACCEPTANCE_MANIFEST": json.dumps(manifest, sort_keys=True),
+            TEST_DISABLE_ENV_FILE_ENV: "1",
             "PYTHONUNBUFFERED": "1",
         }
     )
@@ -56,6 +58,7 @@ def build_backend_env(
         upper = name.upper()
         if name in {
             "FREQTRADE_AI_CANONICAL_REPO_ROOT",
+            TEST_DISABLE_ENV_FILE_ENV,
             "E2E_ACCEPTANCE_MANIFEST",
         }:
             continue
@@ -120,17 +123,33 @@ def run_server(
     registry: Optional[Path] = None,
     source_env: Optional[Mapping[str, str]] = None,
 ) -> int:
-    manifest = create_seed(parent, profile)
+    manifest: Optional[Mapping[str, object]] = None
     child: Optional[subprocess.Popen[bytes]] = None
     previous_handlers: dict[int, object] = {}
+    stop_signal: Optional[int] = None
 
-    def stop_child(_signum: int, _frame: object) -> None:
+    def request_stop(signum: int, _frame: object) -> None:
+        nonlocal stop_signal
+        stop_signal = stop_signal or signum
         if child is not None and child.poll() is None:
             child.terminate()
 
     try:
+        # Install handlers before allocating the seed root or starting Uvicorn.
+        # A signal received in either window is remembered and handled after the
+        # current atomic operation returns, so the finally block owns cleanup.
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            previous_handlers[signum] = signal.signal(signum, request_stop)
+        if stop_signal is not None:
+            return 128 + stop_signal
+
+        manifest = create_seed(parent, profile)
+        if stop_signal is not None:
+            return 128 + stop_signal
         if registry is not None:
             write_cleanup_registry(registry, manifest, parent)
+        if stop_signal is not None:
+            return 128 + stop_signal
         environment = build_backend_env(manifest, source_env or os.environ)
         argv = [
             sys.executable,
@@ -143,9 +162,12 @@ def run_server(
             str(port),
         ]
         child = subprocess.Popen(argv, env=environment)
-        for signum in (signal.SIGTERM, signal.SIGINT):
-            previous_handlers[signum] = signal.signal(signum, stop_child)
-        return child.wait()
+        if stop_signal is not None and child.poll() is None:
+            child.terminate()
+        child_returncode = child.wait()
+        if stop_signal is not None:
+            return 128 + stop_signal
+        return child_returncode
     finally:
         if child is not None and child.poll() is None:
             child.terminate()
@@ -156,7 +178,8 @@ def run_server(
                 child.wait(timeout=5)
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
-        cleanup_seed_root(manifest, parent)
+        if manifest is not None:
+            cleanup_seed_root(manifest, parent)
         if registry is not None:
             try:
                 registry.unlink()
