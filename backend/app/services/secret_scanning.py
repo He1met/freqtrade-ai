@@ -59,7 +59,52 @@ KEY_VALUE_PATTERN = re.compile(
     r"(?P<value>[^,#}\n]+)",
     re.IGNORECASE,
 )
+ANNOTATED_ASSIGNMENT_PATTERN = re.compile(
+    r"^\s*[\"'`]?"
+    r"(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)"
+    r"[\"'`]?\s*:\s*"
+    r"(?P<annotation>[A-Za-z_][A-Za-z0-9_.]*(?:\[[^\]]+\])?)"
+    r"\s*=\s*(?P<value>.+?)\s*$"
+)
+CHAINED_ASSIGNMENT_PATTERN = re.compile(
+    r"(?:\bAND\b|\bOR\b|#)\s*"
+    r"[\"'`]?(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)[\"'`]?"
+    r"\s*[:=]\s*(?P<value>[^,#}\n]+)",
+    re.IGNORECASE,
+)
 ENV_NAME_PATTERN = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+SECRET_LITERAL_PATTERN = re.compile(
+    r"""['"][^'"]*(?:sk-[A-Za-z0-9_-]{8,}|"""
+    r"""-----BEGIN|bearer\s+[A-Za-z0-9._-]{8,})[^'"]*['"]""",
+    re.IGNORECASE,
+)
+SECRET_TOKEN_PATTERN = re.compile(
+    r"(?:sk-[A-Za-z0-9_-]{8,}|-----BEGIN|bearer\s+[A-Za-z0-9._-]{8,})",
+    re.IGNORECASE,
+)
+AUTHORIZATION_METADATA_SAFE_VALUES = {
+    "secret_id": frozenset({"ACTIVE"}),
+    "authorization_schema_version": frozenset({"RISK_V1", "LEGACY"}),
+    "authorization_status": frozenset(
+        {
+            "ACTIVE",
+            "APPROVED",
+            "BLOCKED",
+            "CONSUMED",
+            "EXPIRED",
+            "PENDING_RISK",
+            "REVOKED",
+            "UNKNOWN_LEGACY",
+        }
+    ),
+    "authorization_contract": frozenset(
+        {
+            "LEGACY",
+            "OKX_DEMO_RISK_V1",
+            "RISK_V1",
+        }
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -212,6 +257,14 @@ def _scan_line(path: str, line_number: int, line: str) -> Iterable[SecretScanFin
     stripped = line.strip()
     if not stripped or stripped.startswith("#"):
         return
+    annotated = ANNOTATED_ASSIGNMENT_PATTERN.match(line)
+    if annotated is not None and _is_secret_key(annotated.group("key")):
+        key = annotated.group("key")
+        raw_value = annotated.group("value").strip()
+        if not _is_allowed_secret_reference(key, raw_value, line):
+            yield SecretScanFinding(path=path, line_number=line_number, key=key)
+        return
+    emitted: set[str] = set()
     for match in KEY_VALUE_PATTERN.finditer(line):
         key = match.group("key")
         raw_value = match.group("value").strip()
@@ -219,6 +272,16 @@ def _scan_line(path: str, line_number: int, line: str) -> Iterable[SecretScanFin
             continue
         if _is_allowed_secret_reference(key, raw_value, line):
             continue
+        emitted.add(_normalize(key))
+        yield SecretScanFinding(path=path, line_number=line_number, key=key)
+    for match in CHAINED_ASSIGNMENT_PATTERN.finditer(line):
+        key = match.group("key")
+        if not _is_secret_key(key) or _normalize(key) in emitted:
+            continue
+        raw_value = match.group("value").strip()
+        if _is_allowed_secret_reference(key, raw_value, line):
+            continue
+        emitted.add(_normalize(key))
         yield SecretScanFinding(path=path, line_number=line_number, key=key)
 
 
@@ -233,6 +296,13 @@ def _is_allowed_secret_reference(key: str, raw_value: str, line: str) -> bool:
         return True
     if _looks_like_code_expression(value):
         return True
+    if key_normalized in AUTHORIZATION_METADATA_SAFE_VALUES:
+        return _is_safe_authorization_metadata_value(
+            key_normalized,
+            raw_value,
+            value,
+            line,
+        )
     if key_normalized.endswith("_env") or "api_key_env" in key_normalized or "api_secret_env" in key_normalized:
         return _is_env_reference(value)
     if _is_env_reference(value):
@@ -246,6 +316,33 @@ def _is_allowed_secret_reference(key: str, raw_value: str, line: str) -> bool:
     if "must_not" in value_normalized or "should_not" in value_normalized:
         return True
     if "non_secret" in value_normalized or "not_a_secret" in value_normalized:
+        return True
+    return False
+
+
+def _is_safe_authorization_metadata_value(
+    key_normalized: str,
+    raw_value: str,
+    value: str,
+    line: str,
+) -> bool:
+    safe_values = AUTHORIZATION_METADATA_SAFE_VALUES[key_normalized]
+    if re.search(r"(?:\bAND\b|\bOR\b|#)", line, re.IGNORECASE):
+        return False
+    strict_literal = re.fullmatch(
+        r"""['"`]?(?P<value>[A-Z][A-Z0-9_]*)['"`]?\s*[;),]?""",
+        raw_value.strip(),
+    )
+    if (
+        strict_literal is not None
+        and strict_literal.group("value") in safe_values
+    ):
+        return True
+
+    if (
+        key_normalized == "authorization_schema_version"
+        and value == "intent.authorization_schema_version"
+    ):
         return True
     return False
 
@@ -275,6 +372,8 @@ def _is_secret_key(key: str) -> bool:
         return True
     if "private_key" in normalized or "privatekey" in normalized:
         return True
+    if "hmac_key" in normalized or "hmackey" in normalized:
+        return True
     if "authorization" in normalized:
         return True
     if "password" in parts or "passphrase" in parts or "secret" in parts:
@@ -297,6 +396,7 @@ def _looks_like_type_annotation(value: str) -> bool:
     normalized = value.strip()
     safe_literals = {
         "str",
+        "bytes",
         "string",
         "bool",
         "boolean",
@@ -318,6 +418,7 @@ def _looks_like_type_annotation(value: str) -> bool:
     prefixes = (
         "Optional[",
         "Literal[",
+        "Mapped[",
         "Field(",
         "list[",
         "dict[",
@@ -328,7 +429,11 @@ def _looks_like_type_annotation(value: str) -> bool:
         "Mapping[",
         "Union[",
     )
-    return normalized.startswith(prefixes)
+    return (
+        normalized.startswith(prefixes)
+        and "=" not in normalized
+        and "default" not in normalized.lower()
+    )
 
 
 def _looks_like_code_expression(value: str) -> bool:
@@ -340,12 +445,19 @@ def _looks_like_code_expression(value: str) -> bool:
         "self.",
         "value.",
         "payload.",
+        "excluded.",
         "re.compile",
         "field(",
         "field.default",
     )
     if lowered.startswith(prefixes):
         return True
+    if lowered.startswith("mapped_column("):
+        return (
+            re.search(r"\b(?:default|server_default)\s*=", lowered) is None
+            and SECRET_LITERAL_PATTERN.search(value) is None
+            and SECRET_TOKEN_PATTERN.search(value) is None
+        )
     if value.startswith(("[", "(", "{")):
         return True
     if "{" in value or "}" in value:

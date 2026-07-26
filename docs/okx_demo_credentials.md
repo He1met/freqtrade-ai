@@ -43,7 +43,8 @@ the old fingerprint item before running onboarding again.
 
 ## Read-only attestation
 
-`make okx-demo-preflight` reads the four Keychain items only at the runtime
+`make okx-demo-preflight` reads the four account Keychain items and the
+attestation HMAC proof key only at the runtime
 startup boundary and passes them only to the short-lived project adapter
 preflight child. That child signs one `GET /api/v5/account/config` request with
 the mandatory `x-simulated-trading: 1` header. Its environment does not inherit
@@ -57,6 +58,9 @@ The attestation is fail closed. It requires:
   Keychain fingerprint and is never rendered;
 - exactly `read_only,trade` permissions and no withdrawal permission;
 - Futures account level and `net_mode`.
+- the fixed Keychain service
+  `freqtrade-ai/okx-demo-attestation-proof-key`, provisioned only by
+  `make db-attestation-harden`.
 
 Transport errors, invalid JSON, non-zero OKX response codes, missing or multiple
 account records, unknown identity, excessive permissions, and account-mode

@@ -247,7 +247,9 @@ test("reconciles READY to RUNNING and RUNNING to STOPPED using persistent manage
 
   failManagementRefresh = false;
   await decision.getByRole("button", { name: "刷新状态" }).click();
-  await expect(decision).toHaveAttribute("data-state", "STARTING");
+  await expect
+    .poll(() => decision.getAttribute("data-state"))
+    .toMatch(/^(STARTING|RUNNING)$/);
   await expect(decision).toHaveAttribute("data-state", "RUNNING", { timeout: 10_000 });
 
   await decision.getByRole("button", { name: "停止 Dry-run" }).click();

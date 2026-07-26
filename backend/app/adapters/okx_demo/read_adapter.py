@@ -8,6 +8,11 @@ from urllib.parse import urlencode
 
 from pydantic import BaseModel, ValidationError
 
+from app.adapters.okx_demo.attestation_proof import (
+    ATTESTATION_PROOF_KEY_ENV,
+    AttestationProofKeyUnavailable,
+    require_attestation_proof_key,
+)
 from app.adapters.okx_demo.credentials import (
     OkxDemoCredentialProvider,
     OkxDemoCredentialsUnavailable,
@@ -947,6 +952,7 @@ def create_attested_okx_demo_read_adapter(
         REST_URL_ENV,
         *OKX_DEMO_CREDENTIAL_ENV_NAMES,
         OKX_DEMO_ACCOUNT_FINGERPRINT_ENV,
+        ATTESTATION_PROOF_KEY_ENV,
     )
     snapshot = {name: environment.get(name, "") for name in names}
     try:
@@ -957,17 +963,84 @@ def create_attested_okx_demo_read_adapter(
             raise OkxDemoPreflightBlocked("attestation clock is not timezone-aware")
         attested_at = attested_at.astimezone(timezone.utc)
         expires_at = attested_at + timedelta(seconds=ATTESTATION_TTL_SECONDS)
+        attestation_hmac_key = require_attestation_proof_key(snapshot)
+        from app.services.risk_chain import (
+            _issue_attested_session_capability,
+            _normalize_attested_snapshot,
+            _revoke_attested_session,
+            _revoke_attested_session_capability,
+            _write_attested_snapshot,
+        )
+
+        risk_capability = _issue_attested_session_capability(
+            attestation_hmac_key=attestation_hmac_key,
+            pinned_fingerprint_sha256=expected_fingerprint,
+            created_at=attested_at,
+            expires_at=expires_at,
+        )
 
         class AttestedSession:
             def __init__(self) -> None:
                 self.attested_at = attested_at
                 self.expires_at = expires_at
-                self._environment = dict(snapshot)
+                self._environment = {
+                    name: value
+                    for name, value in snapshot.items()
+                    if name != ATTESTATION_PROOF_KEY_ENV
+                }
                 self._revoked = False
+                self._revoke_session_factory = None
+                self._durability_failed = False
 
-            def revoke(self) -> None:
+            def bind_database(self, db) -> None:
+                if self._revoke_session_factory is None:
+                    from sqlalchemy.orm import sessionmaker
+
+                    self._revoke_session_factory = sessionmaker(
+                        bind=db.get_bind(),
+                        expire_on_commit=False,
+                    )
+
+            def revoke(self, reason: str, *, db=None) -> None:
+                if self._durability_failed:
+                    raise OkxDemoCredentialsUnavailable(
+                        "OKX_DEMO attestation durable revoke is unavailable"
+                    )
+                if self._revoked:
+                    return
+                try:
+                    if db is not None:
+                        _revoke_attested_session(
+                            db,
+                            risk_capability,
+                            reason=reason,
+                            revoked_at=_utc_now(),
+                        )
+                    elif self._revoke_session_factory is not None:
+                        revoke_db = self._revoke_session_factory()
+                        try:
+                            _revoke_attested_session(
+                                revoke_db,
+                                risk_capability,
+                                reason=reason,
+                                revoked_at=_utc_now(),
+                            )
+                            revoke_db.commit()
+                        except BaseException:
+                            revoke_db.rollback()
+                            raise
+                        finally:
+                            revoke_db.close()
+                except BaseException:
+                    self._durability_failed = True
+                    self._environment.clear()
+                    _revoke_attested_session_capability(risk_capability)
+                    raise OkxDemoCredentialsUnavailable(
+                        "OKX_DEMO attestation durable revoke failed"
+                    ) from None
                 self._revoked = True
                 self._environment.clear()
+                _revoke_attested_session_capability(risk_capability)
 
             def authorization_headers(
                 self,
@@ -983,7 +1056,7 @@ def create_attested_okx_demo_read_adapter(
                     or now.tzinfo is None
                     or now.astimezone(timezone.utc) >= self.expires_at
                 ):
-                    self.revoke()
+                    self.revoke("EXPIRED")
                     raise OkxDemoCredentialsUnavailable(
                         "OKX_DEMO account attestation expired or revoked"
                     )
@@ -1010,7 +1083,7 @@ def create_attested_okx_demo_read_adapter(
                             expected_fingerprint=expected_fingerprint,
                         )
                     except OkxDemoPreflightBlocked:
-                        session.revoke()
+                        session.revoke("IDENTITY_DRIFT")
                         raise
 
                 engine = object.__new__(OkxDemoReadAdapter)
@@ -1021,6 +1094,41 @@ def create_attested_okx_demo_read_adapter(
                 engine._ttls = dict(DEFAULT_TTLS)
                 engine._account_config_validator = validate_current_account
                 self._engine = engine
+                self._attested_session = session
+
+            def _persist_risk_snapshot(
+                self,
+                db,
+                *,
+                kind,
+                content,
+                observed_at,
+                snapshot_expires_at,
+            ):
+                self._attested_session.bind_database(db)
+                try:
+                    normalized = _normalize_attested_snapshot(
+                        risk_capability,
+                        kind=kind,
+                        content=content,
+                        observed_at=observed_at,
+                        expires_at=snapshot_expires_at,
+                    )
+                    return _write_attested_snapshot(
+                        db,
+                        risk_capability,
+                        normalized,
+                        now=_utc_now(),
+                    )
+                except BaseException:
+                    try:
+                        self._attested_session.revoke("WRITE_FAILURE", db=db)
+                    except OkxDemoCredentialsUnavailable:
+                        pass
+                    raise
+
+            def close(self) -> None:
+                self._attested_session.revoke("FACTORY_CLOSE")
 
             def instruments(self, inst_id=None):
                 return self._engine.instruments(inst_id)
@@ -1075,7 +1183,7 @@ def create_attested_okx_demo_read_adapter(
                 )
 
         return ProductionReadClient()
-    except OkxDemoPreflightBlocked:
+    except (OkxDemoPreflightBlocked, AttestationProofKeyUnavailable):
         raise OkxDemoCredentialsUnavailable(
             "OKX_DEMO credential provider account attestation failed"
         ) from None

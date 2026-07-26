@@ -1,4 +1,4 @@
-.PHONY: help bootstrap doctor up status down logs verify okx-demo-pin-account okx-demo-preflight okx-demo-canary autostart-install autostart-status autostart-logs autostart-restart autostart-uninstall db-backup db-init db-verify test
+.PHONY: help bootstrap doctor up status down logs verify okx-demo-pin-account okx-demo-preflight okx-demo-canary autostart-install autostart-status autostart-logs autostart-restart autostart-uninstall db-backup db-init db-verify db-attestation-harden test
 
 DATABASE_URL ?= postgresql+psycopg://freqtrade:change_me@localhost:5432/freqtrade_ai
 
@@ -10,6 +10,7 @@ help:
 	@printf '%s\n' 'OKX Demo canary: make okx-demo-canary CANARY_FLAGS=--allow-demo-order'
 	@printf '%s\n' 'macOS autostart: make autostart-install | autostart-status | autostart-logs | autostart-restart | autostart-uninstall'
 	@printf '%s\n' 'The managed runtime uses only local PostgreSQL database freqtrade_ai.'
+	@printf '%s\n' 'One-time peer-admin attestation ACL: make db-attestation-harden'
 
 bootstrap:
 	python3 scripts/local_runtime.py bootstrap
@@ -65,6 +66,9 @@ db-init:
 
 db-verify:
 	cd backend && . .venv/bin/activate && python -m app.db.migrate verify --database-url "$(DATABASE_URL)"
+
+db-attestation-harden:
+	cd backend && . .venv/bin/activate && DATABASE_URL="$(DATABASE_URL)" python ../scripts/harden_okx_demo_attestation.py
 
 test:
 	cd backend && . .venv/bin/activate && pytest

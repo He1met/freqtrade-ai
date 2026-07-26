@@ -2,11 +2,15 @@ import pytest
 
 from app.core.exceptions import ConfigurationError
 from app.db.migrations import (
+    ATTESTED_SESSION_BASE_VERSION,
     EARLY_TARGET_LINEAGE_VERSION,
     LEGACY_SCHEMA_VERSION,
     PREVIOUS_SCHEMA_VERSION,
+    RISK_CHAIN_BASE_VERSION,
+    RISK_CHAIN_HARDENING_BASE_VERSION,
     SCHEMA_VERSION,
     TARGET_LINEAGE_BASE_VERSION,
+    TRUSTED_SNAPSHOT_BASE_VERSION,
     psql_database_url,
     schema_problems,
     verify_schema,
@@ -44,4 +48,8 @@ def test_schema_version_is_explicit_and_stable() -> None:
     assert PREVIOUS_SCHEMA_VERSION == "20260722_01"
     assert TARGET_LINEAGE_BASE_VERSION == "20260723_01"
     assert EARLY_TARGET_LINEAGE_VERSION == "20260727_01"
-    assert SCHEMA_VERSION == "20260727_02"
+    assert RISK_CHAIN_BASE_VERSION == "20260727_02"
+    assert RISK_CHAIN_HARDENING_BASE_VERSION == "20260727_03"
+    assert TRUSTED_SNAPSHOT_BASE_VERSION == "20260727_04"
+    assert ATTESTED_SESSION_BASE_VERSION == "20260727_05"
+    assert SCHEMA_VERSION == "20260727_08"

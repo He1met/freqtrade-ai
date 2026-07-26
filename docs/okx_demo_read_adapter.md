@@ -63,8 +63,10 @@ attestation session remain closure-local. The session expires after 60 seconds
 and revalidates every
 `account_config` response against the original fingerprint and account-safety
 contract. Identity drift permanently revokes the session, so every later
-private read blocks before transport. Other private reads are allowed only
-inside that TTL.
+private read blocks before transport. Identity drift, expiry, factory close,
+and write failure persist a signed revoke reason through the attestor-owned
+database function; failure to persist that revoke permanently blocks the
+writer. Other private reads are allowed only inside that TTL.
 
 Observation timestamps may be at most five seconds ahead of the local
 timezone-aware clock. Funding settlement timestamps are treated as schedules,
@@ -72,7 +74,10 @@ not observation freshness: they must stay within 24 hours of now and remain
 ordered, while snapshot freshness anchors to `received_at`.
 
 The factory is used only inside the short-lived OKX adapter child. It does not
-read Keychain, dotenv, or inherited shell credentials itself. Authorization
+read Keychain, dotenv, or inherited shell credentials itself; the controlled
+startup boundary supplies a 32-byte proof key solely for signing the canonical
+session payload, and the factory drops that key from its retained credential
+environment immediately. Authorization
 headers are passed directly to the injected transport and never enter snapshots
 or errors.
 

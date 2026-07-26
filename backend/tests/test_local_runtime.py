@@ -289,6 +289,7 @@ def test_okx_adapter_is_the_only_environment_receiving_complete_bundle(monkeypat
         "OKX_DEMO_API_SECRET": "adapter-secret",
         "OKX_DEMO_API_PASSPHRASE": "adapter-passphrase",
         "OKX_DEMO_ACCOUNT_FINGERPRINT": "a" * 64,
+        "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY": "74" * 32,
     }
     for key, value in bundle.items():
         monkeypatch.setenv(key, "stale-" + value)
@@ -522,6 +523,11 @@ def test_okx_preflight_child_receives_bundle_and_parent_returns_only_attestation
         ),
     )
     monkeypatch.setattr(runtime, "backend_python", lambda: Path("/venv/bin/python"))
+    monkeypatch.setattr(
+        runtime,
+        "_read_macos_keychain_item",
+        lambda service: "74" * 32,
+    )
 
     def fake_run(command, **kwargs):
         captured["command"] = command
@@ -546,6 +552,12 @@ def test_okx_preflight_child_receives_bundle_and_parent_returns_only_attestation
         "OKX_DEMO_API_PASSPHRASE": "child-passphrase",
         "OKX_DEMO_ACCOUNT_FINGERPRINT": "c" * 64,
     }
+    assert (
+        captured["environment"][
+            "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"
+        ]
+        == "74" * 32
+    )
     assert payload["status"] == "READY"
     assert payload["credentials"]["source"] == "keychain"
     assert not any(
