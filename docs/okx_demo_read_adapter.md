@@ -55,11 +55,21 @@ account level, and `net_mode` all match. A stale pin paired with another Demo
 key therefore blocks before any target private read. The session signs only
 `GET` with an empty body and cannot select another target or REST origin.
 
-Ordinary `OkxDemoReadAdapter` construction accepts only injected non-production
-transports and can never select `UrllibOkxReadTransport`. The attested session
-is closure-local, expires after 60 seconds, and revalidates every
+Ordinary `OkxDemoReadAdapter` construction is an offline normalizer that accepts
+only already-built response values; it has no transport injection parameter and
+cannot compose or wrap `UrllibOkxReadTransport`. The production factory returns
+the read-only `OkxDemoReadClient` protocol while its real transport and
+attestation session remain closure-local. The session expires after 60 seconds
+and revalidates every
 `account_config` response against the original fingerprint and account-safety
-contract. Other private reads are allowed only inside that TTL.
+contract. Identity drift permanently revokes the session, so every later
+private read blocks before transport. Other private reads are allowed only
+inside that TTL.
+
+Observation timestamps may be at most five seconds ahead of the local
+timezone-aware clock. Funding settlement timestamps are treated as schedules,
+not observation freshness: they must stay within 24 hours of now and remain
+ordered, while snapshot freshness anchors to `received_at`.
 
 The factory is used only inside the short-lived OKX adapter child. It does not
 read Keychain, dotenv, or inherited shell credentials itself. Authorization
