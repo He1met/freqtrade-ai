@@ -52,8 +52,8 @@ prevents exchange support from being mistaken for permission to submit orders.
 
 ## Migration and acceptance
 
-The single schema version advances from `20260723_01` to `20260727_01` in one
-PostgreSQL transaction:
+The final schema version is `20260727_02`. Pre-lineage versions advance
+directly to it in one PostgreSQL transaction:
 
 1. create and seed the scope catalog;
 2. add nullable lineage columns to existing roots;
@@ -64,6 +64,15 @@ PostgreSQL transaction:
 7. verify columns, nullability, foreign keys, exact index
    uniqueness/predicates, normalized critical check definitions, and all
    unique constraints before recording the new version.
+
+The previously published `20260727_01` identifier remains an immutable
+historical version. Its dedicated atomic migration adds and backfills
+`exchange_capable` and `order_submission_authorized`, changes the catalog to
+the current non-authorized flags, replaces the old length-only `clOrdId`
+checks, and replaces the permissive manifest check. Existing non-local
+executable-manifest flags are downgraded to false; incompatible historical
+client order IDs block and roll back the entire migration instead of being
+rewritten.
 
 SQLite tests validate repository, rollback, and dialect-specific constraint
 behavior. PostgreSQL acceptance upgrades a frozen pre-lineage DDL snapshot with
