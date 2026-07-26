@@ -16,6 +16,10 @@ from app.adapters.okx_demo.read_adapter import (
     OkxDemoReadAdapter,
     create_attested_okx_demo_read_adapter,
 )
+from app.adapters.okx_demo.server_factory import (
+    OkxDemoServerSession,
+    create_okx_demo_server_session,
+)
 from app.adapters.okx_demo.transport import (
     OkxReadHttpResponse,
     OkxReadTransport,
@@ -29,6 +33,7 @@ __all__ = [
     "OkxDemoCredentialsUnavailable",
     "OkxDemoReadAdapter",
     "OkxDemoReadClient",
+    "OkxDemoServerSession",
     "OkxReadAdapterError",
     "OkxReadHttpResponse",
     "OkxReadSnapshot",
@@ -36,4 +41,5 @@ __all__ = [
     "SnapshotMetadata",
     "UrllibOkxReadTransport",
     "create_attested_okx_demo_read_adapter",
+    "create_okx_demo_server_session",
 ]
