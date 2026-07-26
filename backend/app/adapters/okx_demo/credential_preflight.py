@@ -12,7 +12,9 @@ import sys
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Mapping, Optional
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request
+
+from app.adapters.okx_demo.secure_http import build_direct_no_redirect_opener
 
 
 EXECUTION_TARGET_ENV = "FREQTRADE_AI_EXECUTION_TARGET"
@@ -59,8 +61,15 @@ def _timestamp() -> str:
     )
 
 
-def _signature(secret: str, timestamp: str) -> str:
-    message = "{}GET{}".format(timestamp, ACCOUNT_CONFIG_PATH)
+def _signature(
+    secret: str,
+    timestamp: str,
+    *,
+    method: str,
+    request_path: str,
+    body: str,
+) -> str:
+    message = "{}{}{}{}".format(timestamp, method, request_path, body)
     digest = hmac.new(
         secret.encode("utf-8"),
         message.encode("utf-8"),
@@ -87,39 +96,105 @@ def account_fingerprint(account: Mapping[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def build_account_config_request(
+def _build_demo_authorization_headers(
     environment: Mapping[str, str],
     *,
+    method: str,
+    request_path: str,
+    body: str,
     timestamp: Optional[str] = None,
-) -> Request:
+) -> Dict[str, str]:
+    """Sign one GET-only OKX Demo request inside the credential-bearing child."""
+
     if environment.get(EXECUTION_TARGET_ENV) != "OKX_DEMO":
         raise OkxDemoPreflightBlocked("execution target is not the sole OKX_DEMO target")
     if environment.get(ALLOW_REAL_FUNDS_ENV) != "false":
         raise OkxDemoPreflightBlocked("real-fund access is not explicitly disabled")
     if environment.get(REST_URL_ENV) != OKX_DEMO_REST_URL:
         raise OkxDemoPreflightBlocked("OKX Demo REST URL is missing or unknown")
+    if method != "GET" or body != "":
+        raise OkxDemoPreflightBlocked("OKX Demo credential boundary permits GET only")
+    if (
+        not isinstance(request_path, str)
+        or not request_path.startswith("/api/v5/")
+        or "://" in request_path
+        or "#" in request_path
+        or any(character in request_path for character in ("\x00", "\r", "\n"))
+    ):
+        raise OkxDemoPreflightBlocked("OKX Demo request path is invalid")
 
     credential_parts = tuple(
         _required_environment(environment, name)
         for name in OKX_DEMO_CREDENTIAL_ENV_NAMES
     )
     request_timestamp = timestamp or _timestamp()
+    if (
+        not isinstance(request_timestamp, str)
+        or not request_timestamp
+        or any(
+            character in request_timestamp
+            for character in ("\x00", "\r", "\n")
+        )
+    ):
+        raise OkxDemoPreflightBlocked("OKX Demo request timestamp is invalid")
+    return dict(
+        (
+            ("OK-ACCESS-KEY", credential_parts[0]),
+            (
+                "OK-ACCESS-SIGN",
+                _signature(
+                    credential_parts[1],
+                    request_timestamp,
+                    method=method,
+                    request_path=request_path,
+                    body=body,
+                ),
+            ),
+            ("OK-ACCESS-TIMESTAMP", request_timestamp),
+            ("OK-ACCESS-PASSPHRASE", credential_parts[2]),
+        )
+    )
+
+
+def require_pinned_account_fingerprint(environment: Mapping[str, str]) -> str:
+    """Require the canonical pin before an authenticated adapter read is signed."""
+
+    fingerprint = _required_environment(
+        environment,
+        OKX_DEMO_ACCOUNT_FINGERPRINT_ENV,
+    )
+    if (
+        len(fingerprint) != 64
+        or any(character not in "0123456789abcdef" for character in fingerprint)
+    ):
+        raise OkxDemoPreflightBlocked(
+            "OKX Demo account fingerprint is missing or invalid"
+        )
+    return fingerprint
+
+
+def build_account_config_request(
+    environment: Mapping[str, str],
+    *,
+    timestamp: Optional[str] = None,
+) -> Request:
+    headers = _build_demo_authorization_headers(
+        environment,
+        method="GET",
+        request_path=ACCOUNT_CONFIG_PATH,
+        body="",
+        timestamp=timestamp,
+    )
+    headers.update(
+        {
+            "Accept": "application/json",
+            SIMULATED_TRADING_HEADER[0]: SIMULATED_TRADING_HEADER[1],
+        }
+    )
     return Request(
         OKX_DEMO_REST_URL + ACCOUNT_CONFIG_PATH,
         method="GET",
-        headers=dict(
-            (
-                ("Accept", "application/json"),
-                ("OK-ACCESS-KEY", credential_parts[0]),
-                (
-                    "OK-ACCESS-SIGN",
-                    _signature(credential_parts[1], request_timestamp),
-                ),
-                ("OK-ACCESS-TIMESTAMP", request_timestamp),
-                ("OK-ACCESS-PASSPHRASE", credential_parts[2]),
-                SIMULATED_TRADING_HEADER,
-            )
-        ),
+        headers=headers,
     )
 
 
@@ -202,10 +277,11 @@ def _ready_attestation() -> Dict[str, Any]:
 def _fetch_account_config(
     request: Request,
     *,
-    opener: Callable[..., Any],
+    opener: Optional[Callable[..., Any]],
 ) -> Any:
+    active_opener = opener or build_direct_no_redirect_opener().open
     try:
-        with opener(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+        with active_opener(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
             if response.status < 200 or response.status >= 300:
                 raise OkxDemoPreflightBlocked(
                     "OKX Demo account attestation transport failed"
@@ -226,14 +302,11 @@ def _fetch_account_config(
 def run_preflight(
     environment: Optional[Mapping[str, str]] = None,
     *,
-    opener: Callable[..., Any] = urlopen,
+    opener: Optional[Callable[..., Any]] = None,
 ) -> Dict[str, Any]:
     active_environment = os.environ if environment is None else environment
     request = build_account_config_request(active_environment)
-    expected_fingerprint = _required_environment(
-        active_environment,
-        OKX_DEMO_ACCOUNT_FINGERPRINT_ENV,
-    )
+    expected_fingerprint = require_pinned_account_fingerprint(active_environment)
     payload = _fetch_account_config(request, opener=opener)
     return validate_account_config(
         payload,
@@ -379,7 +452,7 @@ def write_account_fingerprint_pin(
 def run_account_pin(
     environment: Optional[Mapping[str, str]] = None,
     *,
-    opener: Callable[..., Any] = urlopen,
+    opener: Optional[Callable[..., Any]] = None,
     pin_exists: Callable[[], bool] = account_fingerprint_pin_exists,
     pin_writer: Callable[[str], None] = write_account_fingerprint_pin,
 ) -> Dict[str, Any]:

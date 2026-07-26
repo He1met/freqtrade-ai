@@ -37,6 +37,7 @@ they are not a current source of work status.
 - [OKX Demo Keychain credential boundary](okx_demo_credentials.md)
 - [execution_target.md](execution_target.md)
 - [execution_target_lineage.md](execution_target_lineage.md)
+- [okx_demo_read_adapter.md](okx_demo_read_adapter.md)
 - [phase9_operational_readiness_plan.md](phase9_operational_readiness_plan.md)
 - [phase9_acceptance.md](phase9_acceptance.md)
 - [phase9_deepseek_single_e2e.md](phase9_deepseek_single_e2e.md)

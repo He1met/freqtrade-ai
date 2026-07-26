@@ -1,11 +1,16 @@
 import json
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import shlex
 import subprocess
 import sys
+from threading import Thread
+from urllib.error import HTTPError
+from urllib.request import Request
 
 import pytest
 
 from app.adapters.okx_demo import credential_preflight as preflight
+from app.adapters.okx_demo.secure_http import build_direct_no_redirect_opener
 
 
 def valid_environment() -> dict[str, str]:
@@ -52,6 +57,104 @@ def test_request_is_signed_for_fixed_demo_account_config_contract() -> None:
     assert headers["ok-access-passphrase"] == "test-passphrase"
     assert headers["ok-access-timestamp"] == "2026-07-27T01:02:03.004Z"
     assert headers["ok-access-sign"]
+
+
+def test_shared_signature_boundary_is_get_only_and_signs_the_exact_query_path() -> None:
+    headers = preflight._build_demo_authorization_headers(
+        valid_environment(),
+        method="GET",
+        request_path="/api/v5/account/balance?ccy=USDT",
+        body="",
+        timestamp="2026-07-27T01:02:03.004Z",
+    )
+
+    assert set(headers) == {
+        "OK-ACCESS-KEY",
+        "OK-ACCESS-SIGN",
+        "OK-ACCESS-TIMESTAMP",
+        "OK-ACCESS-PASSPHRASE",
+    }
+    assert headers["OK-ACCESS-KEY"] == "test-api-key"
+    assert headers["OK-ACCESS-PASSPHRASE"] == "test-passphrase"
+    assert "x-simulated-trading" not in headers
+
+
+@pytest.mark.parametrize(
+    ("method", "request_path", "body"),
+    [
+        ("POST", "/api/v5/trade/order", ""),
+        ("GET", "/api/v5/account/balance", "{}"),
+        ("GET", "https://example.invalid/api/v5/account/balance", ""),
+        ("GET", "/api/v5/account/balance\nInjected: value", ""),
+    ],
+)
+def test_shared_signature_boundary_rejects_write_or_untrusted_request_contract(
+    method: str,
+    request_path: str,
+    body: str,
+) -> None:
+    with pytest.raises(preflight.OkxDemoPreflightBlocked):
+        preflight._build_demo_authorization_headers(
+            valid_environment(),
+            method=method,
+            request_path=request_path,
+            body=body,
+        )
+
+
+def test_direct_opener_ignores_proxy_env_and_never_forwards_auth_on_302(
+    monkeypatch,
+) -> None:
+    observed = {"source": 0, "sink": 0}
+
+    class SinkHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            observed["sink"] += 1
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *_args):
+            return
+
+    sink = ThreadingHTTPServer(("127.0.0.1", 0), SinkHandler)
+
+    class RedirectHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            observed["source"] += 1
+            assert self.headers.get("OK-ACCESS-SIGN") == "test-signature"
+            self.send_response(302)
+            self.send_header(
+                "Location",
+                "http://127.0.0.1:{}/sink".format(sink.server_port),
+            )
+            self.end_headers()
+
+        def log_message(self, *_args):
+            return
+
+    source = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+    threads = [
+        Thread(target=server.serve_forever, daemon=True)
+        for server in (source, sink)
+    ]
+    for thread in threads:
+        thread.start()
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
+    try:
+        request = Request(
+            "http://127.0.0.1:{}/start".format(source.server_port),
+            headers={"OK-ACCESS-SIGN": "test-signature"},
+        )
+        with pytest.raises(HTTPError) as redirected:
+            build_direct_no_redirect_opener().open(request, timeout=2)
+        assert redirected.value.code == 302
+        assert observed == {"source": 1, "sink": 0}
+    finally:
+        source.shutdown()
+        sink.shutdown()
+        source.server_close()
+        sink.server_close()
 
 
 @pytest.mark.parametrize(
