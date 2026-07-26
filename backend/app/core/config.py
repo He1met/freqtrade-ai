@@ -14,6 +14,7 @@ from app.core.execution_target import (
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 TEST_DISABLE_ENV_FILE_ENV = "FREQTRADE_AI_TEST_DISABLE_ENV_FILE"
+DISABLE_ENV_FILE_ENV = "FREQTRADE_AI_DISABLE_ENV_FILE"
 
 
 class Settings(BaseModel):
@@ -61,7 +62,10 @@ def load_app_yaml(path: Path) -> dict:
 
 @lru_cache
 def get_settings() -> Settings:
-    if os.getenv(TEST_DISABLE_ENV_FILE_ENV) != "1":
+    if (
+        os.getenv(DISABLE_ENV_FILE_ENV) != "1"
+        and os.getenv(TEST_DISABLE_ENV_FILE_ENV) != "1"
+    ):
         load_env_file(REPO_ROOT / ".env")
     app_config = load_app_yaml(REPO_ROOT / "config" / "app.yaml")
 
