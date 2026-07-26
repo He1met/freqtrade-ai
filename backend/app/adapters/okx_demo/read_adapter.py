@@ -7,6 +7,8 @@ from typing import Any, Callable, Mapping, Optional, Protocol, Sequence, Union
 from urllib.parse import urlencode
 
 from pydantic import BaseModel, ValidationError
+from sqlalchemy.engine import Connection
+from sqlalchemy.orm import Session
 
 from app.adapters.okx_demo.attestation_proof import (
     ATTESTATION_PROOF_KEY_ENV,
@@ -856,7 +858,9 @@ class OkxDemoReadAdapter:
             state=item["state"],
             side=item["side"],
             position_side=item["posSide"],
+            margin_mode=item.get("tdMode") or None,
             order_type=item["ordType"],
+            reduce_only=_optional_boolean(item.get("reduceOnly")),
             price=_optional_decimal(item.get("px")),
             size=Decimal(item["sz"]),
             accumulated_fill_size=Decimal(item.get("accFillSz") or "0"),
@@ -939,6 +943,61 @@ class OkxDemoReadAdapter:
                 message="OKX response received_at must be timezone-aware",
             )
         return value.astimezone(timezone.utc)
+
+
+class _AttestedWriterCredentialHandle:
+    """Sealed wrapper emitted only with a successful production attestation."""
+
+    def __init__(self, _provider: object) -> None:
+        raise OkxDemoCredentialsUnavailable(
+            "OKX_DEMO writer credential handle requires production attestation"
+        )
+
+    @classmethod
+    def _from_attested_session(
+        cls,
+        provider: OkxDemoCredentialProvider,
+    ) -> "_AttestedWriterCredentialHandle":
+        handle = object.__new__(cls)
+        handle.__provider = provider
+        handle.__revoked = False
+        return handle
+
+    def active(self) -> bool:
+        return not self.__revoked
+
+    def bind_database(self, db: Session) -> None:
+        bind = db.get_bind()
+        if not isinstance(bind, Connection):
+            raise OkxDemoCredentialsUnavailable(
+                "OKX_DEMO durable revoke requires a pinned database connection"
+            )
+        independent_binding = Session(bind=bind.engine)
+        try:
+            self.__provider.bind_database(independent_binding)
+        finally:
+            independent_binding.close()
+
+    def revoke(self, reason: str) -> None:
+        self.__revoked = True
+        self.__provider.revoke(reason)
+
+    def authorization_headers(
+        self,
+        *,
+        method: str,
+        request_path: str,
+        body: str,
+    ) -> Mapping[str, str]:
+        if self.__revoked:
+            raise OkxDemoCredentialsUnavailable(
+                "OKX_DEMO attested credential session is revoked"
+            )
+        return self.__provider.authorization_headers(
+            method=method,
+            request_path=request_path,
+            body=body,
+        )
 
 
 def create_attested_okx_demo_read_adapter(
@@ -1095,6 +1154,11 @@ def create_attested_okx_demo_read_adapter(
                 engine._account_config_validator = validate_current_account
                 self._engine = engine
                 self._attested_session = session
+                self._writer_credential_handle = (
+                    _AttestedWriterCredentialHandle._from_attested_session(
+                        session
+                    )
+                )
 
             def _persist_risk_snapshot(
                 self,
@@ -1206,3 +1270,13 @@ def _optional_decimal(value: Any) -> Optional[Decimal]:
     if value in (None, ""):
         return None
     return Decimal(str(value))
+
+
+def _optional_boolean(value: Any) -> Optional[bool]:
+    if value in (None, ""):
+        return None
+    if value is True or value == "true":
+        return True
+    if value is False or value == "false":
+        return False
+    raise ValueError("boolean field is malformed")
