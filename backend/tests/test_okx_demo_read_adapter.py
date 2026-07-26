@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import inspect
 import json
 from typing import Mapping, Optional
 
@@ -12,10 +13,11 @@ from app.adapters.okx_demo import (
     OkxReadAdapterError,
     OkxReadHttpResponse,
     UrllibOkxReadTransport,
-    attest_okx_demo_credential_provider,
+    create_attested_okx_demo_read_adapter,
 )
 from app.adapters.okx_demo import credential_preflight as preflight
 from app.adapters.okx_demo import credentials as credential_boundary
+from app.adapters.okx_demo import read_adapter as read_boundary
 
 
 NOW = datetime(2026, 7, 27, 8, 0, tzinfo=timezone.utc)
@@ -24,9 +26,16 @@ OLD_TS = str(int((NOW - timedelta(hours=1)).timestamp() * 1000))
 
 
 class RecordedTransport:
-    def __init__(self, payloads=None, *, status_code: int = 200) -> None:
+    def __init__(
+        self,
+        payloads=None,
+        *,
+        status_code: int = 200,
+        received_at: datetime = NOW,
+    ) -> None:
         self.payloads = list(payloads or [])
         self.status_code = status_code
+        self.received_at = received_at
         self.calls: list[dict[str, object]] = []
 
     def get(
@@ -51,7 +60,7 @@ class RecordedTransport:
         return OkxReadHttpResponse(
             status_code=self.status_code,
             payload=payload,
-            received_at=NOW,
+            received_at=self.received_at,
         )
 
 
@@ -140,7 +149,7 @@ def attestation_opener(account: Mapping[str, str]):
 
 def install_attestation(monkeypatch, account: Mapping[str, str]) -> None:
     monkeypatch.setattr(
-        credential_boundary,
+        read_boundary,
         "run_preflight",
         lambda environment: preflight.run_preflight(
             environment,
@@ -177,29 +186,43 @@ def test_attested_provider_reuses_443_get_only_signature_boundary(
         "_timestamp",
         lambda: "2026-07-27T01:02:03.004Z",
     )
-    provider = attest_okx_demo_credential_provider(environment)
-    environment["OKX_DEMO_API_SECRET"] = "swapped-after-attestation"
-
-    headers = provider.authorization_headers(
-        method="GET",
-        request_path="/api/v5/account/balance?ccy=USDT",
-        body="",
+    monkeypatch.setattr(read_boundary, "_utc_now", lambda: NOW)
+    target_transport = RecordedTransport(
+        [envelope([{"uTime": FRESH_TS, "totalEq": "1", "details": []}])]
     )
+    monkeypatch.setattr(
+        read_boundary,
+        "UrllibOkxReadTransport",
+        lambda: target_transport,
+    )
+    instance = create_attested_okx_demo_read_adapter(environment)
+    environment["OKX_DEMO_API_SECRET"] = "swapped-after-attestation"
+    instance.balance("USDT")
+    headers = target_transport.calls[0]["headers"]
 
-    assert set(headers) == {
+    auth_headers = {
+        name: headers[name]
+        for name in (
+            "OK-ACCESS-KEY",
+            "OK-ACCESS-SIGN",
+            "OK-ACCESS-TIMESTAMP",
+            "OK-ACCESS-PASSPHRASE",
+        )
+    }
+    assert set(auth_headers) == {
         "OK-ACCESS-KEY",
         "OK-ACCESS-SIGN",
         "OK-ACCESS-TIMESTAMP",
         "OK-ACCESS-PASSPHRASE",
     }
-    assert headers["OK-ACCESS-KEY"] == "temporary-api-key"
-    assert headers["OK-ACCESS-PASSPHRASE"] == "temporary-passphrase"
-    assert headers["OK-ACCESS-TIMESTAMP"] == "2026-07-27T01:02:03.004Z"
+    assert auth_headers["OK-ACCESS-KEY"] == "temporary-api-key"
+    assert auth_headers["OK-ACCESS-PASSPHRASE"] == "temporary-passphrase"
+    assert auth_headers["OK-ACCESS-TIMESTAMP"] == "2026-07-27T01:02:03.004Z"
     assert (
-        headers["OK-ACCESS-SIGN"]
+        auth_headers["OK-ACCESS-SIGN"]
         == "0PFbuXrPz3ectz3yPA0AU6UgyJn7YQwrxkz6ZW7DhCs="
     )
-    assert "x-simulated-trading" not in headers
+    assert headers["x-simulated-trading"] == "1"
 
 
 @pytest.mark.parametrize(
@@ -226,33 +249,12 @@ def test_attested_provider_factory_fails_closed_without_leaking_bundle(
     install_attestation(monkeypatch, account)
 
     with pytest.raises(OkxDemoCredentialsUnavailable) as blocked:
-        attest_okx_demo_credential_provider(environment)
+        create_attested_okx_demo_read_adapter(environment)
 
     rendered = str(blocked.value)
     assert "temporary-api-key" not in rendered
     assert "temporary-api-secret" not in rendered
     assert "temporary-passphrase" not in rendered
-
-
-@pytest.mark.parametrize(
-    ("method", "body"),
-    [("POST", ""), ("GET", "{}")],
-)
-def test_attested_provider_still_rejects_write_signatures(
-    monkeypatch,
-    method: str,
-    body: str,
-) -> None:
-    account = attested_account()
-    install_attestation(monkeypatch, account)
-    provider = attest_okx_demo_credential_provider(ephemeral_environment(account))
-
-    with pytest.raises(OkxDemoCredentialsUnavailable):
-        provider.authorization_headers(
-            method=method,
-            request_path="/api/v5/account/balance",
-            body=body,
-        )
 
 
 def test_wrong_account_credentials_block_before_target_private_read(
@@ -266,9 +268,85 @@ def test_wrong_account_credentials_block_before_target_private_read(
     install_attestation(monkeypatch, wrong_account)
 
     with pytest.raises(OkxDemoCredentialsUnavailable):
-        attest_okx_demo_credential_provider(ephemeral_environment(expected_account))
+        create_attested_okx_demo_read_adapter(
+            ephemeral_environment(expected_account)
+        )
 
     assert target_transport.calls == []
+
+
+def test_attested_session_expires_before_private_transport(monkeypatch) -> None:
+    account = attested_account()
+    current = [NOW]
+    target_transport = RecordedTransport(
+        [envelope([{"uTime": FRESH_TS, "totalEq": "1", "details": []}])]
+    )
+    install_attestation(monkeypatch, account)
+    monkeypatch.setattr(read_boundary, "_utc_now", lambda: current[0])
+    monkeypatch.setattr(
+        read_boundary,
+        "UrllibOkxReadTransport",
+        lambda: target_transport,
+    )
+    instance = create_attested_okx_demo_read_adapter(
+        ephemeral_environment(account)
+    )
+    current[0] = NOW + timedelta(seconds=61)
+
+    with pytest.raises(OkxReadAdapterError) as blocked:
+        instance.balance("USDT")
+
+    assert blocked.value.kind == "UNAUTHORIZED"
+    assert blocked.value.status == "BLOCKED"
+    assert target_transport.calls == []
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda account: account.update(uid="another-account"),
+        lambda account: account.update(perm="read_only"),
+    ],
+)
+def test_account_config_revalidates_identity_and_permissions(
+    monkeypatch,
+    mutation,
+) -> None:
+    account = attested_account()
+    drifted = dict(account)
+    mutation(drifted)
+    target_transport = RecordedTransport([envelope([drifted])])
+    install_attestation(monkeypatch, account)
+    monkeypatch.setattr(read_boundary, "_utc_now", lambda: NOW)
+    monkeypatch.setattr(
+        read_boundary,
+        "UrllibOkxReadTransport",
+        lambda: target_transport,
+    )
+    instance = create_attested_okx_demo_read_adapter(
+        ephemeral_environment(account)
+    )
+
+    with pytest.raises(OkxReadAdapterError) as blocked:
+        instance.account_config()
+
+    assert blocked.value.kind == "IDENTITY_DRIFT"
+    assert blocked.value.status == "BLOCKED"
+    assert len(target_transport.calls) == 1
+
+
+def test_common_import_and_constructor_paths_cannot_create_real_session() -> None:
+    assert not hasattr(credential_boundary, "_ATTESTED_PROVIDER_CAPABILITY")
+    assert not hasattr(credential_boundary, "_AttestedOkxDemoCredentialProvider")
+    assert tuple(
+        inspect.signature(create_attested_okx_demo_read_adapter).parameters
+    ) == ("environment",)
+    with pytest.raises(OkxReadAdapterError):
+        OkxDemoReadAdapter(
+            execution_target="OKX_DEMO",
+            transport=UrllibOkxReadTransport(),
+            credential_provider=RecordedCredentialProvider(),
+        )
 
 
 def test_adapter_rejects_every_target_except_okx_demo() -> None:
@@ -339,6 +417,46 @@ def test_instrument_schema_and_contract_conversion_use_exchange_metadata() -> No
     assert spec.contracts_to_units(Decimal("2")) == Decimal("0.02")
     with pytest.raises(ValueError, match="lot_size"):
         spec.contracts_to_units(Decimal("2.5"))
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda item: item.update(ctValCcy="USDT"),
+        lambda item: item.update(
+            instId="BTC-USD-SWAP",
+            quoteCcy="USD",
+            settleCcy="USD",
+            ctType="inverse",
+            ctValCcy="USD",
+        ),
+    ],
+)
+def test_inconsistent_linear_or_inverse_contract_metadata_blocks(
+    mutation,
+) -> None:
+    item = {
+        "instId": "BTC-USDT-SWAP",
+        "instType": "SWAP",
+        "baseCcy": "BTC",
+        "quoteCcy": "USDT",
+        "settleCcy": "USDT",
+        "ctType": "linear",
+        "ctVal": "0.01",
+        "ctValCcy": "BTC",
+        "lotSz": "1",
+        "minSz": "1",
+        "tickSz": "0.1",
+        "state": "live",
+    }
+    mutation(item)
+    instance, _ = adapter([envelope([item])])
+
+    with pytest.raises(OkxReadAdapterError) as blocked:
+        instance.instruments(item["instId"])
+
+    assert blocked.value.kind == "INVALID_RESPONSE"
+    assert blocked.value.status == "BLOCKED"
 
 
 def test_public_market_resources_have_stable_normalized_schemas() -> None:
@@ -692,6 +810,64 @@ def test_expired_market_data_is_blocked_not_returned_as_ready() -> None:
 
     assert exc_info.value.kind == "STALE_DATA"
     assert exc_info.value.status == "BLOCKED"
+
+
+def test_future_exchange_timestamp_is_blocked_as_invalid_response() -> None:
+    future_ts = str(int(datetime(2100, 1, 1, tzinfo=timezone.utc).timestamp() * 1000))
+    instance, _ = adapter(
+        [
+            envelope(
+                [
+                    {
+                        "instId": "BTC-USDT-SWAP",
+                        "last": "100",
+                        "bidPx": "99",
+                        "askPx": "101",
+                        "open24h": "90",
+                        "high24h": "110",
+                        "low24h": "80",
+                        "vol24h": "20",
+                        "volCcy24h": "2",
+                        "ts": future_ts,
+                    }
+                ]
+            )
+        ]
+    )
+
+    with pytest.raises(OkxReadAdapterError) as blocked:
+        instance.ticker("BTC-USDT-SWAP")
+
+    assert blocked.value.kind == "INVALID_RESPONSE"
+    assert blocked.value.status == "BLOCKED"
+
+
+@pytest.mark.parametrize("naive_source", ["received_at", "now"])
+def test_freshness_requires_timezone_aware_received_at_and_now(
+    naive_source: str,
+) -> None:
+    payload = envelope([])
+    transport = RecordedTransport(
+        [payload],
+        received_at=NOW.replace(tzinfo=None)
+        if naive_source == "received_at"
+        else NOW,
+    )
+    instance = OkxDemoReadAdapter(
+        execution_target="OKX_DEMO",
+        transport=transport,
+        credential_provider=RecordedCredentialProvider(),
+        now_provider=(
+            (lambda: NOW.replace(tzinfo=None))
+            if naive_source == "now"
+            else (lambda: NOW)
+        ),
+    )
+
+    with pytest.raises(OkxReadAdapterError) as blocked:
+        instance.positions()
+
+    assert blocked.value.status == "BLOCKED"
 
 
 def test_empty_positions_and_balances_are_valid_authorized_snapshots() -> None:
