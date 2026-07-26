@@ -3,7 +3,6 @@
 from app.adapters.okx_demo.credentials import (
     OkxDemoCredentialProvider,
     OkxDemoCredentialsUnavailable,
-    attest_okx_demo_credential_provider,
 )
 from app.adapters.okx_demo.errors import OkxReadAdapterError
 from app.adapters.okx_demo.models import (
@@ -12,7 +11,10 @@ from app.adapters.okx_demo.models import (
     OkxReadSnapshot,
     SnapshotMetadata,
 )
-from app.adapters.okx_demo.read_adapter import OkxDemoReadAdapter
+from app.adapters.okx_demo.read_adapter import (
+    OkxDemoReadAdapter,
+    create_attested_okx_demo_read_adapter,
+)
 from app.adapters.okx_demo.transport import (
     OkxReadHttpResponse,
     OkxReadTransport,
@@ -31,5 +33,5 @@ __all__ = [
     "OkxReadTransport",
     "SnapshotMetadata",
     "UrllibOkxReadTransport",
-    "attest_okx_demo_credential_provider",
+    "create_attested_okx_demo_read_adapter",
 ]
