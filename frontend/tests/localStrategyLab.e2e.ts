@@ -49,7 +49,8 @@ test("shows fail-closed real database evidence while keeping deterministic Provi
   await expect(page.getByTestId("lab-backtest-result-count").locator("strong")).toHaveText("0");
   await expect(page.getByTestId("lab-core-ranking-count").locator("strong")).not.toHaveText("0");
   await expect(page.getByRole("heading", { name: "非核心诊断记录（不可验收）" })).toBeVisible();
-  await expect(page.locator(".lab-source-summary[data-core-source='true']").first()).toBeVisible();
+  expect(await page.locator(".lab-source-summary[data-core-source='false']").count()).toBeGreaterThan(0);
+  await expect(page.getByRole("button", { name: /回测验证/ })).toBeDisabled();
   await expectNoPageOverflow(page);
   expect(browserProblems).toEqual([]);
 });

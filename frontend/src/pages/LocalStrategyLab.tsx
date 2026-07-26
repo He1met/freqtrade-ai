@@ -6,6 +6,7 @@ import { useMvpData } from "../api/useMvpData";
 import type { StrategyGenerationApiResult } from "../api/types";
 import { PageHeader, StatusBadge } from "../components/DisplayPrimitives";
 import "../styles/local-strategy-lab-submit.css";
+import "../styles/local-strategy-lab-workflow.css";
 import {
   type SubmissionState,
   isCoreGenerationResult,
@@ -16,6 +17,8 @@ import { SubmissionStatusPanel } from "./localStrategyLab/SubmissionStatusPanel"
 import { createActionEvidence } from "./localStrategyLab/actionEvidence";
 import { submissionDisplayModel } from "./localStrategyLab/submissionDisplay";
 import { useActionEvidence } from "./localStrategyLab/useActionEvidence";
+import { WorkflowNavigator } from "./localStrategyLab/WorkflowNavigator";
+import type { LabPhase } from "./localStrategyLab/workflowState";
 
 const DEFAULT_IDEA =
   "构建一个仅用于本地 Dry-run 的 RSI 均值回归策略，包含保守风险检查，不假设或启用实盘交易。";
@@ -26,6 +29,7 @@ export function LocalStrategyLab() {
   const [authorizeRealProvider, setAuthorizeRealProvider] = useState(false);
   const [submission, setSubmission] = useState<SubmissionState>({ kind: "idle" });
   const [snapshotRefreshToken, setSnapshotRefreshToken] = useState(0);
+  const [inspectedPhase, setInspectedPhase] = useState<LabPhase>("generation");
   const snapshot = useMvpData(snapshotRefreshToken);
   const { history, record: recordAction } = useActionEvidence();
   const controllerRef = useRef<AbortController | null>(null);
@@ -222,86 +226,96 @@ export function LocalStrategyLab() {
         title="本地策略实验室（Local Strategy Lab）"
       />
 
-      <aside className="notice lab-safety-notice" role="status">
-        本页只提交本地策略生成请求；不连接交易所、不启动 live trading、不下真实订单，也不表示生产就绪。
-      </aside>
+      <WorkflowNavigator
+        data={snapshot.data}
+        dryRunSource={snapshot.sources.dryRun}
+        error={snapshot.error}
+        inspectedPhase={inspectedPhase}
+        isLoading={snapshot.isLoading}
+        onInspectedPhaseChange={setInspectedPhase}
+      />
 
-      <form className="lab-form" onSubmit={handleSubmit}>
-        <label className="field-group" htmlFor="strategy-idea">
-          <span>策略构想（Strategy idea）</span>
-          <small>描述入场、退出、风险和运行边界；不要粘贴 API key、token 或其他凭据。</small>
-          <textarea
-            id="strategy-idea"
-            maxLength={4000}
-            minLength={1}
-            onChange={(event) => setIdea(event.currentTarget.value)}
-            required
-            rows={7}
-            value={idea}
-          />
-        </label>
-        <div className="lab-form-actions">
-          <label className="field-group compact-field" htmlFor="requested-count">
-            <span>请求数量（requested_count）</span>
-            <small>当前单次固定生成 1 个策略。</small>
-            <input
-              disabled
-              id="requested-count"
-              max={1}
-              min={1}
-              type="number"
-              value={requestedCount}
-            />
-          </label>
-          <label className="field-group compact-field" htmlFor="operator-token">
-            <span>操作授权令牌（operator token）</span>
-            <small>仅用于本地请求；页面不回显，也不写入浏览器存储。</small>
-            <input
-              autoComplete="off"
-              id="operator-token"
-              onChange={(event) => setOperatorToken(event.currentTarget.value)}
-              required
-              type="password"
-              value={operatorToken}
-            />
-          </label>
-          <label className="inline-check" htmlFor="provider-authorization">
-            <input
-              checked={authorizeRealProvider}
-              id="provider-authorization"
-              onChange={(event) => setAuthorizeRealProvider(event.currentTarget.checked)}
-              type="checkbox"
-            />
-            <span>
-              授权本次请求尝试真实 Provider
-              <small>提交后自动取消勾选；不授权交易、Dry-run 或实盘操作。</small>
-            </span>
-          </label>
-          <button
-            aria-busy={isSubmitting}
-            className="primary-button"
-            disabled={isSubmitting || !idea.trim() || !operatorToken}
-            type="submit"
-          >
-            {isSubmitting ? "提交中" : "提交生成"}
-          </button>
-          {isSubmitting ? (
-            <button className="secondary-button" onClick={handleCancel} type="button">
-              取消等待
-            </button>
-          ) : null}
+      {inspectedPhase === "generation" ? (
+        <div className="lab-workflow__content" data-stage="generation">
+          <form className="lab-form" onSubmit={handleSubmit}>
+            <label className="field-group" htmlFor="strategy-idea">
+              <span>策略构想（Strategy idea）</span>
+              <small>描述入场、退出、风险和运行边界；不要粘贴 API key、token 或其他凭据。</small>
+              <textarea
+                id="strategy-idea"
+                maxLength={4000}
+                minLength={1}
+                onChange={(event) => setIdea(event.currentTarget.value)}
+                required
+                rows={7}
+                value={idea}
+              />
+            </label>
+            <div className="lab-form-actions">
+              <label className="field-group compact-field" htmlFor="requested-count">
+                <span>请求数量（requested_count）</span>
+                <small>当前单次固定生成 1 个策略。</small>
+                <input
+                  disabled
+                  id="requested-count"
+                  max={1}
+                  min={1}
+                  type="number"
+                  value={requestedCount}
+                />
+              </label>
+              <label className="field-group compact-field" htmlFor="operator-token">
+                <span>操作授权令牌（operator token）</span>
+                <small>仅用于本地请求；页面不回显，也不写入浏览器存储。</small>
+                <input
+                  autoComplete="off"
+                  id="operator-token"
+                  onChange={(event) => setOperatorToken(event.currentTarget.value)}
+                  required
+                  type="password"
+                  value={operatorToken}
+                />
+              </label>
+              <label className="inline-check" htmlFor="provider-authorization">
+                <input
+                  checked={authorizeRealProvider}
+                  id="provider-authorization"
+                  onChange={(event) => setAuthorizeRealProvider(event.currentTarget.checked)}
+                  type="checkbox"
+                />
+                <span>
+                  授权本次请求尝试真实 Provider
+                  <small>提交后自动取消勾选；不授权交易、Dry-run 或实盘操作。</small>
+                </span>
+              </label>
+              <button
+                aria-busy={isSubmitting}
+                className="primary-button"
+                disabled={isSubmitting || !idea.trim() || !operatorToken}
+                type="submit"
+              >
+                {isSubmitting ? "提交中" : "提交生成"}
+              </button>
+              {isSubmitting ? (
+                <button className="secondary-button" onClick={handleCancel} type="button">
+                  取消等待
+                </button>
+              ) : null}
+            </div>
+            <p className="lab-submit-timeout-note">
+              请求取消或网络超时不会显示为成功；请刷新下方证据区核对是否已经产生持久记录。
+            </p>
+          </form>
+
+          <SubmissionStatusPanel submission={submission} />
         </div>
-        <p className="lab-submit-timeout-note">
-          请求取消或网络超时不会显示为成功；请刷新下方证据区核对是否已经产生持久记录。
-        </p>
-      </form>
-
-      <SubmissionStatusPanel submission={submission} />
+      ) : null}
 
       <PersistentEvidence
         data={snapshot.data}
         error={snapshot.error}
         history={history}
+        inspectedPhase={inspectedPhase}
         isLoading={snapshot.isLoading}
         onRefresh={() => setSnapshotRefreshToken((current) => current + 1)}
         operatorToken={operatorToken}
@@ -316,7 +330,7 @@ export function LocalStrategyLab() {
         ])}
       />
 
-      {currentResult ? <ResultDetails result={currentResult} /> : null}
+      {inspectedPhase === "generation" && currentResult ? <ResultDetails result={currentResult} /> : null}
     </section>
   );
 }

@@ -63,6 +63,7 @@ import {
   readinessReason,
   resolvedControlStatus,
 } from "./readinessControlDisplay";
+import type { LabPhase } from "./workflowState";
 import "../../styles/local-strategy-lab-evidence.css";
 import "../../styles/local-strategy-lab-readiness.css";
 
@@ -1438,12 +1439,14 @@ function ControlStatePanel({
 }
 
 function WorkflowActionsPanel({
+  activeStage,
   data,
   operatorToken,
   promptSummary,
   recordAction,
   onRefresh,
 }: {
+  activeStage: Exclude<LabPhase, "dry-run">;
   data: MvpData;
   operatorToken: string;
   promptSummary: string;
@@ -1571,24 +1574,38 @@ function WorkflowActionsPanel({
         <span>所有动作保留结果摘要；不执行 live trading</span>
       </div>
       <div className="lab-header-actions">
-        <button className="secondary-button" disabled={busy || missingToken || !candidate} onClick={handleBacktest} type="button">
-          {activeAction === "触发本地回测" ? "触发中" : "触发本地回测"}
-        </button>
-        <button className="secondary-button" disabled={busy || missingToken || !ingestTask} onClick={handleIngest} type="button">
-          {activeAction === "导入回测结果并计算评分" ? "导入中" : "导入结果并评分"}
-        </button>
-        <label className="inline-check">
-          <input checked={allowDeepSeek} disabled={busy} onChange={(event) => setAllowDeepSeek(event.target.checked)} type="checkbox" />
-          显式授权一次 DeepSeek 调用
-        </label>
-        <button className="secondary-button" disabled={busy || missingToken || !promptSummary || !allowDeepSeek} onClick={handleDeepSeekSingle} type="button">
-          {activeAction === "运行 DeepSeek 单次 E2E" ? "运行中" : "运行 DeepSeek 单次 E2E"}
-        </button>
+        {activeStage === "backtest" ? (
+          <button className="secondary-button" disabled={busy || missingToken || !candidate} onClick={handleBacktest} type="button">
+            {activeAction === "触发本地回测" ? "触发中" : "触发本地回测"}
+          </button>
+        ) : null}
+        {activeStage === "score" ? (
+          <button className="secondary-button" disabled={busy || missingToken || !ingestTask} onClick={handleIngest} type="button">
+            {activeAction === "导入回测结果并计算评分" ? "导入中" : "导入结果并评分"}
+          </button>
+        ) : null}
+        {activeStage === "generation" ? (
+          <>
+            <label className="inline-check">
+              <input checked={allowDeepSeek} disabled={busy} onChange={(event) => setAllowDeepSeek(event.target.checked)} type="checkbox" />
+              显式授权一次 DeepSeek 调用
+            </label>
+            <button className="secondary-button" disabled={busy || missingToken || !promptSummary || !allowDeepSeek} onClick={handleDeepSeekSingle} type="button">
+              {activeAction === "运行 DeepSeek 单次 E2E" ? "运行中" : "运行 DeepSeek 单次 E2E"}
+            </button>
+          </>
+        ) : null}
       </div>
       <div className="compact-detail-list">
-        <div><dt>本地回测</dt><dd>{candidate ? `候选 strategy_version=${candidate.strategyVersionId}` : "BLOCKED：缺少核心 strategy version。"}</dd></div>
-        <div><dt>artifact 导入 / 评分</dt><dd>{ingestTask ? `候选 task=${ingestTask.id}` : "BLOCKED：没有带 artifact path 的核心回测任务。"}</dd></div>
-        <div><dt>DeepSeek 单次</dt><dd>默认不调用；必须输入 operator token 并勾选一次性显式授权。</dd></div>
+        {activeStage === "backtest" ? (
+          <div><dt>本地回测</dt><dd>{candidate ? `候选 strategy_version=${candidate.strategyVersionId}` : "BLOCKED：缺少核心 strategy version。"}</dd></div>
+        ) : null}
+        {activeStage === "score" ? (
+          <div><dt>artifact 导入 / 评分</dt><dd>{ingestTask ? `候选 task=${ingestTask.id}` : "BLOCKED：没有带 artifact path 的核心回测任务。"}</dd></div>
+        ) : null}
+        {activeStage === "generation" ? (
+          <div><dt>DeepSeek 单次</dt><dd>默认不调用；必须输入 operator token 并勾选一次性显式授权。</dd></div>
+        ) : null}
       </div>
     </section>
   );
@@ -1598,6 +1615,7 @@ export function PersistentEvidence({
   data,
   error,
   history,
+  inspectedPhase,
   isLoading,
   onRefresh,
   operatorToken,
@@ -1608,6 +1626,7 @@ export function PersistentEvidence({
   data: MvpData;
   error: string | null;
   history: ActionEvidence[];
+  inspectedPhase: LabPhase;
   isLoading: boolean;
   onRefresh: () => void;
   operatorToken: string;
@@ -1661,37 +1680,62 @@ export function PersistentEvidence({
         isLoading={isLoading}
         source={evidenceSource}
       />
-      <ReadinessControlOverview data={data} />
-      <DryRunReadinessPanel data={data} recordAction={recordAction} />
-      <ControlStatePanel data={data} operatorToken={operatorToken} recordAction={recordAction} />
-      <ReadinessDomainPanel data={data} />
-      <EvidenceConclusion summary={data.localStrategyLabEvidence} />
-      <div className="lab-evidence-summary">
-        <div data-testid="lab-strategy-version-count">
-          <span>strategy versions</span>
-          <strong>{data.strategyVersions.length}</strong>
-        </div>
-        <div data-testid="lab-backtest-result-count">
-          <span>backtest results</span>
-          <strong>{data.backtestResults.length}</strong>
-        </div>
-        <div data-testid="lab-core-ranking-count">
-          <span>core ranking</span>
-          <strong>{coreRankingCount}</strong>
-        </div>
+      <div className="lab-workflow__stage-heading">
+        <span>阶段内容</span>
+        <strong>{
+          inspectedPhase === "generation"
+            ? "策略生成"
+            : inspectedPhase === "backtest"
+              ? "回测验证"
+              : inspectedPhase === "score"
+                ? "评分选择"
+                : "受控 Dry-run"
+        }</strong>
       </div>
-      <GenerationRunEvidence runs={data.generationRuns} />
-      <StrategyVersionEvidence strategies={data.strategies} versions={data.strategyVersions} />
-      <BacktestEvidence runs={data.backtestRuns} tasks={data.backtestTasks} results={data.backtestResults} />
-      <RankingEvidence ranking={data.ranking} />
+      {inspectedPhase === "generation" ? (
+        <>
+          <EvidenceConclusion summary={data.localStrategyLabEvidence} />
+          <div className="lab-evidence-summary">
+            <div data-testid="lab-strategy-version-count">
+              <span>strategy versions</span>
+              <strong>{data.strategyVersions.length}</strong>
+            </div>
+            <div data-testid="lab-backtest-result-count">
+              <span>backtest results</span>
+              <strong>{data.backtestResults.length}</strong>
+            </div>
+            <div data-testid="lab-core-ranking-count">
+              <span>core ranking</span>
+              <strong>{coreRankingCount}</strong>
+            </div>
+          </div>
+          <GenerationRunEvidence runs={data.generationRuns} />
+          <StrategyVersionEvidence strategies={data.strategies} versions={data.strategyVersions} />
+        </>
+      ) : null}
+      {inspectedPhase === "backtest" ? (
+        <BacktestEvidence runs={data.backtestRuns} tasks={data.backtestTasks} results={data.backtestResults} />
+      ) : null}
+      {inspectedPhase === "score" ? <RankingEvidence ranking={data.ranking} /> : null}
+      {inspectedPhase === "dry-run" ? (
+        <>
+          <ReadinessControlOverview data={data} />
+          <DryRunReadinessPanel data={data} recordAction={recordAction} />
+          <ControlStatePanel data={data} operatorToken={operatorToken} recordAction={recordAction} />
+          <ReadinessDomainPanel data={data} />
+        </>
+      ) : null}
       <ActionEvidenceHistory history={history} />
-      <WorkflowActionsPanel
-        data={data}
-        onRefresh={handleRefresh}
-        operatorToken={operatorToken}
-        promptSummary={promptSummary}
-        recordAction={recordAction}
-      />
+      {inspectedPhase !== "dry-run" ? (
+        <WorkflowActionsPanel
+          activeStage={inspectedPhase}
+          data={data}
+          onRefresh={handleRefresh}
+          operatorToken={operatorToken}
+          promptSummary={promptSummary}
+          recordAction={recordAction}
+        />
+      ) : null}
     </section>
   );
 }
