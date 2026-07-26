@@ -58,4 +58,4 @@ def test_schema_version_is_explicit_and_stable() -> None:
     assert HMAC_ATTESTATION_BASE_VERSION == "20260727_06"
     assert ATTESTATION_ACL_BASE_VERSION == "20260727_07"
     assert ORDER_WRITER_BASE_VERSION == "20260727_08"
-    assert SCHEMA_VERSION == "20260727_09"
+    assert SCHEMA_VERSION == "20260727_10"
