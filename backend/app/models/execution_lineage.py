@@ -18,6 +18,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
+from sqlalchemy.sql.elements import ColumnElement
+from sqlalchemy.ext.compiler import compiles
 
 from app.models.base import Base
 
@@ -25,6 +27,25 @@ from app.models.base import Base
 OKX_DEMO_TARGET_ID = "OKX_DEMO"
 LOCAL_DRY_RUN_SCOPE_ID = "LOCAL_DRY_RUN"
 UNKNOWN_LEGACY_SCOPE_ID = "UNKNOWN_LEGACY"
+
+
+class ClientOrderIdFormatExpression(ColumnElement):
+    inherit_cache = True
+    type = Boolean()
+
+
+@compiles(ClientOrderIdFormatExpression)
+@compiles(ClientOrderIdFormatExpression, "postgresql")
+def _compile_postgresql_client_order_id_format(_element, _compiler, **_kwargs) -> str:
+    return "client_order_id ~ '^[A-Za-z0-9]{1,32}$'"
+
+
+@compiles(ClientOrderIdFormatExpression, "sqlite")
+def _compile_sqlite_client_order_id_format(_element, _compiler, **_kwargs) -> str:
+    return (
+        "length(client_order_id) BETWEEN 1 AND 32 "
+        "AND client_order_id NOT GLOB '*[^A-Za-z0-9]*'"
+    )
 
 
 class ExecutionScope(Base):
@@ -35,20 +56,25 @@ class ExecutionScope(Base):
             name="execution_scopes_kind_check",
         ),
         CheckConstraint(
-            "(scope_id = 'OKX_DEMO' AND scope_kind = 'EXCHANGE_TARGET' "
-            "AND executable = TRUE AND exchange_writes = TRUE) OR "
-            "(scope_id = 'LOCAL_DRY_RUN' AND scope_kind = 'NON_EXCHANGE' "
-            "AND executable = TRUE AND exchange_writes = FALSE) OR "
-            "(scope_id = 'UNKNOWN_LEGACY' AND scope_kind = 'LEGACY' "
-            "AND executable = FALSE AND exchange_writes = FALSE)",
+            "scope_id = 'OKX_DEMO' AND scope_kind = 'EXCHANGE_TARGET' "
+            "AND exchange_capable = TRUE AND executable = FALSE "
+            "AND exchange_writes = FALSE AND order_submission_authorized = FALSE OR "
+            "scope_id = 'LOCAL_DRY_RUN' AND scope_kind = 'NON_EXCHANGE' "
+            "AND exchange_capable = FALSE AND executable = TRUE "
+            "AND exchange_writes = FALSE AND order_submission_authorized = FALSE OR "
+            "scope_id = 'UNKNOWN_LEGACY' AND scope_kind = 'LEGACY' "
+            "AND exchange_capable = FALSE AND executable = FALSE "
+            "AND exchange_writes = FALSE AND order_submission_authorized = FALSE",
             name="execution_scopes_known_contract_check",
         ),
     )
 
     scope_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     scope_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    exchange_capable: Mapped[bool] = mapped_column(Boolean, nullable=False)
     executable: Mapped[bool] = mapped_column(Boolean, nullable=False)
     exchange_writes: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    order_submission_authorized: Mapped[bool] = mapped_column(Boolean, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -102,8 +128,8 @@ class TradeIntent(Base):
             name="trade_intents_okx_demo_target_check",
         ),
         CheckConstraint(
-            "length(client_order_id) BETWEEN 1 AND 32",
-            name="trade_intents_client_order_id_length_check",
+            ClientOrderIdFormatExpression(),
+            name="trade_intents_client_order_id_format_check",
         ),
         UniqueConstraint(
             "execution_target_id",
@@ -175,8 +201,8 @@ class ExchangeOrder(Base):
             name="exchange_orders_okx_demo_target_check",
         ),
         CheckConstraint(
-            "length(client_order_id) BETWEEN 1 AND 32",
-            name="exchange_orders_client_order_id_length_check",
+            ClientOrderIdFormatExpression(),
+            name="exchange_orders_client_order_id_format_check",
         ),
         UniqueConstraint(
             "execution_target_id",
@@ -314,8 +340,8 @@ class ExecutionManifest(Base):
     __tablename__ = "execution_manifests"
     __table_args__ = (
         CheckConstraint(
-            "execution_scope_id <> 'UNKNOWN_LEGACY' OR executable_evidence = FALSE",
-            name="execution_manifests_legacy_not_executable_check",
+            "execution_scope_id = 'LOCAL_DRY_RUN' OR executable_evidence = FALSE",
+            name="execution_manifests_authorization_check",
         ),
         Index("execution_manifests_scope_kind_idx", "execution_scope_id", "manifest_kind"),
     )

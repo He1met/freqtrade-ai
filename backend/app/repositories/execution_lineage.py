@@ -22,23 +22,32 @@ from app.models.execution_lineage import (
 
 
 EXECUTION_SCOPE_CATALOG = (
-    (OKX_DEMO_TARGET_ID, "EXCHANGE_TARGET", True, True),
-    (LOCAL_DRY_RUN_SCOPE_ID, "NON_EXCHANGE", True, False),
-    (UNKNOWN_LEGACY_SCOPE_ID, "LEGACY", False, False),
+    (OKX_DEMO_TARGET_ID, "EXCHANGE_TARGET", True, False, False, False),
+    (LOCAL_DRY_RUN_SCOPE_ID, "NON_EXCHANGE", False, True, False, False),
+    (UNKNOWN_LEGACY_SCOPE_ID, "LEGACY", False, False, False, False),
 )
 
 
 def ensure_execution_scope_catalog(db: Session) -> None:
     """Seed only immutable scope identities; never reclassify persisted records."""
 
-    for scope_id, scope_kind, executable, exchange_writes in EXECUTION_SCOPE_CATALOG:
+    for (
+        scope_id,
+        scope_kind,
+        exchange_capable,
+        executable,
+        exchange_writes,
+        order_submission_authorized,
+    ) in EXECUTION_SCOPE_CATALOG:
         if db.get(ExecutionScope, scope_id) is None:
             db.add(
                 ExecutionScope(
                     scope_id=scope_id,
                     scope_kind=scope_kind,
+                    exchange_capable=exchange_capable,
                     executable=executable,
                     exchange_writes=exchange_writes,
+                    order_submission_authorized=order_submission_authorized,
                 )
             )
     db.flush()
@@ -81,7 +90,7 @@ class ExecutionLineageRepository:
             request_snapshot=request_snapshot or {},
         )
         self.db.add(intent)
-        self.db.commit()
+        self.db.flush()
         self.db.refresh(intent)
         return intent
 
@@ -104,7 +113,7 @@ class ExecutionLineageRepository:
             evidence_snapshot=evidence_snapshot or {},
         )
         self.db.add(decision_row)
-        self.db.commit()
+        self.db.flush()
         self.db.refresh(decision_row)
         return decision_row
 
@@ -134,7 +143,7 @@ class ExecutionLineageRepository:
             response_snapshot=response_snapshot or {},
         )
         self.db.add(order)
-        self.db.commit()
+        self.db.flush()
         self.db.refresh(order)
         return order
 
@@ -170,7 +179,7 @@ class ExecutionLineageRepository:
             snapshot=snapshot or {},
         )
         self.db.add(fill)
-        self.db.commit()
+        self.db.flush()
         self.db.refresh(fill)
         return fill
 
@@ -203,7 +212,7 @@ class ExecutionLineageRepository:
         position.average_price = average_price
         position.snapshot = snapshot or {}
         position.observed_at = observed_at
-        self.db.commit()
+        self.db.flush()
         self.db.refresh(position)
         return position
 
@@ -216,7 +225,7 @@ class ExecutionLineageRepository:
             summary_snapshot=summary_snapshot or {},
         )
         self.db.add(row)
-        self.db.commit()
+        self.db.flush()
         self.db.refresh(row)
         return row
 
@@ -235,6 +244,10 @@ def record_execution_manifest(
     ensure_execution_scope_catalog(db)
     if execution_scope_id == UNKNOWN_LEGACY_SCOPE_ID:
         raise ValueError("UNKNOWN_LEGACY manifest scope is read-only")
+    if execution_scope_id == OKX_DEMO_TARGET_ID and executable_evidence:
+        raise ValueError(
+            "OKX_DEMO executable evidence is blocked while order authorization is false"
+        )
     if execution_scope_id not in {
         OKX_DEMO_TARGET_ID,
         LOCAL_DRY_RUN_SCOPE_ID,
@@ -250,7 +263,7 @@ def record_execution_manifest(
         executable_evidence=executable_evidence,
     )
     db.add(manifest)
-    db.commit()
+    db.flush()
     db.refresh(manifest)
     return manifest
 

@@ -4,7 +4,7 @@ from threading import Barrier, Lock, Thread
 
 import pytest
 from sqlalchemy import inspect, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DataError, IntegrityError
 
 from app.db.migrations import (
     LEGACY_SCHEMA_VERSION,
@@ -19,6 +19,8 @@ from app.db.session import create_database_engine, create_session_factory
 from app.models import BacktestRun, Base, ResearchJob, Strategy, StrategyGenerationRun
 from app.models.execution_lineage import (
     LOCAL_DRY_RUN_SCOPE_ID,
+    OKX_DEMO_TARGET_ID,
+    TradeIntent,
     UNKNOWN_LEGACY_SCOPE_ID,
 )
 from app.repositories import (
@@ -56,6 +58,69 @@ def _reset_schema(engine) -> None:
     with engine.begin() as connection:
         connection.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
         connection.execute(text("CREATE SCHEMA public"))
+
+
+def _create_frozen_pre_lineage_research_jobs(connection) -> None:
+    connection.execute(
+        text(
+            """
+            CREATE TABLE research_jobs (
+                id BIGSERIAL PRIMARY KEY,
+                job_type VARCHAR(80) NOT NULL,
+                operation VARCHAR(120) NOT NULL,
+                idempotency_key_digest VARCHAR(64) NOT NULL,
+                request_hash VARCHAR(64) NOT NULL,
+                request_payload JSON NOT NULL,
+                status VARCHAR(32) NOT NULL DEFAULT 'PENDING',
+                stage VARCHAR(80) NOT NULL DEFAULT 'QUEUED',
+                lease_owner VARCHAR(160),
+                lease_token VARCHAR(64),
+                lease_expires_at TIMESTAMPTZ,
+                heartbeat_at TIMESTAMPTZ,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                max_attempts INTEGER NOT NULL DEFAULT 1,
+                cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
+                provider_attempted_at TIMESTAMPTZ,
+                provider_completed_at TIMESTAMPTZ,
+                strategy_generation_run_id BIGINT
+                    REFERENCES strategy_generation_runs(id) ON DELETE SET NULL,
+                strategy_id BIGINT REFERENCES strategies(id) ON DELETE SET NULL,
+                strategy_version_id BIGINT
+                    REFERENCES strategy_versions(id) ON DELETE SET NULL,
+                backtest_run_id BIGINT REFERENCES backtest_runs(id) ON DELETE SET NULL,
+                backtest_task_id BIGINT REFERENCES backtest_tasks(id) ON DELETE SET NULL,
+                backtest_result_id BIGINT REFERENCES backtest_results(id) ON DELETE SET NULL,
+                strategy_score_id BIGINT REFERENCES strategy_scores(id) ON DELETE SET NULL,
+                evidence_snapshot JSON NOT NULL DEFAULT '{}',
+                error_message TEXT,
+                started_at TIMESTAMPTZ,
+                completed_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                CONSTRAINT research_jobs_status_check CHECK (
+                    status IN ('PENDING', 'RUNNING', 'SUCCESS', 'FAILED',
+                    'BLOCKED', 'CANCELLED', 'STALE')
+                ),
+                CONSTRAINT research_jobs_attempt_count_check CHECK (attempt_count >= 0),
+                CONSTRAINT research_jobs_max_attempts_check CHECK (max_attempts >= 1),
+                CONSTRAINT frozen_global_idempotency_name_is_not_trusted
+                    UNIQUE (operation, idempotency_key_digest)
+            )
+            """
+        )
+    )
+    connection.execute(
+        text(
+            "CREATE INDEX research_jobs_claim_idx "
+            "ON research_jobs (status, created_at, id)"
+        )
+    )
+    connection.execute(
+        text(
+            "CREATE INDEX research_jobs_lease_expiry_idx "
+            "ON research_jobs (status, lease_expires_at)"
+        )
+    )
 
 
 def test_incremental_worker_migration_preserves_existing_runtime_rows(postgres_engine) -> None:
@@ -278,6 +343,116 @@ def test_postgresql_trade_intent_client_order_id_is_unique_per_target(
         db.rollback()
 
 
+def test_frozen_old_research_job_ddl_upgrades_data_and_removes_global_unique(
+    postgres_engine,
+) -> None:
+    Base.metadata.create_all(postgres_engine)
+    with postgres_engine.begin() as connection:
+        connection.execute(text("DROP TABLE research_job_attempts"))
+        connection.execute(text("DROP TABLE research_jobs"))
+        _create_frozen_pre_lineage_research_jobs(connection)
+        connection.execute(
+            text(
+                """
+                INSERT INTO research_jobs (
+                    job_type, operation, idempotency_key_digest, request_hash,
+                    request_payload, evidence_snapshot
+                ) VALUES (
+                    'deepseek_backtest', 'frozen-old-operation', 'frozen-digest',
+                    'frozen-hash', '{}', '{}'
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                f"CREATE TABLE {VERSION_TABLE} ("
+                "version VARCHAR(64) PRIMARY KEY, "
+                "applied_at TIMESTAMPTZ NOT NULL DEFAULT now())"
+            )
+        )
+        connection.execute(
+            text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+            {"version": TARGET_LINEAGE_BASE_VERSION},
+        )
+
+    assert upgrade_database(postgres_engine) == SCHEMA_VERSION
+    assert verify_schema(postgres_engine).ready is True
+    with postgres_engine.connect() as connection:
+        row = connection.execute(
+            text(
+                "SELECT execution_scope_id, operation FROM research_jobs "
+                "WHERE operation = 'frozen-old-operation'"
+            )
+        ).one()
+        assert row.execution_scope_id == UNKNOWN_LEGACY_SCOPE_ID
+        uniques = inspect(connection).get_unique_constraints("research_jobs")
+        unique_columns = {
+            frozenset(constraint["column_names"])
+            for constraint in uniques
+        }
+        assert frozenset(("operation", "idempotency_key_digest")) not in unique_columns
+        assert frozenset(
+            ("execution_scope_id", "operation", "idempotency_key_digest")
+        ) in unique_columns
+
+
+def test_schema_verifier_rejects_weakened_constraints_and_masquerading_indexes(
+    postgres_engine,
+) -> None:
+    assert upgrade_database(postgres_engine) == SCHEMA_VERSION
+    with postgres_engine.begin() as connection:
+        connection.execute(
+            text(
+                "ALTER TABLE research_jobs ADD CONSTRAINT renamed_global_unique "
+                "UNIQUE (operation, idempotency_key_digest)"
+            )
+        )
+        connection.execute(
+            text(
+                "ALTER TABLE trade_intents "
+                "DROP CONSTRAINT trade_intents_okx_demo_target_check"
+            )
+        )
+        connection.execute(
+            text(
+                "ALTER TABLE trade_intents ADD CONSTRAINT "
+                "trade_intents_okx_demo_target_check "
+                "CHECK (execution_target_id IS NOT NULL)"
+            )
+        )
+        connection.execute(text("DROP INDEX trade_intents_target_status_idx"))
+        connection.execute(
+            text(
+                "CREATE UNIQUE INDEX trade_intents_target_status_idx "
+                "ON trade_intents (execution_target_id, status) "
+                "WHERE status <> 'IGNORED'"
+            )
+        )
+
+    readiness = verify_schema(postgres_engine)
+
+    assert readiness.ready is False
+    assert any(
+        "unexpected unique constraint: research_jobs" in problem
+        for problem in readiness.problems
+    )
+    assert any(
+        "check definition mismatch: trade_intents.trade_intents_okx_demo_target_check"
+        in problem
+        for problem in readiness.problems
+    )
+    assert any(
+        "missing index: trade_intents(execution_target_id,status)" in problem
+        for problem in readiness.problems
+    )
+    assert any(
+        "unexpected unique index: trade_intents(execution_target_id,status)"
+        in problem
+        for problem in readiness.problems
+    )
+
+
 def test_postgresql_legacy_mutations_and_cross_scope_completion_are_blocked(
     postgres_engine,
 ) -> None:
@@ -336,3 +511,30 @@ def test_postgresql_legacy_mutations_and_cross_scope_completion_are_blocked(
         assert persisted is not None
         assert persisted.status == "RUNNING"
         assert persisted.strategy_generation_run_id is None
+
+
+@pytest.mark.parametrize("illegal", ["has-hyphen", "空", "x" * 33])
+def test_postgresql_database_rejects_illegal_client_order_id(
+    postgres_engine,
+    illegal: str,
+) -> None:
+    assert upgrade_database(postgres_engine) == SCHEMA_VERSION
+    session_factory = create_session_factory(postgres_engine)
+    with session_factory() as db:
+        ensure_execution_scope_catalog(db)
+        db.commit()
+        db.add(
+            TradeIntent(
+                execution_target_id=OKX_DEMO_TARGET_ID,
+                client_order_id=illegal,
+                instrument_id="BTC-USDT-SWAP",
+                side="buy",
+                position_side="long",
+                order_type="market",
+                quantity=Decimal("1"),
+                request_snapshot={},
+            )
+        )
+
+        with pytest.raises((IntegrityError, DataError)):
+            db.commit()

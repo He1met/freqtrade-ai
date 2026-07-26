@@ -21,7 +21,12 @@ from app.models.execution_lineage import (
     OKX_DEMO_TARGET_ID,
     UNKNOWN_LEGACY_SCOPE_ID,
     ExecutionManifest,
+    ExchangeFill,
+    ExchangeOrder,
+    ExecutionScope,
     ResearchJobAttempt,
+    RiskDecision,
+    TradeIntent,
 )
 from app.repositories import (
     BacktestRepository,
@@ -47,6 +52,7 @@ from app.schemas.strategy_generation_run import (
     StrategyGenerationRunCreate,
     StrategyGenerationRunStatusUpdate,
 )
+from app.services.execution_lineage import ExecutionLineagePersistenceService
 
 
 @pytest.fixture()
@@ -401,6 +407,79 @@ def test_exchange_repository_rejects_every_non_okx_target(db) -> None:
             ExecutionLineageRepository(db, scope_id)
 
 
+def test_okx_demo_scope_is_capability_only_and_not_currently_authorized(db) -> None:
+    ensure_execution_scope_catalog(db)
+    scope = db.get(ExecutionScope, OKX_DEMO_TARGET_ID)
+
+    assert scope is not None
+    assert scope.exchange_capable is True
+    assert scope.executable is False
+    assert scope.exchange_writes is False
+    assert scope.order_submission_authorized is False
+
+
+@pytest.mark.parametrize("failure_kind", ["integrity", "exception"])
+def test_execution_lineage_use_case_rolls_back_the_entire_chain(
+    db,
+    failure_kind: str,
+) -> None:
+    service = ExecutionLineagePersistenceService(db, OKX_DEMO_TARGET_ID)
+
+    def persist(repository, session):
+        intent = repository.create_trade_intent(
+            client_order_id="Atomic1",
+            instrument_id="BTC-USDT-SWAP",
+            side="buy",
+            position_side="long",
+            order_type="market",
+            quantity=Decimal("1"),
+        )
+        repository.record_risk_decision(
+            trade_intent_id=intent.id,
+            decision="BLOCKED",
+            policy_version="test",
+        )
+        order = repository.record_order(
+            trade_intent_id=intent.id,
+            client_order_id=intent.client_order_id,
+            status="PERSISTED_NOT_AUTHORIZED",
+        )
+        repository.record_fill(
+            exchange_order_row_id=order.id,
+            exchange_fill_id="AtomicFill1",
+            price=Decimal("1"),
+            quantity=Decimal("1"),
+        )
+        record_execution_manifest(
+            session,
+            execution_scope_id=OKX_DEMO_TARGET_ID,
+            manifest_kind="persistence-test",
+            schema_version="1",
+            artifact_path="/tmp/atomic.json",
+            artifact_sha256="d" * 64,
+            database_ids={"trade_intent_id": intent.id},
+            executable_evidence=False,
+        )
+        if failure_kind == "integrity":
+            repository.record_fill(
+                exchange_order_row_id=order.id,
+                exchange_fill_id="AtomicFill1",
+                price=Decimal("1"),
+                quantity=Decimal("1"),
+            )
+        raise RuntimeError("injected failure after every persistence stage")
+
+    expected_error = IntegrityError if failure_kind == "integrity" else RuntimeError
+    with pytest.raises(expected_error):
+        service.run(persist)
+
+    assert db.query(TradeIntent).count() == 0
+    assert db.query(RiskDecision).count() == 0
+    assert db.query(ExchangeOrder).count() == 0
+    assert db.query(ExchangeFill).count() == 0
+    assert db.query(ExecutionManifest).count() == 0
+
+
 def test_same_target_client_order_id_is_unique(db) -> None:
     repository = ExecutionLineageRepository(db, OKX_DEMO_TARGET_ID)
     first_intent = repository.create_trade_intent(
@@ -458,6 +537,28 @@ def test_trade_intent_client_order_id_is_unique_and_okx_legal(db) -> None:
                 order_type="market",
                 quantity=Decimal("1"),
             )
+
+
+@pytest.mark.parametrize("illegal", ["has-hyphen", "空", "x" * 33])
+def test_sqlite_database_rejects_illegal_client_order_id(db, illegal: str) -> None:
+    ensure_execution_scope_catalog(db)
+    db.commit()
+    db.add(
+        TradeIntent(
+            execution_target_id=OKX_DEMO_TARGET_ID,
+            client_order_id=illegal,
+            instrument_id="BTC-USDT-SWAP",
+            side="buy",
+            position_side="long",
+            order_type="market",
+            quantity=Decimal("1"),
+            request_snapshot={},
+        )
+    )
+
+    with pytest.raises(IntegrityError):
+        db.commit()
+    db.rollback()
 
 
 def test_child_records_require_a_parent_on_the_same_target(db) -> None:
@@ -532,6 +633,20 @@ def test_unknown_legacy_manifest_cannot_be_executable(db) -> None:
     with pytest.raises(IntegrityError):
         db.commit()
     db.rollback()
+
+
+def test_okx_demo_manifest_cannot_claim_executable_evidence(db) -> None:
+    with pytest.raises(ValueError, match="authorization is false"):
+        record_execution_manifest(
+            db,
+            execution_scope_id=OKX_DEMO_TARGET_ID,
+            manifest_kind="order",
+            schema_version="1",
+            artifact_path="/tmp/order.json",
+            artifact_sha256="e" * 64,
+            database_ids={},
+            executable_evidence=True,
+        )
 
 
 def test_manifest_queries_require_explicit_scope(db) -> None:

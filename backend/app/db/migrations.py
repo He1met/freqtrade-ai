@@ -9,6 +9,7 @@ unversioned databases are blocked instead of guessed at or rewritten.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Iterable, Optional, Union
 
 from sqlalchemy import inspect, text
@@ -95,12 +96,55 @@ def _expected_unique_columns(table: object) -> set[frozenset[str]]:
     return unique_sets
 
 
-def _expected_indexes(table: object) -> set[tuple[str, ...]]:
-    return {
-        tuple(column.name for column in index.columns)
-        for index in table.indexes
-        if isinstance(index, Index)
-    }
+def _expected_indexes(
+    table: object,
+) -> set[tuple[tuple[str, ...], bool, Optional[str]]]:
+    return {_metadata_index_signature(index) for index in table.indexes if isinstance(index, Index)}
+
+
+def _normalized_sql_definition(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    rendered = str(value).lower().replace('"', "")
+    rendered = re.sub(
+        r"::(?:character varying|text|boolean|integer|bigint|numeric)(?:\[\])?",
+        "",
+        rendered,
+    )
+    rendered = re.sub(r"\s+", "", rendered)
+    return rendered
+
+
+def _metadata_index_signature(index: Index) -> tuple[tuple[str, ...], bool, Optional[str]]:
+    predicate = index.dialect_options["postgresql"].get("where")
+    return (
+        tuple(column.name for column in index.columns),
+        bool(index.unique),
+        _normalized_sql_definition(predicate),
+    )
+
+
+def _inspected_index_signature(index: dict) -> tuple[tuple[str, ...], bool, Optional[str]]:
+    dialect_options = index.get("dialect_options") or {}
+    return (
+        tuple(index.get("column_names") or ()),
+        bool(index.get("unique", False)),
+        _normalized_sql_definition(dialect_options.get("postgresql_where")),
+    )
+
+
+CRITICAL_CHECK_DEFINITIONS = {
+    "execution_scopes_known_contract_check",
+    "trade_intents_okx_demo_target_check",
+    "trade_intents_client_order_id_format_check",
+    "risk_decisions_okx_demo_target_check",
+    "exchange_orders_okx_demo_target_check",
+    "exchange_orders_client_order_id_format_check",
+    "exchange_fills_okx_demo_target_check",
+    "exchange_positions_okx_demo_target_check",
+    "reconciliation_runs_okx_demo_target_check",
+    "execution_manifests_authorization_check",
+}
 
 
 def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
@@ -163,27 +207,58 @@ def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
         }
         for columns in sorted(_expected_unique_columns(table) - actual_unique, key=sorted):
             problems.append(f"missing unique constraint: {name}({','.join(sorted(columns))})")
+        for columns in sorted(actual_unique - _expected_unique_columns(table), key=sorted):
+            problems.append(
+                f"unexpected unique constraint: {name}({','.join(sorted(columns))})"
+            )
 
-        actual_indexes = {
-            tuple(index["column_names"])
+        inspected_indexes = [
+            index
             for index in inspector.get_indexes(name, schema=schema_name)
-            if index.get("column_names")
-        }
-        for columns in sorted(_expected_indexes(table) - actual_indexes):
-            problems.append(f"missing index: {name}({','.join(columns)})")
+            if index.get("column_names") and not index.get("duplicates_constraint")
+        ]
+        actual_indexes = {_inspected_index_signature(index) for index in inspected_indexes}
+        for columns, unique, predicate in sorted(
+            _expected_indexes(table) - actual_indexes,
+            key=str,
+        ):
+            problems.append(
+                f"missing index: {name}({','.join(columns)}) "
+                f"unique={unique} predicate={predicate or '<none>'}"
+            )
+        for columns, unique, predicate in sorted(actual_indexes, key=str):
+            if unique and (columns, unique, predicate) not in _expected_indexes(table):
+                problems.append(
+                    f"unexpected unique index: {name}({','.join(columns)}) "
+                    f"predicate={predicate or '<none>'}"
+                )
 
         expected_checks = {
             constraint.name
             for constraint in table.constraints
             if isinstance(constraint, CheckConstraint) and constraint.name
         }
-        actual_checks = {
-            constraint.get("name")
+        actual_check_definitions = {
+            constraint.get("name"): _normalized_sql_definition(constraint.get("sqltext"))
             for constraint in inspector.get_check_constraints(name, schema=schema_name)
             if constraint.get("name")
         }
-        for check_name in sorted(expected_checks - actual_checks):
+        for check_name in sorted(expected_checks - set(actual_check_definitions)):
             problems.append(f"missing check constraint: {name}.{check_name}")
+        expected_check_definitions = {
+            constraint.name: _normalized_sql_definition(
+                constraint.sqltext.compile(dialect=bind.dialect)
+            )
+            for constraint in table.constraints
+            if isinstance(constraint, CheckConstraint)
+            and constraint.name in CRITICAL_CHECK_DEFINITIONS
+        }
+        for check_name, definition in expected_check_definitions.items():
+            actual_definition = actual_check_definitions.get(check_name)
+            if actual_definition is not None and actual_definition != definition:
+                problems.append(
+                    f"check definition mismatch: {name}.{check_name}"
+                )
     return problems
 
 
@@ -249,11 +324,12 @@ def _add_execution_target_lineage(connection: Connection) -> None:
         text(
             """
             INSERT INTO execution_scopes
-                (scope_id, scope_kind, executable, exchange_writes)
+                (scope_id, scope_kind, exchange_capable, executable,
+                 exchange_writes, order_submission_authorized)
             VALUES
-                ('OKX_DEMO', 'EXCHANGE_TARGET', TRUE, TRUE),
-                ('LOCAL_DRY_RUN', 'NON_EXCHANGE', TRUE, FALSE),
-                ('UNKNOWN_LEGACY', 'LEGACY', FALSE, FALSE)
+                ('OKX_DEMO', 'EXCHANGE_TARGET', TRUE, FALSE, FALSE, FALSE),
+                ('LOCAL_DRY_RUN', 'NON_EXCHANGE', FALSE, TRUE, FALSE, FALSE),
+                ('UNKNOWN_LEGACY', 'LEGACY', FALSE, FALSE, FALSE, FALSE)
             ON CONFLICT (scope_id) DO NOTHING
             """
         )
@@ -306,12 +382,22 @@ def _add_execution_target_lineage(connection: Connection) -> None:
         )
 
     if "research_jobs" in table_names:
-        connection.execute(
-            text(
-                "ALTER TABLE research_jobs "
-                "DROP CONSTRAINT IF EXISTS research_jobs_operation_idempotency_unique"
-            )
-        )
+        legacy_unique_columns = {"operation", "idempotency_key_digest"}
+        preparer = connection.dialect.identifier_preparer
+        for constraint in inspect(connection).get_unique_constraints(
+            "research_jobs", schema=schema_name
+        ):
+            if (
+                set(constraint.get("column_names") or ()) == legacy_unique_columns
+                and constraint.get("name")
+            ):
+                quoted_name = preparer.quote(constraint["name"])
+                connection.execute(
+                    text(
+                        "ALTER TABLE research_jobs "
+                        f"DROP CONSTRAINT {quoted_name}"
+                    )
+                )
         unique_names = {
             constraint.get("name")
             for constraint in inspect(connection).get_unique_constraints(
