@@ -60,6 +60,10 @@ jobs:
           import psycopg
 
           with psycopg.connect("postgresql://postgres@127.0.0.1:5432/postgres", autocommit=True) as connection:
+              connection.execute(
+                  "CREATE ROLE freqtrade LOGIN NOSUPERUSER NOCREATEROLE "
+                  "NOCREATEDB NOINHERIT NOREPLICATION NOBYPASSRLS"
+              )
               for database_name in (
                   "freqtrade_ai_ci_test",
                   "freqtrade_ai_phase8_test",
