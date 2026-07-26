@@ -10,16 +10,15 @@ import {
 import {
   StrategyGenerationApiError,
   checkDryRunReadiness,
-  ingestBacktestArtifact,
   runDeepSeekSingle,
   startControlledDryRun,
   stopControlledDryRun,
-  triggerLocalBacktest,
 } from "../../api/client";
 import type {
   BacktestResultSummary,
   BacktestRunSummary,
   BacktestTaskSummary,
+  DataSource,
   DataSourceTraceSummary,
   DryRunControlReport,
   DryRunReadinessReport,
@@ -54,6 +53,8 @@ import {
   type ActionEvidenceHistoryState,
 } from "./actionEvidence";
 import { ActionTimeline, LatestActionFeedback } from "./ActionTimeline";
+import { CandidateWorkbench } from "./CandidateWorkbench";
+import { useLabSelection } from "./useLabSelection";
 import {
   evidenceStateDisplay,
   formatTraceEntries,
@@ -67,6 +68,7 @@ import {
   readinessReason,
   resolvedControlStatus,
 } from "./readinessControlDisplay";
+import { deriveProviderCredentialReadiness } from "./generationFormModel";
 import type { LabPhase } from "./workflowState";
 import "../../styles/local-strategy-lab-evidence.css";
 import "../../styles/local-strategy-lab-readiness.css";
@@ -112,19 +114,6 @@ type SourceRow = {
 };
 
 type RecordActionEvidence = (entry: ActionEvidence) => void;
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
-}
-
-function responseId(value: unknown): string | null {
-  const id = asRecord(value).id;
-  return id === null || id === undefined ? null : String(id);
-}
-
-function responseText(value: unknown): string | null {
-  return typeof value === "string" && value.trim() ? value : null;
-}
 
 function apiErrorMessage(error: unknown, fallback: string): string {
   return error instanceof StrategyGenerationApiError
@@ -1460,18 +1449,18 @@ function ControlStatePanel({
   );
 }
 
-function WorkflowActionsPanel({
-  activeStage,
+function AdvancedDeepSeekPanel({
   data,
   history,
+  operatorDashboardSource,
   operatorToken,
   promptSummary,
   recordAction,
   onRefresh,
 }: {
-  activeStage: Exclude<LabPhase, "dry-run">;
   data: MvpData;
   history: ActionEvidence[];
+  operatorDashboardSource: DataSource;
   operatorToken: string;
   promptSummary: string;
   recordAction: RecordActionEvidence;
@@ -1479,100 +1468,21 @@ function WorkflowActionsPanel({
 }) {
   const [activeAction, setActiveAction] = useState<string | null>(null);
   const [allowDeepSeek, setAllowDeepSeek] = useState(false);
-  const candidate = readinessCandidate(data);
-  const ingestTask = data.backtestTasks.find(
-    (task) =>
-      (task.artifactManifest?.manifestPath || task.resultPath) &&
-      isCoreDataSource(task.dataSource),
-  );
-  const ingestFeedbackSource = ingestTask?.dataSource ?? data.backtestTasks.find(
-    (task) => task.artifactManifest?.manifestPath || task.resultPath,
-  )?.dataSource;
   const busy = activeAction !== null;
   const missingToken = !operatorToken;
+  const providerReadiness = deriveProviderCredentialReadiness(
+    data.operatorDashboard,
+    operatorDashboardSource,
+  );
 
-  function start(action: string, ids: Record<string, string> = {}) {
-    const lifecycleId = createActionLifecycleId(activeStage);
+  function start(action: string) {
+    const lifecycleId = createActionLifecycleId("generation");
     setActiveAction(action);
     recordAction(createActionEvidence({
       action, lifecycleId, status: "RUNNING", message: actionStatusMessage("RUNNING"), nextAction: "等待 backend API 响应。",
-      recommendBug: false, databaseIds: ids, updatedAt: new Date().toISOString(),
+      recommendBug: false, updatedAt: new Date().toISOString(),
     }));
     return lifecycleId;
-  }
-
-  async function handleBacktest() {
-    if (!candidate) return;
-    const action = "触发本地回测";
-    const lifecycleId = start(action, { strategy_version_id: candidate.strategyVersionId });
-    try {
-      const result = await triggerLocalBacktest(candidate.strategyVersionId, operatorToken);
-      const run = asRecord(result.run);
-      const blocked = result.preflight_status === "blocked";
-      const runId = responseId(run);
-      recordAction(createActionEvidence({
-        action, lifecycleId, status: blocked ? "BLOCKED" : runId ? "SUCCESS" : "API_GAP",
-        message: blocked
-          ? (Array.isArray(result.blocked_reasons) ? result.blocked_reasons.join("；") : "本地回测 preflight 被阻止。")
-          : "已创建 preflight-only backtest run；未执行真实交易或下单。",
-        nextAction: blocked ? "补齐 preflight 条件后重试。" : "检查 Backtest Runs/Tasks 的持久记录和 artifact 状态。",
-        recommendBug: false,
-        databaseIds: { strategy_version_id: candidate.strategyVersionId, backtest_run_id: runId },
-        updatedAt: new Date().toISOString(),
-      }));
-      onRefresh();
-    } catch (error) {
-      recordAction(createActionEvidence({
-        action, lifecycleId, status: apiErrorStatus(error), message: apiErrorMessage(error, "本地回测请求失败。"),
-        nextAction: "检查持久 run/task 和 API 错误；若可稳定复现，创建 Bug Issue。", recommendBug: true,
-        databaseIds: { strategy_version_id: candidate.strategyVersionId }, updatedAt: new Date().toISOString(),
-      }));
-    } finally {
-      setActiveAction(null);
-    }
-  }
-
-  async function handleIngest() {
-    if (!ingestTask) return;
-    const action = "导入回测结果并计算评分";
-    const lifecycleId = start(action, { backtest_task_id: ingestTask.id });
-    try {
-      const result = await ingestBacktestArtifact(ingestTask.id, {
-        manifestPath: ingestTask.artifactManifest?.manifestPath,
-        resultPath: ingestTask.resultPath,
-        strategyName: ingestTask.strategyName,
-      }, operatorToken);
-      const task = asRecord(result.task);
-      const run = asRecord(result.run);
-      const parsedResult = asRecord(result.result);
-      const score = asRecord(result.score);
-      const ingestStatus = responseText(result.ingest_status) ?? "failed";
-      const resultId = responseId(parsedResult);
-      const scoreId = responseId(score);
-      const blocked = ingestStatus === "blocked";
-      const succeeded = ingestStatus === "succeeded" && resultId && scoreId;
-      recordAction(createActionEvidence({
-        action, lifecycleId, status: succeeded ? "SUCCESS" : blocked ? "BLOCKED" : ingestStatus === "succeeded" ? "API_GAP" : "FAILED",
-        message: responseText(result.reason) ?? (succeeded ? "回测结果和 StrategyScore 已写入数据库。" : `artifact ingest 返回 ${ingestStatus}。`),
-        nextAction: succeeded ? "刷新并核对 BacktestResult、StrategyScore 与 artifact path。" : "检查 artifact、任务状态和失败原因；不要将不完整结果当作成功。",
-        recommendBug: !blocked && !succeeded,
-        databaseIds: {
-          backtest_run_id: responseId(run), backtest_task_id: responseId(task) ?? ingestTask.id,
-          backtest_result_id: resultId, strategy_score_id: scoreId,
-        },
-        artifactPaths: [ingestTask.artifactManifest?.manifestPath, ingestTask.resultPath], updatedAt: new Date().toISOString(),
-      }));
-      onRefresh();
-    } catch (error) {
-      recordAction(createActionEvidence({
-        action, lifecycleId, status: apiErrorStatus(error), message: apiErrorMessage(error, "artifact ingest 请求失败。"),
-        nextAction: "检查 artifact path、持久任务和 API 错误；若可稳定复现，创建 Bug Issue。", recommendBug: true,
-        databaseIds: { backtest_task_id: ingestTask.id },
-        artifactPaths: [ingestTask.artifactManifest?.manifestPath, ingestTask.resultPath], updatedAt: new Date().toISOString(),
-      }));
-    } finally {
-      setActiveAction(null);
-    }
   }
 
   async function handleDeepSeekSingle() {
@@ -1601,71 +1511,27 @@ function WorkflowActionsPanel({
   }
 
   return (
-    <section className="lab-evidence-section" aria-label="核心工作流操作">
-      <div className="section-header detail-section">
-        <h2>核心工作流操作</h2>
-        <span>所有动作保留结果摘要；不执行 live trading</span>
-      </div>
+    <details className="lab-evidence-section">
+      <summary>高级 / 受控：DeepSeek 单次 E2E</summary>
+      <p>它属于生成阶段，不与普通回测、评分操作并列；默认不会调用真实 Provider。</p>
       <div className="lab-header-actions">
-        {activeStage === "backtest" ? (
-          <button className="secondary-button" disabled={busy || missingToken || !candidate} onClick={handleBacktest} type="button">
-            {activeAction === "触发本地回测" ? "触发中" : "触发本地回测"}
-          </button>
-        ) : null}
-        {activeStage === "score" ? (
-          <button className="secondary-button" disabled={busy || missingToken || !ingestTask} onClick={handleIngest} type="button">
-            {activeAction === "导入回测结果并计算评分" ? "导入中" : "导入结果并评分"}
-          </button>
-        ) : null}
-        {activeStage === "generation" ? (
-          <>
             <label className="inline-check">
               <input checked={allowDeepSeek} disabled={busy} onChange={(event) => setAllowDeepSeek(event.target.checked)} type="checkbox" />
               显式授权一次 DeepSeek 调用
             </label>
-            <button className="secondary-button" disabled={busy || missingToken || !promptSummary || !allowDeepSeek} onClick={handleDeepSeekSingle} type="button">
+            <button className="secondary-button" disabled={busy || missingToken || !promptSummary || !allowDeepSeek || providerReadiness.state !== "ready"} onClick={handleDeepSeekSingle} type="button">
               {activeAction === "运行 DeepSeek 单次 E2E" ? "运行中" : "运行 DeepSeek 单次 E2E"}
             </button>
-          </>
-        ) : null}
       </div>
-      <div className="compact-detail-list">
-        {activeStage === "backtest" ? (
-          <div><dt>本地回测</dt><dd>{candidate ? `候选 strategy_version=${candidate.strategyVersionId}` : "BLOCKED：缺少核心 strategy version。"}</dd></div>
-        ) : null}
-        {activeStage === "score" ? (
-          <div><dt>artifact 导入 / 评分</dt><dd>{ingestTask ? `候选 task=${ingestTask.id}` : "BLOCKED：没有带 artifact path 的核心回测任务。"}</dd></div>
-        ) : null}
-        {activeStage === "generation" ? (
-          <div><dt>DeepSeek 单次</dt><dd>默认不调用；必须输入 operator token 并勾选一次性显式授权。</dd></div>
-        ) : null}
-      </div>
+      <p>{providerReadiness.state === "ready" ? `${providerReadiness.label}：${providerReadiness.detail}` : `BLOCKED：${providerReadiness.label}。${providerReadiness.detail}`}</p>
+      <p>默认不调用；必须输入 operator token 并勾选一次性显式授权。</p>
       <LatestActionFeedback
-        actions={
-          activeStage === "generation"
-            ? ["运行 DeepSeek 单次 E2E"]
-            : activeStage === "backtest"
-              ? ["触发本地回测"]
-              : ["导入回测结果并计算评分"]
-        }
-        environmentScope={
-          activeStage === "backtest"
-            ? strategyFeedbackEnvironment(data, candidate)
-            : activeStage === "score"
-              ? sourceEnvironmentScope(ingestFeedbackSource)
-              : feedbackEnvironmentScope(data.generationRuns.map((run) => run.dataSource))
-        }
-        expectedEntityIds={
-          activeStage === "backtest"
-            ? { strategy_version_id: candidate?.strategyVersionId }
-            : activeStage === "score"
-              ? { backtest_task_id: ingestTask?.id }
-              : {}
-        }
+        actions={["运行 DeepSeek 单次 E2E"]}
+        environmentScope={feedbackEnvironmentScope(data.generationRuns.map((run) => run.dataSource))}
         history={history}
-        phase={activeStage}
+        phase="generation"
       />
-    </section>
+    </details>
   );
 }
 
@@ -1677,6 +1543,7 @@ export function PersistentEvidence({
   inspectedPhase,
   isLoading,
   onRefresh,
+  operatorDashboardSource,
   operatorToken,
   promptSummary,
   recordAction,
@@ -1689,6 +1556,7 @@ export function PersistentEvidence({
   inspectedPhase: LabPhase;
   isLoading: boolean;
   onRefresh: () => void;
+  operatorDashboardSource: DataSource;
   operatorToken: string;
   promptSummary: string;
   recordAction: RecordActionEvidence;
@@ -1696,6 +1564,7 @@ export function PersistentEvidence({
 }) {
   const [refreshPending, setRefreshPending] = useState(false);
   const refreshLifecycleRef = useRef<string | null>(null);
+  const { selection, select } = useLabSelection(data);
   const coreRankingCount = data.ranking.filter((entry) => isCoreDataSource(entry.dataSource)).length;
   const hasCoreEvidence =
     data.strategyVersions.some((version) => isCoreDataSource(version.dataSource)) ||
@@ -1795,12 +1664,23 @@ export function PersistentEvidence({
           <ReadinessDomainPanel data={data} />
         </>
       ) : null}
-      {inspectedPhase !== "dry-run" ? (
-        <WorkflowActionsPanel
-          activeStage={inspectedPhase}
+      <div hidden={inspectedPhase !== "backtest" && inspectedPhase !== "score"}>
+        <CandidateWorkbench
           data={data}
           history={history}
           onRefresh={handleRefresh}
+          operatorToken={operatorToken}
+          recordAction={recordAction}
+          selection={selection}
+          select={select}
+        />
+      </div>
+      {inspectedPhase === "generation" ? (
+        <AdvancedDeepSeekPanel
+          data={data}
+          history={history}
+          onRefresh={handleRefresh}
+          operatorDashboardSource={operatorDashboardSource}
           operatorToken={operatorToken}
           promptSummary={promptSummary}
           recordAction={recordAction}

@@ -4,6 +4,23 @@ import type { StrategyGenerationApiResult } from "./types";
 
 export type WorkflowApiResponse = Record<string, unknown>;
 
+export type LocalBacktestProfileV2 = {
+  schema_version: "2";
+  profile_name: string;
+  pair: string;
+  timeframe: string;
+  timerange: string;
+  strategy: { name: string; path: string };
+  data_source: { kind: "local"; exchange: string; datadir: string };
+  safety: {
+    allow_download: false;
+    allow_exchange_connection: false;
+    allow_dry_run: false;
+    allow_live_trading: false;
+    allow_hyperopt: false;
+  };
+};
+
 function operatorOptions(operatorToken: string, providerAuthorization?: "once") {
   return {
     idempotencyKey: crypto.randomUUID(),
@@ -14,11 +31,12 @@ function operatorOptions(operatorToken: string, providerAuthorization?: "once") 
 
 export async function triggerLocalBacktest(
   strategyVersionId: string,
+  profile: LocalBacktestProfileV2,
   operatorToken: string,
 ): Promise<WorkflowApiResponse> {
   return postJson<WorkflowApiResponse>(
     "/backtest-runs/local",
-    { strategy_version_id: Number(strategyVersionId), profile: {} },
+    { strategy_version_id: Number(strategyVersionId), profile },
     operatorOptions(operatorToken),
   );
 }

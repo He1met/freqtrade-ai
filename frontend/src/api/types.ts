@@ -214,6 +214,7 @@ export type BacktestRunSummary = {
   strategyName: string;
   status: string;
   profileName: string;
+  configSnapshot?: Record<string, unknown>;
   requestedTaskCount: number;
   completedTaskCount: number;
   profitPct: number | null;
