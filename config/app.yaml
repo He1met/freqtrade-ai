@@ -5,6 +5,12 @@ app:
   env: dev
 
 paths:
+  # Trusted identity for the one runnable checkout. Worktrees are development
+  # inputs only and must never become current runtime evidence implicitly.
+  canonical_repo_root: ~/Developer/Freqtrade Ai
+  # Retain records from the pre-migration checkout as read-only evidence.
+  historical_read_only_roots:
+    - ~/Documents/Freqtrade Ai
   # Reuse Freqtrade user_data layout instead of changing Freqtrade source code.
   freqtrade_user_data: ./user_data
   # AI-generated strategy files will be placed here in later phases.

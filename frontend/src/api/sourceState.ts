@@ -171,13 +171,30 @@ export function hasDatabaseIds(source: DataSourceTraceSummary | undefined): bool
   return Boolean(source && Object.keys(source.databaseIds).length > 0);
 }
 
+function hasArtifactPath(source: DataSourceTraceSummary | undefined): boolean {
+  return Boolean(
+    source &&
+      Object.entries(source.artifactRefs).some(
+        ([key, value]) => Boolean(value) && (key === "path" || key.endsWith("_path")),
+      ),
+  );
+}
+
+function isCurrentRunnableEnvironment(source: DataSourceTraceSummary | undefined): boolean {
+  if (!source || !hasArtifactPath(source)) {
+    return true;
+  }
+  return source.environment?.scope === "current" && source.environment.runnable;
+}
+
 export function isCoreDataSourceTrace(source: DataSourceTraceSummary | undefined): boolean {
   return Boolean(
     source?.coreData &&
       source.providerProvenance !== "non-core" &&
       source.providerProvenance !== "unknown" &&
       CORE_DATA_SOURCE_TYPES.includes(source.sourceType as CoreDataSourceType) &&
-      hasDatabaseIds(source),
+      hasDatabaseIds(source) &&
+      isCurrentRunnableEnvironment(source),
   );
 }
 
@@ -235,6 +252,40 @@ function getApiGapReason(source: DataSourceTraceSummary | undefined, sourceType:
 
 export function getDataSourceAcceptance(source: DataSourceTraceSummary | undefined): DataSourceAcceptance {
   const sourceType = source?.sourceType ?? "unknown";
+
+  if (source && hasArtifactPath(source) && source.environment?.scope === "historical") {
+    return {
+      state: "NOT_ACCEPTABLE",
+      canAccept: false,
+      sourceType,
+      reason: source.environment.reason,
+      nextAction: "历史证据仅供只读审计；请在当前唯一环境重新生成，或完成经文件、数据库 ID 与校验和对账的迁移。",
+    };
+  }
+
+  if (
+    source &&
+    hasArtifactPath(source) &&
+    (!source.environment || source.environment.scope === "unknown")
+  ) {
+    return {
+      state: "BLOCKED",
+      canAccept: false,
+      sourceType,
+      reason: source.environment?.reason ?? "API 未返回可复核的 artifact 环境归属。",
+      nextAction: "确认 artifact 归属当前唯一环境后再运行；不可依据成功状态推断其可执行。",
+    };
+  }
+
+  if (source && hasArtifactPath(source) && !source.environment?.runnable) {
+    return {
+      state: "BLOCKED",
+      canAccept: false,
+      sourceType,
+      reason: source.environment.reason,
+      nextAction: "在当前唯一环境重新生成缺失 artifact，或完成经验证的迁移后刷新。",
+    };
+  }
 
   if (source?.providerProvenance === "non-core" || source?.providerProvenance === "unknown") {
     return {

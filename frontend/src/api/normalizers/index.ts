@@ -494,6 +494,11 @@ export type RawDataSourceTrace = Partial<DataSourceTraceSummary> & {
   database_ids?: Record<string, unknown>;
   artifact_refs?: Record<string, unknown>;
   blocked_reason?: string | null;
+  environment?: RawEnvironmentEvidence;
+};
+
+export type RawEnvironmentEvidence = Partial<DataSourceTraceSummary["environment"]> & {
+  migration_verified?: boolean;
 };
 
 export type RawStrategyGenerationRunDetail = Partial<StrategyGenerationRunDetail> & {
@@ -1478,6 +1483,7 @@ export function normalizeDataSourceTrace(
   fallbackDetail: string,
 ): DataSourceTraceSummary {
   const source = raw ?? {};
+  const environment: RawEnvironmentEvidence = source.environment ?? {};
   return {
     sourceType: source.sourceType ?? source.source_type ?? "unknown",
     sourceDetail: redactSensitiveText(source.sourceDetail ?? source.source_detail ?? fallbackDetail),
@@ -1489,6 +1495,19 @@ export function normalizeDataSourceTrace(
       source.blockedReason || source.blocked_reason
         ? redactSensitiveText(source.blockedReason ?? source.blocked_reason ?? "")
         : null,
+    environment: {
+      scope:
+        environment.scope === "current" || environment.scope === "historical"
+          ? environment.scope
+          : "unknown",
+      runnable: asBoolean(environment.runnable),
+      migrationVerified: asBoolean(
+        environment.migrationVerified ?? environment.migration_verified,
+      ),
+      reason: redactSensitiveText(
+        environment.reason ?? "证据环境归属无法确认。",
+      ),
+    },
   };
 }
 

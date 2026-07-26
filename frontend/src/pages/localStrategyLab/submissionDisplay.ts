@@ -2,6 +2,7 @@ import type {
   DataSourceTraceSummary,
   StrategyGenerationApiResult,
 } from "../../api/types";
+import { isCoreDataSourceTrace } from "../../api/sourceState.ts";
 
 export type SubmissionDisplayState =
   | { kind: "idle" }
@@ -49,13 +50,7 @@ export type SubmissionDisplayModel = {
 };
 
 function isCoreSource(source: DataSourceTraceSummary, allowedType: "database" | "api_aggregate"): boolean {
-  return (
-    source.sourceType === allowedType &&
-    source.coreData === true &&
-    source.providerProvenance !== "non-core" &&
-    source.providerProvenance !== "unknown" &&
-    Object.keys(source.databaseIds).length > 0
-  );
+  return source.sourceType === allowedType && isCoreDataSourceTrace(source);
 }
 
 export function hasPersistentGenerationEvidence(result: StrategyGenerationApiResult): boolean {

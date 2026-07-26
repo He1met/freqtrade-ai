@@ -6,6 +6,12 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
+from app.schemas.environment_evidence import (
+    EnvironmentEvidence,
+    classify_artifact_environment,
+    unknown_environment,
+)
+
 
 DataSourceType = Literal["database", "api_aggregate", "fixture", "fallback", "unknown"]
 
@@ -20,6 +26,7 @@ class DataSourceTrace(BaseModel):
     artifact_refs: dict[str, str] = Field(default_factory=dict)
     freshness: Optional[datetime] = None
     blocked_reason: Optional[str] = None
+    environment: EnvironmentEvidence = Field(default_factory=unknown_environment)
 
     @model_validator(mode="after")
     def reject_non_core_sources_claiming_core_success(self) -> "DataSourceTrace":
@@ -27,6 +34,9 @@ class DataSourceTrace(BaseModel):
             raise ValueError(f"{self.source_type} data cannot satisfy core success")
         if self.source_type in {"database", "api_aggregate"} and self.core_data and not self.database_ids:
             raise ValueError(f"{self.source_type} source requires database ids for core success")
+        if self.environment.scope == "historical" and self.core_data:
+            self.core_data = False
+            self.blocked_reason = self.blocked_reason or self.environment.reason
         return self
 
 
@@ -36,14 +46,17 @@ def database_record_source(
     *,
     artifact_refs: Optional[dict[str, str]] = None,
     freshness: Optional[datetime] = None,
+    environment: Optional[EnvironmentEvidence] = None,
 ) -> DataSourceTrace:
+    refs = artifact_refs or {}
     return DataSourceTrace(
         source_type="database",
         source_detail=f"{record_type} record loaded from application database",
         core_data=True,
         database_ids=database_ids,
-        artifact_refs=artifact_refs or {},
+        artifact_refs=refs,
         freshness=freshness,
+        environment=environment or classify_artifact_environment(refs),
     )
 
 
@@ -53,14 +66,17 @@ def api_aggregate_source(
     *,
     artifact_refs: Optional[dict[str, str]] = None,
     freshness: Optional[datetime] = None,
+    environment: Optional[EnvironmentEvidence] = None,
 ) -> DataSourceTrace:
+    refs = artifact_refs or {}
     return DataSourceTrace(
         source_type="api_aggregate",
         source_detail=f"{aggregate_name} assembled from backend API and database records",
         core_data=True,
         database_ids=database_ids,
-        artifact_refs=artifact_refs or {},
+        artifact_refs=refs,
         freshness=freshness,
+        environment=environment or classify_artifact_environment(refs),
     )
 
 

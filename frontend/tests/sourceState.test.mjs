@@ -37,6 +37,93 @@ test("database source with database_ids is ACCEPTABLE", () => {
   assert.equal(isCoreDataSourceTrace(source), true);
 });
 
+test("current runnable artifact remains an acceptable core candidate", () => {
+  const source = {
+    sourceType: "database",
+    sourceDetail: "Current strategy version.",
+    coreData: true,
+    databaseIds: { strategy_version_id: 21 },
+    artifactRefs: { strategy_file_path: "user_data/strategies/generated/current.py" },
+    freshness: null,
+    blockedReason: null,
+    environment: {
+      scope: "current",
+      runnable: true,
+      migrationVerified: false,
+      reason: "证据属于当前唯一环境。",
+    },
+  };
+
+  assert.equal(isCoreDataSourceTrace(source), true);
+  assert.equal(getDataSourceAcceptance(source).state, "ACCEPTABLE");
+});
+
+test("historical artifact is retained but excluded from current candidates", () => {
+  const source = {
+    sourceType: "database",
+    sourceDetail: "Historical strategy version.",
+    coreData: true,
+    databaseIds: { strategy_version_id: 22 },
+    artifactRefs: {
+      strategy_file_path: "/Users/example/Documents/Freqtrade Ai/user_data/strategies/generated/old.py",
+    },
+    freshness: null,
+    blockedReason: null,
+    environment: {
+      scope: "historical",
+      runnable: false,
+      migrationVerified: false,
+      reason: "证据属于历史环境，仅保留只读审计。",
+    },
+  };
+
+  assert.equal(isCoreDataSourceTrace(source), false);
+  assert.equal(getDataSourceAcceptance(source).state, "NOT_ACCEPTABLE");
+  assert.match(getDataSourceAcceptance(source).nextAction, /只读审计/);
+});
+
+test("missing current artifact is BLOCKED instead of inferred successful", () => {
+  const source = {
+    sourceType: "database",
+    sourceDetail: "Current strategy version with missing artifact.",
+    coreData: true,
+    databaseIds: { strategy_version_id: 23 },
+    artifactRefs: { strategy_file_path: "user_data/strategies/generated/missing.py" },
+    freshness: null,
+    blockedReason: null,
+    environment: {
+      scope: "current",
+      runnable: false,
+      migrationVerified: false,
+      reason: "证据属于当前环境，但 artifact 尚不可用。",
+    },
+  };
+
+  assert.equal(isCoreDataSourceTrace(source), false);
+  assert.equal(getDataSourceAcceptance(source).state, "BLOCKED");
+});
+
+test("verified migrated artifact is accepted only after it is current and runnable", () => {
+  const source = {
+    sourceType: "database",
+    sourceDetail: "Verified migrated strategy version.",
+    coreData: true,
+    databaseIds: { strategy_version_id: 24 },
+    artifactRefs: { strategy_file_path: "user_data/strategies/generated/migrated.py" },
+    freshness: null,
+    blockedReason: null,
+    environment: {
+      scope: "current",
+      runnable: true,
+      migrationVerified: true,
+      reason: "迁移证据已完成文件、数据库 ID 与校验和对账。",
+    },
+  };
+
+  assert.equal(isCoreDataSourceTrace(source), true);
+  assert.equal(getDataSourceAcceptance(source).state, "ACCEPTABLE");
+});
+
 test("database source without database_ids is API_GAP", () => {
   const acceptance = getDataSourceAcceptance({
     sourceType: "database",

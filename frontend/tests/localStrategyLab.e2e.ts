@@ -26,7 +26,18 @@ test("shows fail-closed real database evidence while keeping deterministic Provi
 
   const versions = await (await versionsResponse).json() as Array<Record<string, unknown>>;
   expect(versions.some((version) => {
-    const source = version.data_source as { core_data?: unknown } | undefined;
+    const source = version.data_source as {
+      environment?: { scope?: unknown; runnable?: unknown };
+    } | undefined;
+    return (
+      source?.environment?.scope === "current" &&
+      source.environment.runnable === true
+    );
+  })).toBe(true);
+  expect(versions.some((version) => {
+    const source = version.data_source as {
+      core_data?: unknown;
+    } | undefined;
     return source?.core_data === false;
   })).toBe(true);
 
@@ -35,7 +46,7 @@ test("shows fail-closed real database evidence while keeping deterministic Provi
   await expect(conclusion.getByTestId("lab-evidence-status")).toHaveText("FAILED");
   await expect(page.getByTestId("lab-core-evidence-rejection")).toContainText("没有可证明的核心成功结果");
   await expect(page.getByTestId("lab-strategy-version-count").locator("strong")).toHaveText("0");
-  await expect(page.getByTestId("lab-backtest-result-count").locator("strong")).not.toHaveText("0");
+  await expect(page.getByTestId("lab-backtest-result-count").locator("strong")).toHaveText("0");
   await expect(page.getByTestId("lab-core-ranking-count").locator("strong")).not.toHaveText("0");
   await expect(page.getByRole("heading", { name: "非核心诊断记录（不可验收）" })).toBeVisible();
   await expect(page.locator(".lab-source-summary[data-core-source='true']").first()).toBeVisible();

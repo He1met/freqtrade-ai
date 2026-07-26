@@ -384,6 +384,12 @@ make up
 分散的 backend/worker/frontend 启动替代入口。缺少 schema、binary、端口或安全前置时，
 `make up` 以 `BLOCKED` 退出。
 
+`FREQTRADE_AI_CANONICAL_REPO_ROOT` 仅用于 smoke / Playwright 隔离测试。Playwright 会把
+`E2E_EVIDENCE_DIR` 同时传给 smoke 和随后启动的 `uvicorn`，确保两个独立进程使用同一测试
+artifact identity。正常本地运行必须使用 `config/app.yaml` 的
+`paths.canonical_repo_root`；不得把该 override 指向 worktree，也不得用它把历史 artifact
+提升为当前可运行证据。
+
 `make doctor` 同时报告 Python/Node、依赖、端口、DB identity、Freqtrade binary 和行情目录。
 后二者仅供后续本地研究准备度判断，不是启动前后端或 worker 的借口；缺失会如实显示，job 会
 进入 `BLOCKED`，绝不伪造回测或交易成功。`make status`、`make logs` 和 `make verify` 均包含

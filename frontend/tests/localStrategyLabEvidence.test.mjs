@@ -117,6 +117,56 @@ test("core records and non-core diagnostics are partitioned without mixing", () 
   assert.equal(partition.diagnostic[0].provider, "fake");
 });
 
+test("historical backtest and ranking evidence stays out of the core partition", () => {
+  const historical = source({
+    artifactRefs: { result_path: "/retired/reports/backtest.json" },
+    environment: {
+      scope: "historical",
+      runnable: false,
+      migrationVerified: false,
+      reason: "证据属于历史环境，仅保留只读审计。",
+    },
+  });
+  const summary = {
+    state: "NOT_ACCEPTABLE",
+    canAccept: false,
+    reason: "historical only",
+    nextAction: "regenerate",
+    stages: [
+      {
+        key: "backtest",
+        label: "回测",
+        state: "NOT_ACCEPTABLE",
+        canAccept: false,
+        reason: "historical",
+        nextAction: "regenerate",
+        observedCount: 1,
+        coreCount: 0,
+        records: [
+          { id: "4", parentId: "5", status: "SUCCESS", provider: null, model: null, artifactPath: "/retired/reports/backtest.json", source: historical },
+        ],
+      },
+      {
+        key: "score",
+        label: "评分",
+        state: "NOT_ACCEPTABLE",
+        canAccept: false,
+        reason: "historical",
+        nextAction: "regenerate",
+        observedCount: 1,
+        coreCount: 0,
+        records: [
+          { id: "6", parentId: "4", status: "SUCCESS", provider: null, model: null, artifactPath: "/retired/strategies/S.py", source: historical },
+        ],
+      },
+    ],
+  };
+
+  const partition = partitionEvidenceRecords(summary);
+  assert.equal(partition.core.length, 0);
+  assert.equal(partition.diagnostic.length, 2);
+});
+
 test("trace records use a copy-friendly stable multiline format", () => {
   assert.equal(
     formatTraceEntries({ strategy_generation_run_id: 11, strategy_version_id: 12 }),

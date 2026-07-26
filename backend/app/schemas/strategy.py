@@ -16,6 +16,7 @@ from app.schemas.data_source import (
     phase8_local_test_source,
     unknown_source,
 )
+from app.schemas.environment_evidence import classify_strategy_environment
 
 
 StrategyStatus = Literal["draft", "active", "archived"]
@@ -145,6 +146,17 @@ class StrategyVersionRead(BaseModel):
         }
         if self.code_hash:
             artifact_refs["strategy_file_checksum"] = self.code_hash
+        migration_manifest = (
+            self.diff_snapshot.get("environment_migration")
+            if isinstance(self.diff_snapshot.get("environment_migration"), dict)
+            else None
+        )
+        environment = classify_strategy_environment(
+            file_path=self.file_path,
+            database_ids=database_ids,
+            expected_checksum=self.code_hash,
+            migration_manifest=migration_manifest,
+        )
         local_test_source = phase8_local_test_source(
             "strategy_version",
             phase8_local_test_metadata_from_payload(self.blueprint, self.diff_snapshot),
@@ -157,6 +169,11 @@ class StrategyVersionRead(BaseModel):
             return self
 
         if self.file_state.status != "READY":
+            blocked_reason = (
+                environment.reason
+                if environment.scope != "current"
+                else "当前环境中的策略文件不可用；请重新生成或完成经验证的 artifact 迁移。"
+            )
             self.data_source = DataSourceTrace(
                 source_type="database",
                 source_detail="strategy_version record loaded from database, but strategy file artifact is not runnable",
@@ -164,7 +181,21 @@ class StrategyVersionRead(BaseModel):
                 database_ids=database_ids,
                 artifact_refs=artifact_refs,
                 freshness=self.created_at,
-                blocked_reason=self.file_state.blocked_reason,
+                blocked_reason=blocked_reason,
+                environment=environment,
+            )
+            return self
+
+        if environment.scope != "current" or not environment.runnable:
+            self.data_source = DataSourceTrace(
+                source_type="database",
+                source_detail="strategy_version record is retained, but its artifact is not executable in the current environment",
+                core_data=False,
+                database_ids=database_ids,
+                artifact_refs=artifact_refs,
+                freshness=self.created_at,
+                blocked_reason=environment.reason,
+                environment=environment,
             )
             return self
 
@@ -173,6 +204,7 @@ class StrategyVersionRead(BaseModel):
             database_ids,
             artifact_refs=artifact_refs,
             freshness=self.created_at,
+            environment=environment,
         )
         return self
 

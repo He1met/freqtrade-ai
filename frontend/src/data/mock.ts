@@ -63,6 +63,12 @@ export const mockMvpData: MvpData = {
         artifactRefs: { strategy_file_path: "user_data/strategies/AiRsiEma001.py" },
         freshness: null,
         blockedReason: "Mock strategy version is not backed by database rows.",
+        environment: {
+          scope: "unknown",
+          runnable: false,
+          migrationVerified: false,
+          reason: "Fixture artifact 不属于当前可执行证据。",
+        },
       },
     },
     {
@@ -90,6 +96,12 @@ export const mockMvpData: MvpData = {
         artifactRefs: { strategy_file_path: "user_data/strategies/AiBreakout001.py" },
         freshness: null,
         blockedReason: "Mock strategy version is not backed by database rows.",
+        environment: {
+          scope: "unknown",
+          runnable: false,
+          migrationVerified: false,
+          reason: "Fixture artifact 不属于当前可执行证据。",
+        },
       },
     },
   ],
@@ -1010,6 +1022,12 @@ export const mockMvpData: MvpData = {
         artifactRefs: {},
         freshness: null,
         blockedReason: "Mock ranking is not backed by database StrategyScore rows.",
+        environment: {
+          scope: "unknown",
+          runnable: false,
+          migrationVerified: false,
+          reason: "Fixture 记录不属于当前可执行证据。",
+        },
       },
     },
     {
@@ -1053,6 +1071,12 @@ export const mockMvpData: MvpData = {
         artifactRefs: {},
         freshness: null,
         blockedReason: "Mock ranking is not backed by database StrategyScore rows.",
+        environment: {
+          scope: "unknown",
+          runnable: false,
+          migrationVerified: false,
+          reason: "Fixture 记录不属于当前可执行证据。",
+        },
       },
     },
   ],

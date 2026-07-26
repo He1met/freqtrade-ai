@@ -31,6 +31,16 @@ from app.schemas.data_source import (
     fixture_source,
     unknown_source,
 )
+from app.schemas.environment_evidence import (
+    EnvironmentEvidence,
+    EnvironmentIdentity,
+    EnvironmentScope,
+    classify_artifact_environment,
+    classify_strategy_environment,
+    configured_environment_identity,
+    unknown_environment,
+    verify_environment_migration,
+)
 from app.schemas.operation_evidence import OperationEvidence, OperationStatus, operation_error_evidence
 from app.schemas.research_job import (
     ResearchJobCancelRequest,
@@ -223,6 +233,9 @@ __all__ = [
     "DryRunOpenTradesSummary",
     "DryRunSnapshotStatus",
     "DryRunStatusSnapshot",
+    "EnvironmentEvidence",
+    "EnvironmentIdentity",
+    "EnvironmentScope",
     "FreqUILinkConfig",
     "FreqUILinkMetadata",
     "fallback_source",
@@ -308,4 +321,9 @@ __all__ = [
     "StrategyVersionLineageEntry",
     "StrategyVersionRead",
     "unknown_source",
+    "classify_artifact_environment",
+    "classify_strategy_environment",
+    "configured_environment_identity",
+    "unknown_environment",
+    "verify_environment_migration",
 ]

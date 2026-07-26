@@ -2,6 +2,7 @@ from collections.abc import Generator
 import hashlib
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
@@ -22,9 +23,24 @@ from app.schemas import (
     StrategyGenerationRunCreate,
     StrategyVersionCreate,
 )
+from app.schemas.environment_evidence import EnvironmentIdentity
+import app.schemas.environment_evidence as environment_evidence
 
 
-def test_phase8_real_data_list_apis_return_database_sources(tmp_path: Path) -> None:
+def test_phase8_real_data_list_apis_return_database_sources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity = EnvironmentIdentity(
+        canonical_repo_root=tmp_path.resolve(),
+        artifact_roots=(),
+        historical_roots=(),
+    )
+    monkeypatch.setattr(
+        environment_evidence,
+        "configured_environment_identity",
+        lambda settings=None: identity,
+    )
     engine = create_database_engine(f"sqlite+pysqlite:///{tmp_path / 'phase8-real-data.sqlite'}")
     Base.metadata.create_all(engine)
     session_factory = create_session_factory(engine)
