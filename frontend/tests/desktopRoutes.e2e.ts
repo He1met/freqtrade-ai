@@ -3,6 +3,7 @@ import { expect, test } from "@playwright/test";
 import {
   captureBrowserProblems,
   expectPageReady,
+  SUPERSEDED_API_REQUESTS,
 } from "./helpers/desktopGate";
 
 const routes = [
@@ -21,7 +22,7 @@ const routes = [
 
 for (const route of routes) {
   test(`${route.path} desktop route has no overflow or browser diagnostics`, async ({ page }) => {
-    const problems = captureBrowserProblems(page);
+    const problems = captureBrowserProblems(page, SUPERSEDED_API_REQUESTS);
 
     await page.goto(route.path);
     await expect(page.getByRole("heading", { level: 1, name: route.heading })).toBeVisible();
@@ -36,7 +37,7 @@ test("strategy detail route renders against the isolated database", async ({ pag
   expect(response.ok()).toBe(true);
   const strategies = await response.json() as Array<{ id: number | string }>;
   expect(strategies.length, "the isolated Phase 8 seed must include a strategy").toBeGreaterThan(0);
-  const problems = captureBrowserProblems(page);
+  const problems = captureBrowserProblems(page, SUPERSEDED_API_REQUESTS);
 
   await page.goto(`/strategies/${strategies[0].id}`);
   await expectPageReady(page);
@@ -45,7 +46,7 @@ test("strategy detail route renders against the isolated database", async ({ pag
 });
 
 test("unknown route renders the desktop 404 page", async ({ page }) => {
-  const problems = captureBrowserProblems(page);
+  const problems = captureBrowserProblems(page, SUPERSEDED_API_REQUESTS);
 
   await page.goto("/__desktop-e2e-not-found__");
   await expect(page.getByText("404", { exact: true })).toBeVisible();
@@ -56,7 +57,7 @@ test("unknown route renders the desktop 404 page", async ({ page }) => {
 });
 
 test("common keyboard, disclosure, tooltip, and copy contracts work", async ({ page }) => {
-  const problems = captureBrowserProblems(page);
+  const problems = captureBrowserProblems(page, SUPERSEDED_API_REQUESTS);
   await page.addInitScript(() => {
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,

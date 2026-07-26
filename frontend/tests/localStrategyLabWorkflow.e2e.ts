@@ -1,10 +1,10 @@
 import { expect, test } from "@playwright/test";
 
-import { captureBrowserProblems, expectNoPageOverflow } from "./helpers/desktopGate";
+import { captureBrowserProblems, expectNoPageOverflow, SUPERSEDED_API_REQUESTS } from "./helpers/desktopGate";
 
 test("shows the complete task-flow decision above the fold at 1280x720", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "desktop-1280x720", "Issue #426 desktop acceptance uses 1280x720.");
-  const browserProblems = captureBrowserProblems(page);
+  const browserProblems = captureBrowserProblems(page, SUPERSEDED_API_REQUESTS);
 
   await page.goto("/local-strategy-lab");
 

@@ -1,10 +1,10 @@
 import { expect, test } from "@playwright/test";
 
-import { captureBrowserProblems, expectNoPageOverflow } from "./helpers/desktopGate";
+import { captureBrowserProblems, expectNoPageOverflow, SUPERSEDED_API_REQUESTS } from "./helpers/desktopGate";
 
 test("shows contextual auxiliary feedback and restores it without claiming backend state", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "desktop-1280x720", "Issue #432 desktop acceptance uses 1280x720.");
-  const browserProblems = captureBrowserProblems(page);
+  const browserProblems = captureBrowserProblems(page, SUPERSEDED_API_REQUESTS);
 
   await page.goto("/local-strategy-lab");
 
@@ -48,8 +48,8 @@ test("shows backtest score and dry-run feedback next to each operation area", as
       phase: "dry-run",
       action: "停止 controlled dry-run",
       artifactPaths: [],
-      entityIds: {},
-      databaseIds: {},
+      entityIds: { strategy_version_id: "201" },
+      databaseIds: { strategy_version_id: "201" },
       message: "停止接口未返回持久 ID。",
       nextAction: "核对 backend control response。",
       recommendBug: true,
@@ -215,7 +215,7 @@ test("shows backtest score and dry-run feedback next to each operation area", as
   await workflow.getByRole("button", { name: /受控 Dry-run/ }).click();
   const dryRunFeedback = page.getByRole("region", { name: "受控 Dry-run最近操作反馈" });
   await expect(dryRunFeedback).toHaveCount(1);
-  await expect(dryRunFeedback).toContainText("不适用于当前对象");
+  await expect(dryRunFeedback).toContainText("API_GAP");
   await expect(dryRunFeedback).not.toContainText("SUCCESS");
   await expectNoPageOverflow(page);
 });
