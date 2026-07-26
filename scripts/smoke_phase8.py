@@ -48,6 +48,7 @@ if str(BACKEND_PATH) not in sys.path:
 
 from sqlalchemy import select, text  # noqa: E402
 
+from app.core.config import get_settings  # noqa: E402
 from app.db.session import create_database_engine, create_session_factory, get_db  # noqa: E402
 from app.models import Base  # noqa: E402
 from app.models.backtest import BacktestResult  # noqa: E402
@@ -826,6 +827,10 @@ def classify_failure(exc: Exception) -> str:
 def main() -> int:
     args = parse_args()
     context = create_context(args)
+    # This smoke runner is the trusted owner of its isolated evidence root.
+    # Record-level snapshots remain unable to authorize arbitrary paths.
+    os.environ["FREQTRADE_AI_CANONICAL_REPO_ROOT"] = str(context.tmp_dir)
+    get_settings.cache_clear()
     exit_code = 0
     try:
         run_step("prepare local evidence directory", lambda: prepare_tmp_dir(context.tmp_dir))

@@ -29,9 +29,9 @@ if (process.env.DATABASE_URL && databaseUrl === process.env.DATABASE_URL) {
 const pythonBin = process.env.PYTHON_BIN ?? "python3";
 const pythonCommand = JSON.stringify(pythonBin);
 const databaseArgument = JSON.stringify(databaseUrl);
-const evidenceDir = JSON.stringify(
-  process.env.E2E_EVIDENCE_DIR ?? "/tmp/freqtrade-ai-issue-408-desktop-e2e",
-);
+const evidenceRoot =
+  process.env.E2E_EVIDENCE_DIR ?? "/tmp/freqtrade-ai-issue-408-desktop-e2e";
+const evidenceDir = JSON.stringify(evidenceRoot);
 const baseURL = `http://${host}:${frontendPort}`;
 
 export default defineConfig({
@@ -71,6 +71,7 @@ export default defineConfig({
         ...process.env,
         APP_ENV: "phase8",
         DATABASE_URL: databaseUrl,
+        FREQTRADE_AI_CANONICAL_REPO_ROOT: evidenceRoot,
       },
       url: `http://${host}:${backendPort}/health`,
       reuseExistingServer: false,

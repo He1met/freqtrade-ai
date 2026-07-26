@@ -35,9 +35,19 @@ export type DataSourceTraceSummary = {
   artifactRefs: Record<string, string>;
   freshness: string | null;
   blockedReason: string | null;
+  environment: EnvironmentEvidenceSummary;
   providerProvenance?: "real" | "non-core" | "unknown";
   providerName?: string;
   providerModel?: string;
+};
+
+export type EnvironmentScope = "current" | "historical" | "unknown";
+
+export type EnvironmentEvidenceSummary = {
+  scope: EnvironmentScope;
+  runnable: boolean;
+  migrationVerified: boolean;
+  reason: string;
 };
 
 export type StrategyVersionSummary = {

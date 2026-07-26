@@ -79,7 +79,7 @@ test("common keyboard, disclosure, tooltip, and copy contracts work", async ({ p
 
   const disclosure = page.locator(".backtest-technical-details").first();
   await expect(disclosure).toBeVisible();
-  const summary = disclosure.locator("summary");
+  const summary = disclosure.locator(":scope > summary");
   await summary.focus();
   await page.keyboard.press("Enter");
   await expect(disclosure).toHaveAttribute("open", "");

@@ -15,6 +15,8 @@ class Settings(BaseModel):
     env: str = "dev"
     database_enabled: bool = True
     database_url: str = "postgresql+psycopg://freqtrade:change_me@localhost:5432/freqtrade_ai"
+    canonical_repo_root: Path = Field(default=Path("~/Developer/Freqtrade Ai"))
+    historical_read_only_roots: list[Path] = Field(default_factory=list)
     freqtrade_user_data: Path = Field(default=Path("./user_data"))
     strategy_output_dir: Path = Field(default=Path("./user_data/strategies/generated"))
     market_data_dir: Path = Field(default=Path("./user_data/data"))
@@ -70,6 +72,17 @@ def get_settings() -> Settings:
             "DATABASE_URL",
             "postgresql+psycopg://freqtrade:change_me@localhost:5432/freqtrade_ai",
         ),
+        canonical_repo_root=Path(
+            os.getenv(
+                "FREQTRADE_AI_CANONICAL_REPO_ROOT",
+                paths_section.get("canonical_repo_root", "~/Developer/Freqtrade Ai"),
+            )
+        ),
+        historical_read_only_roots=[
+            Path(path)
+            for path in paths_section.get("historical_read_only_roots", [])
+            if isinstance(path, str) and path
+        ],
         freqtrade_user_data=Path(paths_section.get("freqtrade_user_data", "./user_data")),
         strategy_output_dir=Path(paths_section.get("strategy_output_dir", "./user_data/strategies/generated")),
         market_data_dir=Path(paths_section.get("market_data_dir", "./user_data/data")),

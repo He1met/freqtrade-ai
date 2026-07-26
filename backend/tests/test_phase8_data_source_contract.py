@@ -26,6 +26,8 @@ from app.schemas import (
     unknown_source,
 )
 from app.services.strategy_scoring import StrategyScoringService
+from app.schemas.environment_evidence import EnvironmentIdentity
+import app.schemas.environment_evidence as environment_evidence
 
 
 @pytest.fixture()
@@ -56,10 +58,25 @@ def strategy_file_snapshot(output_dir: Path, checksum: str) -> dict:
     }
 
 
+def trust_test_environment(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
+    identity = EnvironmentIdentity(
+        canonical_repo_root=root.resolve(),
+        artifact_roots=(),
+        historical_roots=(),
+    )
+    monkeypatch.setattr(
+        environment_evidence,
+        "configured_environment_identity",
+        lambda settings=None: identity,
+    )
+
+
 def test_core_database_read_models_include_traceable_database_source(
     db_session: Session,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    trust_test_environment(monkeypatch, tmp_path)
     strategy_repository = StrategyRepository(db_session)
     strategy = strategy_repository.create(
         StrategyCreate(name="Phase 8 Source Contract", slug="phase8-source-contract")
@@ -102,7 +119,9 @@ def test_core_database_read_models_include_traceable_database_source(
 def test_strategy_version_read_marks_missing_file_as_non_core(
     db_session: Session,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    trust_test_environment(monkeypatch, tmp_path)
     output_dir = tmp_path / "generated"
     output_dir.mkdir()
     strategy_repository = StrategyRepository(db_session)
@@ -132,13 +151,17 @@ def test_strategy_version_read_marks_missing_file_as_non_core(
     assert "strategy file does not exist" in (version_read.file_state.blocked_reason or "")
     assert version_read.data_source.source_type == "database"
     assert version_read.data_source.core_data is False
-    assert "strategy file does not exist" in (version_read.data_source.blocked_reason or "")
+    assert version_read.data_source.blocked_reason == (
+        "当前环境中的策略文件不可用；请重新生成或完成经验证的 artifact 迁移。"
+    )
 
 
 def test_strategy_version_read_marks_tampered_file_as_failed(
     db_session: Session,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    trust_test_environment(monkeypatch, tmp_path)
     output_dir = tmp_path / "generated"
     original_code = "class TamperedFileSourceContract:\n    value = 1\n"
     strategy_file, checksum = write_strategy_file(

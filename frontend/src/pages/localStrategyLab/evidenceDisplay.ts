@@ -3,6 +3,7 @@ import type {
   LocalStrategyLabEvidenceRecord,
   LocalStrategyLabEvidenceSummary,
 } from "../../api/types";
+import { isCoreDataSourceTrace } from "../../api/sourceState.ts";
 
 export type EvidenceStateDisplay = {
   label: string;
@@ -48,14 +49,7 @@ export function evidenceStateDisplay(state: AcceptanceState): EvidenceStateDispl
 }
 
 export function isCoreEvidenceRecord(record: LocalStrategyLabEvidenceRecord): boolean {
-  const source = record.source;
-  return (
-    source.coreData === true &&
-    (source.sourceType === "database" || source.sourceType === "api_aggregate") &&
-    source.providerProvenance !== "non-core" &&
-    source.providerProvenance !== "unknown" &&
-    Object.keys(source.databaseIds).length > 0
-  );
+  return isCoreDataSourceTrace(record.source);
 }
 
 export function partitionEvidenceRecords(summary: LocalStrategyLabEvidenceSummary): {
