@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import re
-from typing import Any, Callable, Mapping, Optional, Sequence
+from typing import Any, Callable, Mapping, Optional, Protocol, Sequence, Union
 from urllib.parse import urlencode
 
 from pydantic import BaseModel, ValidationError
@@ -75,14 +75,73 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+class _RecordedResponseTransport:
+    """In-memory test seam; it cannot wrap or invoke a network transport."""
+
+    def __init__(
+        self,
+        responses: Sequence[Union[OkxReadHttpResponse, BaseException]],
+    ) -> None:
+        self._responses = list(responses)
+        self.calls: list[dict[str, object]] = []
+
+    def get(
+        self,
+        *,
+        path: str,
+        query: Mapping[str, str],
+        headers: Mapping[str, str],
+        timeout_seconds: float,
+    ) -> OkxReadHttpResponse:
+        self.calls.append(
+            {
+                "path": path,
+                "query": dict(query),
+                "headers": dict(headers),
+                "timeout_seconds": timeout_seconds,
+            }
+        )
+        response = self._responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
+
+
+class OkxDemoReadClient(Protocol):
+    def instruments(self, inst_id: Optional[str] = None) -> OkxReadSnapshot: ...
+    def ticker(self, inst_id: str) -> OkxReadSnapshot: ...
+    def candles(
+        self, inst_id: str, *, bar: str = "1m", limit: int = 100
+    ) -> OkxReadSnapshot: ...
+    def orderbook(self, inst_id: str, *, depth: int = 20) -> OkxReadSnapshot: ...
+    def mark_price(self, inst_id: str) -> OkxReadSnapshot: ...
+    def index_price(self, index_id: str) -> OkxReadSnapshot: ...
+    def funding_rate(self, inst_id: str) -> OkxReadSnapshot: ...
+    def open_interest(self, inst_id: str) -> OkxReadSnapshot: ...
+    def account_config(self) -> OkxReadSnapshot: ...
+    def balance(self, currency: Optional[str] = None) -> OkxReadSnapshot: ...
+    def positions(self, inst_id: Optional[str] = None) -> OkxReadSnapshot: ...
+    def leverage(self, inst_id: str) -> OkxReadSnapshot: ...
+    def fees(self, inst_id: str) -> OkxReadSnapshot: ...
+    def order(
+        self,
+        inst_id: str,
+        *,
+        order_id: Optional[str] = None,
+        client_order_id: Optional[str] = None,
+    ) -> OkxReadSnapshot: ...
+
+
 class OkxDemoReadAdapter:
-    """GET-only OKX_DEMO adapter with normalized, credential-free output."""
+    """Offline recorded-response normalizer with no injectable network transport."""
 
     def __init__(
         self,
         *,
         execution_target: str,
-        transport: Optional[OkxReadTransport] = None,
+        recorded_responses: Sequence[
+            Union[OkxReadHttpResponse, BaseException]
+        ] = (),
         credential_provider: Optional[OkxDemoCredentialProvider] = None,
         timeout_seconds: float = 10.0,
         now_provider: Optional[Callable[[], datetime]] = None,
@@ -94,13 +153,7 @@ class OkxDemoReadAdapter:
                 status="BLOCKED",
                 message="OKX read adapter permits only execution_target=OKX_DEMO",
             )
-        if transport is None or isinstance(transport, UrllibOkxReadTransport):
-            raise OkxReadAdapterError(
-                kind="UNAUTHORIZED",
-                status="BLOCKED",
-                message="real OKX transport requires the attested adapter factory",
-            )
-        resolved_transport = transport
+        resolved_transport = _RecordedResponseTransport(recorded_responses)
         resolved_provider = (
             credential_provider or UnavailableOkxDemoCredentialProvider()
         )
@@ -449,6 +502,8 @@ class OkxDemoReadAdapter:
 
         now = self._now()
         received_at = self._aware_utc_timestamp(response.received_at)
+        if resource == "funding_rate":
+            self._validate_funding_schedule(normalized, now)
         exchange_timestamp = self._latest_timestamp(normalized)
         if (
             received_at > now + timedelta(seconds=FUTURE_SKEW_SECONDS)
@@ -554,9 +609,33 @@ class OkxDemoReadAdapter:
     def _instrument(item: Mapping[str, Any]) -> InstrumentSpec:
         if item["instType"] != "SWAP":
             raise ValueError("instrument is not SWAP")
+        inst_id = item["instId"]
+        if not isinstance(inst_id, str) or not SWAP_ID_PATTERN.fullmatch(inst_id):
+            raise OkxReadAdapterError(
+                kind="INVALID_RESPONSE",
+                status="BLOCKED",
+                message="OKX instrument identity is invalid",
+            )
+        base_ccy, quote_ccy, _suffix = inst_id.split("-")
+        family = "{}-{}".format(base_ccy, quote_ccy)
+        if item.get("uly") != family or item.get("instFamily") != family:
+            raise OkxReadAdapterError(
+                kind="INVALID_RESPONSE",
+                status="BLOCKED",
+                message="OKX instrument family does not match instId",
+            )
+        reported_base = item.get("baseCcy") or ""
+        reported_quote = item.get("quoteCcy") or ""
+        if (
+            reported_base not in ("", base_ccy)
+            or reported_quote not in ("", quote_ccy)
+        ):
+            raise OkxReadAdapterError(
+                kind="INVALID_RESPONSE",
+                status="BLOCKED",
+                message="OKX instrument currencies do not match instId",
+            )
         contract_type = item.get("ctType")
-        base_ccy = item["baseCcy"]
-        quote_ccy = item["quoteCcy"]
         settle_ccy = item["settleCcy"]
         contract_value_ccy = item["ctValCcy"]
         consistent = (
@@ -575,7 +654,7 @@ class OkxDemoReadAdapter:
                 message="OKX instrument contract metadata is inconsistent",
             )
         return InstrumentSpec(
-            inst_id=item["instId"],
+            inst_id=inst_id,
             inst_type=item["instType"],
             base_ccy=base_ccy,
             quote_ccy=quote_ccy,
@@ -659,6 +738,32 @@ class OkxDemoReadAdapter:
             funding_time=_millis(item["fundingTime"]),
             next_funding_time=_optional_millis(item.get("nextFundingTime")),
         )
+
+    @staticmethod
+    def _validate_funding_schedule(
+        items: Sequence[BaseModel],
+        now: datetime,
+    ) -> None:
+        lower = now - timedelta(hours=24)
+        upper = now + timedelta(hours=24)
+        for item in items:
+            if not isinstance(item, FundingRate):
+                continue
+            if not lower <= item.funding_time <= upper:
+                raise OkxReadAdapterError(
+                    kind="INVALID_RESPONSE",
+                    status="BLOCKED",
+                    message="OKX funding schedule is outside the allowed window",
+                )
+            if item.next_funding_time is not None and (
+                not lower <= item.next_funding_time <= upper
+                or item.next_funding_time < item.funding_time
+            ):
+                raise OkxReadAdapterError(
+                    kind="INVALID_RESPONSE",
+                    status="BLOCKED",
+                    message="OKX next funding schedule is inconsistent",
+                )
 
     @staticmethod
     def _open_interest(item: Mapping[str, Any]) -> OpenInterest:
@@ -833,7 +938,7 @@ class OkxDemoReadAdapter:
 
 def create_attested_okx_demo_read_adapter(
     environment: Mapping[str, str],
-) -> OkxDemoReadAdapter:
+) -> OkxDemoReadClient:
     """Create the only production adapter after attesting one frozen bundle."""
 
     names = (
@@ -858,6 +963,11 @@ def create_attested_okx_demo_read_adapter(
                 self.attested_at = attested_at
                 self.expires_at = expires_at
                 self._environment = dict(snapshot)
+                self._revoked = False
+
+            def revoke(self) -> None:
+                self._revoked = True
+                self._environment.clear()
 
             def authorization_headers(
                 self,
@@ -868,12 +978,14 @@ def create_attested_okx_demo_read_adapter(
             ) -> Mapping[str, str]:
                 now = _utc_now()
                 if (
-                    not isinstance(now, datetime)
+                    self._revoked
+                    or not isinstance(now, datetime)
                     or now.tzinfo is None
                     or now.astimezone(timezone.utc) >= self.expires_at
                 ):
+                    self.revoke()
                     raise OkxDemoCredentialsUnavailable(
-                        "OKX_DEMO account attestation expired"
+                        "OKX_DEMO account attestation expired or revoked"
                     )
                 try:
                     return _build_demo_authorization_headers(
@@ -887,18 +999,82 @@ def create_attested_okx_demo_read_adapter(
                         "OKX_DEMO credential provider is unavailable"
                     ) from None
 
-        session = AttestedSession()
-        adapter = object.__new__(OkxDemoReadAdapter)
-        adapter._transport = UrllibOkxReadTransport()
-        adapter._credential_provider = session
-        adapter._timeout_seconds = 10.0
-        adapter._now_provider = _utc_now
-        adapter._ttls = dict(DEFAULT_TTLS)
-        adapter._account_config_validator = lambda payload: validate_account_config(
-            payload,
-            expected_fingerprint=expected_fingerprint,
-        )
-        return adapter
+        class ProductionReadClient:
+            def __init__(self) -> None:
+                session = AttestedSession()
+
+                def validate_current_account(payload: Any) -> None:
+                    try:
+                        validate_account_config(
+                            payload,
+                            expected_fingerprint=expected_fingerprint,
+                        )
+                    except OkxDemoPreflightBlocked:
+                        session.revoke()
+                        raise
+
+                engine = object.__new__(OkxDemoReadAdapter)
+                engine._transport = UrllibOkxReadTransport()
+                engine._credential_provider = session
+                engine._timeout_seconds = 10.0
+                engine._now_provider = _utc_now
+                engine._ttls = dict(DEFAULT_TTLS)
+                engine._account_config_validator = validate_current_account
+                self._engine = engine
+
+            def instruments(self, inst_id=None):
+                return self._engine.instruments(inst_id)
+
+            def ticker(self, inst_id):
+                return self._engine.ticker(inst_id)
+
+            def candles(self, inst_id, *, bar="1m", limit=100):
+                return self._engine.candles(inst_id, bar=bar, limit=limit)
+
+            def orderbook(self, inst_id, *, depth=20):
+                return self._engine.orderbook(inst_id, depth=depth)
+
+            def mark_price(self, inst_id):
+                return self._engine.mark_price(inst_id)
+
+            def index_price(self, index_id):
+                return self._engine.index_price(index_id)
+
+            def funding_rate(self, inst_id):
+                return self._engine.funding_rate(inst_id)
+
+            def open_interest(self, inst_id):
+                return self._engine.open_interest(inst_id)
+
+            def account_config(self):
+                return self._engine.account_config()
+
+            def balance(self, currency=None):
+                return self._engine.balance(currency)
+
+            def positions(self, inst_id=None):
+                return self._engine.positions(inst_id)
+
+            def leverage(self, inst_id):
+                return self._engine.leverage(inst_id)
+
+            def fees(self, inst_id):
+                return self._engine.fees(inst_id)
+
+            def order(
+                self,
+                inst_id,
+                *,
+                order_id=None,
+                client_order_id=None,
+            ):
+                return self._engine.order(
+                    inst_id,
+                    order_id=order_id,
+                    client_order_id=client_order_id,
+                )
+
+        return ProductionReadClient()
     except OkxDemoPreflightBlocked:
         raise OkxDemoCredentialsUnavailable(
             "OKX_DEMO credential provider account attestation failed"
