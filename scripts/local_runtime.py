@@ -36,7 +36,7 @@ from app.adapters.freqtrade.binary import resolve_freqtrade_binary
 from app.adapters.okx_demo.credential_preflight import (
     ALLOW_REAL_FUNDS_ENV,
     EXECUTION_TARGET_ENV,
-    OKX_DEMO_CREDENTIAL_ENV_NAMES,
+    OKX_DEMO_REQUIRED_ENV_NAMES,
     OKX_DEMO_REST_URL,
     REST_URL_ENV,
 )
@@ -51,15 +51,18 @@ DEFAULT_RUNTIME_ENV_FILE = REPO_ROOT / ".freqtrade-ai" / "runtime.env"
 RUNTIME_ENV_KEYS = frozenset({"DATABASE_URL", "FREQTRADE_BINARY"})
 DEEPSEEK_API_KEY_ENV = "DEEPSEEK_API_KEY"
 DEEPSEEK_KEYCHAIN_SERVICE = "freqtrade-ai/deepseek-api-key"
+MANAGED_STRATEGY_PROVIDER = "deepseek"
+MANAGED_STRATEGY_MODEL = "deepseek-v4-pro"
 DISABLE_ENV_FILE_ENV = "FREQTRADE_AI_DISABLE_ENV_FILE"
 OPERATOR_TOKEN_ENV = "FREQTRADE_AI_OPERATOR_TOKEN"
 OKX_DEMO_KEYCHAIN_SERVICES = dict(
     zip(
-        OKX_DEMO_CREDENTIAL_ENV_NAMES,
+        OKX_DEMO_REQUIRED_ENV_NAMES,
         (
             "freqtrade-ai/okx-demo-api-key",
             "freqtrade-ai/okx-demo-api-secret",
             "freqtrade-ai/okx-demo-api-passphrase",
+            "freqtrade-ai/okx-demo-account-fingerprint",
         ),
     )
 )
@@ -90,16 +93,6 @@ SAFE_INHERITED_ENV_KEYS = frozenset(
         "no_proxy",
         "FREQTRADE_BINARY",
         "FREQTRADE_AI_CANONICAL_REPO_ROOT",
-    }
-)
-SAFE_DOTENV_CONFIG_KEYS = frozenset(
-    {
-        "STRATEGY_BLUEPRINT_PROVIDER",
-        "STRATEGY_BLUEPRINT_MODEL",
-        "STRATEGY_BLUEPRINT_BASE_URL",
-        "STRATEGY_BLUEPRINT_API_KEY_ENV",
-        "STRATEGY_BLUEPRINT_TIMEOUT_SECONDS",
-        "STRATEGY_BLUEPRINT_MAX_OUTPUT_TOKENS",
     }
 )
 DEFAULT_DATABASE_URL = (
@@ -282,7 +275,6 @@ def base_service_environment() -> Dict[str, str]:
         for key, value in os.environ.items()
         if key in SAFE_INHERITED_ENV_KEYS
     }
-    environment.update(read_safe_dotenv_environment())
     environment.update(
         {
             "APP_ENV": "local",
@@ -294,28 +286,30 @@ def base_service_environment() -> Dict[str, str]:
     return environment
 
 
-def read_safe_dotenv_environment(path: Optional[Path] = None) -> Dict[str, str]:
-    """Read only explicitly non-secret provider selectors from repo dotenv."""
+def okx_adapter_base_environment() -> Dict[str, str]:
+    """Build the smallest child environment without proxy or CA overrides."""
 
-    config_path = path or REPO_ROOT / ".env"
-    if not config_path.is_file():
-        return {}
-    result: Dict[str, str] = {}
-    for raw_line in config_path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, raw_value = (part.strip() for part in line.split("=", 1))
-        if key not in SAFE_DOTENV_CONFIG_KEYS:
-            continue
-        value = raw_value.strip('"').strip("'")
-        if (
-            value
-            and len(value) <= 4096
-            and not any(character in value for character in ("\x00", "\r", "\n"))
-        ):
-            result[key] = value
-    return result
+    inherited_keys = {
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "TMPDIR",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TZ",
+    }
+    environment = {
+        key: value for key, value in os.environ.items() if key in inherited_keys
+    }
+    environment.update(
+        {
+            "APP_ENV": "local",
+            DISABLE_ENV_FILE_ENV: "1",
+            "PYTHONUNBUFFERED": "1",
+        }
+    )
+    return environment
 
 
 def clean_environment(database_url: str) -> Dict[str, str]:
@@ -463,7 +457,7 @@ def read_okx_demo_credentials() -> Tuple[Optional[Dict[str, str]], Dict[str, Any
         }
 
     credentials: Dict[str, str] = {}
-    for environment_name in OKX_DEMO_CREDENTIAL_ENV_NAMES:
+    for environment_name in OKX_DEMO_REQUIRED_ENV_NAMES:
         service = OKX_DEMO_KEYCHAIN_SERVICES[environment_name]
         value = _read_macos_keychain_item(service)
         if value is None:
@@ -492,9 +486,19 @@ def service_environment(
 
     if service not in {"backend", "worker", "frontend", "okx_adapter"}:
         raise RuntimeBlocked("unknown managed service environment")
-    environment = base_service_environment()
+    environment = (
+        okx_adapter_base_environment()
+        if service == "okx_adapter"
+        else base_service_environment()
+    )
     if service in {"backend", "worker"}:
-        environment["DATABASE_URL"] = database_url
+        environment.update(
+            {
+                "DATABASE_URL": database_url,
+                "STRATEGY_BLUEPRINT_PROVIDER": MANAGED_STRATEGY_PROVIDER,
+                "STRATEGY_BLUEPRINT_MODEL": MANAGED_STRATEGY_MODEL,
+            }
+        )
     if service == "backend":
         operator_token = os.environ.get(OPERATOR_TOKEN_ENV, "")
         if operator_token:
@@ -504,7 +508,7 @@ def service_environment(
     if service == "okx_adapter":
         validate_okx_demo_execution_target()
         if not okx_demo_credentials or set(okx_demo_credentials) != set(
-            OKX_DEMO_CREDENTIAL_ENV_NAMES
+            OKX_DEMO_REQUIRED_ENV_NAMES
         ):
             raise RuntimeBlocked("OKX Demo credential bundle is incomplete")
         environment.update(okx_demo_credentials)
@@ -679,16 +683,20 @@ def run_okx_demo_preflight() -> Dict[str, Any]:
         completed.returncode != 0
         or payload.get("status") != "READY"
         or payload.get("execution_target") != "OKX_DEMO"
-        or payload.get("simulated_trading") is not True
-        or payload.get("identity_verified") is not True
-        or payload.get("permissions")
-        != {"read": True, "trade": True, "withdraw": False}
-        or payload.get("account_contract")
+        or payload.get("remote_account_evidence")
         != {
+            "authenticated_demo_response": True,
+            "identity_present": True,
+            "fingerprint_match": True,
+            "permissions": {"read": True, "trade": True, "withdraw": False},
             "account_level": "2",
             "position_mode": "net_mode",
+        }
+        or payload.get("local_target_contract")
+        != {
             "product_type": "SWAP",
             "margin_mode": "isolated",
+            "allow_real_funds": False,
         }
         or payload.get("request_contract")
         != {
@@ -706,14 +714,18 @@ def run_okx_demo_preflight() -> Dict[str, Any]:
     return {
         "status": "READY",
         "execution_target": "OKX_DEMO",
-        "simulated_trading": True,
-        "identity_verified": True,
-        "permissions": {"read": True, "trade": True, "withdraw": False},
-        "account_contract": {
+        "remote_account_evidence": {
+            "authenticated_demo_response": True,
+            "identity_present": True,
+            "fingerprint_match": True,
+            "permissions": {"read": True, "trade": True, "withdraw": False},
             "account_level": "2",
             "position_mode": "net_mode",
+        },
+        "local_target_contract": {
             "product_type": "SWAP",
             "margin_mode": "isolated",
+            "allow_real_funds": False,
         },
         "request_contract": {
             "method": "GET",

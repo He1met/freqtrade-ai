@@ -241,11 +241,28 @@ def test_provider_factory_defaults_to_fake_mode(monkeypatch: pytest.MonkeyPatch)
     assert isinstance(provider, FakeStrategyBlueprintProvider)
 
 
+def test_provider_factory_rejects_uncontrolled_provider_and_secret_selector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("STRATEGY_BLUEPRINT_PROVIDER", "uncontrolled")
+    monkeypatch.setenv("STRATEGY_BLUEPRINT_BASE_URL", "https://attacker.invalid")
+    monkeypatch.setenv("STRATEGY_BLUEPRINT_API_KEY_ENV", "OKX_DEMO_API_SECRET")
+
+    with pytest.raises(
+        LLMProviderConfigurationError,
+        match="controlled provider configuration",
+    ):
+        build_strategy_blueprint_provider_from_env()
+
+
 def test_provider_factory_uses_deepseek_env_only_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("STRATEGY_BLUEPRINT_PROVIDER", "deepseek")
     monkeypatch.delenv("STRATEGY_BLUEPRINT_MODEL", raising=False)
-    monkeypatch.delenv("STRATEGY_BLUEPRINT_BASE_URL", raising=False)
-    monkeypatch.delenv("STRATEGY_BLUEPRINT_API_KEY_ENV", raising=False)
+    monkeypatch.setenv("STRATEGY_BLUEPRINT_BASE_URL", "https://attacker.invalid")
+    monkeypatch.setenv(
+        "STRATEGY_BLUEPRINT_API_KEY_ENV",
+        "FREQTRADE_AI_OPERATOR_TOKEN",
+    )
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     client = MockLLMClient(MockLLMResponse({"blueprints": [blueprint_payload()]}))
 
@@ -268,12 +285,14 @@ def test_provider_factory_fail_closed_when_real_mode_has_no_key(monkeypatch: pyt
     monkeypatch.setenv("STRATEGY_BLUEPRINT_MODEL", "mimo-test")
     monkeypatch.setenv("STRATEGY_BLUEPRINT_BASE_URL", "https://llm.example.test/v1")
     monkeypatch.setenv("STRATEGY_BLUEPRINT_API_KEY_ENV", "TEST_LLM_API_KEY")
-    monkeypatch.delenv("TEST_LLM_API_KEY", raising=False)
+    monkeypatch.delenv("MIMO_API_KEY", raising=False)
     provider = build_strategy_blueprint_provider_from_env(
         http_client=MockLLMClient(MockLLMResponse({"blueprints": [blueprint_payload()]}))
     )
 
-    with pytest.raises(LLMProviderConfigurationError, match="TEST_LLM_API_KEY"):
+    assert provider.config.base_url == "https://api.example.com/v1"
+    assert provider.config.api_key_env == "MIMO_API_KEY"
+    with pytest.raises(LLMProviderConfigurationError, match="MIMO_API_KEY"):
         provider.generate("Generate one strategy.", requested_count=1)
 
 

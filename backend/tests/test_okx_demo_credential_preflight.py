@@ -13,6 +13,9 @@ def valid_environment() -> dict[str, str]:
         "OKX_DEMO_API_KEY": "test-api-key",
         "OKX_DEMO_API_SECRET": "test-api-secret",
         "OKX_DEMO_API_PASSPHRASE": "test-passphrase",
+        preflight.OKX_DEMO_ACCOUNT_FINGERPRINT_ENV: preflight.account_fingerprint(
+            valid_payload()["data"][0]
+        ),
     }
 
 
@@ -66,14 +69,24 @@ def test_request_contract_fails_closed(name: str, value: str, message: str) -> N
 
 
 def test_valid_demo_identity_and_minimum_permissions_are_redacted() -> None:
-    result = preflight.validate_account_config(valid_payload())
+    expected = preflight.account_fingerprint(valid_payload()["data"][0])
+    result = preflight.validate_account_config(
+        valid_payload(),
+        expected_fingerprint=expected,
+    )
 
     assert result["status"] == "READY"
     assert result["execution_target"] == "OKX_DEMO"
-    assert result["permissions"] == {
+    assert result["remote_account_evidence"]["fingerprint_match"] is True
+    assert result["remote_account_evidence"]["permissions"] == {
         "read": True,
         "trade": True,
         "withdraw": False,
+    }
+    assert result["local_target_contract"] == {
+        "product_type": "SWAP",
+        "margin_mode": "isolated",
+        "allow_real_funds": False,
     }
     rendered = json.dumps(result)
     assert "must-not-be-rendered" not in rendered
@@ -112,9 +125,28 @@ def test_account_attestation_rejects_unknown_or_unsafe_contract(
 ) -> None:
     payload = valid_payload()
     mutation(payload)
+    try:
+        expected = preflight.account_fingerprint(payload["data"][0])
+    except (IndexError, preflight.OkxDemoPreflightBlocked):
+        expected = preflight.account_fingerprint(valid_payload()["data"][0])
 
     with pytest.raises(preflight.OkxDemoPreflightBlocked, match=message):
-        preflight.validate_account_config(payload)
+        preflight.validate_account_config(
+            payload,
+            expected_fingerprint=expected,
+        )
+
+
+@pytest.mark.parametrize("expected", ["", "not-a-sha256", "f" * 64])
+def test_account_attestation_requires_matching_pinned_fingerprint(expected: str) -> None:
+    with pytest.raises(
+        preflight.OkxDemoPreflightBlocked,
+        match="fingerprint",
+    ):
+        preflight.validate_account_config(
+            valid_payload(),
+            expected_fingerprint=expected,
+        )
 
 
 class FakeResponse:
@@ -141,8 +173,24 @@ def test_run_preflight_never_returns_raw_account_identifiers() -> None:
         opener=lambda request, timeout: FakeResponse(payload),
     )
 
-    assert result["identity_verified"] is True
+    assert result["remote_account_evidence"]["fingerprint_match"] is True
     assert "must-not-be-rendered" not in json.dumps(result)
+
+
+def test_run_preflight_does_not_call_network_without_pinned_fingerprint() -> None:
+    environment = valid_environment()
+    environment.pop(preflight.OKX_DEMO_ACCOUNT_FINGERPRINT_ENV)
+
+    with pytest.raises(
+        preflight.OkxDemoPreflightBlocked,
+        match="bundle is incomplete",
+    ):
+        preflight.run_preflight(
+            environment,
+            opener=lambda *_args, **_kwargs: pytest.fail(
+                "network must not run without identity pinning"
+            ),
+        )
 
 
 def test_transport_and_invalid_json_fail_without_echoing_remote_content() -> None:

@@ -23,6 +23,11 @@ OKX_DEMO_CREDENTIAL_ENV_NAMES = (
     "OKX_DEMO_API_SECRET",
     "OKX_DEMO_API_PASSPHRASE",
 )
+OKX_DEMO_ACCOUNT_FINGERPRINT_ENV = "OKX_DEMO_ACCOUNT_FINGERPRINT"
+OKX_DEMO_REQUIRED_ENV_NAMES = (
+    *OKX_DEMO_CREDENTIAL_ENV_NAMES,
+    OKX_DEMO_ACCOUNT_FINGERPRINT_ENV,
+)
 REQUEST_TIMEOUT_SECONDS = 10
 
 
@@ -55,6 +60,24 @@ def _signature(secret: str, timestamp: str) -> str:
         hashlib.sha256,
     ).digest()
     return base64.b64encode(digest).decode("ascii")
+
+
+def account_fingerprint(account: Mapping[str, Any]) -> str:
+    identity = {
+        "uid": account.get("uid"),
+        "mainUid": account.get("mainUid"),
+        "acctLv": account.get("acctLv"),
+        "posMode": account.get("posMode"),
+    }
+    if not all(isinstance(value, str) and value.strip() for value in identity.values()):
+        raise OkxDemoPreflightBlocked("OKX Demo account identity is unknown")
+    canonical = json.dumps(
+        identity,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def build_account_config_request(
@@ -93,7 +116,11 @@ def build_account_config_request(
     )
 
 
-def validate_account_config(payload: Any) -> Dict[str, Any]:
+def validate_account_config(
+    payload: Any,
+    *,
+    expected_fingerprint: str,
+) -> Dict[str, Any]:
     if not isinstance(payload, dict) or payload.get("code") != "0":
         raise OkxDemoPreflightBlocked("OKX Demo account attestation failed")
     data = payload.get("data")
@@ -101,8 +128,14 @@ def validate_account_config(payload: Any) -> Dict[str, Any]:
         raise OkxDemoPreflightBlocked("OKX Demo account identity is unknown")
 
     account = data[0]
-    if not isinstance(account.get("uid"), str) or not account["uid"].strip():
-        raise OkxDemoPreflightBlocked("OKX Demo account identity is unknown")
+    if (
+        len(expected_fingerprint) != 64
+        or any(character not in "0123456789abcdef" for character in expected_fingerprint)
+    ):
+        raise OkxDemoPreflightBlocked("OKX Demo account fingerprint is missing or invalid")
+    observed_fingerprint = account_fingerprint(account)
+    if not hmac.compare_digest(observed_fingerprint, expected_fingerprint):
+        raise OkxDemoPreflightBlocked("OKX Demo account fingerprint does not match")
     permissions = account.get("perm")
     if not isinstance(permissions, str):
         raise OkxDemoPreflightBlocked("OKX Demo API permissions are unknown")
@@ -123,18 +156,22 @@ def validate_account_config(payload: Any) -> Dict[str, Any]:
     return {
         "status": "READY",
         "execution_target": "OKX_DEMO",
-        "simulated_trading": True,
-        "identity_verified": True,
-        "permissions": {
-            "read": True,
-            "trade": True,
-            "withdraw": False,
-        },
-        "account_contract": {
+        "remote_account_evidence": {
+            "authenticated_demo_response": True,
+            "identity_present": True,
+            "fingerprint_match": True,
+            "permissions": {
+                "read": True,
+                "trade": True,
+                "withdraw": False,
+            },
             "account_level": "2",
             "position_mode": "net_mode",
+        },
+        "local_target_contract": {
             "product_type": "SWAP",
             "margin_mode": "isolated",
+            "allow_real_funds": False,
         },
         "request_contract": {
             "method": "GET",
@@ -149,8 +186,11 @@ def run_preflight(
     *,
     opener: Callable[..., Any] = urlopen,
 ) -> Dict[str, Any]:
-    request = build_account_config_request(
-        os.environ if environment is None else environment
+    active_environment = os.environ if environment is None else environment
+    request = build_account_config_request(active_environment)
+    expected_fingerprint = _required_environment(
+        active_environment,
+        OKX_DEMO_ACCOUNT_FINGERPRINT_ENV,
     )
     try:
         with opener(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
@@ -169,7 +209,10 @@ def run_preflight(
         raise OkxDemoPreflightBlocked(
             "OKX Demo account attestation returned invalid JSON"
         ) from None
-    return validate_account_config(payload)
+    return validate_account_config(
+        payload,
+        expected_fingerprint=expected_fingerprint,
+    )
 
 
 def main() -> int:

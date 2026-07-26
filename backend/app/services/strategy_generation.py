@@ -1,7 +1,7 @@
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Optional, Protocol
 from urllib.parse import urlsplit, urlunsplit
 
@@ -60,10 +60,11 @@ class LLMProviderResponseError(RuntimeError):
 
 @dataclass(frozen=True)
 class LLMProviderConfig:
-    """ENV-only provider configuration.
+    """Provider configuration with a fixed endpoint and credential-name contract.
 
     The provider reads secret values from the environment at call time. Config
     objects store environment variable names and public endpoint metadata only.
+    Environment input cannot redirect the endpoint or select another secret.
     """
 
     provider_name: str
@@ -78,15 +79,13 @@ class LLMProviderConfig:
     @classmethod
     def from_env(cls) -> "LLMProviderConfig":
         provider_name = os.environ.get("STRATEGY_BLUEPRINT_PROVIDER", "fake").strip().lower()
-        defaults = _provider_defaults(provider_name)
-        return cls(
-            provider_name=provider_name or "fake",
-            model_name=os.environ.get("STRATEGY_BLUEPRINT_MODEL", defaults["model_name"]).strip()
-            or defaults["model_name"],
-            base_url=os.environ.get("STRATEGY_BLUEPRINT_BASE_URL", defaults["base_url"]).strip()
-            or defaults["base_url"],
-            api_key_env=os.environ.get("STRATEGY_BLUEPRINT_API_KEY_ENV", defaults["api_key_env"]).strip()
-            or defaults["api_key_env"],
+        controlled = _controlled_provider_config(provider_name)
+        return replace(
+            controlled,
+            model_name=os.environ.get(
+                "STRATEGY_BLUEPRINT_MODEL", controlled.model_name
+            ).strip()
+            or controlled.model_name,
             timeout_seconds=float(os.environ.get("STRATEGY_BLUEPRINT_TIMEOUT_SECONDS", "30")),
             max_output_tokens=_optional_int_from_env("STRATEGY_BLUEPRINT_MAX_OUTPUT_TOKENS"),
         )
@@ -98,10 +97,8 @@ class LLMProviderConfig:
             provider_name="deepseek",
             model_name=os.environ.get("STRATEGY_BLUEPRINT_MODEL", "deepseek-v4-pro").strip()
             or "deepseek-v4-pro",
-            base_url=os.environ.get("STRATEGY_BLUEPRINT_BASE_URL", "https://api.deepseek.com").strip()
-            or "https://api.deepseek.com",
-            api_key_env=os.environ.get("STRATEGY_BLUEPRINT_API_KEY_ENV", "DEEPSEEK_API_KEY").strip()
-            or "DEEPSEEK_API_KEY",
+            base_url="https://api.deepseek.com",
+            api_key_env="DEEPSEEK_API_KEY",
             timeout_seconds=float(os.environ.get("STRATEGY_BLUEPRINT_TIMEOUT_SECONDS", "30")),
             max_output_tokens=_optional_int_from_env("STRATEGY_BLUEPRINT_MAX_OUTPUT_TOKENS"),
         )
@@ -350,26 +347,33 @@ def _optional_int_from_env(name: str) -> Optional[int]:
     return int(value)
 
 
-def _provider_defaults(provider_name: str) -> dict[str, str]:
+def _controlled_provider_config(provider_name: str) -> LLMProviderConfig:
     normalized = (provider_name or "fake").strip().lower()
-    defaults = {
-        "model_name": "gpt-4.1-mini",
-        "base_url": "https://api.openai.com/v1",
-        "api_key_env": "OPENAI_API_KEY",
+    providers = {
+        "fake": LLMProviderConfig(
+            provider_name="fake",
+            model_name="gpt-4.1-mini",
+            base_url="https://api.openai.com/v1",
+            api_key_env="OPENAI_API_KEY",
+        ),
+        "deepseek": LLMProviderConfig(
+            provider_name="deepseek",
+            model_name="deepseek-v4-pro",
+            base_url="https://api.deepseek.com",
+            api_key_env="DEEPSEEK_API_KEY",
+        ),
+        "mimo": LLMProviderConfig(
+            provider_name="mimo",
+            model_name="mimo-2.5-pro",
+            base_url="https://api.example.com/v1",
+            api_key_env="MIMO_API_KEY",
+        ),
     }
-    if normalized == "deepseek":
-        return {
-            "model_name": "deepseek-v4-pro",
-            "base_url": "https://api.deepseek.com",
-            "api_key_env": "DEEPSEEK_API_KEY",
-        }
-    if normalized == "mimo":
-        return {
-            "model_name": "mimo-2.5-pro",
-            "base_url": "https://api.example.com/v1",
-            "api_key_env": "MIMO_API_KEY",
-        }
-    return defaults
+    if normalized not in providers:
+        raise LLMProviderConfigurationError(
+            "Provider is not present in the controlled provider configuration"
+        )
+    return providers[normalized]
 
 
 def _normalize_blueprint_payload(payload: dict[str, Any]) -> dict[str, Any]:

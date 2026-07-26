@@ -374,8 +374,8 @@ worker、不会进入 frontend，日志和扫描结果不包含 secret-shaped �
 
 ### macOS OKX Demo 凭据与只读身份预检
 
-`OKX_DEMO` 的 API Key、Secret 和 Passphrase 只允许存入当前用户的 macOS
-登录钥匙串。它们不得进入 `.env`、`.env.example`、`.freqtrade-ai/runtime.env`、
+`OKX_DEMO` 的 API Key、Secret、Passphrase 和预期账户指纹只允许存入当前用户的
+macOS 登录钥匙串。它们不得进入 `.env`、`.env.example`、`.freqtrade-ai/runtime.env`、
 LaunchAgent plist、数据库、日志、页面、Issue、PR 或 manifest。固定映射如下：
 
 | 进程内变量名 | macOS Keychain service |
@@ -383,9 +383,11 @@ LaunchAgent plist、数据库、日志、页面、Issue、PR 或 manifest。固�
 | `OKX_DEMO_API_KEY` | `freqtrade-ai/okx-demo-api-key` |
 | `OKX_DEMO_API_SECRET` | `freqtrade-ai/okx-demo-api-secret` |
 | `OKX_DEMO_API_PASSPHRASE` | `freqtrade-ai/okx-demo-api-passphrase` |
+| `OKX_DEMO_ACCOUNT_FINGERPRINT` | `freqtrade-ai/okx-demo-account-fingerprint` |
 
-首次配置或轮换时逐项运行交互式命令。`-w` 必须是最后一个参数，凭据值只能粘贴到
-macOS 提示中：
+账户指纹是对预期 Demo 账户的 `uid`、`mainUid`、`acctLv`、`posMode` 做规范 JSON
+序列化后计算的 64 位小写 SHA-256；它不是账户标识本身。首次配置或轮换时逐项运行
+交互式命令。`-w` 必须是最后一个参数，值只能粘贴到 macOS 提示中：
 
 ```bash
 /usr/bin/security add-generic-password -a "$USER" \
@@ -394,21 +396,23 @@ macOS 提示中：
   -s 'freqtrade-ai/okx-demo-api-secret' -U -w
 /usr/bin/security add-generic-password -a "$USER" \
   -s 'freqtrade-ai/okx-demo-api-passphrase' -U -w
-make autostart-restart
+/usr/bin/security add-generic-password -a "$USER" \
+  -s 'freqtrade-ai/okx-demo-account-fingerprint' -U -w
 ```
 
 禁止使用 `-w "$OKX_DEMO_API_KEY"`、`launchctl setenv`、`.env` 或第二份
-`~/.okx/config.toml`。三项必须同时可用；任一缺失、空值或不可访问时，只读身份预检
+`~/.okx/config.toml`。四项必须同时可用；任一缺失、空值或不可访问时，只读身份预检
 返回 `BLOCKED`，不会回退到 shell 环境，也不会启动凭据子进程。
 
 受管 backend、worker、frontend、数据库预检和普通测试进程均不会获得 OKX 凭据。
-只有项目自有 OKX adapter 边界能够获得完整三元组。当前提供的唯一凭据子进程只执行
+只有项目自有 OKX adapter 边界能够获得完整四项 bundle。当前提供的唯一凭据子进程只执行
 `GET /api/v5/account/config`，强制 `x-simulated-trading: 1`，并要求：
 
 - 唯一执行目标为 `OKX_DEMO`，`allow_real_funds=false`；
 - API 权限恰好包含 `read_only,trade`，不允许 `withdraw` 或未知权限；
 - 账户为 Futures mode，持仓模式为 `net_mode`；
-- 响应身份可验证，但任何 `uid`、密钥、签名和远端原始消息都不会写入输出。
+- 响应身份与预期账户指纹完全匹配，但任何 `uid`、`mainUid`、密钥、签名和远端原始
+  消息都不会写入输出。
 
 它不下单、不修改账户配置，也不探测 Live 环境：
 
@@ -416,9 +420,15 @@ make autostart-restart
 make okx-demo-preflight
 ```
 
-只有命令返回 `READY` 才证明当前钥匙串三元组通过 Demo 身份和权限预检。`BLOCKED`
-必须按失败处理，不能用 Keychain 条目“看起来存在”或 HTTP 200 伪造成功。配置、轮换
-或删除任一项后都必须执行 `make autostart-restart`，确保健康旧进程不继续持有旧值。
+只有命令返回 `READY` 才证明当前钥匙串 bundle 通过 Demo 身份和权限预检。输出中的
+`remote_account_evidence` 仅证明 Demo 鉴权响应、账户指纹、权限、账户等级与持仓模式；
+`local_target_contract` 中的 `SWAP`、`isolated` 和 `allow_real_funds=false` 是本地执行
+目标约束，不是 `/account/config` 的远端证明。`BLOCKED` 必须按失败处理，不能用
+Keychain 条目“看起来存在”或 HTTP 200 伪造成功。
+
+当前预检是同步、短生命周期子进程：命令退出时凭据 bundle 会被清空，没有后台凭据
+持有进程，因此配置、轮换或删除 Keychain 项后不需要重启 LaunchAgent。后续 #449
+若引入长生命周期 adapter，凭据轮换必须通过受控重启使旧进程释放旧值。
 
 唯一数据库 URL 必须是 localhost 上的 `freqtrade_ai`：
 
