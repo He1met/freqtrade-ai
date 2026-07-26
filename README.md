@@ -386,8 +386,8 @@ LaunchAgent plist、数据库、日志、页面、Issue、PR 或 manifest。固�
 | `OKX_DEMO_ACCOUNT_FINGERPRINT` | `freqtrade-ai/okx-demo-account-fingerprint` |
 
 账户指纹是对预期 Demo 账户的 `uid`、`mainUid`、`acctLv`、`posMode` 做规范 JSON
-序列化后计算的 64 位小写 SHA-256；它不是账户标识本身。首次配置或轮换时逐项运行
-交互式命令。`-w` 必须是最后一个参数，值只能粘贴到 macOS 提示中：
+序列化后计算的 64 位小写 SHA-256；它不是账户标识本身。首次配置时只交互写入前三项
+签名凭据。`-w` 必须是最后一个参数，值只能粘贴到 macOS 提示中：
 
 ```bash
 /usr/bin/security add-generic-password -a "$USER" \
@@ -396,9 +396,20 @@ LaunchAgent plist、数据库、日志、页面、Issue、PR 或 manifest。固�
   -s 'freqtrade-ai/okx-demo-api-secret' -U -w
 /usr/bin/security add-generic-password -a "$USER" \
   -s 'freqtrade-ai/okx-demo-api-passphrase' -U -w
-/usr/bin/security add-generic-password -a "$USER" \
-  -s 'freqtrade-ai/okx-demo-account-fingerprint' -U -w
 ```
+
+随后显式执行一次性 onboarding：
+
+```bash
+make okx-demo-pin-account
+```
+
+该命令不是启动或预检的隐式步骤。它只读取前三项 Keychain，固定请求 Demo
+`GET /api/v5/account/config`，先验证 Demo 响应、`read_only,trade` 权限、Futures mode
+和 `net_mode`，再在内存中计算指纹，并通过受控 stdin 写入固定第四项 Keychain。
+credential、`uid`、`mainUid` 和 fingerprint 都不会进入 argv、stdout、stderr 或日志。
+若第四项已经存在，命令会在网络请求前拒绝覆盖；当前不提供 `--replace`。如确需切换
+Demo 账户，必须由操作者先显式删除旧 fingerprint 项，再重新执行 onboarding。
 
 禁止使用 `-w "$OKX_DEMO_API_KEY"`、`launchctl setenv`、`.env` 或第二份
 `~/.okx/config.toml`。四项必须同时可用；任一缺失、空值或不可访问时，只读身份预检
@@ -426,8 +437,9 @@ make okx-demo-preflight
 目标约束，不是 `/account/config` 的远端证明。`BLOCKED` 必须按失败处理，不能用
 Keychain 条目“看起来存在”或 HTTP 200 伪造成功。
 
-当前预检是同步、短生命周期子进程：命令退出时凭据 bundle 会被清空，没有后台凭据
-持有进程，因此配置、轮换或删除 Keychain 项后不需要重启 LaunchAgent。后续 #449
+当前 onboarding 和预检都是同步、短生命周期子进程：命令退出时凭据 bundle 会被
+清空，没有后台凭据持有进程，因此配置、轮换或删除 Keychain 项后不需要重启
+LaunchAgent。后续 #449
 若引入长生命周期 adapter，凭据轮换必须通过受控重启使旧进程释放旧值。
 
 唯一数据库 URL 必须是 localhost 上的 `freqtrade_ai`：

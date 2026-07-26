@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import argparse
 import base64
 import hashlib
 import hmac
 import json
 import os
+import pwd
+import subprocess
 import sys
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Mapping, Optional
@@ -24,11 +27,15 @@ OKX_DEMO_CREDENTIAL_ENV_NAMES = (
     "OKX_DEMO_API_PASSPHRASE",
 )
 OKX_DEMO_ACCOUNT_FINGERPRINT_ENV = "OKX_DEMO_ACCOUNT_FINGERPRINT"
+OKX_DEMO_ACCOUNT_FINGERPRINT_KEYCHAIN_SERVICE = (
+    "freqtrade-ai/okx-demo-account-fingerprint"
+)
 OKX_DEMO_REQUIRED_ENV_NAMES = (
     *OKX_DEMO_CREDENTIAL_ENV_NAMES,
     OKX_DEMO_ACCOUNT_FINGERPRINT_ENV,
 )
 REQUEST_TIMEOUT_SECONDS = 10
+KEYCHAIN_TIMEOUT_SECONDS = 5
 
 
 class OkxDemoPreflightBlocked(RuntimeError):
@@ -121,13 +128,7 @@ def validate_account_config(
     *,
     expected_fingerprint: str,
 ) -> Dict[str, Any]:
-    if not isinstance(payload, dict) or payload.get("code") != "0":
-        raise OkxDemoPreflightBlocked("OKX Demo account attestation failed")
-    data = payload.get("data")
-    if not isinstance(data, list) or len(data) != 1 or not isinstance(data[0], dict):
-        raise OkxDemoPreflightBlocked("OKX Demo account identity is unknown")
-
-    account = data[0]
+    account = validate_account_safety(payload)
     if (
         len(expected_fingerprint) != 64
         or any(character not in "0123456789abcdef" for character in expected_fingerprint)
@@ -136,6 +137,20 @@ def validate_account_config(
     observed_fingerprint = account_fingerprint(account)
     if not hmac.compare_digest(observed_fingerprint, expected_fingerprint):
         raise OkxDemoPreflightBlocked("OKX Demo account fingerprint does not match")
+    return _ready_attestation()
+
+
+def validate_account_safety(payload: Any) -> Mapping[str, Any]:
+    """Validate remote identity, permissions, and account mode before pinning."""
+
+    if not isinstance(payload, dict) or payload.get("code") != "0":
+        raise OkxDemoPreflightBlocked("OKX Demo account attestation failed")
+    data = payload.get("data")
+    if not isinstance(data, list) or len(data) != 1 or not isinstance(data[0], dict):
+        raise OkxDemoPreflightBlocked("OKX Demo account identity is unknown")
+
+    account = data[0]
+    account_fingerprint(account)
     permissions = account.get("perm")
     if not isinstance(permissions, str):
         raise OkxDemoPreflightBlocked("OKX Demo API permissions are unknown")
@@ -152,7 +167,10 @@ def validate_account_config(
         raise OkxDemoPreflightBlocked("OKX Demo position mode must be net_mode")
     if account.get("acctLv") != "2":
         raise OkxDemoPreflightBlocked("OKX Demo account level must be Futures mode")
+    return account
 
+
+def _ready_attestation() -> Dict[str, Any]:
     return {
         "status": "READY",
         "execution_target": "OKX_DEMO",
@@ -181,17 +199,11 @@ def validate_account_config(
     }
 
 
-def run_preflight(
-    environment: Optional[Mapping[str, str]] = None,
+def _fetch_account_config(
+    request: Request,
     *,
-    opener: Callable[..., Any] = urlopen,
-) -> Dict[str, Any]:
-    active_environment = os.environ if environment is None else environment
-    request = build_account_config_request(active_environment)
-    expected_fingerprint = _required_environment(
-        active_environment,
-        OKX_DEMO_ACCOUNT_FINGERPRINT_ENV,
-    )
+    opener: Callable[..., Any],
+) -> Any:
     try:
         with opener(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
             if response.status < 200 or response.status >= 300:
@@ -204,20 +216,132 @@ def run_preflight(
             "OKX Demo account attestation transport failed"
         ) from None
     try:
-        payload = json.loads(raw_payload)
+        return json.loads(raw_payload)
     except (TypeError, UnicodeDecodeError, json.JSONDecodeError):
         raise OkxDemoPreflightBlocked(
             "OKX Demo account attestation returned invalid JSON"
         ) from None
+
+
+def run_preflight(
+    environment: Optional[Mapping[str, str]] = None,
+    *,
+    opener: Callable[..., Any] = urlopen,
+) -> Dict[str, Any]:
+    active_environment = os.environ if environment is None else environment
+    request = build_account_config_request(active_environment)
+    expected_fingerprint = _required_environment(
+        active_environment,
+        OKX_DEMO_ACCOUNT_FINGERPRINT_ENV,
+    )
+    payload = _fetch_account_config(request, opener=opener)
     return validate_account_config(
         payload,
         expected_fingerprint=expected_fingerprint,
     )
 
 
-def main() -> int:
+def account_fingerprint_pin_exists() -> bool:
+    if sys.platform != "darwin":
+        raise OkxDemoPreflightBlocked("macOS Keychain is required for account pinning")
+    account = pwd.getpwuid(os.getuid()).pw_name
     try:
-        payload = run_preflight()
+        completed = subprocess.run(
+            [
+                "/usr/bin/security",
+                "find-generic-password",
+                "-a",
+                account,
+                "-s",
+                OKX_DEMO_ACCOUNT_FINGERPRINT_KEYCHAIN_SERVICE,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=KEYCHAIN_TIMEOUT_SECONDS,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        raise OkxDemoPreflightBlocked(
+            "OKX Demo account fingerprint Keychain check failed"
+        ) from None
+    if completed.returncode == 0:
+        return True
+    if completed.returncode == 44:
+        return False
+    raise OkxDemoPreflightBlocked(
+        "OKX Demo account fingerprint Keychain check failed"
+    )
+
+
+def write_account_fingerprint_pin(fingerprint: str) -> None:
+    """Write the digest through stdin so it never appears in process argv."""
+
+    if sys.platform != "darwin":
+        raise OkxDemoPreflightBlocked("macOS Keychain is required for account pinning")
+    account = pwd.getpwuid(os.getuid()).pw_name
+    try:
+        completed = subprocess.run(
+            [
+                "/usr/bin/security",
+                "add-generic-password",
+                "-a",
+                account,
+                "-s",
+                OKX_DEMO_ACCOUNT_FINGERPRINT_KEYCHAIN_SERVICE,
+                "-w",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=KEYCHAIN_TIMEOUT_SECONDS,
+            input=fingerprint + "\n",
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        raise OkxDemoPreflightBlocked(
+            "OKX Demo account fingerprint Keychain write failed"
+        ) from None
+    if completed.returncode != 0:
+        raise OkxDemoPreflightBlocked(
+            "OKX Demo account fingerprint Keychain write failed"
+        )
+
+
+def run_account_pin(
+    environment: Optional[Mapping[str, str]] = None,
+    *,
+    opener: Callable[..., Any] = urlopen,
+    pin_exists: Callable[[], bool] = account_fingerprint_pin_exists,
+    pin_writer: Callable[[str], None] = write_account_fingerprint_pin,
+) -> Dict[str, Any]:
+    """Pin one validated Demo identity without returning its identity or digest."""
+
+    if pin_exists():
+        raise OkxDemoPreflightBlocked(
+            "OKX Demo account fingerprint already exists; refusing to overwrite"
+        )
+    active_environment = os.environ if environment is None else environment
+    request = build_account_config_request(active_environment)
+    payload = _fetch_account_config(request, opener=opener)
+    account = validate_account_safety(payload)
+    pin_writer(account_fingerprint(account))
+    return {
+        "status": "READY",
+        "execution_target": "OKX_DEMO",
+        "account_fingerprint_pinned": True,
+    }
+
+
+def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--pin-account", action="store_true")
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    args = parse_args(argv)
+    try:
+        payload = run_account_pin() if args.pin_account else run_preflight()
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
         return 0
     except OkxDemoPreflightBlocked as exc:

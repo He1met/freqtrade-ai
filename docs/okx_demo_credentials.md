@@ -22,6 +22,22 @@ child from reconstructing a removed credential after process launch. Provider
 endpoint and credential selector are fixed in code; shell and dotenv values
 cannot redirect DeepSeek to another URL or secret.
 
+## One-time account pin onboarding
+
+After the three signing credentials have been stored interactively, run
+`make okx-demo-pin-account` explicitly. It is not invoked by startup or
+preflight. The one-shot child reads only those three Keychain items, calls only
+the fixed Demo `GET /api/v5/account/config`, validates the response,
+`read_only,trade` permissions, Futures account level, and `net_mode`, then
+computes the canonical account fingerprint in memory.
+
+The fingerprint is written to the fixed fourth Keychain item through controlled
+stdin, never argv. Credentials, `uid`, `mainUid`, and the fingerprint are not
+written to stdout, stderr, or logs. An existing pin is rejected before any
+network request and is never overwritten; there is no `--replace` mode.
+Switching Demo accounts therefore requires the operator to explicitly delete
+the old fingerprint item before running onboarding again.
+
 ## Read-only attestation
 
 `make okx-demo-preflight` reads the four Keychain items only at the runtime
@@ -51,8 +67,9 @@ Demo response, fingerprint match, permissions, account level, and position
 mode. `SWAP`, `isolated`, and `allow_real_funds=false` are reported separately
 as `local_target_contract`; `/account/config` does not attest them.
 
-The preflight child is synchronous and short lived. Its in-memory credential
-bundle is cleared when the child exits, and no persistent credential holder is
-registered, so current Keychain rotation does not require a LaunchAgent
-restart. If #449 introduces a long-lived adapter, rotation must use a controlled
-restart so the old process releases its previous credential values.
+The onboarding and preflight children are synchronous and short lived. Their
+in-memory credential bundles are cleared when each child exits, and no
+persistent credential holder is registered, so current Keychain rotation does
+not require a LaunchAgent restart. If #449 introduces a long-lived adapter,
+rotation must use a controlled restart so the old process releases its previous
+credential values.

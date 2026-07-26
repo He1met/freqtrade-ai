@@ -384,6 +384,36 @@ def test_read_okx_demo_credentials_uses_four_fixed_keychain_items(monkeypatch):
     assert not any(value in str(metadata) for value in values.values())
 
 
+def test_onboarding_reader_uses_only_three_signing_keychain_items(monkeypatch):
+    runtime = load_runtime_module()
+    observed_services = []
+    monkeypatch.setattr(runtime.sys, "platform", "darwin")
+    monkeypatch.setattr(runtime, "validate_okx_demo_execution_target", lambda: None)
+
+    def fake_read(service):
+        observed_services.append(service)
+        return "value-{}".format(len(observed_services))
+
+    monkeypatch.setattr(runtime, "_read_macos_keychain_item", fake_read)
+
+    credentials, metadata = runtime.read_okx_demo_onboarding_credentials()
+
+    assert observed_services == [
+        runtime.OKX_DEMO_KEYCHAIN_SERVICES[name]
+        for name in runtime.OKX_DEMO_CREDENTIAL_ENV_NAMES
+    ]
+    assert set(credentials or {}) == set(runtime.OKX_DEMO_CREDENTIAL_ENV_NAMES)
+    assert (
+        runtime.OKX_DEMO_KEYCHAIN_SERVICES["OKX_DEMO_ACCOUNT_FINGERPRINT"]
+        not in observed_services
+    )
+    assert metadata == {
+        "status": "READY",
+        "configured": True,
+        "source": "keychain",
+    }
+
+
 def test_read_okx_demo_credentials_fails_atomically_without_env_fallback(monkeypatch):
     runtime = load_runtime_module()
     sentinels = {
@@ -557,6 +587,74 @@ def test_okx_preflight_does_not_spawn_when_keychain_bundle_is_missing(monkeypatc
 
     assert payload["status"] == "BLOCKED"
     assert payload["credentials"]["configured"] is False
+
+
+def test_okx_account_pin_child_receives_only_signing_bundle_and_is_redacted(
+    monkeypatch,
+):
+    runtime = load_runtime_module()
+    credential_bundle = {
+        "OKX_DEMO_API_KEY": "onboarding-key",
+        "OKX_DEMO_API_SECRET": "onboarding-secret",
+        "OKX_DEMO_API_PASSPHRASE": "onboarding-passphrase",
+    }
+    captured = {}
+    monkeypatch.setattr(
+        runtime,
+        "read_okx_demo_onboarding_credentials",
+        lambda: (
+            credential_bundle,
+            {"status": "READY", "configured": True, "source": "keychain"},
+        ),
+    )
+    monkeypatch.setattr(runtime, "backend_python", lambda: Path("/venv/bin/python"))
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured["environment"] = dict(kwargs["env"])
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "status": "READY",
+                    "execution_target": "OKX_DEMO",
+                    "account_fingerprint_pinned": True,
+                }
+            ),
+            stderr="untrusted-child-output",
+        )
+
+    monkeypatch.setattr(runtime.subprocess, "run", fake_run)
+
+    payload = runtime.run_okx_demo_account_pin()
+
+    assert captured["command"] == [
+        "/venv/bin/python",
+        "-m",
+        "app.adapters.okx_demo.credential_preflight",
+        "--pin-account",
+    ]
+    assert {
+        name: captured["environment"][name]
+        for name in runtime.OKX_DEMO_CREDENTIAL_ENV_NAMES
+    } == {
+        "OKX_DEMO_API_KEY": "onboarding-key",
+        "OKX_DEMO_API_SECRET": "onboarding-secret",
+        "OKX_DEMO_API_PASSPHRASE": "onboarding-passphrase",
+    }
+    assert "OKX_DEMO_ACCOUNT_FINGERPRINT" not in captured["environment"]
+    assert payload["account_fingerprint_pinned"] is True
+    assert not any(
+        value in str(payload)
+        for value in (
+            "onboarding-key",
+            "onboarding-secret",
+            "onboarding-passphrase",
+            "untrusted-child-output",
+        )
+    )
+    assert credential_bundle == {}
+    assert "okx_onboarding" not in runtime.PID_FILES
 
 
 def test_doctor_uses_explicit_freqtrade_binary(monkeypatch, tmp_path):

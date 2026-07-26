@@ -193,6 +193,177 @@ def test_run_preflight_does_not_call_network_without_pinned_fingerprint() -> Non
         )
 
 
+def test_account_pin_validates_demo_identity_and_writes_only_in_memory_digest() -> None:
+    payload = json.dumps(valid_payload()).encode()
+    captured = {}
+    environment = valid_environment()
+    environment.pop(preflight.OKX_DEMO_ACCOUNT_FINGERPRINT_ENV)
+
+    result = preflight.run_account_pin(
+        environment,
+        opener=lambda request, timeout: FakeResponse(payload),
+        pin_exists=lambda: False,
+        pin_writer=lambda fingerprint: captured.update(fingerprint=fingerprint),
+    )
+
+    expected = preflight.account_fingerprint(valid_payload()["data"][0])
+    assert captured == {"fingerprint": expected}
+    assert result == {
+        "status": "READY",
+        "execution_target": "OKX_DEMO",
+        "account_fingerprint_pinned": True,
+    }
+    rendered = json.dumps(result)
+    assert expected not in rendered
+    assert "must-not-be-rendered" not in rendered
+    assert "also-private" not in rendered
+
+
+def test_account_pin_refuses_existing_pin_before_network_or_write() -> None:
+    with pytest.raises(
+        preflight.OkxDemoPreflightBlocked,
+        match="already exists",
+    ):
+        preflight.run_account_pin(
+            valid_environment(),
+            opener=lambda *_args, **_kwargs: pytest.fail(
+                "existing pin must prevent the network request"
+            ),
+            pin_exists=lambda: True,
+            pin_writer=lambda _fingerprint: pytest.fail(
+                "existing pin must never be overwritten"
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda payload: payload.update(code="1"),
+        lambda payload: payload["data"][0].update(perm="read_only"),
+        lambda payload: payload["data"][0].update(acctLv="3"),
+        lambda payload: payload["data"][0].update(posMode="long_short_mode"),
+    ],
+)
+def test_account_pin_never_writes_after_remote_validation_failure(mutation) -> None:
+    payload = valid_payload()
+    mutation(payload)
+
+    with pytest.raises(preflight.OkxDemoPreflightBlocked):
+        preflight.run_account_pin(
+            valid_environment(),
+            opener=lambda request, timeout: FakeResponse(
+                json.dumps(payload).encode()
+            ),
+            pin_exists=lambda: False,
+            pin_writer=lambda _fingerprint: pytest.fail(
+                "invalid remote account must never be pinned"
+            ),
+        )
+
+
+def test_keychain_pin_write_uses_stdin_and_never_argv(monkeypatch) -> None:
+    fingerprint = "d" * 64
+    observed = {}
+    monkeypatch.setattr(preflight.sys, "platform", "darwin")
+    monkeypatch.setattr(preflight.os, "getuid", lambda: 501)
+    monkeypatch.setattr(
+        preflight.pwd,
+        "getpwuid",
+        lambda uid: type("Account", (), {"pw_name": "local-user"})(),
+    )
+
+    def fake_run(command, **kwargs):
+        observed["command"] = command
+        observed["kwargs"] = kwargs
+        return type(
+            "Completed",
+            (),
+            {
+                "returncode": 0,
+                "stdout": "untrusted-output-" + fingerprint,
+                "stderr": "untrusted-error-" + fingerprint,
+            },
+        )()
+
+    monkeypatch.setattr(preflight.subprocess, "run", fake_run)
+
+    preflight.write_account_fingerprint_pin(fingerprint)
+
+    assert fingerprint not in observed["command"]
+    assert observed["command"][-1] == "-w"
+    assert observed["kwargs"]["input"] == fingerprint + "\n"
+    assert observed["kwargs"]["capture_output"] is True
+
+
+@pytest.mark.parametrize(
+    ("returncode", "expected"),
+    [(0, True), (44, False)],
+)
+def test_keychain_pin_existence_check_is_explicit_and_redacted(
+    monkeypatch,
+    returncode: int,
+    expected: bool,
+) -> None:
+    observed = {}
+    monkeypatch.setattr(preflight.sys, "platform", "darwin")
+    monkeypatch.setattr(preflight.os, "getuid", lambda: 501)
+    monkeypatch.setattr(
+        preflight.pwd,
+        "getpwuid",
+        lambda uid: type("Account", (), {"pw_name": "local-user"})(),
+    )
+
+    def fake_run(command, **kwargs):
+        observed["command"] = command
+        observed["kwargs"] = kwargs
+        return type(
+            "Completed",
+            (),
+            {
+                "returncode": returncode,
+                "stdout": "untrusted-keychain-output",
+                "stderr": "untrusted-keychain-error",
+            },
+        )()
+
+    monkeypatch.setattr(preflight.subprocess, "run", fake_run)
+
+    assert preflight.account_fingerprint_pin_exists() is expected
+    assert observed["command"][-1] == preflight.OKX_DEMO_ACCOUNT_FINGERPRINT_KEYCHAIN_SERVICE
+    assert "-w" not in observed["command"]
+    assert observed["kwargs"]["stdin"] is preflight.subprocess.DEVNULL
+
+
+def test_keychain_pin_existence_check_fails_closed_on_ambiguous_error(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(preflight.sys, "platform", "darwin")
+    monkeypatch.setattr(preflight.os, "getuid", lambda: 501)
+    monkeypatch.setattr(
+        preflight.pwd,
+        "getpwuid",
+        lambda uid: type("Account", (), {"pw_name": "local-user"})(),
+    )
+    monkeypatch.setattr(
+        preflight.subprocess,
+        "run",
+        lambda *_args, **_kwargs: type(
+            "Completed",
+            (),
+            {"returncode": 1, "stdout": "", "stderr": "sensitive-error"},
+        )(),
+    )
+
+    with pytest.raises(
+        preflight.OkxDemoPreflightBlocked,
+        match="Keychain check failed",
+    ) as blocked:
+        preflight.account_fingerprint_pin_exists()
+
+    assert "sensitive-error" not in str(blocked.value)
+
+
 def test_transport_and_invalid_json_fail_without_echoing_remote_content() -> None:
     with pytest.raises(
         preflight.OkxDemoPreflightBlocked,

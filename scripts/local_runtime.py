@@ -36,6 +36,7 @@ from app.adapters.freqtrade.binary import resolve_freqtrade_binary
 from app.adapters.okx_demo.credential_preflight import (
     ALLOW_REAL_FUNDS_ENV,
     EXECUTION_TARGET_ENV,
+    OKX_DEMO_CREDENTIAL_ENV_NAMES,
     OKX_DEMO_REQUIRED_ENV_NAMES,
     OKX_DEMO_REST_URL,
     REST_URL_ENV,
@@ -476,6 +477,37 @@ def read_okx_demo_credentials() -> Tuple[Optional[Dict[str, str]], Dict[str, Any
     }
 
 
+def read_okx_demo_onboarding_credentials() -> Tuple[Optional[Dict[str, str]], Dict[str, Any]]:
+    """Read only the three signing credentials used to establish the first pin."""
+
+    validate_okx_demo_execution_target()
+    if sys.platform != "darwin":
+        return None, {
+            "status": "BLOCKED",
+            "configured": False,
+            "source": "keychain",
+            "reason": "macOS Keychain is required for OKX Demo credentials",
+        }
+    credentials: Dict[str, str] = {}
+    for environment_name in OKX_DEMO_CREDENTIAL_ENV_NAMES:
+        service = OKX_DEMO_KEYCHAIN_SERVICES[environment_name]
+        value = _read_macos_keychain_item(service)
+        if value is None:
+            credentials.clear()
+            return None, {
+                "status": "BLOCKED",
+                "configured": False,
+                "source": "keychain",
+                "reason": "OKX Demo signing credential bundle is incomplete or inaccessible",
+            }
+        credentials[environment_name] = value
+    return credentials, {
+        "status": "READY",
+        "configured": True,
+        "source": "keychain",
+    }
+
+
 def service_environment(
     service: str,
     database_url: str,
@@ -484,11 +516,17 @@ def service_environment(
 ) -> Dict[str, str]:
     """Give each managed service only the credentials it needs."""
 
-    if service not in {"backend", "worker", "frontend", "okx_adapter"}:
+    if service not in {
+        "backend",
+        "worker",
+        "frontend",
+        "okx_adapter",
+        "okx_onboarding",
+    }:
         raise RuntimeBlocked("unknown managed service environment")
     environment = (
         okx_adapter_base_environment()
-        if service == "okx_adapter"
+        if service in {"okx_adapter", "okx_onboarding"}
         else base_service_environment()
     )
     if service in {"backend", "worker"}:
@@ -505,11 +543,14 @@ def service_environment(
             environment[OPERATOR_TOKEN_ENV] = operator_token
     if service in {"backend", "worker"} and deepseek_api_key:
         environment[DEEPSEEK_API_KEY_ENV] = deepseek_api_key
-    if service == "okx_adapter":
+    if service in {"okx_adapter", "okx_onboarding"}:
         validate_okx_demo_execution_target()
-        if not okx_demo_credentials or set(okx_demo_credentials) != set(
+        required_names = (
             OKX_DEMO_REQUIRED_ENV_NAMES
-        ):
+            if service == "okx_adapter"
+            else OKX_DEMO_CREDENTIAL_ENV_NAMES
+        )
+        if not okx_demo_credentials or set(okx_demo_credentials) != set(required_names):
             raise RuntimeBlocked("OKX Demo credential bundle is incomplete")
         environment.update(okx_demo_credentials)
         environment.update(
@@ -736,6 +777,75 @@ def run_okx_demo_preflight() -> Dict[str, Any]:
     }
 
 
+def run_okx_demo_account_pin() -> Dict[str, Any]:
+    """Establish the first account pin in a one-shot credential-bearing child."""
+
+    credentials, credential_status = read_okx_demo_onboarding_credentials()
+    if credentials is None:
+        return {
+            "status": "BLOCKED",
+            "execution_target": "OKX_DEMO",
+            "credentials": credential_status,
+            "reason": credential_status["reason"],
+        }
+    try:
+        completed = subprocess.run(
+            [
+                str(backend_python()),
+                "-m",
+                "app.adapters.okx_demo.credential_preflight",
+                "--pin-account",
+            ],
+            cwd=str(REPO_ROOT / "backend"),
+            env=service_environment(
+                "okx_onboarding",
+                runtime_database_url(),
+                None,
+                credentials,
+            ),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return {
+            "status": "BLOCKED",
+            "execution_target": "OKX_DEMO",
+            "credentials": credential_status,
+            "reason": "OKX Demo account fingerprint onboarding process failed",
+        }
+    finally:
+        credentials.clear()
+
+    try:
+        payload = json.loads(completed.stdout)
+    except (TypeError, json.JSONDecodeError):
+        payload = {}
+    if (
+        completed.returncode != 0
+        or payload
+        != {
+            "status": "READY",
+            "execution_target": "OKX_DEMO",
+            "account_fingerprint_pinned": True,
+        }
+    ):
+        return {
+            "status": "BLOCKED",
+            "execution_target": "OKX_DEMO",
+            "credentials": credential_status,
+            "reason": "OKX Demo account fingerprint onboarding was refused or failed",
+        }
+    return {
+        "status": "READY",
+        "execution_target": "OKX_DEMO",
+        "account_fingerprint_pinned": True,
+        "credentials": credential_status,
+    }
+
+
 def start_service(
     service: str,
     command: Sequence[str],
@@ -939,6 +1049,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
             "logs",
             "verify",
             "okx-preflight",
+            "okx-pin-account",
         ),
     )
     parser.add_argument("--runtime-dir")
@@ -966,6 +1077,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             payload = recent_logs(state_dir, max(1, args.lines))
         elif args.command == "okx-preflight":
             payload = run_okx_demo_preflight()
+            if payload["status"] != "READY":
+                raise RuntimeBlocked(str(payload["reason"]))
+        elif args.command == "okx-pin-account":
+            payload = run_okx_demo_account_pin()
             if payload["status"] != "READY":
                 raise RuntimeBlocked(str(payload["reason"]))
         else:
