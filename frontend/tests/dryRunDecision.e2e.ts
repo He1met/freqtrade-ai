@@ -1,10 +1,10 @@
 import { expect, test } from "@playwright/test";
 
-import { captureBrowserProblems, expectNoPageOverflow } from "./helpers/desktopGate";
+import { captureBrowserProblems, expectNoPageOverflow, SUPERSEDED_API_REQUESTS } from "./helpers/desktopGate";
 
 test("shows one Dry-run decision, one blocker and at most one primary action at 1280x720", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "desktop-1280x720", "Issue #429 desktop acceptance uses 1280x720.");
-  const browserProblems = captureBrowserProblems(page);
+  const browserProblems = captureBrowserProblems(page, SUPERSEDED_API_REQUESTS);
   const source = (key: string, id: number) => ({
     source_type: "database",
     source_detail: "isolated current E2E database record",

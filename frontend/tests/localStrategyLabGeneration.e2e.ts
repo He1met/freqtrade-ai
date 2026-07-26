@@ -1,10 +1,23 @@
 import { expect, test } from "@playwright/test";
 
-import { captureBrowserProblems, expectNoPageOverflow } from "./helpers/desktopGate";
+import { captureBrowserProblems, expectNoPageOverflow, SUPERSEDED_API_REQUESTS } from "./helpers/desktopGate";
 
 test("generation form explains its inputs and blockers above the 1280x720 fold", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "desktop-1280x720", "Issue #427 desktop acceptance uses 1280x720.");
-  const browserProblems = captureBrowserProblems(page);
+  const browserProblems = captureBrowserProblems(page, SUPERSEDED_API_REQUESTS);
+  for (const path of [
+    "strategies",
+    "strategy-versions",
+    "strategy-generation-runs",
+    "backtest-runs",
+    "backtest-tasks",
+    "backtest-results",
+    "ranking",
+  ]) {
+    await page.route(`**/api/${path}`, (route) =>
+      route.fulfill({ contentType: "application/json", body: "[]" }),
+    );
+  }
 
   await page.goto("/local-strategy-lab");
 

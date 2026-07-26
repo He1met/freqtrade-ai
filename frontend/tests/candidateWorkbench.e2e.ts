@@ -1,10 +1,10 @@
 import { expect, test } from "@playwright/test";
 
-import { captureBrowserProblems, expectNoPageOverflow } from "./helpers/desktopGate";
+import { captureBrowserProblems, expectNoPageOverflow, SUPERSEDED_API_REQUESTS } from "./helpers/desktopGate";
 
 test("keeps one explicit candidate chain and proves POST actions with matching GET records", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "desktop-1280x720", "Issue #428 desktop acceptance uses 1280x720.");
-  const browserProblems = captureBrowserProblems(page);
+  const browserProblems = captureBrowserProblems(page, SUPERSEDED_API_REQUESTS);
   let backtestCreated = false;
   let blockedCreated = false;
   let scoreCreated = false;

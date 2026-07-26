@@ -1,4 +1,6 @@
 import { defineConfig } from "@playwright/test";
+import { randomBytes, randomInt } from "node:crypto";
+import { safeAbsoluteDirectory, safePythonBinary } from "./tests/helpers/e2eConfigSafety";
 
 const host = "127.0.0.1";
 
@@ -13,29 +15,40 @@ function isolatedPort(name: string, fallback: number): number {
   return value;
 }
 
-const backendPort = isolatedPort("E2E_BACKEND_PORT", 18108);
-const frontendPort = isolatedPort("E2E_FRONTEND_PORT", 15178);
+process.env.E2E_BACKEND_PORT ??= String(randomInt(20_000, 30_000));
+process.env.E2E_FRONTEND_PORT ??= String(randomInt(30_001, 40_000));
+const backendPort = isolatedPort("E2E_BACKEND_PORT", 0);
+let frontendPort = isolatedPort("E2E_FRONTEND_PORT", 0);
 if (backendPort === frontendPort) {
-  throw new Error("E2E_BACKEND_PORT and E2E_FRONTEND_PORT must be different.");
+  process.env.E2E_FRONTEND_PORT = String(randomInt(40_001, 50_000));
+  frontendPort = isolatedPort("E2E_FRONTEND_PORT", 0);
 }
 
-const databaseUrl =
-  process.env.E2E_DATABASE_URL ??
-  "sqlite+pysqlite:////tmp/freqtrade-ai-issue-408-desktop-e2e.sqlite";
-if (process.env.DATABASE_URL && databaseUrl === process.env.DATABASE_URL) {
-  throw new Error("E2E_DATABASE_URL must be independent from the real runtime DATABASE_URL.");
+if (process.env.E2E_DATABASE_URL) {
+  throw new Error("E2E_DATABASE_URL is forbidden; the acceptance wrapper allocates a new SQLite database.");
 }
-
-const pythonBin = process.env.PYTHON_BIN ?? "python3";
-const pythonCommand = JSON.stringify(pythonBin);
-const databaseArgument = JSON.stringify(databaseUrl);
-const evidenceRoot =
-  process.env.E2E_EVIDENCE_DIR ?? "/tmp/freqtrade-ai-issue-408-desktop-e2e";
-const evidenceDir = JSON.stringify(evidenceRoot);
+const acceptanceParent = safeAbsoluteDirectory("E2E_TMP_PARENT", process.env.E2E_TMP_PARENT ?? "/private/tmp");
+process.env.E2E_TMP_PARENT = acceptanceParent;
+process.env.E2E_ACCEPTANCE_REGISTRY ??=
+  `${acceptanceParent}/freqtrade-ai-issue-433-registry-${randomBytes(12).toString("hex")}.json`;
+const cleanupRegistry = process.env.E2E_ACCEPTANCE_REGISTRY;
+if (!cleanupRegistry.startsWith(`${acceptanceParent}/freqtrade-ai-issue-433-registry-`) || !cleanupRegistry.endsWith(".json")) {
+  throw new Error("E2E_ACCEPTANCE_REGISTRY is outside the controlled temporary parent.");
+}
+const pythonBin = safePythonBinary(process.env.PYTHON_BIN);
+const backendProfile = process.env.E2E_SEED_PROFILE ?? "complete-current";
+if (!["empty", "complete-current", "missing-result", "missing-strategy", "long-evidence"].includes(backendProfile)) {
+  throw new Error("E2E_SEED_PROFILE is invalid.");
+}
 const baseURL = `http://${host}:${frontendPort}`;
+const pythonArg = JSON.stringify(pythonBin);
+const parentArg = JSON.stringify(acceptanceParent);
+const profileArg = JSON.stringify(backendProfile);
+const registryArg = JSON.stringify(cleanupRegistry);
 
 export default defineConfig({
   testDir: "./tests",
+  globalTeardown: "./tests/helpers/globalTeardown.ts",
   testMatch: "**/*.e2e.ts",
   forbidOnly: Boolean(process.env.CI),
   fullyParallel: false,
@@ -63,15 +76,13 @@ export default defineConfig({
   webServer: [
     {
       command:
-        `${pythonCommand} ../scripts/smoke_phase8.py --offline --skip-frontend ` +
-        `--database-url ${databaseArgument} --tmp-dir ${evidenceDir} && ` +
-        `${pythonCommand} -m uvicorn app.main:app --host ${host} --port ${backendPort}`,
+        `${pythonArg} ../scripts/run_local_strategy_lab_acceptance_server.py ` +
+        `--parent ${parentArg} --host ${host} --port ${backendPort} --profile ${profileArg} ` +
+        `--registry ${registryArg}`,
       cwd: "../backend",
       env: {
         ...process.env,
         APP_ENV: "phase8",
-        DATABASE_URL: databaseUrl,
-        FREQTRADE_AI_CANONICAL_REPO_ROOT: evidenceRoot,
       },
       url: `http://${host}:${backendPort}/health`,
       reuseExistingServer: false,

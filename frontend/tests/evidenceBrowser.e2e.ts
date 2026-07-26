@@ -1,9 +1,9 @@
 import { expect, test } from "@playwright/test";
 
-import { captureBrowserProblems, expectNoPageOverflow } from "./helpers/desktopGate";
+import { captureBrowserProblems, expectNoPageOverflow, SUPERSEDED_API_REQUESTS } from "./helpers/desktopGate";
 
 test("evidence browser keeps one record class visible and opens audit details within 1280px", async ({ page }) => {
-  const browserProblems = captureBrowserProblems(page);
+  const browserProblems = captureBrowserProblems(page, SUPERSEDED_API_REQUESTS);
   await page.goto("/local-strategy-lab?lab_tab=versions&lab_scope=diagnostic");
 
   const browser = page.getByTestId("lab-evidence-browser");

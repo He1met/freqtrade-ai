@@ -1,12 +1,26 @@
 import { expect, type Page } from "@playwright/test";
 
 export type BrowserProblem = {
-  kind: "console.error" | "console.warning" | "pageerror";
+  kind: "console.error" | "console.warning" | "pageerror" | "requestfailed" | "http.error";
   text: string;
 };
 
-export function captureBrowserProblems(page: Page): BrowserProblem[] {
+export type BrowserProblemOptions = {
+  allowedHttpStatuses?: number[];
+  allowedAbortedUrlPatterns?: RegExp[];
+};
+
+export const SUPERSEDED_API_REQUESTS: BrowserProblemOptions = {
+  allowedAbortedUrlPatterns: [/\/api\/(?:strategies|strategy-versions|strategy-generation-runs|backtest-runs|backtest-tasks|backtest-results|hyperopt-runs|dry-run\/management|live-candidates\/governance|runtime\/read-only|runtime\/operator-status|governance-events|ranking|strategy-failure-reasons|strategy-version-lineage)(?:\?|$)/],
+};
+
+export function captureBrowserProblems(
+  page: Page,
+  options: BrowserProblemOptions = {},
+): BrowserProblem[] {
   const problems: BrowserProblem[] = [];
+  const allowedHttpStatuses = new Set(options.allowedHttpStatuses ?? []);
+  const allowedAbortedUrlPatterns = options.allowedAbortedUrlPatterns ?? [];
   page.on("console", (message) => {
     if (message.type() === "error" || message.type() === "warning") {
       problems.push({
@@ -17,6 +31,25 @@ export function captureBrowserProblems(page: Page): BrowserProblem[] {
   });
   page.on("pageerror", (error) => {
     problems.push({ kind: "pageerror", text: error.message });
+  });
+  page.on("requestfailed", (request) => {
+    const explicitlySuperseded =
+      request.failure()?.errorText === "net::ERR_ABORTED" &&
+      allowedAbortedUrlPatterns.some((pattern) => pattern.test(request.url()));
+    if (explicitlySuperseded) return;
+    problems.push({
+      kind: "requestfailed",
+      text: `${request.method()} ${request.url()} ${request.failure()?.errorText ?? "failed"}`,
+    });
+  });
+  page.on("response", (response) => {
+    const status = response.status();
+    if (status >= 400 && !allowedHttpStatuses.has(status)) {
+      problems.push({
+        kind: "http.error",
+        text: `${status} ${response.request().method()} ${response.url()}`,
+      });
+    }
   });
   return problems;
 }
