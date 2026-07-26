@@ -6,7 +6,9 @@ import pytest
 from sqlalchemy import inspect, text
 from sqlalchemy.exc import DataError, IntegrityError
 
+from app.core.exceptions import ConfigurationError
 from app.db.migrations import (
+    EARLY_TARGET_LINEAGE_VERSION,
     LEGACY_SCHEMA_VERSION,
     PREVIOUS_SCHEMA_VERSION,
     SCHEMA_VERSION,
@@ -123,6 +125,81 @@ def _create_frozen_pre_lineage_research_jobs(connection) -> None:
     )
 
 
+def _create_frozen_early_target_lineage_schema(connection) -> None:
+    """Reproduce the published 710afdf ``20260727_01`` contract."""
+
+    Base.metadata.create_all(bind=connection)
+    connection.execute(
+        text(
+            "ALTER TABLE execution_scopes "
+            "DROP CONSTRAINT execution_scopes_known_contract_check, "
+            "DROP COLUMN exchange_capable, "
+            "DROP COLUMN order_submission_authorized, "
+            "ADD CONSTRAINT execution_scopes_known_contract_check CHECK ("
+            "(scope_id = 'OKX_DEMO' AND scope_kind = 'EXCHANGE_TARGET' "
+            "AND executable = TRUE AND exchange_writes = TRUE) OR "
+            "(scope_id = 'LOCAL_DRY_RUN' AND scope_kind = 'NON_EXCHANGE' "
+            "AND executable = TRUE AND exchange_writes = FALSE) OR "
+            "(scope_id = 'UNKNOWN_LEGACY' AND scope_kind = 'LEGACY' "
+            "AND executable = FALSE AND exchange_writes = FALSE))"
+        )
+    )
+    connection.execute(
+        text(
+            """
+            INSERT INTO execution_scopes
+                (scope_id, scope_kind, executable, exchange_writes)
+            VALUES
+                ('OKX_DEMO', 'EXCHANGE_TARGET', TRUE, TRUE),
+                ('LOCAL_DRY_RUN', 'NON_EXCHANGE', TRUE, FALSE),
+                ('UNKNOWN_LEGACY', 'LEGACY', FALSE, FALSE)
+            """
+        )
+    )
+    for table_name in ("trade_intents", "exchange_orders"):
+        connection.execute(
+            text(
+                f"ALTER TABLE {table_name} "
+                f"DROP CONSTRAINT {table_name}_client_order_id_format_check, "
+                f"ADD CONSTRAINT {table_name}_client_order_id_length_check "
+                "CHECK (length(client_order_id) BETWEEN 1 AND 32)"
+            )
+        )
+    connection.execute(
+        text(
+            "ALTER TABLE execution_manifests "
+            "DROP CONSTRAINT execution_manifests_authorization_check, "
+            "ADD CONSTRAINT execution_manifests_legacy_not_executable_check "
+            "CHECK (execution_scope_id <> 'UNKNOWN_LEGACY' OR executable_evidence = FALSE)"
+        )
+    )
+    connection.execute(
+        text(
+            """
+            INSERT INTO execution_manifests (
+                execution_scope_id, manifest_kind, schema_version, artifact_path,
+                artifact_sha256, database_ids, executable_evidence
+            ) VALUES (
+                'OKX_DEMO', 'frozen-early-lineage', '1', '/tmp/frozen.json',
+                :sha, '{}', TRUE
+            )
+            """
+        ),
+        {"sha": "a" * 64},
+    )
+    connection.execute(
+        text(
+            f"CREATE TABLE {VERSION_TABLE} ("
+            "version VARCHAR(64) PRIMARY KEY, "
+            "applied_at TIMESTAMPTZ NOT NULL DEFAULT now())"
+        )
+    )
+    connection.execute(
+        text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+        {"version": EARLY_TARGET_LINEAGE_VERSION},
+    )
+
+
 def test_incremental_worker_migration_preserves_existing_runtime_rows(postgres_engine) -> None:
     old_tables = [
         table
@@ -173,6 +250,89 @@ def test_incremental_worker_migration_preserves_existing_runtime_rows(postgres_e
         preserved = db.get(Strategy, strategy_id)
         assert preserved is not None
         assert preserved.slug == "preserved-migration-strategy"
+
+
+def test_published_20260727_01_upgrades_atomically_to_20260727_02(
+    postgres_engine,
+) -> None:
+    with postgres_engine.begin() as connection:
+        _create_frozen_early_target_lineage_schema(connection)
+
+    assert upgrade_database(postgres_engine) == SCHEMA_VERSION
+    readiness = verify_schema(postgres_engine)
+    assert readiness.ready is True
+    assert readiness.problems == ()
+
+    with postgres_engine.connect() as connection:
+        scopes = {
+            row.scope_id: row
+            for row in connection.execute(
+                text(
+                    "SELECT scope_id, exchange_capable, executable, exchange_writes, "
+                    "order_submission_authorized FROM execution_scopes"
+                )
+            )
+        }
+        assert scopes["OKX_DEMO"].exchange_capable is True
+        assert scopes["OKX_DEMO"].executable is False
+        assert scopes["OKX_DEMO"].exchange_writes is False
+        assert scopes["OKX_DEMO"].order_submission_authorized is False
+        assert scopes["LOCAL_DRY_RUN"].executable is True
+        assert connection.execute(
+            text(
+                "SELECT executable_evidence FROM execution_manifests "
+                "WHERE manifest_kind = 'frozen-early-lineage'"
+            )
+        ).scalar_one() is False
+        assert connection.execute(
+            text(f"SELECT version FROM {VERSION_TABLE} ORDER BY version")
+        ).scalars().all() == [EARLY_TARGET_LINEAGE_VERSION, SCHEMA_VERSION]
+
+
+def test_published_20260727_01_upgrade_rolls_back_on_incompatible_data(
+    postgres_engine,
+) -> None:
+    with postgres_engine.begin() as connection:
+        _create_frozen_early_target_lineage_schema(connection)
+        connection.execute(
+            text(
+                """
+                INSERT INTO trade_intents (
+                    execution_target_id, client_order_id, instrument_id, side,
+                    position_side, order_type, quantity, status, request_snapshot
+                ) VALUES (
+                    'OKX_DEMO', 'old-id-with-hyphen', 'BTC-USDT-SWAP', 'buy',
+                    'long', 'market', 1, 'PENDING_RISK', '{}'
+                )
+                """
+            )
+        )
+
+    with pytest.raises(ConfigurationError, match="Database migration failed"):
+        upgrade_database(postgres_engine)
+
+    with postgres_engine.connect() as connection:
+        columns = {
+            column["name"]
+            for column in inspect(connection).get_columns("execution_scopes")
+        }
+        assert "exchange_capable" not in columns
+        assert "order_submission_authorized" not in columns
+        assert connection.execute(
+            text(
+                "SELECT executable AND exchange_writes FROM execution_scopes "
+                "WHERE scope_id = 'OKX_DEMO'"
+            )
+        ).scalar_one() is True
+        assert connection.execute(
+            text(f"SELECT version FROM {VERSION_TABLE}")
+        ).scalar_one() == EARLY_TARGET_LINEAGE_VERSION
+        assert connection.execute(
+            text(
+                "SELECT executable_evidence FROM execution_manifests "
+                "WHERE manifest_kind = 'frozen-early-lineage'"
+            )
+        ).scalar_one() is True
 
 
 def test_cleanup_migration_drops_only_empty_retired_debug_table(postgres_engine) -> None:
