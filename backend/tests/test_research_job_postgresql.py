@@ -131,6 +131,13 @@ def _create_frozen_early_target_lineage_schema(connection) -> None:
     Base.metadata.create_all(bind=connection)
     connection.execute(
         text(
+            "ALTER TABLE trade_intents "
+            "DROP CONSTRAINT trade_intents_scope_contract_check, "
+            "ALTER COLUMN authorization_schema_version SET DEFAULT 'LEGACY'"
+        )
+    )
+    connection.execute(
+        text(
             "ALTER TABLE execution_scopes "
             "DROP CONSTRAINT execution_scopes_known_contract_check, "
             "DROP COLUMN exchange_capable, "
@@ -206,6 +213,7 @@ def test_incremental_worker_migration_preserves_existing_runtime_rows(postgres_e
         for table in Base.metadata.tables.values()
         if table.name
         not in {
+            "approved_executions",
             "exchange_fills",
             "exchange_orders",
             "exchange_positions",
@@ -215,6 +223,7 @@ def test_incremental_worker_migration_preserves_existing_runtime_rows(postgres_e
             "research_jobs",
             "research_worker_control",
             "risk_decisions",
+            "risk_budgets",
             "trade_intents",
         }
     ]
