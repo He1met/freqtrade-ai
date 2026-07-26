@@ -71,8 +71,27 @@ jobs:
       - name: Migrate and verify fresh PostgreSQL schema
         working-directory: backend
         run: |
-          python -m app.db.migrate upgrade --database-url "$POSTGRES_MIGRATION_URL"
-          python -m app.db.migrate verify --database-url "$POSTGRES_MIGRATION_URL"
+          python - <<'PY'
+          import os
+          import secrets
+          import subprocess
+
+          environment = dict(os.environ)
+          environment["FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"] = secrets.token_hex(32)
+          for action in ("upgrade", "verify"):
+              subprocess.run(
+                  [
+                      "python",
+                      "-m",
+                      "app.db.migrate",
+                      action,
+                      "--database-url",
+                      os.environ["POSTGRES_MIGRATION_URL"],
+                  ],
+                  check=True,
+                  env=environment,
+              )
+          PY
 
       - name: Verify PostgreSQL worker migration and atomic lease gate
         working-directory: backend
