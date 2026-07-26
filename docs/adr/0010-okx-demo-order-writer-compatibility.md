@@ -69,7 +69,10 @@ A write is successful only when all conditions are true:
 3. top-level `code == "0"`;
 4. `data` is non-empty;
 5. every result item has `sCode == "0"`;
-6. identifiers are captured and reconciled.
+6. the request used a predetermined OKX-legal `clOrdId` (1-32
+   case-sensitive alphanumeric characters);
+7. every result contains a non-empty `ordId` and the same `clOrdId` as the
+   request.
 
 HTTP 200 with any non-zero `sCode` is `FAILED`, never success.
 
@@ -77,6 +80,9 @@ Read-only operations may retry network timeouts, HTTP 429/5xx, or documented
 transient OKX codes with bounded exponential backoff and jitter. A write timeout
 or transient response is an unknown outcome: query by the deterministic
 `clOrdId` first. Never blindly repeat `place-order`.
+If the caller did not persist a legal deterministic `clOrdId` before the
+write, the retry decision is `BLOCKED_MISSING_CLORDID`; it must not claim that
+reconciliation is possible.
 
 ## Required canary sequence after #443
 
@@ -114,6 +120,11 @@ Offline (default, expected exit `2` while the canary is blocked):
 python3 scripts/okx_demo_compatibility.py
 echo $?
 ```
+
+On a clean machine, a missing command or a non-zero version command (including
+`import ccxt` failing because CCXT is absent) is reported as `NOT_INSTALLED`.
+That is a missing prerequisite, so the default diagnostic remains
+`BLOCKED` with exit `2`, matching this reproduction contract.
 
 Optional credential-free public REST probe:
 

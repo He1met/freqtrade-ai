@@ -30,6 +30,7 @@ FROZEN_VERSIONS = {
     "ccxt": "4.5.56",
     "okx_agent_trade_kit": "1.2.8",
 }
+OKX_CLIENT_ORDER_ID_PATTERN = re.compile(r"^[A-Za-z0-9]{1,32}$")
 
 
 @dataclass(frozen=True)
@@ -69,8 +70,24 @@ def credential_presence(environ: Mapping[str, str]) -> dict[str, str]:
     }
 
 
-def parse_okx_write_response(payload: object) -> list[dict[str, Any]]:
-    """Require both the OKX envelope code and every per-item sCode to succeed."""
+def validate_okx_client_order_id(client_order_id: object) -> str:
+    """Require an OKX-legal client order ID chosen before the write request."""
+    if not isinstance(client_order_id, str) or not OKX_CLIENT_ORDER_ID_PATTERN.fullmatch(
+        client_order_id
+    ):
+        raise OkxBusinessError(
+            "deterministic clOrdId must be 1-32 case-sensitive alphanumeric characters"
+        )
+    return client_order_id
+
+
+def parse_okx_write_response(
+    payload: object,
+    *,
+    expected_cl_ord_id: str,
+) -> list[dict[str, Any]]:
+    """Require business success and reconcile exchange IDs to the request."""
+    expected_cl_ord_id = validate_okx_client_order_id(expected_cl_ord_id)
     if not isinstance(payload, dict):
         raise OkxBusinessError("response must be a JSON object")
     code = payload.get("code")
@@ -86,6 +103,14 @@ def parse_okx_write_response(payload: object) -> list[dict[str, Any]]:
         s_code = item.get("sCode")
         if str(s_code) != "0":
             raise OkxBusinessError(f"OKX data[{index}] sCode={s_code!r}")
+        ord_id = item.get("ordId")
+        if not isinstance(ord_id, str) or not ord_id.strip():
+            raise OkxBusinessError(f"OKX data[{index}] must contain a non-empty ordId")
+        response_cl_ord_id = item.get("clOrdId")
+        if response_cl_ord_id != expected_cl_ord_id:
+            raise OkxBusinessError(
+                f"OKX data[{index}] clOrdId does not match the predetermined request ID"
+            )
         parsed.append(item)
     return parsed
 
@@ -97,6 +122,7 @@ def retry_decision(
     okx_code: Optional[str] = None,
     timed_out: bool = False,
     network_error: bool = False,
+    deterministic_cl_ord_id: Optional[str] = None,
 ) -> str:
     """
     Classify retries conservatively.
@@ -106,18 +132,24 @@ def retry_decision(
     """
     if operation not in {"read", "write"}:
         raise ValueError("operation must be read or write")
-    if operation == "write" and (
+    write_outcome_unknown = operation == "write" and (
         timed_out
         or network_error
         or http_status in {429, 500, 502, 503, 504}
-    ):
+        or okx_code in {"50001", "50004", "50011", "50013", "50026", "50061"}
+    )
+    if write_outcome_unknown:
+        try:
+            validate_okx_client_order_id(deterministic_cl_ord_id)
+        except OkxBusinessError:
+            return "BLOCKED_MISSING_CLORDID"
         return "RECONCILE_BY_CLORDID"
     if timed_out or network_error:
         return "RETRY_WITH_BACKOFF"
     if http_status == 429 or (http_status is not None and 500 <= http_status <= 599):
         return "RETRY_WITH_BACKOFF"
     if okx_code in {"50001", "50004", "50011", "50013", "50026", "50061"}:
-        return "RETRY_WITH_BACKOFF" if operation == "read" else "RECONCILE_BY_CLORDID"
+        return "RETRY_WITH_BACKOFF"
     return "DO_NOT_RETRY"
 
 
@@ -161,6 +193,8 @@ def _command_version(command: Sequence[str], pattern: str) -> str:
             env={"PATH": os.environ.get("PATH", "")},
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return "NOT_INSTALLED"
+    if completed.returncode != 0:
         return "NOT_INSTALLED"
     text = f"{completed.stdout}\n{completed.stderr}"
     match = re.search(pattern, text)
