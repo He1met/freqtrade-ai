@@ -3,6 +3,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SUPERVISOR_PATH = REPO_ROOT / "scripts" / "local_supervisor.py"
@@ -77,10 +79,11 @@ def test_supervisor_respects_fail_closed_down(monkeypatch):
     assert calls == ["verify", "down"]
 
 
-def test_launch_agent_plist_has_one_keepalive_supervisor(tmp_path):
+def test_launch_agent_plist_has_one_keepalive_supervisor(monkeypatch, tmp_path):
     agent = load_module(LAUNCH_AGENT_PATH, "macos_launch_agent_plist")
     binary = tmp_path / "freqtrade"
     binary.write_text("", encoding="utf-8")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-secret-must-not-enter-plist")
 
     payload = agent.plist_payload(binary)
 
@@ -94,7 +97,74 @@ def test_launch_agent_plist_has_one_keepalive_supervisor(tmp_path):
     assert payload["EnvironmentVariables"]["FREQTRADE_BINARY"] == str(binary)
     assert str(Path.home() / ".local" / "bin") in payload["EnvironmentVariables"]["PATH"]
     assert "DATABASE_URL" not in payload["EnvironmentVariables"]
+    assert "DEEPSEEK_API_KEY" not in payload["EnvironmentVariables"]
+    assert "deepseek-secret-must-not-enter-plist" not in json.dumps(payload)
     assert not any("KEY" in key for key in payload["EnvironmentVariables"])
+
+
+def test_launch_agent_stop_managed_runtime_uses_runtime_down_contract(monkeypatch):
+    agent = load_module(LAUNCH_AGENT_PATH, "macos_launch_agent_stop_runtime")
+    calls = []
+    monkeypatch.setattr(
+        agent,
+        "run",
+        lambda command, **kwargs: (
+            calls.append(tuple(command))
+            or SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "services": [
+                            {"service": "worker", "status": "stopped"},
+                            {"service": "frontend", "status": "not-managed"},
+                            {"service": "backend", "status": "stopped"},
+                        ]
+                    }
+                ),
+                stderr="",
+            )
+        ),
+    )
+
+    agent.stop_managed_runtime()
+
+    assert calls == [
+        (
+            str(agent.BACKEND_PYTHON),
+            str(agent.RUNTIME_SCRIPT),
+            "down",
+            "--json",
+        )
+    ]
+
+
+def test_launch_agent_stop_managed_runtime_fails_closed_on_blocked_service(monkeypatch):
+    agent = load_module(LAUNCH_AGENT_PATH, "macos_launch_agent_stop_blocked")
+    monkeypatch.setattr(
+        agent,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "services": [
+                        {
+                            "service": "worker",
+                            "status": "BLOCKED",
+                            "reason": "pid does not belong to the managed runtime",
+                        }
+                    ]
+                }
+            ),
+            stderr="",
+        ),
+    )
+
+    with pytest.raises(
+        agent.LaunchAgentBlocked,
+        match="managed runtime could not be stopped safely",
+    ):
+        agent.stop_managed_runtime()
 
 
 def test_launch_agent_install_is_idempotent(monkeypatch, tmp_path):
@@ -109,9 +179,22 @@ def test_launch_agent_install_is_idempotent(monkeypatch, tmp_path):
     monkeypatch.setattr(agent, "resolve_freqtrade_binary", lambda: binary)
     monkeypatch.setattr(agent, "write_plist", lambda payload: calls.append(("write", payload)))
     monkeypatch.setattr(agent, "bootout", lambda: calls.append(("bootout",)))
-    monkeypatch.setattr(agent, "wait_until_unloaded", lambda: True)
+    monkeypatch.setattr(
+        agent,
+        "wait_until_unloaded",
+        lambda: calls.append(("wait-unloaded",)) or True,
+    )
+    monkeypatch.setattr(
+        agent,
+        "stop_managed_runtime",
+        lambda: calls.append(("runtime-down",)),
+    )
     monkeypatch.setattr(agent, "bootstrap_with_retry", lambda: calls.append(("bootstrap",)))
-    monkeypatch.setattr(agent, "wait_until_running", lambda: True)
+    monkeypatch.setattr(
+        agent,
+        "wait_until_running",
+        lambda: calls.append(("wait-running",)) or True,
+    )
     monkeypatch.setattr(
         agent,
         "run",
@@ -125,9 +208,67 @@ def test_launch_agent_install_is_idempotent(monkeypatch, tmp_path):
 
     assert result["status"] == "INSTALLED"
     assert calls[0][0] == "write"
-    assert calls[1] == ("bootout",)
-    assert ("launchctl", "enable", agent.launchd_target()) in calls
-    assert ("bootstrap",) in calls
+    assert calls[1:] == [
+        ("bootout",),
+        ("wait-unloaded",),
+        ("runtime-down",),
+        ("launchctl", "enable", agent.launchd_target()),
+        ("bootstrap",),
+        ("wait-running",),
+    ]
+
+
+def test_launch_agent_restart_stops_runtime_before_bootstrap(monkeypatch, tmp_path):
+    agent = load_module(LAUNCH_AGENT_PATH, "macos_launch_agent_restart")
+    plist_path = tmp_path / "runtime.plist"
+    plist_path.write_text("", encoding="utf-8")
+    calls = []
+
+    monkeypatch.setattr(agent, "PLIST_PATH", plist_path)
+    monkeypatch.setattr(agent, "bootout", lambda: calls.append(("bootout",)))
+    monkeypatch.setattr(
+        agent,
+        "wait_until_unloaded",
+        lambda: calls.append(("wait-unloaded",)) or True,
+    )
+    monkeypatch.setattr(
+        agent,
+        "stop_managed_runtime",
+        lambda: calls.append(("runtime-down",)),
+    )
+    monkeypatch.setattr(
+        agent,
+        "run",
+        lambda command, **kwargs: (
+            calls.append(tuple(command))
+            or SimpleNamespace(returncode=0, stdout="", stderr="")
+        ),
+    )
+    monkeypatch.setattr(
+        agent,
+        "bootstrap_with_retry",
+        lambda: calls.append(("bootstrap",)),
+    )
+    monkeypatch.setattr(
+        agent,
+        "wait_until_running",
+        lambda: calls.append(("wait-running",)) or True,
+    )
+
+    result = agent.restart()
+
+    assert result == {
+        "status": "RESTARTED",
+        "label": agent.LABEL,
+    }
+    assert calls == [
+        ("bootout",),
+        ("wait-unloaded",),
+        ("runtime-down",),
+        ("launchctl", "enable", agent.launchd_target()),
+        ("bootstrap",),
+        ("wait-running",),
+    ]
 
 
 def test_launch_agent_waits_until_old_job_is_unloaded(monkeypatch):

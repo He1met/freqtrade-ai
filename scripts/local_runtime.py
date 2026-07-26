@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import pwd
 import re
 import shutil
 import signal
@@ -36,6 +37,25 @@ from app.adapters.freqtrade.binary import resolve_freqtrade_binary
 DEFAULT_RUNTIME_DIR = REPO_ROOT / ".freqtrade-ai" / "runtime"
 DEFAULT_RUNTIME_ENV_FILE = REPO_ROOT / ".freqtrade-ai" / "runtime.env"
 RUNTIME_ENV_KEYS = frozenset({"DATABASE_URL", "FREQTRADE_BINARY"})
+DEEPSEEK_API_KEY_ENV = "DEEPSEEK_API_KEY"
+DEEPSEEK_KEYCHAIN_SERVICE = "freqtrade-ai/deepseek-api-key"
+KEYCHAIN_TIMEOUT_SECONDS = 5
+BACKEND_SECRET_ENV_KEYS = frozenset(
+    {
+        DEEPSEEK_API_KEY_ENV,
+        "FREQTRADE_AI_OPERATOR_TOKEN",
+        "BINANCE_API_KEY",
+        "BINANCE_API_SECRET",
+        "OKX_API_KEY",
+        "OKX_API_SECRET",
+        "OKX_API_PASSPHRASE",
+        "OKX_DEMO_API_KEY",
+        "OKX_DEMO_API_SECRET",
+        "OKX_DEMO_API_PASSPHRASE",
+        "MIMO_API_KEY",
+        "OPENAI_API_KEY",
+    }
+)
 DEFAULT_DATABASE_URL = (
     "postgresql+psycopg://freqtrade:change_me@localhost:5432/freqtrade_ai"
 )
@@ -210,16 +230,115 @@ def is_managed_process(pid: int, service: str) -> bool:
     return "n{}".format(expected_cwd) in cwd_result.stdout
 
 
-def clean_environment(database_url: str) -> Dict[str, str]:
+def base_service_environment() -> Dict[str, str]:
     environment = os.environ.copy()
+    environment.pop("DATABASE_URL", None)
+    for key in BACKEND_SECRET_ENV_KEYS:
+        environment.pop(key, None)
     environment.update(
         {
-            "DATABASE_URL": database_url,
             "APP_ENV": "local",
             "VITE_ENABLE_DEV_FIXTURES": "false",
             "VITE_FREQUI_URL": "",
         }
     )
+    return environment
+
+
+def clean_environment(database_url: str) -> Dict[str, str]:
+    """Build a non-provider environment for database-only preflight commands."""
+
+    environment = base_service_environment()
+    environment["DATABASE_URL"] = database_url
+    return environment
+
+
+def read_deepseek_api_key() -> Tuple[Optional[str], Dict[str, Any]]:
+    """Read the durable macOS credential without changing the parent environment."""
+
+    if sys.platform != "darwin":
+        value = os.environ.get(DEEPSEEK_API_KEY_ENV, "").strip()
+        return (
+            value or None,
+            {
+                "status": "READY" if value else "UNAVAILABLE",
+                "configured": bool(value),
+                "source": "environment" if value else None,
+            },
+        )
+
+    security = Path("/usr/bin/security")
+    if not security.is_file():
+        return None, {
+            "status": "UNAVAILABLE",
+            "configured": False,
+            "source": "keychain",
+            "reason": "macOS security command is unavailable",
+        }
+    account = pwd.getpwuid(os.getuid()).pw_name
+    try:
+        completed = subprocess.run(
+            [
+                str(security),
+                "find-generic-password",
+                "-a",
+                account,
+                "-s",
+                DEEPSEEK_KEYCHAIN_SERVICE,
+                "-w",
+            ],
+            cwd=str(REPO_ROOT),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=KEYCHAIN_TIMEOUT_SECONDS,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None, {
+            "status": "UNAVAILABLE",
+            "configured": False,
+            "source": "keychain",
+            "reason": "Keychain item is missing or inaccessible",
+        }
+
+    value = completed.stdout.rstrip("\r\n")
+    if (
+        completed.returncode != 0
+        or not value
+        or len(value) > 16384
+        or any(character in value for character in ("\x00", "\r", "\n"))
+    ):
+        return None, {
+            "status": "UNAVAILABLE",
+            "configured": False,
+            "source": "keychain",
+            "reason": "Keychain item is missing or inaccessible",
+        }
+    return value, {
+        "status": "READY",
+        "configured": True,
+        "source": "keychain",
+    }
+
+
+def service_environment(
+    service: str,
+    database_url: str,
+    deepseek_api_key: Optional[str],
+) -> Dict[str, str]:
+    """Give each managed service only the credentials it needs."""
+
+    environment = base_service_environment()
+    if service in {"backend", "worker"}:
+        environment["DATABASE_URL"] = database_url
+    if service == "backend":
+        for key in BACKEND_SECRET_ENV_KEYS - {DEEPSEEK_API_KEY_ENV}:
+            value = os.environ.get(key, "")
+            if value:
+                environment[key] = value
+    if service in {"backend", "worker"} and deepseek_api_key:
+        environment[DEEPSEEK_API_KEY_ENV] = deepseek_api_key
     return environment
 
 
@@ -431,13 +550,13 @@ def start(state_dir: Path) -> Dict[str, Any]:
     ensure_schema(database_url)
     ensure_worker_queue_idle(database_url)
     database = {"identity": redact_database_url(database_url), "schema": "verified"}
-    environment = clean_environment(database_url)
+    deepseek_api_key, deepseek_credential = read_deepseek_api_key()
     try:
         start_service(
             "backend",
             [str(backend_python()), "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(BACKEND_PORT)],
             cwd=REPO_ROOT / "backend",
-            environment=environment,
+            environment=service_environment("backend", database_url, deepseek_api_key),
             state_dir=state_dir,
         )
         wait_for_url("http://127.0.0.1:{}/readyz".format(BACKEND_PORT), "backend readiness")
@@ -449,7 +568,7 @@ def start(state_dir: Path) -> Dict[str, Any]:
                 "app.workers.deepseek_backtest_worker",
             ],
             cwd=REPO_ROOT / "backend",
-            environment=environment,
+            environment=service_environment("worker", database_url, deepseek_api_key),
             state_dir=state_dir,
         )
         wait_for_process(state_dir, "worker")
@@ -457,7 +576,7 @@ def start(state_dir: Path) -> Dict[str, Any]:
             "frontend",
             [str(frontend_vite()), "--host", "127.0.0.1", "--port", str(FRONTEND_PORT)],
             cwd=REPO_ROOT / "frontend",
-            environment=environment,
+            environment=service_environment("frontend", database_url, deepseek_api_key),
             state_dir=state_dir,
         )
         wait_for_url("http://127.0.0.1:{}/".format(FRONTEND_PORT), "frontend")
@@ -468,6 +587,7 @@ def start(state_dir: Path) -> Dict[str, Any]:
         "status": "RUNNING",
         "environment": "local",
         "database": database,
+        "credentials": {"deepseek_api_key": deepseek_credential},
         "backend_url": "http://127.0.0.1:{}".format(BACKEND_PORT),
         "frontend_url": "http://127.0.0.1:{}".format(FRONTEND_PORT),
         "trading": {"live": False, "dry_run": False, "real_orders": False},
