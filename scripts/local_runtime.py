@@ -41,6 +41,11 @@ from app.adapters.okx_demo.credential_preflight import (
     OKX_DEMO_REST_URL,
     REST_URL_ENV,
 )
+from app.adapters.okx_demo.demo_canary import (
+    ALLOWED_INSTRUMENTS as OKX_DEMO_CANARY_ALLOWED_INSTRUMENTS,
+    ALLOW_DEMO_ORDER_ENV,
+    DEFAULT_INSTRUMENT as OKX_DEMO_CANARY_DEFAULT_INSTRUMENT,
+)
 from app.core.config import load_app_yaml
 from app.core.execution_target import (
     ExecutionTargetConfigurationError,
@@ -513,6 +518,8 @@ def service_environment(
     database_url: str,
     deepseek_api_key: Optional[str],
     okx_demo_credentials: Optional[Dict[str, str]] = None,
+    *,
+    allow_demo_order: bool = False,
 ) -> Dict[str, str]:
     """Give each managed service only the credentials it needs."""
 
@@ -522,11 +529,12 @@ def service_environment(
         "frontend",
         "okx_adapter",
         "okx_onboarding",
+        "okx_canary",
     }:
         raise RuntimeBlocked("unknown managed service environment")
     environment = (
         okx_adapter_base_environment()
-        if service in {"okx_adapter", "okx_onboarding"}
+        if service in {"okx_adapter", "okx_onboarding", "okx_canary"}
         else base_service_environment()
     )
     if service in {"backend", "worker"}:
@@ -543,11 +551,11 @@ def service_environment(
             environment[OPERATOR_TOKEN_ENV] = operator_token
     if service in {"backend", "worker"} and deepseek_api_key:
         environment[DEEPSEEK_API_KEY_ENV] = deepseek_api_key
-    if service in {"okx_adapter", "okx_onboarding"}:
+    if service in {"okx_adapter", "okx_onboarding", "okx_canary"}:
         validate_okx_demo_execution_target()
         required_names = (
             OKX_DEMO_REQUIRED_ENV_NAMES
-            if service == "okx_adapter"
+            if service in {"okx_adapter", "okx_canary"}
             else OKX_DEMO_CREDENTIAL_ENV_NAMES
         )
         if not okx_demo_credentials or set(okx_demo_credentials) != set(required_names):
@@ -560,6 +568,12 @@ def service_environment(
                 REST_URL_ENV: OKX_DEMO_REST_URL,
             }
         )
+        if service == "okx_canary":
+            if not allow_demo_order:
+                raise RuntimeBlocked(
+                    "explicit --allow-demo-order authorization is required"
+                )
+            environment[ALLOW_DEMO_ORDER_ENV] = "true"
     return environment
 
 
@@ -809,7 +823,14 @@ def run_okx_demo_account_pin() -> Dict[str, Any]:
             timeout=15,
             stdin=subprocess.DEVNULL,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "RECOVERY_REQUIRED",
+            "execution_target": "OKX_DEMO",
+            "credentials": credential_status,
+            "reason": "OKX Demo canary child timed out; reconcile its artifact before retry",
+        }
+    except OSError:
         return {
             "status": "BLOCKED",
             "execution_target": "OKX_DEMO",
@@ -844,6 +865,189 @@ def run_okx_demo_account_pin() -> Dict[str, Any]:
         "account_fingerprint_pinned": True,
         "credentials": credential_status,
     }
+
+
+OKX_DEMO_CANARY_SEQUENCE_VALUES = frozenset(
+    {
+        "account_attested",
+        "initial_scope_empty",
+        "limit_order_accepted",
+        "place_outcome_unknown",
+        "place_reconciled_by_cl_ord_id",
+        "order_queried",
+        "place_intent_persisted",
+        "cancel_requested",
+        "cancel_state_queried",
+        "cancel_reconciliation_uncertain",
+        "unexpected_fill_cleanup_attempted",
+        "post_cancel_fill_cleanup_attempted",
+        "final_scope_cleanup_attempted",
+        "reservation_recovered_before_write",
+        "recovery_started",
+        "recovery_verified",
+        "final_scope_empty",
+    }
+)
+
+
+def _validate_okx_demo_canary_payload(payload: Any) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise RuntimeBlocked("OKX Demo canary returned invalid evidence")
+    status = payload.get("status")
+    if status not in {"PASSED", "FAILED", "BLOCKED", "RECOVERY_REQUIRED"}:
+        raise RuntimeBlocked("OKX Demo canary returned invalid evidence")
+    if payload.get("execution_target") != "OKX_DEMO":
+        raise RuntimeBlocked("OKX Demo canary returned invalid evidence")
+    instrument = payload.get("instrument")
+    if instrument not in OKX_DEMO_CANARY_ALLOWED_INSTRUMENTS:
+        raise RuntimeBlocked("OKX Demo canary returned invalid evidence")
+    artifact_id = payload.get("artifact_id")
+    if (
+        not isinstance(artifact_id, str)
+        or re.fullmatch(r"[0-9a-f]{32}", artifact_id) is None
+    ):
+        raise RuntimeBlocked("OKX Demo canary returned invalid evidence")
+    evidence = payload.get("evidence")
+    if not isinstance(evidence, dict) or set(evidence) != {
+        "cl_ord_id_sha256",
+        "order_id_sha256",
+        "cleanup_cl_ord_id_sha256",
+        "simulated_trading_header",
+        "sequence",
+    }:
+        raise RuntimeBlocked("OKX Demo canary returned invalid evidence")
+    for name in (
+        "cl_ord_id_sha256",
+        "order_id_sha256",
+        "cleanup_cl_ord_id_sha256",
+    ):
+        value = evidence.get(name)
+        if value is not None and (
+            not isinstance(value, str)
+            or re.fullmatch(r"[0-9a-f]{64}", value) is None
+        ):
+            raise RuntimeBlocked("OKX Demo canary returned invalid evidence")
+    sequence = evidence.get("sequence")
+    if (
+        not isinstance(sequence, list)
+        or len(sequence) > 20
+        or any(item not in OKX_DEMO_CANARY_SEQUENCE_VALUES for item in sequence)
+    ):
+        raise RuntimeBlocked("OKX Demo canary returned invalid evidence")
+    if evidence.get("simulated_trading_header") is not True:
+        raise RuntimeBlocked("OKX Demo canary returned invalid evidence")
+    reason_code = payload.get("reason_code")
+    if reason_code is not None and (
+        not isinstance(reason_code, str)
+        or re.fullmatch(r"[A-Z0-9_]{1,80}", reason_code) is None
+    ):
+        raise RuntimeBlocked("OKX Demo canary returned invalid evidence")
+    if status == "PASSED" and reason_code is not None:
+        raise RuntimeBlocked("OKX Demo canary returned invalid evidence")
+    if status != "PASSED" and reason_code is None:
+        raise RuntimeBlocked("OKX Demo canary returned invalid evidence")
+    return {
+        "status": status,
+        "execution_target": "OKX_DEMO",
+        "artifact_id": artifact_id,
+        "instrument": instrument,
+        "evidence": {
+            "cl_ord_id_sha256": evidence["cl_ord_id_sha256"],
+            "order_id_sha256": evidence["order_id_sha256"],
+            "cleanup_cl_ord_id_sha256": evidence[
+                "cleanup_cl_ord_id_sha256"
+            ],
+            "simulated_trading_header": True,
+            "sequence": list(sequence),
+        },
+        **({"reason_code": reason_code} if reason_code is not None else {}),
+    }
+
+
+def run_okx_demo_canary(
+    *,
+    allow_demo_order: bool,
+    instrument: str,
+) -> Dict[str, Any]:
+    """Run the explicit one-shot Demo order canary in its credential child."""
+
+    if not allow_demo_order:
+        return {
+            "status": "BLOCKED",
+            "execution_target": "OKX_DEMO",
+            "reason": "explicit --allow-demo-order authorization is required",
+        }
+    if instrument not in OKX_DEMO_CANARY_ALLOWED_INSTRUMENTS:
+        return {
+            "status": "BLOCKED",
+            "execution_target": "OKX_DEMO",
+            "reason": "OKX Demo canary instrument is not allowlisted",
+        }
+    credentials, credential_status = read_okx_demo_credentials()
+    if credentials is None:
+        return {
+            "status": "BLOCKED",
+            "execution_target": "OKX_DEMO",
+            "credentials": credential_status,
+            "reason": credential_status["reason"],
+        }
+    try:
+        completed = subprocess.run(
+            [
+                str(backend_python()),
+                "-m",
+                "app.adapters.okx_demo.demo_canary",
+                "--allow-demo-order",
+                "--instrument",
+                instrument,
+            ],
+            cwd=str(REPO_ROOT / "backend"),
+            env=service_environment(
+                "okx_canary",
+                DEFAULT_DATABASE_URL,
+                None,
+                credentials,
+                allow_demo_order=True,
+            ),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=90,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return {
+            "status": "BLOCKED",
+            "execution_target": "OKX_DEMO",
+            "credentials": credential_status,
+            "reason": "OKX Demo canary child failed or timed out",
+        }
+    finally:
+        credentials.clear()
+    try:
+        validated = _validate_okx_demo_canary_payload(json.loads(completed.stdout))
+    except (TypeError, json.JSONDecodeError, RuntimeBlocked):
+        return {
+            "status": "RECOVERY_REQUIRED",
+            "execution_target": "OKX_DEMO",
+            "credentials": credential_status,
+            "reason": "OKX Demo canary returned invalid or unsafe evidence",
+        }
+    expected_exit = {
+        "PASSED": 0,
+        "FAILED": 1,
+        "BLOCKED": 2,
+        "RECOVERY_REQUIRED": 2,
+    }[validated["status"]]
+    if completed.returncode != expected_exit:
+        return {
+            "status": "RECOVERY_REQUIRED",
+            "execution_target": "OKX_DEMO",
+            "credentials": credential_status,
+            "reason": "OKX Demo canary exit status did not match its evidence",
+        }
+    validated["credentials"] = credential_status
+    return validated
 
 
 def start_service(
@@ -1050,11 +1254,17 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
             "verify",
             "okx-preflight",
             "okx-pin-account",
+            "okx-demo-canary",
         ),
     )
     parser.add_argument("--runtime-dir")
     parser.add_argument("--lines", type=int, default=80)
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--allow-demo-order", action="store_true")
+    parser.add_argument(
+        "--instrument",
+        default=OKX_DEMO_CANARY_DEFAULT_INSTRUMENT,
+    )
     return parser.parse_args(argv)
 
 
@@ -1083,6 +1293,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             payload = run_okx_demo_account_pin()
             if payload["status"] != "READY":
                 raise RuntimeBlocked(str(payload["reason"]))
+        elif args.command == "okx-demo-canary":
+            payload = run_okx_demo_canary(
+                allow_demo_order=args.allow_demo_order,
+                instrument=args.instrument,
+            )
+            emit(payload, args.json)
+            if payload["status"] == "PASSED":
+                return 0
+            return 1 if payload["status"] == "FAILED" else 2
         else:
             status = current_status(state_dir)
             running = all(service["running"] for service in status["services"])
