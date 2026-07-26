@@ -6,10 +6,11 @@ import json
 from typing import Mapping, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import Request
 
 from app.adapters.okx_demo.credential_preflight import OKX_DEMO_REST_URL
 from app.adapters.okx_demo.errors import OkxReadAdapterError
+from app.adapters.okx_demo.secure_http import build_direct_no_redirect_opener
 
 
 @dataclass(frozen=True)
@@ -31,11 +32,6 @@ class OkxReadTransport(Protocol):
         """Perform one GET and return already decoded JSON."""
 
 
-class _RejectRedirects(HTTPRedirectHandler):
-    def redirect_request(self, *_args, **_kwargs):
-        return None
-
-
 class UrllibOkxReadTransport:
     """Minimal GET-only transport. It never logs headers, payloads, or signatures."""
 
@@ -47,7 +43,7 @@ class UrllibOkxReadTransport:
                 message="OKX read transport permits only the fixed Demo REST origin",
             )
         self._base_url = OKX_DEMO_REST_URL
-        self._opener = build_opener(_RejectRedirects())
+        self._opener = build_direct_no_redirect_opener()
 
     def get(
         self,
