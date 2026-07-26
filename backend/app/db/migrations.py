@@ -25,7 +25,8 @@ from app.models.base import Base
 LEGACY_SCHEMA_VERSION = "20260712_01"
 PREVIOUS_SCHEMA_VERSION = "20260722_01"
 TARGET_LINEAGE_BASE_VERSION = "20260723_01"
-SCHEMA_VERSION = "20260727_01"
+EARLY_TARGET_LINEAGE_VERSION = "20260727_01"
+SCHEMA_VERSION = "20260727_02"
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 
 
@@ -414,6 +415,90 @@ def _add_execution_target_lineage(connection: Connection) -> None:
             )
 
 
+def _upgrade_early_execution_target_lineage(connection: Connection) -> None:
+    """Upgrade the published ``20260727_01`` contract without rebuilding data."""
+
+    connection.execute(
+        text(
+            "ALTER TABLE execution_scopes "
+            "DROP CONSTRAINT IF EXISTS execution_scopes_known_contract_check"
+        )
+    )
+    connection.execute(
+        text(
+            "ALTER TABLE execution_scopes "
+            "ADD COLUMN IF NOT EXISTS exchange_capable BOOLEAN, "
+            "ADD COLUMN IF NOT EXISTS order_submission_authorized BOOLEAN"
+        )
+    )
+    connection.execute(
+        text(
+            """
+            UPDATE execution_scopes
+            SET exchange_capable = CASE scope_id
+                    WHEN 'OKX_DEMO' THEN TRUE
+                    ELSE FALSE
+                END,
+                executable = CASE scope_id
+                    WHEN 'LOCAL_DRY_RUN' THEN TRUE
+                    ELSE FALSE
+                END,
+                exchange_writes = FALSE,
+                order_submission_authorized = FALSE
+            """
+        )
+    )
+    connection.execute(
+        text(
+            "ALTER TABLE execution_scopes "
+            "ALTER COLUMN exchange_capable SET NOT NULL, "
+            "ALTER COLUMN order_submission_authorized SET NOT NULL, "
+            "ADD CONSTRAINT execution_scopes_known_contract_check CHECK ("
+            "scope_id = 'OKX_DEMO' AND scope_kind = 'EXCHANGE_TARGET' "
+            "AND exchange_capable = TRUE AND executable = FALSE "
+            "AND exchange_writes = FALSE AND order_submission_authorized = FALSE OR "
+            "scope_id = 'LOCAL_DRY_RUN' AND scope_kind = 'NON_EXCHANGE' "
+            "AND exchange_capable = FALSE AND executable = TRUE "
+            "AND exchange_writes = FALSE AND order_submission_authorized = FALSE OR "
+            "scope_id = 'UNKNOWN_LEGACY' AND scope_kind = 'LEGACY' "
+            "AND exchange_capable = FALSE AND executable = FALSE "
+            "AND exchange_writes = FALSE AND order_submission_authorized = FALSE)"
+        )
+    )
+
+    for table_name in ("trade_intents", "exchange_orders"):
+        connection.execute(
+            text(
+                f"ALTER TABLE {table_name} "
+                f"DROP CONSTRAINT IF EXISTS {table_name}_client_order_id_length_check, "
+                f"DROP CONSTRAINT IF EXISTS {table_name}_client_order_id_format_check, "
+                f"ADD CONSTRAINT {table_name}_client_order_id_format_check "
+                "CHECK (client_order_id ~ '^[A-Za-z0-9]{1,32}$')"
+            )
+        )
+
+    connection.execute(
+        text(
+            "ALTER TABLE execution_manifests "
+            "DROP CONSTRAINT IF EXISTS execution_manifests_legacy_not_executable_check, "
+            "DROP CONSTRAINT IF EXISTS execution_manifests_authorization_check"
+        )
+    )
+    connection.execute(
+        text(
+            "UPDATE execution_manifests SET executable_evidence = FALSE "
+            "WHERE execution_scope_id <> 'LOCAL_DRY_RUN' AND executable_evidence = TRUE"
+        )
+    )
+    connection.execute(
+        text(
+            "ALTER TABLE execution_manifests "
+            "ADD CONSTRAINT execution_manifests_authorization_check "
+            "CHECK (execution_scope_id = 'LOCAL_DRY_RUN' OR executable_evidence = FALSE)"
+        )
+    )
+
+
 def upgrade_database(engine: Engine) -> str:
     """Upgrade a local PostgreSQL database atomically to ``SCHEMA_VERSION``.
 
@@ -450,6 +535,20 @@ def upgrade_database(engine: Engine) -> str:
                 if problems:
                     raise SchemaMigrationBlocked(
                         "Incremental schema upgrade does not match ORM metadata: "
+                        + "; ".join(problems)
+                    )
+                connection.execute(
+                    text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+                    {"version": SCHEMA_VERSION},
+                    )
+                return SCHEMA_VERSION
+            if current_version == EARLY_TARGET_LINEAGE_VERSION:
+                _upgrade_early_execution_target_lineage(connection)
+                Base.metadata.create_all(bind=connection)
+                problems = schema_problems(connection)
+                if problems:
+                    raise SchemaMigrationBlocked(
+                        "Early target-lineage schema upgrade does not match ORM metadata: "
                         + "; ".join(problems)
                     )
                 connection.execute(
