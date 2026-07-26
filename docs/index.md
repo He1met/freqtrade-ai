@@ -33,6 +33,7 @@ they are not a current source of work status.
 
 ## Primary Runtime Docs
 
+- [ADR-0010: OKX Demo SWAP compatibility and single order writer](adr/0010-okx-demo-order-writer-compatibility.md)
 - [phase9_operational_readiness_plan.md](phase9_operational_readiness_plan.md)
 - [phase9_acceptance.md](phase9_acceptance.md)
 - [phase9_deepseek_single_e2e.md](phase9_deepseek_single_e2e.md)
