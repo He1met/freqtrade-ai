@@ -46,6 +46,10 @@ from app.adapters.okx_demo.demo_canary import (
     ALLOW_DEMO_ORDER_ENV,
     DEFAULT_INSTRUMENT as OKX_DEMO_CANARY_DEFAULT_INSTRUMENT,
 )
+from app.adapters.okx_demo.attestation_proof import (
+    ATTESTATION_PROOF_KEY_ENV,
+    ATTESTATION_PROOF_KEYCHAIN_SERVICE,
+)
 from app.core.config import load_app_yaml
 from app.core.execution_target import (
     ExecutionTargetConfigurationError,
@@ -553,11 +557,15 @@ def service_environment(
         environment[DEEPSEEK_API_KEY_ENV] = deepseek_api_key
     if service in {"okx_adapter", "okx_onboarding", "okx_canary"}:
         validate_okx_demo_execution_target()
-        required_names = (
-            OKX_DEMO_REQUIRED_ENV_NAMES
-            if service in {"okx_adapter", "okx_canary"}
-            else OKX_DEMO_CREDENTIAL_ENV_NAMES
-        )
+        if service == "okx_adapter":
+            required_names = (
+                *OKX_DEMO_REQUIRED_ENV_NAMES,
+                ATTESTATION_PROOF_KEY_ENV,
+            )
+        elif service == "okx_canary":
+            required_names = OKX_DEMO_REQUIRED_ENV_NAMES
+        else:
+            required_names = OKX_DEMO_CREDENTIAL_ENV_NAMES
         if not okx_demo_credentials or set(okx_demo_credentials) != set(required_names):
             raise RuntimeBlocked("OKX Demo credential bundle is incomplete")
         environment.update(okx_demo_credentials)
@@ -699,6 +707,25 @@ def run_okx_demo_preflight() -> Dict[str, Any]:
             "credentials": credential_status,
             "reason": credential_status["reason"],
         }
+    proof_key = _read_macos_keychain_item(ATTESTATION_PROOF_KEYCHAIN_SERVICE)
+    if (
+        proof_key is None
+        or len(proof_key) != 64
+        or any(character not in "0123456789abcdef" for character in proof_key)
+    ):
+        credentials.clear()
+        return {
+            "status": "BLOCKED",
+            "execution_target": "OKX_DEMO",
+            "credentials": {
+                "status": "BLOCKED",
+                "configured": False,
+                "source": "keychain",
+                "reason": "OKX Demo attestation proof key is missing or inaccessible",
+            },
+            "reason": "OKX Demo attestation proof key is missing or inaccessible",
+        }
+    credentials[ATTESTATION_PROOF_KEY_ENV] = proof_key
 
     try:
         completed = subprocess.run(
