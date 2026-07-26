@@ -9,12 +9,13 @@ unversioned databases are blocked instead of guessed at or rewritten.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Iterable, Optional, Union
 
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Connection, Engine, URL, make_url
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.schema import CheckConstraint, UniqueConstraint
+from sqlalchemy.schema import CheckConstraint, Index, UniqueConstraint
 
 from app import models  # noqa: F401 - imports every model into Base.metadata
 from app.core.exceptions import ConfigurationError
@@ -23,7 +24,9 @@ from app.models.base import Base
 
 LEGACY_SCHEMA_VERSION = "20260712_01"
 PREVIOUS_SCHEMA_VERSION = "20260722_01"
-SCHEMA_VERSION = "20260723_01"
+TARGET_LINEAGE_BASE_VERSION = "20260723_01"
+EARLY_TARGET_LINEAGE_VERSION = "20260727_01"
+SCHEMA_VERSION = "20260727_02"
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 
 
@@ -94,6 +97,57 @@ def _expected_unique_columns(table: object) -> set[frozenset[str]]:
     return unique_sets
 
 
+def _expected_indexes(
+    table: object,
+) -> set[tuple[tuple[str, ...], bool, Optional[str]]]:
+    return {_metadata_index_signature(index) for index in table.indexes if isinstance(index, Index)}
+
+
+def _normalized_sql_definition(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    rendered = str(value).lower().replace('"', "")
+    rendered = re.sub(
+        r"::(?:character varying|text|boolean|integer|bigint|numeric)(?:\[\])?",
+        "",
+        rendered,
+    )
+    rendered = re.sub(r"\s+", "", rendered)
+    return rendered
+
+
+def _metadata_index_signature(index: Index) -> tuple[tuple[str, ...], bool, Optional[str]]:
+    predicate = index.dialect_options["postgresql"].get("where")
+    return (
+        tuple(column.name for column in index.columns),
+        bool(index.unique),
+        _normalized_sql_definition(predicate),
+    )
+
+
+def _inspected_index_signature(index: dict) -> tuple[tuple[str, ...], bool, Optional[str]]:
+    dialect_options = index.get("dialect_options") or {}
+    return (
+        tuple(index.get("column_names") or ()),
+        bool(index.get("unique", False)),
+        _normalized_sql_definition(dialect_options.get("postgresql_where")),
+    )
+
+
+CRITICAL_CHECK_DEFINITIONS = {
+    "execution_scopes_known_contract_check",
+    "trade_intents_okx_demo_target_check",
+    "trade_intents_client_order_id_format_check",
+    "risk_decisions_okx_demo_target_check",
+    "exchange_orders_okx_demo_target_check",
+    "exchange_orders_client_order_id_format_check",
+    "exchange_fills_okx_demo_target_check",
+    "exchange_positions_okx_demo_target_check",
+    "reconciliation_runs_okx_demo_target_check",
+    "execution_manifests_authorization_check",
+}
+
+
 def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
     """Compare the live PostgreSQL schema to the SQLAlchemy metadata contract."""
 
@@ -114,11 +168,22 @@ def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
             continue
 
         expected_columns = {column.name for column in table.columns}
-        actual_columns = {column["name"] for column in inspector.get_columns(name, schema=schema_name)}
+        inspected_columns = inspector.get_columns(name, schema=schema_name)
+        actual_columns = {column["name"] for column in inspected_columns}
         for column in sorted(expected_columns - actual_columns):
             problems.append(f"missing column: {name}.{column}")
         for column in sorted(actual_columns - expected_columns):
             problems.append(f"unexpected column: {name}.{column}")
+        actual_nullable = {
+            column["name"]: bool(column.get("nullable", True))
+            for column in inspected_columns
+        }
+        for column in table.columns:
+            if column.name in actual_nullable and actual_nullable[column.name] != column.nullable:
+                problems.append(
+                    f"nullable mismatch: {name}.{column.name} "
+                    f"is nullable={actual_nullable[column.name]}, expected {column.nullable}"
+                )
 
         expected_fks = {
             (foreign_key.parent.name, foreign_key.column.table.name, foreign_key.column.name)
@@ -143,19 +208,58 @@ def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
         }
         for columns in sorted(_expected_unique_columns(table) - actual_unique, key=sorted):
             problems.append(f"missing unique constraint: {name}({','.join(sorted(columns))})")
+        for columns in sorted(actual_unique - _expected_unique_columns(table), key=sorted):
+            problems.append(
+                f"unexpected unique constraint: {name}({','.join(sorted(columns))})"
+            )
+
+        inspected_indexes = [
+            index
+            for index in inspector.get_indexes(name, schema=schema_name)
+            if index.get("column_names") and not index.get("duplicates_constraint")
+        ]
+        actual_indexes = {_inspected_index_signature(index) for index in inspected_indexes}
+        for columns, unique, predicate in sorted(
+            _expected_indexes(table) - actual_indexes,
+            key=str,
+        ):
+            problems.append(
+                f"missing index: {name}({','.join(columns)}) "
+                f"unique={unique} predicate={predicate or '<none>'}"
+            )
+        for columns, unique, predicate in sorted(actual_indexes, key=str):
+            if unique and (columns, unique, predicate) not in _expected_indexes(table):
+                problems.append(
+                    f"unexpected unique index: {name}({','.join(columns)}) "
+                    f"predicate={predicate or '<none>'}"
+                )
 
         expected_checks = {
             constraint.name
             for constraint in table.constraints
             if isinstance(constraint, CheckConstraint) and constraint.name
         }
-        actual_checks = {
-            constraint.get("name")
+        actual_check_definitions = {
+            constraint.get("name"): _normalized_sql_definition(constraint.get("sqltext"))
             for constraint in inspector.get_check_constraints(name, schema=schema_name)
             if constraint.get("name")
         }
-        for check_name in sorted(expected_checks - actual_checks):
+        for check_name in sorted(expected_checks - set(actual_check_definitions)):
             problems.append(f"missing check constraint: {name}.{check_name}")
+        expected_check_definitions = {
+            constraint.name: _normalized_sql_definition(
+                constraint.sqltext.compile(dialect=bind.dialect)
+            )
+            for constraint in table.constraints
+            if isinstance(constraint, CheckConstraint)
+            and constraint.name in CRITICAL_CHECK_DEFINITIONS
+        }
+        for check_name, definition in expected_check_definitions.items():
+            actual_definition = actual_check_definitions.get(check_name)
+            if actual_definition is not None and actual_definition != definition:
+                problems.append(
+                    f"check definition mismatch: {name}.{check_name}"
+                )
     return problems
 
 
@@ -212,6 +316,189 @@ def _drop_retired_debug_table(connection: Connection) -> None:
     connection.execute(text(f'DROP TABLE "{table_name}"'))
 
 
+def _add_execution_target_lineage(connection: Connection) -> None:
+    """Add target lineage without inferring that historical rows belong to OKX Demo."""
+
+    scope_table = Base.metadata.tables["execution_scopes"]
+    scope_table.create(bind=connection, checkfirst=True)
+    connection.execute(
+        text(
+            """
+            INSERT INTO execution_scopes
+                (scope_id, scope_kind, exchange_capable, executable,
+                 exchange_writes, order_submission_authorized)
+            VALUES
+                ('OKX_DEMO', 'EXCHANGE_TARGET', TRUE, FALSE, FALSE, FALSE),
+                ('LOCAL_DRY_RUN', 'NON_EXCHANGE', FALSE, TRUE, FALSE, FALSE),
+                ('UNKNOWN_LEGACY', 'LEGACY', FALSE, FALSE, FALSE, FALSE)
+            ON CONFLICT (scope_id) DO NOTHING
+            """
+        )
+    )
+
+    schema_name = connection.execute(text("SELECT current_schema()")).scalar_one()
+    table_names = set(inspect(connection).get_table_names(schema=schema_name))
+    lineage_roots = (
+        ("strategy_generation_runs", "strategy_generation_runs_scope_created_idx"),
+        ("backtest_runs", "backtest_runs_scope_created_idx"),
+        ("research_jobs", "research_jobs_scope_created_idx"),
+    )
+    for table_name, index_name in lineage_roots:
+        if table_name not in table_names:
+            continue
+        connection.execute(
+            text(
+                f'ALTER TABLE "{table_name}" '
+                "ADD COLUMN IF NOT EXISTS execution_scope_id VARCHAR(64)"
+            )
+        )
+        connection.execute(
+            text(
+                f'UPDATE "{table_name}" SET execution_scope_id = :legacy '
+                "WHERE execution_scope_id IS NULL"
+            ),
+            {"legacy": "UNKNOWN_LEGACY"},
+        )
+        connection.execute(
+            text(
+                f'ALTER TABLE "{table_name}" '
+                "ALTER COLUMN execution_scope_id SET NOT NULL"
+            )
+        )
+        fk_name = f"{table_name}_execution_scope_id_fkey"
+        foreign_keys = inspect(connection).get_foreign_keys(table_name, schema=schema_name)
+        if not any(foreign_key.get("name") == fk_name for foreign_key in foreign_keys):
+            connection.execute(
+                text(
+                    f'ALTER TABLE "{table_name}" ADD CONSTRAINT "{fk_name}" '
+                    "FOREIGN KEY (execution_scope_id) "
+                    "REFERENCES execution_scopes(scope_id)"
+                )
+            )
+        connection.execute(
+            text(
+                f'CREATE INDEX IF NOT EXISTS "{index_name}" '
+                f'ON "{table_name}" (execution_scope_id, created_at)'
+            )
+        )
+
+    if "research_jobs" in table_names:
+        legacy_unique_columns = {"operation", "idempotency_key_digest"}
+        preparer = connection.dialect.identifier_preparer
+        for constraint in inspect(connection).get_unique_constraints(
+            "research_jobs", schema=schema_name
+        ):
+            if (
+                set(constraint.get("column_names") or ()) == legacy_unique_columns
+                and constraint.get("name")
+            ):
+                quoted_name = preparer.quote(constraint["name"])
+                connection.execute(
+                    text(
+                        "ALTER TABLE research_jobs "
+                        f"DROP CONSTRAINT {quoted_name}"
+                    )
+                )
+        unique_names = {
+            constraint.get("name")
+            for constraint in inspect(connection).get_unique_constraints(
+                "research_jobs", schema=schema_name
+            )
+        }
+        if "research_jobs_scope_operation_idempotency_unique" not in unique_names:
+            connection.execute(
+                text(
+                    "ALTER TABLE research_jobs ADD CONSTRAINT "
+                    "research_jobs_scope_operation_idempotency_unique "
+                    "UNIQUE (execution_scope_id, operation, idempotency_key_digest)"
+                )
+            )
+
+
+def _upgrade_early_execution_target_lineage(connection: Connection) -> None:
+    """Upgrade the published ``20260727_01`` contract without rebuilding data."""
+
+    connection.execute(
+        text(
+            "ALTER TABLE execution_scopes "
+            "DROP CONSTRAINT IF EXISTS execution_scopes_known_contract_check"
+        )
+    )
+    connection.execute(
+        text(
+            "ALTER TABLE execution_scopes "
+            "ADD COLUMN IF NOT EXISTS exchange_capable BOOLEAN, "
+            "ADD COLUMN IF NOT EXISTS order_submission_authorized BOOLEAN"
+        )
+    )
+    connection.execute(
+        text(
+            """
+            UPDATE execution_scopes
+            SET exchange_capable = CASE scope_id
+                    WHEN 'OKX_DEMO' THEN TRUE
+                    ELSE FALSE
+                END,
+                executable = CASE scope_id
+                    WHEN 'LOCAL_DRY_RUN' THEN TRUE
+                    ELSE FALSE
+                END,
+                exchange_writes = FALSE,
+                order_submission_authorized = FALSE
+            """
+        )
+    )
+    connection.execute(
+        text(
+            "ALTER TABLE execution_scopes "
+            "ALTER COLUMN exchange_capable SET NOT NULL, "
+            "ALTER COLUMN order_submission_authorized SET NOT NULL, "
+            "ADD CONSTRAINT execution_scopes_known_contract_check CHECK ("
+            "scope_id = 'OKX_DEMO' AND scope_kind = 'EXCHANGE_TARGET' "
+            "AND exchange_capable = TRUE AND executable = FALSE "
+            "AND exchange_writes = FALSE AND order_submission_authorized = FALSE OR "
+            "scope_id = 'LOCAL_DRY_RUN' AND scope_kind = 'NON_EXCHANGE' "
+            "AND exchange_capable = FALSE AND executable = TRUE "
+            "AND exchange_writes = FALSE AND order_submission_authorized = FALSE OR "
+            "scope_id = 'UNKNOWN_LEGACY' AND scope_kind = 'LEGACY' "
+            "AND exchange_capable = FALSE AND executable = FALSE "
+            "AND exchange_writes = FALSE AND order_submission_authorized = FALSE)"
+        )
+    )
+
+    for table_name in ("trade_intents", "exchange_orders"):
+        connection.execute(
+            text(
+                f"ALTER TABLE {table_name} "
+                f"DROP CONSTRAINT IF EXISTS {table_name}_client_order_id_length_check, "
+                f"DROP CONSTRAINT IF EXISTS {table_name}_client_order_id_format_check, "
+                f"ADD CONSTRAINT {table_name}_client_order_id_format_check "
+                "CHECK (client_order_id ~ '^[A-Za-z0-9]{1,32}$')"
+            )
+        )
+
+    connection.execute(
+        text(
+            "ALTER TABLE execution_manifests "
+            "DROP CONSTRAINT IF EXISTS execution_manifests_legacy_not_executable_check, "
+            "DROP CONSTRAINT IF EXISTS execution_manifests_authorization_check"
+        )
+    )
+    connection.execute(
+        text(
+            "UPDATE execution_manifests SET executable_evidence = FALSE "
+            "WHERE execution_scope_id <> 'LOCAL_DRY_RUN' AND executable_evidence = TRUE"
+        )
+    )
+    connection.execute(
+        text(
+            "ALTER TABLE execution_manifests "
+            "ADD CONSTRAINT execution_manifests_authorization_check "
+            "CHECK (execution_scope_id = 'LOCAL_DRY_RUN' OR executable_evidence = FALSE)"
+        )
+    )
+
+
 def upgrade_database(engine: Engine) -> str:
     """Upgrade a local PostgreSQL database atomically to ``SCHEMA_VERSION``.
 
@@ -233,16 +520,35 @@ def upgrade_database(engine: Engine) -> str:
                         "Recorded schema version does not match ORM metadata: " + "; ".join(problems)
                     )
                 return current_version
-            if current_version in {LEGACY_SCHEMA_VERSION, PREVIOUS_SCHEMA_VERSION}:
+            if current_version in {
+                LEGACY_SCHEMA_VERSION,
+                PREVIOUS_SCHEMA_VERSION,
+                TARGET_LINEAGE_BASE_VERSION,
+            }:
                 # The migration preserves runtime tables, adds any missing managed
                 # tables, and removes only the retired debug table after proving it
                 # is empty.
                 _drop_retired_debug_table(connection)
+                _add_execution_target_lineage(connection)
                 Base.metadata.create_all(bind=connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
                         "Incremental schema upgrade does not match ORM metadata: "
+                        + "; ".join(problems)
+                    )
+                connection.execute(
+                    text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+                    {"version": SCHEMA_VERSION},
+                    )
+                return SCHEMA_VERSION
+            if current_version == EARLY_TARGET_LINEAGE_VERSION:
+                _upgrade_early_execution_target_lineage(connection)
+                Base.metadata.create_all(bind=connection)
+                problems = schema_problems(connection)
+                if problems:
+                    raise SchemaMigrationBlocked(
+                        "Early target-lineage schema upgrade does not match ORM metadata: "
                         + "; ".join(problems)
                     )
                 connection.execute(

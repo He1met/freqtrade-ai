@@ -155,7 +155,14 @@ class ResearchReadinessService:
 
     @staticmethod
     def _blocked(name: str, reason: str) -> RuntimeStatusSummary:
-        return RuntimeStatusSummary(name=name, status="BLOCKED", source="derived", summary=reason, blocked_reason=reason)
+        bounded_reason = reason if len(reason) <= 1000 else reason[:997] + "..."
+        return RuntimeStatusSummary(
+            name=name,
+            status="BLOCKED",
+            source="derived",
+            summary=bounded_reason,
+            blocked_reason=bounded_reason,
+        )
 
     @staticmethod
     def _unavailable(name: str, reason: str) -> RuntimeStatusSummary:

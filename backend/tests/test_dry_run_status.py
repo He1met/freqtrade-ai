@@ -83,6 +83,7 @@ def test_parser_reads_latest_snapshot_from_artifact_manifest(tmp_path) -> None:
     manifest_path = tmp_path / "dry-run-manifest.json"
     manifest = {
         "manifest_version": 1,
+        "execution_scope_id": "LOCAL_DRY_RUN",
         "status": "SUCCESS",
         "profile_name": "phase5-local-dry-run",
         "strategy_version_id": 123,
@@ -143,6 +144,7 @@ def test_manifest_without_status_snapshots_returns_explicit_empty_state(tmp_path
         json.dumps(
             {
                 "manifest_version": 1,
+                "execution_scope_id": "LOCAL_DRY_RUN",
                 "status": "SUCCESS",
                 "profile_name": "phase5-local-dry-run",
                 "strategy_version_id": 123,
@@ -165,6 +167,25 @@ def test_manifest_without_status_snapshots_returns_explicit_empty_state(tmp_path
     assert snapshot.open_trades_summary.total_open_trades == 0
     assert snapshot.recent_events[0].event_type == "status_snapshots_empty"
     assert snapshot.artifact_manifest_path == str(manifest_path)
+
+
+def test_historical_manifest_without_lineage_is_blocked(tmp_path) -> None:
+    manifest_path = tmp_path / "historical-dry-run-manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "manifest_version": 1,
+                "status": "SUCCESS",
+                "status_snapshots": [{"status": "running", "dry_run": True}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    snapshot = DryRunStatusSnapshotService().snapshot_from_artifact_manifest(manifest_path)
+
+    assert snapshot.status == "BLOCKED"
+    assert "missing LOCAL_DRY_RUN lineage" in (snapshot.blocked_reason or "")
 
 
 def test_missing_status_file_returns_blocked_snapshot(tmp_path) -> None:

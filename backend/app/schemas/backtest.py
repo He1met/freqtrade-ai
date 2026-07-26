@@ -13,12 +13,14 @@ from app.schemas.data_source import (
 )
 from app.schemas.strategy_score import StrategyScoreRead
 from app.schemas.operation_evidence import OperationEvidence
+from app.models.execution_lineage import LOCAL_DRY_RUN_SCOPE_ID
 
 
 BacktestStatus = Literal["pending", "running", "succeeded", "failed", "cancelled", "blocked"]
 
 
 class BacktestRunCreate(BaseModel):
+    execution_scope_id: Literal["LOCAL_DRY_RUN"] = LOCAL_DRY_RUN_SCOPE_ID
     strategy_version_id: int
     profile_name: Optional[str] = Field(default=None, max_length=120)
     config_snapshot: dict[str, Any] = Field(default_factory=dict)
@@ -66,6 +68,7 @@ class LocalBacktestPreflightCheck(BaseModel):
 
 class BacktestRunRead(BaseModel):
     id: int
+    execution_scope_id: str
     strategy_version_id: int
     strategy_name: Optional[str] = None
     profile_name: Optional[str]

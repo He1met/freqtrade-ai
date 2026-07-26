@@ -126,6 +126,7 @@ def _write_manifest(
         json.dumps(
             {
                 "manifest_version": 2 if run_id is not None else 1,
+                "execution_scope_id": "LOCAL_DRY_RUN",
                 "status": status,
                 "config_path": str(config_path) if config_path is not None else "tmp/freqtrade_configs/backtest.json",
                 "strategy_name": "MvpRsiStrategy",

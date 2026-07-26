@@ -269,6 +269,11 @@ class BacktestArtifactIngestService:
         }
         if manifest.get("manifest_version") != 2:
             return "SUCCESS artifact manifest must use provenance version 2"
+        if manifest.get("execution_scope_id") != task.run.execution_scope_id:
+            return (
+                "artifact manifest execution_scope_id does not match the persisted "
+                "backtest run"
+            )
         for key, value in expected.items():
             if manifest.get(key) != value:
                 return f"artifact manifest {key} does not match the persisted backtest task"

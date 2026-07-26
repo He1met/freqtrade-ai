@@ -16,6 +16,7 @@ from app.adapters.freqtrade.cli_runner import (
 from app.adapters.freqtrade.exceptions import FreqtradeCommandValidationError
 from app.adapters.freqtrade.config_builder import DryRunEnvPreflight
 from app.schemas.dry_run_profile import DryRunProfile
+from app.models.execution_lineage import LOCAL_DRY_RUN_SCOPE_ID
 
 
 FreqtradeDryRunArtifactStatus = Literal["SUCCESS", "FAILED", "BLOCKED", "SKIPPED"]
@@ -81,6 +82,7 @@ class FreqtradeDryRunArtifactManifest:
     blocked_reason: Optional[str] = None
     failed_reason: Optional[str] = None
     skipped_reason: Optional[str] = None
+    execution_scope_id: str = LOCAL_DRY_RUN_SCOPE_ID
 
     def to_dict(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -105,6 +107,7 @@ class FreqtradeDryRunArtifactManifest:
             "blocked_reason": self.blocked_reason,
             "failed_reason": self.failed_reason,
             "skipped_reason": self.skipped_reason,
+            "execution_scope_id": self.execution_scope_id,
         }
         return _sanitize_manifest_payload(payload)
 

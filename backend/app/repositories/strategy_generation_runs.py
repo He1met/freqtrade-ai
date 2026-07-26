@@ -5,6 +5,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.strategy_generation_run import StrategyGenerationRun
+from app.models.execution_lineage import LOCAL_DRY_RUN_SCOPE_ID
+from app.repositories.execution_lineage import ensure_execution_scope_catalog
 from app.schemas.strategy_generation_run import (
     GenerationRunStatus,
     StrategyGenerationRunCreate,
@@ -16,11 +18,23 @@ TERMINAL_STATUSES = {"succeeded", "failed", "cancelled"}
 
 
 class StrategyGenerationRunRepository:
-    def __init__(self, db: Session) -> None:
+    def __init__(self, db: Session, execution_scope_id: str = LOCAL_DRY_RUN_SCOPE_ID) -> None:
         self.db = db
+        self.execution_scope_id = execution_scope_id
+
+    def _require_executable_scope(self) -> None:
+        if self.execution_scope_id != LOCAL_DRY_RUN_SCOPE_ID:
+            raise ValueError(
+                "non-executable or unknown strategy generation scope is read-only"
+            )
 
     def create(self, payload: StrategyGenerationRunCreate) -> StrategyGenerationRun:
+        self._require_executable_scope()
+        ensure_execution_scope_catalog(self.db)
+        if payload.execution_scope_id != self.execution_scope_id:
+            raise ValueError("strategy generation scope does not match repository scope")
         run = StrategyGenerationRun(
+            execution_scope_id=self.execution_scope_id,
             provider=payload.provider,
             model=payload.model,
             prompt_hash=payload.prompt_hash,
@@ -34,10 +48,17 @@ class StrategyGenerationRunRepository:
         return run
 
     def get(self, run_id: int) -> Optional[StrategyGenerationRun]:
-        return self.db.get(StrategyGenerationRun, run_id)
+        statement = select(StrategyGenerationRun).where(
+            StrategyGenerationRun.id == run_id,
+            StrategyGenerationRun.execution_scope_id == self.execution_scope_id,
+        )
+        return self.db.scalars(statement).first()
 
     def list(self, status: Optional[GenerationRunStatus] = None) -> list[StrategyGenerationRun]:
         statement = select(StrategyGenerationRun).order_by(StrategyGenerationRun.created_at.desc())
+        statement = statement.where(
+            StrategyGenerationRun.execution_scope_id == self.execution_scope_id
+        )
         if status is not None:
             statement = statement.where(StrategyGenerationRun.status == status)
         return list(self.db.scalars(statement).all())
@@ -47,6 +68,7 @@ class StrategyGenerationRunRepository:
         run_id: int,
         payload: StrategyGenerationRunStatusUpdate,
     ) -> Optional[StrategyGenerationRun]:
+        self._require_executable_scope()
         run = self.get(run_id)
         if run is None:
             return None

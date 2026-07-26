@@ -19,6 +19,7 @@ ResearchJobStatus = Literal[
 
 class ResearchJobRead(BaseModel):
     id: int
+    execution_scope_id: str
     job_type: str
     operation: str
     request_hash: str

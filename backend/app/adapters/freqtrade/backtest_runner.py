@@ -15,6 +15,7 @@ from app.adapters.freqtrade.cli_runner import (
 from app.adapters.freqtrade.exceptions import FreqtradeCommandError
 from app.adapters.freqtrade.market_data_index import SUPPORTED_DATA_SUFFIXES
 from app.schemas.dry_run_status import redact_secret_text
+from app.models.execution_lineage import LOCAL_DRY_RUN_SCOPE_ID
 
 
 FreqtradeBacktestArtifactStatus = Literal["SUCCESS", "FAILED", "BLOCKED"]
@@ -49,6 +50,7 @@ class FreqtradeBacktestArtifactManifest:
     strategy_version_id: Optional[int] = None
     execution_id: Optional[str] = None
     checksums: Optional[dict[str, str]] = None
+    execution_scope_id: str = LOCAL_DRY_RUN_SCOPE_ID
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -72,6 +74,7 @@ class FreqtradeBacktestArtifactManifest:
             "strategy_version_id": self.strategy_version_id,
             "execution_id": self.execution_id,
             "checksums": self.checksums,
+            "execution_scope_id": self.execution_scope_id,
         }
 
     def write(self) -> Path:

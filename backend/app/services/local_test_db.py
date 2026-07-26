@@ -27,6 +27,8 @@ from app.models import (
     StrategyVersion,
 )
 from app.schemas.data_source import DataSourceTrace, fixture_source, unknown_source
+from app.models.execution_lineage import LOCAL_DRY_RUN_SCOPE_ID
+from app.repositories.execution_lineage import ensure_execution_scope_catalog
 
 
 SAFE_ENVIRONMENT_LABELS = {
@@ -571,6 +573,7 @@ class Phase8LocalTestDbService:
         scenario_name: str,
         source_kind: str,
     ) -> StrategyGenerationRun:
+        ensure_execution_scope_catalog(session)
         if scenario_name == "success":
             status = "succeeded"
             generated_count = accepted_count = 1
@@ -590,6 +593,7 @@ class Phase8LocalTestDbService:
             error_message = self._scenario_error_message(scenario_name)
 
         run = StrategyGenerationRun(
+            execution_scope_id=LOCAL_DRY_RUN_SCOPE_ID,
             provider=f"{SOURCE_LABEL}:{source_kind}",
             model="local-seed-fixture",
             prompt_hash=f"phase8-{scenario_name}",
@@ -621,6 +625,7 @@ class Phase8LocalTestDbService:
         run_status = self._backtest_run_status(scenario_name)
         requested_task_count = 2 if scenario_name == "partial-completion" else 1
         backtest_run = BacktestRun(
+            execution_scope_id=LOCAL_DRY_RUN_SCOPE_ID,
             strategy_version_id=version.id,
             profile_name=f"phase8-local-test-{scenario_name}",
             config_snapshot={

@@ -6,7 +6,16 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.models.backtest import BacktestResult, BacktestRun, BacktestTask
 from app.models.research_job import ResearchJob, ResearchWorkerControl
+from app.models.execution_lineage import (
+    LOCAL_DRY_RUN_SCOPE_ID,
+    ResearchJobAttempt,
+)
+from app.models.strategy import Strategy, StrategyVersion
+from app.models.strategy_generation_run import StrategyGenerationRun
+from app.models.strategy_score import StrategyScore
+from app.repositories.execution_lineage import ensure_execution_scope_catalog
 
 
 TERMINAL_JOB_STATUSES = {
@@ -18,18 +27,32 @@ TERMINAL_JOB_STATUSES = {
 }
 
 
+class ResearchJobLinkageBlocked(ValueError):
+    """Completion evidence failed scope or relationship-chain validation."""
+
+
 class ResearchJobRepository:
     """Database-fenced job queue with one global local execution lease."""
 
-    def __init__(self, db: Session) -> None:
+    def __init__(self, db: Session, execution_scope_id: str = LOCAL_DRY_RUN_SCOPE_ID) -> None:
         self.db = db
+        self.execution_scope_id = execution_scope_id
+
+    def _require_executable_scope(self) -> None:
+        if self.execution_scope_id != LOCAL_DRY_RUN_SCOPE_ID:
+            raise ValueError("non-executable or unknown research job scope is read-only")
 
     def get(self, job_id: int) -> Optional[ResearchJob]:
-        return self.db.get(ResearchJob, job_id)
+        statement = select(ResearchJob).where(
+            ResearchJob.id == job_id,
+            ResearchJob.execution_scope_id == self.execution_scope_id,
+        )
+        return self.db.scalars(statement).first()
 
     def list(self, limit: int = 100) -> list[ResearchJob]:
         statement = (
             select(ResearchJob)
+            .where(ResearchJob.execution_scope_id == self.execution_scope_id)
             .order_by(ResearchJob.created_at.desc(), ResearchJob.id.desc())
             .limit(limit)
         )
@@ -41,6 +64,7 @@ class ResearchJobRepository:
         idempotency_key_digest: str,
     ) -> Optional[ResearchJob]:
         statement = select(ResearchJob).where(
+            ResearchJob.execution_scope_id == self.execution_scope_id,
             ResearchJob.operation == operation,
             ResearchJob.idempotency_key_digest == idempotency_key_digest,
         )
@@ -55,7 +79,10 @@ class ResearchJobRepository:
         request_hash: str,
         request_payload: dict,
     ) -> ResearchJob:
+        self._require_executable_scope()
+        ensure_execution_scope_catalog(self.db)
         job = ResearchJob(
+            execution_scope_id=self.execution_scope_id,
             job_type=job_type,
             operation=operation,
             idempotency_key_digest=idempotency_key_digest,
@@ -101,6 +128,7 @@ class ResearchJobRepository:
         control = self.db.get(ResearchWorkerControl, 1)
         if control is not None:
             return control
+        self._require_executable_scope()
         try:
             control = ResearchWorkerControl(id=1, paused=False)
             self.db.add(control)
@@ -115,6 +143,7 @@ class ResearchJobRepository:
             return control
 
     def set_paused(self, paused: bool, reason: Optional[str]) -> ResearchWorkerControl:
+        self._require_executable_scope()
         self.get_control()
         control = self.db.get(ResearchWorkerControl, 1)
         if control is None:
@@ -126,7 +155,11 @@ class ResearchJobRepository:
         return control
 
     def status_counts(self) -> dict[str, int]:
-        statement = select(ResearchJob.status, func.count(ResearchJob.id)).group_by(ResearchJob.status)
+        statement = (
+            select(ResearchJob.status, func.count(ResearchJob.id))
+            .where(ResearchJob.execution_scope_id == self.execution_scope_id)
+            .group_by(ResearchJob.status)
+        )
         return {status: count for status, count in self.db.execute(statement).all()}
 
     def claim_next(
@@ -136,6 +169,7 @@ class ResearchJobRepository:
         lease_seconds: int,
         now: Optional[datetime] = None,
     ) -> Optional[ResearchJob]:
+        self._require_executable_scope()
         current_time = now or datetime.now(timezone.utc)
         self.get_control()
         self.expire_stale(current_time)
@@ -158,6 +192,7 @@ class ResearchJobRepository:
             statement = (
                 select(ResearchJob)
                 .where(
+                    ResearchJob.execution_scope_id == self.execution_scope_id,
                     ResearchJob.status == "PENDING",
                     ResearchJob.attempt_count < ResearchJob.max_attempts,
                 )
@@ -186,6 +221,15 @@ class ResearchJobRepository:
             job.heartbeat_at = current_time
             job.lease_expires_at = current_time + timedelta(seconds=lease_seconds)
             job.attempt_count += 1
+            self.db.add(
+                ResearchJobAttempt(
+                    research_job_id=job.id,
+                    attempt_number=job.attempt_count,
+                    execution_scope_id=job.execution_scope_id,
+                    status="RUNNING",
+                    started_at=current_time,
+                )
+            )
             job.started_at = job.started_at or current_time
             self.db.execute(
                 update(ResearchWorkerControl)
@@ -208,11 +252,13 @@ class ResearchJobRepository:
         lease_seconds: int,
         now: Optional[datetime] = None,
     ) -> bool:
+        self._require_executable_scope()
         current_time = now or datetime.now(timezone.utc)
         result = self.db.execute(
             update(ResearchJob)
             .where(
                 ResearchJob.id == job_id,
+                ResearchJob.execution_scope_id == self.execution_scope_id,
                 ResearchJob.status == "RUNNING",
                 ResearchJob.lease_token == lease_token,
                 ResearchJob.lease_expires_at > current_time,
@@ -233,11 +279,13 @@ class ResearchJobRepository:
         *,
         now: Optional[datetime] = None,
     ) -> bool:
+        self._require_executable_scope()
         current_time = now or datetime.now(timezone.utc)
         result = self.db.execute(
             update(ResearchJob)
             .where(
                 ResearchJob.id == job_id,
+                ResearchJob.execution_scope_id == self.execution_scope_id,
                 ResearchJob.status == "RUNNING",
                 ResearchJob.lease_token == lease_token,
                 ResearchJob.provider_attempted_at.is_(None),
@@ -261,8 +309,17 @@ class ResearchJobRepository:
         provider_completed: bool,
         now: Optional[datetime] = None,
     ) -> Optional[ResearchJob]:
+        self._require_executable_scope()
         if status not in TERMINAL_JOB_STATUSES:
             raise ValueError(f"invalid terminal job status: {status}")
+        job = self.get(job_id)
+        if (
+            job is None
+            or job.status != "RUNNING"
+            or job.lease_token != lease_token
+        ):
+            return None
+        validated_links = self._validate_completion_links(job, links)
         current_time = now or datetime.now(timezone.utc)
         values = {
             "status": status,
@@ -277,11 +334,12 @@ class ResearchJobRepository:
         }
         if provider_completed:
             values["provider_completed_at"] = current_time
-        values.update({key: value for key, value in links.items() if key in _LINK_COLUMNS})
+        values.update(validated_links)
         result = self.db.execute(
             update(ResearchJob)
             .where(
                 ResearchJob.id == job_id,
+                ResearchJob.execution_scope_id == self.execution_scope_id,
                 ResearchJob.status == "RUNNING",
                 ResearchJob.lease_token == lease_token,
             )
@@ -290,11 +348,26 @@ class ResearchJobRepository:
         if result.rowcount != 1:
             self.db.rollback()
             return None
+        attempt = self.db.scalars(
+            select(ResearchJobAttempt)
+            .where(
+                ResearchJobAttempt.research_job_id == job_id,
+                ResearchJobAttempt.execution_scope_id == self.execution_scope_id,
+            )
+            .order_by(ResearchJobAttempt.attempt_number.desc())
+            .limit(1)
+        ).first()
+        if attempt is not None:
+            attempt.status = status
+            attempt.completed_at = current_time
+            attempt.evidence_snapshot = evidence_snapshot
+            attempt.error_message = error_message
         self._release_control(job_id, lease_token)
         self.db.commit()
         return self.get(job_id)
 
     def cancel(self, job_id: int, reason: str) -> Optional[ResearchJob]:
+        self._require_executable_scope()
         job = self.get(job_id)
         if job is None:
             return None
@@ -323,6 +396,7 @@ class ResearchJobRepository:
         *,
         now: Optional[datetime] = None,
     ) -> Optional[ResearchJob]:
+        self._require_executable_scope()
         job = self.get(job_id)
         if job is None or not job.cancel_requested:
             return None
@@ -344,6 +418,7 @@ class ResearchJobRepository:
         )
 
     def expire_stale(self, now: Optional[datetime] = None) -> Optional[ResearchJob]:
+        self._require_executable_scope()
         current_time = now or datetime.now(timezone.utc)
         self.get_control()
         control = self.db.get(ResearchWorkerControl, 1)
@@ -368,6 +443,7 @@ class ResearchJobRepository:
             update(ResearchJob)
             .where(
                 ResearchJob.id == job.id,
+                ResearchJob.execution_scope_id == self.execution_scope_id,
                 ResearchJob.status == "RUNNING",
                 ResearchJob.lease_token == lease_token,
                 ResearchJob.lease_expires_at <= current_time,
@@ -393,9 +469,184 @@ class ResearchJobRepository:
         if result.rowcount != 1:
             self.db.rollback()
             return None
+        attempt = self.db.scalars(
+            select(ResearchJobAttempt)
+            .where(
+                ResearchJobAttempt.research_job_id == job.id,
+                ResearchJobAttempt.execution_scope_id == self.execution_scope_id,
+            )
+            .order_by(ResearchJobAttempt.attempt_number.desc())
+            .limit(1)
+        ).first()
+        if attempt is not None:
+            attempt.status = "STALE"
+            attempt.completed_at = current_time
+            attempt.error_message = stale_reason
+            attempt.evidence_snapshot = {
+                **job.evidence_snapshot,
+                "status": "STALE",
+                "acceptance_ready": False,
+                "failed_reason": stale_reason,
+            }
         self._release_control(job.id, lease_token)
         self.db.commit()
         return self.get(job.id)
+
+    def _validate_completion_links(
+        self,
+        job: ResearchJob,
+        links: dict[str, Optional[int]],
+    ) -> dict[str, Optional[int]]:
+        unknown_columns = sorted(set(links) - _LINK_COLUMNS)
+        if unknown_columns:
+            self._block_linkage(
+                "unknown completion link columns: " + ", ".join(unknown_columns)
+            )
+        normalized = {key: links.get(key) for key in _LINK_COLUMNS if key in links}
+
+        generation_run = self._linked_row(
+            StrategyGenerationRun,
+            normalized.get("strategy_generation_run_id"),
+            "strategy_generation_run_id",
+        )
+        if (
+            generation_run is not None
+            and generation_run.execution_scope_id != job.execution_scope_id
+        ):
+            self._block_linkage("strategy generation run belongs to another scope")
+
+        backtest_run = self._linked_row(
+            BacktestRun,
+            normalized.get("backtest_run_id"),
+            "backtest_run_id",
+        )
+        if backtest_run is not None and backtest_run.execution_scope_id != job.execution_scope_id:
+            self._block_linkage("backtest run belongs to another scope")
+
+        backtest_task = self._linked_row(
+            BacktestTask,
+            normalized.get("backtest_task_id"),
+            "backtest_task_id",
+        )
+        if backtest_task is not None:
+            task_run = self.db.get(BacktestRun, backtest_task.backtest_run_id)
+            if task_run is None or task_run.execution_scope_id != job.execution_scope_id:
+                self._block_linkage("backtest task belongs to another or missing scope")
+            if backtest_run is not None and backtest_task.backtest_run_id != backtest_run.id:
+                self._block_linkage("backtest task does not belong to linked backtest run")
+
+        backtest_result = self._linked_row(
+            BacktestResult,
+            normalized.get("backtest_result_id"),
+            "backtest_result_id",
+        )
+        if backtest_result is not None:
+            result_run = self.db.get(BacktestRun, backtest_result.backtest_run_id)
+            result_task = self.db.get(BacktestTask, backtest_result.backtest_task_id)
+            if (
+                result_run is None
+                or result_run.execution_scope_id != job.execution_scope_id
+                or result_task is None
+                or result_task.backtest_run_id != result_run.id
+            ):
+                self._block_linkage(
+                    "backtest result has a missing, cross-scope, or inconsistent chain"
+                )
+            if backtest_run is not None and backtest_result.backtest_run_id != backtest_run.id:
+                self._block_linkage("backtest result does not belong to linked backtest run")
+            if backtest_task is not None and backtest_result.backtest_task_id != backtest_task.id:
+                self._block_linkage("backtest result does not belong to linked backtest task")
+
+        strategy = self._linked_row(
+            Strategy,
+            normalized.get("strategy_id"),
+            "strategy_id",
+        )
+        strategy_version = self._linked_row(
+            StrategyVersion,
+            normalized.get("strategy_version_id"),
+            "strategy_version_id",
+        )
+        if strategy_version is not None:
+            if strategy is not None and strategy_version.strategy_id != strategy.id:
+                self._block_linkage("strategy version does not belong to linked strategy")
+            if (
+                generation_run is not None
+                and strategy_version.generation_run_id != generation_run.id
+            ):
+                self._block_linkage(
+                    "strategy version does not belong to linked generation run"
+                )
+            if strategy_version.generation_run_id is not None:
+                version_generation = self.db.get(
+                    StrategyGenerationRun,
+                    strategy_version.generation_run_id,
+                )
+                if (
+                    version_generation is None
+                    or version_generation.execution_scope_id != job.execution_scope_id
+                ):
+                    self._block_linkage(
+                        "strategy version generation lineage is missing or cross-scope"
+                    )
+
+        strategy_score = self._linked_row(
+            StrategyScore,
+            normalized.get("strategy_score_id"),
+            "strategy_score_id",
+        )
+        if strategy_score is not None:
+            if strategy_score.backtest_result_id is None:
+                self._block_linkage("strategy score has no provable backtest scope")
+            if strategy is not None and strategy_score.strategy_id != strategy.id:
+                self._block_linkage("strategy score does not belong to linked strategy")
+            if (
+                strategy_version is not None
+                and strategy_score.strategy_version_id != strategy_version.id
+            ):
+                self._block_linkage(
+                    "strategy score does not belong to linked strategy version"
+                )
+            if (
+                backtest_result is not None
+                and strategy_score.backtest_result_id != backtest_result.id
+            ):
+                self._block_linkage(
+                    "strategy score does not belong to linked backtest result"
+                )
+            if strategy_score.backtest_result_id is not None:
+                score_result = self.db.get(
+                    BacktestResult,
+                    strategy_score.backtest_result_id,
+                )
+                score_run = (
+                    None
+                    if score_result is None
+                    else self.db.get(BacktestRun, score_result.backtest_run_id)
+                )
+                if (
+                    score_result is None
+                    or score_run is None
+                    or score_run.execution_scope_id != job.execution_scope_id
+                ):
+                    self._block_linkage(
+                        "strategy score backtest lineage is missing or cross-scope"
+                    )
+        return normalized
+
+    def _linked_row(self, model, row_id: Optional[int], column: str):
+        if row_id is None:
+            return None
+        if not isinstance(row_id, int) or isinstance(row_id, bool) or row_id <= 0:
+            self._block_linkage(f"{column} must be a positive integer")
+        row = self.db.get(model, row_id)
+        if row is None:
+            self._block_linkage(f"{column} references a missing row")
+        return row
+
+    def _block_linkage(self, reason: str) -> None:
+        self.db.rollback()
+        raise ResearchJobLinkageBlocked(f"BLOCKED completion linkage: {reason}")
 
     def _release_control(self, job_id: int, lease_token: str) -> None:
         self.db.execute(
