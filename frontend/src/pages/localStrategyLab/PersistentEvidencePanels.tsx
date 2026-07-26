@@ -9,10 +9,7 @@ import {
 } from "../../components/DisplayPrimitives";
 import {
   StrategyGenerationApiError,
-  checkDryRunReadiness,
   runDeepSeekSingle,
-  startControlledDryRun,
-  stopControlledDryRun,
 } from "../../api/client";
 import type {
   BacktestResultSummary,
@@ -20,15 +17,12 @@ import type {
   BacktestTaskSummary,
   DataSource,
   DataSourceTraceSummary,
-  DryRunControlReport,
-  DryRunReadinessReport,
   LocalStrategyLabEvidenceSummary,
   MvpData,
   RankingEntry,
   StrategyGenerationApiResult,
   StrategyGenerationStrategy,
   StrategyGenerationVersion,
-  RuntimeStatusSummary,
 } from "../../api/types";
 import {
   metricRows,
@@ -47,7 +41,6 @@ import {
   actionStatusMessage,
   createActionEvidence,
   createActionLifecycleId,
-  latestActionEnvironmentScope,
   type ActionEvidence,
   type ActionEvidenceEnvironmentScope,
   type ActionEvidenceHistoryState,
@@ -60,18 +53,10 @@ import {
   formatTraceEntries,
   partitionEvidenceRecords,
 } from "./evidenceDisplay";
-import {
-  controlNextAction,
-  dryRunBlockers,
-  dryRunSafetyConclusion,
-  readinessNextAction,
-  readinessReason,
-  resolvedControlStatus,
-} from "./readinessControlDisplay";
 import { deriveProviderCredentialReadiness } from "./generationFormModel";
 import type { LabPhase } from "./workflowState";
+import { DryRunDecisionPanel } from "./DryRunDecisionPanel";
 import "../../styles/local-strategy-lab-evidence.css";
-import "../../styles/local-strategy-lab-readiness.css";
 
 export type SubmissionState =
   | { kind: "idle" }
@@ -93,20 +78,6 @@ export type SubmissionState =
       statusCode: number | null;
       statusText: string | null;
     };
-
-type ReadinessState =
-  | { kind: "idle" }
-  | { kind: "checking"; strategyVersionId: string }
-  | { kind: "ready"; report: DryRunReadinessReport }
-  | { kind: "blocked"; report: DryRunReadinessReport | null; message: string | null }
-  | { kind: "failed"; message: string };
-
-type ControlState =
-  | { kind: "idle" }
-  | { kind: "starting"; strategyVersionId: string }
-  | { kind: "stopping" }
-  | { kind: "complete"; report: DryRunControlReport }
-  | { kind: "failed"; message: string };
 
 type SourceRow = {
   label: string;
@@ -334,26 +305,6 @@ export function submissionMessage(submission: SubmissionState): string {
     return `正在提交 ${submission.requestedCount} 个本地策略生成请求。`;
   }
   return "输入策略想法后提交，页面只接受 backend API/DB 可证明的核心结果。";
-}
-
-function readinessStatus(readiness: ReadinessState): {
-  className: string;
-  label: string;
-  title: string;
-} {
-  if (readiness.kind === "checking") {
-    return { className: "status-neutral", label: "检查中", title: "正在请求 readiness API" };
-  }
-  if (readiness.kind === "ready") {
-    return { className: "status-success", label: "READY", title: "本地 dry-run readiness 检查通过" };
-  }
-  if (readiness.kind === "blocked") {
-    return { className: "status-blocked", label: "BLOCKED", title: "本地 dry-run readiness 缺少条件" };
-  }
-  if (readiness.kind === "failed") {
-    return { className: "status-failed", label: "FAILED", title: "readiness API 请求失败" };
-  }
-  return { className: "status-neutral", label: "未检查", title: "尚未执行 readiness 检查" };
 }
 
 function DataSourceTable({ rows }: { rows: SourceRow[] }) {
@@ -680,12 +631,6 @@ function RankingEvidence({ ranking }: { ranking: RankingEntry[] }) {
   );
 }
 
-type ReadinessCandidate = {
-  environmentScope: ActionEvidenceEnvironmentScope;
-  strategyVersionId: string;
-  strategyName: string | null;
-};
-
 function sourceEnvironmentScope(source: DataSourceTraceSummary | undefined): ActionEvidenceEnvironmentScope {
   return source?.environment?.scope ?? "unknown";
 }
@@ -695,361 +640,6 @@ function feedbackEnvironmentScope(sources: Array<DataSourceTraceSummary | undefi
   if (scopes.includes("current")) return "current";
   if (scopes.includes("historical")) return "historical";
   return "unknown";
-}
-
-function strategyFeedbackEnvironment(data: MvpData, candidate: ReadinessCandidate | null): ActionEvidenceEnvironmentScope {
-  if (candidate) return candidate.environmentScope;
-  return feedbackEnvironmentScope([
-    ...data.ranking.map((entry) => entry.dataSource),
-    ...data.strategyVersions.map((version) => version.dataSource),
-  ]);
-}
-
-function readinessCandidate(data: MvpData): ReadinessCandidate | null {
-  const ranked = data.ranking.find((entry) => isCoreDataSource(entry.dataSource));
-  if (ranked?.strategyVersionId) {
-    const rankedVersion = data.strategyVersions.find((version) => version.id === ranked.strategyVersionId);
-    if (rankedVersion && isCoreDataSource(rankedVersion.dataSource)) {
-      return {
-        environmentScope: sourceEnvironmentScope(rankedVersion.dataSource),
-        strategyVersionId: ranked.strategyVersionId,
-        strategyName: rankedVersion.fileState?.className ?? ranked.strategyName,
-      };
-    }
-  }
-
-  const strategyById = new Map(data.strategies.map((strategy) => [strategy.id, strategy]));
-  const version = data.strategyVersions.find((item) => isCoreDataSource(item.dataSource));
-  if (!version) {
-    return null;
-  }
-
-  return {
-    environmentScope: sourceEnvironmentScope(version.dataSource),
-    strategyVersionId: version.id,
-    strategyName: version.fileState?.className ?? strategyById.get(version.strategyId)?.name ?? null,
-  };
-}
-
-function ReadinessControlOverview({ data }: { data: MvpData }) {
-  const candidate = readinessCandidate(data);
-  const runtime = data.operatorDashboard.runtimeContract.dryRunReadiness;
-  const manifest = data.dryRun.manifest;
-  const snapshot = data.dryRun.snapshot;
-  const safety = dryRunSafetyConclusion(snapshot);
-  const runtimeReason = readinessReason(runtime);
-  const persistedBlockers = dryRunBlockers(manifest, snapshot);
-  const blockers = Array.from(new Set([
-    ...(runtime.status === "READY" ? [] : [runtimeReason]),
-    ...persistedBlockers,
-  ]));
-  const nextAction = readinessNextAction(runtime.status, runtimeReason);
-  const profileName = snapshot.profileName ?? manifest?.profileName ?? EMPTY_TEXT;
-
-  return (
-    <section
-      aria-label="Dry-run readiness 与受控运行总览"
-      className="lab-readiness-overview"
-      data-testid="lab-readiness-overview"
-    >
-      <div className="lab-readiness-overview__heading">
-        <div>
-          <span className="lab-readiness-eyebrow">运行前决策</span>
-          <h2>Readiness 与受控 Dry-run</h2>
-        </div>
-        <StatusBadge label={displayStatus(runtime.status)} showRaw status={runtime.status} />
-      </div>
-
-      <div className="lab-readiness-overview__grid">
-        <article className="lab-readiness-overview__card">
-          <span>Dry-run readiness</span>
-          <StatusBadge label={displayStatus(runtime.status)} showRaw status={runtime.status} />
-          <p>{runtime.summary}</p>
-        </article>
-        <article className="lab-readiness-overview__card">
-          <span>持久运行状态</span>
-          <StatusBadge label={displayStatus(snapshot.status)} showRaw status={snapshot.status} />
-          <p>来自最新持久 status snapshot，不以按钮请求状态替代。</p>
-        </article>
-        <article className="lab-readiness-overview__card">
-          <span>安全结论</span>
-          <StatusBadge label={safety.status === "PASS" ? "仅 Dry-run" : "安全阻断"} status={safety.status} />
-          <p>{safety.reason}</p>
-        </article>
-      </div>
-
-      <div className="lab-readiness-decision">
-        <div>
-          <span>{blockers.length ? "当前阻断原因" : "当前结论"}</span>
-          <strong>{blockers[0] ?? runtimeReason}</strong>
-        </div>
-        <div>
-          <span>下一步</span>
-          <strong>{nextAction}</strong>
-        </div>
-      </div>
-
-      {blockers.length > 1 ? (
-        <ul className="lab-readiness-blockers" aria-label="其余阻断原因">
-          {blockers.slice(1).map((blocker) => <li key={blocker}>{blocker}</li>)}
-        </ul>
-      ) : null}
-
-      <dl className="lab-readiness-audit">
-        <div>
-          <dt>候选 strategy version</dt>
-          <dd><CopyableValue label="候选策略版本 ID" value={candidate?.strategyVersionId ?? EMPTY_TEXT} /></dd>
-        </div>
-        <div>
-          <dt>profile</dt>
-          <dd><CopyableValue label="Dry-run profile" value={profileName} /></dd>
-        </div>
-        <div>
-          <dt>dry_run</dt>
-          <dd>{displayBoolean(snapshot.dryRun)}</dd>
-        </div>
-      </dl>
-
-      <details className="lab-readiness-details">
-        <summary>展开 manifest、snapshot 与运行边界证据</summary>
-        <dl className="lab-readiness-audit">
-          <div>
-            <dt>manifest</dt>
-            <dd><CopyableValue label="Manifest 路径" value={manifest?.manifestPath ?? EMPTY_TEXT} /></dd>
-          </div>
-          <div>
-            <dt>snapshot artifact manifest</dt>
-            <dd><CopyableValue label="Snapshot artifact manifest" value={snapshot.artifactManifestPath ?? EMPTY_TEXT} /></dd>
-          </div>
-          <div>
-            <dt>config</dt>
-            <dd><CopyableValue label="Dry-run config 路径" value={manifest?.configPath ?? EMPTY_TEXT} /></dd>
-          </div>
-          <div>
-            <dt>策略 / pair / timeframe</dt>
-            <dd>{snapshot.strategyName ?? manifest?.strategyName ?? EMPTY_TEXT} · {snapshot.pair ?? manifest?.pair ?? EMPTY_TEXT} · {snapshot.timeframe ?? manifest?.timeframe ?? EMPTY_TEXT}</dd>
-          </div>
-          <div>
-            <dt>snapshot 更新时间</dt>
-            <dd>{snapshot.lastUpdated ?? EMPTY_TEXT}</dd>
-          </div>
-          <div>
-            <dt>命令证据</dt>
-            <dd><ExpandableText mono summary="查看完整 Dry-run 命令参数" value={manifest?.commandArgs.join(" ") ?? EMPTY_TEXT} /></dd>
-          </div>
-        </dl>
-      </details>
-
-      <aside className="lab-control-safety" role="note">
-        本区只允许本地受控 dry-run；禁止 live trading、连接真实交易执行链路或提交真实订单。人工批准不改变这一边界。
-      </aside>
-    </section>
-  );
-}
-
-function DryRunReadinessPanel({
-  data,
-  history,
-  recordAction,
-}: {
-  data: MvpData;
-  history: ActionEvidence[];
-  recordAction: RecordActionEvidence;
-}) {
-  const [readiness, setReadiness] = useState<ReadinessState>({ kind: "idle" });
-  const candidate = readinessCandidate(data);
-  const status = readinessStatus(readiness);
-  const isChecking = readiness.kind === "checking";
-  const report = readiness.kind === "ready" || readiness.kind === "blocked" ? readiness.report : null;
-
-  async function handleCheck() {
-    if (!candidate) {
-      const message = "没有可用于 readiness 检查的核心 strategy version。";
-      setReadiness({ kind: "blocked", report: null, message });
-      recordAction(createActionEvidence({
-        action: "检查 Dry-run readiness", status: "BLOCKED", message,
-        nextAction: "先生成并验证包含 database_ids 的核心 strategy version。", recommendBug: false,
-        updatedAt: new Date().toISOString(),
-      }));
-      return;
-    }
-
-    setReadiness({ kind: "checking", strategyVersionId: candidate.strategyVersionId });
-    const lifecycleId = createActionLifecycleId("dry-run");
-    recordAction(createActionEvidence({
-      action: "检查 Dry-run readiness", lifecycleId, status: "RUNNING", message: actionStatusMessage("RUNNING"),
-      nextAction: "等待 backend readiness report。", recommendBug: false,
-      databaseIds: { strategy_version_id: candidate.strategyVersionId }, updatedAt: new Date().toISOString(),
-    }));
-    try {
-      const result = await checkDryRunReadiness({
-        strategyName: candidate.strategyName,
-        strategyVersionId: candidate.strategyVersionId,
-      });
-      setReadiness(
-        result.status === "READY"
-          ? { kind: "ready", report: result }
-          : { kind: "blocked", report: result, message: result.blockedReasons.join("；") || null },
-      );
-      const blocked = result.status !== "READY";
-      recordAction(createActionEvidence({
-        action: "检查 Dry-run readiness", lifecycleId, status: blocked ? "BLOCKED" : "SUCCESS",
-        message: blocked ? result.blockedReasons.join("；") || "readiness 未通过。" : "readiness report 已返回。",
-        nextAction: blocked ? "按 report 的 blocked_reason 补齐前置条件后重试。" : "仅在人工批准后考虑受控 dry-run；不会启动 live trading。",
-        recommendBug: false, databaseIds: { strategy_version_id: result.strategyVersionId }, updatedAt: new Date().toISOString(),
-      }));
-    } catch (error) {
-      const message = apiErrorMessage(error, "readiness API 请求失败");
-      setReadiness({ kind: "failed", message });
-      recordAction(createActionEvidence({
-        action: "检查 Dry-run readiness", lifecycleId, status: apiErrorStatus(error), message,
-        nextAction: "检查 API、策略版本和服务日志；若可稳定复现，创建 Bug Issue。", recommendBug: true,
-        databaseIds: { strategy_version_id: candidate.strategyVersionId }, updatedAt: new Date().toISOString(),
-      }));
-    }
-  }
-
-  return (
-    <section className="lab-readiness-panel" aria-label="本地 dry-run readiness">
-      <div className="lab-readiness-panel__heading">
-        <div>
-          <span className="lab-readiness-eyebrow">运行前检查</span>
-          <h2>Dry-run readiness</h2>
-        </div>
-        <div className="lab-control-actions">
-          <StatusBadge label={status.label} showRaw status={readiness.kind === "checking" ? "CHECKING" : status.label} />
-          <button className="secondary-button" disabled={isChecking || !candidate} onClick={handleCheck} type="button">
-            {isChecking ? "检查中" : "重新检查"}
-          </button>
-        </div>
-      </div>
-      <div className="lab-readiness-decision">
-        <div>
-          <span>{readiness.kind === "ready" ? "检查结论" : "阻断 / 检查状态"}</span>
-          <strong>
-            {readiness.kind === "failed" || readiness.kind === "blocked"
-              ? readiness.message ?? report?.blockedReasons[0] ?? status.title
-              : readiness.kind === "ready"
-                ? "Readiness report 为 READY；仍需人工批准，且仅允许受控 dry-run。"
-                : status.title}
-          </strong>
-        </div>
-        <div>
-          <span>下一步</span>
-          <strong>
-            {readiness.kind === "ready"
-              ? "审计 profile、检查项和安全证据后，再决定是否人工批准受控 dry-run。"
-              : readiness.kind === "checking"
-                ? "等待 backend readiness report，不要重复提交。"
-                : "补齐核心候选版本或按阻断原因修复后重新检查。"}
-          </strong>
-        </div>
-      </div>
-      <dl className="lab-readiness-audit">
-        <div>
-          <dt>候选 strategy_version</dt>
-          <dd><CopyableValue label="候选策略版本 ID" value={candidate?.strategyVersionId ?? EMPTY_TEXT} /></dd>
-        </div>
-        <div>
-          <dt>策略</dt>
-          <dd><CompactText value={candidate?.strategyName ?? EMPTY_TEXT} /></dd>
-        </div>
-        <div>
-          <dt>profile</dt>
-          <dd><CopyableValue label="Readiness profile" value={report?.profileName ?? EMPTY_TEXT} /></dd>
-        </div>
-      </dl>
-      <aside className="lab-control-safety" role="note">
-        Readiness 通过不等于 live ready。本操作不会启动 live trading、连接真实交易执行链路或提交真实订单。
-      </aside>
-      <LatestActionFeedback
-        actions={["检查 Dry-run readiness"]}
-        environmentScope={strategyFeedbackEnvironment(data, candidate)}
-        expectedEntityIds={{ strategy_version_id: candidate?.strategyVersionId }}
-        history={history}
-        phase="dry-run"
-      />
-      {report?.blockedReasons.length ? (
-        <ul className="lab-readiness-blockers">
-          {report.blockedReasons.map((reason) => (
-            <li key={reason}>{reason}</li>
-          ))}
-        </ul>
-      ) : null}
-      {report ? (
-        <>
-          <div className="lab-readiness-checks" aria-label="Readiness 检查项">
-            {report.checks.map((check) => (
-              <article className="lab-readiness-check" key={check.name}>
-                <div className="lab-readiness-check__heading">
-                  <strong>{check.name}</strong>
-                  <StatusBadge showRaw status={check.status} />
-                </div>
-                <p>{check.summary}</p>
-                {check.blockedReason ? <ExpandableText summary="查看阻断原因" value={check.blockedReason} /> : null}
-                <ExpandableText mono summary="展开并复制前先核对完整证据" value={formatEvidence(check.evidence)} />
-              </article>
-            ))}
-          </div>
-          <details className="lab-readiness-details">
-            <summary>展开完整 readiness report</summary>
-            <dl className="lab-readiness-audit">
-              <div>
-                <dt>generated_at</dt>
-                <dd><CopyableValue label="Readiness 生成时间" value={report.generatedAt} /></dd>
-              </div>
-              <div>
-                <dt>env preflight</dt>
-                <dd><ExpandableText mono value={formatEvidence(report.envPreflight)} /></dd>
-              </div>
-              <div>
-                <dt>config preview</dt>
-                <dd><ExpandableText mono value={formatEvidence(report.configPreview)} /></dd>
-              </div>
-              <div>
-                <dt>safety</dt>
-                <dd><ExpandableText mono value={formatEvidence(report.safety)} /></dd>
-              </div>
-            </dl>
-          </details>
-        </>
-      ) : null}
-      {!candidate ? (
-        <EmptyState
-          description="先生成并验证带 database_ids 的核心 strategy version；空结果不代表 readiness 成功。"
-          title="Readiness BLOCKED"
-        />
-      ) : null}
-    </section>
-  );
-}
-
-function ReadinessDomainPanel({ data }: { data: MvpData }) {
-  const contract = data.operatorDashboard.runtimeContract;
-  const domains: Array<[string, RuntimeStatusSummary]> = [
-    ["Research readiness", contract.researchReadiness],
-    ["Dry-run readiness", contract.dryRunReadiness],
-    ["Live readiness (disabled)", contract.liveReadiness],
-  ];
-  return (
-    <section className="lab-evidence-section" aria-label="运行域就绪状态">
-      <div className="section-header detail-section">
-        <h2>运行域就绪状态</h2>
-        <span>只读证据</span>
-      </div>
-      <div className="lab-evidence-summary">
-        {domains.map(([label, readiness]) => (
-          <div key={label}>
-            <span>{label}</span>
-            <strong className={statusClassName(readiness.status)}>{displayStatus(readiness.status)}</strong>
-            <small title={readiness.blockedReason ?? readiness.unavailableReason ?? readiness.staleReason ?? readiness.summary}>
-              {readiness.summary}
-            </small>
-          </div>
-        ))}
-      </div>
-    </section>
-  );
 }
 
 function EvidenceConclusion({ summary }: { summary: LocalStrategyLabEvidenceSummary | undefined }) {
@@ -1176,279 +766,6 @@ function EvidenceConclusion({ summary }: { summary: LocalStrategyLabEvidenceSumm
   );
 }
 
-function ControlStatePanel({
-  data,
-  history,
-  operatorToken,
-  recordAction,
-}: {
-  data: MvpData;
-  history: ActionEvidence[];
-  operatorToken: string;
-  recordAction: RecordActionEvidence;
-}) {
-  const [control, setControl] = useState<ControlState>({ kind: "idle" });
-  const [manualApproval, setManualApproval] = useState(false);
-  const candidate = readinessCandidate(data);
-  const isBusy = control.kind === "starting" || control.kind === "stopping";
-  const report = control.kind === "complete" ? control.report : null;
-  const snapshot = report?.statusSnapshot ?? data.dryRun.snapshot;
-  const manifest = report ? null : data.dryRun.manifest;
-  const controlStatus = resolvedControlStatus({
-    kind: control.kind,
-    report,
-    persistedStatus: data.dryRun.snapshot.status,
-  });
-  const persistedBlockers = dryRunBlockers(manifest, snapshot);
-  const actionBlockers = report
-    ? [...report.blockedReasons, report.failedReason, report.skippedReason]
-      .filter((value): value is string => Boolean(value?.trim()))
-    : [];
-  const controlBlockers = Array.from(new Set([
-    ...(control.kind === "failed" ? [control.message] : []),
-    ...actionBlockers,
-    ...persistedBlockers,
-  ]));
-  const safetyConclusion = dryRunSafetyConclusion(snapshot);
-  const nextAction = controlNextAction(controlStatus, controlBlockers);
-  const manifestPath = report?.manifestPath ?? manifest?.manifestPath ?? snapshot.artifactManifestPath;
-  const snapshotPath = report?.statusSnapshotPath ?? EMPTY_TEXT;
-
-  async function handleStart() {
-    if (!candidate) {
-      const message = "没有可用于受控 dry-run 的核心 strategy version。";
-      setControl({ kind: "failed", message });
-      recordAction(createActionEvidence({
-        action: "启动 controlled dry-run", status: "BLOCKED", message,
-        nextAction: "先生成并验证核心 strategy version。", recommendBug: false, updatedAt: new Date().toISOString(),
-      }));
-      return;
-    }
-
-    setControl({ kind: "starting", strategyVersionId: candidate.strategyVersionId });
-    const lifecycleId = createActionLifecycleId("dry-run");
-    recordAction(createActionEvidence({
-      action: "启动 controlled dry-run", lifecycleId, status: "RUNNING", message: actionStatusMessage("RUNNING"),
-      nextAction: "等待受控 dry-run 报告。", recommendBug: false,
-      databaseIds: { strategy_version_id: candidate.strategyVersionId }, updatedAt: new Date().toISOString(),
-    }));
-    try {
-      const result = await startControlledDryRun({
-        manualApproval,
-        strategyName: candidate.strategyName,
-        strategyVersionId: candidate.strategyVersionId,
-      }, operatorToken);
-      setControl({ kind: "complete", report: result });
-      const status = result.status === "SUCCESS" ? "SUCCESS" : result.status === "BLOCKED" ? "BLOCKED" : "FAILED";
-      recordAction(createActionEvidence({
-        action: "启动 controlled dry-run", lifecycleId, status,
-        message: result.failedReason ?? (result.blockedReasons.join("；") || `受控 dry-run 返回 ${result.status}。`),
-        nextAction: status === "SUCCESS" ? "通过 status_snapshot 对账；停止前不允许切换到 live。" : "按报告的原因修复后重试；不要绕过安全边界。",
-        recommendBug: status === "FAILED", databaseIds: { strategy_version_id: candidate.strategyVersionId },
-        artifactPaths: [result.manifestPath, result.statusSnapshotPath], updatedAt: new Date().toISOString(),
-      }));
-    } catch (error) {
-      const message = apiErrorMessage(error, "受控 dry-run 启动边界请求失败");
-      setControl({ kind: "failed", message });
-      recordAction(createActionEvidence({
-        action: "启动 controlled dry-run", lifecycleId, status: apiErrorStatus(error), message,
-        nextAction: "检查本地授权与 dry-run report；若可稳定复现，创建 Bug Issue。", recommendBug: true,
-        databaseIds: { strategy_version_id: candidate.strategyVersionId }, updatedAt: new Date().toISOString(),
-      }));
-    }
-  }
-
-  async function handleStop() {
-    setControl({ kind: "stopping" });
-    const lifecycleId = createActionLifecycleId("dry-run");
-    recordAction(createActionEvidence({
-      action: "停止 controlled dry-run", lifecycleId, status: "RUNNING", message: actionStatusMessage("RUNNING"),
-      nextAction: "等待停止报告。", recommendBug: false, updatedAt: new Date().toISOString(),
-    }));
-    try {
-      const result = await stopControlledDryRun(operatorToken);
-      setControl({ kind: "complete", report: result });
-      const status = result.status === "STOPPED" || result.status === "SUCCESS" ? "SUCCESS" : result.status === "BLOCKED" ? "BLOCKED" : "FAILED";
-      recordAction(createActionEvidence({
-        action: "停止 controlled dry-run", lifecycleId, status,
-        message: result.failedReason ?? (result.blockedReasons.join("；") || `停止请求返回 ${result.status}。`),
-        nextAction: "通过 status_snapshot 复核已停止，且不会进入 live trading。", recommendBug: status === "FAILED",
-        artifactPaths: [result.manifestPath, result.statusSnapshotPath], updatedAt: new Date().toISOString(),
-      }));
-    } catch (error) {
-      const message = apiErrorMessage(error, "受控 dry-run 停止请求失败");
-      setControl({ kind: "failed", message });
-      recordAction(createActionEvidence({
-        action: "停止 controlled dry-run", lifecycleId, status: apiErrorStatus(error), message,
-        nextAction: "检查本地授权和受控 runtime 状态；若可稳定复现，创建 Bug Issue。", recommendBug: true,
-        updatedAt: new Date().toISOString(),
-      }));
-    }
-  }
-
-  return (
-    <section className="lab-control-panel" aria-label="本地受控 dry-run">
-      <div className="lab-control-panel__heading">
-        <div>
-          <span className="lab-readiness-eyebrow">受控运行</span>
-          <h2>Controlled dry-run</h2>
-        </div>
-        <StatusBadge label={displayStatus(controlStatus)} showRaw status={controlStatus} />
-      </div>
-
-      <div className="lab-readiness-decision">
-        <div>
-          <span>当前状态 / 原因</span>
-          <strong>{controlBlockers[0] ?? `最新可审计状态为 ${controlStatus}。`}</strong>
-        </div>
-        <div>
-          <span>下一步</span>
-          <strong>{nextAction}</strong>
-        </div>
-      </div>
-
-      {controlBlockers.length > 1 ? (
-        <ul className="lab-readiness-blockers" aria-label="Dry-run 其余阻断或失败原因">
-          {controlBlockers.slice(1).map((reason) => <li key={reason}>{reason}</li>)}
-        </ul>
-      ) : null}
-
-      <dl className="lab-readiness-audit">
-        <div>
-          <dt>候选 strategy_version</dt>
-          <dd><CopyableValue label="候选策略版本 ID" value={candidate?.strategyVersionId ?? EMPTY_TEXT} /></dd>
-        </div>
-        <div>
-          <dt>profile</dt>
-          <dd><CopyableValue label="Dry-run profile" value={snapshot.profileName ?? manifest?.profileName ?? EMPTY_TEXT} /></dd>
-        </div>
-        <div>
-          <dt>dry_run</dt>
-          <dd>{displayBoolean(snapshot.dryRun)}</dd>
-        </div>
-        <div>
-          <dt>manifest</dt>
-          <dd><CopyableValue label="Manifest 路径" value={manifestPath ?? EMPTY_TEXT} /></dd>
-        </div>
-        <div>
-          <dt>status_snapshot</dt>
-          <dd><CopyableValue label="Status snapshot 路径" value={snapshotPath} /></dd>
-        </div>
-        <div>
-          <dt>安全结论</dt>
-          <dd><StatusBadge label={safetyConclusion.status === "PASS" ? "仅 Dry-run" : "安全阻断"} status={safetyConclusion.status} /></dd>
-        </div>
-      </dl>
-
-      <aside className="lab-control-safety" role="note">
-        {safetyConclusion.reason} 本页始终禁止 live trading、连接真实交易执行链路或提交真实订单。
-      </aside>
-
-      <div className="lab-control-action-cluster">
-        <div className="lab-control-actions">
-          <label className="inline-check">
-            <input
-              checked={manualApproval}
-              disabled={isBusy}
-              onChange={(event) => setManualApproval(event.target.checked)}
-              type="checkbox"
-            />
-            人工批准本次受控 dry-run
-          </label>
-          <button className="secondary-button" disabled={isBusy || !candidate || !operatorToken} onClick={handleStart} type="button">
-            {control.kind === "starting" ? "启动中" : "启动 Dry-run"}
-          </button>
-          <button className="secondary-button" disabled={isBusy || !operatorToken} onClick={handleStop} type="button">
-            {control.kind === "stopping" ? "停止中" : "停止 Dry-run"}
-          </button>
-        </div>
-        <small className="inline-muted">人工批准只适用于本次本地 dry-run，不会授予 live trading 或真实订单权限。</small>
-      </div>
-      <LatestActionFeedback
-        actions={["启动 controlled dry-run"]}
-        environmentScope={strategyFeedbackEnvironment(data, candidate)}
-        expectedEntityIds={{ strategy_version_id: candidate?.strategyVersionId }}
-        history={history}
-        phase="dry-run"
-      />
-      <LatestActionFeedback
-        actions={["停止 controlled dry-run"]}
-        environmentScope={latestActionEnvironmentScope({
-          actions: ["停止 controlled dry-run"],
-          history,
-          phase: "dry-run",
-        })}
-        history={history}
-        phase="dry-run"
-      />
-
-      <details className="lab-readiness-details">
-        <summary>展开 snapshot、manifest 和安全证据</summary>
-        <dl className="lab-readiness-audit">
-          <div>
-            <dt>snapshot status</dt>
-            <dd><StatusBadge showRaw status={snapshot.status} /></dd>
-          </div>
-          <div>
-            <dt>策略 / pair / timeframe</dt>
-            <dd>{snapshot.strategyName ?? manifest?.strategyName ?? EMPTY_TEXT} · {snapshot.pair ?? manifest?.pair ?? EMPTY_TEXT} · {snapshot.timeframe ?? manifest?.timeframe ?? EMPTY_TEXT}</dd>
-          </div>
-          <div>
-            <dt>snapshot 更新时间</dt>
-            <dd><CopyableValue label="Snapshot 更新时间" value={snapshot.lastUpdated ?? EMPTY_TEXT} /></dd>
-          </div>
-          <div>
-            <dt>config</dt>
-            <dd><CopyableValue label="Dry-run config 路径" value={report?.configPath ?? manifest?.configPath ?? EMPTY_TEXT} /></dd>
-          </div>
-          <div>
-            <dt>report safety</dt>
-            <dd><ExpandableText mono value={report ? formatEvidence(report.safety) : safetyConclusion.reason} /></dd>
-          </div>
-          <div>
-            <dt>命令证据</dt>
-            <dd><ExpandableText mono value={manifest?.commandArgs.join(" ") ?? EMPTY_TEXT} /></dd>
-          </div>
-        </dl>
-
-        {snapshot.recentEvents.length ? (
-          <div className="table-shell lab-table-shell">
-            <table>
-              <thead>
-                <tr>
-                  <th>event</th>
-                  <th>severity</th>
-                  <th>message</th>
-                  <th>source</th>
-                </tr>
-              </thead>
-              <tbody>
-                {snapshot.recentEvents.map((event) => (
-                  <tr key={`${event.timestamp}:${event.eventType}`}>
-                    <td className="primary-cell">{event.eventType}</td>
-                    <td><StatusBadge showRaw status={event.severity} /></td>
-                    <td><ExpandableText value={event.message} /></td>
-                    <td><CompactText value={event.source} /></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <EmptyState description="当前 snapshot 没有 recent_events；这不代表运行成功。" title="暂无运行事件" />
-        )}
-      </details>
-
-      {!candidate ? (
-        <EmptyState
-          description="先生成并验证核心 strategy version；缺少候选时启动操作保持禁用。"
-          title="Controlled dry-run BLOCKED"
-        />
-      ) : null}
-    </section>
-  );
-}
-
 function AdvancedDeepSeekPanel({
   data,
   history,
@@ -1537,6 +854,7 @@ function AdvancedDeepSeekPanel({
 
 export function PersistentEvidence({
   data,
+  dryRunSource,
   error,
   history,
   historyState,
@@ -1544,12 +862,15 @@ export function PersistentEvidence({
   isLoading,
   onRefresh,
   operatorDashboardSource,
+  onOperatorTokenChange,
+  onReconciliationChange,
   operatorToken,
   promptSummary,
   recordAction,
   source,
 }: {
   data: MvpData;
+  dryRunSource: DataSource;
   error: string | null;
   history: ActionEvidence[];
   historyState: ActionEvidenceHistoryState;
@@ -1557,6 +878,8 @@ export function PersistentEvidence({
   isLoading: boolean;
   onRefresh: () => void;
   operatorDashboardSource: DataSource;
+  onOperatorTokenChange: (value: string) => void;
+  onReconciliationChange: (pending: boolean) => void;
   operatorToken: string;
   promptSummary: string;
   recordAction: RecordActionEvidence;
@@ -1657,12 +980,19 @@ export function PersistentEvidence({
       ) : null}
       {inspectedPhase === "score" ? <RankingEvidence ranking={data.ranking} /> : null}
       {inspectedPhase === "dry-run" ? (
-        <>
-          <ReadinessControlOverview data={data} />
-          <DryRunReadinessPanel data={data} history={history} recordAction={recordAction} />
-          <ControlStatePanel data={data} history={history} operatorToken={operatorToken} recordAction={recordAction} />
-          <ReadinessDomainPanel data={data} />
-        </>
+        <DryRunDecisionPanel
+          data={data}
+          dryRunSource={dryRunSource}
+          error={error}
+          history={history}
+          isLoading={isLoading}
+          onOperatorTokenChange={onOperatorTokenChange}
+          onReconciliationChange={onReconciliationChange}
+          onRefresh={handleRefresh}
+          operatorToken={operatorToken}
+          recordAction={recordAction}
+          selection={selection}
+        />
       ) : null}
       <div hidden={inspectedPhase !== "backtest" && inspectedPhase !== "score"}>
         <CandidateWorkbench

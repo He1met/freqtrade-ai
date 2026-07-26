@@ -213,7 +213,9 @@ test("shows backtest score and dry-run feedback next to each operation area", as
   await expect(page.getByRole("region", { name: "评分选择最近操作反馈" })).toContainText("strategy_score_id=701");
 
   await workflow.getByRole("button", { name: /受控 Dry-run/ }).click();
-  await expect(page.getByRole("region", { name: "受控 Dry-run最近操作反馈" }).first()).toContainText("strategy_version_id=201");
-  await expect(page.getByRole("region", { name: "受控 Dry-run最近操作反馈" }).nth(2)).toContainText("API_GAP");
+  const dryRunFeedback = page.getByRole("region", { name: "受控 Dry-run最近操作反馈" });
+  await expect(dryRunFeedback).toHaveCount(1);
+  await expect(dryRunFeedback).toContainText("不适用于当前对象");
+  await expect(dryRunFeedback).not.toContainText("SUCCESS");
   await expectNoPageOverflow(page);
 });

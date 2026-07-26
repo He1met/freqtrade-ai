@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import type { MvpData } from "../../api/types";
 import {
@@ -10,6 +10,10 @@ import {
 
 export function useLabSelection(data: MvpData) {
   const [selection, setSelection] = useState<LabSelection>(EMPTY_LAB_SELECTION);
+  const reconciledSelection = useMemo(
+    () => reconcileLabSelection(data, selection),
+    [data, selection],
+  );
 
   useEffect(() => {
     setSelection((current) => reconcileLabSelection(data, current));
@@ -19,5 +23,5 @@ export function useLabSelection(data: MvpData) {
     setSelection((current) => reconcileLabSelection(data, selectLabEntity(current, key, value)));
   }
 
-  return { selection, select };
+  return { selection: reconciledSelection, select };
 }
