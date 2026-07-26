@@ -7,6 +7,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     JSON,
     String,
@@ -26,12 +27,18 @@ class BacktestRun(Base):
             "status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled', 'blocked')",
             name="backtest_runs_status_check",
         ),
+        Index("backtest_runs_scope_created_idx", "execution_scope_id", "created_at"),
     )
 
     id: Mapped[int] = mapped_column(
         BigInteger().with_variant(Integer, "sqlite"),
         primary_key=True,
         autoincrement=True,
+    )
+    execution_scope_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("execution_scopes.scope_id"),
+        nullable=False,
     )
     strategy_version_id: Mapped[int] = mapped_column(
         BigInteger().with_variant(Integer, "sqlite"),

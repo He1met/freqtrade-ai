@@ -14,7 +14,7 @@ from typing import Iterable, Optional, Union
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Connection, Engine, URL, make_url
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.schema import CheckConstraint, UniqueConstraint
+from sqlalchemy.schema import CheckConstraint, Index, UniqueConstraint
 
 from app import models  # noqa: F401 - imports every model into Base.metadata
 from app.core.exceptions import ConfigurationError
@@ -23,7 +23,8 @@ from app.models.base import Base
 
 LEGACY_SCHEMA_VERSION = "20260712_01"
 PREVIOUS_SCHEMA_VERSION = "20260722_01"
-SCHEMA_VERSION = "20260723_01"
+TARGET_LINEAGE_BASE_VERSION = "20260723_01"
+SCHEMA_VERSION = "20260727_01"
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 
 
@@ -94,6 +95,14 @@ def _expected_unique_columns(table: object) -> set[frozenset[str]]:
     return unique_sets
 
 
+def _expected_indexes(table: object) -> set[tuple[str, ...]]:
+    return {
+        tuple(column.name for column in index.columns)
+        for index in table.indexes
+        if isinstance(index, Index)
+    }
+
+
 def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
     """Compare the live PostgreSQL schema to the SQLAlchemy metadata contract."""
 
@@ -114,11 +123,22 @@ def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
             continue
 
         expected_columns = {column.name for column in table.columns}
-        actual_columns = {column["name"] for column in inspector.get_columns(name, schema=schema_name)}
+        inspected_columns = inspector.get_columns(name, schema=schema_name)
+        actual_columns = {column["name"] for column in inspected_columns}
         for column in sorted(expected_columns - actual_columns):
             problems.append(f"missing column: {name}.{column}")
         for column in sorted(actual_columns - expected_columns):
             problems.append(f"unexpected column: {name}.{column}")
+        actual_nullable = {
+            column["name"]: bool(column.get("nullable", True))
+            for column in inspected_columns
+        }
+        for column in table.columns:
+            if column.name in actual_nullable and actual_nullable[column.name] != column.nullable:
+                problems.append(
+                    f"nullable mismatch: {name}.{column.name} "
+                    f"is nullable={actual_nullable[column.name]}, expected {column.nullable}"
+                )
 
         expected_fks = {
             (foreign_key.parent.name, foreign_key.column.table.name, foreign_key.column.name)
@@ -143,6 +163,14 @@ def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
         }
         for columns in sorted(_expected_unique_columns(table) - actual_unique, key=sorted):
             problems.append(f"missing unique constraint: {name}({','.join(sorted(columns))})")
+
+        actual_indexes = {
+            tuple(index["column_names"])
+            for index in inspector.get_indexes(name, schema=schema_name)
+            if index.get("column_names")
+        }
+        for columns in sorted(_expected_indexes(table) - actual_indexes):
+            problems.append(f"missing index: {name}({','.join(columns)})")
 
         expected_checks = {
             constraint.name
@@ -212,6 +240,94 @@ def _drop_retired_debug_table(connection: Connection) -> None:
     connection.execute(text(f'DROP TABLE "{table_name}"'))
 
 
+def _add_execution_target_lineage(connection: Connection) -> None:
+    """Add target lineage without inferring that historical rows belong to OKX Demo."""
+
+    scope_table = Base.metadata.tables["execution_scopes"]
+    scope_table.create(bind=connection, checkfirst=True)
+    connection.execute(
+        text(
+            """
+            INSERT INTO execution_scopes
+                (scope_id, scope_kind, executable, exchange_writes)
+            VALUES
+                ('OKX_DEMO', 'EXCHANGE_TARGET', TRUE, TRUE),
+                ('LOCAL_DRY_RUN', 'NON_EXCHANGE', TRUE, FALSE),
+                ('UNKNOWN_LEGACY', 'LEGACY', FALSE, FALSE)
+            ON CONFLICT (scope_id) DO NOTHING
+            """
+        )
+    )
+
+    schema_name = connection.execute(text("SELECT current_schema()")).scalar_one()
+    table_names = set(inspect(connection).get_table_names(schema=schema_name))
+    lineage_roots = (
+        ("strategy_generation_runs", "strategy_generation_runs_scope_created_idx"),
+        ("backtest_runs", "backtest_runs_scope_created_idx"),
+        ("research_jobs", "research_jobs_scope_created_idx"),
+    )
+    for table_name, index_name in lineage_roots:
+        if table_name not in table_names:
+            continue
+        connection.execute(
+            text(
+                f'ALTER TABLE "{table_name}" '
+                "ADD COLUMN IF NOT EXISTS execution_scope_id VARCHAR(64)"
+            )
+        )
+        connection.execute(
+            text(
+                f'UPDATE "{table_name}" SET execution_scope_id = :legacy '
+                "WHERE execution_scope_id IS NULL"
+            ),
+            {"legacy": "UNKNOWN_LEGACY"},
+        )
+        connection.execute(
+            text(
+                f'ALTER TABLE "{table_name}" '
+                "ALTER COLUMN execution_scope_id SET NOT NULL"
+            )
+        )
+        fk_name = f"{table_name}_execution_scope_id_fkey"
+        foreign_keys = inspect(connection).get_foreign_keys(table_name, schema=schema_name)
+        if not any(foreign_key.get("name") == fk_name for foreign_key in foreign_keys):
+            connection.execute(
+                text(
+                    f'ALTER TABLE "{table_name}" ADD CONSTRAINT "{fk_name}" '
+                    "FOREIGN KEY (execution_scope_id) "
+                    "REFERENCES execution_scopes(scope_id)"
+                )
+            )
+        connection.execute(
+            text(
+                f'CREATE INDEX IF NOT EXISTS "{index_name}" '
+                f'ON "{table_name}" (execution_scope_id, created_at)'
+            )
+        )
+
+    if "research_jobs" in table_names:
+        connection.execute(
+            text(
+                "ALTER TABLE research_jobs "
+                "DROP CONSTRAINT IF EXISTS research_jobs_operation_idempotency_unique"
+            )
+        )
+        unique_names = {
+            constraint.get("name")
+            for constraint in inspect(connection).get_unique_constraints(
+                "research_jobs", schema=schema_name
+            )
+        }
+        if "research_jobs_scope_operation_idempotency_unique" not in unique_names:
+            connection.execute(
+                text(
+                    "ALTER TABLE research_jobs ADD CONSTRAINT "
+                    "research_jobs_scope_operation_idempotency_unique "
+                    "UNIQUE (execution_scope_id, operation, idempotency_key_digest)"
+                )
+            )
+
+
 def upgrade_database(engine: Engine) -> str:
     """Upgrade a local PostgreSQL database atomically to ``SCHEMA_VERSION``.
 
@@ -233,11 +349,16 @@ def upgrade_database(engine: Engine) -> str:
                         "Recorded schema version does not match ORM metadata: " + "; ".join(problems)
                     )
                 return current_version
-            if current_version in {LEGACY_SCHEMA_VERSION, PREVIOUS_SCHEMA_VERSION}:
+            if current_version in {
+                LEGACY_SCHEMA_VERSION,
+                PREVIOUS_SCHEMA_VERSION,
+                TARGET_LINEAGE_BASE_VERSION,
+            }:
                 # The migration preserves runtime tables, adds any missing managed
                 # tables, and removes only the retired debug table after proving it
                 # is empty.
                 _drop_retired_debug_table(connection)
+                _add_execution_target_lineage(connection)
                 Base.metadata.create_all(bind=connection)
                 problems = schema_problems(connection)
                 if problems:

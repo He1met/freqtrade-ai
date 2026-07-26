@@ -7,6 +7,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.research_job import ResearchJob, ResearchWorkerControl
+from app.models.execution_lineage import (
+    LOCAL_DRY_RUN_SCOPE_ID,
+    ResearchJobAttempt,
+)
+from app.repositories.execution_lineage import ensure_execution_scope_catalog
 
 
 TERMINAL_JOB_STATUSES = {
@@ -21,15 +26,25 @@ TERMINAL_JOB_STATUSES = {
 class ResearchJobRepository:
     """Database-fenced job queue with one global local execution lease."""
 
-    def __init__(self, db: Session) -> None:
+    def __init__(self, db: Session, execution_scope_id: str = LOCAL_DRY_RUN_SCOPE_ID) -> None:
         self.db = db
+        self.execution_scope_id = execution_scope_id
+
+    def _require_executable_scope(self) -> None:
+        if self.execution_scope_id != LOCAL_DRY_RUN_SCOPE_ID:
+            raise ValueError("non-executable or unknown research job scope is read-only")
 
     def get(self, job_id: int) -> Optional[ResearchJob]:
-        return self.db.get(ResearchJob, job_id)
+        statement = select(ResearchJob).where(
+            ResearchJob.id == job_id,
+            ResearchJob.execution_scope_id == self.execution_scope_id,
+        )
+        return self.db.scalars(statement).first()
 
     def list(self, limit: int = 100) -> list[ResearchJob]:
         statement = (
             select(ResearchJob)
+            .where(ResearchJob.execution_scope_id == self.execution_scope_id)
             .order_by(ResearchJob.created_at.desc(), ResearchJob.id.desc())
             .limit(limit)
         )
@@ -41,6 +56,7 @@ class ResearchJobRepository:
         idempotency_key_digest: str,
     ) -> Optional[ResearchJob]:
         statement = select(ResearchJob).where(
+            ResearchJob.execution_scope_id == self.execution_scope_id,
             ResearchJob.operation == operation,
             ResearchJob.idempotency_key_digest == idempotency_key_digest,
         )
@@ -55,7 +71,10 @@ class ResearchJobRepository:
         request_hash: str,
         request_payload: dict,
     ) -> ResearchJob:
+        self._require_executable_scope()
+        ensure_execution_scope_catalog(self.db)
         job = ResearchJob(
+            execution_scope_id=self.execution_scope_id,
             job_type=job_type,
             operation=operation,
             idempotency_key_digest=idempotency_key_digest,
@@ -126,7 +145,11 @@ class ResearchJobRepository:
         return control
 
     def status_counts(self) -> dict[str, int]:
-        statement = select(ResearchJob.status, func.count(ResearchJob.id)).group_by(ResearchJob.status)
+        statement = (
+            select(ResearchJob.status, func.count(ResearchJob.id))
+            .where(ResearchJob.execution_scope_id == self.execution_scope_id)
+            .group_by(ResearchJob.status)
+        )
         return {status: count for status, count in self.db.execute(statement).all()}
 
     def claim_next(
@@ -136,6 +159,7 @@ class ResearchJobRepository:
         lease_seconds: int,
         now: Optional[datetime] = None,
     ) -> Optional[ResearchJob]:
+        self._require_executable_scope()
         current_time = now or datetime.now(timezone.utc)
         self.get_control()
         self.expire_stale(current_time)
@@ -158,6 +182,7 @@ class ResearchJobRepository:
             statement = (
                 select(ResearchJob)
                 .where(
+                    ResearchJob.execution_scope_id == self.execution_scope_id,
                     ResearchJob.status == "PENDING",
                     ResearchJob.attempt_count < ResearchJob.max_attempts,
                 )
@@ -186,6 +211,15 @@ class ResearchJobRepository:
             job.heartbeat_at = current_time
             job.lease_expires_at = current_time + timedelta(seconds=lease_seconds)
             job.attempt_count += 1
+            self.db.add(
+                ResearchJobAttempt(
+                    research_job_id=job.id,
+                    attempt_number=job.attempt_count,
+                    execution_scope_id=job.execution_scope_id,
+                    status="RUNNING",
+                    started_at=current_time,
+                )
+            )
             job.started_at = job.started_at or current_time
             self.db.execute(
                 update(ResearchWorkerControl)
@@ -213,6 +247,7 @@ class ResearchJobRepository:
             update(ResearchJob)
             .where(
                 ResearchJob.id == job_id,
+                ResearchJob.execution_scope_id == self.execution_scope_id,
                 ResearchJob.status == "RUNNING",
                 ResearchJob.lease_token == lease_token,
                 ResearchJob.lease_expires_at > current_time,
@@ -238,6 +273,7 @@ class ResearchJobRepository:
             update(ResearchJob)
             .where(
                 ResearchJob.id == job_id,
+                ResearchJob.execution_scope_id == self.execution_scope_id,
                 ResearchJob.status == "RUNNING",
                 ResearchJob.lease_token == lease_token,
                 ResearchJob.provider_attempted_at.is_(None),
@@ -282,6 +318,7 @@ class ResearchJobRepository:
             update(ResearchJob)
             .where(
                 ResearchJob.id == job_id,
+                ResearchJob.execution_scope_id == self.execution_scope_id,
                 ResearchJob.status == "RUNNING",
                 ResearchJob.lease_token == lease_token,
             )
@@ -290,6 +327,20 @@ class ResearchJobRepository:
         if result.rowcount != 1:
             self.db.rollback()
             return None
+        attempt = self.db.scalars(
+            select(ResearchJobAttempt)
+            .where(
+                ResearchJobAttempt.research_job_id == job_id,
+                ResearchJobAttempt.execution_scope_id == self.execution_scope_id,
+            )
+            .order_by(ResearchJobAttempt.attempt_number.desc())
+            .limit(1)
+        ).first()
+        if attempt is not None:
+            attempt.status = status
+            attempt.completed_at = current_time
+            attempt.evidence_snapshot = evidence_snapshot
+            attempt.error_message = error_message
         self._release_control(job_id, lease_token)
         self.db.commit()
         return self.get(job_id)
@@ -368,6 +419,7 @@ class ResearchJobRepository:
             update(ResearchJob)
             .where(
                 ResearchJob.id == job.id,
+                ResearchJob.execution_scope_id == self.execution_scope_id,
                 ResearchJob.status == "RUNNING",
                 ResearchJob.lease_token == lease_token,
                 ResearchJob.lease_expires_at <= current_time,
@@ -393,6 +445,25 @@ class ResearchJobRepository:
         if result.rowcount != 1:
             self.db.rollback()
             return None
+        attempt = self.db.scalars(
+            select(ResearchJobAttempt)
+            .where(
+                ResearchJobAttempt.research_job_id == job.id,
+                ResearchJobAttempt.execution_scope_id == self.execution_scope_id,
+            )
+            .order_by(ResearchJobAttempt.attempt_number.desc())
+            .limit(1)
+        ).first()
+        if attempt is not None:
+            attempt.status = "STALE"
+            attempt.completed_at = current_time
+            attempt.error_message = stale_reason
+            attempt.evidence_snapshot = {
+                **job.evidence_snapshot,
+                "status": "STALE",
+                "acceptance_ready": False,
+                "failed_reason": stale_reason,
+            }
         self._release_control(job.id, lease_token)
         self.db.commit()
         return self.get(job.id)

@@ -16,6 +16,7 @@ from app.schemas.dry_run_status import (
     DryRunStatusSnapshot,
     redact_dry_run_status_payload,
 )
+from app.models.execution_lineage import LOCAL_DRY_RUN_SCOPE_ID
 
 
 class DryRunStatusParser:
@@ -57,6 +58,13 @@ class DryRunStatusParser:
     ) -> DryRunStatusSnapshot:
         try:
             sanitized = self._sanitize_mapping(payload)
+            if sanitized.get("execution_scope_id") != LOCAL_DRY_RUN_SCOPE_ID:
+                return self.blocked_snapshot(
+                    blocked_reason=(
+                        "dry-run artifact manifest is missing LOCAL_DRY_RUN lineage"
+                    ),
+                    artifact_manifest_path=artifact_manifest_path,
+                )
             status_snapshots = sanitized.get("status_snapshots")
             if not status_snapshots:
                 return self._empty_manifest_snapshot(sanitized, artifact_manifest_path)

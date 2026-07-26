@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import BigInteger, DateTime, Integer, JSON, String, Text
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, Integer, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
@@ -10,11 +10,23 @@ from app.models.base import Base
 
 class StrategyGenerationRun(Base):
     __tablename__ = "strategy_generation_runs"
+    __table_args__ = (
+        Index(
+            "strategy_generation_runs_scope_created_idx",
+            "execution_scope_id",
+            "created_at",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(
         BigInteger().with_variant(Integer, "sqlite"),
         primary_key=True,
         autoincrement=True,
+    )
+    execution_scope_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("execution_scopes.scope_id"),
+        nullable=False,
     )
     provider: Mapped[str] = mapped_column(String(80), nullable=False)
     model: Mapped[str] = mapped_column(String(160), nullable=False)

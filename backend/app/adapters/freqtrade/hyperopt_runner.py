@@ -13,6 +13,7 @@ from app.adapters.freqtrade.cli_runner import (
 )
 from app.adapters.freqtrade.market_data_index import SUPPORTED_DATA_SUFFIXES
 from app.schemas.hyperopt_profile import HyperoptProfile
+from app.models.execution_lineage import LOCAL_DRY_RUN_SCOPE_ID
 
 
 FreqtradeHyperoptArtifactStatus = Literal["SUCCESS", "FAILED", "BLOCKED"]
@@ -57,6 +58,7 @@ class FreqtradeHyperoptArtifactManifest:
     best_params_path: Optional[Path] = None
     blocked_reason: Optional[str] = None
     failed_reason: Optional[str] = None
+    execution_scope_id: str = LOCAL_DRY_RUN_SCOPE_ID
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -86,6 +88,7 @@ class FreqtradeHyperoptArtifactManifest:
             "manifest_path": str(self.manifest_path),
             "blocked_reason": self.blocked_reason,
             "failed_reason": self.failed_reason,
+            "execution_scope_id": self.execution_scope_id,
         }
 
     def write(self) -> Path:

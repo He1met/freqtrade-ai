@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from app.schemas.data_source import DataSourceTrace, api_aggregate_source, database_record_source, unknown_source
 from app.schemas.operation_evidence import OperationEvidence
+from app.models.execution_lineage import LOCAL_DRY_RUN_SCOPE_ID
 from app.schemas.strategy import StrategyRead, StrategyVersionRead
 
 
@@ -12,6 +13,7 @@ GenerationRunStatus = Literal["pending", "running", "succeeded", "failed", "canc
 
 
 class StrategyGenerationRunCreate(BaseModel):
+    execution_scope_id: Literal["LOCAL_DRY_RUN"] = LOCAL_DRY_RUN_SCOPE_ID
     provider: str = Field(min_length=1, max_length=80)
     model: str = Field(min_length=1, max_length=160)
     prompt_hash: Optional[str] = Field(default=None, max_length=128)
@@ -30,6 +32,7 @@ class StrategyGenerationRunStatusUpdate(BaseModel):
 
 class StrategyGenerationRunRead(BaseModel):
     id: int
+    execution_scope_id: str
     provider: str
     model: str
     prompt_hash: Optional[str]

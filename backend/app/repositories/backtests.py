@@ -5,6 +5,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.backtest import BacktestResult, BacktestRun, BacktestTask
+from app.models.execution_lineage import LOCAL_DRY_RUN_SCOPE_ID
+from app.repositories.execution_lineage import ensure_execution_scope_catalog
 from app.models.strategy import StrategyVersion
 from app.schemas.backtest import (
     BacktestResultCreate,
@@ -19,15 +21,25 @@ TERMINAL_STATUSES = {"succeeded", "failed", "cancelled", "blocked"}
 
 
 class BacktestRepository:
-    def __init__(self, db: Session) -> None:
+    def __init__(self, db: Session, execution_scope_id: str = LOCAL_DRY_RUN_SCOPE_ID) -> None:
         self.db = db
+        self.execution_scope_id = execution_scope_id
+
+    def _require_executable_scope(self) -> None:
+        if self.execution_scope_id != LOCAL_DRY_RUN_SCOPE_ID:
+            raise ValueError("non-executable or unknown backtest scope is read-only")
 
     def create_run(self, payload: BacktestRunCreate) -> Optional[BacktestRun]:
+        self._require_executable_scope()
+        ensure_execution_scope_catalog(self.db)
+        if payload.execution_scope_id != self.execution_scope_id:
+            raise ValueError("backtest scope does not match repository scope")
         strategy_version = self.db.get(StrategyVersion, payload.strategy_version_id)
         if strategy_version is None:
             return None
 
         run = BacktestRun(
+            execution_scope_id=self.execution_scope_id,
             strategy_version_id=payload.strategy_version_id,
             profile_name=payload.profile_name,
             config_snapshot=payload.config_snapshot,
@@ -38,11 +50,16 @@ class BacktestRepository:
         return run
 
     def get_run(self, run_id: int) -> Optional[BacktestRun]:
-        return self.db.get(BacktestRun, run_id)
+        statement = select(BacktestRun).where(
+            BacktestRun.id == run_id,
+            BacktestRun.execution_scope_id == self.execution_scope_id,
+        )
+        return self.db.scalars(statement).first()
 
     def list_runs(self, limit: int = 50) -> list[BacktestRun]:
         statement = (
             select(BacktestRun)
+            .where(BacktestRun.execution_scope_id == self.execution_scope_id)
             .order_by(BacktestRun.created_at.desc(), BacktestRun.id.desc())
             .limit(limit)
         )
@@ -87,11 +104,21 @@ class BacktestRepository:
         return task
 
     def get_task(self, task_id: int) -> Optional[BacktestTask]:
-        return self.db.get(BacktestTask, task_id)
+        statement = (
+            select(BacktestTask)
+            .join(BacktestRun, BacktestRun.id == BacktestTask.backtest_run_id)
+            .where(
+                BacktestTask.id == task_id,
+                BacktestRun.execution_scope_id == self.execution_scope_id,
+            )
+        )
+        return self.db.scalars(statement).first()
 
     def list_tasks(self, run_id: int) -> list[BacktestTask]:
         statement = (
             select(BacktestTask)
+            .join(BacktestRun, BacktestRun.id == BacktestTask.backtest_run_id)
+            .where(BacktestRun.execution_scope_id == self.execution_scope_id)
             .where(BacktestTask.backtest_run_id == run_id)
             .order_by(BacktestTask.created_at.asc(), BacktestTask.id.asc())
         )
@@ -100,17 +127,22 @@ class BacktestRepository:
     def list_all_tasks(self, limit: int = 100) -> list[BacktestTask]:
         statement = (
             select(BacktestTask)
+            .join(BacktestRun, BacktestRun.id == BacktestTask.backtest_run_id)
+            .where(BacktestRun.execution_scope_id == self.execution_scope_id)
             .order_by(BacktestTask.created_at.desc(), BacktestTask.id.desc())
             .limit(limit)
         )
         return list(self.db.scalars(statement).all())
 
     def claim_next_pending_task(self, run_id: int) -> Optional[BacktestTask]:
+        self._require_executable_scope()
         statement = (
             select(BacktestTask)
+            .join(BacktestRun, BacktestRun.id == BacktestTask.backtest_run_id)
             .where(
                 BacktestTask.backtest_run_id == run_id,
                 BacktestTask.status == "pending",
+                BacktestRun.execution_scope_id == self.execution_scope_id,
             )
             .order_by(BacktestTask.created_at.asc(), BacktestTask.id.asc())
             .limit(1)
@@ -192,6 +224,8 @@ class BacktestRepository:
     def list_results(self, run_id: int) -> list[BacktestResult]:
         statement = (
             select(BacktestResult)
+            .join(BacktestRun, BacktestRun.id == BacktestResult.backtest_run_id)
+            .where(BacktestRun.execution_scope_id == self.execution_scope_id)
             .where(BacktestResult.backtest_run_id == run_id)
             .order_by(BacktestResult.created_at.asc(), BacktestResult.id.asc())
         )
@@ -200,6 +234,8 @@ class BacktestRepository:
     def list_all_results(self, limit: int = 100) -> list[BacktestResult]:
         statement = (
             select(BacktestResult)
+            .join(BacktestRun, BacktestRun.id == BacktestResult.backtest_run_id)
+            .where(BacktestRun.execution_scope_id == self.execution_scope_id)
             .order_by(BacktestResult.created_at.desc(), BacktestResult.id.desc())
             .limit(limit)
         )

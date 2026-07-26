@@ -33,10 +33,12 @@ class ResearchJob(Base):
         CheckConstraint("attempt_count >= 0", name="research_jobs_attempt_count_check"),
         CheckConstraint("max_attempts >= 1", name="research_jobs_max_attempts_check"),
         UniqueConstraint(
+            "execution_scope_id",
             "operation",
             "idempotency_key_digest",
-            name="research_jobs_operation_idempotency_unique",
+            name="research_jobs_scope_operation_idempotency_unique",
         ),
+        Index("research_jobs_scope_created_idx", "execution_scope_id", "created_at"),
         Index("research_jobs_claim_idx", "status", "created_at", "id"),
         Index("research_jobs_lease_expiry_idx", "status", "lease_expires_at"),
     )
@@ -45,6 +47,11 @@ class ResearchJob(Base):
         BigInteger().with_variant(Integer, "sqlite"),
         primary_key=True,
         autoincrement=True,
+    )
+    execution_scope_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("execution_scopes.scope_id"),
+        nullable=False,
     )
     job_type: Mapped[str] = mapped_column(String(80), nullable=False)
     operation: Mapped[str] = mapped_column(String(120), nullable=False)
