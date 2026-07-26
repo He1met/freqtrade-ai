@@ -1,9 +1,9 @@
 # ADR-0010: OKX Demo SWAP compatibility and single order writer
 
-- Status: Accepted for offline architecture; authenticated Demo canary is BLOCKED
+- Status: Accepted; controlled canary implemented, authenticated run remains separately gated
 - Date: 2026-07-27
 - Issue: [#444](https://github.com/He1met/freqtrade-ai/issues/444)
-- Prerequisite: [#443](https://github.com/He1met/freqtrade-ai/issues/443) is still open
+- Prerequisite: [#443](https://github.com/He1met/freqtrade-ai/issues/443) Keychain boundary
 
 ## Decision
 
@@ -12,10 +12,11 @@ Use a project-owned OKX REST/WebSocket adapter as the sole order writer for
 Trade Kit can be used for read-only investigation, but it must not write orders
 while the project adapter is active.
 
-The authenticated Demo canary is not run by this spike. It stays `BLOCKED`
-until #443 proves Keychain-only credential injection, Demo identity, minimum
-permissions, redaction, and process isolation. This document contains no
-credential values and the diagnostic reports only `PRESENT` or `ABSENT`.
+The controlled Demo canary is implemented behind a one-shot explicit
+`--allow-demo-order` gate and the #443 Keychain-only credential boundary.
+Implementation and offline tests do not prove a real Demo order lifecycle:
+formal acceptance stays `BLOCKED` until an authorized run records redacted
+place/query/cancel/final-zero evidence.
 
 ## Frozen versions and evidence
 
@@ -84,9 +85,9 @@ If the caller did not persist a legal deterministic `clOrdId` before the
 write, the retry decision is `BLOCKED_MISSING_CLORDID`; it must not claim that
 reconciliation is possible.
 
-## Required canary sequence after #443
+## Implemented canary sequence
 
-The future canary must use the smallest valid `BTC-USDT-SWAP` contract size,
+The canary uses the smallest valid `BTC-USDT-SWAP` contract size,
 derived from the current instrument response (`ctVal`, `lotSz`, `minSz`,
 `tickSz`) rather than hard-coded.
 
@@ -94,12 +95,11 @@ derived from the current instrument response (`ctVal`, `lotSz`, `minSz`,
 2. Assert the Keychain-injected credentials are attested Demo credentials with no withdrawal permission.
 3. Query account configuration and require `posMode=net_mode`.
 4. Query the instrument and derive the valid contract count and price precision.
-5. Set isolated leverage within the configured risk ceiling.
-6. Submit a far-from-market, post-only limit order with a unique deterministic `clOrdId`.
-7. Validate top-level `code`, every `sCode`, `ordId`, and `clOrdId`.
-8. Query the order, cancel it, query it again, then reconcile orders, fills, and positions.
-9. Require no open order, no fill, and no residual position. If it unexpectedly fills, use the separately approved reduce-only cleanup path and report the canary `FAILED`.
-10. Persist only redacted request metadata and exchange identifiers.
+5. Submit a far-from-market, post-only isolated limit order with a unique deterministic `clOrdId`.
+6. Validate top-level `code`, every `sCode`, `ordId`, and `clOrdId`.
+7. Query the order, cancel it, query it again, then reconcile orders, fills, and positions.
+8. Require no open order, no fill, and no residual position. If it unexpectedly fills, use the reduce-only cleanup path and report the canary `FAILED`.
+9. Persist only hashed identifiers and an artifact ID.
 
 ## Prohibited combinations
 
@@ -154,5 +154,5 @@ It is safe to run on a clean machine and reports only credential presence.
 - **GO**: implement the project-owned OKX Demo REST/WS adapter as the only writer.
 - **GO**: keep Freqtrade for strategy/backtest/signal generation.
 - **GO**: permit Agent Kit only in read-only diagnosis unless the project adapter is stopped and a separate future approval explicitly changes ownership.
-- **NO-GO**: authenticated Demo canary now, because #443 is open.
+- **GO**: run the one-shot canary only with explicit operator authorization after all Keychain and account-attestation gates pass.
 - **NO-GO**: close #444 as fully accepted until the canary records redacted `ordId`, `clOrdId`, query, cancel, and zero-residual evidence.
