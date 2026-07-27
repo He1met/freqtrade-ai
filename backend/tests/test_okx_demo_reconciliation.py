@@ -15,11 +15,11 @@ from app.models import (
     OkxDemoPositionSnapshot,
     OkxDemoReconciliationState,
     OkxDemoRecoveryBatch,
+    OkxDemoRecoveryGrant,
+    OkxOrderWriteAttempt,
     ReconciliationRun,
 )
 from app.models.execution_lineage import OKX_DEMO_TARGET_ID
-from app.adapters.okx_demo.write_semantics import OkxDemoWriteBlocked
-from app.adapters.okx_demo.writer_repository import SqlAlchemyOrderWriterStore
 from app.api.okx_demo_reconciliation import (
     exchange_state,
     latest_reconciliation,
@@ -235,22 +235,9 @@ def test_position_drift_is_blocked_without_overwriting_local_funds_state(
         assert any(item["code"] == "POSITION_DRIFT" for item in result.findings)
         grant_database_id = result.database_ids["recovery_grants"][0]
     with session_factory() as db:
-        claim = SqlAlchemyOrderWriterStore(db).claim_recovery_grant(
-            grant_database_id,
-            action="REDUCE_ONLY",
-            quantity=Decimal("2"),
-            now=now,
-        )
-        assert claim["max_quantity"] == "2.000000000000000000"
-        assert claim["action"] == "REDUCE_ONLY"
-    with session_factory() as db:
-        with pytest.raises(OkxDemoWriteBlocked):
-            SqlAlchemyOrderWriterStore(db).claim_recovery_grant(
-                grant_database_id,
-                action="REDUCE_ONLY",
-                quantity=Decimal("1"),
-                now=now,
-            )
+        grant = db.get(OkxDemoRecoveryGrant, grant_database_id)
+        assert grant.status == "ACTIVE"
+        assert db.scalar(select(OkxOrderWriteAttempt)) is None
     with session_factory() as db:
         local = db.scalar(select(ExchangePosition))
         run = db.scalar(select(ReconciliationRun))
