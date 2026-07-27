@@ -51,7 +51,7 @@ The only public production entry point, `create_attested_okx_demo_read_adapter`,
 freezes the allowlisted environment and first runs #443's authenticated
 `/account/config` preflight against that same credential snapshot. It returns a
 real-network adapter only after the account fingerprint, exact permissions, Futures
-account level, and `net_mode` all match. A stale pin paired with another Demo
+account level, and `long_short_mode` all match. A stale pin paired with another Demo
 key therefore blocks before any target private read. The session signs only
 `GET` with an empty body and cannot select another target or REST origin.
 
