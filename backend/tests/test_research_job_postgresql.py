@@ -218,6 +218,9 @@ def test_incremental_worker_migration_preserves_existing_runtime_rows(postgres_e
             "exchange_orders",
             "exchange_positions",
             "execution_manifests",
+            "full_chain_runs",
+            "full_chain_signal_snapshots",
+            "full_chain_stage_runs",
             "okx_order_write_attempts",
             "okx_order_writer_leases",
             "okx_demo_account_snapshots",
@@ -234,6 +237,7 @@ def test_incremental_worker_migration_preserves_existing_runtime_rows(postgres_e
             "research_worker_control",
             "risk_decisions",
             "risk_budgets",
+            "strategy_candidate_approvals",
             "trade_intents",
         }
     ]
@@ -277,6 +281,15 @@ def test_incremental_worker_migration_preserves_existing_runtime_rows(postgres_e
     assert {"research_jobs", "research_worker_control"}.issubset(
         set(inspect(postgres_engine).get_table_names())
     )
+    with postgres_engine.connect() as connection:
+        status_constraint = connection.execute(
+            text(
+                "SELECT pg_get_constraintdef(oid) "
+                "FROM pg_constraint "
+                "WHERE conname = 'research_jobs_status_check'"
+            )
+        ).scalar_one()
+    assert "AWAITING_APPROVAL" in status_constraint
     with session_factory() as db:
         preserved = db.get(Strategy, strategy_id)
         assert preserved is not None
@@ -563,6 +576,13 @@ def test_frozen_old_research_job_ddl_upgrades_data_and_removes_global_unique(
 ) -> None:
     Base.metadata.create_all(postgres_engine)
     with postgres_engine.begin() as connection:
+        for table_name in (
+            "full_chain_signal_snapshots",
+            "full_chain_stage_runs",
+            "strategy_candidate_approvals",
+            "full_chain_runs",
+        ):
+            connection.execute(text('DROP TABLE "{}"'.format(table_name)))
         connection.execute(text("DROP TABLE research_job_attempts"))
         connection.execute(text("DROP TABLE research_jobs"))
         _create_frozen_pre_lineage_research_jobs(connection)
