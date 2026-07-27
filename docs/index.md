@@ -36,6 +36,7 @@ they are not a current source of work status.
 - [ADR-0010: OKX Demo SWAP compatibility and single order writer](adr/0010-okx-demo-order-writer-compatibility.md)
 - [OKX Demo Keychain credential boundary](okx_demo_credentials.md)
 - [OKX Demo minimal order canary](okx_demo_canary.md)
+- [OKX Demo E2E acceptance](okx_demo_e2e.md)
 - [execution_target.md](execution_target.md)
 - [execution_target_lineage.md](execution_target_lineage.md)
 - [okx_demo_read_adapter.md](okx_demo_read_adapter.md)
@@ -66,6 +67,8 @@ also include `git diff --check` and `python3 scripts/scan_secrets.py`.
 | Phase 8 local QA | `python3 scripts/smoke_phase8.py --offline --tmp-dir /tmp/freqtrade-ai-phase8-smoke` |
 | Phase 9 single E2E, safe default | `python3 scripts/phase9_deepseek_single_e2e.py --json` |
 | Phase 9 single E2E, real call | `python3 scripts/phase9_deepseek_single_e2e.py --allow-real-call --json` |
+| OKX Demo E2E, network-free CI | `python3 scripts/okx_demo_e2e.py --mode offline-ci` |
+| OKX Demo E2E, controlled real (blocked until normal pipeline integration) | `python3 scripts/okx_demo_e2e.py --mode controlled-real` |
 | Secret scan | `python3 scripts/scan_secrets.py` |
 | Whitespace | `git diff --check` |
 
