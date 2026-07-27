@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import os
 from threading import Barrier
+import time
 from uuid import uuid4
 
 import pytest
@@ -1135,7 +1136,6 @@ def test_postgresql_runtime_cannot_bypass_controlled_gate_or_run_provenance(
     tmp_path,
 ) -> None:
     upgrade_database(postgres_writer_engine)
-    now = datetime.now(timezone.utc)
     with postgres_writer_engine.begin() as connection:
         connection.execute(text("SET LOCAL ROLE freqtrade"))
         assert connection.execute(
@@ -1188,32 +1188,37 @@ def test_postgresql_runtime_cannot_bypass_controlled_gate_or_run_provenance(
             with postgres_writer_engine.begin() as connection:
                 connection.execute(text("SET LOCAL ROLE freqtrade"))
                 connection.execute(text(statement))
-    historical_business_time = now - timedelta(days=1)
-    position_event = {
-        **_postgres_position_event("0", 1),
-        "source": "REST",
-        "observed_at": historical_business_time.isoformat(),
-        "received_at": now.isoformat(),
-    }
-    account_event = {
-        "schema_version": RECONCILIATION_EVENT_SCHEMA_VERSION,
-        "execution_target": "OKX_DEMO",
-        "source": "REST",
-        "entity_kind": "ACCOUNT",
-        "entity_key": "account",
-        "source_sequence": 2,
-        "stream_generation": 1,
-        "observed_at": historical_business_time.isoformat(),
-        "received_at": now.isoformat(),
-        "payload": {
-            "accountFingerprint": "a" * 64,
-            "equity": "10000",
-            "availableBalance": "9000",
-            "marginBalance": "1000",
-        },
-    }
     with Session(postgres_writer_engine) as session:
         session.execute(text("SET LOCAL ROLE freqtrade"))
+        # PostgreSQL CURRENT_TIMESTAMP is fixed when this transaction begins.
+        # A real authenticated REST capture completes later in the same
+        # transaction, so the gate must compare it with the wall clock.
+        time.sleep(0.05)
+        now = datetime.now(timezone.utc)
+        historical_business_time = now - timedelta(days=1)
+        position_event = {
+            **_postgres_position_event("0", 1),
+            "source": "REST",
+            "observed_at": historical_business_time.isoformat(),
+            "received_at": now.isoformat(),
+        }
+        account_event = {
+            "schema_version": RECONCILIATION_EVENT_SCHEMA_VERSION,
+            "execution_target": "OKX_DEMO",
+            "source": "REST",
+            "entity_kind": "ACCOUNT",
+            "entity_key": "account",
+            "source_sequence": 2,
+            "stream_generation": 1,
+            "observed_at": historical_business_time.isoformat(),
+            "received_at": now.isoformat(),
+            "payload": {
+                "accountFingerprint": "a" * 64,
+                "equity": "10000",
+                "availableBalance": "9000",
+                "marginBalance": "1000",
+            },
+        }
         service = OkxDemoReconciliationService(
             session,
             evidence_root=tmp_path / "managed" / "reconciliation",

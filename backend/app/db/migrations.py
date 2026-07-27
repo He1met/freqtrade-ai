@@ -42,7 +42,8 @@ SOAK_BASE_VERSION = "20260727_12"
 RUNTIME_APP_ACL_BASE_VERSION = "20260727_13"
 FILL_SNAPSHOT_REPEAT_BASE_VERSION = "20260727_14"
 RECONCILIATION_BATCH_FRESHNESS_BASE_VERSION = "20260728_15"
-SCHEMA_VERSION = "20260728_16"
+RECOVERY_WALL_CLOCK_BASE_VERSION = "20260728_16"
+SCHEMA_VERSION = "20260728_17"
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 ATTESTATION_PROOF_KEY_ENV = "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"
 
@@ -3642,8 +3643,6 @@ def _add_okx_demo_reconciliation(connection: Connection) -> None:
                            v_run.database_ids::jsonb -> 'recovery_batches'
                        ) <> 1
                        OR v_run.authoritative_observed_at IS NULL
-                       OR v_run.authoritative_observed_at
-                            > CURRENT_TIMESTAMP + INTERVAL '5 seconds'
                     THEN
                         RAISE EXCEPTION
                             'reconciliation gate source is not fresh';
@@ -3676,8 +3675,8 @@ def _add_okx_demo_reconciliation(connection: Connection) -> None:
                        )
                        OR v_batch.event_count < 1
                        OR v_batch.completed_at
-                            < CURRENT_TIMESTAMP - INTERVAL '2 minutes'
-                       OR v_batch.completed_at > CURRENT_TIMESTAMP
+                            < clock_timestamp() - INTERVAL '2 minutes'
+                       OR v_batch.completed_at > clock_timestamp()
                        OR v_batch.observed_at > v_batch.completed_at
                        OR NOT EXISTS (
                            SELECT 1
@@ -4319,6 +4318,7 @@ def upgrade_database(engine: Engine) -> str:
                 RUNTIME_APP_ACL_BASE_VERSION,
                 FILL_SNAPSHOT_REPEAT_BASE_VERSION,
                 RECONCILIATION_BATCH_FRESHNESS_BASE_VERSION,
+                RECOVERY_WALL_CLOCK_BASE_VERSION,
             }
             if current_version in supported_upgrade_versions:
                 connection.execute(
@@ -4347,6 +4347,19 @@ def upgrade_database(engine: Engine) -> str:
                     raise SchemaMigrationBlocked(
                         "Reconciliation batch freshness upgrade does not match "
                         "ORM metadata: " + "; ".join(problems)
+                    )
+                connection.execute(
+                    text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+                    {"version": SCHEMA_VERSION},
+                )
+                return SCHEMA_VERSION
+            if current_version == RECOVERY_WALL_CLOCK_BASE_VERSION:
+                _add_okx_demo_reconciliation(connection)
+                problems = schema_problems(connection)
+                if problems:
+                    raise SchemaMigrationBlocked(
+                        "Recovery wall-clock upgrade does not match ORM metadata: "
+                        + "; ".join(problems)
                     )
                 connection.execute(
                     text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
