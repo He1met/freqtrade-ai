@@ -3,7 +3,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -15,6 +15,7 @@ from app.adapters.okx_demo.models import Balance, FillQuery, OrderQuery, Positio
 from app.models import Base
 from app.models.execution_lineage import ExecutionScope, ReconciliationRun
 from app.models.okx_demo_reconciliation import (
+    OkxDemoExchangeEvent,
     OkxDemoReconciliationState,
     OkxDemoRecoveryGrant,
 )
@@ -108,6 +109,29 @@ def test_runtime_factory_contract_runs_complete_rest_baseline(
         "reconciliation_run"
     ]
     assert tuple(result["database_ids"]) == RUNTIME_DATABASE_ID_KEYS
+
+
+def test_runtime_restart_allocates_generation_after_persisted_rest_events(
+    db,
+    tmp_path,
+) -> None:
+    def adapter():
+        return OkxDemoRuntimeReconciliationAdapter(
+            evidence_root=tmp_path / "managed" / "reconciliation",
+            allowed_evidence_root=tmp_path / "managed",
+            account_fingerprint_sha256="a" * 64,
+            now_provider=lambda: NOW,
+        )
+
+    adapter().reconcile_before_writer(read_client=CompleteReadClient(), db=db)
+    db.commit()
+    adapter().reconcile_before_writer(read_client=CompleteReadClient(), db=db)
+    db.commit()
+
+    generations = set(
+        db.scalars(select(OkxDemoExchangeEvent.stream_generation)).all()
+    )
+    assert generations == {1, 2}
 
 
 def test_runtime_cycle_executes_only_current_run_recovery_grants(db) -> None:

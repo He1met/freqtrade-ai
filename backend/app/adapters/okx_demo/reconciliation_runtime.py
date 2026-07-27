@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.adapters.okx_demo.read_adapter import OkxDemoReadClient
@@ -21,6 +21,7 @@ from app.services.okx_demo_reconciliation import (
     SCHEMA_VERSION,
 )
 from app.models.okx_demo_reconciliation import (
+    OkxDemoExchangeEvent,
     OkxDemoReconciliationState,
     OkxDemoRecoveryGrant,
 )
@@ -177,7 +178,16 @@ class OkxDemoRuntimeReconciliationAdapter:
                 "runtime reconciliation adapter is closed"
             )
         started_at = _aware(self._now_provider())
-        self._stream_generation += 1
+        persisted_generation = db.scalar(
+            select(func.max(OkxDemoExchangeEvent.stream_generation)).where(
+                OkxDemoExchangeEvent.execution_target_id == "OKX_DEMO",
+                OkxDemoExchangeEvent.source == "REST",
+            )
+        )
+        self._stream_generation = max(
+            self._stream_generation + 1,
+            int(persisted_generation or 0) + 1,
+        )
         pending, pending_water, pending_observed = self._pages(
             read_client,
             "pending_orders",
