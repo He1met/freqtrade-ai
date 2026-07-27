@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import re
+from threading import RLock
 from typing import Any, Callable, Mapping, Optional, Protocol, Sequence, Union
 from urllib.parse import urlencode
 
@@ -78,6 +79,7 @@ DEFAULT_TTLS = {
     "fills_history": 30,
 }
 ATTESTATION_TTL_SECONDS = 60
+ATTESTATION_RENEWAL_LEAD_SECONDS = 10
 FUTURE_SKEW_SECONDS = 5
 
 
@@ -1200,6 +1202,72 @@ def create_attested_okx_demo_read_adapter(
                 self._revoked = False
                 self._revoke_session_factory = None
                 self._durability_failed = False
+                self._risk_capability = risk_capability
+                self._renewal_lock = RLock()
+
+            def _renew_if_needed(self, now: datetime) -> None:
+                if (
+                    now
+                    < self.expires_at
+                    - timedelta(seconds=ATTESTATION_RENEWAL_LEAD_SECONDS)
+                ):
+                    return
+                with self._renewal_lock:
+                    if (
+                        now
+                        < self.expires_at
+                        - timedelta(
+                            seconds=ATTESTATION_RENEWAL_LEAD_SECONDS
+                        )
+                    ):
+                        return
+                    old_capability = self._risk_capability
+                    new_expires_at = now + timedelta(
+                        seconds=ATTESTATION_TTL_SECONDS
+                    )
+                    new_capability = _issue_attested_session_capability(
+                        attestation_hmac_key=attestation_hmac_key,
+                        pinned_fingerprint_sha256=expected_fingerprint,
+                        created_at=now,
+                        expires_at=new_expires_at,
+                    )
+                    try:
+                        if self._revoke_session_factory is not None:
+                            renewal_db = self._revoke_session_factory()
+                            try:
+                                _persist_attested_session(
+                                    renewal_db,
+                                    new_capability,
+                                    now=now,
+                                )
+                                _revoke_attested_session(
+                                    renewal_db,
+                                    old_capability,
+                                    reason="EXPIRED",
+                                    revoked_at=now,
+                                )
+                                renewal_db.commit()
+                            except BaseException:
+                                renewal_db.rollback()
+                                raise
+                            finally:
+                                renewal_db.close()
+                    except BaseException:
+                        self._durability_failed = True
+                        self._environment.clear()
+                        _revoke_attested_session_capability(
+                            old_capability
+                        )
+                        _revoke_attested_session_capability(
+                            new_capability
+                        )
+                        raise OkxDemoCredentialsUnavailable(
+                            "OKX_DEMO attestation renewal failed"
+                        ) from None
+                    self._risk_capability = new_capability
+                    self.attested_at = now
+                    self.expires_at = new_expires_at
+                    _revoke_attested_session_capability(old_capability)
 
             def bind_database(self, db) -> None:
                 if self._revoke_session_factory is None:
@@ -1213,7 +1281,7 @@ def create_attested_okx_demo_read_adapter(
                     try:
                         _persist_attested_session(
                             bind_db,
-                            risk_capability,
+                            self._risk_capability,
                             now=_utc_now(),
                         )
                         bind_db.commit()
@@ -1235,7 +1303,7 @@ def create_attested_okx_demo_read_adapter(
                     if db is not None:
                         _revoke_attested_session(
                             db,
-                            risk_capability,
+                            self._risk_capability,
                             reason=reason,
                             revoked_at=_utc_now(),
                         )
@@ -1244,7 +1312,7 @@ def create_attested_okx_demo_read_adapter(
                         try:
                             _revoke_attested_session(
                                 revoke_db,
-                                risk_capability,
+                                self._risk_capability,
                                 reason=reason,
                                 revoked_at=_utc_now(),
                             )
@@ -1257,13 +1325,17 @@ def create_attested_okx_demo_read_adapter(
                 except BaseException:
                     self._durability_failed = True
                     self._environment.clear()
-                    _revoke_attested_session_capability(risk_capability)
+                    _revoke_attested_session_capability(
+                        self._risk_capability
+                    )
                     raise OkxDemoCredentialsUnavailable(
                         "OKX_DEMO attestation durable revoke failed"
                     ) from None
                 self._revoked = True
                 self._environment.clear()
-                _revoke_attested_session_capability(risk_capability)
+                _revoke_attested_session_capability(
+                    self._risk_capability
+                )
 
             def authorization_headers(
                 self,
@@ -1273,16 +1345,17 @@ def create_attested_okx_demo_read_adapter(
                 body: str,
             ) -> Mapping[str, str]:
                 now = _utc_now()
-                if (
-                    self._revoked
-                    or not isinstance(now, datetime)
-                    or now.tzinfo is None
-                    or now.astimezone(timezone.utc) >= self.expires_at
-                ):
+                if self._revoked or not isinstance(now, datetime):
                     self.revoke("EXPIRED")
                     raise OkxDemoCredentialsUnavailable(
                         "OKX_DEMO account attestation expired or revoked"
                     )
+                if now.tzinfo is None:
+                    self.revoke("EXPIRED")
+                    raise OkxDemoCredentialsUnavailable(
+                        "OKX_DEMO account attestation expired or revoked"
+                    )
+                self._renew_if_needed(now.astimezone(timezone.utc))
                 try:
                     return _build_demo_authorization_headers(
                         self._environment,
@@ -1334,9 +1407,17 @@ def create_attested_okx_demo_read_adapter(
                 snapshot_expires_at,
             ):
                 self._attested_session.bind_database(db)
+                snapshot_now = _utc_now()
+                if snapshot_now.tzinfo is None:
+                    raise OkxDemoCredentialsUnavailable(
+                        "OKX_DEMO attestation clock is invalid"
+                    )
+                self._attested_session._renew_if_needed(
+                    snapshot_now.astimezone(timezone.utc)
+                )
                 try:
                     normalized = _normalize_attested_snapshot(
-                        risk_capability,
+                        self._attested_session._risk_capability,
                         kind=kind,
                         content=content,
                         observed_at=observed_at,
@@ -1344,9 +1425,9 @@ def create_attested_okx_demo_read_adapter(
                     )
                     return _write_attested_snapshot(
                         db,
-                        risk_capability,
+                        self._attested_session._risk_capability,
                         normalized,
-                        now=_utc_now(),
+                        now=snapshot_now,
                     )
                 except BaseException:
                     try:

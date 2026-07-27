@@ -7,10 +7,14 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
+from sqlalchemy.orm import Session
 
 from app.adapters.okx_demo import read_adapter as read_boundary
 from app.adapters.okx_demo.errors import OkxReadAdapterError
 from app.adapters.okx_demo.transport import OkxReadHttpResponse
+from app.adapters.okx_demo.write_transport import (
+    _create_attested_writer_credential_bridge,
+)
 from app.db.migrations import (
     ATTESTATION_ACL_BASE_VERSION,
     ATTESTED_SESSION_BASE_VERSION,
@@ -1176,6 +1180,80 @@ def test_runtime_role_persists_unused_session_before_durable_revoke(
         assert persisted is not None
         assert persisted.revoke_reason == "FACTORY_CLOSE"
         assert persisted.revoked_at is not None
+
+
+def test_bound_attested_session_renews_across_multiple_ttl_windows(
+    postgres_engine,
+    monkeypatch,
+) -> None:
+    upgrade_database(postgres_engine)
+    now = datetime.now(timezone.utc)
+    current = [now]
+    expected_fingerprint = "d" * 64
+    monkeypatch.setattr(read_boundary, "_utc_now", lambda: current[0])
+    monkeypatch.setattr(read_boundary, "run_preflight", lambda environment: None)
+    monkeypatch.setattr(
+        read_boundary,
+        "require_pinned_account_fingerprint",
+        lambda environment: expected_fingerprint,
+    )
+    monkeypatch.setattr(
+        read_boundary,
+        "_build_demo_authorization_headers",
+        lambda *args, **kwargs: {
+            "OK-ACCESS-KEY": "temporary-key",
+            "OK-ACCESS-SIGN": "signature",
+            "OK-ACCESS-TIMESTAMP": "2026-07-27T00:00:00.000Z",
+            "OK-ACCESS-PASSPHRASE": "temporary-passphrase",
+        },
+    )
+    client = read_boundary.create_attested_okx_demo_read_adapter(
+        {
+            "FREQTRADE_AI_EXECUTION_TARGET": "OKX_DEMO",
+            "FREQTRADE_AI_ALLOW_REAL_FUNDS": "false",
+            "FREQTRADE_AI_OKX_DEMO_REST_URL": "https://openapi.okx.com",
+            "OKX_DEMO_API_KEY": "temporary-key",
+            "OKX_DEMO_API_SECRET": "temporary-secret",
+            "OKX_DEMO_API_PASSPHRASE": "temporary-passphrase",
+            "OKX_DEMO_ACCOUNT_FINGERPRINT": expected_fingerprint,
+            "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY": "74" * 32,
+        }
+    )
+    handle = _create_attested_writer_credential_bridge(client)
+    with postgres_engine.connect() as connection:
+        db = Session(bind=connection)
+        handle.bind_database(db)
+        db.close()
+    for elapsed_seconds in (55, 110):
+        current[0] = now + timedelta(seconds=elapsed_seconds)
+        headers = handle.authorization_headers(
+            method="GET",
+            request_path="/api/v5/account/config",
+            body="",
+        )
+        assert headers["OK-ACCESS-KEY"] == "temporary-key"
+    with Session(postgres_engine) as db:
+        sessions = db.scalars(
+            select(OkxDemoAttestedSession).order_by(
+                OkxDemoAttestedSession.created_at
+            )
+        ).all()
+        assert len(sessions) == 3
+        assert [
+            session.revoke_reason for session in sessions
+        ] == ["EXPIRED", "EXPIRED", None]
+        assert sum(session.revoked_at is None for session in sessions) == 1
+    current[0] = now + timedelta(seconds=111)
+    client.close()
+    with Session(postgres_engine) as db:
+        sessions = db.scalars(
+            select(OkxDemoAttestedSession)
+        ).all()
+        assert all(session.revoked_at is not None for session in sessions)
+        assert sum(
+            session.revoke_reason == "FACTORY_CLOSE"
+            for session in sessions
+        ) == 1
 
 
 def test_approved_execution_snapshot_foreign_keys_restrict_registry_delete(
