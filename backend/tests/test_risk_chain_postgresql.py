@@ -17,6 +17,7 @@ from app.db.migrations import (
     RISK_CHAIN_BASE_VERSION,
     RISK_CHAIN_HARDENING_BASE_VERSION,
     SCHEMA_VERSION,
+    SchemaMigrationBlocked,
     TRUSTED_SNAPSHOT_BASE_VERSION,
     VERSION_TABLE,
     _add_trusted_snapshot_boundary,
@@ -635,6 +636,74 @@ def test_attestation_hardening_removes_runtime_membership(
     )
     harden_attestation_access_boundary(postgres_engine)
     assert verify_schema(postgres_engine).ready is True
+
+
+def test_attestation_hardening_converges_current_schema_proof_key(
+    postgres_engine,
+) -> None:
+    upgrade_database(postgres_engine)
+    with postgres_engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE okx_demo_attestation_secrets "
+                "SET hmac_key = :mismatched_key "
+                "WHERE secret_id = 'ACTIVE'"
+            ),
+            {"mismatched_key": b"x" * 32},
+        )
+    harden_attestation_access_boundary(postgres_engine)
+    with postgres_engine.connect() as connection:
+        assert connection.execute(
+            text(
+                "SELECT hmac_key = :expected_key "
+                "FROM okx_demo_attestation_secrets "
+                "WHERE secret_id = 'ACTIVE'"
+            ),
+            {"expected_key": b"t" * 32},
+        ).scalar_one() is True
+    with pytest.raises(DBAPIError):
+        with postgres_engine.begin() as connection:
+            connection.execute(text("SET LOCAL ROLE freqtrade"))
+            connection.execute(
+                text("SELECT hmac_key FROM okx_demo_attestation_secrets")
+            )
+
+
+def test_attestation_hardening_refuses_key_rotation_with_active_session(
+    postgres_engine,
+    monkeypatch,
+) -> None:
+    upgrade_database(postgres_engine)
+    factory = create_session_factory(postgres_engine)
+    lineage = _seed(factory)
+    now = datetime.now(timezone.utc)
+    raw_request = _request(lineage, now)
+    envelope = raw_request["snapshots"]["instrument"]
+    capability = _issue_attested_session_capability(
+        attestation_hmac_key=b"t" * 32,
+        pinned_fingerprint_sha256="d" * 64,
+        created_at=now,
+        expires_at=now + timedelta(minutes=10),
+    )
+    normalized = _normalize_attested_snapshot(
+        capability,
+        kind="instrument",
+        content=envelope["content"],
+        observed_at=now,
+        expires_at=now + timedelta(minutes=5),
+    )
+    with factory.begin() as db:
+        db.execute(text("SET LOCAL ROLE freqtrade"))
+        _write_attested_snapshot(db, capability, normalized, now=now)
+    monkeypatch.setenv(
+        "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY",
+        "78" * 32,
+    )
+    with pytest.raises(
+        SchemaMigrationBlocked,
+        match="blocked by an active session",
+    ):
+        harden_attestation_access_boundary(postgres_engine)
 
 
 @pytest.mark.parametrize(

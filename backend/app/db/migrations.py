@@ -2617,13 +2617,68 @@ def _revoke_runtime_attestation_column_privileges(
             )
 
 
+def _required_attestation_proof_key() -> bytes:
+    encoded_key = os.environ.get(ATTESTATION_PROOF_KEY_ENV, "")
+    if not re.fullmatch(r"[0-9a-f]{64}", encoded_key):
+        raise SchemaMigrationBlocked(
+            "{} must contain exactly one lowercase 32-byte hex key for "
+            "attestation hardening.".format(ATTESTATION_PROOF_KEY_ENV)
+        )
+    return bytes.fromhex(encoded_key)
+
+
 def harden_attestation_access_boundary(engine: Engine) -> None:
-    """Remove runtime membership/column grants without rewriting attestation data."""
+    """Converge the proof key and remove unsafe runtime privileges."""
 
     with engine.begin() as connection:
         if connection.dialect.name != "postgresql":
             raise SchemaMigrationBlocked(
                 "Attestation hardening requires PostgreSQL."
+            )
+        _require_attestation_admin(connection)
+        proof_key_bytes = _required_attestation_proof_key()
+        current_key = connection.execute(
+            text(
+                "SELECT hmac_key FROM okx_demo_attestation_secrets "
+                "WHERE secret_id IN ('ACTIVE')"
+            )
+        ).scalar_one_or_none()
+        if current_key != proof_key_bytes:
+            active_sessions = connection.execute(
+                text(
+                    "SELECT count(*) FROM okx_demo_attested_sessions "
+                    "WHERE revoked_at IS NULL "
+                    "AND expires_at > clock_timestamp()"
+                )
+            ).scalar_one()
+            if active_sessions:
+                raise SchemaMigrationBlocked(
+                    "Attestation proof key rotation is blocked by an active session."
+                )
+            connection.execute(
+                text(
+                    "DELETE FROM okx_demo_attestation_secrets "
+                    "WHERE secret_id IN ('ACTIVE')"
+                )
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO okx_demo_attestation_secrets "
+                    "(secret_id, hmac_key) VALUES ('ACTIVE', :proof_key)"
+                ),
+                {"proof_key": proof_key_bytes},
+            )
+        converged = connection.execute(
+            text(
+                "SELECT hmac_key IS NOT DISTINCT FROM :proof_key "
+                "FROM okx_demo_attestation_secrets "
+                "WHERE secret_id IN ('ACTIVE')"
+            ),
+            {"proof_key": proof_key_bytes},
+        ).scalar_one_or_none()
+        if converged is not True:
+            raise SchemaMigrationBlocked(
+                "Attestation proof key convergence could not be verified."
             )
         _revoke_runtime_attestor_membership(connection)
         _revoke_runtime_attestation_column_privileges(connection)
@@ -2711,13 +2766,7 @@ def _add_attested_session_boundary(connection: Connection) -> None:
     schema_name = connection.execute(text("SELECT current_schema()")).scalar_one()
     quoted_schema = '"{}"'.format(schema_name.replace('"', '""'))
     _require_attestation_admin(connection)
-    encoded_key = os.environ.get(ATTESTATION_PROOF_KEY_ENV, "")
-    if not re.fullmatch(r"[0-9a-f]{64}", encoded_key):
-        raise SchemaMigrationBlocked(
-            "{} must contain exactly one lowercase 32-byte hex key for attestation "
-            "hardening.".format(ATTESTATION_PROOF_KEY_ENV)
-        )
-    proof_key_bytes = bytes.fromhex(encoded_key)
+    proof_key_bytes = _required_attestation_proof_key()
     connection.execute(text("CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public"))
     connection.execute(
         text(
