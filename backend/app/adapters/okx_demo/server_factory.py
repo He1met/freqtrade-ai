@@ -119,10 +119,12 @@ class OkxDemoServerSession:
 
 def create_okx_demo_server_session(
     environment: Mapping[str, str],
+    *,
+    lock_path: Path = _DEFAULT_LOCK_PATH,
 ) -> OkxDemoServerSession:
     """Attest once through #446, then share that private session with the writer."""
 
-    process_lock = OkxDemoWriterProcessLock(_DEFAULT_LOCK_PATH)
+    process_lock = OkxDemoWriterProcessLock(lock_path)
     credentials = None
     try:
         process_lock.acquire()
