@@ -15,6 +15,7 @@ from app.db.migrations import (
     RISK_CHAIN_HARDENING_BASE_VERSION,
     RUNTIME_RECOVERY_BASE_VERSION,
     SCHEMA_VERSION,
+    SOAK_BASE_VERSION,
     TARGET_LINEAGE_BASE_VERSION,
     TRUSTED_SNAPSHOT_BASE_VERSION,
     psql_database_url,
@@ -64,4 +65,5 @@ def test_schema_version_is_explicit_and_stable() -> None:
     assert RECONCILIATION_BASE_VERSION == "20260727_09"
     assert RUNTIME_RECOVERY_BASE_VERSION == "20260727_10"
     assert FULL_CHAIN_BASE_VERSION == "20260727_11"
-    assert SCHEMA_VERSION == "20260727_12"
+    assert SOAK_BASE_VERSION == "20260727_12"
+    assert SCHEMA_VERSION == "20260727_13"
