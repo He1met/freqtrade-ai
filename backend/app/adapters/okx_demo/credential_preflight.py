@@ -23,6 +23,7 @@ REST_URL_ENV = "FREQTRADE_AI_OKX_DEMO_REST_URL"
 OKX_DEMO_REST_URL = "https://openapi.okx.com"
 ACCOUNT_CONFIG_PATH = "/api/v5/account/config"
 SIMULATED_TRADING_HEADER = ("x-simulated-trading", "1")
+PREFLIGHT_USER_AGENT = "freqtrade-ai-okx-demo-preflight/1"
 OKX_DEMO_CREDENTIAL_ENV_NAMES = (
     "OKX_DEMO_API_KEY",
     "OKX_DEMO_API_SECRET",
@@ -188,6 +189,7 @@ def build_account_config_request(
     headers.update(
         {
             "Accept": "application/json",
+            "User-Agent": PREFLIGHT_USER_AGENT,
             SIMULATED_TRADING_HEADER[0]: SIMULATED_TRADING_HEADER[1],
         }
     )
