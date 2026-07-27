@@ -34,6 +34,7 @@ from app.models.okx_demo_reconciliation import (
     OkxDemoRecoveryBatch,
     OkxDemoRecoveryGrant,
 )
+from app.models.okx_demo_soak import OkxDemoSoakEvent, OkxDemoSoakProbe, OkxDemoSoakRun
 from app.models.research_job import ResearchJob, ResearchWorkerControl
 from app.models.strategy import Strategy, StrategyVersion
 from app.models.strategy_failure_reason import StrategyFailureReason
@@ -69,6 +70,9 @@ __all__ = [
     "OkxDemoReconciliationState",
     "OkxDemoRecoveryBatch",
     "OkxDemoRecoveryGrant",
+    "OkxDemoSoakEvent",
+    "OkxDemoSoakProbe",
+    "OkxDemoSoakRun",
     "ResearchJob",
     "ResearchJobAttempt",
     "ResearchWorkerControl",
