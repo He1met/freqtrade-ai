@@ -16,6 +16,12 @@ from app.models.execution_lineage import (
     RiskBudget,
     TradeIntent,
 )
+from app.models.full_chain import (
+    FullChainRun,
+    FullChainSignalSnapshot,
+    FullChainStageRun,
+    StrategyCandidateApproval,
+)
 from app.models.local_test_db import LocalTestBatch, LocalTestDbEvent
 from app.models.order_writer import OkxOrderWriteAttempt, OkxOrderWriterLease
 from app.models.okx_demo_reconciliation import (
@@ -45,6 +51,9 @@ __all__ = [
     "ExchangePosition",
     "ExecutionManifest",
     "ExecutionScope",
+    "FullChainRun",
+    "FullChainSignalSnapshot",
+    "FullChainStageRun",
     "OkxDemoAttestationSecret",
     "OkxDemoAttestedSession",
     "OkxDemoTrustedSnapshot",
@@ -67,6 +76,7 @@ __all__ = [
     "RiskDecision",
     "RiskBudget",
     "Strategy",
+    "StrategyCandidateApproval",
     "StrategyFailureReason",
     "StrategyGenerationRun",
     "StrategyScore",

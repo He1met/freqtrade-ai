@@ -274,6 +274,13 @@ def _policy() -> dict:
 def test_20260727_02_upgrades_to_risk_chain_atomically(postgres_engine) -> None:
     Base.metadata.create_all(postgres_engine)
     with postgres_engine.begin() as connection:
+        for table_name in (
+            "full_chain_signal_snapshots",
+            "full_chain_stage_runs",
+            "strategy_candidate_approvals",
+            "full_chain_runs",
+        ):
+            connection.execute(text('DROP TABLE "{}"'.format(table_name)))
         connection.execute(text("DROP TABLE approved_executions"))
         connection.execute(text("DROP TABLE risk_budgets"))
         connection.execute(
@@ -884,7 +891,7 @@ def test_database_rejects_direct_authorization_tampering(
     upgrade_database(postgres_engine)
     factory = create_session_factory(postgres_engine)
     lineage = _seed(factory)
-    now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
     with factory() as db:
         result = RiskChainService(db).evaluate(
             idempotency_key="tamper-target",
@@ -915,7 +922,7 @@ def test_trusted_snapshot_registry_is_database_immutable(
     factory = create_session_factory(postgres_engine)
     request = _request(
         _seed(factory),
-        datetime(2026, 7, 27, 12, tzinfo=timezone.utc),
+        datetime.now(timezone.utc),
         factory,
     )
     with pytest.raises(DBAPIError):
@@ -958,7 +965,7 @@ def test_runtime_role_can_only_write_with_private_capability_functions(
     upgrade_database(postgres_engine)
     factory = create_session_factory(postgres_engine)
     lineage = _seed(factory)
-    now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
     raw_request = _request(lineage, now)
     envelope = raw_request["snapshots"]["instrument"]
     capability = _issue_attested_session_capability(
@@ -1311,7 +1318,7 @@ def test_security_definer_rejects_wrong_pinned_account(
     upgrade_database(postgres_engine)
     factory = create_session_factory(postgres_engine)
     lineage = _seed(factory)
-    now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
     raw_request = _request(lineage, now)
     instrument = raw_request["snapshots"]["instrument"]
     capability = _issue_attested_session_capability(
@@ -1366,7 +1373,7 @@ def test_revoked_or_expired_attested_session_blocks_authorization(
 ) -> None:
     upgrade_database(postgres_engine)
     factory = create_session_factory(postgres_engine)
-    now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
     lineage = _seed(factory)
     revoked_request = _request(lineage, now, factory)
     with postgres_engine.begin() as connection:
@@ -1446,7 +1453,7 @@ def test_legacy_authorization_row_cannot_become_active_approval(
                     order_submission_authorized=False,
                     claim_required=True,
                     status="ACTIVE",
-                    expires_at=datetime(2026, 7, 27, 13, tzinfo=timezone.utc),
+                    expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
                     evidence_snapshot={},
                 )
             )
@@ -1458,7 +1465,7 @@ def test_postgresql_budget_lock_allows_only_one_concurrent_permission(
     upgrade_database(postgres_engine)
     factory = create_session_factory(postgres_engine)
     lineage = _seed(factory)
-    now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
     request = _request(lineage, now, factory)
     barrier = Barrier(2)
     results = []
@@ -1506,7 +1513,7 @@ def test_postgresql_concurrent_idempotent_retry_reads_one_chain(
     upgrade_database(postgres_engine)
     factory = create_session_factory(postgres_engine)
     lineage = _seed(factory)
-    now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
     request = _request(lineage, now, factory)
     barrier = Barrier(2)
     results = []

@@ -26,8 +26,8 @@ class ResearchJob(Base):
     __tablename__ = "research_jobs"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('PENDING', 'RUNNING', 'SUCCESS', 'FAILED', 'BLOCKED', "
-            "'CANCELLED', 'STALE')",
+            "status IN ('PENDING', 'RUNNING', 'AWAITING_APPROVAL', 'SUCCESS', "
+            "'FAILED', 'BLOCKED', 'CANCELLED', 'STALE')",
             name="research_jobs_status_check",
         ),
         CheckConstraint("attempt_count >= 0", name="research_jobs_attempt_count_check"),

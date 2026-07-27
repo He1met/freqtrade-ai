@@ -9,6 +9,7 @@ from app.schemas.data_source import DataSourceTrace, database_record_source, unk
 ResearchJobStatus = Literal[
     "PENDING",
     "RUNNING",
+    "AWAITING_APPROVAL",
     "SUCCESS",
     "FAILED",
     "BLOCKED",

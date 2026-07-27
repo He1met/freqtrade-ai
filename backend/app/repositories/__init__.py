@@ -6,6 +6,12 @@ from app.repositories.execution_lineage import (
     list_execution_manifests,
     record_execution_manifest,
 )
+from app.repositories.full_chain import (
+    FullChainBlocked,
+    FullChainConflict,
+    FullChainRepository,
+    require_authoritative_reconciliation,
+)
 from app.repositories.research_jobs import ResearchJobLinkageBlocked, ResearchJobRepository
 from app.repositories.strategy_failure_reasons import StrategyFailureReasonRepository
 from app.repositories.strategy_scores import StrategyScoreRepository
@@ -15,6 +21,10 @@ from app.repositories.strategy_generation_runs import StrategyGenerationRunRepos
 __all__ = [
     "BacktestRepository",
     "ExecutionLineageRepository",
+    "FullChainBlocked",
+    "FullChainConflict",
+    "FullChainRepository",
+    "require_authoritative_reconciliation",
     "GovernanceEventArchiveRepository",
     "ResearchJobRepository",
     "ResearchJobLinkageBlocked",
