@@ -36,7 +36,8 @@ HMAC_ATTESTATION_BASE_VERSION = "20260727_06"
 ATTESTATION_ACL_BASE_VERSION = "20260727_07"
 ORDER_WRITER_BASE_VERSION = "20260727_08"
 RECONCILIATION_BASE_VERSION = "20260727_09"
-SCHEMA_VERSION = "20260727_10"
+RUNTIME_RECOVERY_BASE_VERSION = "20260727_10"
+SCHEMA_VERSION = "20260727_11"
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 ATTESTATION_PROOF_KEY_ENV = "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"
 
@@ -3312,6 +3313,87 @@ def _add_okx_demo_reconciliation(connection: Connection) -> None:
             """.replace("__SCHEMA__", quoted_schema)
         )
     )
+    connection.execute(
+        text(
+            """
+            GRANT SELECT, UPDATE ON __SCHEMA__.risk_budgets
+                TO freqtrade_ai_attestor;
+            CREATE OR REPLACE FUNCTION release_expired_okx_demo_approval(
+                p_approval_id BIGINT
+            ) RETURNS BOOLEAN
+            LANGUAGE plpgsql
+            SECURITY DEFINER
+            SET search_path = __SCHEMA__, pg_catalog
+            AS $$
+            DECLARE
+                v_approval RECORD;
+            BEGIN
+                PERFORM pg_advisory_xact_lock(
+                    hashtext('OKX_DEMO-risk-budget')
+                );
+                SELECT approved.*,
+                       intent.expires_at AS intent_expires_at
+                INTO v_approval
+                FROM __SCHEMA__.approved_executions AS approved
+                JOIN __SCHEMA__.trade_intents AS intent
+                  ON intent.id = approved.trade_intent_id
+                WHERE approved.id = p_approval_id
+                FOR UPDATE;
+                IF NOT FOUND THEN
+                    RETURN FALSE;
+                END IF;
+                IF v_approval.execution_target_id <> 'OKX_DEMO'
+                   OR v_approval.status <> 'ACTIVE'
+                   OR (
+                       v_approval.expires_at > statement_timestamp()
+                       AND v_approval.intent_expires_at >
+                           statement_timestamp()
+                   )
+                THEN
+                    RAISE EXCEPTION
+                        'approval is not safely releasable as expired';
+                END IF;
+                DELETE FROM __SCHEMA__.approved_executions
+                WHERE id = v_approval.id;
+                UPDATE __SCHEMA__.trade_intents
+                SET status = 'EXPIRED'
+                WHERE id = v_approval.trade_intent_id
+                  AND execution_target_id = 'OKX_DEMO'
+                  AND status = 'APPROVED';
+                UPDATE __SCHEMA__.risk_decisions
+                SET decision = 'EXPIRED',
+                    evidence_snapshot = jsonb_set(
+                        evidence_snapshot::jsonb,
+                        '{reasons}',
+                        '["authorization evidence expired"]'::jsonb,
+                        TRUE
+                    )::json
+                WHERE id = v_approval.risk_decision_id
+                  AND execution_target_id = 'OKX_DEMO'
+                  AND decision = 'APPROVED';
+                UPDATE __SCHEMA__.risk_budgets
+                SET reserved_notional = greatest(
+                        0, reserved_notional -
+                           v_approval.reserved_notional
+                    ),
+                    approved_positions = greatest(
+                        0, approved_positions - 1
+                    )
+                WHERE execution_target_id = 'OKX_DEMO';
+                RETURN TRUE;
+            END
+            $$;
+            ALTER FUNCTION release_expired_okx_demo_approval(BIGINT)
+                OWNER TO freqtrade_ai_attestor;
+            REVOKE ALL ON FUNCTION
+                release_expired_okx_demo_approval(BIGINT)
+                FROM PUBLIC;
+            GRANT EXECUTE ON FUNCTION
+                release_expired_okx_demo_approval(BIGINT)
+                TO freqtrade;
+            """.replace("__SCHEMA__", quoted_schema)
+        )
+    )
     table_names = (
         "reconciliation_runs",
         "okx_demo_exchange_events",
@@ -3718,6 +3800,138 @@ def _add_okx_demo_reconciliation(connection: Connection) -> None:
     )
 
 
+def _add_okx_demo_runtime_recovery_binding(connection: Connection) -> None:
+    """Bind every recovery grant to one durable writer attempt before POST."""
+
+    schema_name = connection.execute(text("SELECT current_schema()")).scalar_one()
+    preparer = connection.dialect.identifier_preparer
+    quoted_schema = preparer.quote(schema_name)
+    attempts = "{}.{}".format(
+        quoted_schema, preparer.quote("okx_order_write_attempts")
+    )
+    connection.execute(
+        text(
+            """
+            ALTER TABLE {attempts}
+                ADD COLUMN IF NOT EXISTS recovery_grant_database_id BIGINT;
+            ALTER TABLE {attempts}
+                DROP CONSTRAINT IF EXISTS
+                    okx_order_write_attempts_recovery_grant_database_id_fkey;
+            ALTER TABLE {attempts}
+                ADD CONSTRAINT
+                    okx_order_write_attempts_recovery_grant_database_id_fkey
+                FOREIGN KEY (recovery_grant_database_id)
+                REFERENCES {schema}.okx_demo_recovery_grants(database_id)
+                ON DELETE RESTRICT;
+            ALTER TABLE {attempts}
+                DROP CONSTRAINT IF EXISTS
+                    okx_order_write_attempts_recovery_grant_database_id_key;
+            ALTER TABLE {attempts}
+                ADD CONSTRAINT
+                    okx_order_write_attempts_recovery_grant_database_id_key
+                UNIQUE (recovery_grant_database_id);
+            """.format(attempts=attempts, schema=quoted_schema)
+        )
+    )
+    connection.execute(
+        text(
+            """
+            CREATE OR REPLACE FUNCTION guard_okx_demo_exchange_order()
+            RETURNS trigger LANGUAGE plpgsql
+            SECURITY DEFINER SET search_path = pg_catalog
+            AS $$
+            DECLARE
+                v_recovery_grant_id BIGINT;
+            BEGIN
+                IF TG_OP = 'INSERT' THEN
+                    IF NEW.client_order_id ~ '^rcv[0-9]{20}$' THEN
+                        v_recovery_grant_id :=
+                            substring(NEW.client_order_id from 4)::BIGINT;
+                        IF NEW.execution_target_id <> 'OKX_DEMO'
+                           OR NEW.status <> 'PREPARED'
+                           OR NEW.exchange_order_id IS NOT NULL
+                           OR json_typeof(NEW.request_snapshot) <> 'object'
+                           OR json_typeof(NEW.response_snapshot) <> 'object'
+                           OR NOT EXISTS (
+                               SELECT 1
+                               FROM __SCHEMA__.okx_demo_recovery_grants AS recovery_grant
+                               JOIN __SCHEMA__.okx_demo_reconciliation_states AS state
+                                 ON state.execution_target_id =
+                                    recovery_grant.execution_target_id
+                               JOIN __SCHEMA__.trade_intents AS intent
+                                 ON intent.id = NEW.trade_intent_id
+                               WHERE recovery_grant.database_id = v_recovery_grant_id
+                                 AND recovery_grant.execution_target_id = 'OKX_DEMO'
+                                 AND recovery_grant.action = 'REDUCE_ONLY'
+                                 AND recovery_grant.status = 'ACTIVE'
+                                 AND recovery_grant.expires_at > statement_timestamp()
+                                 AND state.last_reconciliation_run_id =
+                                     recovery_grant.reconciliation_run_id
+                                 AND state.opening_frozen IS TRUE
+                                 AND intent.execution_target_id = 'OKX_DEMO'
+                                 AND intent.instrument_id =
+                                     recovery_grant.instrument_id
+                           )
+                        THEN
+                            RAISE EXCEPTION
+                                'invalid recovery exchange order creation';
+                        END IF;
+                        RETURN NEW;
+                    END IF;
+                    IF NEW.execution_target_id <> 'OKX_DEMO'
+                       OR NEW.status <> 'PREPARED'
+                       OR NEW.exchange_order_id IS NOT NULL
+                       OR json_typeof(NEW.request_snapshot) <> 'object'
+                       OR json_typeof(NEW.response_snapshot) <> 'object'
+                       OR NOT EXISTS (
+                           SELECT 1
+                           FROM __SCHEMA__.trade_intents AS intent
+                           WHERE intent.id = NEW.trade_intent_id
+                             AND intent.execution_target_id = 'OKX_DEMO'
+                             AND intent.client_order_id =
+                                 NEW.client_order_id
+                             AND intent.status = 'APPROVED'
+                       )
+                    THEN
+                        RAISE EXCEPTION 'invalid exchange order creation';
+                    END IF;
+                    RETURN NEW;
+                END IF;
+                IF OLD.id IS DISTINCT FROM NEW.id
+                   OR OLD.execution_target_id IS DISTINCT FROM NEW.execution_target_id
+                   OR OLD.trade_intent_id IS DISTINCT FROM NEW.trade_intent_id
+                   OR OLD.client_order_id IS DISTINCT FROM NEW.client_order_id
+                   OR OLD.request_snapshot::jsonb IS DISTINCT FROM NEW.request_snapshot::jsonb
+                   OR OLD.created_at IS DISTINCT FROM NEW.created_at
+                   OR (OLD.exchange_order_id IS NOT NULL
+                       AND OLD.exchange_order_id IS DISTINCT FROM NEW.exchange_order_id)
+                   OR NEW.status NOT IN (
+                       'PREPARED', 'ACKNOWLEDGED', 'REJECTED',
+                       'RECOVERY_REQUIRED', 'RESIDUAL_CLOSE_REQUIRED',
+                       'RECONCILED', 'live', 'partially_filled',
+                       'filled', 'canceled', 'mmp_canceled',
+                       'position_zero', 'leverage_confirmed'
+                   )
+                   OR json_typeof(NEW.response_snapshot) <> 'object'
+                   OR (OLD.status IN (
+                       'REJECTED', 'RECONCILED', 'filled', 'canceled',
+                       'mmp_canceled', 'position_zero'
+                   ) AND NEW.status IS DISTINCT FROM OLD.status)
+                THEN
+                    RAISE EXCEPTION 'invalid exchange order transition';
+                END IF;
+                RETURN NEW;
+            END
+            $$;
+            ALTER FUNCTION guard_okx_demo_exchange_order()
+                OWNER TO freqtrade_ai_attestor;
+            REVOKE ALL ON FUNCTION guard_okx_demo_exchange_order()
+                FROM PUBLIC, freqtrade;
+            """.replace("__SCHEMA__", quoted_schema)
+        )
+    )
+
+
 def upgrade_database(engine: Engine) -> str:
     """Upgrade a local PostgreSQL database atomically to ``SCHEMA_VERSION``.
 
@@ -3762,6 +3976,7 @@ def upgrade_database(engine: Engine) -> str:
                 _add_order_writer(connection)
                 Base.metadata.create_all(bind=connection)
                 _add_okx_demo_reconciliation(connection)
+                _add_okx_demo_runtime_recovery_binding(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -3782,6 +3997,7 @@ def upgrade_database(engine: Engine) -> str:
                 _add_order_writer(connection)
                 Base.metadata.create_all(bind=connection)
                 _add_okx_demo_reconciliation(connection)
+                _add_okx_demo_runtime_recovery_binding(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -3801,6 +4017,7 @@ def upgrade_database(engine: Engine) -> str:
                 _add_order_writer(connection)
                 Base.metadata.create_all(bind=connection)
                 _add_okx_demo_reconciliation(connection)
+                _add_okx_demo_runtime_recovery_binding(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -3819,6 +4036,7 @@ def upgrade_database(engine: Engine) -> str:
                 _add_order_writer(connection)
                 Base.metadata.create_all(bind=connection)
                 _add_okx_demo_reconciliation(connection)
+                _add_okx_demo_runtime_recovery_binding(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -3836,6 +4054,7 @@ def upgrade_database(engine: Engine) -> str:
                 _add_order_writer(connection)
                 Base.metadata.create_all(bind=connection)
                 _add_okx_demo_reconciliation(connection)
+                _add_okx_demo_runtime_recovery_binding(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -3852,6 +4071,7 @@ def upgrade_database(engine: Engine) -> str:
                 _add_order_writer(connection)
                 Base.metadata.create_all(bind=connection)
                 _add_okx_demo_reconciliation(connection)
+                _add_okx_demo_runtime_recovery_binding(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -3868,6 +4088,7 @@ def upgrade_database(engine: Engine) -> str:
                 _add_order_writer(connection)
                 Base.metadata.create_all(bind=connection)
                 _add_okx_demo_reconciliation(connection)
+                _add_okx_demo_runtime_recovery_binding(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -3884,6 +4105,7 @@ def upgrade_database(engine: Engine) -> str:
                 _add_order_writer(connection)
                 Base.metadata.create_all(bind=connection)
                 _add_okx_demo_reconciliation(connection)
+                _add_okx_demo_runtime_recovery_binding(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -3899,6 +4121,7 @@ def upgrade_database(engine: Engine) -> str:
                 _add_order_writer(connection)
                 Base.metadata.create_all(bind=connection)
                 _add_okx_demo_reconciliation(connection)
+                _add_okx_demo_runtime_recovery_binding(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -3912,10 +4135,25 @@ def upgrade_database(engine: Engine) -> str:
                 return SCHEMA_VERSION
             if current_version == RECONCILIATION_BASE_VERSION:
                 _add_okx_demo_reconciliation(connection)
+                _add_okx_demo_runtime_recovery_binding(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
                         "Reconciliation schema upgrade does not match ORM metadata: "
+                        + "; ".join(problems)
+                    )
+                connection.execute(
+                    text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+                    {"version": SCHEMA_VERSION},
+                )
+                return SCHEMA_VERSION
+            if current_version == RUNTIME_RECOVERY_BASE_VERSION:
+                _add_okx_demo_reconciliation(connection)
+                _add_okx_demo_runtime_recovery_binding(connection)
+                problems = schema_problems(connection)
+                if problems:
+                    raise SchemaMigrationBlocked(
+                        "Runtime recovery schema upgrade does not match ORM metadata: "
                         + "; ".join(problems)
                     )
                 connection.execute(
@@ -3947,6 +4185,7 @@ def upgrade_database(engine: Engine) -> str:
             _add_attested_session_boundary(connection)
             _add_order_writer(connection)
             _add_okx_demo_reconciliation(connection)
+            _add_okx_demo_runtime_recovery_binding(connection)
             problems = schema_problems(connection)
             if problems:
                 raise SchemaMigrationBlocked(
