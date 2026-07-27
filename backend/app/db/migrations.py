@@ -40,7 +40,8 @@ RUNTIME_RECOVERY_BASE_VERSION = "20260727_10"
 FULL_CHAIN_BASE_VERSION = "20260727_11"
 SOAK_BASE_VERSION = "20260727_12"
 RUNTIME_APP_ACL_BASE_VERSION = "20260727_13"
-SCHEMA_VERSION = "20260727_14"
+FILL_SNAPSHOT_REPEAT_BASE_VERSION = "20260727_14"
+SCHEMA_VERSION = "20260728_15"
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 ATTESTATION_PROOF_KEY_ENV = "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"
 
@@ -4301,6 +4302,45 @@ def upgrade_database(engine: Engine) -> str:
                         "Recorded schema version does not match ORM metadata: " + "; ".join(problems)
                     )
                 return current_version
+            supported_upgrade_versions = {
+                LEGACY_SCHEMA_VERSION,
+                PREVIOUS_SCHEMA_VERSION,
+                TARGET_LINEAGE_BASE_VERSION,
+                EARLY_TARGET_LINEAGE_VERSION,
+                RISK_CHAIN_BASE_VERSION,
+                RISK_CHAIN_HARDENING_BASE_VERSION,
+                TRUSTED_SNAPSHOT_BASE_VERSION,
+                ATTESTED_SESSION_BASE_VERSION,
+                HMAC_ATTESTATION_BASE_VERSION,
+                ATTESTATION_ACL_BASE_VERSION,
+                ORDER_WRITER_BASE_VERSION,
+                RECONCILIATION_BASE_VERSION,
+                RUNTIME_RECOVERY_BASE_VERSION,
+                FULL_CHAIN_BASE_VERSION,
+                SOAK_BASE_VERSION,
+                RUNTIME_APP_ACL_BASE_VERSION,
+                FILL_SNAPSHOT_REPEAT_BASE_VERSION,
+            }
+            if current_version in supported_upgrade_versions:
+                connection.execute(
+                    text(
+                        "ALTER TABLE IF EXISTS okx_demo_fill_snapshots "
+                        "DROP CONSTRAINT IF EXISTS "
+                        "okx_demo_fill_snapshots_fill_unique"
+                    )
+                )
+            if current_version == FILL_SNAPSHOT_REPEAT_BASE_VERSION:
+                problems = schema_problems(connection)
+                if problems:
+                    raise SchemaMigrationBlocked(
+                        "Fill snapshot repeat upgrade does not match ORM metadata: "
+                        + "; ".join(problems)
+                    )
+                connection.execute(
+                    text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+                    {"version": SCHEMA_VERSION},
+                )
+                return SCHEMA_VERSION
             if current_version in {
                 LEGACY_SCHEMA_VERSION,
                 PREVIOUS_SCHEMA_VERSION,

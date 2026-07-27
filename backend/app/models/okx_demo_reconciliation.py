@@ -158,11 +158,6 @@ class OkxDemoFillSnapshot(Base):
         CheckConstraint(TARGET_CHECK, name="okx_demo_fill_snapshots_target_check"),
         UniqueConstraint(
             "execution_target_id",
-            "exchange_fill_id",
-            name="okx_demo_fill_snapshots_fill_unique",
-        ),
-        UniqueConstraint(
-            "execution_target_id",
             "event_database_id",
             name="okx_demo_fill_snapshots_event_unique",
         ),
