@@ -54,6 +54,7 @@ execution:
       exchange: okx
       product_type: SWAP
       margin_mode: isolated
+      position_mode: long_short_mode
       account_mode: demo
       simulated_trading: true
       credential_source: macos_keychain
