@@ -5,7 +5,7 @@
   "execution_target": "OKX_DEMO",
   "instrument_type": "SWAP",
   "margin_mode": "isolated",
-  "position_mode": "net_mode",
+  "position_mode": "long_short_mode",
   "private_rest_headers": {
     "x-simulated-trading": "1"
   },
