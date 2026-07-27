@@ -136,7 +136,7 @@ def attested_account(uid: str = "demo-account-a") -> dict[str, str]:
         "uid": uid,
         "mainUid": "demo-main-account",
         "acctLv": "2",
-        "posMode": "net_mode",
+        "posMode": "long_short_mode",
         "perm": "read_only,trade",
     }
 
@@ -635,7 +635,7 @@ def test_private_account_resources_require_demo_auth_but_never_render_it() -> No
             [
                 {
                     "acctLv": "2",
-                    "posMode": "net_mode",
+                    "posMode": "long_short_mode",
                     "autoLoan": "false",
                     "greeksType": "PA",
                 }
@@ -719,7 +719,7 @@ def test_private_account_resources_require_demo_auth_but_never_render_it() -> No
     fees = instance.fees("BTC-USDT-SWAP")
     order = instance.order("BTC-USDT-SWAP", client_order_id="client123")
 
-    assert config.items[0]["position_mode"] == "net_mode"
+    assert config.items[0]["position_mode"] == "long_short_mode"
     assert balance.items[0]["available_balance"] == "900"
     assert positions.items[0]["contracts"] == "2"
     assert leverage.items[0]["leverage"] == "3"
