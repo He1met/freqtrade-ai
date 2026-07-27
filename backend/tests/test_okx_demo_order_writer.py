@@ -208,6 +208,13 @@ class FakeStore:
     ):
         self.lease_calls.append((writer_instance_id, now, expires_at))
 
+    def acquire_recovery_lease(self, grant_database_id, *, now):
+        self.lease_calls.append(("recovery", grant_database_id, now))
+
+    def load_recovery_order(self, grant_database_id):
+        assert grant_database_id > 0
+        return self.unresolved_order or managed_order()
+
     def unresolved(self):
         if self.current is None:
             return None
@@ -261,14 +268,25 @@ class FakeStore:
         operation_id,
         request_digest,
         safe_request_snapshot,
+        recovery_grant_database_id=None,
     ):
-        return self._prepare(
+        attempt = self._prepare(
             order,
             operation,
             operation_id,
             request_digest,
             safe_request_snapshot,
         )
+        if recovery_grant_database_id is not None:
+            attempt = WriteAttemptRecord(
+                **{
+                    **attempt.__dict__,
+                    "recovery_grant_database_id":
+                        recovery_grant_database_id,
+                }
+            )
+            self.current = attempt
+        return attempt
 
     def prepare_close_cleanup(
         self,
@@ -696,6 +714,29 @@ def test_cancel_reconciles_canceled_state() -> None:
 
     assert result.status == "RECONCILED"
     assert result.order_state == "canceled"
+
+
+def test_recovery_cancel_binds_grant_before_the_only_network_post() -> None:
+    store = FakeStore(unresolved_order=managed_order())
+    read = FakeReadClient(orders=[[order_item(state="canceled")]])
+    write = FakeWriteTransport([response()])
+
+    result = writer(read, write, store).recovery_cancel(
+        recovery_grant_database_id=448,
+    )
+
+    assert result.status == "RECONCILED"
+    assert store.lease_calls == [("recovery", 448, NOW)]
+    assert store.current.recovery_grant_database_id == 448
+    assert write.calls == [
+        (
+            "/api/v5/trade/cancel-order",
+            {
+                "instId": "BTC-USDT-SWAP",
+                "clOrdId": "WriterOrder001",
+            },
+        )
+    ]
 
 
 def test_amend_reconciles_new_precision_and_request_id() -> None:
