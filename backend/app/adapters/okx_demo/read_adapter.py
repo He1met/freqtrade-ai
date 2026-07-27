@@ -1380,6 +1380,51 @@ def create_attested_okx_demo_read_adapter(
                     client_order_id=client_order_id,
                 )
 
+            def pending_orders(
+                self,
+                inst_id=None,
+                *,
+                after=None,
+                before=None,
+                limit=100,
+            ):
+                return self._engine.pending_orders(
+                    inst_id,
+                    after=after,
+                    before=before,
+                    limit=limit,
+                )
+
+            def fills_history(
+                self,
+                inst_id=None,
+                *,
+                after=None,
+                before=None,
+                limit=100,
+            ):
+                return self._engine.fills_history(
+                    inst_id,
+                    after=after,
+                    before=before,
+                    limit=limit,
+                )
+
+            def orders_history(
+                self,
+                inst_id=None,
+                *,
+                after=None,
+                before=None,
+                limit=100,
+            ):
+                return self._engine.orders_history(
+                    inst_id,
+                    after=after,
+                    before=before,
+                    limit=limit,
+                )
+
         return ProductionReadClient()
     except (OkxDemoPreflightBlocked, AttestationProofKeyUnavailable):
         raise OkxDemoCredentialsUnavailable(

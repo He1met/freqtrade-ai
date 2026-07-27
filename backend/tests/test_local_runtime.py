@@ -1514,6 +1514,38 @@ def test_orphan_cleanup_signals_only_marker_and_cwd_verified_process(
     assert signals == [(321, runtime.signal.SIGTERM)]
 
 
+def test_stop_service_preserves_pid_when_process_group_cannot_be_signaled(
+    monkeypatch,
+    tmp_path,
+):
+    runtime = load_runtime_module()
+    pid = 321
+    pid_path = tmp_path / runtime.PID_FILES["backend"]
+    pid_path.write_text("321\n", encoding="utf-8")
+    pid_path.chmod(0o600)
+    monkeypatch.setattr(runtime, "process_running", lambda _pid: True)
+    monkeypatch.setattr(
+        runtime,
+        "is_managed_process",
+        lambda candidate, service: candidate == pid and service == "backend",
+    )
+    monkeypatch.setattr(
+        runtime.os,
+        "killpg",
+        lambda *_args: (_ for _ in ()).throw(PermissionError),
+    )
+
+    result = runtime.stop_service(tmp_path, "backend")
+
+    assert result == {
+        "service": "backend",
+        "status": "BLOCKED",
+        "pid": pid,
+        "reason": "managed process group could not be signaled safely",
+    }
+    assert pid_path.exists()
+
+
 def test_credential_loss_freezes_openings_without_stopping_writer(
     monkeypatch,
     tmp_path,

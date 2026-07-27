@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.adapters.okx_demo import runtime_service
+from app.services.okx_demo_reconciliation import OkxDemoReconciliationBlocked
 from app.adapters.okx_demo.write_semantics import OkxDemoWriteBlocked
 
 
@@ -103,6 +104,29 @@ def test_reconciliation_loader_fails_closed_when_448_adapter_is_absent(
         match="adapter is unavailable",
     ):
         runtime_service.load_reconciliation_factory()
+
+
+def test_runtime_main_records_known_block_reason_without_traceback(
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setattr(
+        runtime_service,
+        "serve",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            OkxDemoReconciliationBlocked("pending_orders pagination is incomplete")
+        ),
+    )
+    monkeypatch.setattr(
+        runtime_service,
+        "_runtime_path",
+        lambda _value: Path("/tmp/freqtrade-ai-runtime"),
+    )
+
+    assert runtime_service.main(["--runtime-dir", "/tmp/runtime"]) == 2
+    assert capsys.readouterr().err == (
+        "OKX_DEMO runtime blocked: pending_orders pagination is incomplete\n"
+    )
 
 
 class FakeWriter:

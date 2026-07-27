@@ -1608,11 +1608,26 @@ def stop_service(state_dir: Path, service: str) -> Dict[str, Any]:
         os.killpg(pid, signal.SIGTERM)
     except ProcessLookupError:
         pass
+    except PermissionError:
+        return {
+            "service": service,
+            "status": "BLOCKED",
+            "pid": pid,
+            "reason": "managed process group could not be signaled safely",
+        }
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline and process_running(pid):
         time.sleep(0.1)
     if process_running(pid):
-        os.killpg(pid, signal.SIGKILL)
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except PermissionError:
+            return {
+                "service": service,
+                "status": "BLOCKED",
+                "pid": pid,
+                "reason": "managed process group could not be terminated safely",
+            }
     pid_path.unlink(missing_ok=True)
     return {"service": service, "status": "stopped", "pid": pid}
 
