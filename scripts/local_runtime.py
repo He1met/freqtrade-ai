@@ -883,7 +883,7 @@ def ensure_worker_queue_idle(database_url: str) -> None:
         "engine=create_engine(__import__('os').environ['DATABASE_URL']); "
         "connection=engine.connect(); "
         "count=connection.execute(text("
-        "\"SELECT count(*) FROM research_jobs WHERE status IN ('pending','running')\""
+        "\"SELECT count(*) FROM research_jobs WHERE status IN ('PENDING','RUNNING')\""
         ")).scalar_one(); "
         "connection.close(); "
         "raise SystemExit(0 if count == 0 else 3)"
@@ -896,9 +896,13 @@ def ensure_worker_queue_idle(database_url: str) -> None:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+    if completed.returncode == 3:
+        raise RuntimeBlocked(
+            "research worker queue is not idle; resolve PENDING/RUNNING jobs before `make up`"
+        )
     if completed.returncode:
         raise RuntimeBlocked(
-            "research worker queue is not idle; resolve pending/running jobs before `make up`"
+            "research worker queue read failed; verify runtime database ACL and schema"
         )
 
 
