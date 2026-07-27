@@ -102,6 +102,35 @@ def test_launch_agent_plist_has_one_keepalive_supervisor(monkeypatch, tmp_path):
     assert not any("KEY" in key for key in payload["EnvironmentVariables"])
 
 
+def test_launch_agent_refuses_install_from_noncanonical_worktree(monkeypatch):
+    agent = load_module(
+        LAUNCH_AGENT_PATH,
+        "macos_launch_agent_noncanonical",
+    )
+    monkeypatch.setattr(
+        agent,
+        "REPO_ROOT",
+        Path("/Users/local/.codex/worktrees/freqtrade-ai-449"),
+    )
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "app.core.config",
+        SimpleNamespace(
+            load_app_yaml=lambda _path: {
+                "paths": {
+                    "canonical_repo_root": "/Users/local/Developer/Freqtrade Ai"
+                }
+            }
+        ),
+    )
+
+    with pytest.raises(
+        agent.LaunchAgentBlocked,
+        match="canonical repository",
+    ):
+        agent.require_canonical_repo()
+
+
 def test_launch_agent_stop_managed_runtime_uses_runtime_down_contract(monkeypatch):
     agent = load_module(LAUNCH_AGENT_PATH, "macos_launch_agent_stop_runtime")
     calls = []
@@ -173,6 +202,7 @@ def test_launch_agent_install_is_idempotent(monkeypatch, tmp_path):
     binary.write_text("", encoding="utf-8")
     binary.chmod(0o755)
     calls = []
+    monkeypatch.setattr(agent, "require_canonical_repo", lambda: None)
 
     monkeypatch.setattr(agent.sys, "platform", "darwin")
     monkeypatch.setattr(agent.shutil, "which", lambda _name: "/bin/launchctl")
@@ -223,6 +253,7 @@ def test_launch_agent_restart_stops_runtime_before_bootstrap(monkeypatch, tmp_pa
     plist_path = tmp_path / "runtime.plist"
     plist_path.write_text("", encoding="utf-8")
     calls = []
+    monkeypatch.setattr(agent, "require_canonical_repo", lambda: None)
 
     monkeypatch.setattr(agent, "PLIST_PATH", plist_path)
     monkeypatch.setattr(agent, "bootout", lambda: calls.append(("bootout",)))
@@ -395,3 +426,153 @@ def test_runtime_command_parses_json_without_exposing_environment(monkeypatch):
         "status": "VERIFIED",
         "return_code": 0,
     }
+
+
+def test_supervisor_rotates_credentials_through_controlled_down_up_verify(
+    monkeypatch,
+):
+    supervisor = load_module(SUPERVISOR_PATH, "local_supervisor_rotation")
+    calls = []
+    supervisor.LAST_CREDENTIAL_GENERATION = "generation-old"
+    responses = {
+        "supervisor-capability": {
+            "status": "READY",
+            "_generation": "generation-new",
+            "return_code": 0,
+        },
+        "down": {"services": [], "return_code": 0},
+        "up": {"status": "RUNNING", "return_code": 0},
+        "verify": {"status": "VERIFIED", "return_code": 0},
+    }
+
+    def fake_run(command):
+        calls.append(command)
+        return responses[command]
+
+    monkeypatch.setattr(supervisor, "run_runtime", fake_run)
+
+    assert supervisor.supervise_once() is True
+    assert calls == ["supervisor-capability", "down", "up", "verify"]
+    assert supervisor.LAST_CREDENTIAL_GENERATION == "generation-new"
+
+
+def test_missing_keychain_does_not_stop_running_cleanup_capability(monkeypatch):
+    supervisor = load_module(
+        SUPERVISOR_PATH,
+        "local_supervisor_missing_keychain",
+    )
+    calls = []
+    responses = {
+        "supervisor-capability": {
+            "status": "BLOCKED",
+            "return_code": 2,
+        },
+        "supervisor-freeze-openings": {
+            "status": "BLOCKED_OPENINGS",
+            "return_code": 0,
+        },
+        "verify": {"status": "BLOCKED_OPENINGS", "return_code": 0},
+    }
+
+    def fake_run(command):
+        calls.append(command)
+        return responses[command]
+
+    monkeypatch.setattr(supervisor, "run_runtime", fake_run)
+
+    assert supervisor.supervise_once() is True
+    assert calls == [
+        "supervisor-capability",
+        "supervisor-freeze-openings",
+        "verify",
+    ]
+
+
+def test_same_non_secret_generation_thaws_then_verifies(monkeypatch):
+    supervisor = load_module(
+        SUPERVISOR_PATH,
+        "local_supervisor_same_generation",
+    )
+    supervisor.LAST_CREDENTIAL_GENERATION = "generation-7"
+    calls = []
+    responses = {
+        "supervisor-capability": {
+            "status": "READY",
+            "_generation": "generation-7",
+            "return_code": 0,
+        },
+        "supervisor-thaw-openings": {
+            "status": "READY",
+            "return_code": 0,
+        },
+        "verify": {"status": "VERIFIED", "return_code": 0},
+    }
+    monkeypatch.setattr(
+        supervisor,
+        "run_runtime",
+        lambda command: calls.append(command) or responses[command],
+    )
+
+    assert supervisor.supervise_once() is True
+    assert calls == [
+        "supervisor-capability",
+        "supervisor-thaw-openings",
+        "verify",
+    ]
+
+
+def test_failed_rotation_does_not_commit_generation(monkeypatch):
+    supervisor = load_module(
+        SUPERVISOR_PATH,
+        "local_supervisor_failed_rotation",
+    )
+    supervisor.LAST_CREDENTIAL_GENERATION = "generation-old"
+    responses = {
+        "supervisor-capability": {
+            "status": "READY",
+            "_generation": "generation-new",
+            "return_code": 0,
+        },
+        "down": {
+            "services": [
+                {"service": "okx_runtime", "status": "BLOCKED"}
+            ],
+            "return_code": 0,
+        },
+    }
+    monkeypatch.setattr(
+        supervisor,
+        "run_runtime",
+        lambda command: responses[command],
+    )
+
+    assert supervisor.supervise_once() is False
+    assert supervisor.LAST_CREDENTIAL_GENERATION == "generation-old"
+
+
+def test_supervisor_cold_start_replaces_unknown_existing_child(monkeypatch):
+    supervisor = load_module(
+        SUPERVISOR_PATH,
+        "local_supervisor_cold_start",
+    )
+    supervisor.LAST_CREDENTIAL_GENERATION = None
+    calls = []
+    responses = {
+        "supervisor-capability": {
+            "status": "READY",
+            "_generation": "gen-2",
+            "return_code": 0,
+        },
+        "down": {"services": [], "return_code": 0},
+        "up": {"status": "RUNNING", "return_code": 0},
+        "verify": {"status": "VERIFIED", "return_code": 0},
+    }
+    monkeypatch.setattr(
+        supervisor,
+        "run_runtime",
+        lambda command: calls.append(command) or responses[command],
+    )
+
+    assert supervisor.supervise_once() is True
+    assert calls == ["supervisor-capability", "down", "up", "verify"]
+    assert supervisor.LAST_CREDENTIAL_GENERATION == "gen-2"
