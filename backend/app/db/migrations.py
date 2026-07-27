@@ -41,7 +41,8 @@ FULL_CHAIN_BASE_VERSION = "20260727_11"
 SOAK_BASE_VERSION = "20260727_12"
 RUNTIME_APP_ACL_BASE_VERSION = "20260727_13"
 FILL_SNAPSHOT_REPEAT_BASE_VERSION = "20260727_14"
-SCHEMA_VERSION = "20260728_15"
+RECONCILIATION_BATCH_FRESHNESS_BASE_VERSION = "20260728_15"
+SCHEMA_VERSION = "20260728_16"
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 ATTESTATION_PROOF_KEY_ENV = "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"
 
@@ -3642,8 +3643,6 @@ def _add_okx_demo_reconciliation(connection: Connection) -> None:
                        ) <> 1
                        OR v_run.authoritative_observed_at IS NULL
                        OR v_run.authoritative_observed_at
-                            < CURRENT_TIMESTAMP - INTERVAL '2 minutes'
-                       OR v_run.authoritative_observed_at
                             > CURRENT_TIMESTAMP + INTERVAL '5 seconds'
                     THEN
                         RAISE EXCEPTION
@@ -3679,8 +3678,7 @@ def _add_okx_demo_reconciliation(connection: Connection) -> None:
                        OR v_batch.completed_at
                             < CURRENT_TIMESTAMP - INTERVAL '2 minutes'
                        OR v_batch.completed_at > CURRENT_TIMESTAMP
-                       OR v_batch.observed_at
-                            IS DISTINCT FROM v_run.authoritative_observed_at
+                       OR v_batch.observed_at > v_batch.completed_at
                        OR NOT EXISTS (
                            SELECT 1
                            FROM __SCHEMA__.okx_demo_account_snapshots AS account
@@ -4320,6 +4318,7 @@ def upgrade_database(engine: Engine) -> str:
                 SOAK_BASE_VERSION,
                 RUNTIME_APP_ACL_BASE_VERSION,
                 FILL_SNAPSHOT_REPEAT_BASE_VERSION,
+                RECONCILIATION_BATCH_FRESHNESS_BASE_VERSION,
             }
             if current_version in supported_upgrade_versions:
                 connection.execute(
@@ -4335,6 +4334,19 @@ def upgrade_database(engine: Engine) -> str:
                     raise SchemaMigrationBlocked(
                         "Fill snapshot repeat upgrade does not match ORM metadata: "
                         + "; ".join(problems)
+                    )
+                connection.execute(
+                    text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+                    {"version": SCHEMA_VERSION},
+                )
+                return SCHEMA_VERSION
+            if current_version == RECONCILIATION_BATCH_FRESHNESS_BASE_VERSION:
+                _add_okx_demo_reconciliation(connection)
+                problems = schema_problems(connection)
+                if problems:
+                    raise SchemaMigrationBlocked(
+                        "Reconciliation batch freshness upgrade does not match "
+                        "ORM metadata: " + "; ".join(problems)
                     )
                 connection.execute(
                     text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),

@@ -1188,10 +1188,11 @@ def test_postgresql_runtime_cannot_bypass_controlled_gate_or_run_provenance(
             with postgres_writer_engine.begin() as connection:
                 connection.execute(text("SET LOCAL ROLE freqtrade"))
                 connection.execute(text(statement))
+    historical_business_time = now - timedelta(days=1)
     position_event = {
         **_postgres_position_event("0", 1),
         "source": "REST",
-        "observed_at": now.isoformat(),
+        "observed_at": historical_business_time.isoformat(),
         "received_at": now.isoformat(),
     }
     account_event = {
@@ -1202,7 +1203,7 @@ def test_postgresql_runtime_cannot_bypass_controlled_gate_or_run_provenance(
         "entity_key": "account",
         "source_sequence": 2,
         "stream_generation": 1,
-        "observed_at": now.isoformat(),
+        "observed_at": historical_business_time.isoformat(),
         "received_at": now.isoformat(),
         "payload": {
             "accountFingerprint": "a" * 64,
@@ -1243,6 +1244,7 @@ def test_postgresql_runtime_cannot_bypass_controlled_gate_or_run_provenance(
         assert state.status == "RECONCILED"
         assert state.opening_frozen is False
         assert ready_run.artifact_status == "READY"
+        assert ready_run.authoritative_observed_at == historical_business_time
         ready_digest = ready_run.artifact_sha256
 
     for statement in (

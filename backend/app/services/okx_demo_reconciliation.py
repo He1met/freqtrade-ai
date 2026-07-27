@@ -432,11 +432,6 @@ class OkxDemoReconciliationService:
             findings.append(
                 _finding("COMPLETE_BASELINE_MISSING_OR_STALE", "BLOCKED", "all")
             )
-        elif now - _aware(latest_event_at) > stale_after:
-            status = "STALE"
-            findings.append(
-                _finding("AUTHORITATIVE_STATE_STALE", "BLOCKED", "all")
-            )
         else:
             self._compare_orders(
                 latest_orders,
@@ -509,8 +504,11 @@ class OkxDemoReconciliationService:
             authoritative_positions=latest_positions,
             now=now,
             expires_at=(
-                min(now + stale_after, _aware(latest_event_at) + stale_after)
-                if latest_event_at is not None
+                min(
+                    now + stale_after,
+                    _aware(complete_batch.completed_at) + stale_after,
+                )
+                if complete_batch is not None
                 else now
             ),
             complete_snapshot=complete_batch is not None,
