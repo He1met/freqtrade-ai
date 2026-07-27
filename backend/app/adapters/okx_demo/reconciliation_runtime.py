@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 from uuid import uuid4
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.adapters.okx_demo.read_adapter import OkxDemoReadClient
@@ -19,6 +20,11 @@ from app.services.okx_demo_reconciliation import (
     RECOVERY_STREAMS,
     SCHEMA_VERSION,
 )
+from app.models.okx_demo_reconciliation import (
+    OkxDemoReconciliationState,
+    OkxDemoRecoveryGrant,
+)
+from app.models.order_writer import OkxOrderWriteAttempt
 
 
 PAGE_LIMIT = 100
@@ -82,9 +88,80 @@ class OkxDemoRuntimeReconciliationAdapter:
         return self._full_rest_reconciliation(read_client=read_client, db=db)
 
     def run_cycle(self, *, read_client, writer, db: Session) -> None:
-        # Recovery writes require an explicit #448 recovery grant.  The runtime
-        # never guesses one or bypasses an expired risk approval.
-        return None
+        del read_client
+        pending = list(
+            db.scalars(
+                select(OkxOrderWriteAttempt)
+                .where(
+                    OkxOrderWriteAttempt.execution_target_id == "OKX_DEMO",
+                    OkxOrderWriteAttempt.recovery_grant_database_id.is_not(
+                        None
+                    ),
+                    OkxOrderWriteAttempt.state.in_(
+                        (
+                            "PREPARED",
+                            "ACKNOWLEDGED",
+                            "RECOVERY_REQUIRED",
+                            "RESIDUAL_CLOSE_REQUIRED",
+                        )
+                    ),
+                )
+                .order_by(OkxOrderWriteAttempt.id)
+            )
+        )
+        if len(pending) > 1:
+            raise OkxDemoReconciliationBlocked(
+                "multiple unresolved runtime recovery attempts exist"
+            )
+        if pending:
+            attempt = pending[0]
+            if attempt.operation == "CANCEL":
+                writer.recovery_cancel(
+                    recovery_grant_database_id=(
+                        attempt.recovery_grant_database_id
+                    )
+                )
+            elif attempt.operation == "CLOSE":
+                writer.recovery_reduce_only(
+                    recovery_grant_database_id=(
+                        attempt.recovery_grant_database_id
+                    )
+                )
+            else:
+                raise OkxDemoReconciliationBlocked(
+                    "unresolved runtime recovery operation is unsupported"
+                )
+            return
+        grants = list(
+            db.scalars(
+                select(OkxDemoRecoveryGrant)
+                .join(
+                    OkxDemoReconciliationState,
+                    OkxDemoReconciliationState.execution_target_id
+                    == OkxDemoRecoveryGrant.execution_target_id,
+                )
+                .where(
+                    OkxDemoRecoveryGrant.execution_target_id == "OKX_DEMO",
+                    OkxDemoRecoveryGrant.status == "ACTIVE",
+                    OkxDemoRecoveryGrant.reconciliation_run_id
+                    == OkxDemoReconciliationState.last_reconciliation_run_id,
+                )
+                .order_by(OkxDemoRecoveryGrant.database_id)
+            )
+        )
+        for grant in grants:
+            if grant.action == "CANCEL":
+                writer.recovery_cancel(
+                    recovery_grant_database_id=grant.database_id
+                )
+            elif grant.action == "REDUCE_ONLY":
+                writer.recovery_reduce_only(
+                    recovery_grant_database_id=grant.database_id
+                )
+            else:
+                raise OkxDemoReconciliationBlocked(
+                    "runtime recovery grant action is unsupported"
+                )
 
     def close(self) -> None:
         self._closed = True
