@@ -21,6 +21,7 @@ from app.adapters.okx_demo.order_writer import (
     OkxDemoOrderWriter,
     WriterResult,
 )
+from app.adapters.okx_demo.credentials import OkxDemoCredentialsUnavailable
 from app.adapters.okx_demo.read_adapter import OkxDemoReadClient
 from app.adapters.okx_demo.server_factory import create_okx_demo_server_session
 from app.adapters.okx_demo.write_semantics import OkxDemoWriteBlocked
@@ -29,6 +30,7 @@ from app.adapters.okx_demo.writer_models import (
     OrderSubmissionAuthorization,
     approved_execution_view,
 )
+from app.services.okx_demo_reconciliation import OkxDemoReconciliationBlocked
 
 
 RECONCILIATION_MODULE = "app.adapters.okx_demo.reconciliation_runtime"
@@ -476,9 +478,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             runtime_path=_runtime_path(args.runtime_dir),
         )
         return 0
-    except OkxDemoRuntimeBlocked:
+    except (
+        OkxDemoRuntimeBlocked,
+        OkxDemoReconciliationBlocked,
+        OkxDemoWriteBlocked,
+        OkxDemoCredentialsUnavailable,
+    ) as exc:
+        # This process writes to a mode-0600 runtime log.  Known domain errors
+        # are deliberately safe to retain there and make a fail-closed startup
+        # diagnosable without printing credentials or request signatures.
+        print("OKX_DEMO runtime blocked: {}".format(exc), file=sys.stderr)
         return 2
     except Exception:
+        print(
+            "OKX_DEMO runtime failed unexpectedly; inspect the private runtime log",
+            file=sys.stderr,
+        )
         return 1
 
 

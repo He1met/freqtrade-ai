@@ -253,6 +253,36 @@ def test_real_attested_factory_result_builds_writer_bridge(monkeypatch) -> None:
     assert type(transport) is UrllibOkxDemoWriteTransport
 
 
+def test_attested_read_client_exposes_complete_reconciliation_pagination(
+    monkeypatch,
+) -> None:
+    account = attested_account()
+    environment = ephemeral_environment(account)
+    install_attestation(monkeypatch, account)
+    instance = create_attested_okx_demo_read_adapter(environment)
+    captured = []
+
+    def record(name):
+        def method(inst_id=None, *, after=None, before=None, limit=100):
+            captured.append((name, inst_id, after, before, limit))
+            return name
+
+        return method
+
+    monkeypatch.setattr(instance._engine, "pending_orders", record("pending"))
+    monkeypatch.setattr(instance._engine, "orders_history", record("history"))
+    monkeypatch.setattr(instance._engine, "fills_history", record("fills"))
+
+    assert instance.pending_orders("BTC-USDT-SWAP", after="20", limit=50) == "pending"
+    assert instance.orders_history(before="10") == "history"
+    assert instance.fills_history("ETH-USDT-SWAP", after="9", before="8") == "fills"
+    assert captured == [
+        ("pending", "BTC-USDT-SWAP", "20", None, 50),
+        ("history", None, None, "10", 100),
+        ("fills", "ETH-USDT-SWAP", "9", "8", 100),
+    ]
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
