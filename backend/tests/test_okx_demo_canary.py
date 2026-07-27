@@ -25,7 +25,7 @@ def environment() -> dict[str, str]:
     }
 
 
-def account_payload() -> dict:
+def account_payload(position_mode: str = "net_mode") -> dict:
     return {
         "code": "0",
         "data": [
@@ -33,7 +33,7 @@ def account_payload() -> dict:
                 "uid": "private-uid",
                 "mainUid": "private-main-uid",
                 "acctLv": "2",
-                "posMode": "net_mode",
+                "posMode": position_mode,
                 "perm": "read_only,trade",
             }
         ],
@@ -240,6 +240,28 @@ def test_successful_canary_is_sanitized_and_persisted(tmp_path: Path) -> None:
     ):
         assert forbidden not in rendered
     assert transport.script == []
+
+
+def test_dual_side_account_blocks_legacy_net_canary_before_any_write(tmp_path: Path) -> None:
+    account = account_payload("long_short_mode")
+    environment_values = environment()
+    environment_values[canary.OKX_DEMO_ACCOUNT_FINGERPRINT_ENV] = account_fingerprint(
+        account["data"][0]
+    )
+    transport = ScriptedTransport(
+        [("GET", "/api/v5/account/config", account)]
+    )
+
+    result = canary.run_canary(
+        environment_values,
+        transport=transport,
+        cl_ord_id=CLIENT_ORDER_ID,
+        artifact_dir=tmp_path,
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason_code"] == "DUAL_SIDE_CANARY_NOT_IMPLEMENTED"
+    assert all(call["method"] != "POST" for call in transport.calls)
 
 
 def test_missing_explicit_authorization_is_zero_network_and_zero_artifact(
