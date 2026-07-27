@@ -53,6 +53,7 @@ def test_request_is_signed_for_fixed_demo_account_config_contract() -> None:
     assert request.method == "GET"
     headers = {key.lower(): value for key, value in request.header_items()}
     assert headers["x-simulated-trading"] == "1"
+    assert headers["user-agent"] == preflight.PREFLIGHT_USER_AGENT
     assert headers["ok-access-key"] == "test-api-key"
     assert headers["ok-access-passphrase"] == "test-passphrase"
     assert headers["ok-access-timestamp"] == "2026-07-27T01:02:03.004Z"
