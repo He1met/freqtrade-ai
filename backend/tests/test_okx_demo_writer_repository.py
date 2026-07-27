@@ -24,6 +24,7 @@ from app.models.execution_lineage import (
     TradeIntent,
 )
 from app.models.order_writer import OkxOrderWriteAttempt, OkxOrderWriterLease
+from app.models.okx_demo_reconciliation import OkxDemoReconciliationState
 from app.repositories.execution_lineage import ensure_execution_scope_catalog
 from app.services.risk_chain import (
     _issue_attested_session_capability,
@@ -319,6 +320,65 @@ def test_sqlite_claim_is_approval_backed_and_transitions_are_committed(db) -> No
     assert persisted.state == "RECONCILED"
     assert persisted.attempt_count == 1
     assert persisted.safe_response_snapshot == {"sCode": "0", "state": "live"}
+
+
+def test_reconciliation_drift_freezes_place_but_allows_cancel(db) -> None:
+    session, approval_id = db
+    store = SqlAlchemyOrderWriterStore(session, now_provider=lambda: NOW)
+    acquire(
+        store,
+        session,
+        approval_id,
+        writer_instance_id="WriterInstance01",
+        now=NOW,
+        expires_at=NOW + timedelta(minutes=1),
+    )
+    command = claimed_command(store, approval_id)
+    order, prepared = store.prepare_place(
+        command,
+        operation="PLACE",
+        operation_id=command.client_order_id,
+        request_digest="a" * 64,
+        safe_request_snapshot=command.request_body,
+    )
+    acknowledged = store.transition(
+        prepared,
+        event=WriteEvent.ACKNOWLEDGE,
+        exchange_order_id="exchange-order-freeze",
+    )
+    store.transition(
+        acknowledged,
+        event=WriteEvent.RECONCILE,
+        order_state="live",
+    )
+    session.add(
+        OkxDemoReconciliationState(
+            execution_target_id="OKX_DEMO",
+            status="DRIFTED",
+            opening_frozen=True,
+            block_reason="POSITION_DRIFT",
+        )
+    )
+    session.commit()
+    with pytest.raises(OkxDemoWriteBlocked):
+        store.prepare_place(
+            command,
+            operation="PLACE",
+            operation_id="SecondOpeningRisk01",
+            request_digest="b" * 64,
+            safe_request_snapshot=command.request_body,
+        )
+    canceled = store.prepare_existing(
+        order,
+        operation="CANCEL",
+        operation_id=order.client_order_id,
+        request_digest="c" * 64,
+        safe_request_snapshot={
+            "instId": order.instrument_id,
+            "clOrdId": order.client_order_id,
+        },
+    )
+    assert canceled.operation == "CANCEL"
 
 
 def test_consumed_approval_cannot_create_a_second_placement(db) -> None:

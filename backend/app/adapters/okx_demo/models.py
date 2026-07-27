@@ -219,3 +219,17 @@ class OrderQuery(StableModel):
     fee_currency: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+
+
+class FillQuery(StableModel):
+    fill_id: str
+    order_id: str
+    inst_id: str
+    price: Decimal
+    size: Decimal
+    fee: Optional[Decimal] = None
+    timestamp: datetime
+
+    @field_serializer("price", "size", "fee")
+    def serialize_fill_decimal(self, value: Optional[Decimal]) -> Optional[str]:
+        return format(value, "f") if value is not None else None

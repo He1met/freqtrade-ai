@@ -31,6 +31,26 @@ EXECUTION_SCOPE_CATALOG = (
 def ensure_execution_scope_catalog(db: Session) -> None:
     """Seed only immutable scope identities; never reclassify persisted records."""
 
+    if db.get_bind().dialect.name == "postgresql":
+        rows = db.execute(
+            select(
+                ExecutionScope.scope_id,
+                ExecutionScope.scope_kind,
+                ExecutionScope.exchange_capable,
+                ExecutionScope.executable,
+                ExecutionScope.exchange_writes,
+                ExecutionScope.order_submission_authorized,
+            ).where(
+                ExecutionScope.scope_id.in_(
+                    [item[0] for item in EXECUTION_SCOPE_CATALOG]
+                )
+            )
+        ).all()
+        if set(tuple(row) for row in rows) != set(EXECUTION_SCOPE_CATALOG):
+            raise ValueError(
+                "PostgreSQL execution scope catalog is missing or altered"
+            )
+        return
     for (
         scope_id,
         scope_kind,

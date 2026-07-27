@@ -220,6 +220,14 @@ def test_incremental_worker_migration_preserves_existing_runtime_rows(postgres_e
             "execution_manifests",
             "okx_order_write_attempts",
             "okx_order_writer_leases",
+            "okx_demo_account_snapshots",
+            "okx_demo_exchange_events",
+            "okx_demo_fill_snapshots",
+            "okx_demo_order_snapshots",
+            "okx_demo_position_snapshots",
+            "okx_demo_reconciliation_states",
+            "okx_demo_recovery_batches",
+            "okx_demo_recovery_grants",
             "reconciliation_runs",
             "research_job_attempts",
             "research_jobs",
@@ -419,6 +427,29 @@ def test_postgresql_two_workers_claim_only_one_global_job(postgres_engine) -> No
 
 def test_target_lineage_migration_marks_existing_rows_unknown_legacy(postgres_engine) -> None:
     Base.metadata.create_all(postgres_engine)
+    with postgres_engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                INSERT INTO execution_scopes (
+                    scope_id, scope_kind, exchange_capable, executable,
+                    exchange_writes, order_submission_authorized
+                ) VALUES
+                    (
+                        'OKX_DEMO', 'EXCHANGE_TARGET',
+                        TRUE, FALSE, FALSE, FALSE
+                    ),
+                    (
+                        'LOCAL_DRY_RUN', 'NON_EXCHANGE',
+                        FALSE, TRUE, FALSE, FALSE
+                    ),
+                    (
+                        'UNKNOWN_LEGACY', 'LEGACY',
+                        FALSE, FALSE, FALSE, FALSE
+                    )
+                """
+            )
+        )
     session_factory = create_session_factory(postgres_engine)
     with session_factory() as db:
         strategy_repository = StrategyRepository(db)
@@ -474,6 +505,7 @@ def test_target_lineage_migration_marks_existing_rows_unknown_legacy(postgres_en
                     "DROP COLUMN execution_scope_id CASCADE"
                 )
             )
+        connection.execute(text("DELETE FROM execution_scopes"))
 
     assert upgrade_database(postgres_engine) == SCHEMA_VERSION
     assert verify_schema(postgres_engine).ready is True

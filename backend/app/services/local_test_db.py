@@ -27,8 +27,11 @@ from app.models import (
     StrategyVersion,
 )
 from app.schemas.data_source import DataSourceTrace, fixture_source, unknown_source
-from app.models.execution_lineage import LOCAL_DRY_RUN_SCOPE_ID
-from app.repositories.execution_lineage import ensure_execution_scope_catalog
+from app.models.execution_lineage import ExecutionScope, LOCAL_DRY_RUN_SCOPE_ID
+from app.repositories.execution_lineage import (
+    EXECUTION_SCOPE_CATALOG,
+    ensure_execution_scope_catalog,
+)
 
 
 SAFE_ENVIRONMENT_LABELS = {
@@ -256,6 +259,31 @@ class Phase8LocalTestDbService:
         Base.metadata.drop_all(self.engine)
         Base.metadata.create_all(self.engine)
         with self.session_factory() as session:
+            if self.engine.dialect.name == "postgresql":
+                # Runtime repositories deliberately refuse to repair a missing
+                # or altered PostgreSQL catalog. This destructive reset owns an
+                # isolated test database, so seed the exact immutable catalog
+                # once before any fixture repository is allowed to use it.
+                for (
+                    scope_id,
+                    scope_kind,
+                    exchange_capable,
+                    executable,
+                    exchange_writes,
+                    order_submission_authorized,
+                ) in EXECUTION_SCOPE_CATALOG:
+                    session.add(
+                        ExecutionScope(
+                            scope_id=scope_id,
+                            scope_kind=scope_kind,
+                            exchange_capable=exchange_capable,
+                            executable=executable,
+                            exchange_writes=exchange_writes,
+                            order_submission_authorized=order_submission_authorized,
+                        )
+                    )
+                session.flush()
+                ensure_execution_scope_catalog(session)
             batch = self._create_batch(session, "reset", "reset")
             self._record_event(
                 session,

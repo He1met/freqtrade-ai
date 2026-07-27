@@ -35,7 +35,8 @@ ATTESTED_SESSION_BASE_VERSION = "20260727_05"
 HMAC_ATTESTATION_BASE_VERSION = "20260727_06"
 ATTESTATION_ACL_BASE_VERSION = "20260727_07"
 ORDER_WRITER_BASE_VERSION = "20260727_08"
-SCHEMA_VERSION = "20260727_09"
+RECONCILIATION_BASE_VERSION = "20260727_09"
+SCHEMA_VERSION = "20260727_10"
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 ATTESTATION_PROOF_KEY_ENV = "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"
 
@@ -403,6 +404,27 @@ CRITICAL_CHECK_DEFINITIONS = {
     "exchange_fills_okx_demo_target_check",
     "exchange_positions_okx_demo_target_check",
     "reconciliation_runs_okx_demo_target_check",
+    "reconciliation_runs_status_check",
+    "reconciliation_runs_artifact_status_check",
+    "okx_demo_exchange_events_target_check",
+    "okx_demo_exchange_events_source_check",
+    "okx_demo_exchange_events_ws_sequence_check",
+    "okx_demo_exchange_events_kind_check",
+    "okx_demo_exchange_events_digest_check",
+    "okx_demo_order_snapshots_target_check",
+    "okx_demo_order_snapshots_status_check",
+    "okx_demo_fill_snapshots_target_check",
+    "okx_demo_position_snapshots_target_check",
+    "okx_demo_account_snapshots_target_check",
+    "okx_demo_reconciliation_states_target_check",
+    "okx_demo_reconciliation_states_status_check",
+    "okx_demo_recovery_batches_target_check",
+    "okx_demo_recovery_batches_complete_check",
+    "okx_demo_recovery_batches_time_check",
+    "okx_demo_recovery_grants_target_check",
+    "okx_demo_recovery_grants_action_check",
+    "okx_demo_recovery_grants_status_check",
+    "okx_demo_recovery_grants_digest_quantity_check",
     "execution_manifests_authorization_check",
 }
 
@@ -599,7 +621,33 @@ def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
             "okx_demo_trusted_snapshots",
             "trustedsnapshotsareimmutable",
         ),
+        "okx_demo_recovery_grants_guard": (
+            "beforeupdateon",
+            "invalidrecoverygranttransition",
+            "old.grant_digestisdistinctfromnew.grant_digest",
+            "old.status<>'active'",
+        ),
+        "exchange_orders_guard": (
+            "beforeinsertorupdateon",
+            "invalidexchangeordercreation",
+            "invalidexchangeordertransition",
+            "old.request_snapshot::jsonb",
+            "old.exchange_order_idisnotnull",
+        ),
     }
+    for table_name in (
+        "okx_demo_exchange_events",
+        "okx_demo_order_snapshots",
+        "okx_demo_fill_snapshots",
+        "okx_demo_position_snapshots",
+        "okx_demo_account_snapshots",
+        "okx_demo_recovery_batches",
+    ):
+        expected_trigger_fragments[table_name + "_immutable"] = (
+            "beforedeleteorupdateon",
+            table_name,
+            "reconciliationevidenceisimmutable",
+        )
     for trigger_name, fragments in expected_trigger_fragments.items():
         definitions = trigger_definitions.get(trigger_name)
         if definitions is None:
@@ -1048,6 +1096,24 @@ def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
                                  'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE',
                                  'REFERENCES', 'TRIGGER', 'MAINTAIN'
                              )
+                             OR (
+                                 relation.relname IN (
+                                     'execution_scopes',
+                                     'trade_intents',
+                                     'risk_decisions',
+                                     'approved_executions',
+                                     'exchange_orders',
+                                     'exchange_fills',
+                                     'exchange_positions'
+                                 )
+                                 AND acl.grantee NOT IN (
+                                     0,
+                                     relation.relowner,
+                                     (SELECT oid FROM pg_roles
+                                      WHERE rolname = 'freqtrade')
+                                 )
+                                 AND acl.privilege_type = 'SELECT'
+                             )
                        )
                 FROM pg_class AS relation
                 JOIN pg_namespace AS namespace
@@ -1055,8 +1121,24 @@ def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
                 JOIN pg_roles AS owner ON owner.oid = relation.relowner
                 WHERE namespace.nspname = :schema_name
                   AND relation.relname IN (
+                      'execution_scopes',
+                      'trade_intents',
+                      'risk_decisions',
+                      'approved_executions',
+                      'exchange_orders',
+                      'exchange_fills',
+                      'exchange_positions',
                       'okx_order_writer_leases',
-                      'okx_order_write_attempts'
+                      'okx_order_write_attempts',
+                      'reconciliation_runs',
+                      'okx_demo_exchange_events',
+                      'okx_demo_order_snapshots',
+                      'okx_demo_fill_snapshots',
+                      'okx_demo_position_snapshots',
+                      'okx_demo_account_snapshots',
+                      'okx_demo_reconciliation_states',
+                      'okx_demo_recovery_batches',
+                      'okx_demo_recovery_grants'
                   )
                 ORDER BY relation.relname
                 """
@@ -1071,8 +1153,24 @@ def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
             for row in writer_table_rows
         }
         for table_name in (
+            "execution_scopes",
+            "trade_intents",
+            "risk_decisions",
+            "approved_executions",
+            "exchange_orders",
+            "exchange_fills",
+            "exchange_positions",
             "okx_order_writer_leases",
             "okx_order_write_attempts",
+            "reconciliation_runs",
+            "okx_demo_exchange_events",
+            "okx_demo_order_snapshots",
+            "okx_demo_fill_snapshots",
+            "okx_demo_position_snapshots",
+            "okx_demo_account_snapshots",
+            "okx_demo_reconciliation_states",
+            "okx_demo_recovery_batches",
+            "okx_demo_recovery_grants",
         ):
             (
                 owner,
@@ -1093,7 +1191,24 @@ def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
                         owner or "<missing>",
                     )
                 )
-            if not (can_select and can_insert and can_update):
+            update_required = table_name in {
+                "okx_order_writer_leases",
+                "okx_order_write_attempts",
+            }
+            insert_required = table_name not in {
+                "execution_scopes",
+                "trade_intents",
+                "risk_decisions",
+                "approved_executions",
+                "exchange_orders",
+                "exchange_fills",
+                "exchange_positions",
+            }
+            if not (
+                can_select
+                and can_insert is insert_required
+                and can_update is update_required
+            ):
                 problems.append(
                     "runtime writer DML privilege missing: {}".format(
                         table_name
@@ -1131,6 +1246,40 @@ def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
                              AND acl.privilege_type IN (
                                  'INSERT', 'UPDATE', 'REFERENCES'
                              )
+                             AND NOT (
+                                 relation.relname =
+                                     'okx_demo_recovery_grants'
+                                 AND attribute.attname IN (
+                                     'status', 'consumed_at'
+                                 )
+                                 AND acl.privilege_type = 'UPDATE'
+                             )
+                             AND NOT (
+                                 relation.relname = 'exchange_orders'
+                                 AND (
+                                     (
+                                         attribute.attname IN (
+                                             'execution_target_id',
+                                             'trade_intent_id',
+                                             'client_order_id',
+                                             'exchange_order_id',
+                                             'status',
+                                             'request_snapshot',
+                                             'response_snapshot'
+                                         )
+                                         AND acl.privilege_type = 'INSERT'
+                                     )
+                                     OR (
+                                         attribute.attname IN (
+                                             'exchange_order_id',
+                                             'status',
+                                             'response_snapshot',
+                                             'updated_at'
+                                         )
+                                         AND acl.privilege_type = 'UPDATE'
+                                     )
+                                 )
+                             )
                        ),
                        EXISTS (
                            SELECT 1
@@ -1162,8 +1311,24 @@ def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
                  AND NOT attribute.attisdropped
                 WHERE namespace.nspname = :schema_name
                   AND relation.relname IN (
+                      'execution_scopes',
+                      'trade_intents',
+                      'risk_decisions',
+                      'approved_executions',
+                      'exchange_orders',
+                      'exchange_fills',
+                      'exchange_positions',
                       'okx_order_writer_leases',
-                      'okx_order_write_attempts'
+                      'okx_order_write_attempts',
+                      'reconciliation_runs',
+                      'okx_demo_exchange_events',
+                      'okx_demo_order_snapshots',
+                      'okx_demo_fill_snapshots',
+                      'okx_demo_position_snapshots',
+                      'okx_demo_account_snapshots',
+                      'okx_demo_reconciliation_states',
+                      'okx_demo_recovery_batches',
+                      'okx_demo_recovery_grants'
                   )
                 """
             ),
@@ -1195,6 +1360,36 @@ def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
                     "unexpected role has writer column DML: {}.{}".format(
                         table_name,
                         column_name,
+                    )
+                )
+        required_exchange_order_column_privileges = {
+            ("execution_target_id", "INSERT"),
+            ("trade_intent_id", "INSERT"),
+            ("client_order_id", "INSERT"),
+            ("exchange_order_id", "INSERT"),
+            ("status", "INSERT"),
+            ("request_snapshot", "INSERT"),
+            ("response_snapshot", "INSERT"),
+            ("exchange_order_id", "UPDATE"),
+            ("status", "UPDATE"),
+            ("response_snapshot", "UPDATE"),
+            ("updated_at", "UPDATE"),
+        }
+        for column_name, privilege in sorted(
+            required_exchange_order_column_privileges
+        ):
+            if not bind.execute(
+                text(
+                    "SELECT has_column_privilege("
+                    "'freqtrade', 'exchange_orders', :column_name, "
+                    ":privilege)"
+                ),
+                {"column_name": column_name, "privilege": privilege},
+            ).scalar_one():
+                problems.append(
+                    "exchange order column privilege missing: {} {}".format(
+                        column_name,
+                        privilege,
                     )
                 )
         writer_sequence = bind.execute(
@@ -1274,6 +1469,103 @@ def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
             or sequence_unexpected
         ):
             problems.append("writer attempt sequence ACL mismatch")
+        reconciliation_sequence_names = {
+            "exchange_orders_id_seq",
+            "reconciliation_runs_id_seq",
+            "okx_demo_exchange_events_database_id_seq",
+            "okx_demo_order_snapshots_database_id_seq",
+            "okx_demo_fill_snapshots_database_id_seq",
+            "okx_demo_position_snapshots_database_id_seq",
+            "okx_demo_account_snapshots_database_id_seq",
+            "okx_demo_reconciliation_states_database_id_seq",
+            "okx_demo_recovery_batches_database_id_seq",
+            "okx_demo_recovery_grants_database_id_seq",
+        }
+        reconciliation_sequences = bind.execute(
+            text(
+                """
+                SELECT relation.relname, owner.rolname,
+                       has_sequence_privilege(
+                           'freqtrade', relation.oid, 'USAGE'
+                       ),
+                       has_sequence_privilege(
+                           'freqtrade', relation.oid, 'SELECT'
+                       ),
+                       has_sequence_privilege(
+                           'freqtrade', relation.oid, 'UPDATE'
+                       ),
+                       EXISTS (
+                           SELECT 1
+                           FROM aclexplode(
+                               COALESCE(
+                                   relation.relacl,
+                                   acldefault('S', relation.relowner)
+                               )
+                           ) AS acl
+                           WHERE acl.grantee = 0
+                       ),
+                       EXISTS (
+                           SELECT 1
+                           FROM aclexplode(
+                               COALESCE(
+                                   relation.relacl,
+                                   acldefault('S', relation.relowner)
+                               )
+                           ) AS acl
+                           WHERE acl.grantee NOT IN (
+                               0,
+                               relation.relowner,
+                               (SELECT oid FROM pg_roles
+                                WHERE rolname = 'freqtrade')
+                           )
+                       )
+                FROM pg_class AS relation
+                JOIN pg_namespace AS namespace
+                  ON namespace.oid = relation.relnamespace
+                JOIN pg_roles AS owner ON owner.oid = relation.relowner
+                WHERE namespace.nspname = :schema_name
+                  AND relation.relkind = 'S'
+                  AND relation.relname::text =
+                      ANY(CAST(:sequence_names AS text[]))
+                """
+            ),
+            {
+                "schema_name": schema_name,
+                "sequence_names": sorted(reconciliation_sequence_names),
+            },
+        ).all()
+        reconciliation_sequence_acl = {
+            name: (
+                owner,
+                usage,
+                can_select,
+                can_update,
+                public_privilege,
+                unexpected_privilege,
+            )
+            for (
+                name,
+                owner,
+                usage,
+                can_select,
+                can_update,
+                public_privilege,
+                unexpected_privilege,
+            )
+            in reconciliation_sequences
+        }
+        for expected_name in sorted(reconciliation_sequence_names):
+            if reconciliation_sequence_acl.get(expected_name) != (
+                "freqtrade_ai_attestor",
+                True,
+                True,
+                False,
+                False,
+                False,
+            ):
+                problems.append(
+                    "reconciliation sequence ACL mismatch: " + expected_name
+                )
         secured_functions = bind.execute(
             text(
                 """
@@ -1302,7 +1594,10 @@ def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
                   AND function.proname IN (
                       'write_okx_demo_attested_session',
                       'write_okx_demo_trusted_snapshot',
-                      'revoke_okx_demo_attested_session'
+                      'revoke_okx_demo_attested_session',
+                      'finalize_okx_demo_reconciliation_run',
+                      'apply_okx_demo_reconciliation_gate',
+                      'freeze_okx_demo_reconciliation_gate'
                   )
                 """
             ),
@@ -1366,6 +1661,49 @@ def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
             if actual_hash != expected_hash:
                 problems.append(
                     "attestation function definition mismatch: {}".format(
+                        function_name
+                    )
+                )
+        reconciliation_function_fragments = {
+            "finalize_okx_demo_reconciliation_run": (
+                "artifact_status <> 'PENDING'",
+                "invalid reconciliation run finalization",
+                "artifact_status = 'READY'",
+            ),
+            "apply_okx_demo_reconciliation_gate": (
+                "artifact_status <> 'READY'",
+                "v_run.database_ids::jsonb -> 'reconciliation_run'",
+                "v_batch.complete_streams::jsonb IS DISTINCT FROM",
+                "v_batch.high_watermarks::jsonb",
+                "opening_frozen = NOT v_unfrozen",
+            ),
+            "freeze_okx_demo_reconciliation_gate": (
+                "p_status NOT IN ('STALE', 'UNKNOWN')",
+                "opening_frozen = TRUE",
+                "invalid reconciliation freeze transition",
+            ),
+        }
+        for function_name, fragments in reconciliation_function_fragments.items():
+            (
+                owner,
+                security_definer,
+                config,
+                runtime_can_execute,
+                public_can_execute,
+                source,
+            ) = function_security.get(
+                function_name, (None, False, [], False, True, "")
+            )
+            if (
+                owner != "freqtrade_ai_attestor"
+                or security_definer is not True
+                or "search_path=pg_catalog" not in config
+                or runtime_can_execute is not True
+                or public_can_execute is True
+                or any(fragment not in source for fragment in fragments)
+            ):
+                problems.append(
+                    "reconciliation function boundary mismatch: {}".format(
                         function_name
                     )
                 )
@@ -1444,6 +1782,30 @@ def _add_execution_target_lineage(connection: Connection) -> None:
             """
         )
     )
+    actual_scope_catalog = {
+        tuple(row)
+        for row in connection.execute(
+            text(
+                """
+                SELECT scope_id, scope_kind, exchange_capable, executable,
+                       exchange_writes, order_submission_authorized
+                FROM execution_scopes
+                WHERE scope_id IN (
+                    'OKX_DEMO', 'LOCAL_DRY_RUN', 'UNKNOWN_LEGACY'
+                )
+                """
+            )
+        ).all()
+    }
+    expected_scope_catalog = {
+        ("OKX_DEMO", "EXCHANGE_TARGET", True, False, False, False),
+        ("LOCAL_DRY_RUN", "NON_EXCHANGE", False, True, False, False),
+        ("UNKNOWN_LEGACY", "LEGACY", False, False, False, False),
+    }
+    if actual_scope_catalog != expected_scope_catalog:
+        raise SchemaMigrationBlocked(
+            "Execution scope catalog is missing or contract-mismatched"
+        )
 
     schema_name = connection.execute(text("SELECT current_schema()")).scalar_one()
     table_names = set(inspect(connection).get_table_names(schema=schema_name))
@@ -2666,6 +3028,696 @@ def _add_order_writer(connection: Connection) -> None:
     )
 
 
+def _add_okx_demo_reconciliation(connection: Connection) -> None:
+    """Install the append-only #448 evidence and fail-closed opening gate."""
+
+    schema_name, effective_schemas = connection.execute(
+        text("SELECT current_schema(), current_schemas(false)")
+    ).one()
+    if not schema_name or list(effective_schemas or ()) != [schema_name]:
+        raise SchemaMigrationBlocked(
+            "Reconciliation migration requires exactly one effective schema"
+        )
+    quote = connection.dialect.identifier_preparer.quote
+    quoted_schema = quote(schema_name)
+    # Incremental schemas can predate #448 entirely. Create the lineage parent
+    # before any state/grant child table that references reconciliation_runs.
+    Base.metadata.tables["reconciliation_runs"].create(
+        bind=connection,
+        checkfirst=True,
+    )
+    connection.execute(
+        text(
+            """
+            ALTER TABLE reconciliation_runs
+                ADD COLUMN IF NOT EXISTS database_ids JSONB NOT NULL
+                    DEFAULT '{}'::jsonb,
+                ADD COLUMN IF NOT EXISTS artifact_path TEXT,
+                ADD COLUMN IF NOT EXISTS artifact_sha256 VARCHAR(64),
+                ADD COLUMN IF NOT EXISTS artifact_status VARCHAR(16)
+                    NOT NULL DEFAULT 'PENDING',
+                ADD COLUMN IF NOT EXISTS authoritative_observed_at TIMESTAMPTZ,
+                ADD COLUMN IF NOT EXISTS source_type VARCHAR(32) NOT NULL
+                    DEFAULT 'api_aggregate',
+                ADD COLUMN IF NOT EXISTS core_data BOOLEAN NOT NULL DEFAULT TRUE,
+                DROP CONSTRAINT IF EXISTS reconciliation_runs_status_check;
+            ALTER TABLE reconciliation_runs
+                DROP CONSTRAINT IF EXISTS
+                    reconciliation_runs_artifact_status_check;
+            UPDATE reconciliation_runs
+            SET status = 'UNKNOWN'
+            WHERE status NOT IN (
+                'RECONCILED', 'DRIFTED', 'STALE', 'UNKNOWN', 'RECOVERED'
+            );
+            ALTER TABLE reconciliation_runs
+                ADD CONSTRAINT reconciliation_runs_status_check CHECK (
+                    status IN (
+                        'RECONCILED', 'DRIFTED', 'STALE', 'UNKNOWN', 'RECOVERED'
+                    )
+                ),
+                ADD CONSTRAINT reconciliation_runs_artifact_status_check CHECK (
+                    artifact_status IN ('PENDING', 'READY')
+                );
+            """
+        )
+    )
+    for table_name in (
+        "okx_demo_recovery_batches",
+        "okx_demo_exchange_events",
+        "okx_demo_order_snapshots",
+        "okx_demo_fill_snapshots",
+        "okx_demo_position_snapshots",
+        "okx_demo_account_snapshots",
+        "okx_demo_reconciliation_states",
+        "okx_demo_recovery_grants",
+    ):
+        Base.metadata.tables[table_name].create(bind=connection, checkfirst=True)
+    connection.execute(
+        text(
+            """
+            INSERT INTO execution_scopes (
+                scope_id, scope_kind, exchange_capable, executable,
+                exchange_writes, order_submission_authorized
+            ) VALUES
+                (
+                    'OKX_DEMO', 'EXCHANGE_TARGET',
+                    TRUE, FALSE, FALSE, FALSE
+                ),
+                (
+                    'LOCAL_DRY_RUN', 'NON_EXCHANGE',
+                    FALSE, TRUE, FALSE, FALSE
+                ),
+                (
+                    'UNKNOWN_LEGACY', 'LEGACY',
+                    FALSE, FALSE, FALSE, FALSE
+                )
+            ON CONFLICT (scope_id) DO NOTHING;
+            INSERT INTO okx_demo_reconciliation_states (
+                execution_target_id, status, opening_frozen, block_reason
+            ) VALUES (
+                'OKX_DEMO', 'UNKNOWN', TRUE, 'RECONCILIATION_REQUIRED'
+            )
+            ON CONFLICT (execution_target_id) DO NOTHING
+            """
+        )
+    )
+    actual_scope_catalog = {
+        tuple(row)
+        for row in connection.execute(
+            text(
+                """
+                SELECT scope_id, scope_kind, exchange_capable, executable,
+                       exchange_writes, order_submission_authorized
+                FROM execution_scopes
+                WHERE scope_id IN (
+                    'OKX_DEMO', 'LOCAL_DRY_RUN', 'UNKNOWN_LEGACY'
+                )
+                """
+            )
+        ).all()
+    }
+    expected_scope_catalog = {
+        ("OKX_DEMO", "EXCHANGE_TARGET", True, False, False, False),
+        ("LOCAL_DRY_RUN", "NON_EXCHANGE", False, True, False, False),
+        ("UNKNOWN_LEGACY", "LEGACY", False, False, False, False),
+    }
+    if actual_scope_catalog != expected_scope_catalog:
+        raise SchemaMigrationBlocked(
+            "Execution scope catalog is missing or contract-mismatched"
+        )
+    execution_scopes_table = "{}.{}".format(
+        quoted_schema,
+        quote("execution_scopes"),
+    )
+    connection.execute(
+        text(
+            "ALTER TABLE {} OWNER TO freqtrade_ai_attestor; "
+            "REVOKE ALL ON TABLE {} FROM PUBLIC, freqtrade; "
+            "GRANT SELECT ON TABLE {} TO freqtrade".format(
+                execution_scopes_table,
+                execution_scopes_table,
+                execution_scopes_table,
+            )
+        )
+    )
+    for projection_table_name in (
+        "exchange_orders",
+        "exchange_fills",
+        "exchange_positions",
+    ):
+        projection_table = "{}.{}".format(
+            quoted_schema,
+            quote(projection_table_name),
+        )
+        connection.execute(
+            text(
+                "ALTER TABLE {} OWNER TO freqtrade_ai_attestor; "
+                "REVOKE ALL ON TABLE {} FROM PUBLIC, freqtrade; "
+                "GRANT SELECT ON TABLE {} TO freqtrade".format(
+                    projection_table,
+                    projection_table,
+                    projection_table,
+                )
+            )
+        )
+        if projection_table_name == "exchange_orders":
+            connection.execute(
+                text(
+                    "GRANT INSERT (execution_target_id, trade_intent_id, "
+                    "client_order_id, exchange_order_id, status, request_snapshot, "
+                    "response_snapshot) ON {} TO freqtrade; "
+                    "GRANT UPDATE (exchange_order_id, status, "
+                    "response_snapshot, updated_at) ON {} TO freqtrade".format(
+                        projection_table,
+                        projection_table,
+                    )
+                )
+            )
+    for lineage_table_name in (
+        "trade_intents",
+        "risk_decisions",
+        "approved_executions",
+    ):
+        lineage_table = "{}.{}".format(
+            quoted_schema,
+            quote(lineage_table_name),
+        )
+        connection.execute(
+            text(
+                "ALTER TABLE {} OWNER TO freqtrade_ai_attestor; "
+                "REVOKE ALL ON TABLE {} FROM PUBLIC, freqtrade; "
+                "GRANT SELECT ON TABLE {} TO freqtrade".format(
+                    lineage_table,
+                    lineage_table,
+                    lineage_table,
+                )
+            )
+        )
+    exchange_orders_sequence = connection.execute(
+        text(
+            "SELECT pg_get_serial_sequence("
+            ":qualified_table, 'id')"
+        ),
+        {"qualified_table": "{}.exchange_orders".format(schema_name)},
+    ).scalar_one()
+    if not exchange_orders_sequence:
+        raise SchemaMigrationBlocked("Exchange order sequence is missing")
+    connection.execute(
+        text(
+            "ALTER SEQUENCE {} OWNER TO freqtrade_ai_attestor; "
+            "REVOKE ALL ON SEQUENCE {} FROM PUBLIC, freqtrade; "
+            "GRANT USAGE, SELECT ON SEQUENCE {} TO freqtrade".format(
+                exchange_orders_sequence,
+                exchange_orders_sequence,
+                exchange_orders_sequence,
+            )
+        )
+    )
+    connection.execute(
+        text(
+            """
+            CREATE OR REPLACE FUNCTION guard_okx_demo_exchange_order()
+            RETURNS trigger LANGUAGE plpgsql
+            SECURITY DEFINER SET search_path = pg_catalog
+            AS $$
+            BEGIN
+                IF TG_OP = 'INSERT' THEN
+                    IF NEW.execution_target_id <> 'OKX_DEMO'
+                       OR NEW.status <> 'PREPARED'
+                       OR NEW.exchange_order_id IS NOT NULL
+                       OR json_typeof(NEW.request_snapshot) <> 'object'
+                       OR json_typeof(NEW.response_snapshot) <> 'object'
+                       OR NOT EXISTS (
+                           SELECT 1
+                           FROM __SCHEMA__.trade_intents AS intent
+                           WHERE intent.id = NEW.trade_intent_id
+                             AND intent.execution_target_id = 'OKX_DEMO'
+                             AND intent.client_order_id =
+                                 NEW.client_order_id
+                             AND intent.status = 'APPROVED'
+                       )
+                    THEN
+                        RAISE EXCEPTION
+                            'invalid exchange order creation';
+                    END IF;
+                    RETURN NEW;
+                END IF;
+                IF OLD.id IS DISTINCT FROM NEW.id
+                   OR OLD.execution_target_id
+                        IS DISTINCT FROM NEW.execution_target_id
+                   OR OLD.trade_intent_id
+                        IS DISTINCT FROM NEW.trade_intent_id
+                   OR OLD.client_order_id
+                        IS DISTINCT FROM NEW.client_order_id
+                   OR OLD.request_snapshot::jsonb
+                        IS DISTINCT FROM NEW.request_snapshot::jsonb
+                   OR OLD.created_at IS DISTINCT FROM NEW.created_at
+                   OR (
+                       OLD.exchange_order_id IS NOT NULL
+                       AND OLD.exchange_order_id
+                            IS DISTINCT FROM NEW.exchange_order_id
+                   )
+                   OR NEW.status NOT IN (
+                       'PREPARED', 'ACKNOWLEDGED', 'REJECTED',
+                       'RECOVERY_REQUIRED', 'RESIDUAL_CLOSE_REQUIRED',
+                       'RECONCILED', 'live', 'partially_filled',
+                       'filled', 'canceled', 'mmp_canceled',
+                       'position_zero', 'leverage_confirmed'
+                   )
+                   OR json_typeof(NEW.response_snapshot) <> 'object'
+                   OR (
+                       OLD.status IN (
+                           'REJECTED', 'RECONCILED', 'filled',
+                           'canceled', 'mmp_canceled', 'position_zero'
+                       )
+                       AND NEW.status IS DISTINCT FROM OLD.status
+                   )
+                THEN
+                    RAISE EXCEPTION
+                        'invalid exchange order transition';
+                END IF;
+                RETURN NEW;
+            END
+            $$;
+            ALTER FUNCTION guard_okx_demo_exchange_order()
+                OWNER TO freqtrade_ai_attestor;
+            REVOKE ALL ON FUNCTION guard_okx_demo_exchange_order()
+                FROM PUBLIC, freqtrade;
+            DROP TRIGGER IF EXISTS exchange_orders_guard
+                ON exchange_orders;
+            CREATE TRIGGER exchange_orders_guard
+                BEFORE INSERT OR UPDATE ON exchange_orders
+                FOR EACH ROW EXECUTE FUNCTION
+                    guard_okx_demo_exchange_order();
+            """.replace("__SCHEMA__", quoted_schema)
+        )
+    )
+    table_names = (
+        "reconciliation_runs",
+        "okx_demo_exchange_events",
+        "okx_demo_order_snapshots",
+        "okx_demo_fill_snapshots",
+        "okx_demo_position_snapshots",
+        "okx_demo_account_snapshots",
+        "okx_demo_reconciliation_states",
+        "okx_demo_recovery_batches",
+        "okx_demo_recovery_grants",
+    )
+    for table_name in table_names:
+        qualified_table = "{}.{}".format(quoted_schema, quote(table_name))
+        quoted_columns = ", ".join(
+            quote(column.name)
+            for column in Base.metadata.tables[table_name].columns
+        )
+        runtime_privileges = "SELECT, INSERT"
+        connection.execute(
+            text(
+                "ALTER TABLE {} OWNER TO freqtrade_ai_attestor; "
+                "REVOKE ALL ({}) ON {} FROM PUBLIC, freqtrade; "
+                "REVOKE ALL ON TABLE {} FROM PUBLIC, freqtrade; "
+                "GRANT {} ON TABLE {} TO freqtrade".format(
+                    qualified_table,
+                    quoted_columns,
+                    qualified_table,
+                    qualified_table,
+                    runtime_privileges,
+                    qualified_table,
+                )
+            )
+        )
+        if table_name == "okx_demo_recovery_grants":
+            connection.execute(
+                text(
+                    "GRANT UPDATE (status, consumed_at) ON {} "
+                    "TO freqtrade".format(qualified_table)
+                )
+            )
+        sequence_identity = connection.execute(
+            text(
+                "SELECT pg_get_serial_sequence(:qualified_table, 'database_id')"
+                if table_name != "reconciliation_runs"
+                else "SELECT pg_get_serial_sequence(:qualified_table, 'id')"
+            ),
+            {"qualified_table": "{}.{}".format(schema_name, table_name)},
+        ).scalar_one()
+        if not sequence_identity:
+            raise SchemaMigrationBlocked(
+                "Reconciliation sequence is missing: " + table_name
+            )
+        connection.execute(
+            text(
+                "ALTER SEQUENCE {} OWNER TO freqtrade_ai_attestor; "
+                "REVOKE ALL ON SEQUENCE {} FROM PUBLIC, freqtrade; "
+                "GRANT USAGE, SELECT ON SEQUENCE {} TO freqtrade".format(
+                    sequence_identity,
+                    sequence_identity,
+                    sequence_identity,
+                )
+            )
+        )
+    immutable_tables = (
+        "okx_demo_exchange_events",
+        "okx_demo_order_snapshots",
+        "okx_demo_fill_snapshots",
+        "okx_demo_position_snapshots",
+        "okx_demo_account_snapshots",
+        "okx_demo_recovery_batches",
+    )
+    connection.execute(
+        text(
+            """
+            CREATE OR REPLACE FUNCTION reject_okx_demo_evidence_mutation()
+            RETURNS trigger LANGUAGE plpgsql
+            SECURITY DEFINER SET search_path = pg_catalog
+            AS $$
+            BEGIN
+                RAISE EXCEPTION 'OKX Demo reconciliation evidence is immutable';
+            END
+            $$;
+            ALTER FUNCTION reject_okx_demo_evidence_mutation()
+                OWNER TO freqtrade_ai_attestor;
+            REVOKE ALL ON FUNCTION reject_okx_demo_evidence_mutation()
+                FROM PUBLIC, freqtrade;
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            CREATE OR REPLACE FUNCTION finalize_okx_demo_reconciliation_run(
+                p_run_id BIGINT,
+                p_summary JSONB,
+                p_database_ids JSONB,
+                p_artifact_path TEXT,
+                p_artifact_sha256 TEXT
+            ) RETURNS BIGINT
+            LANGUAGE plpgsql
+            SECURITY DEFINER
+            SET search_path = pg_catalog
+            AS $$
+            DECLARE
+                v_run RECORD;
+            BEGIN
+                SELECT * INTO v_run
+                FROM __SCHEMA__.reconciliation_runs
+                WHERE id = p_run_id
+                FOR UPDATE;
+                IF NOT FOUND
+                   OR v_run.execution_target_id <> 'OKX_DEMO'
+                   OR v_run.artifact_status <> 'PENDING'
+                   OR v_run.artifact_path IS NOT NULL
+                   OR v_run.artifact_sha256 IS NOT NULL
+                   OR v_run.database_ids::jsonb <> '{}'::jsonb
+                   OR v_run.summary_snapshot::jsonb <> '{}'::jsonb
+                   OR v_run.source_type <> 'api_aggregate'
+                   OR v_run.core_data IS NOT TRUE
+                   OR jsonb_typeof(p_summary) <> 'object'
+                   OR jsonb_typeof(p_database_ids) <> 'object'
+                   OR p_summary ->> 'execution_target' <> 'OKX_DEMO'
+                   OR p_summary ->> 'status' <> v_run.status
+                   OR p_summary ->> 'source_type' <> 'api_aggregate'
+                   OR (p_summary ->> 'core_data')::boolean IS NOT TRUE
+                   OR p_summary -> 'database_ids'
+                        IS DISTINCT FROM p_database_ids
+                   OR p_database_ids -> 'reconciliation_run'
+                        IS DISTINCT FROM jsonb_build_array(p_run_id)
+                   OR p_artifact_path !~
+                        ('/okx-demo-reconciliation-' || p_run_id || E'\\.json$')
+                   OR p_artifact_sha256 !~ '^[0-9a-f]{64}$'
+                THEN
+                    RAISE EXCEPTION
+                        'invalid reconciliation run finalization';
+                END IF;
+                UPDATE __SCHEMA__.reconciliation_runs
+                SET summary_snapshot = p_summary::json,
+                    database_ids = p_database_ids::json,
+                    artifact_path = p_artifact_path,
+                    artifact_sha256 = p_artifact_sha256,
+                    artifact_status = 'READY'
+                WHERE id = p_run_id;
+                RETURN p_run_id;
+            END
+            $$;
+            ALTER FUNCTION finalize_okx_demo_reconciliation_run(
+                BIGINT, JSONB, JSONB, TEXT, TEXT
+            ) OWNER TO freqtrade_ai_attestor;
+            REVOKE ALL ON FUNCTION finalize_okx_demo_reconciliation_run(
+                BIGINT, JSONB, JSONB, TEXT, TEXT
+            ) FROM PUBLIC;
+            GRANT EXECUTE ON FUNCTION finalize_okx_demo_reconciliation_run(
+                BIGINT, JSONB, JSONB, TEXT, TEXT
+            ) TO freqtrade;
+
+            CREATE OR REPLACE FUNCTION apply_okx_demo_reconciliation_gate(
+                p_run_id BIGINT
+            ) RETURNS BIGINT
+            LANGUAGE plpgsql
+            SECURITY DEFINER
+            SET search_path = pg_catalog
+            AS $$
+            DECLARE
+                v_run RECORD;
+                v_batch RECORD;
+                v_state_id BIGINT;
+                v_batch_id BIGINT;
+                v_unfrozen BOOLEAN;
+                v_reason TEXT;
+                v_current_run_id BIGINT;
+                v_current_completed_at TIMESTAMPTZ;
+            BEGIN
+                SELECT * INTO v_run
+                FROM __SCHEMA__.reconciliation_runs
+                WHERE id = p_run_id
+                FOR SHARE;
+                IF NOT FOUND
+                   OR v_run.execution_target_id <> 'OKX_DEMO'
+                   OR v_run.artifact_status <> 'READY'
+                   OR v_run.status NOT IN (
+                       'RECONCILED', 'RECOVERED', 'DRIFTED',
+                       'STALE', 'UNKNOWN'
+                   )
+                   OR v_run.database_ids::jsonb -> 'reconciliation_run'
+                        IS DISTINCT FROM jsonb_build_array(p_run_id)
+                   OR v_run.summary_snapshot::jsonb ->> 'status'
+                        <> v_run.status
+                   OR v_run.summary_snapshot::jsonb -> 'database_ids'
+                        IS DISTINCT FROM v_run.database_ids::jsonb
+                THEN
+                    RAISE EXCEPTION 'invalid reconciliation gate source';
+                END IF;
+                v_unfrozen := v_run.status IN ('RECONCILED', 'RECOVERED');
+                IF v_unfrozen THEN
+                    IF jsonb_typeof(
+                           v_run.database_ids::jsonb -> 'recovery_batches'
+                       ) <> 'array'
+                       OR jsonb_array_length(
+                           v_run.database_ids::jsonb -> 'recovery_batches'
+                       ) <> 1
+                       OR v_run.authoritative_observed_at IS NULL
+                       OR v_run.authoritative_observed_at
+                            < CURRENT_TIMESTAMP - INTERVAL '2 minutes'
+                       OR v_run.authoritative_observed_at
+                            > CURRENT_TIMESTAMP + INTERVAL '5 seconds'
+                    THEN
+                        RAISE EXCEPTION
+                            'reconciliation gate source is not fresh';
+                    END IF;
+                    v_batch_id := (
+                        v_run.database_ids::jsonb
+                        -> 'recovery_batches' ->> 0
+                    )::BIGINT;
+                    SELECT * INTO v_batch
+                    FROM __SCHEMA__.okx_demo_recovery_batches
+                    WHERE database_id = v_batch_id
+                      AND execution_target_id = 'OKX_DEMO'
+                    FOR SHARE;
+                    IF NOT FOUND
+                       OR v_batch.authenticated IS NOT TRUE
+                       OR v_batch.pagination_complete IS NOT TRUE
+                       OR v_batch.complete_streams::jsonb IS DISTINCT FROM
+                            '["ACCOUNT", "FILL", "ORDER", "POSITION"]'::jsonb
+                       OR (
+                           SELECT count(*)
+                           FROM jsonb_object_keys(
+                               v_batch.high_watermarks::jsonb
+                           )
+                       ) <> 4
+                       OR NOT (
+                           v_batch.high_watermarks::jsonb
+                           ?& ARRAY[
+                               'ACCOUNT', 'FILL', 'ORDER', 'POSITION'
+                           ]
+                       )
+                       OR v_batch.event_count < 1
+                       OR v_batch.completed_at
+                            < CURRENT_TIMESTAMP - INTERVAL '2 minutes'
+                       OR v_batch.completed_at > CURRENT_TIMESTAMP
+                       OR v_batch.observed_at
+                            IS DISTINCT FROM v_run.authoritative_observed_at
+                       OR NOT EXISTS (
+                           SELECT 1
+                           FROM __SCHEMA__.okx_demo_account_snapshots AS account
+                           JOIN __SCHEMA__.okx_demo_exchange_events AS event
+                             ON event.database_id =
+                                account.event_database_id
+                           WHERE event.recovery_batch_database_id = v_batch_id
+                       )
+                    THEN
+                        RAISE EXCEPTION
+                            'reconciliation gate baseline is incomplete';
+                    END IF;
+                END IF;
+                v_reason := CASE
+                    WHEN v_unfrozen THEN NULL
+                    ELSE v_run.summary_snapshot::jsonb
+                         -> 'findings' -> 0 ->> 'code'
+                END;
+                SELECT database_id, last_reconciliation_run_id
+                INTO v_state_id, v_current_run_id
+                FROM __SCHEMA__.okx_demo_reconciliation_states
+                WHERE execution_target_id = 'OKX_DEMO'
+                FOR UPDATE;
+                IF v_state_id IS NULL THEN
+                    RAISE EXCEPTION
+                        'reconciliation gate state is missing';
+                END IF;
+                IF v_current_run_id IS NOT NULL THEN
+                    SELECT completed_at INTO v_current_completed_at
+                    FROM __SCHEMA__.reconciliation_runs
+                    WHERE id = v_current_run_id;
+                    IF v_current_completed_at > v_run.completed_at THEN
+                        RAISE EXCEPTION
+                            'reconciliation gate source is older than current';
+                    END IF;
+                END IF;
+                UPDATE __SCHEMA__.okx_demo_reconciliation_states
+                SET status = v_run.status,
+                    opening_frozen = NOT v_unfrozen,
+                    block_reason = v_reason,
+                    last_event_observed_at =
+                        v_run.authoritative_observed_at,
+                    last_reconciliation_run_id = v_run.id
+                WHERE database_id = v_state_id;
+                RETURN v_state_id;
+            END
+            $$;
+            ALTER FUNCTION apply_okx_demo_reconciliation_gate(BIGINT)
+                OWNER TO freqtrade_ai_attestor;
+            REVOKE ALL ON FUNCTION
+                apply_okx_demo_reconciliation_gate(BIGINT) FROM PUBLIC;
+            GRANT EXECUTE ON FUNCTION
+                apply_okx_demo_reconciliation_gate(BIGINT) TO freqtrade;
+
+            CREATE OR REPLACE FUNCTION freeze_okx_demo_reconciliation_gate(
+                p_status TEXT,
+                p_reason TEXT,
+                p_observed_at TIMESTAMPTZ
+            ) RETURNS BIGINT
+            LANGUAGE plpgsql
+            SECURITY DEFINER
+            SET search_path = pg_catalog
+            AS $$
+            DECLARE
+                v_state_id BIGINT;
+            BEGIN
+                IF p_status NOT IN ('STALE', 'UNKNOWN')
+                   OR p_reason IS NULL
+                   OR length(p_reason) NOT BETWEEN 1 AND 240
+                   OR p_observed_at IS NULL
+                   OR p_observed_at > CURRENT_TIMESTAMP + INTERVAL '5 seconds'
+                THEN
+                    RAISE EXCEPTION
+                        'invalid reconciliation freeze transition';
+                END IF;
+                UPDATE __SCHEMA__.okx_demo_reconciliation_states
+                SET status = p_status,
+                    opening_frozen = TRUE,
+                    block_reason = p_reason,
+                    last_event_observed_at = p_observed_at
+                WHERE execution_target_id = 'OKX_DEMO'
+                RETURNING database_id INTO v_state_id;
+                IF v_state_id IS NULL THEN
+                    RAISE EXCEPTION
+                        'reconciliation gate state is missing';
+                END IF;
+                RETURN v_state_id;
+            END
+            $$;
+            ALTER FUNCTION freeze_okx_demo_reconciliation_gate(
+                TEXT, TEXT, TIMESTAMPTZ
+            ) OWNER TO freqtrade_ai_attestor;
+            REVOKE ALL ON FUNCTION freeze_okx_demo_reconciliation_gate(
+                TEXT, TEXT, TIMESTAMPTZ
+            ) FROM PUBLIC;
+            GRANT EXECUTE ON FUNCTION freeze_okx_demo_reconciliation_gate(
+                TEXT, TEXT, TIMESTAMPTZ
+            ) TO freqtrade;
+            """.replace("__SCHEMA__", quoted_schema)
+        )
+    )
+    for table_name in immutable_tables:
+        connection.execute(
+            text(
+                "DROP TRIGGER IF EXISTS {}_immutable ON {}; "
+                "CREATE TRIGGER {}_immutable "
+                "BEFORE UPDATE OR DELETE ON {} "
+                "FOR EACH ROW EXECUTE FUNCTION "
+                "reject_okx_demo_evidence_mutation()".format(
+                    table_name,
+                    table_name,
+                    table_name,
+                    table_name,
+                )
+            )
+        )
+    connection.execute(
+        text(
+            """
+            CREATE OR REPLACE FUNCTION guard_okx_demo_recovery_grant_update()
+            RETURNS trigger LANGUAGE plpgsql
+            SECURITY DEFINER SET search_path = pg_catalog
+            AS $$
+            BEGIN
+                IF OLD.execution_target_id IS DISTINCT FROM NEW.execution_target_id
+                   OR OLD.reconciliation_run_id IS DISTINCT FROM NEW.reconciliation_run_id
+                   OR OLD.exchange_order_row_id IS DISTINCT FROM NEW.exchange_order_row_id
+                   OR OLD.grant_digest IS DISTINCT FROM NEW.grant_digest
+                   OR OLD.action IS DISTINCT FROM NEW.action
+                   OR OLD.instrument_id IS DISTINCT FROM NEW.instrument_id
+                   OR OLD.position_side IS DISTINCT FROM NEW.position_side
+                   OR OLD.max_quantity IS DISTINCT FROM NEW.max_quantity
+                   OR OLD.expires_at IS DISTINCT FROM NEW.expires_at
+                   OR OLD.created_at IS DISTINCT FROM NEW.created_at
+                   OR OLD.status <> 'ACTIVE'
+                   OR NEW.status NOT IN ('CONSUMED', 'EXPIRED')
+                   OR (
+                       NEW.status = 'CONSUMED'
+                       AND NEW.consumed_at IS NULL
+                   )
+                   OR (
+                       NEW.status = 'EXPIRED'
+                       AND NEW.consumed_at IS NOT NULL
+                   ) THEN
+                    RAISE EXCEPTION 'invalid recovery grant transition';
+                END IF;
+                RETURN NEW;
+            END
+            $$;
+            ALTER FUNCTION guard_okx_demo_recovery_grant_update()
+                OWNER TO freqtrade_ai_attestor;
+            REVOKE ALL ON FUNCTION guard_okx_demo_recovery_grant_update()
+                FROM PUBLIC, freqtrade;
+            DROP TRIGGER IF EXISTS okx_demo_recovery_grants_guard
+                ON okx_demo_recovery_grants;
+            CREATE TRIGGER okx_demo_recovery_grants_guard
+                BEFORE UPDATE ON okx_demo_recovery_grants
+                FOR EACH ROW EXECUTE FUNCTION
+                    guard_okx_demo_recovery_grant_update();
+            """
+        )
+    )
+
+
 def upgrade_database(engine: Engine) -> str:
     """Upgrade a local PostgreSQL database atomically to ``SCHEMA_VERSION``.
 
@@ -2709,6 +3761,7 @@ def upgrade_database(engine: Engine) -> str:
                 _add_attested_session_boundary(connection)
                 _add_order_writer(connection)
                 Base.metadata.create_all(bind=connection)
+                _add_okx_demo_reconciliation(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -2728,6 +3781,7 @@ def upgrade_database(engine: Engine) -> str:
                 _add_attested_session_boundary(connection)
                 _add_order_writer(connection)
                 Base.metadata.create_all(bind=connection)
+                _add_okx_demo_reconciliation(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -2746,6 +3800,7 @@ def upgrade_database(engine: Engine) -> str:
                 _add_attested_session_boundary(connection)
                 _add_order_writer(connection)
                 Base.metadata.create_all(bind=connection)
+                _add_okx_demo_reconciliation(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -2763,6 +3818,7 @@ def upgrade_database(engine: Engine) -> str:
                 _add_attested_session_boundary(connection)
                 _add_order_writer(connection)
                 Base.metadata.create_all(bind=connection)
+                _add_okx_demo_reconciliation(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -2779,6 +3835,7 @@ def upgrade_database(engine: Engine) -> str:
                 _add_attested_session_boundary(connection)
                 _add_order_writer(connection)
                 Base.metadata.create_all(bind=connection)
+                _add_okx_demo_reconciliation(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -2794,6 +3851,7 @@ def upgrade_database(engine: Engine) -> str:
                 _add_attested_session_boundary(connection)
                 _add_order_writer(connection)
                 Base.metadata.create_all(bind=connection)
+                _add_okx_demo_reconciliation(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -2809,6 +3867,7 @@ def upgrade_database(engine: Engine) -> str:
                 _add_attested_session_boundary(connection)
                 _add_order_writer(connection)
                 Base.metadata.create_all(bind=connection)
+                _add_okx_demo_reconciliation(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -2824,6 +3883,7 @@ def upgrade_database(engine: Engine) -> str:
                 _add_approved_snapshot_lineage(connection)
                 _add_order_writer(connection)
                 Base.metadata.create_all(bind=connection)
+                _add_okx_demo_reconciliation(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -2837,10 +3897,25 @@ def upgrade_database(engine: Engine) -> str:
                 return SCHEMA_VERSION
             if current_version == ORDER_WRITER_BASE_VERSION:
                 _add_order_writer(connection)
+                Base.metadata.create_all(bind=connection)
+                _add_okx_demo_reconciliation(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
                         "Order-writer schema upgrade does not match ORM metadata: "
+                        + "; ".join(problems)
+                    )
+                connection.execute(
+                    text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+                    {"version": SCHEMA_VERSION},
+                )
+                return SCHEMA_VERSION
+            if current_version == RECONCILIATION_BASE_VERSION:
+                _add_okx_demo_reconciliation(connection)
+                problems = schema_problems(connection)
+                if problems:
+                    raise SchemaMigrationBlocked(
+                        "Reconciliation schema upgrade does not match ORM metadata: "
                         + "; ".join(problems)
                     )
                 connection.execute(
@@ -2871,6 +3946,7 @@ def upgrade_database(engine: Engine) -> str:
             _add_trusted_snapshot_boundary(connection)
             _add_attested_session_boundary(connection)
             _add_order_writer(connection)
+            _add_okx_demo_reconciliation(connection)
             problems = schema_problems(connection)
             if problems:
                 raise SchemaMigrationBlocked(
