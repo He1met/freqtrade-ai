@@ -9,6 +9,7 @@ from sqlalchemy.exc import DataError, IntegrityError
 from app.core.exceptions import ConfigurationError
 from app.db.migrations import (
     EARLY_TARGET_LINEAGE_VERSION,
+    FILL_SNAPSHOT_REPEAT_BASE_VERSION,
     LEGACY_SCHEMA_VERSION,
     PREVIOUS_SCHEMA_VERSION,
     SCHEMA_VERSION,
@@ -60,6 +61,35 @@ def _reset_schema(engine) -> None:
     with engine.begin() as connection:
         connection.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
         connection.execute(text("CREATE SCHEMA public"))
+
+
+def test_fill_snapshot_repeat_upgrade_drops_only_cross_generation_unique(
+    postgres_engine,
+) -> None:
+    assert upgrade_database(postgres_engine) == SCHEMA_VERSION
+    with postgres_engine.begin() as connection:
+        connection.execute(
+            text(
+                "ALTER TABLE okx_demo_fill_snapshots ADD CONSTRAINT "
+                "okx_demo_fill_snapshots_fill_unique UNIQUE "
+                "(execution_target_id, exchange_fill_id)"
+            )
+        )
+        connection.execute(text(f"DELETE FROM {VERSION_TABLE}"))
+        connection.execute(
+            text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+            {"version": FILL_SNAPSHOT_REPEAT_BASE_VERSION},
+        )
+
+    assert upgrade_database(postgres_engine) == SCHEMA_VERSION
+    constraints = {
+        item["name"]
+        for item in inspect(postgres_engine).get_unique_constraints(
+            "okx_demo_fill_snapshots"
+        )
+    }
+    assert "okx_demo_fill_snapshots_fill_unique" not in constraints
+    assert "okx_demo_fill_snapshots_event_unique" in constraints
 
 
 def _create_frozen_pre_lineage_research_jobs(connection) -> None:
