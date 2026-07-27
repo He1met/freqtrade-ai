@@ -20,6 +20,13 @@ def test_make_runtime_commands_use_the_one_project_virtualenv():
         )
         == 11
     )
+    assert "python3 scripts/okx_demo_e2e.py" not in makefile
+    assert (
+        makefile.count(
+            "backend/.venv/bin/python scripts/okx_demo_e2e.py"
+        )
+        == 2
+    )
 
 
 def load_runtime_module():

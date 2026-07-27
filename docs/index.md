@@ -41,6 +41,7 @@ they are not a current source of work status.
 - [execution_target_lineage.md](execution_target_lineage.md)
 - [okx_demo_read_adapter.md](okx_demo_read_adapter.md)
 - [okx_demo_risk_chain.md](okx_demo_risk_chain.md)
+- [okx_demo_soak.md](okx_demo_soak.md)
 - [phase9_operational_readiness_plan.md](phase9_operational_readiness_plan.md)
 - [phase9_acceptance.md](phase9_acceptance.md)
 - [phase9_deepseek_single_e2e.md](phase9_deepseek_single_e2e.md)

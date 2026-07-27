@@ -44,10 +44,10 @@ okx-demo-canary:
 	backend/.venv/bin/python scripts/local_runtime.py okx-demo-canary $(CANARY_FLAGS)
 
 okx-demo-e2e-offline:
-	python3 scripts/okx_demo_e2e.py --mode offline-ci
+	backend/.venv/bin/python scripts/okx_demo_e2e.py --mode offline-ci
 
 okx-demo-e2e-controlled:
-	python3 scripts/okx_demo_e2e.py --mode controlled-real $(E2E_FLAGS)
+	backend/.venv/bin/python scripts/okx_demo_e2e.py --mode controlled-real $(E2E_FLAGS)
 
 autostart-install:
 	backend/.venv/bin/python scripts/macos_launch_agent.py install

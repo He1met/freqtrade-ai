@@ -38,7 +38,8 @@ ORDER_WRITER_BASE_VERSION = "20260727_08"
 RECONCILIATION_BASE_VERSION = "20260727_09"
 RUNTIME_RECOVERY_BASE_VERSION = "20260727_10"
 FULL_CHAIN_BASE_VERSION = "20260727_11"
-SCHEMA_VERSION = "20260727_12"
+SOAK_BASE_VERSION = "20260727_12"
+SCHEMA_VERSION = "20260727_13"
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 ATTESTATION_PROOF_KEY_ENV = "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"
 
@@ -3969,6 +3970,64 @@ def _add_full_chain(connection: Connection) -> None:
             """
         )
     )
+    _add_okx_demo_soak(connection)
+
+
+def _add_okx_demo_soak(connection: Connection) -> None:
+    """Add #453 evidence tables without another runtime or database."""
+
+    schema_name, effective_schemas = connection.execute(
+        text("SELECT current_schema(), current_schemas(false)")
+    ).one()
+    if not schema_name or list(effective_schemas or ()) != [schema_name]:
+        raise SchemaMigrationBlocked(
+            "OKX Demo soak migration requires exactly one effective schema"
+        )
+    for table_name in (
+        "okx_demo_soak_runs",
+        "okx_demo_soak_probes",
+        "okx_demo_soak_events",
+    ):
+        Base.metadata.tables[table_name].create(bind=connection, checkfirst=True)
+    quote = connection.dialect.identifier_preparer.quote
+    quoted_schema = quote(schema_name)
+    for table_name in (
+        "okx_demo_soak_runs",
+        "okx_demo_soak_probes",
+        "okx_demo_soak_events",
+    ):
+        qualified_table = "{}.{}".format(quoted_schema, quote(table_name))
+        connection.execute(
+            text(
+                "ALTER TABLE {} OWNER TO freqtrade_ai_attestor; "
+                "REVOKE ALL ON TABLE {} FROM PUBLIC, freqtrade; "
+                "GRANT SELECT, INSERT{} ON TABLE {} TO freqtrade".format(
+                    qualified_table,
+                    qualified_table,
+                    ", UPDATE" if table_name == "okx_demo_soak_runs" else "",
+                    qualified_table,
+                )
+            )
+        )
+        sequence_identity = connection.execute(
+            text("SELECT pg_get_serial_sequence(:table_name, 'id')"),
+            {"table_name": "{}.{}".format(schema_name, table_name)},
+        ).scalar_one()
+        if not sequence_identity:
+            raise SchemaMigrationBlocked(
+                "OKX Demo soak sequence is missing: " + table_name
+            )
+        connection.execute(
+            text(
+                "ALTER SEQUENCE {} OWNER TO freqtrade_ai_attestor; "
+                "REVOKE ALL ON SEQUENCE {} FROM PUBLIC, freqtrade; "
+                "GRANT USAGE, SELECT ON SEQUENCE {} TO freqtrade".format(
+                    sequence_identity,
+                    sequence_identity,
+                    sequence_identity,
+                )
+            )
+        )
 
 
 def upgrade_database(engine: Engine) -> str:
@@ -4219,6 +4278,19 @@ def upgrade_database(engine: Engine) -> str:
                 if problems:
                     raise SchemaMigrationBlocked(
                         "Full-chain schema upgrade does not match ORM metadata: "
+                        + "; ".join(problems)
+                    )
+                connection.execute(
+                    text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+                    {"version": SCHEMA_VERSION},
+                )
+                return SCHEMA_VERSION
+            if current_version == SOAK_BASE_VERSION:
+                _add_okx_demo_soak(connection)
+                problems = schema_problems(connection)
+                if problems:
+                    raise SchemaMigrationBlocked(
+                        "OKX Demo soak schema upgrade does not match ORM metadata: "
                         + "; ".join(problems)
                     )
                 connection.execute(
