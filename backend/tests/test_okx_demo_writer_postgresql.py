@@ -6,7 +6,7 @@ from threading import Barrier
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -20,6 +20,7 @@ from app.adapters.okx_demo.writer_models import (
 from app.adapters.okx_demo.writer_repository import SqlAlchemyOrderWriterStore
 from app.adapters.okx_demo.writer_state import WriteEvent
 from app.db.migrations import (
+    FULL_CHAIN_BASE_VERSION,
     ORDER_WRITER_BASE_VERSION,
     RECONCILIATION_BASE_VERSION,
     SCHEMA_VERSION,
@@ -560,6 +561,36 @@ def test_connection_schema_rejects_writer_security_tampering(
         assert any(problem in item for item in readiness.problems)
         transaction.rollback()
     assert verify_schema(postgres_writer_engine).ready is True
+
+
+def test_postgresql_upgrade_from_reconciliation_schema_adds_full_chain_tables(
+    postgres_writer_engine,
+) -> None:
+    assert upgrade_database(postgres_writer_engine) == SCHEMA_VERSION
+    full_chain_tables = (
+        "full_chain_signal_snapshots",
+        "full_chain_stage_runs",
+        "strategy_candidate_approvals",
+        "full_chain_runs",
+    )
+    with postgres_writer_engine.begin() as connection:
+        for table_name in full_chain_tables:
+            connection.execute(text('DROP TABLE "{}" CASCADE'.format(table_name)))
+        connection.execute(text("DELETE FROM {}".format(VERSION_TABLE)))
+        connection.execute(
+            text(
+                "INSERT INTO {} (version) VALUES (:version)".format(
+                    VERSION_TABLE
+                )
+            ),
+            {"version": FULL_CHAIN_BASE_VERSION},
+        )
+
+    assert upgrade_database(postgres_writer_engine) == SCHEMA_VERSION
+    assert verify_schema(postgres_writer_engine).ready is True
+    assert set(full_chain_tables).issubset(
+        set(inspect(postgres_writer_engine).get_table_names())
+    )
 
 
 def test_connection_schema_rejects_role_that_can_set_runtime_writer(
