@@ -283,6 +283,49 @@ def test_attested_read_client_exposes_complete_reconciliation_pagination(
     ]
 
 
+@pytest.mark.parametrize("resource", ["orders_history", "fills_history"])
+def test_history_snapshot_freshness_uses_authenticated_response_receipt(
+    monkeypatch,
+    resource,
+) -> None:
+    instance, _transport = adapter([envelope([])])
+    monkeypatch.setattr(
+        instance,
+        "_latest_timestamp",
+        lambda _items: NOW - timedelta(days=30),
+    )
+
+    snapshot = instance._request(
+        resource=resource,
+        path="/api/v5/test",
+        query={},
+        authenticated=False,
+        parser=lambda _data: [],
+        allow_empty=True,
+    )
+
+    assert snapshot.metadata.expires_at == NOW + timedelta(seconds=30)
+
+
+def test_realtime_snapshot_still_rejects_old_exchange_timestamp(monkeypatch) -> None:
+    instance, _transport = adapter([envelope([])])
+    monkeypatch.setattr(
+        instance,
+        "_latest_timestamp",
+        lambda _items: NOW - timedelta(days=30),
+    )
+
+    with pytest.raises(OkxReadAdapterError, match="snapshot is expired"):
+        instance._request(
+            resource="pending_orders",
+            path="/api/v5/test",
+            query={},
+            authenticated=False,
+            parser=lambda _data: [],
+            allow_empty=True,
+        )
+
+
 @pytest.mark.parametrize(
     "mutation",
     [

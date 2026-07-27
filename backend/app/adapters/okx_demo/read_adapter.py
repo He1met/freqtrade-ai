@@ -620,7 +620,15 @@ class OkxDemoReadAdapter:
                 status="BLOCKED",
                 message=f"OKX {resource} snapshot timestamp is in the future",
             )
-        freshness_anchor = exchange_timestamp or received_at
+        # Historical records retain their exchange timestamps for ordering and
+        # reconciliation watermarks, but those timestamps do not describe the
+        # freshness of a just-authenticated archive response.  Treat the HTTP
+        # receipt as the snapshot freshness evidence for archive streams.
+        freshness_anchor = (
+            received_at
+            if resource in {"orders_history", "fills_history"}
+            else exchange_timestamp or received_at
+        )
         expires_at = freshness_anchor + timedelta(seconds=self._ttls[resource])
         stale = self._now() > expires_at
         if stale:
