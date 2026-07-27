@@ -1456,7 +1456,13 @@ def okx_runtime_readiness(state_dir: Path) -> Dict[str, Any]:
     }
 
 
-def wait_for_okx_runtime(state_dir: Path, timeout_seconds: int = 20) -> None:
+OKX_RUNTIME_STARTUP_TIMEOUT_SECONDS = 90
+
+
+def wait_for_okx_runtime(
+    state_dir: Path,
+    timeout_seconds: int = OKX_RUNTIME_STARTUP_TIMEOUT_SECONDS,
+) -> None:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         if okx_runtime_readiness(state_dir).get("status") == "READY":

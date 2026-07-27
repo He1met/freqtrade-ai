@@ -1448,6 +1448,58 @@ def test_okx_runtime_readiness_reports_blocked_openings_without_secrets(
     }
 
 
+def test_okx_runtime_startup_allows_authenticated_recovery_after_twenty_seconds(
+    monkeypatch,
+    tmp_path,
+):
+    runtime = load_runtime_module()
+    moments = iter((0.0, 21.0))
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: next(moments))
+    monkeypatch.setattr(
+        runtime,
+        "okx_runtime_readiness",
+        lambda _state_dir: {"status": "READY"},
+    )
+
+    runtime.wait_for_okx_runtime(tmp_path)
+
+    assert runtime.OKX_RUNTIME_STARTUP_TIMEOUT_SECONDS == 90
+
+
+def test_okx_runtime_startup_fails_closed_when_child_exits(
+    monkeypatch,
+    tmp_path,
+):
+    runtime = load_runtime_module()
+    moments = iter((0.0, 1.0))
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: next(moments))
+    monkeypatch.setattr(
+        runtime,
+        "okx_runtime_readiness",
+        lambda _state_dir: {"status": "BLOCKED"},
+    )
+    monkeypatch.setattr(
+        runtime,
+        "process_status",
+        lambda _state_dir, _service: {"running": False},
+    )
+
+    with pytest.raises(runtime.RuntimeBlocked, match="did not establish"):
+        runtime.wait_for_okx_runtime(tmp_path)
+
+
+def test_okx_runtime_startup_fails_closed_after_bounded_timeout(
+    monkeypatch,
+    tmp_path,
+):
+    runtime = load_runtime_module()
+    moments = iter((0.0, 90.0))
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: next(moments))
+
+    with pytest.raises(runtime.RuntimeBlocked, match="did not establish"):
+        runtime.wait_for_okx_runtime(tmp_path)
+
+
 def test_repeated_start_refuses_without_stopping_healthy_runtime(
     monkeypatch,
     tmp_path,

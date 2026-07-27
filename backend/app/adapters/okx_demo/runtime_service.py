@@ -445,20 +445,29 @@ def serve(
                 db.rollback()
                 raise
     finally:
-        ready_path.unlink(missing_ok=True)
+        primary_error = sys.exc_info()[1]
+        cleanup_error = None
+        cleanup_actions = [
+            lambda: ready_path.unlink(missing_ok=True),
+        ]
         if adapter is not None:
-            try:
-                adapter.close()
-            except Exception:
-                pass
+            cleanup_actions.append(adapter.close)
         if server_session is not None:
-            server_session.close()
+            cleanup_actions.append(server_session.close)
         if db is not None:
-            db.close()
+            cleanup_actions.append(db.close)
         if connection is not None:
-            connection.close()
+            cleanup_actions.append(connection.close)
         if engine is not None:
-            engine.dispose()
+            cleanup_actions.append(engine.dispose)
+        for cleanup_action in cleanup_actions:
+            try:
+                cleanup_action()
+            except BaseException as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
+        if primary_error is None and cleanup_error is not None:
+            raise cleanup_error
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
