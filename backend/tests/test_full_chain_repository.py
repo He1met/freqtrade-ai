@@ -1,0 +1,534 @@
+from datetime import datetime, timedelta, timezone
+
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from app.models import (
+    BacktestResult,
+    BacktestRun,
+    BacktestTask,
+    Base,
+    FullChainRun,
+    FullChainStageRun,
+    ReconciliationRun,
+    Strategy,
+    StrategyGenerationRun,
+    StrategyScore,
+    StrategyVersion,
+)
+from app.repositories.execution_lineage import ensure_execution_scope_catalog
+from app.repositories.full_chain import (
+    FullChainBlocked,
+    FullChainConflict,
+    FullChainRepository,
+    require_authoritative_reconciliation,
+)
+from app.repositories.research_jobs import ResearchJobRepository
+
+
+NOW = datetime(2026, 7, 27, 8, 0, tzinfo=timezone.utc)
+
+
+@pytest.fixture
+def db():
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    with factory() as session:
+        ensure_execution_scope_catalog(session)
+        yield session
+    engine.dispose()
+
+
+def claimed_job(db):
+    jobs = ResearchJobRepository(db)
+    job = jobs.create(
+        job_type="deepseek_backtest",
+        operation="strategy_generation.deepseek_backtest_loop",
+        idempotency_key_digest="a" * 64,
+        request_hash="b" * 64,
+        request_payload={"allow_real_call": False, "strategy": {"name": "Chain"}},
+    )
+    claimed = jobs.claim_next(owner="full-chain-test", lease_seconds=600, now=NOW)
+    assert claimed is not None and claimed.id == job.id and claimed.lease_token
+    return claimed
+
+
+def seed_research_lineage(db):
+    generation = StrategyGenerationRun(
+        execution_scope_id="LOCAL_DRY_RUN",
+        provider="deepseek",
+        model="deepseek-test",
+        status="succeeded",
+        requested_count=1,
+        generated_count=1,
+        accepted_count=1,
+    )
+    strategy = Strategy(name="Chain", slug="chain", source="ai_generated")
+    db.add_all([generation, strategy])
+    db.flush()
+    version = StrategyVersion(
+        strategy_id=strategy.id,
+        generation_run_id=generation.id,
+        version_number=1,
+        blueprint={"strategy": "Chain"},
+        generated_code="class Chain: pass",
+        code_hash="c" * 64,
+        file_path="user_data/strategies/Chain.py",
+        validation_status="passed",
+    )
+    db.add(version)
+    db.flush()
+    run = BacktestRun(
+        execution_scope_id="LOCAL_DRY_RUN",
+        strategy_version_id=version.id,
+        profile_name="full-chain",
+        status="succeeded",
+        requested_task_count=1,
+    )
+    db.add(run)
+    db.flush()
+    task = BacktestTask(
+        backtest_run_id=run.id,
+        pair="BTC/USDT:USDT",
+        timeframe="5m",
+        status="succeeded",
+        result_path="reports/backtests/chain.json",
+    )
+    db.add(task)
+    db.flush()
+    result = BacktestResult(
+        backtest_run_id=run.id,
+        backtest_task_id=task.id,
+        result_path="reports/backtests/chain.json",
+        metrics_snapshot={"total_trades": 12},
+        total_trades=12,
+    )
+    db.add(result)
+    db.flush()
+    score = StrategyScore(
+        strategy_id=strategy.id,
+        strategy_version_id=version.id,
+        backtest_result_id=result.id,
+        scoring_version="full-chain-v1",
+        total_score=80,
+        metrics_snapshot={"acceptance_ready": True},
+    )
+    db.add(score)
+    db.commit()
+    return generation, strategy, version, run, task, result, score
+
+
+def prepare_and_complete_research(db, repository, chain, lease_token):
+    generation, strategy, version, run, task, result, score = seed_research_lineage(db)
+    repository.prepare_stage(
+        chain.id,
+        "GENERATION",
+        lease_token,
+        idempotency_key="generation-1",
+        input_snapshot={"provider": "deepseek", "model": "deepseek-test"},
+        now=NOW,
+    )
+    repository.complete_stage(
+        chain.id,
+        "GENERATION",
+        lease_token,
+        database_ids={
+            "strategy_generation_run_id": generation.id,
+            "strategy_id": strategy.id,
+            "strategy_version_id": version.id,
+        },
+        output_snapshot={"status": "succeeded", "artifact_sha256": "c" * 64},
+        now=NOW,
+    )
+    repository.prepare_stage(
+        chain.id,
+        "BACKTEST",
+        lease_token,
+        idempotency_key="backtest-1",
+        input_snapshot={"strategy_version_id": version.id, "profile": "full-chain"},
+        now=NOW,
+    )
+    repository.complete_stage(
+        chain.id,
+        "BACKTEST",
+        lease_token,
+        database_ids={
+            "backtest_run_id": run.id,
+            "backtest_task_id": task.id,
+            "backtest_result_id": result.id,
+        },
+        output_snapshot={"status": "succeeded", "artifact_sha256": "d" * 64},
+        now=NOW,
+    )
+    repository.prepare_stage(
+        chain.id,
+        "SCORING",
+        lease_token,
+        idempotency_key="scoring-1",
+        input_snapshot={"backtest_result_id": result.id, "scoring_version": "full-chain-v1"},
+        now=NOW,
+    )
+    repository.complete_stage(
+        chain.id,
+        "SCORING",
+        lease_token,
+        database_ids={"strategy_score_id": score.id},
+        output_snapshot={"status": "succeeded", "score": 80},
+        now=NOW,
+    )
+    return generation, strategy, version, run, task, result, score
+
+
+def test_chain_reuses_research_job_attempt_and_persists_approval_and_signal(db) -> None:
+    job = claimed_job(db)
+    repository = FullChainRepository(db)
+    chain = repository.open_for_claimed_job(job.id, job.lease_token, now=NOW)
+    replay = repository.open_for_claimed_job(job.id, job.lease_token, now=NOW)
+    assert replay.id == chain.id
+    assert chain.research_scope_id == "LOCAL_DRY_RUN"
+    assert chain.execution_target_id == "OKX_DEMO"
+
+    lineage = prepare_and_complete_research(
+        db, repository, chain, job.lease_token
+    )
+    version, result, score = lineage[2], lineage[5], lineage[6]
+
+    with pytest.raises(FullChainBlocked, match="predecessors"):
+        repository.prepare_stage(
+            chain.id,
+            "RISK",
+            job.lease_token,
+            idempotency_key="skip-to-risk",
+            input_snapshot={"execution_target": "OKX_DEMO"},
+            now=NOW,
+        )
+
+    approval_stage = repository.prepare_stage(
+        chain.id,
+        "CANDIDATE_APPROVAL",
+        job.lease_token,
+        idempotency_key="candidate-approval-1",
+        input_snapshot={
+            "strategy_version_id": version.id,
+            "backtest_result_id": result.id,
+            "strategy_score_id": score.id,
+        },
+        now=NOW,
+    )
+    approval = repository.create_candidate_approval(
+        chain.id,
+        job.lease_token,
+        requested_by="operator",
+        expires_at=NOW + timedelta(minutes=10),
+        now=NOW,
+    )
+    assert approval.status == "PENDING"
+    repository.decide_candidate(
+        approval.id,
+        decision="APPROVED",
+        decided_by="operator",
+        reason="Reviewed the exact scored candidate.",
+        now=NOW + timedelta(seconds=1),
+    )
+    waiting_job = ResearchJobRepository(db).get(job.id)
+    assert waiting_job is not None
+    assert waiting_job.status == "PENDING"
+    assert waiting_job.stage == "CANDIDATE_APPROVED"
+    assert waiting_job.lease_token is None
+    resumed = ResearchJobRepository(db).claim_next(
+        owner="full-chain-resume",
+        lease_seconds=600,
+        now=NOW + timedelta(seconds=2),
+    )
+    assert resumed is not None
+    assert resumed.id == job.id
+    assert resumed.attempt_count == 1
+    assert resumed.lease_token
+    repository.open_for_claimed_job(
+        resumed.id,
+        resumed.lease_token,
+        now=NOW + timedelta(seconds=2),
+    )
+    assert approval_stage.id is not None
+
+    repository.prepare_stage(
+        chain.id,
+        "SIGNAL",
+        resumed.lease_token,
+        idempotency_key="signal-1",
+        input_snapshot={"instrument_id": "BTC-USDT-SWAP"},
+        now=NOW + timedelta(seconds=3),
+    )
+    signal = repository.record_signal(
+        chain.id,
+        resumed.lease_token,
+        instrument_id="BTC-USDT-SWAP",
+        source_type="api_aggregate",
+        source_database_ids={"market_snapshot_id": 12, "candle_id": 34},
+        signal_snapshot={"side": "buy", "timeframe": "5m", "closed_candle": True},
+        observed_at=NOW + timedelta(seconds=3),
+        expires_at=NOW + timedelta(minutes=1),
+    )
+    repository.complete_stage(
+        chain.id,
+        "SIGNAL",
+        resumed.lease_token,
+        database_ids={"signal_snapshot_id": signal.id},
+        output_snapshot={"status": "succeeded", "signal_digest": signal.signal_digest},
+        now=NOW + timedelta(seconds=3),
+    )
+
+    persisted = db.get(FullChainRun, chain.id)
+    assert persisted.status == "EXECUTING"
+    assert persisted.strategy_version_id == version.id
+    assert persisted.candidate_approval_id == approval.id
+    assert persisted.signal_snapshot_id == signal.id
+    assert [
+        row.stage
+        for row in db.query(FullChainStageRun)
+        .filter(FullChainStageRun.full_chain_run_id == chain.id)
+        .order_by(FullChainStageRun.id)
+    ] == [
+        "GENERATION",
+        "BACKTEST",
+        "SCORING",
+        "CANDIDATE_APPROVAL",
+        "SIGNAL",
+    ]
+
+
+def test_stage_prepare_is_idempotent_and_rejects_changed_input_or_secrets(db) -> None:
+    job = claimed_job(db)
+    repository = FullChainRepository(db)
+    chain = repository.open_for_claimed_job(job.id, job.lease_token, now=NOW)
+    first = repository.prepare_stage(
+        chain.id,
+        "GENERATION",
+        job.lease_token,
+        idempotency_key="generation-1",
+        input_snapshot={"provider": "deepseek"},
+        now=NOW,
+    )
+    with pytest.raises(FullChainBlocked, match="refusing to repeat"):
+        repository.prepare_stage(
+            chain.id,
+            "GENERATION",
+            job.lease_token,
+            idempotency_key="generation-1",
+            input_snapshot={"provider": "deepseek"},
+            now=NOW,
+        )
+    assert first.status == "PREPARED"
+    with pytest.raises(FullChainConflict, match="different"):
+        repository.prepare_stage(
+            chain.id,
+            "GENERATION",
+            job.lease_token,
+            idempotency_key="generation-1",
+            input_snapshot={"provider": "fallback"},
+            now=NOW,
+        )
+
+    second_job = ResearchJobRepository(db).create(
+        job_type="deepseek_backtest",
+        operation="strategy_generation.deepseek_backtest_loop",
+        idempotency_key_digest="e" * 64,
+        request_hash="f" * 64,
+        request_payload={"allow_real_call": False},
+    )
+    assert second_job.status == "PENDING"
+    with pytest.raises(FullChainBlocked, match="ResearchJob lease"):
+        repository.open_for_claimed_job(second_job.id, "not-owner", now=NOW)
+
+    with pytest.raises(FullChainBlocked, match="secret-shaped"):
+        repository.prepare_stage(
+            chain.id,
+            "GENERATION",
+            job.lease_token,
+            idempotency_key="other",
+            input_snapshot={"api_key": "must-not-persist"},
+            now=NOW,
+        )
+
+
+def test_empty_or_failed_stage_never_marks_chain_success(db) -> None:
+    job = claimed_job(db)
+    repository = FullChainRepository(db)
+    chain = repository.open_for_claimed_job(job.id, job.lease_token, now=NOW)
+    repository.prepare_stage(
+        chain.id,
+        "GENERATION",
+        job.lease_token,
+        idempotency_key="generation-failure",
+        input_snapshot={"provider": "deepseek"},
+        now=NOW,
+    )
+    with pytest.raises(FullChainBlocked, match="database IDs mismatch"):
+        repository.complete_stage(
+            chain.id,
+            "GENERATION",
+            job.lease_token,
+            database_ids={},
+            output_snapshot={"status": "succeeded"},
+            now=NOW,
+        )
+    repository.fail_stage(
+        chain.id,
+        "GENERATION",
+        job.lease_token,
+        status="BLOCKED",
+        error_code="PROVIDER_NOT_CONFIGURED",
+        error_message="DeepSeek was not called.",
+        now=NOW,
+    )
+    persisted = db.get(FullChainRun, chain.id)
+    assert persisted.status == "BLOCKED"
+    assert persisted.completed_at == NOW
+    assert db.query(FullChainRun).filter(FullChainRun.status == "SUCCESS").count() == 0
+
+
+def test_candidate_expiry_is_persisted_and_blocks_downstream_stages(db) -> None:
+    job = claimed_job(db)
+    repository = FullChainRepository(db)
+    chain = repository.open_for_claimed_job(job.id, job.lease_token, now=NOW)
+    prepare_and_complete_research(db, repository, chain, job.lease_token)
+    repository.prepare_stage(
+        chain.id,
+        "CANDIDATE_APPROVAL",
+        job.lease_token,
+        idempotency_key="candidate-expiry",
+        input_snapshot={"review": "required"},
+        now=NOW,
+    )
+    approval = repository.create_candidate_approval(
+        chain.id,
+        job.lease_token,
+        requested_by="operator",
+        expires_at=NOW + timedelta(seconds=1),
+        now=NOW,
+    )
+    with pytest.raises(FullChainBlocked, match="expired"):
+        repository.decide_candidate(
+            approval.id,
+            decision="APPROVED",
+            decided_by="operator",
+            reason="too late",
+            now=NOW + timedelta(seconds=2),
+        )
+    db.refresh(approval)
+    db.refresh(chain)
+    assert approval.status == "EXPIRED"
+    assert chain.status == "BLOCKED"
+    with pytest.raises(FullChainBlocked, match="terminal"):
+        repository.prepare_stage(
+            chain.id,
+            "SIGNAL",
+            job.lease_token,
+            idempotency_key="blocked-signal",
+            input_snapshot={"instrument_id": "BTC-USDT-SWAP"},
+            now=NOW + timedelta(seconds=2),
+        )
+
+
+def test_reconciliation_row_alone_cannot_mark_an_incomplete_chain_success(db) -> None:
+    job = claimed_job(db)
+    repository = FullChainRepository(db)
+    chain = repository.open_for_claimed_job(job.id, job.lease_token, now=NOW)
+    reconciliation = ReconciliationRun(
+        execution_target_id="OKX_DEMO",
+        status="RECONCILED",
+        summary_snapshot={"fixture": True},
+        started_at=NOW,
+        completed_at=NOW,
+    )
+    db.add(reconciliation)
+    db.flush()
+    db.add(
+        FullChainStageRun(
+            full_chain_run_id=chain.id,
+            stage="RECONCILIATION",
+            status="PREPARED",
+            idempotency_key_digest="1" * 64,
+            input_digest="2" * 64,
+            input_snapshot={"execution_target": "OKX_DEMO"},
+            prepared_at=NOW,
+        )
+    )
+    db.commit()
+
+    with pytest.raises(FullChainBlocked, match="missing database IDs"):
+        repository.finalize_reconciliation(
+            chain.id,
+            job.lease_token,
+            reconciliation_run_id=reconciliation.id,
+            now=NOW,
+        )
+    db.refresh(chain)
+    assert chain.status == "RUNNING"
+    assert chain.reconciliation_run_id is None
+
+
+def authoritative_reconciliation() -> ReconciliationRun:
+    database_ids = {
+        "reconciliation_run": [99],
+        "exchange_events": [101, 102, 103, 104],
+        "order_snapshots": [201],
+        "fill_snapshots": [301],
+        "position_snapshots": [],
+        "account_snapshots": [401],
+        "repaired_exchange_orders": [],
+        "recovery_batches": [501],
+        "reconciliation_state": [601],
+        "recovery_grants": [],
+    }
+    observed_at = NOW - timedelta(seconds=1)
+    return ReconciliationRun(
+        id=99,
+        execution_target_id="OKX_DEMO",
+        status="RECONCILED",
+        summary_snapshot={
+            "execution_target": "OKX_DEMO",
+            "status": "RECONCILED",
+            "source_type": "api_aggregate",
+            "core_data": True,
+            "database_ids": database_ids,
+            "authoritative_observed_at": observed_at.isoformat(),
+        },
+        database_ids=database_ids,
+        artifact_path="reports/okx_demo_reconciliation/okx-demo-reconciliation-99.json",
+        artifact_sha256="a" * 64,
+        artifact_status="READY",
+        authoritative_observed_at=observed_at,
+        source_type="api_aggregate",
+        core_data=True,
+        started_at=observed_at,
+        completed_at=NOW,
+    )
+
+
+def test_only_finalized_authoritative_reconciliation_is_acceptance_ready() -> None:
+    reconciliation = authoritative_reconciliation()
+    assert require_authoritative_reconciliation(reconciliation) == reconciliation.database_ids
+
+    reconciliation.artifact_status = "PENDING"
+    with pytest.raises(FullChainBlocked, match="not finalized"):
+        require_authoritative_reconciliation(reconciliation)
+
+    reconciliation.artifact_status = "READY"
+    reconciliation.database_ids = {
+        **reconciliation.database_ids,
+        "fill_snapshots": [],
+    }
+    reconciliation.summary_snapshot = {
+        **reconciliation.summary_snapshot,
+        "database_ids": reconciliation.database_ids,
+    }
+    with pytest.raises(FullChainBlocked, match="empty.*fill_snapshots"):
+        require_authoritative_reconciliation(reconciliation)
