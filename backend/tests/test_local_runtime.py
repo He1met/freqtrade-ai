@@ -1266,14 +1266,40 @@ def test_verify_fails_closed_when_worker_is_not_running(monkeypatch, capsys):
 
 def test_worker_queue_must_be_idle(monkeypatch):
     runtime = load_runtime_module()
+    calls = []
+    monkeypatch.setattr(runtime, "backend_python", lambda: Path("/venv/bin/python"))
+
+    def fake_run(*args, **kwargs):
+        calls.append((args, kwargs))
+        return SimpleNamespace(returncode=3)
+
+    monkeypatch.setattr(
+        runtime.subprocess,
+        "run",
+        fake_run,
+    )
+
+    with pytest.raises(runtime.RuntimeBlocked, match="worker queue is not idle"):
+        runtime.ensure_worker_queue_idle(runtime.DEFAULT_DATABASE_URL)
+
+    command = calls[0][0][0]
+    assert "status IN ('PENDING','RUNNING')" in command[2]
+    assert "status IN ('pending','running')" not in command[2]
+
+
+def test_worker_queue_read_failure_reports_acl_or_schema_problem(monkeypatch):
+    runtime = load_runtime_module()
     monkeypatch.setattr(runtime, "backend_python", lambda: Path("/venv/bin/python"))
     monkeypatch.setattr(
         runtime.subprocess,
         "run",
-        lambda *args, **kwargs: SimpleNamespace(returncode=3),
+        lambda *args, **kwargs: SimpleNamespace(returncode=1),
     )
 
-    with pytest.raises(runtime.RuntimeBlocked, match="worker queue is not idle"):
+    with pytest.raises(
+        runtime.RuntimeBlocked,
+        match="worker queue read failed; verify runtime database ACL and schema",
+    ):
         runtime.ensure_worker_queue_idle(runtime.DEFAULT_DATABASE_URL)
 
 

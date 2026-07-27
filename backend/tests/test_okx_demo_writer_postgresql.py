@@ -23,6 +23,8 @@ from app.db.migrations import (
     FULL_CHAIN_BASE_VERSION,
     ORDER_WRITER_BASE_VERSION,
     RECONCILIATION_BASE_VERSION,
+    RUNTIME_APP_ACL_BASE_VERSION,
+    RUNTIME_APPLICATION_TABLES,
     SCHEMA_VERSION,
     SOAK_BASE_VERSION,
     SchemaMigrationBlocked,
@@ -1747,3 +1749,170 @@ def test_soak_base_version_upgrades_in_place_and_is_append_only(
             "UPDATE": False,
             "DELETE": False,
         }
+
+
+def test_runtime_application_acl_upgrades_in_place_without_widening_sensitive_tables(
+    postgres_writer_engine,
+) -> None:
+    assert upgrade_database(postgres_writer_engine) == SCHEMA_VERSION
+    privileges = ("SELECT", "INSERT", "UPDATE", "DELETE")
+    with postgres_writer_engine.begin() as connection:
+        specialized_tables = tuple(
+            sorted(
+                set(inspect(connection).get_table_names())
+                - set(RUNTIME_APPLICATION_TABLES)
+                - {VERSION_TABLE}
+            )
+        )
+        sensitive_before = {
+            table_name: tuple(
+                connection.execute(
+                    text(
+                        "SELECT has_table_privilege("
+                        "'freqtrade', :table_name, :privilege)"
+                    ),
+                    {"table_name": table_name, "privilege": privilege},
+                ).scalar_one()
+                for privilege in privileges
+            )
+            for table_name in specialized_tables
+        }
+        for table_name in RUNTIME_APPLICATION_TABLES:
+            connection.execute(
+                text(
+                    "REVOKE ALL ON TABLE {} FROM freqtrade".format(table_name)
+                )
+            )
+            sequence_identity = (
+                connection.execute(
+                    text("SELECT pg_get_serial_sequence(:table_name, 'id')"),
+                    {"table_name": table_name},
+                ).scalar_one()
+                if "id"
+                in {
+                    column["name"]
+                    for column in inspect(connection).get_columns(table_name)
+                }
+                else None
+            )
+            if sequence_identity:
+                connection.execute(
+                    text(
+                        "REVOKE ALL ON SEQUENCE {} FROM freqtrade".format(
+                            sequence_identity
+                        )
+                    )
+                )
+        connection.execute(
+            text(
+                "GRANT SELECT (name) ON TABLE strategies TO PUBLIC; "
+                "GRANT UPDATE (name) ON TABLE strategies TO freqtrade"
+            )
+        )
+        connection.execute(text("DELETE FROM {}".format(VERSION_TABLE)))
+        connection.execute(
+            text(
+                "INSERT INTO {} (version) VALUES (:version)".format(
+                    VERSION_TABLE
+                )
+            ),
+            {"version": RUNTIME_APP_ACL_BASE_VERSION},
+        )
+
+    assert upgrade_database(postgres_writer_engine) == SCHEMA_VERSION
+    assert verify_schema(postgres_writer_engine).ready is True
+    with postgres_writer_engine.connect() as connection:
+        for table_name in RUNTIME_APPLICATION_TABLES:
+            assert {
+                privilege: connection.execute(
+                    text(
+                        "SELECT has_table_privilege("
+                        "'freqtrade', :table_name, :privilege)"
+                    ),
+                    {"table_name": table_name, "privilege": privilege},
+                ).scalar_one()
+                for privilege in privileges
+            } == {
+                "SELECT": True,
+                "INSERT": True,
+                "UPDATE": True,
+                "DELETE": False,
+            }
+            sequence_identity = (
+                connection.execute(
+                    text("SELECT pg_get_serial_sequence(:table_name, 'id')"),
+                    {"table_name": table_name},
+                ).scalar_one()
+                if "id"
+                in {
+                    column["name"]
+                    for column in inspect(connection).get_columns(table_name)
+                }
+                else None
+            )
+            if sequence_identity:
+                assert connection.execute(
+                    text(
+                        "SELECT has_sequence_privilege("
+                        "'freqtrade', :sequence_name, 'USAGE') "
+                        "AND has_sequence_privilege("
+                        "'freqtrade', :sequence_name, 'SELECT')"
+                    ),
+                    {"sequence_name": sequence_identity},
+                ).scalar_one() is True
+        sensitive_after = {
+            table_name: tuple(
+                connection.execute(
+                    text(
+                        "SELECT has_table_privilege("
+                        "'freqtrade', :table_name, :privilege)"
+                    ),
+                    {"table_name": table_name, "privilege": privilege},
+                ).scalar_one()
+                for privilege in privileges
+            )
+            for table_name in specialized_tables
+        }
+        explicit_application_column_acl = connection.execute(
+            text(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_attribute AS attribute
+                    CROSS JOIN LATERAL aclexplode(attribute.attacl) AS acl
+                    WHERE attribute.attrelid = 'strategies'::regclass
+                      AND attribute.attname = 'name'
+                      AND acl.grantee IN (
+                          0,
+                          (SELECT oid FROM pg_roles
+                           WHERE rolname = 'freqtrade')
+                      )
+                )
+                """
+            )
+        ).scalar_one()
+    assert sensitive_after == sensitive_before
+    assert explicit_application_column_acl is False
+
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(
+            text("REVOKE SELECT ON TABLE research_jobs FROM freqtrade")
+        )
+    readiness = verify_schema(postgres_writer_engine)
+    assert readiness.ready is False
+    assert "runtime application DML privilege missing: research_jobs" in (
+        readiness.problems
+    )
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(text("DELETE FROM {}".format(VERSION_TABLE)))
+        connection.execute(
+            text(
+                "INSERT INTO {} (version) VALUES (:version)".format(
+                    VERSION_TABLE
+                )
+            ),
+            {"version": RUNTIME_APP_ACL_BASE_VERSION},
+        )
+    assert upgrade_database(postgres_writer_engine) == SCHEMA_VERSION
+    assert upgrade_database(postgres_writer_engine) == SCHEMA_VERSION
+    assert verify_schema(postgres_writer_engine).ready is True

@@ -39,9 +39,32 @@ RECONCILIATION_BASE_VERSION = "20260727_09"
 RUNTIME_RECOVERY_BASE_VERSION = "20260727_10"
 FULL_CHAIN_BASE_VERSION = "20260727_11"
 SOAK_BASE_VERSION = "20260727_12"
-SCHEMA_VERSION = "20260727_13"
+RUNTIME_APP_ACL_BASE_VERSION = "20260727_13"
+SCHEMA_VERSION = "20260727_14"
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 ATTESTATION_PROOF_KEY_ENV = "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"
+
+RUNTIME_APPLICATION_TABLES = (
+    "strategies",
+    "strategy_versions",
+    "strategy_generation_runs",
+    "strategy_failure_reasons",
+    "backtest_runs",
+    "backtest_tasks",
+    "backtest_results",
+    "strategy_scores",
+    "research_jobs",
+    "research_job_attempts",
+    "research_worker_control",
+    "execution_manifests",
+    "local_test_batches",
+    "local_test_db_events",
+    "full_chain_runs",
+    "full_chain_stage_runs",
+    "strategy_candidate_approvals",
+    "full_chain_signal_snapshots",
+    "risk_budgets",
+)
 
 
 ATTESTED_SESSION_FUNCTION_BODY = """
@@ -1727,6 +1750,8 @@ def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
                         function_name
                     )
                 )
+    if "freqtrade" in roles:
+        problems.extend(_runtime_application_acl_problems(bind, schema_name))
     return problems
 
 
@@ -3973,6 +3998,230 @@ def _add_full_chain(connection: Connection) -> None:
     _add_okx_demo_soak(connection)
 
 
+def _grant_runtime_application_acl(connection: Connection) -> None:
+    """Grant the runtime role only the ordinary application-data ACL.
+
+    OKX attestation, authorization, writer, exchange and reconciliation tables
+    deliberately remain outside this allowlist because their narrower grants are
+    installed and verified by their owning migrations.
+    """
+
+    schema_name, effective_schemas = connection.execute(
+        text("SELECT current_schema(), current_schemas(false)")
+    ).one()
+    if not schema_name or list(effective_schemas or ()) != [schema_name]:
+        raise SchemaMigrationBlocked(
+            "Runtime application ACL migration requires exactly one effective schema"
+        )
+    existing_tables = set(inspect(connection).get_table_names(schema=schema_name))
+    missing_tables = set(RUNTIME_APPLICATION_TABLES) - existing_tables
+    if missing_tables:
+        raise SchemaMigrationBlocked(
+            "Runtime application ACL tables are missing: "
+            + ", ".join(sorted(missing_tables))
+        )
+    quote = connection.dialect.identifier_preparer.quote
+    quoted_schema = quote(schema_name)
+    inspector = inspect(connection)
+    for table_name in RUNTIME_APPLICATION_TABLES:
+        qualified_table = "{}.{}".format(quoted_schema, quote(table_name))
+        column_names = {
+            column["name"]
+            for column in inspector.get_columns(table_name, schema=schema_name)
+        }
+        quoted_columns = ", ".join(
+            quote(column_name) for column_name in sorted(column_names)
+        )
+        connection.execute(
+            text(
+                "REVOKE ALL ({}) ON TABLE {} FROM PUBLIC, freqtrade; "
+                "REVOKE ALL ON TABLE {} FROM PUBLIC, freqtrade; "
+                "GRANT SELECT, INSERT, UPDATE ON TABLE {} TO freqtrade".format(
+                    quoted_columns,
+                    qualified_table,
+                    qualified_table,
+                    qualified_table,
+                )
+            )
+        )
+        sequence_identity = (
+            connection.execute(
+                text("SELECT pg_get_serial_sequence(:table_name, 'id')"),
+                {"table_name": "{}.{}".format(schema_name, table_name)},
+            ).scalar_one()
+            if "id" in column_names
+            else None
+        )
+        if sequence_identity:
+            connection.execute(
+                text(
+                    "REVOKE ALL ON SEQUENCE {} FROM PUBLIC, freqtrade; "
+                    "GRANT USAGE, SELECT ON SEQUENCE {} TO freqtrade".format(
+                        sequence_identity,
+                        sequence_identity,
+                    )
+                )
+            )
+
+
+def _runtime_application_acl_problems(
+    connection: Connection,
+    schema_name: str,
+) -> list[str]:
+    """Return exact runtime ACL drift for the ordinary application allowlist."""
+
+    problems = []
+    server_version_num = int(
+        connection.execute(text("SHOW server_version_num")).scalar_one()
+    )
+    unsafe_privileges = (
+        "DELETE,TRUNCATE,REFERENCES,TRIGGER"
+        + (",MAINTAIN" if server_version_num >= 170000 else "")
+    )
+    inspector = inspect(connection)
+    existing_tables = set(inspector.get_table_names(schema=schema_name))
+    for table_name in RUNTIME_APPLICATION_TABLES:
+        if table_name not in existing_tables:
+            problems.append("runtime application ACL table missing: " + table_name)
+            continue
+        can_select, can_insert, can_update, can_unsafe = connection.execute(
+            text(
+                "SELECT "
+                "has_table_privilege('freqtrade', :table_name, 'SELECT'), "
+                "has_table_privilege('freqtrade', :table_name, 'INSERT'), "
+                "has_table_privilege('freqtrade', :table_name, 'UPDATE'), "
+                "has_table_privilege('freqtrade', :table_name, :unsafe)"
+            ),
+            {
+                "table_name": "{}.{}".format(schema_name, table_name),
+                "unsafe": unsafe_privileges,
+            },
+        ).one()
+        if not (can_select and can_insert and can_update):
+            problems.append(
+                "runtime application DML privilege missing: " + table_name
+            )
+        if can_unsafe:
+            problems.append(
+                "runtime application unsafe privilege present: " + table_name
+            )
+        public_table_acl = connection.execute(
+            text(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_class AS relation
+                    JOIN pg_namespace AS namespace
+                      ON namespace.oid = relation.relnamespace
+                    CROSS JOIN LATERAL aclexplode(
+                        COALESCE(
+                            relation.relacl,
+                            acldefault('r', relation.relowner)
+                        )
+                    ) AS acl
+                    WHERE namespace.nspname = :schema_name
+                      AND relation.relname = :table_name
+                      AND acl.grantee = 0
+                      AND acl.privilege_type IN (
+                          'SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE',
+                          'REFERENCES', 'TRIGGER', 'MAINTAIN'
+                      )
+                )
+                """
+            ),
+            {"schema_name": schema_name, "table_name": table_name},
+        ).scalar_one()
+        if public_table_acl:
+            problems.append(
+                "PUBLIC runtime application table privilege present: "
+                + table_name
+            )
+        explicit_column_acl = connection.execute(
+            text(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_class AS relation
+                    JOIN pg_namespace AS namespace
+                      ON namespace.oid = relation.relnamespace
+                    JOIN pg_attribute AS attribute
+                      ON attribute.attrelid = relation.oid
+                     AND attribute.attnum > 0
+                     AND NOT attribute.attisdropped
+                    CROSS JOIN LATERAL aclexplode(attribute.attacl) AS acl
+                    WHERE namespace.nspname = :schema_name
+                      AND relation.relname = :table_name
+                      AND acl.grantee IN (
+                          0,
+                          (SELECT oid FROM pg_roles
+                           WHERE rolname = 'freqtrade')
+                      )
+                )
+                """
+            ),
+            {"schema_name": schema_name, "table_name": table_name},
+        ).scalar_one()
+        if explicit_column_acl:
+            problems.append(
+                "runtime application column privilege present: " + table_name
+            )
+        column_names = {
+            column["name"]
+            for column in inspector.get_columns(table_name, schema=schema_name)
+        }
+        sequence_identity = (
+            connection.execute(
+                text("SELECT pg_get_serial_sequence(:table_name, 'id')"),
+                {"table_name": "{}.{}".format(schema_name, table_name)},
+            ).scalar_one()
+            if "id" in column_names
+            else None
+        )
+        if not sequence_identity:
+            continue
+        can_usage, can_sequence_select, can_sequence_update = connection.execute(
+            text(
+                "SELECT "
+                "has_sequence_privilege('freqtrade', :sequence_name, 'USAGE'), "
+                "has_sequence_privilege('freqtrade', :sequence_name, 'SELECT'), "
+                "has_sequence_privilege('freqtrade', :sequence_name, 'UPDATE')"
+            ),
+            {"sequence_name": sequence_identity},
+        ).one()
+        if not (can_usage and can_sequence_select) or can_sequence_update:
+            problems.append(
+                "runtime application sequence privilege mismatch: "
+                + sequence_identity
+            )
+        public_sequence_acl = connection.execute(
+            text(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_class AS sequence
+                    JOIN pg_namespace AS namespace
+                      ON namespace.oid = sequence.relnamespace
+                    CROSS JOIN LATERAL aclexplode(
+                        COALESCE(
+                            sequence.relacl,
+                            acldefault('S', sequence.relowner)
+                        )
+                    ) AS acl
+                    WHERE sequence.oid = to_regclass(:sequence_name)
+                      AND acl.grantee = 0
+                )
+                """
+            ),
+            {"sequence_name": sequence_identity},
+        ).scalar_one()
+        if public_sequence_acl:
+            problems.append(
+                "PUBLIC runtime application sequence privilege present: "
+                + sequence_identity
+            )
+    return problems
+
+
 def _add_okx_demo_soak(connection: Connection) -> None:
     """Add #453 evidence tables without another runtime or database."""
 
@@ -4028,6 +4277,7 @@ def _add_okx_demo_soak(connection: Connection) -> None:
                 )
             )
         )
+    _grant_runtime_application_acl(connection)
 
 
 def upgrade_database(engine: Engine) -> str:
@@ -4291,6 +4541,19 @@ def upgrade_database(engine: Engine) -> str:
                 if problems:
                     raise SchemaMigrationBlocked(
                         "OKX Demo soak schema upgrade does not match ORM metadata: "
+                        + "; ".join(problems)
+                    )
+                connection.execute(
+                    text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+                    {"version": SCHEMA_VERSION},
+                )
+                return SCHEMA_VERSION
+            if current_version == RUNTIME_APP_ACL_BASE_VERSION:
+                _grant_runtime_application_acl(connection)
+                problems = schema_problems(connection)
+                if problems:
+                    raise SchemaMigrationBlocked(
+                        "Runtime application ACL upgrade does not match ORM metadata: "
                         + "; ".join(problems)
                     )
                 connection.execute(
