@@ -160,7 +160,7 @@ def validate_target_contract(target: Mapping[str, object]) -> list[str]:
         "instrument_type": "SWAP",
         "trading_mode": "futures",
         "margin_mode": "isolated",
-        "position_mode": "net_mode",
+        "position_mode": "long_short_mode",
         "simulated_trading": True,
         "allow_real_funds": False,
         "rest_url": OKX_REST_URL,
@@ -251,7 +251,7 @@ def run_diagnostics(
         Check(
             "target_contract",
             "FAILED" if failures else "PASS",
-            "; ".join(failures) if failures else "OKX_DEMO/SWAP/isolated/net_mode contract is exact",
+            "; ".join(failures) if failures else "OKX_DEMO/SWAP/isolated/long_short_mode contract is exact",
         )
     )
     version_details = {
