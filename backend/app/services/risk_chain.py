@@ -409,6 +409,70 @@ def _revoke_attested_session(
             raise RiskChainBlocked("attested session revoke conflicts")
 
 
+def _persist_attested_session(
+    db: Session,
+    capability: _AttestedSessionCapability,
+    *,
+    now: datetime,
+) -> OkxDemoAttestedSession:
+    """Bind an attested capability durably before any writer can use it."""
+
+    active_now = _aware(now, "attested session bind now")
+    identity, proof = capability._open(_CAPABILITY_SENTINEL, active_now)
+    proof_digest = hashlib.sha256(proof.encode("utf-8")).hexdigest()
+    session = db.get(OkxDemoAttestedSession, identity.session_id)
+    if session is None:
+        if db.bind is not None and db.bind.dialect.name == "postgresql":
+            db.execute(
+                text(
+                    "SELECT write_okx_demo_attested_session("
+                    "CAST(:session_id AS text), CAST(:target AS text), "
+                    "CAST(:fingerprint AS text), :created_micros, "
+                    ":expires_micros, CAST(:nonce AS text), "
+                    "CAST(:signature AS text))"
+                ),
+                {
+                    "session_id": identity.session_id,
+                    "target": identity.execution_target,
+                    "fingerprint": identity.pinned_fingerprint_sha256,
+                    "created_micros": int(
+                        identity.created_at.timestamp() * 1_000_000
+                    ),
+                    "expires_micros": int(
+                        identity.expires_at.timestamp() * 1_000_000
+                    ),
+                    "nonce": identity.nonce,
+                    "signature": proof,
+                },
+            )
+            session = db.get(OkxDemoAttestedSession, identity.session_id)
+        else:
+            session = OkxDemoAttestedSession(
+                session_id=identity.session_id,
+                execution_target_id=identity.execution_target,
+                pinned_fingerprint_sha256=identity.pinned_fingerprint_sha256,
+                capability_proof_digest=proof_digest,
+                attestation_nonce=identity.nonce,
+                created_at=identity.created_at,
+                expires_at=identity.expires_at,
+            )
+            db.add(session)
+            db.flush()
+    if (
+        session is None
+        or session.execution_target_id != identity.execution_target
+        or session.pinned_fingerprint_sha256
+        != identity.pinned_fingerprint_sha256
+        or session.capability_proof_digest != proof_digest
+        or session.attestation_nonce != identity.nonce
+        or _persisted_aware(session.created_at) != identity.created_at
+        or _persisted_aware(session.expires_at) != identity.expires_at
+        or session.revoked_at is not None
+    ):
+        raise RiskChainBlocked("attested session database binding is invalid")
+    return session
+
+
 def _write_attested_snapshot(
     db: Session,
     capability: _AttestedSessionCapability,
@@ -455,53 +519,11 @@ def _write_attested_snapshot(
     ):
         raise RiskChainBlocked("trusted snapshot time window is invalid")
     digest = canonical_digest(content)
-    session = db.get(OkxDemoAttestedSession, identity.session_id)
-    proof_digest = hashlib.sha256(proof.encode("utf-8")).hexdigest()
-    if session is None:
-        if db.bind is not None and db.bind.dialect.name == "postgresql":
-            created_micros = int(identity.created_at.timestamp() * 1_000_000)
-            expires_micros = int(identity.expires_at.timestamp() * 1_000_000)
-            db.execute(
-                text(
-                    "SELECT write_okx_demo_attested_session("
-                    "CAST(:session_id AS text), CAST(:target AS text), "
-                    "CAST(:fingerprint AS text), :created_micros, "
-                    ":expires_micros, CAST(:nonce AS text), "
-                    "CAST(:signature AS text))"
-                ),
-                {
-                    "session_id": identity.session_id,
-                    "target": identity.execution_target,
-                    "fingerprint": identity.pinned_fingerprint_sha256,
-                    "created_micros": created_micros,
-                    "expires_micros": expires_micros,
-                    "nonce": identity.nonce,
-                    "signature": proof,
-                },
-            )
-            session = db.get(OkxDemoAttestedSession, identity.session_id)
-        else:
-            session = OkxDemoAttestedSession(
-                session_id=identity.session_id,
-                execution_target_id=identity.execution_target,
-                pinned_fingerprint_sha256=identity.pinned_fingerprint_sha256,
-                capability_proof_digest=proof_digest,
-                attestation_nonce=identity.nonce,
-                created_at=identity.created_at,
-                expires_at=identity.expires_at,
-            )
-            db.add(session)
-            db.flush()
-    elif (
-        session.execution_target_id != identity.execution_target
-        or session.pinned_fingerprint_sha256 != identity.pinned_fingerprint_sha256
-        or session.capability_proof_digest != proof_digest
-        or session.attestation_nonce != identity.nonce
-        or _persisted_aware(session.created_at) != identity.created_at
-        or _persisted_aware(session.expires_at) != identity.expires_at
-        or session.revoked_at is not None
-    ):
-        raise RiskChainBlocked("attested session database binding is invalid")
+    session = _persist_attested_session(
+        db,
+        capability,
+        now=active_now,
+    )
     snapshot_id = _trusted_snapshot_id(
         OkxDemoTrustedSnapshot(
             kind=kind,

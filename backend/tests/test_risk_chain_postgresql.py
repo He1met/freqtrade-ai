@@ -47,6 +47,7 @@ from app.services.risk_chain import (
     RiskChainService,
     _issue_attested_session_capability,
     _normalize_attested_snapshot,
+    _persist_attested_session,
     _revoke_attested_session,
     _write_attested_snapshot,
     canonical_digest,
@@ -1068,6 +1069,44 @@ def test_runtime_role_durable_revoke_blocks_old_session(
         assert session is not None
         assert session.revoke_reason == "IDENTITY_DRIFT"
         assert session.revoked_at is not None
+
+
+def test_runtime_role_persists_unused_session_before_durable_revoke(
+    postgres_engine,
+) -> None:
+    upgrade_database(postgres_engine)
+    factory = create_session_factory(postgres_engine)
+    now = datetime.now(timezone.utc)
+    capability = _issue_attested_session_capability(
+        attestation_hmac_key=b"t" * 32,
+        pinned_fingerprint_sha256="d" * 64,
+        created_at=now,
+        expires_at=now + timedelta(minutes=1),
+    )
+    with factory.begin() as db:
+        db.execute(text("SET LOCAL ROLE freqtrade"))
+        persisted = _persist_attested_session(
+            db,
+            capability,
+            now=now,
+        )
+        session_id = persisted.session_id
+    with factory.begin() as db:
+        db.execute(text("SET LOCAL ROLE freqtrade"))
+        persisted = db.get(OkxDemoAttestedSession, session_id)
+        assert persisted is not None
+        assert persisted.revoked_at is None
+        _revoke_attested_session(
+            db,
+            capability,
+            reason="FACTORY_CLOSE",
+            revoked_at=now + timedelta(seconds=1),
+        )
+    with factory() as db:
+        persisted = db.get(OkxDemoAttestedSession, session_id)
+        assert persisted is not None
+        assert persisted.revoke_reason == "FACTORY_CLOSE"
+        assert persisted.revoked_at is not None
 
 
 def test_approved_execution_snapshot_foreign_keys_restrict_registry_delete(
