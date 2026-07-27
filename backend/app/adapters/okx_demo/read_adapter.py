@@ -979,8 +979,15 @@ class OkxDemoReadAdapter:
     def _fill(item: Mapping[str, Any]):
         from app.adapters.okx_demo.models import FillQuery
 
+        trade_id = item.get("tradeId")
+        legacy_fill_id = item.get("fillId")
+        if trade_id and legacy_fill_id and trade_id != legacy_fill_id:
+            raise ValueError("fill identity fields conflict")
+        fill_id = trade_id or legacy_fill_id
+        if not fill_id:
+            raise ValueError("fill identity is missing")
         return FillQuery(
-            fill_id=item["fillId"],
+            fill_id=fill_id,
             order_id=item["ordId"],
             inst_id=item["instId"],
             price=Decimal(item["fillPx"]),
