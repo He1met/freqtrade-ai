@@ -326,6 +326,40 @@ def test_realtime_snapshot_still_rejects_old_exchange_timestamp(monkeypatch) -> 
         )
 
 
+def test_official_trade_id_is_normalized_to_internal_fill_id() -> None:
+    fill = OkxDemoReadAdapter._fill(
+        {
+            "tradeId": "12345",
+            "ordId": "67890",
+            "instId": "BTC-USDT-SWAP",
+            "fillPx": "50000",
+            "fillSz": "1",
+            "fee": "-0.01",
+            "ts": FRESH_TS,
+        }
+    )
+
+    assert fill.fill_id == "12345"
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [{}, {"tradeId": "1", "fillId": "2"}],
+)
+def test_missing_or_conflicting_fill_identity_is_rejected(identity) -> None:
+    payload = {
+        "ordId": "67890",
+        "instId": "BTC-USDT-SWAP",
+        "fillPx": "50000",
+        "fillSz": "1",
+        "ts": FRESH_TS,
+        **identity,
+    }
+
+    with pytest.raises(ValueError, match="fill identity"):
+        OkxDemoReadAdapter._fill(payload)
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
