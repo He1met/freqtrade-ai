@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import hashlib
 import json
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine, select
@@ -85,6 +86,17 @@ def _account() -> dict:
         "equity": "10000",
         "availableBalance": "9000",
         "marginBalance": "1000",
+    }
+
+
+def _fill() -> dict:
+    return {
+        "fillId": "external-fill-1",
+        "ordId": "external-order-1",
+        "instId": "BTC-USDT-SWAP",
+        "fillPx": "50000",
+        "fillSz": "1",
+        "fee": "-0.01",
     }
 
 
@@ -265,6 +277,7 @@ def test_complete_rest_recovery_batch_restores_gate_after_restart(
             now,
         ),
         _event("ACCOUNT", "account", _account(), now),
+        _event("FILL", "external-fill-1", _fill(), now),
     ]
     with session_factory.begin() as db:
         service = OkxDemoReconciliationService(
@@ -290,9 +303,35 @@ def test_complete_rest_recovery_batch_restores_gate_after_restart(
             now=now,
             recovered=True,
         )
-        assert len(ingested) == 2
+        assert len(ingested) == 3
         assert result.status == "RECOVERED"
         assert result.opening_frozen is False
+        assert len(result.database_ids["fill_snapshots"]) == 1
+
+
+def test_fill_drift_only_applies_to_locally_managed_orders() -> None:
+    class Result:
+        def __init__(self, values):
+            self._values = values
+
+        def all(self):
+            return self._values
+
+    results = iter((Result(["managed-order"]), Result([])))
+    service = OkxDemoReconciliationService(
+        SimpleNamespace(scalars=lambda _query: next(results))
+    )
+    findings = []
+
+    service._compare_fills(
+        {
+            "managed-fill": SimpleNamespace(exchange_order_id="managed-order"),
+            "external-fill": SimpleNamespace(exchange_order_id="external-order"),
+        },
+        findings,
+    )
+
+    assert [item["identity"] for item in findings] == ["managed-fill"]
 
 
 def test_empty_complete_streams_are_durable_but_cannot_fake_account_readiness(

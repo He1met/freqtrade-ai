@@ -841,6 +841,14 @@ class OkxDemoReconciliationService:
         authoritative: Mapping[str, OkxDemoFillSnapshot],
         findings: list[dict[str, Any]],
     ) -> None:
+        managed_order_ids = set(
+            self.db.scalars(
+                select(ExchangeOrder.exchange_order_id).where(
+                    ExchangeOrder.execution_target_id == OKX_DEMO_TARGET_ID,
+                    ExchangeOrder.exchange_order_id.is_not(None),
+                )
+            ).all()
+        )
         local_ids = set(
             self.db.scalars(
                 select(ExchangeFill.exchange_fill_id).where(
@@ -848,7 +856,12 @@ class OkxDemoReconciliationService:
                 )
             ).all()
         )
-        for exchange_fill_id in sorted(set(authoritative) - local_ids):
+        managed_authoritative_ids = {
+            exchange_fill_id
+            for exchange_fill_id, snapshot in authoritative.items()
+            if snapshot.exchange_order_id in managed_order_ids
+        }
+        for exchange_fill_id in sorted(managed_authoritative_ids - local_ids):
             findings.append(
                 _finding(
                     "AUTHORITATIVE_FILL_MISSING_LOCALLY",
