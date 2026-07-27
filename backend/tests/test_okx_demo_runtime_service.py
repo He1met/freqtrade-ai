@@ -301,6 +301,43 @@ def test_runtime_orders_reconciliation_before_writer_and_keeps_drift_alive(
     assert db.rollbacks == 0
 
 
+def test_runtime_cleanup_does_not_mask_primary_failure(
+    monkeypatch,
+    tmp_path: Path,
+):
+    class FailingServerSession(FakeServerSession):
+        def close(self):
+            raise RuntimeError("cleanup failure")
+
+    class FailingAdapter(FakeAdapter):
+        def reconcile_before_writer(self, **_kwargs):
+            raise runtime_service.OkxDemoRuntimeBlocked("primary failure")
+
+    events = []
+    server = FailingServerSession(events)
+    db = FakeDatabaseSession()
+    connection = SimpleNamespace(close=lambda: None)
+    engine = SimpleNamespace(connect=lambda: connection, dispose=lambda: None)
+    monkeypatch.setattr(runtime_service, "Session", lambda bind: db)
+    monkeypatch.setattr(
+        runtime_service,
+        "create_okx_demo_server_session",
+        lambda _environment, lock_path: server,
+    )
+
+    with pytest.raises(
+        runtime_service.OkxDemoRuntimeBlocked,
+        match="primary failure",
+    ):
+        runtime_service.serve(
+            environment={"DATABASE_URL": "postgresql+psycopg:///freqtrade_ai"},
+            runtime_path=tmp_path,
+            reconciliation_factory=FailingAdapter,
+            engine_factory=lambda *_args, **_kwargs: engine,
+            now_provider=lambda: NOW,
+        )
+
+
 def test_invalid_reconciliation_rolls_back_persisted_evidence():
     db = FakeDatabaseSession()
     invalid = reconciliation()
