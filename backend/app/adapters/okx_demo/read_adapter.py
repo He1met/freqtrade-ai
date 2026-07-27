@@ -1175,6 +1175,7 @@ def create_attested_okx_demo_read_adapter(
         from app.services.risk_chain import (
             _issue_attested_session_capability,
             _normalize_attested_snapshot,
+            _persist_attested_session,
             _revoke_attested_session,
             _revoke_attested_session_capability,
             _write_attested_snapshot,
@@ -1204,10 +1205,24 @@ def create_attested_okx_demo_read_adapter(
                 if self._revoke_session_factory is None:
                     from sqlalchemy.orm import sessionmaker
 
-                    self._revoke_session_factory = sessionmaker(
+                    revoke_session_factory = sessionmaker(
                         bind=db.get_bind(),
                         expire_on_commit=False,
                     )
+                    bind_db = revoke_session_factory()
+                    try:
+                        _persist_attested_session(
+                            bind_db,
+                            risk_capability,
+                            now=_utc_now(),
+                        )
+                        bind_db.commit()
+                    except BaseException:
+                        bind_db.rollback()
+                        raise
+                    finally:
+                        bind_db.close()
+                    self._revoke_session_factory = revoke_session_factory
 
             def revoke(self, reason: str, *, db=None) -> None:
                 if self._durability_failed:
