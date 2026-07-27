@@ -24,6 +24,7 @@ from app.db.migrations import (
     ORDER_WRITER_BASE_VERSION,
     RECONCILIATION_BASE_VERSION,
     SCHEMA_VERSION,
+    SOAK_BASE_VERSION,
     SchemaMigrationBlocked,
     VERSION_TABLE,
     _add_order_writer,
@@ -1690,3 +1691,59 @@ def test_postgresql_recovery_grant_and_cancel_attempt_commit_together(
                 == reduce_grant_id
             )
         ) is not None
+
+
+def test_soak_base_version_upgrades_in_place_and_is_append_only(
+    postgres_writer_engine,
+) -> None:
+    assert upgrade_database(postgres_writer_engine) == SCHEMA_VERSION
+    with postgres_writer_engine.begin() as connection:
+        for table_name in (
+            "okx_demo_soak_events",
+            "okx_demo_soak_probes",
+            "okx_demo_soak_runs",
+        ):
+            connection.execute(text("DROP TABLE {}".format(table_name)))
+        connection.execute(text("DELETE FROM {}".format(VERSION_TABLE)))
+        connection.execute(
+            text(
+                "INSERT INTO {} (version) VALUES (:version)".format(
+                    VERSION_TABLE
+                )
+            ),
+            {"version": SOAK_BASE_VERSION},
+        )
+
+    assert upgrade_database(postgres_writer_engine) == SCHEMA_VERSION
+    assert verify_schema(postgres_writer_engine).ready is True
+    with postgres_writer_engine.connect() as connection:
+        privileges = {
+            table_name: {
+                privilege: connection.execute(
+                    text(
+                        "SELECT has_table_privilege("
+                        "'freqtrade', :table_name, :privilege)"
+                    ),
+                    {"table_name": table_name, "privilege": privilege},
+                ).scalar_one()
+                for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE")
+            }
+            for table_name in (
+                "okx_demo_soak_runs",
+                "okx_demo_soak_probes",
+                "okx_demo_soak_events",
+            )
+        }
+    assert privileges["okx_demo_soak_runs"] == {
+        "SELECT": True,
+        "INSERT": True,
+        "UPDATE": True,
+        "DELETE": False,
+    }
+    for table_name in ("okx_demo_soak_probes", "okx_demo_soak_events"):
+        assert privileges[table_name] == {
+            "SELECT": True,
+            "INSERT": True,
+            "UPDATE": False,
+            "DELETE": False,
+        }
