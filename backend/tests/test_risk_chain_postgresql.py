@@ -274,6 +274,13 @@ def _policy() -> dict:
 def test_20260727_02_upgrades_to_risk_chain_atomically(postgres_engine) -> None:
     Base.metadata.create_all(postgres_engine)
     with postgres_engine.begin() as connection:
+        for table_name in (
+            "full_chain_signal_snapshots",
+            "full_chain_stage_runs",
+            "strategy_candidate_approvals",
+            "full_chain_runs",
+        ):
+            connection.execute(text('DROP TABLE "{}"'.format(table_name)))
         connection.execute(text("DROP TABLE approved_executions"))
         connection.execute(text("DROP TABLE risk_budgets"))
         connection.execute(
