@@ -25,7 +25,7 @@ def target() -> dict[str, object]:
         "instrument_type": "SWAP",
         "trading_mode": "futures",
         "margin_mode": "isolated",
-        "position_mode": "net_mode",
+        "position_mode": "long_short_mode",
         "simulated_trading": True,
         "allow_real_funds": False,
         "rest_url": "https://openapi.okx.com",
@@ -36,7 +36,7 @@ def target() -> dict[str, object]:
     }
 
 
-def test_target_contract_accepts_only_demo_swap_isolated_net_mode(target) -> None:
+def test_target_contract_accepts_only_demo_swap_isolated_dual_side_mode(target) -> None:
     assert validate_target_contract(target) == []
 
 
@@ -46,7 +46,7 @@ def test_target_contract_accepts_only_demo_swap_isolated_net_mode(target) -> Non
         ("execution_target", "OKX_LIVE"),
         ("instrument_type", "SPOT"),
         ("margin_mode", "cross"),
-        ("position_mode", "long_short_mode"),
+        ("position_mode", "net_mode"),
         ("simulated_trading", False),
         ("allow_real_funds", True),
         ("private_ws_url", "wss://ws.okx.com:8443/ws/v5/private"),
