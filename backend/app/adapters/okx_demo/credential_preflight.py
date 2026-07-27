@@ -24,6 +24,7 @@ OKX_DEMO_REST_URL = "https://openapi.okx.com"
 ACCOUNT_CONFIG_PATH = "/api/v5/account/config"
 SIMULATED_TRADING_HEADER = ("x-simulated-trading", "1")
 PREFLIGHT_USER_AGENT = "freqtrade-ai-okx-demo-preflight/1"
+REQUIRED_POSITION_MODE = "long_short_mode"
 OKX_DEMO_CREDENTIAL_ENV_NAMES = (
     "OKX_DEMO_API_KEY",
     "OKX_DEMO_API_SECRET",
@@ -240,8 +241,10 @@ def validate_account_safety(payload: Any) -> Mapping[str, Any]:
         raise OkxDemoPreflightBlocked(
             "OKX Demo API permissions must be exactly read_only and trade"
         )
-    if account.get("posMode") != "net_mode":
-        raise OkxDemoPreflightBlocked("OKX Demo position mode must be net_mode")
+    if account.get("posMode") != REQUIRED_POSITION_MODE:
+        raise OkxDemoPreflightBlocked(
+            "OKX Demo position mode must be long_short_mode"
+        )
     if account.get("acctLv") != "2":
         raise OkxDemoPreflightBlocked("OKX Demo account level must be Futures mode")
     return account
@@ -261,7 +264,7 @@ def _ready_attestation() -> Dict[str, Any]:
                 "withdraw": False,
             },
             "account_level": "2",
-            "position_mode": "net_mode",
+            "position_mode": REQUIRED_POSITION_MODE,
         },
         "local_target_contract": {
             "product_type": "SWAP",
