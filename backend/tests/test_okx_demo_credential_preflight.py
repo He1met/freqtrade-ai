@@ -36,7 +36,7 @@ def valid_payload() -> dict:
                 "uid": "must-not-be-rendered",
                 "mainUid": "also-private",
                 "acctLv": "2",
-                "posMode": "net_mode",
+                "posMode": "long_short_mode",
                 "perm": "read_only,trade",
             }
         ],
@@ -217,8 +217,8 @@ def test_valid_demo_identity_and_minimum_permissions_are_redacted() -> None:
             "exactly read_only and trade",
         ),
         (
-            lambda payload: payload["data"][0].update(posMode="long_short_mode"),
-            "net_mode",
+            lambda payload: payload["data"][0].update(posMode="net_mode"),
+            "long_short_mode",
         ),
         (
             lambda payload: payload["data"][0].update(acctLv="3"),
@@ -349,7 +349,7 @@ def test_account_pin_refuses_existing_pin_before_network_or_write() -> None:
         lambda payload: payload.update(code="1"),
         lambda payload: payload["data"][0].update(perm="read_only"),
         lambda payload: payload["data"][0].update(acctLv="3"),
-        lambda payload: payload["data"][0].update(posMode="long_short_mode"),
+        lambda payload: payload["data"][0].update(posMode="net_mode"),
     ],
 )
 def test_account_pin_never_writes_after_remote_validation_failure(mutation) -> None:
