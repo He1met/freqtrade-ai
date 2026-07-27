@@ -12,6 +12,8 @@ trading, or reads provider credentials.  Runtime state stays in
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+import fcntl
 import json
 import os
 import pwd
@@ -19,14 +21,16 @@ import re
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 from urllib.error import URLError
 from urllib.parse import urlsplit
 from urllib.request import urlopen
+from uuid import uuid4
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -76,6 +80,9 @@ OKX_DEMO_KEYCHAIN_SERVICES = dict(
         ),
     )
 )
+OKX_DEMO_CREDENTIAL_GENERATION_SERVICE = (
+    "freqtrade-ai/okx-demo-credential-generation"
+)
 KEYCHAIN_TIMEOUT_SECONDS = 5
 SAFE_INHERITED_ENV_KEYS = frozenset(
     {
@@ -114,24 +121,38 @@ PID_FILES = {
     "backend": "backend.pid",
     "worker": "worker.pid",
     "frontend": "frontend.pid",
+    "okx_runtime": "okx-runtime.pid",
 }
 LOG_FILES = {
     "backend": "backend.log",
     "worker": "worker.log",
     "frontend": "frontend.log",
+    "okx_runtime": "okx-runtime.log",
 }
 SERVICE_PROCESS_MARKERS = {
     "backend": "uvicorn",
     "worker": "app.workers.deepseek_backtest_worker",
     "frontend": "vite",
+    "okx_runtime": "app.adapters.okx_demo.runtime_service",
 }
 SERVICE_WORKING_DIRECTORIES = {
     "backend": REPO_ROOT / "backend",
     "worker": REPO_ROOT / "backend",
     "frontend": REPO_ROOT / "frontend",
+    "okx_runtime": REPO_ROOT / "backend",
 }
+SERVICE_START_ORDER = ("backend", "worker", "frontend", "okx_runtime")
+SERVICE_STOP_ORDER = tuple(reversed(SERVICE_START_ORDER))
+OKX_RUNTIME_READY_FILE = "okx-runtime.ready.json"
+OKX_WRITER_LOCK_FILE = "okx-demo-order-writer.lock"
+CONTROL_LOCK_FILE = "runtime-control.lock"
+OPENINGS_FREEZE_FILE = "okx-runtime.freeze-openings"
 SECRET_LINE = re.compile(
-    r"(?i)(api[_-]?key|token|secret|password|passphrase)\s*([=:])\s*([^\s,;]+)"
+    r"(?i)(api[_-]?key|token|secret|password|passphrase|authorization|"
+    r"ok-access-(?:key|sign|passphrase))([\"']?\s*[:=]\s*[\"']?)([^\s,;\"']+)"
+)
+DATABASE_CREDENTIALS = re.compile(
+    r"(?i)(postgres(?:ql)?(?:\+[a-z0-9_]+)?://[^:\s/@]+:)([^@\s]+)(@)"
 )
 
 
@@ -238,9 +259,83 @@ def process_running(pid: int) -> bool:
 
 def read_pid(path: Path) -> Optional[int]:
     try:
-        return int(path.read_text(encoding="utf-8").strip())
+        return int(read_private_state(path).strip())
     except (OSError, ValueError):
         return None
+
+
+def read_private_state(path: Path) -> str:
+    descriptor = os.open(
+        path,
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+    )
+    metadata = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) & 0o077
+    ):
+        os.close(descriptor)
+        raise OSError("unsafe private runtime state")
+    with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+        return handle.read()
+
+
+def write_private_state(path: Path, value: str) -> None:
+    temporary = path.with_name(
+        ".{}.{}.tmp".format(path.name, os.getpid())
+    )
+    descriptor = os.open(
+        temporary,
+        os.O_CREAT
+        | os.O_EXCL
+        | os.O_WRONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(path)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+@contextmanager
+def runtime_control_lock(state_dir: Path):
+    """Serialize up/down/verify without creating another supervisor."""
+
+    state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = state_dir / CONTROL_LOCK_FILE
+    descriptor = os.open(
+        path,
+        os.O_CREAT
+        | os.O_RDWR
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    metadata = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) & 0o077
+    ):
+        os.close(descriptor)
+        raise RuntimeBlocked("runtime control lock is not a safe local file")
+    handle = os.fdopen(descriptor, "r+")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
 
 
 def process_status(state_dir: Path, service: str) -> Dict[str, Any]:
@@ -486,6 +581,101 @@ def read_okx_demo_credentials() -> Tuple[Optional[Dict[str, str]], Dict[str, Any
     }
 
 
+def read_okx_runtime_capability() -> Tuple[
+    Optional[Dict[str, str]],
+    Dict[str, Any],
+]:
+    """Read the sole runtime bundle plus its non-secret rotation generation."""
+
+    credentials, metadata = read_okx_demo_credentials()
+    if credentials is None:
+        return None, metadata
+    proof_key = _read_macos_keychain_item(ATTESTATION_PROOF_KEYCHAIN_SERVICE)
+    if (
+        proof_key is None
+        or len(proof_key) != 64
+        or any(character not in "0123456789abcdef" for character in proof_key)
+    ):
+        credentials.clear()
+        return None, {
+            "status": "BLOCKED",
+            "configured": False,
+            "source": "keychain",
+            "reason": "OKX Demo attestation proof key is missing or inaccessible",
+        }
+    credentials[ATTESTATION_PROOF_KEY_ENV] = proof_key
+    generation = _read_macos_keychain_item(
+        OKX_DEMO_CREDENTIAL_GENERATION_SERVICE
+    )
+    if (
+        generation is None
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", generation)
+        is None
+    ):
+        credentials.clear()
+        return None, {
+            "status": "BLOCKED",
+            "configured": False,
+            "source": "keychain",
+            "reason": "OKX Demo credential generation metadata is missing or invalid",
+        }
+    return credentials, {
+        "status": "READY",
+        "configured": True,
+        "source": "keychain",
+        "_generation": generation,
+    }
+
+
+def configure_okx_credential_generation() -> Dict[str, Any]:
+    """Rotate non-secret metadata after the operator replaces all OKX keys."""
+
+    if sys.platform != "darwin":
+        raise RuntimeBlocked("macOS Keychain is required")
+    security = Path("/usr/bin/security")
+    if not security.is_file():
+        raise RuntimeBlocked("macOS security command is unavailable")
+    credentials, metadata = read_okx_demo_credentials()
+    if credentials is None:
+        raise RuntimeBlocked(str(metadata["reason"]))
+    credentials.clear()
+    account = pwd.getpwuid(os.getuid()).pw_name
+    generation = uuid4().hex
+    try:
+        completed = subprocess.run(
+            [
+                str(security),
+                "add-generic-password",
+                "-U",
+                "-a",
+                account,
+                "-s",
+                OKX_DEMO_CREDENTIAL_GENERATION_SERVICE,
+                "-w",
+                generation,
+            ],
+            cwd=str(REPO_ROOT),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=KEYCHAIN_TIMEOUT_SECONDS,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        raise RuntimeBlocked(
+            "OKX Demo credential generation could not be updated"
+        ) from None
+    if completed.returncode != 0:
+        raise RuntimeBlocked(
+            "OKX Demo credential generation could not be updated"
+        )
+    return {
+        "status": "READY",
+        "credential_generation": "UPDATED",
+        "next_action": "run `make autostart-restart`",
+    }
+
+
 def read_okx_demo_onboarding_credentials() -> Tuple[Optional[Dict[str, str]], Dict[str, Any]]:
     """Read only the three signing credentials used to establish the first pin."""
 
@@ -534,17 +724,28 @@ def service_environment(
         "okx_adapter",
         "okx_onboarding",
         "okx_canary",
+        "okx_runtime",
     }:
         raise RuntimeBlocked("unknown managed service environment")
     environment = (
         okx_adapter_base_environment()
-        if service in {"okx_adapter", "okx_onboarding", "okx_canary"}
+        if service in {
+            "okx_adapter",
+            "okx_onboarding",
+            "okx_canary",
+            "okx_runtime",
+        }
         else base_service_environment()
     )
-    if service in {"backend", "worker"}:
+    if service in {"backend", "worker", "okx_runtime"}:
         environment.update(
             {
                 "DATABASE_URL": database_url,
+            }
+        )
+    if service in {"backend", "worker"}:
+        environment.update(
+            {
                 "STRATEGY_BLUEPRINT_PROVIDER": MANAGED_STRATEGY_PROVIDER,
                 "STRATEGY_BLUEPRINT_MODEL": MANAGED_STRATEGY_MODEL,
             }
@@ -555,9 +756,14 @@ def service_environment(
             environment[OPERATOR_TOKEN_ENV] = operator_token
     if service in {"backend", "worker"} and deepseek_api_key:
         environment[DEEPSEEK_API_KEY_ENV] = deepseek_api_key
-    if service in {"okx_adapter", "okx_onboarding", "okx_canary"}:
+    if service in {
+        "okx_adapter",
+        "okx_onboarding",
+        "okx_canary",
+        "okx_runtime",
+    }:
         validate_okx_demo_execution_target()
-        if service == "okx_adapter":
+        if service in {"okx_adapter", "okx_runtime"}:
             required_names = (
                 *OKX_DEMO_REQUIRED_ENV_NAMES,
                 ATTESTATION_PROOF_KEY_ENV,
@@ -1089,7 +1295,24 @@ def start_service(
     if current["running"]:
         raise RuntimeBlocked("{} is already managed by this runtime (pid {})".format(service, current["pid"]))
     log_path = state_dir / LOG_FILES[service]
-    log_handle = log_path.open("a", encoding="utf-8")
+    log_descriptor = os.open(
+        log_path,
+        os.O_CREAT
+        | os.O_APPEND
+        | os.O_WRONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    log_metadata = os.fstat(log_descriptor)
+    if (
+        not stat.S_ISREG(log_metadata.st_mode)
+        or log_metadata.st_uid != os.getuid()
+        or stat.S_IMODE(log_metadata.st_mode) & 0o077
+    ):
+        os.close(log_descriptor)
+        raise RuntimeBlocked("{} log path is unsafe".format(service))
+    log_handle = os.fdopen(log_descriptor, "a", encoding="utf-8")
     try:
         process = subprocess.Popen(
             list(command),
@@ -1101,7 +1324,14 @@ def start_service(
         )
     finally:
         log_handle.close()
-    (state_dir / PID_FILES[service]).write_text("{}\n".format(process.pid), encoding="utf-8")
+    try:
+        write_private_state(
+            state_dir / PID_FILES[service],
+            "{}\n".format(process.pid),
+        )
+    except OSError:
+        os.killpg(process.pid, signal.SIGTERM)
+        raise RuntimeBlocked("{} PID state could not be written safely".format(service))
 
 
 def wait_for_url(url: str, description: str, timeout_seconds: int = 20) -> None:
@@ -1125,6 +1355,234 @@ def wait_for_process(state_dir: Path, service: str, timeout_seconds: float = 2.0
         if not status["running"]:
             raise RuntimeBlocked("{} exited during startup; inspect {}".format(service, LOG_FILES[service]))
         time.sleep(0.1)
+
+
+def _writer_lock_holder(state_dir: Path) -> Optional[int]:
+    path = state_dir / OKX_WRITER_LOCK_FILE
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDWR
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except OSError:
+        return None
+    handle = os.fdopen(descriptor, "r+")
+    try:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            try:
+                handle.seek(0)
+                return int(handle.read().strip())
+            except ValueError:
+                return None
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return None
+    finally:
+        handle.close()
+
+
+def okx_runtime_readiness(state_dir: Path) -> Dict[str, Any]:
+    """Validate only the safe, fixed child readiness contract."""
+
+    service = process_status(state_dir, "okx_runtime")
+    path = state_dir / OKX_RUNTIME_READY_FILE
+    if (
+        not service["running"]
+        or not isinstance(service.get("pid"), int)
+        or not is_managed_process(service["pid"], "okx_runtime")
+    ):
+        return {"status": "BLOCKED", "reason": "OKX runtime is not running"}
+    try:
+        metadata = path.lstat()
+        if (
+            not path.is_file()
+            or path.is_symlink()
+            or metadata.st_uid != os.getuid()
+            or metadata.st_mode & 0o077
+        ):
+            raise ValueError
+        payload = json.loads(read_private_state(path))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return {
+            "status": "BLOCKED",
+            "reason": "OKX runtime readiness evidence is missing or unsafe",
+        }
+    if set(payload) != {
+        "status",
+        "execution_target",
+        "adapter",
+        "reconciliation",
+        "writer",
+        "pid",
+    }:
+        return {
+            "status": "BLOCKED",
+            "reason": "OKX runtime readiness contains unexpected fields",
+        }
+    status = payload.get("status")
+    reconciliation = payload.get("reconciliation")
+    valid_state = (
+        status == "READY"
+        and reconciliation in {"RECONCILED", "RECOVERED"}
+    ) or (
+        status == "BLOCKED_OPENINGS"
+        and reconciliation in {"DRIFTED", "STALE", "UNKNOWN"}
+    )
+    if (
+        not valid_state
+        or payload.get("execution_target") != "OKX_DEMO"
+        or payload.get("adapter") != "ATTESTED"
+        or payload.get("writer") != "UNIQUE"
+        or payload.get("pid") != service["pid"]
+        or _writer_lock_holder(state_dir) != service["pid"]
+    ):
+        return {
+            "status": "BLOCKED",
+            "reason": "OKX runtime readiness or writer uniqueness is not verified",
+        }
+    return {
+        "status": status,
+        "execution_target": "OKX_DEMO",
+        "adapter": "ATTESTED",
+        "reconciliation": reconciliation,
+        "writer": "UNIQUE",
+    }
+
+
+def wait_for_okx_runtime(state_dir: Path, timeout_seconds: int = 20) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if okx_runtime_readiness(state_dir).get("status") == "READY":
+            return
+        if not process_status(state_dir, "okx_runtime")["running"]:
+            break
+        time.sleep(0.25)
+    raise RuntimeBlocked(
+        "OKX runtime did not establish attested reconciliation and unique writer readiness"
+    )
+
+
+def cleanup_stale_runtime_state(state_dir: Path) -> None:
+    """Remove dead PID/readiness evidence; never bless an unrelated live PID."""
+
+    for service in SERVICE_START_ORDER:
+        pid_path = state_dir / PID_FILES[service]
+        pid = read_pid(pid_path)
+        if pid is not None and not process_running(pid):
+            pid_path.unlink(missing_ok=True)
+        elif pid is None:
+            try:
+                metadata = pid_path.lstat()
+            except OSError:
+                continue
+            if (
+                stat.S_ISREG(metadata.st_mode)
+                and metadata.st_uid == os.getuid()
+            ):
+                # Remove legacy/invalid owner-controlled PID evidence. Any
+                # live child is rediscovered by marker+cwd before startup.
+                pid_path.unlink(missing_ok=True)
+    okx_status = process_status(state_dir, "okx_runtime")
+    if not okx_status["running"]:
+        (state_dir / OKX_RUNTIME_READY_FILE).unlink(missing_ok=True)
+
+
+def freeze_okx_openings(state_dir: Path, timeout_seconds: int = 5) -> Dict[str, Any]:
+    if not process_status(state_dir, "okx_runtime")["running"]:
+        raise RuntimeBlocked("OKX runtime is not running; openings cannot be frozen")
+    path = state_dir / OPENINGS_FREEZE_FILE
+    descriptor = os.open(
+        path,
+        os.O_CREAT
+        | os.O_TRUNC
+        | os.O_WRONLY
+        | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write("BLOCKED_OPENINGS\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        readiness = okx_runtime_readiness(state_dir)
+        if readiness.get("status") == "BLOCKED_OPENINGS":
+            return {
+                "status": "BLOCKED_OPENINGS",
+                "reason": "credential capability is unavailable",
+            }
+        time.sleep(0.1)
+    raise RuntimeBlocked("OKX runtime did not freeze openings")
+
+
+def thaw_okx_openings(state_dir: Path, timeout_seconds: int = 5) -> Dict[str, Any]:
+    if not process_status(state_dir, "okx_runtime")["running"]:
+        raise RuntimeBlocked("OKX runtime is not running; openings cannot be thawed")
+    (state_dir / OPENINGS_FREEZE_FILE).unlink(missing_ok=True)
+    deadline = time.monotonic() + timeout_seconds
+    last = {"status": "BLOCKED"}
+    while time.monotonic() < deadline:
+        last = okx_runtime_readiness(state_dir)
+        if last.get("status") == "READY" or (
+            last.get("status") == "BLOCKED_OPENINGS"
+            and last.get("reconciliation") != "UNKNOWN"
+        ):
+            return last
+        time.sleep(0.1)
+    return last
+
+
+def orphaned_managed_processes(
+    state_dir: Path,
+    service: str,
+) -> list[int]:
+    tracked = read_pid(state_dir / PID_FILES[service])
+    try:
+        completed = subprocess.run(
+            ["ps", "-axo", "pid=,command="],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        raise RuntimeBlocked("managed process discovery is unavailable") from None
+    candidates = []
+    for line in completed.stdout.splitlines():
+        fields = line.strip().split(maxsplit=1)
+        if len(fields) != 2 or SERVICE_PROCESS_MARKERS[service] not in fields[1]:
+            continue
+        try:
+            pid = int(fields[0])
+        except ValueError:
+            continue
+        if pid in {os.getpid(), tracked}:
+            continue
+        if is_managed_process(pid, service):
+            candidates.append(pid)
+    return candidates
+
+
+def cleanup_orphaned_managed_processes(state_dir: Path) -> None:
+    """Terminate only exact marker+cwd children missing from canonical PID files."""
+
+    for service in SERVICE_STOP_ORDER:
+        for pid in orphaned_managed_processes(state_dir, service):
+            try:
+                os.killpg(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                continue
+            deadline = time.monotonic() + 10
+            alive = True
+            while time.monotonic() < deadline:
+                alive = process_running(pid)
+                if not alive:
+                    break
+                time.sleep(0.1)
+            if alive:
+                os.killpg(pid, signal.SIGKILL)
 
 
 def stop_service(state_dir: Path, service: str) -> Dict[str, Any]:
@@ -1156,25 +1614,77 @@ def stop_service(state_dir: Path, service: str) -> Dict[str, Any]:
 
 
 def stop_all(state_dir: Path) -> Dict[str, Any]:
-    return {
-        "services": [
-            stop_service(state_dir, service)
-            for service in ("worker", "frontend", "backend")
-        ]
+    services = [
+        stop_service(state_dir, service)
+        for service in SERVICE_STOP_ORDER
+    ]
+    (state_dir / OKX_RUNTIME_READY_FILE).unlink(missing_ok=True)
+    return {"services": services}
+
+
+def require_complete_startup_cleanup(
+    state_dir: Path,
+    stopped: Mapping[str, Any],
+) -> None:
+    blocked = [
+        item.get("service", "unknown")
+        for item in stopped.get("services", [])
+        if item.get("status") == "BLOCKED"
+    ]
+    remaining = [
+        service
+        for service in SERVICE_START_ORDER
+        if process_status(state_dir, service)["running"]
+    ]
+    orphaned = {
+        service: orphaned_managed_processes(state_dir, service)
+        for service in SERVICE_START_ORDER
     }
+    orphaned = {
+        service: pids for service, pids in orphaned.items() if pids
+    }
+    lock_holder = _writer_lock_holder(state_dir)
+    if blocked or remaining or orphaned or lock_holder is not None:
+        raise RuntimeBlocked(
+            "runtime startup failed and cleanup is incomplete; "
+            "blocked={}, remaining={}, orphaned={}, writer_lock_held={}".format(
+                blocked,
+                remaining,
+                sorted(orphaned),
+                lock_holder is not None,
+            )
+        )
 
 
 def start(state_dir: Path) -> Dict[str, Any]:
     state_dir.mkdir(parents=True, exist_ok=True)
+    cleanup_stale_runtime_state(state_dir)
+    running = [
+        service
+        for service in SERVICE_START_ORDER
+        if process_status(state_dir, service)["running"]
+    ]
+    if running:
+        raise RuntimeBlocked(
+            "runtime is already managed; repeated up was refused: {}".format(
+                ", ".join(running)
+            )
+        )
+    cleanup_orphaned_managed_processes(state_dir)
     backend_python()
     frontend_vite()
     if not port_available(BACKEND_PORT) or not port_available(FRONTEND_PORT):
         raise RuntimeBlocked("port 8000 or 5173 is already in use; run `make status` before starting")
     database_url = runtime_database_url()
+    validate_okx_demo_execution_target()
     ensure_schema(database_url)
     ensure_worker_queue_idle(database_url)
     database = {"identity": redact_database_url(database_url), "schema": "verified"}
     deepseek_api_key, deepseek_credential = read_deepseek_api_key()
+    okx_credentials, okx_capability = read_okx_runtime_capability()
+    if okx_credentials is None:
+        raise RuntimeBlocked(str(okx_capability["reason"]))
+    (state_dir / OPENINGS_FREEZE_FILE).unlink(missing_ok=True)
     try:
         start_service(
             "backend",
@@ -1204,14 +1714,43 @@ def start(state_dir: Path) -> Dict[str, Any]:
             state_dir=state_dir,
         )
         wait_for_url("http://127.0.0.1:{}/".format(FRONTEND_PORT), "frontend")
-    except RuntimeBlocked:
-        stop_all(state_dir)
-        raise
+        start_service(
+            "okx_runtime",
+            [
+                str(backend_python()),
+                "-m",
+                "app.adapters.okx_demo.runtime_service",
+                "--runtime-dir",
+                str(state_dir),
+            ],
+            cwd=REPO_ROOT / "backend",
+            environment=service_environment(
+                "okx_runtime",
+                database_url,
+                None,
+                okx_credentials,
+            ),
+            state_dir=state_dir,
+        )
+        wait_for_okx_runtime(state_dir)
+    except Exception:
+        stopped = stop_all(state_dir)
+        require_complete_startup_cleanup(state_dir, stopped)
+        raise RuntimeBlocked("runtime startup failed and was cleaned up") from None
+    finally:
+        okx_credentials.clear()
     return {
         "status": "RUNNING",
         "environment": "local",
         "database": database,
-        "credentials": {"deepseek_api_key": deepseek_credential},
+        "credentials": {
+            "deepseek_provider": deepseek_credential,
+            "okx_demo": {
+                key: value
+                for key, value in okx_capability.items()
+                if key != "_generation"
+            },
+        },
         "backend_url": "http://127.0.0.1:{}".format(BACKEND_PORT),
         "frontend_url": "http://127.0.0.1:{}".format(FRONTEND_PORT),
         "trading": {"live": False, "dry_run": False, "real_orders": False},
@@ -1219,15 +1758,36 @@ def start(state_dir: Path) -> Dict[str, Any]:
 
 
 def current_status(state_dir: Path) -> Dict[str, Any]:
+    services = [
+        process_status(state_dir, service)
+        for service in SERVICE_START_ORDER
+    ]
     result: Dict[str, Any] = {
         "environment": "local",
         "runtime_dir": str(state_dir),
-        "services": [
-            process_status(state_dir, service)
-            for service in ("backend", "worker", "frontend")
-        ],
+        "services": services,
         "trading": {"live": False, "dry_run": False, "real_orders": False},
     }
+    try:
+        validate_okx_demo_execution_target()
+        result["execution_target"] = {
+            "status": "READY",
+            "active": "OKX_DEMO",
+        }
+    except RuntimeBlocked as exc:
+        result["execution_target"] = {
+            "status": "BLOCKED",
+            "reason": str(exc),
+        }
+    credentials, capability = read_okx_runtime_capability()
+    if credentials is not None:
+        credentials.clear()
+    result["credentials"] = {
+        "okx_demo": {
+            key: value for key, value in capability.items() if key != "_generation"
+        }
+    }
+    result["okx_runtime"] = okx_runtime_readiness(state_dir)
     try:
         database_url = runtime_database_url()
         ensure_schema(database_url)
@@ -1238,11 +1798,27 @@ def current_status(state_dir: Path) -> Dict[str, Any]:
         }
     except RuntimeBlocked as exc:
         result["database"] = {"status": "BLOCKED", "reason": str(exc)}
+    ready = (
+        all(service["running"] for service in services)
+        and result["execution_target"].get("status") == "READY"
+        and result["credentials"]["okx_demo"].get("status") == "READY"
+        and result["database"].get("schema") == "verified"
+        and result["okx_runtime"].get("status")
+        in {"READY", "BLOCKED_OPENINGS"}
+    )
+    if ready and result["okx_runtime"].get("status") == "BLOCKED_OPENINGS":
+        result["status"] = "BLOCKED_OPENINGS"
+    else:
+        result["status"] = "RUNNING" if ready else "DEGRADED"
     return result
 
 
 def redact_line(line: str) -> str:
-    return SECRET_LINE.sub(lambda match: "{}{}***".format(match.group(1), match.group(2)), line)
+    redacted = SECRET_LINE.sub(
+        lambda match: "{}{}***".format(match.group(1), match.group(2)),
+        line,
+    )
+    return DATABASE_CREDENTIALS.sub(r"\1***\3", redacted)
 
 
 def recent_logs(state_dir: Path, lines: int) -> Dict[str, Any]:
@@ -1252,7 +1828,15 @@ def recent_logs(state_dir: Path, lines: int) -> Dict[str, Any]:
         if not path.exists():
             result[service] = {"status": "missing", "path": str(path)}
             continue
-        tail = path.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:]
+        try:
+            tail = read_private_state(path).splitlines()[-lines:]
+        except OSError:
+            result[service] = {
+                "status": "BLOCKED",
+                "path": str(path),
+                "reason": "runtime log path is unsafe",
+            }
+            continue
         result[service] = {"status": "available", "path": str(path), "lines": [redact_line(line) for line in tail]}
     return result
 
@@ -1282,6 +1866,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
             "okx-preflight",
             "okx-pin-account",
             "okx-demo-canary",
+            "okx-rotate-generation",
+            "supervisor-capability",
+            "supervisor-freeze-openings",
+            "supervisor-thaw-openings",
         ),
     )
     parser.add_argument("--runtime-dir")
@@ -1305,11 +1893,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         elif args.command == "bootstrap":
             payload = bootstrap()
         elif args.command == "up":
-            payload = start(state_dir)
+            with runtime_control_lock(state_dir):
+                payload = start(state_dir)
         elif args.command == "status":
             payload = current_status(state_dir)
         elif args.command == "down":
-            payload = stop_all(state_dir)
+            with runtime_control_lock(state_dir):
+                payload = stop_all(state_dir)
         elif args.command == "logs":
             payload = recent_logs(state_dir, max(1, args.lines))
         elif args.command == "okx-preflight":
@@ -1329,17 +1919,64 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if payload["status"] == "PASSED":
                 return 0
             return 1 if payload["status"] == "FAILED" else 2
+        elif args.command == "okx-rotate-generation":
+            payload = configure_okx_credential_generation()
+        elif args.command == "supervisor-capability":
+            credentials, payload = read_okx_runtime_capability()
+            if credentials is not None:
+                credentials.clear()
+            if payload["status"] != "READY":
+                raise RuntimeBlocked(str(payload["reason"]))
+        elif args.command == "supervisor-freeze-openings":
+            with runtime_control_lock(state_dir):
+                payload = freeze_okx_openings(state_dir)
+        elif args.command == "supervisor-thaw-openings":
+            with runtime_control_lock(state_dir):
+                payload = thaw_okx_openings(state_dir)
         else:
-            status = current_status(state_dir)
-            running = all(service["running"] for service in status["services"])
-            ensure_schema(runtime_database_url())
-            if not running:
-                raise RuntimeBlocked(
-                    "backend, worker, and frontend must all be running before verification"
+            with runtime_control_lock(state_dir):
+                status = current_status(state_dir)
+                running = all(
+                    service["running"] for service in status["services"]
                 )
-            wait_for_url("http://127.0.0.1:{}/readyz".format(BACKEND_PORT), "backend readiness")
-            wait_for_url("http://127.0.0.1:{}/".format(FRONTEND_PORT), "frontend")
-            payload = {"status": "VERIFIED", **status}
+                ensure_schema(runtime_database_url())
+                if not running:
+                    raise RuntimeBlocked(
+                        "backend, worker, frontend, and OKX runtime must all be running "
+                        "before verification"
+                    )
+                if (
+                    status["execution_target"].get("status") != "READY"
+                    or (
+                        status["credentials"]["okx_demo"].get("status")
+                        != "READY"
+                        and status["okx_runtime"].get("status")
+                        != "BLOCKED_OPENINGS"
+                    )
+                    or status["okx_runtime"].get("status")
+                    not in {"READY", "BLOCKED_OPENINGS"}
+                ):
+                    raise RuntimeBlocked(
+                        "OKX target, Keychain capability, reconciliation, schema/ACL, "
+                        "and writer uniqueness must all be READY"
+                    )
+                wait_for_url(
+                    "http://127.0.0.1:{}/readyz".format(BACKEND_PORT),
+                    "backend readiness",
+                )
+                wait_for_url(
+                    "http://127.0.0.1:{}/".format(FRONTEND_PORT),
+                    "frontend",
+                )
+                payload = {
+                    **status,
+                    "status": (
+                        "BLOCKED_OPENINGS"
+                        if status["okx_runtime"].get("status")
+                        == "BLOCKED_OPENINGS"
+                        else "VERIFIED"
+                    ),
+                }
         emit(payload, args.json)
         return 0
     except RuntimeBlocked as exc:

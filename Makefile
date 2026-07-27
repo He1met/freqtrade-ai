@@ -1,4 +1,4 @@
-.PHONY: help bootstrap doctor up status down logs verify okx-demo-pin-account okx-demo-preflight okx-demo-canary autostart-install autostart-status autostart-logs autostart-restart autostart-uninstall db-backup db-init db-verify db-attestation-harden test
+.PHONY: help bootstrap doctor up status down logs verify okx-demo-pin-account okx-demo-preflight okx-demo-canary okx-rotate-generation autostart-install autostart-status autostart-logs autostart-restart autostart-uninstall db-backup db-init db-verify db-attestation-harden test
 
 DATABASE_URL ?= postgresql+psycopg://freqtrade:change_me@localhost:5432/freqtrade_ai
 
@@ -8,6 +8,7 @@ help:
 	@printf '%s\n' 'OKX Demo onboarding: make okx-demo-pin-account (one-time; refuses overwrite)'
 	@printf '%s\n' 'OKX Demo: make okx-demo-preflight (authenticated read-only; never submits orders)'
 	@printf '%s\n' 'OKX Demo canary: make okx-demo-canary CANARY_FLAGS=--allow-demo-order'
+	@printf '%s\n' 'OKX credential setup/rotation: make okx-rotate-generation, then make autostart-restart'
 	@printf '%s\n' 'macOS autostart: make autostart-install | autostart-status | autostart-logs | autostart-restart | autostart-uninstall'
 	@printf '%s\n' 'The managed runtime uses only local PostgreSQL database freqtrade_ai.'
 	@printf '%s\n' 'One-time peer-admin attestation ACL: make db-attestation-harden'
@@ -41,6 +42,9 @@ okx-demo-preflight:
 
 okx-demo-canary:
 	python3 scripts/local_runtime.py okx-demo-canary $(CANARY_FLAGS)
+
+okx-rotate-generation:
+	python3 scripts/local_runtime.py okx-rotate-generation
 
 autostart-install:
 	backend/.venv/bin/python scripts/macos_launch_agent.py install

@@ -35,6 +35,7 @@ from app.models.execution_lineage import (
     ApprovedExecution,
     ExchangeOrder,
     ReconciliationRun,
+    RiskBudget,
     RiskDecision,
     TradeIntent,
 )
@@ -42,6 +43,7 @@ from app.models.order_writer import OkxOrderWriteAttempt
 from app.models.okx_demo_reconciliation import (
     OkxDemoExchangeEvent,
     OkxDemoReconciliationState,
+    OkxDemoRecoveryGrant,
 )
 from app.repositories.execution_lineage import ensure_execution_scope_catalog
 from app.services.risk_chain import (
@@ -57,7 +59,9 @@ from app.services.okx_demo_reconciliation import (
 )
 
 
-NOW = datetime(2026, 7, 27, tzinfo=timezone.utc)
+# PostgreSQL attestation functions validate against statement_timestamp();
+# keep integration evidence fresh instead of coupling the suite to one date.
+NOW = datetime.now(timezone.utc).replace(microsecond=0)
 
 
 @pytest.fixture
@@ -1446,3 +1450,212 @@ def test_postgresql_runtime_role_completes_real_writer_happy_lifecycle(
                 ),
                 {"approval_id": approval_id},
             )
+
+
+def test_postgresql_runtime_role_releases_expired_approval_budget(
+    postgres_writer_engine,
+) -> None:
+    upgrade_database(postgres_writer_engine)
+    with Session(postgres_writer_engine) as session:
+        approval_id, _ = _seed_approved_order(
+            session,
+            create_order=False,
+        )
+        approval = session.get(ApprovedExecution, approval_id)
+        intent_id = approval.trade_intent_id
+        decision_id = approval.risk_decision_id
+        session.add(
+            RiskBudget(
+                execution_target_id="OKX_DEMO",
+                reserved_notional=approval.reserved_notional,
+                approved_positions=1,
+            )
+        )
+        session.execute(
+            text(
+                "UPDATE approved_executions SET expires_at = :expired "
+                "WHERE id = :approval_id"
+            ),
+            {"expired": NOW - timedelta(seconds=1), "approval_id": approval_id},
+        )
+        session.commit()
+
+    with Session(postgres_writer_engine) as session:
+        session.execute(text("SET LOCAL ROLE freqtrade"))
+        store = SqlAlchemyOrderWriterStore(
+            session,
+            now_provider=lambda: datetime.now(timezone.utc),
+        )
+        with pytest.raises(
+            OkxDemoWriteBlocked,
+            match="no longer active",
+        ):
+            store.load_approved_execution(approval_id)
+
+    with Session(postgres_writer_engine) as session:
+        assert session.get(ApprovedExecution, approval_id) is None
+        assert session.get(TradeIntent, intent_id).status == "EXPIRED"
+        assert session.get(RiskDecision, decision_id).decision == "EXPIRED"
+        budget = session.get(RiskBudget, "OKX_DEMO")
+        assert budget.reserved_notional == 0
+        assert budget.approved_positions == 0
+
+
+def test_postgresql_recovery_grant_and_cancel_attempt_commit_together(
+    postgres_writer_engine,
+    tmp_path,
+) -> None:
+    upgrade_database(postgres_writer_engine)
+    with Session(postgres_writer_engine) as session:
+        _approval_id, order_id = _seed_approved_order(session)
+        order = session.get(ExchangeOrder, order_id)
+        order.exchange_order_id = "okx-recovery-order-1"
+        order.status = "live"
+        session.commit()
+
+    order_event = {
+        "schema_version": RECONCILIATION_EVENT_SCHEMA_VERSION,
+        "execution_target": "OKX_DEMO",
+        "source": "REST",
+        "entity_kind": "ORDER",
+        "entity_key": "okx-recovery-order-1",
+        "source_sequence": 1,
+        "stream_generation": 1,
+        "observed_at": NOW.isoformat(),
+        "received_at": NOW.isoformat(),
+        "payload": {
+            "ordId": "okx-recovery-order-1",
+            "clOrdId": "PgWriterOrder001",
+            "instId": "BTC-USDT-SWAP",
+            "state": "live",
+            "sz": "1",
+            "accFillSz": "0",
+            "avgPx": "",
+            "reduceOnly": False,
+        },
+    }
+    position_event = {
+        **_postgres_position_event("1", 2),
+        "source": "REST",
+        "observed_at": NOW.isoformat(),
+        "received_at": NOW.isoformat(),
+    }
+    account_event = {
+        "schema_version": RECONCILIATION_EVENT_SCHEMA_VERSION,
+        "execution_target": "OKX_DEMO",
+        "source": "REST",
+        "entity_kind": "ACCOUNT",
+        "entity_key": "account",
+        "source_sequence": 3,
+        "stream_generation": 1,
+        "observed_at": NOW.isoformat(),
+        "received_at": NOW.isoformat(),
+        "payload": {
+            "accountFingerprint": "a" * 64,
+            "equity": "10000",
+            "availableBalance": "9000",
+            "marginBalance": "1000",
+        },
+    }
+    with Session(postgres_writer_engine) as session:
+        session.execute(text("SET LOCAL ROLE freqtrade"))
+        service = OkxDemoReconciliationService(
+            session,
+            evidence_root=tmp_path / "managed" / "reconciliation",
+            allowed_evidence_root=tmp_path / "managed",
+        )
+        service.ingest_recovery_batch(
+            [order_event, position_event, account_event],
+            recovery_batch_id="atomic-recovery-writer",
+            high_watermarks={
+                "ORDER": "orders-end",
+                "FILL": "fills-end",
+                "POSITION": "positions-end",
+                "ACCOUNT": "account-end",
+            },
+            overlap_started_at=NOW - timedelta(seconds=5),
+            observed_at=NOW,
+            completed_at=NOW,
+        )
+        result = service.reconcile(now=NOW)
+        session.commit()
+        assert result.status == "DRIFTED"
+
+    with Session(postgres_writer_engine) as session:
+        cancel_grant = session.scalar(
+            select(OkxDemoRecoveryGrant).where(
+                OkxDemoRecoveryGrant.action == "CANCEL"
+            )
+        )
+        assert cancel_grant is not None
+        grant_id = cancel_grant.database_id
+
+    with Session(postgres_writer_engine) as session:
+        session.execute(text("SET LOCAL ROLE freqtrade"))
+        store = SqlAlchemyOrderWriterStore(
+            session,
+            now_provider=lambda: NOW,
+        )
+        store.acquire_recovery_lease(grant_id, now=NOW)
+        managed = store.load_recovery_order(grant_id)
+        prepared = store.prepare_existing(
+            managed,
+            operation="CANCEL",
+            operation_id=managed.client_order_id,
+            request_digest="a" * 64,
+            safe_request_snapshot={
+                "instId": managed.instrument_id,
+                "clOrdId": managed.client_order_id,
+            },
+            recovery_grant_database_id=grant_id,
+        )
+        assert prepared.recovery_grant_database_id == grant_id
+
+    with Session(postgres_writer_engine) as session:
+        persisted_grant = session.get(OkxDemoRecoveryGrant, grant_id)
+        persisted_attempt = session.scalar(
+            select(OkxOrderWriteAttempt).where(
+                OkxOrderWriteAttempt.recovery_grant_database_id == grant_id
+            )
+        )
+        assert persisted_grant.status == "CONSUMED"
+        assert persisted_attempt is not None
+        assert persisted_attempt.state == "PREPARED"
+        persisted_attempt.state = "RECONCILED"
+        session.execute(text("DELETE FROM okx_order_writer_leases"))
+        reduce_grant = session.scalar(
+            select(OkxDemoRecoveryGrant).where(
+                OkxDemoRecoveryGrant.action == "REDUCE_ONLY"
+            )
+        )
+        reduce_grant_id = reduce_grant.database_id
+        session.commit()
+
+    with Session(postgres_writer_engine) as session:
+        session.execute(text("SET LOCAL ROLE freqtrade"))
+        store = SqlAlchemyOrderWriterStore(
+            session,
+            now_provider=lambda: NOW,
+        )
+        store.acquire_recovery_lease(reduce_grant_id, now=NOW)
+        close_order, close_attempt, body = store.prepare_recovery_close(
+            reduce_grant_id
+        )
+        assert close_attempt.recovery_grant_database_id == reduce_grant_id
+        assert close_order.client_order_id == "rcv{:020d}".format(
+            reduce_grant_id
+        )
+        assert body["reduceOnly"] is True
+        assert body["side"] == "sell"
+
+    with Session(postgres_writer_engine) as session:
+        assert session.get(
+            OkxDemoRecoveryGrant,
+            reduce_grant_id,
+        ).status == "CONSUMED"
+        assert session.scalar(
+            select(OkxOrderWriteAttempt).where(
+                OkxOrderWriteAttempt.recovery_grant_database_id
+                == reduce_grant_id
+            )
+        ) is not None

@@ -262,6 +262,18 @@ def test_incremental_worker_migration_preserves_existing_runtime_rows(postgres_e
     readiness = verify_schema(postgres_engine)
     assert readiness.ready is True
     assert readiness.schema_version == SCHEMA_VERSION
+    recovery_fks = inspect(postgres_engine).get_foreign_keys(
+        "okx_order_write_attempts"
+    )
+    assert any(
+        foreign_key.get("constrained_columns")
+        == ["recovery_grant_database_id"]
+        and foreign_key.get("referred_table")
+        == "okx_demo_recovery_grants"
+        and (foreign_key.get("options") or {}).get("ondelete")
+        == "RESTRICT"
+        for foreign_key in recovery_fks
+    )
     assert {"research_jobs", "research_worker_control"}.issubset(
         set(inspect(postgres_engine).get_table_names())
     )

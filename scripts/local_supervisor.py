@@ -24,6 +24,7 @@ RUNTIME_SCRIPT = REPO_ROOT / "scripts" / "local_runtime.py"
 DEFAULT_INTERVAL_SECONDS = 30
 COMMAND_TIMEOUT_SECONDS = 90
 STOP_EVENT = threading.Event()
+LAST_CREDENTIAL_GENERATION: Optional[str] = None
 
 
 def timestamp() -> str:
@@ -71,7 +72,7 @@ def run_runtime(command: str, timeout: int = COMMAND_TIMEOUT_SECONDS) -> Dict[st
         }
     payload["return_code"] = completed.returncode
     if completed.stderr.strip():
-        payload["stderr_tail"] = completed.stderr.strip()[-1000:]
+        payload["stderr"] = "runtime command wrote redacted diagnostic output"
     return payload
 
 
@@ -111,6 +112,63 @@ def verify_or_recover() -> bool:
     return recovered
 
 
+def credential_generation() -> Optional[str]:
+    """Read only operator-managed, non-secret Keychain generation metadata."""
+
+    capability = run_runtime("supervisor-capability")
+    generation = capability.get("_generation")
+    if (
+        capability.get("return_code") != 0
+        or capability.get("status") != "READY"
+        or not isinstance(generation, str)
+        or not 1 <= len(generation) <= 64
+    ):
+        return None
+    return generation
+
+
+def controlled_credential_restart(generation: str) -> bool:
+    """Commit generation only after the replacement child verifies."""
+
+    global LAST_CREDENTIAL_GENERATION
+    stopped = run_runtime("down")
+    if any(
+        service.get("status") == "BLOCKED"
+        for service in stopped.get("services", [])
+    ):
+        emit("runtime_recovery_blocked", stage="credential-rotation-down")
+        return False
+    started = run_runtime("up")
+    if started.get("return_code") != 0:
+        emit("runtime_recovery_blocked", stage="credential-rotation-up")
+        return False
+    verification = run_runtime("verify")
+    if verification.get("return_code") != 0:
+        emit("runtime_recovery_blocked", stage="credential-rotation-verify")
+        return False
+    LAST_CREDENTIAL_GENERATION = generation
+    return True
+
+
+def supervise_once() -> bool:
+    generation = credential_generation()
+    if generation is None:
+        emit("credential_capability_unavailable")
+        frozen = run_runtime("supervisor-freeze-openings")
+        if frozen.get("return_code") != 0:
+            emit("runtime_recovery_blocked", stage="freeze-openings")
+            return False
+        return verify_or_recover()
+    if (
+        LAST_CREDENTIAL_GENERATION is None
+        or generation != LAST_CREDENTIAL_GENERATION
+    ):
+        emit("credential_rotation_detected")
+        return controlled_credential_restart(generation)
+    run_runtime("supervisor-thaw-openings")
+    return verify_or_recover()
+
+
 def _stop(_signum: int, _frame: Optional[object]) -> None:
     STOP_EVENT.set()
 
@@ -129,13 +187,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     while not STOP_EVENT.is_set():
         try:
-            verify_or_recover()
+            supervise_once()
         except subprocess.TimeoutExpired:
             emit("runtime_recovery_failed", reason="runtime command timed out")
         except Exception as exc:
             emit("supervisor_error", error_type=exc.__class__.__name__)
         STOP_EVENT.wait(interval)
-    emit("supervisor_stopped")
+    stopped = run_runtime("down")
+    emit(
+        "supervisor_stopped",
+        runtime_down=(
+            "CLEAN"
+            if not any(
+                service.get("status") == "BLOCKED"
+                for service in stopped.get("services", [])
+            )
+            else "BLOCKED"
+        ),
+    )
     return 0
 
 

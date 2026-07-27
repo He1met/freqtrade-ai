@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +13,11 @@ from app.adapters.okx_demo.reconciliation_runtime import (
 )
 from app.adapters.okx_demo.models import Balance, FillQuery, OrderQuery, Position
 from app.models import Base
+from app.models.execution_lineage import ExecutionScope, ReconciliationRun
+from app.models.okx_demo_reconciliation import (
+    OkxDemoReconciliationState,
+    OkxDemoRecoveryGrant,
+)
 from app.services.okx_demo_reconciliation import OkxDemoReconciliationBlocked
 
 
@@ -102,6 +108,85 @@ def test_runtime_factory_contract_runs_complete_rest_baseline(
         "reconciliation_run"
     ]
     assert tuple(result["database_ids"]) == RUNTIME_DATABASE_ID_KEYS
+
+
+def test_runtime_cycle_executes_only_current_run_recovery_grants(db) -> None:
+    db.add(
+        ExecutionScope(
+            scope_id="OKX_DEMO",
+            scope_kind="EXCHANGE_TARGET",
+            exchange_capable=True,
+            executable=False,
+            exchange_writes=False,
+            order_submission_authorized=False,
+        )
+    )
+    runs = []
+    for _ in range(2):
+        run = ReconciliationRun(
+            execution_target_id="OKX_DEMO",
+            status="DRIFTED",
+            summary_snapshot={},
+            database_ids={},
+            artifact_status="PENDING",
+            authoritative_observed_at=NOW,
+            source_type="api_aggregate",
+            core_data=True,
+            started_at=NOW,
+            completed_at=NOW,
+        )
+        db.add(run)
+        db.flush()
+        runs.append(run)
+    state = OkxDemoReconciliationState(
+        execution_target_id="OKX_DEMO",
+        status="DRIFTED",
+        opening_frozen=True,
+        block_reason="test",
+        last_reconciliation_run_id=runs[-1].id,
+    )
+    db.add(state)
+    for run, action in (
+        (runs[0], "CANCEL"),
+        (runs[1], "CANCEL"),
+        (runs[1], "REDUCE_ONLY"),
+    ):
+        db.add(
+            OkxDemoRecoveryGrant(
+                execution_target_id="OKX_DEMO",
+                reconciliation_run_id=run.id,
+                exchange_order_row_id=1 if action == "CANCEL" else None,
+                grant_digest=("{:064x}".format(run.id * 10 + len(action))),
+                action=action,
+                instrument_id="BTC-USDT-SWAP",
+                position_side="net",
+                max_quantity=(
+                    Decimal("0") if action == "CANCEL" else Decimal("1")
+                ),
+                status="ACTIVE",
+                expires_at=NOW + timedelta(minutes=1),
+            )
+        )
+    db.commit()
+
+    class RecoveryWriter:
+        def __init__(self):
+            self.calls = []
+
+        def recovery_cancel(self, *, recovery_grant_database_id):
+            self.calls.append(("CANCEL", recovery_grant_database_id))
+
+        def recovery_reduce_only(self, *, recovery_grant_database_id):
+            self.calls.append(("REDUCE_ONLY", recovery_grant_database_id))
+
+    writer = RecoveryWriter()
+    adapter = object.__new__(OkxDemoRuntimeReconciliationAdapter)
+    adapter.run_cycle(read_client=object(), writer=writer, db=db)
+
+    assert [action for action, _ in writer.calls] == [
+        "CANCEL",
+        "REDUCE_ONLY",
+    ]
 
 
 def test_runtime_rejects_stale_page_and_conflicting_page_identity(

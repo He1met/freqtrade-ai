@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import hashlib
+import json
 import secrets
 from typing import Any, Mapping, Optional
 
@@ -34,8 +35,13 @@ from app.models.execution_lineage import (
     OkxDemoTrustedSnapshot,
     RiskDecision,
     TradeIntent,
+    ReconciliationRun,
 )
-from app.models.okx_demo_reconciliation import OkxDemoReconciliationState
+from app.models.okx_demo_reconciliation import (
+    OkxDemoPositionSnapshot,
+    OkxDemoReconciliationState,
+    OkxDemoRecoveryGrant,
+)
 from app.models.order_writer import OkxOrderWriteAttempt, OkxOrderWriterLease
 from app.services.risk_chain import RiskChainBlocked, RiskChainService, canonical_digest
 from app.services.okx_demo_reconciliation import (
@@ -125,30 +131,255 @@ class SqlAlchemyOrderWriterStore:
             self.db.rollback()
             raise
 
-    def claim_recovery_grant(
+    def acquire_recovery_lease(
         self,
         grant_database_id: int,
         *,
-        action: str,
-        quantity: Decimal = Decimal("0"),
-        now: Optional[datetime] = None,
-    ) -> Mapping[str, Any]:
-        """Consume a run-bound cancel/reduce-only grant without reviving approval."""
+        now: datetime,
+    ) -> None:
+        """Fence recovery writes without depending on an expired approval."""
 
+        now = _aware_utc(now)
+        digest = self._process_token_digest
         try:
-            claim = OkxDemoReconciliationService(self.db).claim_recovery_grant(
-                grant_database_id,
-                action=action,
-                quantity=quantity,
-                now=now or self._now(),
+            self._lock_lease_key()
+            self._require_target_contract()
+            grant = self.db.scalars(
+                select(OkxDemoRecoveryGrant)
+                .where(
+                    OkxDemoRecoveryGrant.database_id == grant_database_id,
+                    OkxDemoRecoveryGrant.execution_target_id == OKX_DEMO,
+                )
+                .with_for_update()
+            ).first()
+            resumable_attempt = (
+                self.db.scalars(
+                    select(OkxOrderWriteAttempt).where(
+                        OkxOrderWriteAttempt.recovery_grant_database_id
+                        == grant_database_id,
+                        OkxOrderWriteAttempt.state.in_(UNRESOLVED_STATES),
+                    )
+                ).first()
+                if grant is not None and grant.status == "CONSUMED"
+                else None
             )
+            if (
+                grant is None
+                or (
+                    grant.status == "ACTIVE"
+                    and _aware_utc(grant.expires_at) <= now
+                )
+                or (
+                    grant.status != "ACTIVE"
+                    and resumable_attempt is None
+                )
+            ):
+                raise OkxDemoWriteBlocked("recovery grant is not active")
+            lease_expires_at = (
+                _aware_utc(grant.expires_at)
+                if grant.status == "ACTIVE"
+                else now + timedelta(seconds=30)
+            )
+            lease = self.db.scalars(
+                select(OkxOrderWriterLease)
+                .where(OkxOrderWriterLease.execution_target_id == OKX_DEMO)
+                .with_for_update()
+            ).first()
+            if lease is None:
+                lease = OkxOrderWriterLease(
+                    execution_target_id=OKX_DEMO,
+                    holder_token_digest=digest,
+                    generation=1,
+                    acquired_at=now,
+                    heartbeat_at=now,
+                    expires_at=lease_expires_at,
+                )
+                self.db.add(lease)
+            elif lease.holder_token_digest == digest:
+                lease.heartbeat_at = now
+                lease.expires_at = lease_expires_at
+            elif _aware_utc(lease.expires_at) <= now:
+                lease.holder_token_digest = digest
+                lease.generation += 1
+                lease.acquired_at = now
+                lease.heartbeat_at = now
+                lease.expires_at = lease_expires_at
+            else:
+                raise OkxDemoWriteBlocked(
+                    "another OKX_DEMO writer holds the database lease"
+                )
             self.db.commit()
-            return claim
-        except OkxDemoReconciliationBlocked as exc:
+            self._holder_digest = digest
+            self._lease_generation = lease.generation
+        except Exception:
+            self.db.rollback()
+            raise
+
+    def load_recovery_order(self, grant_database_id: int) -> ManagedOrder:
+        self._require_lease()
+        grant = self.db.get(OkxDemoRecoveryGrant, grant_database_id)
+        if (
+            grant is None
+            or grant.action != "CANCEL"
+            or grant.exchange_order_row_id is None
+        ):
+            self.db.rollback()
+            raise OkxDemoWriteBlocked("recovery cancel grant is invalid")
+        order = self.db.get(ExchangeOrder, grant.exchange_order_row_id)
+        intent = (
+            self.db.get(TradeIntent, order.trade_intent_id)
+            if order is not None
+            else None
+        )
+        approval = (
+            self.db.scalars(
+                select(ApprovedExecution)
+                .where(ApprovedExecution.trade_intent_id == intent.id)
+                .order_by(ApprovedExecution.id.desc())
+            ).first()
+            if intent is not None
+            else None
+        )
+        if order is None or intent is None:
+            self.db.rollback()
+            raise OkxDemoWriteBlocked("recovery cancel lineage is missing")
+        managed = self._managed_order(
+            order,
+            intent,
+            approval.id if approval is not None else intent.id,
+        )
+        self.db.commit()
+        return managed
+
+    def prepare_recovery_close(
+        self,
+        grant_database_id: int,
+    ) -> tuple[ManagedOrder, WriteAttemptRecord, Mapping[str, Any]]:
+        """Atomically persist a close attempt and consume its exact grant."""
+
+        self._require_lease()
+        try:
+            now = self._now()
+            grant = self.db.get(OkxDemoRecoveryGrant, grant_database_id)
+            run = (
+                self.db.get(ReconciliationRun, grant.reconciliation_run_id)
+                if grant is not None
+                else None
+            )
+            position_ids = (
+                (run.database_ids or {}).get("position_snapshots", [])
+                if run is not None
+                else []
+            )
+            position = self.db.scalars(
+                select(OkxDemoPositionSnapshot).where(
+                    OkxDemoPositionSnapshot.database_id.in_(position_ids),
+                    OkxDemoPositionSnapshot.instrument_id
+                    == (grant.instrument_id if grant is not None else ""),
+                    OkxDemoPositionSnapshot.position_side
+                    == (grant.position_side if grant is not None else ""),
+                )
+            ).first()
+            quantity = (
+                abs(Decimal(position.quantity))
+                if position is not None
+                else Decimal("0")
+            )
+            if (
+                grant is None
+                or grant.action != "REDUCE_ONLY"
+                or position is None
+                or quantity <= 0
+                or quantity > Decimal(grant.max_quantity)
+            ):
+                raise OkxDemoWriteBlocked(
+                    "recovery close authoritative position is invalid"
+                )
+            intent = self.db.scalars(
+                select(TradeIntent)
+                .where(
+                    TradeIntent.execution_target_id == OKX_DEMO,
+                    TradeIntent.instrument_id == grant.instrument_id,
+                )
+                .order_by(TradeIntent.id.desc())
+            ).first()
+            approval = (
+                self.db.scalars(
+                    select(ApprovedExecution)
+                    .where(ApprovedExecution.trade_intent_id == intent.id)
+                    .order_by(ApprovedExecution.id.desc())
+                ).first()
+                if intent is not None
+                else None
+            )
+            if intent is None:
+                raise OkxDemoWriteBlocked(
+                    "recovery close has no persisted local lineage"
+                )
+            lineage_id = approval.id if approval is not None else intent.id
+            client_order_id = "rcv{:020d}".format(grant.database_id)
+            side = "sell" if Decimal(position.quantity) > 0 else "buy"
+            body = {
+                "instId": grant.instrument_id,
+                "tdMode": "isolated",
+                "side": side,
+                "posSide": "net",
+                "ordType": "market",
+                "sz": format(quantity, "f"),
+                "clOrdId": client_order_id,
+                "reduceOnly": True,
+            }
+            order_row = ExchangeOrder(
+                execution_target_id=OKX_DEMO,
+                trade_intent_id=intent.id,
+                client_order_id=client_order_id,
+                status=WriteState.PREPARED.value,
+                request_snapshot=dict(body),
+                response_snapshot={},
+            )
+            self.db.add(order_row)
+            self.db.flush()
+            attempt = self._new_attempt(
+                order_row,
+                lineage_id,
+                operation="CLOSE",
+                operation_id=client_order_id,
+                request_digest=hashlib.sha256(
+                    json.dumps(
+                        body, sort_keys=True, separators=(",", ":")
+                    ).encode()
+                ).hexdigest(),
+                safe_request_snapshot=body,
+                now=now,
+                recovery_grant_database_id=grant_database_id,
+            )
+            claim = OkxDemoReconciliationService(
+                self.db
+            ).claim_recovery_grant(
+                grant_database_id,
+                action="REDUCE_ONLY",
+                quantity=quantity,
+                now=now,
+            )
+            if claim.get("instrument_id") != grant.instrument_id:
+                raise OkxDemoWriteBlocked(
+                    "recovery close grant identity changed"
+                )
+            self.db.commit()
+            return (
+                self._managed_order(order_row, intent, lineage_id),
+                self._record(attempt),
+                body,
+            )
+        except (
+            OkxDemoWriteBlocked,
+            OkxDemoReconciliationBlocked,
+            IntegrityError,
+        ):
             self.db.rollback()
             raise OkxDemoWriteBlocked(
-                "recovery grant could not authorize the risk-reducing action"
-            ) from exc
+                "recovery close could not be prepared atomically"
+            ) from None
 
     def acquire_lease(
         self,
@@ -352,6 +583,7 @@ class SqlAlchemyOrderWriterStore:
         operation_id: str,
         request_digest: str,
         safe_request_snapshot: Mapping[str, Any],
+        recovery_grant_database_id: Optional[int] = None,
     ) -> WriteAttemptRecord:
         self._require_lease()
         try:
@@ -362,7 +594,8 @@ class SqlAlchemyOrderWriterStore:
                 for_update=True,
             )
             now = self._now()
-            self._validate_approval(approved, intent, decision, now=now)
+            if recovery_grant_database_id is None:
+                self._validate_approval(approved, intent, decision, now=now)
             if (
                 row is None
                 or row.execution_target_id != OKX_DEMO
@@ -387,10 +620,35 @@ class SqlAlchemyOrderWriterStore:
                 request_digest=request_digest,
                 safe_request_snapshot=safe_request_snapshot,
                 now=now,
+                recovery_grant_database_id=recovery_grant_database_id,
             )
+            if recovery_grant_database_id is not None:
+                if operation != "CANCEL":
+                    raise OkxDemoWriteBlocked(
+                        "recovery grant action is not supported by this operation"
+                    )
+                claim = OkxDemoReconciliationService(
+                    self.db
+                ).claim_recovery_grant(
+                    recovery_grant_database_id,
+                    action="CANCEL",
+                    quantity=Decimal("0"),
+                    now=now,
+                )
+                if (
+                    claim.get("exchange_order_row_id")
+                    != order.exchange_order_row_id
+                ):
+                    raise OkxDemoWriteBlocked(
+                        "recovery grant belongs to another exchange order"
+                    )
             self.db.commit()
             return self._record(attempt)
-        except (OkxDemoWriteBlocked, IntegrityError):
+        except (
+            OkxDemoWriteBlocked,
+            OkxDemoReconciliationBlocked,
+            IntegrityError,
+        ):
             self.db.rollback()
             raise OkxDemoWriteBlocked(
                 "order operation could not be prepared exactly once"
@@ -566,11 +824,13 @@ class SqlAlchemyOrderWriterStore:
         now: datetime,
         parent_attempt_id: Optional[int] = None,
         close_sequence: int = 0,
+        recovery_grant_database_id: Optional[int] = None,
     ) -> OkxOrderWriteAttempt:
         attempt = OkxOrderWriteAttempt(
             execution_target_id=OKX_DEMO,
             exchange_order_row_id=order.id,
             approval_id=approval_id,
+            recovery_grant_database_id=recovery_grant_database_id,
             operation=operation,
             operation_id=operation_id,
             client_order_id=order.client_order_id,
@@ -587,8 +847,9 @@ class SqlAlchemyOrderWriterStore:
         )
         self.db.add(attempt)
         self.db.flush()
-        order.status = WriteState.PREPARED.value
-        order.request_snapshot = dict(safe_request_snapshot)
+        if recovery_grant_database_id is None:
+            order.status = WriteState.PREPARED.value
+            order.request_snapshot = dict(safe_request_snapshot)
         return attempt
 
     def _approval_lineage(
@@ -630,6 +891,28 @@ class SqlAlchemyOrderWriterStore:
             approval_id,
             for_update=False,
         )
+        expiries = (approved.expires_at, intent.expires_at)
+        if any(
+            value is None or _aware_utc(value) <= now
+            for value in expiries
+        ):
+            if any(
+                value is not None and _aware_utc(value) <= now
+                for value in expiries
+            ):
+                self.db.execute(
+                    text(
+                        "SELECT release_expired_okx_demo_approval("
+                        ":approval_id)"
+                    ),
+                    {"approval_id": approval_id},
+                )
+                # The controlled function owns the complete release mutation.
+                # Persist it before reporting the fail-closed claim result.
+                self.db.commit()
+            raise OkxDemoWriteBlocked(
+                "approved execution claim is no longer active"
+            )
         self._validate_approval(
             approved,
             intent,
@@ -957,6 +1240,7 @@ class SqlAlchemyOrderWriterStore:
             close_sequence=row.close_sequence,
             parent_attempt_id=row.parent_attempt_id,
             lease_generation=row.lease_generation,
+            recovery_grant_database_id=row.recovery_grant_database_id,
         )
 
     def _now(self) -> datetime:

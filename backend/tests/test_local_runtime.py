@@ -18,6 +18,45 @@ def load_runtime_module():
     return module
 
 
+def install_ready_okx_runtime(monkeypatch, runtime):
+    bundle = {
+        "OKX_DEMO_API_KEY": "runtime-key",
+        "OKX_DEMO_API_SECRET": "runtime-secret",
+        "OKX_DEMO_API_PASSPHRASE": "runtime-passphrase",
+        "OKX_DEMO_ACCOUNT_FINGERPRINT": "a" * 64,
+        "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY": "74" * 32,
+    }
+    monkeypatch.setattr(
+        runtime,
+        "read_okx_runtime_capability",
+        lambda: (
+            dict(bundle),
+            {
+                "status": "READY",
+                "configured": True,
+                "source": "keychain",
+                "_generation": "generation-test-1",
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "validate_okx_demo_execution_target",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        runtime,
+        "wait_for_okx_runtime",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        runtime,
+        "cleanup_orphaned_managed_processes",
+        lambda _state_dir: None,
+    )
+    return bundle
+
+
 def test_runtime_database_defaults_to_one_canonical_postgres(monkeypatch):
     runtime = load_runtime_module()
     monkeypatch.delenv("DATABASE_URL", raising=False)
@@ -76,6 +115,25 @@ def test_log_redaction_does_not_echo_secret_values():
     assert "should-not-appear" not in redacted
     assert "also-hidden" not in redacted
     assert redacted.count("***") == 2
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "postgresql://runtime:database-password@localhost/freqtrade_ai",
+        (
+            '{"database":"postgresql+psycopg://runtime:database-password'
+            '@127.0.0.1/freqtrade_ai"}'
+        ),
+    ],
+)
+def test_log_redaction_hides_postgresql_passwords(line):
+    runtime = load_runtime_module()
+
+    redacted = runtime.redact_line(line)
+
+    assert "database-password" not in redacted
+    assert ":***@" in redacted
 
 
 def test_read_deepseek_api_key_uses_fixed_macos_keychain_contract(monkeypatch):
@@ -440,6 +498,92 @@ def test_read_okx_demo_credentials_fails_atomically_without_env_fallback(monkeyp
     assert metadata["status"] == "BLOCKED"
     assert metadata["configured"] is False
     assert not any(value in str(metadata) for value in sentinels.values())
+
+
+def test_runtime_capability_uses_non_secret_keychain_generation(monkeypatch):
+    runtime = load_runtime_module()
+    bundle = {
+        name: "value-{}".format(index)
+        for index, name in enumerate(
+            runtime.OKX_DEMO_REQUIRED_ENV_NAMES,
+            start=1,
+        )
+    }
+    monkeypatch.setattr(
+        runtime,
+        "read_okx_demo_credentials",
+        lambda: (
+            dict(bundle),
+            {"status": "READY", "configured": True, "source": "keychain"},
+        ),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_read_macos_keychain_item",
+        lambda service: (
+            "74" * 32
+            if service == runtime.ATTESTATION_PROOF_KEYCHAIN_SERVICE
+            else "generation-9"
+        ),
+    )
+
+    credentials, metadata = runtime.read_okx_runtime_capability()
+
+    assert credentials is not None
+    assert metadata["_generation"] == "generation-9"
+    assert "_revision" not in metadata
+    assert not any(value in str(metadata) for value in bundle.values())
+    credentials.clear()
+
+
+def test_explicit_generation_rotation_writes_only_non_secret_metadata(
+    monkeypatch,
+):
+    runtime = load_runtime_module()
+    captured = {}
+    secret_bundle = {
+        name: "secret-{}".format(index)
+        for index, name in enumerate(
+            runtime.OKX_DEMO_REQUIRED_ENV_NAMES,
+            start=1,
+        )
+    }
+    monkeypatch.setattr(runtime.sys, "platform", "darwin")
+    monkeypatch.setattr(runtime.Path, "is_file", lambda _path: True)
+    monkeypatch.setattr(
+        runtime,
+        "read_okx_demo_credentials",
+        lambda: (
+            secret_bundle,
+            {"status": "READY", "configured": True, "source": "keychain"},
+        ),
+    )
+    monkeypatch.setattr(runtime.os, "getuid", lambda: 501)
+    monkeypatch.setattr(
+        runtime.pwd,
+        "getpwuid",
+        lambda _uid: SimpleNamespace(pw_name="local-user"),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "uuid4",
+        lambda: SimpleNamespace(hex="generationvalue123"),
+    )
+
+    def fake_run(command, **kwargs):
+        captured["command"] = list(command)
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(runtime.subprocess, "run", fake_run)
+
+    payload = runtime.configure_okx_credential_generation()
+
+    assert captured["command"][-2:] == ["-w", "generationvalue123"]
+    assert runtime.OKX_DEMO_CREDENTIAL_GENERATION_SERVICE in captured["command"]
+    assert payload["credential_generation"] == "UPDATED"
+    assert "generationvalue123" not in str(payload)
+    assert secret_bundle == {}
 
 
 def test_macos_keychain_reader_uses_service_without_rendering_errors(monkeypatch):
@@ -935,10 +1079,16 @@ def test_down_stops_worker_before_frontend_and_backend(monkeypatch, tmp_path):
 
     payload = runtime.stop_all(tmp_path)
 
-    assert [service for _, service in observed] == ["worker", "frontend", "backend"]
-    assert [service["service"] for service in payload["services"]] == [
-        "worker",
+    assert [service for _, service in observed] == [
+        "okx_runtime",
         "frontend",
+        "worker",
+        "backend",
+    ]
+    assert [service["service"] for service in payload["services"]] == [
+        "okx_runtime",
+        "frontend",
+        "worker",
         "backend",
     ]
 
@@ -958,6 +1108,7 @@ def test_status_includes_backend_worker_and_frontend(monkeypatch, tmp_path):
         "backend",
         "worker",
         "frontend",
+        "okx_runtime",
     ]
 
 
@@ -971,6 +1122,7 @@ def test_start_launches_worker_with_expected_module(monkeypatch, tmp_path):
     monkeypatch.setattr(runtime, "ensure_worker_queue_idle", lambda _url: None)
     monkeypatch.setattr(runtime, "wait_for_url", lambda *args, **kwargs: None)
     monkeypatch.setattr(runtime, "wait_for_process", lambda *args, **kwargs: None)
+    install_ready_okx_runtime(monkeypatch, runtime)
 
     def fake_start_service(service, command, **kwargs):
         observed.append((service, list(command), kwargs["cwd"]))
@@ -1000,6 +1152,7 @@ def test_start_injects_keychain_key_only_into_backend_and_worker(monkeypatch, tm
     monkeypatch.setattr(runtime, "ensure_worker_queue_idle", lambda _url: None)
     monkeypatch.setattr(runtime, "wait_for_url", lambda *args, **kwargs: None)
     monkeypatch.setattr(runtime, "wait_for_process", lambda *args, **kwargs: None)
+    install_ready_okx_runtime(monkeypatch, runtime)
     monkeypatch.setattr(
         runtime,
         "read_deepseek_api_key",
@@ -1019,7 +1172,7 @@ def test_start_injects_keychain_key_only_into_backend_and_worker(monkeypatch, tm
     assert observed["backend"]["DEEPSEEK_API_KEY"] == sentinel
     assert observed["worker"]["DEEPSEEK_API_KEY"] == sentinel
     assert "DEEPSEEK_API_KEY" not in observed["frontend"]
-    assert payload["credentials"]["deepseek_api_key"] == {
+    assert payload["credentials"]["deepseek_provider"] == {
         "status": "READY",
         "configured": True,
         "source": "keychain",
@@ -1039,6 +1192,7 @@ def test_start_omits_stale_inherited_key_when_keychain_is_unavailable(monkeypatc
     monkeypatch.setattr(runtime, "ensure_worker_queue_idle", lambda _url: None)
     monkeypatch.setattr(runtime, "wait_for_url", lambda *args, **kwargs: None)
     monkeypatch.setattr(runtime, "wait_for_process", lambda *args, **kwargs: None)
+    install_ready_okx_runtime(monkeypatch, runtime)
     monkeypatch.setattr(
         runtime,
         "read_deepseek_api_key",
@@ -1062,7 +1216,7 @@ def test_start_omits_stale_inherited_key_when_keychain_is_unavailable(monkeypatc
 
     assert all("DEEPSEEK_API_KEY" not in environment for environment in observed.values())
     assert payload["status"] == "RUNNING"
-    assert payload["credentials"]["deepseek_api_key"]["status"] == "UNAVAILABLE"
+    assert payload["credentials"]["deepseek_provider"]["status"] == "UNAVAILABLE"
     assert "stale-inherited-value" not in str(payload)
 
 
@@ -1085,7 +1239,10 @@ def test_verify_fails_closed_when_worker_is_not_running(monkeypatch, capsys):
     exit_code = runtime.main(["verify"])
 
     assert exit_code == 2
-    assert "backend, worker, and frontend must all be running" in capsys.readouterr().out
+    assert (
+        "backend, worker, frontend, and OKX runtime must all be running"
+        in capsys.readouterr().out
+    )
 
 
 def test_worker_queue_must_be_idle(monkeypatch):
@@ -1099,3 +1256,334 @@ def test_worker_queue_must_be_idle(monkeypatch):
 
     with pytest.raises(runtime.RuntimeBlocked, match="worker queue is not idle"):
         runtime.ensure_worker_queue_idle(runtime.DEFAULT_DATABASE_URL)
+
+
+def test_start_missing_okx_keychain_is_zero_process(monkeypatch, tmp_path):
+    runtime = load_runtime_module()
+    started = []
+    monkeypatch.setattr(runtime, "backend_python", lambda: Path("/venv/bin/python"))
+    monkeypatch.setattr(runtime, "frontend_vite", lambda: Path("/frontend/vite"))
+    monkeypatch.setattr(runtime, "port_available", lambda _port: True)
+    monkeypatch.setattr(runtime, "ensure_schema", lambda _url: None)
+    monkeypatch.setattr(runtime, "ensure_worker_queue_idle", lambda _url: None)
+    monkeypatch.setattr(
+        runtime,
+        "validate_okx_demo_execution_target",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        runtime,
+        "read_okx_runtime_capability",
+        lambda: (
+            None,
+            {
+                "status": "BLOCKED",
+                "configured": False,
+                "source": "keychain",
+                "reason": "bundle unavailable",
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "start_service",
+        lambda service, *_args, **_kwargs: started.append(service),
+    )
+
+    with pytest.raises(runtime.RuntimeBlocked, match="bundle unavailable"):
+        runtime.start(tmp_path)
+
+    assert started == []
+
+
+def test_partial_start_failure_cleans_all_services(monkeypatch, tmp_path):
+    runtime = load_runtime_module()
+    install_ready_okx_runtime(monkeypatch, runtime)
+    started = []
+    stopped = []
+    monkeypatch.setattr(runtime, "backend_python", lambda: Path("/venv/bin/python"))
+    monkeypatch.setattr(runtime, "frontend_vite", lambda: Path("/frontend/vite"))
+    monkeypatch.setattr(runtime, "port_available", lambda _port: True)
+    monkeypatch.setattr(runtime, "ensure_schema", lambda _url: None)
+    monkeypatch.setattr(runtime, "ensure_worker_queue_idle", lambda _url: None)
+    monkeypatch.setattr(runtime, "wait_for_url", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runtime, "wait_for_process", lambda *_args, **_kwargs: None)
+
+    def fake_start(service, *_args, **_kwargs):
+        started.append(service)
+        if service == "frontend":
+            raise RuntimeError("crash")
+
+    monkeypatch.setattr(runtime, "start_service", fake_start)
+    monkeypatch.setattr(
+        runtime,
+        "stop_service",
+        lambda _state_dir, service: (
+            stopped.append(service)
+            or {"service": service, "status": "stopped"}
+        ),
+    )
+
+    with pytest.raises(runtime.RuntimeBlocked, match="cleaned up"):
+        runtime.start(tmp_path)
+
+    assert started == ["backend", "worker", "frontend"]
+    assert stopped == list(runtime.SERVICE_STOP_ORDER)
+
+
+def test_cleanup_stale_runtime_removes_dead_pid_and_readiness(
+    monkeypatch,
+    tmp_path,
+):
+    runtime = load_runtime_module()
+    (tmp_path / runtime.PID_FILES["okx_runtime"]).write_text(
+        "12345\n",
+        encoding="utf-8",
+    )
+    (tmp_path / runtime.OKX_RUNTIME_READY_FILE).write_text(
+        "{}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runtime, "process_running", lambda _pid: False)
+
+    runtime.cleanup_stale_runtime_state(tmp_path)
+
+    assert not (tmp_path / runtime.PID_FILES["okx_runtime"]).exists()
+    assert not (tmp_path / runtime.OKX_RUNTIME_READY_FILE).exists()
+
+
+def test_okx_runtime_readiness_reports_blocked_openings_without_secrets(
+    monkeypatch,
+    tmp_path,
+):
+    runtime = load_runtime_module()
+    pid = 4321
+    (tmp_path / runtime.OKX_RUNTIME_READY_FILE).write_text(
+        json.dumps(
+            {
+                "status": "BLOCKED_OPENINGS",
+                "execution_target": "OKX_DEMO",
+                "adapter": "ATTESTED",
+                "reconciliation": "DRIFTED",
+                "writer": "UNIQUE",
+                "pid": pid,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / runtime.OKX_RUNTIME_READY_FILE).chmod(0o600)
+    monkeypatch.setattr(
+        runtime,
+        "process_status",
+        lambda _state_dir, _service: {
+            "service": "okx_runtime",
+            "pid": pid,
+            "running": True,
+        },
+    )
+    monkeypatch.setattr(
+        runtime,
+        "is_managed_process",
+        lambda candidate, service: (
+            candidate == pid and service == "okx_runtime"
+        ),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_writer_lock_holder",
+        lambda _state_dir: pid,
+    )
+
+    assert runtime.okx_runtime_readiness(tmp_path) == {
+        "status": "BLOCKED_OPENINGS",
+        "execution_target": "OKX_DEMO",
+        "adapter": "ATTESTED",
+        "reconciliation": "DRIFTED",
+        "writer": "UNIQUE",
+    }
+
+
+def test_repeated_start_refuses_without_stopping_healthy_runtime(
+    monkeypatch,
+    tmp_path,
+):
+    runtime = load_runtime_module()
+    stopped = []
+    monkeypatch.setattr(
+        runtime,
+        "process_status",
+        lambda _state_dir, service: {
+            "service": service,
+            "pid": 9001 if service == "backend" else None,
+            "running": service == "backend",
+        },
+    )
+    monkeypatch.setattr(
+        runtime,
+        "stop_all",
+        lambda _state_dir: stopped.append(True),
+    )
+
+    with pytest.raises(runtime.RuntimeBlocked, match="repeated up was refused"):
+        runtime.start(tmp_path)
+
+    assert stopped == []
+
+
+def test_orphan_cleanup_signals_only_marker_and_cwd_verified_process(
+    monkeypatch,
+    tmp_path,
+):
+    runtime = load_runtime_module()
+    signals = []
+    monkeypatch.setattr(
+        runtime.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            stdout=(
+                "321 python -m app.adapters.okx_demo.runtime_service\n"
+                "654 python unrelated.py\n"
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "is_managed_process",
+        lambda pid, service: pid == 321 and service == "okx_runtime",
+    )
+    running = iter((True, False))
+    monkeypatch.setattr(
+        runtime,
+        "process_running",
+        lambda _pid: next(running),
+    )
+    monkeypatch.setattr(
+        runtime.os,
+        "killpg",
+        lambda pid, signum: signals.append((pid, signum)),
+    )
+    monkeypatch.setattr(runtime.time, "sleep", lambda _seconds: None)
+
+    runtime.cleanup_orphaned_managed_processes(tmp_path)
+
+    assert signals == [(321, runtime.signal.SIGTERM)]
+
+
+def test_credential_loss_freezes_openings_without_stopping_writer(
+    monkeypatch,
+    tmp_path,
+):
+    runtime = load_runtime_module()
+    stopped = []
+    monkeypatch.setattr(
+        runtime,
+        "process_status",
+        lambda _state_dir, _service: {
+            "service": "okx_runtime",
+            "pid": 123,
+            "running": True,
+        },
+    )
+    monkeypatch.setattr(
+        runtime,
+        "okx_runtime_readiness",
+        lambda _state_dir: {"status": "BLOCKED_OPENINGS"},
+    )
+    monkeypatch.setattr(
+        runtime,
+        "stop_all",
+        lambda _state_dir: stopped.append(True),
+    )
+
+    result = runtime.freeze_okx_openings(tmp_path)
+
+    assert result["status"] == "BLOCKED_OPENINGS"
+    assert (
+        tmp_path / runtime.OPENINGS_FREEZE_FILE
+    ).read_text(encoding="utf-8") == "BLOCKED_OPENINGS\n"
+    assert stopped == []
+
+
+def test_readiness_rejects_reused_pid_even_when_writer_lock_is_held(
+    monkeypatch,
+    tmp_path,
+):
+    runtime = load_runtime_module()
+    pid = 777
+    path = tmp_path / runtime.OKX_RUNTIME_READY_FILE
+    path.write_text(
+        json.dumps(
+            {
+                "status": "READY",
+                "execution_target": "OKX_DEMO",
+                "adapter": "ATTESTED",
+                "reconciliation": "RECONCILED",
+                "writer": "UNIQUE",
+                "pid": pid,
+            }
+        ),
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+    monkeypatch.setattr(
+        runtime,
+        "process_status",
+        lambda *_args: {
+            "service": "okx_runtime",
+            "pid": pid,
+            "running": True,
+        },
+    )
+    monkeypatch.setattr(
+        runtime,
+        "is_managed_process",
+        lambda *_args: False,
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_writer_lock_holder",
+        lambda _state_dir: pid,
+    )
+
+    assert runtime.okx_runtime_readiness(tmp_path)["status"] == "BLOCKED"
+
+
+def test_incomplete_startup_cleanup_never_claims_clean(monkeypatch, tmp_path):
+    runtime = load_runtime_module()
+    monkeypatch.setattr(
+        runtime,
+        "process_status",
+        lambda _state_dir, service: {
+            "service": service,
+            "pid": 88 if service == "okx_runtime" else None,
+            "running": service == "okx_runtime",
+        },
+    )
+    monkeypatch.setattr(
+        runtime,
+        "orphaned_managed_processes",
+        lambda *_args: [],
+    )
+    monkeypatch.setattr(runtime, "_writer_lock_holder", lambda _path: 88)
+
+    with pytest.raises(runtime.RuntimeBlocked, match="cleanup is incomplete"):
+        runtime.require_complete_startup_cleanup(
+            tmp_path,
+            {
+                "services": [
+                    {"service": "okx_runtime", "status": "BLOCKED"}
+                ]
+            },
+        )
+
+
+def test_recent_logs_refuses_symlink(monkeypatch, tmp_path):
+    runtime = load_runtime_module()
+    target = tmp_path / "private.txt"
+    target.write_text("password=must-not-appear\n", encoding="utf-8")
+    (tmp_path / runtime.LOG_FILES["backend"]).symlink_to(target)
+
+    payload = runtime.recent_logs(tmp_path, 10)
+
+    assert payload["backend"]["status"] == "BLOCKED"
+    assert "must-not-appear" not in str(payload)

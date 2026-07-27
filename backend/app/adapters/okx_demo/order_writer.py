@@ -48,6 +48,7 @@ class WriteAttemptRecord:
     close_sequence: int = 0
     parent_attempt_id: Optional[int] = None
     lease_generation: int = 1
+    recovery_grant_database_id: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -86,6 +87,20 @@ class WriterResult:
 
 
 class OrderWriterStore(Protocol):
+    def acquire_recovery_lease(
+        self,
+        grant_database_id: int,
+        *,
+        now: datetime,
+    ) -> None: ...
+
+    def load_recovery_order(self, grant_database_id: int) -> ManagedOrder: ...
+
+    def prepare_recovery_close(
+        self,
+        grant_database_id: int,
+    ) -> tuple[ManagedOrder, WriteAttemptRecord, Mapping[str, Any]]: ...
+
     def acquire_lease(
         self,
         *,
@@ -118,6 +133,7 @@ class OrderWriterStore(Protocol):
         operation_id: str,
         request_digest: str,
         safe_request_snapshot: Mapping[str, Any],
+        recovery_grant_database_id: Optional[int] = None,
     ) -> WriteAttemptRecord: ...
 
     def prepare_close_cleanup(
@@ -272,6 +288,80 @@ class OkxDemoOrderWriter:
             attempt=attempt,
             order=order,
             path="/api/v5/trade/cancel-order",
+            body=body,
+            require_terminal=True,
+        )
+
+    def recovery_cancel(
+        self,
+        *,
+        recovery_grant_database_id: int,
+    ) -> WriterResult:
+        """Cancel under a reconciliation grant without reviving an approval."""
+
+        self._store.acquire_recovery_lease(
+            recovery_grant_database_id,
+            now=self._now(),
+        )
+        unresolved = self._store.unresolved()
+        if unresolved is not None:
+            if (
+                unresolved.recovery_grant_database_id
+                != recovery_grant_database_id
+            ):
+                raise OkxDemoWriteBlocked(
+                    "unresolved attempt belongs to another recovery grant"
+                )
+            return self._recover(unresolved)
+        order = self._store.load_recovery_order(recovery_grant_database_id)
+        body = {
+            "instId": order.instrument_id,
+            "clOrdId": validate_client_order_id(order.client_order_id),
+        }
+        attempt = self._store.prepare_existing(
+            order,
+            operation="CANCEL",
+            operation_id=order.client_order_id,
+            request_digest=_digest(body),
+            safe_request_snapshot=_safe_request(body),
+            recovery_grant_database_id=recovery_grant_database_id,
+        )
+        return self._post_and_reconcile(
+            attempt=attempt,
+            order=order,
+            path="/api/v5/trade/cancel-order",
+            body=body,
+            require_terminal=True,
+        )
+
+    def recovery_reduce_only(
+        self,
+        *,
+        recovery_grant_database_id: int,
+    ) -> WriterResult:
+        """Close the exact authoritative position under a run-bound grant."""
+
+        self._store.acquire_recovery_lease(
+            recovery_grant_database_id,
+            now=self._now(),
+        )
+        unresolved = self._store.unresolved()
+        if unresolved is not None:
+            if (
+                unresolved.recovery_grant_database_id
+                != recovery_grant_database_id
+            ):
+                raise OkxDemoWriteBlocked(
+                    "unresolved attempt belongs to another recovery grant"
+                )
+            return self._recover(unresolved)
+        order, attempt, body = self._store.prepare_recovery_close(
+            recovery_grant_database_id
+        )
+        return self._post_and_reconcile(
+            attempt=attempt,
+            order=order,
+            path="/api/v5/trade/order",
             body=body,
             require_terminal=True,
         )

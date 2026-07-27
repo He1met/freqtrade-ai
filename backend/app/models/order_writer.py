@@ -141,6 +141,10 @@ class OkxOrderWriteAttempt(Base):
         BigInteger().with_variant(Integer, "sqlite"),
         nullable=False,
     )
+    recovery_grant_database_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        unique=True,
+    )
     operation: Mapped[str] = mapped_column(String(16), nullable=False)
     operation_id: Mapped[str] = mapped_column(String(32), nullable=False)
     client_order_id: Mapped[str] = mapped_column(String(32), nullable=False)

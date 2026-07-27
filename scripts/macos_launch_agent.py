@@ -33,6 +33,26 @@ class LaunchAgentBlocked(Exception):
     """The LaunchAgent cannot be installed or safely managed."""
 
 
+def require_canonical_repo() -> None:
+    """Never install the global label from a worktree or historical checkout."""
+
+    sys.path.insert(0, str(REPO_ROOT / "backend"))
+    from app.core.config import load_app_yaml
+
+    raw = load_app_yaml(REPO_ROOT / "config" / "app.yaml")
+    configured = Path(
+        raw.get("paths", {}).get(
+            "canonical_repo_root",
+            "~/Developer/Freqtrade Ai",
+        )
+    ).expanduser().resolve()
+    if REPO_ROOT.resolve() != configured:
+        raise LaunchAgentBlocked(
+            "LaunchAgent install/restart is allowed only from the canonical "
+            "repository: {}".format(configured)
+        )
+
+
 def launchd_target() -> str:
     return "gui/{}/{}".format(os.getuid(), LABEL)
 
@@ -191,6 +211,7 @@ def stop_managed_runtime() -> None:
 
 
 def install() -> Dict[str, Any]:
+    require_canonical_repo()
     if sys.platform != "darwin" or shutil.which("launchctl") is None:
         raise LaunchAgentBlocked("macOS launchctl is required")
     if not SUPERVISOR_SCRIPT.is_file() or not RUNTIME_SCRIPT.is_file():
@@ -245,6 +266,7 @@ def status() -> Dict[str, Any]:
 
 
 def restart() -> Dict[str, Any]:
+    require_canonical_repo()
     if not PLIST_PATH.is_file():
         raise LaunchAgentBlocked("LaunchAgent plist is missing; run `make autostart-install`")
     bootout()
