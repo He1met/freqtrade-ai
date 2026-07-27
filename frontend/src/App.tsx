@@ -11,6 +11,7 @@ import { LiveGovernance } from "./pages/LiveGovernance";
 import { LocalStrategyLab } from "./pages/LocalStrategyLab";
 import { NotFound } from "./pages/NotFound";
 import { OperatorDashboard } from "./pages/OperatorDashboard";
+import { OkxDemo } from "./pages/OkxDemo";
 import { Ranking } from "./pages/Ranking";
 import { Strategies } from "./pages/Strategies";
 import { StrategyDetail } from "./pages/StrategyDetail";
@@ -29,6 +30,7 @@ export function App() {
         <Route path="hyperopt-runs" element={<HyperoptRuns />} />
         <Route path="live-governance" element={<LiveGovernance />} />
         <Route path="operator-dashboard" element={<OperatorDashboard />} />
+        <Route path="okx-demo" element={<OkxDemo />} />
         <Route path="ranking" element={<Ranking />} />
         <Route path="freq-ui" element={<FreqUILink />} />
         <Route path="*" element={<NotFound />} />
