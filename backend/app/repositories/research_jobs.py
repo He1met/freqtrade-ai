@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 from uuid import uuid4
 
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -194,7 +194,13 @@ class ResearchJobRepository:
                 .where(
                     ResearchJob.execution_scope_id == self.execution_scope_id,
                     ResearchJob.status == "PENDING",
-                    ResearchJob.attempt_count < ResearchJob.max_attempts,
+                    or_(
+                        ResearchJob.attempt_count < ResearchJob.max_attempts,
+                        and_(
+                            ResearchJob.stage == "CANDIDATE_APPROVED",
+                            ResearchJob.attempt_count >= 1,
+                        ),
+                    ),
                 )
                 .order_by(ResearchJob.created_at.asc(), ResearchJob.id.asc())
                 .limit(1)
@@ -214,22 +220,44 @@ class ResearchJobRepository:
                 )
                 return None
 
+            resuming_approval = (
+                job.stage == "CANDIDATE_APPROVED" and job.attempt_count >= 1
+            )
             job.status = "RUNNING"
-            job.stage = "GENERATION"
+            job.stage = "SIGNAL" if resuming_approval else "GENERATION"
             job.lease_owner = owner
             job.lease_token = lease_token
             job.heartbeat_at = current_time
             job.lease_expires_at = current_time + timedelta(seconds=lease_seconds)
-            job.attempt_count += 1
-            self.db.add(
-                ResearchJobAttempt(
-                    research_job_id=job.id,
-                    attempt_number=job.attempt_count,
-                    execution_scope_id=job.execution_scope_id,
-                    status="RUNNING",
-                    started_at=current_time,
+            if resuming_approval:
+                attempt = self.db.scalars(
+                    select(ResearchJobAttempt)
+                    .where(
+                        ResearchJobAttempt.research_job_id == job.id,
+                        ResearchJobAttempt.execution_scope_id
+                        == self.execution_scope_id,
+                        ResearchJobAttempt.attempt_number == job.attempt_count,
+                        ResearchJobAttempt.status == "AWAITING_APPROVAL",
+                    )
+                    .limit(1)
+                ).first()
+                if attempt is None:
+                    raise ResearchJobLinkageBlocked(
+                        "candidate-approved job has no matching waiting attempt"
+                    )
+                attempt.status = "RUNNING"
+                attempt.completed_at = None
+            else:
+                job.attempt_count += 1
+                self.db.add(
+                    ResearchJobAttempt(
+                        research_job_id=job.id,
+                        attempt_number=job.attempt_count,
+                        execution_scope_id=job.execution_scope_id,
+                        status="RUNNING",
+                        started_at=current_time,
+                    )
                 )
-            )
             job.started_at = job.started_at or current_time
             self.db.execute(
                 update(ResearchWorkerControl)
@@ -371,7 +399,7 @@ class ResearchJobRepository:
         job = self.get(job_id)
         if job is None:
             return None
-        if job.status == "PENDING":
+        if job.status in {"PENDING", "AWAITING_APPROVAL"}:
             job.status = "CANCELLED"
             job.stage = "CANCELLED"
             job.error_message = reason
@@ -388,6 +416,142 @@ class ResearchJobRepository:
         self.db.commit()
         self.db.refresh(job)
         return job
+
+    def wait_for_candidate_approval(
+        self,
+        job_id: int,
+        lease_token: str,
+        *,
+        evidence_snapshot: dict,
+        now: Optional[datetime] = None,
+        commit: bool = True,
+    ) -> Optional[ResearchJob]:
+        """Release the one worker lease while an operator reviews a candidate."""
+
+        self._require_executable_scope()
+        current_time = now or datetime.now(timezone.utc)
+        job = self.get(job_id)
+        if (
+            job is None
+            or job.status != "RUNNING"
+            or job.lease_token != lease_token
+            or job.cancel_requested
+        ):
+            return None
+        attempt = self.db.scalars(
+            select(ResearchJobAttempt)
+            .where(
+                ResearchJobAttempt.research_job_id == job_id,
+                ResearchJobAttempt.execution_scope_id == self.execution_scope_id,
+                ResearchJobAttempt.attempt_number == job.attempt_count,
+                ResearchJobAttempt.status == "RUNNING",
+            )
+            .limit(1)
+        ).first()
+        if attempt is None:
+            return None
+        result = self.db.execute(
+            update(ResearchJob)
+            .where(
+                ResearchJob.id == job_id,
+                ResearchJob.execution_scope_id == self.execution_scope_id,
+                ResearchJob.status == "RUNNING",
+                ResearchJob.lease_token == lease_token,
+                ResearchJob.cancel_requested.is_(False),
+            )
+            .values(
+                status="AWAITING_APPROVAL",
+                stage="CANDIDATE_APPROVAL",
+                evidence_snapshot=evidence_snapshot,
+                lease_owner=None,
+                lease_token=None,
+                lease_expires_at=None,
+                heartbeat_at=None,
+            )
+        )
+        if result.rowcount != 1:
+            self.db.rollback()
+            return None
+        attempt.status = "AWAITING_APPROVAL"
+        attempt.completed_at = current_time
+        attempt.evidence_snapshot = evidence_snapshot
+        self._release_control(job_id, lease_token)
+        if commit:
+            self.db.commit()
+        else:
+            self.db.flush()
+        return self.get(job_id)
+
+    def resume_after_candidate_approval(
+        self,
+        job_id: int,
+        *,
+        evidence_snapshot: dict,
+        commit: bool = True,
+    ) -> Optional[ResearchJob]:
+        """Make an approved waiting job claimable by the same unique queue."""
+
+        self._require_executable_scope()
+        result = self.db.execute(
+            update(ResearchJob)
+            .where(
+                ResearchJob.id == job_id,
+                ResearchJob.execution_scope_id == self.execution_scope_id,
+                ResearchJob.status == "AWAITING_APPROVAL",
+                ResearchJob.cancel_requested.is_(False),
+                ResearchJob.lease_token.is_(None),
+            )
+            .values(
+                status="PENDING",
+                stage="CANDIDATE_APPROVED",
+                evidence_snapshot=evidence_snapshot,
+                error_message=None,
+            )
+        )
+        if result.rowcount != 1:
+            self.db.rollback()
+            return None
+        if commit:
+            self.db.commit()
+        else:
+            self.db.flush()
+        return self.get(job_id)
+
+    def block_waiting_candidate_approval(
+        self,
+        job_id: int,
+        *,
+        reason: str,
+        evidence_snapshot: dict,
+        now: Optional[datetime] = None,
+        commit: bool = True,
+    ) -> Optional[ResearchJob]:
+        self._require_executable_scope()
+        current_time = now or datetime.now(timezone.utc)
+        result = self.db.execute(
+            update(ResearchJob)
+            .where(
+                ResearchJob.id == job_id,
+                ResearchJob.execution_scope_id == self.execution_scope_id,
+                ResearchJob.status == "AWAITING_APPROVAL",
+                ResearchJob.lease_token.is_(None),
+            )
+            .values(
+                status="BLOCKED",
+                stage="CANDIDATE_APPROVAL",
+                evidence_snapshot=evidence_snapshot,
+                error_message=reason,
+                completed_at=current_time,
+            )
+        )
+        if result.rowcount != 1:
+            self.db.rollback()
+            return None
+        if commit:
+            self.db.commit()
+        else:
+            self.db.flush()
+        return self.get(job_id)
 
     def cancel_at_checkpoint(
         self,
