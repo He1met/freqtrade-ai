@@ -20,6 +20,7 @@ class ExecutionTargetDefinition(BaseModel):
     exchange: str = Field(min_length=1, max_length=64)
     product_type: str = Field(min_length=1, max_length=64)
     margin_mode: str = Field(min_length=1, max_length=64)
+    position_mode: str = Field(min_length=1, max_length=64)
     account_mode: str = Field(min_length=1, max_length=64)
     simulated_trading: bool
     credential_source: str = Field(min_length=1, max_length=64)
@@ -68,6 +69,7 @@ class ExecutionTargetManifest(BaseModel):
             "exchange": "okx",
             "product_type": "SWAP",
             "margin_mode": "isolated",
+            "position_mode": "long_short_mode",
             "account_mode": "demo",
             "simulated_trading": True,
             "credential_source": "macos_keychain",
@@ -128,6 +130,7 @@ def okx_demo_execution_target_manifest() -> ExecutionTargetManifest:
                 exchange="okx",
                 product_type="SWAP",
                 margin_mode="isolated",
+                position_mode="long_short_mode",
                 account_mode="demo",
                 simulated_trading=True,
                 credential_source="macos_keychain",

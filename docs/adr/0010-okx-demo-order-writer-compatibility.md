@@ -56,7 +56,8 @@ Primary evidence:
 | Demo public/private/business WS | Dedicated `wspap.okx.com` URLs | REST-oriented trade toolkit; not the bot market-data WS owner | CCXT Pro has OKX WS support | OKX WS enabled, but no supported OKX Demo activation | Project adapter owns explicit Demo URLs |
 | `SWAP` | Supported | `swap_*` tools | `swap=true` | Futures mapping supported | Supported |
 | `isolated` | `tdMode=isolated` | Exposed on contract orders | Supported | Explicit supported pair | Required |
-| one-way position | `posMode=net_mode` | Account mode tool supports `net_mode` | `posSide=net` semantics | OKX adapter declares `net_only` | Required initially |
+| one-way position | `posMode=net_mode` | Account mode tool supports `net_mode` | `posSide=net` semantics | OKX adapter declares `net_only` | Superseded by #474; legacy only |
+| dual-side position | `posMode=long_short_mode` | Account mode tool supports `long_short_mode` | `posSide=long|short` semantics | #475/#476 implement writer and reconciliation | Required target contract; writes blocked until implementation |
 | JSON | JSON API | `--json` raw output | Python objects | CLI/log abstractions | Persist normalized, redacted JSON evidence |
 | HTTP exit | HTTP can succeed while business item fails | CLI sets exit 1 on failed item `sCode` | Raises mapped errors | Maps CCXT errors | Check HTTP, top-level `code`, and every `sCode` |
 | Timeout/retry | Rate limits and transient codes exist | Configurable timeout and retry hints | Network exceptions/retry support | Retrier wrappers | Write timeout means unknown outcome; query by `clOrdId` before any resubmit |
@@ -93,7 +94,9 @@ derived from the current instrument response (`ctVal`, `lotSz`, `minSz`,
 
 1. Assert `ExecutionTarget=OKX_DEMO`, `allow_real_funds=false`, and exactly one writer.
 2. Assert the Keychain-injected credentials are attested Demo credentials with no withdrawal permission.
-3. Query account configuration and require `posMode=net_mode`.
+3. Query account configuration and require `posMode=long_short_mode`; the
+   legacy net-only canary remains blocked until the dual-side lifecycle is
+   implemented.
 4. Query the instrument and derive the valid contract count and price precision.
 5. Submit a far-from-market, post-only isolated limit order with a unique deterministic `clOrdId`.
 6. Validate top-level `code`, every `sCode`, `ordId`, and `clOrdId`.

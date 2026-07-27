@@ -663,7 +663,7 @@ def test_okx_preflight_child_receives_bundle_and_parent_returns_only_attestation
             "fingerprint_match": True,
             "permissions": {"read": True, "trade": True, "withdraw": False},
             "account_level": "2",
-            "position_mode": "net_mode",
+            "position_mode": "long_short_mode",
         },
         "local_target_contract": {
             "product_type": "SWAP",

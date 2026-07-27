@@ -5,6 +5,11 @@ controlled, one-shot order lifecycle against `OKX_DEMO`. The implementation is
 safe by default: without explicit authorization it returns `BLOCKED` before
 Keychain access, child-process creation, network access, or artifact creation.
 
+> 当前唯一账户约束已切换为 `long_short_mode`（双向持仓）。现有 canary 的
+> `posSide=net` 生命周期不能安全用于双向账户，因此在双向账户上会于任何写请求前
+> 返回 `BLOCKED / DUAL_SIDE_CANARY_NOT_IMPLEMENTED`。Issue #476 完成双侧
+> 对账与清理前，`--allow-demo-order` 不可作为可执行验收。
+
 ## Operator command
 
 ```bash
@@ -24,8 +29,8 @@ redirects, and adds `x-simulated-trading: 1` to every request.
 ## Exact lifecycle
 
 1. Acquire the single-writer lock and persist a unique legal `clOrdId` intent.
-2. Attest the pinned Demo account, exact `read_only,trade` permissions, Futures
-   account mode, and `net_mode`.
+2. （历史 net-mode 生命周期）Attest the pinned Demo account, exact
+   `read_only,trade` permissions, Futures account mode, and `net_mode`.
 3. Require zero pending `BTC-USDT-SWAP` orders and zero isolated net position.
 4. Read live instrument metadata and bid price.
 5. Derive the minimum legal size and a tick-aligned buy price 5% below bid;

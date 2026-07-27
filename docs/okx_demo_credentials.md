@@ -28,7 +28,7 @@ After the three signing credentials have been stored interactively, run
 `make okx-demo-pin-account` explicitly. It is not invoked by startup or
 preflight. The one-shot child reads only those three Keychain items, calls only
 the fixed Demo `GET /api/v5/account/config`, validates the response,
-`read_only,trade` permissions, Futures account level, and `net_mode`, then
+`read_only,trade` permissions, Futures account level, and `long_short_mode`, then
 computes the canonical account fingerprint in memory.
 
 The fingerprint is written to the fixed fourth Keychain item through controlled
@@ -57,7 +57,7 @@ The attestation is fail closed. It requires:
 - a non-empty account identity whose canonical SHA-256 matches the pinned
   Keychain fingerprint and is never rendered;
 - exactly `read_only,trade` permissions and no withdrawal permission;
-- Futures account level and `net_mode`.
+- Futures account level and `long_short_mode`.
 - the fixed Keychain service
   `freqtrade-ai/okx-demo-attestation-proof-key`, provisioned only by
   `make db-attestation-harden`.

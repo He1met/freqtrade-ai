@@ -26,7 +26,7 @@ from app.adapters.okx_demo.credential_preflight import (
     OKX_DEMO_REST_URL,
     OkxDemoPreflightBlocked,
     REST_URL_ENV,
-    validate_account_config,
+    account_fingerprint,
 )
 from app.adapters.okx_demo.write_semantics import (
     CLIENT_ORDER_ID_PATTERN,
@@ -704,13 +704,31 @@ def _attest_account(
     active_environment: Mapping[str, str],
 ) -> None:
     account_payload = transport.request("GET", "/api/v5/account/config")
-    validate_account_config(
-        account_payload,
-        expected_fingerprint=_required(
-            active_environment,
-            OKX_DEMO_ACCOUNT_FINGERPRINT_ENV,
-        ),
-    )
+    if (
+        not isinstance(account_payload, dict)
+        or account_payload.get("code") != "0"
+        or not isinstance(account_payload.get("data"), list)
+        or len(account_payload["data"]) != 1
+        or not isinstance(account_payload["data"][0], dict)
+    ):
+        raise OkxDemoCanaryBlocked("ACCOUNT_ATTESTATION_FAILED")
+    account = account_payload["data"][0]
+    try:
+        observed_fingerprint = account_fingerprint(account)
+    except OkxDemoPreflightBlocked:
+        raise OkxDemoCanaryBlocked("ACCOUNT_ATTESTATION_FAILED") from None
+    if not hmac.compare_digest(
+        observed_fingerprint,
+        _required(active_environment, OKX_DEMO_ACCOUNT_FINGERPRINT_ENV),
+    ):
+        raise OkxDemoCanaryBlocked("ACCOUNT_ATTESTATION_FAILED")
+    permissions = account.get("perm")
+    if not isinstance(permissions, str) or {
+        item.strip().lower() for item in permissions.split(",") if item.strip()
+    } != {"read_only", "trade"} or account.get("acctLv") != "2":
+        raise OkxDemoCanaryBlocked("ACCOUNT_ATTESTATION_FAILED")
+    if account.get("posMode") != "net_mode":
+        raise OkxDemoCanaryBlocked("DUAL_SIDE_CANARY_NOT_IMPLEMENTED")
 
 
 def _query_recovery_order(
