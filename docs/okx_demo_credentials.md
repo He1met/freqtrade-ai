@@ -74,9 +74,28 @@ Demo response, fingerprint match, permissions, account level, and position
 mode. `SWAP`, `isolated`, and `allow_real_funds=false` are reported separately
 as `local_target_contract`; `/account/config` does not attest them.
 
-The onboarding and preflight children are synchronous and short lived. Their
-in-memory credential bundles are cleared when each child exits, and no
-persistent credential holder is registered, so current Keychain rotation does
-not require a LaunchAgent restart. If #449 introduces a long-lived adapter,
-rotation must use a controlled restart so the old process releases its previous
-credential values.
+## Long-running runtime and credential rotation
+
+The existing single LaunchAgent supervises one credential-bearing
+`okx_runtime` child after backend, worker, and frontend readiness. No second
+plist, virtualenv, database, or runtime directory is created. The child owns
+the attested read adapter, startup reconciliation, and the sole writer process
+lock.
+
+After the Keychain bundle, account pin, and attestation proof key have been
+provisioned, run `make okx-rotate-generation` once, followed by
+`make autostart-restart`. The command validates that the complete OKX bundle
+exists, generates non-secret random generation metadata, and writes only that
+metadata to the fixed Keychain service
+`freqtrade-ai/okx-demo-credential-generation`. It never prints the generation
+or any credential.
+
+Repeat `make okx-rotate-generation` after every replacement of an OKX key,
+secret, passphrase, fingerprint, or attestation key, then run
+`make autostart-restart`. The supervisor compares only this non-secret
+generation. A new generation causes a controlled `down -> up -> verify`, and
+the generation is accepted only after the replacement child verifies.
+Temporary Keychain unavailability freezes new openings while leaving the
+existing child alive for cancellation and reduce-only cleanup. When the same
+generation becomes readable again, the supervisor removes that external
+freeze; the reconciliation gate remains authoritative.
