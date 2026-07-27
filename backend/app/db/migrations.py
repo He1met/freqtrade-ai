@@ -37,7 +37,8 @@ ATTESTATION_ACL_BASE_VERSION = "20260727_07"
 ORDER_WRITER_BASE_VERSION = "20260727_08"
 RECONCILIATION_BASE_VERSION = "20260727_09"
 RUNTIME_RECOVERY_BASE_VERSION = "20260727_10"
-SCHEMA_VERSION = "20260727_11"
+FULL_CHAIN_BASE_VERSION = "20260727_11"
+SCHEMA_VERSION = "20260727_12"
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 ATTESTATION_PROOF_KEY_ENV = "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"
 
@@ -3949,6 +3950,27 @@ def _add_okx_demo_runtime_recovery_binding(connection: Connection) -> None:
     )
 
 
+def _add_full_chain(connection: Connection) -> None:
+    """Install #450 tables and the lease-free operator approval state."""
+
+    Base.metadata.create_all(bind=connection)
+    connection.execute(
+        text(
+            """
+            ALTER TABLE research_jobs
+                DROP CONSTRAINT IF EXISTS research_jobs_status_check;
+            ALTER TABLE research_jobs
+                ADD CONSTRAINT research_jobs_status_check CHECK (
+                    status IN (
+                        'PENDING', 'RUNNING', 'AWAITING_APPROVAL', 'SUCCESS',
+                        'FAILED', 'BLOCKED', 'CANCELLED', 'STALE'
+                    )
+                );
+            """
+        )
+    )
+
+
 def upgrade_database(engine: Engine) -> str:
     """Upgrade a local PostgreSQL database atomically to ``SCHEMA_VERSION``.
 
@@ -3994,6 +4016,7 @@ def upgrade_database(engine: Engine) -> str:
                 Base.metadata.create_all(bind=connection)
                 _add_okx_demo_reconciliation(connection)
                 _add_okx_demo_runtime_recovery_binding(connection)
+                _add_full_chain(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -4015,6 +4038,7 @@ def upgrade_database(engine: Engine) -> str:
                 Base.metadata.create_all(bind=connection)
                 _add_okx_demo_reconciliation(connection)
                 _add_okx_demo_runtime_recovery_binding(connection)
+                _add_full_chain(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -4035,6 +4059,7 @@ def upgrade_database(engine: Engine) -> str:
                 Base.metadata.create_all(bind=connection)
                 _add_okx_demo_reconciliation(connection)
                 _add_okx_demo_runtime_recovery_binding(connection)
+                _add_full_chain(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -4054,6 +4079,7 @@ def upgrade_database(engine: Engine) -> str:
                 Base.metadata.create_all(bind=connection)
                 _add_okx_demo_reconciliation(connection)
                 _add_okx_demo_runtime_recovery_binding(connection)
+                _add_full_chain(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -4072,6 +4098,7 @@ def upgrade_database(engine: Engine) -> str:
                 Base.metadata.create_all(bind=connection)
                 _add_okx_demo_reconciliation(connection)
                 _add_okx_demo_runtime_recovery_binding(connection)
+                _add_full_chain(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -4089,6 +4116,7 @@ def upgrade_database(engine: Engine) -> str:
                 Base.metadata.create_all(bind=connection)
                 _add_okx_demo_reconciliation(connection)
                 _add_okx_demo_runtime_recovery_binding(connection)
+                _add_full_chain(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -4106,6 +4134,7 @@ def upgrade_database(engine: Engine) -> str:
                 Base.metadata.create_all(bind=connection)
                 _add_okx_demo_reconciliation(connection)
                 _add_okx_demo_runtime_recovery_binding(connection)
+                _add_full_chain(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -4123,6 +4152,7 @@ def upgrade_database(engine: Engine) -> str:
                 Base.metadata.create_all(bind=connection)
                 _add_okx_demo_reconciliation(connection)
                 _add_okx_demo_runtime_recovery_binding(connection)
+                _add_full_chain(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -4139,6 +4169,7 @@ def upgrade_database(engine: Engine) -> str:
                 Base.metadata.create_all(bind=connection)
                 _add_okx_demo_reconciliation(connection)
                 _add_okx_demo_runtime_recovery_binding(connection)
+                _add_full_chain(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -4151,8 +4182,10 @@ def upgrade_database(engine: Engine) -> str:
                 )
                 return SCHEMA_VERSION
             if current_version == RECONCILIATION_BASE_VERSION:
+                Base.metadata.create_all(bind=connection)
                 _add_okx_demo_reconciliation(connection)
                 _add_okx_demo_runtime_recovery_binding(connection)
+                _add_full_chain(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -4165,12 +4198,27 @@ def upgrade_database(engine: Engine) -> str:
                 )
                 return SCHEMA_VERSION
             if current_version == RUNTIME_RECOVERY_BASE_VERSION:
+                Base.metadata.create_all(bind=connection)
                 _add_okx_demo_reconciliation(connection)
                 _add_okx_demo_runtime_recovery_binding(connection)
+                _add_full_chain(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
                         "Runtime recovery schema upgrade does not match ORM metadata: "
+                        + "; ".join(problems)
+                    )
+                connection.execute(
+                    text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+                    {"version": SCHEMA_VERSION},
+                )
+                return SCHEMA_VERSION
+            if current_version == FULL_CHAIN_BASE_VERSION:
+                _add_full_chain(connection)
+                problems = schema_problems(connection)
+                if problems:
+                    raise SchemaMigrationBlocked(
+                        "Full-chain schema upgrade does not match ORM metadata: "
                         + "; ".join(problems)
                     )
                 connection.execute(
@@ -4203,6 +4251,7 @@ def upgrade_database(engine: Engine) -> str:
             _add_order_writer(connection)
             _add_okx_demo_reconciliation(connection)
             _add_okx_demo_runtime_recovery_binding(connection)
+            _add_full_chain(connection)
             problems = schema_problems(connection)
             if problems:
                 raise SchemaMigrationBlocked(
