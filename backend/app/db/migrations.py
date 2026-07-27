@@ -481,6 +481,23 @@ def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
             for constraint in table.constraints
             if isinstance(constraint, ForeignKeyConstraint)
         }
+        # The recovery-grant parent is installed by the later #448 migration.
+        # Keeping this FK out of the early #447 ORM CREATE prevents legacy
+        # upgrades from referencing a table that does not exist yet; the
+        # runtime recovery migration adds and verifies the real PostgreSQL FK.
+        if name == "okx_order_write_attempts":
+            expected_fks.add(
+                (
+                    ("recovery_grant_database_id",),
+                    schema_name,
+                    "okx_demo_recovery_grants",
+                    ("database_id",),
+                    "RESTRICT",
+                    "NO ACTION",
+                    False,
+                    None,
+                )
+            )
         actual_fks = {
             (
                 tuple(foreign_key["constrained_columns"]),
