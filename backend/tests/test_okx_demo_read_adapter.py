@@ -416,11 +416,29 @@ def test_wrong_account_credentials_block_before_target_private_read(
     assert target_transport.calls == []
 
 
-def test_attested_session_expires_before_private_transport(monkeypatch) -> None:
+def test_attested_session_renews_before_private_transport(monkeypatch) -> None:
     account = attested_account()
     current = [NOW]
     target_transport = RecordedTransport(
-        [envelope([{"uTime": FRESH_TS, "totalEq": "1", "details": []}])]
+        [
+            envelope(
+                [
+                    {
+                        "uTime": str(
+                            int(
+                                (
+                                    NOW + timedelta(seconds=60)
+                                ).timestamp()
+                                * 1000
+                            )
+                        ),
+                        "totalEq": "1",
+                        "details": [],
+                    }
+                ]
+            )
+        ],
+        received_at=NOW + timedelta(seconds=61),
     )
     install_attestation(monkeypatch, account)
     monkeypatch.setattr(read_boundary, "_utc_now", lambda: current[0])
@@ -434,12 +452,10 @@ def test_attested_session_expires_before_private_transport(monkeypatch) -> None:
     )
     current[0] = NOW + timedelta(seconds=61)
 
-    with pytest.raises(OkxReadAdapterError) as blocked:
-        instance.balance("USDT")
+    snapshot = instance.balance("USDT")
 
-    assert blocked.value.kind == "UNAUTHORIZED"
-    assert blocked.value.status == "BLOCKED"
-    assert target_transport.calls == []
+    assert snapshot.metadata.authenticated is True
+    assert len(target_transport.calls) == 1
 
 
 @pytest.mark.parametrize(
