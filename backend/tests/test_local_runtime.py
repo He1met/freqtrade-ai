@@ -10,6 +10,18 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "local_runtime.py"
 
 
+def test_make_runtime_commands_use_the_one_project_virtualenv():
+    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+
+    assert "python3 scripts/local_runtime.py" not in makefile
+    assert (
+        makefile.count(
+            "backend/.venv/bin/python scripts/local_runtime.py"
+        )
+        == 11
+    )
+
+
 def load_runtime_module():
     spec = importlib.util.spec_from_file_location("local_runtime", SCRIPT_PATH)
     assert spec and spec.loader

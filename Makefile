@@ -1,50 +1,53 @@
-.PHONY: help bootstrap doctor up status down logs verify okx-demo-pin-account okx-demo-preflight okx-demo-canary okx-rotate-generation autostart-install autostart-status autostart-logs autostart-restart autostart-uninstall db-backup db-init db-verify db-attestation-harden test
+.PHONY: help bootstrap doctor up status down logs verify okx-demo-pin-account okx-demo-preflight okx-demo-canary okx-demo-e2e-offline okx-demo-e2e-controlled autostart-install autostart-status autostart-logs autostart-restart autostart-uninstall db-backup db-init db-verify db-attestation-harden test
 
 DATABASE_URL ?= postgresql+psycopg://freqtrade:change_me@localhost:5432/freqtrade_ai
 
 help:
-	@python3 scripts/local_runtime.py doctor --json >/dev/null || true
+	@backend/.venv/bin/python scripts/local_runtime.py doctor --json >/dev/null || true
 	@printf '%s\n' 'Local runtime: make bootstrap | doctor | up | status | logs | verify | down'
 	@printf '%s\n' 'OKX Demo onboarding: make okx-demo-pin-account (one-time; refuses overwrite)'
 	@printf '%s\n' 'OKX Demo: make okx-demo-preflight (authenticated read-only; never submits orders)'
 	@printf '%s\n' 'OKX Demo canary: make okx-demo-canary CANARY_FLAGS=--allow-demo-order'
-	@printf '%s\n' 'OKX credential setup/rotation: make okx-rotate-generation, then make autostart-restart'
+	@printf '%s\n' 'OKX Demo E2E: make okx-demo-e2e-offline (controlled mode stays blocked until #449/#450 integration)'
 	@printf '%s\n' 'macOS autostart: make autostart-install | autostart-status | autostart-logs | autostart-restart | autostart-uninstall'
 	@printf '%s\n' 'The managed runtime uses only local PostgreSQL database freqtrade_ai.'
 	@printf '%s\n' 'One-time peer-admin attestation ACL: make db-attestation-harden'
 
 bootstrap:
-	python3 scripts/local_runtime.py bootstrap
+	backend/.venv/bin/python scripts/local_runtime.py bootstrap
 
 doctor:
-	python3 scripts/local_runtime.py doctor
+	backend/.venv/bin/python scripts/local_runtime.py doctor
 
 up:
-	python3 scripts/local_runtime.py up
+	backend/.venv/bin/python scripts/local_runtime.py up
 
 status:
-	python3 scripts/local_runtime.py status
+	backend/.venv/bin/python scripts/local_runtime.py status
 
 down:
-	python3 scripts/local_runtime.py down
+	backend/.venv/bin/python scripts/local_runtime.py down
 
 logs:
-	python3 scripts/local_runtime.py logs
+	backend/.venv/bin/python scripts/local_runtime.py logs
 
 verify:
-	python3 scripts/local_runtime.py verify
+	backend/.venv/bin/python scripts/local_runtime.py verify
 
 okx-demo-pin-account:
-	python3 scripts/local_runtime.py okx-pin-account
+	backend/.venv/bin/python scripts/local_runtime.py okx-pin-account
 
 okx-demo-preflight:
-	python3 scripts/local_runtime.py okx-preflight
+	backend/.venv/bin/python scripts/local_runtime.py okx-preflight
 
 okx-demo-canary:
-	python3 scripts/local_runtime.py okx-demo-canary $(CANARY_FLAGS)
+	backend/.venv/bin/python scripts/local_runtime.py okx-demo-canary $(CANARY_FLAGS)
 
-okx-rotate-generation:
-	python3 scripts/local_runtime.py okx-rotate-generation
+okx-demo-e2e-offline:
+	python3 scripts/okx_demo_e2e.py --mode offline-ci
+
+okx-demo-e2e-controlled:
+	python3 scripts/okx_demo_e2e.py --mode controlled-real $(E2E_FLAGS)
 
 autostart-install:
 	backend/.venv/bin/python scripts/macos_launch_agent.py install
