@@ -982,7 +982,7 @@ def run_okx_demo_preflight() -> Dict[str, Any]:
             "fingerprint_match": True,
             "permissions": {"read": True, "trade": True, "withdraw": False},
             "account_level": "2",
-            "position_mode": "net_mode",
+            "position_mode": "long_short_mode",
         }
         or payload.get("local_target_contract")
         != {
@@ -1012,7 +1012,7 @@ def run_okx_demo_preflight() -> Dict[str, Any]:
             "fingerprint_match": True,
             "permissions": {"read": True, "trade": True, "withdraw": False},
             "account_level": "2",
-            "position_mode": "net_mode",
+            "position_mode": "long_short_mode",
         },
         "local_target_contract": {
             "product_type": "SWAP",
