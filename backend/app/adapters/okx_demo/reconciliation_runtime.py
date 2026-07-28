@@ -25,6 +25,7 @@ from app.models.okx_demo_reconciliation import (
     OkxDemoReconciliationState,
     OkxDemoRecoveryGrant,
 )
+from app.models.execution_lineage import ReconciliationRun
 from app.models.order_writer import OkxOrderWriteAttempt
 
 
@@ -188,6 +189,34 @@ class OkxDemoRuntimeReconciliationAdapter:
             self._stream_generation + 1,
             int(persisted_generation or 0) + 1,
         )
+        persisted_completed_at = db.scalar(
+            select(ReconciliationRun.completed_at)
+            .where(
+                ReconciliationRun.execution_target_id == "OKX_DEMO",
+                ReconciliationRun.completed_at.is_not(None),
+            )
+            .order_by(
+                ReconciliationRun.completed_at.desc(),
+                ReconciliationRun.id.desc(),
+            )
+            .limit(1)
+        )
+        if persisted_completed_at is not None:
+            persisted_completed_at = (
+                persisted_completed_at.replace(tzinfo=timezone.utc)
+                if persisted_completed_at.tzinfo is None
+                else _aware(persisted_completed_at)
+            )
+            if (
+                self._last_completed_at is None
+                or persisted_completed_at > self._last_completed_at
+            ):
+                self._last_completed_at = persisted_completed_at
+        history_floor = (
+            self._last_completed_at - timedelta(seconds=5)
+            if self._last_completed_at is not None
+            else None
+        )
         pending, pending_water, pending_observed = self._pages(
             read_client,
             "pending_orders",
@@ -197,11 +226,15 @@ class OkxDemoRuntimeReconciliationAdapter:
             read_client,
             "orders_history",
             identity_field="order_id",
+            stop_at=history_floor,
+            timestamp_field="updated_at",
         )
         fills, fill_water, fills_observed = self._pages(
             read_client,
             "fills_history",
             identity_field="fill_id",
+            stop_at=history_floor,
+            timestamp_field="timestamp",
         )
         positions_snapshot = read_client.positions()
         balance_snapshot = read_client.balance()
@@ -330,9 +363,7 @@ class OkxDemoRuntimeReconciliationAdapter:
             complete_streams=RECOVERY_STREAMS,
             high_watermarks=high_watermarks,
             overlap_started_at=(
-                self._last_completed_at - timedelta(seconds=5)
-                if self._last_completed_at is not None
-                else started_at
+                history_floor if history_floor is not None else started_at
             ),
             observed_at=observed_at,
             completed_at=completed_at,
@@ -360,7 +391,14 @@ class OkxDemoRuntimeReconciliationAdapter:
         method_name: str,
         *,
         identity_field: str,
+        stop_at: Optional[datetime] = None,
+        timestamp_field: Optional[str] = None,
     ) -> tuple[list[dict[str, Any]], str, datetime]:
+        if stop_at is not None and timestamp_field is None:
+            raise OkxDemoReconciliationBlocked(
+                "incremental pagination requires both a cutoff and timestamp field"
+            )
+        cutoff = _aware(stop_at) if stop_at is not None else None
         method = getattr(read_client, method_name, None)
         if not callable(method):
             raise OkxDemoReconciliationBlocked(
@@ -372,6 +410,7 @@ class OkxDemoRuntimeReconciliationAdapter:
         seen_cursors = set()
         items_by_identity: dict[str, dict[str, Any]] = {}
         oldest_fetched_at: Optional[datetime] = None
+        previous_item_time: Optional[datetime] = None
         for _page in range(MAX_PAGES):
             snapshot = method(after=cursor, limit=PAGE_LIMIT)
             fetched_at = _aware(snapshot.metadata.fetched_at)
@@ -392,7 +431,27 @@ class OkxDemoRuntimeReconciliationAdapter:
                 if oldest_fetched_at is None
                 else min(oldest_fetched_at, fetched_at)
             )
+            reached_cutoff = False
             for item in page_items:
+                if cutoff is not None and timestamp_field is not None:
+                    item_time = _required_item_time(
+                        item,
+                        timestamp_field,
+                        method_name,
+                    )
+                    if (
+                        previous_item_time is not None
+                        and item_time > previous_item_time
+                    ):
+                        raise OkxDemoReconciliationBlocked(
+                            "{} pagination is not newest-first".format(
+                                method_name
+                            )
+                        )
+                    previous_item_time = item_time
+                    if item_time < cutoff:
+                        reached_cutoff = True
+                        continue
                 identity = str(item.get(identity_field, ""))
                 if not identity:
                     raise OkxDemoReconciliationBlocked(
@@ -408,8 +467,12 @@ class OkxDemoRuntimeReconciliationAdapter:
                         )
                     )
                 items_by_identity[identity] = item
-            if len(page_items) < PAGE_LIMIT:
-                watermark = cursor or "EMPTY"
+            if reached_cutoff or len(page_items) < PAGE_LIMIT:
+                watermark = (
+                    "CUTOFF:{}:{}".format(cutoff.isoformat(), cursor or "FIRST")
+                    if reached_cutoff and cutoff is not None
+                    else cursor or "EMPTY"
+                )
                 if oldest_fetched_at is None:
                     raise OkxDemoReconciliationBlocked(
                         "{} pagination returned no freshness evidence".format(
@@ -514,6 +577,27 @@ def _item_time(
     if isinstance(value, str):
         return _aware(datetime.fromisoformat(value.replace("Z", "+00:00")))
     return fallback
+
+
+def _required_item_time(
+    item: Mapping[str, Any],
+    field: str,
+    method_name: str,
+) -> datetime:
+    value = item.get(field)
+    if isinstance(value, datetime):
+        return _aware(value)
+    if isinstance(value, str):
+        try:
+            return _aware(datetime.fromisoformat(value.replace("Z", "+00:00")))
+        except ValueError:
+            pass
+    raise OkxDemoReconciliationBlocked(
+        "{} pagination item lacks a valid {} timestamp".format(
+            method_name,
+            field,
+        )
+    )
 
 
 def _aware(value: datetime) -> datetime:

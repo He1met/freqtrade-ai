@@ -412,6 +412,7 @@ gui/501/com.he1met.freqtrade-ai.runtime = {
 
 def test_runtime_command_parses_json_without_exposing_environment(monkeypatch):
     supervisor = load_module(SUPERVISOR_PATH, "local_supervisor_json")
+    assert supervisor.COMMAND_TIMEOUT_SECONDS == 330
     monkeypatch.setattr(
         supervisor.subprocess,
         "run",
