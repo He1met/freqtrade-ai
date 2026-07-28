@@ -108,6 +108,21 @@ def test_empty_ranking_returns_empty_list(db_session: Session) -> None:
     assert StrategyScoreRepository(db_session).list_ranking() == []
 
 
+def test_zero_trade_eliminated_score_is_filtered_from_ranking(
+    db_session: Session,
+) -> None:
+    score_strategy(
+        db_session,
+        slug="zero-trade-strategy",
+        profit_pct=0,
+        max_drawdown_pct=0,
+        win_rate=0,
+        total_trades=0,
+    )
+
+    assert StrategyScoreRepository(db_session).list_ranking() == []
+
+
 def test_fixture_only_score_source_is_filtered_from_core_ranking(db_session: Session) -> None:
     result = score_strategy(
         db_session,

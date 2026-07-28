@@ -102,5 +102,18 @@ class StrategyScoreRepository:
             return False
         if snapshot.get("backtest_result_id") != score.backtest_result_id:
             return False
+        total_trades = snapshot.get("total_trades")
+        if (
+            not isinstance(total_trades, int)
+            or isinstance(total_trades, bool)
+            or total_trades <= 0
+        ):
+            return False
+        elimination = snapshot.get("elimination")
+        if (
+            isinstance(elimination, dict)
+            and elimination.get("eliminated") is True
+        ):
+            return False
         missing_metrics = snapshot.get("missing_metrics")
         return isinstance(missing_metrics, list) and not missing_metrics
