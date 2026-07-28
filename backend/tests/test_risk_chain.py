@@ -148,6 +148,8 @@ def _request(lineage: dict[str, int], now: datetime, factory=None) -> dict:
         "margin_mode": "isolated",
         "current_exposure": "0",
         "open_positions": 0,
+        "exposure_by_position_side": {"long": "0", "short": "0"},
+        "open_positions_by_position_side": {"long": 0, "short": 0},
         "leverage_by_position_side": {"long": "2", "short": "2"},
         "as_of": now.isoformat(),
         "expires_at": expiry,
@@ -703,6 +705,31 @@ def test_ambiguous_or_opposite_side_risk_request_is_blocked(
     assert result.status == "BLOCKED"
 
 
+def test_gross_long_and_short_exposure_cannot_net_to_zero(session_factory) -> None:
+    now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
+    lineage = _seed_lineage(session_factory)
+    request = _request(lineage, now)
+    account = request["snapshots"]["account"]["content"]
+    account.update(
+        current_exposure="1400",
+        open_positions=2,
+        exposure_by_position_side={"long": "700", "short": "700"},
+        open_positions_by_position_side={"long": 1, "short": 1},
+    )
+    _resign(request, "account")
+    _register_snapshots(session_factory, request, now)
+
+    with session_factory() as db:
+        result = RiskChainService(db).evaluate(
+            idempotency_key="gross-exposure",
+            request=request,
+            policy=_policy(),
+            now=now,
+        )
+
+    assert result.status == "REJECTED"
+
+
 def test_policy_change_blocks_retry_and_revokes_old_permission(session_factory) -> None:
     now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
     request = _request(_seed_lineage(session_factory), now, session_factory)
@@ -806,6 +833,8 @@ def test_inverse_notional_uses_contract_face_value_and_account_baseline(
     account = request["snapshots"]["account"]["content"]
     account["current_exposure"] = "100"
     account["open_positions"] = 1
+    account["exposure_by_position_side"] = {"long": "100", "short": "0"}
+    account["open_positions_by_position_side"] = {"long": 1, "short": 0}
     _resign(request, "account")
     request["quantity"] = "2"
     _register_snapshots(session_factory, request, now)

@@ -191,6 +191,8 @@ def _request(
         "margin_mode": "isolated",
         "current_exposure": "0",
         "open_positions": 0,
+        "exposure_by_position_side": {"long": "0", "short": "0"},
+        "open_positions_by_position_side": {"long": 0, "short": 0},
         "leverage_by_position_side": {"long": "2", "short": "2"},
         "as_of": now.isoformat(),
         "expires_at": expiry,

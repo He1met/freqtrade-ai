@@ -912,11 +912,24 @@ class RiskChainService:
             take_profit=take_profit,
             reduce_only=reduce_only,
             notional=notional,
-            account_exposure=_decimal(
-                account["current_exposure"], "current_exposure"
+            account_exposure=sum(
+                (
+                    _decimal(
+                        account["exposure_by_position_side"][position_side],
+                        "account {} exposure".format(position_side),
+                    )
+                    for position_side in ("long", "short")
+                ),
+                Decimal("0"),
             ),
-            account_positions=_integer(
-                account["open_positions"], "open_positions"
+            account_positions=sum(
+                (
+                    _integer(
+                        account["open_positions_by_position_side"][position_side],
+                        "account {} position count".format(position_side),
+                    )
+                    for position_side in ("long", "short")
+                )
             ),
         )
 
@@ -1135,6 +1148,8 @@ class RiskChainService:
             "margin_mode",
             "current_exposure",
             "open_positions",
+            "exposure_by_position_side",
+            "open_positions_by_position_side",
             "leverage_by_position_side",
             "as_of",
             "expires_at",
@@ -1157,6 +1172,40 @@ class RiskChainService:
         if _decimal(account["current_exposure"], "current_exposure") < 0:
             raise RiskChainBlocked("current exposure is invalid")
         _integer(account["open_positions"], "open_positions")
+        exposure_by_position_side = account["exposure_by_position_side"]
+        position_count_by_side = account["open_positions_by_position_side"]
+        if (
+            not isinstance(exposure_by_position_side, Mapping)
+            or set(exposure_by_position_side) != {"long", "short"}
+            or not isinstance(position_count_by_side, Mapping)
+            or set(position_count_by_side) != {"long", "short"}
+        ):
+            raise RiskChainBlocked("account side exposure evidence is invalid")
+        gross_exposure = sum(
+            (
+                _decimal(
+                    exposure_by_position_side[position_side],
+                    "account {} exposure".format(position_side),
+                )
+                for position_side in ("long", "short")
+            ),
+            Decimal("0"),
+        )
+        if gross_exposure < 0:
+            raise RiskChainBlocked("account side exposure is invalid")
+        gross_positions = sum(
+            (
+                _integer(
+                    position_count_by_side[position_side],
+                    "account {} position count".format(position_side),
+                )
+                for position_side in ("long", "short")
+            )
+        )
+        if _decimal(account["current_exposure"], "current_exposure") != gross_exposure:
+            raise RiskChainBlocked("account gross exposure does not match side evidence")
+        if _integer(account["open_positions"], "open_positions") != gross_positions:
+            raise RiskChainBlocked("account position count does not match side evidence")
         leverage_by_position_side = account["leverage_by_position_side"]
         if (
             not isinstance(leverage_by_position_side, Mapping)
