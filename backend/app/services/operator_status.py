@@ -490,7 +490,7 @@ class OperatorStatusService:
         self,
         checks: list[OperatorDiagnosticCheck],
     ) -> OperatorReadinessStatus:
-        statuses = {check.status for check in checks}
+        statuses = {check.status for check in checks if check.required}
         if "BLOCKED" in statuses:
             return "BLOCKED"
         if "UNAVAILABLE" in statuses:

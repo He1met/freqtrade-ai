@@ -396,7 +396,7 @@ export function OperatorDashboard() {
   const counts = operatorDiagnosticCounts(operatorStatus.checks);
   const safetyViolations = safetyBoundaryViolations(runtimeContract, operatorStatus);
   const firstProblem = sortOperatorDiagnostics(operatorStatus.checks).find((check) =>
-    isOperatorProblemStatus(check.status),
+    check.required && isOperatorProblemStatus(check.status),
   );
   const firstProblemReason = firstProblem ? operatorDiagnosticReason(firstProblem) : null;
 
@@ -440,25 +440,20 @@ export function OperatorDashboard() {
           <StatusBadge showRaw status={operatorStatus.status} />
         </article>
         <article className="operator-summary-card">
-          <span>Smoke 状态</span>
-          <strong>{displayStatus(runtimeContract.smokeStatus.status)}</strong>
-          <CompactText label="Smoke 状态摘要" value={runtimeContract.smokeStatus.summary} />
-        </article>
-        <article className="operator-summary-card">
           <span>研究就绪</span>
           <strong>{displayStatus(runtimeContract.researchReadiness.status)}</strong>
           <CompactText label="研究状态摘要" value={runtimeContract.researchReadiness.summary} />
         </article>
         <article className="operator-summary-card">
-          <span>Dry-run 就绪</span>
-          <strong>{displayStatus(runtimeContract.dryRunReadiness.status)}</strong>
-          <CompactText label="Dry-run 状态摘要" value={runtimeContract.dryRunReadiness.summary} />
+          <span>当前执行目标</span>
+          <strong>OKX_DEMO</strong>
+          <CompactText label="执行目标说明" value="OKX 模拟盘 · SWAP · isolated" />
         </article>
-        <article className={`operator-summary-card ${counts.totalProblems > 0 ? "is-problem" : ""}`}>
-          <span>诊断问题</span>
+        <article className="operator-summary-card">
+          <span>诊断信息</span>
           <strong>{counts.totalProblems}</strong>
           <span className="operator-secondary">
-            失败 {counts.failed} · 阻断 {counts.blocked} · 不可用 {counts.unavailable} · 过期 {counts.stale}
+            包含未启用的历史/可选检查；仅 required 项影响系统结论
           </span>
         </article>
       </section>

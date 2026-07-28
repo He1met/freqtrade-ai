@@ -116,10 +116,11 @@ export function operatorSystemConclusion(
   const candidates = [
     {
       status: runtimeContract.status,
-      reason:
-        runtimeContract.blockedReasons.find((reason) => reason.trim()) ??
-        runtimeContract.unavailableReasons.find((reason) => reason.trim()) ??
-        runtimeStatusReason(runtimeContract.systemStatus),
+      reason: isOperatorProblemStatus(runtimeContract.status)
+        ? runtimeContract.blockedReasons.find((reason) => reason.trim()) ??
+          runtimeContract.unavailableReasons.find((reason) => reason.trim()) ??
+          runtimeStatusReason(runtimeContract.systemStatus)
+        : null,
     },
     {
       status: runtimeContract.systemStatus.status,
@@ -127,11 +128,12 @@ export function operatorSystemConclusion(
     },
     {
       status: operatorStatus.status,
-      reason:
-        operatorStatus.blockedReasons.find((reason) => reason.trim()) ??
-        operatorStatus.unavailableReasons.find((reason) => reason.trim()) ??
-        operatorStatus.warnings.find((warning) => warning.trim()) ??
-        null,
+      reason: isOperatorProblemStatus(operatorStatus.status)
+        ? operatorStatus.blockedReasons.find((reason) => reason.trim()) ??
+          operatorStatus.unavailableReasons.find((reason) => reason.trim()) ??
+          operatorStatus.warnings.find((warning) => warning.trim()) ??
+          null
+        : null,
     },
   ];
   const worst = candidates.reduce((current, candidate) =>

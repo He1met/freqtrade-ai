@@ -132,6 +132,18 @@ test("healthy runtime status does not render a fake warning", () => {
   );
 });
 
+test("healthy current target ignores reasons from inactive optional scopes", () => {
+  const { runtimeContract, operatorStatus } = dashboardContracts();
+  runtimeContract.blockedReasons = ["legacy local dry-run is not active"];
+  operatorStatus.unavailableReasons = ["optional Phase 7 report is absent"];
+
+  assert.deepEqual(operatorSystemConclusion(runtimeContract, operatorStatus), {
+    status: "READY",
+    label: "系统当前可用",
+    reason: null,
+  });
+});
+
 test("system conclusion keeps blocked operator evidence visible", () => {
   const { runtimeContract, operatorStatus } = dashboardContracts();
   operatorStatus.status = "BLOCKED";

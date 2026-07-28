@@ -194,6 +194,29 @@ def test_operator_status_blocks_unsafe_runtime_flags(tmp_path) -> None:
     assert any("allow_live_trading=true" in reason for reason in report.blocked_reasons)
 
 
+def test_optional_historical_reports_do_not_downgrade_current_operator_status(
+    tmp_path,
+) -> None:
+    prepare_repo_fixture(tmp_path)
+    runtime_dir = tmp_path / "reports" / "runtime"
+    runtime_dir.rmdir()
+
+    report = service(environ={"DATABASE_URL": "present"}).build_status(
+        repo_root=tmp_path,
+        settings=settings_for(),
+    )
+
+    assert report.status == "READY"
+    assert any(
+        check.status == "UNAVAILABLE" and check.required is False
+        for check in report.checks
+    )
+    assert any(
+        "Phase 7 smoke summary does not exist" in reason
+        for reason in report.unavailable_reasons
+    )
+
+
 def test_operator_status_endpoint_returns_read_only_shape() -> None:
     client = TestClient(app)
 
