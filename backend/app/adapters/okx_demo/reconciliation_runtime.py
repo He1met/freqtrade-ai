@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import hashlib
+import json
 import os
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -409,9 +410,12 @@ class OkxDemoRuntimeReconciliationAdapter:
         cursor = None
         seen_cursors = set()
         items_by_identity: dict[str, dict[str, Any]] = {}
+        retained_by_identity: dict[str, dict[str, Any]] = {}
         oldest_fetched_at: Optional[datetime] = None
+        page_count = 0
         for _page in range(MAX_PAGES):
             snapshot = method(after=cursor, limit=PAGE_LIMIT)
+            page_count += 1
             fetched_at = _aware(snapshot.metadata.fetched_at)
             expires_at = _aware(snapshot.metadata.expires_at)
             if (
@@ -430,21 +434,15 @@ class OkxDemoRuntimeReconciliationAdapter:
                 if oldest_fetched_at is None
                 else min(oldest_fetched_at, fetched_at)
             )
-            reached_cutoff = False
             for item in page_items:
-                if cutoff is not None and timestamp_field is not None:
-                    item_time = _required_item_time(
-                        item,
-                        timestamp_field,
-                        method_name,
-                    )
-                    if item_time < cutoff:
-                        reached_cutoff = True
-                        continue
-                identity = str(item.get(identity_field, ""))
-                if not identity:
+                identity, identity_cursor = _pagination_identity(
+                    item,
+                    identity_field,
+                    method_name,
+                )
+                if cursor is not None and identity_cursor > int(cursor):
                     raise OkxDemoReconciliationBlocked(
-                        "{} page contains an item without identity".format(
+                        "{} pagination item escapes the requested cursor window".format(
                             method_name
                         )
                     )
@@ -456,12 +454,21 @@ class OkxDemoRuntimeReconciliationAdapter:
                         )
                     )
                 items_by_identity[identity] = item
-            if reached_cutoff or len(page_items) < PAGE_LIMIT:
-                watermark = (
-                    "CUTOFF:{}:{}".format(cutoff.isoformat(), cursor or "FIRST")
-                    if reached_cutoff and cutoff is not None
-                    else cursor or "EMPTY"
+                if cutoff is None or timestamp_field is None:
+                    retained_by_identity[identity] = item
+                    continue
+                item_time = _required_item_time(
+                    item,
+                    timestamp_field,
+                    method_name,
                 )
+                if item_time >= cutoff:
+                    retained_by_identity[identity] = item
+            # A timestamp cutoff cannot prove that a subsequent page contains
+            # only older records: the exchange may return a page in reverse or
+            # arbitrary order.  Only a short/empty page proves that this cursor
+            # traversal is complete, so keep paging even after crossing it.
+            if len(page_items) < PAGE_LIMIT:
                 if oldest_fetched_at is None:
                     raise OkxDemoReconciliationBlocked(
                         "{} pagination returned no freshness evidence".format(
@@ -469,12 +476,30 @@ class OkxDemoRuntimeReconciliationAdapter:
                         )
                     )
                 return (
-                    list(items_by_identity.values()),
-                    hashlib.sha256(str(watermark).encode()).hexdigest(),
+                    list(retained_by_identity.values()),
+                    _pagination_watermark(
+                        method_name=method_name,
+                        cutoff=cutoff,
+                        terminal_cursor=cursor,
+                        page_count=page_count,
+                        items_by_identity=items_by_identity,
+                    ),
                     oldest_fetched_at,
                 )
-            next_cursor = str(page_items[-1].get(identity_field, ""))
-            if not next_cursor or next_cursor in seen_cursors:
+            next_cursor = str(
+                min(
+                    _pagination_identity(
+                        item,
+                        identity_field,
+                        method_name,
+                    )[1]
+                    for item in page_items
+                )
+            )
+            if (
+                next_cursor in seen_cursors
+                or (cursor is not None and int(next_cursor) >= int(cursor))
+            ):
                 raise OkxDemoReconciliationBlocked(
                     "{} pagination cursor did not advance".format(method_name)
                 )
@@ -587,6 +612,56 @@ def _required_item_time(
             field,
         )
     )
+
+
+def _pagination_identity(
+    item: Mapping[str, Any],
+    identity_field: str,
+    method_name: str,
+) -> tuple[str, int]:
+    """Return an identity that can be proved safe to reuse as an OKX cursor."""
+    value = item.get(identity_field)
+    identity = str(value) if value is not None else ""
+    if not identity:
+        raise OkxDemoReconciliationBlocked(
+            "{} page contains an item without identity".format(method_name)
+        )
+    if not identity.isdigit() or identity != str(int(identity)):
+        raise OkxDemoReconciliationBlocked(
+            "{} pagination identity is not a canonical numeric cursor".format(
+                method_name
+            )
+        )
+    return identity, int(identity)
+
+
+def _pagination_watermark(
+    *,
+    method_name: str,
+    cutoff: Optional[datetime],
+    terminal_cursor: Optional[str],
+    page_count: int,
+    items_by_identity: Mapping[str, Mapping[str, Any]],
+) -> str:
+    """Bind the terminal cursor to every observed identity and payload."""
+    material = {
+        "method": method_name,
+        "cutoff": cutoff.isoformat() if cutoff is not None else None,
+        "terminal_cursor": terminal_cursor,
+        "page_count": page_count,
+        "items": [
+            [identity, dict(items_by_identity[identity])]
+            for identity in sorted(items_by_identity, key=int)
+        ],
+    }
+    return hashlib.sha256(
+        json.dumps(
+            material,
+            default=str,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
 
 
 def _aware(value: datetime) -> datetime:
