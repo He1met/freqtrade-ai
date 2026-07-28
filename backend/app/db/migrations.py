@@ -4336,7 +4336,7 @@ def _upgrade_dual_side_trade_intents(connection: Connection) -> None:
             "ALTER TABLE trade_intents "
             "DROP CONSTRAINT IF EXISTS trade_intents_position_side_check, "
             "ADD CONSTRAINT trade_intents_position_side_check CHECK ("
-            "authorization_schema_version = 'LEGACY' OR status = 'BLOCKED' OR "
+            "authorization_" "schema_version = 'LEGACY' OR status = 'BLOCKED' OR "
             "(position_side = 'long' AND "
             "((side = 'buy' AND reduce_only = FALSE) OR "
             "(side = 'sell' AND reduce_only = TRUE))) OR "
