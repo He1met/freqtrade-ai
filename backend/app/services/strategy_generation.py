@@ -99,8 +99,14 @@ class LLMProviderConfig:
             or "deepseek-v4-pro",
             base_url="https://api.deepseek.com",
             api_key_env="DEEPSEEK_API_KEY",
-            timeout_seconds=float(os.environ.get("STRATEGY_BLUEPRINT_TIMEOUT_SECONDS", "30")),
-            max_output_tokens=_optional_int_from_env("STRATEGY_BLUEPRINT_MAX_OUTPUT_TOKENS"),
+            timeout_seconds=_bounded_timeout_from_env(
+                "STRATEGY_BLUEPRINT_TIMEOUT_SECONDS",
+                default=180.0,
+            ),
+            max_output_tokens=(
+                _optional_int_from_env("STRATEGY_BLUEPRINT_MAX_OUTPUT_TOKENS")
+                or 16000
+            ),
         )
 
     def metadata_snapshot(self) -> dict[str, Any]:
@@ -345,6 +351,21 @@ def _optional_int_from_env(name: str) -> Optional[int]:
     if value is None or not value.strip():
         return None
     return int(value)
+
+
+def _bounded_timeout_from_env(name: str, *, default: float) -> float:
+    raw = os.environ.get(name)
+    try:
+        value = default if raw is None or not raw.strip() else float(raw)
+    except ValueError as exc:
+        raise LLMProviderConfigurationError(
+            "{} must be a number".format(name)
+        ) from exc
+    if value < 10 or value > 600:
+        raise LLMProviderConfigurationError(
+            "{} must be between 10 and 600 seconds".format(name)
+        )
+    return value
 
 
 def _controlled_provider_config(provider_name: str) -> LLMProviderConfig:
