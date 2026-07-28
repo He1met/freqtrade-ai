@@ -1,4 +1,5 @@
 .PHONY: help bootstrap doctor up status down logs verify operator-token-init operator-token-status okx-demo-pin-account okx-demo-preflight okx-demo-compatibility okx-demo-canary okx-demo-e2e-offline okx-demo-e2e-controlled autostart-install autostart-status autostart-logs autostart-restart autostart-uninstall db-backup db-init db-verify db-attestation-harden test
+.PHONY: help bootstrap doctor up status down logs verify operator-token-init operator-token-status okx-demo-pin-account okx-demo-preflight okx-demo-canary okx-demo-e2e-offline okx-demo-e2e-controlled autostart-install autostart-status autostart-logs autostart-restart autostart-uninstall db-backup db-init db-verify db-attestation-harden db-reconciliation-compact-plan db-reconciliation-compact-apply db-reconciliation-compact-verify test
 
 DATABASE_URL ?= postgresql+psycopg://freqtrade:change_me@localhost:5432/freqtrade_ai
 
@@ -14,6 +15,7 @@ help:
 	@printf '%s\n' 'macOS autostart: make autostart-install | autostart-status | autostart-logs | autostart-restart | autostart-uninstall'
 	@printf '%s\n' 'The managed runtime uses only local PostgreSQL database freqtrade_ai.'
 	@printf '%s\n' 'One-time peer-admin attestation ACL: make db-attestation-harden'
+	@printf '%s\n' 'Reconciliation maintenance: make down; make db-reconciliation-compact-plan; review; make db-reconciliation-compact-apply; make up; make db-reconciliation-compact-verify'
 
 bootstrap:
 	backend/.venv/bin/python scripts/local_runtime.py bootstrap
@@ -86,6 +88,15 @@ db-verify:
 
 db-attestation-harden:
 	cd backend && . .venv/bin/activate && DATABASE_URL="$(DATABASE_URL)" python ../scripts/harden_okx_demo_attestation.py
+
+db-reconciliation-compact-plan:
+	backend/.venv/bin/python scripts/compact_okx_demo_reconciliation.py --database-url "$(DATABASE_URL)"
+
+db-reconciliation-compact-apply:
+	backend/.venv/bin/python scripts/compact_okx_demo_reconciliation.py --database-url "$(DATABASE_URL)" --apply --maintenance-stopped
+
+db-reconciliation-compact-verify:
+	backend/.venv/bin/python scripts/compact_okx_demo_reconciliation.py --database-url "$(DATABASE_URL)" --verify
 
 test:
 	cd backend && . .venv/bin/activate && pytest
