@@ -16,6 +16,7 @@ from app.models import Base
 from app.repositories import BacktestRepository, StrategyRepository, StrategyScoreRepository
 from app.schemas import (
     BacktestArtifactIngestRequest,
+    BacktestResultCreate,
     BacktestRunCreate,
     BacktestTaskCreate,
     StrategyCreate,
@@ -268,6 +269,49 @@ def test_api_ingests_success_manifest_and_persists_reconcilable_result(
         assert ranking[0].backtest_result_id == payload["result"]["id"]
         assert ranking[0].strategy_version_id == strategy_version_id
         assert ranking[0].data_source.core_data is True
+
+
+def test_zero_trade_result_is_blocked_without_score_or_ranking(
+    db_session: Session,
+    strategy_version_id: int,
+    safe_artifact_dir: Path,
+) -> None:
+    run_id, task_id = _create_task(db_session, strategy_version_id)
+    result_path = safe_artifact_dir / "zero-trade-result.json"
+    result_path.write_text("{}", encoding="utf-8")
+
+    class ZeroTradeParser:
+        def parse_backtest_result(
+            self,
+            path: Path,
+            strategy_name: Optional[str] = None,
+        ) -> BacktestResultCreate:
+            del strategy_name
+            return BacktestResultCreate(
+                result_path=str(path),
+                metrics_snapshot={"total_trades": 0},
+                total_trades=0,
+            )
+
+    response = BacktestArtifactIngestService(
+        db_session,
+        parser=ZeroTradeParser(),
+        approved_roots=[safe_artifact_dir],
+    ).ingest_task_artifact(
+        task_id,
+        BacktestArtifactIngestRequest(result_path=str(result_path)),
+    )
+
+    assert response is not None
+    assert response.ingest_status == "blocked"
+    assert response.evidence is not None
+    assert response.evidence.acceptance_ready is False
+    assert (
+        response.evidence.blocked_reason
+        == "BLOCKED: backtest result contains no executed trades"
+    )
+    assert BacktestRepository(db_session).list_results(run_id) == []
+    assert StrategyScoreRepository(db_session).list_ranking() == []
 
 
 def test_success_manifest_with_missing_result_path_blocks_without_result(

@@ -170,6 +170,16 @@ class BacktestArtifactIngestService:
                 manifest_path=manifest_path,
                 result_path=result_path,
             )
+        if (
+            parsed_result.total_trades is None
+            or parsed_result.total_trades <= 0
+        ):
+            return self._record_blocked(
+                task,
+                "backtest result contains no executed trades",
+                manifest_path=manifest_path,
+                result_path=result_path,
+            )
 
         try:
             result = self.repository.save_result(
