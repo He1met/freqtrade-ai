@@ -1,5 +1,6 @@
 import { defineConfig } from "@playwright/test";
 import { randomBytes, randomInt } from "node:crypto";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { safeAbsoluteDirectory, safePythonBinary } from "./tests/helpers/e2eConfigSafety";
@@ -45,7 +46,9 @@ if (!cleanupRegistry.startsWith(`${acceptanceParent}/freqtrade-ai-issue-433-regi
 const canonicalPythonBin = fileURLToPath(
   new URL("../backend/.venv/bin/python", import.meta.url),
 );
-const pythonBin = safePythonBinary(process.env.PYTHON_BIN ?? canonicalPythonBin);
+const pythonBin = safePythonBinary(
+  process.env.PYTHON_BIN ?? (existsSync(canonicalPythonBin) ? canonicalPythonBin : undefined),
+);
 const backendProfile = process.env.E2E_SEED_PROFILE ?? "complete-current";
 if (!["empty", "complete-current", "missing-result", "missing-strategy", "long-evidence"].includes(backendProfile)) {
   throw new Error("E2E_SEED_PROFILE is invalid.");
