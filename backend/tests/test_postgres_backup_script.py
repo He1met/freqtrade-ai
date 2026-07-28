@@ -1,10 +1,18 @@
+import importlib.util
 import json
 import stat
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from scripts import postgres_backup
+
+SCRIPT_PATH = Path(__file__).resolve().parents[2] / "scripts" / "postgres_backup.py"
+SPEC = importlib.util.spec_from_file_location("postgres_backup", SCRIPT_PATH)
+assert SPEC is not None
+assert SPEC.loader is not None
+postgres_backup = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(postgres_backup)
 
 
 DATABASE_URL = "postgresql+psycopg://freqtrade:change_me@localhost:5432/freqtrade_ai"
