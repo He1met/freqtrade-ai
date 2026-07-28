@@ -8,11 +8,13 @@ from fastapi.testclient import TestClient
 import pytest
 from sqlalchemy.orm import Session
 
+from app.adapters.freqtrade.binary import resolve_freqtrade_binary
 from app.db.session import create_database_engine, create_session_factory, get_db
 from app.main import app
 from app.models import BacktestResult, BacktestRun, BacktestTask, Base
 from app.repositories import StrategyRepository
 from app.schemas import StrategyCreate, StrategyVersionCreate
+from app.services import local_backtest_trigger
 
 
 def client_with_backtest_db(tmp_path: Path) -> tuple[TestClient, object]:
@@ -300,10 +302,18 @@ def test_local_backtest_trigger_uses_runtime_binary_when_path_is_empty(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    binary = install_fake_freqtrade(tmp_path, monkeypatch)
+    runtime_env = tmp_path / "runtime.env"
+    runtime_env.write_text(f"FREQTRADE_BINARY={binary}\n", encoding="utf-8")
     empty_bin = tmp_path / "empty-bin"
     empty_bin.mkdir()
     monkeypatch.setenv("PATH", str(empty_bin))
     monkeypatch.delenv("FREQTRADE_BINARY", raising=False)
+    monkeypatch.setattr(
+        local_backtest_trigger,
+        "resolve_freqtrade_binary",
+        lambda: resolve_freqtrade_binary(runtime_env_path=runtime_env),
+    )
     client, session_factory = client_with_backtest_db(tmp_path)
     datadir = write_market_data(tmp_path)
     with session_factory() as db:
