@@ -14,7 +14,12 @@ from app.core.config import get_settings
 
 READY_FILENAME = "okx-runtime.ready.json"
 WRITER_LOCK_FILENAME = "okx-demo-order-writer.lock"
-MAX_HEARTBEAT_AGE = timedelta(seconds=5)
+# The credential-bearing runtime refreshes readiness between complete,
+# authenticated REST reconciliation cycles.  One bounded cycle may take
+# longer than five seconds when all paginated exchange resources are read.
+# PID liveness and the exclusive writer lock are still verified on every
+# request, so this age budget does not keep a dead writer looking healthy.
+MAX_HEARTBEAT_AGE = timedelta(seconds=90)
 
 
 @dataclass(frozen=True)
