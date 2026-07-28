@@ -1,5 +1,8 @@
+import pytest
+
 from app.schemas.strategy_blueprint import StrategyBlueprint
 from app.services.strategy_renderer import StrategyCodeRenderer
+from app.services.strategy_static_review import StrategyStaticReviewService
 
 
 def test_renderer_outputs_freqtrade_strategy_class() -> None:
@@ -49,3 +52,43 @@ def test_blueprint_rejects_rules_for_missing_indicators() -> None:
         assert "rule indicator is not defined" in str(exc)
     else:
         raise AssertionError("rule for missing indicator was accepted")
+
+
+def test_renderer_outputs_dual_direction_signals() -> None:
+    blueprint = StrategyBlueprint(
+        name="Dual RSI Demo",
+        slug="dual-rsi-demo",
+        class_name="DualRsiDemoStrategy",
+        can_short=True,
+        indicators=[{"name": "rsi", "kind": "rsi", "period": 14}],
+        entry_rules=[{"indicator": "rsi", "operator": "<", "value": 35}],
+        exit_rules=[{"indicator": "rsi", "operator": ">", "value": 55}],
+        short_entry_rules=[
+            {"indicator": "rsi", "operator": ">", "value": 65}
+        ],
+        short_exit_rules=[
+            {"indicator": "rsi", "operator": "<", "value": 45}
+        ],
+    )
+
+    code = StrategyCodeRenderer().render(blueprint)
+
+    assert "can_short = True" in code
+    assert "'enter_short'] = 1" in code
+    assert "'exit_short'] = 1" in code
+    compile(code, "generated_strategy.py", "exec")
+    assert StrategyStaticReviewService().review_code(code).passed is True
+
+
+def test_blueprint_rejects_impossible_and_conditions() -> None:
+    with pytest.raises(ValueError, match="impossible AND conditions"):
+        StrategyBlueprint(
+            name="Impossible RSI",
+            slug="impossible-rsi",
+            class_name="ImpossibleRsiStrategy",
+            indicators=[{"name": "rsi", "kind": "rsi", "period": 14}],
+            entry_rules=[
+                {"indicator": "rsi", "operator": "<", "value": 30},
+                {"indicator": "rsi", "operator": ">", "value": 70},
+            ],
+        )

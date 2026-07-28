@@ -229,8 +229,10 @@ class OpenAICompatibleStrategyBlueprintProvider:
                         "Generate Freqtrade strategy blueprints. Return only JSON with a "
                         "top-level blueprints array. Every blueprint must satisfy schema_version 2. "
                         "Required fields per blueprint: schema_version, name, slug, class_name, "
-                        "timeframe, stoploss, minimal_roi, indicators, entry_rules, exit_rules, tags. "
-                        "indicators, entry_rules, exit_rules, and tags must be JSON arrays even when "
+                        "timeframe, stoploss, minimal_roi, indicators, entry_rules, exit_rules, "
+                        "can_short, short_entry_rules, short_exit_rules, tags. "
+                        "indicators, entry_rules, exit_rules, short_entry_rules, short_exit_rules, "
+                        "and tags must be JSON arrays even when "
                         "there is only one item. Put indicator period at the indicator object top level, "
                         "not inside params. Use rule fields indicator, operator, and value exactly. "
                         "Allowed indicator kind values: rsi, ema, sma. Allowed operators: <, <=, >, >=, ==. "
@@ -408,7 +410,12 @@ def _normalize_blueprint_payload(payload: dict[str, Any]) -> dict[str, Any]:
             _normalize_indicator_payload(item) if isinstance(item, dict) else item
             for item in normalized["indicators"]
         ]
-    for rules_key in ("entry_rules", "exit_rules"):
+    for rules_key in (
+        "entry_rules",
+        "exit_rules",
+        "short_entry_rules",
+        "short_exit_rules",
+    ):
         if isinstance(normalized.get(rules_key), dict):
             normalized[rules_key] = [normalized[rules_key]]
         if isinstance(normalized.get(rules_key), list):
