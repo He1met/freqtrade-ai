@@ -70,6 +70,7 @@ def main() -> int:
         environ={"FREQTRADE_BINARY": configured_binary}
         if configured_binary
         else {},
+        runtime_env_path=args.runtime_env,
     )
     try:
         target = load_target(args.target)
