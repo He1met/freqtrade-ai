@@ -113,6 +113,22 @@ export function operatorSystemConclusion(
   runtimeContract: RuntimeReadOnlyContractSummary,
   operatorStatus: OperatorStatusReportSummary,
 ): OperatorSystemConclusion {
+  const currentStatus = normalizedStatus(operatorStatus.status);
+  if (!["UNKNOWN", "UNAVAILABLE", "MISSING"].includes(currentStatus)) {
+    const reason = isOperatorProblemStatus(currentStatus)
+      ? operatorStatus.blockedReasons.find((item) => item.trim()) ??
+        operatorStatus.unavailableReasons.find((item) => item.trim()) ??
+        operatorStatus.warnings.find((item) => item.trim()) ??
+        null
+      : null;
+    return {
+      status: currentStatus,
+      label: isOperatorProblemStatus(currentStatus)
+        ? "系统当前不可验收"
+        : "系统当前可用",
+      reason,
+    };
+  }
   const candidates = [
     {
       status: runtimeContract.status,
@@ -125,15 +141,6 @@ export function operatorSystemConclusion(
     {
       status: runtimeContract.systemStatus.status,
       reason: runtimeStatusReason(runtimeContract.systemStatus),
-    },
-    {
-      status: operatorStatus.status,
-      reason: isOperatorProblemStatus(operatorStatus.status)
-        ? operatorStatus.blockedReasons.find((reason) => reason.trim()) ??
-          operatorStatus.unavailableReasons.find((reason) => reason.trim()) ??
-          operatorStatus.warnings.find((warning) => warning.trim()) ??
-          null
-        : null,
     },
   ];
   const worst = candidates.reduce((current, candidate) =>
