@@ -410,7 +410,6 @@ class OkxDemoRuntimeReconciliationAdapter:
         seen_cursors = set()
         items_by_identity: dict[str, dict[str, Any]] = {}
         oldest_fetched_at: Optional[datetime] = None
-        previous_item_time: Optional[datetime] = None
         for _page in range(MAX_PAGES):
             snapshot = method(after=cursor, limit=PAGE_LIMIT)
             fetched_at = _aware(snapshot.metadata.fetched_at)
@@ -439,16 +438,6 @@ class OkxDemoRuntimeReconciliationAdapter:
                         timestamp_field,
                         method_name,
                     )
-                    if (
-                        previous_item_time is not None
-                        and item_time > previous_item_time
-                    ):
-                        raise OkxDemoReconciliationBlocked(
-                            "{} pagination is not newest-first".format(
-                                method_name
-                            )
-                        )
-                    previous_item_time = item_time
                     if item_time < cutoff:
                         reached_cutoff = True
                         continue

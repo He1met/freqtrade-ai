@@ -192,11 +192,12 @@ def test_runtime_restart_stops_history_at_persisted_overlap_watermark(
             assert after is None
             return self._fresh_snapshot(
                 [
+                    order(998, old_at),
                     order(1000, recent_at),
                     order(999, recent_at),
                     *(
                         order(order_id, old_at - timedelta(seconds=index))
-                        for index, order_id in enumerate(range(998, 900, -1))
+                        for index, order_id in enumerate(range(997, 900, -1))
                     ),
                 ]
             )
