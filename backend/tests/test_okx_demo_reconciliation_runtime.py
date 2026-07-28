@@ -289,7 +289,7 @@ def test_runtime_cycle_executes_only_current_run_recovery_grants(db) -> None:
                 grant_digest=("{:064x}".format(run.id * 10 + len(action))),
                 action=action,
                 instrument_id="BTC-USDT-SWAP",
-                position_side="net",
+                position_side="long",
                 max_quantity=(
                     Decimal("0") if action == "CANCEL" else Decimal("1")
                 ),
@@ -377,7 +377,7 @@ def test_runtime_accepts_actual_normalized_pydantic_models_and_exact_449_ids(
         client_order_id="FAI00000000000000000000000000001",
         state="live",
         side="buy",
-        position_side="net",
+        position_side="long",
         margin_mode="cross",
         order_type="limit",
         reduce_only=False,
@@ -399,7 +399,7 @@ def test_runtime_accepts_actual_normalized_pydantic_models_and_exact_449_ids(
     position = Position(
         inst_id="BTC-USDT-SWAP",
         margin_mode="cross",
-        position_side="net",
+        position_side="long",
         contracts="0",
         available_contracts="0",
         timestamp=NOW,

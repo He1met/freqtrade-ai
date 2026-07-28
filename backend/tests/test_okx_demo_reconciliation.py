@@ -74,7 +74,7 @@ def _event(
 def _position(quantity: str) -> dict:
     return {
         "instId": "BTC-USDT-SWAP",
-        "posSide": "net",
+        "posSide": "long",
         "pos": quantity,
         "avgPx": "50000" if Decimal(quantity) else "",
     }
@@ -107,7 +107,7 @@ def test_event_ingest_is_idempotent_and_out_of_order_never_rewinds_projection(
     now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
     newer = _event(
         "POSITION",
-        "BTC-USDT-SWAP:net",
+        "BTC-USDT-SWAP:long",
         _position("0"),
         now,
         source="WS",
@@ -115,7 +115,7 @@ def test_event_ingest_is_idempotent_and_out_of_order_never_rewinds_projection(
     )
     older = _event(
         "POSITION",
-        "BTC-USDT-SWAP:net",
+        "BTC-USDT-SWAP:long",
         _position("1"),
         now - timedelta(seconds=1),
         source="WS",
@@ -160,7 +160,7 @@ def test_ambiguous_event_identity_freezes_opening_gate(
         service.ingest_event(
             _event(
                 "POSITION",
-                "BTC-USDT-SWAP:net",
+                "BTC-USDT-SWAP:long",
                 _position("0"),
                 now,
                 source="WS",
@@ -170,7 +170,7 @@ def test_ambiguous_event_identity_freezes_opening_gate(
         if conflict == "SAME_TIMESTAMP":
             invalid = _event(
                 "POSITION",
-                "BTC-USDT-SWAP:net",
+                "BTC-USDT-SWAP:long",
                 _position("1"),
                 now,
                 source="WS",
@@ -179,7 +179,7 @@ def test_ambiguous_event_identity_freezes_opening_gate(
         elif conflict == "OLD_GENERATION":
             invalid = _event(
                 "POSITION",
-                "BTC-USDT-SWAP:net",
+                "BTC-USDT-SWAP:long",
                 _position("0"),
                 now + timedelta(seconds=1),
                 source="WS",
@@ -212,7 +212,7 @@ def test_position_drift_is_blocked_without_overwriting_local_funds_state(
         local = ExchangePosition(
             execution_target_id=OKX_DEMO_TARGET_ID,
             instrument_id="BTC-USDT-SWAP",
-            position_side="net",
+            position_side="long",
             quantity=Decimal("1"),
             average_price=Decimal("50000"),
             snapshot={"source": "local-writer"},
@@ -229,7 +229,7 @@ def test_position_drift_is_blocked_without_overwriting_local_funds_state(
             [
                 _event(
                     "POSITION",
-                    "BTC-USDT-SWAP:net",
+                    "BTC-USDT-SWAP:long",
                     _position("2"),
                     now,
                 ),
@@ -264,6 +264,29 @@ def test_position_drift_is_blocked_without_overwriting_local_funds_state(
         assert artifact["execution_target"] == OKX_DEMO_TARGET_ID
 
 
+def test_net_mode_position_snapshot_is_rejected_before_persistence(
+    session_factory,
+    tmp_path,
+) -> None:
+    now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
+    payload = _position("1")
+    payload["posSide"] = "net"
+    with session_factory.begin() as db:
+        service = OkxDemoReconciliationService(
+            db,
+            evidence_root=tmp_path / "evidence",
+            allowed_evidence_root=tmp_path,
+        )
+        with pytest.raises(
+            OkxDemoReconciliationBlocked,
+            match="could not be persisted exactly once",
+        ):
+            service.ingest_event(
+                _event("POSITION", "BTC-USDT-SWAP:net", payload, now)
+            )
+        assert db.scalar(select(OkxDemoPositionSnapshot)) is None
+
+
 def test_complete_rest_recovery_batch_restores_gate_after_restart(
     session_factory,
     tmp_path,
@@ -272,7 +295,7 @@ def test_complete_rest_recovery_batch_restores_gate_after_restart(
     events = [
         _event(
             "POSITION",
-            "BTC-USDT-SWAP:net",
+            "BTC-USDT-SWAP:long",
             _position("0"),
             now,
         ),
@@ -376,7 +399,7 @@ def test_only_one_fresh_authenticated_four_stream_batch_can_unlock(
     events = [
         _event(
             "POSITION",
-            "BTC-USDT-SWAP:net",
+            "BTC-USDT-SWAP:long",
             _position("0"),
             now - timedelta(minutes=3),
         ),
@@ -488,7 +511,7 @@ def test_artifact_writer_is_confined_and_never_overwrites(
             service.ingest_event(
                 _event(
                     "POSITION",
-                    "BTC-USDT-SWAP:net",
+                    "BTC-USDT-SWAP:long",
                     _position("0"),
                     now,
                 )
@@ -515,7 +538,7 @@ def test_read_api_reconciles_database_ids_without_raw_account_payload(
         service.ingest_event(
             _event(
                 "POSITION",
-                "BTC-USDT-SWAP:net",
+                "BTC-USDT-SWAP:long",
                 _position("0"),
                 now,
             )

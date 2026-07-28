@@ -787,7 +787,7 @@ def test_private_account_resources_require_demo_auth_but_never_render_it() -> No
                 {
                     "instId": "BTC-USDT-SWAP",
                     "mgnMode": "isolated",
-                    "posSide": "net",
+                    "posSide": "long",
                     "pos": "2",
                     "availPos": "2",
                     "avgPx": "95",
@@ -805,7 +805,7 @@ def test_private_account_resources_require_demo_auth_but_never_render_it() -> No
                 {
                     "instId": "BTC-USDT-SWAP",
                     "mgnMode": "isolated",
-                    "posSide": "net",
+                    "posSide": "long",
                     "lever": "3",
                 }
             ]
@@ -819,7 +819,7 @@ def test_private_account_resources_require_demo_auth_but_never_render_it() -> No
                     "clOrdId": "client123",
                     "state": "live",
                     "side": "buy",
-                    "posSide": "net",
+                    "posSide": "long",
                     "ordType": "limit",
                     "px": "90",
                     "sz": "2",
@@ -1252,7 +1252,7 @@ def mismatch_cases():
             {
                 "instId": "ETH-USDT-SWAP",
                 "mgnMode": "isolated",
-                "posSide": "net",
+                "posSide": "long",
                 "pos": "0",
                 "availPos": "0",
                 "uTime": FRESH_TS,
@@ -1264,7 +1264,7 @@ def mismatch_cases():
             {
                 "instId": "ETH-USDT-SWAP",
                 "mgnMode": "isolated",
-                "posSide": "net",
+                "posSide": "long",
                 "lever": "3",
             },
             True,
@@ -1286,7 +1286,7 @@ def mismatch_cases():
                 "clOrdId": "client999",
                 "state": "live",
                 "side": "buy",
-                "posSide": "net",
+                "posSide": "long",
                 "ordType": "limit",
                 "px": "90",
                 "sz": "2",
@@ -1307,7 +1307,7 @@ def mismatch_cases():
                 "clOrdId": "client999",
                 "state": "live",
                 "side": "buy",
-                "posSide": "net",
+                "posSide": "long",
                 "ordType": "limit",
                 "px": "90",
                 "sz": "2",

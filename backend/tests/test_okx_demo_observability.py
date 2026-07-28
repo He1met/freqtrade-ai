@@ -88,7 +88,7 @@ def test_allowlisted_projection_omits_raw_snapshots_and_requires_reconciliation(
             client_order_id="okxDemo451",
             instrument_id="BTC-USDT-SWAP",
             side="buy",
-            position_side="net",
+            position_side="long",
             order_type="market",
             quantity=Decimal("1"),
             reference_price=Decimal("60000"),
@@ -142,7 +142,7 @@ def test_allowlisted_projection_omits_raw_snapshots_and_requires_reconciliation(
             ExchangePosition(
                 execution_target_id="OKX_DEMO",
                 instrument_id="BTC-USDT-SWAP",
-                position_side="net",
+                position_side="long",
                 quantity=Decimal("1"),
                 average_price=Decimal("60001"),
                 snapshot={"password": "must-not-leak"},
@@ -186,10 +186,10 @@ def test_allowlisted_projection_omits_raw_snapshots_and_requires_reconciliation(
             ),
             _event(
                 "POSITION",
-                "BTC-USDT-SWAP:net",
+                "BTC-USDT-SWAP:long",
                 {
                     "instId": "BTC-USDT-SWAP",
-                    "posSide": "net",
+                    "posSide": "long",
                     "pos": "1",
                     "avgPx": "60001",
                 },
@@ -381,10 +381,10 @@ def test_incremental_recovery_keeps_historical_snapshots_without_marking_current
                 ),
                 _event(
                     "POSITION",
-                    "BTC-USDT-SWAP:net",
+                    "BTC-USDT-SWAP:long",
                     {
                         "instId": "BTC-USDT-SWAP",
-                        "posSide": "net",
+                        "posSide": "long",
                         "pos": "0",
                     },
                     now,

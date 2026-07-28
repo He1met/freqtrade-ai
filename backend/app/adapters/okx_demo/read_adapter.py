@@ -922,10 +922,11 @@ class OkxDemoReadAdapter:
 
     @staticmethod
     def _position(item: Mapping[str, Any]) -> Position:
+        position_side = OkxDemoReadAdapter._long_short_position_side(item)
         return Position(
             inst_id=item["instId"],
             margin_mode=item["mgnMode"],
-            position_side=item["posSide"],
+            position_side=position_side,
             contracts=Decimal(item["pos"]),
             available_contracts=Decimal(item.get("availPos") or "0"),
             average_price=_optional_decimal(item.get("avgPx")),
@@ -939,12 +940,22 @@ class OkxDemoReadAdapter:
 
     @staticmethod
     def _leverage(item: Mapping[str, Any]) -> LeverageInfo:
+        position_side = OkxDemoReadAdapter._long_short_position_side(item)
         return LeverageInfo(
             inst_id=item["instId"],
             margin_mode=item["mgnMode"],
-            position_side=item.get("posSide", "net"),
+            position_side=position_side,
             leverage=Decimal(item["lever"]),
         )
+
+    @staticmethod
+    def _long_short_position_side(item: Mapping[str, Any]) -> str:
+        """Reject net-mode snapshots before they enter the Demo execution path."""
+
+        position_side = item.get("posSide")
+        if position_side not in ("long", "short"):
+            raise ValueError("OKX long_short_mode requires posSide=long or short")
+        return position_side
 
     @staticmethod
     def _fee(item: Mapping[str, Any]) -> TradingFee:
@@ -957,13 +968,14 @@ class OkxDemoReadAdapter:
 
     @staticmethod
     def _order(item: Mapping[str, Any]) -> OrderQuery:
+        position_side = OkxDemoReadAdapter._long_short_position_side(item)
         return OrderQuery(
             inst_id=item["instId"],
             order_id=item["ordId"],
             client_order_id=item.get("clOrdId") or None,
             state=item["state"],
             side=item["side"],
-            position_side=item["posSide"],
+            position_side=position_side,
             margin_mode=item.get("tdMode") or None,
             order_type=item["ordType"],
             reduce_only=_optional_boolean(item.get("reduceOnly")),
