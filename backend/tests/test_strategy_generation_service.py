@@ -171,6 +171,30 @@ def provider_config() -> LLMProviderConfig:
     )
 
 
+def test_deepseek_provider_uses_bounded_generation_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("STRATEGY_BLUEPRINT_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("STRATEGY_BLUEPRINT_MAX_OUTPUT_TOKENS", raising=False)
+
+    config = LLMProviderConfig.deepseek_from_env()
+
+    assert config.timeout_seconds == 180
+    assert config.max_output_tokens == 16000
+
+
+def test_deepseek_provider_rejects_unbounded_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("STRATEGY_BLUEPRINT_TIMEOUT_SECONDS", "3601")
+
+    with pytest.raises(
+        LLMProviderConfigurationError,
+        match="between 10 and 600",
+    ):
+        LLMProviderConfig.deepseek_from_env()
+
+
 def blueprint_payload(slug: str = "mock-rsi-strategy") -> dict:
     return {
         "schema_version": "2",
