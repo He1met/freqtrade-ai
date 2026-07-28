@@ -39,6 +39,7 @@ def test_resolves_path_command_when_env_is_absent(tmp_path: Path) -> None:
     resolution = resolve_freqtrade_binary(
         environ={},
         which=lambda name: str(binary) if name == "freqtrade" else None,
+        runtime_env_path=tmp_path / "missing-runtime.env",
     )
 
     assert resolution.ready is True
@@ -46,8 +47,12 @@ def test_resolves_path_command_when_env_is_absent(tmp_path: Path) -> None:
     assert resolution.resolved_path == binary.resolve()
 
 
-def test_reports_missing_binary_consistently() -> None:
-    resolution = resolve_freqtrade_binary(environ={}, which=lambda _name: None)
+def test_reports_missing_binary_consistently(tmp_path: Path) -> None:
+    resolution = resolve_freqtrade_binary(
+        environ={},
+        which=lambda _name: None,
+        runtime_env_path=tmp_path / "missing-runtime.env",
+    )
 
     assert resolution.ready is False
     assert resolution.resolved_path is None
@@ -67,3 +72,24 @@ def test_reads_canonical_runtime_env_binary_without_loading_other_values(tmp_pat
     )
 
     assert runtime_env_freqtrade_binary(runtime_env) == str(binary)
+
+
+def test_runtime_env_binary_is_used_when_process_env_is_absent(tmp_path: Path) -> None:
+    binary = tmp_path / "freqtrade"
+    binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    binary.chmod(0o755)
+    runtime_env = tmp_path / "runtime.env"
+    runtime_env.write_text(
+        "FREQTRADE_BINARY={}\n".format(binary),
+        encoding="utf-8",
+    )
+
+    resolution = resolve_freqtrade_binary(
+        environ={},
+        which=lambda _name: None,
+        runtime_env_path=runtime_env,
+    )
+
+    assert resolution.ready is True
+    assert resolution.source == "runtime.env"
+    assert resolution.resolved_path == binary.resolve()

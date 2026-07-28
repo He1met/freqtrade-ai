@@ -28,11 +28,23 @@ def resolve_freqtrade_binary(
     *,
     environ: Optional[Mapping[str, str]] = None,
     which: Optional[Which] = None,
+    runtime_env_path: Path = DEFAULT_RUNTIME_ENV_PATH,
 ) -> FreqtradeBinaryResolution:
+    """Resolve the sole Freqtrade binary contract for every local entrypoint.
+
+    An explicitly injected environment always wins.  If it is absent, use the
+    canonical, non-secret ``runtime.env`` selector before consulting ``PATH``.
+    This keeps doctor, API workers, launchd and standalone diagnostics on the
+    same executable without loading any other runtime value from that file.
+    """
+
     environment = environ if environ is not None else os.environ
     path_lookup = which or shutil.which
     configured = str(environment.get("FREQTRADE_BINARY", "")).strip()
-    source = "FREQTRADE_BINARY" if configured else "PATH"
+    source = "FREQTRADE_BINARY"
+    if not configured:
+        configured = runtime_env_freqtrade_binary(runtime_env_path)
+        source = "runtime.env" if configured else "PATH"
     candidate = configured or "freqtrade"
 
     if configured:

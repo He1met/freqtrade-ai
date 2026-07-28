@@ -296,7 +296,7 @@ def test_local_backtest_trigger_blocks_when_strategy_file_is_missing(
     assert checks["local_market_data"]["status"] == "READY"
 
 
-def test_local_backtest_trigger_blocks_when_freqtrade_binary_is_missing(
+def test_local_backtest_trigger_uses_runtime_binary_when_path_is_empty(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -319,11 +319,10 @@ def test_local_backtest_trigger_blocks_when_freqtrade_binary_is_missing(
 
     assert response.status_code == 201
     payload = response.json()
-    assert payload["preflight_status"] == "blocked"
-    assert payload["tasks"][0]["status"] == "blocked"
-    assert "freqtrade binary is not available" in payload["tasks"][0]["error_message"]
+    assert payload["preflight_status"] == "ready"
     checks = checks_by_name(payload)
-    assert checks["freqtrade_binary"]["status"] == "BLOCKED"
+    assert checks["freqtrade_binary"]["status"] == "READY"
+    assert checks["freqtrade_binary"]["evidence"]["source"] == "runtime.env"
     assert checks["backtest_config"]["status"] == "READY"
 
 
