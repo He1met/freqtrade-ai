@@ -19,6 +19,10 @@ from app.spikes.okx_demo_compatibility import (  # noqa: E402
     load_target,
     run_diagnostics,
 )
+from app.adapters.freqtrade.binary import (  # noqa: E402
+    resolve_freqtrade_binary,
+    runtime_env_freqtrade_binary,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -33,7 +37,17 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=REPO_ROOT / "config" / "compatibility" / "okx_demo_contract.json",
     )
-    parser.add_argument("--freqtrade-bin", default=os.environ.get("FREQTRADE_BINARY", "freqtrade"))
+    parser.add_argument(
+        "--freqtrade-bin",
+        default=None,
+        help="Override the shared FREQTRADE_BINARY resolver with one absolute path or PATH command.",
+    )
+    parser.add_argument(
+        "--runtime-env",
+        type=Path,
+        default=REPO_ROOT / ".freqtrade-ai" / "runtime.env",
+        help="Canonical non-secret runtime selector file used when FREQTRADE_BINARY is unset.",
+    )
     parser.add_argument("--python-bin", default=sys.executable)
     parser.add_argument("--agent-bin", default="okx")
     parser.add_argument(
@@ -46,6 +60,17 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    configured_binary = (
+        args.freqtrade_bin
+        if args.freqtrade_bin is not None
+        else os.environ.get("FREQTRADE_BINARY", "").strip()
+        or runtime_env_freqtrade_binary(args.runtime_env)
+    )
+    resolution = resolve_freqtrade_binary(
+        environ={"FREQTRADE_BINARY": configured_binary}
+        if configured_binary
+        else {},
+    )
     try:
         target = load_target(args.target)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
@@ -55,10 +80,11 @@ def main() -> int:
         environ=os.environ,
         target=target,
         versions=detect_versions(
-            freqtrade_binary=args.freqtrade_bin,
+            freqtrade_binary=str(resolution.resolved_path or resolution.configured),
             python_binary=args.python_bin,
             agent_binary=args.agent_bin,
         ),
+        freqtrade_binary_resolution=resolution,
         probe_public=args.probe_public_rest,
     )
     print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2, sort_keys=True))

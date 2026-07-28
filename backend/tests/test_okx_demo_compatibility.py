@@ -210,7 +210,12 @@ def test_real_cli_defaults_to_blocked_when_tools_and_ccxt_are_not_installed(
     }
 
     completed = subprocess.run(
-        [sys.executable, str(repo_root / "scripts" / "okx_demo_compatibility.py")],
+        [
+            sys.executable,
+            str(repo_root / "scripts" / "okx_demo_compatibility.py"),
+            "--runtime-env",
+            str(tmp_path / "missing-runtime.env"),
+        ],
         cwd=repo_root,
         env=environment,
         capture_output=True,

@@ -10,6 +10,8 @@ from typing import Any, Mapping, Optional, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from app.adapters.freqtrade.binary import FreqtradeBinaryResolution
+
 
 OKX_REST_URL = "https://openapi.okx.com"
 OKX_DEMO_PUBLIC_WS_URL = "wss://wspap.okx.com:8443/ws/v5/public"
@@ -243,6 +245,7 @@ def run_diagnostics(
     environ: Mapping[str, str],
     target: Mapping[str, object],
     versions: Mapping[str, str],
+    freqtrade_binary_resolution: Optional[FreqtradeBinaryResolution] = None,
     probe_public: bool = False,
 ) -> DiagnosticReport:
     checks: list[Check] = []
@@ -254,6 +257,22 @@ def run_diagnostics(
             "; ".join(failures) if failures else "OKX_DEMO/SWAP/isolated/long_short_mode contract is exact",
         )
     )
+    if freqtrade_binary_resolution is not None:
+        checks.append(
+            Check(
+                "freqtrade_binary",
+                "PASS" if freqtrade_binary_resolution.ready else "BLOCKED",
+                (
+                    "resolved from {}: {}".format(
+                        freqtrade_binary_resolution.source,
+                        freqtrade_binary_resolution.resolved_path,
+                    )
+                    if freqtrade_binary_resolution.ready
+                    else freqtrade_binary_resolution.blocked_reason
+                    or "freqtrade binary is unavailable"
+                ),
+            )
+        )
     version_details = {
         "freqtrade": (
             "Freqtrade 2026.5 OKX adapter supports futures+isolated+net mode "
@@ -316,7 +335,7 @@ def run_diagnostics(
         Check(
             "demo_canary",
             "BLOCKED",
-            "Issue #443 is open; no authenticated request or order was attempted",
+            "normal Demo execution and dual-side canary are not integrated; no authenticated request or order was attempted",
         )
     )
 
@@ -331,7 +350,8 @@ def run_diagnostics(
         credentials=credentials,
         decision=(
             "GO for a project-owned OKX REST/WS adapter as the only order writer; "
-            "NO-GO for Demo canary until #443; NO-GO for Freqtrade demo_trading on OKX; "
+            "NO-GO for Demo canary until the normal dual-side execution chain is accepted; "
+            "NO-GO for Freqtrade demo_trading on OKX; "
             "NO-GO for Agent Kit and Freqtrade/project adapter writing concurrently"
         ),
     )

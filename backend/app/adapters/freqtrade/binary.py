@@ -8,6 +8,8 @@ from typing import Callable, Mapping, Optional
 
 
 Which = Callable[[str], Optional[str]]
+REPO_ROOT = Path(__file__).resolve().parents[4]
+DEFAULT_RUNTIME_ENV_PATH = REPO_ROOT / ".freqtrade-ai" / "runtime.env"
 
 
 @dataclass(frozen=True)
@@ -72,3 +74,21 @@ def resolve_freqtrade_binary(
         resolved_path=resolved,
         blocked_reason=reason,
     )
+
+
+def runtime_env_freqtrade_binary(path: Path = DEFAULT_RUNTIME_ENV_PATH) -> str:
+    """Read only the non-secret binary selector from the canonical runtime file."""
+
+    try:
+        if not path.is_file() or path.is_symlink():
+            return ""
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = (part.strip() for part in line.split("=", 1))
+            if key == "FREQTRADE_BINARY":
+                return value
+    except OSError:
+        return ""
+    return ""

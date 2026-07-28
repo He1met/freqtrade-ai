@@ -1,6 +1,9 @@
 from pathlib import Path
 
-from app.adapters.freqtrade.binary import resolve_freqtrade_binary
+from app.adapters.freqtrade.binary import (
+    resolve_freqtrade_binary,
+    runtime_env_freqtrade_binary,
+)
 
 
 def test_resolves_absolute_env_binary(tmp_path: Path) -> None:
@@ -49,3 +52,18 @@ def test_reports_missing_binary_consistently() -> None:
     assert resolution.ready is False
     assert resolution.resolved_path is None
     assert resolution.blocked_reason == "freqtrade binary is not available: freqtrade"
+
+
+def test_reads_canonical_runtime_env_binary_without_loading_other_values(tmp_path: Path) -> None:
+    binary = tmp_path / "freqtrade"
+    binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    binary.chmod(0o755)
+    runtime_env = tmp_path / "runtime.env"
+    runtime_env.write_text(
+        "DATABASE_URL=postgresql+psycopg://ignored\nFREQTRADE_BINARY={}\n".format(
+            binary
+        ),
+        encoding="utf-8",
+    )
+
+    assert runtime_env_freqtrade_binary(runtime_env) == str(binary)
