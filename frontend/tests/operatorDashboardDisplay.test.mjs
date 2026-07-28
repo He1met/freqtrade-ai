@@ -144,6 +144,31 @@ test("healthy current target ignores reasons from inactive optional scopes", () 
   });
 });
 
+test("current operator READY overrides an unavailable legacy runtime contract", () => {
+  const { runtimeContract, operatorStatus } = dashboardContracts();
+  runtimeContract.status = "UNAVAILABLE";
+  runtimeContract.systemStatus = runtimeStatus("UNAVAILABLE", {
+    unavailableReason: "legacy report is absent",
+  });
+
+  assert.deepEqual(operatorSystemConclusion(runtimeContract, operatorStatus), {
+    status: "READY",
+    label: "系统当前可用",
+    reason: null,
+  });
+});
+
+test("unavailable current operator falls back to the runtime contract", () => {
+  const { runtimeContract, operatorStatus } = dashboardContracts();
+  operatorStatus.status = "UNAVAILABLE";
+
+  assert.deepEqual(operatorSystemConclusion(runtimeContract, operatorStatus), {
+    status: "READY",
+    label: "系统当前可用",
+    reason: null,
+  });
+});
+
 test("system conclusion keeps blocked operator evidence visible", () => {
   const { runtimeContract, operatorStatus } = dashboardContracts();
   operatorStatus.status = "BLOCKED";
