@@ -33,7 +33,6 @@ export const navigationSections: NavigationSection[] = [
       { to: "/live-governance", label: "实盘候选治理" },
       { to: "/operator-dashboard", label: "运维面板" },
       { to: "/okx-demo", label: "OKX Demo 执行" },
-      { to: "/freq-ui", label: "Dry-run / FreqUI" },
     ],
   },
 ];

@@ -1,10 +1,9 @@
-import { Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes } from "react-router-dom";
 
 import { AppLayout } from "./layout/AppLayout";
 import { BacktestRuns } from "./pages/BacktestRuns";
 import { BacktestTasks } from "./pages/BacktestTasks";
 import { Dashboard } from "./pages/Dashboard";
-import { FreqUILink } from "./pages/FreqUILink";
 import { GenerationRuns } from "./pages/GenerationRuns";
 import { HyperoptRuns } from "./pages/HyperoptRuns";
 import { LiveGovernance } from "./pages/LiveGovernance";
@@ -32,7 +31,7 @@ export function App() {
         <Route path="operator-dashboard" element={<OperatorDashboard />} />
         <Route path="okx-demo" element={<OkxDemo />} />
         <Route path="ranking" element={<Ranking />} />
-        <Route path="freq-ui" element={<FreqUILink />} />
+        <Route path="freq-ui" element={<Navigate replace to="/okx-demo" />} />
         <Route path="*" element={<NotFound />} />
       </Route>
     </Routes>
