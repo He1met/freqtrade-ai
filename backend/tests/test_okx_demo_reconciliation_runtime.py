@@ -134,6 +134,111 @@ def test_runtime_restart_allocates_generation_after_persisted_rest_events(
     assert generations == {1, 2}
 
 
+def test_runtime_restart_stops_history_at_persisted_overlap_watermark(
+    db,
+    tmp_path,
+) -> None:
+    def adapter(now):
+        return OkxDemoRuntimeReconciliationAdapter(
+            evidence_root=tmp_path / "managed" / "reconciliation",
+            allowed_evidence_root=tmp_path / "managed",
+            account_fingerprint_sha256="a" * 64,
+            now_provider=lambda: now,
+        )
+
+    adapter(NOW).reconcile_before_writer(
+        read_client=CompleteReadClient(),
+        db=db,
+    )
+    db.commit()
+
+    restarted_at = NOW + timedelta(minutes=1)
+    recent_at = NOW + timedelta(seconds=30)
+    old_at = NOW - timedelta(seconds=10)
+
+    def order(order_id, updated_at):
+        return {
+            "order_id": str(order_id),
+            "client_order_id": "FAI{:029d}".format(order_id),
+            "inst_id": "BTC-USDT-SWAP",
+            "state": "filled",
+            "size": "1",
+            "accumulated_fill_size": "1",
+            "average_price": "50000",
+            "reduce_only": False,
+            "updated_at": updated_at.isoformat(),
+        }
+
+    class IncrementalReadClient(CompleteReadClient):
+        history_calls = 0
+
+        def _fresh_snapshot(self, items):
+            return SimpleNamespace(
+                metadata=SimpleNamespace(
+                    authenticated=True,
+                    stale=False,
+                    fetched_at=restarted_at,
+                    exchange_timestamp=restarted_at,
+                    expires_at=restarted_at + timedelta(seconds=30),
+                ),
+                items=items,
+            )
+
+        def pending_orders(self, *, after=None, limit=100):
+            return self._fresh_snapshot([])
+
+        def orders_history(self, *, after=None, limit=100):
+            self.history_calls += 1
+            assert after is None
+            return self._fresh_snapshot(
+                [
+                    order(1000, recent_at),
+                    order(999, recent_at),
+                    *(
+                        order(order_id, old_at - timedelta(seconds=index))
+                        for index, order_id in enumerate(range(998, 900, -1))
+                    ),
+                ]
+            )
+
+        def fills_history(self, *, after=None, limit=100):
+            return self._fresh_snapshot([])
+
+        def positions(self):
+            return self._fresh_snapshot([])
+
+        def balance(self):
+            return self._fresh_snapshot(
+                [
+                    {
+                        "currency": "USDT",
+                        "total_equity": "10000",
+                        "available_balance": "9000",
+                        "equity": "10000",
+                        "timestamp": restarted_at.isoformat(),
+                    }
+                ]
+            )
+
+    client = IncrementalReadClient()
+    adapter(restarted_at).reconcile_before_writer(
+        read_client=client,
+        db=db,
+    )
+    db.commit()
+
+    assert client.history_calls == 1
+    persisted_order_ids = set(
+        db.scalars(
+            select(OkxDemoExchangeEvent.entity_key).where(
+                OkxDemoExchangeEvent.entity_kind == "ORDER",
+                OkxDemoExchangeEvent.stream_generation == 2,
+            )
+        ).all()
+    )
+    assert persisted_order_ids == {"1000", "999"}
+
+
 def test_runtime_cycle_executes_only_current_run_recovery_grants(db) -> None:
     db.add(
         ExecutionScope(
