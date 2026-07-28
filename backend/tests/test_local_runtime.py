@@ -18,7 +18,7 @@ def test_make_runtime_commands_use_the_one_project_virtualenv():
         makefile.count(
             "backend/.venv/bin/python scripts/local_runtime.py"
         )
-        == 11
+        == 13
     )
     assert "python3 scripts/okx_demo_e2e.py" not in makefile
     assert (
@@ -72,6 +72,18 @@ def install_ready_okx_runtime(monkeypatch, runtime):
         runtime,
         "cleanup_orphaned_managed_processes",
         lambda _state_dir: None,
+    )
+    monkeypatch.setattr(
+        runtime,
+        "read_operator_token",
+        lambda: (
+            "test-operator-token-with-at-least-32-characters",
+            {
+                "status": "READY",
+                "configured": True,
+                "source": "keychain",
+            },
+        ),
     )
     return bundle
 
@@ -252,6 +264,84 @@ def test_read_deepseek_api_key_fails_closed_without_exposing_keychain_errors(
     assert "item not found" not in str(metadata)
 
 
+def test_read_operator_token_uses_only_the_dedicated_keychain_item(
+    monkeypatch,
+):
+    runtime = load_runtime_module()
+    sentinel = "operator-token-with-at-least-32-characters"
+    observed = []
+    monkeypatch.setattr(runtime.sys, "platform", "darwin")
+    monkeypatch.setenv(runtime.OPERATOR_TOKEN_ENV, "stale-shell-value")
+    monkeypatch.setattr(
+        runtime,
+        "_read_macos_keychain_item",
+        lambda service: observed.append(service) or sentinel,
+    )
+
+    value, metadata = runtime.read_operator_token()
+
+    assert value == sentinel
+    assert metadata == {
+        "status": "READY",
+        "configured": True,
+        "source": "keychain",
+    }
+    assert observed == [runtime.OPERATOR_TOKEN_KEYCHAIN_SERVICE]
+    assert "stale-shell-value" not in str(metadata)
+    assert sentinel not in str(metadata)
+
+
+def test_operator_token_init_uses_interactive_keychain_prompt_without_argv_secret(
+    monkeypatch,
+):
+    runtime = load_runtime_module()
+    results = iter(
+        (
+            (None, {"status": "UNAVAILABLE"}),
+            (
+                "operator-token-with-at-least-32-characters",
+                {"status": "READY"},
+            ),
+        )
+    )
+    observed = {}
+    monkeypatch.setattr(runtime.sys, "platform", "darwin")
+    monkeypatch.setattr(runtime, "read_operator_token", lambda: next(results))
+    monkeypatch.setattr(runtime.Path, "is_file", lambda _path: True)
+    monkeypatch.setattr(runtime.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(runtime.os, "getuid", lambda: 501)
+    monkeypatch.setattr(
+        runtime.pwd,
+        "getpwuid",
+        lambda _uid: SimpleNamespace(pw_name="local-user"),
+    )
+
+    def fake_run(command, **kwargs):
+        observed["command"] = command
+        observed["kwargs"] = kwargs
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(runtime.subprocess, "run", fake_run)
+
+    payload = runtime.configure_operator_token()
+
+    assert payload["status"] == "READY"
+    assert payload["changed"] is True
+    assert observed["command"] == [
+        "/usr/bin/security",
+        "add-generic-password",
+        "-a",
+        "local-user",
+        "-s",
+        runtime.OPERATOR_TOKEN_KEYCHAIN_SERVICE,
+        "-w",
+    ]
+    assert observed["kwargs"] == {
+        "cwd": str(REPO_ROOT),
+        "check": False,
+    }
+
+
 def test_service_environment_limits_credentials_to_required_services(monkeypatch):
     runtime = load_runtime_module()
     database_url = runtime.DEFAULT_DATABASE_URL
@@ -280,7 +370,12 @@ def test_service_environment_limits_credentials_to_required_services(monkeypatch
     monkeypatch.setenv("DATABASE_URL", "postgresql://stale.invalid/other")
     monkeypatch.setenv("PATH", "/safe/path")
 
-    backend = runtime.service_environment("backend", database_url, sentinel)
+    backend = runtime.service_environment(
+        "backend",
+        database_url,
+        sentinel,
+        operator_token="operator-token-from-keychain-123456",
+    )
     worker = runtime.service_environment("worker", database_url, sentinel)
     frontend = runtime.service_environment("frontend", database_url, sentinel)
 
@@ -288,7 +383,10 @@ def test_service_environment_limits_credentials_to_required_services(monkeypatch
     assert backend["DEEPSEEK_API_KEY"] == sentinel
     assert backend["STRATEGY_BLUEPRINT_PROVIDER"] == "deepseek"
     assert backend["STRATEGY_BLUEPRINT_MODEL"] == "deepseek-v4-pro"
-    assert backend["FREQTRADE_AI_OPERATOR_TOKEN"] == "operator-token"
+    assert (
+        backend["FREQTRADE_AI_OPERATOR_TOKEN"]
+        == "operator-token-from-keychain-123456"
+    )
     assert not (
         set(inherited_secrets)
         - {
@@ -1191,7 +1289,15 @@ def test_start_injects_keychain_key_only_into_backend_and_worker(monkeypatch, tm
     assert observed["backend"]["DEEPSEEK_API_KEY"] == sentinel
     assert observed["worker"]["DEEPSEEK_API_KEY"] == sentinel
     assert "DEEPSEEK_API_KEY" not in observed["frontend"]
+    assert "FREQTRADE_AI_OPERATOR_TOKEN" in observed["backend"]
+    assert "FREQTRADE_AI_OPERATOR_TOKEN" not in observed["worker"]
+    assert "FREQTRADE_AI_OPERATOR_TOKEN" not in observed["frontend"]
     assert payload["credentials"]["deepseek_provider"] == {
+        "status": "READY",
+        "configured": True,
+        "source": "keychain",
+    }
+    assert payload["credentials"]["local_action"] == {
         "status": "READY",
         "configured": True,
         "source": "keychain",
@@ -1306,6 +1412,14 @@ def test_worker_queue_read_failure_reports_acl_or_schema_problem(monkeypatch):
 def test_start_missing_okx_keychain_is_zero_process(monkeypatch, tmp_path):
     runtime = load_runtime_module()
     started = []
+    monkeypatch.setattr(
+        runtime,
+        "read_operator_token",
+        lambda: (
+            "test-operator-token-with-at-least-32-characters",
+            {"status": "READY", "configured": True, "source": "keychain"},
+        ),
+    )
     monkeypatch.setattr(runtime, "backend_python", lambda: Path("/venv/bin/python"))
     monkeypatch.setattr(runtime, "frontend_vite", lambda: Path("/frontend/vite"))
     monkeypatch.setattr(runtime, "port_available", lambda _port: True)

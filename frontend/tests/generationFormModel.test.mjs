@@ -8,6 +8,7 @@ import {
 } from "../src/api/operatorPresenceContract.ts";
 import { mockMvpData } from "../src/data/mock.ts";
 import {
+  deriveOperatorCredentialReadiness,
   deriveProviderCredentialReadiness,
   generationFormModel,
 } from "../src/pages/localStrategyLab/generationFormModel.ts";
@@ -110,6 +111,11 @@ test("missing Provider credential is distinct from the local operator token", ()
     idea: "RSI 入场，均线退出，单笔风险 1%，15m。",
     isSubmitting: false,
     operatorTokenPresent: true,
+    operatorCredentialReadiness: {
+      state: "ready",
+      label: "已配置",
+      detail: "presence only",
+    },
     providerReadiness,
   });
 
@@ -122,6 +128,11 @@ test("missing Provider credential is distinct from the local operator token", ()
     idea: "RSI 入场，均线退出，单笔风险 1%，15m。",
     isSubmitting: false,
     operatorTokenPresent: true,
+    operatorCredentialReadiness: {
+      state: "ready",
+      label: "已配置",
+      detail: "presence only",
+    },
     providerReadiness,
   });
   assert.equal(realProviderSubmission.canSubmit, false);
@@ -134,6 +145,11 @@ test("disabled submit reasons are concrete and requested_count remains fixed", (
     idea: " ",
     isSubmitting: false,
     operatorTokenPresent: false,
+    operatorCredentialReadiness: {
+      state: "ready",
+      label: "已配置",
+      detail: "presence only",
+    },
     providerReadiness: {
       state: "unknown",
       label: "未确认",
@@ -154,6 +170,11 @@ test("submitting state blocks another request and keeps authorization semantics 
     idea: "RSI 入场，均线退出。",
     isSubmitting: true,
     operatorTokenPresent: true,
+    operatorCredentialReadiness: {
+      state: "ready",
+      label: "已配置",
+      detail: "presence only",
+    },
     providerReadiness: {
       state: "ready",
       label: "已就绪",
@@ -164,4 +185,32 @@ test("submitting state blocks another request and keeps authorization semantics 
   assert.equal(model.canSubmit, false);
   assert.equal(model.providerCallLabel, "仅授权下一次提交");
   assert.match(model.disabledReasons.join(" "), /正在提交/);
+});
+
+test("operator credential readiness trusts only the real presence contract", () => {
+  const readyDashboard = dashboardWithCredential({
+    name: "FREQTRADE_AI_OPERATOR_TOKEN",
+    present: true,
+    source: "env",
+    valueRendered: false,
+  });
+  assert.equal(
+    deriveOperatorCredentialReadiness(readyDashboard, "api").state,
+    "ready",
+  );
+
+  const missingDashboard = dashboardWithCredential({
+    name: "FREQTRADE_AI_OPERATOR_TOKEN",
+    present: false,
+    source: "env",
+    valueRendered: false,
+  });
+  assert.equal(
+    deriveOperatorCredentialReadiness(missingDashboard, "api").state,
+    "missing",
+  );
+  assert.equal(
+    deriveOperatorCredentialReadiness(readyDashboard, "fixture").state,
+    "unknown",
+  );
 });

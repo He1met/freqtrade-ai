@@ -19,7 +19,10 @@ import {
   createActionEvidence,
   createActionLifecycleId,
 } from "./localStrategyLab/actionEvidence";
-import { deriveProviderCredentialReadiness } from "./localStrategyLab/generationFormModel";
+import {
+  deriveOperatorCredentialReadiness,
+  deriveProviderCredentialReadiness,
+} from "./localStrategyLab/generationFormModel";
 import { submissionDisplayModel } from "./localStrategyLab/submissionDisplay";
 import { useActionEvidence } from "./localStrategyLab/useActionEvidence";
 import { WorkflowNavigator } from "./localStrategyLab/WorkflowNavigator";
@@ -44,6 +47,10 @@ export function LocalStrategyLab() {
   const submissionDisplay = submissionDisplayModel(submission);
   const currentResult = submission.kind === "success" || submission.kind === "blocked" ? submission.result : undefined;
   const providerReadiness = deriveProviderCredentialReadiness(
+    snapshot.data.operatorDashboard,
+    snapshot.sources.operatorDashboard,
+  );
+  const operatorCredentialReadiness = deriveOperatorCredentialReadiness(
     snapshot.data.operatorDashboard,
     snapshot.sources.operatorDashboard,
   );
@@ -85,6 +92,17 @@ export function LocalStrategyLab() {
         action: "生成策略", status: "UNAUTHORIZED", message,
         nextAction: "提供本地 operator token 后重试；不要在页面或日志中保存 token。", recommendBug: false,
         updatedAt: new Date().toISOString(),
+      }));
+      return;
+    }
+    if (operatorCredentialReadiness.state !== "ready") {
+      const message =
+        "本地 operator authorization 尚未由真实 API 确认为就绪；未提交生成请求。";
+      setSubmission({ kind: "blocked", message });
+      recordAction(createActionEvidence({
+        action: "生成策略", status: "BLOCKED", message,
+        nextAction: "初始化 operator token、重启唯一运行环境并刷新状态。",
+        recommendBug: false, updatedAt: new Date().toISOString(),
       }));
       return;
     }
@@ -284,6 +302,7 @@ export function LocalStrategyLab() {
             onOperatorTokenChange={setOperatorToken}
             onSubmit={handleSubmit}
             operatorTokenPresent={Boolean(operatorToken)}
+            operatorCredentialReadiness={operatorCredentialReadiness}
             providerReadiness={providerReadiness}
             submission={submission}
           />

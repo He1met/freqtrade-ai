@@ -69,6 +69,7 @@ MANAGED_STRATEGY_PROVIDER = "deepseek"
 MANAGED_STRATEGY_MODEL = "deepseek-v4-pro"
 DISABLE_ENV_FILE_ENV = "FREQTRADE_AI_DISABLE_ENV_FILE"
 OPERATOR_TOKEN_ENV = "FREQTRADE_AI_OPERATOR_TOKEN"
+OPERATOR_TOKEN_KEYCHAIN_SERVICE = "freqtrade-ai/operator-token"
 OKX_DEMO_KEYCHAIN_SERVICES = dict(
     zip(
         OKX_DEMO_REQUIRED_ENV_NAMES,
@@ -494,6 +495,85 @@ def read_deepseek_api_key() -> Tuple[Optional[str], Dict[str, Any]]:
     }
 
 
+def read_operator_token() -> Tuple[Optional[str], Dict[str, Any]]:
+    """Read the local action credential without accepting a macOS ENV fallback."""
+
+    value = (
+        _read_macos_keychain_item(OPERATOR_TOKEN_KEYCHAIN_SERVICE)
+        if sys.platform == "darwin"
+        else os.environ.get(OPERATOR_TOKEN_ENV, "").strip() or None
+    )
+    source = "keychain" if sys.platform == "darwin" else "environment"
+    if (
+        value is None
+        or not 32 <= len(value) <= 512
+        or any(character in value for character in ("\x00", "\r", "\n"))
+    ):
+        return None, {
+            "status": "UNAVAILABLE",
+            "configured": False,
+            "source": source,
+            "reason": "Local operator credential is missing or inaccessible",
+        }
+    return value, {
+        "status": "READY",
+        "configured": True,
+        "source": source,
+    }
+
+
+def configure_operator_token() -> Dict[str, Any]:
+    """Prompt once for a Keychain-backed local action credential."""
+
+    if sys.platform != "darwin":
+        raise RuntimeBlocked("macOS Keychain is required")
+    current, _metadata = read_operator_token()
+    if current is not None:
+        return {
+            "status": "READY",
+            "configured": True,
+            "source": "keychain",
+            "changed": False,
+            "next_action": "operator token is already configured",
+        }
+    security = Path("/usr/bin/security")
+    if not security.is_file():
+        raise RuntimeBlocked("macOS security command is unavailable")
+    if not sys.stdin.isatty():
+        raise RuntimeBlocked(
+            "operator token initialization requires an interactive terminal"
+        )
+    account = pwd.getpwuid(os.getuid()).pw_name
+    try:
+        completed = subprocess.run(
+            [
+                str(security),
+                "add-generic-password",
+                "-a",
+                account,
+                "-s",
+                OPERATOR_TOKEN_KEYCHAIN_SERVICE,
+                "-w",
+            ],
+            cwd=str(REPO_ROOT),
+            check=False,
+        )
+    except OSError:
+        raise RuntimeBlocked("operator token could not be stored in Keychain") from None
+    configured, _metadata = read_operator_token()
+    if completed.returncode != 0 or configured is None:
+        raise RuntimeBlocked(
+            "operator token was not stored; enter a value of at least 32 characters"
+        )
+    return {
+        "status": "READY",
+        "configured": True,
+        "source": "keychain",
+        "changed": True,
+        "next_action": "run `make autostart-restart`",
+    }
+
+
 def validate_okx_demo_execution_target() -> None:
     raw_config = load_app_yaml(REPO_ROOT / "config" / "app.yaml")
     try:
@@ -713,6 +793,7 @@ def service_environment(
     deepseek_api_key: Optional[str],
     okx_demo_credentials: Optional[Dict[str, str]] = None,
     *,
+    operator_token: Optional[str] = None,
     allow_demo_order: bool = False,
 ) -> Dict[str, str]:
     """Give each managed service only the credentials it needs."""
@@ -750,10 +831,8 @@ def service_environment(
                 "STRATEGY_BLUEPRINT_MODEL": MANAGED_STRATEGY_MODEL,
             }
         )
-    if service == "backend":
-        operator_token = os.environ.get(OPERATOR_TOKEN_ENV, "")
-        if operator_token:
-            environment[OPERATOR_TOKEN_ENV] = operator_token
+    if service == "backend" and operator_token:
+        environment[OPERATOR_TOKEN_ENV] = operator_token
     if service in {"backend", "worker"} and deepseek_api_key:
         environment[DEEPSEEK_API_KEY_ENV] = deepseek_api_key
     if service in {
@@ -1706,6 +1785,9 @@ def start(state_dir: Path) -> Dict[str, Any]:
     ensure_worker_queue_idle(database_url)
     database = {"identity": redact_database_url(database_url), "schema": "verified"}
     deepseek_api_key, deepseek_credential = read_deepseek_api_key()
+    operator_token, operator_credential = read_operator_token()
+    if operator_token is None:
+        raise RuntimeBlocked(str(operator_credential["reason"]))
     okx_credentials, okx_capability = read_okx_runtime_capability()
     if okx_credentials is None:
         raise RuntimeBlocked(str(okx_capability["reason"]))
@@ -1715,7 +1797,12 @@ def start(state_dir: Path) -> Dict[str, Any]:
             "backend",
             [str(backend_python()), "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(BACKEND_PORT)],
             cwd=REPO_ROOT / "backend",
-            environment=service_environment("backend", database_url, deepseek_api_key),
+            environment=service_environment(
+                "backend",
+                database_url,
+                deepseek_api_key,
+                operator_token=operator_token,
+            ),
             state_dir=state_dir,
         )
         wait_for_url("http://127.0.0.1:{}/readyz".format(BACKEND_PORT), "backend readiness")
@@ -1770,6 +1857,7 @@ def start(state_dir: Path) -> Dict[str, Any]:
         "database": database,
         "credentials": {
             "deepseek_provider": deepseek_credential,
+            "local_action": operator_credential,
             "okx_demo": {
                 key: value
                 for key, value in okx_capability.items()
@@ -1807,7 +1895,9 @@ def current_status(state_dir: Path) -> Dict[str, Any]:
     credentials, capability = read_okx_runtime_capability()
     if credentials is not None:
         credentials.clear()
+    operator_token, operator_credential = read_operator_token()
     result["credentials"] = {
+        "local_action": operator_credential,
         "okx_demo": {
             key: value for key, value in capability.items() if key != "_generation"
         }
@@ -1827,6 +1917,7 @@ def current_status(state_dir: Path) -> Dict[str, Any]:
         all(service["running"] for service in services)
         and result["execution_target"].get("status") == "READY"
         and result["credentials"]["okx_demo"].get("status") == "READY"
+        and result["credentials"]["local_action"].get("status") == "READY"
         and result["database"].get("schema") == "verified"
         and result["okx_runtime"].get("status")
         in {"READY", "BLOCKED_OPENINGS"}
@@ -1892,6 +1983,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
             "okx-pin-account",
             "okx-demo-canary",
             "okx-rotate-generation",
+            "operator-token-init",
+            "operator-token-status",
             "supervisor-capability",
             "supervisor-freeze-openings",
             "supervisor-thaw-openings",
@@ -1946,6 +2039,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return 1 if payload["status"] == "FAILED" else 2
         elif args.command == "okx-rotate-generation":
             payload = configure_okx_credential_generation()
+        elif args.command == "operator-token-init":
+            payload = configure_operator_token()
+        elif args.command == "operator-token-status":
+            _operator_token, payload = read_operator_token()
         elif args.command == "supervisor-capability":
             credentials, payload = read_okx_runtime_capability()
             if credentials is not None:

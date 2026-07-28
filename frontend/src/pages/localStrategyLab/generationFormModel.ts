@@ -9,6 +9,8 @@ export type ProviderCredentialReadiness = {
   detail: string;
 };
 
+export type OperatorCredentialReadiness = ProviderCredentialReadiness;
+
 export type GenerationFormModel = {
   canSubmit: boolean;
   disabledReasons: string[];
@@ -64,17 +66,59 @@ export function deriveProviderCredentialReadiness(
   };
 }
 
+export function deriveOperatorCredentialReadiness(
+  dashboard: OperatorDashboardSummary,
+  source: DataSource,
+): OperatorCredentialReadiness {
+  if (source !== "api") {
+    return {
+      state: "unknown",
+      label: "Operator 授权未确认",
+      detail: "必须由真实 Operator Status API 确认本地授权凭据存在。",
+    };
+  }
+  const credential = dashboard.operatorStatus.envPresence.find(
+    (entry) => entry.name === "FREQTRADE_AI_OPERATOR_TOKEN",
+  );
+  if (
+    dashboard.operatorStatus.safety.reportsEnvValues !== false ||
+    !credential ||
+    credential.source !== "env" ||
+    credential.valueRendered !== false
+  ) {
+    return {
+      state: "unknown",
+      label: "Operator 授权未确认",
+      detail: "后端未返回安全、仅 presence 的 operator token 状态。",
+    };
+  }
+  if (!credential.present) {
+    return {
+      state: "missing",
+      label: "Operator 授权未配置",
+      detail: "请先运行 make operator-token-init，并受控重启唯一运行环境。",
+    };
+  }
+  return {
+    state: "ready",
+    label: "Operator 授权已配置",
+    detail: "后端仅确认 Keychain 凭据存在；页面不会读取或展示 token。",
+  };
+}
+
 export function generationFormModel({
   authorizeRealProvider,
   idea,
   isSubmitting,
   operatorTokenPresent,
+  operatorCredentialReadiness,
   providerReadiness,
 }: {
   authorizeRealProvider: boolean;
   idea: string;
   isSubmitting: boolean;
   operatorTokenPresent: boolean;
+  operatorCredentialReadiness: OperatorCredentialReadiness;
   providerReadiness: ProviderCredentialReadiness;
 }): GenerationFormModel {
   const disabledReasons: string[] = [];
@@ -86,6 +130,13 @@ export function generationFormModel({
   }
   if (!operatorTokenPresent) {
     disabledReasons.push("输入本次请求使用的本地 operator token。");
+  }
+  if (operatorCredentialReadiness.state !== "ready") {
+    disabledReasons.push(
+      operatorCredentialReadiness.state === "missing"
+        ? "后端尚未配置 operator token；先初始化 Keychain 凭据并重启。"
+        : "Operator authorization 尚未由真实 API 确认。",
+    );
   }
   if (authorizeRealProvider && providerReadiness.state !== "ready") {
     disabledReasons.push(

@@ -1,10 +1,11 @@
-.PHONY: help bootstrap doctor up status down logs verify okx-demo-pin-account okx-demo-preflight okx-demo-canary okx-demo-e2e-offline okx-demo-e2e-controlled autostart-install autostart-status autostart-logs autostart-restart autostart-uninstall db-backup db-init db-verify db-attestation-harden test
+.PHONY: help bootstrap doctor up status down logs verify operator-token-init operator-token-status okx-demo-pin-account okx-demo-preflight okx-demo-canary okx-demo-e2e-offline okx-demo-e2e-controlled autostart-install autostart-status autostart-logs autostart-restart autostart-uninstall db-backup db-init db-verify db-attestation-harden test
 
 DATABASE_URL ?= postgresql+psycopg://freqtrade:change_me@localhost:5432/freqtrade_ai
 
 help:
 	@backend/.venv/bin/python scripts/local_runtime.py doctor --json >/dev/null || true
 	@printf '%s\n' 'Local runtime: make bootstrap | doctor | up | status | logs | verify | down'
+	@printf '%s\n' 'Local authorization: make operator-token-init (one-time interactive Keychain prompt) | operator-token-status'
 	@printf '%s\n' 'OKX Demo onboarding: make okx-demo-pin-account (one-time; refuses overwrite)'
 	@printf '%s\n' 'OKX Demo: make okx-demo-preflight (authenticated read-only; never submits orders)'
 	@printf '%s\n' 'OKX Demo canary: make okx-demo-canary CANARY_FLAGS=--allow-demo-order'
@@ -33,6 +34,12 @@ logs:
 
 verify:
 	backend/.venv/bin/python scripts/local_runtime.py verify
+
+operator-token-init:
+	backend/.venv/bin/python scripts/local_runtime.py operator-token-init
+
+operator-token-status:
+	backend/.venv/bin/python scripts/local_runtime.py operator-token-status
 
 okx-demo-pin-account:
 	backend/.venv/bin/python scripts/local_runtime.py okx-pin-account

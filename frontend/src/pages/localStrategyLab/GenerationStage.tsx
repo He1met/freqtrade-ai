@@ -5,6 +5,7 @@ import "../../styles/local-strategy-lab-generation-stage.css";
 import type { SubmissionState } from "./EvidencePanels";
 import {
   generationFormModel,
+  type OperatorCredentialReadiness,
   type ProviderCredentialReadiness,
 } from "./generationFormModel";
 import { SubmissionStatusPanel } from "./SubmissionStatusPanel";
@@ -19,6 +20,7 @@ export function GenerationStage({
   onOperatorTokenChange,
   onSubmit,
   operatorTokenPresent,
+  operatorCredentialReadiness,
   providerReadiness,
   submission,
 }: {
@@ -31,6 +33,7 @@ export function GenerationStage({
   onOperatorTokenChange: (value: string) => void;
   onSubmit: FormEventHandler<HTMLFormElement>;
   operatorTokenPresent: boolean;
+  operatorCredentialReadiness: OperatorCredentialReadiness;
   providerReadiness: ProviderCredentialReadiness;
   submission: SubmissionState;
 }) {
@@ -39,6 +42,7 @@ export function GenerationStage({
     idea,
     isSubmitting,
     operatorTokenPresent,
+    operatorCredentialReadiness,
     providerReadiness,
   });
 
@@ -84,7 +88,7 @@ export function GenerationStage({
           <div className="generation-stage__prerequisites" aria-label="生成前置条件">
             <label className="generation-stage__token" htmlFor="operator-token">
               <span>本地操作授权（operator token）</span>
-              <small>仅保存在当前页面会话内存；密码框不回显，不写入浏览器持久存储、日志或 action evidence。</small>
+              <small>仅保留在当前页面内存；密码框不回显，不写入浏览器存储或日志。</small>
               <input
                 aria-describedby="operator-token-state"
                 autoComplete="off"
@@ -93,7 +97,24 @@ export function GenerationStage({
                 required
                 type="password"
               />
-              <strong id="operator-token-state">{model.operatorTokenLabel}</strong>
+              <div
+                className="generation-stage__operator-state"
+                id="operator-token-state"
+                title={operatorCredentialReadiness.detail}
+              >
+                <strong>{model.operatorTokenLabel}</strong>
+                <StatusBadge
+                  label={operatorCredentialReadiness.label}
+                  showRaw
+                  status={
+                    operatorCredentialReadiness.state === "ready"
+                      ? "READY"
+                      : operatorCredentialReadiness.state === "missing"
+                        ? "BLOCKED"
+                        : "UNKNOWN"
+                  }
+                />
+              </div>
             </label>
 
             <div className="generation-stage__readiness">
