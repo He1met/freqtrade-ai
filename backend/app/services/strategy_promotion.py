@@ -8,11 +8,14 @@ still being ineligible for a Demo or Live execution chain.
 from __future__ import annotations
 
 import math
+import hashlib
+import json
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping
 
 from app.models.backtest import BacktestResult
 from app.models.strategy_score import StrategyScore
+from app.models.strategy import StrategyVersion
 
 
 PROMOTION_POLICY_VERSION = "strategy-promotion-v1"
@@ -38,6 +41,7 @@ def assess_strategy_promotion(
     result: BacktestResult,
     score: StrategyScore,
     *,
+    strategy_version: StrategyVersion | None = None,
     policy: StrategyPromotionPolicy = DEFAULT_PROMOTION_POLICY,
 ) -> dict[str, Any]:
     """Return immutable promotion evidence or raise before approval is created.
@@ -49,6 +53,13 @@ def assess_strategy_promotion(
 
     if score.backtest_result_id != result.id:
         raise StrategyPromotionBlocked("promotion score is not bound to backtest result")
+    if strategy_version is not None:
+        if score.strategy_version_id != strategy_version.id:
+            raise StrategyPromotionBlocked("promotion score is not bound to strategy version")
+        if result.run is None or result.run.strategy_version_id != strategy_version.id:
+            raise StrategyPromotionBlocked("backtest result is not bound to strategy version")
+        if strategy_version.validation_status != "passed":
+            raise StrategyPromotionBlocked("strategy version is not validated")
     score_snapshot = _mapping(score.metrics_snapshot, "score metrics snapshot")
     if score_snapshot.get("source") not in {None, "backtest_result"}:
         raise StrategyPromotionBlocked("promotion score has an unsupported source")
@@ -94,7 +105,7 @@ def assess_strategy_promotion(
     if len(normalized_states) < policy.min_market_states:
         raise StrategyPromotionBlocked("walk-forward market-state coverage is insufficient")
 
-    return {
+    assessment = {
         "policy": asdict(policy),
         "backtest_result_id": result.id,
         "strategy_score_id": score.id,
@@ -110,6 +121,50 @@ def assess_strategy_promotion(
         "walk_forward": {"market_states": normalized_states},
         "net_of_costs": True,
     }
+    if strategy_version is not None:
+        # The version ID alone is insufficient: a manual rewrite or a changed
+        # market/result payload under a reused database row must invalidate an
+        # earlier approval before any Demo signal can advance.
+        assessment["lineage"] = {
+            "strategy_version_id": strategy_version.id,
+            "strategy_code_digest": _strategy_code_digest(strategy_version),
+            "validation_status": strategy_version.validation_status,
+            "backtest_timerange": result.timerange,
+            "backtest_result_path": result.result_path,
+            "market_data_digest": _stable_digest(
+                {
+                    "timerange": result.timerange,
+                    "run_config": result.run.config_snapshot,
+                    "promotion_evidence": raw_evidence,
+                }
+            ),
+        }
+    return assessment
+
+
+def promotion_candidate_digest(
+    result: BacktestResult,
+    score: StrategyScore,
+    strategy_version: StrategyVersion,
+    *,
+    policy: StrategyPromotionPolicy = DEFAULT_PROMOTION_POLICY,
+) -> tuple[dict[str, Any], str]:
+    """Assess one exact candidate and return its immutable approval digest."""
+
+    assessment = assess_strategy_promotion(
+        result,
+        score,
+        strategy_version=strategy_version,
+        policy=policy,
+    )
+    return assessment, _stable_digest(
+        {
+            "strategy_version_id": strategy_version.id,
+            "backtest_result_id": result.id,
+            "strategy_score_id": score.id,
+            "assessment": assessment,
+        }
+    )
 
 
 def _mapping(value: Any, name: str) -> Mapping[str, Any]:
@@ -134,3 +189,15 @@ def _positive_int(value: Any, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise StrategyPromotionBlocked("{} is missing or invalid".format(name))
     return value
+
+
+def _strategy_code_digest(strategy_version: StrategyVersion) -> str:
+    code_hash = strategy_version.code_hash
+    if isinstance(code_hash, str) and code_hash.strip():
+        return code_hash.strip()
+    return hashlib.sha256(strategy_version.generated_code.encode("utf-8")).hexdigest()
+
+
+def _stable_digest(value: Mapping[str, Any]) -> str:
+    serialized = json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()

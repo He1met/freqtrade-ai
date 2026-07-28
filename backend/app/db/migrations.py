@@ -44,7 +44,8 @@ FILL_SNAPSHOT_REPEAT_BASE_VERSION = "20260727_14"
 RECONCILIATION_BATCH_FRESHNESS_BASE_VERSION = "20260728_15"
 RECOVERY_WALL_CLOCK_BASE_VERSION = "20260728_16"
 DUAL_SIDE_BASE_VERSION = "20260728_17"
-SCHEMA_VERSION = "20260728_18"
+STRATEGY_PROMOTION_BASE_VERSION = "20260728_18"
+SCHEMA_VERSION = "20260729_19"
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 ATTESTATION_PROOF_KEY_ENV = "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"
 
@@ -4033,6 +4034,7 @@ def _add_full_chain(connection: Connection) -> None:
     """Install #450 tables and the lease-free operator approval state."""
 
     Base.metadata.create_all(bind=connection)
+    _upgrade_strategy_candidate_approvals(connection)
     connection.execute(
         text(
             """
@@ -4049,6 +4051,38 @@ def _add_full_chain(connection: Connection) -> None:
         )
     )
     _add_okx_demo_soak(connection)
+
+
+def _upgrade_strategy_candidate_approvals(connection: Connection) -> None:
+    """Persist promotion proof with the approval and invalidate legacy proof.
+
+    Existing approvals lacked a durable policy/evidence snapshot.  They are
+    intentionally marked as legacy-unverified, which makes the next signal
+    revalidation revoke them rather than silently allowing an old decision.
+    """
+
+    connection.execute(
+        text(
+            "ALTER TABLE strategy_candidate_approvals "
+            "ADD COLUMN IF NOT EXISTS promotion_policy_version VARCHAR(80), "
+            "ADD COLUMN IF NOT EXISTS promotion_evidence JSON"
+        )
+    )
+    connection.execute(
+        text(
+            "UPDATE strategy_candidate_approvals "
+            "SET promotion_policy_version = COALESCE(promotion_policy_version, 'legacy-unverified'), "
+            "promotion_evidence = COALESCE(promotion_evidence, '{}'::json) "
+            "WHERE promotion_policy_version IS NULL OR promotion_evidence IS NULL"
+        )
+    )
+    connection.execute(
+        text(
+            "ALTER TABLE strategy_candidate_approvals "
+            "ALTER COLUMN promotion_policy_version SET NOT NULL, "
+            "ALTER COLUMN promotion_evidence SET NOT NULL"
+        )
+    )
 
 
 def _grant_runtime_application_acl(connection: Connection) -> None:
@@ -4395,6 +4429,7 @@ def upgrade_database(engine: Engine) -> str:
                 RECONCILIATION_BATCH_FRESHNESS_BASE_VERSION,
                 RECOVERY_WALL_CLOCK_BASE_VERSION,
                 DUAL_SIDE_BASE_VERSION,
+                STRATEGY_PROMOTION_BASE_VERSION,
             }
             if current_version in supported_upgrade_versions:
                 connection.execute(
@@ -4444,10 +4479,24 @@ def upgrade_database(engine: Engine) -> str:
                 return SCHEMA_VERSION
             if current_version == DUAL_SIDE_BASE_VERSION:
                 _upgrade_dual_side_trade_intents(connection)
+                _upgrade_strategy_candidate_approvals(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
                         "Dual-side upgrade does not match ORM metadata: "
+                        + "; ".join(problems)
+                    )
+                connection.execute(
+                    text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+                    {"version": SCHEMA_VERSION},
+                )
+                return SCHEMA_VERSION
+            if current_version == STRATEGY_PROMOTION_BASE_VERSION:
+                _upgrade_strategy_candidate_approvals(connection)
+                problems = schema_problems(connection)
+                if problems:
+                    raise SchemaMigrationBlocked(
+                        "Strategy promotion upgrade does not match ORM metadata: "
                         + "; ".join(problems)
                     )
                 connection.execute(

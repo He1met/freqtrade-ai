@@ -270,6 +270,11 @@ class StrategyCandidateApproval(Base):
         nullable=False,
     )
     candidate_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    # This is deliberately stored next to the human decision instead of only in
+    # a stage checkpoint.  A later signal must be able to prove exactly which
+    # policy and research evidence the operator approved, then revalidate it.
+    promotion_policy_version: Mapped[str] = mapped_column(String(80), nullable=False)
+    promotion_evidence: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="PENDING")
     requested_by: Mapped[str] = mapped_column(String(160), nullable=False)
     decided_by: Mapped[Optional[str]] = mapped_column(String(160))
