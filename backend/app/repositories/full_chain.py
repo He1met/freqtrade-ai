@@ -33,6 +33,10 @@ from app.models.execution_lineage import LOCAL_DRY_RUN_SCOPE_ID, OKX_DEMO_TARGET
 from app.models.full_chain import FULL_CHAIN_STAGES
 from app.repositories.research_jobs import ResearchJobRepository
 from app.schemas.dry_run_status import redact_dry_run_status_payload, redact_secret_text
+from app.services.strategy_promotion import (
+    StrategyPromotionBlocked,
+    assess_strategy_promotion,
+)
 
 
 TERMINAL_CHAIN_STATUSES = {
@@ -289,12 +293,21 @@ class FullChainRepository:
         )
         if any(value is None for value in required):
             raise FullChainBlocked("candidate approval is missing scored research lineage")
+        result = self.db.get(BacktestResult, chain.backtest_result_id)
+        score = self.db.get(StrategyScore, chain.strategy_score_id)
+        if result is None or score is None:
+            raise FullChainBlocked("candidate approval research records are missing")
+        try:
+            promotion = assess_strategy_promotion(result, score)
+        except StrategyPromotionBlocked as exc:
+            raise FullChainBlocked("candidate promotion is blocked: {}".format(exc))
         candidate_digest = _stable_digest(
             {
                 "execution_target_id": OKX_DEMO_TARGET_ID,
                 "strategy_version_id": chain.strategy_version_id,
                 "backtest_result_id": chain.backtest_result_id,
                 "strategy_score_id": chain.strategy_score_id,
+                "promotion": promotion,
             }
         )
         existing = self.db.scalars(
@@ -319,6 +332,7 @@ class FullChainRepository:
             expires_at=expires_at,
         )
         chain.status = "AWAITING_APPROVAL"
+        checkpoint.output_snapshot = {"promotion": promotion}
         self.db.add(approval)
         self.db.flush()
         chain.candidate_approval_id = approval.id
@@ -431,7 +445,10 @@ class FullChainRepository:
         else:
             checkpoint.status = "SUCCESS"
             checkpoint.database_ids = {"candidate_approval_id": approval.id}
-            checkpoint.output_snapshot = {"status": "APPROVED"}
+            checkpoint.output_snapshot = {
+                **checkpoint.output_snapshot,
+                "status": "APPROVED",
+            }
             checkpoint.completed_at = current_time
             chain.status = "APPROVED"
             chain.current_stage = "SIGNAL"
@@ -452,6 +469,42 @@ class FullChainRepository:
                 raise FullChainBlocked(
                     "ResearchJob candidate approval resume transition failed"
                 )
+        self.db.commit()
+        self.db.refresh(approval)
+        return approval
+
+    def revoke_candidate_approval(
+        self,
+        approval_id: int,
+        *,
+        revoked_by: str,
+        reason: str,
+        now: Optional[datetime] = None,
+    ) -> StrategyCandidateApproval:
+        """Revoke an approved candidate before any later chain stage can proceed."""
+
+        current_time = now or datetime.now(timezone.utc)
+        approval = self.db.get(StrategyCandidateApproval, approval_id)
+        if approval is None:
+            raise FullChainBlocked("candidate approval does not exist")
+        if approval.status != "APPROVED":
+            raise FullChainConflict("only an approved candidate can be revoked")
+        if not revoked_by.strip():
+            raise FullChainBlocked("candidate revocation actor is required")
+        safe_reason = redact_secret_text(reason)[:2000]
+        if not safe_reason.strip():
+            raise FullChainBlocked("candidate revocation reason is required")
+        chain = self.db.get(FullChainRun, approval.full_chain_run_id)
+        if chain is None or chain.status in TERMINAL_CHAIN_STATUSES:
+            raise FullChainBlocked("candidate approval chain is not active")
+
+        approval.status = "REVOKED"
+        approval.decided_by = revoked_by[:160]
+        approval.decision_reason = safe_reason
+        approval.decided_at = current_time
+        chain.status = "BLOCKED"
+        chain.terminal_reason = "Candidate approval revoked: {}".format(safe_reason)
+        chain.completed_at = current_time
         self.db.commit()
         self.db.refresh(approval)
         return approval

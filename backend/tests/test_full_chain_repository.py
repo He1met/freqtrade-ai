@@ -107,8 +107,23 @@ def seed_research_lineage(db):
         backtest_run_id=run.id,
         backtest_task_id=task.id,
         result_path="reports/backtests/chain.json",
-        metrics_snapshot={"total_trades": 12},
-        total_trades=12,
+        metrics_snapshot={
+            "promotion_evidence": {
+                "net_of_costs": True,
+                "out_of_sample": {
+                    "passed": True,
+                    "profit_pct": 0.04,
+                    "total_trades": 36,
+                },
+                "walk_forward": {
+                    "passed": True,
+                    "market_states": ["bull", "bear", "range"],
+                },
+            },
+        },
+        profit_pct=0.06,
+        max_drawdown_pct=0.12,
+        total_trades=36,
     )
     db.add(result)
     db.flush()
@@ -118,7 +133,11 @@ def seed_research_lineage(db):
         backtest_result_id=result.id,
         scoring_version="full-chain-v1",
         total_score=80,
-        metrics_snapshot={"acceptance_ready": True},
+        metrics_snapshot={
+            "source": "backtest_result",
+            "backtest_result_id": result.id,
+            "acceptance_ready": True,
+        },
     )
     db.add(score)
     db.commit()
@@ -257,7 +276,6 @@ def test_chain_reuses_research_job_attempt_and_persists_approval_and_signal(db) 
         now=NOW + timedelta(seconds=2),
     )
     assert approval_stage.id is not None
-
     repository.prepare_stage(
         chain.id,
         "SIGNAL",
@@ -302,6 +320,72 @@ def test_chain_reuses_research_job_attempt_and_persists_approval_and_signal(db) 
         "CANDIDATE_APPROVAL",
         "SIGNAL",
     ]
+
+
+def test_candidate_approval_blocks_unvalidated_promotion_evidence(db) -> None:
+    job = claimed_job(db)
+    repository = FullChainRepository(db)
+    chain = repository.open_for_claimed_job(job.id, job.lease_token, now=NOW)
+    lineage = prepare_and_complete_research(db, repository, chain, job.lease_token)
+    result = lineage[5]
+    result.metrics_snapshot = {}
+    db.commit()
+    repository.prepare_stage(
+        chain.id,
+        "CANDIDATE_APPROVAL",
+        job.lease_token,
+        idempotency_key="candidate-promotion-blocked",
+        input_snapshot={"backtest_result_id": result.id},
+        now=NOW,
+    )
+
+    with pytest.raises(FullChainBlocked, match="promotion requires net-of-costs evidence"):
+        repository.create_candidate_approval(
+            chain.id,
+            job.lease_token,
+            requested_by="operator",
+            expires_at=NOW + timedelta(minutes=10),
+            now=NOW,
+        )
+
+
+def test_approved_candidate_can_be_revoked_before_execution(db) -> None:
+    job = claimed_job(db)
+    repository = FullChainRepository(db)
+    chain = repository.open_for_claimed_job(job.id, job.lease_token, now=NOW)
+    lineage = prepare_and_complete_research(db, repository, chain, job.lease_token)
+    repository.prepare_stage(
+        chain.id,
+        "CANDIDATE_APPROVAL",
+        job.lease_token,
+        idempotency_key="candidate-revocation",
+        input_snapshot={"strategy_score_id": lineage[6].id},
+        now=NOW,
+    )
+    approval = repository.create_candidate_approval(
+        chain.id,
+        job.lease_token,
+        requested_by="operator",
+        expires_at=NOW + timedelta(minutes=10),
+        now=NOW,
+    )
+    repository.decide_candidate(
+        approval.id,
+        decision="APPROVED",
+        decided_by="operator",
+        reason="Initial review completed.",
+        now=NOW + timedelta(seconds=1),
+    )
+
+    revoked = repository.revoke_candidate_approval(
+        approval.id,
+        revoked_by="operator",
+        reason="Market conditions changed.",
+        now=NOW + timedelta(seconds=2),
+    )
+
+    assert revoked.status == "REVOKED"
+    assert db.get(FullChainRun, chain.id).status == "BLOCKED"
 
 
 def test_stage_prepare_is_idempotent_and_rejects_changed_input_or_secrets(db) -> None:
