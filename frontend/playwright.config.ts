@@ -1,6 +1,7 @@
 import { defineConfig } from "@playwright/test";
 import { randomBytes, randomInt } from "node:crypto";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { safeAbsoluteDirectory, safePythonBinary } from "./tests/helpers/e2eConfigSafety";
 
 const host = "127.0.0.1";
@@ -39,7 +40,12 @@ const cleanupRegistry = process.env.E2E_ACCEPTANCE_REGISTRY;
 if (!cleanupRegistry.startsWith(`${acceptanceParent}/freqtrade-ai-issue-433-registry-`) || !cleanupRegistry.endsWith(".json")) {
   throw new Error("E2E_ACCEPTANCE_REGISTRY is outside the controlled temporary parent.");
 }
-const pythonBin = safePythonBinary(process.env.PYTHON_BIN);
+// E2E must use the repository's sole Python dependency environment.  An
+// explicit override remains supported only after the same path safety check.
+const canonicalPythonBin = fileURLToPath(
+  new URL("../backend/.venv/bin/python", import.meta.url),
+);
+const pythonBin = safePythonBinary(process.env.PYTHON_BIN ?? canonicalPythonBin);
 const backendProfile = process.env.E2E_SEED_PROFILE ?? "complete-current";
 if (!["empty", "complete-current", "missing-result", "missing-strategy", "long-evidence"].includes(backendProfile)) {
   throw new Error("E2E_SEED_PROFILE is invalid.");

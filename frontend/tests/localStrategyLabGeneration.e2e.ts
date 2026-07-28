@@ -6,34 +6,35 @@ async function confirmOperatorCredentialPresence(
   page: Page,
   { deepSeek = false }: { deepSeek?: boolean } = {},
 ): Promise<void> {
-  await page.route("**/api/runtime/operator-status", async (route) => {
-    const response = await route.fetch();
-    const body = await response.json();
-    body.env_presence = [
-      ...(body.env_presence ?? []).filter(
-        (entry: { name?: string }) =>
-          entry.name !== "FREQTRADE_AI_OPERATOR_TOKEN" &&
-          (!deepSeek || entry.name !== "DEEPSEEK_API_KEY"),
-      ),
-      {
-        name: "FREQTRADE_AI_OPERATOR_TOKEN",
-        present: true,
-        required: false,
-        source: "env",
-        value_rendered: false,
+  // Keep this browser-only fixture self-contained. Fetching the isolated
+  // backend in a route callback can leave an in-flight request during page
+  // teardown and turn a completed assertion into a false E2E failure.
+  await page.route("**/api/runtime/operator-status", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({
+      safety: {
+        reports_env_values: false,
       },
-      ...(deepSeek
-        ? [{
-            name: "DEEPSEEK_API_KEY",
-            present: true,
-            required: false,
-            source: "env",
-            value_rendered: false,
-          }]
-        : []),
-    ];
-    await route.fulfill({ response, json: body });
-  });
+      env_presence: [
+        {
+          name: "FREQTRADE_AI_OPERATOR_TOKEN",
+          present: true,
+          required: false,
+          source: "env",
+          value_rendered: false,
+        },
+        ...(deepSeek
+          ? [{
+              name: "DEEPSEEK_API_KEY",
+              present: true,
+              required: false,
+              source: "env",
+              value_rendered: false,
+            }]
+          : []),
+      ],
+    }),
+  }));
 }
 
 test("generation form explains its inputs and blockers above the 1280x720 fold", async ({ page }, testInfo) => {

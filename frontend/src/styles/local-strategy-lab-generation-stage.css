@@ -9,7 +9,8 @@
   border: 1px solid #d8ded7;
   border-radius: 10px;
   background: #fff;
-  padding: 12px;
+  /* Keep the first actionable submit control inside the 1280×720 desktop fold. */
+  padding: 7px 12px;
 }
 
 .local-strategy-lab .generation-stage__heading {
