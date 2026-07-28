@@ -43,6 +43,7 @@ ALLOWED_INSTRUMENTS = frozenset({DEFAULT_INSTRUMENT})
 SIMULATED_TRADING_HEADER = ("x-simulated-trading", "1")
 REQUEST_TIMEOUT_SECONDS = 10
 MAX_NOTIONAL_USDT = Decimal("2000")
+CANARY_POSITION_SIDE = "long"
 ARTIFACT_ROOT = (
     Path(__file__).resolve().parents[4]
     / ".freqtrade-ai"
@@ -250,7 +251,7 @@ def _query_order(
         or item.get("tdMode") != "isolated"
         or item.get("ordType") != "post_only"
         or item.get("side") != "buy"
-        or item.get("posSide") != "net"
+        or item.get("posSide") != CANARY_POSITION_SIDE
         or item.get("px") != expected_price
         or item.get("sz") != expected_size
     ):
@@ -283,9 +284,14 @@ def _position_size(payload: Any, instrument: str) -> Decimal:
     for item in data:
         if item.get("instId") != instrument:
             continue
-        if item.get("posSide") != "net" or item.get("mgnMode") != "isolated":
+        if item.get("posSide") not in {"long", "short"} or item.get("mgnMode") != "isolated":
             raise OkxDemoCanaryBlocked("POSITION_QUERY_FAILED")
-        total += _decimal(item.get("pos", "0"), "POSITION_QUERY_FAILED")
+        position = _decimal(item.get("pos", "0"), "POSITION_QUERY_FAILED")
+        if item.get("posSide") != CANARY_POSITION_SIDE:
+            if position != 0:
+                raise OkxDemoCanaryBlocked("OPPOSITE_SIDE_POSITION_DRIFT")
+            continue
+        total += position
     return total
 
 
@@ -447,14 +453,14 @@ def _cleanup_unexpected_position(
     body = {
         "instId": instrument,
         "tdMode": "isolated",
-        "side": "sell" if position > 0 else "buy",
-        "posSide": "net",
+        "side": "sell",
+        "posSide": CANARY_POSITION_SIDE,
         "ordType": "market",
         "sz": _format_decimal(abs(position)),
         "reduceOnly": True,
         "clOrdId": cleanup_cl_ord_id,
     }
-    expected_side = "sell" if position > 0 else "buy"
+    expected_side = "sell"
     expected_size = _format_decimal(abs(position))
     try:
         payload = transport.request(
@@ -521,7 +527,7 @@ def _query_cleanup_order(
         or item.get("tdMode") != "isolated"
         or item.get("ordType") != "market"
         or item.get("side") != expected_side
-        or item.get("posSide") != "net"
+        or item.get("posSide") != CANARY_POSITION_SIDE
         or str(item.get("reduceOnly")).lower() != "true"
         or item.get("sz") != expected_size
         or not isinstance(item.get("ordId"), str)
@@ -727,8 +733,8 @@ def _attest_account(
         item.strip().lower() for item in permissions.split(",") if item.strip()
     } != {"read_only", "trade"} or account.get("acctLv") != "2":
         raise OkxDemoCanaryBlocked("ACCOUNT_ATTESTATION_FAILED")
-    if account.get("posMode") != "net_mode":
-        raise OkxDemoCanaryBlocked("DUAL_SIDE_CANARY_NOT_IMPLEMENTED")
+    if account.get("posMode") != "long_short_mode":
+        raise OkxDemoCanaryBlocked("ACCOUNT_POSITION_MODE_INVALID")
 
 
 def _query_recovery_order(
@@ -753,7 +759,7 @@ def _query_recovery_order(
         or item.get("tdMode") != "isolated"
         or item.get("ordType") != "post_only"
         or item.get("side") != "buy"
-        or item.get("posSide") != "net"
+        or item.get("posSide") != CANARY_POSITION_SIDE
         or _decimal(price, "RECOVERY_ORDER_IDENTITY_MISMATCH") <= 0
         or _decimal(size, "RECOVERY_ORDER_IDENTITY_MISMATCH") <= 0
     ):
@@ -1073,7 +1079,7 @@ def _execute_canary(
             "ordType": "post_only",
             "px": price,
             "sz": size,
-            "posSide": "net",
+            "posSide": CANARY_POSITION_SIDE,
             "clOrdId": client_order_id,
         }
         sequence.append("place_intent_persisted")

@@ -25,7 +25,7 @@ def environment() -> dict[str, str]:
     }
 
 
-def account_payload(position_mode: str = "net_mode") -> dict:
+def account_payload(position_mode: str = "long_short_mode") -> dict:
     return {
         "code": "0",
         "data": [
@@ -82,7 +82,7 @@ def zero_position_payload() -> dict:
         "data": [
             {
                 "instId": canary.DEFAULT_INSTRUMENT,
-                "posSide": "net",
+                "posSide": "long",
                 "mgnMode": "isolated",
                 "pos": "0",
             }
@@ -120,7 +120,7 @@ def order_payload(
         "tdMode": "isolated",
         "ordType": "post_only",
         "side": "buy",
-        "posSide": "net",
+        "posSide": "long",
         "px": "57000",
         "sz": "0.01",
         "accFillSz": accumulated_fill,
@@ -147,7 +147,7 @@ def cleanup_order_payload(
                 "tdMode": "isolated",
                 "ordType": "market",
                 "side": side,
-                "posSide": "net",
+                "posSide": "long",
                 "reduceOnly": "true",
                 "sz": size,
             }
@@ -219,7 +219,7 @@ def test_successful_canary_is_sanitized_and_persisted(tmp_path: Path) -> None:
         "ordType": "post_only",
         "px": "57000",
         "sz": "0.01",
-        "posSide": "net",
+        "posSide": "long",
         "clOrdId": CLIENT_ORDER_ID,
     }
     artifact = json.loads(
@@ -242,8 +242,8 @@ def test_successful_canary_is_sanitized_and_persisted(tmp_path: Path) -> None:
     assert transport.script == []
 
 
-def test_dual_side_account_blocks_legacy_net_canary_before_any_write(tmp_path: Path) -> None:
-    account = account_payload("long_short_mode")
+def test_legacy_net_account_blocks_dual_side_canary_before_any_write(tmp_path: Path) -> None:
+    account = account_payload("net_mode")
     environment_values = environment()
     environment_values[canary.OKX_DEMO_ACCOUNT_FINGERPRINT_ENV] = account_fingerprint(
         account["data"][0]
@@ -260,7 +260,39 @@ def test_dual_side_account_blocks_legacy_net_canary_before_any_write(tmp_path: P
     )
 
     assert result["status"] == "BLOCKED"
-    assert result["reason_code"] == "DUAL_SIDE_CANARY_NOT_IMPLEMENTED"
+    assert result["reason_code"] == "ACCOUNT_POSITION_MODE_INVALID"
+    assert all(call["method"] != "POST" for call in transport.calls)
+
+
+def test_opposite_side_position_is_drift_and_never_cleaned_as_long(tmp_path: Path) -> None:
+    opposite_position = {
+        "code": "0",
+        "data": [
+            {
+                "instId": canary.DEFAULT_INSTRUMENT,
+                "posSide": "short",
+                "mgnMode": "isolated",
+                "pos": "0.01",
+            }
+        ],
+    }
+    transport = ScriptedTransport(
+        [
+            ("GET", "/api/v5/account/config", account_payload()),
+            ("GET", "/api/v5/trade/orders-pending", empty_payload()),
+            ("GET", "/api/v5/account/positions", opposite_position),
+        ]
+    )
+
+    result = canary.run_canary(
+        environment(),
+        transport=transport,
+        cl_ord_id=CLIENT_ORDER_ID,
+        artifact_dir=tmp_path,
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason_code"] == "OPPOSITE_SIDE_POSITION_DRIFT"
     assert all(call["method"] != "POST" for call in transport.calls)
 
 
@@ -392,7 +424,7 @@ def test_unexpected_partial_fill_is_canceled_and_reduce_only_cleaned(
         "data": [
             {
                 "instId": canary.DEFAULT_INSTRUMENT,
-                "posSide": "net",
+                "posSide": "long",
                 "mgnMode": "isolated",
                 "pos": "0.005",
             }
@@ -449,7 +481,7 @@ def test_unexpected_partial_fill_is_canceled_and_reduce_only_cleaned(
         "instId": canary.DEFAULT_INSTRUMENT,
         "tdMode": "isolated",
         "side": "sell",
-        "posSide": "net",
+        "posSide": "long",
         "ordType": "market",
         "sz": "0.005",
         "reduceOnly": True,
@@ -618,14 +650,14 @@ def test_cleanup_timeout_reconciles_without_second_cleanup_write(
     cleanup_id = "FTAICLEAN{}".format(
         canary.hashlib.sha256(CLIENT_ORDER_ID.encode()).hexdigest()[:20]
     )
-    short_position = {
+    long_position = {
         "code": "0",
         "data": [
             {
                 "instId": canary.DEFAULT_INSTRUMENT,
-                "posSide": "net",
+                "posSide": "long",
                 "mgnMode": "isolated",
-                "pos": "-0.005",
+                "pos": "0.005",
             }
         ],
     }
@@ -635,7 +667,7 @@ def test_cleanup_timeout_reconciles_without_second_cleanup_write(
             "/api/v5/trade/order",
             order_payload("filled", accumulated_fill="0.005"),
         ),
-        ("GET", "/api/v5/account/positions", short_position),
+        ("GET", "/api/v5/account/positions", long_position),
         (
             "POST",
             "/api/v5/trade/order",
@@ -644,7 +676,7 @@ def test_cleanup_timeout_reconciles_without_second_cleanup_write(
         (
             "GET",
             "/api/v5/trade/order",
-            cleanup_order_payload(cleanup_id, side="buy"),
+            cleanup_order_payload(cleanup_id, side="sell"),
         ),
         ("GET", "/api/v5/account/positions", zero_position_payload()),
         (
@@ -673,7 +705,7 @@ def test_cleanup_timeout_reconciles_without_second_cleanup_write(
         if call["method"] == "POST" and call["path"] == "/api/v5/trade/order"
     ]
     assert len(cleanup_writes) == 2
-    assert cleanup_writes[-1]["body"]["side"] == "buy"
+    assert cleanup_writes[-1]["body"]["side"] == "sell"
     assert cleanup_writes[-1]["body"]["reduceOnly"] is True
 
 
@@ -1047,7 +1079,7 @@ def test_partial_fill_cancel_uncertainty_cannot_report_cleaned(
         "data": [
             {
                 "instId": canary.DEFAULT_INSTRUMENT,
-                "posSide": "net",
+                "posSide": "long",
                 "mgnMode": "isolated",
                 "pos": "0.005",
             }
