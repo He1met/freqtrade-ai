@@ -22,7 +22,7 @@ from typing import Any, Dict, Optional, Sequence
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_SCRIPT = REPO_ROOT / "scripts" / "local_runtime.py"
 DEFAULT_INTERVAL_SECONDS = 30
-COMMAND_TIMEOUT_SECONDS = 90
+COMMAND_TIMEOUT_SECONDS = 330
 STOP_EVENT = threading.Event()
 LAST_CREDENTIAL_GENERATION: Optional[str] = None
 
