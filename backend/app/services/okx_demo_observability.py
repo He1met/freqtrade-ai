@@ -117,12 +117,14 @@ class OkxDemoObservabilityService:
         self,
         db: Session,
         *,
-        runtime_readiness_provider: Callable[
-            [], OkxDemoRuntimeReadiness
-        ] = read_okx_demo_runtime_readiness,
+        runtime_readiness_provider: Optional[
+            Callable[[], OkxDemoRuntimeReadiness]
+        ] = None,
     ) -> None:
         self.db = db
-        self._runtime_readiness_provider = runtime_readiness_provider
+        self._runtime_readiness_provider = (
+            runtime_readiness_provider or read_okx_demo_runtime_readiness
+        )
 
     def build(self, limit: int = 100) -> OkxDemoObservabilityResponse:
         target_id = ONLY_EXCHANGE_EXECUTION_TARGET_ID

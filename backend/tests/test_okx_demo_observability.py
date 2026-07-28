@@ -25,6 +25,7 @@ from app.services.okx_demo_reconciliation import (
     OkxDemoReconciliationService,
     SCHEMA_VERSION,
 )
+from app.services.okx_demo_runtime_readiness import blocked_runtime_readiness
 
 
 def _client(tmp_path: Path) -> tuple[TestClient, object]:
@@ -62,7 +63,12 @@ def test_empty_database_is_explicitly_not_acceptable(tmp_path: Path) -> None:
 
 def test_allowlisted_projection_omits_raw_snapshots_and_requires_reconciliation(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
+    monkeypatch.setattr(
+        "app.services.okx_demo_observability.read_okx_demo_runtime_readiness",
+        blocked_runtime_readiness,
+    )
     client, session_factory = _client(tmp_path)
     now = datetime.now(timezone.utc)
     digests = {
