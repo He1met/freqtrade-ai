@@ -144,11 +144,11 @@ def _request(lineage: dict[str, int], now: datetime, factory=None) -> dict:
         "resource": "account",
         "stale": False,
         "authenticated": True,
-        "account_mode": "net",
+        "account_mode": "long_short_mode",
         "margin_mode": "isolated",
         "current_exposure": "0",
         "open_positions": 0,
-        "leverage": "2",
+        "leverage_by_position_side": {"long": "2", "short": "2"},
         "as_of": now.isoformat(),
         "expires_at": expiry,
     }
@@ -174,7 +174,7 @@ def _request(lineage: dict[str, int], now: datetime, factory=None) -> dict:
         },
         "instrument_id": "BTC-USDT-SWAP",
         "side": "buy",
-        "position_side": "net",
+        "position_side": "long",
         "order_type": "limit",
         "quantity": "0.01",
         "limit_price": "50000",
@@ -670,6 +670,37 @@ def test_score_threshold_is_authorization_evidence(session_factory) -> None:
         decision = db.get(RiskDecision, result.risk_decision_id)
     assert result.status == "BLOCKED"
     assert "threshold" in decision.evidence_snapshot["reasons"][0]
+
+
+@pytest.mark.parametrize(
+    ("side", "position_side", "reduce_only"),
+    [
+        ("buy", "short", False),
+        ("sell", "long", False),
+        ("buy", "long", True),
+        ("sell", "short", True),
+    ],
+)
+def test_ambiguous_or_opposite_side_risk_request_is_blocked(
+    session_factory, side, position_side, reduce_only
+) -> None:
+    now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
+    request = _request(_seed_lineage(session_factory), now, session_factory)
+    request.update(
+        side=side,
+        position_side=position_side,
+        reduce_only=reduce_only,
+    )
+
+    with session_factory() as db:
+        result = RiskChainService(db).evaluate(
+            idempotency_key="direction-{}-{}-{}".format(side, position_side, reduce_only),
+            request=request,
+            policy=_policy(),
+            now=now,
+        )
+
+    assert result.status == "BLOCKED"
 
 
 def test_policy_change_blocks_retry_and_revokes_old_permission(session_factory) -> None:

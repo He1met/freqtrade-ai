@@ -1048,6 +1048,7 @@ class SqlAlchemyOrderWriterStore:
             or command.client_order_id != intent.client_order_id
             or command.instrument_id != intent.instrument_id
             or command.side != intent.side
+            or command.position_side != intent.position_side
             or command.order_type != intent.order_type
             or command.contracts != intent.quantity
             or command.limit_price != intent.limit_price
@@ -1077,6 +1078,7 @@ class SqlAlchemyOrderWriterStore:
             or command.risk_decision_id != decision.id
             or command.instrument_id != intent.instrument_id
             or command.side != intent.side
+            or command.position_side != intent.position_side
             or command.contracts > intent.quantity
         ):
             raise OkxDemoWriteBlocked("cleanup command lineage is inconsistent")
@@ -1218,6 +1220,7 @@ class SqlAlchemyOrderWriterStore:
             client_order_id=order.client_order_id,
             exchange_order_id=order.exchange_order_id,
             side=intent.side,
+            position_side=intent.position_side,
             order_type=intent.order_type,
             contracts=intent.quantity,
             limit_price=intent.limit_price,

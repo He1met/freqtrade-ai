@@ -43,7 +43,8 @@ RUNTIME_APP_ACL_BASE_VERSION = "20260727_13"
 FILL_SNAPSHOT_REPEAT_BASE_VERSION = "20260727_14"
 RECONCILIATION_BATCH_FRESHNESS_BASE_VERSION = "20260728_15"
 RECOVERY_WALL_CLOCK_BASE_VERSION = "20260728_16"
-SCHEMA_VERSION = "20260728_17"
+DUAL_SIDE_BASE_VERSION = "20260728_17"
+SCHEMA_VERSION = "20260728_18"
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 ATTESTATION_PROOF_KEY_ENV = "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"
 
@@ -4327,6 +4328,26 @@ def _add_okx_demo_soak(connection: Connection) -> None:
     _grant_runtime_application_acl(connection)
 
 
+def _upgrade_dual_side_trade_intents(connection: Connection) -> None:
+    """Replace the legacy net-position constraint without rewriting lineage."""
+
+    connection.execute(
+        text(
+            "ALTER TABLE trade_intents "
+            "DROP CONSTRAINT IF EXISTS trade_intents_position_side_check, "
+            "ADD CONSTRAINT trade_intents_position_side_check CHECK ("
+            "authorization_schema_version = 'LEGACY' OR status = 'BLOCKED' OR "
+            "(position_side = 'long' AND "
+            "((side = 'buy' AND reduce_only = FALSE) OR "
+            "(side = 'sell' AND reduce_only = TRUE))) OR "
+            "(position_side = 'short' AND "
+            "((side = 'sell' AND reduce_only = FALSE) OR "
+            "(side = 'buy' AND reduce_only = TRUE)))"
+            ")"
+        )
+    )
+
+
 def upgrade_database(engine: Engine) -> str:
     """Upgrade a local PostgreSQL database atomically to ``SCHEMA_VERSION``.
 
@@ -4368,6 +4389,7 @@ def upgrade_database(engine: Engine) -> str:
                 FILL_SNAPSHOT_REPEAT_BASE_VERSION,
                 RECONCILIATION_BATCH_FRESHNESS_BASE_VERSION,
                 RECOVERY_WALL_CLOCK_BASE_VERSION,
+                DUAL_SIDE_BASE_VERSION,
             }
             if current_version in supported_upgrade_versions:
                 connection.execute(
@@ -4408,6 +4430,19 @@ def upgrade_database(engine: Engine) -> str:
                 if problems:
                     raise SchemaMigrationBlocked(
                         "Recovery wall-clock upgrade does not match ORM metadata: "
+                        + "; ".join(problems)
+                    )
+                connection.execute(
+                    text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+                    {"version": SCHEMA_VERSION},
+                )
+                return SCHEMA_VERSION
+            if current_version == DUAL_SIDE_BASE_VERSION:
+                _upgrade_dual_side_trade_intents(connection)
+                problems = schema_problems(connection)
+                if problems:
+                    raise SchemaMigrationBlocked(
+                        "Dual-side upgrade does not match ORM metadata: "
                         + "; ".join(problems)
                     )
                 connection.execute(

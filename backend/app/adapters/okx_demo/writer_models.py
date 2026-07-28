@@ -108,7 +108,7 @@ class ApprovedExecutionView(StrictModel):
     client_order_id: str
     instrument_id: str = Field(pattern=r"^[A-Z0-9]+-[A-Z0-9]+-SWAP$")
     side: Literal["buy", "sell"]
-    position_side: Literal["net"]
+    position_side: Literal["long", "short"]
     order_type: Literal["limit", "post_only", "market"]
     contracts: Decimal = Field(gt=0)
     limit_price: Optional[Decimal] = Field(default=None, gt=0)
@@ -143,6 +143,15 @@ class ApprovedExecutionView(StrictModel):
             raise ValueError(
                 "reduce-only close must be market without attached exits"
             )
+        expected_position_side = (
+            "long"
+            if (self.side == "buy") is not self.reduce_only
+            else "short"
+        )
+        if self.position_side != expected_position_side:
+            raise ValueError(
+                "side, position_side and reduce_only do not describe one OKX long/short action"
+            )
         for trigger, order_price, label in (
             (
                 self.take_profit_trigger_price,
@@ -176,6 +185,7 @@ class NormalizedOrderCommand(StrictModel):
     client_order_id: str
     instrument_id: str
     side: Literal["buy", "sell"]
+    position_side: Literal["long", "short"]
     order_type: Literal["limit", "post_only", "market"]
     contracts: Decimal
     limit_price: Optional[Decimal]
@@ -261,7 +271,7 @@ def normalize_order_command(
         "instId": approved.instrument_id,
         "tdMode": "isolated",
         "side": approved.side,
-        "posSide": "net",
+        "posSide": approved.position_side,
         "ordType": approved.order_type,
         "sz": _decimal_text(approved.contracts),
         "clOrdId": approved.client_order_id,
@@ -284,6 +294,7 @@ def normalize_order_command(
         client_order_id=approved.client_order_id,
         instrument_id=approved.instrument_id,
         side=approved.side,
+        position_side=approved.position_side,
         order_type=approved.order_type,
         contracts=approved.contracts,
         limit_price=approved.limit_price,

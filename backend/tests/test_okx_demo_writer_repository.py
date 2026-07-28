@@ -104,7 +104,7 @@ def db():
                 "order": {
                     "instrument_id": "BTC-USDT-SWAP",
                     "side": "buy",
-                    "position_side": "net",
+                    "position_side": "long",
                     "order_type": "limit",
                     "quantity": Decimal("0.02"),
                     "limit_price": Decimal("57000"),
@@ -129,7 +129,7 @@ def db():
             client_order_id="WriterOrder001",
             instrument_id="BTC-USDT-SWAP",
             side="buy",
-            position_side="net",
+            position_side="long",
             order_type="limit",
             quantity=Decimal("0.02"),
             limit_price=Decimal("57000"),
