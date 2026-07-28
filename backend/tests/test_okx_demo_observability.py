@@ -16,6 +16,7 @@ from app.models.execution_lineage import (
     RiskDecision,
     TradeIntent,
 )
+from app.models.okx_demo_reconciliation import OkxDemoOrderSnapshot
 from app.repositories.execution_lineage import ensure_execution_scope_catalog
 from app.services.okx_demo_observability import (
     OkxDemoObservabilityService,
@@ -26,6 +27,7 @@ from app.services.okx_demo_reconciliation import (
     SCHEMA_VERSION,
 )
 from app.services.okx_demo_runtime_readiness import blocked_runtime_readiness
+from app.services.okx_demo_runtime_readiness import OkxDemoRuntimeReadiness
 
 
 def _client(tmp_path: Path) -> tuple[TestClient, object]:
@@ -326,6 +328,137 @@ def test_completion_predicate_fails_closed_for_each_missing_evidence() -> None:
         state, reason = order_completion(**candidate)
         assert state == "INCOMPLETE"
         assert "缺少" in reason
+
+
+def test_incremental_recovery_keeps_historical_snapshots_without_marking_current_projection_unknown(
+    tmp_path: Path,
+) -> None:
+    """A no-change batch proves current state without copying old order snapshots."""
+
+    _, session_factory = _client(tmp_path)
+    now = datetime.now(timezone.utc)
+    first_account = {
+        "accountFingerprint": "a" * 64,
+        "equity": "10000",
+        "availableBalance": "9000",
+        "marginBalance": "1000",
+    }
+    with session_factory.begin() as session:
+        ensure_execution_scope_catalog(session)
+        service = OkxDemoReconciliationService(
+            session,
+            evidence_root=tmp_path / "managed" / "evidence",
+            allowed_evidence_root=tmp_path / "managed",
+        )
+        service.ingest_recovery_batch(
+            [
+                _event(
+                    "ORDER",
+                    "historic-order",
+                    {
+                        "ordId": "historic-order",
+                        "instId": "BTC-USDT-SWAP",
+                        "state": "filled",
+                        "sz": "1",
+                        "accFillSz": "1",
+                        "avgPx": "60000",
+                        "reduceOnly": False,
+                    },
+                    now,
+                ),
+                _event(
+                    "FILL",
+                    "historic-fill",
+                    {
+                        "fillId": "historic-fill",
+                        "ordId": "historic-order",
+                        "instId": "BTC-USDT-SWAP",
+                        "fillPx": "60000",
+                        "fillSz": "1",
+                        "fee": "-0.1",
+                    },
+                    now,
+                ),
+                _event(
+                    "POSITION",
+                    "BTC-USDT-SWAP:net",
+                    {
+                        "instId": "BTC-USDT-SWAP",
+                        "posSide": "net",
+                        "pos": "0",
+                    },
+                    now,
+                ),
+                _event("ACCOUNT", "account", first_account, now),
+            ],
+            recovery_batch_id="historical-baseline",
+            high_watermarks={
+                "ORDER": "first-order",
+                "FILL": "first-fill",
+                "POSITION": "first-position",
+                "ACCOUNT": "first-account",
+            },
+            observed_at=now,
+            completed_at=now + timedelta(seconds=1),
+        )
+        assert service.reconcile(now=now + timedelta(seconds=2)).status == "RECONCILED"
+
+        # The next complete REST recovery has no order/fill/position changes.
+        # It intentionally persists only its current account proof.
+        second_observed_at = now + timedelta(seconds=10)
+        service.ingest_recovery_batch(
+            [
+                _event(
+                    "ACCOUNT",
+                    "account",
+                    first_account,
+                    second_observed_at,
+                    source_sequence=2,
+                )
+            ],
+            recovery_batch_id="incremental-no-change",
+            high_watermarks={
+                "ORDER": "second-order",
+                "FILL": "second-fill",
+                "POSITION": "second-position",
+                "ACCOUNT": "second-account",
+            },
+            observed_at=second_observed_at,
+            completed_at=second_observed_at + timedelta(seconds=1),
+        )
+        result = service.reconcile(
+            now=second_observed_at + timedelta(seconds=2),
+            recovered=True,
+        )
+        assert result.status == "RECOVERED"
+        assert result.database_ids["order_snapshots"] == []
+        assert result.database_ids["fill_snapshots"] == []
+        assert session.query(OkxDemoOrderSnapshot).count() == 1
+
+    ready = OkxDemoRuntimeReadiness(
+        status="READY",
+        target_ready=True,
+        credentials_ready=True,
+        writer_ready=True,
+        observed_at=now + timedelta(seconds=12),
+    )
+    with session_factory() as session:
+        response = OkxDemoObservabilityService(
+            session,
+            runtime_readiness_provider=lambda: ready,
+        ).build()
+
+    assert response.latest_reconciliation is not None
+    assert response.latest_reconciliation.status == "RECOVERED"
+    assert response.orders == []
+    assert response.positions == []
+    assert response.account.status == "READY"
+    assert {
+        check.key: check.status for check in response.readiness
+    }["market"] == "READY"
+    assert {
+        check.key: check.status for check in response.readiness
+    }["reconciliation"] == "READY"
 
 
 def _event(
