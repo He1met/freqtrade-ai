@@ -1,10 +1,45 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 import { captureBrowserProblems, expectNoPageOverflow, SUPERSEDED_API_REQUESTS } from "./helpers/desktopGate";
+
+async function confirmOperatorCredentialPresence(
+  page: Page,
+  { deepSeek = false }: { deepSeek?: boolean } = {},
+): Promise<void> {
+  await page.route("**/api/runtime/operator-status", async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    body.env_presence = [
+      ...(body.env_presence ?? []).filter(
+        (entry: { name?: string }) =>
+          entry.name !== "FREQTRADE_AI_OPERATOR_TOKEN" &&
+          (!deepSeek || entry.name !== "DEEPSEEK_API_KEY"),
+      ),
+      {
+        name: "FREQTRADE_AI_OPERATOR_TOKEN",
+        present: true,
+        required: false,
+        source: "env",
+        value_rendered: false,
+      },
+      ...(deepSeek
+        ? [{
+            name: "DEEPSEEK_API_KEY",
+            present: true,
+            required: false,
+            source: "env",
+            value_rendered: false,
+          }]
+        : []),
+    ];
+    await route.fulfill({ response, json: body });
+  });
+}
 
 test("generation form explains its inputs and blockers above the 1280x720 fold", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "desktop-1280x720", "Issue #427 desktop acceptance uses 1280x720.");
   const browserProblems = captureBrowserProblems(page, SUPERSEDED_API_REQUESTS);
+  await confirmOperatorCredentialPresence(page);
   for (const path of [
     "strategies",
     "strategy-versions",
@@ -69,15 +104,7 @@ test("generation form explains its inputs and blockers above the 1280x720 fold",
 });
 
 test("real Provider authorization is separate, optional and one-request scoped", async ({ page }) => {
-  await page.route("**/api/runtime/operator-status", async (route) => {
-    const response = await route.fetch();
-    const body = await response.json();
-    body.env_presence = [
-      ...(body.env_presence ?? []).filter((entry: { name?: string }) => entry.name !== "DEEPSEEK_API_KEY"),
-      { name: "DEEPSEEK_API_KEY", present: true, required: false, source: "env", value_rendered: false },
-    ];
-    await route.fulfill({ response, json: body });
-  });
+  await confirmOperatorCredentialPresence(page, { deepSeek: true });
 
   let providerAuthorizationHeader: string | undefined;
   let requestBody: unknown;
@@ -179,6 +206,7 @@ test("Advanced DeepSeek fails closed when Operator Dashboard source is not API",
 
 test("unconfirmed Provider readiness cannot be bypassed by direct form submission", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "desktop-1280x720", "One desktop project is sufficient for the submit guard.");
+  await confirmOperatorCredentialPresence(page);
   let postRequests = 0;
   await page.route("**/api/strategy-generation-runs", async (route) => {
     if (route.request().method() === "POST") {
