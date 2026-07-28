@@ -1535,7 +1535,7 @@ def okx_runtime_readiness(state_dir: Path) -> Dict[str, Any]:
     }
 
 
-OKX_RUNTIME_STARTUP_TIMEOUT_SECONDS = 90
+OKX_RUNTIME_STARTUP_TIMEOUT_SECONDS = 300
 
 
 def wait_for_okx_runtime(

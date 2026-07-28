@@ -1577,7 +1577,7 @@ def test_okx_runtime_startup_allows_authenticated_recovery_after_twenty_seconds(
 
     runtime.wait_for_okx_runtime(tmp_path)
 
-    assert runtime.OKX_RUNTIME_STARTUP_TIMEOUT_SECONDS == 90
+    assert runtime.OKX_RUNTIME_STARTUP_TIMEOUT_SECONDS == 300
 
 
 def test_okx_runtime_startup_fails_closed_when_child_exits(
@@ -1607,7 +1607,7 @@ def test_okx_runtime_startup_fails_closed_after_bounded_timeout(
     tmp_path,
 ):
     runtime = load_runtime_module()
-    moments = iter((0.0, 90.0))
+    moments = iter((0.0, 300.0))
     monkeypatch.setattr(runtime.time, "monotonic", lambda: next(moments))
 
     with pytest.raises(runtime.RuntimeBlocked, match="did not establish"):

@@ -105,7 +105,7 @@ def test_runtime_readiness_accepts_a_complete_reconciliation_cycle_age(
             runtime_dir=tmp_path,
         )
 
-    assert MAX_HEARTBEAT_AGE == timedelta(seconds=90)
+    assert MAX_HEARTBEAT_AGE == timedelta(seconds=300)
     assert result.status == "READY"
     assert result.credentials_ready is True
     assert result.writer_ready is True
