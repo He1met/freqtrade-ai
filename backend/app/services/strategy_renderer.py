@@ -6,6 +6,12 @@ class StrategyCodeRenderer:
         indicator_lines = self._render_indicators(blueprint)
         entry_conditions = self._render_conditions(blueprint.entry_rules)
         exit_conditions = self._render_conditions(blueprint.exit_rules)
+        short_entry_conditions = self._render_conditions(
+            blueprint.short_entry_rules
+        )
+        short_exit_conditions = self._render_conditions(
+            blueprint.short_exit_rules
+        )
 
         return "\n".join(
             [
@@ -20,7 +26,7 @@ class StrategyCodeRenderer:
                 f"    timeframe = {blueprint.timeframe!r}",
                 f"    stoploss = {blueprint.stoploss!r}",
                 f"    minimal_roi = {blueprint.minimal_roi!r}",
-                "    can_short = False",
+                f"    can_short = {blueprint.can_short!r}",
                 "    startup_candle_count = 50",
                 "",
                 "    def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:",
@@ -33,6 +39,11 @@ class StrategyCodeRenderer:
                 "        ]",
                 "        if conditions:",
                 "            dataframe.loc[reduce(lambda left, right: left & right, conditions), 'enter_long'] = 1",
+                "        short_conditions = [",
+                *short_entry_conditions,
+                "        ]",
+                "        if short_conditions:",
+                "            dataframe.loc[reduce(lambda left, right: left & right, short_conditions), 'enter_short'] = 1",
                 "        return dataframe",
                 "",
                 "    def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:",
@@ -41,6 +52,11 @@ class StrategyCodeRenderer:
                 "        ]",
                 "        if conditions:",
                 "            dataframe.loc[reduce(lambda left, right: left & right, conditions), 'exit_long'] = 1",
+                "        short_conditions = [",
+                *short_exit_conditions,
+                "        ]",
+                "        if short_conditions:",
+                "            dataframe.loc[reduce(lambda left, right: left & right, short_conditions), 'exit_short'] = 1",
                 "        return dataframe",
                 "",
             ]
