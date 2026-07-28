@@ -335,7 +335,7 @@ def run_diagnostics(
         Check(
             "demo_canary",
             "BLOCKED",
-            "normal Demo execution and dual-side canary are not integrated; no authenticated request or order was attempted",
+            "the controlled authenticated canary is not integrated into the normal Demo execution chain; no authenticated request or order was attempted",
         )
     )
 
