@@ -14,6 +14,8 @@ import sys
 from typing import Optional
 from uuid import uuid4
 
+from sqlalchemy.engine import URL, make_url
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "backend"))
@@ -26,6 +28,28 @@ EXCLUDED_TABLES = ("public.okx_demo_attestation_secrets",)
 
 class BackupBlocked(RuntimeError):
     pass
+
+
+def peer_admin_database_url(database_url: str) -> str:
+    """Return the local peer-admin URL without copying runtime credentials."""
+    parsed = make_url(database_url)
+    if (
+        parsed.get_backend_name() != "postgresql"
+        or parsed.host not in {"localhost", "127.0.0.1", "::1"}
+        or parsed.database != "freqtrade_ai"
+    ):
+        raise BackupBlocked(
+            "backup is restricted to the canonical local PostgreSQL database"
+        )
+    peer = URL.create(
+        drivername="postgresql",
+        database=parsed.database,
+        query={
+            "host": "/tmp",
+            "port": str(parsed.port or 5432),
+        },
+    )
+    return peer.render_as_string(hide_password=False)
 
 
 def create_backup(
@@ -56,7 +80,7 @@ def create_backup(
         "--no-owner",
         "--no-privileges",
         "--exclude-table={}".format(EXCLUDED_TABLES[0]),
-        psql_database_url(database_url),
+        psql_database_url(peer_admin_database_url(database_url)),
     ]
     try:
         descriptor = os.open(

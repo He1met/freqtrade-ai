@@ -41,6 +41,10 @@ def test_backup_is_atomic_data_only_and_excludes_attestation_secrets(
         "--exclude-table=public.okx_demo_attestation_secrets"
         in observed["argv"]
     )
+    dump_url = observed["argv"][-1]
+    assert "change_me" not in dump_url
+    assert "freqtrade@" not in dump_url
+    assert "host=%2Ftmp" in dump_url
     assert stat.S_IMODE(backup.stat().st_mode) == 0o600
     payload = json.loads(manifest.read_text(encoding="utf-8"))
     assert payload["kind"] == "postgresql-data-only"
@@ -67,3 +71,10 @@ def test_backup_failure_removes_partial_files(monkeypatch, tmp_path):
         )
 
     assert list(tmp_path.iterdir()) == []
+
+
+def test_backup_rejects_noncanonical_database() -> None:
+    with pytest.raises(postgres_backup.BackupBlocked):
+        postgres_backup.peer_admin_database_url(
+            "postgresql+psycopg://freqtrade:change_me@example.com/other"
+        )
