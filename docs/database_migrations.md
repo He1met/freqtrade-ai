@@ -31,4 +31,9 @@ check constraint；任一不匹配都会 fail closed。
 ## psql / pg_dump 边界
 
 `postgresql+psycopg://` 是 SQLAlchemy 专用 URL。`psql` 和 `pg_dump` 使用 `postgresql://`
+
+`make db-backup` 生成 data-only SQL 与同名 manifest。最小权限运行账号不能读取
+`okx_demo_attestation_secrets`，该表会被明确排除，备份不会提升 ACL 或复制 attestation
+secret。恢复时先对空库运行当前 migrations，再导入 SQL；导入后 OKX Demo 必须保持
+`BLOCKED`，直到在本机重新完成 account pin / attestation。
 形式，并应通过 `PGPASSWORD` 或 `.pgpass` 认证，而不是把密码打印在终端、文档或日志中。

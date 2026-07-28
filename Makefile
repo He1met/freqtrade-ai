@@ -72,8 +72,7 @@ autostart-uninstall:
 	backend/.venv/bin/python scripts/macos_launch_agent.py uninstall
 
 db-backup:
-	mkdir -p .freqtrade-ai/backups
-	cd backend && . .venv/bin/activate && export DATABASE_URL="$(DATABASE_URL)"; psql_url=$$(python -c 'import os; from app.db.migrations import psql_database_url; print(psql_database_url(os.environ["DATABASE_URL"]))'); backup="../.freqtrade-ai/backups/freqtrade-ai-$$(date +%Y%m%d%H%M%S).sql"; pg_dump "$$psql_url" > "$$backup.tmp" && mv "$$backup.tmp" "$$backup"
+	DATABASE_URL="$(DATABASE_URL)" backend/.venv/bin/python scripts/postgres_backup.py
 
 db-init:
 	cd backend && . .venv/bin/activate && python -m app.db.migrate upgrade --database-url "$(DATABASE_URL)"
