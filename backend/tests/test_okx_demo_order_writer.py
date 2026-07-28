@@ -65,7 +65,7 @@ def order_item(**overrides):
         "client_order_id": "WriterOrder001",
         "state": "live",
         "side": "buy",
-        "position_side": "net",
+        "position_side": "long",
         "margin_mode": "isolated",
         "order_type": "limit",
         "reduce_only": False,
@@ -89,7 +89,7 @@ def approved(**overrides):
         "client_order_id": "WriterOrder001",
         "instrument_id": "BTC-USDT-SWAP",
         "side": "buy",
-        "position_side": "net",
+            "position_side": "long",
         "order_type": "limit",
         "contracts": Decimal("0.02"),
         "limit_price": Decimal("57000.1"),
@@ -137,7 +137,7 @@ class FakeReadClient:
                     {
                         "inst_id": "BTC-USDT-SWAP",
                         "margin_mode": "isolated",
-                        "position_side": "net",
+            "position_side": "long",
                         "leverage": Decimal("3"),
                     }
                 ]
@@ -247,6 +247,7 @@ class FakeStore:
             client_order_id=command.client_order_id,
             exchange_order_id=None,
             side=command.side,
+            position_side=command.position_side,
             order_type=command.order_type,
             contracts=command.contracts,
             limit_price=command.limit_price,
@@ -315,6 +316,7 @@ class FakeStore:
             client_order_id=command.client_order_id,
             exchange_order_id=None,
             side=command.side,
+            position_side=command.position_side,
             order_type=command.order_type,
             contracts=command.contracts,
             limit_price=command.limit_price,
@@ -411,6 +413,7 @@ def managed_order():
         client_order_id="WriterOrder001",
         exchange_order_id="exchange-order-1",
         side="buy",
+        position_side="long",
         order_type="limit",
         contracts=Decimal("0.02"),
         limit_price=Decimal("57000.1"),
@@ -436,7 +439,7 @@ def test_limit_place_is_prepared_before_post_and_reconciled() -> None:
                 "instId": "BTC-USDT-SWAP",
                 "tdMode": "isolated",
                 "side": "buy",
-                "posSide": "net",
+                            "posSide": "long",
                 "ordType": "limit",
                 "sz": "0.02",
                 "clOrdId": "WriterOrder001",
@@ -512,7 +515,7 @@ def test_mismatched_leverage_is_attested_then_order_is_placed() -> None:
                 {
                     "inst_id": "BTC-USDT-SWAP",
                     "margin_mode": "isolated",
-                    "position_side": "net",
+                        "position_side": "long",
                     "leverage": Decimal("2"),
                 }
             ],
@@ -520,7 +523,7 @@ def test_mismatched_leverage_is_attested_then_order_is_placed() -> None:
                 {
                     "inst_id": "BTC-USDT-SWAP",
                     "margin_mode": "isolated",
-                    "position_side": "net",
+                    "position_side": "long",
                     "leverage": Decimal("3"),
                 }
             ],
@@ -536,7 +539,7 @@ def test_mismatched_leverage_is_attested_then_order_is_placed() -> None:
                         "instId": "BTC-USDT-SWAP",
                         "lever": "3",
                         "mgnMode": "isolated",
-                        "posSide": "net",
+                        "posSide": "long",
                     }
                 ],
             },
@@ -574,7 +577,7 @@ def test_set_leverage_timeout_queries_and_never_reposts() -> None:
                 {
                     "inst_id": "BTC-USDT-SWAP",
                     "margin_mode": "isolated",
-                    "position_side": "net",
+                        "position_side": "long",
                     "leverage": Decimal("3"),
                 }
             ],
@@ -795,7 +798,7 @@ def test_reduce_only_market_execution_is_classified_as_close() -> None:
                 {
                     "inst_id": "BTC-USDT-SWAP",
                     "margin_mode": "isolated",
-                    "position_side": "net",
+                        "position_side": "long",
                     "contracts": Decimal("0.02"),
                 }
             ],
@@ -849,7 +852,7 @@ def test_canceled_partial_close_creates_deterministic_residual_cleanup() -> None
                 {
                     "inst_id": "BTC-USDT-SWAP",
                     "margin_mode": "isolated",
-                    "position_side": "net",
+                        "position_side": "long",
                     "contracts": Decimal("0.02"),
                 }
             ],
@@ -857,7 +860,7 @@ def test_canceled_partial_close_creates_deterministic_residual_cleanup() -> None
                 {
                     "inst_id": "BTC-USDT-SWAP",
                     "margin_mode": "isolated",
-                    "position_side": "net",
+                        "position_side": "long",
                     "contracts": Decimal("0.01"),
                 }
             ],
@@ -865,7 +868,7 @@ def test_canceled_partial_close_creates_deterministic_residual_cleanup() -> None
                 {
                     "inst_id": "BTC-USDT-SWAP",
                     "margin_mode": "isolated",
-                    "position_side": "net",
+                    "position_side": "long",
                     "contracts": Decimal("0.01"),
                 }
             ],
@@ -876,7 +879,7 @@ def test_canceled_partial_close_creates_deterministic_residual_cleanup() -> None
                 {
                     "inst_id": "BTC-USDT-SWAP",
                     "margin_mode": "isolated",
-                    "position_side": "net",
+                    "position_side": "long",
                     "leverage": Decimal("3"),
                 }
             ],
@@ -884,7 +887,7 @@ def test_canceled_partial_close_creates_deterministic_residual_cleanup() -> None
                 {
                     "inst_id": "BTC-USDT-SWAP",
                     "margin_mode": "isolated",
-                    "position_side": "net",
+                    "position_side": "long",
                     "leverage": Decimal("3"),
                 }
             ],

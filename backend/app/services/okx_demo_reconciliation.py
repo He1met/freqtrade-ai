@@ -624,10 +624,15 @@ class OkxDemoReconciliationService:
                 fee=_optional_decimal(payload.get("fee")),
             )
         elif event.entity_kind == "POSITION":
+            position_side = _text(payload, "posSide")
+            if position_side not in {"long", "short"}:
+                raise OkxDemoReconciliationBlocked(
+                    "OKX long_short_mode requires position posSide=long or short"
+                )
             row = OkxDemoPositionSnapshot(
                 **common,
                 instrument_id=_text(payload, "instId"),
-                position_side=_text(payload, "posSide"),
+                position_side=position_side,
                 quantity=_decimal(payload, "pos"),
                 average_price=_optional_decimal(payload.get("avgPx")),
             )

@@ -189,7 +189,9 @@ def test_runtime_restart_stops_history_at_persisted_overlap_watermark(
 
         def orders_history(self, *, after=None, limit=100):
             self.history_calls += 1
-            assert after is None
+            if after is not None:
+                assert after == "901"
+                return self._fresh_snapshot([])
             return self._fresh_snapshot(
                 [
                     order(998, old_at),
@@ -228,7 +230,9 @@ def test_runtime_restart_stops_history_at_persisted_overlap_watermark(
     )
     db.commit()
 
-    assert client.history_calls == 1
+    # A cutoff found in an unordered full page cannot prove that the next page
+    # contains only old rows.  The adapter must consume the terminal page.
+    assert client.history_calls == 2
     persisted_order_ids = set(
         db.scalars(
             select(OkxDemoExchangeEvent.entity_key).where(
@@ -238,6 +242,148 @@ def test_runtime_restart_stops_history_at_persisted_overlap_watermark(
         ).all()
     )
     assert persisted_order_ids == {"1000", "999"}
+
+
+def test_runtime_pagination_accepts_reverse_and_out_of_order_pages(
+    tmp_path,
+) -> None:
+    adapter = OkxDemoRuntimeReconciliationAdapter(
+        evidence_root=tmp_path / "managed" / "reconciliation",
+        allowed_evidence_root=tmp_path / "managed",
+        account_fingerprint_sha256="a" * 64,
+        now_provider=lambda: NOW,
+    )
+    first_page = list(range(300, 200, -1))
+    # This is neither newest-first nor oldest-first. Cursor selection must not
+    # depend on the position of a row in the response.
+    first_page = first_page[::2] + first_page[1::2]
+
+    class UnorderedClient:
+        calls = []
+
+        def orders_history(self, *, after=None, limit=100):
+            self.calls.append(after)
+            if after is None:
+                return _snapshot([{"order_id": str(value)} for value in first_page])
+            assert after == "201"
+            return _snapshot([{"order_id": "200"}, {"order_id": "199"}])
+
+    client = UnorderedClient()
+    items, _watermark, _observed = adapter._pages(
+        client,
+        "orders_history",
+        identity_field="order_id",
+    )
+
+    assert client.calls == [None, "201"]
+    assert {item["order_id"] for item in items} == {
+        str(value) for value in range(199, 301)
+    }
+
+
+def test_runtime_pagination_deduplicates_a_boundary_identity(
+    tmp_path,
+) -> None:
+    adapter = OkxDemoRuntimeReconciliationAdapter(
+        evidence_root=tmp_path / "managed" / "reconciliation",
+        allowed_evidence_root=tmp_path / "managed",
+        account_fingerprint_sha256="a" * 64,
+        now_provider=lambda: NOW,
+    )
+
+    class BoundaryClient:
+        def orders_history(self, *, after=None, limit=100):
+            if after is None:
+                return _snapshot(
+                    [{"order_id": str(value)} for value in range(300, 200, -1)]
+                )
+            assert after == "201"
+            return _snapshot(
+                [
+                    {"order_id": "201"},
+                    {"order_id": "200"},
+                    {"order_id": "199"},
+                ]
+            )
+
+    items, _watermark, _observed = adapter._pages(
+        BoundaryClient(),
+        "orders_history",
+        identity_field="order_id",
+    )
+
+    identities = [item["order_id"] for item in items]
+    assert len(identities) == len(set(identities)) == 102
+    assert identities.count("201") == 1
+
+
+@pytest.mark.parametrize(
+    "second_page, match",
+    [
+        ([{"order_id": "202"}], "escapes the requested cursor window"),
+        ([{"order_id": "201"}] * 100, "cursor did not advance"),
+    ],
+)
+def test_runtime_pagination_blocks_a_contradictory_or_looping_cursor(
+    tmp_path,
+    second_page,
+    match,
+) -> None:
+    adapter = OkxDemoRuntimeReconciliationAdapter(
+        evidence_root=tmp_path / "managed" / "reconciliation",
+        allowed_evidence_root=tmp_path / "managed",
+        account_fingerprint_sha256="a" * 64,
+        now_provider=lambda: NOW,
+    )
+
+    class InvalidCursorClient:
+        def orders_history(self, *, after=None, limit=100):
+            if after is None:
+                return _snapshot(
+                    [{"order_id": str(value)} for value in range(300, 200, -1)]
+                )
+            assert after == "201"
+            return _snapshot(second_page)
+
+    with pytest.raises(OkxDemoReconciliationBlocked, match=match):
+        adapter._pages(
+            InvalidCursorClient(),
+            "orders_history",
+            identity_field="order_id",
+        )
+
+
+@pytest.mark.parametrize(
+    "item, match",
+    [
+        ({}, "without identity"),
+        ({"order_id": "not-a-cursor"}, "not a canonical numeric cursor"),
+        ({"order_id": "001"}, "not a canonical numeric cursor"),
+    ],
+)
+def test_runtime_pagination_blocks_an_unprovable_identity(
+    tmp_path,
+    item,
+    match,
+) -> None:
+    adapter = OkxDemoRuntimeReconciliationAdapter(
+        evidence_root=tmp_path / "managed" / "reconciliation",
+        allowed_evidence_root=tmp_path / "managed",
+        account_fingerprint_sha256="a" * 64,
+        now_provider=lambda: NOW,
+    )
+
+    class MissingIdentityClient:
+        def orders_history(self, *, after=None, limit=100):
+            assert after is None
+            return _snapshot([item])
+
+    with pytest.raises(OkxDemoReconciliationBlocked, match=match):
+        adapter._pages(
+            MissingIdentityClient(),
+            "orders_history",
+            identity_field="order_id",
+        )
 
 
 def test_runtime_cycle_executes_only_current_run_recovery_grants(db) -> None:
@@ -289,7 +435,7 @@ def test_runtime_cycle_executes_only_current_run_recovery_grants(db) -> None:
                 grant_digest=("{:064x}".format(run.id * 10 + len(action))),
                 action=action,
                 instrument_id="BTC-USDT-SWAP",
-                position_side="net",
+                position_side="long",
                 max_quantity=(
                     Decimal("0") if action == "CANCEL" else Decimal("1")
                 ),
@@ -377,7 +523,7 @@ def test_runtime_accepts_actual_normalized_pydantic_models_and_exact_449_ids(
         client_order_id="FAI00000000000000000000000000001",
         state="live",
         side="buy",
-        position_side="net",
+        position_side="long",
         margin_mode="cross",
         order_type="limit",
         reduce_only=False,
@@ -399,7 +545,7 @@ def test_runtime_accepts_actual_normalized_pydantic_models_and_exact_449_ids(
     position = Position(
         inst_id="BTC-USDT-SWAP",
         margin_mode="cross",
-        position_side="net",
+        position_side="long",
         contracts="0",
         available_contracts="0",
         timestamp=NOW,

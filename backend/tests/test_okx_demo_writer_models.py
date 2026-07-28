@@ -55,7 +55,7 @@ def approved(**overrides):
         "client_order_id": "WriterOrder001",
         "instrument_id": "BTC-USDT-SWAP",
         "side": "buy",
-        "position_side": "net",
+        "position_side": "long",
         "order_type": "limit",
         "contracts": Decimal("0.02"),
         "limit_price": Decimal("57000.1"),
@@ -113,7 +113,7 @@ def test_normalize_limit_with_attached_take_profit_and_stop_loss() -> None:
         "instId": "BTC-USDT-SWAP",
         "tdMode": "isolated",
         "side": "buy",
-        "posSide": "net",
+        "posSide": "long",
         "ordType": "limit",
         "sz": "0.02",
         "clOrdId": "WriterOrder001",
@@ -148,6 +148,28 @@ def test_market_reduce_only_close_shape_has_no_price() -> None:
     assert command.request_body["ordType"] == "market"
     assert command.request_body["reduceOnly"] is True
     assert "px" not in command.request_body
+
+
+@pytest.mark.parametrize(
+    ("side", "position_side", "reduce_only"),
+    [
+        ("buy", "short", False),
+        ("sell", "long", False),
+        ("buy", "long", True),
+        ("sell", "short", True),
+    ],
+)
+def test_long_short_order_direction_rejects_ambiguous_position_side(
+    side, position_side, reduce_only
+) -> None:
+    with pytest.raises(ValidationError, match="long/short action"):
+        approved(
+            side=side,
+            position_side=position_side,
+            reduce_only=reduce_only,
+            order_type="market" if reduce_only else "limit",
+            limit_price=None if reduce_only else Decimal("57000.1"),
+        )
 
 
 def test_reduce_only_close_rejects_limit_or_attached_exit_shape() -> None:

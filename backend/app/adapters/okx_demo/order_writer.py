@@ -63,6 +63,7 @@ class ManagedOrder:
     client_order_id: str
     exchange_order_id: Optional[str]
     side: Literal["buy", "sell"]
+    position_side: Literal["long", "short"]
     order_type: Literal["limit", "post_only", "market"]
     contracts: Decimal
     limit_price: Optional[Decimal]
@@ -597,7 +598,10 @@ class OkxDemoOrderWriter:
                 self._store.order_for_attempt(parent),
                 reason_code="CLOSE_CLEANUP_LIMIT_REACHED",
             )
-        contracts, side = self._current_close_position(approved.instrument_id)
+        contracts, side = self._current_close_position(
+            approved.instrument_id,
+            approved.position_side,
+        )
         if contracts == 0:
             parent = self._store.transition(
                 parent,
@@ -626,6 +630,7 @@ class OkxDemoOrderWriter:
         if not self._leverage_matches(
             command.instrument_id,
             command.margin_mode,
+            command.position_side,
             command.leverage,
         ):
             raise OkxDemoWriteBlocked(
@@ -657,7 +662,7 @@ class OkxDemoOrderWriter:
         if (
             item.get("inst_id") != order.instrument_id
             or item.get("client_order_id") != order.client_order_id
-            or item.get("position_side") != "net"
+            or item.get("position_side") != order.position_side
             or item.get("margin_mode") != "isolated"
             or item.get("side") != order.side
             or item.get("order_type") != order.order_type
@@ -682,6 +687,7 @@ class OkxDemoOrderWriter:
         if self._leverage_matches(
             command.instrument_id,
             command.margin_mode,
+            command.position_side,
             command.leverage,
         ):
             return None, None
@@ -689,7 +695,7 @@ class OkxDemoOrderWriter:
             "instId": command.instrument_id,
             "lever": _decimal_text(command.leverage),
             "mgnMode": command.margin_mode,
-            "posSide": "net",
+            "posSide": command.position_side,
         }
         order, attempt = self._store.prepare_place(
             command,
@@ -712,7 +718,7 @@ class OkxDemoOrderWriter:
             if (
                 item.get("instId") != command.instrument_id
                 or item.get("mgnMode") != command.margin_mode
-                or item.get("posSide", "net") != "net"
+                or item.get("posSide") != command.position_side
                 or Decimal(str(item.get("lever"))) != command.leverage
             ):
                 raise OkxDemoRecoveryRequired("SET_LEVERAGE_ACK_MISMATCH")
@@ -764,6 +770,7 @@ class OkxDemoOrderWriter:
             if not self._leverage_matches(
                 order.instrument_id,
                 margin_mode,
+                str(attempt.safe_request_snapshot["posSide"]),
                 expected,
             ):
                 raise OkxDemoRecoveryRequired("LEVERAGE_NOT_RECONCILED")
@@ -806,6 +813,7 @@ class OkxDemoOrderWriter:
         self,
         instrument_id: str,
         margin_mode: str,
+        position_side: str,
         leverage: Decimal,
     ) -> bool:
         snapshot = self._read.leverage(instrument_id)
@@ -819,7 +827,7 @@ class OkxDemoOrderWriter:
         return (
             item.get("inst_id") == instrument_id
             and item.get("margin_mode") == margin_mode
-            and item.get("position_side") == "net"
+            and item.get("position_side") == position_side
             and observed == leverage
         )
 
@@ -828,18 +836,24 @@ class OkxDemoOrderWriter:
         command: NormalizedOrderCommand,
     ) -> None:
         snapshot = self._read.positions(command.instrument_id)
-        if len(snapshot.items) != 1:
-            raise OkxDemoWriteBlocked("close requires exactly one current net position")
-        item = snapshot.items[0]
+        matches = [
+            item
+            for item in snapshot.items
+            if item.get("inst_id") == command.instrument_id
+            and item.get("position_side") == command.position_side
+        ]
+        if len(matches) != 1:
+            raise OkxDemoWriteBlocked("close requires exactly one current position side")
+        item = matches[0]
         try:
             contracts = Decimal(str(item["contracts"]))
         except (KeyError, TypeError, ValueError):
             raise OkxDemoWriteBlocked("close position evidence is malformed") from None
-        expected_side = "sell" if contracts > 0 else "buy"
+        expected_side = "sell" if command.position_side == "long" else "buy"
         if (
             item.get("inst_id") != command.instrument_id
             or item.get("margin_mode") != "isolated"
-            or item.get("position_side") != "net"
+            or item.get("position_side") != command.position_side
             or contracts == 0
             or abs(contracts) != command.contracts
             or command.side != expected_side
@@ -852,9 +866,15 @@ class OkxDemoOrderWriter:
         snapshot = self._read.positions(order.instrument_id)
         if not snapshot.items:
             return True
-        if len(snapshot.items) != 1:
+        matches = [
+            item
+            for item in snapshot.items
+            if item.get("inst_id") == order.instrument_id
+            and item.get("position_side") == order.position_side
+        ]
+        if len(matches) != 1:
             return False
-        item = snapshot.items[0]
+        item = matches[0]
         try:
             contracts = Decimal(str(item["contracts"]))
         except (KeyError, TypeError, ValueError):
@@ -862,20 +882,27 @@ class OkxDemoOrderWriter:
         return (
             item.get("inst_id") == order.instrument_id
             and item.get("margin_mode") == "isolated"
-            and item.get("position_side") == "net"
+            and item.get("position_side") == order.position_side
             and contracts == 0
         )
 
     def _current_close_position(
         self,
         instrument_id: str,
+        position_side: Literal["long", "short"],
     ) -> tuple[Decimal, Literal["buy", "sell"]]:
         snapshot = self._read.positions(instrument_id)
         if not snapshot.items:
             return Decimal("0"), "sell"
-        if len(snapshot.items) != 1:
+        matches = [
+            item
+            for item in snapshot.items
+            if item.get("inst_id") == instrument_id
+            and item.get("position_side") == position_side
+        ]
+        if len(matches) != 1:
             raise OkxDemoWriteBlocked("close cleanup position is not unique")
-        item = snapshot.items[0]
+        item = matches[0]
         try:
             contracts = Decimal(str(item["contracts"]))
         except (KeyError, TypeError, ValueError):
@@ -883,10 +910,10 @@ class OkxDemoOrderWriter:
         if (
             item.get("inst_id") != instrument_id
             or item.get("margin_mode") != "isolated"
-            or item.get("position_side") != "net"
+            or item.get("position_side") != position_side
         ):
             raise OkxDemoWriteBlocked("close cleanup position identity mismatched")
-        return contracts, ("sell" if contracts > 0 else "buy")
+        return contracts, ("sell" if position_side == "long" else "buy")
 
     def _authorize_existing(
         self,

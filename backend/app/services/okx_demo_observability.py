@@ -14,6 +14,7 @@ from app.models.execution_lineage import (
 )
 from app.models.okx_demo_reconciliation import (
     OkxDemoAccountSnapshot,
+    OkxDemoExchangeEvent,
     OkxDemoFillSnapshot,
     OkxDemoOrderSnapshot,
     OkxDemoPositionSnapshot,
@@ -154,21 +155,36 @@ class OkxDemoObservabilityService:
             if state is not None and state.last_reconciliation_run_id is not None
             else None
         )
+        order_snapshot_ids = self._database_id_set(run, "order_snapshots")
+        position_snapshot_ids = self._database_id_set(run, "position_snapshots")
+        account_snapshot_ids = self._database_id_set(run, "account_snapshots")
+        event_ids = self._database_id_set(run, "exchange_events")
+        latest_exchange_event_id = self.db.scalars(
+            select(OkxDemoExchangeEvent.database_id)
+            .where(OkxDemoExchangeEvent.execution_target_id == target_id)
+            .order_by(OkxDemoExchangeEvent.database_id.desc())
+            .limit(1)
+        ).first()
         authoritative_orders = self._latest_by_identity(
             OkxDemoOrderSnapshot,
             "exchange_order_id",
+            database_ids=order_snapshot_ids,
             limit=max(limit * 4, 200),
         )
-        authoritative_positions = self._latest_positions(limit=max(limit * 4, 200))
+        authoritative_positions = self._latest_positions(
+            database_ids=position_snapshot_ids,
+            limit=max(limit * 4, 200),
+        )
         latest_account = self.db.scalars(
             select(OkxDemoAccountSnapshot)
             .where(OkxDemoAccountSnapshot.execution_target_id == target_id)
+            .where(OkxDemoAccountSnapshot.database_id.in_(account_snapshot_ids))
             .order_by(
                 OkxDemoAccountSnapshot.observed_at.desc(),
                 OkxDemoAccountSnapshot.database_id.desc(),
             )
             .limit(1)
-        ).first()
+        ).first() if account_snapshot_ids else None
 
         intent_by_id = {intent.id: intent for intent in intents}
         decisions = self._decisions(intent_by_id)
@@ -177,42 +193,27 @@ class OkxDemoObservabilityService:
             run=run,
         )
         reconciliation = self._reconciliation(state, run)
-        order_snapshot_ids = self._database_id_set(run, "order_snapshots")
-        position_snapshot_ids = self._database_id_set(run, "position_snapshots")
-        event_ids = self._database_id_set(run, "exchange_events")
         order_projection_current = all(
-            row.database_id in order_snapshot_ids
-            and row.event_database_id in event_ids
+            row.event_database_id in event_ids
             for row in authoritative_orders.values()
         )
         position_projection_current = all(
-            row.database_id in position_snapshot_ids
-            and row.event_database_id in event_ids
+            row.event_database_id in event_ids
             for row in authoritative_positions.values()
         )
-        authoritative_orders = {
-            key: row
-            for key, row in authoritative_orders.items()
-            if row.database_id in order_snapshot_ids
-            and row.event_database_id in event_ids
-        }
-        authoritative_positions = {
-            key: row
-            for key, row in authoritative_positions.items()
-            if row.database_id in position_snapshot_ids
-            and row.event_database_id in event_ids
-        }
         chains = self._full_chains(local_orders, run=run, decisions=decisions)
         projection_current = (
             fills_current
             and order_projection_current
             and position_projection_current
             and (
+                latest_exchange_event_id is None
+                or latest_exchange_event_id in event_ids
+            )
+            and (
                 latest_account is None
                 or (
-                    latest_account.database_id
-                    in self._database_id_set(run, "account_snapshots")
-                    and latest_account.event_database_id in event_ids
+                    latest_account.event_database_id in event_ids
                 )
             )
         )
@@ -335,11 +336,15 @@ class OkxDemoObservabilityService:
         model: Type[Snapshot],
         identity_name: str,
         *,
+        database_ids: set[int],
         limit: int,
     ) -> dict[str, Snapshot]:
+        if not database_ids:
+            return {}
         rows = self.db.scalars(
             select(model)
             .where(model.execution_target_id == ONLY_EXCHANGE_EXECUTION_TARGET_ID)
+            .where(model.database_id.in_(database_ids))
             .order_by(model.observed_at.desc(), model.database_id.desc())
             .limit(limit)
         ).all()
@@ -348,13 +353,21 @@ class OkxDemoObservabilityService:
             result.setdefault(str(getattr(row, identity_name)), row)
         return result
 
-    def _latest_positions(self, *, limit: int) -> dict[str, OkxDemoPositionSnapshot]:
+    def _latest_positions(
+        self,
+        *,
+        database_ids: set[int],
+        limit: int,
+    ) -> dict[str, OkxDemoPositionSnapshot]:
+        if not database_ids:
+            return {}
         rows = self.db.scalars(
             select(OkxDemoPositionSnapshot)
             .where(
                 OkxDemoPositionSnapshot.execution_target_id
                 == ONLY_EXCHANGE_EXECUTION_TARGET_ID
             )
+            .where(OkxDemoPositionSnapshot.database_id.in_(database_ids))
             .order_by(
                 OkxDemoPositionSnapshot.observed_at.desc(),
                 OkxDemoPositionSnapshot.database_id.desc(),
@@ -381,12 +394,16 @@ class OkxDemoObservabilityService:
     ]:
         if not exchange_order_ids:
             return {}, {}, True
+        snapshot_ids = self._database_id_set(run, "fill_snapshots")
+        if not snapshot_ids:
+            return {}, {}, True
         rows = self.db.scalars(
             select(OkxDemoFillSnapshot)
             .where(
                 OkxDemoFillSnapshot.execution_target_id
                 == ONLY_EXCHANGE_EXECUTION_TARGET_ID,
                 OkxDemoFillSnapshot.exchange_order_id.in_(exchange_order_ids),
+                OkxDemoFillSnapshot.database_id.in_(snapshot_ids),
             )
             .order_by(
                 OkxDemoFillSnapshot.observed_at.asc(),
@@ -396,12 +413,10 @@ class OkxDemoObservabilityService:
         result: dict[str, list[OkxDemoFillSummary]] = {}
         coverage: dict[str, bool] = {}
         all_current = True
-        snapshot_ids = self._database_id_set(run, "fill_snapshots")
         event_ids = self._database_id_set(run, "exchange_events")
         for row in rows:
             covered = (
-                row.database_id in snapshot_ids
-                and row.event_database_id in event_ids
+                row.event_database_id in event_ids
             )
             if not covered:
                 all_current = False

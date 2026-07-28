@@ -60,8 +60,6 @@ def _assert_safe_parent(parent: Path) -> Path:
     if stat.S_ISLNK(os.lstat(expanded).st_mode):
         raise ValueError("acceptance parent must not be a symlink")
     resolved = expanded.resolve(strict=True)
-    if not resolved.is_dir() or resolved in {Path("/"), REPO_ROOT, REPO_ROOT.parent}:
-        raise ValueError("unsafe acceptance parent")
     forbidden = {
         REAL_CANONICAL_ROOT,
         (REAL_CANONICAL_ROOT / "user_data").resolve(strict=False),
@@ -69,6 +67,8 @@ def _assert_safe_parent(parent: Path) -> Path:
     }
     if resolved in forbidden or _is_relative_to(resolved, REAL_CANONICAL_ROOT):
         raise ValueError("acceptance parent must not be the real canonical repository or artifact roots")
+    if not resolved.is_dir() or resolved in {Path("/"), REPO_ROOT, REPO_ROOT.parent}:
+        raise ValueError("unsafe acceptance parent")
     return resolved
 
 

@@ -8,11 +8,13 @@ from fastapi.testclient import TestClient
 import pytest
 from sqlalchemy.orm import Session
 
+from app.adapters.freqtrade.binary import resolve_freqtrade_binary
 from app.db.session import create_database_engine, create_session_factory, get_db
 from app.main import app
 from app.models import BacktestResult, BacktestRun, BacktestTask, Base
 from app.repositories import StrategyRepository
 from app.schemas import StrategyCreate, StrategyVersionCreate
+from app.services import local_backtest_trigger
 
 
 def client_with_backtest_db(tmp_path: Path) -> tuple[TestClient, object]:
@@ -296,14 +298,22 @@ def test_local_backtest_trigger_blocks_when_strategy_file_is_missing(
     assert checks["local_market_data"]["status"] == "READY"
 
 
-def test_local_backtest_trigger_blocks_when_freqtrade_binary_is_missing(
+def test_local_backtest_trigger_uses_runtime_binary_when_path_is_empty(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    binary = install_fake_freqtrade(tmp_path, monkeypatch)
+    runtime_env = tmp_path / "runtime.env"
+    runtime_env.write_text(f"FREQTRADE_BINARY={binary}\n", encoding="utf-8")
     empty_bin = tmp_path / "empty-bin"
     empty_bin.mkdir()
     monkeypatch.setenv("PATH", str(empty_bin))
     monkeypatch.delenv("FREQTRADE_BINARY", raising=False)
+    monkeypatch.setattr(
+        local_backtest_trigger,
+        "resolve_freqtrade_binary",
+        lambda: resolve_freqtrade_binary(runtime_env_path=runtime_env),
+    )
     client, session_factory = client_with_backtest_db(tmp_path)
     datadir = write_market_data(tmp_path)
     with session_factory() as db:
@@ -319,11 +329,10 @@ def test_local_backtest_trigger_blocks_when_freqtrade_binary_is_missing(
 
     assert response.status_code == 201
     payload = response.json()
-    assert payload["preflight_status"] == "blocked"
-    assert payload["tasks"][0]["status"] == "blocked"
-    assert "freqtrade binary is not available" in payload["tasks"][0]["error_message"]
+    assert payload["preflight_status"] == "ready"
     checks = checks_by_name(payload)
-    assert checks["freqtrade_binary"]["status"] == "BLOCKED"
+    assert checks["freqtrade_binary"]["status"] == "READY"
+    assert checks["freqtrade_binary"]["evidence"]["source"] == "runtime.env"
     assert checks["backtest_config"]["status"] == "READY"
 
 

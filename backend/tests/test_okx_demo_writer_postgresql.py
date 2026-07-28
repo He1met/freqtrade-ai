@@ -290,7 +290,7 @@ def _seed_approved_order(
             "order": {
                 "instrument_id": "BTC-USDT-SWAP",
                 "side": "buy",
-                "position_side": "net",
+                "position_side": "long",
                 "order_type": "limit",
                 "quantity": Decimal("1"),
                 "limit_price": Decimal("57000"),
@@ -315,7 +315,7 @@ def _seed_approved_order(
         client_order_id="PgWriterOrder001",
         instrument_id="BTC-USDT-SWAP",
         side="buy",
-        position_side="net",
+        position_side="long",
         order_type="limit",
         quantity="1",
         limit_price="57000",
@@ -999,14 +999,14 @@ def _postgres_position_event(quantity: str, sequence: int) -> dict:
         "execution_target": "OKX_DEMO",
         "source": "WS",
         "entity_kind": "POSITION",
-        "entity_key": "BTC-USDT-SWAP:net",
+        "entity_key": "BTC-USDT-SWAP:long",
         "source_sequence": sequence,
         "stream_generation": 1,
         "observed_at": NOW.isoformat(),
         "received_at": (NOW + timedelta(seconds=1)).isoformat(),
         "payload": {
             "instId": "BTC-USDT-SWAP",
-            "posSide": "net",
+            "posSide": "long",
             "pos": quantity,
             "avgPx": "50000" if quantity != "0" else "",
         },
@@ -1128,7 +1128,7 @@ def test_postgresql_reconciliation_evidence_is_append_only_for_runtime_role(
     with Session(postgres_writer_engine) as session:
         row = session.get(OkxDemoExchangeEvent, event_database_id)
         assert row is not None
-        assert row.entity_key == "BTC-USDT-SWAP:net"
+        assert row.entity_key == "BTC-USDT-SWAP:long"
 
 
 def test_postgresql_runtime_cannot_bypass_controlled_gate_or_run_provenance(
@@ -1181,7 +1181,7 @@ def test_postgresql_runtime_cannot_bypass_controlled_gate_or_run_provenance(
         "INSERT INTO exchange_positions ("
         "execution_target_id, instrument_id, position_side, quantity, "
         "snapshot, observed_at"
-        ") VALUES ('OKX_DEMO', 'BTC-USDT-SWAP', 'net', 0, "
+        ") VALUES ('OKX_DEMO', 'BTC-USDT-SWAP', 'long', 0, "
         "'{}'::jsonb, CURRENT_TIMESTAMP)",
     ):
         with pytest.raises(SQLAlchemyError):
@@ -1688,6 +1688,7 @@ def test_postgresql_recovery_grant_and_cancel_attempt_commit_together(
         )
         assert body["reduceOnly"] is True
         assert body["side"] == "sell"
+        assert body["posSide"] == "long"
 
     with Session(postgres_writer_engine) as session:
         assert session.get(

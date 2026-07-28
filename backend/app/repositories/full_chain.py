@@ -33,6 +33,10 @@ from app.models.execution_lineage import LOCAL_DRY_RUN_SCOPE_ID, OKX_DEMO_TARGET
 from app.models.full_chain import FULL_CHAIN_STAGES
 from app.repositories.research_jobs import ResearchJobRepository
 from app.schemas.dry_run_status import redact_dry_run_status_payload, redact_secret_text
+from app.services.strategy_promotion import (
+    StrategyPromotionBlocked,
+    promotion_candidate_digest,
+)
 
 
 TERMINAL_CHAIN_STATUSES = {
@@ -289,14 +293,17 @@ class FullChainRepository:
         )
         if any(value is None for value in required):
             raise FullChainBlocked("candidate approval is missing scored research lineage")
-        candidate_digest = _stable_digest(
-            {
-                "execution_target_id": OKX_DEMO_TARGET_ID,
-                "strategy_version_id": chain.strategy_version_id,
-                "backtest_result_id": chain.backtest_result_id,
-                "strategy_score_id": chain.strategy_score_id,
-            }
-        )
+        result = self.db.get(BacktestResult, chain.backtest_result_id)
+        score = self.db.get(StrategyScore, chain.strategy_score_id)
+        strategy_version = self.db.get(StrategyVersion, chain.strategy_version_id)
+        if result is None or score is None or strategy_version is None:
+            raise FullChainBlocked("candidate approval research records are missing")
+        try:
+            promotion, candidate_digest = promotion_candidate_digest(
+                result, score, strategy_version
+            )
+        except StrategyPromotionBlocked as exc:
+            raise FullChainBlocked("candidate promotion is blocked: {}".format(exc))
         existing = self.db.scalars(
             select(StrategyCandidateApproval).where(
                 StrategyCandidateApproval.full_chain_run_id == chain.id
@@ -313,12 +320,15 @@ class FullChainRepository:
             backtest_result_id=chain.backtest_result_id,
             strategy_score_id=chain.strategy_score_id,
             candidate_digest=candidate_digest,
+            promotion_policy_version=promotion["policy"]["policy_version"],
+            promotion_evidence=promotion,
             status="PENDING",
             requested_by=requested_by[:160],
             requested_at=current_time,
             expires_at=expires_at,
         )
         chain.status = "AWAITING_APPROVAL"
+        checkpoint.output_snapshot = {"promotion": promotion}
         self.db.add(approval)
         self.db.flush()
         chain.candidate_approval_id = approval.id
@@ -431,7 +441,10 @@ class FullChainRepository:
         else:
             checkpoint.status = "SUCCESS"
             checkpoint.database_ids = {"candidate_approval_id": approval.id}
-            checkpoint.output_snapshot = {"status": "APPROVED"}
+            checkpoint.output_snapshot = {
+                **checkpoint.output_snapshot,
+                "status": "APPROVED",
+            }
             checkpoint.completed_at = current_time
             chain.status = "APPROVED"
             chain.current_stage = "SIGNAL"
@@ -452,6 +465,42 @@ class FullChainRepository:
                 raise FullChainBlocked(
                     "ResearchJob candidate approval resume transition failed"
                 )
+        self.db.commit()
+        self.db.refresh(approval)
+        return approval
+
+    def revoke_candidate_approval(
+        self,
+        approval_id: int,
+        *,
+        revoked_by: str,
+        reason: str,
+        now: Optional[datetime] = None,
+    ) -> StrategyCandidateApproval:
+        """Revoke an approved candidate before any later chain stage can proceed."""
+
+        current_time = now or datetime.now(timezone.utc)
+        approval = self.db.get(StrategyCandidateApproval, approval_id)
+        if approval is None:
+            raise FullChainBlocked("candidate approval does not exist")
+        if approval.status != "APPROVED":
+            raise FullChainConflict("only an approved candidate can be revoked")
+        if not revoked_by.strip():
+            raise FullChainBlocked("candidate revocation actor is required")
+        safe_reason = redact_secret_text(reason)[:2000]
+        if not safe_reason.strip():
+            raise FullChainBlocked("candidate revocation reason is required")
+        chain = self.db.get(FullChainRun, approval.full_chain_run_id)
+        if chain is None or chain.status in TERMINAL_CHAIN_STATUSES:
+            raise FullChainBlocked("candidate approval chain is not active")
+
+        approval.status = "REVOKED"
+        approval.decided_by = revoked_by[:160]
+        approval.decision_reason = safe_reason
+        approval.decided_at = current_time
+        chain.status = "BLOCKED"
+        chain.terminal_reason = "Candidate approval revoked: {}".format(safe_reason)
+        chain.completed_at = current_time
         self.db.commit()
         self.db.refresh(approval)
         return approval
@@ -484,6 +533,7 @@ class FullChainRepository:
             or _as_utc(approval.expires_at) <= _as_utc(observed_at)
         ):
             raise FullChainBlocked("a current approved candidate is required for a signal")
+        self._require_current_candidate_approval(approval, chain, observed_at)
         if source_type not in {"database", "api_aggregate"}:
             raise FullChainBlocked("signal source must be database or api_aggregate")
         if (
@@ -538,6 +588,47 @@ class FullChainRepository:
         self.db.commit()
         self.db.refresh(signal)
         return signal
+
+    def _require_current_candidate_approval(
+        self,
+        approval: StrategyCandidateApproval,
+        chain: FullChainRun,
+        now: datetime,
+    ) -> None:
+        """Fail closed if post-approval strategy or market evidence drifted."""
+
+        result = self.db.get(BacktestResult, approval.backtest_result_id)
+        score = self.db.get(StrategyScore, approval.strategy_score_id)
+        version = self.db.get(StrategyVersion, approval.strategy_version_id)
+        try:
+            if result is None or score is None or version is None:
+                raise StrategyPromotionBlocked("candidate research records are missing")
+            evidence, digest = promotion_candidate_digest(result, score, version)
+            if approval.promotion_policy_version != evidence["policy"]["policy_version"]:
+                raise StrategyPromotionBlocked("promotion policy version changed")
+            if approval.promotion_evidence != evidence or approval.candidate_digest != digest:
+                raise StrategyPromotionBlocked("strategy or market evidence changed after approval")
+        except StrategyPromotionBlocked as exc:
+            reason = "Automatic promotion invalidation: {}".format(exc)
+            approval.status = "REVOKED"
+            approval.decided_by = "system:promotion-revalidation"
+            approval.decision_reason = reason
+            approval.decided_at = now
+            checkpoint = self._prepared_stage(chain.id, "CANDIDATE_APPROVAL")
+            checkpoint.status = "BLOCKED"
+            checkpoint.error_code = "CANDIDATE_APPROVAL_STALE"
+            checkpoint.error_message = reason
+            checkpoint.completed_at = now
+            checkpoint.output_snapshot = {
+                **checkpoint.output_snapshot,
+                "status": "REVOKED",
+                "revalidation_reason": reason,
+            }
+            chain.status = "BLOCKED"
+            chain.terminal_reason = reason
+            chain.completed_at = now
+            self.db.commit()
+            raise FullChainBlocked(reason)
 
     def finalize_reconciliation(
         self,

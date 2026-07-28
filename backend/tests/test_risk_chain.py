@@ -144,11 +144,13 @@ def _request(lineage: dict[str, int], now: datetime, factory=None) -> dict:
         "resource": "account",
         "stale": False,
         "authenticated": True,
-        "account_mode": "net",
+        "account_mode": "long_short_mode",
         "margin_mode": "isolated",
         "current_exposure": "0",
         "open_positions": 0,
-        "leverage": "2",
+        "exposure_by_position_side": {"long": "0", "short": "0"},
+        "open_positions_by_position_side": {"long": 0, "short": 0},
+        "leverage_by_position_side": {"long": "2", "short": "2"},
         "as_of": now.isoformat(),
         "expires_at": expiry,
     }
@@ -174,7 +176,7 @@ def _request(lineage: dict[str, int], now: datetime, factory=None) -> dict:
         },
         "instrument_id": "BTC-USDT-SWAP",
         "side": "buy",
-        "position_side": "net",
+        "position_side": "long",
         "order_type": "limit",
         "quantity": "0.01",
         "limit_price": "50000",
@@ -672,6 +674,62 @@ def test_score_threshold_is_authorization_evidence(session_factory) -> None:
     assert "threshold" in decision.evidence_snapshot["reasons"][0]
 
 
+@pytest.mark.parametrize(
+    ("side", "position_side", "reduce_only"),
+    [
+        ("buy", "short", False),
+        ("sell", "long", False),
+        ("buy", "long", True),
+        ("sell", "short", True),
+    ],
+)
+def test_ambiguous_or_opposite_side_risk_request_is_blocked(
+    session_factory, side, position_side, reduce_only
+) -> None:
+    now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
+    request = _request(_seed_lineage(session_factory), now, session_factory)
+    request.update(
+        side=side,
+        position_side=position_side,
+        reduce_only=reduce_only,
+    )
+
+    with session_factory() as db:
+        result = RiskChainService(db).evaluate(
+            idempotency_key="direction-{}-{}-{}".format(side, position_side, reduce_only),
+            request=request,
+            policy=_policy(),
+            now=now,
+        )
+
+    assert result.status == "BLOCKED"
+
+
+def test_gross_long_and_short_exposure_cannot_net_to_zero(session_factory) -> None:
+    now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
+    lineage = _seed_lineage(session_factory)
+    request = _request(lineage, now)
+    account = request["snapshots"]["account"]["content"]
+    account.update(
+        current_exposure="1400",
+        open_positions=2,
+        exposure_by_position_side={"long": "700", "short": "700"},
+        open_positions_by_position_side={"long": 1, "short": 1},
+    )
+    _resign(request, "account")
+    _register_snapshots(session_factory, request, now)
+
+    with session_factory() as db:
+        result = RiskChainService(db).evaluate(
+            idempotency_key="gross-exposure",
+            request=request,
+            policy=_policy(),
+            now=now,
+        )
+
+    assert result.status == "REJECTED"
+
+
 def test_policy_change_blocks_retry_and_revokes_old_permission(session_factory) -> None:
     now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
     request = _request(_seed_lineage(session_factory), now, session_factory)
@@ -775,6 +833,8 @@ def test_inverse_notional_uses_contract_face_value_and_account_baseline(
     account = request["snapshots"]["account"]["content"]
     account["current_exposure"] = "100"
     account["open_positions"] = 1
+    account["exposure_by_position_side"] = {"long": "100", "short": "0"}
+    account["open_positions_by_position_side"] = {"long": 1, "short": 0}
     _resign(request, "account")
     request["quantity"] = "2"
     _register_snapshots(session_factory, request, now)

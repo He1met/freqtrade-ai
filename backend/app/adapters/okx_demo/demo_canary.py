@@ -43,6 +43,10 @@ ALLOWED_INSTRUMENTS = frozenset({DEFAULT_INSTRUMENT})
 SIMULATED_TRADING_HEADER = ("x-simulated-trading", "1")
 REQUEST_TIMEOUT_SECONDS = 10
 MAX_NOTIONAL_USDT = Decimal("2000")
+# The canary is deliberately parameterised instead of treating one side as the
+# account default.  In long/short mode both sides are separate OKX identities.
+CANARY_POSITION_SIDE = "long"
+POSITION_SIDES = frozenset({"long", "short"})
 ARTIFACT_ROOT = (
     Path(__file__).resolve().parents[4]
     / ".freqtrade-ai"
@@ -183,6 +187,20 @@ def _validate_instrument(instrument: str) -> str:
     return instrument
 
 
+def _validate_position_side(position_side: str) -> str:
+    if position_side not in POSITION_SIDES:
+        raise OkxDemoCanaryBlocked("POSITION_SIDE_MUST_BE_LONG_OR_SHORT")
+    return position_side
+
+
+def _entry_side(position_side: str) -> str:
+    return "buy" if position_side == "long" else "sell"
+
+
+def _cleanup_side(position_side: str) -> str:
+    return "sell" if position_side == "long" else "buy"
+
+
 def _validate_client_order_id(value: str) -> str:
     if not CLIENT_ORDER_ID_PATTERN.fullmatch(value):
         raise OkxDemoCanaryBlocked("INVALID_PREDETERMINED_CLIENT_ORDER_ID")
@@ -234,6 +252,7 @@ def _query_order(
     *,
     expected_price: str,
     expected_size: str,
+    position_side: str = CANARY_POSITION_SIDE,
 ) -> Mapping[str, Any]:
     payload = transport.request(
         "GET",
@@ -249,10 +268,11 @@ def _query_order(
         or item.get("clOrdId") != cl_ord_id
         or item.get("tdMode") != "isolated"
         or item.get("ordType") != "post_only"
-        or item.get("side") != "buy"
-        or item.get("posSide") != "net"
+        or item.get("side") != _entry_side(position_side)
+        or item.get("posSide") != position_side
         or item.get("px") != expected_price
         or item.get("sz") != expected_size
+        or item.get("attachAlgoOrds") not in (None, [])
     ):
         raise OkxDemoCanaryBlocked("ORDER_QUERY_IDENTITY_MISMATCH")
     order_id = item.get("ordId")
@@ -277,15 +297,20 @@ def _query_order(
     return item
 
 
-def _position_size(payload: Any, instrument: str) -> Decimal:
+def _position_size(payload: Any, instrument: str, position_side: str) -> Decimal:
     data = _top_level_data(payload, "POSITION_QUERY_FAILED")
     total = Decimal("0")
     for item in data:
         if item.get("instId") != instrument:
             continue
-        if item.get("posSide") != "net" or item.get("mgnMode") != "isolated":
+        if item.get("posSide") not in POSITION_SIDES or item.get("mgnMode") != "isolated":
             raise OkxDemoCanaryBlocked("POSITION_QUERY_FAILED")
-        total += _decimal(item.get("pos", "0"), "POSITION_QUERY_FAILED")
+        position = _decimal(item.get("pos", "0"), "POSITION_QUERY_FAILED")
+        if item.get("posSide") != position_side:
+            if position != 0:
+                raise OkxDemoCanaryBlocked("OPPOSITE_SIDE_POSITION_DRIFT")
+            continue
+        total += position
     return total
 
 
@@ -388,6 +413,7 @@ def _cancel_with_reconciliation(
     *,
     expected_price: str,
     expected_size: str,
+    position_side: str,
 ) -> Mapping[str, Any]:
     body = {"instId": instrument, "clOrdId": cl_ord_id}
     for attempt in range(2):
@@ -413,6 +439,7 @@ def _cancel_with_reconciliation(
                 cl_ord_id,
                 expected_price=expected_price,
                 expected_size=expected_size,
+                position_side=position_side,
             )
             if reconciled.get("state") in {"canceled", "mmp_canceled"}:
                 return reconciled
@@ -428,6 +455,7 @@ def _cancel_with_reconciliation(
             cl_ord_id,
             expected_price=expected_price,
             expected_size=expected_size,
+            position_side=position_side,
         )
         if final_order.get("state") in {"canceled", "mmp_canceled"}:
             return final_order
@@ -440,21 +468,25 @@ def _cleanup_unexpected_position(
     transport: CanaryTransport,
     instrument: str,
     cleanup_cl_ord_id: str,
+    *,
+    position_side: str,
 ) -> bool:
-    position = _position_size(_query_positions(transport, instrument), instrument)
+    position = _position_size(
+        _query_positions(transport, instrument), instrument, position_side
+    )
     if position == 0:
         return True
     body = {
         "instId": instrument,
         "tdMode": "isolated",
-        "side": "sell" if position > 0 else "buy",
-        "posSide": "net",
+        "side": _cleanup_side(position_side),
+        "posSide": position_side,
         "ordType": "market",
         "sz": _format_decimal(abs(position)),
         "reduceOnly": True,
         "clOrdId": cleanup_cl_ord_id,
     }
-    expected_side = "sell" if position > 0 else "buy"
+    expected_side = _cleanup_side(position_side)
     expected_size = _format_decimal(abs(position))
     try:
         payload = transport.request(
@@ -484,6 +516,7 @@ def _cleanup_unexpected_position(
             cleanup_cl_ord_id,
             expected_side=expected_side,
             expected_size=expected_size,
+            position_side=position_side,
         )
         if cleanup_order.get("state") not in {
             "filled",
@@ -492,7 +525,9 @@ def _cleanup_unexpected_position(
         }:
             return False
         return (
-            _position_size(_query_positions(transport, instrument), instrument) == 0
+            _position_size(
+                _query_positions(transport, instrument), instrument, position_side
+            ) == 0
         )
     except (OkxDemoCanaryBlocked, OkxDemoTransportError):
         return False
@@ -505,6 +540,7 @@ def _query_cleanup_order(
     *,
     expected_side: str,
     expected_size: str,
+    position_side: str,
 ) -> Mapping[str, Any]:
     payload = transport.request(
         "GET",
@@ -521,7 +557,7 @@ def _query_cleanup_order(
         or item.get("tdMode") != "isolated"
         or item.get("ordType") != "market"
         or item.get("side") != expected_side
-        or item.get("posSide") != "net"
+        or item.get("posSide") != position_side
         or str(item.get("reduceOnly")).lower() != "true"
         or item.get("sz") != expected_size
         or not isinstance(item.get("ordId"), str)
@@ -543,6 +579,8 @@ def _reconcile_existing_cleanup(
     transport: CanaryTransport,
     instrument: str,
     cleanup_cl_ord_id: str,
+    *,
+    position_side: str,
 ) -> bool:
     try:
         payload = transport.request(
@@ -555,7 +593,7 @@ def _reconcile_existing_cleanup(
             return False
         side = data[0].get("side")
         size = str(data[0].get("sz", ""))
-        if side not in {"buy", "sell"} or _decimal(
+        if side != _cleanup_side(position_side) or _decimal(
             size,
             "REDUCE_ONLY_CLEANUP_IDENTITY_MISMATCH",
         ) <= 0:
@@ -566,6 +604,7 @@ def _reconcile_existing_cleanup(
             cleanup_cl_ord_id,
             expected_side=side,
             expected_size=size,
+            position_side=position_side,
         )
         if cleanup_order.get("state") not in {
             "filled",
@@ -574,7 +613,9 @@ def _reconcile_existing_cleanup(
         }:
             return False
         return (
-            _position_size(_query_positions(transport, instrument), instrument) == 0
+            _position_size(
+                _query_positions(transport, instrument), instrument, position_side
+            ) == 0
         )
     except (OkxDemoCanaryBlocked, OkxDemoTransportError):
         return False
@@ -613,6 +654,7 @@ def _reserve_canary(
     artifact_id: str,
     instrument: str,
     cl_ord_id: str,
+    position_side: str,
 ) -> None:
     cl_ord_id_hash = _hash_identifier(cl_ord_id)
     for path in target_dir.glob("*.json"):
@@ -632,6 +674,7 @@ def _reserve_canary(
             artifact_id=artifact_id,
             instrument=instrument,
             cl_ord_id=cl_ord_id,
+            position_side=position_side,
             order_id=None,
             sequence=[],
             reason_code="DURABLE_INTENT_BEFORE_NETWORK_WRITE",
@@ -668,6 +711,7 @@ def _result(
     order_id: Optional[str],
     sequence: list[str],
     reason_code: Optional[str],
+    position_side: str = CANARY_POSITION_SIDE,
     cleanup_cl_ord_id: Optional[str] = None,
     recovery_attempt_count: Optional[int] = None,
     recovery_last_attempt_at: Optional[str] = None,
@@ -677,11 +721,16 @@ def _result(
         "execution_target": "OKX_DEMO",
         "artifact_id": artifact_id,
         "instrument": instrument,
+        "position_side": position_side,
         "evidence": {
             "cl_ord_id_sha256": _hash_identifier(cl_ord_id),
             "order_id_sha256": _hash_identifier(order_id),
             "cleanup_cl_ord_id_sha256": _hash_identifier(cleanup_cl_ord_id),
             "simulated_trading_header": True,
+            "position_side": position_side,
+            # A post-only no-fill canary must not create or mutate TP/SL
+            # algo orders.  Persist this contract for side-specific review.
+            "tp_sl_scope": "not_attached_post_only_no_fill_canary",
             "sequence": sequence,
         },
     }
@@ -727,14 +776,16 @@ def _attest_account(
         item.strip().lower() for item in permissions.split(",") if item.strip()
     } != {"read_only", "trade"} or account.get("acctLv") != "2":
         raise OkxDemoCanaryBlocked("ACCOUNT_ATTESTATION_FAILED")
-    if account.get("posMode") != "net_mode":
-        raise OkxDemoCanaryBlocked("DUAL_SIDE_CANARY_NOT_IMPLEMENTED")
+    if account.get("posMode") != "long_short_mode":
+        raise OkxDemoCanaryBlocked("ACCOUNT_POSITION_MODE_INVALID")
 
 
 def _query_recovery_order(
     transport: CanaryTransport,
     instrument: str,
     cl_ord_id: str,
+    *,
+    position_side: str,
 ) -> tuple[Mapping[str, Any], str, str]:
     payload = transport.request(
         "GET",
@@ -752,10 +803,11 @@ def _query_recovery_order(
         or item.get("clOrdId") != cl_ord_id
         or item.get("tdMode") != "isolated"
         or item.get("ordType") != "post_only"
-        or item.get("side") != "buy"
-        or item.get("posSide") != "net"
+        or item.get("side") != _entry_side(position_side)
+        or item.get("posSide") != position_side
         or _decimal(price, "RECOVERY_ORDER_IDENTITY_MISMATCH") <= 0
         or _decimal(size, "RECOVERY_ORDER_IDENTITY_MISMATCH") <= 0
+        or item.get("attachAlgoOrds") not in (None, [])
     ):
         raise OkxDemoRecoveryRequired("RECOVERY_ORDER_IDENTITY_MISMATCH")
     validated = _query_order(
@@ -764,6 +816,7 @@ def _query_recovery_order(
         cl_ord_id,
         expected_price=price,
         expected_size=size,
+        position_side=position_side,
     )
     return validated, price, size
 
@@ -777,6 +830,9 @@ def _recover_nonterminal_canary(
 ) -> Dict[str, Any]:
     artifact_id = existing.get("artifact_id")
     instrument = existing.get("instrument")
+    position_side = _validate_position_side(
+        str(existing.get("position_side", CANARY_POSITION_SIDE))
+    )
     evidence = existing.get("evidence")
     raw_sequence = evidence.get("sequence", []) if isinstance(evidence, dict) else []
     sequence: list[str] = []
@@ -823,6 +879,7 @@ def _recover_nonterminal_canary(
                 artifact_id=artifact_id,
                 instrument=instrument,
                 cl_ord_id=cl_ord_id,
+                position_side=position_side,
                 order_id=None,
                 sequence=sequence,
                 reason_code="RESERVATION_ABORTED_BEFORE_WRITE",
@@ -841,6 +898,7 @@ def _recover_nonterminal_canary(
             active_transport,
             instrument,
             cl_ord_id,
+            position_side=position_side,
         )
         order_id = str(order["ordId"])
         if order.get("state") in {"live", "partially_filled"}:
@@ -851,6 +909,7 @@ def _recover_nonterminal_canary(
                     cl_ord_id,
                     expected_price=price,
                     expected_size=size,
+                    position_side=position_side,
                 )
             except (
                 OkxDemoCanaryBlocked,
@@ -868,12 +927,14 @@ def _recover_nonterminal_canary(
         position = _position_size(
             _query_positions(active_transport, instrument),
             instrument,
+            position_side,
         )
         if cleanup_was_intended:
             if not _reconcile_existing_cleanup(
                 active_transport,
                 instrument,
                 cleanup_cl_ord_id,
+                position_side=position_side,
             ):
                 raise OkxDemoRecoveryRequired("RECOVERY_CLEANUP_UNVERIFIED")
         elif _order_has_fill(order) or fills or position != 0:
@@ -884,6 +945,7 @@ def _recover_nonterminal_canary(
                     artifact_id=artifact_id,
                     instrument=instrument,
                     cl_ord_id=cl_ord_id,
+                    position_side=position_side,
                     order_id=order_id,
                     sequence=sequence,
                     reason_code="RECOVERY_CLEANUP_INTENT_PERSISTED",
@@ -897,19 +959,23 @@ def _recover_nonterminal_canary(
                 active_transport,
                 instrument,
                 cleanup_cl_ord_id,
+                position_side=position_side,
             ):
                 raise OkxDemoRecoveryRequired("RECOVERY_CLEANUP_UNVERIFIED")
         order, _price, _size = _query_recovery_order(
             active_transport,
             instrument,
             cl_ord_id,
+            position_side=position_side,
         )
         if order.get("state") not in {"canceled", "mmp_canceled", "filled"}:
             raise OkxDemoRecoveryRequired("ORIGINAL_ORDER_NOT_TERMINAL")
         if _pending_count(_query_pending(active_transport, instrument), instrument):
             raise OkxDemoRecoveryRequired("RECOVERY_PENDING_ORDERS_PRESENT")
         _query_fills(active_transport, instrument, order_id)
-        if _position_size(_query_positions(active_transport, instrument), instrument) != 0:
+        if _position_size(
+            _query_positions(active_transport, instrument), instrument, position_side
+        ) != 0:
             raise OkxDemoRecoveryRequired("RECOVERY_POSITION_PRESENT")
         _append_sequence_once(sequence, "recovery_verified")
         return _persist_result(
@@ -918,6 +984,7 @@ def _recover_nonterminal_canary(
                 artifact_id=artifact_id,
                 instrument=instrument,
                 cl_ord_id=cl_ord_id,
+                position_side=position_side,
                 order_id=order_id,
                 sequence=sequence,
                 reason_code="PRIOR_CANARY_RECOVERED",
@@ -940,6 +1007,7 @@ def _recover_nonterminal_canary(
                 artifact_id=artifact_id,
                 instrument=instrument,
                 cl_ord_id=cl_ord_id,
+                position_side=position_side,
                 order_id=order_id,
                 sequence=sequence,
                 reason_code="NONTERMINAL_OUTCOME_REQUIRES_RECOVERY",
@@ -961,6 +1029,7 @@ def _execute_canary(
     client_order_id: str,
     artifact_dir: Path,
     artifact_id: str,
+    position_side: str,
 ) -> Dict[str, Any]:
     cleanup_cl_ord_id = _validate_client_order_id(
         "FTAICLEAN{}".format(hashlib.sha256(client_order_id.encode()).hexdigest()[:20])
@@ -981,6 +1050,7 @@ def _execute_canary(
                 artifact_id=artifact_id,
                 instrument=instrument,
                 cl_ord_id=client_order_id,
+                position_side=position_side,
                 order_id=order_id,
                 sequence=sequence,
                 reason_code="REDUCE_ONLY_CLEANUP_INTENT_PERSISTED",
@@ -992,6 +1062,7 @@ def _execute_canary(
             active_transport,
             instrument,
             cleanup_cl_ord_id,
+            position_side=position_side,
         )
         sequence.append(sequence_value)
         original_terminal = False
@@ -1003,6 +1074,7 @@ def _execute_canary(
                 client_order_id,
                 expected_price=expected_price,
                 expected_size=expected_size,
+                position_side=position_side,
             )
             original_terminal = reconciled_original.get("state") in {
                 "canceled",
@@ -1021,6 +1093,7 @@ def _execute_canary(
                 _position_size(
                     _query_positions(active_transport, instrument),
                     instrument,
+                    position_side,
                 )
                 == 0
             )
@@ -1034,6 +1107,7 @@ def _execute_canary(
                 artifact_id=artifact_id,
                 instrument=instrument,
                 cl_ord_id=client_order_id,
+                position_side=position_side,
                 order_id=order_id,
                 sequence=sequence,
                 reason_code=(
@@ -1051,7 +1125,9 @@ def _execute_canary(
         sequence.append("account_attested")
         if _pending_count(_query_pending(active_transport, instrument), instrument):
             raise OkxDemoCanaryBlocked("INITIAL_PENDING_ORDERS_PRESENT")
-        if _position_size(_query_positions(active_transport, instrument), instrument) != 0:
+        if _position_size(
+            _query_positions(active_transport, instrument), instrument, position_side
+        ) != 0:
             raise OkxDemoCanaryBlocked("INITIAL_POSITION_PRESENT")
         sequence.append("initial_scope_empty")
 
@@ -1069,11 +1145,11 @@ def _execute_canary(
         order_body = {
             "instId": instrument,
             "tdMode": "isolated",
-            "side": "buy",
+            "side": _entry_side(position_side),
             "ordType": "post_only",
             "px": price,
             "sz": size,
-            "posSide": "net",
+            "posSide": position_side,
             "clOrdId": client_order_id,
         }
         sequence.append("place_intent_persisted")
@@ -1083,6 +1159,7 @@ def _execute_canary(
                 artifact_id=artifact_id,
                 instrument=instrument,
                 cl_ord_id=client_order_id,
+                position_side=position_side,
                 order_id=None,
                 sequence=sequence,
                 reason_code="PLACE_INTENT_PERSISTED",
@@ -1112,6 +1189,7 @@ def _execute_canary(
                     client_order_id,
                     expected_price=price,
                     expected_size=size,
+                    position_side=position_side,
                 )
             except (OkxDemoCanaryBlocked, OkxDemoTransportError):
                 raise OkxDemoRecoveryRequired("PLACE_OUTCOME_UNRESOLVED") from None
@@ -1128,6 +1206,7 @@ def _execute_canary(
                     client_order_id,
                     expected_price=price,
                     expected_size=size,
+                    position_side=position_side,
                 )
             except (OkxDemoCanaryBlocked, OkxDemoTransportError):
                 raise OkxDemoRecoveryRequired("PLACE_OUTCOME_UNRESOLVED") from None
@@ -1140,6 +1219,7 @@ def _execute_canary(
             client_order_id,
             expected_price=price,
             expected_size=size,
+            position_side=position_side,
         )
         order_id = str(order["ordId"])
         sequence.append("order_queried")
@@ -1152,6 +1232,7 @@ def _execute_canary(
                         client_order_id,
                         expected_price=price,
                         expected_size=size,
+                        position_side=position_side,
                     )
                 except (
                     OkxDemoCanaryBlocked,
@@ -1174,6 +1255,7 @@ def _execute_canary(
             client_order_id,
             expected_price=price,
             expected_size=size,
+            position_side=position_side,
         )
         sequence.extend(("cancel_requested", "cancel_state_queried"))
         if _order_has_fill(final_order):
@@ -1194,6 +1276,7 @@ def _execute_canary(
         final_position = _position_size(
             _query_positions(active_transport, instrument),
             instrument,
+            position_side,
         )
         if final_fill_count or final_position != 0:
             return finish_unexpected_exposure(
@@ -1208,6 +1291,7 @@ def _execute_canary(
                 artifact_id=artifact_id,
                 instrument=instrument,
                 cl_ord_id=client_order_id,
+                position_side=position_side,
                 order_id=order_id,
                 sequence=sequence,
                 reason_code=None,
@@ -1221,6 +1305,7 @@ def _execute_canary(
                 artifact_id=artifact_id,
                 instrument=instrument,
                 cl_ord_id=client_order_id,
+                position_side=position_side,
                 order_id=order_id,
                 sequence=sequence,
                 reason_code="NONTERMINAL_OUTCOME_REQUIRES_RECOVERY",
@@ -1234,6 +1319,7 @@ def _execute_canary(
                 artifact_id=artifact_id,
                 instrument=instrument,
                 cl_ord_id=client_order_id,
+                position_side=position_side,
                 order_id=order_id,
                 sequence=sequence,
                 reason_code="ACCOUNT_ATTESTATION_FAILED",
@@ -1254,6 +1340,7 @@ def _execute_canary(
                 artifact_id=artifact_id,
                 instrument=instrument,
                 cl_ord_id=client_order_id,
+                position_side=position_side,
                 order_id=order_id,
                 sequence=sequence,
                 reason_code=(
@@ -1272,6 +1359,7 @@ def _execute_canary(
                 artifact_id=artifact_id,
                 instrument=instrument,
                 cl_ord_id=client_order_id,
+                position_side=position_side,
                 order_id=order_id,
                 sequence=sequence,
                 reason_code=(
@@ -1293,6 +1381,7 @@ def _execute_canary(
                 artifact_id=artifact_id,
                 instrument=instrument,
                 cl_ord_id=client_order_id,
+                position_side=position_side,
                 order_id=order_id,
                 sequence=sequence,
                 reason_code=(
@@ -1310,12 +1399,14 @@ def run_canary(
     *,
     transport: Optional[CanaryTransport] = None,
     instrument: str = DEFAULT_INSTRUMENT,
+    position_side: str = CANARY_POSITION_SIDE,
     cl_ord_id: Optional[str] = None,
     artifact_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     active_environment = os.environ if environment is None else environment
     _validate_environment(active_environment)
     instrument = _validate_instrument(instrument)
+    position_side = _validate_position_side(position_side)
     artifact_id = uuid.uuid4().hex
     client_order_id = _validate_client_order_id(
         cl_ord_id or "FTAICANARY{}".format(artifact_id[:20])
@@ -1340,6 +1431,7 @@ def run_canary(
                 artifact_id=artifact_id,
                 instrument=instrument,
                 cl_ord_id=client_order_id,
+                position_side=position_side,
             )
         except OSError:
             raise OkxDemoCanaryBlocked(
@@ -1352,6 +1444,7 @@ def run_canary(
             client_order_id=client_order_id,
             artifact_dir=target_dir,
             artifact_id=artifact_id,
+            position_side=position_side,
         )
     finally:
         fcntl.flock(writer_lock.fileno(), fcntl.LOCK_UN)
@@ -1362,6 +1455,11 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--allow-demo-order", action="store_true")
     parser.add_argument("--instrument", default=DEFAULT_INSTRUMENT)
+    parser.add_argument(
+        "--position-side",
+        choices=sorted(POSITION_SIDES),
+        default=CANARY_POSITION_SIDE,
+    )
     return parser.parse_args(argv)
 
 
@@ -1376,7 +1474,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
         return 2
     try:
-        payload = run_canary(instrument=args.instrument)
+        payload = run_canary(
+            instrument=args.instrument,
+            position_side=args.position_side,
+        )
     except OkxDemoCanaryBlocked as exc:
         payload = {
             "status": "BLOCKED",

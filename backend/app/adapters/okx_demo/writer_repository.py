@@ -289,6 +289,8 @@ class SqlAlchemyOrderWriterStore:
                 grant is None
                 or grant.action != "REDUCE_ONLY"
                 or position is None
+                or grant.position_side not in ("long", "short")
+                or position.position_side != grant.position_side
                 or quantity <= 0
                 or quantity > Decimal(grant.max_quantity)
             ):
@@ -300,6 +302,7 @@ class SqlAlchemyOrderWriterStore:
                 .where(
                     TradeIntent.execution_target_id == OKX_DEMO,
                     TradeIntent.instrument_id == grant.instrument_id,
+                    TradeIntent.position_side == grant.position_side,
                 )
                 .order_by(TradeIntent.id.desc())
             ).first()
@@ -318,12 +321,14 @@ class SqlAlchemyOrderWriterStore:
                 )
             lineage_id = approval.id if approval is not None else intent.id
             client_order_id = "rcv{:020d}".format(grant.database_id)
-            side = "sell" if Decimal(position.quantity) > 0 else "buy"
+            # In long/short mode the close direction is derived from the
+            # persisted position identity, never from a signed/net quantity.
+            side = "sell" if grant.position_side == "long" else "buy"
             body = {
                 "instId": grant.instrument_id,
                 "tdMode": "isolated",
                 "side": side,
-                "posSide": "net",
+                "posSide": grant.position_side,
                 "ordType": "market",
                 "sz": format(quantity, "f"),
                 "clOrdId": client_order_id,
@@ -361,7 +366,10 @@ class SqlAlchemyOrderWriterStore:
                 quantity=quantity,
                 now=now,
             )
-            if claim.get("instrument_id") != grant.instrument_id:
+            if (
+                claim.get("instrument_id") != grant.instrument_id
+                or claim.get("position_side") != grant.position_side
+            ):
                 raise OkxDemoWriteBlocked(
                     "recovery close grant identity changed"
                 )
@@ -1048,6 +1056,7 @@ class SqlAlchemyOrderWriterStore:
             or command.client_order_id != intent.client_order_id
             or command.instrument_id != intent.instrument_id
             or command.side != intent.side
+            or command.position_side != intent.position_side
             or command.order_type != intent.order_type
             or command.contracts != intent.quantity
             or command.limit_price != intent.limit_price
@@ -1077,6 +1086,7 @@ class SqlAlchemyOrderWriterStore:
             or command.risk_decision_id != decision.id
             or command.instrument_id != intent.instrument_id
             or command.side != intent.side
+            or command.position_side != intent.position_side
             or command.contracts > intent.quantity
         ):
             raise OkxDemoWriteBlocked("cleanup command lineage is inconsistent")
@@ -1218,6 +1228,7 @@ class SqlAlchemyOrderWriterStore:
             client_order_id=order.client_order_id,
             exchange_order_id=order.exchange_order_id,
             side=intent.side,
+            position_side=intent.position_side,
             order_type=intent.order_type,
             contracts=intent.quantity,
             limit_price=intent.limit_price,

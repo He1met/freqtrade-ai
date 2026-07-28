@@ -87,7 +87,7 @@ def test_set_leverage_uses_the_same_attested_demo_boundary() -> None:
             "instId": "BTC-USDT-SWAP",
             "lever": "3",
             "mgnMode": "isolated",
-            "posSide": "net",
+            "posSide": "long",
         },
     )
 

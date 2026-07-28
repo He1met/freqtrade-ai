@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 
 import { ingestBacktestArtifact, triggerLocalBacktest } from "../../api/client";
+import {
+  loadStrategyPromotionStatus,
+  type StrategyPromotionStatus,
+} from "../../api/strategyPromotionApi";
 import type { MvpData } from "../../api/types";
 import { CopyableValue, StatusBadge } from "../../components/DisplayPrimitives";
 import { LatestActionFeedback } from "./ActionTimeline";
@@ -113,6 +117,8 @@ export function CandidateWorkbench({
   const [busyAction, setBusyAction] = useState<"backtest" | "score" | null>(null);
   const [pendingProof, setPendingProof] = useState<PendingProof | null>(null);
   const [profileDraft, setProfileDraft] = useState<BacktestProfileDraft>(DEFAULT_BACKTEST_PROFILE_DRAFT);
+  const [promotion, setPromotion] = useState<StrategyPromotionStatus | null>(null);
+  const [promotionError, setPromotionError] = useState<string | null>(null);
   const busyRef = useRef(false);
   const chain = candidateWorkbenchChain(data, selection);
   const strategyNames = new Map(data.strategies.map((strategy) => [strategy.id, strategy.name]));
@@ -250,6 +256,30 @@ export function CandidateWorkbench({
     }));
     setPendingProof(null);
   }, [data, pendingProof, recordAction]);
+
+  useEffect(() => {
+    if (!selection.strategyVersionId || !selection.backtestResultId || !selection.scoreId) {
+      setPromotion(null);
+      setPromotionError(null);
+      return;
+    }
+    const controller = new AbortController();
+    setPromotion(null);
+    setPromotionError(null);
+    loadStrategyPromotionStatus(
+      selection.strategyVersionId,
+      selection.backtestResultId,
+      selection.scoreId,
+      controller.signal,
+    )
+      .then(setPromotion)
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted) {
+          setPromotionError(error instanceof Error ? error.message : "策略晋级状态读取失败。");
+        }
+      });
+    return () => controller.abort();
+  }, [selection.backtestResultId, selection.scoreId, selection.strategyVersionId]);
 
   async function handleBacktest() {
     if (busyRef.current || backtestReason || !selection.strategyVersionId || !builtProfile.profile) return;
@@ -562,6 +592,37 @@ export function CandidateWorkbench({
               <span>持久评分</span>
               <strong>{selectedScore.totalScore.toFixed(1)}</strong>
               <CopyableValue label="StrategyScore ID" value={selectedScore.scoreId} />
+            </div>
+          ) : null}
+          {selectedScore ? (
+            <div className="lab-workbench__score" aria-live="polite">
+              <span>Demo 晋级门槛</span>
+              {promotionError ? (
+                <p className="lab-workbench__blocker">无法复核晋级证据：{promotionError}</p>
+              ) : promotion ? (
+                <div>
+                  <StatusBadge
+                    label={promotion.status === "ELIGIBLE" ? "可申请 Demo 审批" : promotion.status}
+                    status={promotion.status === "ELIGIBLE" ? "READY" : "BLOCKED"}
+                  />
+                  <p>{promotion.reason ?? "评分仅通过研究门槛；仍需独立人工审批与风险批准，不能直接交易。"}</p>
+                  {promotion.policy ? (
+                    <small>
+                      policy={promotion.policy.policy_version} · 最低 {promotion.policy.min_total_trades} 笔 · 最大回撤 {Math.round(promotion.policy.max_drawdown_pct * 100)}%
+                    </small>
+                  ) : null}
+                  {promotion.evidence ? (
+                    <small>
+                      净收益已计成本 · OOS {promotion.evidence.out_of_sample?.total_trades ?? 0} 笔 · 市场状态 {promotion.evidence.walk_forward?.market_states?.join(" / ") ?? "缺失"}
+                    </small>
+                  ) : null}
+                  {promotion.approval ? (
+                    <small>
+                      审批 #{promotion.approval.database_id}：{promotion.approval.status} · {promotion.approval.reason ?? "无决定原因"}
+                    </small>
+                  ) : null}
+                </div>
+              ) : <small>正在从 API 复核 policy、样本外和 walk-forward 证据…</small>}
             </div>
           ) : null}
           <LatestActionFeedback

@@ -222,6 +222,24 @@ test("keeps one explicit candidate chain and proves POST actions with matching G
       }] : []),
     });
   });
+  // This test owns its candidate/score fixtures in the browser, so its
+  // promotion read must use the same deterministic lineage instead of asking
+  // the isolated backend for IDs that only exist in this route fixture.
+  await page.route("**/api/strategy-promotions/evaluate?*", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({
+      status: "BLOCKED",
+      reason: "Issue #527 fixture has no independently approved Demo promotion.",
+      database_ids: {
+        strategy_version_id: 201,
+        backtest_result_id: 401,
+        strategy_score_id: 701,
+      },
+      policy: null,
+      evidence: null,
+      approval: null,
+    }),
+  }));
   await page.route("**/api/backtest-tasks/601/artifact-ingest", async (route) => {
     ingestPosts += 1;
     await ingestGate;

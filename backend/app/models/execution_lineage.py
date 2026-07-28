@@ -237,7 +237,12 @@ class TradeIntent(Base):
         ),
         CheckConstraint(
             "authorization_" "schema_version = 'LEGACY' OR status = 'BLOCKED' "
-            "OR position_side = 'net'",
+            "OR position_side = 'long' AND "
+            "(side = 'buy' AND reduce_only = FALSE OR "
+            "side = 'sell' AND reduce_only = TRUE) "
+            "OR position_side = 'short' AND "
+            "(side = 'sell' AND reduce_only = FALSE OR "
+            "side = 'buy' AND reduce_only = TRUE)",
             name="trade_intents_position_side_check",
         ),
         CheckConstraint(

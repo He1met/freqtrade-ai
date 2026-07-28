@@ -835,7 +835,9 @@ class RiskChainService:
             pattern=INSTRUMENT_ID,
         )
         side = self._enum(request.get("side"), "side", SIDE_VALUES)
-        position_side = self._enum(request.get("position_side"), "position_side", {"net"})
+        position_side = self._enum(
+            request.get("position_side"), "position_side", {"long", "short"}
+        )
         margin_mode = self._enum(request.get("margin_mode"), "margin_mode", {"isolated"})
         order_type = self._enum(request.get("order_type"), "order_type", ORDER_TYPES)
         if order_type not in set(policy["allowed_order_types"]):
@@ -862,13 +864,25 @@ class RiskChainService:
                 raise RiskChainBlocked("market order must not carry limit_price")
             limit_price = None
         leverage = _decimal(request.get("leverage"), "leverage", positive=True)
-        if leverage != _decimal(account["leverage"], "account leverage", positive=True):
+        leverage_by_position_side = account["leverage_by_position_side"]
+        if leverage != _decimal(
+            leverage_by_position_side[position_side],
+            "account leverage for position side",
+            positive=True,
+        ):
             raise RiskChainBlocked("request leverage does not match account snapshot")
         stop_loss = _decimal(request.get("stop_loss"), "stop_loss", positive=True)
         take_profit = _decimal(request.get("take_profit"), "take_profit", positive=True)
         reduce_only = request.get("reduce_only")
         if not isinstance(reduce_only, bool):
             raise RiskChainBlocked("reduce_only is invalid")
+        expected_position_side = (
+            "long" if (side == "buy") != reduce_only else "short"
+        )
+        if position_side != expected_position_side:
+            raise RiskChainBlocked(
+                "side, position_side and reduce_only do not describe one long/short action"
+            )
 
         lot_size = _decimal(instrument["lotSz"], "lotSz", positive=True)
         minimum_size = _decimal(instrument["minSz"], "minSz", positive=True)
@@ -898,11 +912,24 @@ class RiskChainService:
             take_profit=take_profit,
             reduce_only=reduce_only,
             notional=notional,
-            account_exposure=_decimal(
-                account["current_exposure"], "current_exposure"
+            account_exposure=sum(
+                (
+                    _decimal(
+                        account["exposure_by_position_side"][position_side],
+                        "account {} exposure".format(position_side),
+                    )
+                    for position_side in ("long", "short")
+                ),
+                Decimal("0"),
             ),
-            account_positions=_integer(
-                account["open_positions"], "open_positions"
+            account_positions=sum(
+                (
+                    _integer(
+                        account["open_positions_by_position_side"][position_side],
+                        "account {} position count".format(position_side),
+                    )
+                    for position_side in ("long", "short")
+                )
             ),
         )
 
@@ -1121,7 +1148,9 @@ class RiskChainService:
             "margin_mode",
             "current_exposure",
             "open_positions",
-            "leverage",
+            "exposure_by_position_side",
+            "open_positions_by_position_side",
+            "leverage_by_position_side",
             "as_of",
             "expires_at",
             "source",
@@ -1134,7 +1163,7 @@ class RiskChainService:
         account_as_of = _aware(account["as_of"], "account as_of")
         if (
             account["execution_target"] != OKX_DEMO_TARGET_ID
-            or account["account_mode"] != "net"
+            or account["account_mode"] != "long_short_mode"
             or account["margin_mode"] != "isolated"
             or account_as_of > now
             or account_as_of >= _aware(account["expires_at"], "account expires_at")
@@ -1143,7 +1172,48 @@ class RiskChainService:
         if _decimal(account["current_exposure"], "current_exposure") < 0:
             raise RiskChainBlocked("current exposure is invalid")
         _integer(account["open_positions"], "open_positions")
-        _decimal(account["leverage"], "account leverage", positive=True)
+        exposure_by_position_side = account["exposure_by_position_side"]
+        position_count_by_side = account["open_positions_by_position_side"]
+        if (
+            not isinstance(exposure_by_position_side, Mapping)
+            or set(exposure_by_position_side) != {"long", "short"}
+            or not isinstance(position_count_by_side, Mapping)
+            or set(position_count_by_side) != {"long", "short"}
+        ):
+            raise RiskChainBlocked("account side exposure evidence is invalid")
+        gross_exposure = sum(
+            (
+                _decimal(
+                    exposure_by_position_side[position_side],
+                    "account {} exposure".format(position_side),
+                )
+                for position_side in ("long", "short")
+            ),
+            Decimal("0"),
+        )
+        if gross_exposure < 0:
+            raise RiskChainBlocked("account side exposure is invalid")
+        gross_positions = sum(
+            (
+                _integer(
+                    position_count_by_side[position_side],
+                    "account {} position count".format(position_side),
+                )
+                for position_side in ("long", "short")
+            )
+        )
+        if _decimal(account["current_exposure"], "current_exposure") != gross_exposure:
+            raise RiskChainBlocked("account gross exposure does not match side evidence")
+        if _integer(account["open_positions"], "open_positions") != gross_positions:
+            raise RiskChainBlocked("account position count does not match side evidence")
+        leverage_by_position_side = account["leverage_by_position_side"]
+        if (
+            not isinstance(leverage_by_position_side, Mapping)
+            or set(leverage_by_position_side) != {"long", "short"}
+        ):
+            raise RiskChainBlocked("account leverage-by-position-side is invalid")
+        for position_side, leverage in leverage_by_position_side.items():
+            _decimal(leverage, "account leverage for {}".format(position_side), positive=True)
         return evidence, min(expiries), instrument, market, account
 
     @staticmethod
@@ -1201,8 +1271,8 @@ class RiskChainService:
             reasons.append("instrument is not allowlisted")
         if trusted.side not in set(policy["allowed_sides"]):
             reasons.append("side is not allowlisted")
-        if trusted.position_side != "net" or trusted.margin_mode != "isolated":
-            reasons.append("net isolated mode is required")
+        if trusted.position_side not in {"long", "short"} or trusted.margin_mode != "isolated":
+            reasons.append("long/short isolated mode is required")
         if trusted.leverage > _decimal(policy["max_leverage"], "max_leverage"):
             reasons.append("maximum leverage exceeded")
         if trusted.notional > _decimal(
