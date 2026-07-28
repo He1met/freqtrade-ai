@@ -5,6 +5,7 @@ import "../../styles/local-strategy-lab-generation-stage.css";
 import type { SubmissionState } from "./EvidencePanels";
 import {
   generationFormModel,
+  type OperatorCredentialReadiness,
   type ProviderCredentialReadiness,
 } from "./generationFormModel";
 import { SubmissionStatusPanel } from "./SubmissionStatusPanel";
@@ -19,6 +20,7 @@ export function GenerationStage({
   onOperatorTokenChange,
   onSubmit,
   operatorTokenPresent,
+  operatorCredentialReadiness,
   providerReadiness,
   submission,
 }: {
@@ -31,6 +33,7 @@ export function GenerationStage({
   onOperatorTokenChange: (value: string) => void;
   onSubmit: FormEventHandler<HTMLFormElement>;
   operatorTokenPresent: boolean;
+  operatorCredentialReadiness: OperatorCredentialReadiness;
   providerReadiness: ProviderCredentialReadiness;
   submission: SubmissionState;
 }) {
@@ -39,6 +42,7 @@ export function GenerationStage({
     idea,
     isSubmitting,
     operatorTokenPresent,
+    operatorCredentialReadiness,
     providerReadiness,
   });
 
@@ -94,6 +98,18 @@ export function GenerationStage({
                 type="password"
               />
               <strong id="operator-token-state">{model.operatorTokenLabel}</strong>
+              <StatusBadge
+                label={operatorCredentialReadiness.label}
+                showRaw
+                status={
+                  operatorCredentialReadiness.state === "ready"
+                    ? "READY"
+                    : operatorCredentialReadiness.state === "missing"
+                      ? "BLOCKED"
+                      : "UNKNOWN"
+                }
+              />
+              <small>{operatorCredentialReadiness.detail}</small>
             </label>
 
             <div className="generation-stage__readiness">
