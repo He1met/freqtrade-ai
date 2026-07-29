@@ -51,6 +51,15 @@ from app.adapters.okx_demo.models import (
     SnapshotMetadata,
     Ticker,
     TradingFee,
+    TrustedAccountSnapshotContent,
+    TrustedBbo,
+    TrustedClosedCandle,
+    TrustedInstrumentSnapshotContent,
+    TrustedMarketSnapshotContent,
+    TrustedMarkPrice,
+    TrustedPositionSummary,
+    TrustedSignalBundle,
+    TrustedSnapshotReference,
 )
 from app.adapters.okx_demo.transport import OkxReadTransport, UrllibOkxReadTransport
 
@@ -81,6 +90,22 @@ DEFAULT_TTLS = {
 ATTESTATION_TTL_SECONDS = 60
 ATTESTATION_RENEWAL_LEAD_SECONDS = 10
 FUTURE_SKEW_SECONDS = 5
+SIGNAL_TIMEFRAMES: dict[str, tuple[str, int]] = {
+    "1m": ("1m", 60),
+    "3m": ("3m", 3 * 60),
+    "5m": ("5m", 5 * 60),
+    "15m": ("15m", 15 * 60),
+    "30m": ("30m", 30 * 60),
+    "1h": ("1H", 60 * 60),
+    "2h": ("2H", 2 * 60 * 60),
+    "4h": ("4H", 4 * 60 * 60),
+    "6h": ("6H", 6 * 60 * 60),
+    "12h": ("12H", 12 * 60 * 60),
+    "1d": ("1D", 24 * 60 * 60),
+    "2d": ("2D", 2 * 24 * 60 * 60),
+    "3d": ("3D", 3 * 24 * 60 * 60),
+    "1w": ("1W", 7 * 24 * 60 * 60),
+}
 
 
 def _utc_now() -> datetime:
@@ -166,6 +191,14 @@ class OkxDemoReadClient(Protocol):
         before: Optional[str] = None,
         limit: int = 100,
     ) -> OkxReadSnapshot: ...
+    def capture_trusted_signal_bundle(
+        self,
+        db: Session,
+        *,
+        inst_id: str,
+        timeframe: str,
+        candle_limit: int = 100,
+    ) -> TrustedSignalBundle: ...
 
 
 class OkxDemoReadAdapter:
@@ -1447,6 +1480,375 @@ def create_attested_okx_demo_read_adapter(
                     except OkxDemoCredentialsUnavailable:
                         pass
                     raise
+
+            def capture_trusted_signal_bundle(
+                self,
+                db: Session,
+                *,
+                inst_id: str,
+                timeframe: str,
+                candle_limit: int = 100,
+            ) -> TrustedSignalBundle:
+                """Capture one typed, atomic evidence bundle for signal and risk."""
+
+                from app.core.config import get_settings
+                from app.services.risk_chain import canonical_digest
+
+                allowed_instruments = set(
+                    get_settings()
+                    .demo_automation_policy.demo_risk_policy.allowed_instruments
+                )
+                if inst_id not in allowed_instruments:
+                    self._block_signal_bundle(
+                        "instrument is not allowlisted by the OKX Demo risk policy"
+                    )
+                timeframe_mapping = SIGNAL_TIMEFRAMES.get(timeframe)
+                if timeframe_mapping is None:
+                    self._block_signal_bundle(
+                        "timeframe has no explicit OKX closed-candle mapping"
+                    )
+                if not 2 <= candle_limit <= 300:
+                    self._block_signal_bundle(
+                        "signal bundle requires between 2 and 300 candles"
+                    )
+                okx_bar, timeframe_seconds = timeframe_mapping
+
+                instrument_snapshot = self._engine.instruments(inst_id)
+                candle_snapshot = self._engine.candles(
+                    inst_id,
+                    bar=okx_bar,
+                    limit=candle_limit,
+                )
+                book_snapshot = self._engine.orderbook(inst_id, depth=1)
+                mark_snapshot = self._engine.mark_price(inst_id)
+                config_snapshot = self._engine.account_config()
+                positions_snapshot = self._engine.positions(inst_id)
+                leverage_snapshot = self._engine.leverage(inst_id)
+
+                if len(instrument_snapshot.items) != 1:
+                    self._block_signal_bundle(
+                        "signal bundle requires exactly one instrument"
+                    )
+                instrument = InstrumentSpec.model_validate(
+                    instrument_snapshot.items[0]
+                )
+                if instrument.inst_id != inst_id or instrument.state != "live":
+                    self._block_signal_bundle(
+                        "instrument is not an active OKX Demo SWAP"
+                    )
+
+                raw_candles = [
+                    Candle.model_validate(item)
+                    for item in candle_snapshot.items
+                ]
+                if len(raw_candles) != candle_limit:
+                    self._block_signal_bundle(
+                        "closed-candle response is incomplete"
+                    )
+                raw_timestamps = [item.timestamp for item in raw_candles]
+                if any(
+                    newer <= older
+                    for newer, older in zip(
+                        raw_timestamps,
+                        raw_timestamps[1:],
+                    )
+                ):
+                    self._block_signal_bundle(
+                        "closed candles are duplicated or out of newest-first order"
+                    )
+                candles = list(reversed(raw_candles))
+                if any(not item.confirmed for item in candles):
+                    self._block_signal_bundle(
+                        "signal bundle contains an unconfirmed candle"
+                    )
+                expected_delta = timedelta(seconds=timeframe_seconds)
+                if any(
+                    current.timestamp - previous.timestamp != expected_delta
+                    for previous, current in zip(candles, candles[1:])
+                ):
+                    self._block_signal_bundle(
+                        "closed candles are not continuous for the timeframe"
+                    )
+                typed_candles = tuple(
+                    TrustedClosedCandle.model_validate(
+                        candle.model_dump()
+                    )
+                    for candle in candles
+                )
+                serialized_candles = [
+                    candle.model_dump(mode="json")
+                    for candle in typed_candles
+                ]
+                candle_set_digest = canonical_digest(
+                    {
+                        "instrument_id": inst_id,
+                        "timeframe": timeframe,
+                        "candles": serialized_candles,
+                    }
+                )
+
+                if len(book_snapshot.items) != 1:
+                    self._block_signal_bundle(
+                        "signal bundle requires exactly one order book"
+                    )
+                order_book = OrderBook.model_validate(
+                    book_snapshot.items[0]
+                )
+                if (
+                    order_book.inst_id != inst_id
+                    or not order_book.bids
+                    or not order_book.asks
+                ):
+                    self._block_signal_bundle(
+                        "signal bundle order book has no complete BBO"
+                    )
+                best_bid = max(order_book.bids, key=lambda item: item.price)
+                best_ask = min(order_book.asks, key=lambda item: item.price)
+                if best_bid.price >= best_ask.price:
+                    self._block_signal_bundle(
+                        "signal bundle BBO is crossed or locked"
+                    )
+                bbo = TrustedBbo(
+                    bid_price=best_bid.price,
+                    bid_size=best_bid.size,
+                    ask_price=best_ask.price,
+                    ask_size=best_ask.size,
+                    timestamp=order_book.timestamp,
+                )
+
+                if len(mark_snapshot.items) != 1:
+                    self._block_signal_bundle(
+                        "signal bundle requires exactly one mark price"
+                    )
+                mark_price = ReferencePrice.model_validate(
+                    mark_snapshot.items[0]
+                )
+                if (
+                    mark_price.inst_id != inst_id
+                    or mark_price.price_kind != "mark"
+                    or mark_price.price <= 0
+                ):
+                    self._block_signal_bundle(
+                        "signal bundle mark price is invalid"
+                    )
+                mark = TrustedMarkPrice(
+                    price=mark_price.price,
+                    timestamp=mark_price.timestamp,
+                )
+
+                if len(config_snapshot.items) != 1:
+                    self._block_signal_bundle(
+                        "signal bundle requires exactly one account config"
+                    )
+                account_config = AccountConfig.model_validate(
+                    config_snapshot.items[0]
+                )
+                if account_config.position_mode != "long_short_mode":
+                    self._block_signal_bundle(
+                        "OKX Demo account is not in long_short_mode"
+                    )
+
+                positions = [
+                    Position.model_validate(item)
+                    for item in positions_snapshot.items
+                ]
+                if any(
+                    item.inst_id != inst_id
+                    or item.margin_mode != "isolated"
+                    or item.position_side not in {"long", "short"}
+                    or item.contracts < 0
+                    for item in positions
+                ):
+                    self._block_signal_bundle(
+                        "account positions are not isolated long/short evidence"
+                    )
+                leverages = [
+                    LeverageInfo.model_validate(item)
+                    for item in leverage_snapshot.items
+                ]
+                leverage_by_side: dict[str, Decimal] = {}
+                for item in leverages:
+                    if (
+                        item.inst_id != inst_id
+                        or item.margin_mode != "isolated"
+                        or item.position_side not in {"long", "short"}
+                        or item.leverage <= 0
+                        or item.position_side in leverage_by_side
+                    ):
+                        self._block_signal_bundle(
+                            "account leverage evidence is invalid or duplicated"
+                        )
+                    leverage_by_side[item.position_side] = item.leverage
+                if set(leverage_by_side) != {"long", "short"}:
+                    self._block_signal_bundle(
+                        "account leverage evidence must cover long and short"
+                    )
+
+                exposure_by_side = {
+                    "long": Decimal("0"),
+                    "short": Decimal("0"),
+                }
+                positions_by_side = {"long": 0, "short": 0}
+                position_summaries = []
+                for position in positions:
+                    if position.contracts == 0:
+                        continue
+                    pricing = position.mark_price or mark_price.price
+                    exposure = (
+                        position.contracts
+                        * instrument.contract_value
+                        * pricing
+                        if instrument.contract_type == "linear"
+                        else position.contracts * instrument.contract_value
+                    )
+                    exposure_by_side[position.position_side] += exposure
+                    positions_by_side[position.position_side] += 1
+                    position_summaries.append(
+                        TrustedPositionSummary(
+                            position_side=position.position_side,
+                            contracts=position.contracts,
+                            mark_price=position.mark_price,
+                            leverage=position.leverage,
+                            timestamp=position.timestamp,
+                        )
+                    )
+
+                fetched_snapshots = (
+                    instrument_snapshot,
+                    candle_snapshot,
+                    book_snapshot,
+                    mark_snapshot,
+                    config_snapshot,
+                    positions_snapshot,
+                    leverage_snapshot,
+                )
+                common_expiry = min(
+                    *(
+                        snapshot.metadata.expires_at
+                        for snapshot in fetched_snapshots
+                    ),
+                    self._attested_session.expires_at,
+                )
+                observed_at = _utc_now()
+                if observed_at.tzinfo is None:
+                    self._block_signal_bundle(
+                        "signal bundle clock is not timezone-aware"
+                    )
+                observed_at = observed_at.astimezone(timezone.utc)
+                if observed_at >= common_expiry:
+                    self._block_signal_bundle(
+                        "signal bundle expired before atomic persistence"
+                    )
+                market_as_of = max(
+                    candles[-1].timestamp,
+                    order_book.timestamp,
+                    mark_price.timestamp,
+                )
+                account_as_of = max(
+                    config_snapshot.metadata.fetched_at,
+                    positions_snapshot.metadata.fetched_at,
+                    leverage_snapshot.metadata.fetched_at,
+                )
+
+                instrument_content = TrustedInstrumentSnapshotContent(
+                    instId=instrument.inst_id,
+                    ctVal=instrument.contract_value,
+                    ctValCcy=instrument.contract_value_ccy,
+                    lotSz=instrument.lot_size,
+                    minSz=instrument.min_size,
+                    tickSz=instrument.tick_size,
+                    contract_shape=instrument.contract_type,
+                    state=instrument.state,
+                    expires_at=common_expiry,
+                )
+                market_content = TrustedMarketSnapshotContent(
+                    instrument_id=inst_id,
+                    timeframe=timeframe,
+                    okx_bar=okx_bar,
+                    reference_price=mark_price.price,
+                    as_of=market_as_of,
+                    first_candle_at=candles[0].timestamp,
+                    last_candle_at=candles[-1].timestamp,
+                    candle_count=len(candles),
+                    candle_set_digest=candle_set_digest,
+                    confirmed_candles=typed_candles,
+                    bbo=bbo,
+                    mark=mark,
+                    expires_at=common_expiry,
+                )
+                account_content = TrustedAccountSnapshotContent(
+                    current_exposure=sum(
+                        exposure_by_side.values(),
+                        Decimal("0"),
+                    ),
+                    open_positions=sum(positions_by_side.values()),
+                    exposure_by_position_side=exposure_by_side,
+                    open_positions_by_position_side=positions_by_side,
+                    leverage_by_position_side=leverage_by_side,
+                    positions=tuple(position_summaries),
+                    as_of=account_as_of,
+                    expires_at=common_expiry,
+                )
+
+                self._attested_session.bind_database(db)
+                self._attested_session._renew_if_needed(observed_at)
+                contents = {
+                    "instrument": instrument_content.model_dump(mode="json"),
+                    "market": market_content.model_dump(mode="json"),
+                    "account": account_content.model_dump(mode="json"),
+                }
+                rows = {}
+                try:
+                    with db.begin_nested():
+                        for kind, content in contents.items():
+                            normalized = _normalize_attested_snapshot(
+                                self._attested_session._risk_capability,
+                                kind=kind,
+                                content=content,
+                                observed_at=observed_at,
+                                expires_at=common_expiry,
+                            )
+                            rows[kind] = _write_attested_snapshot(
+                                db,
+                                self._attested_session._risk_capability,
+                                normalized,
+                                now=observed_at,
+                            )
+                except BaseException:
+                    try:
+                        self._attested_session.revoke("WRITE_FAILURE")
+                    except OkxDemoCredentialsUnavailable:
+                        pass
+                    raise
+
+                def reference(kind: str) -> TrustedSnapshotReference:
+                    row = rows[kind]
+                    return TrustedSnapshotReference(
+                        kind=kind,
+                        database_id=row.database_id,
+                        snapshot_id=row.snapshot_id,
+                        digest=row.digest,
+                        expires_at=common_expiry,
+                    )
+
+                return TrustedSignalBundle(
+                    instrument_id=inst_id,
+                    timeframe=timeframe,
+                    candle_set_digest=candle_set_digest,
+                    observed_at=observed_at,
+                    expires_at=common_expiry,
+                    instrument=reference("instrument"),
+                    market=reference("market"),
+                    account=reference("account"),
+                )
+
+            @staticmethod
+            def _block_signal_bundle(message: str) -> None:
+                raise OkxReadAdapterError(
+                    kind="INVALID_SIGNAL_BUNDLE",
+                    status="BLOCKED",
+                    message=message,
+                )
 
             def close(self) -> None:
                 self._attested_session.revoke("FACTORY_CLOSE")
