@@ -5,6 +5,9 @@ import json
 from typing import Mapping, Optional
 
 import pytest
+from sqlalchemy import create_engine, event, select
+from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
 
 from app.adapters.okx_demo import (
     InstrumentSpec,
@@ -15,6 +18,11 @@ from app.adapters.okx_demo import (
     UrllibOkxReadTransport,
     create_attested_okx_demo_read_adapter,
 )
+from app.adapters.okx_demo.models import (
+    OkxReadSnapshot,
+    SnapshotMetadata,
+    TrustedSignalBundle,
+)
 from app.adapters.okx_demo import credential_preflight as preflight
 from app.adapters.okx_demo import credentials as credential_boundary
 from app.adapters.okx_demo import read_adapter as read_boundary
@@ -23,6 +31,10 @@ from app.adapters.okx_demo.write_transport import (
     _create_attested_writer_credential_bridge,
     _create_production_write_transport,
 )
+from app.models import Base
+from app.models.execution_lineage import OkxDemoTrustedSnapshot
+from app.repositories.execution_lineage import ensure_execution_scope_catalog
+from app.services.risk_chain import canonical_digest
 
 
 NOW = datetime(2026, 7, 27, 8, 0, tzinfo=timezone.utc)
@@ -129,6 +141,177 @@ def adapter(payloads, *, credentials=None, status_code=200, ttl_seconds=None):
 
 def envelope(data, code="0"):
     return {"code": code, "msg": "", "data": data}
+
+
+def trusted_read_snapshot(
+    resource: str,
+    items: list[dict],
+    *,
+    authenticated: bool,
+    expires_at: datetime = NOW + timedelta(seconds=30),
+) -> OkxReadSnapshot:
+    return OkxReadSnapshot(
+        metadata=SnapshotMetadata(
+            resource=resource,
+            fetched_at=NOW,
+            exchange_timestamp=NOW - timedelta(seconds=1),
+            expires_at=expires_at,
+            stale=False,
+            authenticated=authenticated,
+        ),
+        items=items,
+    )
+
+
+def trusted_bundle_engine_snapshots(*, confirmed: bool = True) -> dict[str, OkxReadSnapshot]:
+    candle_rows = [
+        {
+            "timestamp": NOW - timedelta(minutes=minute),
+            "open": str(100 + minute),
+            "high": str(102 + minute),
+            "low": str(99 + minute),
+            "close": str(101 + minute),
+            "volume": "12",
+            "volume_ccy": "1200",
+            "confirmed": confirmed,
+        }
+        for minute in (1, 2, 3)
+    ]
+    return {
+        "instruments": trusted_read_snapshot(
+            "instruments",
+            [
+                {
+                    "inst_id": "BTC-USDT-SWAP",
+                    "inst_type": "SWAP",
+                    "base_ccy": "BTC",
+                    "quote_ccy": "USDT",
+                    "settle_ccy": "USDT",
+                    "contract_type": "linear",
+                    "contract_value": "0.01",
+                    "contract_value_ccy": "BTC",
+                    "lot_size": "1",
+                    "min_size": "1",
+                    "tick_size": "0.1",
+                    "state": "live",
+                    "listed_at": None,
+                }
+            ],
+            authenticated=False,
+        ),
+        "candles": trusted_read_snapshot(
+            "candles",
+            candle_rows,
+            authenticated=False,
+        ),
+        "orderbook": trusted_read_snapshot(
+            "orderbook",
+            [
+                {
+                    "inst_id": "BTC-USDT-SWAP",
+                    "bids": [{"price": "100", "size": "2", "orders": 1}],
+                    "asks": [{"price": "101", "size": "3", "orders": 1}],
+                    "timestamp": NOW - timedelta(seconds=1),
+                }
+            ],
+            authenticated=False,
+            expires_at=NOW + timedelta(seconds=5),
+        ),
+        "mark_price": trusted_read_snapshot(
+            "mark_price",
+            [
+                {
+                    "inst_id": "BTC-USDT-SWAP",
+                    "price_kind": "mark",
+                    "price": "100.5",
+                    "timestamp": NOW - timedelta(seconds=1),
+                }
+            ],
+            authenticated=False,
+        ),
+        "account_config": trusted_read_snapshot(
+            "account_config",
+            [
+                {
+                    "account_level": "2",
+                    "position_mode": "long_short_mode",
+                    "auto_loan": False,
+                    "greeks_type": "PA",
+                }
+            ],
+            authenticated=True,
+        ),
+        "positions": trusted_read_snapshot(
+            "positions",
+            [
+                {
+                    "inst_id": "BTC-USDT-SWAP",
+                    "margin_mode": "isolated",
+                    "position_side": "long",
+                    "contracts": "2",
+                    "available_contracts": "2",
+                    "average_price": "99",
+                    "mark_price": "100.5",
+                    "liquidation_price": "50",
+                    "leverage": "2",
+                    "margin_ratio": "10",
+                    "unrealized_pnl": "1",
+                    "timestamp": NOW - timedelta(seconds=1),
+                }
+            ],
+            authenticated=True,
+        ),
+        "leverage": trusted_read_snapshot(
+            "leverage",
+            [
+                {
+                    "inst_id": "BTC-USDT-SWAP",
+                    "margin_mode": "isolated",
+                    "position_side": "long",
+                    "leverage": "2",
+                },
+                {
+                    "inst_id": "BTC-USDT-SWAP",
+                    "margin_mode": "isolated",
+                    "position_side": "short",
+                    "leverage": "2",
+                },
+            ],
+            authenticated=True,
+        ),
+    }
+
+
+def install_trusted_bundle_engine(client, snapshots) -> None:
+    client._engine.instruments = lambda inst_id: snapshots["instruments"]
+    client._engine.candles = (
+        lambda inst_id, *, bar, limit: snapshots["candles"]
+    )
+    client._engine.orderbook = (
+        lambda inst_id, *, depth: snapshots["orderbook"]
+    )
+    client._engine.mark_price = lambda inst_id: snapshots["mark_price"]
+    client._engine.account_config = lambda: snapshots["account_config"]
+    client._engine.positions = lambda inst_id: snapshots["positions"]
+    client._engine.leverage = lambda inst_id: snapshots["leverage"]
+
+
+def trusted_bundle_db() -> Session:
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+
+    @event.listens_for(engine, "connect")
+    def enable_foreign_keys(connection, _record):
+        connection.execute("PRAGMA foreign_keys=ON")
+
+    Base.metadata.create_all(engine)
+    db = Session(engine)
+    ensure_execution_scope_catalog(db)
+    db.commit()
+    return db
 
 
 def attested_account(uid: str = "demo-account-a") -> dict[str, str]:
@@ -1341,3 +1524,218 @@ def test_exact_queries_reject_mismatched_response_identity(
     assert exc_info.value.kind == "INVALID_RESPONSE"
     assert exc_info.value.status == "FAILED"
     assert len(transport.calls) == 1
+
+
+def test_attested_client_captures_typed_atomic_signal_bundle(monkeypatch) -> None:
+    account = attested_account()
+    install_attestation(monkeypatch, account)
+    monkeypatch.setattr(read_boundary, "_utc_now", lambda: NOW)
+    client = create_attested_okx_demo_read_adapter(
+        ephemeral_environment(account)
+    )
+    install_trusted_bundle_engine(
+        client,
+        trusted_bundle_engine_snapshots(),
+    )
+    db = trusted_bundle_db()
+    try:
+        first = client.capture_trusted_signal_bundle(
+            db,
+            inst_id="BTC-USDT-SWAP",
+            timeframe="1m",
+            candle_limit=3,
+        )
+        second = client.capture_trusted_signal_bundle(
+            db,
+            inst_id="BTC-USDT-SWAP",
+            timeframe="1m",
+            candle_limit=3,
+        )
+        db.commit()
+
+        assert isinstance(first, TrustedSignalBundle)
+        assert first == second
+        assert first.execution_target == "OKX_DEMO"
+        assert first.expires_at == NOW + timedelta(seconds=5)
+        assert first.candle_set_digest == canonical_digest(
+            {
+                "instrument_id": "BTC-USDT-SWAP",
+                "timeframe": "1m",
+                "candles": [
+                    {
+                        "timestamp": (
+                            NOW - timedelta(minutes=minute)
+                        ).isoformat().replace("+00:00", "Z"),
+                        "open": str(100 + minute),
+                        "high": str(102 + minute),
+                        "low": str(99 + minute),
+                        "close": str(101 + minute),
+                        "volume": "12",
+                        "volume_ccy": "1200",
+                        "confirmed": True,
+                    }
+                    for minute in (3, 2, 1)
+                ],
+            }
+        )
+        assert {
+            first.instrument.kind,
+            first.market.kind,
+            first.account.kind,
+        } == {"instrument", "market", "account"}
+        assert db.scalars(select(OkxDemoTrustedSnapshot)).all().__len__() == 3
+        rows = {
+            row.kind: row
+            for row in db.scalars(select(OkxDemoTrustedSnapshot)).all()
+        }
+        assert {
+            rows["instrument"].attested_session_id,
+            rows["market"].attested_session_id,
+            rows["account"].attested_session_id,
+        } == {rows["market"].attested_session_id}
+        assert rows["market"].content_json["candle_set_digest"] == (
+            first.candle_set_digest
+        )
+        assert len(rows["market"].content_json["confirmed_candles"]) == 3
+        assert rows["market"].content_json["bbo"] == {
+            "bid_price": "100",
+            "bid_size": "2",
+            "ask_price": "101",
+            "ask_size": "3",
+            "timestamp": (NOW - timedelta(seconds=1))
+            .isoformat()
+            .replace("+00:00", "Z"),
+        }
+        assert rows["market"].content_json["mark"]["price"] == "100.5"
+        assert rows["account"].content_json["account_mode"] == "long_short_mode"
+        assert rows["account"].content_json["margin_mode"] == "isolated"
+        assert rows["account"].content_json["leverage_by_position_side"] == {
+            "long": "2",
+            "short": "2",
+        }
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            lambda snapshots: snapshots["candles"].items[0].update(
+                confirmed=False
+            ),
+            "unconfirmed candle",
+        ),
+        (
+            lambda snapshots: snapshots["candles"].items[1].update(
+                timestamp=NOW - timedelta(minutes=1)
+            ),
+            "duplicated or out of newest-first order",
+        ),
+        (
+            lambda snapshots: snapshots["account_config"].items[0].update(
+                position_mode="net_mode"
+            ),
+            "long_short_mode",
+        ),
+        (
+            lambda snapshots: snapshots["leverage"].items.pop(),
+            "must cover long and short",
+        ),
+    ],
+)
+def test_signal_bundle_component_failure_persists_no_partial_rows(
+    monkeypatch,
+    mutation,
+    message,
+) -> None:
+    account = attested_account()
+    install_attestation(monkeypatch, account)
+    monkeypatch.setattr(read_boundary, "_utc_now", lambda: NOW)
+    client = create_attested_okx_demo_read_adapter(
+        ephemeral_environment(account)
+    )
+    snapshots = trusted_bundle_engine_snapshots()
+    mutation(snapshots)
+    install_trusted_bundle_engine(client, snapshots)
+    db = trusted_bundle_db()
+    try:
+        with pytest.raises(OkxReadAdapterError, match=message):
+            client.capture_trusted_signal_bundle(
+                db,
+                inst_id="BTC-USDT-SWAP",
+                timeframe="1m",
+                candle_limit=3,
+            )
+        assert db.scalars(select(OkxDemoTrustedSnapshot)).all() == []
+    finally:
+        db.close()
+
+
+def test_signal_bundle_database_write_is_all_or_nothing(
+    monkeypatch,
+) -> None:
+    from app.services import risk_chain
+
+    account = attested_account()
+    install_attestation(monkeypatch, account)
+    monkeypatch.setattr(read_boundary, "_utc_now", lambda: NOW)
+    real_writer = risk_chain._write_attested_snapshot
+    calls = []
+
+    def fail_second_write(*args, **kwargs):
+        calls.append(args[2].kind)
+        if len(calls) == 2:
+            raise RuntimeError("synthetic second snapshot failure")
+        return real_writer(*args, **kwargs)
+
+    monkeypatch.setattr(
+        risk_chain,
+        "_write_attested_snapshot",
+        fail_second_write,
+    )
+    client = create_attested_okx_demo_read_adapter(
+        ephemeral_environment(account)
+    )
+    monkeypatch.setattr(
+        client._attested_session,
+        "revoke",
+        lambda *_args, **_kwargs: None,
+    )
+    install_trusted_bundle_engine(
+        client,
+        trusted_bundle_engine_snapshots(),
+    )
+    db = trusted_bundle_db()
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match="synthetic second snapshot failure",
+        ):
+            client.capture_trusted_signal_bundle(
+                db,
+                inst_id="BTC-USDT-SWAP",
+                timeframe="1m",
+                candle_limit=3,
+            )
+        assert calls == ["instrument", "market"]
+        assert db.scalars(select(OkxDemoTrustedSnapshot)).all() == []
+    finally:
+        db.close()
+
+
+def test_only_attested_production_client_exposes_typed_bundle_capture(
+    monkeypatch,
+) -> None:
+    account = attested_account()
+    install_attestation(monkeypatch, account)
+    monkeypatch.setattr(read_boundary, "_utc_now", lambda: NOW)
+    production = create_attested_okx_demo_read_adapter(
+        ephemeral_environment(account)
+    )
+    offline, _transport = adapter([])
+
+    assert callable(production.capture_trusted_signal_bundle)
+    assert not hasattr(offline, "capture_trusted_signal_bundle")
+    assert not hasattr(production, "persist")
+    assert not hasattr(production, "persist_snapshot")
