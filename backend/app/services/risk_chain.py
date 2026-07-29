@@ -1770,7 +1770,7 @@ class RiskChainService:
             approved.status = "EXPIRED"
             approved.evidence_snapshot = {
                 **dict(approved.evidence_snapshot or {}),
-                "authorization_active": False,
+                "approval_active": False,
                 "invalidation_reason": reason,
             }
             for chain in bound_chains:

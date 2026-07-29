@@ -11,6 +11,7 @@ from app.adapters.okx_demo.reconciliation_runtime import (
     OkxDemoRuntimeReconciliationAdapter,
     RUNTIME_DATABASE_ID_KEYS,
 )
+from app.adapters.okx_demo.writer_models import ClaimedApprovedExecution
 from app.adapters.okx_demo.models import Balance, FillQuery, OrderQuery, Position
 from app.models import Base
 from app.models.execution_lineage import ExecutionScope, ReconciliationRun
@@ -19,6 +20,8 @@ from app.models.okx_demo_reconciliation import (
     OkxDemoReconciliationState,
     OkxDemoRecoveryGrant,
 )
+from app.models.order_writer import OkxOrderWriteAttempt
+from app.models.strategy_deployment import StrategyDeployment
 from app.services.okx_demo_reconciliation import OkxDemoReconciliationBlocked
 
 
@@ -586,3 +589,437 @@ def test_runtime_accepts_actual_normalized_pydantic_models_and_exact_449_ids(
     assert tuple(result["database_ids"]) == RUNTIME_DATABASE_ID_KEYS
     assert "recovery_grants" not in result["database_ids"]
     assert result["observed_at"] == NOW.isoformat()
+
+
+def _runtime_approved_execution() -> ClaimedApprovedExecution:
+    return ClaimedApprovedExecution(
+        approval_id=41,
+        trade_intent_id=31,
+        risk_decision_id=37,
+        execution_target_id="OKX_DEMO",
+        authorization_schema_version="RISK_V1",
+        canonical_hash="1" * 64,
+        policy_digest="2" * 64,
+        approved_payload_hash="3" * 64,
+        client_order_id="RuntimeApproval00000000000000001",
+        instrument_id="BTC-USDT-SWAP",
+        side="buy",
+        position_side="long",
+        order_type="limit",
+        contracts=Decimal("1"),
+        limit_price=Decimal("50000"),
+        reduce_only=False,
+        margin_mode="isolated",
+        leverage=Decimal("2"),
+        approved_at=NOW,
+        expires_at=NOW + timedelta(minutes=1),
+        policy_version="risk-v1",
+        idempotency_digest="4" * 64,
+        take_profit_trigger_price=None,
+        take_profit_order_price=None,
+        stop_loss_trigger_price=None,
+        stop_loss_order_price=None,
+    )
+
+
+def _allow_fresh_runtime_opening(db) -> None:
+    run = ReconciliationRun(
+        execution_target_id="OKX_DEMO",
+        status="RECONCILED",
+        summary_snapshot={},
+        database_ids={},
+        artifact_status="PENDING",
+        authoritative_observed_at=NOW,
+        source_type="api_aggregate",
+        core_data=True,
+        started_at=NOW,
+        completed_at=NOW,
+    )
+    db.add(run)
+    db.flush()
+    db.add(
+        OkxDemoReconciliationState(
+            execution_target_id="OKX_DEMO",
+            status="RECONCILED",
+            opening_frozen=False,
+            last_event_observed_at=NOW,
+            last_reconciliation_run_id=run.id,
+        )
+    )
+    db.commit()
+
+
+def test_runtime_submission_disabled_never_calls_writer(
+    db,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setattr(
+        "app.adapters.okx_demo.reconciliation_runtime.get_settings",
+        lambda: SimpleNamespace(
+            execution_target_manifest=SimpleNamespace(
+                active_target=SimpleNamespace(
+                    order_submission_enabled=False,
+                )
+            )
+        ),
+    )
+    adapter = OkxDemoRuntimeReconciliationAdapter(
+        evidence_root=tmp_path / "managed" / "reconciliation",
+        allowed_evidence_root=tmp_path / "managed",
+        account_fingerprint_sha256="a" * 64,
+        order_submission_enabled=True,
+        now_provider=lambda: NOW,
+    )
+    monkeypatch.setattr(
+        "app.adapters.okx_demo.reconciliation_runtime."
+        "_next_unconsumed_approved_execution",
+        lambda *_args, **_kwargs: _runtime_approved_execution(),
+    )
+
+    class Writer:
+        calls = []
+
+        def place(self, approved, *, submission_grant):
+            self.calls.append((approved, submission_grant))
+
+    writer = Writer()
+    adapter.run_cycle(read_client=object(), writer=writer, db=db)
+
+    assert writer.calls == []
+
+
+def test_runtime_submits_at_most_one_fresh_approval_with_ephemeral_demo_grant(
+    db,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    _allow_fresh_runtime_opening(db)
+    monkeypatch.setattr(
+        "app.adapters.okx_demo.reconciliation_runtime.get_settings",
+        lambda: SimpleNamespace(
+            execution_target_manifest=SimpleNamespace(
+                active_target=SimpleNamespace(
+                    order_submission_enabled=True,
+                )
+            )
+        ),
+    )
+    adapter = OkxDemoRuntimeReconciliationAdapter(
+        evidence_root=tmp_path / "managed" / "reconciliation",
+        allowed_evidence_root=tmp_path / "managed",
+        account_fingerprint_sha256="a" * 64,
+        order_submission_enabled=True,
+        now_provider=lambda: NOW,
+    )
+    selected = []
+
+    def next_approval(*_args, **_kwargs):
+        selected.append(True)
+        return _runtime_approved_execution()
+
+    monkeypatch.setattr(
+        "app.adapters.okx_demo.reconciliation_runtime."
+        "_next_unconsumed_approved_execution",
+        next_approval,
+    )
+
+    class Writer:
+        calls = []
+
+        def place(self, approved, *, submission_grant):
+            self.calls.append((approved, submission_grant))
+
+    writer = Writer()
+    adapter.run_cycle(read_client=object(), writer=writer, db=db)
+
+    assert selected == [True]
+    assert len(writer.calls) == 1
+    approved, grant = writer.calls[0]
+    assert grant.approval_id == approved.approval_id
+    assert grant.execution_target_id == "OKX_DEMO"
+    assert grant.simulated_trading is True
+    assert grant.allow_real_funds is False
+    assert grant.order_submission_enabled is True
+    assert grant.writer_instance_id.startswith("Runtime")
+    assert grant.canonical_hash == approved.canonical_hash
+    assert grant.policy_digest == approved.policy_digest
+    assert grant.approved_payload_hash == approved.approved_payload_hash
+    assert grant.expires_at == NOW + timedelta(seconds=10)
+
+
+def test_runtime_resumes_unresolved_placement_before_selecting_new_approval(
+    db,
+    monkeypatch,
+) -> None:
+    db.add(
+        OkxOrderWriteAttempt(
+            execution_target_id="OKX_DEMO",
+            exchange_order_row_id=901,
+            approval_id=41,
+            operation="PLACE",
+            operation_id="RuntimeApproval00000000000000001",
+            client_order_id="RuntimeApproval00000000000000001",
+            instrument_id="BTC-USDT-SWAP",
+            state="PREPARED",
+            request_digest="5" * 64,
+            safe_request_snapshot={},
+            safe_response_snapshot={},
+            attempt_count=1,
+            lease_generation=1,
+            close_sequence=0,
+            last_attempt_at=NOW,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    db.commit()
+    adapter = object.__new__(OkxDemoRuntimeReconciliationAdapter)
+    adapter._order_submission_enabled = True
+    adapter._now_provider = lambda: NOW
+    adapter._writer_instance_id = "RuntimeWriter01"
+    monkeypatch.setattr(
+        "app.adapters.okx_demo.reconciliation_runtime."
+        "_approved_execution_by_id",
+        lambda *_args, **_kwargs: _runtime_approved_execution(),
+    )
+    monkeypatch.setattr(
+        "app.adapters.okx_demo.reconciliation_runtime."
+        "_next_unconsumed_approved_execution",
+        lambda *_args, **_kwargs: pytest.fail(
+            "new approval selection must not run before unresolved recovery"
+        ),
+    )
+
+    class Writer:
+        calls = []
+
+        def place(self, approved, *, submission_grant):
+            self.calls.append((approved, submission_grant))
+
+    writer = Writer()
+    adapter.run_cycle(read_client=object(), writer=writer, db=db)
+
+    assert len(writer.calls) == 1
+    assert writer.calls[0][0].approval_id == 41
+
+
+def _active_runtime_deployment(db) -> StrategyDeployment:
+    deployment = StrategyDeployment(
+        execution_target_id="OKX_DEMO",
+        candidate_approval_id=71,
+        strategy_id=72,
+        strategy_version_id=73,
+        candidate_digest="6" * 64,
+        promotion_policy_version="promotion-v1",
+        deployment_policy_digest="7" * 64,
+        instrument_id="BTC-USDT-SWAP",
+        timeframe="5m",
+        status="ACTIVE",
+        evidence_snapshot={},
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    db.add(deployment)
+    db.commit()
+    return deployment
+
+
+def test_runtime_enqueues_same_closed_candle_once_and_no_action_does_not_place(
+    db,
+    monkeypatch,
+) -> None:
+    deployment = _active_runtime_deployment(db)
+
+    class Repository:
+        identities = {}
+        claimed = False
+
+        def __init__(self, _db):
+            pass
+
+        def enqueue_evaluation(self, deployment_id, *, closed_candle_at):
+            identity = (deployment_id, closed_candle_at)
+            self.identities.setdefault(identity, len(self.identities) + 1)
+
+        def claim_next(self, *, owner, lease_seconds, now):
+            assert owner.startswith("RuntimeSignal")
+            assert lease_seconds == 30
+            if self.claimed:
+                return None
+            self.__class__.claimed = True
+            return SimpleNamespace(
+                id=81,
+                lease_token="lease-token",
+                fencing_sequence=1,
+            )
+
+    class Orchestrator:
+        calls = []
+
+        def __init__(self, _db, *, read_client, deployment_repository):
+            pass
+
+        def process(self, evaluation_id, **kwargs):
+            self.calls.append((evaluation_id, kwargs))
+            return SimpleNamespace(status="NO_ACTION")
+
+    monkeypatch.setattr(
+        "app.adapters.okx_demo.reconciliation_runtime."
+        "StrategyDeploymentRepository",
+        Repository,
+    )
+    monkeypatch.setattr(
+        "app.adapters.okx_demo.reconciliation_runtime."
+        "OkxDemoExecutionOrchestrator",
+        Orchestrator,
+    )
+    adapter = object.__new__(OkxDemoRuntimeReconciliationAdapter)
+    adapter._order_submission_enabled = False
+    adapter._now_provider = lambda: NOW + timedelta(minutes=3)
+    adapter._writer_instance_id = "RuntimeWriter01"
+    adapter._signal_lease_owner = "RuntimeSignal01"
+
+    class Writer:
+        calls = []
+
+        def place(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+
+    writer = Writer()
+    adapter.run_cycle(read_client=object(), writer=writer, db=db)
+    adapter.run_cycle(read_client=object(), writer=writer, db=db)
+
+    assert len(Repository.identities) == 1
+    assert next(iter(Repository.identities)) == (
+        deployment.id,
+        datetime(2026, 7, 27, 11, 55, tzinfo=timezone.utc),
+    )
+    assert len(Orchestrator.calls) == 1
+    assert writer.calls == []
+
+
+def test_runtime_actionable_evaluation_defers_approval_to_next_cycle(
+    db,
+    monkeypatch,
+) -> None:
+    _active_runtime_deployment(db)
+    _allow_fresh_runtime_opening(db)
+
+    class Repository:
+        claimed = False
+
+        def __init__(self, _db):
+            pass
+
+        def enqueue_evaluation(self, deployment_id, *, closed_candle_at):
+            pass
+
+        def claim_next(self, **_kwargs):
+            if self.claimed:
+                return None
+            self.__class__.claimed = True
+            return SimpleNamespace(
+                id=82,
+                lease_token="lease-token",
+                fencing_sequence=1,
+            )
+
+    class Orchestrator:
+        def __init__(self, _db, **_kwargs):
+            pass
+
+        def process(self, *_args, **_kwargs):
+            return SimpleNamespace(status="ACTIONABLE")
+
+    monkeypatch.setattr(
+        "app.adapters.okx_demo.reconciliation_runtime."
+        "StrategyDeploymentRepository",
+        Repository,
+    )
+    monkeypatch.setattr(
+        "app.adapters.okx_demo.reconciliation_runtime."
+        "OkxDemoExecutionOrchestrator",
+        Orchestrator,
+    )
+    monkeypatch.setattr(
+        "app.adapters.okx_demo.reconciliation_runtime."
+        "_next_unconsumed_approved_execution",
+        lambda *_args, **_kwargs: _runtime_approved_execution(),
+    )
+    adapter = object.__new__(OkxDemoRuntimeReconciliationAdapter)
+    adapter._order_submission_enabled = True
+    adapter._now_provider = lambda: NOW
+    adapter._writer_instance_id = "RuntimeWriter01"
+    adapter._signal_lease_owner = "RuntimeSignal01"
+
+    class Writer:
+        calls = []
+
+        def place(self, approved, *, submission_grant):
+            self.calls.append((approved, submission_grant))
+
+    writer = Writer()
+    adapter.run_cycle(read_client=object(), writer=writer, db=db)
+    assert writer.calls == []
+    adapter.run_cycle(read_client=object(), writer=writer, db=db)
+    assert len(writer.calls) == 1
+
+
+@pytest.mark.parametrize("failure_point", ["lease", "service"])
+def test_runtime_signal_failure_is_fail_closed_and_never_places(
+    db,
+    monkeypatch,
+    failure_point,
+) -> None:
+    _active_runtime_deployment(db)
+
+    class Repository:
+        def __init__(self, _db):
+            pass
+
+        def enqueue_evaluation(self, deployment_id, *, closed_candle_at):
+            pass
+
+        def claim_next(self, **_kwargs):
+            if failure_point == "lease":
+                raise RuntimeError("lease failed")
+            return SimpleNamespace(
+                id=83,
+                lease_token="lease-token",
+                fencing_sequence=1,
+            )
+
+    class Orchestrator:
+        def __init__(self, _db, **_kwargs):
+            pass
+
+        def process(self, *_args, **_kwargs):
+            raise RuntimeError("evaluation completion failed")
+
+    monkeypatch.setattr(
+        "app.adapters.okx_demo.reconciliation_runtime."
+        "StrategyDeploymentRepository",
+        Repository,
+    )
+    monkeypatch.setattr(
+        "app.adapters.okx_demo.reconciliation_runtime."
+        "OkxDemoExecutionOrchestrator",
+        Orchestrator,
+    )
+    adapter = object.__new__(OkxDemoRuntimeReconciliationAdapter)
+    adapter._order_submission_enabled = True
+    adapter._now_provider = lambda: NOW
+    adapter._writer_instance_id = "RuntimeWriter01"
+    adapter._signal_lease_owner = "RuntimeSignal01"
+
+    class Writer:
+        calls = []
+
+        def place(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+
+    writer = Writer()
+    with pytest.raises(RuntimeError):
+        adapter.run_cycle(read_client=object(), writer=writer, db=db)
+    assert writer.calls == []

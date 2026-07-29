@@ -288,6 +288,7 @@ def test_approved_candidate_without_continuation_blocks_and_releases_lease(tmp_p
     worker = DeepSeekBacktestWorker(
         session_factory=factory,
         service_factory=forbidden_research_factory,
+        continuation_factory=None,
         owner="unconfigured-signal-worker",
         lease_seconds=60,
     )

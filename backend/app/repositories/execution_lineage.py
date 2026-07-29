@@ -235,6 +235,14 @@ class ExecutionLineageRepository:
             "payload_digest"
         )
         expected_payload_digest = expected_snapshot.get("payload_digest")
+        payload_conflicts = (
+            existing_payload_digest is not None
+            and (
+                not isinstance(existing_payload_digest, str)
+                or len(existing_payload_digest) != 64
+                or existing_payload_digest != expected_payload_digest
+            )
+        )
         if (
             existing.exchange_order_row_id != exchange_order_row_id
             or Decimal(existing.price) != Decimal(price)
@@ -243,9 +251,7 @@ class ExecutionLineageRepository:
                 None if existing.fee is None else Decimal(existing.fee)
             )
             != (None if fee is None else Decimal(fee))
-            or not isinstance(existing_payload_digest, str)
-            or len(existing_payload_digest) != 64
-            or existing_payload_digest != expected_payload_digest
+            or payload_conflicts
         ):
             raise ValueError(
                 "exchange fill identity conflicts with persisted lineage"

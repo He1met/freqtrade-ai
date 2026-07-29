@@ -9,7 +9,11 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.models.full_chain import FullChainRun, StrategyCandidateApproval
+from app.models.full_chain import (
+    FullChainRun,
+    FullChainSignalSnapshot,
+    StrategyCandidateApproval,
+)
 from app.models.strategy import Strategy, StrategyVersion
 from app.models.strategy_deployment import SignalEvaluation, StrategyDeployment
 
@@ -395,6 +399,161 @@ class StrategyDeploymentRepository:
         self.db.commit()
         self.db.expire_all()
         return result.rowcount == 1
+
+    def checkpoint_leased(
+        self,
+        evaluation_id: int,
+        *,
+        lease_token: str,
+        fencing_sequence: int,
+        input_digest: str,
+        result_snapshot: dict,
+        now: Optional[datetime] = None,
+    ) -> SignalEvaluation:
+        """Persist immutable evaluator output without terminating its lease.
+
+        The checkpoint survives lease expiry and is therefore replayable by a
+        later fencing sequence.  A different digest or payload is a hard
+        conflict rather than permission to repeat exchange reads/evaluation.
+        """
+
+        _require_sha256(input_digest, "input_digest")
+        if (
+            not isinstance(result_snapshot, dict)
+            or result_snapshot.get("checkpoint_schema") != "SIGNAL_EVALUATION_V1"
+        ):
+            raise StrategyDeploymentBlocked(
+                "leased evaluation checkpoint schema is invalid"
+            )
+        evaluation, _ = self.require_active_lease(
+            evaluation_id,
+            lease_token=lease_token,
+            fencing_sequence=fencing_sequence,
+            now=now,
+            for_update=True,
+        )
+        existing_snapshot = evaluation.result_snapshot or {}
+        if evaluation.input_digest is not None:
+            if (
+                evaluation.input_digest != input_digest
+                or existing_snapshot != result_snapshot
+            ):
+                raise StrategyDeploymentConflict(
+                    "leased evaluation checkpoint is immutable"
+                )
+            self.db.commit()
+            return evaluation
+        evaluation.input_digest = input_digest
+        evaluation.result_snapshot = result_snapshot
+        self.db.commit()
+        self.db.refresh(evaluation)
+        return evaluation
+
+    def renew_checkpoint_execution_authority(
+        self,
+        evaluation_id: int,
+        *,
+        lease_token: str,
+        fencing_sequence: int,
+        full_chain_run_id: int,
+        signal_snapshot_id: int,
+        now: Optional[datetime] = None,
+    ) -> datetime:
+        """Renew only the execution approval bounded by a fresh fenced lease.
+
+        Recovery never extends beyond the immutable trusted signal expiry.
+        """
+
+        current_time = _as_utc(now or datetime.now(timezone.utc))
+        evaluation, deployment = self.require_active_lease(
+            evaluation_id,
+            lease_token=lease_token,
+            fencing_sequence=fencing_sequence,
+            now=current_time,
+            for_update=True,
+        )
+        chain = self.db.get(FullChainRun, full_chain_run_id)
+        signal = self.db.get(FullChainSignalSnapshot, signal_snapshot_id)
+        approval = (
+            self.db.get(StrategyCandidateApproval, chain.candidate_approval_id)
+            if chain is not None and chain.candidate_approval_id is not None
+            else None
+        )
+        if (
+            chain is None
+            or chain.run_kind != "EXECUTION"
+            or chain.signal_evaluation_id != evaluation.id
+            or chain.strategy_id != deployment.strategy_id
+            or chain.strategy_version_id != deployment.strategy_version_id
+            or chain.signal_snapshot_id != signal_snapshot_id
+            or signal is None
+            or signal.full_chain_run_id != chain.id
+            or signal.execution_target_id != "OKX_DEMO"
+            or signal.core_data is not True
+            or _as_utc(signal.expires_at) <= current_time
+            or approval is None
+            or approval.full_chain_run_id != chain.id
+            or approval.status != "APPROVED"
+            or approval.candidate_digest != deployment.candidate_digest
+        ):
+            raise StrategyDeploymentBlocked(
+                "checkpoint execution authority is stale or inconsistent"
+            )
+        renewed_until = min(
+            _as_utc(evaluation.lease_expires_at),
+            _as_utc(signal.expires_at),
+        )
+        if renewed_until <= current_time:
+            raise StrategyDeploymentBlocked(
+                "checkpoint execution authority cannot be renewed"
+            )
+        approval.expires_at = renewed_until
+        self.db.commit()
+        return renewed_until
+
+    def block_checkpoint_execution_chain(
+        self,
+        evaluation_id: int,
+        *,
+        lease_token: str,
+        fencing_sequence: int,
+        full_chain_run_id: int,
+        reason: str,
+        now: Optional[datetime] = None,
+    ) -> FullChainRun:
+        """Terminally fence a partially advanced chain after orchestration failure."""
+
+        current_time = _as_utc(now or datetime.now(timezone.utc))
+        evaluation, _ = self.require_active_lease(
+            evaluation_id,
+            lease_token=lease_token,
+            fencing_sequence=fencing_sequence,
+            now=current_time,
+            for_update=True,
+        )
+        chain = self.db.get(FullChainRun, full_chain_run_id)
+        if (
+            chain is None
+            or chain.run_kind != "EXECUTION"
+            or chain.signal_evaluation_id != evaluation.id
+            or chain.execution_target_id != "OKX_DEMO"
+        ):
+            raise StrategyDeploymentBlocked(
+                "checkpoint execution chain binding is inconsistent"
+            )
+        if chain.status not in {
+            "SUCCESS",
+            "FAILED",
+            "BLOCKED",
+            "CANCELLED",
+            "STALE",
+        }:
+            chain.status = "BLOCKED"
+            chain.terminal_reason = reason[:2000]
+            chain.completed_at = current_time
+            self.db.commit()
+            self.db.refresh(chain)
+        return chain
 
     def complete(
         self,

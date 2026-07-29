@@ -237,6 +237,74 @@ def test_publish_is_idempotent_and_persists_exact_candidate_binding(
         assert persisted.status == "ACTIVE"
 
 
+def test_leased_signal_checkpoint_survives_expiry_and_is_immutable(
+    session_factory,
+) -> None:
+    with session_factory() as db:
+        approval = seed_approved_candidate(db)
+        deployment = publish(db, approval.id)
+        repository = StrategyDeploymentRepository(db)
+        evaluation = repository.enqueue_evaluation(
+            deployment.id,
+            closed_candle_at=NOW,
+        )
+        first = repository.claim_next(
+            owner="first-runtime",
+            lease_seconds=2,
+            now=NOW + timedelta(seconds=1),
+        )
+        assert first is not None and first.lease_token
+        first_lease_token = first.lease_token
+        first_fencing_sequence = first.fencing_sequence
+        checkpoint = {
+            "checkpoint_schema": "SIGNAL_EVALUATION_V1",
+            "evaluation_id": evaluation.id,
+            "bundle": {"market": "trusted:1"},
+            "signal": {"decision": "ACTIONABLE"},
+        }
+        repository.checkpoint_leased(
+            evaluation.id,
+            lease_token=first_lease_token,
+            fencing_sequence=first_fencing_sequence,
+            input_digest="e" * 64,
+            result_snapshot=checkpoint,
+            now=NOW + timedelta(seconds=2),
+        )
+
+        assert repository.expire_stale(now=NOW + timedelta(seconds=4)) == 1
+        second = repository.claim_next(
+            owner="recovery-runtime",
+            lease_seconds=30,
+            now=NOW + timedelta(seconds=4),
+        )
+        assert second is not None and second.lease_token
+        assert second.lease_token != first_lease_token
+        assert second.fencing_sequence == first_fencing_sequence + 1
+        assert second.input_digest == "e" * 64
+        assert second.result_snapshot == checkpoint
+
+        repository.checkpoint_leased(
+            evaluation.id,
+            lease_token=second.lease_token,
+            fencing_sequence=second.fencing_sequence,
+            input_digest="e" * 64,
+            result_snapshot=checkpoint,
+            now=NOW + timedelta(seconds=5),
+        )
+        with pytest.raises(
+            StrategyDeploymentConflict,
+            match="checkpoint is immutable",
+        ):
+            repository.checkpoint_leased(
+                evaluation.id,
+                lease_token=second.lease_token,
+                fencing_sequence=second.fencing_sequence,
+                input_digest="f" * 64,
+                result_snapshot=checkpoint,
+                now=NOW + timedelta(seconds=5),
+            )
+
+
 def test_actionable_evaluation_opens_one_fenced_execution_chain(
     session_factory,
 ) -> None:
