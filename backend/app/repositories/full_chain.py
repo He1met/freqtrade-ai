@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.models import (
     ApprovedExecution,
     BacktestResult,
@@ -46,6 +47,9 @@ TERMINAL_CHAIN_STATUSES = {
     "CANCELLED",
     "STALE",
 }
+
+OKX_DEMO_AUTO_APPROVAL_ACTOR = "system:okx-demo-auto-promotion"
+OKX_DEMO_AUTO_APPROVAL_TTL = timedelta(minutes=5)
 
 AUTHORITATIVE_RECONCILIATION_ID_KEYS = {
     "reconciliation_run",
@@ -363,6 +367,7 @@ class FullChainRepository:
         decision: str,
         decided_by: str,
         reason: str,
+        decision_evidence: Optional[dict[str, Any]] = None,
         now: Optional[datetime] = None,
     ) -> StrategyCandidateApproval:
         if decision not in {"APPROVED", "REJECTED"}:
@@ -382,6 +387,11 @@ class FullChainRepository:
         safe_reason = redact_secret_text(reason)[:2000]
         if not safe_reason.strip():
             raise FullChainBlocked("candidate approval decision reason is required")
+        safe_decision_evidence = (
+            _require_safe_snapshot(decision_evidence, "candidate decision")
+            if decision_evidence is not None
+            else {}
+        )
         if _as_utc(approval.expires_at) <= _as_utc(current_time):
             approval.status = "EXPIRED"
             approval.decided_at = current_time
@@ -443,6 +453,7 @@ class FullChainRepository:
             checkpoint.database_ids = {"candidate_approval_id": approval.id}
             checkpoint.output_snapshot = {
                 **checkpoint.output_snapshot,
+                **safe_decision_evidence,
                 "status": "APPROVED",
             }
             checkpoint.completed_at = current_time
@@ -468,6 +479,78 @@ class FullChainRepository:
         self.db.commit()
         self.db.refresh(approval)
         return approval
+
+    def auto_approve_candidate(
+        self,
+        chain_id: int,
+        lease_token: str,
+        *,
+        now: Optional[datetime] = None,
+    ) -> StrategyCandidateApproval:
+        """Approve one exact eligible candidate under the locked Demo policy.
+
+        This is deliberately narrower than the general decision API: the target,
+        actor, policy evidence and lifetime are fixed by code, and all existing
+        promotion checks run before the decision can be persisted.
+        """
+
+        current_time = now or datetime.now(timezone.utc)
+        chain = self._require_active_chain(chain_id)
+        automation = get_settings().demo_automation_policy
+        if (
+            automation.enabled is not True
+            or automation.automatic_candidate_approval is not True
+            or automation.execution_target_id != OKX_DEMO_TARGET_ID
+            or chain.execution_target_id != OKX_DEMO_TARGET_ID
+            or automation.allow_live_trading is not False
+            or automation.allow_real_funds is not False
+        ):
+            raise FullChainBlocked("automatic candidate approval is OKX_DEMO only")
+        approval = self.create_candidate_approval(
+            chain.id,
+            lease_token,
+            requested_by=OKX_DEMO_AUTO_APPROVAL_ACTOR,
+            expires_at=current_time + OKX_DEMO_AUTO_APPROVAL_TTL,
+            now=current_time,
+        )
+        promotion = approval.promotion_evidence
+        policy = promotion.get("policy") if isinstance(promotion, dict) else None
+        policy_version = (
+            policy.get("policy_version")
+            if isinstance(policy, dict)
+            else None
+        )
+        if policy_version != approval.promotion_policy_version:
+            raise FullChainBlocked("automatic approval policy evidence is invalid")
+        return self.decide_candidate(
+            approval.id,
+            decision="APPROVED",
+            decided_by=OKX_DEMO_AUTO_APPROVAL_ACTOR,
+            reason=(
+                "Automatically approved for OKX_DEMO after deterministic "
+                "promotion gates passed."
+            ),
+            decision_evidence={
+                "approval_mode": "AUTOMATIC",
+                "decision_actor": OKX_DEMO_AUTO_APPROVAL_ACTOR,
+                "automation_policy_schema_version": automation.schema_version,
+                "candidate_digest": approval.candidate_digest,
+                "promotion_policy_version": approval.promotion_policy_version,
+                "hard_gates": {
+                    "validated_strategy_version": True,
+                    "positive_net_profit": True,
+                    "drawdown_limit": True,
+                    "minimum_trade_count": True,
+                    "out_of_sample": True,
+                    "walk_forward_market_states": True,
+                    "net_of_costs": True,
+                },
+                "manual_confirmation_required": False,
+                "execution_target_id": OKX_DEMO_TARGET_ID,
+                "allow_real_funds": False,
+            },
+            now=current_time,
+        )
 
     def revoke_candidate_approval(
         self,

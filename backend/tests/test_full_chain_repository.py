@@ -24,6 +24,7 @@ from app.repositories.full_chain import (
     FullChainBlocked,
     FullChainConflict,
     FullChainRepository,
+    OKX_DEMO_AUTO_APPROVAL_ACTOR,
     require_authoritative_reconciliation,
 )
 from app.repositories.research_jobs import ResearchJobRepository
@@ -346,6 +347,100 @@ def test_candidate_approval_blocks_unvalidated_promotion_evidence(db) -> None:
             job.lease_token,
             requested_by="operator",
             expires_at=NOW + timedelta(minutes=10),
+            now=NOW,
+        )
+
+
+def test_okx_demo_candidate_is_automatically_approved_with_auditable_gates(db) -> None:
+    job = claimed_job(db)
+    repository = FullChainRepository(db)
+    chain = repository.open_for_claimed_job(job.id, job.lease_token, now=NOW)
+    lineage = prepare_and_complete_research(db, repository, chain, job.lease_token)
+    version, result, score = lineage[2], lineage[5], lineage[6]
+    checkpoint = repository.prepare_stage(
+        chain.id,
+        "CANDIDATE_APPROVAL",
+        job.lease_token,
+        idempotency_key="automatic-candidate-approval-1",
+        input_snapshot={
+            "approval_mode": "AUTOMATIC",
+            "execution_target_id": "OKX_DEMO",
+            "strategy_version_id": version.id,
+            "backtest_result_id": result.id,
+            "strategy_score_id": score.id,
+        },
+        now=NOW,
+    )
+
+    approval = repository.auto_approve_candidate(
+        chain.id,
+        job.lease_token,
+        now=NOW,
+    )
+
+    assert approval.status == "APPROVED"
+    assert approval.requested_by == OKX_DEMO_AUTO_APPROVAL_ACTOR
+    assert approval.decided_by == OKX_DEMO_AUTO_APPROVAL_ACTOR
+    assert approval.decision_reason == (
+        "Automatically approved for OKX_DEMO after deterministic "
+        "promotion gates passed."
+    )
+    assert approval.expires_at.replace(tzinfo=timezone.utc) == NOW + timedelta(minutes=5)
+    assert checkpoint.status == "SUCCESS"
+    assert checkpoint.database_ids == {"candidate_approval_id": approval.id}
+    assert checkpoint.output_snapshot["approval_mode"] == "AUTOMATIC"
+    assert checkpoint.output_snapshot["manual_confirmation_required"] is False
+    assert checkpoint.output_snapshot["automation_policy_schema_version"] == "1"
+    assert checkpoint.output_snapshot["execution_target_id"] == "OKX_DEMO"
+    assert checkpoint.output_snapshot["allow_real_funds"] is False
+    assert checkpoint.output_snapshot["candidate_digest"] == approval.candidate_digest
+    assert checkpoint.output_snapshot["hard_gates"] == {
+        "validated_strategy_version": True,
+        "positive_net_profit": True,
+        "drawdown_limit": True,
+        "minimum_trade_count": True,
+        "out_of_sample": True,
+        "walk_forward_market_states": True,
+        "net_of_costs": True,
+    }
+    persisted_chain = db.get(FullChainRun, chain.id)
+    assert persisted_chain.status == "APPROVED"
+    assert persisted_chain.current_stage == "SIGNAL"
+    resumed_job = ResearchJobRepository(db).get(job.id)
+    assert resumed_job is not None
+    assert resumed_job.status == "PENDING"
+    assert resumed_job.stage == "CANDIDATE_APPROVED"
+    assert resumed_job.lease_token is None
+
+
+def test_okx_demo_auto_approval_keeps_promotion_fail_closed(db) -> None:
+    job = claimed_job(db)
+    repository = FullChainRepository(db)
+    chain = repository.open_for_claimed_job(job.id, job.lease_token, now=NOW)
+    lineage = prepare_and_complete_research(db, repository, chain, job.lease_token)
+    result = lineage[5]
+    result.metrics_snapshot = {}
+    db.commit()
+    repository.prepare_stage(
+        chain.id,
+        "CANDIDATE_APPROVAL",
+        job.lease_token,
+        idempotency_key="automatic-candidate-promotion-blocked",
+        input_snapshot={
+            "approval_mode": "AUTOMATIC",
+            "execution_target_id": "OKX_DEMO",
+            "backtest_result_id": result.id,
+        },
+        now=NOW,
+    )
+
+    with pytest.raises(
+        FullChainBlocked,
+        match="promotion requires net-of-costs evidence",
+    ):
+        repository.auto_approve_candidate(
+            chain.id,
+            job.lease_token,
             now=NOW,
         )
 

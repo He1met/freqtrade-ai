@@ -6,6 +6,10 @@ import os
 import yaml
 from pydantic import BaseModel, Field
 
+from app.core.demo_automation import (
+    OkxDemoAutomationPolicy,
+    parse_demo_automation_policy,
+)
 from app.core.execution_target import (
     ExecutionTargetManifest,
     parse_execution_target_manifest,
@@ -39,6 +43,9 @@ class Settings(BaseModel):
     allow_dry_run_trading: bool = False
     allow_controlled_dry_run_process: bool = False
     execution_target_manifest: ExecutionTargetManifest
+    demo_automation_policy: OkxDemoAutomationPolicy = Field(
+        default_factory=OkxDemoAutomationPolicy
+    )
 
 
 def load_env_file(path: Path) -> None:
@@ -76,6 +83,7 @@ def get_settings() -> Settings:
     frequi_section = app_config.get("frequi", {})
     security_section = app_config.get("security", {})
     execution_section = app_config.get("execution")
+    demo_automation_section = app_config.get("demo_automation")
 
     return Settings(
         app_name=app_section.get("name", "freqtrade-ai"),
@@ -114,4 +122,7 @@ def get_settings() -> Settings:
         allow_dry_run_trading=security_section.get("allow_dry_run_trading", False),
         allow_controlled_dry_run_process=security_section.get("allow_controlled_dry_run_process", False),
         execution_target_manifest=parse_execution_target_manifest(execution_section),
+        demo_automation_policy=parse_demo_automation_policy(
+            demo_automation_section
+        ),
     )
