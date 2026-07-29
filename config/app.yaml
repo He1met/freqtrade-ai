@@ -64,6 +64,24 @@ demo_automation:
   require_reconciliation: true
   allow_live_trading: false
   allow_real_funds: false
+  # New locked OKX_DEMO numerical policy. These values are an explicit project
+  # policy, not defaults inferred from test fixtures or the one-shot canary.
+  demo_risk_policy:
+    schema_version: "1"
+    allowed_instruments:
+      - BTC-USDT-SWAP
+    allowed_sides:
+      - buy
+      - sell
+    allowed_order_types:
+      - limit
+    max_leverage: 2
+    max_order_notional: 1000
+    max_total_exposure: 2000
+    max_positions: 2
+    max_price_deviation_pct: 0.01
+    min_strategy_score: 70
+    scoring_version: phase2-quality-v1
 
 execution:
   # One codebase, one runtime, one PostgreSQL, and one unambiguous exchange

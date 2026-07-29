@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import create_engine
@@ -6,6 +7,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.models import (
+    ApprovedExecution,
     BacktestResult,
     BacktestRun,
     BacktestTask,
@@ -13,10 +15,12 @@ from app.models import (
     FullChainRun,
     FullChainStageRun,
     ReconciliationRun,
+    RiskDecision,
     Strategy,
     StrategyGenerationRun,
     StrategyScore,
     StrategyVersion,
+    TradeIntent,
 )
 from app.repositories.execution_lineage import ensure_execution_scope_catalog
 from app.api.strategy_promotion import evaluate_strategy_promotion
@@ -322,6 +326,106 @@ def test_chain_reuses_research_job_attempt_and_persists_approval_and_signal(db) 
         "CANDIDATE_APPROVAL",
         "SIGNAL",
     ]
+
+    intent = TradeIntent(
+        execution_target_id="OKX_DEMO",
+        authorization_schema_version="RISK_V1",
+        intent_id="1" * 64,
+        canonical_hash="2" * 64,
+        policy_digest="3" * 64,
+        approved_payload_hash="4" * 64,
+        idempotency_key_digest="5" * 64,
+        client_order_id="FAI" + "1" * 29,
+        strategy_id=chain.strategy_id,
+        strategy_version_id=chain.strategy_version_id,
+        backtest_run_id=chain.backtest_run_id,
+        backtest_result_id=chain.backtest_result_id,
+        strategy_score_id=chain.strategy_score_id,
+        instrument_id=signal.instrument_id,
+        side="buy",
+        position_side="long",
+        order_type="limit",
+        quantity=Decimal("0.01"),
+        limit_price=Decimal("50000"),
+        reference_price=Decimal("50000"),
+        leverage=Decimal("2"),
+        margin_mode="isolated",
+        stop_loss=Decimal("48000"),
+        take_profit=Decimal("54000"),
+        reduce_only=False,
+        status="APPROVED",
+        request_snapshot={
+            "canonical_input": {
+                "full_chain_run_id": chain.id,
+                "candidate_approval_id": approval.id + 1,
+                "signal_snapshot_id": signal.id,
+                "signal_digest": signal.signal_digest,
+            }
+        },
+        expires_at=NOW + timedelta(minutes=2),
+    )
+    db.add(intent)
+    db.flush()
+    decision = RiskDecision(
+        execution_target_id="OKX_DEMO",
+        trade_intent_id=intent.id,
+        authorization_schema_version="RISK_V1",
+        policy_digest=intent.policy_digest,
+        decision="APPROVED",
+        policy_version="risk-chain-v2",
+        evidence_snapshot={},
+    )
+    db.add(decision)
+    db.flush()
+    execution = ApprovedExecution(
+        execution_target_id="OKX_DEMO",
+        trade_intent_id=intent.id,
+        risk_decision_id=decision.id,
+        intent_id=intent.intent_id,
+        client_order_id=intent.client_order_id,
+        authorization_schema_version="RISK_V1",
+        canonical_hash=intent.canonical_hash,
+        policy_digest=intent.policy_digest,
+        approved_payload_hash=intent.approved_payload_hash,
+        instrument_snapshot_id="instrument:test",
+        market_snapshot_id="market:test",
+        account_snapshot_id="account:test",
+        decision="APPROVED",
+        intent_status="APPROVED",
+        reserved_notional=Decimal("500"),
+        order_submission_authorized=False,
+        claim_required=True,
+        status="ACTIVE",
+        expires_at=NOW + timedelta(minutes=2),
+        evidence_snapshot={},
+    )
+    db.add(execution)
+    db.commit()
+    repository.prepare_stage(
+        chain.id,
+        "RISK",
+        resumed.lease_token,
+        idempotency_key="risk-binding-check",
+        input_snapshot={"signal_snapshot_id": signal.id},
+        now=NOW + timedelta(seconds=4),
+    )
+
+    with pytest.raises(
+        FullChainBlocked,
+        match="risk approval lineage is inconsistent",
+    ):
+        repository.complete_stage(
+            chain.id,
+            "RISK",
+            resumed.lease_token,
+            database_ids={
+                "trade_intent_id": intent.id,
+                "risk_decision_id": decision.id,
+                "approved_execution_id": execution.id,
+            },
+            output_snapshot={"status": "APPROVED"},
+            now=NOW + timedelta(seconds=4),
+        )
 
 
 def test_candidate_approval_blocks_unvalidated_promotion_evidence(db) -> None:

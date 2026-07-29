@@ -37,11 +37,17 @@ from app.models import (
     BacktestRun,
     BacktestTask,
     Base,
+    FullChainRun,
+    FullChainSignalSnapshot,
+    FullChainStageRun,
     OkxDemoAttestedSession,
     OkxDemoTrustedSnapshot,
     RiskBudget,
     RiskDecision,
+    ResearchJob,
+    ResearchJobAttempt,
     Strategy,
+    StrategyCandidateApproval,
     StrategyScore,
     StrategyVersion,
     TradeIntent,
@@ -105,7 +111,7 @@ def _seed(factory) -> dict[str, int]:
         db.flush()
         strategy.current_version_id = version.id
         run = BacktestRun(
-            execution_scope_id=OKX_DEMO_TARGET_ID,
+            execution_scope_id="LOCAL_DRY_RUN",
             strategy_version_id=version.id,
             config_snapshot={},
             status="succeeded",
@@ -137,6 +143,96 @@ def _seed(factory) -> dict[str, int]:
         )
         db.add(score)
         db.flush()
+        identity = uuid4().hex
+        job = ResearchJob(
+            execution_scope_id="LOCAL_DRY_RUN",
+            job_type="deepseek_backtest",
+            operation="strategy_generation.deepseek_backtest_loop",
+            idempotency_key_digest=identity * 2,
+            request_hash=uuid4().hex * 2,
+            request_payload={"allow_real_call": False},
+            status="RUNNING",
+            stage="RISK",
+            attempt_count=1,
+            max_attempts=1,
+        )
+        db.add(job)
+        db.flush()
+        attempt = ResearchJobAttempt(
+            research_job_id=job.id,
+            attempt_number=1,
+            execution_scope_id="LOCAL_DRY_RUN",
+            status="RUNNING",
+        )
+        db.add(attempt)
+        db.flush()
+        chain = FullChainRun(
+            research_job_id=job.id,
+            research_job_attempt_id=attempt.id,
+            research_scope_id="LOCAL_DRY_RUN",
+            execution_target_id=OKX_DEMO_TARGET_ID,
+            status="EXECUTING",
+            current_stage="RISK",
+            strategy_id=strategy.id,
+            strategy_version_id=version.id,
+            backtest_run_id=run.id,
+            backtest_task_id=task.id,
+            backtest_result_id=result.id,
+            strategy_score_id=score.id,
+        )
+        db.add(chain)
+        db.flush()
+        approval = StrategyCandidateApproval(
+            full_chain_run_id=chain.id,
+            execution_target_id=OKX_DEMO_TARGET_ID,
+            strategy_version_id=version.id,
+            backtest_result_id=result.id,
+            strategy_score_id=score.id,
+            candidate_digest=uuid4().hex * 2,
+            promotion_policy_version="strategy-promotion-v1",
+            promotion_evidence={"eligible": True},
+            status="APPROVED",
+            requested_by="system:test",
+            decided_by="system:test",
+            decision_reason="PostgreSQL risk fixture.",
+            requested_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+            decided_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+            expires_at=datetime(2035, 1, 1, tzinfo=timezone.utc),
+        )
+        db.add(approval)
+        db.flush()
+        signal = FullChainSignalSnapshot(
+            full_chain_run_id=chain.id,
+            candidate_approval_id=approval.id,
+            execution_target_id=OKX_DEMO_TARGET_ID,
+            instrument_id="BTC-USDT-SWAP",
+            signal_digest=uuid4().hex * 2,
+            source_type="api_aggregate",
+            core_data=True,
+            source_database_ids={"market_snapshot_id": 1},
+            signal_snapshot={"side": "buy", "closed_candle": True},
+            observed_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+            expires_at=datetime(2035, 1, 1, tzinfo=timezone.utc),
+        )
+        db.add(signal)
+        db.flush()
+        chain.candidate_approval_id = approval.id
+        chain.signal_snapshot_id = signal.id
+        db.add(
+            FullChainStageRun(
+                full_chain_run_id=chain.id,
+                stage="SIGNAL",
+                status="SUCCESS",
+                idempotency_key_digest=uuid4().hex * 2,
+                input_digest=uuid4().hex * 2,
+                input_snapshot={"instrument_id": "BTC-USDT-SWAP"},
+                output_snapshot={"status": "succeeded"},
+                database_ids={"signal_snapshot_id": signal.id},
+                prepared_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+                completed_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+            )
+        )
+        db.flush()
         return {
             "strategy_id": strategy.id,
             "strategy_version_id": version.id,
@@ -144,6 +240,10 @@ def _seed(factory) -> dict[str, int]:
             "backtest_task_id": task.id,
             "backtest_result_id": result.id,
             "strategy_score_id": score.id,
+            "_full_chain_run_id": chain.id,
+            "_candidate_approval_id": approval.id,
+            "_signal_snapshot_id": signal.id,
+            "_signal_digest": signal.signal_digest,
         }
 
 
@@ -208,6 +308,10 @@ def _request(
 
     request = {
         "execution_target": OKX_DEMO_TARGET_ID,
+        "full_chain_run_id": lineage["_full_chain_run_id"],
+        "candidate_approval_id": lineage["_candidate_approval_id"],
+        "signal_snapshot_id": lineage["_signal_snapshot_id"],
+        "signal_digest": lineage["_signal_digest"],
         "lineage": lineage,
         "snapshots": {
             name: envelope(name, content)

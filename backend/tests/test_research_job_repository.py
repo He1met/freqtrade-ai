@@ -74,6 +74,53 @@ def enqueue(
     )
 
 
+@pytest.mark.parametrize("provider_attempted", [True, False])
+def test_candidate_wait_records_only_completed_real_provider_calls(
+    session_factory,
+    provider_attempted,
+) -> None:
+    with session_factory() as db:
+        repository = ResearchJobRepository(db)
+        job_id = enqueue(
+            db,
+            f"candidate-provider-completion-{provider_attempted}",
+        ).id
+        claimed = repository.claim_next(
+            owner="candidate-worker",
+            lease_seconds=60,
+            now=FIXED_NOW,
+        )
+        assert claimed is not None and claimed.lease_token
+        if provider_attempted:
+            assert repository.mark_provider_attempt(
+                job_id,
+                claimed.lease_token,
+                now=FIXED_NOW,
+            )
+
+        waiting = repository.wait_for_candidate_approval(
+            job_id,
+            claimed.lease_token,
+            evidence_snapshot={
+                "status": "AWAITING_APPROVAL",
+                "acceptance_ready": False,
+            },
+            now=FIXED_NOW + timedelta(seconds=1),
+        )
+
+        assert waiting is not None
+        assert waiting.status == "AWAITING_APPROVAL"
+        if provider_attempted:
+            assert waiting.provider_attempted_at is not None
+            assert waiting.provider_completed_at is not None
+            assert waiting.provider_completed_at.replace(tzinfo=timezone.utc) == (
+                FIXED_NOW + timedelta(seconds=1)
+            )
+        else:
+            assert waiting.provider_attempted_at is None
+            assert waiting.provider_completed_at is None
+
+
 def test_idempotency_survives_new_session_and_does_not_persist_raw_key(session_factory) -> None:
     raw_key = "durable-research-job-key"
     with session_factory() as first_db:

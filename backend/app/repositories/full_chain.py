@@ -931,14 +931,41 @@ class FullChainRepository:
             intent = loaded["trade_intent_id"]
             decision = loaded["risk_decision_id"]
             approval = loaded["approved_execution_id"]
+            canonical_input = (
+                intent.request_snapshot.get("canonical_input")
+                if isinstance(intent.request_snapshot, dict)
+                else None
+            )
+            signal = (
+                self.db.get(FullChainSignalSnapshot, chain.signal_snapshot_id)
+                if chain.signal_snapshot_id is not None
+                else None
+            )
             if (
                 intent.execution_target_id != OKX_DEMO_TARGET_ID
+                or intent.strategy_id != chain.strategy_id
                 or intent.strategy_version_id != chain.strategy_version_id
+                or intent.backtest_run_id != chain.backtest_run_id
                 or intent.backtest_result_id != chain.backtest_result_id
                 or intent.strategy_score_id != chain.strategy_score_id
+                or not isinstance(canonical_input, dict)
+                or canonical_input.get("full_chain_run_id") != chain.id
+                or canonical_input.get("candidate_approval_id")
+                != chain.candidate_approval_id
+                or canonical_input.get("signal_snapshot_id")
+                != chain.signal_snapshot_id
+                or signal is None
+                or canonical_input.get("signal_digest") != signal.signal_digest
+                or intent.instrument_id != signal.instrument_id
+                or decision.execution_target_id != OKX_DEMO_TARGET_ID
                 or decision.trade_intent_id != intent.id
                 or decision.decision != "APPROVED"
+                or decision.policy_digest != intent.policy_digest
+                or approval.execution_target_id != OKX_DEMO_TARGET_ID
                 or approval.trade_intent_id != intent.id
+                or approval.risk_decision_id != decision.id
+                or approval.decision != "APPROVED"
+                or approval.status != "ACTIVE"
             ):
                 raise FullChainBlocked("OKX Demo risk approval lineage is inconsistent")
         elif stage == "EXECUTION":

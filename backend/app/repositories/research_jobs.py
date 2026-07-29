@@ -450,6 +450,17 @@ class ResearchJobRepository:
         ).first()
         if attempt is None:
             return None
+        values = {
+            "status": "AWAITING_APPROVAL",
+            "stage": "CANDIDATE_APPROVAL",
+            "evidence_snapshot": evidence_snapshot,
+            "lease_owner": None,
+            "lease_token": None,
+            "lease_expires_at": None,
+            "heartbeat_at": None,
+        }
+        if job.provider_attempted_at is not None:
+            values["provider_completed_at"] = current_time
         result = self.db.execute(
             update(ResearchJob)
             .where(
@@ -459,15 +470,7 @@ class ResearchJobRepository:
                 ResearchJob.lease_token == lease_token,
                 ResearchJob.cancel_requested.is_(False),
             )
-            .values(
-                status="AWAITING_APPROVAL",
-                stage="CANDIDATE_APPROVAL",
-                evidence_snapshot=evidence_snapshot,
-                lease_owner=None,
-                lease_token=None,
-                lease_expires_at=None,
-                heartbeat_at=None,
-            )
+            .values(**values)
         )
         if result.rowcount != 1:
             self.db.rollback()

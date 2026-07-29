@@ -71,6 +71,60 @@ class FailingService:
         raise RuntimeError("provider token=synthetic-sensitive-value failed without safe response")
 
 
+class CompletingContinuation:
+    def __init__(self, db, calls: list[int]) -> None:
+        self.db = db
+        self.calls = calls
+
+    def run(self, job_id: int, lease_token: str) -> None:
+        self.calls.append(job_id)
+        ResearchJobRepository(self.db).complete(
+            job_id,
+            lease_token,
+            status="SUCCESS",
+            stage="COMPLETED",
+            links={},
+            evidence_snapshot={
+                "status": "SUCCESS",
+                "acceptance_ready": True,
+                "continuation": "completed",
+            },
+            error_message=None,
+            provider_completed=False,
+        )
+
+
+def prepare_approved_candidate_resume(factory, *, allow_real_call: bool) -> int:
+    with factory() as db:
+        repository = ResearchJobRepository(db)
+        job_id = ResearchJobQueueService(db).enqueue_deepseek_backtest(
+            request(allow_real_call=allow_real_call),
+            idempotency_key=f"approved-resume-{allow_real_call}",
+        ).id
+        claimed = repository.claim_next(owner="research-worker", lease_seconds=60)
+        assert claimed is not None and claimed.lease_token
+        if allow_real_call:
+            assert repository.mark_provider_attempt(job_id, claimed.lease_token)
+        waiting = repository.wait_for_candidate_approval(
+            job_id,
+            claimed.lease_token,
+            evidence_snapshot={
+                "status": "AWAITING_APPROVAL",
+                "acceptance_ready": False,
+            },
+        )
+        assert waiting is not None
+        resumed = repository.resume_after_candidate_approval(
+            job_id,
+            evidence_snapshot={
+                "status": "PENDING",
+                "acceptance_ready": False,
+            },
+        )
+        assert resumed is not None
+        return job_id
+
+
 class MockLLMResponse:
     def raise_for_status(self) -> None:
         return None
@@ -174,6 +228,82 @@ def test_worker_persists_terminal_response_and_never_reexecutes_terminal_job(tmp
         assert job.lease_owner is None
         assert job.lease_token is None
         assert job.evidence_snapshot["status"] == "BLOCKED"
+
+
+@pytest.mark.parametrize("allow_real_call", [True, False])
+def test_approved_candidate_resume_dispatches_continuation_without_repeating_research(
+    tmp_path,
+    allow_real_call,
+) -> None:
+    factory = session_factory(tmp_path)
+    job_id = prepare_approved_candidate_resume(
+        factory,
+        allow_real_call=allow_real_call,
+    )
+    research_factory_calls: list[bool] = []
+    continuation_calls: list[int] = []
+
+    def forbidden_research_factory(db):
+        research_factory_calls.append(True)
+        raise AssertionError("approved candidate must not repeat research")
+
+    worker = DeepSeekBacktestWorker(
+        session_factory=factory,
+        service_factory=forbidden_research_factory,
+        continuation_factory=lambda db: CompletingContinuation(db, continuation_calls),
+        owner="signal-worker",
+        lease_seconds=60,
+    )
+
+    assert worker.run_once() == job_id
+    assert research_factory_calls == []
+    assert continuation_calls == [job_id]
+    with factory() as db:
+        repository = ResearchJobRepository(db)
+        job = repository.get(job_id)
+        control = repository.get_control()
+        assert job is not None
+        assert job.status == "SUCCESS"
+        assert job.stage == "COMPLETED"
+        assert job.attempt_count == 1
+        assert job.lease_token is None
+        assert control.active_job_id is None
+        if allow_real_call:
+            assert job.provider_attempted_at is not None
+            assert job.provider_completed_at is not None
+        else:
+            assert job.provider_attempted_at is None
+            assert job.provider_completed_at is None
+
+
+def test_approved_candidate_without_continuation_blocks_and_releases_lease(tmp_path) -> None:
+    factory = session_factory(tmp_path)
+    job_id = prepare_approved_candidate_resume(factory, allow_real_call=True)
+    research_factory_calls: list[bool] = []
+
+    def forbidden_research_factory(db):
+        research_factory_calls.append(True)
+        raise AssertionError("approved candidate must not repeat research")
+
+    worker = DeepSeekBacktestWorker(
+        session_factory=factory,
+        service_factory=forbidden_research_factory,
+        owner="unconfigured-signal-worker",
+        lease_seconds=60,
+    )
+
+    assert worker.run_once() == job_id
+    assert research_factory_calls == []
+    with factory() as db:
+        repository = ResearchJobRepository(db)
+        job = repository.get(job_id)
+        control = repository.get_control()
+        assert job is not None
+        assert job.status == "BLOCKED"
+        assert job.stage == "SIGNAL"
+        assert "continuation is not configured" in (job.error_message or "")
+        assert job.lease_token is None
+        assert control.active_job_id is None
 
 
 def test_restart_marks_unknown_provider_outcome_stale_without_calling_provider(tmp_path) -> None:

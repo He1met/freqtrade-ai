@@ -9,6 +9,26 @@ class DemoAutomationConfigurationError(RuntimeError):
     """Raised when the durable OKX Demo automation boundary is ambiguous."""
 
 
+class OkxDemoRiskPolicy(BaseModel):
+    """Locked numerical limits for the first automated OKX Demo policy."""
+
+    schema_version: Literal["1"] = "1"
+    allowed_instruments: tuple[Literal["BTC-USDT-SWAP"]] = (
+        "BTC-USDT-SWAP",
+    )
+    allowed_sides: tuple[Literal["buy"], Literal["sell"]] = ("buy", "sell")
+    allowed_order_types: tuple[Literal["limit"]] = ("limit",)
+    max_leverage: Literal[2] = 2
+    max_order_notional: Literal[1000] = 1000
+    max_total_exposure: Literal[2000] = 2000
+    max_positions: Literal[2] = 2
+    max_price_deviation_pct: Literal[0.01] = 0.01
+    min_strategy_score: Literal[70] = 70
+    scoring_version: Literal["phase2-quality-v1"] = "phase2-quality-v1"
+
+    model_config = {"extra": "forbid"}
+
+
 class OkxDemoAutomationPolicy(BaseModel):
     schema_version: Literal["1"] = "1"
     enabled: Literal[True] = True
@@ -27,6 +47,7 @@ class OkxDemoAutomationPolicy(BaseModel):
     require_reconciliation: Literal[True] = True
     allow_live_trading: Literal[False] = False
     allow_real_funds: Literal[False] = False
+    demo_risk_policy: OkxDemoRiskPolicy = OkxDemoRiskPolicy()
 
     model_config = {"extra": "forbid"}
 
@@ -35,6 +56,20 @@ def parse_demo_automation_policy(raw: Any) -> OkxDemoAutomationPolicy:
     if not isinstance(raw, dict) or not raw:
         raise DemoAutomationConfigurationError(
             "OKX Demo automation policy is missing; implicit authorization is forbidden"
+        )
+    expected_automation_fields = set(OkxDemoAutomationPolicy.model_fields)
+    if set(raw) != expected_automation_fields:
+        raise DemoAutomationConfigurationError(
+            "OKX Demo automation policy fields are missing or unexpected"
+        )
+    raw_risk_policy = raw.get("demo_risk_policy")
+    if not isinstance(raw_risk_policy, dict):
+        raise DemoAutomationConfigurationError(
+            "OKX Demo risk policy is missing; numerical limits are required"
+        )
+    if set(raw_risk_policy) != set(OkxDemoRiskPolicy.model_fields):
+        raise DemoAutomationConfigurationError(
+            "OKX Demo risk policy fields are missing or unexpected"
         )
     try:
         return OkxDemoAutomationPolicy.model_validate(raw)

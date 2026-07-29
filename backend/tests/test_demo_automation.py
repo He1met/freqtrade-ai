@@ -30,6 +30,16 @@ def test_app_yaml_pins_okx_demo_automation_without_live_or_real_funds() -> None:
     assert policy.require_reconciliation is True
     assert policy.allow_live_trading is False
     assert policy.allow_real_funds is False
+    assert policy.demo_risk_policy.allowed_instruments == ("BTC-USDT-SWAP",)
+    assert policy.demo_risk_policy.allowed_sides == ("buy", "sell")
+    assert policy.demo_risk_policy.allowed_order_types == ("limit",)
+    assert policy.demo_risk_policy.max_leverage == 2
+    assert policy.demo_risk_policy.max_order_notional == 1000
+    assert policy.demo_risk_policy.max_total_exposure == 2000
+    assert policy.demo_risk_policy.max_positions == 2
+    assert policy.demo_risk_policy.max_price_deviation_pct == 0.01
+    assert policy.demo_risk_policy.min_strategy_score == 70
+    assert policy.demo_risk_policy.scoring_version == "phase2-quality-v1"
 
 
 @pytest.mark.parametrize(
@@ -76,3 +86,46 @@ def test_missing_demo_automation_policy_fails_closed() -> None:
         match="implicit authorization is forbidden",
     ):
         parse_demo_automation_policy(None)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("allowed_instruments", ["ETH-USDT-SWAP"]),
+        ("allowed_sides", ["buy"]),
+        ("allowed_order_types", ["market"]),
+        ("max_leverage", 3),
+        ("max_order_notional", 1001),
+        ("max_total_exposure", 2001),
+        ("max_positions", 3),
+        ("max_price_deviation_pct", 0.02),
+        ("min_strategy_score", 69),
+        ("scoring_version", "fixture-score-v1"),
+    ],
+)
+def test_demo_risk_policy_cannot_be_weakened(field: str, value) -> None:
+    raw = load_app_yaml(REPO_ROOT / "config" / "app.yaml")["demo_automation"]
+    unsafe = deepcopy(raw)
+    unsafe["demo_risk_policy"][field] = value
+
+    with pytest.raises(DemoAutomationConfigurationError):
+        parse_demo_automation_policy(unsafe)
+
+
+def test_demo_risk_policy_missing_or_extra_fields_fail_closed() -> None:
+    raw = load_app_yaml(REPO_ROOT / "config" / "app.yaml")["demo_automation"]
+
+    missing_policy = deepcopy(raw)
+    del missing_policy["demo_risk_policy"]
+    with pytest.raises(DemoAutomationConfigurationError, match="fields"):
+        parse_demo_automation_policy(missing_policy)
+
+    missing_limit = deepcopy(raw)
+    del missing_limit["demo_risk_policy"]["max_order_notional"]
+    with pytest.raises(DemoAutomationConfigurationError, match="risk policy fields"):
+        parse_demo_automation_policy(missing_limit)
+
+    extra_limit = deepcopy(raw)
+    extra_limit["demo_risk_policy"]["unreviewed_limit"] = 1
+    with pytest.raises(DemoAutomationConfigurationError, match="risk policy fields"):
+        parse_demo_automation_policy(extra_limit)

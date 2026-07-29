@@ -19,16 +19,20 @@ from app.models import (
     BacktestResult,
     BacktestRun,
     BacktestTask,
+    FullChainRun,
+    FullChainSignalSnapshot,
+    FullChainStageRun,
     OkxDemoAttestedSession,
     OkxDemoTrustedSnapshot,
     RiskBudget,
     RiskDecision,
     Strategy,
+    StrategyCandidateApproval,
     StrategyScore,
     StrategyVersion,
     TradeIntent,
 )
-from app.models.execution_lineage import OKX_DEMO_TARGET_ID
+from app.models.execution_lineage import LOCAL_DRY_RUN_SCOPE_ID, OKX_DEMO_TARGET_ID
 from app.repositories.execution_lineage import ensure_execution_scope_catalog
 
 
@@ -797,6 +801,10 @@ class RiskChainService:
             raise RiskChainBlocked("request must be an object")
         names = (
             "execution_target",
+            "full_chain_run_id",
+            "candidate_approval_id",
+            "signal_snapshot_id",
+            "signal_digest",
             "lineage",
             "snapshot_ids",
             "instrument_id",
@@ -825,6 +833,7 @@ class RiskChainService:
         _reject_unsafe_content(request)
         self._validate_policy(policy)
         lineage = self._validate_lineage(request.get("lineage"), policy)
+        self._validate_full_chain_binding(request, lineage, now)
         snapshots, expires_at, instrument, market, account = self._validate_snapshots(
             request.get("snapshot_ids"), request, now
         )
@@ -933,6 +942,97 @@ class RiskChainService:
             ),
         )
 
+    def _validate_full_chain_binding(
+        self,
+        request: Mapping[str, Any],
+        lineage: Mapping[str, Any],
+        now: datetime,
+    ) -> None:
+        chain_id = _integer(
+            request.get("full_chain_run_id"),
+            "full_chain_run_id",
+            minimum=1,
+        )
+        candidate_approval_id = _integer(
+            request.get("candidate_approval_id"),
+            "candidate_approval_id",
+            minimum=1,
+        )
+        signal_snapshot_id = _integer(
+            request.get("signal_snapshot_id"),
+            "signal_snapshot_id",
+            minimum=1,
+        )
+        signal_digest = _safe_string(
+            request.get("signal_digest"),
+            "signal_digest",
+            maximum=64,
+            pattern=re.compile(r"^[0-9a-f]{64}$"),
+        )
+        chain = self.db.get(FullChainRun, chain_id)
+        approval = self.db.get(StrategyCandidateApproval, candidate_approval_id)
+        signal = self.db.get(FullChainSignalSnapshot, signal_snapshot_id)
+        if (
+            chain is None
+            or chain.execution_target_id != OKX_DEMO_TARGET_ID
+            or chain.research_scope_id != LOCAL_DRY_RUN_SCOPE_ID
+            or chain.status != "EXECUTING"
+            or chain.current_stage != "RISK"
+            or chain.candidate_approval_id != candidate_approval_id
+            or chain.signal_snapshot_id != signal_snapshot_id
+        ):
+            raise RiskChainBlocked("full-chain risk binding is not active")
+        expected_lineage = {
+            "strategy_id": chain.strategy_id,
+            "strategy_version_id": chain.strategy_version_id,
+            "backtest_run_id": chain.backtest_run_id,
+            "backtest_task_id": chain.backtest_task_id,
+            "backtest_result_id": chain.backtest_result_id,
+            "strategy_score_id": chain.strategy_score_id,
+        }
+        if any(
+            value is None or lineage.get(name) != value
+            for name, value in expected_lineage.items()
+        ):
+            raise RiskChainBlocked("full-chain research lineage is inconsistent")
+        if (
+            approval is None
+            or approval.full_chain_run_id != chain.id
+            or approval.execution_target_id != OKX_DEMO_TARGET_ID
+            or approval.status != "APPROVED"
+            or approval.strategy_version_id != chain.strategy_version_id
+            or approval.backtest_result_id != chain.backtest_result_id
+            or approval.strategy_score_id != chain.strategy_score_id
+            or _persisted_aware(approval.expires_at) <= now
+        ):
+            raise RiskChainBlocked("full-chain candidate approval is not current")
+        if (
+            signal is None
+            or signal.full_chain_run_id != chain.id
+            or signal.candidate_approval_id != approval.id
+            or signal.execution_target_id != OKX_DEMO_TARGET_ID
+            or signal.core_data is not True
+            or signal.source_type not in {"database", "api_aggregate"}
+            or signal.signal_digest != signal_digest
+            or signal.instrument_id != request.get("instrument_id")
+            or _persisted_aware(signal.observed_at) > now
+            or _persisted_aware(signal.expires_at) <= now
+        ):
+            raise RiskChainBlocked("full-chain signal binding is invalid or stale")
+        signal_checkpoint = self.db.scalars(
+            select(FullChainStageRun).where(
+                FullChainStageRun.full_chain_run_id == chain.id,
+                FullChainStageRun.stage == "SIGNAL",
+            )
+        ).first()
+        if (
+            signal_checkpoint is None
+            or signal_checkpoint.status != "SUCCESS"
+            or signal_checkpoint.database_ids
+            != {"signal_snapshot_id": signal.id}
+        ):
+            raise RiskChainBlocked("full-chain signal checkpoint is incomplete")
+
     def _validate_lineage(
         self,
         lineage: Any,
@@ -963,7 +1063,7 @@ class RiskChainService:
             version.strategy_id == strategy.id
             and version.validation_status == "passed"
             and run.strategy_version_id == version.id
-            and run.execution_scope_id == OKX_DEMO_TARGET_ID
+            and run.execution_scope_id == LOCAL_DRY_RUN_SCOPE_ID
             and run.status == "succeeded"
             and task.backtest_run_id == run.id
             and task.status == "succeeded"
