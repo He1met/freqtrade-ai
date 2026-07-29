@@ -551,6 +551,49 @@ def test_failed_rotation_does_not_commit_generation(monkeypatch):
     assert supervisor.LAST_CREDENTIAL_GENERATION == "generation-old"
 
 
+def test_failed_rotation_same_generation_backs_off_then_retries(monkeypatch):
+    supervisor = load_module(
+        SUPERVISOR_PATH,
+        "local_supervisor_failed_rotation_cooldown",
+    )
+    supervisor.LAST_CREDENTIAL_GENERATION = "generation-old"
+    now = [100.0]
+    calls = []
+    responses = {
+        "supervisor-capability": {
+            "status": "READY",
+            "_generation": "generation-new",
+            "return_code": 0,
+        },
+        "down": {
+            "services": [
+                {"service": "okx_runtime", "status": "BLOCKED"}
+            ],
+            "return_code": 0,
+        },
+    }
+    monkeypatch.setattr(supervisor.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        supervisor,
+        "run_runtime",
+        lambda command: calls.append(command) or responses[command],
+    )
+
+    assert supervisor.supervise_once() is False
+    assert calls == ["supervisor-capability", "down"]
+    assert supervisor.LAST_FAILED_CREDENTIAL_GENERATION == "generation-new"
+
+    calls.clear()
+    now[0] += supervisor.CREDENTIAL_RETRY_COOLDOWN_SECONDS - 1
+    assert supervisor.supervise_once() is False
+    assert calls == ["supervisor-capability"]
+
+    calls.clear()
+    now[0] += 1
+    assert supervisor.supervise_once() is False
+    assert calls == ["supervisor-capability", "down"]
+
+
 def test_supervisor_cold_start_replaces_unknown_existing_child(monkeypatch):
     supervisor = load_module(
         SUPERVISOR_PATH,

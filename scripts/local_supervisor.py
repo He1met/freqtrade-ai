@@ -14,6 +14,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
@@ -23,8 +24,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_SCRIPT = REPO_ROOT / "scripts" / "local_runtime.py"
 DEFAULT_INTERVAL_SECONDS = 30
 COMMAND_TIMEOUT_SECONDS = 330
+CREDENTIAL_RETRY_COOLDOWN_SECONDS = 300
 STOP_EVENT = threading.Event()
 LAST_CREDENTIAL_GENERATION: Optional[str] = None
+LAST_FAILED_CREDENTIAL_GENERATION: Optional[str] = None
+LAST_FAILED_CREDENTIAL_RETRY_AT = 0.0
 
 
 def timestamp() -> str:
@@ -131,26 +135,44 @@ def controlled_credential_restart(generation: str) -> bool:
     """Commit generation only after the replacement child verifies."""
 
     global LAST_CREDENTIAL_GENERATION
+    global LAST_FAILED_CREDENTIAL_GENERATION
+    global LAST_FAILED_CREDENTIAL_RETRY_AT
+
+    def record_failure(stage: str) -> bool:
+        global LAST_FAILED_CREDENTIAL_GENERATION
+        global LAST_FAILED_CREDENTIAL_RETRY_AT
+        LAST_FAILED_CREDENTIAL_GENERATION = generation
+        LAST_FAILED_CREDENTIAL_RETRY_AT = (
+            time.monotonic() + CREDENTIAL_RETRY_COOLDOWN_SECONDS
+        )
+        emit(
+            "runtime_recovery_blocked",
+            stage=stage,
+            retry_after_seconds=CREDENTIAL_RETRY_COOLDOWN_SECONDS,
+        )
+        return False
+
     stopped = run_runtime("down")
     if any(
         service.get("status") == "BLOCKED"
         for service in stopped.get("services", [])
     ):
-        emit("runtime_recovery_blocked", stage="credential-rotation-down")
-        return False
+        return record_failure("credential-rotation-down")
     started = run_runtime("up")
     if started.get("return_code") != 0:
-        emit("runtime_recovery_blocked", stage="credential-rotation-up")
-        return False
+        return record_failure("credential-rotation-up")
     verification = run_runtime("verify")
     if verification.get("return_code") != 0:
-        emit("runtime_recovery_blocked", stage="credential-rotation-verify")
-        return False
+        return record_failure("credential-rotation-verify")
     LAST_CREDENTIAL_GENERATION = generation
+    LAST_FAILED_CREDENTIAL_GENERATION = None
+    LAST_FAILED_CREDENTIAL_RETRY_AT = 0.0
     return True
 
 
 def supervise_once() -> bool:
+    global LAST_FAILED_CREDENTIAL_GENERATION
+    global LAST_FAILED_CREDENTIAL_RETRY_AT
     generation = credential_generation()
     if generation is None:
         emit("credential_capability_unavailable")
@@ -163,6 +185,18 @@ def supervise_once() -> bool:
         LAST_CREDENTIAL_GENERATION is None
         or generation != LAST_CREDENTIAL_GENERATION
     ):
+        if (
+            generation == LAST_FAILED_CREDENTIAL_GENERATION
+            and time.monotonic() < LAST_FAILED_CREDENTIAL_RETRY_AT
+        ):
+            emit(
+                "credential_rotation_backoff",
+                retry_after_seconds=max(
+                    1,
+                    int(LAST_FAILED_CREDENTIAL_RETRY_AT - time.monotonic()),
+                ),
+            )
+            return False
         emit("credential_rotation_detected")
         return controlled_credential_restart(generation)
     run_runtime("supervisor-thaw-openings")
