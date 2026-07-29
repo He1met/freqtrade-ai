@@ -17,7 +17,13 @@ from typing import Iterable, Optional, Union
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Connection, Engine, URL, make_url
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.schema import CheckConstraint, ForeignKeyConstraint, Index, UniqueConstraint
+from sqlalchemy.schema import (
+    AddConstraint,
+    CheckConstraint,
+    ForeignKeyConstraint,
+    Index,
+    UniqueConstraint,
+)
 
 from app import models  # noqa: F401 - imports every model into Base.metadata
 from app.core.exceptions import ConfigurationError
@@ -4393,6 +4399,74 @@ def _add_strategy_deployment_queue(connection: Connection) -> None:
     )
 
 
+def _add_deferred_execution_foreign_keys(connection: Connection) -> None:
+    """Restore metadata FKs deferred by the cyclic execution graph.
+
+    ``full_chain_runs`` references ``signal_evaluations``, whose deployment
+    ultimately references ``strategy_candidate_approvals`` and the originating
+    full-chain run.  SQLAlchemy correctly defers this cycle when creating every
+    table together, but ``create_all(checkfirst=True)`` cannot add those deferred
+    constraints to tables that already existed before an incremental upgrade.
+    Add only absent metadata constraints after every table in the cycle exists.
+    """
+
+    schema_name = connection.execute(text("SELECT current_schema()")).scalar_one()
+    inspector = inspect(connection)
+    for table_name in (
+        "full_chain_runs",
+        "strategy_candidate_approvals",
+        "strategy_deployments",
+        "signal_evaluations",
+    ):
+        table = Base.metadata.tables[table_name]
+        actual_fks = {
+            (
+                tuple(foreign_key["constrained_columns"]),
+                foreign_key.get("referred_schema") or schema_name,
+                foreign_key["referred_table"],
+                tuple(foreign_key["referred_columns"]),
+                (
+                    (foreign_key.get("options") or {}).get("ondelete")
+                    or "NO ACTION"
+                ).upper(),
+                (
+                    (foreign_key.get("options") or {}).get("onupdate")
+                    or "NO ACTION"
+                ).upper(),
+                bool(
+                    (foreign_key.get("options") or {}).get(
+                        "deferrable",
+                        False,
+                    )
+                ),
+                (
+                    (foreign_key.get("options") or {}).get("initially")
+                    or ""
+                ).upper()
+                or None,
+            )
+            for foreign_key in inspector.get_foreign_keys(
+                table_name,
+                schema=schema_name,
+            )
+        }
+        for constraint in table.constraints:
+            if not isinstance(constraint, ForeignKeyConstraint):
+                continue
+            signature = (
+                tuple(element.parent.name for element in constraint.elements),
+                constraint.elements[0].column.table.schema or schema_name,
+                constraint.elements[0].column.table.name,
+                tuple(element.column.name for element in constraint.elements),
+                (constraint.ondelete or "NO ACTION").upper(),
+                (constraint.onupdate or "NO ACTION").upper(),
+                bool(constraint.deferrable),
+                (constraint.initially or "").upper() or None,
+            )
+            if signature not in actual_fks:
+                connection.execute(AddConstraint(constraint))
+
+
 def _upgrade_execution_full_chain(connection: Connection) -> None:
     """Allow one lease-fenced execution chain per signal evaluation."""
 
@@ -4427,6 +4501,7 @@ def _upgrade_execution_full_chain(connection: Connection) -> None:
             """
         )
     )
+    _add_deferred_execution_foreign_keys(connection)
 
 
 def _upgrade_dual_side_trade_intents(connection: Connection) -> None:

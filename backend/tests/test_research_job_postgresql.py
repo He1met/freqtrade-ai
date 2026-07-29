@@ -64,6 +64,16 @@ def _reset_schema(engine) -> None:
         connection.execute(text("CREATE SCHEMA public"))
 
 
+def _detach_signal_evaluations_from_full_chain(connection) -> None:
+    connection.execute(
+        text(
+            "ALTER TABLE full_chain_runs "
+            "DROP CONSTRAINT IF EXISTS "
+            "full_chain_runs_signal_evaluation_id_fkey"
+        )
+    )
+
+
 def test_fill_snapshot_repeat_upgrade_drops_only_cross_generation_unique(
     postgres_engine,
 ) -> None:
@@ -98,6 +108,7 @@ def test_strategy_deployment_queue_upgrades_from_previous_schema(
 ) -> None:
     assert upgrade_database(postgres_engine) == SCHEMA_VERSION
     with postgres_engine.begin() as connection:
+        _detach_signal_evaluations_from_full_chain(connection)
         connection.execute(text("DROP TABLE signal_evaluations"))
         connection.execute(text("DROP TABLE strategy_deployments"))
         connection.execute(text(f"DELETE FROM {VERSION_TABLE}"))
@@ -643,6 +654,9 @@ def test_frozen_old_research_job_ddl_upgrades_data_and_removes_global_unique(
 ) -> None:
     Base.metadata.create_all(postgres_engine)
     with postgres_engine.begin() as connection:
+        _detach_signal_evaluations_from_full_chain(connection)
+        connection.execute(text("DROP TABLE signal_evaluations"))
+        connection.execute(text("DROP TABLE strategy_deployments"))
         for table_name in (
             "full_chain_signal_snapshots",
             "full_chain_stage_runs",
