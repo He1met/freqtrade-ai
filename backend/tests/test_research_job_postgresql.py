@@ -13,6 +13,7 @@ from app.db.migrations import (
     LEGACY_SCHEMA_VERSION,
     PREVIOUS_SCHEMA_VERSION,
     SCHEMA_VERSION,
+    STRATEGY_DEPLOYMENT_BASE_VERSION,
     TARGET_LINEAGE_BASE_VERSION,
     VERSION_TABLE,
     upgrade_database,
@@ -90,6 +91,42 @@ def test_fill_snapshot_repeat_upgrade_drops_only_cross_generation_unique(
     }
     assert "okx_demo_fill_snapshots_fill_unique" not in constraints
     assert "okx_demo_fill_snapshots_event_unique" in constraints
+
+
+def test_strategy_deployment_queue_upgrades_from_previous_schema(
+    postgres_engine,
+) -> None:
+    assert upgrade_database(postgres_engine) == SCHEMA_VERSION
+    with postgres_engine.begin() as connection:
+        connection.execute(text("DROP TABLE signal_evaluations"))
+        connection.execute(text("DROP TABLE strategy_deployments"))
+        connection.execute(text(f"DELETE FROM {VERSION_TABLE}"))
+        connection.execute(
+            text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+            {"version": STRATEGY_DEPLOYMENT_BASE_VERSION},
+        )
+
+    assert upgrade_database(postgres_engine) == SCHEMA_VERSION
+    readiness = verify_schema(postgres_engine)
+    assert readiness.ready is True
+    assert readiness.problems == ()
+
+    inspector = inspect(postgres_engine)
+    assert {"strategy_deployments", "signal_evaluations"}.issubset(
+        inspector.get_table_names()
+    )
+    unique_constraints = {
+        item["name"]
+        for item in inspector.get_unique_constraints("signal_evaluations")
+    }
+    assert "signal_evaluations_deployment_candle_unique" in unique_constraints
+    indexes = {
+        item["name"]: item
+        for item in inspector.get_indexes("signal_evaluations")
+    }
+    single_consumer = indexes["signal_evaluations_single_consumer_idx"]
+    assert single_consumer["unique"] is True
+    assert "status" in str(single_consumer.get("dialect_options"))
 
 
 def _create_frozen_pre_lineage_research_jobs(connection) -> None:

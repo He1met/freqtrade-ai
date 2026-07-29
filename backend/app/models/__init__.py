@@ -39,6 +39,7 @@ from app.models.research_job import ResearchJob, ResearchWorkerControl
 from app.models.strategy import Strategy, StrategyVersion
 from app.models.strategy_failure_reason import StrategyFailureReason
 from app.models.strategy_score import StrategyScore
+from app.models.strategy_deployment import SignalEvaluation, StrategyDeployment
 from app.models.strategy_generation_run import StrategyGenerationRun
 
 __all__ = [
@@ -81,9 +82,11 @@ __all__ = [
     "RiskBudget",
     "Strategy",
     "StrategyCandidateApproval",
+    "StrategyDeployment",
     "StrategyFailureReason",
     "StrategyGenerationRun",
     "StrategyScore",
     "StrategyVersion",
+    "SignalEvaluation",
     "TradeIntent",
 ]

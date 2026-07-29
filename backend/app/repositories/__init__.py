@@ -17,6 +17,11 @@ from app.repositories.strategy_failure_reasons import StrategyFailureReasonRepos
 from app.repositories.strategy_scores import StrategyScoreRepository
 from app.repositories.strategies import StrategyRepository
 from app.repositories.strategy_generation_runs import StrategyGenerationRunRepository
+from app.repositories.strategy_deployments import (
+    StrategyDeploymentBlocked,
+    StrategyDeploymentConflict,
+    StrategyDeploymentRepository,
+)
 
 __all__ = [
     "BacktestRepository",
@@ -30,6 +35,9 @@ __all__ = [
     "ResearchJobLinkageBlocked",
     "StrategyFailureReasonRepository",
     "StrategyGenerationRunRepository",
+    "StrategyDeploymentBlocked",
+    "StrategyDeploymentConflict",
+    "StrategyDeploymentRepository",
     "StrategyRepository",
     "StrategyScoreRepository",
     "ensure_execution_scope_catalog",

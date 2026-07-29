@@ -45,7 +45,8 @@ RECONCILIATION_BATCH_FRESHNESS_BASE_VERSION = "20260728_15"
 RECOVERY_WALL_CLOCK_BASE_VERSION = "20260728_16"
 DUAL_SIDE_BASE_VERSION = "20260728_17"
 STRATEGY_PROMOTION_BASE_VERSION = "20260728_18"
-SCHEMA_VERSION = "20260729_19"
+STRATEGY_DEPLOYMENT_BASE_VERSION = "20260729_19"
+SCHEMA_VERSION = "20260729_20"
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 ATTESTATION_PROOF_KEY_ENV = "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"
 
@@ -68,6 +69,8 @@ RUNTIME_APPLICATION_TABLES = (
     "full_chain_stage_runs",
     "strategy_candidate_approvals",
     "full_chain_signal_snapshots",
+    "strategy_deployments",
+    "signal_evaluations",
     "risk_budgets",
 )
 
@@ -4364,7 +4367,21 @@ def _add_okx_demo_soak(connection: Connection) -> None:
                 )
             )
         )
+    _add_strategy_deployment_queue(connection)
     _grant_runtime_application_acl(connection)
+
+
+def _add_strategy_deployment_queue(connection: Connection) -> None:
+    """Install the durable deployment and per-candle evaluation handoff."""
+
+    Base.metadata.tables["strategy_deployments"].create(
+        bind=connection,
+        checkfirst=True,
+    )
+    Base.metadata.tables["signal_evaluations"].create(
+        bind=connection,
+        checkfirst=True,
+    )
 
 
 def _upgrade_dual_side_trade_intents(connection: Connection) -> None:
@@ -4430,6 +4447,7 @@ def upgrade_database(engine: Engine) -> str:
                 RECOVERY_WALL_CLOCK_BASE_VERSION,
                 DUAL_SIDE_BASE_VERSION,
                 STRATEGY_PROMOTION_BASE_VERSION,
+                STRATEGY_DEPLOYMENT_BASE_VERSION,
             }
             if current_version in supported_upgrade_versions:
                 connection.execute(
@@ -4440,6 +4458,8 @@ def upgrade_database(engine: Engine) -> str:
                     )
                 )
             if current_version == FILL_SNAPSHOT_REPEAT_BASE_VERSION:
+                _add_strategy_deployment_queue(connection)
+                _grant_runtime_application_acl(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -4453,6 +4473,8 @@ def upgrade_database(engine: Engine) -> str:
                 return SCHEMA_VERSION
             if current_version == RECONCILIATION_BATCH_FRESHNESS_BASE_VERSION:
                 _add_okx_demo_reconciliation(connection)
+                _add_strategy_deployment_queue(connection)
+                _grant_runtime_application_acl(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -4466,6 +4488,8 @@ def upgrade_database(engine: Engine) -> str:
                 return SCHEMA_VERSION
             if current_version == RECOVERY_WALL_CLOCK_BASE_VERSION:
                 _add_okx_demo_reconciliation(connection)
+                _add_strategy_deployment_queue(connection)
+                _grant_runtime_application_acl(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -4480,6 +4504,8 @@ def upgrade_database(engine: Engine) -> str:
             if current_version == DUAL_SIDE_BASE_VERSION:
                 _upgrade_dual_side_trade_intents(connection)
                 _upgrade_strategy_candidate_approvals(connection)
+                _add_strategy_deployment_queue(connection)
+                _grant_runtime_application_acl(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -4493,10 +4519,26 @@ def upgrade_database(engine: Engine) -> str:
                 return SCHEMA_VERSION
             if current_version == STRATEGY_PROMOTION_BASE_VERSION:
                 _upgrade_strategy_candidate_approvals(connection)
+                _add_strategy_deployment_queue(connection)
+                _grant_runtime_application_acl(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
                         "Strategy promotion upgrade does not match ORM metadata: "
+                        + "; ".join(problems)
+                    )
+                connection.execute(
+                    text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+                    {"version": SCHEMA_VERSION},
+                )
+                return SCHEMA_VERSION
+            if current_version == STRATEGY_DEPLOYMENT_BASE_VERSION:
+                _add_strategy_deployment_queue(connection)
+                _grant_runtime_application_acl(connection)
+                problems = schema_problems(connection)
+                if problems:
+                    raise SchemaMigrationBlocked(
+                        "Strategy deployment queue upgrade does not match ORM metadata: "
                         + "; ".join(problems)
                     )
                 connection.execute(
@@ -4752,6 +4794,7 @@ def upgrade_database(engine: Engine) -> str:
                 )
                 return SCHEMA_VERSION
             if current_version == RUNTIME_APP_ACL_BASE_VERSION:
+                _add_strategy_deployment_queue(connection)
                 _grant_runtime_application_acl(connection)
                 problems = schema_problems(connection)
                 if problems:
