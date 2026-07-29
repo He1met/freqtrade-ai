@@ -386,6 +386,15 @@ def _policy() -> dict:
 def test_20260727_02_upgrades_to_risk_chain_atomically(postgres_engine) -> None:
     Base.metadata.create_all(postgres_engine)
     with postgres_engine.begin() as connection:
+        connection.execute(
+            text(
+                "ALTER TABLE full_chain_runs "
+                "DROP CONSTRAINT IF EXISTS "
+                "full_chain_runs_signal_evaluation_id_fkey"
+            )
+        )
+        connection.execute(text("DROP TABLE signal_evaluations"))
+        connection.execute(text("DROP TABLE strategy_deployments"))
         for table_name in (
             "full_chain_signal_snapshots",
             "full_chain_stage_runs",
