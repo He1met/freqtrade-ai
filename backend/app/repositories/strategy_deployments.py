@@ -56,6 +56,61 @@ class StrategyDeploymentRepository:
     def get_evaluation(self, evaluation_id: int) -> Optional[SignalEvaluation]:
         return self.db.get(SignalEvaluation, evaluation_id)
 
+    def require_active_lease(
+        self,
+        evaluation_id: int,
+        *,
+        lease_token: str,
+        fencing_sequence: int,
+        now: Optional[datetime] = None,
+        for_update: bool = False,
+    ) -> tuple[SignalEvaluation, StrategyDeployment]:
+        """Return one currently fenced runtime evaluation without committing.
+
+        The raw research-job lease is deliberately not accepted here.  Every
+        execution-chain mutation must prove the SignalEvaluation token and
+        fencing sequence issued to the sole OKX runtime consumer.
+        """
+
+        if not lease_token:
+            raise StrategyDeploymentBlocked("evaluation lease token is required")
+        current_time = _as_utc(now or datetime.now(timezone.utc))
+        statement = (
+            select(SignalEvaluation, StrategyDeployment)
+            .join(
+                StrategyDeployment,
+                StrategyDeployment.id == SignalEvaluation.deployment_id,
+            )
+            .where(SignalEvaluation.id == evaluation_id)
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        row = self.db.execute(statement).first()
+        if row is None:
+            raise StrategyDeploymentBlocked("signal evaluation is missing")
+        evaluation, deployment = row
+        if (
+            evaluation.execution_target_id != "OKX_DEMO"
+            or evaluation.status != "LEASED"
+            or evaluation.lease_token != lease_token
+            or evaluation.fencing_sequence != fencing_sequence
+            or evaluation.lease_expires_at is None
+            or _as_utc(evaluation.lease_expires_at) <= current_time
+        ):
+            raise StrategyDeploymentBlocked(
+                "signal evaluation lease is absent, stale, or fenced"
+            )
+        if (
+            deployment.execution_target_id != "OKX_DEMO"
+            or deployment.status != "ACTIVE"
+            or evaluation.instrument_id != deployment.instrument_id
+            or evaluation.timeframe != deployment.timeframe
+        ):
+            raise StrategyDeploymentBlocked(
+                "signal evaluation deployment is disabled or inconsistent"
+            )
+        return evaluation, deployment
+
     def publish(
         self,
         *,

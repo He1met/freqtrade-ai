@@ -80,4 +80,4 @@ def test_schema_version_is_explicit_and_stable() -> None:
     assert DUAL_SIDE_BASE_VERSION == "20260728_17"
     assert STRATEGY_PROMOTION_BASE_VERSION == "20260728_18"
     assert STRATEGY_DEPLOYMENT_BASE_VERSION == "20260729_19"
-    assert SCHEMA_VERSION == "20260729_20"
+    assert SCHEMA_VERSION == "20260729_21"

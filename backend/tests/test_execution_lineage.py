@@ -585,6 +585,42 @@ def test_child_records_require_a_parent_on_the_same_target(db) -> None:
         )
 
 
+def test_record_fill_idempotently_reuses_only_identical_lineage(db) -> None:
+    repository = ExecutionLineageRepository(db, OKX_DEMO_TARGET_ID)
+    intent = repository.create_trade_intent(
+        client_order_id="FillIdempotent1",
+        instrument_id="BTC-USDT-SWAP",
+        side="buy",
+        position_side="long",
+        order_type="market",
+        quantity=Decimal("1"),
+    )
+    order = repository.record_order(
+        trade_intent_id=intent.id,
+        client_order_id=intent.client_order_id,
+        exchange_order_id="order-fill-idempotent-1",
+        status="filled",
+    )
+    values = {
+        "exchange_order_row_id": order.id,
+        "exchange_fill_id": "fill-idempotent-1",
+        "price": Decimal("50000"),
+        "quantity": Decimal("1"),
+        "fee": Decimal("-0.01"),
+        "snapshot": {"payload_digest": "a" * 64},
+    }
+
+    first = repository.record_fill_idempotently(**values)
+    duplicate = repository.record_fill_idempotently(**values)
+    assert duplicate.id == first.id
+    assert db.query(ExchangeFill).count() == 1
+
+    with pytest.raises(ValueError, match="conflicts"):
+        repository.record_fill_idempotently(
+            **{**values, "quantity": Decimal("2")}
+        )
+
+
 def test_order_queries_are_bound_to_the_repository_target(db) -> None:
     repository = ExecutionLineageRepository(db, OKX_DEMO_TARGET_ID)
     intent = repository.create_trade_intent(

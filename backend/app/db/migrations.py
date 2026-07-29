@@ -46,7 +46,8 @@ RECOVERY_WALL_CLOCK_BASE_VERSION = "20260728_16"
 DUAL_SIDE_BASE_VERSION = "20260728_17"
 STRATEGY_PROMOTION_BASE_VERSION = "20260728_18"
 STRATEGY_DEPLOYMENT_BASE_VERSION = "20260729_19"
-SCHEMA_VERSION = "20260729_20"
+EXECUTION_FULL_CHAIN_BASE_VERSION = "20260729_20"
+SCHEMA_VERSION = "20260729_21"
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 ATTESTATION_PROOF_KEY_ENV = "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"
 
@@ -4045,6 +4046,7 @@ def _add_full_chain(connection: Connection) -> None:
 
     Base.metadata.create_all(bind=connection)
     _upgrade_strategy_candidate_approvals(connection)
+    _upgrade_execution_full_chain(connection)
     connection.execute(
         text(
             """
@@ -4391,6 +4393,42 @@ def _add_strategy_deployment_queue(connection: Connection) -> None:
     )
 
 
+def _upgrade_execution_full_chain(connection: Connection) -> None:
+    """Allow one lease-fenced execution chain per signal evaluation."""
+
+    connection.execute(
+        text(
+            """
+            ALTER TABLE full_chain_runs
+                DROP CONSTRAINT IF EXISTS full_chain_runs_research_job_unique,
+                ADD COLUMN IF NOT EXISTS run_kind VARCHAR(16),
+                ADD COLUMN IF NOT EXISTS signal_evaluation_id BIGINT;
+            UPDATE full_chain_runs
+               SET run_kind = 'RESEARCH'
+             WHERE run_kind IS NULL;
+            ALTER TABLE full_chain_runs
+                ALTER COLUMN run_kind SET DEFAULT 'RESEARCH',
+                ALTER COLUMN run_kind SET NOT NULL,
+                DROP CONSTRAINT IF EXISTS full_chain_runs_kind_binding_check,
+                ADD CONSTRAINT full_chain_runs_kind_binding_check CHECK (
+                    run_kind = 'RESEARCH' AND signal_evaluation_id IS NULL
+                    OR run_kind = 'EXECUTION' AND signal_evaluation_id IS NOT NULL
+                ),
+                DROP CONSTRAINT IF EXISTS full_chain_runs_signal_evaluation_id_fkey,
+                ADD CONSTRAINT full_chain_runs_signal_evaluation_id_fkey
+                    FOREIGN KEY (signal_evaluation_id)
+                    REFERENCES signal_evaluations(id) ON DELETE RESTRICT;
+            CREATE UNIQUE INDEX IF NOT EXISTS full_chain_runs_research_job_unique
+                ON full_chain_runs (research_job_id)
+                WHERE run_kind = 'RESEARCH';
+            CREATE UNIQUE INDEX IF NOT EXISTS full_chain_runs_signal_evaluation_unique
+                ON full_chain_runs (signal_evaluation_id)
+                WHERE run_kind = 'EXECUTION';
+            """
+        )
+    )
+
+
 def _upgrade_dual_side_trade_intents(connection: Connection) -> None:
     """Replace the legacy net-position constraint without rewriting lineage."""
 
@@ -4541,11 +4579,26 @@ def upgrade_database(engine: Engine) -> str:
                 return SCHEMA_VERSION
             if current_version == STRATEGY_DEPLOYMENT_BASE_VERSION:
                 _add_strategy_deployment_queue(connection)
+                _upgrade_execution_full_chain(connection)
                 _grant_runtime_application_acl(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
                         "Strategy deployment queue upgrade does not match ORM metadata: "
+                        + "; ".join(problems)
+                    )
+                connection.execute(
+                    text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+                    {"version": SCHEMA_VERSION},
+                )
+                return SCHEMA_VERSION
+            if current_version == EXECUTION_FULL_CHAIN_BASE_VERSION:
+                _upgrade_execution_full_chain(connection)
+                _grant_runtime_application_acl(connection)
+                problems = schema_problems(connection)
+                if problems:
+                    raise SchemaMigrationBlocked(
+                        "Execution full-chain upgrade does not match ORM metadata: "
                         + "; ".join(problems)
                     )
                 connection.execute(

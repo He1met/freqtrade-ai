@@ -26,6 +26,12 @@ from app.repositories import (
     StrategyDeploymentRepository,
     ensure_execution_scope_catalog,
 )
+from app.repositories.full_chain import (
+    FullChainBlocked,
+    FullChainConflict,
+    FullChainRepository,
+)
+from app.services.strategy_promotion import promotion_candidate_digest
 
 
 NOW = datetime(2026, 7, 29, 12, 0, tzinfo=timezone.utc)
@@ -89,7 +95,21 @@ def seed_approved_candidate(db, *, expires_at: datetime | None = None):
         backtest_run_id=backtest_run.id,
         backtest_task_id=backtest_task.id,
         result_path="reports/backtests/deployment.json",
-        metrics_snapshot={"acceptance_ready": True},
+        metrics_snapshot={
+            "acceptance_ready": True,
+            "promotion_evidence": {
+                "net_of_costs": True,
+                "out_of_sample": {
+                    "passed": True,
+                    "profit_pct": 0.04,
+                    "total_trades": 30,
+                },
+                "walk_forward": {
+                    "passed": True,
+                    "market_states": ["bull", "bear", "range"],
+                },
+            },
+        },
         profit_pct=0.05,
         max_drawdown_pct=0.1,
         total_trades=30,
@@ -102,7 +122,11 @@ def seed_approved_candidate(db, *, expires_at: datetime | None = None):
         backtest_result_id=backtest_result.id,
         scoring_version="phase2-quality-v1",
         total_score=82,
-        metrics_snapshot={"acceptance_ready": True},
+        metrics_snapshot={
+            "source": "backtest_result",
+            "backtest_result_id": backtest_result.id,
+            "acceptance_ready": True,
+        },
     )
     db.add(score)
     db.commit()
@@ -138,15 +162,20 @@ def seed_approved_candidate(db, *, expires_at: datetime | None = None):
     )
     db.add(chain)
     db.flush()
+    promotion_evidence, candidate_digest = promotion_candidate_digest(
+        backtest_result,
+        score,
+        version,
+    )
     approval = StrategyCandidateApproval(
         full_chain_run_id=chain.id,
         execution_target_id="OKX_DEMO",
         strategy_version_id=version.id,
         backtest_result_id=backtest_result.id,
         strategy_score_id=score.id,
-        candidate_digest="e" * 64,
-        promotion_policy_version="phase2-quality-v1",
-        promotion_evidence={"acceptance_ready": True},
+        candidate_digest=candidate_digest,
+        promotion_policy_version=promotion_evidence["policy"]["policy_version"],
+        promotion_evidence=promotion_evidence,
         status="APPROVED",
         requested_by="system:test",
         decided_by="system:test",
@@ -206,6 +235,139 @@ def test_publish_is_idempotent_and_persists_exact_candidate_binding(
         )
         assert persisted is not None
         assert persisted.status == "ACTIVE"
+
+
+def test_actionable_evaluation_opens_one_fenced_execution_chain(
+    session_factory,
+) -> None:
+    with session_factory() as db:
+        source_approval = seed_approved_candidate(db)
+        deployment = publish(db, source_approval.id)
+        evaluations = StrategyDeploymentRepository(db)
+        evaluation = evaluations.enqueue_evaluation(
+            deployment.id,
+            closed_candle_at=NOW,
+        )
+        claimed = evaluations.claim_next(
+            owner="okx-runtime",
+            lease_seconds=60,
+            now=NOW + timedelta(seconds=1),
+        )
+        assert claimed is not None and claimed.lease_token
+
+        chains = FullChainRepository(db)
+        first = chains.open_for_signal_evaluation(
+            evaluation.id,
+            claimed.lease_token,
+            claimed.fencing_sequence,
+            now=NOW + timedelta(seconds=2),
+        )
+        replay = chains.open_for_signal_evaluation(
+            evaluation.id,
+            claimed.lease_token,
+            claimed.fencing_sequence,
+            now=NOW + timedelta(seconds=2),
+        )
+        assert replay.id == first.id
+        assert first.run_kind == "EXECUTION"
+        assert first.signal_evaluation_id == evaluation.id
+        source_chain = db.get(FullChainRun, source_approval.full_chain_run_id)
+        assert source_chain is not None
+        assert first.research_job_id == source_chain.research_job_id
+        assert first.candidate_approval_id != source_approval.id
+        assert db.query(FullChainRun).filter_by(run_kind="EXECUTION").count() == 1
+
+        prepared = chains.prepare_execution_stage(
+            first.id,
+            "SIGNAL",
+            evaluation_id=evaluation.id,
+            lease_token=claimed.lease_token,
+            fencing_sequence=claimed.fencing_sequence,
+            idempotency_key="evaluation-signal",
+            input_snapshot={"evaluation_id": evaluation.id},
+            now=NOW + timedelta(seconds=3),
+        )
+        resumed = chains.prepare_execution_stage(
+            first.id,
+            "SIGNAL",
+            evaluation_id=evaluation.id,
+            lease_token=claimed.lease_token,
+            fencing_sequence=claimed.fencing_sequence,
+            idempotency_key="evaluation-signal",
+            input_snapshot={"evaluation_id": evaluation.id},
+            now=NOW + timedelta(seconds=3),
+        )
+        assert resumed.id == prepared.id
+        assert resumed.status == "PREPARED"
+        signal = chains.record_execution_signal(
+            first.id,
+            evaluation_id=evaluation.id,
+            lease_token=claimed.lease_token,
+            fencing_sequence=claimed.fencing_sequence,
+            instrument_id="BTC-USDT-SWAP",
+            source_type="database",
+            source_database_ids={
+                "instrument_snapshot_id": 1,
+                "market_snapshot_id": 2,
+                "account_snapshot_id": 3,
+            },
+            signal_snapshot={
+                "decision": "ACTIONABLE",
+                "enter_long": True,
+                "enter_short": False,
+            },
+            observed_at=NOW + timedelta(seconds=3),
+            expires_at=NOW + timedelta(seconds=30),
+        )
+        completed_signal = chains.complete_execution_stage(
+            first.id,
+            "SIGNAL",
+            evaluation_id=evaluation.id,
+            lease_token=claimed.lease_token,
+            fencing_sequence=claimed.fencing_sequence,
+            database_ids={"signal_snapshot_id": signal.id},
+            output_snapshot={
+                "status": "ACTIONABLE",
+                "signal_digest": signal.signal_digest,
+            },
+            now=NOW + timedelta(seconds=4),
+        )
+        replayed_signal = chains.complete_execution_stage(
+            first.id,
+            "SIGNAL",
+            evaluation_id=evaluation.id,
+            lease_token=claimed.lease_token,
+            fencing_sequence=claimed.fencing_sequence,
+            database_ids={"signal_snapshot_id": signal.id},
+            output_snapshot={
+                "status": "ACTIONABLE",
+                "signal_digest": signal.signal_digest,
+            },
+            now=NOW + timedelta(seconds=5),
+        )
+        assert completed_signal.status == "SUCCESS"
+        assert replayed_signal.id == completed_signal.id
+        assert first.current_stage == "RISK"
+        with pytest.raises(FullChainConflict, match="different idempotency"):
+            chains.prepare_execution_stage(
+                first.id,
+                "SIGNAL",
+                evaluation_id=evaluation.id,
+                lease_token=claimed.lease_token,
+                fencing_sequence=claimed.fencing_sequence,
+                idempotency_key="different",
+                input_snapshot={"evaluation_id": evaluation.id},
+                now=NOW + timedelta(seconds=3),
+            )
+
+    with session_factory() as restarted_db:
+        with pytest.raises(FullChainBlocked, match="absent, stale, or fenced"):
+            FullChainRepository(restarted_db).open_for_signal_evaluation(
+                evaluation.id,
+                claimed.lease_token,
+                claimed.fencing_sequence + 1,
+                now=NOW + timedelta(seconds=4),
+            )
 
 
 def test_single_consumer_and_no_action_do_not_create_full_chain_signal(

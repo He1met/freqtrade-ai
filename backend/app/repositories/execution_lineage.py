@@ -203,6 +203,55 @@ class ExecutionLineageRepository:
         self.db.refresh(fill)
         return fill
 
+    def record_fill_idempotently(
+        self,
+        *,
+        exchange_order_row_id: int,
+        exchange_fill_id: str,
+        price: Decimal,
+        quantity: Decimal,
+        fee: Optional[Decimal] = None,
+        snapshot: Optional[dict] = None,
+    ) -> ExchangeFill:
+        """Persist one authoritative fill, or prove an identical row exists."""
+
+        expected_snapshot = snapshot or {}
+        existing = self.db.scalars(
+            select(ExchangeFill).where(
+                ExchangeFill.execution_target_id == self.execution_target_id,
+                ExchangeFill.exchange_fill_id == exchange_fill_id,
+            )
+        ).first()
+        if existing is None:
+            return self.record_fill(
+                exchange_order_row_id=exchange_order_row_id,
+                exchange_fill_id=exchange_fill_id,
+                price=price,
+                quantity=quantity,
+                fee=fee,
+                snapshot=expected_snapshot,
+            )
+        existing_payload_digest = (existing.snapshot or {}).get(
+            "payload_digest"
+        )
+        expected_payload_digest = expected_snapshot.get("payload_digest")
+        if (
+            existing.exchange_order_row_id != exchange_order_row_id
+            or Decimal(existing.price) != Decimal(price)
+            or Decimal(existing.quantity) != Decimal(quantity)
+            or (
+                None if existing.fee is None else Decimal(existing.fee)
+            )
+            != (None if fee is None else Decimal(fee))
+            or not isinstance(existing_payload_digest, str)
+            or len(existing_payload_digest) != 64
+            or existing_payload_digest != expected_payload_digest
+        ):
+            raise ValueError(
+                "exchange fill identity conflicts with persisted lineage"
+            )
+        return existing
+
     def upsert_position(
         self,
         *,

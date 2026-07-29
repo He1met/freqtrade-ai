@@ -11,6 +11,8 @@ from sqlalchemy.pool import StaticPool
 
 from app.models import (
     Base,
+    ExchangeFill,
+    ExchangeOrder,
     ExchangePosition,
     OkxDemoExchangeEvent,
     OkxDemoPositionSnapshot,
@@ -26,7 +28,10 @@ from app.api.okx_demo_reconciliation import (
     latest_reconciliation,
     reconciliation_run,
 )
-from app.repositories.execution_lineage import ensure_execution_scope_catalog
+from app.repositories.execution_lineage import (
+    ExecutionLineageRepository,
+    ensure_execution_scope_catalog,
+)
 from app.services.okx_demo_reconciliation import (
     OkxDemoReconciliationBlocked,
     OkxDemoReconciliationService,
@@ -98,6 +103,46 @@ def _fill() -> dict:
         "fillSz": "1",
         "fee": "-0.01",
     }
+
+
+def _order(
+    *,
+    order_id: str = "managed-order-1",
+    client_order_id: str = "ManagedFill1",
+) -> dict:
+    return {
+        "ordId": order_id,
+        "clOrdId": client_order_id,
+        "instId": "BTC-USDT-SWAP",
+        "state": "filled",
+        "sz": "1",
+        "accFillSz": "1",
+        "avgPx": "50000",
+        "reduceOnly": False,
+    }
+
+
+def _managed_order(
+    db,
+    *,
+    order_id: str = "managed-order-1",
+    client_order_id: str = "ManagedFill1",
+) -> ExchangeOrder:
+    repository = ExecutionLineageRepository(db, OKX_DEMO_TARGET_ID)
+    intent = repository.create_trade_intent(
+        client_order_id=client_order_id,
+        instrument_id="BTC-USDT-SWAP",
+        side="buy",
+        position_side="long",
+        order_type="market",
+        quantity=Decimal("1"),
+    )
+    return repository.record_order(
+        trade_intent_id=intent.id,
+        client_order_id=client_order_id,
+        exchange_order_id=order_id,
+        status="filled",
+    )
 
 
 def test_event_ingest_is_idempotent_and_out_of_order_never_rewinds_projection(
@@ -330,6 +375,7 @@ def test_complete_rest_recovery_batch_restores_gate_after_restart(
         assert result.status == "RECOVERED"
         assert result.opening_frozen is False
         assert len(result.database_ids["fill_snapshots"]) == 1
+        assert db.scalar(select(ExchangeFill)) is None
 
 
 def test_fill_drift_only_applies_to_locally_managed_orders() -> None:
@@ -381,6 +427,7 @@ def test_empty_complete_streams_are_durable_but_cannot_fake_account_readiness(
         assert result.opening_frozen is True
         assert result.database_ids["recovery_batches"]
     with session_factory() as db:
+        assert db.scalar(select(ExchangeFill)) is None
         batch = db.scalar(select(OkxDemoRecoveryBatch))
         assert batch is not None and batch.event_count == 0
         assert set(batch.complete_streams) == {
@@ -388,6 +435,151 @@ def test_empty_complete_streams_are_durable_but_cannot_fake_account_readiness(
             "FILL",
             "POSITION",
             "ACCOUNT",
+        }
+
+
+def test_managed_fill_is_bridged_exactly_once_before_drift_comparison(
+    session_factory,
+    tmp_path,
+) -> None:
+    now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
+    fill = _fill()
+    fill.update({"fillId": "managed-fill-1", "ordId": "managed-order-1"})
+    with session_factory.begin() as db:
+        _managed_order(db)
+    with session_factory.begin() as db:
+        service = OkxDemoReconciliationService(
+            db,
+            evidence_root=tmp_path / "evidence",
+            allowed_evidence_root=tmp_path,
+        )
+        service.ingest_recovery_batch(
+            [
+                _event("ORDER", "managed-order-1", _order(), now),
+                _event("FILL", "managed-fill-1", fill, now),
+                _event("POSITION", "BTC-USDT-SWAP:long", _position("0"), now),
+                _event("ACCOUNT", "account", _account(), now),
+            ],
+            recovery_batch_id="managed-fill-baseline",
+            high_watermarks=_high_watermarks(),
+            overlap_started_at=now - timedelta(minutes=1),
+            observed_at=now,
+            completed_at=now,
+        )
+        first = service.reconcile(now=now)
+        first_fill = db.scalar(select(ExchangeFill))
+        first_provenance = dict(first_fill.snapshot)
+        service.ingest_recovery_batch(
+            [
+                _event(
+                    "ORDER",
+                    "managed-order-1",
+                    _order(),
+                    now + timedelta(seconds=1),
+                    stream_generation=2,
+                ),
+                _event(
+                    "FILL",
+                    "managed-fill-1",
+                    fill,
+                    now + timedelta(seconds=1),
+                    stream_generation=2,
+                ),
+                _event(
+                    "POSITION",
+                    "BTC-USDT-SWAP:long",
+                    _position("0"),
+                    now + timedelta(seconds=1),
+                    stream_generation=2,
+                ),
+                _event(
+                    "ACCOUNT",
+                    "account",
+                    _account(),
+                    now + timedelta(seconds=1),
+                    stream_generation=2,
+                ),
+            ],
+            recovery_batch_id="managed-fill-next-generation",
+            high_watermarks=_high_watermarks(),
+            overlap_started_at=now,
+            observed_at=now + timedelta(seconds=1),
+            completed_at=now + timedelta(seconds=1),
+        )
+        second = service.reconcile(now=now + timedelta(seconds=1))
+        assert first.status == "RECONCILED"
+        assert second.status == "RECONCILED"
+        rows = list(db.scalars(select(ExchangeFill)).all())
+        assert len(rows) == 1
+        assert rows[0].snapshot == first_provenance
+        assert rows[0].exchange_fill_id == "managed-fill-1"
+        assert rows[0].exchange_order_row_id == db.scalar(
+            select(ExchangeOrder.id).where(
+                ExchangeOrder.exchange_order_id == "managed-order-1"
+            )
+        )
+        assert rows[0].snapshot["fill_snapshot_database_id"] > 0
+        assert len(rows[0].snapshot["payload_digest"]) == 64
+
+
+@pytest.mark.parametrize("conflict_kind", ["content", "parent"])
+def test_managed_fill_lineage_conflict_freezes_openings(
+    session_factory,
+    tmp_path,
+    conflict_kind,
+) -> None:
+    now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
+    fill = _fill()
+    fill.update({"fillId": "managed-fill-1", "ordId": "managed-order-1"})
+    with session_factory.begin() as db:
+        expected_order = _managed_order(db)
+        other_order = _managed_order(
+            db,
+            order_id="managed-order-2",
+            client_order_id="ManagedFill2",
+        )
+        db.add(
+            ExchangeFill(
+                execution_target_id=OKX_DEMO_TARGET_ID,
+                exchange_order_row_id=(
+                    other_order.id if conflict_kind == "parent" else expected_order.id
+                ),
+                exchange_fill_id="managed-fill-1",
+                price=Decimal("50001" if conflict_kind == "content" else "50000"),
+                quantity=Decimal("1"),
+                fee=Decimal("-0.01"),
+                snapshot={"source": "conflicting-local-evidence"},
+            )
+        )
+    with session_factory.begin() as db:
+        service = OkxDemoReconciliationService(
+            db,
+            evidence_root=tmp_path / conflict_kind / "evidence",
+            allowed_evidence_root=tmp_path,
+        )
+        service.ingest_recovery_batch(
+            [
+                _event("ORDER", "managed-order-1", _order(), now),
+                _event("FILL", "managed-fill-1", fill, now),
+                _event("POSITION", "BTC-USDT-SWAP:long", _position("0"), now),
+                _event("ACCOUNT", "account", _account(), now),
+            ],
+            recovery_batch_id="managed-fill-conflict-{}".format(conflict_kind),
+            high_watermarks=_high_watermarks(),
+            overlap_started_at=now - timedelta(minutes=1),
+            observed_at=now,
+            completed_at=now,
+        )
+        result = service.reconcile(now=now)
+        assert result.status == "DRIFTED"
+        assert result.opening_frozen is True
+        assert any(
+            item["code"] == "AUTHORITATIVE_FILL_LINEAGE_CONFLICT"
+            and item["identity"] == "managed-fill-1"
+            for item in result.findings
+        )
+        assert db.scalar(select(ExchangeFill)).snapshot == {
+            "source": "conflicting-local-evidence"
         }
 
 
