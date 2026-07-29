@@ -7,7 +7,7 @@ import time
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, inspect, select, text
+from sqlalchemy import create_engine, func, inspect, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -40,16 +40,19 @@ from app.models.execution_lineage import (
     ApprovedExecution,
     ExchangeOrder,
     ReconciliationRun,
+    ResearchJobAttempt,
     RiskBudget,
     RiskDecision,
     TradeIntent,
 )
+from app.models.full_chain import FullChainRun, FullChainStageRun
 from app.models.order_writer import OkxOrderWriteAttempt
 from app.models.okx_demo_reconciliation import (
     OkxDemoExchangeEvent,
     OkxDemoReconciliationState,
     OkxDemoRecoveryGrant,
 )
+from app.models.research_job import ResearchJob
 from app.repositories.execution_lineage import ensure_execution_scope_catalog
 from app.services.risk_chain import (
     _issue_attested_session_capability,
@@ -373,6 +376,7 @@ def _seed_approved_order(
     )
     session.add(approval)
     session.flush()
+    _bind_completed_risk_stage(session, intent, decision, approval)
     order = None
     if create_order:
         order = ExchangeOrder(
@@ -386,6 +390,71 @@ def _seed_approved_order(
         session.add(order)
     session.commit()
     return approval.id, order.id if order is not None else 0
+
+
+def _bind_completed_risk_stage(
+    session: Session,
+    intent: TradeIntent,
+    decision: RiskDecision,
+    approval: ApprovedExecution,
+) -> FullChainRun:
+    identity = uuid4().hex
+    job = ResearchJob(
+        execution_scope_id="LOCAL_DRY_RUN",
+        job_type="deepseek_backtest",
+        operation="strategy_generation.deepseek_backtest_loop",
+        idempotency_key_digest=canonical_digest({"job": identity}),
+        request_hash=canonical_digest({"request": identity}),
+        request_payload={},
+        status="RUNNING",
+        stage="EXECUTION",
+        attempt_count=1,
+        max_attempts=1,
+    )
+    session.add(job)
+    session.flush()
+    attempt = ResearchJobAttempt(
+        research_job_id=job.id,
+        attempt_number=1,
+        execution_scope_id="LOCAL_DRY_RUN",
+        status="RUNNING",
+    )
+    session.add(attempt)
+    session.flush()
+    chain = FullChainRun(
+        research_job_id=job.id,
+        research_job_attempt_id=attempt.id,
+        research_scope_id="LOCAL_DRY_RUN",
+        execution_target_id="OKX_DEMO",
+        status="EXECUTING",
+        current_stage="EXECUTION",
+        trade_intent_id=intent.id,
+        risk_decision_id=decision.id,
+        approved_execution_id=approval.id,
+        started_at=NOW,
+    )
+    session.add(chain)
+    session.flush()
+    session.add(
+        FullChainStageRun(
+            full_chain_run_id=chain.id,
+            stage="RISK",
+            status="SUCCESS",
+            idempotency_key_digest=canonical_digest({"risk": identity}),
+            input_digest=canonical_digest({"input": identity}),
+            input_snapshot={"approval_id": approval.id},
+            output_snapshot={"status": "APPROVED"},
+            database_ids={
+                "trade_intent_id": intent.id,
+                "risk_decision_id": decision.id,
+                "approved_execution_id": approval.id,
+            },
+            prepared_at=NOW,
+            completed_at=NOW,
+        )
+    )
+    session.flush()
+    return chain
 
 
 def test_postgresql_fresh_schema_and_any_predicate_verify(
@@ -1534,12 +1603,55 @@ def test_postgresql_runtime_role_releases_expired_approval_budget(
             store.load_approved_execution(approval_id)
 
     with Session(postgres_writer_engine) as session:
-        assert session.get(ApprovedExecution, approval_id) is None
-        assert session.get(TradeIntent, intent_id).status == "EXPIRED"
-        assert session.get(RiskDecision, decision_id).decision == "EXPIRED"
+        retained = session.get(ApprovedExecution, approval_id)
+        assert retained is not None and retained.status == "EXPIRED"
+        assert session.get(TradeIntent, intent_id).status == "APPROVED"
+        assert session.get(RiskDecision, decision_id).decision == "APPROVED"
         budget = session.get(RiskBudget, "OKX_DEMO")
         assert budget.reserved_notional == 0
         assert budget.approved_positions == 0
+
+
+def test_postgresql_writer_blocks_incomplete_full_chain_risk_checkpoint(
+    postgres_writer_engine,
+) -> None:
+    upgrade_database(postgres_writer_engine)
+    with Session(postgres_writer_engine) as session:
+        approval_id, _ = _seed_approved_order(
+            session,
+            create_order=False,
+        )
+        approval = session.get(ApprovedExecution, approval_id)
+        chain = session.scalars(
+            select(FullChainRun).where(
+                FullChainRun.trade_intent_id == approval.trade_intent_id
+            )
+        ).one()
+        checkpoint = session.scalars(
+            select(FullChainStageRun).where(
+                FullChainStageRun.full_chain_run_id == chain.id,
+                FullChainStageRun.stage == "RISK",
+            )
+        ).one()
+        chain.current_stage = "RISK"
+        checkpoint.status = "PREPARED"
+        checkpoint.database_ids = {}
+        session.commit()
+
+    with Session(postgres_writer_engine) as session:
+        session.execute(text("SET LOCAL ROLE freqtrade"))
+        store = SqlAlchemyOrderWriterStore(
+            session,
+            now_provider=lambda: datetime.now(timezone.utc),
+        )
+        with pytest.raises(
+            OkxDemoWriteBlocked,
+            match="full-chain RISK checkpoint is incomplete",
+        ):
+            store.load_approved_execution(approval_id)
+        assert session.scalar(
+            select(func.count()).select_from(OkxOrderWriteAttempt)
+        ) == 0
 
 
 def test_postgresql_recovery_grant_and_cancel_attempt_commit_together(
