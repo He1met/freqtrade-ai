@@ -19,16 +19,20 @@ from app.models import (
     BacktestResult,
     BacktestRun,
     BacktestTask,
+    FullChainRun,
+    FullChainSignalSnapshot,
+    FullChainStageRun,
     OkxDemoAttestedSession,
     OkxDemoTrustedSnapshot,
     RiskBudget,
     RiskDecision,
     Strategy,
+    StrategyCandidateApproval,
     StrategyScore,
     StrategyVersion,
     TradeIntent,
 )
-from app.models.execution_lineage import OKX_DEMO_TARGET_ID
+from app.models.execution_lineage import LOCAL_DRY_RUN_SCOPE_ID, OKX_DEMO_TARGET_ID
 from app.repositories.execution_lineage import ensure_execution_scope_catalog
 
 
@@ -789,7 +793,62 @@ class RiskChainService:
                     reason=reason,
                 )
                 return None
+            self.require_completed_full_chain_binding(
+                approved=approved,
+                intent=intent,
+                decision=decision,
+            )
             return approved
+
+    def require_completed_full_chain_binding(
+        self,
+        *,
+        approved: ApprovedExecution,
+        intent: TradeIntent,
+        decision: RiskDecision,
+    ) -> None:
+        """Require the durable RISK checkpoint before a writer-side claim."""
+
+        chains = list(
+            self.db.scalars(
+                select(FullChainRun).where(
+                    FullChainRun.trade_intent_id == intent.id,
+                    FullChainRun.execution_target_id == OKX_DEMO_TARGET_ID,
+                    FullChainRun.research_scope_id == LOCAL_DRY_RUN_SCOPE_ID,
+                )
+            ).all()
+        )
+        if len(chains) != 1:
+            raise RiskChainBlocked(
+                "approval is not bound to exactly one completed full-chain risk stage"
+            )
+        chain = chains[0]
+        expected_ids = {
+            "trade_intent_id": intent.id,
+            "risk_decision_id": decision.id,
+            "approved_execution_id": approved.id,
+        }
+        checkpoints = list(
+            self.db.scalars(
+                select(FullChainStageRun).where(
+                    FullChainStageRun.full_chain_run_id == chain.id,
+                    FullChainStageRun.stage == "RISK",
+                )
+            ).all()
+        )
+        if (
+            chain.status != "EXECUTING"
+            or chain.current_stage != "EXECUTION"
+            or chain.trade_intent_id != intent.id
+            or chain.risk_decision_id != decision.id
+            or chain.approved_execution_id != approved.id
+            or len(checkpoints) != 1
+            or checkpoints[0].status != "SUCCESS"
+            or checkpoints[0].database_ids != expected_ids
+        ):
+            raise RiskChainBlocked(
+                "approval full-chain RISK checkpoint is incomplete or inconsistent"
+            )
 
     @staticmethod
     def _authorization_input(request: Mapping[str, Any]) -> dict[str, Any]:
@@ -797,6 +856,10 @@ class RiskChainService:
             raise RiskChainBlocked("request must be an object")
         names = (
             "execution_target",
+            "full_chain_run_id",
+            "candidate_approval_id",
+            "signal_snapshot_id",
+            "signal_digest",
             "lineage",
             "snapshot_ids",
             "instrument_id",
@@ -825,6 +888,7 @@ class RiskChainService:
         _reject_unsafe_content(request)
         self._validate_policy(policy)
         lineage = self._validate_lineage(request.get("lineage"), policy)
+        self._validate_full_chain_binding(request, lineage, now)
         snapshots, expires_at, instrument, market, account = self._validate_snapshots(
             request.get("snapshot_ids"), request, now
         )
@@ -933,6 +997,97 @@ class RiskChainService:
             ),
         )
 
+    def _validate_full_chain_binding(
+        self,
+        request: Mapping[str, Any],
+        lineage: Mapping[str, Any],
+        now: datetime,
+    ) -> None:
+        chain_id = _integer(
+            request.get("full_chain_run_id"),
+            "full_chain_run_id",
+            minimum=1,
+        )
+        candidate_approval_id = _integer(
+            request.get("candidate_approval_id"),
+            "candidate_approval_id",
+            minimum=1,
+        )
+        signal_snapshot_id = _integer(
+            request.get("signal_snapshot_id"),
+            "signal_snapshot_id",
+            minimum=1,
+        )
+        signal_digest = _safe_string(
+            request.get("signal_digest"),
+            "signal_digest",
+            maximum=64,
+            pattern=re.compile(r"^[0-9a-f]{64}$"),
+        )
+        chain = self.db.get(FullChainRun, chain_id)
+        approval = self.db.get(StrategyCandidateApproval, candidate_approval_id)
+        signal = self.db.get(FullChainSignalSnapshot, signal_snapshot_id)
+        if (
+            chain is None
+            or chain.execution_target_id != OKX_DEMO_TARGET_ID
+            or chain.research_scope_id != LOCAL_DRY_RUN_SCOPE_ID
+            or chain.status != "EXECUTING"
+            or chain.current_stage != "RISK"
+            or chain.candidate_approval_id != candidate_approval_id
+            or chain.signal_snapshot_id != signal_snapshot_id
+        ):
+            raise RiskChainBlocked("full-chain risk binding is not active")
+        expected_lineage = {
+            "strategy_id": chain.strategy_id,
+            "strategy_version_id": chain.strategy_version_id,
+            "backtest_run_id": chain.backtest_run_id,
+            "backtest_task_id": chain.backtest_task_id,
+            "backtest_result_id": chain.backtest_result_id,
+            "strategy_score_id": chain.strategy_score_id,
+        }
+        if any(
+            value is None or lineage.get(name) != value
+            for name, value in expected_lineage.items()
+        ):
+            raise RiskChainBlocked("full-chain research lineage is inconsistent")
+        if (
+            approval is None
+            or approval.full_chain_run_id != chain.id
+            or approval.execution_target_id != OKX_DEMO_TARGET_ID
+            or approval.status != "APPROVED"
+            or approval.strategy_version_id != chain.strategy_version_id
+            or approval.backtest_result_id != chain.backtest_result_id
+            or approval.strategy_score_id != chain.strategy_score_id
+            or _persisted_aware(approval.expires_at) <= now
+        ):
+            raise RiskChainBlocked("full-chain candidate approval is not current")
+        if (
+            signal is None
+            or signal.full_chain_run_id != chain.id
+            or signal.candidate_approval_id != approval.id
+            or signal.execution_target_id != OKX_DEMO_TARGET_ID
+            or signal.core_data is not True
+            or signal.source_type not in {"database", "api_aggregate"}
+            or signal.signal_digest != signal_digest
+            or signal.instrument_id != request.get("instrument_id")
+            or _persisted_aware(signal.observed_at) > now
+            or _persisted_aware(signal.expires_at) <= now
+        ):
+            raise RiskChainBlocked("full-chain signal binding is invalid or stale")
+        signal_checkpoint = self.db.scalars(
+            select(FullChainStageRun).where(
+                FullChainStageRun.full_chain_run_id == chain.id,
+                FullChainStageRun.stage == "SIGNAL",
+            )
+        ).first()
+        if (
+            signal_checkpoint is None
+            or signal_checkpoint.status != "SUCCESS"
+            or signal_checkpoint.database_ids
+            != {"signal_snapshot_id": signal.id}
+        ):
+            raise RiskChainBlocked("full-chain signal checkpoint is incomplete")
+
     def _validate_lineage(
         self,
         lineage: Any,
@@ -963,7 +1118,7 @@ class RiskChainService:
             version.strategy_id == strategy.id
             and version.validation_status == "passed"
             and run.strategy_version_id == version.id
-            and run.execution_scope_id == OKX_DEMO_TARGET_ID
+            and run.execution_scope_id == LOCAL_DRY_RUN_SCOPE_ID
             and run.status == "succeeded"
             and task.backtest_run_id == run.id
             and task.status == "succeeded"
@@ -1458,10 +1613,15 @@ class RiskChainService:
             intent.canonical_hash != input_digest
             or intent.policy_digest != policy_digest
         ):
+            retained_approval = False
             if approved is not None:
-                self._revoke_approval(approved)
-            intent.status = "BLOCKED"
-            decision.decision = "BLOCKED"
+                retained_approval = self._revoke_approval(
+                    approved,
+                    reason="idempotency key input or policy conflict",
+                )
+            if not retained_approval:
+                intent.status = "BLOCKED"
+                decision.decision = "BLOCKED"
             decision.evidence_snapshot = {
                 "reasons": ["idempotency key input or policy conflict"],
                 "input_digest": input_digest,
@@ -1478,10 +1638,15 @@ class RiskChainService:
             if value is not None
         )
         if expiry <= now:
+            retained_approval = False
             if approved is not None:
-                self._revoke_approval(approved)
-            intent.status = "EXPIRED"
-            decision.decision = "EXPIRED"
+                retained_approval = self._revoke_approval(
+                    approved,
+                    reason="authorization evidence expired",
+                )
+            if not retained_approval:
+                intent.status = "EXPIRED"
+                decision.decision = "EXPIRED"
             decision.evidence_snapshot = {
                 **decision.evidence_snapshot,
                 "reasons": ["authorization evidence expired"],
@@ -1494,9 +1659,13 @@ class RiskChainService:
             invalid_state = self._existing_snapshot_state(approved, now)
             if invalid_state is not None:
                 status, reason = invalid_state
-                self._revoke_approval(approved)
-                intent.status = status
-                decision.decision = status
+                retained_approval = self._revoke_approval(
+                    approved,
+                    reason=reason,
+                )
+                if not retained_approval:
+                    intent.status = status
+                    decision.decision = status
                 decision.evidence_snapshot = {
                     **decision.evidence_snapshot,
                     "reasons": [reason],
@@ -1566,7 +1735,12 @@ class RiskChainService:
                 return "BLOCKED", reason
         return None
 
-    def _revoke_approval(self, approved: ApprovedExecution) -> None:
+    def _revoke_approval(
+        self,
+        approved: ApprovedExecution,
+        *,
+        reason: str = "authorization permission revoked",
+    ) -> bool:
         if self.db.bind is not None and self.db.bind.dialect.name == "postgresql":
             self.db.execute(
                 text(
@@ -1585,8 +1759,29 @@ class RiskChainService:
                 budget.reserved_notional - approved.reserved_notional,
             )
             budget.approved_positions = max(0, budget.approved_positions - 1)
+        bound_chains = list(
+            self.db.scalars(
+                select(FullChainRun)
+                .where(FullChainRun.approved_execution_id == approved.id)
+                .with_for_update()
+            ).all()
+        )
+        if bound_chains:
+            approved.status = "EXPIRED"
+            approved.evidence_snapshot = {
+                **dict(approved.evidence_snapshot or {}),
+                "approval_active": False,
+                "invalidation_reason": reason,
+            }
+            for chain in bound_chains:
+                chain.status = "BLOCKED"
+                chain.terminal_reason = reason
+                chain.completed_at = datetime.now(timezone.utc)
+            self.db.flush()
+            return True
         self.db.delete(approved)
         self.db.flush()
+        return False
 
     def _invalidate_approval(
         self,
@@ -1597,9 +1792,13 @@ class RiskChainService:
         status: str,
         reason: str,
     ) -> None:
-        self._revoke_approval(approved)
-        intent.status = status
-        decision.decision = status
+        retained_approval = self._revoke_approval(
+            approved,
+            reason=reason,
+        )
+        if not retained_approval:
+            intent.status = status
+            decision.decision = status
         decision.evidence_snapshot = {
             **decision.evidence_snapshot,
             "reasons": [reason],

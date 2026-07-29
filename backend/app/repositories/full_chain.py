@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.models import (
     ApprovedExecution,
     BacktestResult,
@@ -29,9 +31,14 @@ from app.models import (
     StrategyVersion,
     TradeIntent,
 )
+from app.models.strategy_deployment import SignalEvaluation, StrategyDeployment
 from app.models.execution_lineage import LOCAL_DRY_RUN_SCOPE_ID, OKX_DEMO_TARGET_ID
 from app.models.full_chain import FULL_CHAIN_STAGES
 from app.repositories.research_jobs import ResearchJobRepository
+from app.repositories.strategy_deployments import (
+    StrategyDeploymentBlocked,
+    StrategyDeploymentRepository,
+)
 from app.schemas.dry_run_status import redact_dry_run_status_payload, redact_secret_text
 from app.services.strategy_promotion import (
     StrategyPromotionBlocked,
@@ -46,6 +53,9 @@ TERMINAL_CHAIN_STATUSES = {
     "CANCELLED",
     "STALE",
 }
+
+OKX_DEMO_AUTO_APPROVAL_ACTOR = "system:okx-demo-auto-promotion"
+OKX_DEMO_AUTO_APPROVAL_TTL = timedelta(minutes=5)
 
 AUTHORITATIVE_RECONCILIATION_ID_KEYS = {
     "reconciliation_run",
@@ -137,6 +147,298 @@ class FullChainRepository:
         self.db.commit()
         self.db.refresh(chain)
         return chain
+
+    def open_for_signal_evaluation(
+        self,
+        evaluation_id: int,
+        lease_token: str,
+        fencing_sequence: int,
+        *,
+        now: Optional[datetime] = None,
+    ) -> FullChainRun:
+        """Create one execution chain under the evaluation lease, never a job lease."""
+
+        current_time = now or datetime.now(timezone.utc)
+        try:
+            evaluation, deployment = StrategyDeploymentRepository(
+                self.db
+            ).require_active_lease(
+                evaluation_id,
+                lease_token=lease_token,
+                fencing_sequence=fencing_sequence,
+                now=current_time,
+                for_update=True,
+            )
+        except StrategyDeploymentBlocked as exc:
+            raise FullChainBlocked(str(exc)) from exc
+        existing = self.db.scalars(
+            select(FullChainRun).where(
+                FullChainRun.signal_evaluation_id == evaluation.id
+            )
+        ).first()
+        if existing is not None:
+            self._validate_execution_chain_binding(
+                existing,
+                evaluation=evaluation,
+                deployment=deployment,
+            )
+            return existing
+
+        source_approval = self.db.get(
+            StrategyCandidateApproval,
+            deployment.candidate_approval_id,
+        )
+        source_chain = (
+            self.db.get(FullChainRun, source_approval.full_chain_run_id)
+            if source_approval is not None
+            else None
+        )
+        if (
+            source_approval is None
+            or source_chain is None
+            or source_approval.status != "APPROVED"
+            or source_chain.run_kind != "RESEARCH"
+            or deployment.strategy_id != source_chain.strategy_id
+            or deployment.strategy_version_id != source_chain.strategy_version_id
+            or deployment.candidate_digest != source_approval.candidate_digest
+            or deployment.promotion_policy_version
+            != source_approval.promotion_policy_version
+        ):
+            raise FullChainBlocked("deployment research lineage is incomplete or stale")
+        chain = FullChainRun(
+            research_job_id=source_chain.research_job_id,
+            research_job_attempt_id=source_chain.research_job_attempt_id,
+            run_kind="EXECUTION",
+            signal_evaluation_id=evaluation.id,
+            research_scope_id=LOCAL_DRY_RUN_SCOPE_ID,
+            execution_target_id=OKX_DEMO_TARGET_ID,
+            status="APPROVED",
+            current_stage="SIGNAL",
+            strategy_generation_run_id=source_chain.strategy_generation_run_id,
+            strategy_id=source_chain.strategy_id,
+            strategy_version_id=source_chain.strategy_version_id,
+            backtest_run_id=source_chain.backtest_run_id,
+            backtest_task_id=source_chain.backtest_task_id,
+            backtest_result_id=source_chain.backtest_result_id,
+            strategy_score_id=source_chain.strategy_score_id,
+            started_at=current_time,
+        )
+        self.db.add(chain)
+        self.db.flush()
+        approval = StrategyCandidateApproval(
+            full_chain_run_id=chain.id,
+            execution_target_id=OKX_DEMO_TARGET_ID,
+            strategy_version_id=source_approval.strategy_version_id,
+            backtest_result_id=source_approval.backtest_result_id,
+            strategy_score_id=source_approval.strategy_score_id,
+            candidate_digest=source_approval.candidate_digest,
+            promotion_policy_version=source_approval.promotion_policy_version,
+            promotion_evidence=source_approval.promotion_evidence,
+            status="APPROVED",
+            requested_by="system:strategy-deployment",
+            requested_at=current_time,
+            decided_by="system:strategy-deployment",
+            decided_at=current_time,
+            decision_reason=(
+                "Execution authorization inherited from immutable deployment "
+                f"{deployment.id} for signal evaluation {evaluation.id}."
+            ),
+            expires_at=_as_utc(evaluation.lease_expires_at),
+        )
+        self.db.add(approval)
+        self.db.flush()
+        chain.candidate_approval_id = approval.id
+        try:
+            self.db.commit()
+        except IntegrityError:
+            self.db.rollback()
+            replay = self.db.scalars(
+                select(FullChainRun).where(
+                    FullChainRun.signal_evaluation_id == evaluation.id
+                )
+            ).first()
+            if replay is None:
+                raise
+            evaluation, deployment = StrategyDeploymentRepository(
+                self.db
+            ).require_active_lease(
+                evaluation_id,
+                lease_token=lease_token,
+                fencing_sequence=fencing_sequence,
+                now=current_time,
+            )
+            self._validate_execution_chain_binding(
+                replay,
+                evaluation=evaluation,
+                deployment=deployment,
+            )
+            return replay
+        self.db.refresh(chain)
+        return chain
+
+    def prepare_execution_stage(
+        self,
+        chain_id: int,
+        stage: str,
+        *,
+        evaluation_id: int,
+        lease_token: str,
+        fencing_sequence: int,
+        idempotency_key: str,
+        input_snapshot: dict,
+        now: Optional[datetime] = None,
+    ) -> FullChainStageRun:
+        if stage not in {"SIGNAL", "RISK"}:
+            raise FullChainBlocked(
+                "evaluation lease may prepare only SIGNAL or RISK"
+            )
+        current_time = now or datetime.now(timezone.utc)
+        chain = self._require_execution_chain(
+            chain_id,
+            evaluation_id=evaluation_id,
+            lease_token=lease_token,
+            fencing_sequence=fencing_sequence,
+            now=current_time,
+        )
+        if stage == "RISK":
+            signal = self.db.scalars(
+                select(FullChainStageRun).where(
+                    FullChainStageRun.full_chain_run_id == chain.id,
+                    FullChainStageRun.stage == "SIGNAL",
+                    FullChainStageRun.status == "SUCCESS",
+                )
+            ).first()
+            if signal is None:
+                raise FullChainBlocked("RISK requires a successful SIGNAL checkpoint")
+        if not idempotency_key.strip():
+            raise FullChainBlocked("stage idempotency key is required")
+        safe_input = _require_safe_snapshot(input_snapshot, "stage input")
+        input_digest = _stable_digest(safe_input)
+        idempotency_digest = _sha256(idempotency_key)
+        existing = self.db.scalars(
+            select(FullChainStageRun).where(
+                FullChainStageRun.full_chain_run_id == chain.id,
+                FullChainStageRun.stage == stage,
+            )
+        ).first()
+        if existing is not None:
+            if (
+                existing.idempotency_key_digest != idempotency_digest
+                or existing.input_digest != input_digest
+            ):
+                raise FullChainConflict(
+                    "stage was already prepared with different idempotency or input"
+                )
+            if existing.status in {"PREPARED", "SUCCESS"}:
+                return existing
+            raise FullChainBlocked("stage checkpoint is terminal and cannot resume")
+        checkpoint = FullChainStageRun(
+            full_chain_run_id=chain.id,
+            stage=stage,
+            status="PREPARED",
+            idempotency_key_digest=idempotency_digest,
+            input_digest=input_digest,
+            input_snapshot=safe_input,
+            prepared_at=current_time,
+        )
+        chain.current_stage = stage
+        self.db.add(checkpoint)
+        self.db.commit()
+        self.db.refresh(checkpoint)
+        return checkpoint
+
+    def complete_execution_stage(
+        self,
+        chain_id: int,
+        stage: str,
+        *,
+        evaluation_id: int,
+        lease_token: str,
+        fencing_sequence: int,
+        database_ids: dict[str, int],
+        output_snapshot: dict,
+        now: Optional[datetime] = None,
+    ) -> FullChainStageRun:
+        """Complete SIGNAL/RISK under the same fenced evaluation lease."""
+
+        if stage not in {"SIGNAL", "RISK"}:
+            raise FullChainBlocked(
+                "evaluation lease may complete only SIGNAL or RISK"
+            )
+        current_time = now or datetime.now(timezone.utc)
+        chain = self._require_execution_chain(
+            chain_id,
+            evaluation_id=evaluation_id,
+            lease_token=lease_token,
+            fencing_sequence=fencing_sequence,
+            now=current_time,
+        )
+        checkpoint = self._prepared_stage(chain.id, stage)
+        safe_output = _require_safe_snapshot(output_snapshot, "stage output")
+        normalized_ids = _require_database_ids(stage, database_ids)
+        if checkpoint.status == "SUCCESS":
+            if (
+                checkpoint.database_ids != normalized_ids
+                or checkpoint.output_snapshot != safe_output
+            ):
+                raise FullChainConflict("successful stage evidence cannot be rewritten")
+            return checkpoint
+        if checkpoint.status != "PREPARED":
+            raise FullChainBlocked("only a PREPARED stage can be completed")
+        self._validate_database_lineage(chain, stage, normalized_ids)
+        for key, value in normalized_ids.items():
+            if hasattr(chain, key):
+                setattr(chain, key, value)
+        checkpoint.status = "SUCCESS"
+        checkpoint.database_ids = normalized_ids
+        checkpoint.output_snapshot = safe_output
+        checkpoint.completed_at = current_time
+        chain.current_stage = _next_stage(stage) or stage
+        chain.status = "EXECUTING"
+        self.db.commit()
+        self.db.refresh(checkpoint)
+        return checkpoint
+
+    def fail_execution_stage(
+        self,
+        chain_id: int,
+        stage: str,
+        *,
+        evaluation_id: int,
+        lease_token: str,
+        fencing_sequence: int,
+        status: str,
+        error_code: str,
+        error_message: str,
+        now: Optional[datetime] = None,
+    ) -> FullChainStageRun:
+        """Fail SIGNAL/RISK without borrowing the completed research-job lease."""
+
+        if stage not in {"SIGNAL", "RISK"}:
+            raise FullChainBlocked("evaluation lease may fail only SIGNAL or RISK")
+        if status not in {"FAILED", "BLOCKED", "CANCELLED", "STALE"}:
+            raise ValueError("invalid terminal stage status")
+        current_time = now or datetime.now(timezone.utc)
+        chain = self._require_execution_chain(
+            chain_id,
+            evaluation_id=evaluation_id,
+            lease_token=lease_token,
+            fencing_sequence=fencing_sequence,
+            now=current_time,
+        )
+        checkpoint = self._prepared_stage(chain.id, stage)
+        if checkpoint.status != "PREPARED":
+            raise FullChainBlocked("only a PREPARED stage can be failed")
+        checkpoint.status = status
+        checkpoint.error_code = error_code[:80]
+        checkpoint.error_message = redact_secret_text(error_message)[:2000]
+        checkpoint.completed_at = current_time
+        chain.status = status
+        chain.terminal_reason = checkpoint.error_message
+        chain.completed_at = current_time
+        self.db.commit()
+        self.db.refresh(checkpoint)
+        return checkpoint
 
     def prepare_stage(
         self,
@@ -363,6 +665,7 @@ class FullChainRepository:
         decision: str,
         decided_by: str,
         reason: str,
+        decision_evidence: Optional[dict[str, Any]] = None,
         now: Optional[datetime] = None,
     ) -> StrategyCandidateApproval:
         if decision not in {"APPROVED", "REJECTED"}:
@@ -382,6 +685,11 @@ class FullChainRepository:
         safe_reason = redact_secret_text(reason)[:2000]
         if not safe_reason.strip():
             raise FullChainBlocked("candidate approval decision reason is required")
+        safe_decision_evidence = (
+            _require_safe_snapshot(decision_evidence, "candidate decision")
+            if decision_evidence is not None
+            else {}
+        )
         if _as_utc(approval.expires_at) <= _as_utc(current_time):
             approval.status = "EXPIRED"
             approval.decided_at = current_time
@@ -443,6 +751,7 @@ class FullChainRepository:
             checkpoint.database_ids = {"candidate_approval_id": approval.id}
             checkpoint.output_snapshot = {
                 **checkpoint.output_snapshot,
+                **safe_decision_evidence,
                 "status": "APPROVED",
             }
             checkpoint.completed_at = current_time
@@ -468,6 +777,78 @@ class FullChainRepository:
         self.db.commit()
         self.db.refresh(approval)
         return approval
+
+    def auto_approve_candidate(
+        self,
+        chain_id: int,
+        lease_token: str,
+        *,
+        now: Optional[datetime] = None,
+    ) -> StrategyCandidateApproval:
+        """Approve one exact eligible candidate under the locked Demo policy.
+
+        This is deliberately narrower than the general decision API: the target,
+        actor, policy evidence and lifetime are fixed by code, and all existing
+        promotion checks run before the decision can be persisted.
+        """
+
+        current_time = now or datetime.now(timezone.utc)
+        chain = self._require_active_chain(chain_id)
+        automation = get_settings().demo_automation_policy
+        if (
+            automation.enabled is not True
+            or automation.automatic_candidate_approval is not True
+            or automation.execution_target_id != OKX_DEMO_TARGET_ID
+            or chain.execution_target_id != OKX_DEMO_TARGET_ID
+            or automation.allow_live_trading is not False
+            or automation.allow_real_funds is not False
+        ):
+            raise FullChainBlocked("automatic candidate approval is OKX_DEMO only")
+        approval = self.create_candidate_approval(
+            chain.id,
+            lease_token,
+            requested_by=OKX_DEMO_AUTO_APPROVAL_ACTOR,
+            expires_at=current_time + OKX_DEMO_AUTO_APPROVAL_TTL,
+            now=current_time,
+        )
+        promotion = approval.promotion_evidence
+        policy = promotion.get("policy") if isinstance(promotion, dict) else None
+        policy_version = (
+            policy.get("policy_version")
+            if isinstance(policy, dict)
+            else None
+        )
+        if policy_version != approval.promotion_policy_version:
+            raise FullChainBlocked("automatic approval policy evidence is invalid")
+        return self.decide_candidate(
+            approval.id,
+            decision="APPROVED",
+            decided_by=OKX_DEMO_AUTO_APPROVAL_ACTOR,
+            reason=(
+                "Automatically approved for OKX_DEMO after deterministic "
+                "promotion gates passed."
+            ),
+            decision_evidence={
+                "approval_mode": "AUTOMATIC",
+                "decision_actor": OKX_DEMO_AUTO_APPROVAL_ACTOR,
+                "automation_policy_schema_version": automation.schema_version,
+                "candidate_digest": approval.candidate_digest,
+                "promotion_policy_version": approval.promotion_policy_version,
+                "hard_gates": {
+                    "validated_strategy_version": True,
+                    "positive_net_profit": True,
+                    "drawdown_limit": True,
+                    "minimum_trade_count": True,
+                    "out_of_sample": True,
+                    "walk_forward_market_states": True,
+                    "net_of_costs": True,
+                },
+                "manual_confirmation_required": False,
+                "execution_target_id": OKX_DEMO_TARGET_ID,
+                "allow_real_funds": False,
+            },
+            now=current_time,
+        )
 
     def revoke_candidate_approval(
         self,
@@ -589,6 +970,99 @@ class FullChainRepository:
         self.db.refresh(signal)
         return signal
 
+    def record_execution_signal(
+        self,
+        chain_id: int,
+        *,
+        evaluation_id: int,
+        lease_token: str,
+        fencing_sequence: int,
+        instrument_id: str,
+        source_type: str,
+        source_database_ids: dict,
+        signal_snapshot: dict,
+        observed_at: datetime,
+        expires_at: datetime,
+    ) -> FullChainSignalSnapshot:
+        """Persist the evaluated signal under its own durable queue lease."""
+
+        chain = self._require_execution_chain(
+            chain_id,
+            evaluation_id=evaluation_id,
+            lease_token=lease_token,
+            fencing_sequence=fencing_sequence,
+            now=observed_at,
+        )
+        checkpoint = self._prepared_stage(chain.id, "SIGNAL")
+        if checkpoint.status not in {"PREPARED", "SUCCESS"}:
+            raise FullChainBlocked("signal stage is not resumable")
+        approval = (
+            self.db.get(StrategyCandidateApproval, chain.candidate_approval_id)
+            if chain.candidate_approval_id
+            else None
+        )
+        if (
+            approval is None
+            or approval.status != "APPROVED"
+            or _as_utc(approval.expires_at) <= _as_utc(observed_at)
+        ):
+            raise FullChainBlocked("a current approved candidate is required for a signal")
+        self._require_current_candidate_approval(approval, chain, observed_at)
+        if source_type not in {"database", "api_aggregate"}:
+            raise FullChainBlocked("signal source must be database or api_aggregate")
+        if (
+            not source_database_ids
+            or any(
+                isinstance(value, bool) or not isinstance(value, int) or value <= 0
+                for value in source_database_ids.values()
+            )
+        ):
+            raise FullChainBlocked("signal source database IDs are required")
+        if not instrument_id.strip():
+            raise FullChainBlocked("signal instrument is required")
+        if observed_at >= expires_at:
+            raise FullChainBlocked("signal snapshot is stale or has an invalid lifetime")
+        safe_snapshot = _require_safe_snapshot(signal_snapshot, "signal")
+        digest = _stable_digest(
+            {
+                "candidate_digest": approval.candidate_digest,
+                "instrument_id": instrument_id,
+                "source_type": source_type,
+                "source_database_ids": source_database_ids,
+                "signal_snapshot": safe_snapshot,
+                "observed_at": observed_at,
+                "expires_at": expires_at,
+            }
+        )
+        existing = self.db.scalars(
+            select(FullChainSignalSnapshot).where(
+                FullChainSignalSnapshot.full_chain_run_id == chain.id
+            )
+        ).first()
+        if existing is not None:
+            if existing.signal_digest != digest:
+                raise FullChainConflict("signal snapshot is immutable")
+            return existing
+        signal = FullChainSignalSnapshot(
+            full_chain_run_id=chain.id,
+            candidate_approval_id=approval.id,
+            execution_target_id=OKX_DEMO_TARGET_ID,
+            instrument_id=instrument_id,
+            signal_digest=digest,
+            source_type=source_type,
+            core_data=True,
+            source_database_ids=source_database_ids,
+            signal_snapshot=safe_snapshot,
+            observed_at=observed_at,
+            expires_at=expires_at,
+        )
+        self.db.add(signal)
+        self.db.flush()
+        chain.signal_snapshot_id = signal.id
+        self.db.commit()
+        self.db.refresh(signal)
+        return signal
+
     def _require_current_candidate_approval(
         self,
         approval: StrategyCandidateApproval,
@@ -614,16 +1088,17 @@ class FullChainRepository:
             approval.decided_by = "system:promotion-revalidation"
             approval.decision_reason = reason
             approval.decided_at = now
-            checkpoint = self._prepared_stage(chain.id, "CANDIDATE_APPROVAL")
-            checkpoint.status = "BLOCKED"
-            checkpoint.error_code = "CANDIDATE_APPROVAL_STALE"
-            checkpoint.error_message = reason
-            checkpoint.completed_at = now
-            checkpoint.output_snapshot = {
-                **checkpoint.output_snapshot,
-                "status": "REVOKED",
-                "revalidation_reason": reason,
-            }
+            if chain.run_kind == "RESEARCH":
+                checkpoint = self._prepared_stage(chain.id, "CANDIDATE_APPROVAL")
+                checkpoint.status = "BLOCKED"
+                checkpoint.error_code = "CANDIDATE_APPROVAL_STALE"
+                checkpoint.error_message = reason
+                checkpoint.completed_at = now
+                checkpoint.output_snapshot = {
+                    **checkpoint.output_snapshot,
+                    "status": "REVOKED",
+                    "revalidation_reason": reason,
+                }
             chain.status = "BLOCKED"
             chain.terminal_reason = reason
             chain.completed_at = now
@@ -705,6 +1180,64 @@ class FullChainRepository:
             or chain.execution_target_id != OKX_DEMO_TARGET_ID
         ):
             raise FullChainBlocked("full chain scope or execution target is invalid")
+        return chain
+
+    def _validate_execution_chain_binding(
+        self,
+        chain: FullChainRun,
+        *,
+        evaluation: SignalEvaluation,
+        deployment: StrategyDeployment,
+    ) -> None:
+        approval = (
+            self.db.get(StrategyCandidateApproval, chain.candidate_approval_id)
+            if chain.candidate_approval_id is not None
+            else None
+        )
+        if (
+            chain.run_kind != "EXECUTION"
+            or chain.signal_evaluation_id != evaluation.id
+            or chain.execution_target_id != OKX_DEMO_TARGET_ID
+            or chain.research_scope_id != LOCAL_DRY_RUN_SCOPE_ID
+            or chain.strategy_id != deployment.strategy_id
+            or chain.strategy_version_id != deployment.strategy_version_id
+            or approval is None
+            or approval.full_chain_run_id != chain.id
+            or approval.candidate_digest != deployment.candidate_digest
+            or approval.promotion_policy_version
+            != deployment.promotion_policy_version
+        ):
+            raise FullChainConflict(
+                "signal evaluation already has a different execution-chain binding"
+            )
+
+    def _require_execution_chain(
+        self,
+        chain_id: int,
+        *,
+        evaluation_id: int,
+        lease_token: str,
+        fencing_sequence: int,
+        now: datetime,
+    ) -> FullChainRun:
+        try:
+            evaluation, deployment = StrategyDeploymentRepository(
+                self.db
+            ).require_active_lease(
+                evaluation_id,
+                lease_token=lease_token,
+                fencing_sequence=fencing_sequence,
+                now=now,
+                for_update=True,
+            )
+        except StrategyDeploymentBlocked as exc:
+            raise FullChainBlocked(str(exc)) from exc
+        chain = self._require_active_chain(chain_id)
+        self._validate_execution_chain_binding(
+            chain,
+            evaluation=evaluation,
+            deployment=deployment,
+        )
         return chain
 
     def _require_owned_job(
@@ -848,14 +1381,41 @@ class FullChainRepository:
             intent = loaded["trade_intent_id"]
             decision = loaded["risk_decision_id"]
             approval = loaded["approved_execution_id"]
+            canonical_input = (
+                intent.request_snapshot.get("canonical_input")
+                if isinstance(intent.request_snapshot, dict)
+                else None
+            )
+            signal = (
+                self.db.get(FullChainSignalSnapshot, chain.signal_snapshot_id)
+                if chain.signal_snapshot_id is not None
+                else None
+            )
             if (
                 intent.execution_target_id != OKX_DEMO_TARGET_ID
+                or intent.strategy_id != chain.strategy_id
                 or intent.strategy_version_id != chain.strategy_version_id
+                or intent.backtest_run_id != chain.backtest_run_id
                 or intent.backtest_result_id != chain.backtest_result_id
                 or intent.strategy_score_id != chain.strategy_score_id
+                or not isinstance(canonical_input, dict)
+                or canonical_input.get("full_chain_run_id") != chain.id
+                or canonical_input.get("candidate_approval_id")
+                != chain.candidate_approval_id
+                or canonical_input.get("signal_snapshot_id")
+                != chain.signal_snapshot_id
+                or signal is None
+                or canonical_input.get("signal_digest") != signal.signal_digest
+                or intent.instrument_id != signal.instrument_id
+                or decision.execution_target_id != OKX_DEMO_TARGET_ID
                 or decision.trade_intent_id != intent.id
                 or decision.decision != "APPROVED"
+                or decision.policy_digest != intent.policy_digest
+                or approval.execution_target_id != OKX_DEMO_TARGET_ID
                 or approval.trade_intent_id != intent.id
+                or approval.risk_decision_id != decision.id
+                or approval.decision != "APPROVED"
+                or approval.status != "ACTIVE"
             ):
                 raise FullChainBlocked("OKX Demo risk approval lineage is inconsistent")
         elif stage == "EXECUTION":

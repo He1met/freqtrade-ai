@@ -30,7 +30,10 @@ from app.models import (
     TradeIntent,
 )
 from app.models.execution_lineage import OKX_DEMO_TARGET_ID
-from app.repositories.execution_lineage import ensure_execution_scope_catalog
+from app.repositories.execution_lineage import (
+    ExecutionLineageRepository,
+    ensure_execution_scope_catalog,
+)
 
 
 SCHEMA_VERSION = "OKX_DEMO_RECON_V1"
@@ -439,6 +442,7 @@ class OkxDemoReconciliationService:
                 repaired_order_ids,
                 complete_snapshot=complete_batch is not None,
             )
+            self._bridge_managed_fills(latest_fills, findings)
             self._compare_fills(latest_fills, findings)
             self._compare_positions(latest_positions, findings)
             self._compare_account(latest_account, latest_positions, findings)
@@ -894,6 +898,84 @@ class OkxDemoReconciliationService:
             ):
                 findings.append(
                     _finding("POSITION_DRIFT", "BLOCKED", identity)
+                )
+
+    def _bridge_managed_fills(
+        self,
+        authoritative: Mapping[str, OkxDemoFillSnapshot],
+        findings: list[dict[str, Any]],
+    ) -> None:
+        """Copy authoritative managed fills into execution lineage exactly once."""
+
+        repository = ExecutionLineageRepository(self.db, OKX_DEMO_TARGET_ID)
+        for exchange_fill_id in sorted(authoritative):
+            fill_snapshot = authoritative[exchange_fill_id]
+            orders = list(
+                self.db.scalars(
+                    select(ExchangeOrder).where(
+                        ExchangeOrder.execution_target_id == OKX_DEMO_TARGET_ID,
+                        ExchangeOrder.exchange_order_id
+                        == fill_snapshot.exchange_order_id,
+                    )
+                ).all()
+            )
+            if not orders:
+                # Account-level history also includes orders outside this project.
+                continue
+            if len(orders) != 1:
+                findings.append(
+                    _finding(
+                        "AUTHORITATIVE_FILL_ORDER_AMBIGUOUS",
+                        "BLOCKED",
+                        exchange_fill_id,
+                    )
+                )
+                continue
+            event = self.db.get(
+                OkxDemoExchangeEvent,
+                fill_snapshot.event_database_id,
+            )
+            if event is None or event.payload_digest != _digest(
+                dict(fill_snapshot.authoritative_snapshot)
+            ):
+                findings.append(
+                    _finding(
+                        "AUTHORITATIVE_FILL_EVIDENCE_INVALID",
+                        "BLOCKED",
+                        exchange_fill_id,
+                    )
+                )
+                continue
+            evidence = {
+                "source": "okx_demo_reconciliation",
+                "fill_snapshot_database_id": fill_snapshot.database_id,
+                "event_database_id": event.database_id,
+                "payload_digest": event.payload_digest,
+                "authoritative_snapshot": dict(
+                    fill_snapshot.authoritative_snapshot
+                ),
+                "observed_at": _aware(fill_snapshot.observed_at).isoformat(),
+            }
+            try:
+                repository.record_fill_idempotently(
+                    exchange_order_row_id=orders[0].id,
+                    exchange_fill_id=fill_snapshot.exchange_fill_id,
+                    price=Decimal(fill_snapshot.price),
+                    quantity=Decimal(fill_snapshot.quantity),
+                    fee=(
+                        None
+                        if fill_snapshot.fee is None
+                        else Decimal(fill_snapshot.fee)
+                    ),
+                    snapshot=evidence,
+                )
+            except ValueError:
+                findings.append(
+                    _finding(
+                        "AUTHORITATIVE_FILL_LINEAGE_CONFLICT",
+                        "BLOCKED",
+                        exchange_fill_id,
+                    )
                 )
 
     def _compare_account(

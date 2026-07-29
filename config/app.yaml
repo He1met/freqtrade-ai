@@ -44,6 +44,45 @@ security:
   allow_live_trading: false
   allow_dry_run_trading: false
 
+demo_automation:
+  # Durable operator authorization for automatic operation in OKX Demo only.
+  # Every required gate remains fail-closed; this never authorizes OKX_LIVE.
+  schema_version: "1"
+  enabled: true
+  execution_target_id: OKX_DEMO
+  automatic_strategy_selection: true
+  automatic_candidate_approval: true
+  automatic_demo_order_submission: true
+  automatic_service_recovery: true
+  fail_closed: true
+  require_validated_backtest: true
+  require_fresh_market_and_account_data: true
+  require_risk_approval: true
+  require_position_and_notional_limits: true
+  require_unique_writer: true
+  require_idempotency: true
+  require_reconciliation: true
+  allow_live_trading: false
+  allow_real_funds: false
+  # New locked OKX_DEMO numerical policy. These values are an explicit project
+  # policy, not defaults inferred from test fixtures or the one-shot canary.
+  demo_risk_policy:
+    schema_version: "1"
+    allowed_instruments:
+      - BTC-USDT-SWAP
+    allowed_sides:
+      - buy
+      - sell
+    allowed_order_types:
+      - limit
+    max_leverage: 2
+    max_order_notional: 1000
+    max_total_exposure: 2000
+    max_positions: 2
+    max_price_deviation_pct: 0.01
+    min_strategy_score: 70
+    scoring_version: phase2-quality-v1
+
 execution:
   # One codebase, one runtime, one PostgreSQL, and one unambiguous exchange
   # order destination. This contract does not connect to OKX or submit orders.

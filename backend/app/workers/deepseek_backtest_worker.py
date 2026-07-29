@@ -5,7 +5,7 @@ import socket
 import sys
 import time
 from threading import Event, Thread
-from typing import Callable, Optional
+from typing import Callable, Optional, Protocol
 from uuid import uuid4
 
 from sqlalchemy.orm import Session, sessionmaker
@@ -25,9 +25,22 @@ from app.services.strategy_generation import (
     StrategyGenerationService,
     build_deepseek_single_provider_from_env,
 )
+from app.services.strategy_deployment_continuation import (
+    StrategyDeploymentContinuationBlocked,
+    default_strategy_deployment_continuation_factory,
+)
 
 
 ServiceFactory = Callable[[Session], DeepSeekBacktestLoopService]
+
+
+class ApprovedCandidateContinuation(Protocol):
+    """Continue one already-approved candidate without repeating research."""
+
+    def run(self, job_id: int, lease_token: str) -> None: ...
+
+
+ContinuationFactory = Callable[[Session], ApprovedCandidateContinuation]
 
 
 def default_service_factory(db: Session) -> DeepSeekBacktestLoopService:
@@ -88,12 +101,16 @@ class DeepSeekBacktestWorker:
         *,
         session_factory: sessionmaker = SessionLocal,
         service_factory: ServiceFactory = default_service_factory,
+        continuation_factory: Optional[
+            ContinuationFactory
+        ] = default_strategy_deployment_continuation_factory,
         owner: Optional[str] = None,
         lease_seconds: int = 300,
         heartbeat_interval_seconds: Optional[float] = None,
     ) -> None:
         self.session_factory = session_factory
         self.service_factory = service_factory
+        self.continuation_factory = continuation_factory
         self.owner = owner or f"{socket.gethostname()}:{uuid4().hex}"
         self.lease_seconds = lease_seconds
         self.heartbeat_interval_seconds = heartbeat_interval_seconds or max(
@@ -136,6 +153,14 @@ class DeepSeekBacktestWorker:
             job = repository.get(job_id)
             if job is None or job.status != "RUNNING" or job.lease_token != lease_token:
                 return
+            if job.stage == "SIGNAL":
+                self._execute_approved_candidate_continuation(
+                    repository,
+                    job_id,
+                    lease_token,
+                    heartbeat,
+                )
+                return
             payload = DeepSeekBacktestLoopRequest.model_validate(job.request_payload)
             if payload.allow_real_call:
                 if not repository.mark_provider_attempt(job_id, lease_token):
@@ -167,6 +192,97 @@ class DeepSeekBacktestWorker:
             if repository.cancel_at_checkpoint(job_id, lease_token) is not None:
                 return
             self._persist_response(repository, job_id, lease_token, payload, response)
+
+    def _execute_approved_candidate_continuation(
+        self,
+        repository: ResearchJobRepository,
+        job_id: int,
+        lease_token: str,
+        heartbeat: _Heartbeat,
+    ) -> None:
+        """Dispatch SIGNAL without ever re-entering DeepSeek or backtesting."""
+
+        if self.continuation_factory is None:
+            self._complete_signal_failure(
+                repository,
+                job_id,
+                lease_token,
+                status="BLOCKED",
+                reason=(
+                    "Approved candidate continuation is not configured; "
+                    "DeepSeek and backtesting were not repeated."
+                ),
+            )
+            return
+        try:
+            self.continuation_factory(repository.db).run(job_id, lease_token)
+        except StrategyDeploymentContinuationBlocked as exc:
+            if heartbeat.lease_lost.is_set():
+                return
+            self._complete_signal_failure(
+                repository,
+                job_id,
+                lease_token,
+                status="BLOCKED",
+                reason=redact_secret_text(str(exc))[:2000],
+            )
+            return
+        except Exception as exc:
+            if heartbeat.lease_lost.is_set():
+                return
+            self._complete_signal_failure(
+                repository,
+                job_id,
+                lease_token,
+                status="FAILED",
+                reason=redact_secret_text(str(exc))[:2000],
+            )
+            return
+        if heartbeat.lease_lost.is_set():
+            return
+        current = repository.get(job_id)
+        if (
+            current is not None
+            and current.status == "RUNNING"
+            and current.lease_token == lease_token
+        ):
+            self._complete_signal_failure(
+                repository,
+                job_id,
+                lease_token,
+                status="BLOCKED",
+                reason=(
+                    "Approved candidate continuation returned without a durable "
+                    "terminal checkpoint."
+                ),
+            )
+
+    @staticmethod
+    def _complete_signal_failure(
+        repository: ResearchJobRepository,
+        job_id: int,
+        lease_token: str,
+        *,
+        status: str,
+        reason: str,
+    ) -> None:
+        job = repository.get(job_id)
+        evidence = job.evidence_snapshot if job is not None else {}
+        repository.complete(
+            job_id,
+            lease_token,
+            status=status,
+            stage="SIGNAL",
+            links={},
+            evidence_snapshot={
+                **evidence,
+                "status": status,
+                "acceptance_ready": False,
+                "failed_reason": reason,
+            },
+            error_message=reason,
+            provider_completed=False,
+        )
 
     @staticmethod
     def _persist_response(

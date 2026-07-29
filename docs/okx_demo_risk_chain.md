@@ -9,6 +9,33 @@ not an exchange order. `ApprovedExecution.order_submission_authorized` is
 database-constrained to `FALSE`, and the later claim path must re-check target
 authorization before #447 can submit anything.
 
+## Automatic Demo candidate approval
+
+`OKX_DEMO` does not require a per-candidate human click. After the immutable
+generation, backtest, and scoring stages have completed, the full-chain worker
+may call `FullChainRepository.auto_approve_candidate`. The decision actor is
+fixed to `system:okx-demo-auto-promotion`, expires after five minutes, and is
+accepted only when the existing version validation, positive net profit,
+drawdown, trade-count, net-of-costs, out-of-sample, and walk-forward market-state
+gates all pass.
+
+The candidate digest, promotion policy version, system actor, hard-gate summary,
+target, and `allow_real_funds=false` are persisted in the
+`CANDIDATE_APPROVAL` checkpoint. A successful decision resumes the same
+DB-backed research job at `SIGNAL` without creating a second attempt or
+re-running DeepSeek. Missing or changed evidence remains fail-closed. This
+automatic decision is not available to `OKX_LIVE` and does not itself authorize
+an exchange order.
+
+The durable `demo_automation` manifest also records standing authorization for
+automatic strategy selection, controlled Demo order submission, and local
+service recovery. Those permissions are capabilities, not bypasses: an order
+still requires fresh trusted snapshots, a passing risk decision, position and
+notional limits, the unique writer, target-scoped idempotency, and healthy
+reconciliation. Missing evidence blocks automatically. The manifest cannot be
+weakened to `OKX_LIVE`, real funds, optional risk checks, multiple writers, or
+non-reconciled writes.
+
 ## Required evidence
 
 Every request must carry a consistent:

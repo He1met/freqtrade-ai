@@ -13,6 +13,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
@@ -52,9 +53,24 @@ class FullChainRun(Base):
             "'CANCELLED', 'STALE')",
             name="full_chain_runs_status_check",
         ),
-        UniqueConstraint(
+        CheckConstraint(
+            "(run_kind = 'RESEARCH' AND signal_evaluation_id IS NULL) OR "
+            "(run_kind = 'EXECUTION' AND signal_evaluation_id IS NOT NULL)",
+            name="full_chain_runs_kind_binding_check",
+        ),
+        Index(
+            "full_chain_runs_research_job_unique",
             "research_job_id",
-            name="full_chain_runs_research_job_unique",
+            unique=True,
+            postgresql_where=text("run_kind = 'RESEARCH'"),
+            sqlite_where=text("run_kind = 'RESEARCH'"),
+        ),
+        Index(
+            "full_chain_runs_signal_evaluation_unique",
+            "signal_evaluation_id",
+            unique=True,
+            postgresql_where=text("run_kind = 'EXECUTION'"),
+            sqlite_where=text("run_kind = 'EXECUTION'"),
         ),
         Index("full_chain_runs_status_created_idx", "status", "created_at"),
     )
@@ -73,6 +89,15 @@ class FullChainRun(Base):
         BigInteger().with_variant(Integer, "sqlite"),
         ForeignKey("research_job_attempts.id", ondelete="RESTRICT"),
         nullable=False,
+    )
+    run_kind: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="RESEARCH",
+    )
+    signal_evaluation_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey("signal_evaluations.id", ondelete="RESTRICT"),
     )
     research_scope_id: Mapped[str] = mapped_column(
         String(64),

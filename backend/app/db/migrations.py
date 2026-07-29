@@ -17,7 +17,13 @@ from typing import Iterable, Optional, Union
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Connection, Engine, URL, make_url
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.schema import CheckConstraint, ForeignKeyConstraint, Index, UniqueConstraint
+from sqlalchemy.schema import (
+    AddConstraint,
+    CheckConstraint,
+    ForeignKeyConstraint,
+    Index,
+    UniqueConstraint,
+)
 
 from app import models  # noqa: F401 - imports every model into Base.metadata
 from app.core.exceptions import ConfigurationError
@@ -45,7 +51,9 @@ RECONCILIATION_BATCH_FRESHNESS_BASE_VERSION = "20260728_15"
 RECOVERY_WALL_CLOCK_BASE_VERSION = "20260728_16"
 DUAL_SIDE_BASE_VERSION = "20260728_17"
 STRATEGY_PROMOTION_BASE_VERSION = "20260728_18"
-SCHEMA_VERSION = "20260729_19"
+STRATEGY_DEPLOYMENT_BASE_VERSION = "20260729_19"
+EXECUTION_FULL_CHAIN_BASE_VERSION = "20260729_20"
+SCHEMA_VERSION = "20260729_21"
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 ATTESTATION_PROOF_KEY_ENV = "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"
 
@@ -68,6 +76,8 @@ RUNTIME_APPLICATION_TABLES = (
     "full_chain_stage_runs",
     "strategy_candidate_approvals",
     "full_chain_signal_snapshots",
+    "strategy_deployments",
+    "signal_evaluations",
     "risk_budgets",
 )
 
@@ -3456,16 +3466,17 @@ def _add_okx_demo_reconciliation(connection: Connection) -> None:
                     RAISE EXCEPTION
                         'approval is not safely releasable as expired';
                 END IF;
-                DELETE FROM __SCHEMA__.approved_executions
-                WHERE id = v_approval.id;
-                UPDATE __SCHEMA__.trade_intents
-                SET status = 'EXPIRED'
-                WHERE id = v_approval.trade_intent_id
-                  AND execution_target_id = 'OKX_DEMO'
-                  AND status = 'APPROVED';
-                UPDATE __SCHEMA__.risk_decisions
-                SET decision = 'EXPIRED',
+                UPDATE __SCHEMA__.approved_executions
+                SET status = 'EXPIRED',
                     evidence_snapshot = jsonb_set(
+                        evidence_snapshot::jsonb,
+                        '{invalidation_reason}',
+                        '"authorization evidence expired"'::jsonb,
+                        TRUE
+                    )::json
+                WHERE id = v_approval.id;
+                UPDATE __SCHEMA__.risk_decisions
+                SET evidence_snapshot = jsonb_set(
                         evidence_snapshot::jsonb,
                         '{reasons}',
                         '["authorization evidence expired"]'::jsonb,
@@ -3474,6 +3485,12 @@ def _add_okx_demo_reconciliation(connection: Connection) -> None:
                 WHERE id = v_approval.risk_decision_id
                   AND execution_target_id = 'OKX_DEMO'
                   AND decision = 'APPROVED';
+                UPDATE __SCHEMA__.full_chain_runs
+                SET status = 'BLOCKED',
+                    terminal_reason = 'authorization evidence expired',
+                    completed_at = statement_timestamp()
+                WHERE approved_execution_id = v_approval.id
+                  AND execution_target_id = 'OKX_DEMO';
                 UPDATE __SCHEMA__.risk_budgets
                 SET reserved_notional = greatest(
                         0, reserved_notional -
@@ -4035,6 +4052,7 @@ def _add_full_chain(connection: Connection) -> None:
 
     Base.metadata.create_all(bind=connection)
     _upgrade_strategy_candidate_approvals(connection)
+    _upgrade_execution_full_chain(connection)
     connection.execute(
         text(
             """
@@ -4364,7 +4382,126 @@ def _add_okx_demo_soak(connection: Connection) -> None:
                 )
             )
         )
+    _add_strategy_deployment_queue(connection)
     _grant_runtime_application_acl(connection)
+
+
+def _add_strategy_deployment_queue(connection: Connection) -> None:
+    """Install the durable deployment and per-candle evaluation handoff."""
+
+    Base.metadata.tables["strategy_deployments"].create(
+        bind=connection,
+        checkfirst=True,
+    )
+    Base.metadata.tables["signal_evaluations"].create(
+        bind=connection,
+        checkfirst=True,
+    )
+
+
+def _add_deferred_execution_foreign_keys(connection: Connection) -> None:
+    """Restore metadata FKs deferred by the cyclic execution graph.
+
+    ``full_chain_runs`` references ``signal_evaluations``, whose deployment
+    ultimately references ``strategy_candidate_approvals`` and the originating
+    full-chain run.  SQLAlchemy correctly defers this cycle when creating every
+    table together, but ``create_all(checkfirst=True)`` cannot add those deferred
+    constraints to tables that already existed before an incremental upgrade.
+    Add only absent metadata constraints after every table in the cycle exists.
+    """
+
+    schema_name = connection.execute(text("SELECT current_schema()")).scalar_one()
+    inspector = inspect(connection)
+    for table_name in (
+        "full_chain_runs",
+        "strategy_candidate_approvals",
+        "strategy_deployments",
+        "signal_evaluations",
+    ):
+        table = Base.metadata.tables[table_name]
+        actual_fks = {
+            (
+                tuple(foreign_key["constrained_columns"]),
+                foreign_key.get("referred_schema") or schema_name,
+                foreign_key["referred_table"],
+                tuple(foreign_key["referred_columns"]),
+                (
+                    (foreign_key.get("options") or {}).get("ondelete")
+                    or "NO ACTION"
+                ).upper(),
+                (
+                    (foreign_key.get("options") or {}).get("onupdate")
+                    or "NO ACTION"
+                ).upper(),
+                bool(
+                    (foreign_key.get("options") or {}).get(
+                        "deferrable",
+                        False,
+                    )
+                ),
+                (
+                    (foreign_key.get("options") or {}).get("initially")
+                    or ""
+                ).upper()
+                or None,
+            )
+            for foreign_key in inspector.get_foreign_keys(
+                table_name,
+                schema=schema_name,
+            )
+        }
+        for constraint in table.constraints:
+            if not isinstance(constraint, ForeignKeyConstraint):
+                continue
+            signature = (
+                tuple(element.parent.name for element in constraint.elements),
+                constraint.elements[0].column.table.schema or schema_name,
+                constraint.elements[0].column.table.name,
+                tuple(element.column.name for element in constraint.elements),
+                (constraint.ondelete or "NO ACTION").upper(),
+                (constraint.onupdate or "NO ACTION").upper(),
+                bool(constraint.deferrable),
+                (constraint.initially or "").upper() or None,
+            )
+            if signature not in actual_fks:
+                connection.execute(AddConstraint(constraint))
+
+
+def _upgrade_execution_full_chain(connection: Connection) -> None:
+    """Allow one lease-fenced execution chain per signal evaluation."""
+
+    connection.execute(
+        text(
+            """
+            ALTER TABLE full_chain_runs
+                DROP CONSTRAINT IF EXISTS full_chain_runs_research_job_unique,
+                ADD COLUMN IF NOT EXISTS run_kind VARCHAR(16),
+                ADD COLUMN IF NOT EXISTS signal_evaluation_id BIGINT;
+            UPDATE full_chain_runs
+               SET run_kind = 'RESEARCH'
+             WHERE run_kind IS NULL;
+            ALTER TABLE full_chain_runs
+                ALTER COLUMN run_kind SET DEFAULT 'RESEARCH',
+                ALTER COLUMN run_kind SET NOT NULL,
+                DROP CONSTRAINT IF EXISTS full_chain_runs_kind_binding_check,
+                ADD CONSTRAINT full_chain_runs_kind_binding_check CHECK (
+                    run_kind = 'RESEARCH' AND signal_evaluation_id IS NULL
+                    OR run_kind = 'EXECUTION' AND signal_evaluation_id IS NOT NULL
+                ),
+                DROP CONSTRAINT IF EXISTS full_chain_runs_signal_evaluation_id_fkey,
+                ADD CONSTRAINT full_chain_runs_signal_evaluation_id_fkey
+                    FOREIGN KEY (signal_evaluation_id)
+                    REFERENCES signal_evaluations(id) ON DELETE RESTRICT;
+            CREATE UNIQUE INDEX IF NOT EXISTS full_chain_runs_research_job_unique
+                ON full_chain_runs (research_job_id)
+                WHERE run_kind = 'RESEARCH';
+            CREATE UNIQUE INDEX IF NOT EXISTS full_chain_runs_signal_evaluation_unique
+                ON full_chain_runs (signal_evaluation_id)
+                WHERE run_kind = 'EXECUTION';
+            """
+        )
+    )
+    _add_deferred_execution_foreign_keys(connection)
 
 
 def _upgrade_dual_side_trade_intents(connection: Connection) -> None:
@@ -4430,6 +4567,7 @@ def upgrade_database(engine: Engine) -> str:
                 RECOVERY_WALL_CLOCK_BASE_VERSION,
                 DUAL_SIDE_BASE_VERSION,
                 STRATEGY_PROMOTION_BASE_VERSION,
+                STRATEGY_DEPLOYMENT_BASE_VERSION,
             }
             if current_version in supported_upgrade_versions:
                 connection.execute(
@@ -4440,6 +4578,8 @@ def upgrade_database(engine: Engine) -> str:
                     )
                 )
             if current_version == FILL_SNAPSHOT_REPEAT_BASE_VERSION:
+                _add_strategy_deployment_queue(connection)
+                _grant_runtime_application_acl(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -4453,6 +4593,8 @@ def upgrade_database(engine: Engine) -> str:
                 return SCHEMA_VERSION
             if current_version == RECONCILIATION_BATCH_FRESHNESS_BASE_VERSION:
                 _add_okx_demo_reconciliation(connection)
+                _add_strategy_deployment_queue(connection)
+                _grant_runtime_application_acl(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -4466,6 +4608,8 @@ def upgrade_database(engine: Engine) -> str:
                 return SCHEMA_VERSION
             if current_version == RECOVERY_WALL_CLOCK_BASE_VERSION:
                 _add_okx_demo_reconciliation(connection)
+                _add_strategy_deployment_queue(connection)
+                _grant_runtime_application_acl(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -4480,6 +4624,8 @@ def upgrade_database(engine: Engine) -> str:
             if current_version == DUAL_SIDE_BASE_VERSION:
                 _upgrade_dual_side_trade_intents(connection)
                 _upgrade_strategy_candidate_approvals(connection)
+                _add_strategy_deployment_queue(connection)
+                _grant_runtime_application_acl(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -4493,10 +4639,41 @@ def upgrade_database(engine: Engine) -> str:
                 return SCHEMA_VERSION
             if current_version == STRATEGY_PROMOTION_BASE_VERSION:
                 _upgrade_strategy_candidate_approvals(connection)
+                _add_strategy_deployment_queue(connection)
+                _grant_runtime_application_acl(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
                         "Strategy promotion upgrade does not match ORM metadata: "
+                        + "; ".join(problems)
+                    )
+                connection.execute(
+                    text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+                    {"version": SCHEMA_VERSION},
+                )
+                return SCHEMA_VERSION
+            if current_version == STRATEGY_DEPLOYMENT_BASE_VERSION:
+                _add_strategy_deployment_queue(connection)
+                _upgrade_execution_full_chain(connection)
+                _grant_runtime_application_acl(connection)
+                problems = schema_problems(connection)
+                if problems:
+                    raise SchemaMigrationBlocked(
+                        "Strategy deployment queue upgrade does not match ORM metadata: "
+                        + "; ".join(problems)
+                    )
+                connection.execute(
+                    text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+                    {"version": SCHEMA_VERSION},
+                )
+                return SCHEMA_VERSION
+            if current_version == EXECUTION_FULL_CHAIN_BASE_VERSION:
+                _upgrade_execution_full_chain(connection)
+                _grant_runtime_application_acl(connection)
+                problems = schema_problems(connection)
+                if problems:
+                    raise SchemaMigrationBlocked(
+                        "Execution full-chain upgrade does not match ORM metadata: "
                         + "; ".join(problems)
                     )
                 connection.execute(
@@ -4752,6 +4929,7 @@ def upgrade_database(engine: Engine) -> str:
                 )
                 return SCHEMA_VERSION
             if current_version == RUNTIME_APP_ACL_BASE_VERSION:
+                _add_strategy_deployment_queue(connection)
                 _grant_runtime_application_acl(connection)
                 problems = schema_problems(connection)
                 if problems:

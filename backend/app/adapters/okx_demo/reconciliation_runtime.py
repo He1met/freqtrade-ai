@@ -13,6 +13,11 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.adapters.okx_demo.read_adapter import OkxDemoReadClient
+from app.adapters.okx_demo.writer_models import (
+    ClaimedApprovedExecution,
+    OrderSubmissionAuthorization,
+)
+from app.core.config import get_settings
 from app.services.okx_demo_reconciliation import (
     DEFAULT_ALLOWED_EVIDENCE_ROOT,
     DEFAULT_EVIDENCE_ROOT,
@@ -26,12 +31,26 @@ from app.models.okx_demo_reconciliation import (
     OkxDemoReconciliationState,
     OkxDemoRecoveryGrant,
 )
-from app.models.execution_lineage import ReconciliationRun
+from app.models.execution_lineage import (
+    ApprovedExecution,
+    ReconciliationRun,
+    RiskDecision,
+    TradeIntent,
+)
+from app.models.full_chain import FullChainRun, FullChainStageRun
 from app.models.order_writer import OkxOrderWriteAttempt
+from app.models.strategy_deployment import SignalEvaluation, StrategyDeployment
+from app.repositories.strategy_deployments import StrategyDeploymentRepository
+from app.services.okx_demo_execution_orchestrator import (
+    OkxDemoExecutionOrchestrator,
+)
 
 
 PAGE_LIMIT = 100
 MAX_PAGES = 100
+MAX_RUNTIME_RECONCILIATION_AGE_SECONDS = 30
+DEMO_GRANT_TTL_SECONDS = 10
+SIGNAL_EVALUATION_LEASE_SECONDS = 30
 RUNTIME_DATABASE_ID_KEYS = (
     "reconciliation_run",
     "exchange_events",
@@ -54,6 +73,7 @@ class OkxDemoRuntimeReconciliationAdapter:
         evidence_root: Path = DEFAULT_EVIDENCE_ROOT,
         allowed_evidence_root: Path = DEFAULT_ALLOWED_EVIDENCE_ROOT,
         account_fingerprint_sha256: Optional[str] = None,
+        order_submission_enabled: Optional[bool] = None,
         now_provider=lambda: datetime.now(timezone.utc),
     ) -> None:
         self._evidence_root = Path(evidence_root)
@@ -70,6 +90,16 @@ class OkxDemoRuntimeReconciliationAdapter:
                 "runtime reconciliation requires the pinned account fingerprint digest"
             )
         self._now_provider = now_provider
+        manifest_submission_enabled = (
+            get_settings()
+            .execution_target_manifest.active_target.order_submission_enabled
+        )
+        self._order_submission_enabled = (
+            manifest_submission_enabled
+            and order_submission_enabled is not False
+        )
+        self._writer_instance_id = "Runtime{}".format(uuid4().hex)
+        self._signal_lease_owner = "RuntimeSignal{}".format(uuid4().hex)
         self._last_completed_at: Optional[datetime] = None
         self._stream_generation = 0
         self._closed = False
@@ -91,15 +121,11 @@ class OkxDemoRuntimeReconciliationAdapter:
         return self._full_rest_reconciliation(read_client=read_client, db=db)
 
     def run_cycle(self, *, read_client, writer, db: Session) -> None:
-        del read_client
         pending = list(
             db.scalars(
                 select(OkxOrderWriteAttempt)
                 .where(
                     OkxOrderWriteAttempt.execution_target_id == "OKX_DEMO",
-                    OkxOrderWriteAttempt.recovery_grant_database_id.is_not(
-                        None
-                    ),
                     OkxOrderWriteAttempt.state.in_(
                         (
                             "PREPARED",
@@ -118,21 +144,46 @@ class OkxDemoRuntimeReconciliationAdapter:
             )
         if pending:
             attempt = pending[0]
-            if attempt.operation == "CANCEL":
+            if (
+                attempt.recovery_grant_database_id is not None
+                and attempt.operation == "CANCEL"
+            ):
                 writer.recovery_cancel(
                     recovery_grant_database_id=(
                         attempt.recovery_grant_database_id
                     )
                 )
-            elif attempt.operation == "CLOSE":
+            elif (
+                attempt.recovery_grant_database_id is not None
+                and attempt.operation == "CLOSE"
+            ):
                 writer.recovery_reduce_only(
                     recovery_grant_database_id=(
                         attempt.recovery_grant_database_id
                     )
                 )
-            else:
+            elif attempt.recovery_grant_database_id is not None:
                 raise OkxDemoReconciliationBlocked(
                     "unresolved runtime recovery operation is unsupported"
+                )
+            elif attempt.operation in {"PLACE", "CLOSE", "SET_LEVERAGE"}:
+                if not getattr(self, "_order_submission_enabled", False):
+                    return
+                approved = _approved_execution_by_id(
+                    db,
+                    approval_id=attempt.approval_id,
+                )
+                if approved is None:
+                    raise OkxDemoReconciliationBlocked(
+                        "unresolved runtime placement approval is unavailable"
+                    )
+                writer.place(
+                    approved,
+                    submission_grant=self._submission_authorization(approved),
+                )
+            else:
+                raise OkxDemoReconciliationBlocked(
+                    "unresolved runtime placement operation is unsupported"
                 )
             return
         grants = list(
@@ -165,6 +216,103 @@ class OkxDemoRuntimeReconciliationAdapter:
                 raise OkxDemoReconciliationBlocked(
                     "runtime recovery grant action is unsupported"
                 )
+        if grants:
+            return
+        if self._process_one_signal_evaluation(
+            read_client=read_client,
+            db=db,
+        ):
+            return
+        if not getattr(self, "_order_submission_enabled", False):
+            return
+        now = _aware(self._now_provider())
+        if not _fresh_reconciliation_allows_opening(db, now=now):
+            raise OkxDemoReconciliationBlocked(
+                "fresh reconciled runtime state is required before new submission"
+            )
+        approved = _next_unconsumed_approved_execution(db, now=now)
+        if approved is None:
+            return
+        writer.place(
+            approved,
+            submission_grant=self._submission_authorization(approved),
+        )
+
+    def _process_one_signal_evaluation(
+        self,
+        *,
+        read_client: Any,
+        db: Session,
+    ) -> bool:
+        now = _aware(self._now_provider())
+        repository = StrategyDeploymentRepository(db)
+        deployments = list(
+            db.scalars(
+                select(StrategyDeployment)
+                .where(
+                    StrategyDeployment.execution_target_id == "OKX_DEMO",
+                    StrategyDeployment.status == "ACTIVE",
+                )
+                .order_by(StrategyDeployment.id)
+            )
+        )
+        for deployment in deployments:
+            repository.enqueue_evaluation(
+                deployment.id,
+                closed_candle_at=_latest_closed_candle_open(
+                    now,
+                    deployment.timeframe,
+                ),
+            )
+        claimed = repository.claim_next(
+            owner=self._signal_lease_owner,
+            lease_seconds=SIGNAL_EVALUATION_LEASE_SECONDS,
+            now=now,
+        )
+        if claimed is None:
+            return False
+        if not claimed.lease_token:
+            raise OkxDemoReconciliationBlocked(
+                "claimed signal evaluation lacks a lease token"
+            )
+        OkxDemoExecutionOrchestrator(
+            db,
+            read_client=read_client,
+            deployment_repository=repository,
+        ).process(
+            claimed.id,
+            lease_token=claimed.lease_token,
+            fencing_sequence=claimed.fencing_sequence,
+            now=now,
+        )
+        return True
+
+    def _submission_authorization(
+        self,
+        approved: ClaimedApprovedExecution,
+    ) -> OrderSubmissionAuthorization:
+        now = _aware(self._now_provider())
+        expires_at = min(
+            approved.expires_at,
+            now + timedelta(seconds=DEMO_GRANT_TTL_SECONDS),
+        )
+        if expires_at <= now:
+            raise OkxDemoReconciliationBlocked(
+                "approved execution expired before runtime submission"
+            )
+        return OrderSubmissionAuthorization(
+            execution_target_id="OKX_DEMO",
+            authorization_schema_version="RISK_V1",
+            canonical_hash=approved.canonical_hash,
+            policy_digest=approved.policy_digest,
+            approved_payload_hash=approved.approved_payload_hash,
+            allow_real_funds=False,
+            simulated_trading=True,
+            order_submission_enabled=True,
+            writer_instance_id=self._writer_instance_id,
+            approval_id=approved.approval_id,
+            expires_at=expires_at,
+        )
 
     def close(self) -> None:
         self._closed = True
@@ -662,6 +810,233 @@ def _pagination_watermark(
             sort_keys=True,
         ).encode()
     ).hexdigest()
+
+
+def _latest_closed_candle_open(now: datetime, timeframe: str) -> datetime:
+    if len(timeframe) < 2 or not timeframe[:-1].isdigit():
+        raise OkxDemoReconciliationBlocked(
+            "strategy deployment timeframe is invalid"
+        )
+    count = int(timeframe[:-1])
+    units = {
+        "m": timedelta(minutes=count),
+        "h": timedelta(hours=count),
+        "d": timedelta(days=count),
+        "w": timedelta(weeks=count),
+    }
+    interval = units.get(timeframe[-1])
+    if count < 1 or interval is None:
+        raise OkxDemoReconciliationBlocked(
+            "strategy deployment timeframe is invalid"
+        )
+    active_now = _aware(now)
+    anchor = (
+        datetime(1970, 1, 5, tzinfo=timezone.utc)
+        if timeframe[-1] == "w"
+        else datetime(1970, 1, 1, tzinfo=timezone.utc)
+    )
+    elapsed = active_now - anchor
+    completed_intervals = elapsed // interval
+    return anchor + (completed_intervals - 1) * interval
+
+
+def _fresh_reconciliation_allows_opening(
+    db: Session,
+    *,
+    now: datetime,
+) -> bool:
+    state = db.scalars(
+        select(OkxDemoReconciliationState).where(
+            OkxDemoReconciliationState.execution_target_id == "OKX_DEMO"
+        )
+    ).first()
+    run = (
+        db.get(ReconciliationRun, state.last_reconciliation_run_id)
+        if state is not None and state.last_reconciliation_run_id is not None
+        else None
+    )
+    if (
+        state is None
+        or state.status not in {"RECONCILED", "RECOVERED"}
+        or state.opening_frozen
+        or run is None
+        or run.execution_target_id != "OKX_DEMO"
+        or run.status not in {"RECONCILED", "RECOVERED"}
+        or run.completed_at is None
+        or run.authoritative_observed_at is None
+    ):
+        return False
+    maximum_age = timedelta(seconds=MAX_RUNTIME_RECONCILIATION_AGE_SECONDS)
+    completed_age = now - _database_aware(run.completed_at)
+    observed_age = now - _database_aware(run.authoritative_observed_at)
+    return (
+        -timedelta(seconds=5) <= completed_age <= maximum_age
+        and -timedelta(seconds=5) <= observed_age <= maximum_age
+    )
+
+
+def _next_unconsumed_approved_execution(
+    db: Session,
+    *,
+    now: datetime,
+) -> Optional[ClaimedApprovedExecution]:
+    consumed = (
+        select(OkxOrderWriteAttempt.id)
+        .where(
+            OkxOrderWriteAttempt.approval_id == ApprovedExecution.id,
+            OkxOrderWriteAttempt.operation.in_(("PLACE", "CLOSE")),
+        )
+        .exists()
+    )
+    completed_risk = (
+        select(FullChainStageRun.id)
+        .where(
+            FullChainStageRun.full_chain_run_id == FullChainRun.id,
+            FullChainStageRun.stage == "RISK",
+            FullChainStageRun.status == "SUCCESS",
+        )
+        .exists()
+    )
+    row = db.execute(
+        select(
+            ApprovedExecution,
+            TradeIntent,
+            RiskDecision,
+            FullChainRun,
+            SignalEvaluation,
+        )
+        .join(
+            TradeIntent,
+            TradeIntent.id == ApprovedExecution.trade_intent_id,
+        )
+        .join(
+            RiskDecision,
+            RiskDecision.id == ApprovedExecution.risk_decision_id,
+        )
+        .join(
+            FullChainRun,
+            FullChainRun.approved_execution_id == ApprovedExecution.id,
+        )
+        .join(
+            SignalEvaluation,
+            SignalEvaluation.id == FullChainRun.signal_evaluation_id,
+        )
+        .where(
+            ApprovedExecution.execution_target_id == "OKX_DEMO",
+            ApprovedExecution.status == "ACTIVE",
+            ApprovedExecution.claim_required.is_(True),
+            ApprovedExecution.order_submission_authorized.is_(False),
+            ApprovedExecution.expires_at > now,
+            TradeIntent.execution_target_id == "OKX_DEMO",
+            TradeIntent.status == "APPROVED",
+            TradeIntent.expires_at > now,
+            RiskDecision.execution_target_id == "OKX_DEMO",
+            RiskDecision.decision == "APPROVED",
+            FullChainRun.execution_target_id == "OKX_DEMO",
+            FullChainRun.run_kind == "EXECUTION",
+            FullChainRun.signal_evaluation_id.is_not(None),
+            FullChainRun.trade_intent_id == ApprovedExecution.trade_intent_id,
+            FullChainRun.risk_decision_id == ApprovedExecution.risk_decision_id,
+            FullChainRun.status == "EXECUTING",
+            FullChainRun.current_stage == "EXECUTION",
+            SignalEvaluation.execution_target_id == "OKX_DEMO",
+            SignalEvaluation.status == "ACTIONABLE",
+            completed_risk,
+            ~consumed,
+        )
+        .order_by(ApprovedExecution.created_at, ApprovedExecution.id)
+        .limit(1)
+    ).first()
+    if row is None:
+        return None
+    approved, intent, decision, chain, evaluation = row
+    result = evaluation.result_snapshot or {}
+    expected = {
+        "full_chain_run_id": chain.id,
+        "trade_intent_id": intent.id,
+        "risk_decision_id": decision.id,
+        "approved_execution_id": approved.id,
+    }
+    if any(result.get(key) != value for key, value in expected.items()):
+        raise OkxDemoReconciliationBlocked(
+            "ACTIONABLE evaluation result does not bind exact execution lineage"
+        )
+    return _project_approved_execution(approved, intent, decision)
+
+
+def _approved_execution_by_id(
+    db: Session,
+    *,
+    approval_id: int,
+) -> Optional[ClaimedApprovedExecution]:
+    row = db.execute(
+        select(ApprovedExecution, TradeIntent, RiskDecision)
+        .join(
+            TradeIntent,
+            TradeIntent.id == ApprovedExecution.trade_intent_id,
+        )
+        .join(
+            RiskDecision,
+            RiskDecision.id == ApprovedExecution.risk_decision_id,
+        )
+        .where(
+            ApprovedExecution.id == approval_id,
+            ApprovedExecution.execution_target_id == "OKX_DEMO",
+        )
+    ).first()
+    return _project_approved_execution(*row) if row is not None else None
+
+
+def _project_approved_execution(
+    approved: ApprovedExecution,
+    intent: TradeIntent,
+    decision: RiskDecision,
+) -> ClaimedApprovedExecution:
+    expires_at = min(
+        _database_aware(value)
+        for value in (approved.expires_at, intent.expires_at)
+        if value is not None
+    )
+    return ClaimedApprovedExecution(
+        approval_id=approved.id,
+        trade_intent_id=intent.id,
+        risk_decision_id=decision.id,
+        execution_target_id="OKX_DEMO",
+        authorization_schema_version="RISK_V1",
+        canonical_hash=approved.canonical_hash,
+        policy_digest=approved.policy_digest,
+        approved_payload_hash=approved.approved_payload_hash,
+        client_order_id=intent.client_order_id,
+        instrument_id=intent.instrument_id,
+        side=intent.side,
+        position_side=intent.position_side,
+        order_type=intent.order_type,
+        contracts=intent.quantity,
+        limit_price=intent.limit_price,
+        reduce_only=bool(intent.reduce_only),
+        margin_mode=intent.margin_mode,
+        leverage=intent.leverage,
+        approved_at=_database_aware(approved.created_at),
+        expires_at=expires_at,
+        policy_version=decision.policy_version,
+        idempotency_digest=intent.idempotency_key_digest,
+        take_profit_trigger_price=intent.take_profit,
+        take_profit_order_price=(
+            Decimal("-1") if intent.take_profit is not None else None
+        ),
+        stop_loss_trigger_price=intent.stop_loss,
+        stop_loss_order_price=(
+            Decimal("-1") if intent.stop_loss is not None else None
+        ),
+    )
+
+
+def _database_aware(value: datetime) -> datetime:
+    return (
+        value.replace(tzinfo=timezone.utc)
+        if value.tzinfo is None
+        else value.astimezone(timezone.utc)
+    )
 
 
 def _aware(value: datetime) -> datetime:
