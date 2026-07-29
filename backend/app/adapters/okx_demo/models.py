@@ -4,11 +4,15 @@ from datetime import datetime
 from decimal import Decimal, ROUND_DOWN
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field, field_serializer
+from pydantic import BaseModel, Field, field_serializer, model_validator
 
 
 class StableModel(BaseModel):
     model_config = {"extra": "forbid"}
+
+
+class ImmutableStableModel(BaseModel):
+    model_config = {"extra": "forbid", "frozen": True}
 
 
 class SnapshotMetadata(StableModel):
@@ -233,3 +237,230 @@ class FillQuery(StableModel):
     @field_serializer("price", "size", "fee")
     def serialize_fill_decimal(self, value: Optional[Decimal]) -> Optional[str]:
         return format(value, "f") if value is not None else None
+
+
+class TrustedClosedCandle(ImmutableStableModel):
+    timestamp: datetime
+    open: Decimal = Field(gt=0)
+    high: Decimal = Field(gt=0)
+    low: Decimal = Field(gt=0)
+    close: Decimal = Field(gt=0)
+    volume: Decimal = Field(ge=0)
+    volume_ccy: Decimal = Field(ge=0)
+    confirmed: Literal[True] = True
+
+    @field_serializer(
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "volume_ccy",
+    )
+    def serialize_decimal(self, value: Decimal) -> str:
+        return format(value, "f")
+
+    @model_validator(mode="after")
+    def validate_price_range(self) -> "TrustedClosedCandle":
+        if self.low > min(self.open, self.close) or self.high < max(
+            self.open,
+            self.close,
+        ):
+            raise ValueError("closed candle OHLC range is inconsistent")
+        return self
+
+
+class TrustedBbo(ImmutableStableModel):
+    bid_price: Decimal = Field(gt=0)
+    bid_size: Decimal = Field(gt=0)
+    ask_price: Decimal = Field(gt=0)
+    ask_size: Decimal = Field(gt=0)
+    timestamp: datetime
+
+    @field_serializer("bid_price", "bid_size", "ask_price", "ask_size")
+    def serialize_decimal(self, value: Decimal) -> str:
+        return format(value, "f")
+
+
+class TrustedMarkPrice(ImmutableStableModel):
+    price: Decimal = Field(gt=0)
+    timestamp: datetime
+
+    @field_serializer("price")
+    def serialize_decimal(self, value: Decimal) -> str:
+        return format(value, "f")
+
+
+class TrustedPositionSummary(ImmutableStableModel):
+    position_side: Literal["long", "short"]
+    contracts: Decimal = Field(ge=0)
+    mark_price: Optional[Decimal] = Field(default=None, gt=0)
+    leverage: Optional[Decimal] = Field(default=None, gt=0)
+    timestamp: datetime
+
+    @field_serializer("contracts", "mark_price", "leverage")
+    def serialize_decimal(self, value: Optional[Decimal]) -> Optional[str]:
+        return format(value, "f") if value is not None else None
+
+
+class TrustedInstrumentSnapshotContent(ImmutableStableModel):
+    execution_target: Literal["OKX_DEMO"] = "OKX_DEMO"
+    source: Literal["okx_demo_rest"] = "okx_demo_rest"
+    resource: Literal["instrument"] = "instrument"
+    stale: Literal[False] = False
+    authenticated: Literal[False] = False
+    instId: str = Field(pattern=r"^[A-Z0-9]+-[A-Z0-9]+-SWAP$")
+    instrument_type: Literal["SWAP"] = "SWAP"
+    ctVal: Decimal = Field(gt=0)
+    ctValCcy: str
+    lotSz: Decimal = Field(gt=0)
+    minSz: Decimal = Field(gt=0)
+    tickSz: Decimal = Field(gt=0)
+    contract_shape: Literal["linear", "inverse"]
+    state: str
+    expires_at: datetime
+
+    @field_serializer("ctVal", "lotSz", "minSz", "tickSz")
+    def serialize_decimal(self, value: Decimal) -> str:
+        return format(value, "f")
+
+
+class TrustedMarketSnapshotContent(ImmutableStableModel):
+    execution_target: Literal["OKX_DEMO"] = "OKX_DEMO"
+    source: Literal["okx_demo_rest"] = "okx_demo_rest"
+    resource: Literal["market"] = "market"
+    stale: Literal[False] = False
+    authenticated: Literal[False] = False
+    instrument_id: str = Field(pattern=r"^[A-Z0-9]+-[A-Z0-9]+-SWAP$")
+    timeframe: str
+    okx_bar: str
+    reference_price: Decimal = Field(gt=0)
+    as_of: datetime
+    first_candle_at: datetime
+    last_candle_at: datetime
+    candle_count: int = Field(ge=2, le=300)
+    candle_set_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    confirmed_candles: tuple[TrustedClosedCandle, ...] = Field(
+        min_length=2,
+        max_length=300,
+    )
+    bbo: TrustedBbo
+    mark: TrustedMarkPrice
+    expires_at: datetime
+
+    @field_serializer("reference_price")
+    def serialize_decimal(self, value: Decimal) -> str:
+        return format(value, "f")
+
+    @model_validator(mode="after")
+    def validate_market_summary(self) -> "TrustedMarketSnapshotContent":
+        if (
+            len(self.confirmed_candles) != self.candle_count
+            or self.confirmed_candles[0].timestamp != self.first_candle_at
+            or self.confirmed_candles[-1].timestamp != self.last_candle_at
+            or self.first_candle_at >= self.last_candle_at
+            or self.bbo.bid_price >= self.bbo.ask_price
+            or self.mark.price != self.reference_price
+        ):
+            raise ValueError("trusted market snapshot summary is inconsistent")
+        return self
+
+
+class TrustedAccountSnapshotContent(ImmutableStableModel):
+    execution_target: Literal["OKX_DEMO"] = "OKX_DEMO"
+    source: Literal["okx_demo_rest"] = "okx_demo_rest"
+    resource: Literal["account"] = "account"
+    stale: Literal[False] = False
+    authenticated: Literal[True] = True
+    account_mode: Literal["long_short_mode"] = "long_short_mode"
+    margin_mode: Literal["isolated"] = "isolated"
+    current_exposure: Decimal = Field(ge=0)
+    open_positions: int = Field(ge=0)
+    exposure_by_position_side: dict[Literal["long", "short"], Decimal]
+    open_positions_by_position_side: dict[Literal["long", "short"], int]
+    leverage_by_position_side: dict[Literal["long", "short"], Decimal]
+    positions: tuple[TrustedPositionSummary, ...]
+    as_of: datetime
+    expires_at: datetime
+
+    @field_serializer("current_exposure")
+    def serialize_decimal(self, value: Decimal) -> str:
+        return format(value, "f")
+
+    @field_serializer(
+        "exposure_by_position_side",
+        "leverage_by_position_side",
+    )
+    def serialize_decimal_mapping(
+        self,
+        value: dict[str, Decimal],
+    ) -> dict[str, str]:
+        return {key: format(item, "f") for key, item in value.items()}
+
+    @model_validator(mode="after")
+    def validate_account_summary(self) -> "TrustedAccountSnapshotContent":
+        sides = {"long", "short"}
+        if (
+            set(self.exposure_by_position_side) != sides
+            or set(self.open_positions_by_position_side) != sides
+            or set(self.leverage_by_position_side) != sides
+            or any(
+                value < 0
+                for value in self.exposure_by_position_side.values()
+            )
+            or any(
+                value < 0
+                for value in self.open_positions_by_position_side.values()
+            )
+            or any(
+                value <= 0
+                for value in self.leverage_by_position_side.values()
+            )
+            or self.current_exposure
+            != sum(self.exposure_by_position_side.values(), Decimal("0"))
+            or self.open_positions
+            != sum(self.open_positions_by_position_side.values())
+        ):
+            raise ValueError("trusted account snapshot summary is inconsistent")
+        return self
+
+
+class TrustedSnapshotReference(ImmutableStableModel):
+    kind: Literal["instrument", "market", "account"]
+    database_id: int = Field(gt=0)
+    snapshot_id: str = Field(
+        pattern=r"^(instrument|market|account):[0-9a-f]{48}$"
+    )
+    digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    expires_at: datetime
+
+
+class TrustedSignalBundle(ImmutableStableModel):
+    schema_version: Literal["1"] = "1"
+    execution_target: Literal["OKX_DEMO"] = "OKX_DEMO"
+    instrument_id: str = Field(pattern=r"^[A-Z0-9]+-[A-Z0-9]+-SWAP$")
+    timeframe: str
+    candle_set_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    observed_at: datetime
+    expires_at: datetime
+    instrument: TrustedSnapshotReference
+    market: TrustedSnapshotReference
+    account: TrustedSnapshotReference
+
+    @model_validator(mode="after")
+    def validate_bundle_references(self) -> "TrustedSignalBundle":
+        if (
+            self.instrument.kind != "instrument"
+            or self.market.kind != "market"
+            or self.account.kind != "account"
+            or {
+                self.instrument.expires_at,
+                self.market.expires_at,
+                self.account.expires_at,
+                self.expires_at,
+            }
+            != {self.expires_at}
+            or self.observed_at >= self.expires_at
+        ):
+            raise ValueError("trusted signal bundle references are inconsistent")
+        return self
