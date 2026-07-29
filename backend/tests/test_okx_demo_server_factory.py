@@ -276,6 +276,35 @@ def test_process_lock_is_acquired_before_preflight_and_released_on_failure(
     ]
 
 
+def test_safe_preflight_reason_survives_factory_boundary(monkeypatch) -> None:
+    FakeProcessLock.events = []
+    monkeypatch.setattr(
+        server_factory,
+        "OkxDemoWriterProcessLock",
+        FakeProcessLock,
+    )
+    monkeypatch.setattr(
+        server_factory,
+        "create_attested_okx_demo_read_adapter",
+        lambda _snapshot: (_ for _ in ()).throw(
+            preflight.OkxDemoPreflightBlocked(
+                preflight.IP_WHITELIST_REJECTED_REASON
+            )
+        ),
+    )
+
+    with pytest.raises(
+        OkxDemoCredentialsUnavailable,
+        match=preflight.IP_WHITELIST_REJECTED_REASON,
+    ):
+        server_factory.create_okx_demo_server_session(environment())
+
+    assert [event[0] for event in FakeProcessLock.events] == [
+        "acquire",
+        "release",
+    ]
+
+
 def test_server_session_and_production_transport_are_factory_gated() -> None:
     class ForgedProvider:
         def _assert_attested_session(self, _capability):

@@ -40,10 +40,12 @@ from app.adapters.freqtrade.binary import resolve_freqtrade_binary
 from app.adapters.okx_demo.credential_preflight import (
     ALLOW_REAL_FUNDS_ENV,
     EXECUTION_TARGET_ENV,
+    IP_WHITELIST_REJECTED_REASON,
     OKX_DEMO_CREDENTIAL_ENV_NAMES,
     OKX_DEMO_REQUIRED_ENV_NAMES,
     OKX_DEMO_REST_URL,
     REST_URL_ENV,
+    SAFE_OPERATOR_PREFLIGHT_REASONS,
 )
 from app.adapters.okx_demo.demo_canary import (
     ALLOWED_INSTRUMENTS as OKX_DEMO_CANARY_ALLOWED_INSTRUMENTS,
@@ -1076,11 +1078,16 @@ def run_okx_demo_preflight() -> Dict[str, Any]:
             "simulated_trading_header": True,
         }
     ):
+        safe_reason = payload.get("reason")
+        if safe_reason not in SAFE_OPERATOR_PREFLIGHT_REASONS:
+            safe_reason = (
+                "OKX Demo account identity or permissions could not be attested"
+            )
         return {
             "status": "BLOCKED",
             "execution_target": "OKX_DEMO",
             "credentials": credential_status,
-            "reason": "OKX Demo account identity or permissions could not be attested",
+            "reason": safe_reason,
         }
     return {
         "status": "READY",
