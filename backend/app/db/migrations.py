@@ -3459,16 +3459,17 @@ def _add_okx_demo_reconciliation(connection: Connection) -> None:
                     RAISE EXCEPTION
                         'approval is not safely releasable as expired';
                 END IF;
-                DELETE FROM __SCHEMA__.approved_executions
-                WHERE id = v_approval.id;
-                UPDATE __SCHEMA__.trade_intents
-                SET status = 'EXPIRED'
-                WHERE id = v_approval.trade_intent_id
-                  AND execution_target_id = 'OKX_DEMO'
-                  AND status = 'APPROVED';
-                UPDATE __SCHEMA__.risk_decisions
-                SET decision = 'EXPIRED',
+                UPDATE __SCHEMA__.approved_executions
+                SET status = 'EXPIRED',
                     evidence_snapshot = jsonb_set(
+                        evidence_snapshot::jsonb,
+                        '{invalidation_reason}',
+                        '"authorization evidence expired"'::jsonb,
+                        TRUE
+                    )::json
+                WHERE id = v_approval.id;
+                UPDATE __SCHEMA__.risk_decisions
+                SET evidence_snapshot = jsonb_set(
                         evidence_snapshot::jsonb,
                         '{reasons}',
                         '["authorization evidence expired"]'::jsonb,
@@ -3477,6 +3478,12 @@ def _add_okx_demo_reconciliation(connection: Connection) -> None:
                 WHERE id = v_approval.risk_decision_id
                   AND execution_target_id = 'OKX_DEMO'
                   AND decision = 'APPROVED';
+                UPDATE __SCHEMA__.full_chain_runs
+                SET status = 'BLOCKED',
+                    terminal_reason = 'authorization evidence expired',
+                    completed_at = statement_timestamp()
+                WHERE approved_execution_id = v_approval.id
+                  AND execution_target_id = 'OKX_DEMO';
                 UPDATE __SCHEMA__.risk_budgets
                 SET reserved_notional = greatest(
                         0, reserved_notional -

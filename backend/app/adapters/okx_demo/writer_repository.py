@@ -952,6 +952,16 @@ class SqlAlchemyOrderWriterStore:
         now: datetime,
     ) -> None:
         self._require_target_contract()
+        try:
+            RiskChainService(self.db).require_completed_full_chain_binding(
+                approved=approved,
+                intent=intent,
+                decision=decision,
+            )
+        except RiskChainBlocked as exc:
+            raise OkxDemoWriteBlocked(
+                "approved execution full-chain RISK checkpoint is incomplete"
+            ) from exc
         values = (
             approved.execution_target_id,
             intent.execution_target_id,

@@ -15,16 +15,19 @@ from app.adapters.okx_demo.writer_models import (
 from app.adapters.okx_demo.writer_repository import SqlAlchemyOrderWriterStore
 from app.adapters.okx_demo.writer_state import WriteEvent, WriteState
 from app.models import Base
+from app.models.full_chain import FullChainRun, FullChainStageRun
 from app.models.execution_lineage import (
     ApprovedExecution,
     OkxDemoAttestedSession,
     OkxDemoTrustedSnapshot,
+    ResearchJobAttempt,
     RiskDecision,
     RiskBudget,
     TradeIntent,
 )
 from app.models.order_writer import OkxOrderWriteAttempt, OkxOrderWriterLease
 from app.models.okx_demo_reconciliation import OkxDemoReconciliationState
+from app.models.research_job import ResearchJob
 from app.repositories.execution_lineage import ensure_execution_scope_catalog
 from app.services.risk_chain import (
     _issue_attested_session_capability,
@@ -194,10 +197,75 @@ def db():
             )
         )
         session.flush()
+        _bind_completed_risk_stage(session, intent, decision, approval)
         approval_id = approval.id
         session.commit()
         yield session, approval_id
     engine.dispose()
+
+
+def _bind_completed_risk_stage(
+    session: Session,
+    intent: TradeIntent,
+    decision: RiskDecision,
+    approval: ApprovedExecution,
+) -> FullChainRun:
+    job = ResearchJob(
+        execution_scope_id="LOCAL_DRY_RUN",
+        job_type="deepseek_backtest",
+        operation="strategy_generation.deepseek_backtest_loop",
+        idempotency_key_digest="8" * 64,
+        request_hash="9" * 64,
+        request_payload={},
+        status="RUNNING",
+        stage="EXECUTION",
+        attempt_count=1,
+        max_attempts=1,
+    )
+    session.add(job)
+    session.flush()
+    attempt = ResearchJobAttempt(
+        research_job_id=job.id,
+        attempt_number=1,
+        execution_scope_id="LOCAL_DRY_RUN",
+        status="RUNNING",
+    )
+    session.add(attempt)
+    session.flush()
+    chain = FullChainRun(
+        research_job_id=job.id,
+        research_job_attempt_id=attempt.id,
+        research_scope_id="LOCAL_DRY_RUN",
+        execution_target_id="OKX_DEMO",
+        status="EXECUTING",
+        current_stage="EXECUTION",
+        trade_intent_id=intent.id,
+        risk_decision_id=decision.id,
+        approved_execution_id=approval.id,
+        started_at=NOW,
+    )
+    session.add(chain)
+    session.flush()
+    session.add(
+        FullChainStageRun(
+            full_chain_run_id=chain.id,
+            stage="RISK",
+            status="SUCCESS",
+            idempotency_key_digest="a" * 64,
+            input_digest="b" * 64,
+            input_snapshot={"approval_id": approval.id},
+            output_snapshot={"status": "APPROVED"},
+            database_ids={
+                "trade_intent_id": intent.id,
+                "risk_decision_id": decision.id,
+                "approved_execution_id": approval.id,
+            },
+            prepared_at=NOW,
+            completed_at=NOW,
+        )
+    )
+    session.flush()
+    return chain
 
 
 def instrument():
@@ -278,6 +346,33 @@ def acquire(
         now=now,
         expires_at=expires_at,
     )
+
+
+def test_sqlite_claim_blocks_until_full_chain_risk_stage_is_successful(db) -> None:
+    session, approval_id = db
+    approval = session.get(ApprovedExecution, approval_id)
+    chain = session.scalars(
+        select(FullChainRun).where(
+            FullChainRun.trade_intent_id == approval.trade_intent_id
+        )
+    ).one()
+    checkpoint = session.scalars(
+        select(FullChainStageRun).where(
+            FullChainStageRun.full_chain_run_id == chain.id,
+            FullChainStageRun.stage == "RISK",
+        )
+    ).one()
+    chain.current_stage = "RISK"
+    checkpoint.status = "PREPARED"
+    checkpoint.database_ids = {}
+    session.commit()
+
+    store = SqlAlchemyOrderWriterStore(session, now_provider=lambda: NOW)
+    with pytest.raises(OkxDemoWriteBlocked, match="could not be verified"):
+        store.load_approved_execution(approval_id)
+
+    assert session.scalars(select(OkxOrderWriterLease)).all() == []
+    assert session.scalars(select(OkxOrderWriteAttempt)).all() == []
 
 
 def test_sqlite_claim_is_approval_backed_and_transitions_are_committed(db) -> None:
@@ -526,9 +621,10 @@ def test_expired_approval_is_rejected_before_claim(db) -> None:
     with pytest.raises(OkxDemoWriteBlocked, match="no longer active"):
         store.load_approved_execution(approval_id)
 
-    assert session.get(ApprovedExecution, approval_id) is None
-    assert session.get(TradeIntent, intent_id).status == "EXPIRED"
-    assert session.get(RiskDecision, decision_id).decision == "EXPIRED"
+    retained = session.get(ApprovedExecution, approval_id)
+    assert retained is not None and retained.status == "EXPIRED"
+    assert session.get(TradeIntent, intent_id).status == "APPROVED"
+    assert session.get(RiskDecision, decision_id).decision == "APPROVED"
     budget = session.get(RiskBudget, "OKX_DEMO")
     assert budget.reserved_notional == 0
     assert budget.approved_positions == 0
@@ -568,9 +664,10 @@ def test_revoked_attested_session_invalidates_claim_before_lease(db) -> None:
             expires_at=NOW + timedelta(minutes=1),
         )
 
-    assert session.get(ApprovedExecution, approval_id) is None
-    assert session.get(TradeIntent, intent_id).status == "BLOCKED"
-    assert session.get(RiskDecision, decision_id).decision == "BLOCKED"
+    retained = session.get(ApprovedExecution, approval_id)
+    assert retained is not None and retained.status == "EXPIRED"
+    assert session.get(TradeIntent, intent_id).status == "APPROVED"
+    assert session.get(RiskDecision, decision_id).decision == "APPROVED"
     budget = session.get(RiskBudget, "OKX_DEMO")
     assert budget.reserved_notional == 0
     assert budget.approved_positions == 0
@@ -634,7 +731,8 @@ def test_invalidated_approval_preserves_existing_write_journal(db) -> None:
             expires_at=NOW + timedelta(minutes=1),
         )
 
-    assert session.get(ApprovedExecution, approval_id) is None
+    retained = session.get(ApprovedExecution, approval_id)
+    assert retained is not None and retained.status == "EXPIRED"
     persisted = session.get(OkxOrderWriteAttempt, prepared.attempt_id)
     assert persisted is not None
     assert persisted.approval_id == approval_id
