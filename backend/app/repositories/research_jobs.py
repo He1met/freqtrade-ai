@@ -25,6 +25,11 @@ TERMINAL_JOB_STATUSES = {
     "CANCELLED",
     "STALE",
 }
+RECOVERY_JOB_STAGES = {
+    "CANDIDATE_APPROVED",
+    "GENERATION_RETRY",
+    "PERSISTED_RESULT_RECOVERY",
+}
 
 
 class ResearchJobLinkageBlocked(ValueError):
@@ -197,7 +202,7 @@ class ResearchJobRepository:
                     or_(
                         ResearchJob.attempt_count < ResearchJob.max_attempts,
                         and_(
-                            ResearchJob.stage == "CANDIDATE_APPROVED",
+                            ResearchJob.stage.in_(RECOVERY_JOB_STAGES),
                             ResearchJob.attempt_count >= 1,
                         ),
                     ),
@@ -220,16 +225,24 @@ class ResearchJobRepository:
                 )
                 return None
 
-            resuming_approval = (
-                job.stage == "CANDIDATE_APPROVED" and job.attempt_count >= 1
+            recovery_stage = job.stage
+            resuming_existing_attempt = (
+                recovery_stage in RECOVERY_JOB_STAGES
+                and job.attempt_count >= 1
             )
             job.status = "RUNNING"
-            job.stage = "SIGNAL" if resuming_approval else "GENERATION"
+            job.stage = (
+                "SIGNAL"
+                if recovery_stage == "CANDIDATE_APPROVED"
+                else recovery_stage
+                if resuming_existing_attempt
+                else "GENERATION"
+            )
             job.lease_owner = owner
             job.lease_token = lease_token
             job.heartbeat_at = current_time
             job.lease_expires_at = current_time + timedelta(seconds=lease_seconds)
-            if resuming_approval:
+            if resuming_existing_attempt:
                 attempt = self.db.scalars(
                     select(ResearchJobAttempt)
                     .where(
@@ -237,13 +250,15 @@ class ResearchJobRepository:
                         ResearchJobAttempt.execution_scope_id
                         == self.execution_scope_id,
                         ResearchJobAttempt.attempt_number == job.attempt_count,
-                        ResearchJobAttempt.status == "AWAITING_APPROVAL",
+                        ResearchJobAttempt.status.in_(
+                            {"AWAITING_APPROVAL", "STALE"}
+                        ),
                     )
                     .limit(1)
                 ).first()
                 if attempt is None:
                     raise ResearchJobLinkageBlocked(
-                        "candidate-approved job has no matching waiting attempt"
+                        "recoverable job has no matching prior attempt"
                     )
                 attempt.status = "RUNNING"
                 attempt.completed_at = None
@@ -271,6 +286,117 @@ class ResearchJobRepository:
 
         self.db.refresh(job)
         return job
+
+    def checkpoint_research_result(
+        self,
+        job_id: int,
+        lease_token: str,
+        *,
+        links: dict[str, Optional[int]],
+        evidence_snapshot: dict,
+        now: Optional[datetime] = None,
+    ) -> Optional[ResearchJob]:
+        """Persist Provider/backtest output before full-chain advancement."""
+
+        self._require_executable_scope()
+        job = self.get(job_id)
+        if (
+            job is None
+            or job.status != "RUNNING"
+            or job.lease_token != lease_token
+            or job.lease_expires_at is None
+            or _as_utc(job.lease_expires_at)
+            <= _as_utc(now or datetime.now(timezone.utc))
+        ):
+            return None
+        validated_links = self._validate_completion_links(job, links)
+        result = self.db.execute(
+            update(ResearchJob)
+            .where(
+                ResearchJob.id == job_id,
+                ResearchJob.execution_scope_id == self.execution_scope_id,
+                ResearchJob.status == "RUNNING",
+                ResearchJob.lease_token == lease_token,
+            )
+            .values(
+                **validated_links,
+                provider_completed_at=now or datetime.now(timezone.utc),
+                stage="PERSISTED_RESULT",
+                evidence_snapshot=evidence_snapshot,
+            )
+        )
+        if result.rowcount != 1:
+            self.db.rollback()
+            return None
+        self.db.commit()
+        return self.get(job_id)
+
+    def prepare_stale_recovery(
+        self,
+        job_id: int,
+        *,
+        recovery_stage: str,
+    ) -> Optional[ResearchJob]:
+        """Requeue one stale attempt only under an explicit safe recovery mode."""
+
+        self._require_executable_scope()
+        if recovery_stage not in {
+            "GENERATION_RETRY",
+            "PERSISTED_RESULT_RECOVERY",
+        }:
+            raise ValueError("invalid research recovery stage")
+        recovery_guards = (
+            (
+                ResearchJob.provider_attempted_at.is_(None),
+                ResearchJob.provider_completed_at.is_(None),
+                ResearchJob.strategy_generation_run_id.is_(None),
+                ResearchJob.strategy_id.is_(None),
+                ResearchJob.strategy_version_id.is_(None),
+                ResearchJob.backtest_run_id.is_(None),
+                ResearchJob.backtest_task_id.is_(None),
+                ResearchJob.backtest_result_id.is_(None),
+                ResearchJob.strategy_score_id.is_(None),
+            )
+            if recovery_stage == "GENERATION_RETRY"
+            else (
+                ResearchJob.provider_attempted_at.is_not(None),
+                ResearchJob.provider_completed_at.is_not(None),
+                ResearchJob.strategy_generation_run_id.is_not(None),
+                ResearchJob.strategy_id.is_not(None),
+                ResearchJob.strategy_version_id.is_not(None),
+                ResearchJob.backtest_run_id.is_not(None),
+                ResearchJob.backtest_task_id.is_not(None),
+                ResearchJob.backtest_result_id.is_not(None),
+                ResearchJob.strategy_score_id.is_not(None),
+            )
+        )
+        result = self.db.execute(
+            update(ResearchJob)
+            .where(
+                ResearchJob.id == job_id,
+                ResearchJob.execution_scope_id == self.execution_scope_id,
+                ResearchJob.status == "STALE",
+                ResearchJob.stage == "LEASE_EXPIRED",
+                ResearchJob.lease_token.is_(None),
+                *recovery_guards,
+            )
+            .values(
+                status="PENDING",
+                stage=recovery_stage,
+                completed_at=None,
+                error_message=None,
+                evidence_snapshot={
+                    "status": "PENDING",
+                    "acceptance_ready": False,
+                    "recovery_stage": recovery_stage,
+                },
+            )
+        )
+        if result.rowcount != 1:
+            self.db.rollback()
+            return None
+        self.db.commit()
+        return self.get(job_id)
 
     def heartbeat(
         self,

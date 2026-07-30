@@ -343,6 +343,42 @@ def test_restart_marks_unknown_provider_outcome_stale_without_calling_provider(t
     assert calls == []
 
 
+def test_restart_reuses_same_attempt_when_provider_was_never_called(tmp_path) -> None:
+    factory = session_factory(tmp_path)
+    fixed_now = datetime(2026, 7, 22, 12, 0, tzinfo=timezone.utc)
+    with factory() as db:
+        repository = ResearchJobRepository(db)
+        job_id = ResearchJobQueueService(db).enqueue_deepseek_backtest(
+            request(allow_real_call=False),
+            idempotency_key="crash-before-provider",
+        ).id
+        claimed = repository.claim_next(
+            owner="crashed-before-provider",
+            lease_seconds=10,
+            now=fixed_now,
+        )
+        assert claimed is not None
+        assert claimed.attempt_count == 1
+
+    calls: list[str] = []
+    restarted_worker = DeepSeekBacktestWorker(
+        session_factory=factory,
+        service_factory=lambda db: BlockedService(calls),
+        owner="restarted-worker",
+        lease_seconds=60,
+    )
+
+    assert restarted_worker.run_once() == job_id
+    assert calls == ["Generate one safe local research strategy."]
+    with factory() as db:
+        job = ResearchJobRepository(db).get(job_id)
+        assert job is not None
+        assert job.status == "BLOCKED"
+        assert job.attempt_count == 1
+        assert job.provider_attempted_at is None
+        assert job.provider_completed_at is None
+
+
 def test_worker_exception_is_failed_redacted_and_does_not_claim_provider_completion(tmp_path) -> None:
     factory = session_factory(tmp_path)
     with factory() as db:

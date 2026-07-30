@@ -128,7 +128,10 @@ class DeepSeekBacktestWorker:
 
     def run_once(self) -> Optional[int]:
         with self.session_factory() as db:
-            job = ResearchJobRepository(db).claim_next(
+            repository = ResearchJobRepository(db)
+            repository.expire_stale()
+            self.research_chain_factory(db).recover_one_stale()
+            job = repository.claim_next(
                 owner=self.owner,
                 lease_seconds=self.lease_seconds,
             )
@@ -169,6 +172,28 @@ class DeepSeekBacktestWorker:
                     lease_token,
                     heartbeat,
                 )
+                return
+            if job.stage == "PERSISTED_RESULT_RECOVERY":
+                try:
+                    self.research_chain_factory(db).advance(
+                        job_id,
+                        lease_token,
+                    )
+                except ResearchFullChainBlocked as exc:
+                    repository.complete(
+                        job_id,
+                        lease_token,
+                        status="BLOCKED",
+                        stage="CANDIDATE_APPROVAL",
+                        links=exc.links,
+                        evidence_snapshot={
+                            "status": "BLOCKED",
+                            "acceptance_ready": False,
+                            "failed_reason": redact_secret_text(str(exc))[:2000],
+                        },
+                        error_message=redact_secret_text(str(exc))[:2000],
+                        provider_completed=True,
+                    )
                 return
             payload = DeepSeekBacktestLoopRequest.model_validate(job.request_payload)
             chain = self.research_chain_factory(db)
@@ -214,6 +239,7 @@ class DeepSeekBacktestWorker:
                 return
             if response.overall_status == "succeeded":
                 try:
+                    chain.checkpoint_response(job_id, lease_token, response)
                     chain.advance(job_id, lease_token, response)
                 except ResearchFullChainBlocked as exc:
                     repository.complete(

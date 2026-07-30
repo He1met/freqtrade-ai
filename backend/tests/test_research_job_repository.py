@@ -345,6 +345,73 @@ def test_heartbeat_expiry_and_lease_token_fencing(session_factory) -> None:
         ) is None
 
 
+def test_stale_recovery_reuses_attempt_only_before_provider_call(session_factory) -> None:
+    with session_factory() as db:
+        repository = ResearchJobRepository(db)
+        job_id = enqueue(db, "safe-generation-recovery").id
+        claimed = repository.claim_next(
+            owner="crashed-before-provider",
+            lease_seconds=10,
+            now=FIXED_NOW,
+        )
+        assert claimed is not None
+        assert repository.expire_stale(
+            FIXED_NOW + timedelta(seconds=10)
+        ) is not None
+        recovered = repository.prepare_stale_recovery(
+            job_id,
+            recovery_stage="GENERATION_RETRY",
+        )
+        assert recovered is not None
+        assert recovered.status == "PENDING"
+        assert recovered.stage == "GENERATION_RETRY"
+
+        resumed = repository.claim_next(
+            owner="recovery-worker",
+            lease_seconds=30,
+            now=FIXED_NOW + timedelta(seconds=11),
+        )
+        assert resumed is not None
+        assert resumed.id == job_id
+        assert resumed.stage == "GENERATION_RETRY"
+        assert resumed.attempt_count == 1
+
+
+def test_unknown_provider_outcome_cannot_be_requeued_by_recovery_api(
+    session_factory,
+) -> None:
+    with session_factory() as db:
+        repository = ResearchJobRepository(db)
+        job_id = enqueue(db, "unknown-provider-recovery").id
+        claimed = repository.claim_next(
+            owner="crashed-during-provider",
+            lease_seconds=10,
+            now=FIXED_NOW,
+        )
+        assert claimed is not None and claimed.lease_token
+        assert repository.mark_provider_attempt(
+            job_id,
+            claimed.lease_token,
+            now=FIXED_NOW,
+        )
+        assert repository.expire_stale(
+            FIXED_NOW + timedelta(seconds=10)
+        ) is not None
+
+        assert repository.prepare_stale_recovery(
+            job_id,
+            recovery_stage="GENERATION_RETRY",
+        ) is None
+        assert repository.prepare_stale_recovery(
+            job_id,
+            recovery_stage="PERSISTED_RESULT_RECOVERY",
+        ) is None
+        stale = repository.get(job_id)
+        assert stale is not None
+        assert stale.status == "STALE"
+        assert stale.stage == "LEASE_EXPIRED"
+
+
 def test_pending_cancel_is_terminal_without_a_lease(session_factory) -> None:
     with session_factory() as db:
         job_id = enqueue(db, "cancel-pending-key").id
