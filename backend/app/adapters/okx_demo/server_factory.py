@@ -32,6 +32,7 @@ _SAFE_EXCEPTION_TYPES = frozenset(
     {
         "OkxDemoCredentialsUnavailable",
         "OkxDemoPreflightBlocked",
+        "OkxDemoWriteBlocked",
     }
 )
 _SAFE_SESSION_FAILURE_STAGES = frozenset(
@@ -45,6 +46,7 @@ _SAFE_SESSION_FAILURE_CATEGORIES = frozenset(
     {
         "PREFLIGHT",
         "ATTESTATION",
+        "WRITER",
         "UNEXPECTED",
     }
 )
@@ -85,6 +87,8 @@ def _session_failure(
         category = "PREFLIGHT"
     elif isinstance(exc, OkxDemoCredentialsUnavailable):
         category = "ATTESTATION"
+    elif isinstance(exc, OkxDemoWriteBlocked):
+        category = "WRITER"
     else:
         category = "UNEXPECTED"
     return OkxDemoServerSessionBlocked(
@@ -204,12 +208,11 @@ def create_okx_demo_server_session(
             process_lock=process_lock,
             _capability=_SERVER_SESSION_CAPABILITY,
         )
-    except OkxDemoWriteBlocked:
-        if credentials is not None:
-            credentials.revoke("FACTORY_FAILURE")
-        process_lock.release()
-        raise
-    except (OkxDemoPreflightBlocked, OkxDemoCredentialsUnavailable) as exc:
+    except (
+        OkxDemoWriteBlocked,
+        OkxDemoPreflightBlocked,
+        OkxDemoCredentialsUnavailable,
+    ) as exc:
         if credentials is not None:
             credentials.revoke("FACTORY_FAILURE")
         process_lock.release()

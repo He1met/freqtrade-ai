@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.adapters.okx_demo import runtime_service, server_factory
-from app.adapters.okx_demo.credentials import OkxDemoCredentialsUnavailable
+from app.adapters.okx_demo.write_semantics import OkxDemoWriteBlocked
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -505,25 +505,45 @@ def test_factory_diagnostic_crosses_runtime_sidecar_and_supervisor_allowlist(
     capsys,
     tmp_path,
 ):
-    factory_failure = server_factory.OkxDemoServerSessionBlocked(
-        stage="read-attestation",
-        category="ATTESTATION",
-        cause=OkxDemoCredentialsUnavailable("secret-must-not-cross"),
+    lock_events = []
+
+    class BlockedWriterLock:
+        def __init__(self, path):
+            lock_events.append(("init", path))
+
+        def acquire(self):
+            lock_events.append(("acquire",))
+            raise OkxDemoWriteBlocked(
+                "signature=secret-must-not-cross"
+            )
+
+        def release(self):
+            lock_events.append(("release",))
+
+    monkeypatch.setattr(
+        server_factory,
+        "OkxDemoWriterProcessLock",
+        BlockedWriterLock,
     )
     with pytest.raises(
         runtime_service.OkxDemoRuntimeStartupBlocked,
     ) as captured:
         runtime_service._startup_call(
             "server-session",
-            lambda: (_ for _ in ()).throw(factory_failure),
+            lambda: server_factory.create_okx_demo_server_session(
+                {},
+                lock_path=tmp_path / "writer.lock",
+            ),
         )
 
-    assert captured.value.stage == "read-attestation"
-    assert captured.value.category == "ATTESTATION"
-    assert (
-        captured.value.cause_type
-        == "OkxDemoCredentialsUnavailable"
-    )
+    assert captured.value.stage == "writer-lock"
+    assert captured.value.category == "WRITER"
+    assert captured.value.cause_type == "OkxDemoWriteBlocked"
+    assert [event[0] for event in lock_events] == [
+        "init",
+        "acquire",
+        "release",
+    ]
     failure_path = tmp_path / runtime_service.FAILURE_FILENAME
     assert runtime_service._write_startup_failure(
         failure_path,
@@ -536,9 +556,9 @@ def test_factory_diagnostic_crosses_runtime_sidecar_and_supervisor_allowlist(
     )
     parsed = local_runtime.okx_runtime_failure(tmp_path)
     assert parsed == {
-        "stage": "read-attestation",
-        "category": "ATTESTATION",
-        "cause_type": "OkxDemoCredentialsUnavailable",
+        "stage": "writer-lock",
+        "category": "WRITER",
+        "cause_type": "OkxDemoWriteBlocked",
     }
 
     supervisor = load_module(
@@ -566,9 +586,9 @@ def test_factory_diagnostic_crosses_runtime_sidecar_and_supervisor_allowlist(
     assert supervisor.controlled_credential_restart("generation") is False
 
     emitted = capsys.readouterr().out
-    assert '"okx_runtime_failure_stage": "read-attestation"' in emitted
-    assert '"okx_runtime_failure_category": "ATTESTATION"' in emitted
-    assert "OkxDemoCredentialsUnavailable" in emitted
+    assert '"okx_runtime_failure_stage": "writer-lock"' in emitted
+    assert '"okx_runtime_failure_category": "WRITER"' in emitted
+    assert "OkxDemoWriteBlocked" in emitted
     assert "secret-must-not-cross" not in emitted
 
 
