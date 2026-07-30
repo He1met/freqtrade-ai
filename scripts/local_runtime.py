@@ -162,6 +162,17 @@ DATABASE_CREDENTIALS = re.compile(
 class RuntimeBlocked(Exception):
     """A local prerequisite is absent or unsafe; nothing was started."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        safe_stage: Optional[str] = None,
+        elapsed_ms: Optional[int] = None,
+    ) -> None:
+        super().__init__(message)
+        self.safe_stage = safe_stage
+        self.elapsed_ms = elapsed_ms
+
 
 def load_runtime_environment(path: Optional[Path] = None) -> None:
     """Load the two non-secret runtime selectors from one repo-local file."""
@@ -944,14 +955,20 @@ def bootstrap() -> Dict[str, Any]:
 
 def ensure_schema(database_url: str) -> None:
     environment = clean_environment(database_url)
-    completed = subprocess.run(
-        [str(backend_python()), "-m", "app.db.migrate", "verify", "--database-url", database_url],
-        cwd=str(REPO_ROOT / "backend"),
-        env=environment,
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    try:
+        completed = subprocess.run(
+            [str(backend_python()), "-m", "app.db.migrate", "verify", "--database-url", database_url],
+            cwd=str(REPO_ROOT / "backend"),
+            env=environment,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=SCHEMA_VERIFY_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeBlocked(
+            "PostgreSQL schema verification timed out; inspect the canonical database"
+        ) from None
     if completed.returncode:
         raise RuntimeBlocked(
             "PostgreSQL schema verification failed; run `make db-init` on the canonical database"
@@ -969,14 +986,20 @@ def ensure_worker_queue_idle(database_url: str) -> None:
         "connection.close(); "
         "raise SystemExit(0 if count == 0 else 3)"
     )
-    completed = subprocess.run(
-        [str(backend_python()), "-c", code],
-        cwd=str(REPO_ROOT / "backend"),
-        env=clean_environment(database_url),
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    try:
+        completed = subprocess.run(
+            [str(backend_python()), "-c", code],
+            cwd=str(REPO_ROOT / "backend"),
+            env=clean_environment(database_url),
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=WORKER_QUEUE_VERIFY_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeBlocked(
+            "research worker queue read timed out; inspect the canonical database"
+        ) from None
     if completed.returncode == 3:
         raise RuntimeBlocked(
             "research worker queue is not idle; resolve PENDING/RUNNING jobs before `make up`"
@@ -1543,6 +1566,29 @@ def okx_runtime_readiness(state_dir: Path) -> Dict[str, Any]:
 
 
 OKX_RUNTIME_STARTUP_TIMEOUT_SECONDS = 300
+SCHEMA_VERIFY_TIMEOUT_SECONDS = 90
+WORKER_QUEUE_VERIFY_TIMEOUT_SECONDS = 30
+BACKEND_STARTUP_TIMEOUT_SECONDS = 60
+WORKER_STARTUP_TIMEOUT_SECONDS = 5
+FRONTEND_STARTUP_TIMEOUT_SECONDS = 45
+STARTUP_PREFLIGHT_BUDGET_SECONDS = 180
+STARTUP_CLEANUP_BUDGET_SECONDS = 60
+STARTUP_COMMAND_BUDGET_SECONDS = (
+    STARTUP_PREFLIGHT_BUDGET_SECONDS
+    + BACKEND_STARTUP_TIMEOUT_SECONDS
+    + WORKER_STARTUP_TIMEOUT_SECONDS
+    + FRONTEND_STARTUP_TIMEOUT_SECONDS
+    + OKX_RUNTIME_STARTUP_TIMEOUT_SECONDS
+    + STARTUP_CLEANUP_BUDGET_SECONDS
+)
+SAFE_STARTUP_STAGES = frozenset(
+    {
+        "backend-readiness",
+        "worker-stability",
+        "frontend-readiness",
+        "okx-runtime-readiness",
+    }
+)
 
 
 def wait_for_okx_runtime(
@@ -1631,41 +1677,63 @@ def thaw_okx_openings(state_dir: Path, timeout_seconds: int = 5) -> Dict[str, An
     return last
 
 
-def orphaned_managed_processes(
+def orphaned_managed_process_map(
     state_dir: Path,
-    service: str,
-) -> list[int]:
-    tracked = read_pid(state_dir / PID_FILES[service])
+    services: Sequence[str],
+) -> Dict[str, list[int]]:
+    """Classify one process-table snapshot by exact managed markers."""
+
+    tracked = {
+        service: read_pid(state_dir / PID_FILES[service])
+        for service in services
+    }
     try:
         completed = subprocess.run(
             ["ps", "-axo", "pid=,command="],
             check=False,
             capture_output=True,
             text=True,
+            timeout=30,
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         raise RuntimeBlocked("managed process discovery is unavailable") from None
-    candidates = []
+    candidates: Dict[str, list[int]] = {
+        service: [] for service in services
+    }
     for line in completed.stdout.splitlines():
         fields = line.strip().split(maxsplit=1)
-        if len(fields) != 2 or SERVICE_PROCESS_MARKERS[service] not in fields[1]:
+        if len(fields) != 2:
             continue
         try:
             pid = int(fields[0])
         except ValueError:
             continue
-        if pid in {os.getpid(), tracked}:
-            continue
-        if is_managed_process(pid, service):
-            candidates.append(pid)
+        for service in services:
+            if SERVICE_PROCESS_MARKERS[service] not in fields[1]:
+                continue
+            if pid in {os.getpid(), tracked[service]}:
+                continue
+            if is_managed_process(pid, service):
+                candidates[service].append(pid)
     return candidates
+
+
+def orphaned_managed_processes(
+    state_dir: Path,
+    service: str,
+) -> list[int]:
+    return orphaned_managed_process_map(state_dir, (service,))[service]
 
 
 def cleanup_orphaned_managed_processes(state_dir: Path) -> None:
     """Terminate only exact marker+cwd children missing from canonical PID files."""
 
+    orphaned = orphaned_managed_process_map(
+        state_dir,
+        SERVICE_STOP_ORDER,
+    )
     for service in SERVICE_STOP_ORDER:
-        for pid in orphaned_managed_processes(state_dir, service):
+        for pid in orphaned[service]:
             try:
                 os.killpg(pid, signal.SIGTERM)
             except ProcessLookupError:
@@ -1747,10 +1815,10 @@ def require_complete_startup_cleanup(
         for service in SERVICE_START_ORDER
         if process_status(state_dir, service)["running"]
     ]
-    orphaned = {
-        service: orphaned_managed_processes(state_dir, service)
-        for service in SERVICE_START_ORDER
-    }
+    orphaned = orphaned_managed_process_map(
+        state_dir,
+        SERVICE_START_ORDER,
+    )
     orphaned = {
         service: pids for service, pids in orphaned.items() if pids
     }
@@ -1799,6 +1867,9 @@ def start(state_dir: Path) -> Dict[str, Any]:
     if okx_credentials is None:
         raise RuntimeBlocked(str(okx_capability["reason"]))
     (state_dir / OPENINGS_FREEZE_FILE).unlink(missing_ok=True)
+    stage = "backend-readiness"
+    stage_started = time.monotonic()
+    stage_durations: Dict[str, int] = {}
     try:
         start_service(
             "backend",
@@ -1812,7 +1883,16 @@ def start(state_dir: Path) -> Dict[str, Any]:
             ),
             state_dir=state_dir,
         )
-        wait_for_url("http://127.0.0.1:{}/readyz".format(BACKEND_PORT), "backend readiness")
+        wait_for_url(
+            "http://127.0.0.1:{}/readyz".format(BACKEND_PORT),
+            "backend readiness",
+            timeout_seconds=BACKEND_STARTUP_TIMEOUT_SECONDS,
+        )
+        stage_durations[stage] = int(
+            (time.monotonic() - stage_started) * 1000
+        )
+        stage = "worker-stability"
+        stage_started = time.monotonic()
         start_service(
             "worker",
             [
@@ -1824,7 +1904,16 @@ def start(state_dir: Path) -> Dict[str, Any]:
             environment=service_environment("worker", database_url, deepseek_api_key),
             state_dir=state_dir,
         )
-        wait_for_process(state_dir, "worker")
+        wait_for_process(
+            state_dir,
+            "worker",
+            timeout_seconds=WORKER_STARTUP_TIMEOUT_SECONDS,
+        )
+        stage_durations[stage] = int(
+            (time.monotonic() - stage_started) * 1000
+        )
+        stage = "frontend-readiness"
+        stage_started = time.monotonic()
         start_service(
             "frontend",
             [str(frontend_vite()), "--host", "127.0.0.1", "--port", str(FRONTEND_PORT)],
@@ -1832,7 +1921,16 @@ def start(state_dir: Path) -> Dict[str, Any]:
             environment=service_environment("frontend", database_url, deepseek_api_key),
             state_dir=state_dir,
         )
-        wait_for_url("http://127.0.0.1:{}/".format(FRONTEND_PORT), "frontend")
+        wait_for_url(
+            "http://127.0.0.1:{}/".format(FRONTEND_PORT),
+            "frontend",
+            timeout_seconds=FRONTEND_STARTUP_TIMEOUT_SECONDS,
+        )
+        stage_durations[stage] = int(
+            (time.monotonic() - stage_started) * 1000
+        )
+        stage = "okx-runtime-readiness"
+        stage_started = time.monotonic()
         start_service(
             "okx_runtime",
             [
@@ -1852,10 +1950,21 @@ def start(state_dir: Path) -> Dict[str, Any]:
             state_dir=state_dir,
         )
         wait_for_okx_runtime(state_dir)
+        stage_durations[stage] = int(
+            (time.monotonic() - stage_started) * 1000
+        )
     except Exception:
+        failed_stage = stage
+        failed_elapsed_ms = int(
+            (time.monotonic() - stage_started) * 1000
+        )
         stopped = stop_all(state_dir)
         require_complete_startup_cleanup(state_dir, stopped)
-        raise RuntimeBlocked("runtime startup failed and was cleaned up") from None
+        raise RuntimeBlocked(
+            "runtime startup failed at a managed stage and was cleaned up",
+            safe_stage=failed_stage,
+            elapsed_ms=failed_elapsed_ms,
+        ) from None
     finally:
         okx_credentials.clear()
     return {
@@ -1873,6 +1982,10 @@ def start(state_dir: Path) -> Dict[str, Any]:
         },
         "backend_url": "http://127.0.0.1:{}".format(BACKEND_PORT),
         "frontend_url": "http://127.0.0.1:{}".format(FRONTEND_PORT),
+        "startup": {
+            "status": "READY",
+            "stage_elapsed_ms": stage_durations,
+        },
         "trading": {"live": False, "dry_run": False, "real_orders": False},
     }
 
@@ -2109,7 +2222,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         emit(payload, args.json)
         return 0
     except RuntimeBlocked as exc:
-        emit({"status": "BLOCKED", "reason": str(exc)}, args.json)
+        blocked = {"status": "BLOCKED", "reason": str(exc)}
+        if (
+            exc.safe_stage in SAFE_STARTUP_STAGES
+            and isinstance(exc.elapsed_ms, int)
+            and 0 <= exc.elapsed_ms <= STARTUP_COMMAND_BUDGET_SECONDS * 1000
+        ):
+            blocked["startup_stage"] = exc.safe_stage
+            blocked["startup_stage_elapsed_ms"] = exc.elapsed_ms
+        emit(blocked, args.json)
         return 2
 
 
