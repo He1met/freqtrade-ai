@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-import re
 from typing import Any, Mapping
 
 from sqlalchemy.orm import Session
@@ -29,16 +28,41 @@ _DEFAULT_LOCK_PATH = (
     Path.home() / ".freqtrade-ai" / "run" / "okx-demo-order-writer.lock"
 )
 _SERVER_SESSION_CAPABILITY = object()
-_SAFE_EXCEPTION_TYPE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+_SAFE_EXCEPTION_TYPES = frozenset(
+    {
+        "OkxDemoCredentialsUnavailable",
+        "OkxDemoPreflightBlocked",
+    }
+)
+_SAFE_SESSION_FAILURE_STAGES = frozenset(
+    {
+        "writer-lock",
+        "read-attestation",
+        "writer-credential-bridge",
+    }
+)
+_SAFE_SESSION_FAILURE_CATEGORIES = frozenset(
+    {
+        "PREFLIGHT",
+        "ATTESTATION",
+        "UNEXPECTED",
+    }
+)
 
 
 class OkxDemoServerSessionBlocked(OkxDemoCredentialsUnavailable):
     """Safe, typed failure from the credential-bearing session factory."""
 
     def __init__(self, *, stage: str, category: str, cause: BaseException) -> None:
+        if stage not in _SAFE_SESSION_FAILURE_STAGES:
+            stage = "read-attestation"
+            category = "UNEXPECTED"
+        if category not in _SAFE_SESSION_FAILURE_CATEGORIES:
+            category = "UNEXPECTED"
         cause_type = type(cause).__name__
-        if _SAFE_EXCEPTION_TYPE.fullmatch(cause_type) is None:
-            cause_type = "UnknownError"
+        if cause_type not in _SAFE_EXCEPTION_TYPES:
+            cause_type = "UnexpectedError"
+            category = "UNEXPECTED"
         self.stage = stage
         self.category = category
         self.cause_type = cause_type

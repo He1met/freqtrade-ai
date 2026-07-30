@@ -397,8 +397,9 @@ def test_factory_unknown_failure_preserves_safe_stage_and_type_only(
 
     assert captured.value.stage == "read-attestation"
     assert captured.value.category == "UNEXPECTED"
-    assert captured.value.cause_type == "SensitiveFailure"
+    assert captured.value.cause_type == "UnexpectedError"
     rendered = str(captured.value)
     assert "secret" not in rendered
     assert "signature" not in rendered
     assert "password" not in rendered
+    assert "SensitiveFailure" not in rendered

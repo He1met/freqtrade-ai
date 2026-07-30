@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import signal
 import sys
+import tempfile
 import threading
 from typing import Any, Callable, Mapping, Optional, Protocol, Sequence
 
@@ -23,7 +24,10 @@ from app.adapters.okx_demo.order_writer import (
 )
 from app.adapters.okx_demo.credentials import OkxDemoCredentialsUnavailable
 from app.adapters.okx_demo.read_adapter import OkxDemoReadClient
-from app.adapters.okx_demo.server_factory import create_okx_demo_server_session
+from app.adapters.okx_demo.server_factory import (
+    OkxDemoServerSessionBlocked,
+    create_okx_demo_server_session,
+)
 from app.adapters.okx_demo.write_semantics import OkxDemoWriteBlocked
 from app.adapters.okx_demo.writer_models import (
     ApprovedExecution,
@@ -41,6 +45,47 @@ OPENINGS_FREEZE_FILENAME = "okx-runtime.freeze-openings"
 POLL_SECONDS = 1.0
 MAX_RECONCILIATION_AGE_SECONDS = 30
 STOP_EVENT = threading.Event()
+SAFE_STARTUP_FAILURE_STAGES = frozenset(
+    {
+        "reconciliation-adapter-load",
+        "reconciliation-adapter-create",
+        "writer-lock",
+        "read-attestation",
+        "writer-credential-bridge",
+        "database-engine",
+        "database-connect",
+        "database-session",
+        "startup-reconciliation",
+        "writer-capability",
+        "runtime",
+    }
+)
+SAFE_STARTUP_FAILURE_CATEGORIES = frozenset(
+    {
+        "PREFLIGHT",
+        "ATTESTATION",
+        "DATABASE",
+        "RECONCILIATION",
+        "WRITER",
+        "RUNTIME",
+        "UNEXPECTED",
+    }
+)
+SAFE_STARTUP_FAILURE_TYPES = frozenset(
+    {
+        "DatabaseError",
+        "IntegrityError",
+        "InterfaceError",
+        "OkxDemoCredentialsUnavailable",
+        "OkxDemoPreflightBlocked",
+        "OkxDemoReconciliationBlocked",
+        "OkxDemoRuntimeBlocked",
+        "OkxDemoWriteBlocked",
+        "OperationalError",
+        "ProgrammingError",
+        "UnexpectedError",
+    }
+)
 
 
 class OkxDemoRuntimeBlocked(Exception):
@@ -50,16 +95,41 @@ class OkxDemoRuntimeBlocked(Exception):
 class OkxDemoRuntimeStartupBlocked(OkxDemoRuntimeBlocked):
     """Safe startup-stage failure that never renders the original exception."""
 
-    def __init__(self, *, stage: str, cause: BaseException) -> None:
-        cause_type = type(cause).__name__
-        if not cause_type.isidentifier() or len(cause_type) > 64:
-            cause_type = "UnknownError"
+    def __init__(
+        self,
+        *,
+        stage: str,
+        category: str,
+        cause_type: str,
+    ) -> None:
+        if stage not in SAFE_STARTUP_FAILURE_STAGES:
+            stage = "runtime"
+        if category not in SAFE_STARTUP_FAILURE_CATEGORIES:
+            category = "UNEXPECTED"
+        if cause_type not in SAFE_STARTUP_FAILURE_TYPES:
+            cause_type = "UnexpectedError"
+            category = "UNEXPECTED"
         self.stage = stage
+        self.category = category
         self.cause_type = cause_type
         super().__init__(
             "OKX_DEMO runtime startup blocked "
-            "[stage={}, cause_type={}]".format(stage, cause_type)
+            "[stage={}, category={}, cause_type={}]".format(
+                stage,
+                category,
+                cause_type,
+            )
         )
+
+
+def _runtime_failure_category(stage: str) -> str:
+    if stage.startswith("database-"):
+        return "DATABASE"
+    if stage == "startup-reconciliation":
+        return "RECONCILIATION"
+    if stage == "writer-capability":
+        return "WRITER"
+    return "RUNTIME"
 
 
 def _startup_call(stage: str, callback: Callable[[], Any]) -> Any:
@@ -71,8 +141,23 @@ def _startup_call(stage: str, callback: Callable[[], Any]) -> Any:
         SystemExit,
     ):
         raise
+    except OkxDemoServerSessionBlocked as exc:
+        raise OkxDemoRuntimeStartupBlocked(
+            stage=exc.stage,
+            category=exc.category,
+            cause_type=exc.cause_type,
+        ) from None
     except BaseException as exc:
-        raise OkxDemoRuntimeStartupBlocked(stage=stage, cause=exc) from None
+        cause_type = type(exc).__name__
+        category = _runtime_failure_category(stage)
+        if cause_type not in SAFE_STARTUP_FAILURE_TYPES:
+            cause_type = "UnexpectedError"
+            category = "UNEXPECTED"
+        raise OkxDemoRuntimeStartupBlocked(
+            stage=stage,
+            category=category,
+            cause_type=cause_type,
+        ) from None
 
 
 @dataclass(frozen=True)
@@ -372,38 +457,32 @@ def _write_startup_failure(
     exc: BaseException,
 ) -> bool:
     stage = getattr(exc, "stage", "runtime")
+    category = getattr(exc, "category", "UNEXPECTED")
     cause_type = getattr(exc, "cause_type", type(exc).__name__)
-    if (
-        not isinstance(stage, str)
-        or not stage
-        or len(stage) > 64
-        or any(
-            character not in "abcdefghijklmnopqrstuvwxyz-"
-            for character in stage
-        )
-    ):
+    if stage not in SAFE_STARTUP_FAILURE_STAGES:
         stage = "runtime"
-    if (
-        not isinstance(cause_type, str)
-        or not cause_type.isidentifier()
-        or len(cause_type) > 64
-    ):
-        cause_type = "UnknownError"
-    temporary = path.with_suffix(".tmp")
+    if category not in SAFE_STARTUP_FAILURE_CATEGORIES:
+        category = "UNEXPECTED"
+    if cause_type not in SAFE_STARTUP_FAILURE_TYPES:
+        cause_type = "UnexpectedError"
+        category = "UNEXPECTED"
+    temporary = None
+    descriptor = -1
     try:
-        descriptor = os.open(
-            temporary,
-            os.O_CREAT
-            | os.O_TRUNC
-            | os.O_WRONLY
-            | getattr(os, "O_NOFOLLOW", 0),
-            0o600,
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix="{}.".format(path.name),
+            suffix=".tmp",
+            dir=str(path.parent),
         )
+        temporary = Path(temporary_name)
+        os.fchmod(descriptor, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = -1
             json.dump(
                 {
                     "status": "BLOCKED",
                     "stage": stage,
+                    "category": category,
                     "cause_type": cause_type,
                 },
                 handle,
@@ -414,7 +493,10 @@ def _write_startup_failure(
             os.fsync(handle.fileno())
         temporary.replace(path)
     except BaseException:
-        temporary.unlink(missing_ok=True)
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
         return False
     return True
 

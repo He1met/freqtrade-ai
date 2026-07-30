@@ -5,9 +5,13 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.adapters.okx_demo import runtime_service, server_factory
+from app.adapters.okx_demo.credentials import OkxDemoCredentialsUnavailable
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SUPERVISOR_PATH = REPO_ROOT / "scripts" / "local_supervisor.py"
+RUNTIME_PATH = REPO_ROOT / "scripts" / "local_runtime.py"
 LAUNCH_AGENT_PATH = REPO_ROOT / "scripts" / "macos_launch_agent.py"
 
 
@@ -473,8 +477,9 @@ def test_supervisor_propagates_allowlisted_okx_runtime_failure_diagnostic(
             "return_code": 2,
             "startup_stage": "okx-runtime-readiness",
             "startup_stage_elapsed_ms": 1234,
-            "okx_runtime_failure_stage": "writer-capability",
-            "okx_runtime_failure_type": "IntegrityError",
+            "okx_runtime_failure_stage": "read-attestation",
+            "okx_runtime_failure_category": "ATTESTATION",
+            "okx_runtime_failure_type": "OkxDemoCredentialsUnavailable",
             "command_elapsed_ms": 2000,
         },
     }
@@ -487,8 +492,84 @@ def test_supervisor_propagates_allowlisted_okx_runtime_failure_diagnostic(
     assert supervisor.supervise_once() is False
 
     emitted = capsys.readouterr().out
-    assert '"okx_runtime_failure_stage": "writer-capability"' in emitted
-    assert '"okx_runtime_failure_type": "IntegrityError"' in emitted
+    assert '"okx_runtime_failure_stage": "read-attestation"' in emitted
+    assert '"okx_runtime_failure_category": "ATTESTATION"' in emitted
+    assert (
+        '"okx_runtime_failure_type": "OkxDemoCredentialsUnavailable"'
+        in emitted
+    )
+
+
+def test_factory_diagnostic_crosses_runtime_sidecar_and_supervisor_allowlist(
+    monkeypatch,
+    capsys,
+    tmp_path,
+):
+    factory_failure = server_factory.OkxDemoServerSessionBlocked(
+        stage="read-attestation",
+        category="ATTESTATION",
+        cause=OkxDemoCredentialsUnavailable("secret-must-not-cross"),
+    )
+    with pytest.raises(
+        runtime_service.OkxDemoRuntimeStartupBlocked,
+    ) as captured:
+        runtime_service._startup_call(
+            "server-session",
+            lambda: (_ for _ in ()).throw(factory_failure),
+        )
+
+    assert captured.value.stage == "read-attestation"
+    assert captured.value.category == "ATTESTATION"
+    assert (
+        captured.value.cause_type
+        == "OkxDemoCredentialsUnavailable"
+    )
+    failure_path = tmp_path / runtime_service.FAILURE_FILENAME
+    assert runtime_service._write_startup_failure(
+        failure_path,
+        captured.value,
+    )
+
+    local_runtime = load_module(
+        RUNTIME_PATH,
+        "local_runtime_cross_layer_diagnostic",
+    )
+    parsed = local_runtime.okx_runtime_failure(tmp_path)
+    assert parsed == {
+        "stage": "read-attestation",
+        "category": "ATTESTATION",
+        "cause_type": "OkxDemoCredentialsUnavailable",
+    }
+
+    supervisor = load_module(
+        SUPERVISOR_PATH,
+        "local_supervisor_cross_layer_diagnostic",
+    )
+    responses = {
+        "down": {"services": [], "return_code": 0},
+        "up": {
+            "status": "BLOCKED",
+            "return_code": 2,
+            "startup_stage": "okx-runtime-readiness",
+            "startup_stage_elapsed_ms": 100,
+            "okx_runtime_failure_stage": parsed["stage"],
+            "okx_runtime_failure_category": parsed["category"],
+            "okx_runtime_failure_type": parsed["cause_type"],
+        },
+    }
+    monkeypatch.setattr(
+        supervisor,
+        "run_runtime",
+        lambda command: responses[command],
+    )
+
+    assert supervisor.controlled_credential_restart("generation") is False
+
+    emitted = capsys.readouterr().out
+    assert '"okx_runtime_failure_stage": "read-attestation"' in emitted
+    assert '"okx_runtime_failure_category": "ATTESTATION"' in emitted
+    assert "OkxDemoCredentialsUnavailable" in emitted
+    assert "secret-must-not-cross" not in emitted
 
 
 def test_supervisor_rotates_credentials_through_controlled_down_up_verify(

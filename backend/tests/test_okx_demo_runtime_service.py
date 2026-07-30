@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.adapters.okx_demo import runtime_service
+from app.adapters.okx_demo.credentials import OkxDemoCredentialsUnavailable
 from app.services.okx_demo_reconciliation import OkxDemoReconciliationBlocked
 from app.adapters.okx_demo.write_semantics import OkxDemoWriteBlocked
 
@@ -330,6 +331,7 @@ def test_runtime_cleanup_does_not_mask_primary_failure(
         runtime_service.OkxDemoRuntimeStartupBlocked,
         match=(
             r"stage=startup-reconciliation, "
+            r"category=RECONCILIATION, "
             r"cause_type=OkxDemoRuntimeBlocked"
         ),
     ):
@@ -340,6 +342,42 @@ def test_runtime_cleanup_does_not_mask_primary_failure(
             engine_factory=lambda *_args, **_kwargs: engine,
             now_provider=lambda: NOW,
         )
+
+
+def test_factory_failure_preserves_fine_stage_category_and_allowed_type(
+    monkeypatch,
+    tmp_path: Path,
+):
+    adapter = FakeAdapter()
+    monkeypatch.setattr(
+        runtime_service,
+        "create_okx_demo_server_session",
+        lambda _environment, lock_path: (_ for _ in ()).throw(
+            runtime_service.OkxDemoServerSessionBlocked(
+                stage="read-attestation",
+                category="ATTESTATION",
+                cause=OkxDemoCredentialsUnavailable("must-not-cross"),
+            )
+        ),
+    )
+
+    with pytest.raises(
+        runtime_service.OkxDemoRuntimeStartupBlocked,
+    ) as captured:
+        runtime_service.serve(
+            environment={"DATABASE_URL": "postgresql+psycopg:///freqtrade_ai"},
+            runtime_path=tmp_path,
+            reconciliation_factory=lambda: adapter,
+        )
+
+    assert captured.value.stage == "read-attestation"
+    assert captured.value.category == "ATTESTATION"
+    assert (
+        captured.value.cause_type
+        == "OkxDemoCredentialsUnavailable"
+    )
+    assert "must-not-cross" not in str(captured.value)
+    assert adapter.closed is True
 
 
 def test_runtime_writer_startup_failure_preserves_stage_without_secret(
@@ -380,13 +418,17 @@ def test_runtime_writer_startup_failure_preserves_stage_without_secret(
         )
 
     assert captured.value.stage == "writer-capability"
-    assert captured.value.cause_type == "SensitiveWriterFailure"
+    assert captured.value.category == "UNEXPECTED"
+    assert captured.value.cause_type == "UnexpectedError"
     rendered = str(captured.value)
     assert "secret" not in rendered
     assert "signature" not in rendered
     assert "password" not in rendered
 
     failure_path = tmp_path / runtime_service.FAILURE_FILENAME
+    legacy_temporary = failure_path.with_suffix(".tmp")
+    legacy_temporary.write_text("unsafe legacy temporary\n", encoding="utf-8")
+    legacy_temporary.chmod(0o644)
     assert runtime_service._write_startup_failure(
         failure_path,
         captured.value,
@@ -395,8 +437,13 @@ def test_runtime_writer_startup_failure_preserves_stage_without_secret(
     assert json.loads(failure_path.read_text(encoding="utf-8")) == {
         "status": "BLOCKED",
         "stage": "writer-capability",
-        "cause_type": "SensitiveWriterFailure",
+        "category": "UNEXPECTED",
+        "cause_type": "UnexpectedError",
     }
+    assert legacy_temporary.stat().st_mode & 0o077 == 0o044
+    assert legacy_temporary.read_text(encoding="utf-8") == (
+        "unsafe legacy temporary\n"
+    )
     assert "secret" not in failure_path.read_text(encoding="utf-8")
 
 
