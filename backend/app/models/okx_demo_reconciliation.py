@@ -76,6 +76,13 @@ class OkxDemoExchangeEvent(Base):
             "entity_key",
             "observed_at",
         ),
+        Index(
+            "okx_demo_exchange_events_batch_observed_idx",
+            "execution_target_id",
+            "recovery_batch_database_id",
+            "observed_at",
+            "database_id",
+        ),
     )
 
     database_id: Mapped[int] = mapped_column(
