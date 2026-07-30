@@ -1,5 +1,8 @@
 import importlib.util
 import json
+import subprocess
+import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -35,6 +38,135 @@ def load_runtime_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_supervisor_capability_short_process_avoids_heavy_app_imports_and_gc():
+    harness = """
+import importlib.util
+import json
+from pathlib import Path
+import sys
+
+script_path = Path({script_path!r})
+spec = importlib.util.spec_from_file_location("isolated_local_runtime", script_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+class ClearingBundle(dict):
+    cleared = False
+
+    def clear(self):
+        self.cleared = True
+        super().clear()
+
+bundle = ClearingBundle({{
+    "OKX_DEMO_API_KEY": "must-not-be-printed",
+    "OKX_DEMO_API_SECRET": "must-not-be-printed",
+}})
+module.DEFAULT_RUNTIME_ENV_FILE = script_path.parent / "missing-runtime.env"
+module.validate_okx_demo_execution_target()
+module.read_okx_runtime_capability = lambda: (
+    bundle,
+    {{
+        "status": "READY",
+        "configured": True,
+        "source": "keychain",
+        "_generation": "fixture-generation",
+    }},
+)
+exit_code = module.main(["supervisor-capability", "--json"])
+print("RESULT:" + json.dumps({{
+    "exit_code": exit_code,
+    "cleared": bundle.cleared,
+    "app_imported": any(
+        name == "app" or name.startswith("app.") for name in sys.modules
+    ),
+    "pydantic_imported": any(
+        name == "pydantic" or name.startswith("pydantic.") for name in sys.modules
+    ),
+}}))
+raise SystemExit(exit_code)
+""".format(script_path=str(SCRIPT_PATH))
+
+    started = time.monotonic()
+    completed = subprocess.run(
+        [sys.executable, "-c", harness],
+        cwd=str(REPO_ROOT),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    elapsed = time.monotonic() - started
+
+    assert completed.returncode == 0, completed.stderr
+    assert elapsed < 5
+    assert "must-not-be-printed" not in completed.stdout
+    result_line = next(
+        line for line in completed.stdout.splitlines() if line.startswith("RESULT:")
+    )
+    result = json.loads(result_line.removeprefix("RESULT:"))
+    assert result == {
+        "exit_code": 0,
+        "cleared": True,
+        "app_imported": False,
+        "pydantic_imported": False,
+    }
+
+
+def test_down_main_releases_control_lock_on_normal_return(monkeypatch, tmp_path):
+    runtime = load_runtime_module()
+    runtime.REPO_ROOT = tmp_path
+    runtime.DEFAULT_RUNTIME_ENV_FILE = tmp_path / "missing-runtime.env"
+    state_dir = tmp_path / "runtime"
+    monkeypatch.setattr(
+        runtime,
+        "stop_all",
+        lambda _state_dir: {"status": "STOPPED", "services": []},
+    )
+
+    assert (
+        runtime.main(
+            ["down", "--runtime-dir", str(state_dir), "--json"]
+        )
+        == 0
+    )
+
+    lock_path = state_dir / runtime.CONTROL_LOCK_FILE
+    with lock_path.open("r+") as handle:
+        runtime.fcntl.flock(
+            handle.fileno(),
+            runtime.fcntl.LOCK_EX | runtime.fcntl.LOCK_NB,
+        )
+        runtime.fcntl.flock(handle.fileno(), runtime.fcntl.LOCK_UN)
+
+
+def test_lightweight_constants_match_backend_okx_contract():
+    runtime = load_runtime_module()
+    from app.adapters.okx_demo import attestation_proof, credential_preflight
+    from app.adapters.okx_demo import demo_canary
+
+    assert runtime.EXECUTION_TARGET_ENV == credential_preflight.EXECUTION_TARGET_ENV
+    assert runtime.ALLOW_REAL_FUNDS_ENV == credential_preflight.ALLOW_REAL_FUNDS_ENV
+    assert runtime.REST_URL_ENV == credential_preflight.REST_URL_ENV
+    assert runtime.OKX_DEMO_REST_URL == credential_preflight.OKX_DEMO_REST_URL
+    assert (
+        runtime.OKX_DEMO_REQUIRED_ENV_NAMES
+        == credential_preflight.OKX_DEMO_REQUIRED_ENV_NAMES
+    )
+    assert (
+        runtime.SAFE_OPERATOR_PREFLIGHT_REASONS
+        == credential_preflight.SAFE_OPERATOR_PREFLIGHT_REASONS
+    )
+    assert runtime.ALLOW_DEMO_ORDER_ENV == demo_canary.ALLOW_DEMO_ORDER_ENV
+    assert (
+        runtime.OKX_DEMO_CANARY_ALLOWED_INSTRUMENTS
+        == demo_canary.ALLOWED_INSTRUMENTS
+    )
+    assert (
+        runtime.ATTESTATION_PROOF_KEY_ENV
+        == attestation_proof.ATTESTATION_PROOF_KEY_ENV
+    )
 
 
 def install_ready_okx_runtime(monkeypatch, runtime):
