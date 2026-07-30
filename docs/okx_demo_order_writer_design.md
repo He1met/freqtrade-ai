@@ -22,9 +22,10 @@ policy.
 
 ## Controlled authorization
 
-The normal application manifest keeps `order_submission_enabled=false`.
-Starting backend, worker, frontend, Freqtrade, Agent Trade Kit, or the read
-adapter never enables the writer.
+The #450 application manifest sets `order_submission_enabled=true` only for
+the sole `OKX_DEMO` runtime. Starting backend, worker, frontend, Freqtrade,
+Agent Trade Kit, or the read adapter still cannot submit by itself. Setting
+the manifest flag back to false stops new submissions before writer selection.
 
 The production server factory exposes a controlled lifecycle writer, never the
 raw authenticated POST transport. The production transport has no importable

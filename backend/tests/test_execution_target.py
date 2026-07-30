@@ -51,7 +51,7 @@ def test_default_app_config_resolves_only_okx_demo() -> None:
     assert len(settings.execution_target_manifest.targets) == 1
     assert settings.execution_target_manifest.implicit_fallback is False
     assert settings.execution_target_manifest.active_target.allow_real_funds is False
-    assert settings.execution_target_manifest.active_target.order_submission_enabled is False
+    assert settings.execution_target_manifest.active_target.order_submission_enabled is True
 
 
 def test_app_yaml_contains_the_same_execution_target_manifest() -> None:
@@ -165,7 +165,6 @@ def test_real_funds_disguised_as_demo_fails_closed() -> None:
         ("position_mode", "net_mode"),
         ("credential_source", "env_file"),
         ("write_policy", "MULTIPLE_WRITERS"),
-        ("order_submission_enabled", True),
     ],
 )
 def test_okx_demo_contract_cannot_be_relabelled_or_weakened(field: str, value) -> None:
@@ -174,6 +173,28 @@ def test_okx_demo_contract_cannot_be_relabelled_or_weakened(field: str, value) -
 
     with pytest.raises(ExecutionTargetConfigurationError, match=field):
         parse_execution_target_manifest(raw)
+
+
+def test_order_submission_can_be_disabled_without_changing_demo_target() -> None:
+    parsed = parse_execution_target_manifest(valid_manifest())
+
+    assert parsed.active_target.order_submission_enabled is False
+    assert parsed.active_target.target_id == "OKX_DEMO"
+    assert parsed.active_target.simulated_trading is True
+    assert parsed.active_target.allow_real_funds is False
+
+
+def test_order_submission_can_be_enabled_only_inside_the_locked_demo_contract() -> None:
+    raw = valid_manifest()
+    raw["targets"][0]["order_submission_enabled"] = True
+
+    parsed = parse_execution_target_manifest(raw)
+
+    assert parsed.active_target.order_submission_enabled is True
+    assert parsed.active_target.target_id == "OKX_DEMO"
+    assert parsed.active_target.account_mode == "demo"
+    assert parsed.active_target.simulated_trading is True
+    assert parsed.active_target.allow_real_funds is False
 
 
 def test_implicit_fallback_cannot_be_enabled_or_named() -> None:

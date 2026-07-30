@@ -588,7 +588,6 @@ def validate_okx_demo_execution_target() -> None:
         or target.credential_source != "macos_keychain"
         or target.simulated_trading is not True
         or target.allow_real_funds is not False
-        or target.order_submission_enabled is not False
     ):
         raise RuntimeBlocked("OKX Demo execution target is BLOCKED")
 

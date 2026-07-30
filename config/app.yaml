@@ -98,8 +98,10 @@ execution:
       simulated_trading: true
       credential_source: macos_keychain
       write_policy: SOLE_EXCHANGE_ORDER_TARGET
-      # Remains disabled until the dedicated OKX_DEMO writer is implemented.
-      order_submission_enabled: false
+      # #450 activation: the sole writer may submit only after every automatic
+      # risk, freshness, idempotency, reconciliation, and Demo attestation gate
+      # succeeds. Set false for an immediate configuration-level stop.
+      order_submission_enabled: true
       allow_real_funds: false
   non_exchange_scopes:
     - scope_id: LOCAL_DRY_RUN

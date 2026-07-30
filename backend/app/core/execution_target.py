@@ -74,7 +74,6 @@ class ExecutionTargetManifest(BaseModel):
             "simulated_trading": True,
             "credential_source": "macos_keychain",
             "write_policy": "SOLE_EXCHANGE_ORDER_TARGET",
-            "order_submission_enabled": False,
             "allow_real_funds": False,
         }
         actual = {field: getattr(target, field) for field in expected}
@@ -118,8 +117,16 @@ def parse_execution_target_manifest(raw: Any) -> ExecutionTargetManifest:
         ) from exc
 
 
-def okx_demo_execution_target_manifest() -> ExecutionTargetManifest:
-    """Build the explicit safe contract for dependency-injected tests and smoke runs."""
+def okx_demo_execution_target_manifest(
+    *,
+    order_submission_enabled: bool = False,
+) -> ExecutionTargetManifest:
+    """Build the explicit Demo-only contract for injected tests and smoke runs.
+
+    The helper remains submission-disabled by default. Production activation is
+    explicit in ``config/app.yaml`` and can be returned to ``False`` as an
+    emergency stop without weakening any target, credential, or real-fund gate.
+    """
 
     return ExecutionTargetManifest(
         implicit_fallback=False,
@@ -135,7 +142,7 @@ def okx_demo_execution_target_manifest() -> ExecutionTargetManifest:
                 simulated_trading=True,
                 credential_source="macos_keychain",
                 write_policy="SOLE_EXCHANGE_ORDER_TARGET",
-                order_submission_enabled=False,
+                order_submission_enabled=order_submission_enabled,
                 allow_real_funds=False,
             )
         ],

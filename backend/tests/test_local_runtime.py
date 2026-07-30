@@ -95,6 +95,26 @@ def test_runtime_database_defaults_to_one_canonical_postgres(monkeypatch):
     assert runtime.runtime_database_url() == runtime.DEFAULT_DATABASE_URL
 
 
+def test_runtime_accepts_enabled_submission_only_for_locked_okx_demo() -> None:
+    runtime = load_runtime_module()
+
+    raw = runtime.load_app_yaml(REPO_ROOT / "config" / "app.yaml")
+    assert raw["execution"]["targets"][0]["order_submission_enabled"] is True
+
+    runtime.validate_okx_demo_execution_target()
+
+
+def test_runtime_accepts_configuration_level_demo_submission_stop(
+    monkeypatch,
+) -> None:
+    runtime = load_runtime_module()
+    raw = runtime.load_app_yaml(REPO_ROOT / "config" / "app.yaml")
+    raw["execution"]["targets"][0]["order_submission_enabled"] = False
+    monkeypatch.setattr(runtime, "load_app_yaml", lambda _path: raw)
+
+    runtime.validate_okx_demo_execution_target()
+
+
 def test_runtime_environment_file_loads_only_non_secret_selectors(monkeypatch, tmp_path):
     runtime = load_runtime_module()
     config = tmp_path / "runtime.env"
