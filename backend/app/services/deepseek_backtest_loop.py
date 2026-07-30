@@ -37,6 +37,10 @@ from app.schemas.deepseek_backtest_loop import (
 from app.services.backtest_artifact_ingest import BacktestArtifactIngestService
 from app.services.local_backtest_trigger import LocalBacktestTriggerService
 from app.services.strategy_generation import StrategyGenerationExecutionError, StrategyGenerationService
+from app.services.strategy_promotion_validation import (
+    StrategyPromotionValidationBlocked,
+    StrategyPromotionValidationService,
+)
 
 
 @dataclass(frozen=True)
@@ -281,6 +285,19 @@ class DeepSeekBacktestLoopService:
             "blocked": "blocked",
             "failed": "failed",
         }[artifact_ingest.ingest_status]
+        if (
+            artifact_ingest.ingest_status == "succeeded"
+            and artifact_ingest.result is not None
+        ):
+            try:
+                StrategyPromotionValidationService(self.db).attach(
+                    artifact_ingest.result.id
+                )
+            except StrategyPromotionValidationBlocked:
+                # Research/backtest completion remains truthful. The downstream
+                # CANDIDATE_APPROVAL stage evaluates the persisted result and
+                # records the exact fail-closed promotion reason.
+                self.db.rollback()
         evidence = self._final_evidence(generation, backtest, execution, artifact_ingest)
         return DeepSeekBacktestLoopResponse(
             overall_status=overall_status,

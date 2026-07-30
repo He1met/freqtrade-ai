@@ -29,6 +29,10 @@ from app.services.strategy_deployment_continuation import (
     StrategyDeploymentContinuationBlocked,
     default_strategy_deployment_continuation_factory,
 )
+from app.services.research_full_chain_orchestrator import (
+    ResearchFullChainBlocked,
+    default_research_full_chain_orchestrator_factory,
+)
 
 
 ServiceFactory = Callable[[Session], DeepSeekBacktestLoopService]
@@ -41,6 +45,7 @@ class ApprovedCandidateContinuation(Protocol):
 
 
 ContinuationFactory = Callable[[Session], ApprovedCandidateContinuation]
+ResearchChainFactory = Callable[[Session], object]
 
 
 def default_service_factory(db: Session) -> DeepSeekBacktestLoopService:
@@ -104,6 +109,9 @@ class DeepSeekBacktestWorker:
         continuation_factory: Optional[
             ContinuationFactory
         ] = default_strategy_deployment_continuation_factory,
+        research_chain_factory: ResearchChainFactory = (
+            default_research_full_chain_orchestrator_factory
+        ),
         owner: Optional[str] = None,
         lease_seconds: int = 300,
         heartbeat_interval_seconds: Optional[float] = None,
@@ -111,6 +119,7 @@ class DeepSeekBacktestWorker:
         self.session_factory = session_factory
         self.service_factory = service_factory
         self.continuation_factory = continuation_factory
+        self.research_chain_factory = research_chain_factory
         self.owner = owner or f"{socket.gethostname()}:{uuid4().hex}"
         self.lease_seconds = lease_seconds
         self.heartbeat_interval_seconds = heartbeat_interval_seconds or max(
@@ -162,6 +171,18 @@ class DeepSeekBacktestWorker:
                 )
                 return
             payload = DeepSeekBacktestLoopRequest.model_validate(job.request_payload)
+            chain = self.research_chain_factory(db)
+            try:
+                chain.begin(job_id, lease_token)
+            except ResearchFullChainBlocked as exc:
+                self._complete_signal_failure(
+                    repository,
+                    job_id,
+                    lease_token,
+                    status="BLOCKED",
+                    reason=redact_secret_text(str(exc))[:2000],
+                )
+                return
             if payload.allow_real_call:
                 if not repository.mark_provider_attempt(job_id, lease_token):
                     return
@@ -191,6 +212,40 @@ class DeepSeekBacktestWorker:
                 return
             if repository.cancel_at_checkpoint(job_id, lease_token) is not None:
                 return
+            if response.overall_status == "succeeded":
+                try:
+                    chain.advance(job_id, lease_token, response)
+                except ResearchFullChainBlocked as exc:
+                    repository.complete(
+                        job_id,
+                        lease_token,
+                        status="BLOCKED",
+                        stage="CANDIDATE_APPROVAL",
+                        links=exc.links,
+                        evidence_snapshot={
+                            "status": "BLOCKED",
+                            "acceptance_ready": False,
+                            "failed_reason": redact_secret_text(str(exc))[:2000],
+                        },
+                        error_message=redact_secret_text(str(exc))[:2000],
+                        provider_completed=payload.allow_real_call,
+                    )
+                return
+            reason = (
+                response.evidence.blocked_reason
+                or response.evidence.failed_reason
+                or "Research execution did not succeed."
+            )
+            chain.fail_generation(
+                job_id,
+                lease_token,
+                status=(
+                    "BLOCKED"
+                    if response.overall_status == "blocked"
+                    else "FAILED"
+                ),
+                reason=reason,
+            )
             self._persist_response(repository, job_id, lease_token, payload, response)
 
     def _execute_approved_candidate_continuation(
