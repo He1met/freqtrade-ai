@@ -23,8 +23,16 @@ from typing import Any, Dict, Optional, Sequence
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_SCRIPT = REPO_ROOT / "scripts" / "local_runtime.py"
 DEFAULT_INTERVAL_SECONDS = 30
-COMMAND_TIMEOUT_SECONDS = 330
+COMMAND_TIMEOUT_SECONDS = 720
 CREDENTIAL_RETRY_COOLDOWN_SECONDS = 300
+SAFE_RUNTIME_STARTUP_STAGES = frozenset(
+    {
+        "backend-readiness",
+        "worker-stability",
+        "frontend-readiness",
+        "okx-runtime-readiness",
+    }
+)
 STOP_EVENT = threading.Event()
 LAST_CREDENTIAL_GENERATION: Optional[str] = None
 LAST_FAILED_CREDENTIAL_GENERATION: Optional[str] = None
@@ -58,6 +66,7 @@ def interval_seconds() -> int:
 
 
 def run_runtime(command: str, timeout: int = COMMAND_TIMEOUT_SECONDS) -> Dict[str, Any]:
+    started_at = time.monotonic()
     completed = subprocess.run(
         [sys.executable, str(RUNTIME_SCRIPT), command, "--json"],
         cwd=str(REPO_ROOT),
@@ -75,6 +84,9 @@ def run_runtime(command: str, timeout: int = COMMAND_TIMEOUT_SECONDS) -> Dict[st
             "reason": "runtime command returned invalid JSON",
         }
     payload["return_code"] = completed.returncode
+    payload["command_elapsed_ms"] = int(
+        (time.monotonic() - started_at) * 1000
+    )
     if completed.stderr.strip():
         payload["stderr"] = "runtime command wrote redacted diagnostic output"
     return payload
@@ -138,18 +150,43 @@ def controlled_credential_restart(generation: str) -> bool:
     global LAST_FAILED_CREDENTIAL_GENERATION
     global LAST_FAILED_CREDENTIAL_RETRY_AT
 
-    def record_failure(stage: str) -> bool:
+    def record_failure(
+        stage: str,
+        runtime_payload: Optional[Dict[str, Any]] = None,
+    ) -> bool:
         global LAST_FAILED_CREDENTIAL_GENERATION
         global LAST_FAILED_CREDENTIAL_RETRY_AT
         LAST_FAILED_CREDENTIAL_GENERATION = generation
         LAST_FAILED_CREDENTIAL_RETRY_AT = (
             time.monotonic() + CREDENTIAL_RETRY_COOLDOWN_SECONDS
         )
-        emit(
-            "runtime_recovery_blocked",
-            stage=stage,
-            retry_after_seconds=CREDENTIAL_RETRY_COOLDOWN_SECONDS,
-        )
+        details: Dict[str, Any] = {
+            "stage": stage,
+            "retry_after_seconds": CREDENTIAL_RETRY_COOLDOWN_SECONDS,
+        }
+        if runtime_payload is not None:
+            runtime_stage = runtime_payload.get("startup_stage")
+            runtime_elapsed_ms = runtime_payload.get(
+                "startup_stage_elapsed_ms"
+            )
+            command_elapsed_ms = runtime_payload.get("command_elapsed_ms")
+            if (
+                runtime_stage in SAFE_RUNTIME_STARTUP_STAGES
+                and isinstance(runtime_elapsed_ms, int)
+                and 0 <= runtime_elapsed_ms <= COMMAND_TIMEOUT_SECONDS * 1000
+            ):
+                details["runtime_stage"] = runtime_stage
+                details["runtime_stage_elapsed_ms"] = runtime_elapsed_ms
+            if (
+                isinstance(command_elapsed_ms, int)
+                and 0
+                <= command_elapsed_ms
+                <= COMMAND_TIMEOUT_SECONDS * 1000
+            ):
+                details["runtime_command_elapsed_ms"] = (
+                    command_elapsed_ms
+                )
+        emit("runtime_recovery_blocked", **details)
         return False
 
     stopped = run_runtime("down")
@@ -157,16 +194,24 @@ def controlled_credential_restart(generation: str) -> bool:
         service.get("status") == "BLOCKED"
         for service in stopped.get("services", [])
     ):
-        return record_failure("credential-rotation-down")
+        return record_failure("credential-rotation-down", stopped)
     started = run_runtime("up")
     if started.get("return_code") != 0:
-        return record_failure("credential-rotation-up")
+        return record_failure("credential-rotation-up", started)
     verification = run_runtime("verify")
     if verification.get("return_code") != 0:
-        return record_failure("credential-rotation-verify")
+        return record_failure("credential-rotation-verify", verification)
     LAST_CREDENTIAL_GENERATION = generation
     LAST_FAILED_CREDENTIAL_GENERATION = None
     LAST_FAILED_CREDENTIAL_RETRY_AT = 0.0
+    emit(
+        "credential_rotation_completed",
+        command_elapsed_ms={
+            "down": stopped.get("command_elapsed_ms"),
+            "up": started.get("command_elapsed_ms"),
+            "verify": verification.get("command_elapsed_ms"),
+        },
+    )
     return True
 
 
