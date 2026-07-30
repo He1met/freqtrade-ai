@@ -382,8 +382,17 @@ class OkxDemoRuntimeReconciliationAdapter:
             read_client,
             "fills_history",
             identity_field="fill_id",
+            cursor_field="bill_id",
             stop_at=history_floor,
             timestamp_field="timestamp",
+            request_kwargs=(
+                {
+                    "begin": _epoch_millis(history_floor),
+                    "end": _epoch_millis(started_at),
+                }
+                if history_floor is not None
+                else None
+            ),
         )
         positions_snapshot = read_client.positions()
         balance_snapshot = read_client.balance()
@@ -540,8 +549,10 @@ class OkxDemoRuntimeReconciliationAdapter:
         method_name: str,
         *,
         identity_field: str,
+        cursor_field: Optional[str] = None,
         stop_at: Optional[datetime] = None,
         timestamp_field: Optional[str] = None,
+        request_kwargs: Optional[Mapping[str, str]] = None,
     ) -> tuple[list[dict[str, Any]], str, datetime]:
         if stop_at is not None and timestamp_field is None:
             raise OkxDemoReconciliationBlocked(
@@ -562,7 +573,11 @@ class OkxDemoRuntimeReconciliationAdapter:
         oldest_fetched_at: Optional[datetime] = None
         page_count = 0
         for _page in range(MAX_PAGES):
-            snapshot = method(after=cursor, limit=PAGE_LIMIT)
+            snapshot = method(
+                after=cursor,
+                limit=PAGE_LIMIT,
+                **dict(request_kwargs or {}),
+            )
             page_count += 1
             fetched_at = _aware(snapshot.metadata.fetched_at)
             expires_at = _aware(snapshot.metadata.expires_at)
@@ -583,9 +598,10 @@ class OkxDemoRuntimeReconciliationAdapter:
                 else min(oldest_fetched_at, fetched_at)
             )
             for item in page_items:
-                identity, identity_cursor = _pagination_identity(
+                identity = _item_identity(item, identity_field, method_name)
+                identity_cursor = _pagination_cursor(
                     item,
-                    identity_field,
+                    cursor_field or identity_field,
                     method_name,
                 )
                 if cursor is not None and identity_cursor > int(cursor):
@@ -636,11 +652,11 @@ class OkxDemoRuntimeReconciliationAdapter:
                 )
             next_cursor = str(
                 min(
-                    _pagination_identity(
+                    _pagination_cursor(
                         item,
-                        identity_field,
+                        cursor_field or identity_field,
                         method_name,
-                    )[1]
+                    )
                     for item in page_items
                 )
             )
@@ -762,25 +778,45 @@ def _required_item_time(
     )
 
 
-def _pagination_identity(
+def _item_identity(
     item: Mapping[str, Any],
     identity_field: str,
     method_name: str,
-) -> tuple[str, int]:
-    """Return an identity that can be proved safe to reuse as an OKX cursor."""
+) -> str:
     value = item.get(identity_field)
     identity = str(value) if value is not None else ""
     if not identity:
         raise OkxDemoReconciliationBlocked(
             "{} page contains an item without identity".format(method_name)
         )
-    if not identity.isdigit() or identity != str(int(identity)):
+    return identity
+
+
+def _pagination_cursor(
+    item: Mapping[str, Any],
+    cursor_field: str,
+    method_name: str,
+) -> int:
+    """Return the authoritative OKX cursor without conflating business identity."""
+    value = item.get(cursor_field)
+    cursor = str(value) if value is not None else ""
+    if not cursor:
         raise OkxDemoReconciliationBlocked(
-            "{} pagination identity is not a canonical numeric cursor".format(
+            "{} page contains an item without pagination cursor".format(
                 method_name
             )
         )
-    return identity, int(identity)
+    if not cursor.isdigit() or cursor != str(int(cursor)):
+        raise OkxDemoReconciliationBlocked(
+            "{} pagination cursor is not canonical numeric".format(
+                method_name
+            )
+        )
+    return int(cursor)
+
+
+def _epoch_millis(value: datetime) -> str:
+    return str(int(_aware(value).timestamp() * 1000))
 
 
 def _pagination_watermark(

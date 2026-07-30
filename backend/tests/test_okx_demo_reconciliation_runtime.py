@@ -62,7 +62,14 @@ class CompleteReadClient:
     def orders_history(self, *, after=None, limit=100):
         return _snapshot([])
 
-    def fills_history(self, *, after=None, limit=100):
+    def fills_history(
+        self,
+        *,
+        after=None,
+        begin=None,
+        end=None,
+        limit=100,
+    ):
         return _snapshot([])
 
     def positions(self):
@@ -207,7 +214,18 @@ def test_runtime_restart_stops_history_at_persisted_overlap_watermark(
                 ]
             )
 
-        def fills_history(self, *, after=None, limit=100):
+        def fills_history(
+            self,
+            *,
+            after=None,
+            begin=None,
+            end=None,
+            limit=100,
+        ):
+            assert begin == str(
+                int((NOW - timedelta(seconds=5)).timestamp() * 1000)
+            )
+            assert end == str(int(restarted_at.timestamp() * 1000))
             return self._fresh_snapshot([])
 
         def positions(self):
@@ -320,6 +338,63 @@ def test_runtime_pagination_deduplicates_a_boundary_identity(
     assert identities.count("201") == 1
 
 
+def test_fill_pagination_uses_bill_id_without_changing_trade_identity(
+    tmp_path,
+) -> None:
+    adapter = OkxDemoRuntimeReconciliationAdapter(
+        evidence_root=tmp_path / "managed" / "reconciliation",
+        allowed_evidence_root=tmp_path / "managed",
+        account_fingerprint_sha256="a" * 64,
+        now_provider=lambda: NOW,
+    )
+
+    class FillClient:
+        calls = []
+
+        def fills_history(
+            self,
+            *,
+            after=None,
+            begin=None,
+            end=None,
+            limit=100,
+        ):
+            self.calls.append((after, begin, end, limit))
+            if after is None:
+                return _snapshot(
+                    [
+                        {
+                            "fill_id": str(10000 + value),
+                            "bill_id": str(value),
+                        }
+                        for value in range(500, 400, -1)
+                    ]
+                )
+            assert after == "401"
+            return _snapshot(
+                [{"fill_id": "10400", "bill_id": "400"}]
+            )
+
+    client = FillClient()
+    items, _watermark, _observed = adapter._pages(
+        client,
+        "fills_history",
+        identity_field="fill_id",
+        cursor_field="bill_id",
+        request_kwargs={"begin": "1000", "end": "2000"},
+    )
+
+    assert client.calls == [
+        (None, "1000", "2000", 100),
+        ("401", "1000", "2000", 100),
+    ]
+    assert len(items) == 101
+    assert {item["fill_id"] for item in items} >= {
+        "10500",
+        "10400",
+    }
+
+
 @pytest.mark.parametrize(
     "second_page, match",
     [
@@ -360,8 +435,8 @@ def test_runtime_pagination_blocks_a_contradictory_or_looping_cursor(
     "item, match",
     [
         ({}, "without identity"),
-        ({"order_id": "not-a-cursor"}, "not a canonical numeric cursor"),
-        ({"order_id": "001"}, "not a canonical numeric cursor"),
+        ({"order_id": "not-a-cursor"}, "pagination cursor is not canonical numeric"),
+        ({"order_id": "001"}, "pagination cursor is not canonical numeric"),
     ],
 )
 def test_runtime_pagination_blocks_an_unprovable_identity(
@@ -538,6 +613,7 @@ def test_runtime_accepts_actual_normalized_pydantic_models_and_exact_449_ids(
     )
     fill = FillQuery(
         fill_id="2001",
+        bill_id="3001",
         order_id="1000",
         inst_id="BTC-USDT-SWAP",
         price="49900",
@@ -565,7 +641,14 @@ def test_runtime_accepts_actual_normalized_pydantic_models_and_exact_449_ids(
         def pending_orders(self, *, after=None, limit=100):
             return _snapshot([order])
 
-        def fills_history(self, *, after=None, limit=100):
+        def fills_history(
+            self,
+            *,
+            after=None,
+            begin=None,
+            end=None,
+            limit=100,
+        ):
             return _snapshot([fill])
 
         def positions(self):
