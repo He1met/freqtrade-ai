@@ -23,6 +23,7 @@ from app.models import (
     ReconciliationRun,
     ResearchJob,
     ResearchJobAttempt,
+    ResearchWorkerControl,
     RiskDecision,
     Strategy,
     StrategyCandidateApproval,
@@ -792,48 +793,165 @@ class FullChainRepository:
         promotion checks run before the decision can be persisted.
         """
 
-        current_time = now or datetime.now(timezone.utc)
-        chain = self._require_active_chain(chain_id)
+        current_time = _as_utc(now or datetime.now(timezone.utc))
         automation = get_settings().demo_automation_policy
-        if (
-            automation.enabled is not True
-            or automation.automatic_candidate_approval is not True
-            or automation.execution_target_id != OKX_DEMO_TARGET_ID
-            or chain.execution_target_id != OKX_DEMO_TARGET_ID
-            or automation.allow_live_trading is not False
-            or automation.allow_real_funds is not False
-        ):
-            raise FullChainBlocked("automatic candidate approval is OKX_DEMO only")
-        approval = self.create_candidate_approval(
-            chain.id,
-            lease_token,
-            requested_by=OKX_DEMO_AUTO_APPROVAL_ACTOR,
-            expires_at=current_time + OKX_DEMO_AUTO_APPROVAL_TTL,
-            now=current_time,
-        )
-        promotion = approval.promotion_evidence
-        policy = promotion.get("policy") if isinstance(promotion, dict) else None
-        policy_version = (
-            policy.get("policy_version")
-            if isinstance(policy, dict)
-            else None
-        )
-        if policy_version != approval.promotion_policy_version:
-            raise FullChainBlocked("automatic approval policy evidence is invalid")
-        return self.decide_candidate(
-            approval.id,
-            decision="APPROVED",
-            decided_by=OKX_DEMO_AUTO_APPROVAL_ACTOR,
-            reason=(
-                "Automatically approved for OKX_DEMO after deterministic "
-                "promotion gates passed."
-            ),
-            decision_evidence={
+        try:
+            chain = self.db.scalar(
+                select(FullChainRun)
+                .where(FullChainRun.id == chain_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if chain is None:
+                raise FullChainBlocked("full chain run does not exist")
+            if (
+                chain.run_kind != "RESEARCH"
+                or chain.status in TERMINAL_CHAIN_STATUSES
+                or chain.research_scope_id != LOCAL_DRY_RUN_SCOPE_ID
+                or chain.execution_target_id != OKX_DEMO_TARGET_ID
+            ):
+                raise FullChainBlocked(
+                    "automatic candidate approval requires one active OKX_DEMO "
+                    "research chain"
+                )
+            if (
+                automation.enabled is not True
+                or automation.automatic_candidate_approval is not True
+                or automation.execution_target_id != OKX_DEMO_TARGET_ID
+                or automation.allow_live_trading is not False
+                or automation.allow_real_funds is not False
+            ):
+                raise FullChainBlocked(
+                    "automatic candidate approval is OKX_DEMO only"
+                )
+
+            job = self.db.scalar(
+                select(ResearchJob)
+                .where(ResearchJob.id == chain.research_job_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if (
+                job is None
+                or job.execution_scope_id != LOCAL_DRY_RUN_SCOPE_ID
+                or job.job_type != "deepseek_backtest"
+                or job.operation
+                != "strategy_generation.deepseek_backtest_loop"
+                or job.status != "RUNNING"
+                or job.cancel_requested
+                or job.lease_token != lease_token
+                or job.lease_expires_at is None
+                or _as_utc(job.lease_expires_at) <= current_time
+            ):
+                raise FullChainBlocked(
+                    "ResearchJob lease is absent, stale, cancelled, or fenced"
+                )
+            attempt = self.db.scalar(
+                select(ResearchJobAttempt)
+                .where(
+                    ResearchJobAttempt.id == chain.research_job_attempt_id,
+                    ResearchJobAttempt.research_job_id == job.id,
+                    ResearchJobAttempt.attempt_number == job.attempt_count,
+                    ResearchJobAttempt.execution_scope_id
+                    == LOCAL_DRY_RUN_SCOPE_ID,
+                    ResearchJobAttempt.status == "RUNNING",
+                )
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if attempt is None:
+                raise FullChainBlocked(
+                    "active ResearchJobAttempt is missing or fenced"
+                )
+            control = self.db.scalar(
+                select(ResearchWorkerControl)
+                .where(ResearchWorkerControl.id == 1)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if (
+                control is None
+                or control.active_job_id != job.id
+                or control.active_lease_token != lease_token
+            ):
+                raise FullChainBlocked(
+                    "research worker control no longer owns this lease"
+                )
+            checkpoint = self.db.scalar(
+                select(FullChainStageRun)
+                .where(
+                    FullChainStageRun.full_chain_run_id == chain.id,
+                    FullChainStageRun.stage == "CANDIDATE_APPROVAL",
+                )
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if checkpoint is None or checkpoint.status != "PREPARED":
+                raise FullChainBlocked(
+                    "candidate approval stage is not PREPARED"
+                )
+            if chain.candidate_approval_id is not None:
+                raise FullChainConflict(
+                    "candidate approval was already decided by another actor"
+                )
+            existing = self.db.scalar(
+                select(StrategyCandidateApproval)
+                .where(
+                    StrategyCandidateApproval.full_chain_run_id == chain.id
+                )
+                .with_for_update()
+            )
+            if existing is not None:
+                raise FullChainConflict(
+                    "candidate approval was already created by another actor"
+                )
+
+            result = (
+                self.db.get(BacktestResult, chain.backtest_result_id)
+                if chain.backtest_result_id is not None
+                else None
+            )
+            score = (
+                self.db.get(StrategyScore, chain.strategy_score_id)
+                if chain.strategy_score_id is not None
+                else None
+            )
+            strategy_version = (
+                self.db.get(StrategyVersion, chain.strategy_version_id)
+                if chain.strategy_version_id is not None
+                else None
+            )
+            if result is None or score is None or strategy_version is None:
+                raise FullChainBlocked(
+                    "candidate approval research records are missing"
+                )
+            try:
+                promotion, candidate_digest = promotion_candidate_digest(
+                    result,
+                    score,
+                    strategy_version,
+                )
+            except StrategyPromotionBlocked as exc:
+                raise FullChainBlocked(
+                    "candidate promotion is blocked: {}".format(exc)
+                ) from exc
+            policy = promotion.get("policy")
+            policy_version = (
+                policy.get("policy_version")
+                if isinstance(policy, dict)
+                else None
+            )
+            if not isinstance(policy_version, str) or not policy_version:
+                raise FullChainBlocked(
+                    "automatic approval policy evidence is invalid"
+                )
+
+            decision_evidence = {
                 "approval_mode": "AUTOMATIC",
                 "decision_actor": OKX_DEMO_AUTO_APPROVAL_ACTOR,
                 "automation_policy_schema_version": automation.schema_version,
-                "candidate_digest": approval.candidate_digest,
-                "promotion_policy_version": approval.promotion_policy_version,
+                "candidate_digest": candidate_digest,
+                "promotion_policy_version": policy_version,
                 "hard_gates": {
                     "validated_strategy_version": True,
                     "positive_net_profit": True,
@@ -846,9 +964,70 @@ class FullChainRepository:
                 "manual_confirmation_required": False,
                 "execution_target_id": OKX_DEMO_TARGET_ID,
                 "allow_real_funds": False,
-            },
-            now=current_time,
-        )
+            }
+            approval = StrategyCandidateApproval(
+                full_chain_run_id=chain.id,
+                execution_target_id=OKX_DEMO_TARGET_ID,
+                strategy_version_id=strategy_version.id,
+                backtest_result_id=result.id,
+                strategy_score_id=score.id,
+                candidate_digest=candidate_digest,
+                promotion_policy_version=policy_version,
+                promotion_evidence=promotion,
+                status="APPROVED",
+                requested_by=OKX_DEMO_AUTO_APPROVAL_ACTOR,
+                requested_at=current_time,
+                decided_by=OKX_DEMO_AUTO_APPROVAL_ACTOR,
+                decided_at=current_time,
+                decision_reason=(
+                    "Automatically approved for OKX_DEMO after deterministic "
+                    "promotion gates passed."
+                ),
+                expires_at=current_time + OKX_DEMO_AUTO_APPROVAL_TTL,
+            )
+            self.db.add(approval)
+            self.db.flush()
+
+            checkpoint.status = "SUCCESS"
+            checkpoint.database_ids = {
+                "candidate_approval_id": approval.id
+            }
+            checkpoint.output_snapshot = {
+                "promotion": promotion,
+                **decision_evidence,
+                "status": "APPROVED",
+            }
+            checkpoint.completed_at = current_time
+            chain.candidate_approval_id = approval.id
+            chain.status = "APPROVED"
+            chain.current_stage = "SIGNAL"
+            resumed_evidence = {
+                **chain_evidence_snapshot(chain),
+                "status": "PENDING",
+                "acceptance_ready": False,
+                "candidate_approval_id": approval.id,
+            }
+            job.status = "PENDING"
+            job.stage = "CANDIDATE_APPROVED"
+            job.evidence_snapshot = resumed_evidence
+            job.error_message = None
+            job.lease_owner = None
+            job.lease_token = None
+            job.lease_expires_at = None
+            job.heartbeat_at = None
+            if job.provider_attempted_at is not None:
+                job.provider_completed_at = current_time
+            attempt.status = "AWAITING_APPROVAL"
+            attempt.completed_at = current_time
+            attempt.evidence_snapshot = resumed_evidence
+            control.active_job_id = None
+            control.active_lease_token = None
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
+        self.db.refresh(approval)
+        return approval
 
     def revoke_candidate_approval(
         self,
