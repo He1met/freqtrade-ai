@@ -390,6 +390,10 @@ def test_restart_marks_unknown_provider_outcome_stale_without_calling_provider(t
         assert "automatic retry is forbidden" in (stale.error_message or "")
         assert restarted_db.query(FullChainRun).one().status == "STALE"
         assert restarted_db.query(FullChainStageRun).one().status == "STALE"
+        assert (
+            restarted_db.query(ResearchJobAttempt).one().evidence_snapshot
+            == stale.evidence_snapshot
+        )
 
     calls: list[str] = []
     restarted_worker = DeepSeekBacktestWorker(

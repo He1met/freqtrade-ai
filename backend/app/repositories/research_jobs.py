@@ -790,6 +790,27 @@ class ResearchJobRepository:
             if job.provider_attempted_at is not None and job.provider_completed_at is None
             else "Worker lease expired before a safe terminal checkpoint."
         )
+        stale_evidence = {
+            **job.evidence_snapshot,
+            "status": "STALE",
+            "acceptance_ready": False,
+            "recovery_allowed": (
+                previous_stage == "SIGNAL"
+                or job.provider_attempted_at is None
+                or job.provider_completed_at is not None
+            ),
+            "previous_stage": previous_stage,
+            "failed_reason": stale_reason,
+            **(
+                {
+                    "full_chain_run_id": chain.id,
+                    "full_chain_status": "STALE",
+                    "previous_full_chain_status": previous_chain_status,
+                }
+                if chain is not None
+                else {}
+            ),
+        }
         result = self.db.execute(
             update(ResearchJob)
             .where(
@@ -803,27 +824,7 @@ class ResearchJobRepository:
                 status="STALE",
                 stage="LEASE_EXPIRED",
                 error_message=stale_reason,
-                evidence_snapshot={
-                    **job.evidence_snapshot,
-                    "status": "STALE",
-                    "acceptance_ready": False,
-                    "recovery_allowed": (
-                        previous_stage == "SIGNAL"
-                        or job.provider_attempted_at is None
-                        or job.provider_completed_at is not None
-                    ),
-                    "previous_stage": previous_stage,
-                    "failed_reason": stale_reason,
-                    **(
-                        {
-                            "full_chain_run_id": chain.id,
-                            "full_chain_status": "STALE",
-                            "previous_full_chain_status": previous_chain_status,
-                        }
-                        if chain is not None
-                        else {}
-                    ),
-                },
+                evidence_snapshot=stale_evidence,
                 completed_at=current_time,
                 lease_owner=None,
                 lease_token=None,
@@ -848,12 +849,7 @@ class ResearchJobRepository:
             attempt.status = "STALE"
             attempt.completed_at = current_time
             attempt.error_message = stale_reason
-            attempt.evidence_snapshot = {
-                **job.evidence_snapshot,
-                "status": "STALE",
-                "acceptance_ready": False,
-                "failed_reason": stale_reason,
-            }
+            attempt.evidence_snapshot = stale_evidence
         if chain is not None and chain.status not in {
             "SUCCESS",
             "FAILED",
