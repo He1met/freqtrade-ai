@@ -446,8 +446,16 @@ def test_attested_read_client_exposes_complete_reconciliation_pagination(
     captured = []
 
     def record(name):
-        def method(inst_id=None, *, after=None, before=None, limit=100):
-            captured.append((name, inst_id, after, before, limit))
+        def method(
+            inst_id=None,
+            *,
+            after=None,
+            before=None,
+            begin=None,
+            end=None,
+            limit=100,
+        ):
+            captured.append((name, inst_id, after, before, begin, end, limit))
             return name
 
         return method
@@ -458,11 +466,20 @@ def test_attested_read_client_exposes_complete_reconciliation_pagination(
 
     assert instance.pending_orders("BTC-USDT-SWAP", after="20", limit=50) == "pending"
     assert instance.orders_history(before="10") == "history"
-    assert instance.fills_history("ETH-USDT-SWAP", after="9", before="8") == "fills"
+    assert (
+        instance.fills_history(
+            "ETH-USDT-SWAP",
+            after="9",
+            before="8",
+            begin="1000",
+            end="2000",
+        )
+        == "fills"
+    )
     assert captured == [
-        ("pending", "BTC-USDT-SWAP", "20", None, 50),
-        ("history", None, None, "10", 100),
-        ("fills", "ETH-USDT-SWAP", "9", "8", 100),
+        ("pending", "BTC-USDT-SWAP", "20", None, None, None, 50),
+        ("history", None, None, "10", None, None, 100),
+        ("fills", "ETH-USDT-SWAP", "9", "8", "1000", "2000", 100),
     ]
 
 
@@ -513,6 +530,7 @@ def test_official_trade_id_is_normalized_to_internal_fill_id() -> None:
     fill = OkxDemoReadAdapter._fill(
         {
             "tradeId": "12345",
+            "billId": "98765",
             "ordId": "67890",
             "instId": "BTC-USDT-SWAP",
             "fillPx": "50000",
@@ -523,6 +541,7 @@ def test_official_trade_id_is_normalized_to_internal_fill_id() -> None:
     )
 
     assert fill.fill_id == "12345"
+    assert fill.bill_id == "98765"
 
 
 @pytest.mark.parametrize(
@@ -531,6 +550,7 @@ def test_official_trade_id_is_normalized_to_internal_fill_id() -> None:
 )
 def test_missing_or_conflicting_fill_identity_is_rejected(identity) -> None:
     payload = {
+        "billId": "98765",
         "ordId": "67890",
         "instId": "BTC-USDT-SWAP",
         "fillPx": "50000",
@@ -541,6 +561,46 @@ def test_missing_or_conflicting_fill_identity_is_rejected(identity) -> None:
 
     with pytest.raises(ValueError, match="fill identity"):
         OkxDemoReadAdapter._fill(payload)
+
+
+@pytest.mark.parametrize("bill_id", [None, "", "not-numeric", "001"])
+def test_fill_requires_authoritative_canonical_bill_id(bill_id) -> None:
+    payload = {
+        "tradeId": "12345",
+        "billId": bill_id,
+        "ordId": "67890",
+        "instId": "BTC-USDT-SWAP",
+        "fillPx": "50000",
+        "fillSz": "1",
+        "ts": FRESH_TS,
+    }
+
+    with pytest.raises(ValueError, match="billId"):
+        OkxDemoReadAdapter._fill(payload)
+
+
+def test_fills_history_sends_bounded_timestamp_window() -> None:
+    instance, transport = adapter(
+        [envelope([])],
+        credentials=RecordedCredentialProvider(),
+    )
+
+    instance.fills_history(
+        "BTC-USDT-SWAP",
+        after="900",
+        begin="1000",
+        end="2000",
+        limit=50,
+    )
+
+    assert transport.calls[0]["query"] == {
+        "instType": "SWAP",
+        "instId": "BTC-USDT-SWAP",
+        "after": "900",
+        "begin": "1000",
+        "end": "2000",
+        "limit": "50",
+    }
 
 
 @pytest.mark.parametrize(

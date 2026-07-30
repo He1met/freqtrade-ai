@@ -181,6 +181,8 @@ class OkxDemoReadClient(Protocol):
         *,
         after: Optional[str] = None,
         before: Optional[str] = None,
+        begin: Optional[str] = None,
+        end: Optional[str] = None,
         limit: int = 100,
     ) -> OkxReadSnapshot: ...
     def orders_history(
@@ -498,6 +500,8 @@ class OkxDemoReadAdapter:
         *,
         after: Optional[str] = None,
         before: Optional[str] = None,
+        begin: Optional[str] = None,
+        end: Optional[str] = None,
         limit: int = 100,
     ) -> OkxReadSnapshot:
         query = self._history_query(
@@ -506,6 +510,20 @@ class OkxDemoReadAdapter:
             before=before,
             limit=limit,
         )
+        for field, value in (("begin", begin), ("end", end)):
+            if value is not None and (
+                not str(value).isdigit()
+                or str(value) != str(int(str(value)))
+            ):
+                self._invalid_request(
+                    "fills history {} must be canonical epoch milliseconds".format(
+                        field
+                    )
+                )
+            if value is not None:
+                query[field] = str(value)
+        if begin is not None and end is not None and int(begin) > int(end):
+            self._invalid_request("fills history begin must not exceed end")
         return self._request(
             resource="fills_history",
             path="/api/v5/trade/fills-history",
@@ -1033,8 +1051,16 @@ class OkxDemoReadAdapter:
         fill_id = trade_id or legacy_fill_id
         if not fill_id:
             raise ValueError("fill identity is missing")
+        bill_id = item.get("billId")
+        if (
+            not bill_id
+            or not str(bill_id).isdigit()
+            or str(bill_id) != str(int(str(bill_id)))
+        ):
+            raise ValueError("fill billId is not a canonical numeric cursor")
         return FillQuery(
             fill_id=fill_id,
+            bill_id=str(bill_id),
             order_id=item["ordId"],
             inst_id=item["instId"],
             price=Decimal(item["fillPx"]),
@@ -1926,12 +1952,16 @@ def create_attested_okx_demo_read_adapter(
                 *,
                 after=None,
                 before=None,
+                begin=None,
+                end=None,
                 limit=100,
             ):
                 return self._engine.fills_history(
                     inst_id,
                     after=after,
                     before=before,
+                    begin=begin,
+                    end=end,
                     limit=limit,
                 )
 
