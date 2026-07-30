@@ -6,6 +6,7 @@ from typing import Any, Mapping
 from sqlalchemy.orm import Session
 from sqlalchemy.engine import Connection
 
+from app.adapters.okx_demo.credential_preflight import OkxDemoPreflightBlocked
 from app.adapters.okx_demo.credentials import OkxDemoCredentialsUnavailable
 from app.adapters.okx_demo.order_writer import OkxDemoOrderWriter
 from app.adapters.okx_demo.read_adapter import (
@@ -141,6 +142,11 @@ def create_okx_demo_server_session(
             credentials.revoke("FACTORY_FAILURE")
         process_lock.release()
         raise
+    except OkxDemoPreflightBlocked as exc:
+        if credentials is not None:
+            credentials.revoke("FACTORY_FAILURE")
+        process_lock.release()
+        raise OkxDemoCredentialsUnavailable(str(exc)) from None
     except Exception:
         if credentials is not None:
             credentials.revoke("FACTORY_FAILURE")

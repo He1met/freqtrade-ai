@@ -53,7 +53,8 @@ DUAL_SIDE_BASE_VERSION = "20260728_17"
 STRATEGY_PROMOTION_BASE_VERSION = "20260728_18"
 STRATEGY_DEPLOYMENT_BASE_VERSION = "20260729_19"
 EXECUTION_FULL_CHAIN_BASE_VERSION = "20260729_20"
-SCHEMA_VERSION = "20260729_21"
+RECONCILIATION_INDEX_BASE_VERSION = "20260729_21"
+SCHEMA_VERSION = "20260730_22"
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 ATTESTATION_PROOF_KEY_ENV = "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"
 
@@ -3206,6 +3207,7 @@ def _add_okx_demo_reconciliation(connection: Connection) -> None:
         "okx_demo_recovery_grants",
     ):
         Base.metadata.tables[table_name].create(bind=connection, checkfirst=True)
+    _add_okx_demo_recovery_batch_index(connection)
     connection.execute(
         text(
             """
@@ -4524,6 +4526,25 @@ def _upgrade_dual_side_trade_intents(connection: Connection) -> None:
     )
 
 
+def _add_okx_demo_recovery_batch_index(connection: Connection) -> None:
+    """Install the batch lookup used by every runtime reconciliation cycle."""
+
+    schema_name = connection.execute(text("SELECT current_schema()")).scalar_one()
+    if "okx_demo_exchange_events" not in inspect(connection).get_table_names(
+        schema=schema_name
+    ):
+        return
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS "
+            "okx_demo_exchange_events_batch_observed_idx "
+            "ON okx_demo_exchange_events ("
+            "execution_target_id, recovery_batch_database_id, "
+            "observed_at, database_id)"
+        )
+    )
+
+
 def upgrade_database(engine: Engine) -> str:
     """Upgrade a local PostgreSQL database atomically to ``SCHEMA_VERSION``.
 
@@ -4568,6 +4589,8 @@ def upgrade_database(engine: Engine) -> str:
                 DUAL_SIDE_BASE_VERSION,
                 STRATEGY_PROMOTION_BASE_VERSION,
                 STRATEGY_DEPLOYMENT_BASE_VERSION,
+                EXECUTION_FULL_CHAIN_BASE_VERSION,
+                RECONCILIATION_INDEX_BASE_VERSION,
             }
             if current_version in supported_upgrade_versions:
                 connection.execute(
@@ -4577,6 +4600,19 @@ def upgrade_database(engine: Engine) -> str:
                         "okx_demo_fill_snapshots_fill_unique"
                     )
                 )
+                _add_okx_demo_recovery_batch_index(connection)
+            if current_version == RECONCILIATION_INDEX_BASE_VERSION:
+                problems = schema_problems(connection)
+                if problems:
+                    raise SchemaMigrationBlocked(
+                        "Reconciliation index upgrade does not match ORM metadata: "
+                        + "; ".join(problems)
+                    )
+                connection.execute(
+                    text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+                    {"version": SCHEMA_VERSION},
+                )
+                return SCHEMA_VERSION
             if current_version == FILL_SNAPSHOT_REPEAT_BASE_VERSION:
                 _add_strategy_deployment_queue(connection)
                 _grant_runtime_application_acl(connection)

@@ -1,4 +1,5 @@
 import json
+from io import BytesIO
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import shlex
 import subprocess
@@ -198,6 +199,39 @@ def test_valid_demo_identity_and_minimum_permissions_are_redacted() -> None:
     rendered = json.dumps(result)
     assert "must-not-be-rendered" not in rendered
     assert "mainUid" not in rendered
+
+
+def test_ip_whitelist_rejection_is_specific_without_forwarding_remote_message() -> None:
+    unsafe_remote_message = (
+        "current IP is blocked for api-key-identifier-must-not-render"
+    )
+    error = HTTPError(
+        preflight.OKX_DEMO_REST_URL + preflight.ACCOUNT_CONFIG_PATH,
+        401,
+        "Unauthorized",
+        {},
+        BytesIO(
+            json.dumps(
+                {
+                    "code": "50110",
+                    "msg": unsafe_remote_message,
+                }
+            ).encode("utf-8")
+        ),
+    )
+
+    def blocked_opener(_request, timeout):
+        assert timeout == preflight.REQUEST_TIMEOUT_SECONDS
+        raise error
+
+    with pytest.raises(
+        preflight.OkxDemoPreflightBlocked,
+        match=preflight.IP_WHITELIST_REJECTED_REASON,
+    ) as blocked:
+        preflight.run_preflight(valid_environment(), opener=blocked_opener)
+
+    assert unsafe_remote_message not in str(blocked.value)
+    assert "api-key-identifier-must-not-render" not in str(blocked.value)
 
 
 @pytest.mark.parametrize(

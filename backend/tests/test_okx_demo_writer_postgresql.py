@@ -24,6 +24,7 @@ from app.db.migrations import (
     FULL_CHAIN_BASE_VERSION,
     ORDER_WRITER_BASE_VERSION,
     RECONCILIATION_BASE_VERSION,
+    RECONCILIATION_INDEX_BASE_VERSION,
     RUNTIME_APP_ACL_BASE_VERSION,
     RUNTIME_APPLICATION_TABLES,
     SCHEMA_VERSION,
@@ -2036,3 +2037,58 @@ def test_runtime_application_acl_upgrades_in_place_without_widening_sensitive_ta
     assert upgrade_database(postgres_writer_engine) == SCHEMA_VERSION
     assert upgrade_database(postgres_writer_engine) == SCHEMA_VERSION
     assert verify_schema(postgres_writer_engine).ready is True
+
+
+def test_reconciliation_batch_index_upgrades_in_place_and_supports_runtime_query(
+    postgres_writer_engine,
+) -> None:
+    index_name = "okx_demo_exchange_events_batch_observed_idx"
+    assert upgrade_database(postgres_writer_engine) == SCHEMA_VERSION
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(text("DROP INDEX {}".format(index_name)))
+        connection.execute(text("DELETE FROM {}".format(VERSION_TABLE)))
+        connection.execute(
+            text(
+                "INSERT INTO {} (version) VALUES (:version)".format(
+                    VERSION_TABLE
+                )
+            ),
+            {"version": RECONCILIATION_INDEX_BASE_VERSION},
+        )
+
+    assert upgrade_database(postgres_writer_engine) == SCHEMA_VERSION
+    assert verify_schema(postgres_writer_engine).ready is True
+
+    indexes = {
+        item["name"]: item
+        for item in inspect(postgres_writer_engine).get_indexes(
+            "okx_demo_exchange_events"
+        )
+    }
+    assert indexes[index_name]["column_names"] == [
+        "execution_target_id",
+        "recovery_batch_database_id",
+        "observed_at",
+        "database_id",
+    ]
+    assert indexes[index_name]["unique"] is False
+
+    with postgres_writer_engine.connect() as connection:
+        connection.execute(text("SET LOCAL enable_seqscan = off"))
+        plan = "\n".join(
+            row[0]
+            for row in connection.execute(
+                text(
+                    """
+                    EXPLAIN
+                    SELECT observed_at
+                    FROM okx_demo_exchange_events
+                    WHERE execution_target_id = 'OKX_DEMO'
+                      AND recovery_batch_database_id = -1
+                    ORDER BY observed_at DESC, database_id DESC
+                    LIMIT 1
+                    """
+                )
+            )
+        )
+    assert index_name in plan

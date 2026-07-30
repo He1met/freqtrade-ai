@@ -40,6 +40,20 @@ OKX_DEMO_REQUIRED_ENV_NAMES = (
 )
 REQUEST_TIMEOUT_SECONDS = 10
 KEYCHAIN_TIMEOUT_SECONDS = 5
+IP_WHITELIST_REJECTED_REASON = (
+    "OKX Demo API IP whitelist rejected the current egress IP"
+)
+SAFE_OPERATOR_PREFLIGHT_REASONS = frozenset(
+    {
+        IP_WHITELIST_REJECTED_REASON,
+        "OKX Demo account attestation transport failed",
+        "OKX Demo account identity is unknown",
+        "OKX Demo account fingerprint does not match",
+        "OKX Demo API permissions must be exactly read_only and trade",
+        "OKX Demo position mode must be long_short_mode",
+        "OKX Demo account level must be Futures mode",
+    }
+)
 
 
 class OkxDemoPreflightBlocked(RuntimeError):
@@ -292,7 +306,17 @@ def _fetch_account_config(
                     "OKX Demo account attestation transport failed"
                 )
             raw_payload = response.read()
-    except (HTTPError, URLError, TimeoutError, OSError):
+    except HTTPError as exc:
+        try:
+            payload = json.loads(exc.read(4096))
+        except (OSError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
+            payload = {}
+        if isinstance(payload, dict) and payload.get("code") == "50110":
+            raise OkxDemoPreflightBlocked(IP_WHITELIST_REJECTED_REASON) from None
+        raise OkxDemoPreflightBlocked(
+            "OKX Demo account attestation transport failed"
+        ) from None
+    except (URLError, TimeoutError, OSError):
         raise OkxDemoPreflightBlocked(
             "OKX Demo account attestation transport failed"
         ) from None

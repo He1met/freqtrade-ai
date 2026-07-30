@@ -882,6 +882,51 @@ def test_okx_preflight_does_not_spawn_when_keychain_bundle_is_missing(monkeypatc
     assert payload["credentials"]["configured"] is False
 
 
+def test_okx_preflight_surfaces_only_allowlisted_safe_child_reason(monkeypatch):
+    runtime = load_runtime_module()
+    credential_bundle = {
+        "OKX_DEMO_API_KEY": "child-key",
+        "OKX_DEMO_API_SECRET": "child-secret",
+        "OKX_DEMO_API_PASSPHRASE": "child-passphrase",
+        "OKX_DEMO_ACCOUNT_FINGERPRINT": "c" * 64,
+    }
+    monkeypatch.setattr(
+        runtime,
+        "read_okx_demo_credentials",
+        lambda: (
+            credential_bundle,
+            {"status": "READY", "configured": True, "source": "keychain"},
+        ),
+    )
+    monkeypatch.setattr(runtime, "backend_python", lambda: Path("/venv/bin/python"))
+    monkeypatch.setattr(
+        runtime,
+        "_read_macos_keychain_item",
+        lambda _service: "74" * 32,
+    )
+    monkeypatch.setattr(
+        runtime.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=2,
+            stdout=json.dumps(
+                {
+                    "status": "BLOCKED",
+                    "reason": runtime.IP_WHITELIST_REJECTED_REASON,
+                }
+            ),
+            stderr="untrusted-child-output",
+        ),
+    )
+
+    payload = runtime.run_okx_demo_preflight()
+
+    assert payload["status"] == "BLOCKED"
+    assert payload["reason"] == runtime.IP_WHITELIST_REJECTED_REASON
+    assert "untrusted-child-output" not in str(payload)
+    assert credential_bundle == {}
+
+
 def test_okx_account_pin_child_receives_only_signing_bundle_and_is_redacted(
     monkeypatch,
 ):
