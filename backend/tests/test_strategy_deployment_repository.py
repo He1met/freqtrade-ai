@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from app.models import (
     ResearchJobAttempt,
     Strategy,
     StrategyCandidateApproval,
+    StrategyDeployment,
     StrategyScore,
     StrategyVersion,
 )
@@ -54,10 +56,16 @@ def session_factory(tmp_path: Path):
         engine.dispose()
 
 
-def seed_approved_candidate(db, *, expires_at: datetime | None = None):
+def seed_approved_candidate(
+    db,
+    *,
+    expires_at: datetime | None = None,
+    suffix: str = "",
+):
+    slug_suffix = f"-{suffix}" if suffix else ""
     strategy = Strategy(
-        name="DeploymentStrategy",
-        slug="deployment-strategy",
+        name=f"DeploymentStrategy{suffix}",
+        slug=f"deployment-strategy{slug_suffix}",
         source="ai_generated",
     )
     db.add(strategy)
@@ -68,7 +76,7 @@ def seed_approved_candidate(db, *, expires_at: datetime | None = None):
         blueprint={"schema_version": "2", "strategy": {"name": strategy.name}},
         generated_code="class DeploymentStrategy: pass",
         code_hash="c" * 64,
-        file_path="user_data/strategies/DeploymentStrategy.py",
+        file_path=f"user_data/strategies/DeploymentStrategy{suffix}.py",
         validation_status="passed",
     )
     db.add(version)
@@ -87,14 +95,14 @@ def seed_approved_candidate(db, *, expires_at: datetime | None = None):
         pair="BTC/USDT:USDT",
         timeframe="5m",
         status="succeeded",
-        result_path="reports/backtests/deployment.json",
+        result_path=f"reports/backtests/deployment{slug_suffix}.json",
     )
     db.add(backtest_task)
     db.flush()
     backtest_result = BacktestResult(
         backtest_run_id=backtest_run.id,
         backtest_task_id=backtest_task.id,
-        result_path="reports/backtests/deployment.json",
+        result_path=f"reports/backtests/deployment{slug_suffix}.json",
         metrics_snapshot={
             "acceptance_ready": True,
             "promotion_evidence": {
@@ -135,8 +143,12 @@ def seed_approved_candidate(db, *, expires_at: datetime | None = None):
     job = jobs.create(
         job_type="deepseek_backtest",
         operation="strategy_generation.deepseek_backtest_loop",
-        idempotency_key_digest="a" * 64,
-        request_hash="b" * 64,
+        idempotency_key_digest=hashlib.sha256(
+            f"deployment-seed{suffix}".encode()
+        ).hexdigest(),
+        request_hash=hashlib.sha256(
+            f"deployment-request{suffix}".encode()
+        ).hexdigest(),
         request_payload={"allow_real_call": True},
     )
     claimed = jobs.claim_next(
@@ -235,6 +247,40 @@ def test_publish_is_idempotent_and_persists_exact_candidate_binding(
         )
         assert persisted is not None
         assert persisted.status == "ACTIVE"
+
+
+def test_publish_blocks_a_second_active_okx_demo_deployment(
+    session_factory,
+) -> None:
+    with session_factory() as db:
+        first_approval = seed_approved_candidate(db, suffix="One")
+        first = publish(db, first_approval.id)
+        jobs = ResearchJobRepository(db)
+        first_chain = db.get(FullChainRun, first_approval.full_chain_run_id)
+        assert first_chain is not None
+        active_job = jobs.get(first_chain.research_job_id)
+        assert active_job is not None and active_job.lease_token
+        jobs.complete(
+            active_job.id,
+            active_job.lease_token,
+            status="SUCCESS",
+            stage="DEPLOYED",
+            links={},
+            evidence_snapshot={"status": "SUCCESS"},
+            error_message=None,
+            provider_completed=False,
+            now=NOW,
+        )
+
+        second_approval = seed_approved_candidate(db, suffix="Two")
+        with pytest.raises(
+            StrategyDeploymentConflict,
+            match="already has a different ACTIVE",
+        ):
+            publish(db, second_approval.id)
+
+        persisted = db.query(StrategyDeployment).all()
+        assert [deployment.id for deployment in persisted] == [first.id]
 
 
 def test_leased_signal_checkpoint_survives_expiry_and_is_immutable(

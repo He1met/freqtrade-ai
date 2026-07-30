@@ -54,7 +54,8 @@ STRATEGY_PROMOTION_BASE_VERSION = "20260728_18"
 STRATEGY_DEPLOYMENT_BASE_VERSION = "20260729_19"
 EXECUTION_FULL_CHAIN_BASE_VERSION = "20260729_20"
 RECONCILIATION_INDEX_BASE_VERSION = "20260729_21"
-SCHEMA_VERSION = "20260730_22"
+SINGLE_ACTIVE_DEPLOYMENT_BASE_VERSION = "20260730_22"
+SCHEMA_VERSION = "20260730_23"
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 ATTESTATION_PROOF_KEY_ENV = "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"
 
@@ -4399,6 +4400,38 @@ def _add_strategy_deployment_queue(connection: Connection) -> None:
         bind=connection,
         checkfirst=True,
     )
+    _add_single_active_strategy_deployment_index(connection)
+
+
+def _add_single_active_strategy_deployment_index(connection: Connection) -> None:
+    """Fail closed before enforcing one ACTIVE deployment for OKX_DEMO."""
+
+    table_names = set(
+        inspect(connection).get_table_names(
+            schema=connection.execute(text("SELECT current_schema()")).scalar_one()
+        )
+    )
+    if "strategy_deployments" not in table_names:
+        return
+    active_count = int(
+        connection.execute(
+            text(
+                "SELECT count(*) FROM strategy_deployments "
+                "WHERE execution_target_id = 'OKX_DEMO' AND status = 'ACTIVE'"
+            )
+        ).scalar_one()
+    )
+    if active_count > 1:
+        raise SchemaMigrationBlocked(
+            "Multiple ACTIVE OKX_DEMO strategy deployments require an explicit "
+            "data-preserving resolution before migration"
+        )
+    index = next(
+        index
+        for index in Base.metadata.tables["strategy_deployments"].indexes
+        if index.name == "strategy_deployments_single_active_idx"
+    )
+    index.create(bind=connection, checkfirst=True)
 
 
 def _add_deferred_execution_foreign_keys(connection: Connection) -> None:
@@ -4591,6 +4624,7 @@ def upgrade_database(engine: Engine) -> str:
                 STRATEGY_DEPLOYMENT_BASE_VERSION,
                 EXECUTION_FULL_CHAIN_BASE_VERSION,
                 RECONCILIATION_INDEX_BASE_VERSION,
+                SINGLE_ACTIVE_DEPLOYMENT_BASE_VERSION,
             }
             if current_version in supported_upgrade_versions:
                 connection.execute(
@@ -4602,10 +4636,24 @@ def upgrade_database(engine: Engine) -> str:
                 )
                 _add_okx_demo_recovery_batch_index(connection)
             if current_version == RECONCILIATION_INDEX_BASE_VERSION:
+                _add_strategy_deployment_queue(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
                         "Reconciliation index upgrade does not match ORM metadata: "
+                        + "; ".join(problems)
+                    )
+                connection.execute(
+                    text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+                    {"version": SCHEMA_VERSION},
+                )
+                return SCHEMA_VERSION
+            if current_version == SINGLE_ACTIVE_DEPLOYMENT_BASE_VERSION:
+                _add_single_active_strategy_deployment_index(connection)
+                problems = schema_problems(connection)
+                if problems:
+                    raise SchemaMigrationBlocked(
+                        "Single active deployment upgrade does not match ORM metadata: "
                         + "; ".join(problems)
                     )
                 connection.execute(
