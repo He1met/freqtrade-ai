@@ -34,33 +34,6 @@ from uuid import uuid4
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT / "backend"))
-
-from app.adapters.freqtrade.binary import resolve_freqtrade_binary
-from app.adapters.okx_demo.credential_preflight import (
-    ALLOW_REAL_FUNDS_ENV,
-    EXECUTION_TARGET_ENV,
-    IP_WHITELIST_REJECTED_REASON,
-    OKX_DEMO_CREDENTIAL_ENV_NAMES,
-    OKX_DEMO_REQUIRED_ENV_NAMES,
-    OKX_DEMO_REST_URL,
-    REST_URL_ENV,
-    SAFE_OPERATOR_PREFLIGHT_REASONS,
-)
-from app.adapters.okx_demo.demo_canary import (
-    ALLOWED_INSTRUMENTS as OKX_DEMO_CANARY_ALLOWED_INSTRUMENTS,
-    ALLOW_DEMO_ORDER_ENV,
-    DEFAULT_INSTRUMENT as OKX_DEMO_CANARY_DEFAULT_INSTRUMENT,
-)
-from app.adapters.okx_demo.attestation_proof import (
-    ATTESTATION_PROOF_KEY_ENV,
-    ATTESTATION_PROOF_KEYCHAIN_SERVICE,
-)
-from app.core.config import load_app_yaml
-from app.core.execution_target import (
-    ExecutionTargetConfigurationError,
-    parse_execution_target_manifest,
-)
 
 DEFAULT_RUNTIME_DIR = REPO_ROOT / ".freqtrade-ai" / "runtime"
 DEFAULT_RUNTIME_ENV_FILE = REPO_ROOT / ".freqtrade-ai" / "runtime.env"
@@ -72,6 +45,16 @@ MANAGED_STRATEGY_MODEL = "deepseek-v4-pro"
 DISABLE_ENV_FILE_ENV = "FREQTRADE_AI_DISABLE_ENV_FILE"
 OPERATOR_TOKEN_ENV = "FREQTRADE_AI_OPERATOR_TOKEN"
 OPERATOR_TOKEN_KEYCHAIN_SERVICE = "freqtrade-ai/operator-token"
+OKX_DEMO_CREDENTIAL_ENV_NAMES = (
+    "OKX_DEMO_API_KEY",
+    "OKX_DEMO_API_SECRET",
+    "OKX_DEMO_API_PASSPHRASE",
+)
+OKX_DEMO_ACCOUNT_FINGERPRINT_ENV = "OKX_DEMO_ACCOUNT_FINGERPRINT"
+OKX_DEMO_REQUIRED_ENV_NAMES = (
+    *OKX_DEMO_CREDENTIAL_ENV_NAMES,
+    OKX_DEMO_ACCOUNT_FINGERPRINT_ENV,
+)
 OKX_DEMO_KEYCHAIN_SERVICES = dict(
     zip(
         OKX_DEMO_REQUIRED_ENV_NAMES,
@@ -85,6 +68,33 @@ OKX_DEMO_KEYCHAIN_SERVICES = dict(
 )
 OKX_DEMO_CREDENTIAL_GENERATION_SERVICE = (
     "freqtrade-ai/okx-demo-credential-generation"
+)
+EXECUTION_TARGET_ENV = "FREQTRADE_AI_EXECUTION_TARGET"
+ALLOW_REAL_FUNDS_ENV = "FREQTRADE_AI_ALLOW_REAL_FUNDS"
+REST_URL_ENV = "FREQTRADE_AI_OKX_DEMO_REST_URL"
+OKX_DEMO_REST_URL = "https://openapi.okx.com"
+IP_WHITELIST_REJECTED_REASON = (
+    "OKX Demo API IP whitelist rejected the current egress IP"
+)
+SAFE_OPERATOR_PREFLIGHT_REASONS = frozenset(
+    {
+        IP_WHITELIST_REJECTED_REASON,
+        "OKX Demo account attestation transport failed",
+        "OKX Demo account identity is unknown",
+        "OKX Demo account fingerprint does not match",
+        "OKX Demo API permissions must be exactly read_only and trade",
+        "OKX Demo position mode must be long_short_mode",
+        "OKX Demo account level must be Futures mode",
+    }
+)
+ALLOW_DEMO_ORDER_ENV = "FREQTRADE_AI_ALLOW_DEMO_ORDER"
+OKX_DEMO_CANARY_DEFAULT_INSTRUMENT = "BTC-USDT-SWAP"
+OKX_DEMO_CANARY_ALLOWED_INSTRUMENTS = frozenset(
+    {OKX_DEMO_CANARY_DEFAULT_INSTRUMENT}
+)
+ATTESTATION_PROOF_KEY_ENV = "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"
+ATTESTATION_PROOF_KEYCHAIN_SERVICE = (
+    "freqtrade-ai/okx-demo-attestation-proof-key"
 )
 KEYCHAIN_TIMEOUT_SECONDS = 5
 SAFE_INHERITED_ENV_KEYS = frozenset(
@@ -588,19 +598,78 @@ def configure_operator_token() -> Dict[str, Any]:
 
 
 def validate_okx_demo_execution_target() -> None:
-    raw_config = load_app_yaml(REPO_ROOT / "config" / "app.yaml")
     try:
-        manifest = parse_execution_target_manifest(raw_config.get("execution"))
-    except ExecutionTargetConfigurationError as exc:
+        import yaml
+    except ImportError as exc:
         raise RuntimeBlocked("OKX Demo execution target is BLOCKED") from exc
-    target = manifest.active_target
+
+    try:
+        raw_config = yaml.safe_load(
+            (REPO_ROOT / "config" / "app.yaml").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        raise RuntimeBlocked("OKX Demo execution target is BLOCKED") from exc
+
+    execution = raw_config.get("execution") if isinstance(raw_config, dict) else None
+    if not isinstance(execution, dict):
+        raise RuntimeBlocked("OKX Demo execution target is BLOCKED")
+    allowed_manifest_keys = {
+        "schema_version",
+        "implicit_fallback",
+        "targets",
+        "non_exchange_scopes",
+    }
     if (
-        target.target_id != "OKX_DEMO"
-        or target.credential_source != "macos_keychain"
-        or target.simulated_trading is not True
-        or target.allow_real_funds is not False
-        or target.order_submission_enabled is not False
+        set(execution) - allowed_manifest_keys
+        or execution.get("schema_version", "1") != "1"
+        or execution.get("implicit_fallback") is not False
     ):
+        raise RuntimeBlocked("OKX Demo execution target is BLOCKED")
+
+    targets = execution.get("targets")
+    scopes = execution.get("non_exchange_scopes")
+    if (
+        not isinstance(targets, list)
+        or len(targets) != 1
+        or not isinstance(scopes, list)
+        or len(scopes) != 1
+    ):
+        raise RuntimeBlocked("OKX Demo execution target is BLOCKED")
+
+    expected_target = {
+        "target_id": "OKX_DEMO",
+        "status": "ACTIVE",
+        "exchange": "okx",
+        "product_type": "SWAP",
+        "margin_mode": "isolated",
+        "position_mode": "long_short_mode",
+        "account_mode": "demo",
+        "simulated_trading": True,
+        "credential_source": "macos_keychain",
+        "write_policy": "SOLE_EXCHANGE_ORDER_TARGET",
+        "order_submission_enabled": False,
+        "allow_real_funds": False,
+    }
+    expected_scope = {
+        "scope_id": "LOCAL_DRY_RUN",
+        "scope_type": "local_simulation",
+        "exchange_order_execution": False,
+        "write_policy": "NO_EXCHANGE_WRITES",
+    }
+
+    def matches_exact_contract(actual: Any, expected: Mapping[str, Any]) -> bool:
+        return (
+            isinstance(actual, dict)
+            and set(actual) == set(expected)
+            and all(
+                type(actual[key]) is type(value) and actual[key] == value
+                for key, value in expected.items()
+            )
+        )
+
+    if not matches_exact_contract(targets[0], expected_target):
+        raise RuntimeBlocked("OKX Demo execution target is BLOCKED")
+    if not matches_exact_contract(scopes[0], expected_scope):
         raise RuntimeBlocked("OKX Demo execution target is BLOCKED")
 
 
@@ -904,6 +973,13 @@ def run_checked(command: Sequence[str], *, cwd: Path, environment: Optional[Dict
 
 
 def doctor(state_dir: Path) -> Dict[str, Any]:
+    backend_path = str(REPO_ROOT / "backend")
+    sys.path.insert(0, backend_path)
+    try:
+        from app.adapters.freqtrade.binary import resolve_freqtrade_binary
+    finally:
+        sys.path.remove(backend_path)
+
     freqtrade_resolution = resolve_freqtrade_binary()
     database_url = runtime_database_url()
     checks = {
