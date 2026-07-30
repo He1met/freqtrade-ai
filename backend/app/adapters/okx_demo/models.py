@@ -227,6 +227,7 @@ class OrderQuery(StableModel):
 
 class FillQuery(StableModel):
     fill_id: str
+    bill_id: str
     order_id: str
     inst_id: str
     price: Decimal

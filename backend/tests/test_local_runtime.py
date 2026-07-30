@@ -1302,6 +1302,67 @@ def test_start_launches_worker_with_expected_module(monkeypatch, tmp_path):
     assert worker[2] == REPO_ROOT / "backend"
 
 
+def test_start_uses_explicit_per_stage_readiness_budgets(
+    monkeypatch,
+    tmp_path,
+):
+    runtime = load_runtime_module()
+    url_waits = []
+    process_waits = []
+    monkeypatch.setattr(
+        runtime,
+        "backend_python",
+        lambda: Path("/venv/bin/python"),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "frontend_vite",
+        lambda: Path("/frontend/vite"),
+    )
+    monkeypatch.setattr(runtime, "port_available", lambda _port: True)
+    monkeypatch.setattr(runtime, "ensure_schema", lambda _url: None)
+    monkeypatch.setattr(
+        runtime,
+        "ensure_worker_queue_idle",
+        lambda _url: None,
+    )
+    monkeypatch.setattr(
+        runtime,
+        "wait_for_url",
+        lambda url, description, timeout_seconds=20: url_waits.append(
+            (url, description, timeout_seconds)
+        ),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "wait_for_process",
+        lambda state_dir, service, timeout_seconds=2.0: process_waits.append(
+            (state_dir, service, timeout_seconds)
+        ),
+    )
+    install_ready_okx_runtime(monkeypatch, runtime)
+    monkeypatch.setattr(
+        runtime,
+        "start_service",
+        lambda *_args, **_kwargs: None,
+    )
+
+    payload = runtime.start(tmp_path)
+
+    assert [item[2] for item in url_waits] == [
+        runtime.BACKEND_STARTUP_TIMEOUT_SECONDS,
+        runtime.FRONTEND_STARTUP_TIMEOUT_SECONDS,
+    ]
+    assert process_waits == [
+        (tmp_path, "worker", runtime.WORKER_STARTUP_TIMEOUT_SECONDS)
+    ]
+    assert runtime.BACKEND_STARTUP_TIMEOUT_SECONDS > 20
+    assert payload["startup"]["status"] == "READY"
+    assert set(payload["startup"]["stage_elapsed_ms"]) == (
+        runtime.SAFE_STARTUP_STAGES
+    )
+
+
 def test_start_injects_keychain_key_only_into_backend_and_worker(monkeypatch, tmp_path):
     runtime = load_runtime_module()
     sentinel = "test-keychain-runtime-value"
@@ -1528,9 +1589,14 @@ def test_partial_start_failure_cleans_all_services(monkeypatch, tmp_path):
         ),
     )
 
-    with pytest.raises(runtime.RuntimeBlocked, match="cleaned up"):
+    with pytest.raises(
+        runtime.RuntimeBlocked,
+        match="managed stage.*cleaned up",
+    ) as raised:
         runtime.start(tmp_path)
 
+    assert raised.value.safe_stage == "frontend-readiness"
+    assert isinstance(raised.value.elapsed_ms, int)
     assert started == ["backend", "worker", "frontend"]
     assert stopped == list(runtime.SERVICE_STOP_ORDER)
 
@@ -1692,13 +1758,17 @@ def test_orphan_cleanup_signals_only_marker_and_cwd_verified_process(
 ):
     runtime = load_runtime_module()
     signals = []
+    process_snapshots = []
     monkeypatch.setattr(
         runtime.subprocess,
         "run",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            stdout=(
-                "321 python -m app.adapters.okx_demo.runtime_service\n"
-                "654 python unrelated.py\n"
+        lambda *_args, **_kwargs: (
+            process_snapshots.append(True)
+            or SimpleNamespace(
+                stdout=(
+                    "321 python -m app.adapters.okx_demo.runtime_service\n"
+                    "654 python unrelated.py\n"
+                )
             )
         ),
     )
@@ -1723,6 +1793,7 @@ def test_orphan_cleanup_signals_only_marker_and_cwd_verified_process(
     runtime.cleanup_orphaned_managed_processes(tmp_path)
 
     assert signals == [(321, runtime.signal.SIGTERM)]
+    assert process_snapshots == [True]
 
 
 def test_stop_service_preserves_pid_when_process_group_cannot_be_signaled(
@@ -1849,8 +1920,10 @@ def test_incomplete_startup_cleanup_never_claims_clean(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(
         runtime,
-        "orphaned_managed_processes",
-        lambda *_args: [],
+        "orphaned_managed_process_map",
+        lambda _state_dir, services: {
+            service: [] for service in services
+        },
     )
     monkeypatch.setattr(runtime, "_writer_lock_holder", lambda _path: 88)
 

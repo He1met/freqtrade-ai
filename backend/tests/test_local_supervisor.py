@@ -412,7 +412,13 @@ gui/501/com.he1met.freqtrade-ai.runtime = {
 
 def test_runtime_command_parses_json_without_exposing_environment(monkeypatch):
     supervisor = load_module(SUPERVISOR_PATH, "local_supervisor_json")
-    assert supervisor.COMMAND_TIMEOUT_SECONDS == 330
+    assert supervisor.COMMAND_TIMEOUT_SECONDS == 720
+    moments = iter((10.0, 10.125))
+    monkeypatch.setattr(
+        supervisor.time,
+        "monotonic",
+        lambda: next(moments),
+    )
     monkeypatch.setattr(
         supervisor.subprocess,
         "run",
@@ -426,7 +432,24 @@ def test_runtime_command_parses_json_without_exposing_environment(monkeypatch):
     assert supervisor.run_runtime("verify") == {
         "status": "VERIFIED",
         "return_code": 0,
+        "command_elapsed_ms": 125,
     }
+
+
+def test_supervisor_command_budget_covers_runtime_startup_and_cleanup():
+    supervisor = load_module(
+        SUPERVISOR_PATH,
+        "local_supervisor_command_budget",
+    )
+    runtime = load_module(
+        REPO_ROOT / "scripts" / "local_runtime.py",
+        "local_runtime_command_budget",
+    )
+
+    assert (
+        supervisor.COMMAND_TIMEOUT_SECONDS
+        > runtime.STARTUP_COMMAND_BUDGET_SECONDS
+    )
 
 
 def test_supervisor_rotates_credentials_through_controlled_down_up_verify(
@@ -549,6 +572,40 @@ def test_failed_rotation_does_not_commit_generation(monkeypatch):
 
     assert supervisor.supervise_once() is False
     assert supervisor.LAST_CREDENTIAL_GENERATION == "generation-old"
+
+
+def test_failed_rotation_emits_only_allowlisted_startup_diagnostic(
+    monkeypatch,
+    capsys,
+):
+    supervisor = load_module(
+        SUPERVISOR_PATH,
+        "local_supervisor_safe_startup_diagnostic",
+    )
+    responses = {
+        "down": {"services": [], "return_code": 0},
+        "up": {
+            "status": "BLOCKED",
+            "reason": "untrusted detail must not be logged",
+            "startup_stage": "backend-readiness",
+            "startup_stage_elapsed_ms": 23456,
+            "command_elapsed_ms": 30000,
+            "return_code": 2,
+        },
+    }
+    monkeypatch.setattr(
+        supervisor,
+        "run_runtime",
+        lambda command: responses[command],
+    )
+
+    assert supervisor.controlled_credential_restart("generation-new") is False
+
+    emitted = capsys.readouterr().out
+    assert '"runtime_stage": "backend-readiness"' in emitted
+    assert '"runtime_stage_elapsed_ms": 23456' in emitted
+    assert '"runtime_command_elapsed_ms": 30000' in emitted
+    assert "untrusted detail" not in emitted
 
 
 def test_failed_rotation_same_generation_backs_off_then_retries(monkeypatch):
