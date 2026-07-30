@@ -1488,7 +1488,8 @@ def test_start_uses_explicit_per_stage_readiness_budgets(
     assert process_waits == [
         (tmp_path, "worker", runtime.WORKER_STARTUP_TIMEOUT_SECONDS)
     ]
-    assert runtime.BACKEND_STARTUP_TIMEOUT_SECONDS > 20
+    assert runtime.BACKEND_STARTUP_TIMEOUT_SECONDS == 120
+    assert runtime.STARTUP_COMMAND_BUDGET_SECONDS == 710
     assert payload["startup"]["status"] == "READY"
     assert set(payload["startup"]["stage_elapsed_ms"]) == (
         runtime.SAFE_STARTUP_STAGES
