@@ -157,6 +157,7 @@ SERVICE_WORKING_DIRECTORIES = {
 SERVICE_START_ORDER = ("backend", "worker", "frontend", "okx_runtime")
 SERVICE_STOP_ORDER = tuple(reversed(SERVICE_START_ORDER))
 OKX_RUNTIME_READY_FILE = "okx-runtime.ready.json"
+OKX_RUNTIME_FAILURE_FILE = "okx-runtime.failure.json"
 OKX_WRITER_LOCK_FILE = "okx-demo-order-writer.lock"
 CONTROL_LOCK_FILE = "runtime-control.lock"
 OPENINGS_FREEZE_FILE = "okx-runtime.freeze-openings"
@@ -178,10 +179,14 @@ class RuntimeBlocked(Exception):
         *,
         safe_stage: Optional[str] = None,
         elapsed_ms: Optional[int] = None,
+        okx_runtime_failure_stage: Optional[str] = None,
+        okx_runtime_failure_type: Optional[str] = None,
     ) -> None:
         super().__init__(message)
         self.safe_stage = safe_stage
         self.elapsed_ms = elapsed_ms
+        self.okx_runtime_failure_stage = okx_runtime_failure_stage
+        self.okx_runtime_failure_type = okx_runtime_failure_type
 
 
 def load_runtime_environment(path: Optional[Path] = None) -> None:
@@ -1665,6 +1670,54 @@ SAFE_STARTUP_STAGES = frozenset(
         "okx-runtime-readiness",
     }
 )
+SAFE_OKX_RUNTIME_FAILURE_STAGES = frozenset(
+    {
+        "reconciliation-adapter-load",
+        "reconciliation-adapter-create",
+        "server-session",
+        "database-engine",
+        "database-connect",
+        "database-session",
+        "startup-reconciliation",
+        "writer-capability",
+        "runtime",
+    }
+)
+
+
+def okx_runtime_failure(state_dir: Path) -> Dict[str, str]:
+    path = state_dir / OKX_RUNTIME_FAILURE_FILE
+    try:
+        metadata = path.lstat()
+    except OSError:
+        return {}
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) & 0o077
+    ):
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict) or set(payload) != {
+        "status",
+        "stage",
+        "cause_type",
+    }:
+        return {}
+    stage = payload.get("stage")
+    cause_type = payload.get("cause_type")
+    if (
+        payload.get("status") != "BLOCKED"
+        or stage not in SAFE_OKX_RUNTIME_FAILURE_STAGES
+        or not isinstance(cause_type, str)
+        or not cause_type.isidentifier()
+        or len(cause_type) > 64
+    ):
+        return {}
+    return {"stage": stage, "cause_type": cause_type}
 
 
 def wait_for_okx_runtime(
@@ -1678,8 +1731,11 @@ def wait_for_okx_runtime(
         if not process_status(state_dir, "okx_runtime")["running"]:
             break
         time.sleep(0.25)
+    failure = okx_runtime_failure(state_dir)
     raise RuntimeBlocked(
-        "OKX runtime did not establish attested reconciliation and unique writer readiness"
+        "OKX runtime did not establish attested reconciliation and unique writer readiness",
+        okx_runtime_failure_stage=failure.get("stage"),
+        okx_runtime_failure_type=failure.get("cause_type"),
     )
 
 
@@ -2029,10 +2085,20 @@ def start(state_dir: Path) -> Dict[str, Any]:
         stage_durations[stage] = int(
             (time.monotonic() - stage_started) * 1000
         )
-    except Exception:
+    except Exception as exc:
         failed_stage = stage
         failed_elapsed_ms = int(
             (time.monotonic() - stage_started) * 1000
+        )
+        runtime_failure_stage = getattr(
+            exc,
+            "okx_runtime_failure_stage",
+            None,
+        )
+        runtime_failure_type = getattr(
+            exc,
+            "okx_runtime_failure_type",
+            None,
         )
         stopped = stop_all(state_dir)
         require_complete_startup_cleanup(state_dir, stopped)
@@ -2040,6 +2106,8 @@ def start(state_dir: Path) -> Dict[str, Any]:
             "runtime startup failed at a managed stage and was cleaned up",
             safe_stage=failed_stage,
             elapsed_ms=failed_elapsed_ms,
+            okx_runtime_failure_stage=runtime_failure_stage,
+            okx_runtime_failure_type=runtime_failure_type,
         ) from None
     finally:
         okx_credentials.clear()
@@ -2306,6 +2374,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ):
             blocked["startup_stage"] = exc.safe_stage
             blocked["startup_stage_elapsed_ms"] = exc.elapsed_ms
+            if (
+                exc.okx_runtime_failure_stage
+                in SAFE_OKX_RUNTIME_FAILURE_STAGES
+                and isinstance(exc.okx_runtime_failure_type, str)
+                and exc.okx_runtime_failure_type.isidentifier()
+                and len(exc.okx_runtime_failure_type) <= 64
+            ):
+                blocked["okx_runtime_failure_stage"] = (
+                    exc.okx_runtime_failure_stage
+                )
+                blocked["okx_runtime_failure_type"] = (
+                    exc.okx_runtime_failure_type
+                )
         emit(blocked, args.json)
         return 2
 

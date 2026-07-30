@@ -35,6 +35,7 @@ from app.services.okx_demo_reconciliation import OkxDemoReconciliationBlocked
 
 RECONCILIATION_MODULE = "app.adapters.okx_demo.reconciliation_runtime"
 READY_FILENAME = "okx-runtime.ready.json"
+FAILURE_FILENAME = "okx-runtime.failure.json"
 WRITER_LOCK_FILENAME = "okx-demo-order-writer.lock"
 OPENINGS_FREEZE_FILENAME = "okx-runtime.freeze-openings"
 POLL_SECONDS = 1.0
@@ -44,6 +45,34 @@ STOP_EVENT = threading.Event()
 
 class OkxDemoRuntimeBlocked(Exception):
     """The credential-bearing runtime cannot safely expose writer capability."""
+
+
+class OkxDemoRuntimeStartupBlocked(OkxDemoRuntimeBlocked):
+    """Safe startup-stage failure that never renders the original exception."""
+
+    def __init__(self, *, stage: str, cause: BaseException) -> None:
+        cause_type = type(cause).__name__
+        if not cause_type.isidentifier() or len(cause_type) > 64:
+            cause_type = "UnknownError"
+        self.stage = stage
+        self.cause_type = cause_type
+        super().__init__(
+            "OKX_DEMO runtime startup blocked "
+            "[stage={}, cause_type={}]".format(stage, cause_type)
+        )
+
+
+def _startup_call(stage: str, callback: Callable[[], Any]) -> Any:
+    try:
+        return callback()
+    except (
+        OkxDemoRuntimeStartupBlocked,
+        KeyboardInterrupt,
+        SystemExit,
+    ):
+        raise
+    except BaseException as exc:
+        raise OkxDemoRuntimeStartupBlocked(stage=stage, cause=exc) from None
 
 
 @dataclass(frozen=True)
@@ -338,6 +367,58 @@ def _write_readiness(path: Path, payload: Mapping[str, Any]) -> None:
     temporary.replace(path)
 
 
+def _write_startup_failure(
+    path: Path,
+    exc: BaseException,
+) -> bool:
+    stage = getattr(exc, "stage", "runtime")
+    cause_type = getattr(exc, "cause_type", type(exc).__name__)
+    if (
+        not isinstance(stage, str)
+        or not stage
+        or len(stage) > 64
+        or any(
+            character not in "abcdefghijklmnopqrstuvwxyz-"
+            for character in stage
+        )
+    ):
+        stage = "runtime"
+    if (
+        not isinstance(cause_type, str)
+        or not cause_type.isidentifier()
+        or len(cause_type) > 64
+    ):
+        cause_type = "UnknownError"
+    temporary = path.with_suffix(".tmp")
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_CREAT
+            | os.O_TRUNC
+            | os.O_WRONLY
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "status": "BLOCKED",
+                    "stage": stage,
+                    "cause_type": cause_type,
+                },
+                handle,
+                sort_keys=True,
+            )
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        return False
+    return True
+
+
 def _stop(_signum: int, _frame: Optional[object]) -> None:
     STOP_EVENT.set()
 
@@ -364,22 +445,37 @@ def serve(
     connection = None
     db = None
     try:
-        factory = reconciliation_factory or load_reconciliation_factory()
-        adapter = factory()
-        server_session = create_okx_demo_server_session(
-            environment,
-            lock_path=writer_lock_path,
+        factory = reconciliation_factory or _startup_call(
+            "reconciliation-adapter-load",
+            load_reconciliation_factory,
         )
-        engine = engine_factory(database_url, pool_pre_ping=True)
-        connection = engine.connect()
-        db = Session(bind=connection)
-        startup = _reconcile_transaction(
-            db,
-            lambda: adapter.reconcile_before_writer(
-                read_client=server_session.read,
-                db=db,
+        adapter = _startup_call("reconciliation-adapter-create", factory)
+        server_session = _startup_call(
+            "server-session",
+            lambda: create_okx_demo_server_session(
+                environment,
+                lock_path=writer_lock_path,
             ),
-            now=now_provider(),
+        )
+        engine = _startup_call(
+            "database-engine",
+            lambda: engine_factory(database_url, pool_pre_ping=True),
+        )
+        connection = _startup_call("database-connect", engine.connect)
+        db = _startup_call(
+            "database-session",
+            lambda: Session(bind=connection),
+        )
+        startup = _startup_call(
+            "startup-reconciliation",
+            lambda: _reconcile_transaction(
+                db,
+                lambda: adapter.reconcile_before_writer(
+                    read_client=server_session.read,
+                    db=db,
+                ),
+                now=now_provider(),
+            ),
         )
         if startup.status not in {"RECONCILED", "RECOVERED"}:
             raise OkxDemoRuntimeBlocked(
@@ -387,8 +483,11 @@ def serve(
             )
         if db.in_transaction():
             db.rollback()
-        writer = _RuntimeWriterCapability(
-            server_session.create_order_writer(db)
+        writer = _startup_call(
+            "writer-capability",
+            lambda: _RuntimeWriterCapability(
+                server_session.create_order_writer(db)
+            ),
         )
         writer.set_openings_allowed(True)
         _write_readiness(
@@ -478,13 +577,16 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
+    runtime_path = _runtime_path(args.runtime_dir)
+    failure_path = runtime_path / FAILURE_FILENAME
+    failure_path.unlink(missing_ok=True)
     STOP_EVENT.clear()
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
     try:
         serve(
             environment=os.environ,
-            runtime_path=_runtime_path(args.runtime_dir),
+            runtime_path=runtime_path,
         )
         return 0
     except (
@@ -493,12 +595,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         OkxDemoWriteBlocked,
         OkxDemoCredentialsUnavailable,
     ) as exc:
+        _write_startup_failure(failure_path, exc)
         # This process writes to a mode-0600 runtime log.  Known domain errors
         # are deliberately safe to retain there and make a fail-closed startup
         # diagnosable without printing credentials or request signatures.
         print("OKX_DEMO runtime blocked: {}".format(exc), file=sys.stderr)
         return 2
-    except Exception:
+    except Exception as exc:
+        _write_startup_failure(failure_path, exc)
         print(
             "OKX_DEMO runtime failed unexpectedly; inspect the private runtime log",
             file=sys.stderr,

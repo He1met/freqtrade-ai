@@ -1734,6 +1734,70 @@ def test_partial_start_failure_cleans_all_services(monkeypatch, tmp_path):
     assert stopped == list(runtime.SERVICE_STOP_ORDER)
 
 
+def test_okx_startup_failure_diagnostic_survives_cleanup(
+    monkeypatch,
+    tmp_path,
+):
+    runtime = load_runtime_module()
+    started = []
+    stopped = []
+    monkeypatch.setattr(
+        runtime,
+        "backend_python",
+        lambda: Path("/venv/bin/python"),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "frontend_vite",
+        lambda: Path("/frontend/vite"),
+    )
+    monkeypatch.setattr(runtime, "port_available", lambda _port: True)
+    monkeypatch.setattr(runtime, "ensure_schema", lambda _url: None)
+    monkeypatch.setattr(runtime, "ensure_worker_queue_idle", lambda _url: None)
+    monkeypatch.setattr(runtime, "wait_for_url", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        runtime,
+        "wait_for_process",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        runtime,
+        "start_service",
+        lambda service, *_args, **_kwargs: started.append(service),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "wait_for_okx_runtime",
+        lambda _state_dir: (_ for _ in ()).throw(
+            runtime.RuntimeBlocked(
+                "safe generic failure",
+                okx_runtime_failure_stage="writer-capability",
+                okx_runtime_failure_type="IntegrityError",
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "stop_service",
+        lambda _state_dir, service: (
+            stopped.append(service)
+            or {"service": service, "status": "stopped"}
+        ),
+    )
+
+    with pytest.raises(runtime.RuntimeBlocked) as raised:
+        runtime.start(tmp_path)
+
+    assert raised.value.safe_stage == "okx-runtime-readiness"
+    assert (
+        raised.value.okx_runtime_failure_stage
+        == "writer-capability"
+    )
+    assert raised.value.okx_runtime_failure_type == "IntegrityError"
+    assert started == list(runtime.SERVICE_START_ORDER)
+    assert stopped == list(runtime.SERVICE_STOP_ORDER)
+
+
 def test_cleanup_stale_runtime_removes_dead_pid_and_readiness(
     monkeypatch,
     tmp_path,
@@ -1844,6 +1908,74 @@ def test_okx_runtime_startup_fails_closed_when_child_exits(
 
     with pytest.raises(runtime.RuntimeBlocked, match="did not establish"):
         runtime.wait_for_okx_runtime(tmp_path)
+
+
+def test_okx_runtime_startup_propagates_only_safe_failure_stage_and_type(
+    monkeypatch,
+    tmp_path,
+):
+    runtime = load_runtime_module()
+    moments = iter((0.0, 1.0))
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: next(moments))
+    monkeypatch.setattr(
+        runtime,
+        "okx_runtime_readiness",
+        lambda _state_dir: {"status": "BLOCKED"},
+    )
+    monkeypatch.setattr(
+        runtime,
+        "process_status",
+        lambda _state_dir, _service: {"running": False},
+    )
+    failure_path = tmp_path / runtime.OKX_RUNTIME_FAILURE_FILE
+    failure_path.write_text(
+        json.dumps(
+            {
+                "status": "BLOCKED",
+                "stage": "writer-capability",
+                "cause_type": "IntegrityError",
+            }
+        ),
+        encoding="utf-8",
+    )
+    failure_path.chmod(0o600)
+
+    with pytest.raises(runtime.RuntimeBlocked) as captured:
+        runtime.wait_for_okx_runtime(tmp_path)
+
+    assert captured.value.okx_runtime_failure_stage == "writer-capability"
+    assert captured.value.okx_runtime_failure_type == "IntegrityError"
+
+
+def test_okx_runtime_failure_rejects_unsafe_or_unexpected_evidence(tmp_path):
+    runtime = load_runtime_module()
+    failure_path = tmp_path / runtime.OKX_RUNTIME_FAILURE_FILE
+    failure_path.write_text(
+        json.dumps(
+            {
+                "status": "BLOCKED",
+                "stage": "writer-capability",
+                "cause_type": "IntegrityError",
+                "secret": "must-not-be-read",
+            }
+        ),
+        encoding="utf-8",
+    )
+    failure_path.chmod(0o600)
+    assert runtime.okx_runtime_failure(tmp_path) == {}
+
+    failure_path.write_text(
+        json.dumps(
+            {
+                "status": "BLOCKED",
+                "stage": "writer-capability",
+                "cause_type": "IntegrityError",
+            }
+        ),
+        encoding="utf-8",
+    )
+    failure_path.chmod(0o644)
+    assert runtime.okx_runtime_failure(tmp_path) == {}
 
 
 def test_okx_runtime_startup_fails_closed_after_bounded_timeout(

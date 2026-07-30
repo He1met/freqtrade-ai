@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -326,8 +327,11 @@ def test_runtime_cleanup_does_not_mask_primary_failure(
     )
 
     with pytest.raises(
-        runtime_service.OkxDemoRuntimeBlocked,
-        match="primary failure",
+        runtime_service.OkxDemoRuntimeStartupBlocked,
+        match=(
+            r"stage=startup-reconciliation, "
+            r"cause_type=OkxDemoRuntimeBlocked"
+        ),
     ):
         runtime_service.serve(
             environment={"DATABASE_URL": "postgresql+psycopg:///freqtrade_ai"},
@@ -336,6 +340,64 @@ def test_runtime_cleanup_does_not_mask_primary_failure(
             engine_factory=lambda *_args, **_kwargs: engine,
             now_provider=lambda: NOW,
         )
+
+
+def test_runtime_writer_startup_failure_preserves_stage_without_secret(
+    monkeypatch,
+    tmp_path: Path,
+):
+    class SensitiveWriterFailure(RuntimeError):
+        pass
+
+    class FailingServerSession(FakeServerSession):
+        def create_order_writer(self, _db):
+            raise SensitiveWriterFailure(
+                "api-key=secret signature=private "
+                "postgresql://operator:password@localhost/db"
+            )
+
+    events = []
+    server = FailingServerSession(events)
+    db = FakeDatabaseSession()
+    connection = SimpleNamespace(close=lambda: None)
+    engine = SimpleNamespace(connect=lambda: connection, dispose=lambda: None)
+    monkeypatch.setattr(runtime_service, "Session", lambda bind: db)
+    monkeypatch.setattr(
+        runtime_service,
+        "create_okx_demo_server_session",
+        lambda _environment, lock_path: server,
+    )
+
+    with pytest.raises(
+        runtime_service.OkxDemoRuntimeStartupBlocked,
+    ) as captured:
+        runtime_service.serve(
+            environment={"DATABASE_URL": "postgresql+psycopg:///freqtrade_ai"},
+            runtime_path=tmp_path,
+            reconciliation_factory=FakeAdapter,
+            engine_factory=lambda *_args, **_kwargs: engine,
+            now_provider=lambda: NOW,
+        )
+
+    assert captured.value.stage == "writer-capability"
+    assert captured.value.cause_type == "SensitiveWriterFailure"
+    rendered = str(captured.value)
+    assert "secret" not in rendered
+    assert "signature" not in rendered
+    assert "password" not in rendered
+
+    failure_path = tmp_path / runtime_service.FAILURE_FILENAME
+    assert runtime_service._write_startup_failure(
+        failure_path,
+        captured.value,
+    )
+    assert failure_path.stat().st_mode & 0o077 == 0
+    assert json.loads(failure_path.read_text(encoding="utf-8")) == {
+        "status": "BLOCKED",
+        "stage": "writer-capability",
+        "cause_type": "SensitiveWriterFailure",
+    }
+    assert "secret" not in failure_path.read_text(encoding="utf-8")
 
 
 def test_invalid_reconciliation_rolls_back_persisted_evidence():

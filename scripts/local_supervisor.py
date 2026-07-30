@@ -33,6 +33,19 @@ SAFE_RUNTIME_STARTUP_STAGES = frozenset(
         "okx-runtime-readiness",
     }
 )
+SAFE_OKX_RUNTIME_FAILURE_STAGES = frozenset(
+    {
+        "reconciliation-adapter-load",
+        "reconciliation-adapter-create",
+        "server-session",
+        "database-engine",
+        "database-connect",
+        "database-session",
+        "startup-reconciliation",
+        "writer-capability",
+        "runtime",
+    }
+)
 STOP_EVENT = threading.Event()
 LAST_CREDENTIAL_GENERATION: Optional[str] = None
 LAST_FAILED_CREDENTIAL_GENERATION: Optional[str] = None
@@ -170,6 +183,12 @@ def controlled_credential_restart(generation: str) -> bool:
                 "startup_stage_elapsed_ms"
             )
             command_elapsed_ms = runtime_payload.get("command_elapsed_ms")
+            runtime_failure_stage = runtime_payload.get(
+                "okx_runtime_failure_stage"
+            )
+            runtime_failure_type = runtime_payload.get(
+                "okx_runtime_failure_type"
+            )
             if (
                 runtime_stage in SAFE_RUNTIME_STARTUP_STAGES
                 and isinstance(runtime_elapsed_ms, int)
@@ -186,6 +205,14 @@ def controlled_credential_restart(generation: str) -> bool:
                 details["runtime_command_elapsed_ms"] = (
                     command_elapsed_ms
                 )
+            if (
+                runtime_failure_stage in SAFE_OKX_RUNTIME_FAILURE_STAGES
+                and isinstance(runtime_failure_type, str)
+                and runtime_failure_type.isidentifier()
+                and len(runtime_failure_type) <= 64
+            ):
+                details["okx_runtime_failure_stage"] = runtime_failure_stage
+                details["okx_runtime_failure_type"] = runtime_failure_type
         emit("runtime_recovery_blocked", **details)
         return False
 

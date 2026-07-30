@@ -267,9 +267,17 @@ def test_process_lock_is_acquired_before_preflight_and_released_on_failure(
         blocked,
     )
 
-    with pytest.raises(OkxDemoCredentialsUnavailable, match="attestation failed"):
+    with pytest.raises(
+        server_factory.OkxDemoServerSessionBlocked,
+        match=(
+            r"stage=read-attestation, category=ATTESTATION, "
+            r"cause_type=OkxDemoCredentialsUnavailable"
+        ),
+    ) as captured:
         server_factory.create_okx_demo_server_session(environment())
 
+    assert captured.value.stage == "read-attestation"
+    assert captured.value.category == "ATTESTATION"
     assert [event[0] for event in FakeProcessLock.events] == [
         "acquire",
         "release",
@@ -293,12 +301,13 @@ def test_safe_preflight_reason_survives_factory_boundary(monkeypatch) -> None:
         ),
     )
 
-    with pytest.raises(
-        OkxDemoCredentialsUnavailable,
-        match=preflight.IP_WHITELIST_REJECTED_REASON,
-    ):
+    with pytest.raises(server_factory.OkxDemoServerSessionBlocked) as captured:
         server_factory.create_okx_demo_server_session(environment())
 
+    assert captured.value.stage == "read-attestation"
+    assert captured.value.category == "PREFLIGHT"
+    assert captured.value.cause_type == "OkxDemoPreflightBlocked"
+    assert preflight.IP_WHITELIST_REJECTED_REASON not in str(captured.value)
     assert [event[0] for event in FakeProcessLock.events] == [
         "acquire",
         "release",
@@ -356,3 +365,40 @@ def test_factory_failure_never_renders_or_serializes_credentials(
     assert "ephemeral-api-key" not in rendered
     assert "ephemeral-api-secret" not in rendered
     assert "ephemeral-passphrase" not in rendered
+    assert "unsafe" not in rendered
+
+
+def test_factory_unknown_failure_preserves_safe_stage_and_type_only(
+    monkeypatch,
+) -> None:
+    FakeProcessLock.events = []
+    monkeypatch.setattr(
+        server_factory,
+        "OkxDemoWriterProcessLock",
+        FakeProcessLock,
+    )
+
+    class SensitiveFailure(RuntimeError):
+        pass
+
+    monkeypatch.setattr(
+        server_factory,
+        "create_attested_okx_demo_read_adapter",
+        lambda _snapshot: (_ for _ in ()).throw(
+            SensitiveFailure(
+                "api-key=secret signature=private "
+                "postgresql://operator:password@localhost/db"
+            )
+        ),
+    )
+
+    with pytest.raises(server_factory.OkxDemoServerSessionBlocked) as captured:
+        server_factory.create_okx_demo_server_session(environment())
+
+    assert captured.value.stage == "read-attestation"
+    assert captured.value.category == "UNEXPECTED"
+    assert captured.value.cause_type == "SensitiveFailure"
+    rendered = str(captured.value)
+    assert "secret" not in rendered
+    assert "signature" not in rendered
+    assert "password" not in rendered

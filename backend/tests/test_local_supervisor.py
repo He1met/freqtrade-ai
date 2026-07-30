@@ -452,6 +452,45 @@ def test_supervisor_command_budget_covers_runtime_startup_and_cleanup():
     )
 
 
+def test_supervisor_propagates_allowlisted_okx_runtime_failure_diagnostic(
+    monkeypatch,
+    capsys,
+):
+    supervisor = load_module(
+        SUPERVISOR_PATH,
+        "local_supervisor_okx_failure_diagnostic",
+    )
+    supervisor.LAST_CREDENTIAL_GENERATION = "generation-old"
+    responses = {
+        "supervisor-capability": {
+            "status": "READY",
+            "_generation": "generation-new",
+            "return_code": 0,
+        },
+        "down": {"services": [], "return_code": 0},
+        "up": {
+            "status": "BLOCKED",
+            "return_code": 2,
+            "startup_stage": "okx-runtime-readiness",
+            "startup_stage_elapsed_ms": 1234,
+            "okx_runtime_failure_stage": "writer-capability",
+            "okx_runtime_failure_type": "IntegrityError",
+            "command_elapsed_ms": 2000,
+        },
+    }
+    monkeypatch.setattr(
+        supervisor,
+        "run_runtime",
+        lambda command: responses[command],
+    )
+
+    assert supervisor.supervise_once() is False
+
+    emitted = capsys.readouterr().out
+    assert '"okx_runtime_failure_stage": "writer-capability"' in emitted
+    assert '"okx_runtime_failure_type": "IntegrityError"' in emitted
+
+
 def test_supervisor_rotates_credentials_through_controlled_down_up_verify(
     monkeypatch,
 ):
