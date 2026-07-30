@@ -23,7 +23,7 @@ from typing import Any, Dict, Optional, Sequence
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_SCRIPT = REPO_ROOT / "scripts" / "local_runtime.py"
 DEFAULT_INTERVAL_SECONDS = 30
-COMMAND_TIMEOUT_SECONDS = 720
+COMMAND_TIMEOUT_SECONDS = 900
 CREDENTIAL_RETRY_COOLDOWN_SECONDS = 300
 SAFE_RUNTIME_STARTUP_STAGES = frozenset(
     {
