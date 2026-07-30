@@ -1,14 +1,16 @@
+import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from threading import Barrier
-import os
+from typing import Optional
 
 import pytest
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.db.migrations import upgrade_database
 from app.db.session import create_database_engine, create_session_factory
 from app.models import (
     ApprovedExecution,
@@ -70,11 +72,8 @@ def postgres_factory():
     with engine.begin() as connection:
         connection.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
         connection.execute(text("CREATE SCHEMA public"))
-    Base.metadata.create_all(engine)
+    upgrade_database(engine)
     factory = create_session_factory(engine)
-    with factory() as session:
-        ensure_execution_scope_catalog(session)
-        session.commit()
     yield factory
     with engine.begin() as connection:
         connection.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
@@ -755,7 +754,7 @@ def test_postgresql_concurrent_okx_demo_auto_approval_has_one_fenced_winner(
 
     barrier = Barrier(2)
 
-    def approve() -> tuple[str, int | None]:
+    def approve() -> tuple[str, Optional[int]]:
         with postgres_factory() as session:
             barrier.wait()
             try:
