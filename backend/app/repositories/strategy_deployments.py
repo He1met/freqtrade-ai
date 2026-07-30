@@ -188,6 +188,16 @@ class StrategyDeploymentRepository:
                     "candidate approval already has a different deployment binding"
                 )
             return existing
+        active = self.db.scalar(
+            select(StrategyDeployment).where(
+                StrategyDeployment.execution_target_id == "OKX_DEMO",
+                StrategyDeployment.status == "ACTIVE",
+            )
+        )
+        if active is not None:
+            raise StrategyDeploymentConflict(
+                "OKX_DEMO already has a different ACTIVE strategy deployment"
+            )
 
         deployment = StrategyDeployment(
             execution_target_id="OKX_DEMO",
@@ -225,6 +235,16 @@ class StrategyDeploymentRepository:
                 )
             )
             if replay is None:
+                active = self.db.scalar(
+                    select(StrategyDeployment).where(
+                        StrategyDeployment.execution_target_id == "OKX_DEMO",
+                        StrategyDeployment.status == "ACTIVE",
+                    )
+                )
+                if active is not None:
+                    raise StrategyDeploymentConflict(
+                        "OKX_DEMO already has a different ACTIVE strategy deployment"
+                    )
                 raise
             replay_binding = (
                 replay.execution_target_id,

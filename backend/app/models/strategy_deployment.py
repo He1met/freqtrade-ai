@@ -49,6 +49,13 @@ class StrategyDeployment(Base):
             "status",
             "created_at",
         ),
+        Index(
+            "strategy_deployments_single_active_idx",
+            "execution_target_id",
+            unique=True,
+            postgresql_where=text("status = 'ACTIVE'"),
+            sqlite_where=text("status = 'ACTIVE'"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(
