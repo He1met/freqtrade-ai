@@ -31,9 +31,9 @@ from app.models import (
     StrategyVersion,
     TradeIntent,
 )
-from app.models.strategy_deployment import SignalEvaluation, StrategyDeployment
 from app.models.execution_lineage import LOCAL_DRY_RUN_SCOPE_ID, OKX_DEMO_TARGET_ID
 from app.models.full_chain import FULL_CHAIN_STAGES
+from app.models.strategy_deployment import SignalEvaluation, StrategyDeployment
 from app.repositories.research_jobs import ResearchJobRepository
 from app.repositories.strategy_deployments import (
     StrategyDeploymentBlocked,
@@ -44,7 +44,6 @@ from app.services.strategy_promotion import (
     StrategyPromotionBlocked,
     promotion_candidate_digest,
 )
-
 
 TERMINAL_CHAIN_STATUSES = {
     "SUCCESS",
@@ -549,12 +548,19 @@ class FullChainRepository:
         error_code: str,
         error_message: str,
         now: Optional[datetime] = None,
+        commit: bool = True,
+        allow_cancel_requested: bool = False,
     ) -> FullChainStageRun:
         if status not in {"FAILED", "BLOCKED", "CANCELLED", "STALE"}:
             raise ValueError("invalid terminal stage status")
         current_time = now or datetime.now(timezone.utc)
         chain = self._require_active_chain(chain_id)
-        self._require_owned_job(chain.research_job_id, lease_token, current_time)
+        self._require_owned_job(
+            chain.research_job_id,
+            lease_token,
+            current_time,
+            allow_cancel_requested=allow_cancel_requested,
+        )
         checkpoint = self._prepared_stage(chain.id, stage)
         if checkpoint.status != "PREPARED":
             raise FullChainBlocked("only a PREPARED stage can be failed")
@@ -565,8 +571,11 @@ class FullChainRepository:
         chain.status = status
         chain.terminal_reason = checkpoint.error_message
         chain.completed_at = current_time
-        self.db.commit()
-        self.db.refresh(checkpoint)
+        if commit:
+            self.db.commit()
+            self.db.refresh(checkpoint)
+        else:
+            self.db.flush()
         return checkpoint
 
     def create_candidate_approval(
@@ -1245,6 +1254,8 @@ class FullChainRepository:
         job_id: int,
         lease_token: str,
         now: datetime,
+        *,
+        allow_cancel_requested: bool = False,
     ) -> tuple[ResearchJob, ResearchJobAttempt]:
         job = self.db.get(ResearchJob, job_id)
         if (
@@ -1253,7 +1264,7 @@ class FullChainRepository:
             or job.job_type != "deepseek_backtest"
             or job.operation != "strategy_generation.deepseek_backtest_loop"
             or job.status != "RUNNING"
-            or job.cancel_requested
+            or (job.cancel_requested and not allow_cancel_requested)
             or job.lease_token != lease_token
             or job.lease_expires_at is None
             or _as_utc(job.lease_expires_at) <= _as_utc(now)

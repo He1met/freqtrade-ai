@@ -21,19 +21,18 @@ from app.schemas.deepseek_backtest_loop import (
 )
 from app.schemas.dry_run_status import redact_secret_text
 from app.services.deepseek_backtest_loop import DeepSeekBacktestLoopService
-from app.services.strategy_generation import (
-    StrategyGenerationService,
-    build_deepseek_single_provider_from_env,
+from app.services.research_full_chain_orchestrator import (
+    ResearchFullChainBlocked,
+    default_research_full_chain_orchestrator_factory,
 )
 from app.services.strategy_deployment_continuation import (
     StrategyDeploymentContinuationBlocked,
     default_strategy_deployment_continuation_factory,
 )
-from app.services.research_full_chain_orchestrator import (
-    ResearchFullChainBlocked,
-    default_research_full_chain_orchestrator_factory,
+from app.services.strategy_generation import (
+    StrategyGenerationService,
+    build_deepseek_single_provider_from_env,
 )
-
 
 ServiceFactory = Callable[[Session], DeepSeekBacktestLoopService]
 
@@ -159,11 +158,19 @@ class DeepSeekBacktestWorker:
     def _execute(self, job_id: int, lease_token: str, heartbeat: _Heartbeat) -> None:
         with self.session_factory() as db:
             repository = ResearchJobRepository(db)
-            cancelled = repository.cancel_at_checkpoint(job_id, lease_token)
-            if cancelled is not None:
-                return
             job = repository.get(job_id)
             if job is None or job.status != "RUNNING" or job.lease_token != lease_token:
+                return
+            chain = self.research_chain_factory(db)
+            if job.cancel_requested:
+                chain.terminalize_owned(
+                    job_id,
+                    lease_token,
+                    status="CANCELLED",
+                    stage="CANCELLED",
+                    reason=job.error_message or "Cancelled by local operator.",
+                    provider_completed=False,
+                )
                 return
             if job.stage == "SIGNAL":
                 self._execute_approved_candidate_continuation(
@@ -175,37 +182,37 @@ class DeepSeekBacktestWorker:
                 return
             if job.stage == "PERSISTED_RESULT_RECOVERY":
                 try:
-                    self.research_chain_factory(db).advance(
+                    chain.advance(
                         job_id,
                         lease_token,
                     )
                 except ResearchFullChainBlocked as exc:
-                    repository.complete(
+                    chain.terminalize_owned(
                         job_id,
                         lease_token,
                         status="BLOCKED",
                         stage="CANDIDATE_APPROVAL",
-                        links=exc.links,
+                        links={},
                         evidence_snapshot={
                             "status": "BLOCKED",
                             "acceptance_ready": False,
                             "failed_reason": redact_secret_text(str(exc))[:2000],
                         },
-                        error_message=redact_secret_text(str(exc))[:2000],
+                        reason=redact_secret_text(str(exc))[:2000],
                         provider_completed=True,
                     )
                 return
             payload = DeepSeekBacktestLoopRequest.model_validate(job.request_payload)
-            chain = self.research_chain_factory(db)
             try:
                 chain.begin(job_id, lease_token)
             except ResearchFullChainBlocked as exc:
-                self._complete_signal_failure(
-                    repository,
+                chain.terminalize_owned(
                     job_id,
                     lease_token,
                     status="BLOCKED",
+                    stage="GENERATION",
                     reason=redact_secret_text(str(exc))[:2000],
+                    provider_completed=False,
                 )
                 return
             if payload.allow_real_call:
@@ -217,43 +224,53 @@ class DeepSeekBacktestWorker:
             except Exception as exc:
                 if heartbeat.lease_lost.is_set():
                     return
-                repository.complete(
+                status = "STALE" if payload.allow_real_call else "FAILED"
+                reason = redact_secret_text(str(exc))[:2000]
+                chain.terminalize_owned(
                     job_id,
                     lease_token,
-                    status="FAILED",
-                    stage="FAILED",
-                    links={},
+                    status=status,
+                    stage="PROVIDER_OUTCOME_UNKNOWN" if status == "STALE" else "FAILED",
+                    reason=reason,
                     evidence_snapshot={
-                        "status": "FAILED",
+                        "status": status,
                         "acceptance_ready": False,
-                        "failed_reason": "Worker execution failed without a safe application response.",
+                        "recovery_allowed": False,
                     },
-                    error_message=redact_secret_text(str(exc))[:2000],
                     provider_completed=False,
                 )
                 return
 
             if heartbeat.lease_lost.is_set():
                 return
-            if repository.cancel_at_checkpoint(job_id, lease_token) is not None:
+            current = repository.get(job_id)
+            if current is not None and current.cancel_requested:
+                chain.terminalize_owned(
+                    job_id,
+                    lease_token,
+                    status="CANCELLED",
+                    stage="CANCELLED",
+                    reason=current.error_message or "Cancelled by local operator.",
+                    provider_completed=payload.allow_real_call,
+                )
                 return
             if response.overall_status == "succeeded":
                 try:
                     chain.checkpoint_response(job_id, lease_token, response)
                     chain.advance(job_id, lease_token, response)
                 except ResearchFullChainBlocked as exc:
-                    repository.complete(
+                    chain.terminalize_owned(
                         job_id,
                         lease_token,
                         status="BLOCKED",
                         stage="CANDIDATE_APPROVAL",
-                        links=exc.links,
+                        links={},
                         evidence_snapshot={
                             "status": "BLOCKED",
                             "acceptance_ready": False,
                             "failed_reason": redact_secret_text(str(exc))[:2000],
                         },
-                        error_message=redact_secret_text(str(exc))[:2000],
+                        reason=redact_secret_text(str(exc))[:2000],
                         provider_completed=payload.allow_real_call,
                     )
                 return
@@ -262,7 +279,7 @@ class DeepSeekBacktestWorker:
                 or response.evidence.failed_reason
                 or "Research execution did not succeed."
             )
-            chain.fail_generation(
+            chain.terminalize_owned(
                 job_id,
                 lease_token,
                 status=(
@@ -270,9 +287,16 @@ class DeepSeekBacktestWorker:
                     if response.overall_status == "blocked"
                     else "FAILED"
                 ),
+                stage=(
+                    "BLOCKED"
+                    if response.overall_status == "blocked"
+                    else "FAILED"
+                ),
                 reason=reason,
+                links={},
+                evidence_snapshot=response.evidence.model_dump(mode="json"),
+                provider_completed=payload.allow_real_call,
             )
-            self._persist_response(repository, job_id, lease_token, payload, response)
 
     def _execute_approved_candidate_continuation(
         self,
@@ -338,8 +362,8 @@ class DeepSeekBacktestWorker:
                 ),
             )
 
-    @staticmethod
     def _complete_signal_failure(
+        self,
         repository: ResearchJobRepository,
         job_id: int,
         lease_token: str,
@@ -349,7 +373,7 @@ class DeepSeekBacktestWorker:
     ) -> None:
         job = repository.get(job_id)
         evidence = job.evidence_snapshot if job is not None else {}
-        repository.complete(
+        self.research_chain_factory(repository.db).terminalize_owned(
             job_id,
             lease_token,
             status=status,
@@ -361,71 +385,9 @@ class DeepSeekBacktestWorker:
                 "acceptance_ready": False,
                 "failed_reason": reason,
             },
-            error_message=reason,
+            reason=reason,
             provider_completed=False,
         )
-
-    @staticmethod
-    def _persist_response(
-        repository: ResearchJobRepository,
-        job_id: int,
-        lease_token: str,
-        payload: DeepSeekBacktestLoopRequest,
-        response: DeepSeekBacktestLoopResponse,
-    ) -> None:
-        status = {
-            "succeeded": "SUCCESS",
-            "failed": "FAILED",
-            "blocked": "BLOCKED",
-        }[response.overall_status]
-        evidence = response.evidence.model_dump(mode="json")
-        links = {
-            key: evidence.get("ids", {}).get(key)
-            for key in (
-                "strategy_generation_run_id",
-                "strategy_id",
-                "strategy_version_id",
-                "backtest_run_id",
-                "backtest_task_id",
-                "backtest_result_id",
-                "strategy_score_id",
-            )
-        }
-        reason = evidence.get("blocked_reason") or evidence.get("failed_reason")
-        if status == "SUCCESS":
-            required_ids = {
-                "strategy_generation_run_id",
-                "strategy_id",
-                "strategy_version_id",
-                "backtest_run_id",
-                "backtest_task_id",
-                "backtest_result_id",
-                "strategy_score_id",
-            }
-            missing_ids = sorted(key for key in required_ids if not links.get(key))
-            if not evidence.get("acceptance_ready") or missing_ids:
-                status = "FAILED"
-                reason = (
-                    "Worker refused an incomplete SUCCESS response; missing reconciled database ids: "
-                    + ", ".join(missing_ids or ["acceptance_ready"])
-                )
-                evidence = {
-                    **evidence,
-                    "status": "FAILED",
-                    "acceptance_ready": False,
-                    "failed_reason": reason,
-                }
-        repository.complete(
-            job_id,
-            lease_token,
-            status=status,
-            stage="COMPLETED" if status == "SUCCESS" else status,
-            links=links,
-            evidence_snapshot=evidence,
-            error_message=redact_secret_text(reason)[:2000] if isinstance(reason, str) else None,
-            provider_completed=payload.allow_real_call,
-        )
-
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the local DB-backed DeepSeek backtest worker.")

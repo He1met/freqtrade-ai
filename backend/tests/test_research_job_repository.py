@@ -5,8 +5,6 @@ from pathlib import Path
 from threading import Barrier, Lock, Thread
 
 import pytest
-from sqlalchemy.orm import Session
-
 from app.db.session import create_database_engine, create_session_factory
 from app.models import Base
 from app.repositories import ResearchJobRepository
@@ -15,7 +13,7 @@ from app.services.research_job_queue import (
     ResearchJobConflict,
     ResearchJobQueueService,
 )
-
+from sqlalchemy.orm import Session
 
 FIXED_NOW = datetime(2026, 7, 22, 12, 0, tzinfo=timezone.utc)
 

@@ -3,12 +3,17 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.models.backtest import BacktestResult, BacktestRun, BacktestTask
+from app.models.execution_lineage import (
+    LOCAL_DRY_RUN_SCOPE_ID,
+    ResearchJobAttempt,
+)
 from app.models.full_chain import (
     FullChainRun,
     FullChainStageRun,
@@ -22,7 +27,6 @@ from app.repositories.full_chain import FullChainBlocked, FullChainRepository
 from app.repositories.research_jobs import ResearchJobRepository
 from app.schemas.deepseek_backtest_loop import DeepSeekBacktestLoopResponse
 from app.schemas.dry_run_status import redact_secret_text
-
 
 LINK_KEYS = (
     "strategy_generation_run_id",
@@ -54,6 +58,12 @@ def _digest(value: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 class ResearchFullChainOrchestrator:
     """Bind one real ResearchJob result to the existing durable full chain."""
 
@@ -69,7 +79,7 @@ class ResearchFullChainOrchestrator:
             self.db.scalars(
                 select(ResearchJob)
                 .where(
-                    ResearchJob.execution_scope_id == "LOCAL_DRY_RUN",
+                    ResearchJob.execution_scope_id == LOCAL_DRY_RUN_SCOPE_ID,
                     ResearchJob.status == "STALE",
                     ResearchJob.stage == "LEASE_EXPIRED",
                 )
@@ -79,30 +89,169 @@ class ResearchFullChainOrchestrator:
         for job in candidates:
             chain = self._chain(job.id)
             generation_stage = self._stage(chain, "GENERATION") if chain else None
-            if job.provider_attempted_at is None and (
-                chain is None
-                or generation_stage is None
-                or generation_stage.status == "PREPARED"
+            links = self._job_links(job)
+            if (
+                job.provider_attempted_at is None
+                and job.provider_completed_at is None
+                and not links
+                and (
+                    chain is None
+                    or (
+                        chain.status in {"RUNNING", "STALE"}
+                        and (
+                            generation_stage is None
+                            or generation_stage.status == "PREPARED"
+                        )
+                    )
+                )
             ):
                 recovered = jobs.prepare_stale_recovery(
                     job.id,
                     recovery_stage="GENERATION_RETRY",
+                    commit=False,
                 )
-                return recovered.id if recovered is not None else None
-            links = self._job_links(job)
+                if recovered is not None:
+                    self._resume_recoverable_chain(chain)
+                    self.db.commit()
+                    return recovered.id
+                self._block_unrecoverable_stale(
+                    job,
+                    chain,
+                    "safe generation recovery guard rejected the stale job",
+                )
+                continue
+            if (
+                job.provider_attempted_at is not None
+                and job.provider_completed_at is None
+            ):
+                # The external outcome is ambiguous. It must remain isolated as
+                # STALE and may never be replayed automatically.
+                continue
             if (
                 job.provider_attempted_at is not None
                 and job.provider_completed_at is not None
                 and len(links) == len(LINK_KEYS)
                 and chain is not None
+                and chain.status in {"RUNNING", "STALE"}
             ):
-                self._load_and_validate(job, links)
+                try:
+                    self._load_and_validate(job, links)
+                except ResearchFullChainBlocked as exc:
+                    self._block_unrecoverable_stale(job, chain, str(exc))
+                    continue
                 recovered = jobs.prepare_stale_recovery(
                     job.id,
                     recovery_stage="PERSISTED_RESULT_RECOVERY",
+                    commit=False,
                 )
-                return recovered.id if recovered is not None else None
+                if recovered is not None:
+                    self._resume_recoverable_chain(chain)
+                    self.db.commit()
+                    return recovered.id
+                self._block_unrecoverable_stale(
+                    job,
+                    chain,
+                    "persisted-result recovery guard rejected the stale job",
+                )
+                continue
+            self._block_unrecoverable_stale(
+                job,
+                chain,
+                "stale research job has inconsistent provider or lineage state",
+            )
         return None
+
+    def terminalize_owned(
+        self,
+        job_id: int,
+        lease_token: str,
+        *,
+        status: str,
+        stage: str,
+        reason: str,
+        links: Optional[dict[str, int]] = None,
+        evidence_snapshot: Optional[dict] = None,
+        provider_completed: bool,
+    ) -> bool:
+        """Atomically close Job, Attempt, FullChain and its active checkpoint."""
+
+        if status not in {"FAILED", "BLOCKED", "CANCELLED", "STALE"}:
+            raise ValueError("invalid research terminal status")
+        safe_reason = redact_secret_text(reason)[:2000]
+        current_time = datetime.now(timezone.utc)
+        job = ResearchJobRepository(self.db).get(job_id)
+        if (
+            job is None
+            or job.status != "RUNNING"
+            or job.lease_token != lease_token
+            or job.lease_expires_at is None
+            or _as_utc(job.lease_expires_at) <= current_time
+        ):
+            self.db.rollback()
+            return False
+        chain = self._chain(job_id)
+        try:
+            if chain is not None:
+                checkpoint = self.db.scalar(
+                    select(FullChainStageRun)
+                    .where(
+                        FullChainStageRun.full_chain_run_id == chain.id,
+                        FullChainStageRun.status == "PREPARED",
+                    )
+                    .order_by(FullChainStageRun.id.desc())
+                    .limit(1)
+                )
+                if checkpoint is not None:
+                    self.chains.fail_stage(
+                        chain.id,
+                        checkpoint.stage,
+                        lease_token,
+                        status=status,
+                        error_code=f"RESEARCH_{status}",
+                        error_message=safe_reason,
+                        now=current_time,
+                        commit=False,
+                        allow_cancel_requested=status == "CANCELLED",
+                    )
+                elif chain.status not in {
+                    "SUCCESS",
+                    "FAILED",
+                    "BLOCKED",
+                    "CANCELLED",
+                    "STALE",
+                }:
+                    chain.status = status
+                    chain.terminal_reason = safe_reason
+                    chain.completed_at = current_time
+            safe_evidence = {
+                **(evidence_snapshot or {}),
+                "status": status,
+                "acceptance_ready": False,
+                "failed_reason": safe_reason,
+            }
+            if chain is not None:
+                safe_evidence["full_chain_run_id"] = chain.id
+                safe_evidence["full_chain_status"] = status
+            completed = ResearchJobRepository(self.db).complete(
+                job_id,
+                lease_token,
+                status=status,
+                stage=stage,
+                links=links or {},
+                evidence_snapshot=safe_evidence,
+                error_message=safe_reason,
+                provider_completed=provider_completed,
+                now=current_time,
+                commit=False,
+            )
+            if completed is None:
+                self.db.rollback()
+                return False
+            self.db.commit()
+            return True
+        except Exception:
+            self.db.rollback()
+            raise
 
     def begin(self, job_id: int, lease_token: str) -> FullChainRun:
         job = self.db.get(ResearchJob, job_id)
@@ -304,32 +453,8 @@ class ResearchFullChainOrchestrator:
                 lease_token,
             )
         except (FullChainBlocked, KeyError, TypeError, ValueError) as exc:
-            self._block_prepared_stage(chain, lease_token, str(exc))
             raise ResearchFullChainBlocked(str(exc), links=links) from exc
         return approval.id
-
-    def fail_generation(
-        self,
-        job_id: int,
-        lease_token: str,
-        *,
-        status: str,
-        reason: str,
-    ) -> None:
-        chain = self._chain(job_id)
-        if chain is None:
-            return
-        checkpoint = self._stage(chain, "GENERATION")
-        if checkpoint is None or checkpoint.status != "PREPARED":
-            return
-        self.chains.fail_stage(
-            chain.id,
-            "GENERATION",
-            lease_token,
-            status=status if status in {"FAILED", "BLOCKED"} else "FAILED",
-            error_code="RESEARCH_EXECUTION_" + status,
-            error_message=reason,
-        )
 
     def _ensure_stage(
         self,
@@ -459,34 +584,100 @@ class ResearchFullChainOrchestrator:
             return approval
         return None
 
-    def _block_prepared_stage(
+    def _block_unrecoverable_stale(
         self,
-        chain: FullChainRun,
-        lease_token: str,
+        job: ResearchJob,
+        chain: Optional[FullChainRun],
         reason: str,
     ) -> None:
-        checkpoint = self.db.scalar(
-            select(FullChainStageRun)
+        """Quarantine malformed stale state without requiring an expired lease."""
+
+        safe_reason = redact_secret_text(reason)[:2000]
+        current_time = datetime.now(timezone.utc)
+        evidence_snapshot = {
+            **job.evidence_snapshot,
+            "status": "BLOCKED",
+            "acceptance_ready": False,
+            "recovery_allowed": False,
+            "failed_reason": safe_reason,
+        }
+        if chain is not None:
+            evidence_snapshot = {
+                **evidence_snapshot,
+                "full_chain_run_id": chain.id,
+                "full_chain_status": "BLOCKED",
+            }
+        blocked = self.db.execute(
+            update(ResearchJob)
             .where(
-                FullChainStageRun.full_chain_run_id == chain.id,
-                FullChainStageRun.status == "PREPARED",
+                ResearchJob.id == job.id,
+                ResearchJob.execution_scope_id == LOCAL_DRY_RUN_SCOPE_ID,
+                ResearchJob.status == "STALE",
+                ResearchJob.stage == "LEASE_EXPIRED",
+                ResearchJob.lease_token.is_(None),
             )
-            .order_by(FullChainStageRun.id.desc())
+            .values(
+                status="BLOCKED",
+                stage="RECOVERY_BLOCKED",
+                error_message=safe_reason,
+                completed_at=current_time,
+                evidence_snapshot=evidence_snapshot,
+            )
+        )
+        if blocked.rowcount != 1:
+            self.db.rollback()
+            return
+        attempt = self.db.scalar(
+            select(ResearchJobAttempt)
+            .where(
+                ResearchJobAttempt.research_job_id == job.id,
+                ResearchJobAttempt.execution_scope_id
+                == LOCAL_DRY_RUN_SCOPE_ID,
+                ResearchJobAttempt.attempt_number == job.attempt_count,
+            )
             .limit(1)
         )
-        if checkpoint is None:
-            return
-        try:
-            self.chains.fail_stage(
-                chain.id,
-                checkpoint.stage,
-                lease_token,
-                status="BLOCKED",
-                error_code="RESEARCH_PROMOTION_BLOCKED",
-                error_message=reason,
+        if attempt is not None:
+            attempt.status = "BLOCKED"
+            attempt.completed_at = current_time
+            attempt.error_message = safe_reason
+            attempt.evidence_snapshot = evidence_snapshot
+        if chain is not None and chain.status not in {
+            "SUCCESS",
+            "FAILED",
+            "BLOCKED",
+            "CANCELLED",
+        }:
+            checkpoint = self.db.scalar(
+                select(FullChainStageRun)
+                .where(
+                    FullChainStageRun.full_chain_run_id == chain.id,
+                    FullChainStageRun.status == "PREPARED",
+                )
+                .order_by(FullChainStageRun.id.desc())
+                .limit(1)
             )
-        except FullChainBlocked:
-            self.db.rollback()
+            if checkpoint is not None:
+                checkpoint.status = "BLOCKED"
+                checkpoint.error_code = "RESEARCH_RECOVERY_BLOCKED"
+                checkpoint.error_message = safe_reason
+                checkpoint.completed_at = current_time
+            chain.status = "BLOCKED"
+            chain.terminal_reason = safe_reason
+            chain.completed_at = current_time
+        self.db.commit()
+
+    @staticmethod
+    def _resume_recoverable_chain(chain: Optional[FullChainRun]) -> None:
+        if chain is None:
+            return
+        if chain.status not in {"RUNNING", "STALE"}:
+            raise ResearchFullChainBlocked(
+                "stale recovery cannot resume a terminal full-chain run"
+            )
+        chain.status = "RUNNING"
+        chain.terminal_reason = None
+        chain.completed_at = None
 
     def _chain(self, job_id: int) -> Optional[FullChainRun]:
         return self.db.scalar(

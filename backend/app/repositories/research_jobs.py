@@ -7,16 +7,16 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.backtest import BacktestResult, BacktestRun, BacktestTask
-from app.models.research_job import ResearchJob, ResearchWorkerControl
 from app.models.execution_lineage import (
     LOCAL_DRY_RUN_SCOPE_ID,
     ResearchJobAttempt,
 )
+from app.models.full_chain import FullChainRun
+from app.models.research_job import ResearchJob, ResearchWorkerControl
 from app.models.strategy import Strategy, StrategyVersion
 from app.models.strategy_generation_run import StrategyGenerationRun
 from app.models.strategy_score import StrategyScore
 from app.repositories.execution_lineage import ensure_execution_scope_catalog
-
 
 TERMINAL_JOB_STATUSES = {
     "SUCCESS",
@@ -336,6 +336,7 @@ class ResearchJobRepository:
         job_id: int,
         *,
         recovery_stage: str,
+        commit: bool = True,
     ) -> Optional[ResearchJob]:
         """Requeue one stale attempt only under an explicit safe recovery mode."""
 
@@ -395,7 +396,10 @@ class ResearchJobRepository:
         if result.rowcount != 1:
             self.db.rollback()
             return None
-        self.db.commit()
+        if commit:
+            self.db.commit()
+        else:
+            self.db.flush()
         return self.get(job_id)
 
     def heartbeat(
@@ -462,6 +466,7 @@ class ResearchJobRepository:
         error_message: Optional[str],
         provider_completed: bool,
         now: Optional[datetime] = None,
+        commit: bool = True,
     ) -> Optional[ResearchJob]:
         self._require_executable_scope()
         if status not in TERMINAL_JOB_STATUSES:
@@ -517,7 +522,10 @@ class ResearchJobRepository:
             attempt.evidence_snapshot = evidence_snapshot
             attempt.error_message = error_message
         self._release_control(job_id, lease_token)
-        self.db.commit()
+        if commit:
+            self.db.commit()
+        else:
+            self.db.flush()
         return self.get(job_id)
 
     def cancel(self, job_id: int, reason: str) -> Optional[ResearchJob]:
@@ -727,6 +735,12 @@ class ResearchJobRepository:
         ):
             return None
         lease_token = job.lease_token
+        chain = self.db.scalar(
+            select(FullChainRun).where(
+                FullChainRun.research_job_id == job.id,
+                FullChainRun.run_kind == "RESEARCH",
+            )
+        )
         stale_reason = (
             "Provider outcome is unknown after lease expiry; automatic retry is forbidden."
             if job.provider_attempted_at is not None and job.provider_completed_at is None
@@ -749,7 +763,16 @@ class ResearchJobRepository:
                     **job.evidence_snapshot,
                     "status": "STALE",
                     "acceptance_ready": False,
+                    "recovery_allowed": job.provider_attempted_at is None,
                     "failed_reason": stale_reason,
+                    **(
+                        {
+                            "full_chain_run_id": chain.id,
+                            "full_chain_status": "STALE",
+                        }
+                        if chain is not None
+                        else {}
+                    ),
                 },
                 completed_at=current_time,
                 lease_owner=None,
@@ -781,6 +804,16 @@ class ResearchJobRepository:
                 "acceptance_ready": False,
                 "failed_reason": stale_reason,
             }
+        if chain is not None and chain.status not in {
+            "SUCCESS",
+            "FAILED",
+            "BLOCKED",
+            "CANCELLED",
+            "STALE",
+        }:
+            chain.status = "STALE"
+            chain.terminal_reason = stale_reason
+            chain.completed_at = current_time
         self._release_control(job.id, lease_token)
         self.db.commit()
         return self.get(job.id)
