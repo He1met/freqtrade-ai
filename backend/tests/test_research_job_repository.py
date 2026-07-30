@@ -375,6 +375,94 @@ def test_stale_recovery_reuses_attempt_only_before_provider_call(session_factory
         assert resumed.attempt_count == 1
 
 
+def test_expired_lease_cannot_complete_checkpoint_or_start_provider(
+    session_factory,
+) -> None:
+    with session_factory() as db:
+        repository = ResearchJobRepository(db)
+        job_id = enqueue(db, "expired-lease-cas").id
+        claimed = repository.claim_next(
+            owner="expired-worker",
+            lease_seconds=10,
+            now=FIXED_NOW,
+        )
+        assert claimed is not None and claimed.lease_token
+        expired_at = FIXED_NOW + timedelta(seconds=10)
+
+        assert repository.mark_provider_attempt(
+            job_id,
+            claimed.lease_token,
+            now=expired_at,
+        ) is False
+        assert repository.checkpoint_research_result(
+            job_id,
+            claimed.lease_token,
+            links={},
+            evidence_snapshot={
+                "status": "RUNNING",
+                "acceptance_ready": False,
+            },
+            now=expired_at,
+        ) is None
+        assert repository.complete(
+            job_id,
+            claimed.lease_token,
+            status="FAILED",
+            stage="FAILED",
+            links={},
+            evidence_snapshot={
+                "status": "FAILED",
+                "acceptance_ready": False,
+            },
+            error_message="expired lease must not commit",
+            provider_completed=False,
+            now=expired_at,
+        ) is None
+        still_running = repository.get(job_id)
+        assert still_running is not None
+        assert still_running.status == "RUNNING"
+        assert still_running.lease_token == claimed.lease_token
+
+
+def test_persisted_result_checkpoint_is_single_transition(session_factory) -> None:
+    with session_factory() as db:
+        repository = ResearchJobRepository(db)
+        job_id = enqueue(db, "single-result-checkpoint").id
+        claimed = repository.claim_next(
+            owner="checkpoint-worker",
+            lease_seconds=30,
+            now=FIXED_NOW,
+        )
+        assert claimed is not None and claimed.lease_token
+        assert repository.mark_provider_attempt(
+            job_id,
+            claimed.lease_token,
+            now=FIXED_NOW,
+        )
+        first = repository.checkpoint_research_result(
+            job_id,
+            claimed.lease_token,
+            links={},
+            evidence_snapshot={
+                "status": "RUNNING",
+                "acceptance_ready": False,
+            },
+            now=FIXED_NOW + timedelta(seconds=1),
+        )
+        assert first is not None
+        assert first.stage == "PERSISTED_RESULT"
+        assert repository.checkpoint_research_result(
+            job_id,
+            claimed.lease_token,
+            links={},
+            evidence_snapshot={
+                "status": "RUNNING",
+                "acceptance_ready": False,
+            },
+            now=FIXED_NOW + timedelta(seconds=2),
+        ) is None
+
+
 def test_unknown_provider_outcome_cannot_be_requeued_by_recovery_api(
     session_factory,
 ) -> None:

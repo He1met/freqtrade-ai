@@ -37,6 +37,7 @@ from app.schemas import (
 from app.schemas.deepseek_backtest_loop import DeepSeekBacktestLoopResponse
 from app.services.deepseek_backtest_loop import DeepSeekBacktestLoopService
 from app.services.research_full_chain_orchestrator import (
+    ResearchFullChainBlocked,
     ResearchFullChainOrchestrator,
 )
 from app.services.research_job_queue import ResearchJobQueueService
@@ -388,7 +389,7 @@ def test_restart_marks_unknown_provider_outcome_stale_without_calling_provider(t
         assert stale.status == "STALE"
         assert "automatic retry is forbidden" in (stale.error_message or "")
         assert restarted_db.query(FullChainRun).one().status == "STALE"
-        assert restarted_db.query(FullChainStageRun).one().status == "PREPARED"
+        assert restarted_db.query(FullChainStageRun).one().status == "STALE"
 
     calls: list[str] = []
     restarted_worker = DeepSeekBacktestWorker(
@@ -424,7 +425,7 @@ def test_safe_restart_temporarily_marks_chain_stale_then_resumes_it(tmp_path) ->
         )
         assert stale is not None
         assert db.query(FullChainRun).one().status == "STALE"
-        assert db.query(FullChainStageRun).one().status == "PREPARED"
+        assert db.query(FullChainStageRun).one().status == "STALE"
 
     with factory() as db:
         assert ResearchFullChainOrchestrator(db).recover_one_stale() == job_id
@@ -434,6 +435,7 @@ def test_safe_restart_temporarily_marks_chain_stale_then_resumes_it(tmp_path) ->
         assert job.status == "PENDING"
         assert job.stage == "GENERATION_RETRY"
         assert chain.status == "RUNNING"
+        assert db.query(FullChainStageRun).one().status == "PREPARED"
         assert chain.completed_at is None
         assert chain.terminal_reason is None
 
@@ -569,6 +571,46 @@ def test_success_response_with_missing_links_blocks_all_durable_states(tmp_path)
         assert "missing persisted strategy_id" in (job.error_message or "")
 
 
+def test_terminal_chain_status_cannot_be_rewritten_by_job_evidence(tmp_path) -> None:
+    factory = session_factory(tmp_path)
+    with factory() as db:
+        repository = ResearchJobRepository(db)
+        job_id = ResearchJobQueueService(db).enqueue_deepseek_backtest(
+            request(allow_real_call=False),
+            idempotency_key="terminal-chain-conflict",
+        ).id
+        claimed = repository.claim_next(
+            owner="terminal-conflict-worker",
+            lease_seconds=60,
+        )
+        assert claimed is not None and claimed.lease_token
+        orchestrator = ResearchFullChainOrchestrator(db)
+        chain = orchestrator.begin(job_id, claimed.lease_token)
+        chain.status = "BLOCKED"
+        chain.terminal_reason = "prior immutable terminal status"
+        chain.completed_at = datetime.now(timezone.utc)
+        db.commit()
+
+        with pytest.raises(
+            ResearchFullChainBlocked,
+            match="terminal full-chain status cannot be rewritten",
+        ):
+            orchestrator.terminalize_owned(
+                job_id,
+                claimed.lease_token,
+                status="FAILED",
+                stage="FAILED",
+                reason="conflicting terminal evidence",
+                provider_completed=False,
+            )
+
+        unchanged = repository.get(job_id)
+        assert unchanged is not None
+        assert unchanged.status == "RUNNING"
+        assert unchanged.evidence_snapshot.get("full_chain_status") is None
+        assert db.get(FullChainRun, chain.id).status == "BLOCKED"
+
+
 def test_invalid_stale_job_is_quarantined_and_does_not_stop_next_job(tmp_path) -> None:
     factory = session_factory(tmp_path)
     fixed_now = datetime.now(timezone.utc)
@@ -627,10 +669,10 @@ def test_invalid_stale_job_is_quarantined_and_does_not_stop_next_job(tmp_path) -
         malformed_chain = db.query(FullChainRun).filter_by(
             research_job_id=malformed_id
         ).one()
-        assert malformed_chain.status == "BLOCKED"
+        assert malformed_chain.status == "STALE"
         assert db.query(FullChainStageRun).filter_by(
             full_chain_run_id=malformed_chain.id
-        ).one().status == "BLOCKED"
+        ).one().status == "STALE"
 
 
 def test_worker_exception_is_stale_and_closes_chain_without_claiming_provider_completion(
@@ -801,6 +843,39 @@ def test_worker_runs_controlled_service_chain_and_reconciles_all_database_ids(
         heartbeat_interval_seconds=10,
     )
     assert worker.run_once() == job_id
+    original_complete = ResearchJobRepository.complete
+
+    def crash_after_deployment_publish(self, *args, **kwargs):
+        if kwargs.get("stage") == "DEPLOYED":
+            raise SystemExit("synthetic crash after idempotent deployment publish")
+        return original_complete(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        ResearchJobRepository,
+        "complete",
+        crash_after_deployment_publish,
+    )
+    with pytest.raises(SystemExit, match="synthetic crash"):
+        worker.run_once()
+    monkeypatch.setattr(
+        ResearchJobRepository,
+        "complete",
+        original_complete,
+    )
+    with factory() as db:
+        repository = ResearchJobRepository(db)
+        crashed = repository.get(job_id)
+        assert crashed is not None
+        assert crashed.status == "RUNNING"
+        assert crashed.stage == "SIGNAL"
+        assert db.query(StrategyDeployment).count() == 1
+        assert crashed.lease_expires_at is not None
+        assert repository.expire_stale(
+            crashed.lease_expires_at.replace(tzinfo=timezone.utc)
+            + timedelta(microseconds=1)
+        ) is not None
+        assert db.query(FullChainRun).one().status == "STALE"
+
     assert worker.run_once() == job_id
     assert worker.run_once() is None
     assert len(http_client.requests) == 1

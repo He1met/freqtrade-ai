@@ -90,6 +90,38 @@ class ResearchFullChainOrchestrator:
             chain = self._chain(job.id)
             generation_stage = self._stage(chain, "GENERATION") if chain else None
             links = self._job_links(job)
+            previous_stage = (
+                job.evidence_snapshot.get("previous_stage")
+                if isinstance(job.evidence_snapshot, dict)
+                else None
+            )
+            if previous_stage == "SIGNAL":
+                approval = self._approved_candidate(chain) if chain else None
+                if (
+                    chain is not None
+                    and chain.status == "STALE"
+                    and chain.current_stage == "SIGNAL"
+                    and approval is not None
+                    and len(links) == len(LINK_KEYS)
+                ):
+                    recovered = jobs.prepare_stale_recovery(
+                        job.id,
+                        recovery_stage="SIGNAL_RECOVERY",
+                        commit=False,
+                    )
+                    if recovered is not None:
+                        self._resume_recoverable_chain(
+                            chain,
+                            target_status="APPROVED",
+                        )
+                        self.db.commit()
+                        return recovered.id
+                self._block_unrecoverable_stale(
+                    job,
+                    chain,
+                    "SIGNAL recovery requires one current approved candidate",
+                )
+                continue
             if (
                 job.provider_attempted_at is None
                 and job.provider_completed_at is None
@@ -100,7 +132,7 @@ class ResearchFullChainOrchestrator:
                         chain.status in {"RUNNING", "STALE"}
                         and (
                             generation_stage is None
-                            or generation_stage.status == "PREPARED"
+                            or generation_stage.status in {"PREPARED", "STALE"}
                         )
                     )
                 )
@@ -192,6 +224,20 @@ class ResearchFullChainOrchestrator:
         chain = self._chain(job_id)
         try:
             if chain is not None:
+                terminal_statuses = {
+                    "SUCCESS",
+                    "FAILED",
+                    "BLOCKED",
+                    "CANCELLED",
+                    "STALE",
+                }
+                if (
+                    chain.status in terminal_statuses
+                    and chain.status != status
+                ):
+                    raise ResearchFullChainBlocked(
+                        "terminal full-chain status cannot be rewritten"
+                    )
                 checkpoint = self.db.scalar(
                     select(FullChainStageRun)
                     .where(
@@ -213,13 +259,7 @@ class ResearchFullChainOrchestrator:
                         commit=False,
                         allow_cancel_requested=status == "CANCELLED",
                     )
-                elif chain.status not in {
-                    "SUCCESS",
-                    "FAILED",
-                    "BLOCKED",
-                    "CANCELLED",
-                    "STALE",
-                }:
+                elif chain.status not in terminal_statuses:
                     chain.status = status
                     chain.terminal_reason = safe_reason
                     chain.completed_at = current_time
@@ -602,10 +642,16 @@ class ResearchFullChainOrchestrator:
             "failed_reason": safe_reason,
         }
         if chain is not None:
+            chain_evidence_status = (
+                chain.status
+                if chain.status
+                in {"SUCCESS", "FAILED", "BLOCKED", "CANCELLED", "STALE"}
+                else "BLOCKED"
+            )
             evidence_snapshot = {
                 **evidence_snapshot,
                 "full_chain_run_id": chain.id,
-                "full_chain_status": "BLOCKED",
+                "full_chain_status": chain_evidence_status,
             }
         blocked = self.db.execute(
             update(ResearchJob)
@@ -647,6 +693,7 @@ class ResearchFullChainOrchestrator:
             "FAILED",
             "BLOCKED",
             "CANCELLED",
+            "STALE",
         }:
             checkpoint = self.db.scalar(
                 select(FullChainStageRun)
@@ -667,15 +714,32 @@ class ResearchFullChainOrchestrator:
             chain.completed_at = current_time
         self.db.commit()
 
-    @staticmethod
-    def _resume_recoverable_chain(chain: Optional[FullChainRun]) -> None:
+    def _resume_recoverable_chain(
+        self,
+        chain: Optional[FullChainRun],
+        *,
+        target_status: str = "RUNNING",
+    ) -> None:
         if chain is None:
             return
         if chain.status not in {"RUNNING", "STALE"}:
             raise ResearchFullChainBlocked(
                 "stale recovery cannot resume a terminal full-chain run"
             )
-        chain.status = "RUNNING"
+        if target_status not in {"RUNNING", "APPROVED"}:
+            raise ResearchFullChainBlocked("invalid full-chain recovery status")
+        for checkpoint in self.db.scalars(
+            select(FullChainStageRun).where(
+                FullChainStageRun.full_chain_run_id == chain.id,
+                FullChainStageRun.status == "STALE",
+            )
+        ):
+            if checkpoint.status == "STALE":
+                checkpoint.status = "PREPARED"
+                checkpoint.error_code = None
+                checkpoint.error_message = None
+                checkpoint.completed_at = None
+        chain.status = target_status
         chain.terminal_reason = None
         chain.completed_at = None
 
