@@ -53,12 +53,8 @@ class StrategyDeployment(Base):
             "strategy_deployments_single_active_idx",
             "execution_target_id",
             unique=True,
-            postgresql_where=text(
-                "execution_target_id = 'OKX_DEMO' AND status = 'ACTIVE'"
-            ),
-            sqlite_where=text(
-                "execution_target_id = 'OKX_DEMO' AND status = 'ACTIVE'"
-            ),
+            postgresql_where=text("status = 'ACTIVE'"),
+            sqlite_where=text("status = 'ACTIVE'"),
         ),
     )
 
