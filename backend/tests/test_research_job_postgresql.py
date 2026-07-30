@@ -12,6 +12,7 @@ from app.db.migrations import (
     FILL_SNAPSHOT_REPEAT_BASE_VERSION,
     LEGACY_SCHEMA_VERSION,
     PREVIOUS_SCHEMA_VERSION,
+    RESEARCH_RECOVERY_BASE_VERSION,
     SCHEMA_VERSION,
     STRATEGY_DEPLOYMENT_BASE_VERSION,
     TARGET_LINEAGE_BASE_VERSION,
@@ -138,6 +139,30 @@ def test_strategy_deployment_queue_upgrades_from_previous_schema(
     single_consumer = indexes["signal_evaluations_single_consumer_idx"]
     assert single_consumer["unique"] is True
     assert "status" in str(single_consumer.get("dialect_options"))
+
+
+def test_validation_matrix_fresh_and_upgrade_schema_match_orm(
+    postgres_engine,
+) -> None:
+    assert upgrade_database(postgres_engine) == SCHEMA_VERSION
+    assert {
+        "strategy_validation_plans",
+        "strategy_validation_windows",
+    }.issubset(set(inspect(postgres_engine).get_table_names()))
+
+    with postgres_engine.begin() as connection:
+        connection.execute(text("DROP TABLE strategy_validation_windows"))
+        connection.execute(text("DROP TABLE strategy_validation_plans"))
+        connection.execute(text(f"DELETE FROM {VERSION_TABLE}"))
+        connection.execute(
+            text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+            {"version": RESEARCH_RECOVERY_BASE_VERSION},
+        )
+
+    assert upgrade_database(postgres_engine) == SCHEMA_VERSION
+    readiness = verify_schema(postgres_engine)
+    assert readiness.ready is True
+    assert readiness.problems == ()
 
 
 def _create_frozen_pre_lineage_research_jobs(connection) -> None:

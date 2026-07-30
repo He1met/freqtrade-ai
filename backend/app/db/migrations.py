@@ -55,7 +55,8 @@ STRATEGY_DEPLOYMENT_BASE_VERSION = "20260729_19"
 EXECUTION_FULL_CHAIN_BASE_VERSION = "20260729_20"
 RECONCILIATION_INDEX_BASE_VERSION = "20260729_21"
 SINGLE_ACTIVE_DEPLOYMENT_BASE_VERSION = "20260730_22"
-SCHEMA_VERSION = "20260730_23"
+RESEARCH_RECOVERY_BASE_VERSION = "20260730_23"
+SCHEMA_VERSION = "20260730_24"
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 ATTESTATION_PROOF_KEY_ENV = "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"
 
@@ -81,6 +82,8 @@ RUNTIME_APPLICATION_TABLES = (
     "strategy_deployments",
     "signal_evaluations",
     "risk_budgets",
+    "strategy_validation_plans",
+    "strategy_validation_windows",
 )
 
 
@@ -4578,6 +4581,33 @@ def _add_okx_demo_recovery_batch_index(connection: Connection) -> None:
     )
 
 
+def _add_strategy_validation_matrix(connection: Connection) -> None:
+    """Install immutable OOS/walk-forward plans without touching execution tables."""
+
+    for table_name in ("strategy_validation_plans", "strategy_validation_windows"):
+        Base.metadata.tables[table_name].create(bind=connection, checkfirst=True)
+    schema_name = connection.execute(text("SELECT current_schema()")).scalar_one()
+    quoted_schema = connection.dialect.identifier_preparer.quote_schema(schema_name)
+    for table_name in ("strategy_validation_plans", "strategy_validation_windows"):
+        quoted_table = connection.dialect.identifier_preparer.quote(table_name)
+        connection.execute(
+            text(
+                f"REVOKE ALL ON TABLE {quoted_schema}.{quoted_table} FROM PUBLIC; "
+                f"GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "
+                f"{quoted_schema}.{quoted_table} TO freqtrade"
+            )
+        )
+        sequence_name = f"{table_name}_id_seq"
+        quoted_sequence = connection.dialect.identifier_preparer.quote(sequence_name)
+        connection.execute(
+            text(
+                f"REVOKE ALL ON SEQUENCE {quoted_schema}.{quoted_sequence} FROM PUBLIC; "
+                f"GRANT USAGE, SELECT ON SEQUENCE "
+                f"{quoted_schema}.{quoted_sequence} TO freqtrade"
+            )
+        )
+
+
 def upgrade_database(engine: Engine) -> str:
     """Upgrade a local PostgreSQL database atomically to ``SCHEMA_VERSION``.
 
@@ -4625,6 +4655,7 @@ def upgrade_database(engine: Engine) -> str:
                 EXECUTION_FULL_CHAIN_BASE_VERSION,
                 RECONCILIATION_INDEX_BASE_VERSION,
                 SINGLE_ACTIVE_DEPLOYMENT_BASE_VERSION,
+                RESEARCH_RECOVERY_BASE_VERSION,
             }
             if current_version in supported_upgrade_versions:
                 connection.execute(
@@ -4635,6 +4666,19 @@ def upgrade_database(engine: Engine) -> str:
                     )
                 )
                 _add_okx_demo_recovery_batch_index(connection)
+                _add_strategy_validation_matrix(connection)
+            if current_version == RESEARCH_RECOVERY_BASE_VERSION:
+                problems = schema_problems(connection)
+                if problems:
+                    raise SchemaMigrationBlocked(
+                        "Strategy validation matrix upgrade does not match ORM metadata: "
+                        + "; ".join(problems)
+                    )
+                connection.execute(
+                    text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+                    {"version": SCHEMA_VERSION},
+                )
+                return SCHEMA_VERSION
             if current_version == RECONCILIATION_INDEX_BASE_VERSION:
                 _add_strategy_deployment_queue(connection)
                 problems = schema_problems(connection)
@@ -5052,6 +5096,7 @@ def upgrade_database(engine: Engine) -> str:
             _add_okx_demo_reconciliation(connection)
             _add_okx_demo_runtime_recovery_binding(connection)
             _add_full_chain(connection)
+            _add_strategy_validation_matrix(connection)
             problems = schema_problems(connection)
             if problems:
                 raise SchemaMigrationBlocked(

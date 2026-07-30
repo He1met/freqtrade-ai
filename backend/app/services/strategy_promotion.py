@@ -13,7 +13,11 @@ import json
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping
 
+from sqlalchemy import select
+from sqlalchemy.orm import object_session
+
 from app.models.backtest import BacktestResult
+from app.models.strategy_validation import StrategyValidationPlan
 from app.models.strategy_score import StrategyScore
 from app.models.strategy import StrategyVersion
 
@@ -43,6 +47,7 @@ def assess_strategy_promotion(
     *,
     strategy_version: StrategyVersion | None = None,
     policy: StrategyPromotionPolicy = DEFAULT_PROMOTION_POLICY,
+    validation_plan: StrategyValidationPlan | None = None,
 ) -> dict[str, Any]:
     """Return immutable promotion evidence or raise before approval is created.
 
@@ -85,6 +90,28 @@ def assess_strategy_promotion(
     if not isinstance(raw_evidence, Mapping):
         raise StrategyPromotionBlocked("promotion requires net-of-costs evidence")
     evidence = raw_evidence
+    matrix = _mapping(evidence.get("validation_matrix"), "validation_matrix")
+    persisted_plan = validation_plan or _persisted_validation_plan(result)
+    if persisted_plan is None or persisted_plan.status != "PASSED":
+        raise StrategyPromotionBlocked(
+            "promotion requires a passing persisted validation matrix"
+        )
+    if (
+        matrix.get("plan_id") != persisted_plan.id
+        or matrix.get("plan_digest") != persisted_plan.plan_digest
+        or matrix.get("evidence_digest") != persisted_plan.evidence_digest
+        or matrix.get("provider") != "freqtrade"
+    ):
+        raise StrategyPromotionBlocked("promotion validation matrix lineage does not match")
+    result_ids = matrix.get("window_result_ids")
+    persisted_ids = persisted_plan.promotion_evidence.get("window_result_ids")
+    if (
+        not isinstance(result_ids, list)
+        or len(result_ids) < 4
+        or len(set(result_ids)) != len(result_ids)
+        or result_ids != persisted_ids
+    ):
+        raise StrategyPromotionBlocked("promotion validation window lineage is incomplete")
     if evidence.get("net_of_costs") is not True:
         raise StrategyPromotionBlocked("promotion requires net-of-costs evidence")
     out_of_sample = _mapping(evidence.get("out_of_sample"), "out_of_sample")
@@ -201,3 +228,16 @@ def _strategy_code_digest(strategy_version: StrategyVersion) -> str:
 def _stable_digest(value: Mapping[str, Any]) -> str:
     serialized = json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _persisted_validation_plan(
+    result: BacktestResult,
+) -> StrategyValidationPlan | None:
+    session = object_session(result)
+    if session is None or result.id is None:
+        return None
+    return session.scalar(
+        select(StrategyValidationPlan).where(
+            StrategyValidationPlan.promotion_backtest_result_id == result.id
+        )
+    )

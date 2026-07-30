@@ -408,7 +408,12 @@ class FreqtradeBacktestRunner:
             task_id=task_id,
             strategy_version_id=strategy_version_id,
             execution_id=execution_id,
-            checksums=_artifact_checksums(config_path, result_path, strategy_file_path or strategy_path)
+            checksums=_artifact_checksums(
+                config_path,
+                result_path,
+                strategy_file_path or strategy_path,
+                datadir,
+            )
             if status == "SUCCESS" else None,
         )
         manifest.write()
@@ -422,7 +427,12 @@ def _sanitize_and_tail(text: str, max_length: int = 4000) -> str:
     return redacted[-max_length:]
 
 
-def _artifact_checksums(config_path: Path, result_path: Path, strategy_path: Optional[Path]) -> dict[str, str]:
+def _artifact_checksums(
+    config_path: Path,
+    result_path: Path,
+    strategy_path: Optional[Path],
+    datadir: Optional[Path] = None,
+) -> dict[str, str]:
     """Return byte-level evidence only for artifacts that must exist on SUCCESS."""
     paths = {"config": config_path, "result": result_path, "strategy": strategy_path}
     checksums: dict[str, str] = {}
@@ -430,4 +440,18 @@ def _artifact_checksums(config_path: Path, result_path: Path, strategy_path: Opt
         if path is None or not path.is_file():
             continue
         checksums[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    if datadir is not None and datadir.is_dir():
+        digest = hashlib.sha256()
+        data_files = sorted(
+            path
+            for path in datadir.rglob("*")
+            if path.is_file()
+            and any(path.name.lower().endswith(suffix) for suffix in SUPPORTED_DATA_SUFFIXES)
+        )
+        for path in data_files:
+            digest.update(str(path.relative_to(datadir)).encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(hashlib.sha256(path.read_bytes()).digest())
+        if data_files:
+            checksums["market_data"] = digest.hexdigest()
     return checksums

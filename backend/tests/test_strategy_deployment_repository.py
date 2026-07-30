@@ -19,6 +19,7 @@ from app.models import (
     StrategyCandidateApproval,
     StrategyDeployment,
     StrategyScore,
+    StrategyValidationPlan,
     StrategyVersion,
 )
 from app.repositories import (
@@ -124,6 +125,38 @@ def seed_approved_candidate(
     )
     db.add(backtest_result)
     db.flush()
+    validation_plan = StrategyValidationPlan(
+        strategy_version_id=version.id,
+        promotion_backtest_result_id=backtest_result.id,
+        provider_name="freqtrade",
+        strategy_code_digest=version.code_hash,
+        plan_digest=hashlib.sha256(f"plan{suffix}".encode()).hexdigest(),
+        plan_snapshot={"test_scope": "deployment mechanics"},
+        status="PASSED",
+        evidence_digest=hashlib.sha256(f"evidence{suffix}".encode()).hexdigest(),
+        promotion_evidence={
+            "window_result_ids": [
+                backtest_result.id * 10 + index for index in range(1, 5)
+            ]
+        },
+    )
+    db.add(validation_plan)
+    db.flush()
+    backtest_result.metrics_snapshot = {
+        **backtest_result.metrics_snapshot,
+        "promotion_evidence": {
+            **backtest_result.metrics_snapshot["promotion_evidence"],
+            "validation_matrix": {
+                "plan_id": validation_plan.id,
+                "plan_digest": validation_plan.plan_digest,
+                "evidence_digest": validation_plan.evidence_digest,
+                "window_result_ids": validation_plan.promotion_evidence[
+                    "window_result_ids"
+                ],
+                "provider": "freqtrade",
+            },
+        },
+    }
     score = StrategyScore(
         strategy_id=strategy.id,
         strategy_version_id=version.id,

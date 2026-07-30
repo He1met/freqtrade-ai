@@ -41,6 +41,7 @@ from app.models.strategy_failure_reason import StrategyFailureReason
 from app.models.strategy_score import StrategyScore
 from app.models.strategy_deployment import SignalEvaluation, StrategyDeployment
 from app.models.strategy_generation_run import StrategyGenerationRun
+from app.models.strategy_validation import StrategyValidationPlan, StrategyValidationWindow
 
 __all__ = [
     "ApprovedExecution",
@@ -87,6 +88,8 @@ __all__ = [
     "StrategyGenerationRun",
     "StrategyScore",
     "StrategyVersion",
+    "StrategyValidationPlan",
+    "StrategyValidationWindow",
     "SignalEvaluation",
     "TradeIntent",
 ]

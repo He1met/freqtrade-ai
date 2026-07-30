@@ -342,6 +342,13 @@ class BacktestArtifactIngestService:
             "result_path": str(result_path),
             "status": manifest.get("status") if manifest is not None else None,
             "manifest_version": manifest.get("manifest_version") if manifest is not None else None,
+            "provider": "freqtrade" if manifest is not None else None,
+            "execution_id": manifest.get("execution_id") if manifest is not None else None,
+            "checksums": manifest.get("checksums") if manifest is not None else None,
+            "datadir": manifest.get("datadir") if manifest is not None else None,
+            "manifest_checksum": self._sha256(manifest_path)
+            if manifest_path is not None and manifest_path.is_file()
+            else None,
             "config_path": manifest.get("config_path") if manifest is not None else task.config_path,
             "return_code": manifest.get("return_code") if manifest is not None else None,
             "blocked_reason": manifest.get("blocked_reason") if manifest is not None else None,
