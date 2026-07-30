@@ -97,6 +97,10 @@ class StrategyValidationWindow(Base):
         UniqueConstraint("backtest_run_id", name="strategy_validation_windows_run_unique"),
         UniqueConstraint("backtest_task_id", name="strategy_validation_windows_task_unique"),
         UniqueConstraint("backtest_result_id", name="strategy_validation_windows_result_unique"),
+        UniqueConstraint(
+            "execution_id",
+            name="strategy_validation_windows_execution_id_unique",
+        ),
     )
 
     id: Mapped[int] = mapped_column(
@@ -111,7 +115,13 @@ class StrategyValidationWindow(Base):
     )
     ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
     window_kind: Mapped[str] = mapped_column(String(24), nullable=False)
+    required_market_state: Mapped[Optional[str]] = mapped_column(String(24))
     market_state: Mapped[Optional[str]] = mapped_column(String(24))
+    market_state_source: Mapped[Optional[str]] = mapped_column(String(80))
+    market_state_algorithm: Mapped[Optional[str]] = mapped_column(String(80))
+    market_state_parameters: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    market_state_evidence: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    market_state_evidence_digest: Mapped[Optional[str]] = mapped_column(String(64))
     timerange: Mapped[str] = mapped_column(String(80), nullable=False)
     profile_snapshot: Mapped[dict] = mapped_column(JSON, nullable=False)
     expected_config_digest: Mapped[Optional[str]] = mapped_column(String(64))

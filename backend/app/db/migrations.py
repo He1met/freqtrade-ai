@@ -82,8 +82,6 @@ RUNTIME_APPLICATION_TABLES = (
     "strategy_deployments",
     "signal_evaluations",
     "risk_budgets",
-    "strategy_validation_plans",
-    "strategy_validation_windows",
 )
 
 
@@ -696,6 +694,17 @@ def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
             "invalidexchangeordertransition",
             "old.request_snapshot::jsonb",
             "old.exchange_order_idisnotnull",
+        ),
+        "strategy_validation_plans_immutable": (
+            "beforedeleteorupdateon",
+            "strategyvalidationplansareimmutable",
+            "old.plan_digestisdistinctfromnew.plan_digest",
+        ),
+        "strategy_validation_windows_immutable": (
+            "beforedeleteorupdateon",
+            "strategyvalidationwindowsareimmutable",
+            "old.execution_idisnotnull",
+            "old.expected_market_data_digestisdistinctfromnew.expected_market_data_digest",
         ),
     }
     for table_name in (
@@ -1772,6 +1781,7 @@ def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
                 )
     if "freqtrade" in roles:
         problems.extend(_runtime_application_acl_problems(bind, schema_name))
+        problems.extend(_strategy_validation_acl_problems(bind, schema_name))
     return problems
 
 
@@ -4333,6 +4343,74 @@ def _runtime_application_acl_problems(
     return problems
 
 
+def _strategy_validation_acl_problems(
+    connection: Connection,
+    schema_name: str,
+) -> list[str]:
+    """Verify immutable validation identity and narrow mutable-column updates."""
+
+    problems: list[str] = []
+    mutable_columns = {
+        "strategy_validation_plans": {
+            "status",
+            "promotion_evidence",
+            "evidence_digest",
+            "blocked_reason",
+            "completed_at",
+        },
+        "strategy_validation_windows": {
+            "expected_config_digest",
+            "backtest_run_id",
+            "backtest_task_id",
+            "backtest_result_id",
+            "execution_id",
+            "artifact_manifest_checksum",
+            "result_checksum",
+            "market_state",
+            "market_state_source",
+            "market_state_algorithm",
+            "market_state_parameters",
+            "market_state_evidence",
+            "market_state_evidence_digest",
+            "status",
+            "blocked_reason",
+        },
+    }
+    inspector = inspect(connection)
+    tables = set(inspector.get_table_names(schema=schema_name))
+    for table_name, allowed_updates in mutable_columns.items():
+        if table_name not in tables:
+            problems.append("strategy validation ACL table missing: " + table_name)
+            continue
+        qualified = f"{schema_name}.{table_name}"
+        can_select, can_insert, can_table_update, can_delete = connection.execute(
+            text(
+                "SELECT "
+                "has_table_privilege('freqtrade', :table, 'SELECT'), "
+                "has_table_privilege('freqtrade', :table, 'INSERT'), "
+                "has_table_privilege('freqtrade', :table, 'UPDATE'), "
+                "has_table_privilege('freqtrade', :table, 'DELETE')"
+            ),
+            {"table": qualified},
+        ).one()
+        if not (can_select and can_insert) or can_table_update or can_delete:
+            problems.append("strategy validation table ACL mismatch: " + table_name)
+        for column in inspector.get_columns(table_name, schema=schema_name):
+            can_update = connection.execute(
+                text(
+                    "SELECT has_column_privilege("
+                    "'freqtrade', :table, :column, 'UPDATE')"
+                ),
+                {"table": qualified, "column": column["name"]},
+            ).scalar_one()
+            if bool(can_update) != (column["name"] in allowed_updates):
+                problems.append(
+                    "strategy validation column ACL mismatch: "
+                    f"{table_name}.{column['name']}"
+                )
+    return problems
+
+
 def _add_okx_demo_soak(connection: Connection) -> None:
     """Add #453 evidence tables without another runtime or database."""
 
@@ -4588,13 +4666,43 @@ def _add_strategy_validation_matrix(connection: Connection) -> None:
         Base.metadata.tables[table_name].create(bind=connection, checkfirst=True)
     schema_name = connection.execute(text("SELECT current_schema()")).scalar_one()
     quoted_schema = connection.dialect.identifier_preparer.quote_schema(schema_name)
-    for table_name in ("strategy_validation_plans", "strategy_validation_windows"):
+    quote = connection.dialect.identifier_preparer.quote
+    mutable_columns = {
+        "strategy_validation_plans": (
+            "status",
+            "promotion_evidence",
+            "evidence_digest",
+            "blocked_reason",
+            "completed_at",
+        ),
+        "strategy_validation_windows": (
+            "expected_config_digest",
+            "backtest_run_id",
+            "backtest_task_id",
+            "backtest_result_id",
+            "execution_id",
+            "artifact_manifest_checksum",
+            "result_checksum",
+            "market_state",
+            "market_state_source",
+            "market_state_algorithm",
+            "market_state_parameters",
+            "market_state_evidence",
+            "market_state_evidence_digest",
+            "status",
+            "blocked_reason",
+        ),
+    }
+    for table_name, update_columns in mutable_columns.items():
         quoted_table = connection.dialect.identifier_preparer.quote(table_name)
+        quoted_updates = ", ".join(quote(name) for name in update_columns)
         connection.execute(
             text(
                 f"REVOKE ALL ON TABLE {quoted_schema}.{quoted_table} "
                 f"FROM PUBLIC, freqtrade; "
-                f"GRANT SELECT, INSERT, UPDATE ON TABLE "
+                f"GRANT SELECT, INSERT ON TABLE "
+                f"{quoted_schema}.{quoted_table} TO freqtrade; "
+                f"GRANT UPDATE ({quoted_updates}) ON TABLE "
                 f"{quoted_schema}.{quoted_table} TO freqtrade"
             )
         )
@@ -4608,6 +4716,70 @@ def _add_strategy_validation_matrix(connection: Connection) -> None:
                 f"{quoted_schema}.{quoted_sequence} TO freqtrade"
             )
         )
+    connection.execute(
+        text(
+            f"""
+            CREATE OR REPLACE FUNCTION {quoted_schema}.guard_strategy_validation_plan()
+            RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+                IF TG_OP = 'DELETE' THEN
+                    RAISE EXCEPTION 'strategy validation plans are immutable';
+                END IF;
+                IF OLD.strategy_version_id IS DISTINCT FROM NEW.strategy_version_id
+                   OR OLD.promotion_backtest_result_id IS DISTINCT FROM NEW.promotion_backtest_result_id
+                   OR OLD.provider_name IS DISTINCT FROM NEW.provider_name
+                   OR OLD.strategy_code_digest IS DISTINCT FROM NEW.strategy_code_digest
+                   OR OLD.plan_digest IS DISTINCT FROM NEW.plan_digest
+                   OR OLD.plan_snapshot::jsonb IS DISTINCT FROM NEW.plan_snapshot::jsonb
+                   OR OLD.created_at IS DISTINCT FROM NEW.created_at THEN
+                    RAISE EXCEPTION 'strategy validation plan identity is immutable';
+                END IF;
+                RETURN NEW;
+            END
+            $$;
+            DROP TRIGGER IF EXISTS strategy_validation_plans_immutable
+                ON {quoted_schema}.strategy_validation_plans;
+            CREATE TRIGGER strategy_validation_plans_immutable
+                BEFORE UPDATE OR DELETE ON {quoted_schema}.strategy_validation_plans
+                FOR EACH ROW EXECUTE FUNCTION
+                {quoted_schema}.guard_strategy_validation_plan();
+
+            CREATE OR REPLACE FUNCTION {quoted_schema}.guard_strategy_validation_window()
+            RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+                IF TG_OP = 'DELETE' THEN
+                    RAISE EXCEPTION 'strategy validation windows are immutable';
+                END IF;
+                IF OLD.validation_plan_id IS DISTINCT FROM NEW.validation_plan_id
+                   OR OLD.ordinal IS DISTINCT FROM NEW.ordinal
+                   OR OLD.window_kind IS DISTINCT FROM NEW.window_kind
+                   OR OLD.required_market_state IS DISTINCT FROM NEW.required_market_state
+                   OR OLD.timerange IS DISTINCT FROM NEW.timerange
+                   OR OLD.profile_snapshot::jsonb IS DISTINCT FROM NEW.profile_snapshot::jsonb
+                   OR OLD.expected_market_data_digest IS DISTINCT FROM NEW.expected_market_data_digest
+                   OR OLD.created_at IS DISTINCT FROM NEW.created_at
+                   OR (OLD.backtest_run_id IS NOT NULL
+                       AND OLD.backtest_run_id IS DISTINCT FROM NEW.backtest_run_id)
+                   OR (OLD.backtest_task_id IS NOT NULL
+                       AND OLD.backtest_task_id IS DISTINCT FROM NEW.backtest_task_id)
+                   OR (OLD.backtest_result_id IS NOT NULL
+                       AND OLD.backtest_result_id IS DISTINCT FROM NEW.backtest_result_id)
+                   OR (OLD.execution_id IS NOT NULL
+                       AND OLD.execution_id IS DISTINCT FROM NEW.execution_id) THEN
+                    RAISE EXCEPTION 'strategy validation window identity is immutable';
+                END IF;
+                RETURN NEW;
+            END
+            $$;
+            DROP TRIGGER IF EXISTS strategy_validation_windows_immutable
+                ON {quoted_schema}.strategy_validation_windows;
+            CREATE TRIGGER strategy_validation_windows_immutable
+                BEFORE UPDATE OR DELETE ON {quoted_schema}.strategy_validation_windows
+                FOR EACH ROW EXECUTE FUNCTION
+                {quoted_schema}.guard_strategy_validation_window();
+            """
+        )
+    )
 
 
 def upgrade_database(engine: Engine) -> str:

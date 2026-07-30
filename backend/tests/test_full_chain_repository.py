@@ -33,13 +33,19 @@ from app.repositories.full_chain import (
     require_authoritative_reconciliation,
 )
 from app.repositories.research_jobs import ResearchJobRepository
+from app.services.strategy_validation_matrix import StrategyValidationMatrixService
 
 
 NOW = datetime(2026, 7, 27, 8, 0, tzinfo=timezone.utc)
 
 
 @pytest.fixture
-def db():
+def db(monkeypatch):
+    monkeypatch.setattr(
+        StrategyValidationMatrixService,
+        "assert_current_for_promotion",
+        lambda self, plan: plan.promotion_evidence,
+    )
     engine = create_engine(
         "sqlite://",
         connect_args={"check_same_thread": False},

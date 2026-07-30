@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+import gzip
 import hashlib
 import json
 from pathlib import Path
@@ -27,6 +28,7 @@ from app.models import (
     StrategyVersion,
 )
 from app.schemas.backtest import LocalBacktestTriggerRequest
+from app.services.backtest_artifact_ingest import backtest_ingest_receipt
 from app.services.local_backtest_trigger import LocalBacktestTriggerService
 
 
@@ -78,7 +80,10 @@ class StrategyValidationMatrixService:
         if provider_name != "freqtrade":
             raise StrategyValidationBlocked("validation provider must be real Freqtrade")
 
-        normalized = self._validate_specs(windows)
+        normalized = self._validate_specs(
+            windows,
+            primary_timerange=promotion_result.timerange,
+        )
         code_digest = self._strategy_code_digest(version)
         snapshot = {
             "schema_version": "strategy-validation-matrix-v1",
@@ -119,7 +124,7 @@ class StrategyValidationMatrixService:
                     validation_plan_id=plan.id,
                     ordinal=ordinal,
                     window_kind=spec.window_kind,
-                    market_state=spec.market_state,
+                    required_market_state=spec.market_state,
                     timerange=spec.timerange,
                     profile_snapshot=spec.profile,
                     expected_market_data_digest=spec.expected_market_data_digest,
@@ -223,57 +228,10 @@ class StrategyValidationMatrixService:
         """Aggregate only independent persisted, checksummed Freqtrade results."""
 
         plan = self._require_plan(plan_id)
-        if plan.status == "PASSED":
-            return plan
-        if _stable_digest(plan.plan_snapshot) != plan.plan_digest:
-            return self._block(plan, "pre-declared validation plan checksum drift detected")
-        if self._strategy_code_digest(plan.strategy_version) != plan.strategy_code_digest:
-            return self._block(plan, "strategy version checksum drift detected")
-        blockers: list[str] = []
-        seen_runs: set[int] = set()
-        seen_tasks: set[int] = set()
-        seen_results: set[int] = set()
-        seen_execution_ids: set[str] = set()
-        window_evidence: list[dict[str, object]] = []
-
-        for window in plan.windows:
-            blocker, evidence = self._validate_window(
-                plan,
-                window,
-                seen_runs=seen_runs,
-                seen_tasks=seen_tasks,
-                seen_results=seen_results,
-                seen_execution_ids=seen_execution_ids,
-            )
-            if blocker:
-                window.status = "BLOCKED"
-                window.blocked_reason = blocker
-                blockers.append(f"window {window.ordinal}: {blocker}")
-            else:
-                window.status = "PASSED"
-                window.blocked_reason = None
-                window_evidence.append(evidence)
-
-        if blockers:
-            return self._block(plan, "; ".join(blockers))
-
-        oos = next(item for item in window_evidence if item["window_kind"] == "OOS")
-        walk_forward = [
-            item for item in window_evidence if item["window_kind"] == "WALK_FORWARD"
-        ]
-        payload = {
-            "schema_version": "strategy-validation-matrix-v1",
-            "status": "PASSED",
-            "validation_plan_id": plan.id,
-            "plan_digest": plan.plan_digest,
-            "provider": plan.provider_name,
-            "strategy_version_id": plan.strategy_version_id,
-            "strategy_code_digest": plan.strategy_code_digest,
-            "window_result_ids": [item["backtest_result_id"] for item in window_evidence],
-            "out_of_sample": oos,
-            "walk_forward": walk_forward,
-            "market_states": sorted(str(item["market_state"]) for item in walk_forward),
-        }
+        try:
+            payload = self._collect_current_evidence(plan, persist=True)
+        except StrategyValidationBlocked as exc:
+            return self._block(plan, str(exc))
         evidence_digest = _stable_digest(payload)
         plan.status = "PASSED"
         plan.promotion_evidence = payload
@@ -282,6 +240,7 @@ class StrategyValidationMatrixService:
         plan.completed_at = datetime.now(timezone.utc)
 
         result = plan.promotion_result
+        oos = payload["out_of_sample"]
         metrics = dict(result.metrics_snapshot or {})
         metrics["promotion_evidence"] = {
             "net_of_costs": True,
@@ -307,6 +266,100 @@ class StrategyValidationMatrixService:
         self.db.refresh(plan)
         return plan
 
+    def assert_current_for_promotion(
+        self,
+        plan: StrategyValidationPlan,
+    ) -> dict[str, object]:
+        """Re-read every DB row and artifact even when the plan says PASSED."""
+
+        plan_id = plan.id
+        self.db.expire_all()
+        plan = self._require_plan(plan_id)
+        if plan.status != "PASSED":
+            raise StrategyValidationBlocked(
+                "promotion requires a passing persisted validation matrix"
+            )
+        payload = self._collect_current_evidence(plan, persist=False)
+        digest = _stable_digest(payload)
+        if plan.promotion_evidence != payload or plan.evidence_digest != digest:
+            raise StrategyValidationBlocked(
+                "persisted promotion evidence no longer matches current validation lineage"
+            )
+        if any(window.status != "PASSED" for window in plan.windows):
+            raise StrategyValidationBlocked(
+                "persisted validation windows are not all PASSED"
+            )
+        return payload
+
+    def _collect_current_evidence(
+        self,
+        plan: StrategyValidationPlan,
+        *,
+        persist: bool,
+    ) -> dict[str, object]:
+        if _stable_digest(plan.plan_snapshot) != plan.plan_digest:
+            raise StrategyValidationBlocked(
+                "pre-declared validation plan checksum drift detected"
+            )
+        if self._strategy_code_digest(plan.strategy_version) != plan.strategy_code_digest:
+            raise StrategyValidationBlocked("strategy version checksum drift detected")
+        primary = plan.promotion_result
+        primary_ids = {
+            "run": primary.backtest_run_id,
+            "task": primary.backtest_task_id,
+            "result": primary.id,
+        }
+        blockers: list[str] = []
+        seen_runs: set[int] = set()
+        seen_tasks: set[int] = set()
+        seen_results: set[int] = set()
+        seen_execution_ids: set[str] = set()
+        window_evidence: list[dict[str, object]] = []
+
+        for window in plan.windows:
+            blocker, evidence = self._validate_window(
+                plan,
+                window,
+                seen_runs=seen_runs,
+                seen_tasks=seen_tasks,
+                seen_results=seen_results,
+                seen_execution_ids=seen_execution_ids,
+                primary_ids=primary_ids,
+                primary_timerange=primary.timerange,
+                persist=persist,
+            )
+            if blocker:
+                if persist:
+                    window.status = "BLOCKED"
+                    window.blocked_reason = blocker
+                blockers.append(f"window {window.ordinal}: {blocker}")
+            else:
+                if persist:
+                    window.status = "PASSED"
+                    window.blocked_reason = None
+                window_evidence.append(evidence)
+
+        if blockers:
+            raise StrategyValidationBlocked("; ".join(blockers))
+
+        oos = next(item for item in window_evidence if item["window_kind"] == "OOS")
+        walk_forward = [
+            item for item in window_evidence if item["window_kind"] == "WALK_FORWARD"
+        ]
+        return {
+            "schema_version": "strategy-validation-matrix-v1",
+            "status": "PASSED",
+            "validation_plan_id": plan.id,
+            "plan_digest": plan.plan_digest,
+            "provider": plan.provider_name,
+            "strategy_version_id": plan.strategy_version_id,
+            "strategy_code_digest": plan.strategy_code_digest,
+            "window_result_ids": [item["backtest_result_id"] for item in window_evidence],
+            "out_of_sample": oos,
+            "walk_forward": walk_forward,
+            "market_states": sorted(str(item["market_state"]) for item in walk_forward),
+        }
+
     def _validate_window(
         self,
         plan: StrategyValidationPlan,
@@ -316,6 +369,9 @@ class StrategyValidationMatrixService:
         seen_tasks: set[int],
         seen_results: set[int],
         seen_execution_ids: set[str],
+        primary_ids: dict[str, int],
+        primary_timerange: Optional[str],
+        persist: bool,
     ) -> tuple[Optional[str], dict[str, object]]:
         if window.backtest_run_id is None or window.backtest_task_id is None:
             return "independent run/task is missing", {}
@@ -327,7 +383,7 @@ class StrategyValidationMatrixService:
             declared.get(name) != value
             for name, value in (
                 ("window_kind", window.window_kind),
-                ("market_state", window.market_state),
+                ("market_state", window.required_market_state),
                 ("timerange", window.timerange),
                 ("profile", window.profile_snapshot),
                 ("expected_market_data_digest", window.expected_market_data_digest),
@@ -340,6 +396,8 @@ class StrategyValidationMatrixService:
             return "persisted run/task lineage is invalid", {}
         if run.strategy_version_id != plan.strategy_version_id:
             return "run strategy version does not match plan", {}
+        if run.id == primary_ids["run"] or task.id == primary_ids["task"]:
+            return "validation run/task reuses the primary promotion lineage", {}
         if run.id in seen_runs or task.id in seen_tasks:
             return "run/task is reused by another validation window", {}
         seen_runs.add(run.id)
@@ -358,8 +416,12 @@ class StrategyValidationMatrixService:
         if result.id in seen_results:
             return "BacktestResult is reused by another validation window", {}
         seen_results.add(result.id)
+        if result.id == primary_ids["result"]:
+            return "validation result reuses the primary promotion result", {}
         if result.timerange != window.timerange:
             return "result timerange does not match pre-declared window", {}
+        if _timeranges_overlap(primary_timerange, result.timerange):
+            return "validation timerange overlaps the primary promotion timerange", {}
         if result.total_trades is None or result.total_trades < 30:
             return "validation result has fewer than 30 trades", {}
         if result.profit_pct is None or result.profit_pct <= 0:
@@ -398,6 +460,45 @@ class StrategyValidationMatrixService:
         actual_manifest_checksum = _sha256_file_or_none(Path(manifest_path))
         if actual_manifest_checksum != manifest.get("manifest_checksum"):
             return "artifact manifest checksum drift detected", {}
+        expected_receipt = backtest_ingest_receipt(
+            manifest_checksum=actual_manifest_checksum,
+            backtest_run_id=run.id,
+            backtest_task_id=task.id,
+            strategy_version_id=plan.strategy_version_id,
+            execution_id=execution_id,
+        )
+        if parser_metadata.get("ingest_receipt") != expected_receipt:
+            return "session-backed artifact ingest receipt is missing or invalid", {}
+        actual_manifest = _read_json_object(Path(manifest_path))
+        if actual_manifest is None:
+            return "artifact manifest is missing or not valid JSON", {}
+        expected_manifest_lineage = {
+            "manifest_version": 2,
+            "status": "SUCCESS",
+            "execution_scope_id": run.execution_scope_id,
+            "run_id": run.id,
+            "task_id": task.id,
+            "strategy_version_id": plan.strategy_version_id,
+            "execution_id": execution_id,
+            "result_path": result_path,
+            "config_path": config_path,
+            "strategy_path": strategy_path,
+            "datadir": datadir,
+            "checksums": checksums,
+            "return_code": 0,
+        }
+        if any(
+            actual_manifest.get(key) != value
+            for key, value in expected_manifest_lineage.items()
+        ):
+            return "session-backed Freqtrade manifest lineage does not match", {}
+        command_args = actual_manifest.get("command_args")
+        if (
+            not isinstance(command_args, list)
+            or "backtesting" not in command_args
+            or "--export" not in command_args
+        ):
+            return "Freqtrade backtesting command provenance is missing", {}
         actual = {
             "config": _sha256_file_or_none(Path(config_path)),
             "result": _sha256_file_or_none(Path(result_path)),
@@ -414,14 +515,47 @@ class StrategyValidationMatrixService:
         if plan.strategy_code_digest != checksums["strategy"]:
             return "strategy code checksum does not match immutable version", {}
 
-        window.backtest_result_id = result.id
-        window.execution_id = execution_id
-        window.artifact_manifest_checksum = actual_manifest_checksum
-        window.result_checksum = checksums["result"]
+        regime = _classify_market_regime(
+            Path(datadir),
+            timerange=window.timerange,
+            market_data_digest=checksums["market_data"],
+        )
+        if regime is None:
+            return "market-regime classification evidence is unavailable", {}
+        if (
+            window.window_kind == "WALK_FORWARD"
+            and regime["market_state"] != window.required_market_state
+        ):
+            return "computed market regime does not match the pre-declared window", {}
+        if persist:
+            window.backtest_result_id = result.id
+            window.execution_id = execution_id
+            window.artifact_manifest_checksum = actual_manifest_checksum
+            window.result_checksum = checksums["result"]
+            window.market_state = str(regime["market_state"])
+            window.market_state_source = str(regime["source"])
+            window.market_state_algorithm = str(regime["algorithm"])
+            window.market_state_parameters = dict(regime["parameters"])
+            window.market_state_evidence = dict(regime)
+            window.market_state_evidence_digest = _stable_digest(regime)
+        elif (
+            window.backtest_result_id != result.id
+            or window.execution_id != execution_id
+            or window.artifact_manifest_checksum != actual_manifest_checksum
+            or window.result_checksum != checksums["result"]
+            or window.market_state != regime["market_state"]
+            or window.market_state_source != regime["source"]
+            or window.market_state_algorithm != regime["algorithm"]
+            or window.market_state_parameters != regime["parameters"]
+            or window.market_state_evidence != regime
+            or window.market_state_evidence_digest != _stable_digest(regime)
+        ):
+            return "persisted window evidence no longer matches current artifacts", {}
         return None, {
             "window_id": window.id,
             "window_kind": window.window_kind,
-            "market_state": window.market_state,
+            "market_state": regime["market_state"],
+            "market_state_evidence_digest": _stable_digest(regime),
             "timerange": window.timerange,
             "backtest_run_id": run.id,
             "backtest_task_id": task.id,
@@ -436,7 +570,10 @@ class StrategyValidationMatrixService:
         }
 
     def _validate_specs(
-        self, windows: list[ValidationWindowSpec]
+        self,
+        windows: list[ValidationWindowSpec],
+        *,
+        primary_timerange: Optional[str],
     ) -> list[ValidationWindowSpec]:
         if len(windows) < 4:
             raise StrategyValidationBlocked("plan requires one OOS and at least three walk-forward windows")
@@ -459,6 +596,13 @@ class StrategyValidationMatrixService:
         ordered = sorted(intervals)
         if any(current[0] < previous[1] for previous, current in zip(ordered, ordered[1:])):
             raise StrategyValidationBlocked("validation windows overlap")
+        if any(
+            _timeranges_overlap(primary_timerange, spec.timerange)
+            for spec in windows
+        ):
+            raise StrategyValidationBlocked(
+                "validation windows overlap the primary promotion timerange"
+            )
         return list(windows)
 
     def _strategy_code_digest(self, version: StrategyVersion) -> str:
@@ -524,3 +668,145 @@ def _market_data_digest(datadir: Path) -> Optional[str]:
         digest.update(b"\0")
         digest.update(hashlib.sha256(path.read_bytes()).digest())
     return digest.hexdigest()
+
+
+def _read_json_object(path: Path) -> Optional[dict[str, object]]:
+    if not path.is_file():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _timeranges_overlap(left: Optional[str], right: Optional[str]) -> bool:
+    left_match = TIMERANGE_RE.fullmatch(left or "")
+    right_match = TIMERANGE_RE.fullmatch(right or "")
+    if left_match is None or right_match is None:
+        return True
+    return (
+        left_match["start"] < right_match["end"]
+        and right_match["start"] < left_match["end"]
+    )
+
+
+def _classify_market_regime(
+    datadir: Path,
+    *,
+    timerange: str,
+    market_data_digest: str,
+) -> Optional[dict[str, object]]:
+    """Derive the regime from persisted market files, never from a caller label."""
+
+    match = TIMERANGE_RE.fullmatch(timerange)
+    if match is None:
+        return None
+    points: list[tuple[str, float]] = []
+    source_paths: list[str] = []
+    for path in sorted(datadir.rglob("*")):
+        if not path.is_file() or not any(
+            path.name.lower().endswith(suffix) for suffix in SUPPORTED_DATA_SUFFIXES
+        ):
+            continue
+        loaded = _load_market_points(path)
+        if loaded:
+            source_paths.append(str(path.relative_to(datadir)))
+            points.extend(loaded)
+    selected = sorted(
+        (
+            timestamp,
+            close,
+        )
+        for timestamp, close in points
+        if match["start"] <= timestamp[:8] < match["end"]
+    )
+    if len(selected) < 2 or selected[0][1] <= 0:
+        return None
+    parameters = {
+        "bull_threshold": 0.05,
+        "bear_threshold": -0.05,
+        "minimum_observations": 2,
+    }
+    net_return = selected[-1][1] / selected[0][1] - 1.0
+    if net_return >= parameters["bull_threshold"]:
+        state = "bull"
+    elif net_return <= parameters["bear_threshold"]:
+        state = "bear"
+    else:
+        state = "range"
+    return {
+        "source": "persisted_market_data",
+        "source_artifacts": source_paths,
+        "algorithm": "window-close-return-v1",
+        "parameters": parameters,
+        "market_data_digest": market_data_digest,
+        "timerange": timerange,
+        "observation_count": len(selected),
+        "first_timestamp": selected[0][0],
+        "last_timestamp": selected[-1][0],
+        "first_close": selected[0][1],
+        "last_close": selected[-1][1],
+        "net_return": net_return,
+        "market_state": state,
+    }
+
+
+def _load_market_points(path: Path) -> list[tuple[str, float]]:
+    name = path.name.lower()
+    rows: object
+    try:
+        if name.endswith(".json"):
+            rows = json.loads(path.read_text(encoding="utf-8"))
+        elif name.endswith(".json.gz"):
+            with gzip.open(path, "rt", encoding="utf-8") as handle:
+                rows = json.load(handle)
+        else:
+            import pandas as pd  # type: ignore[import-not-found]
+
+            if name.endswith(".feather"):
+                rows = pd.read_feather(path).to_dict("records")
+            elif name.endswith(".parquet"):
+                rows = pd.read_parquet(path).to_dict("records")
+            elif name.endswith(".csv"):
+                rows = pd.read_csv(path).to_dict("records")
+            else:
+                return []
+    except Exception:
+        return []
+    if isinstance(rows, dict):
+        rows = rows.get("data") or rows.get("candles") or rows.get("rows")
+    if not isinstance(rows, list):
+        return []
+    points: list[tuple[str, float]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        timestamp = row.get("date", row.get("datetime", row.get("timestamp")))
+        close = row.get("close")
+        try:
+            close_value = float(close)
+        except (TypeError, ValueError):
+            continue
+        normalized = _normalize_market_timestamp(timestamp)
+        if normalized is not None:
+            points.append((normalized, close_value))
+    return points
+
+
+def _normalize_market_timestamp(value: object) -> Optional[str]:
+    if hasattr(value, "strftime"):
+        try:
+            return value.strftime("%Y%m%d%H%M%S")  # type: ignore[union-attr]
+        except (TypeError, ValueError):
+            return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        seconds = float(value) / 1000.0 if float(value) > 10_000_000_000 else float(value)
+        try:
+            return datetime.fromtimestamp(seconds, tz=timezone.utc).strftime("%Y%m%d%H%M%S")
+        except (OSError, OverflowError, ValueError):
+            return None
+    if not isinstance(value, str):
+        return None
+    digits = "".join(character for character in value if character.isdigit())
+    return digits[:14].ljust(14, "0") if len(digits) >= 8 else None

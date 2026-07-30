@@ -35,6 +35,7 @@ from app.repositories.full_chain import (
     FullChainRepository,
 )
 from app.services.strategy_promotion import promotion_candidate_digest
+from app.services.strategy_validation_matrix import StrategyValidationMatrixService
 
 
 NOW = datetime(2026, 7, 29, 12, 0, tzinfo=timezone.utc)
@@ -42,7 +43,12 @@ POLICY_DIGEST = "d" * 64
 
 
 @pytest.fixture()
-def session_factory(tmp_path: Path):
+def session_factory(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        StrategyValidationMatrixService,
+        "assert_current_for_promotion",
+        lambda self, plan: plan.promotion_evidence,
+    )
     engine = create_database_engine(
         f"sqlite+pysqlite:///{tmp_path / 'strategy-deployment.sqlite'}"
     )

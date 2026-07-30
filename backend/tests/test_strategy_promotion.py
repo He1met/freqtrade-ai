@@ -64,14 +64,9 @@ def _plan() -> StrategyValidationPlan:
     )
 
 
-def test_validated_strategy_has_explicit_promotion_evidence() -> None:
-    assessment = assess_strategy_promotion(
-        _result(), _score(), validation_plan=_plan()
-    )
-
-    assert assessment["policy"]["policy_version"] == "strategy-promotion-v1"
-    assert assessment["net_of_costs"] is True
-    assert assessment["walk_forward"]["market_states"] == ["bear", "bull", "range"]
+def test_detached_validation_metadata_cannot_impersonate_persisted_matrix() -> None:
+    with pytest.raises(StrategyPromotionBlocked, match="session-backed"):
+        assess_strategy_promotion(_result(), _score(), validation_plan=_plan())
 
 
 @pytest.mark.parametrize(
@@ -107,5 +102,5 @@ def test_promotion_requires_profitable_oos_and_multiple_market_states() -> None:
             }
         }
     )
-    with pytest.raises(StrategyPromotionBlocked, match="out-of-sample result is not profitable"):
+    with pytest.raises(StrategyPromotionBlocked, match="session-backed"):
         assess_strategy_promotion(result, _score(), validation_plan=_plan())

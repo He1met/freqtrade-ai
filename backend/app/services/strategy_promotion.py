@@ -96,6 +96,24 @@ def assess_strategy_promotion(
         raise StrategyPromotionBlocked(
             "promotion requires a passing persisted validation matrix"
         )
+    session = object_session(result)
+    if session is None:
+        raise StrategyPromotionBlocked(
+            "promotion validation requires session-backed database lineage"
+        )
+    try:
+        from app.services.strategy_validation_matrix import (
+            StrategyValidationBlocked,
+            StrategyValidationMatrixService,
+        )
+
+        StrategyValidationMatrixService(session).assert_current_for_promotion(
+            persisted_plan
+        )
+    except StrategyValidationBlocked as exc:
+        raise StrategyPromotionBlocked(
+            "promotion validation matrix is stale or invalid: {}".format(exc)
+        ) from exc
     if (
         matrix.get("plan_id") != persisted_plan.id
         or matrix.get("plan_digest") != persisted_plan.plan_digest

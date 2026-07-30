@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.session import create_database_engine, create_session_factory
@@ -23,6 +24,7 @@ from app.services.strategy_promotion import (
     StrategyPromotionBlocked,
     assess_strategy_promotion,
 )
+from app.services.backtest_artifact_ingest import backtest_ingest_receipt
 from app.services.strategy_validation_matrix import (
     StrategyValidationBlocked,
     StrategyValidationMatrixService,
@@ -44,11 +46,14 @@ def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _seed_primary(db: Session, tmp_path: Path):
-    strategy_path = tmp_path / "MatrixStrategy.py"
+def _seed_primary(db: Session, tmp_path: Path, suffix: str = ""):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    strategy_path = tmp_path / f"MatrixStrategy{suffix}.py"
     strategy_path.write_text("class MatrixStrategy: pass\n", encoding="utf-8")
     strategies = StrategyRepository(db)
-    strategy = strategies.create(StrategyCreate(name="Matrix", slug="matrix"))
+    strategy = strategies.create(
+        StrategyCreate(name=f"Matrix{suffix}", slug=f"matrix{suffix}")
+    )
     version = strategies.create_version(
         StrategyVersionCreate(
             strategy_id=strategy.id,
@@ -121,10 +126,29 @@ def _specs(market_digest: str) -> list[ValidationWindowSpec]:
     ]
 
 
-def _attach_real_results(db: Session, plan, tmp_path: Path) -> None:
-    datadir = tmp_path / "market"
+def _write_market_data(datadir: Path) -> None:
     datadir.mkdir()
-    (datadir / "BTC_USDT_USDT-15m.feather").write_bytes(b"declared")
+    (datadir / "BTC_USDT_USDT-15m.json").write_text(
+        json.dumps(
+            [
+                {"date": "2024-01-01T00:00:00Z", "close": 100},
+                {"date": "2024-01-31T23:45:00Z", "close": 102},
+                {"date": "2024-02-01T00:00:00Z", "close": 100},
+                {"date": "2024-02-29T23:45:00Z", "close": 110},
+                {"date": "2024-03-01T00:00:00Z", "close": 110},
+                {"date": "2024-03-31T23:45:00Z", "close": 90},
+                {"date": "2024-04-01T00:00:00Z", "close": 100},
+                {"date": "2024-04-30T23:45:00Z", "close": 102},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def _attach_real_results(db: Session, plan, tmp_path: Path) -> None:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    datadir = tmp_path / "market"
+    _write_market_data(datadir)
     market_digest = _market_data_digest(datadir)
     assert market_digest is not None
     backtests = BacktestRepository(db)
@@ -158,16 +182,38 @@ def _attach_real_results(db: Session, plan, tmp_path: Path) -> None:
         assert task is not None
         execution_id = f"validation-plan-{plan.id}-window-{window.ordinal}"
         execution_ids.append(execution_id)
-        manifest_path.write_text(
-            json.dumps({"execution_id": execution_id, "window": window.ordinal}),
-            encoding="utf-8",
-        )
         checksums = {
             "config": _sha(config_path),
             "result": _sha(result_path),
             "strategy": plan.strategy_code_digest,
             "market_data": market_digest,
         }
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "manifest_version": 2,
+                    "status": "SUCCESS",
+                    "execution_scope_id": "LOCAL_DRY_RUN",
+                    "run_id": run.id,
+                    "task_id": task.id,
+                    "strategy_version_id": plan.strategy_version_id,
+                    "execution_id": execution_id,
+                    "result_path": str(result_path),
+                    "config_path": str(config_path),
+                    "strategy_path": plan.strategy_version.file_path,
+                    "datadir": str(datadir),
+                    "checksums": checksums,
+                    "return_code": 0,
+                    "command_args": [
+                        "freqtrade",
+                        "backtesting",
+                        "--export",
+                        "trades",
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
         result = BacktestResult(
             backtest_run_id=run.id,
             backtest_task_id=task.id,
@@ -179,6 +225,13 @@ def _attach_real_results(db: Session, plan, tmp_path: Path) -> None:
             metrics_snapshot={
                 "parser_metadata": {
                     "ingest_source": "local_backtest_artifact_ingest",
+                    "ingest_receipt": backtest_ingest_receipt(
+                        manifest_checksum=_sha(manifest_path),
+                        backtest_run_id=run.id,
+                        backtest_task_id=task.id,
+                        strategy_version_id=plan.strategy_version_id,
+                        execution_id=execution_id,
+                    ),
                     "artifact_manifest": {
                         "provider": "freqtrade",
                         "status": "SUCCESS",
@@ -209,8 +262,7 @@ def test_independent_matrix_persists_four_runs_and_is_required_for_promotion(
 ) -> None:
     version, primary = _seed_primary(db, tmp_path)
     datadir = tmp_path / "declared-market"
-    datadir.mkdir()
-    (datadir / "BTC_USDT_USDT-15m.feather").write_bytes(b"declared")
+    _write_market_data(datadir)
     market_digest = _market_data_digest(datadir)
     assert market_digest is not None
     service = StrategyValidationMatrixService(db)
@@ -241,6 +293,16 @@ def test_independent_matrix_persists_four_runs_and_is_required_for_promotion(
         strategy_version=version,
     )
     assert assessment["net_of_costs"] is True
+    assert assessment["policy"]["policy_version"] == "strategy-promotion-v1"
+
+    first_window_result = db.get(
+        BacktestResult, plan.windows[0].backtest_result_id
+    )
+    assert first_window_result is not None
+    Path(first_window_result.result_path).write_text("tampered-after-pass", encoding="utf-8")
+    with pytest.raises(StrategyPromotionBlocked, match="stale or invalid"):
+        assess_strategy_promotion(primary, score, strategy_version=version)
+    assert service.evaluate(plan.id).status == "BLOCKED"
 
 
 def test_plan_rejects_missing_market_state_and_overlapping_windows(
@@ -272,11 +334,26 @@ def test_plan_rejects_missing_market_state_and_overlapping_windows(
             windows=overlap,
         )
 
+    primary_overlap = _specs(digest)
+    primary_overlap[0] = ValidationWindowSpec(
+        window_kind="OOS",
+        timerange="20231215-20240115",
+        profile={},
+        expected_market_data_digest=digest,
+    )
+    with pytest.raises(StrategyValidationBlocked, match="primary"):
+        service.declare(
+            promotion_backtest_result_id=primary.id,
+            strategy_version_id=version.id,
+            windows=primary_overlap,
+        )
+
 
 @pytest.mark.parametrize(
     ("mutation", "expected"),
     [
         ("fixture", "fixture/offline"),
+        ("metadata", "session-backed artifact ingest receipt"),
         ("checksum", "result checksum drift"),
         ("missing", "run/task is not succeeded"),
     ],
@@ -300,6 +377,14 @@ def test_fixture_checksum_and_missing_window_fail_closed(
         snapshot = dict(result.metrics_snapshot)
         metadata = dict(snapshot["parser_metadata"])
         metadata["ingest_source"] = "fixture"
+        snapshot["parser_metadata"] = metadata
+        result.metrics_snapshot = snapshot
+    elif mutation == "metadata":
+        snapshot = dict(result.metrics_snapshot)
+        metadata = dict(snapshot["parser_metadata"])
+        manifest = dict(metadata["artifact_manifest"])
+        manifest["execution_id"] = "hand-made-fixture-execution"
+        metadata["artifact_manifest"] = manifest
         snapshot["parser_metadata"] = metadata
         result.metrics_snapshot = snapshot
     elif mutation == "checksum":
@@ -354,6 +439,68 @@ def test_single_result_trade_slices_cannot_claim_oos_or_walk_forward() -> None:
     )
     with pytest.raises(StrategyPromotionBlocked, match="validation_matrix"):
         assess_strategy_promotion(result, score)
+
+
+def test_primary_lineage_reuse_and_untrusted_market_label_are_blocked(
+    db: Session, tmp_path: Path
+) -> None:
+    version, primary = _seed_primary(db, tmp_path)
+    datadir = tmp_path / "declared-market"
+    _write_market_data(datadir)
+    digest = _market_data_digest(datadir)
+    assert digest is not None
+    service = StrategyValidationMatrixService(db)
+    plan = service.declare(
+        promotion_backtest_result_id=primary.id,
+        strategy_version_id=version.id,
+        windows=_specs(digest),
+    )
+    first = plan.windows[0]
+    first.backtest_run_id = primary.backtest_run_id
+    first.backtest_task_id = primary.backtest_task_id
+    db.commit()
+    plan = service.evaluate(plan.id)
+    assert plan.status == "BLOCKED"
+    assert "primary promotion lineage" in (plan.blocked_reason or "")
+
+    version2, primary2 = _seed_primary(db, tmp_path, suffix="regime")
+    swapped = _specs(digest)
+    swapped[1] = ValidationWindowSpec(
+        window_kind="WALK_FORWARD",
+        market_state="bear",
+        timerange=swapped[1].timerange,
+        profile=swapped[1].profile,
+        expected_market_data_digest=digest,
+    )
+    swapped[2] = ValidationWindowSpec(
+        window_kind="WALK_FORWARD",
+        market_state="bull",
+        timerange=swapped[2].timerange,
+        profile=swapped[2].profile,
+        expected_market_data_digest=digest,
+    )
+    plan2 = service.declare(
+        promotion_backtest_result_id=primary2.id,
+        strategy_version_id=version2.id,
+        windows=swapped,
+    )
+    _attach_real_results(db, plan2, tmp_path / "regime-run")
+    assert service.evaluate(plan2.id).status == "BLOCKED"
+    assert "computed market regime" in (plan2.blocked_reason or "")
+
+
+def test_execution_id_is_globally_unique(db: Session, tmp_path: Path) -> None:
+    version, primary = _seed_primary(db, tmp_path)
+    plan = StrategyValidationMatrixService(db).declare(
+        promotion_backtest_result_id=primary.id,
+        strategy_version_id=version.id,
+        windows=_specs("a" * 64),
+    )
+    plan.windows[0].execution_id = "same-execution"
+    plan.windows[1].execution_id = "same-execution"
+    with pytest.raises(IntegrityError):
+        db.commit()
+    db.rollback()
 
 
 def test_prepare_recovery_does_not_duplicate_backtest_after_crash(

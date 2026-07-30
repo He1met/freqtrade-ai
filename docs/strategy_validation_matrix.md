@@ -23,6 +23,26 @@ walk-forward。
    `strategy_validation_plans`，并将受 plan ID/digest 约束的
    `promotion_evidence.validation_matrix` 绑定到主回测结果。
 
+每次 `promotion_candidate_digest` 都会清空 ORM identity cache 后从数据库
+重新读取 plan/window/run/task/result，并重新读取 manifest、config、
+result、strategy 与 market-data 文件计算 checksum。`status=PASSED` 不是
+快照缓存，也不能跳过重验；PASSED 后任何文件或数据库 lineage 漂移都会
+阻断晋级。
+
+主回测的 Run/Task/Result 以及 timerange 均不得被 OOS/WF 窗口复用或
+重叠。artifact ingest 会保存由服务端基于 manifest checksum 和数据库
+identity 生成的 receipt；仅在 metadata 中手造 `ingest_source=freqtrade`
+不能通过。
+
+`bull` / `bear` / `range` 不是调用者提供的事实。调用者只能预声明希望
+覆盖的 regime slot；执行后系统使用 `window-close-return-v1` 从持久化
+market-data 文件计算首末 close return，同时保存 source artifacts、
+algorithm、parameters、market-data checksum 与 evidence digest。
+
+PostgreSQL 对 plan/window identity 提供不可变 trigger。运行角色只能更新
+状态和执行证据列，不能更新 plan digest、窗口 timerange、预声明 regime
+或 market-data digest；`execution_id` 具有全表唯一约束。
+
 ## 与 #570 的集成边界
 
 #570 的 research/full-chain 编排应在 BACKTEST/SCORING 后调用本服务：
