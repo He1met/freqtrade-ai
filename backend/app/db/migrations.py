@@ -4592,8 +4592,9 @@ def _add_strategy_validation_matrix(connection: Connection) -> None:
         quoted_table = connection.dialect.identifier_preparer.quote(table_name)
         connection.execute(
             text(
-                f"REVOKE ALL ON TABLE {quoted_schema}.{quoted_table} FROM PUBLIC; "
-                f"GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "
+                f"REVOKE ALL ON TABLE {quoted_schema}.{quoted_table} "
+                f"FROM PUBLIC, freqtrade; "
+                f"GRANT SELECT, INSERT, UPDATE ON TABLE "
                 f"{quoted_schema}.{quoted_table} TO freqtrade"
             )
         )
@@ -4601,7 +4602,8 @@ def _add_strategy_validation_matrix(connection: Connection) -> None:
         quoted_sequence = connection.dialect.identifier_preparer.quote(sequence_name)
         connection.execute(
             text(
-                f"REVOKE ALL ON SEQUENCE {quoted_schema}.{quoted_sequence} FROM PUBLIC; "
+                f"REVOKE ALL ON SEQUENCE {quoted_schema}.{quoted_sequence} "
+                f"FROM PUBLIC, freqtrade; "
                 f"GRANT USAGE, SELECT ON SEQUENCE "
                 f"{quoted_schema}.{quoted_sequence} TO freqtrade"
             )
