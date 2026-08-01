@@ -165,6 +165,8 @@ def test_renderer_outputs_regime_masks_and_regime_gated_rules() -> None:
     code = StrategyCodeRenderer().render(blueprint)
 
     assert "regime_masks = {" in code
+    assert "regime_match_count" in code
+    assert "(regime_match_count == 1)" in code
     assert "'bull': reduce" in code
     assert "regime_masks['bull']" in code
     assert code.count("regime_masks = {") == 2

@@ -104,7 +104,7 @@ class StrategyCodeRenderer:
         if not blueprint.regime_rules:
             return []
         lines = [
-            "        regime_masks = {",
+            "        regime_matches = {",
         ]
         for regime_rule in blueprint.regime_rules:
             expressions = [
@@ -119,6 +119,22 @@ class StrategyCodeRenderer:
                 ]
             )
         lines.append("        }")
+        lines.extend(
+            [
+                "        regime_match_count = reduce(lambda left, right: left + right, [",
+                *[
+                    f"            regime_matches[{regime_rule.regime!r}].astype(int),"
+                    for regime_rule in blueprint.regime_rules
+                ],
+                "        ])",
+                "        regime_masks = {",
+                *[
+                    f"            {regime_rule.regime!r}: regime_matches[{regime_rule.regime!r}] & (regime_match_count == 1),"
+                    for regime_rule in blueprint.regime_rules
+                ],
+                "        }",
+            ]
+        )
         return lines
 
     def _render_rule_expression(self, rule: SignalRule) -> str:
