@@ -20,7 +20,10 @@ from app.schemas.deepseek_backtest_loop import (
     DeepSeekBacktestLoopResponse,
 )
 from app.schemas.dry_run_status import redact_secret_text
-from app.services.deepseek_backtest_loop import DeepSeekBacktestLoopService
+from app.services.deepseek_backtest_loop import (
+    DeepSeekBacktestLoopService,
+    DeepSeekPromotionValidationBlocked,
+)
 from app.services.research_full_chain_orchestrator import (
     ResearchFullChainBlocked,
     default_research_full_chain_orchestrator_factory,
@@ -182,6 +185,51 @@ class DeepSeekBacktestWorker:
                 return
             if job.stage == "PERSISTED_RESULT_RECOVERY":
                 try:
+                    payload = DeepSeekBacktestLoopRequest.model_validate(
+                        job.request_payload
+                    )
+                    links = chain.prepare_promotion(
+                        job_id,
+                        lease_token,
+                    )
+                except ResearchFullChainBlocked as exc:
+                    chain.terminalize_owned(
+                        job_id,
+                        lease_token,
+                        status="BLOCKED",
+                        stage="CANDIDATE_APPROVAL",
+                        links={},
+                        evidence_snapshot={
+                            "status": "BLOCKED",
+                            "acceptance_ready": False,
+                            "failed_reason": redact_secret_text(str(exc))[:2000],
+                        },
+                        reason=redact_secret_text(str(exc))[:2000],
+                        provider_completed=True,
+                    )
+                    return
+                try:
+                    self.service_factory(db).validate_for_promotion(
+                        payload,
+                        links,
+                    )
+                except DeepSeekPromotionValidationBlocked as exc:
+                    chain.terminalize_owned(
+                        job_id,
+                        lease_token,
+                        status="BLOCKED",
+                        stage="VALIDATION",
+                        links=links,
+                        evidence_snapshot={
+                            "status": "BLOCKED",
+                            "acceptance_ready": False,
+                            "failed_reason": redact_secret_text(str(exc))[:2000],
+                        },
+                        reason=redact_secret_text(str(exc))[:2000],
+                        provider_completed=True,
+                    )
+                    return
+                try:
                     chain.advance(
                         job_id,
                         lease_token,
@@ -256,7 +304,54 @@ class DeepSeekBacktestWorker:
                 return
             if response.overall_status == "succeeded":
                 try:
-                    chain.checkpoint_response(job_id, lease_token, response)
+                    links = chain.checkpoint_response(
+                        job_id,
+                        lease_token,
+                        response,
+                    )
+                    chain.prepare_promotion(
+                        job_id,
+                        lease_token,
+                        response,
+                    )
+                except ResearchFullChainBlocked as exc:
+                    chain.terminalize_owned(
+                        job_id,
+                        lease_token,
+                        status="BLOCKED",
+                        stage="CANDIDATE_APPROVAL",
+                        links={},
+                        evidence_snapshot={
+                            "status": "BLOCKED",
+                            "acceptance_ready": False,
+                            "failed_reason": redact_secret_text(str(exc))[:2000],
+                        },
+                        reason=redact_secret_text(str(exc))[:2000],
+                        provider_completed=payload.allow_real_call,
+                    )
+                    return
+                try:
+                    self.service_factory(db).validate_for_promotion(
+                        payload,
+                        links,
+                    )
+                except DeepSeekPromotionValidationBlocked as exc:
+                    chain.terminalize_owned(
+                        job_id,
+                        lease_token,
+                        status="BLOCKED",
+                        stage="VALIDATION",
+                        links=links,
+                        evidence_snapshot={
+                            "status": "BLOCKED",
+                            "acceptance_ready": False,
+                            "failed_reason": redact_secret_text(str(exc))[:2000],
+                        },
+                        reason=redact_secret_text(str(exc))[:2000],
+                        provider_completed=payload.allow_real_call,
+                    )
+                    return
+                try:
                     chain.advance(job_id, lease_token, response)
                 except ResearchFullChainBlocked as exc:
                     chain.terminalize_owned(

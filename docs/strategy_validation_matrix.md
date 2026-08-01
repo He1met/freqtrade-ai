@@ -43,13 +43,15 @@ PostgreSQL 对 plan/window identity 提供不可变 trigger。运行角色只能
 状态和执行证据列，不能更新 plan digest、窗口 timerange、预声明 regime
 或 market-data digest；`execution_id` 具有全表唯一约束。
 
-## 与 #570 的集成边界
+## #570 运行时集成
 
-#570 的 research/full-chain 编排应在 BACKTEST/SCORING 后调用本服务：
+#570 的 research/full-chain 编排在 BACKTEST/SCORING 后调用本服务：
 先准备并执行所有验证任务，再等待 `StrategyValidationPlan.status=PASSED`，
-最后才进入 `promotion_candidate_digest`。本改动不修改
-`research_full_chain_orchestrator.py`、`research_jobs` 恢复逻辑或
-full-chain 原子审批；旧的单结果切片证据会被晋级门直接拒绝。
+最后才进入 `promotion_candidate_digest`。validation artifact ingest 只保存
+独立 BacktestResult，不生成或覆盖主 StrategyScore。任务在 validation
+期间崩溃时复用已持久化的 run/task；`running` task 只有在确定性的 SUCCESS
+manifest 已存在时才继续 ingest，结果未知时立即 BLOCKED，不重复外部回测。
+旧的单结果切片证据会被晋级门直接拒绝。
 
 单元测试中的 fixture 只验证机械合同，不能作为真实 provider 或执行门的
 验收证据。

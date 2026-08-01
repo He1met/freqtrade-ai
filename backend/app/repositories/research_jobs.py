@@ -555,7 +555,8 @@ class ResearchJobRepository:
             self.db.commit()
         else:
             self.db.flush()
-        return self.get(job_id)
+        self.db.refresh(job)
+        return job
 
     def cancel(self, job_id: int, reason: str) -> Optional[ResearchJob]:
         self._require_executable_scope()

@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import subprocess
@@ -26,6 +27,8 @@ from app.models import (
     StrategyDeployment,
     StrategyGenerationRun,
     StrategyScore,
+    StrategyValidationPlan,
+    StrategyValidationWindow,
     StrategyVersion,
 )
 from app.repositories import ResearchJobRepository
@@ -212,8 +215,65 @@ def write_market_data(tmp_path: Path) -> Path:
     datadir = tmp_path / "user_data" / "data"
     exchange_dir = datadir / "okx" / "futures"
     exchange_dir.mkdir(parents=True)
-    exchange_dir.joinpath("BTC_USDT_USDT-15m-futures.feather").write_bytes(b"local candles")
+    exchange_dir.joinpath("BTC_USDT_USDT-15m-futures.json").write_text(
+        json.dumps(
+            [
+                {"date": "2024-01-01", "close": 100.0},
+                {"date": "2024-01-31", "close": 102.0},
+                {"date": "2024-02-01", "close": 100.0},
+                {"date": "2024-02-28", "close": 102.0},
+                {"date": "2024-03-01", "close": 100.0},
+                {"date": "2024-03-28", "close": 110.0},
+                {"date": "2024-04-01", "close": 100.0},
+                {"date": "2024-04-28", "close": 90.0},
+                {"date": "2024-05-01", "close": 100.0},
+                {"date": "2024-05-28", "close": 101.0},
+            ]
+        ),
+        encoding="utf-8",
+    )
     return datadir
+
+
+def market_data_digest(datadir: Path) -> str:
+    root = datadir / "okx"
+    digest = hashlib.sha256()
+    files = sorted(path for path in root.rglob("*") if path.is_file())
+    assert files
+    for path in files:
+        digest.update(str(path.relative_to(root)).encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(hashlib.sha256(path.read_bytes()).digest())
+    return digest.hexdigest()
+
+
+def validation_windows(datadir: Path) -> list[dict[str, str]]:
+    digest = market_data_digest(datadir)
+    return [
+        {
+            "window_kind": "OOS",
+            "timerange": "20240201-20240301",
+            "expected_market_data_digest": digest,
+        },
+        {
+            "window_kind": "WALK_FORWARD",
+            "timerange": "20240301-20240401",
+            "expected_market_data_digest": digest,
+            "market_state": "bull",
+        },
+        {
+            "window_kind": "WALK_FORWARD",
+            "timerange": "20240401-20240501",
+            "expected_market_data_digest": digest,
+            "market_state": "bear",
+        },
+        {
+            "window_kind": "WALK_FORWARD",
+            "timerange": "20240501-20240601",
+            "expected_market_data_digest": digest,
+            "market_state": "range",
+        },
+    ]
 
 
 def install_fake_freqtrade(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -745,6 +805,10 @@ def test_worker_runs_controlled_service_chain_and_reconciles_all_database_ids(
 
     def fake_executor(args, cwd, timeout_seconds):
         observed_args.extend(args)
+        config_path = Path(args[args.index("--config") + 1])
+        timerange = json.loads(config_path.read_text(encoding="utf-8"))[
+            "timerange"
+        ]
         result_dir = Path(args[args.index("--backtest-directory") + 1])
         result_dir.mkdir(parents=True, exist_ok=True)
         zip_path = result_dir / "backtest-result-2026-07-22_12-00-00.zip"
@@ -781,7 +845,7 @@ def test_worker_runs_controlled_service_chain_and_reconciles_all_database_ids(
                                 "max_drawdown_pct": 4.2,
                                 "winrate": 61.0,
                                 "total_trades": len(trades),
-                                "timerange": "20240101-20240201",
+                                "timerange": timerange,
                                 "starting_balance": 1000.0,
                                 "trades": trades,
                             }
@@ -834,6 +898,7 @@ def test_worker_runs_controlled_service_chain_and_reconciles_all_database_ids(
                 prompt_summary="Generate one controlled strategy and run the local worker chain.",
                 allow_real_call=True,
                 backtest_profile=local_profile(datadir),
+                validation_windows=validation_windows(datadir),
                 timeout_seconds=60,
             ),
             idempotency_key="worker-full-chain",
@@ -846,6 +911,54 @@ def test_worker_runs_controlled_service_chain_and_reconciles_all_database_ids(
         lease_seconds=60,
         heartbeat_interval_seconds=10,
     )
+    original_run_with_manifest = (
+        FreqtradeBacktestRunner.run_backtest_with_artifact_manifest
+    )
+    crashed_validation = False
+
+    def crash_after_first_validation_manifest(self, *args, **kwargs):
+        nonlocal crashed_validation
+        manifest = original_run_with_manifest(self, *args, **kwargs)
+        if (
+            str(kwargs.get("execution_id", "")).startswith("validation-run-")
+            and not crashed_validation
+        ):
+            crashed_validation = True
+            raise SystemExit("synthetic crash after validation manifest")
+        return manifest
+
+    monkeypatch.setattr(
+        FreqtradeBacktestRunner,
+        "run_backtest_with_artifact_manifest",
+        crash_after_first_validation_manifest,
+    )
+    with pytest.raises(SystemExit, match="synthetic crash after validation manifest"):
+        worker.run_once()
+    monkeypatch.setattr(
+        FreqtradeBacktestRunner,
+        "run_backtest_with_artifact_manifest",
+        original_run_with_manifest,
+    )
+    with factory() as db:
+        repository = ResearchJobRepository(db)
+        validation_crash = repository.get(job_id)
+        assert validation_crash is not None
+        assert validation_crash.status == "RUNNING"
+        assert validation_crash.stage == "PERSISTED_RESULT"
+        assert validation_crash.lease_expires_at is not None
+        plan = db.query(StrategyValidationPlan).one()
+        assert plan.status == "RUNNING"
+        running = [
+            window
+            for window in db.query(StrategyValidationWindow).all()
+            if window.backtest_task.status == "running"
+        ]
+        assert len(running) == 1
+        assert repository.expire_stale(
+            validation_crash.lease_expires_at.replace(tzinfo=timezone.utc)
+            + timedelta(microseconds=1)
+        ) is not None
+
     assert worker.run_once() == job_id
     original_complete = ResearchJobRepository.complete
 
@@ -908,19 +1021,33 @@ def test_worker_runs_controlled_service_chain_and_reconciles_all_database_ids(
         assert db.query(StrategyGenerationRun).count() == 1
         assert db.query(Strategy).count() == 1
         assert db.query(StrategyVersion).count() == 1
-        assert db.query(BacktestRun).count() == 1
-        assert db.query(BacktestTask).count() == 1
-        assert db.query(BacktestResult).count() == 1
+        assert db.query(BacktestRun).count() == 5
+        assert db.query(BacktestTask).count() == 5
+        assert db.query(BacktestResult).count() == 5
         assert db.query(StrategyScore).count() == 1
         assert db.query(FullChainRun).count() == 1
         assert db.query(StrategyCandidateApproval).count() == 1
         assert db.query(StrategyDeployment).count() == 1
-        assert (
-            db.query(BacktestResult)
-            .one()
-            .metrics_snapshot["promotion_evidence"]["source"]
-            == "persisted_freqtrade_backtest_trades"
+        plan = db.query(StrategyValidationPlan).one()
+        assert plan.status == "PASSED"
+        assert db.query(StrategyValidationWindow).count() == 4
+        assert all(
+            window.status == "PASSED"
+            for window in db.query(StrategyValidationWindow).all()
         )
-        assert db.query(BacktestRun).one().status == "succeeded"
-        assert db.query(BacktestTask).one().status == "succeeded"
+        primary_result = db.get(BacktestResult, job.backtest_result_id)
+        assert primary_result is not None
+        assert (
+            primary_result.metrics_snapshot["promotion_evidence"][
+                "validation_matrix"
+            ]["plan_id"]
+            == plan.id
+        )
+        assert all(
+            run.status == "succeeded" for run in db.query(BacktestRun).all()
+        )
+        assert all(
+            task.status == "succeeded" for task in db.query(BacktestTask).all()
+        )
+    assert observed_args.count("backtesting") == 5
     assert observed_args[observed_args.index("--datadir") + 1] == str(datadir / "okx")

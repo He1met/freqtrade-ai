@@ -380,89 +380,11 @@ class ResearchFullChainOrchestrator:
                 links=links,
             )
         try:
-            (
-                generation,
-                strategy,
-                version,
-                run,
-                task,
-                result,
-                score,
-            ) = self._load_and_validate(job, links)
-            self._ensure_stage(
+            version, result, score = self._prepare_research_stages(
+                job,
                 chain,
-                "GENERATION",
                 lease_token,
-                idempotency_key=(
-                    f"research-job:{job.id}:{job.request_hash}:generation"
-                ),
-                input_snapshot={
-                    "research_job_id": job.id,
-                    "request_digest": job.request_hash,
-                    "provider": "deepseek",
-                    "execution_scope_id": "LOCAL_DRY_RUN",
-                    "execution_target_id": "OKX_DEMO",
-                },
-                database_ids={
-                    "strategy_generation_run_id": generation.id,
-                    "strategy_id": strategy.id,
-                    "strategy_version_id": version.id,
-                },
-                output_snapshot={
-                    "status": "SUCCESS",
-                    "strategy_code_digest": (
-                        version.code_hash
-                        or hashlib.sha256(
-                            version.generated_code.encode("utf-8")
-                        ).hexdigest()
-                    ),
-                },
-            )
-            self._ensure_stage(
-                chain,
-                "BACKTEST",
-                lease_token,
-                idempotency_key=(
-                    f"research-job:{job_id}:{run.id}:{task.id}:backtest"
-                ),
-                input_snapshot={
-                    "strategy_version_id": version.id,
-                    "backtest_run_id": run.id,
-                    "backtest_task_id": task.id,
-                },
-                database_ids={
-                    "backtest_run_id": run.id,
-                    "backtest_task_id": task.id,
-                    "backtest_result_id": result.id,
-                },
-                output_snapshot={
-                    "status": "SUCCESS",
-                    "result_digest": _digest(result.metrics_snapshot),
-                    "promotion_evidence_present": isinstance(
-                        result.metrics_snapshot.get("promotion_evidence")
-                        if isinstance(result.metrics_snapshot, dict)
-                        else None,
-                        dict,
-                    ),
-                },
-            )
-            self._ensure_stage(
-                chain,
-                "SCORING",
-                lease_token,
-                idempotency_key=(
-                    f"research-job:{job_id}:{score.id}:scoring"
-                ),
-                input_snapshot={
-                    "backtest_result_id": result.id,
-                    "scoring_version": score.scoring_version,
-                },
-                database_ids={"strategy_score_id": score.id},
-                output_snapshot={
-                    "status": "SUCCESS",
-                    "total_score": score.total_score,
-                    "score_digest": _digest(score.metrics_snapshot),
-                },
+                links,
             )
             approval = self._approved_candidate(chain)
             if approval is not None:
@@ -496,6 +418,128 @@ class ResearchFullChainOrchestrator:
             raise ResearchFullChainBlocked(str(exc), links=links) from exc
         return approval.id
 
+    def prepare_promotion(
+        self,
+        job_id: int,
+        lease_token: str,
+        response: Optional[DeepSeekBacktestLoopResponse] = None,
+    ) -> dict[str, int]:
+        """Complete durable research checkpoints before validation runs start."""
+
+        job = self.db.get(ResearchJob, job_id)
+        if job is None:
+            raise ResearchFullChainBlocked("research job is missing")
+        links = self._links(response) if response is not None else self._job_links(job)
+        if len(links) != len(LINK_KEYS):
+            raise ResearchFullChainBlocked(
+                "persisted research recovery is missing complete database IDs",
+                links=links,
+            )
+        chain = self._chain(job_id)
+        if chain is None:
+            raise ResearchFullChainBlocked(
+                "research full-chain run is missing",
+                links=links,
+            )
+        try:
+            self._prepare_research_stages(job, chain, lease_token, links)
+        except (FullChainBlocked, KeyError, TypeError, ValueError) as exc:
+            raise ResearchFullChainBlocked(str(exc), links=links) from exc
+        return links
+
+    def _prepare_research_stages(
+        self,
+        job: ResearchJob,
+        chain: FullChainRun,
+        lease_token: str,
+        links: dict[str, int],
+    ) -> tuple[StrategyVersion, BacktestResult, StrategyScore]:
+        (
+            generation,
+            strategy,
+            version,
+            run,
+            task,
+            result,
+            score,
+        ) = self._load_and_validate(job, links)
+        self._ensure_stage(
+            chain,
+            "GENERATION",
+            lease_token,
+            idempotency_key=(
+                f"research-job:{job.id}:{job.request_hash}:generation"
+            ),
+            input_snapshot={
+                "research_job_id": job.id,
+                "request_digest": job.request_hash,
+                "provider": "deepseek",
+                "execution_scope_id": "LOCAL_DRY_RUN",
+                "execution_target_id": "OKX_DEMO",
+            },
+            database_ids={
+                "strategy_generation_run_id": generation.id,
+                "strategy_id": strategy.id,
+                "strategy_version_id": version.id,
+            },
+            output_snapshot={
+                "status": "SUCCESS",
+                "strategy_code_digest": (
+                    version.code_hash
+                    or hashlib.sha256(
+                        version.generated_code.encode("utf-8")
+                    ).hexdigest()
+                ),
+            },
+        )
+        self._ensure_stage(
+            chain,
+            "BACKTEST",
+            lease_token,
+            idempotency_key=(
+                f"research-job:{job.id}:{run.id}:{task.id}:backtest"
+            ),
+            input_snapshot={
+                "strategy_version_id": version.id,
+                "backtest_run_id": run.id,
+                "backtest_task_id": task.id,
+            },
+            database_ids={
+                "backtest_run_id": run.id,
+                "backtest_task_id": task.id,
+                "backtest_result_id": result.id,
+            },
+            output_snapshot={
+                "status": "SUCCESS",
+                "result_digest": _digest(result.metrics_snapshot),
+                "promotion_evidence_present": isinstance(
+                    result.metrics_snapshot.get("promotion_evidence")
+                    if isinstance(result.metrics_snapshot, dict)
+                    else None,
+                    dict,
+                ),
+            },
+        )
+        self._ensure_stage(
+            chain,
+            "SCORING",
+            lease_token,
+            idempotency_key=(
+                f"research-job:{job.id}:{score.id}:scoring"
+            ),
+            input_snapshot={
+                "backtest_result_id": result.id,
+                "scoring_version": score.scoring_version,
+            },
+            database_ids={"strategy_score_id": score.id},
+            output_snapshot={
+                "status": "SUCCESS",
+                "total_score": score.total_score,
+                "score_digest": _digest(score.metrics_snapshot),
+            },
+        )
+        return version, result, score
+
     def _ensure_stage(
         self,
         chain: FullChainRun,
@@ -520,6 +564,22 @@ class ResearchFullChainOrchestrator:
             raise FullChainBlocked(
                 f"{stage} checkpoint is terminal and cannot recover"
             )
+        if checkpoint.status == "SUCCESS":
+            idempotency_digest = hashlib.sha256(
+                idempotency_key.encode("utf-8")
+            ).hexdigest()
+            if (
+                checkpoint.idempotency_key_digest != idempotency_digest
+                or checkpoint.input_digest != _digest(input_snapshot)
+            ):
+                raise FullChainBlocked(
+                    f"{stage} checkpoint idempotency or input drift detected"
+                )
+            if checkpoint.database_ids != database_ids:
+                raise FullChainBlocked(
+                    f"{stage} checkpoint database lineage drift detected"
+                )
+            return checkpoint
         return self.chains.complete_stage(
             chain.id,
             stage,

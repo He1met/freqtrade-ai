@@ -43,13 +43,15 @@ the `GENERATION` checkpoint before a real DeepSeek call. A successful response
 can advance only by loading the exact persisted generation, strategy version,
 backtest result, and score database rows under the same ResearchJob lease.
 
-Promotion evidence is derived from the checksummed Freqtrade result already
-stored by artifact ingest. It requires persisted trade-level fee fields,
-a profitable chronological holdout with at least 30 trades, three profitable
-consecutive walk-forward folds, and observed bull, bear, and range moves. A
-request label, aggregate ranking score, fixture, or manually supplied JSON
-cannot become production promotion evidence. Missing or failed evidence closes
-the candidate checkpoint as `BLOCKED`.
+Promotion requires a plan declared before validation execution: one independent
+OOS window and at least three non-overlapping walk-forward windows covering
+persisted bull, bear, and range market moves. Every window has its own
+BacktestRun/Task/Result, Freqtrade execution ID, manifest, and config/result/
+strategy/market-data checksums. Validation results never replace the primary
+StrategyScore. A single-result trade slice, request label, aggregate ranking
+score, fixture, or manually supplied JSON cannot become production promotion
+evidence. Missing, ambiguous, overlapping, or drifted evidence closes the
+candidate path as `BLOCKED`.
 
 Only the locked `OKX_DEMO` automation policy may approve a passing candidate.
 The worker then releases its lease and reclaims the same attempt at `SIGNAL`;

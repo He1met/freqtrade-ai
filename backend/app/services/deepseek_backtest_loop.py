@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterable, Mapping, Optional
 
 from sqlalchemy.orm import Session
 
@@ -37,9 +37,10 @@ from app.schemas.deepseek_backtest_loop import (
 from app.services.backtest_artifact_ingest import BacktestArtifactIngestService
 from app.services.local_backtest_trigger import LocalBacktestTriggerService
 from app.services.strategy_generation import StrategyGenerationExecutionError, StrategyGenerationService
-from app.services.strategy_promotion_validation import (
-    StrategyPromotionValidationBlocked,
-    StrategyPromotionValidationService,
+from app.services.strategy_validation_matrix import (
+    StrategyValidationBlocked,
+    StrategyValidationMatrixService,
+    ValidationWindowSpec,
 )
 
 
@@ -47,6 +48,10 @@ from app.services.strategy_promotion_validation import (
 class DeepSeekBacktestLoopExecutionArtifacts:
     manifest_path: Path
     result_path: Path
+
+
+class DeepSeekPromotionValidationBlocked(ValueError):
+    """Independent promotion validation could not safely complete."""
 
 
 class DeepSeekBacktestLoopService:
@@ -285,19 +290,6 @@ class DeepSeekBacktestLoopService:
             "blocked": "blocked",
             "failed": "failed",
         }[artifact_ingest.ingest_status]
-        if (
-            artifact_ingest.ingest_status == "succeeded"
-            and artifact_ingest.result is not None
-        ):
-            try:
-                StrategyPromotionValidationService(self.db).attach(
-                    artifact_ingest.result.id
-                )
-            except StrategyPromotionValidationBlocked:
-                # Research/backtest completion remains truthful. The downstream
-                # CANDIDATE_APPROVAL stage evaluates the persisted result and
-                # records the exact fail-closed promotion reason.
-                self.db.rollback()
         evidence = self._final_evidence(generation, backtest, execution, artifact_ingest)
         return DeepSeekBacktestLoopResponse(
             overall_status=overall_status,
@@ -308,6 +300,173 @@ class DeepSeekBacktestLoopService:
             artifact_ingest=artifact_ingest,
             evidence=evidence,
         )
+
+    def validate_for_promotion(
+        self,
+        payload: DeepSeekBacktestLoopRequest,
+        links: Mapping[str, int],
+    ) -> int:
+        """Run or recover the pre-declared independent validation matrix."""
+
+        try:
+            strategy_version_id = int(links["strategy_version_id"])
+            backtest_result_id = int(links["backtest_result_id"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise DeepSeekPromotionValidationBlocked(
+                "promotion validation is missing persisted primary lineage"
+            ) from exc
+        if strategy_version_id <= 0 or backtest_result_id <= 0:
+            raise DeepSeekPromotionValidationBlocked(
+                "promotion validation primary lineage is invalid"
+            )
+        if not payload.validation_windows:
+            raise DeepSeekPromotionValidationBlocked(
+                "promotion requires one pre-declared OOS and three walk-forward windows"
+            )
+
+        specs: list[ValidationWindowSpec] = []
+        for window in payload.validation_windows:
+            profile = dict(payload.backtest_profile)
+            profile["timerange"] = window.timerange
+            specs.append(
+                ValidationWindowSpec(
+                    window_kind=window.window_kind,
+                    timerange=window.timerange,
+                    profile=profile,
+                    expected_market_data_digest=(
+                        window.expected_market_data_digest
+                    ),
+                    market_state=window.market_state,
+                )
+            )
+
+        matrix = StrategyValidationMatrixService(
+            self.db,
+            trigger_service=self.backtest_trigger_service,
+        )
+        plan = None
+        try:
+            plan = matrix.declare(
+                promotion_backtest_result_id=backtest_result_id,
+                strategy_version_id=strategy_version_id,
+                windows=specs,
+            )
+            plan = matrix.prepare_runs(plan.id)
+            if plan.status == "BLOCKED":
+                raise StrategyValidationBlocked(
+                    plan.blocked_reason or "validation run preparation was blocked"
+                )
+            version = self.strategies.get_version(strategy_version_id)
+            if version is None:
+                raise StrategyValidationBlocked(
+                    "validation strategy version is missing"
+                )
+            for window in sorted(plan.windows, key=lambda item: item.ordinal):
+                self._execute_or_recover_validation_window(
+                    window.backtest_run_id,
+                    window.backtest_task_id,
+                    version,
+                    timeout_seconds=payload.timeout_seconds,
+                )
+            plan = matrix.evaluate(plan.id)
+            if plan.status != "PASSED":
+                raise StrategyValidationBlocked(
+                    plan.blocked_reason or "validation matrix did not pass"
+                )
+        except StrategyValidationBlocked as exc:
+            if plan is not None and plan.status not in {"PASSED", "BLOCKED"}:
+                try:
+                    matrix.evaluate(plan.id)
+                except Exception:
+                    self.db.rollback()
+            raise DeepSeekPromotionValidationBlocked(str(exc)) from exc
+        return plan.id
+
+    def _execute_or_recover_validation_window(
+        self,
+        run_id: Optional[int],
+        task_id: Optional[int],
+        version,
+        *,
+        timeout_seconds: Optional[int],
+    ) -> None:
+        if run_id is None or task_id is None:
+            raise StrategyValidationBlocked(
+                "validation window is missing its persisted run/task"
+            )
+        task = self.backtests.get_task(task_id)
+        run = self.backtests.get_run(run_id)
+        if task is None or run is None or task.backtest_run_id != run.id:
+            raise StrategyValidationBlocked(
+                "validation run/task lineage is missing or inconsistent"
+            )
+        if task.status == "succeeded":
+            if task.result is None:
+                raise StrategyValidationBlocked(
+                    "succeeded validation task is missing its BacktestResult"
+                )
+            return
+
+        execution_paths = self._execution_artifacts(run.id, task.id)
+        if task.status == "pending":
+            claimed = self.backtests.claim_next_pending_task(run.id)
+            if claimed is None or claimed.id != task.id:
+                raise StrategyValidationBlocked(
+                    "validation task could not be uniquely claimed"
+                )
+            task = claimed
+            profile_payload = (run.config_snapshot or {}).get("profile")
+            try:
+                profile = BacktestProfileV2.model_validate(profile_payload)
+            except Exception as exc:
+                raise StrategyValidationBlocked(
+                    "persisted validation profile is invalid"
+                ) from exc
+            manifest = self.backtest_runner.run_backtest_with_artifact_manifest(
+                Path(task.config_path or ""),
+                profile.strategy.name,
+                result_path=execution_paths.result_path,
+                manifest_path=execution_paths.manifest_path,
+                timeout_seconds=timeout_seconds,
+                datadir=(
+                    resolve_repo_path(profile.data_source.datadir)
+                    / profile.data_source.exchange
+                ),
+                strategy_path=resolve_repo_path(version.file_path).parent,
+                strategy_file_path=resolve_repo_path(version.file_path),
+                userdir=resolve_repo_path(get_settings().freqtrade_user_data),
+                run_id=run.id,
+                task_id=task.id,
+                strategy_version_id=version.id,
+                execution_id=f"validation-run-{run.id}-task-{task.id}",
+            )
+            if manifest.status != "SUCCESS":
+                self._mark_execution_terminal(task.id, manifest)
+                reason = manifest.blocked_reason or manifest.failed_reason
+                raise StrategyValidationBlocked(
+                    reason or "validation Freqtrade execution did not succeed"
+                )
+        elif task.status != "running":
+            raise StrategyValidationBlocked(
+                f"validation task is terminal with status {task.status}"
+            )
+
+        ingest = self.artifact_ingest_service.ingest_task_artifact(
+            task.id,
+            BacktestArtifactIngestRequest(
+                manifest_path=str(execution_paths.manifest_path),
+                result_path=str(execution_paths.result_path),
+                strategy_name=(
+                    (version.blueprint or {}).get("class_name")
+                    or version.strategy.name
+                ),
+            ),
+        )
+        if ingest is None or ingest.ingest_status != "succeeded":
+            raise StrategyValidationBlocked(
+                (ingest.reason if ingest is not None else None)
+                or "validation artifact ingest did not succeed"
+            )
 
     def _generation_response(
         self,

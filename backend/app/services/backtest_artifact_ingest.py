@@ -5,6 +5,7 @@ import hashlib
 from pathlib import Path
 from typing import Any, Optional
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.adapters.freqtrade.exceptions import FreqtradeResultParseError
@@ -12,6 +13,7 @@ from app.adapters.freqtrade.result_parser import FreqtradeResultParser
 from app.core.config import get_settings
 from app.core.paths import resolve_repo_path
 from app.models.backtest import BacktestResult, BacktestTask
+from app.models.strategy_validation import StrategyValidationWindow
 from app.models.strategy_score import StrategyScore
 from app.repositories import BacktestRepository
 from app.schemas import (
@@ -193,9 +195,22 @@ class BacktestArtifactIngestService:
             if result is None:
                 raise RuntimeError("backtest result was not saved")
             self.repository.db.flush()
-            score = StrategyScoringService(self.repository.db).score_backtest_result(result.id, commit=False)
-            if score is None:
-                raise RuntimeError("strategy score could not be generated from backtest result metrics")
+            validation_window_id = self.repository.db.scalar(
+                select(StrategyValidationWindow.id).where(
+                    StrategyValidationWindow.backtest_run_id
+                    == task.backtest_run_id,
+                    StrategyValidationWindow.backtest_task_id == task.id,
+                )
+            )
+            score = None
+            if validation_window_id is None:
+                score = StrategyScoringService(
+                    self.repository.db
+                ).score_backtest_result(result.id, commit=False)
+                if score is None:
+                    raise RuntimeError(
+                        "strategy score could not be generated from backtest result metrics"
+                    )
             updated_task = self.repository.update_task_status(
                 task.id,
                 BacktestTaskStatusUpdate(status="succeeded", result_path=str(result_path), error_message=self._artifact_note("SUCCEEDED", None, manifest_path, result_path)),
@@ -206,7 +221,8 @@ class BacktestArtifactIngestService:
                 raise RuntimeError("backtest task disappeared during artifact ingest")
             self.repository.db.commit()
             self.repository.db.refresh(result)
-            self.repository.db.refresh(score)
+            if score is not None:
+                self.repository.db.refresh(score)
             self.repository.db.refresh(updated_task)
         except Exception as exc:
             self.repository.db.rollback()
