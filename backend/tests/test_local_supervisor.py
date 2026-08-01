@@ -5,9 +5,13 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.adapters.okx_demo import runtime_service, server_factory
+from app.adapters.okx_demo.write_semantics import OkxDemoWriteBlocked
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SUPERVISOR_PATH = REPO_ROOT / "scripts" / "local_supervisor.py"
+RUNTIME_PATH = REPO_ROOT / "scripts" / "local_runtime.py"
 LAUNCH_AGENT_PATH = REPO_ROOT / "scripts" / "macos_launch_agent.py"
 
 
@@ -450,6 +454,142 @@ def test_supervisor_command_budget_covers_runtime_startup_and_cleanup():
         supervisor.COMMAND_TIMEOUT_SECONDS
         > runtime.STARTUP_COMMAND_BUDGET_SECONDS
     )
+
+
+def test_supervisor_propagates_allowlisted_okx_runtime_failure_diagnostic(
+    monkeypatch,
+    capsys,
+):
+    supervisor = load_module(
+        SUPERVISOR_PATH,
+        "local_supervisor_okx_failure_diagnostic",
+    )
+    supervisor.LAST_CREDENTIAL_GENERATION = "generation-old"
+    responses = {
+        "supervisor-capability": {
+            "status": "READY",
+            "_generation": "generation-new",
+            "return_code": 0,
+        },
+        "down": {"services": [], "return_code": 0},
+        "up": {
+            "status": "BLOCKED",
+            "return_code": 2,
+            "startup_stage": "okx-runtime-readiness",
+            "startup_stage_elapsed_ms": 1234,
+            "okx_runtime_failure_stage": "read-attestation",
+            "okx_runtime_failure_category": "ATTESTATION",
+            "okx_runtime_failure_type": "OkxDemoCredentialsUnavailable",
+            "command_elapsed_ms": 2000,
+        },
+    }
+    monkeypatch.setattr(
+        supervisor,
+        "run_runtime",
+        lambda command: responses[command],
+    )
+
+    assert supervisor.supervise_once() is False
+
+    emitted = capsys.readouterr().out
+    assert '"okx_runtime_failure_stage": "read-attestation"' in emitted
+    assert '"okx_runtime_failure_category": "ATTESTATION"' in emitted
+    assert (
+        '"okx_runtime_failure_type": "OkxDemoCredentialsUnavailable"'
+        in emitted
+    )
+
+
+def test_factory_diagnostic_crosses_runtime_sidecar_and_supervisor_allowlist(
+    monkeypatch,
+    capsys,
+    tmp_path,
+):
+    lock_events = []
+
+    class BlockedWriterLock:
+        def __init__(self, path):
+            lock_events.append(("init", path))
+
+        def acquire(self):
+            lock_events.append(("acquire",))
+            raise OkxDemoWriteBlocked(
+                "signature=secret-must-not-cross"
+            )
+
+        def release(self):
+            lock_events.append(("release",))
+
+    monkeypatch.setattr(
+        server_factory,
+        "OkxDemoWriterProcessLock",
+        BlockedWriterLock,
+    )
+    with pytest.raises(
+        runtime_service.OkxDemoRuntimeStartupBlocked,
+    ) as captured:
+        runtime_service._startup_call(
+            "server-session",
+            lambda: server_factory.create_okx_demo_server_session(
+                {},
+                lock_path=tmp_path / "writer.lock",
+            ),
+        )
+
+    assert captured.value.stage == "writer-lock"
+    assert captured.value.category == "WRITER"
+    assert captured.value.cause_type == "OkxDemoWriteBlocked"
+    assert [event[0] for event in lock_events] == [
+        "init",
+        "acquire",
+        "release",
+    ]
+    failure_path = tmp_path / runtime_service.FAILURE_FILENAME
+    assert runtime_service._write_startup_failure(
+        failure_path,
+        captured.value,
+    )
+
+    local_runtime = load_module(
+        RUNTIME_PATH,
+        "local_runtime_cross_layer_diagnostic",
+    )
+    parsed = local_runtime.okx_runtime_failure(tmp_path)
+    assert parsed == {
+        "stage": "writer-lock",
+        "category": "WRITER",
+        "cause_type": "OkxDemoWriteBlocked",
+    }
+
+    supervisor = load_module(
+        SUPERVISOR_PATH,
+        "local_supervisor_cross_layer_diagnostic",
+    )
+    responses = {
+        "down": {"services": [], "return_code": 0},
+        "up": {
+            "status": "BLOCKED",
+            "return_code": 2,
+            "startup_stage": "okx-runtime-readiness",
+            "startup_stage_elapsed_ms": 100,
+            "okx_runtime_failure_stage": parsed["stage"],
+            "okx_runtime_failure_category": parsed["category"],
+            "okx_runtime_failure_type": parsed["cause_type"],
+        },
+    }
+    monkeypatch.setattr(
+        supervisor,
+        "run_runtime",
+        lambda command: responses[command],
+    )
+
+    assert supervisor.controlled_credential_restart("generation") is False
+
+    emitted = capsys.readouterr().out
+    assert '"okx_runtime_failure_stage": "writer-lock"' in emitted
+    assert '"okx_runtime_failure_category": "WRITER"' in emitted
+    assert "OkxDemoWriteBlocked" in emitted
+    assert "secret-must-not-cross" not in emitted
 
 
 def test_supervisor_rotates_credentials_through_controlled_down_up_verify(
