@@ -18,7 +18,10 @@ from app.models import (
     BacktestRun,
     BacktestTask,
     Base,
+    FullChainRun,
     Strategy,
+    StrategyCandidateApproval,
+    StrategyDeployment,
     StrategyGenerationRun,
     StrategyScore,
     StrategyVersion,
@@ -138,6 +141,7 @@ class MockLLMResponse:
                     "slug": "worker-deepseek-rsi",
                     "class_name": "WorkerDeepseekRsiStrategy",
                     "description": "Controlled provider fixture for the DB-backed worker test.",
+                    "timeframe": "15m",
                     "indicators": [{"name": "rsi", "kind": "rsi", "period": 14}],
                     "entry_rules": [{"indicator": "rsi", "operator": "<", "value": 32}],
                     "exit_rules": [{"indicator": "rsi", "operator": ">", "value": 68}],
@@ -396,6 +400,27 @@ def test_worker_runs_controlled_service_chain_and_reconciles_all_database_ids(
         result_dir = Path(args[args.index("--backtest-directory") + 1])
         result_dir.mkdir(parents=True, exist_ok=True)
         zip_path = result_dir / "backtest-result-2026-07-22_12-00-00.zip"
+        trades = []
+        for index in range(90):
+            open_rate, close_rate = {
+                0: (100.0, 101.0),
+                1: (100.0, 99.0),
+                2: (100.0, 100.1),
+            }[index % 3]
+            opened = 1_704_067_200_000 + index * 300_000
+            trades.append(
+                {
+                    "open_timestamp": opened,
+                    "close_timestamp": opened + 240_000,
+                    "open_rate": open_rate,
+                    "close_rate": close_rate,
+                    "fee_open": 0.0005,
+                    "fee_close": 0.0005,
+                    "funding_fees": 0.0,
+                    "profit_abs": 1.0,
+                    "profit_ratio": 0.001,
+                }
+            )
         with zipfile.ZipFile(zip_path, "w") as archive:
             archive.writestr(
                 "backtest-result-2026-07-22_12-00-00.json",
@@ -407,8 +432,10 @@ def test_worker_runs_controlled_service_chain_and_reconciles_all_database_ids(
                                 "profit_total_pct": 12.5,
                                 "max_drawdown_pct": 4.2,
                                 "winrate": 61.0,
-                                "total_trades": 42,
+                                "total_trades": len(trades),
                                 "timerange": "20240101-20240201",
+                                "starting_balance": 1000.0,
+                                "trades": trades,
                             }
                         }
                     }
@@ -472,6 +499,7 @@ def test_worker_runs_controlled_service_chain_and_reconciles_all_database_ids(
         heartbeat_interval_seconds=10,
     )
     assert worker.run_once() == job_id
+    assert worker.run_once() == job_id
     assert worker.run_once() is None
     assert len(http_client.requests) == 1
     assert http_client.requests[0]["url"] == "https://api.deepseek.com/chat/completions"
@@ -480,7 +508,7 @@ def test_worker_runs_controlled_service_chain_and_reconciles_all_database_ids(
         job = ResearchJobRepository(db).get(job_id)
         assert job is not None
         assert job.status == "SUCCESS", (job.error_message, job.evidence_snapshot)
-        assert job.stage == "COMPLETED"
+        assert job.stage == "DEPLOYED"
         assert job.provider_attempted_at is not None
         assert job.provider_completed_at is not None
         assert job.evidence_snapshot["acceptance_ready"] is True
@@ -503,6 +531,15 @@ def test_worker_runs_controlled_service_chain_and_reconciles_all_database_ids(
         assert db.query(BacktestTask).count() == 1
         assert db.query(BacktestResult).count() == 1
         assert db.query(StrategyScore).count() == 1
+        assert db.query(FullChainRun).count() == 1
+        assert db.query(StrategyCandidateApproval).count() == 1
+        assert db.query(StrategyDeployment).count() == 1
+        assert (
+            db.query(BacktestResult)
+            .one()
+            .metrics_snapshot["promotion_evidence"]["source"]
+            == "persisted_freqtrade_backtest_trades"
+        )
         assert db.query(BacktestRun).one().status == "succeeded"
         assert db.query(BacktestTask).one().status == "succeeded"
     assert observed_args[observed_args.index("--datadir") + 1] == str(datadir / "okx")
