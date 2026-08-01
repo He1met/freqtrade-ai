@@ -1534,11 +1534,15 @@ def wait_for_url(url: str, description: str, timeout_seconds: int = 20) -> None:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         try:
-            with urlopen(url, timeout=2) as response:
+            probe_timeout = min(
+                READINESS_PROBE_TIMEOUT_SECONDS,
+                max(0.1, deadline - time.monotonic()),
+            )
+            with urlopen(url, timeout=probe_timeout) as response:
                 if 200 <= response.status < 400:
                     return
         except (URLError, OSError):
-            time.sleep(0.25)
+            time.sleep(0.5)
     raise RuntimeBlocked("{} did not become reachable within {} seconds".format(description, timeout_seconds))
 
 
@@ -1651,6 +1655,12 @@ def okx_runtime_readiness(state_dir: Path) -> Dict[str, Any]:
 OKX_RUNTIME_STARTUP_TIMEOUT_SECONDS = 300
 SCHEMA_VERIFY_TIMEOUT_SECONDS = 90
 WORKER_QUEUE_VERIFY_TIMEOUT_SECONDS = 30
+# PostgreSQL schema readiness is intentionally strict and can take several
+# seconds on the canonical local database. Keep one probe in flight long
+# enough for that check to finish; a shorter client timeout causes the
+# synchronous /readyz handler to continue after the client gives up, and the
+# retry loop then piles up idle-in-transaction connections.
+READINESS_PROBE_TIMEOUT_SECONDS = 30
 # Real canonical macOS cold starts have reached ~181s before Uvicorn
 # readiness. Keep enough headroom for normal machine variance while the
 # supervisor still enforces the overall startup command budget.
