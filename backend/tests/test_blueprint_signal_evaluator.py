@@ -29,6 +29,8 @@ def blueprint(
     can_short=False,
     short_entry_rules=None,
     timeframe="5m",
+    indicators=None,
+    regime_rules=None,
 ) -> StrategyBlueprint:
     return StrategyBlueprint.model_validate(
         {
@@ -37,7 +39,7 @@ def blueprint(
             "slug": "deterministic-signal-strategy",
             "class_name": "DeterministicSignalStrategy",
             "timeframe": timeframe,
-            "indicators": [
+            "indicators": indicators or [
                 {"name": "rsi_fast", "kind": "rsi", "period": 3},
                 {"name": "ema_fast", "kind": "ema", "period": 3},
                 {"name": "sma_fast", "kind": "sma", "period": 3},
@@ -52,6 +54,7 @@ def blueprint(
             "can_short": can_short,
             "short_entry_rules": short_entry_rules or [],
             "short_exit_rules": [],
+            "regime_rules": regime_rules or [],
         }
     )
 
@@ -401,4 +404,122 @@ def test_talib_numeric_comparison_boundary_is_fail_closed() -> None:
     ):
         BlueprintSignalEvaluator().evaluate(
             request(strategy, candles(prices))
+        )
+
+
+def test_evaluates_indicator_cross_and_rising_rules_on_closed_candles() -> None:
+    strategy = blueprint(
+        indicators=[
+            {"name": "ema_fast", "kind": "ema", "period": 3},
+            {"name": "ema_slow", "kind": "ema", "period": 8},
+        ],
+        entry_rules=[
+            {
+                "indicator": "ema_fast",
+                "operator": "crosses_above",
+                "compare_indicator": "ema_slow",
+                "lookback": 1,
+            },
+            {"indicator": "ema_fast", "operator": "rising", "lookback": 2},
+        ],
+    )
+    prices = [Decimal("10")] * 48 + [Decimal("8"), Decimal("20")]
+
+    result = BlueprintSignalEvaluator().evaluate(
+        request(strategy, candles(prices))
+    )
+
+    assert result.enter_long is True
+    assert result.market_regime is None
+    assert [item["operator"] for item in result.rule_evidence] == [
+        "crosses_above",
+        "rising",
+    ]
+    assert all("previous_value" in item for item in result.rule_evidence)
+
+
+def test_regime_rules_gate_signals_and_require_one_match() -> None:
+    strategy = blueprint(
+        indicators=[
+            {"name": "ema_fast", "kind": "ema", "period": 3},
+            {"name": "ema_slow", "kind": "ema", "period": 8},
+            {"name": "rsi", "kind": "rsi", "period": 3},
+        ],
+        entry_rules=[
+            {"indicator": "rsi", "operator": ">", "value": 50, "regime": "bull"}
+        ],
+        regime_rules=[
+            {
+                "regime": "bull",
+                "rules": [
+                    {
+                        "indicator": "ema_fast",
+                        "operator": ">",
+                        "compare_indicator": "ema_slow",
+                    }
+                ],
+            },
+            {
+                "regime": "bear",
+                "rules": [
+                    {
+                        "indicator": "ema_fast",
+                        "operator": "<",
+                        "compare_indicator": "ema_slow",
+                    }
+                ],
+            },
+        ],
+    )
+    rising_prices = [Decimal("10")] * 42 + [Decimal("8")] * 5 + [Decimal("20")] * 3
+    result = BlueprintSignalEvaluator().evaluate(
+        request(strategy, candles(rising_prices))
+    )
+
+    assert result.market_regime == "bull"
+    assert result.enter_long is True
+    assert any(item.get("regime") == "bull" for item in result.rule_evidence)
+
+    no_match_strategy = blueprint(
+        indicators=[
+            {"name": "ema_fast", "kind": "ema", "period": 3},
+            {"name": "ema_slow", "kind": "ema", "period": 8},
+        ],
+        entry_rules=[
+            {
+                "indicator": "ema_fast",
+                "operator": ">",
+                "compare_indicator": "ema_slow",
+                "regime": "bull",
+            }
+        ],
+        regime_rules=[
+            {
+                "regime": "bull",
+                "rules": [
+                    {
+                        "indicator": "ema_fast",
+                        "operator": ">",
+                        "compare_indicator": "ema_slow",
+                    }
+                ],
+            },
+            {
+                "regime": "bear",
+                "rules": [
+                    {
+                        "indicator": "ema_fast",
+                        "operator": "<",
+                        "compare_indicator": "ema_slow",
+                    }
+                ],
+            },
+        ],
+    )
+    with pytest.raises(
+        BlueprintSignalEvaluationBlocked,
+        match="does not match exactly one declared market regime",
+    ):
+        BlueprintSignalEvaluator().evaluate(
+            request(no_match_strategy, candles([Decimal("10")] * 50))
         )

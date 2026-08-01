@@ -1,12 +1,34 @@
 import math
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    StrictFloat,
+    StrictInt,
+    field_validator,
+    model_validator,
+)
 
 
 BLUEPRINT_SCHEMA_VERSION = "2"
 IndicatorKind = Literal["rsi", "ema", "sma"]
-SignalOperator = Literal["<", "<=", ">", ">=", "=="]
+SignalOperator = Literal[
+    "<",
+    "<=",
+    ">",
+    ">=",
+    "==",
+    "crosses_above",
+    "crosses_below",
+    "rising",
+    "falling",
+]
+MarketRegime = Literal["bull", "bear", "range"]
+
+_VALUE_OPERATORS = {"<", "<=", ">", ">=", "=="}
+_CROSSING_OPERATORS = {"crosses_above", "crosses_below"}
+_TREND_OPERATORS = {"rising", "falling"}
 
 
 class IndicatorBlueprint(BaseModel):
@@ -20,16 +42,68 @@ class IndicatorBlueprint(BaseModel):
 class SignalRule(BaseModel):
     indicator: str = Field(min_length=1, max_length=80, pattern=r"^[a-z][a-z0-9_]*$")
     operator: SignalOperator
-    value: float
+    # A rule either compares an indicator with a finite numeric threshold or
+    # with another declared indicator.  Cross/trend rules use ``lookback``
+    # to inspect only prior closed candles; arbitrary Python expressions are
+    # intentionally not part of this contract.
+    value: Optional[StrictFloat] = None
+    compare_indicator: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=80,
+        pattern=r"^[a-z][a-z0-9_]*$",
+    )
+    lookback: StrictInt = Field(default=1, ge=1, le=500)
+    regime: Optional[MarketRegime] = None
 
     model_config = {"extra": "forbid"}
 
     @field_validator("value")
     @classmethod
-    def validate_value_is_finite(cls, value: float) -> float:
-        if not math.isfinite(value):
+    def validate_value_is_finite(cls, value: Optional[float]) -> Optional[float]:
+        if value is not None and not math.isfinite(value):
             raise ValueError("rule value must be finite")
         return value
+
+    @model_validator(mode="after")
+    def validate_expression_shape(self) -> "SignalRule":
+        if self.operator in _VALUE_OPERATORS:
+            if self.value is None and self.compare_indicator is None:
+                raise ValueError(
+                    "comparison rules require value or compare_indicator"
+                )
+            if self.value is not None and self.compare_indicator is not None:
+                raise ValueError(
+                    "comparison rules cannot set both value and compare_indicator"
+                )
+            if self.lookback != 1:
+                raise ValueError(
+                    "lookback is only supported for crossing or trend rules"
+                )
+        elif self.operator in _CROSSING_OPERATORS:
+            if self.compare_indicator is None or self.value is not None:
+                raise ValueError(
+                    "crossing rules require compare_indicator and no value"
+                )
+        elif self.operator in _TREND_OPERATORS:
+            if self.compare_indicator is not None or self.value is not None:
+                raise ValueError("trend rules require no value or compare_indicator")
+        return self
+
+
+class RegimeRule(BaseModel):
+    """Closed-candle indicator conditions defining one market regime."""
+
+    regime: MarketRegime
+    rules: list[SignalRule] = Field(min_length=1, max_length=8)
+
+    model_config = {"extra": "forbid"}
+
+    @model_validator(mode="after")
+    def reject_nested_regime_gates(self) -> "RegimeRule":
+        if any(rule.regime is not None for rule in self.rules):
+            raise ValueError("regime rules cannot contain nested regime gates")
+        return self
 
 
 class StrategyBlueprint(BaseModel):
@@ -47,6 +121,7 @@ class StrategyBlueprint(BaseModel):
     can_short: bool = False
     short_entry_rules: list[SignalRule] = Field(default_factory=list)
     short_exit_rules: list[SignalRule] = Field(default_factory=list)
+    regime_rules: list[RegimeRule] = Field(default_factory=list, max_length=3)
     tags: list[str] = Field(default_factory=list)
 
     model_config = {"extra": "forbid"}
@@ -88,18 +163,47 @@ class StrategyBlueprint(BaseModel):
             "short_entry_rules": self.short_entry_rules,
             "short_exit_rules": self.short_exit_rules,
         }
+        regime_by_name: dict[str, RegimeRule] = {}
+        for regime_rule in self.regime_rules:
+            if regime_rule.regime in regime_by_name:
+                raise ValueError(
+                    f"regime rules must be unique: {regime_rule.regime}"
+                )
+            regime_by_name[regime_rule.regime] = regime_rule
+        declared_regimes = set(regime_by_name)
         for rule in [
             rule
             for rules in rule_groups.values()
             for rule in rules
-        ]:
+        ] + [rule for item in self.regime_rules for rule in item.rules]:
             indicator = indicator_by_name.get(rule.indicator)
             if indicator is None:
                 raise ValueError(f"rule indicator is not defined: {rule.indicator}")
+            if rule.compare_indicator is not None and rule.compare_indicator not in indicator_by_name:
+                raise ValueError(
+                    f"rule compare_indicator is not defined: {rule.compare_indicator}"
+                )
+            if rule.regime is not None and rule.regime not in declared_regimes:
+                raise ValueError(
+                    f"rule regime is not defined: {rule.regime}"
+                )
+            if rule.value is None:
+                continue
             if indicator.kind == "rsi" and not 0 <= rule.value <= 100:
                 raise ValueError(f"rsi rule value must be between 0 and 100: {rule.indicator}")
             if indicator.kind in {"ema", "sma"} and rule.value <= 0:
                 raise ValueError(f"moving average rule value must be positive: {rule.indicator}")
+        signal_rules = [
+            rule
+            for rules in rule_groups.values()
+            for rule in rules
+        ]
+        if self.regime_rules and (
+            not signal_rules or any(rule.regime is None for rule in signal_rules)
+        ):
+            raise ValueError(
+                "regime_rules require every signal rule to declare a regime"
+            )
         if self.can_short and not self.short_entry_rules:
             raise ValueError(
                 "can_short strategies require short_entry_rules"
@@ -121,6 +225,11 @@ class StrategyBlueprint(BaseModel):
     ) -> None:
         by_indicator: dict[str, list[SignalRule]] = {}
         for rule in rules:
+            # Dynamic indicator relations and temporal rules cannot be
+            # reduced to a static threshold interval.  They are evaluated by
+            # the deterministic closed-candle evaluator instead.
+            if rule.value is None or rule.operator not in _VALUE_OPERATORS:
+                continue
             by_indicator.setdefault(rule.indicator, []).append(rule)
         for indicator, indicator_rules in by_indicator.items():
             lower: Optional[tuple[float, bool]] = None

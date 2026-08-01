@@ -230,14 +230,22 @@ class OpenAICompatibleStrategyBlueprintProvider:
                         "top-level blueprints array. Every blueprint must satisfy schema_version 2. "
                         "Required fields per blueprint: schema_version, name, slug, class_name, "
                         "timeframe, stoploss, minimal_roi, indicators, entry_rules, exit_rules, "
-                        "can_short, short_entry_rules, short_exit_rules, tags. "
+                        "can_short, short_entry_rules, short_exit_rules, regime_rules, tags. "
                         "indicators, entry_rules, exit_rules, short_entry_rules, short_exit_rules, "
                         "and tags must be JSON arrays even when "
                         "there is only one item. Put indicator period at the indicator object top level, "
-                        "not inside params. Use rule fields indicator, operator, and value exactly. "
-                        "Allowed indicator kind values: rsi, ema, sma. Allowed operators: <, <=, >, >=, ==. "
+                        "not inside params. Use rule fields indicator and operator exactly, plus either "
+                        "numeric value or compare_indicator as described below. "
+                        "For a numeric threshold rule use value as a JSON number (never a quoted string); "
+                        "for indicator relations use compare_indicator and omit value. "
+                        "Allowed indicator kind values: rsi, ema, sma. Allowed operators: <, <=, >, >=, ==, "
+                        "crosses_above, crosses_below, rising, falling. "
+                        "Crossing/trend rules may set integer lookback from 1 to 500 and must use only "
+                        "prior closed candles. A rule may set regime to bull, bear, or range only when a "
+                        "matching regime_rules entry exists; regime_rules entries contain a regime and a "
+                        "non-empty rules array and cannot nest regime gates. "
                         "Indicator names and rule references must be lowercase snake_case. "
-                        "Do not wrap the JSON in markdown."
+                        "Do not emit arbitrary Python, expressions, or unknown fields. Do not wrap the JSON in markdown."
                     ),
                 },
                 {
@@ -423,6 +431,17 @@ def _normalize_blueprint_payload(payload: dict[str, Any]) -> dict[str, Any]:
                 _normalize_rule_payload(item) if isinstance(item, dict) else item
                 for item in normalized[rules_key]
             ]
+    regime_rules = normalized.get("regime_rules")
+    if isinstance(regime_rules, dict):
+        regime_rules = [
+            {"regime": regime, "rules": rules}
+            for regime, rules in regime_rules.items()
+        ]
+    if isinstance(regime_rules, list):
+        normalized["regime_rules"] = [
+            _normalize_regime_rule_payload(item) if isinstance(item, dict) else item
+            for item in regime_rules
+        ]
     return normalized
 
 
@@ -451,6 +470,8 @@ def _normalize_rule_payload(payload: dict[str, Any]) -> dict[str, Any]:
     aliases = (
         ("indicator", "indicator_name"),
         ("indicator", "indicatorName"),
+        ("compare_indicator", "compareIndicator"),
+        ("compare_indicator", "reference_indicator"),
         ("operator", "comparison"),
         ("operator", "condition"),
         ("operator", "op"),
@@ -462,6 +483,24 @@ def _normalize_rule_payload(payload: dict[str, Any]) -> dict[str, Any]:
             normalized[target] = normalized[source]
         if source in normalized:
             normalized.pop(source)
+    return normalized
+
+
+def _normalize_regime_rule_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(payload)
+    rules = normalized.get("rules")
+    if isinstance(rules, dict):
+        nested_rules = rules.get("rules")
+        normalized["rules"] = (
+            nested_rules
+            if isinstance(nested_rules, list)
+            else [rules]
+        )
+    if isinstance(normalized.get("rules"), list):
+        normalized["rules"] = [
+            _normalize_rule_payload(item) if isinstance(item, dict) else item
+            for item in normalized["rules"]
+        ]
     return normalized
 
 

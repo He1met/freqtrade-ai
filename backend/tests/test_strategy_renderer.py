@@ -92,3 +92,83 @@ def test_blueprint_rejects_impossible_and_conditions() -> None:
                 {"indicator": "rsi", "operator": ">", "value": 70},
             ],
         )
+
+
+def test_renderer_outputs_indicator_cross_and_trend_rules_without_future_shift() -> None:
+    blueprint = StrategyBlueprint(
+        name="Trend Cross Demo",
+        slug="trend-cross-demo",
+        class_name="TrendCrossDemoStrategy",
+        indicators=[
+            {"name": "ema_fast", "kind": "ema", "period": 12},
+            {"name": "ema_slow", "kind": "ema", "period": 26},
+        ],
+        entry_rules=[
+            {
+                "indicator": "ema_fast",
+                "operator": "crosses_above",
+                "compare_indicator": "ema_slow",
+                "lookback": 2,
+            },
+            {"indicator": "ema_fast", "operator": "rising", "lookback": 3},
+        ],
+    )
+
+    code = StrategyCodeRenderer().render(blueprint)
+
+    assert "dataframe['ema_fast'] > dataframe['ema_slow']" in code
+    assert "dataframe['ema_fast'].shift(2) <= dataframe['ema_slow'].shift(2)" in code
+    assert "dataframe['ema_fast'] > dataframe['ema_fast'].shift(3)" in code
+    assert "shift(-" not in code
+    assert "startup_candle_count = 50" in code
+    compile(code, "generated_strategy.py", "exec")
+    assert StrategyStaticReviewService().review_code(code).passed is True
+
+
+def test_renderer_outputs_regime_masks_and_regime_gated_rules() -> None:
+    blueprint = StrategyBlueprint(
+        name="Regime Demo",
+        slug="regime-demo",
+        class_name="RegimeDemoStrategy",
+        indicators=[
+            {"name": "ema_fast", "kind": "ema", "period": 12},
+            {"name": "ema_slow", "kind": "ema", "period": 26},
+            {"name": "rsi", "kind": "rsi", "period": 14},
+        ],
+        entry_rules=[
+            {"indicator": "rsi", "operator": ">", "value": 50, "regime": "bull"}
+        ],
+        regime_rules=[
+            {
+                "regime": "bull",
+                "rules": [
+                    {
+                        "indicator": "ema_fast",
+                        "operator": ">",
+                        "compare_indicator": "ema_slow",
+                    }
+                ],
+            },
+            {
+                "regime": "bear",
+                "rules": [
+                    {
+                        "indicator": "ema_fast",
+                        "operator": "<",
+                        "compare_indicator": "ema_slow",
+                    }
+                ],
+            },
+        ],
+    )
+
+    code = StrategyCodeRenderer().render(blueprint)
+
+    assert "regime_masks = {" in code
+    assert "regime_match_count" in code
+    assert "(regime_match_count == 1)" in code
+    assert "'bull': reduce" in code
+    assert "regime_masks['bull']" in code
+    assert code.count("regime_masks = {") == 2
+    compile(code, "generated_strategy.py", "exec")
+    assert StrategyStaticReviewService().review_code(code).passed is True

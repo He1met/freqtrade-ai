@@ -347,6 +347,11 @@ def test_real_llm_provider_uses_env_key_and_validates_response(
     assert client.requests[0]["url"] == "https://llm.example.test/v1/chat/completions"
     assert client.requests[0]["headers"]["Authorization"] == "Bearer test-secret-value"
     assert client.requests[0]["json"]["model"] == "mimo-test"
+    prompt = client.requests[0]["json"]["messages"][0]["content"]
+    assert "crosses_above" in prompt
+    assert "compare_indicator" in prompt
+    assert "JSON number (never a quoted string)" in prompt
+    assert "regime_rules" in prompt
     assert "test-secret-value" not in str(client.requests[0]["json"])
     assert "test-secret-value" not in str(provider.metadata_snapshot())
 
@@ -448,6 +453,50 @@ def test_real_llm_provider_normalizes_convertible_blueprint_shape(
     assert blueprints[0].indicators[0].period == 14
     assert blueprints[0].entry_rules[0].indicator == "rsi"
     assert blueprints[0].entry_rules[0].operator == "<"
+
+
+def test_real_llm_provider_normalizes_regime_rule_object_and_indicator_relation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TEST_LLM_API_KEY", "test-secret-value")
+    convertible = blueprint_payload(slug="regime-cross")
+    convertible["indicators"] = [
+        {"name": "ema_fast", "kind": "ema", "period": 12},
+        {"name": "ema_slow", "kind": "ema", "period": 26},
+        {"name": "rsi", "kind": "rsi", "period": 14},
+    ]
+    convertible["entry_rules"] = [
+        {"indicator": "rsi", "operator": ">", "value": 50, "regime": "bull"}
+    ]
+    convertible["exit_rules"] = [
+        {"indicator": "rsi", "operator": "<", "value": 50, "regime": "bull"}
+    ]
+    convertible["regime_rules"] = {
+        "bull": {
+            "indicator": "ema_fast",
+            "operator": ">",
+            "compareIndicator": "ema_slow",
+        },
+        "bear": {
+            "rules": [
+                {
+                    "indicator": "ema_fast",
+                    "operator": "<",
+                    "compare_indicator": "ema_slow",
+                }
+            ]
+        },
+    }
+    response = MockLLMResponse({"strategy_blueprint": convertible})
+    provider = OpenAICompatibleStrategyBlueprintProvider(
+        provider_config(),
+        http_client=MockLLMClient(response),
+    )
+
+    blueprints = provider.generate("Generate one regime-aware strategy.", requested_count=1)
+
+    assert [item.regime for item in blueprints[0].regime_rules] == ["bull", "bear"]
+    assert blueprints[0].regime_rules[0].rules[0].compare_indicator == "ema_slow"
 
 
 def test_real_llm_provider_rejects_non_json_content_without_leaking_secret(

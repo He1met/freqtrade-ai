@@ -3,11 +3,11 @@ from __future__ import annotations
 import math
 from datetime import datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from app.schemas.strategy_blueprint import StrategyBlueprint
+from app.schemas.strategy_blueprint import MarketRegime, StrategyBlueprint
 
 
 class ClosedCandle(BaseModel):
@@ -81,7 +81,7 @@ class BlueprintSignalEvaluationRequest(BaseModel):
 
 class BlueprintSignalEvaluation(BaseModel):
     schema_version: Literal["1"] = "1"
-    evaluator_version: Literal["blueprint-signal-v1"] = "blueprint-signal-v1"
+    evaluator_version: Literal["blueprint-signal-v2"] = "blueprint-signal-v2"
     indicator_engine_version: Literal[
         "decimal-talib-golden-v1"
     ] = "decimal-talib-golden-v1"
@@ -102,6 +102,7 @@ class BlueprintSignalEvaluation(BaseModel):
     evaluated_at: datetime
     enter_long: bool
     enter_short: bool
+    market_regime: Optional[MarketRegime] = None
     indicator_values: dict[str, str]
     rule_evidence: list[dict[str, object]]
     candle_count: int = Field(gt=0)
