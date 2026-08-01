@@ -435,6 +435,7 @@ export function DryRunDecisionPanel({
         {model.action ? (
           <button
             className="primary-button"
+            data-action-id={`lab.dry-run.${model.action}`}
             disabled={Boolean(actionDisabledReason)}
             onClick={
               model.action === "check"

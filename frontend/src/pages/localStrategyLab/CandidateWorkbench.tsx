@@ -515,6 +515,7 @@ export function CandidateWorkbench({
           <p>{backtestReason ?? "候选已通过当前环境与文件门禁，可创建一次本地回测。"}</p>
           <button
             className="primary-button"
+            data-action-id="lab.backtest.trigger"
             disabled={Boolean(backtestReason) || busyAction !== null}
             onClick={handleBacktest}
             type="button"
@@ -557,7 +558,14 @@ export function CandidateWorkbench({
               value={selection.backtestResultId}
             />
           </div>
-          <button className="primary-button" onClick={onRefresh} type="button">刷新持久结果</button>
+          <button
+            className="secondary-button"
+            data-action-id="lab.backtest.refresh-results"
+            onClick={onRefresh}
+            type="button"
+          >
+            刷新回测结果
+          </button>
           <p className="lab-workbench__hint">
             {selectedResult
               ? `已核对 result=${selectedResult.id}；仅 POST 成功不会到达此状态。`
@@ -572,6 +580,7 @@ export function CandidateWorkbench({
           <p>{scoreReason ?? "artifact 与当前任务已对账，可导入并计算评分。"}</p>
           <button
             className="primary-button"
+            data-action-id="lab.score.ingest"
             disabled={Boolean(scoreReason) || busyAction !== null}
             onClick={handleIngest}
             type="button"

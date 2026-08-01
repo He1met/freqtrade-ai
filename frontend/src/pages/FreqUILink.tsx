@@ -350,11 +350,23 @@ export function FreqUILink() {
           <ExpandableText mono summary="展开脱敏 URL" value={link.displayUrl} />
         </div>
         {link.enabled && link.href ? (
-          <a className="primary-link freq-ui-open-link" href={link.href} rel="noreferrer" target="_blank">
+          <a
+            className="primary-link freq-ui-open-link"
+            data-action-id="freq-ui.open"
+            href={link.href}
+            rel="noreferrer"
+            target="_blank"
+          >
             打开 FreqUI
           </a>
         ) : (
-          <span aria-disabled="true" className="primary-link disabled-link freq-ui-open-link">不可用</span>
+          <span
+            aria-disabled="true"
+            className="primary-link disabled-link freq-ui-open-link"
+            data-action-id="freq-ui.open"
+          >
+            不可用
+          </span>
         )}
       </section>
 
