@@ -1651,7 +1651,10 @@ def okx_runtime_readiness(state_dir: Path) -> Dict[str, Any]:
 OKX_RUNTIME_STARTUP_TIMEOUT_SECONDS = 300
 SCHEMA_VERIFY_TIMEOUT_SECONDS = 90
 WORKER_QUEUE_VERIFY_TIMEOUT_SECONDS = 30
-BACKEND_STARTUP_TIMEOUT_SECONDS = 120
+# Real canonical macOS cold starts have reached ~122s before Uvicorn
+# readiness. Keep enough headroom for normal machine variance while the
+# supervisor still enforces the overall startup command budget.
+BACKEND_STARTUP_TIMEOUT_SECONDS = 180
 WORKER_STARTUP_TIMEOUT_SECONDS = 5
 FRONTEND_STARTUP_TIMEOUT_SECONDS = 45
 STARTUP_PREFLIGHT_BUDGET_SECONDS = 180
