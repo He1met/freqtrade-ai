@@ -73,6 +73,76 @@ def test_wait_for_url_uses_a_bounded_slow_probe_timeout(monkeypatch):
     ]
 
 
+def test_wait_for_url_accepts_readiness_after_legacy_twenty_second_budget(
+    monkeypatch,
+):
+    runtime = load_runtime_module()
+    elapsed = [0.0]
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: elapsed[0])
+    monkeypatch.setattr(
+        runtime.time,
+        "sleep",
+        lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds),
+    )
+
+    def delayed_urlopen(_url, *, timeout):
+        assert 0 < timeout <= runtime.READINESS_PROBE_TIMEOUT_SECONDS
+        if elapsed[0] <= 20:
+            raise runtime.URLError("backend still starting")
+        return Response()
+
+    monkeypatch.setattr(runtime, "urlopen", delayed_urlopen)
+
+    runtime.wait_for_url(
+        "http://127.0.0.1:8000/readyz",
+        "backend readiness",
+        timeout_seconds=runtime.BACKEND_STARTUP_TIMEOUT_SECONDS,
+    )
+
+    assert elapsed[0] > 20
+
+
+def test_wait_for_url_still_fails_closed_at_explicit_budget(monkeypatch):
+    runtime = load_runtime_module()
+    elapsed = [0.0]
+
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: elapsed[0])
+    monkeypatch.setattr(
+        runtime.time,
+        "sleep",
+        lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            runtime.URLError("backend unavailable")
+        ),
+    )
+
+    with pytest.raises(
+        runtime.RuntimeBlocked,
+        match="backend readiness did not become reachable within 20 seconds",
+    ):
+        runtime.wait_for_url(
+            "http://127.0.0.1:8000/readyz",
+            "backend readiness",
+            timeout_seconds=20,
+        )
+
+    assert elapsed[0] == 20
+
+
 def test_supervisor_capability_short_process_avoids_heavy_app_imports_and_gc():
     harness = """
 import importlib.util
@@ -1575,6 +1645,56 @@ def test_verify_fails_closed_when_worker_is_not_running(monkeypatch, capsys):
         "backend, worker, frontend, and OKX runtime must all be running"
         in capsys.readouterr().out
     )
+
+
+def test_verify_uses_canonical_readiness_budgets(monkeypatch, tmp_path):
+    runtime = load_runtime_module()
+    runtime.REPO_ROOT = tmp_path.resolve()
+    runtime.DEFAULT_RUNTIME_ENV_FILE = tmp_path / "missing-runtime.env"
+    state_dir = runtime.REPO_ROOT / "runtime"
+    waits = []
+    services = [
+        {"service": service, "running": True}
+        for service in ("backend", "worker", "frontend", "okx_runtime")
+    ]
+    monkeypatch.setattr(
+        runtime,
+        "current_status",
+        lambda _state_dir: {
+            "environment": "local",
+            "services": services,
+            "execution_target": {"status": "READY", "active": "OKX_DEMO"},
+            "credentials": {
+                "okx_demo": {"status": "READY"},
+                "local_action": {"status": "READY"},
+            },
+            "database": {"schema": "verified"},
+            "okx_runtime": {"status": "READY"},
+        },
+    )
+    monkeypatch.setattr(runtime, "ensure_schema", lambda _url: None)
+    monkeypatch.setattr(
+        runtime,
+        "wait_for_url",
+        lambda url, description, timeout_seconds=20: waits.append(
+            (url, description, timeout_seconds)
+        ),
+    )
+
+    assert runtime.main(["verify", "--runtime-dir", str(state_dir)]) == 0
+
+    assert waits == [
+        (
+            "http://127.0.0.1:{}/readyz".format(runtime.BACKEND_PORT),
+            "backend readiness",
+            runtime.BACKEND_STARTUP_TIMEOUT_SECONDS,
+        ),
+        (
+            "http://127.0.0.1:{}/".format(runtime.FRONTEND_PORT),
+            "frontend",
+            runtime.FRONTEND_STARTUP_TIMEOUT_SECONDS,
+        ),
+    ]
 
 
 def test_worker_queue_must_be_idle(monkeypatch):
