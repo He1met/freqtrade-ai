@@ -28,6 +28,74 @@ _DEFAULT_LOCK_PATH = (
     Path.home() / ".freqtrade-ai" / "run" / "okx-demo-order-writer.lock"
 )
 _SERVER_SESSION_CAPABILITY = object()
+_SAFE_EXCEPTION_TYPES = frozenset(
+    {
+        "OkxDemoCredentialsUnavailable",
+        "OkxDemoPreflightBlocked",
+        "OkxDemoWriteBlocked",
+    }
+)
+_SAFE_SESSION_FAILURE_STAGES = frozenset(
+    {
+        "writer-lock",
+        "read-attestation",
+        "writer-credential-bridge",
+    }
+)
+_SAFE_SESSION_FAILURE_CATEGORIES = frozenset(
+    {
+        "PREFLIGHT",
+        "ATTESTATION",
+        "WRITER",
+        "UNEXPECTED",
+    }
+)
+
+
+class OkxDemoServerSessionBlocked(OkxDemoCredentialsUnavailable):
+    """Safe, typed failure from the credential-bearing session factory."""
+
+    def __init__(self, *, stage: str, category: str, cause: BaseException) -> None:
+        if stage not in _SAFE_SESSION_FAILURE_STAGES:
+            stage = "read-attestation"
+            category = "UNEXPECTED"
+        if category not in _SAFE_SESSION_FAILURE_CATEGORIES:
+            category = "UNEXPECTED"
+        cause_type = type(cause).__name__
+        if cause_type not in _SAFE_EXCEPTION_TYPES:
+            cause_type = "UnexpectedError"
+            category = "UNEXPECTED"
+        self.stage = stage
+        self.category = category
+        self.cause_type = cause_type
+        super().__init__(
+            "OKX_DEMO server session blocked "
+            "[stage={}, category={}, cause_type={}]".format(
+                stage,
+                category,
+                cause_type,
+            )
+        )
+
+
+def _session_failure(
+    *,
+    stage: str,
+    exc: BaseException,
+) -> OkxDemoServerSessionBlocked:
+    if isinstance(exc, OkxDemoPreflightBlocked):
+        category = "PREFLIGHT"
+    elif isinstance(exc, OkxDemoCredentialsUnavailable):
+        category = "ATTESTATION"
+    elif isinstance(exc, OkxDemoWriteBlocked):
+        category = "WRITER"
+    else:
+        category = "UNEXPECTED"
+    return OkxDemoServerSessionBlocked(
+        stage=stage,
+        category=category,
+        cause=exc,
+    )
 
 
 class OkxDemoServerSession:
@@ -127,9 +195,12 @@ def create_okx_demo_server_session(
 
     process_lock = OkxDemoWriterProcessLock(lock_path)
     credentials = None
+    stage = "writer-lock"
     try:
         process_lock.acquire()
+        stage = "read-attestation"
         read = create_attested_okx_demo_read_adapter(environment)
+        stage = "writer-credential-bridge"
         credentials = _create_attested_writer_credential_bridge(read)
         return OkxDemoServerSession(
             read=read,
@@ -137,20 +208,17 @@ def create_okx_demo_server_session(
             process_lock=process_lock,
             _capability=_SERVER_SESSION_CAPABILITY,
         )
-    except OkxDemoWriteBlocked:
+    except (
+        OkxDemoWriteBlocked,
+        OkxDemoPreflightBlocked,
+        OkxDemoCredentialsUnavailable,
+    ) as exc:
         if credentials is not None:
             credentials.revoke("FACTORY_FAILURE")
         process_lock.release()
-        raise
-    except OkxDemoPreflightBlocked as exc:
+        raise _session_failure(stage=stage, exc=exc) from None
+    except Exception as exc:
         if credentials is not None:
             credentials.revoke("FACTORY_FAILURE")
         process_lock.release()
-        raise OkxDemoCredentialsUnavailable(str(exc)) from None
-    except Exception:
-        if credentials is not None:
-            credentials.revoke("FACTORY_FAILURE")
-        process_lock.release()
-        raise OkxDemoCredentialsUnavailable(
-            "OKX_DEMO server session attestation failed"
-        ) from None
+        raise _session_failure(stage=stage, exc=exc) from None

@@ -40,6 +40,109 @@ def load_runtime_module():
     return module
 
 
+def test_wait_for_url_uses_a_bounded_slow_probe_timeout(monkeypatch):
+    runtime = load_runtime_module()
+    calls = []
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def fake_urlopen(url, *, timeout):
+        calls.append((url, timeout))
+        return Response()
+
+    monkeypatch.setattr(runtime, "urlopen", fake_urlopen)
+
+    runtime.wait_for_url(
+        "http://127.0.0.1:8000/readyz",
+        "backend readiness",
+        timeout_seconds=45,
+    )
+
+    assert calls == [
+        (
+            "http://127.0.0.1:8000/readyz",
+            runtime.READINESS_PROBE_TIMEOUT_SECONDS,
+        )
+    ]
+
+
+def test_wait_for_url_accepts_readiness_after_legacy_twenty_second_budget(
+    monkeypatch,
+):
+    runtime = load_runtime_module()
+    elapsed = [0.0]
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: elapsed[0])
+    monkeypatch.setattr(
+        runtime.time,
+        "sleep",
+        lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds),
+    )
+
+    def delayed_urlopen(_url, *, timeout):
+        assert 0 < timeout <= runtime.READINESS_PROBE_TIMEOUT_SECONDS
+        if elapsed[0] <= 20:
+            raise runtime.URLError("backend still starting")
+        return Response()
+
+    monkeypatch.setattr(runtime, "urlopen", delayed_urlopen)
+
+    runtime.wait_for_url(
+        "http://127.0.0.1:8000/readyz",
+        "backend readiness",
+        timeout_seconds=runtime.BACKEND_STARTUP_TIMEOUT_SECONDS,
+    )
+
+    assert elapsed[0] > 20
+
+
+def test_wait_for_url_still_fails_closed_at_explicit_budget(monkeypatch):
+    runtime = load_runtime_module()
+    elapsed = [0.0]
+
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: elapsed[0])
+    monkeypatch.setattr(
+        runtime.time,
+        "sleep",
+        lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            runtime.URLError("backend unavailable")
+        ),
+    )
+
+    with pytest.raises(
+        runtime.RuntimeBlocked,
+        match="backend readiness did not become reachable within 20 seconds",
+    ):
+        runtime.wait_for_url(
+            "http://127.0.0.1:8000/readyz",
+            "backend readiness",
+            timeout_seconds=20,
+        )
+
+    assert elapsed[0] == 20
+
+
 def test_supervisor_capability_short_process_avoids_heavy_app_imports_and_gc():
     harness = """
 import importlib.util
@@ -1132,8 +1235,40 @@ def test_okx_canary_without_explicit_flag_is_zero_keychain_and_zero_child(
     assert payload == {
         "status": "BLOCKED",
         "execution_target": "OKX_DEMO",
-        "reason": "explicit --allow-demo-order authorization is required",
+        "reason": "direct OKX Demo canary is permanently disabled; use canonical runtime one-shot grant",
     }
+
+
+def test_okx_canary_cli_tombstone_is_exit_two_and_zero_capability(
+    monkeypatch,
+    capsys,
+):
+    runtime = load_runtime_module()
+    monkeypatch.setattr(
+        runtime,
+        "read_okx_demo_credentials",
+        lambda: pytest.fail("tombstone must not read Keychain"),
+    )
+    monkeypatch.setattr(
+        runtime.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail(
+            "tombstone must not start a child or network path"
+        ),
+    )
+
+    exit_code = runtime.main(
+        [
+            "okx-demo-canary",
+            "--allow-demo-order",
+            "--instrument",
+            "NOT-ALLOWLISTED",
+            "--json",
+        ]
+    )
+
+    assert exit_code == 2
+    assert json.loads(capsys.readouterr().out)["status"] == "BLOCKED"
 
 
 def test_okx_canary_with_missing_keychain_bundle_is_zero_child(monkeypatch):
@@ -1165,150 +1300,53 @@ def test_okx_canary_with_missing_keychain_bundle_is_zero_child(monkeypatch):
     )
 
     assert payload["status"] == "BLOCKED"
-    assert payload["reason"] == "bundle unavailable"
+    assert payload["reason"] == (
+        "direct OKX Demo canary is permanently disabled; "
+        "use canonical runtime one-shot grant"
+    )
 
 
 def test_okx_canary_child_receives_exact_bundle_and_returns_only_safe_evidence(
     monkeypatch,
 ):
     runtime = load_runtime_module()
-    credential_bundle = {
-        "OKX_DEMO_API_KEY": "canary-key",
-        "OKX_DEMO_API_SECRET": "canary-secret",
-        "OKX_DEMO_API_PASSPHRASE": "canary-passphrase",
-        "OKX_DEMO_ACCOUNT_FINGERPRINT": "a" * 64,
-    }
-    captured = {}
     monkeypatch.setattr(
         runtime,
         "read_okx_demo_credentials",
-        lambda: (
-            credential_bundle,
-            {"status": "READY", "configured": True, "source": "keychain"},
+        lambda: pytest.fail("retired canary must never read Keychain"),
+    )
+    monkeypatch.setattr(
+        runtime.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail(
+            "retired canary must never start a subprocess or network child"
         ),
     )
-    monkeypatch.setattr(runtime, "backend_python", lambda: Path("/venv/bin/python"))
-
-    def fake_run(command, **kwargs):
-        captured["command"] = command
-        captured["environment"] = dict(kwargs["env"])
-        return SimpleNamespace(
-            returncode=0,
-            stdout=json.dumps(
-                {
-                    "status": "PASSED",
-                    "execution_target": "OKX_DEMO",
-                    "artifact_id": "b" * 32,
-                    "instrument": "BTC-USDT-SWAP",
-                    "evidence": {
-                        "cl_ord_id_sha256": "c" * 64,
-                        "order_id_sha256": "d" * 64,
-                        "cleanup_cl_ord_id_sha256": None,
-                        "simulated_trading_header": True,
-                        "sequence": [
-                            "account_attested",
-                            "initial_scope_empty",
-                            "limit_order_accepted",
-                            "order_queried",
-                            "cancel_requested",
-                            "cancel_state_queried",
-                            "final_scope_empty",
-                        ],
-                    },
-                }
-            ),
-            stderr="untrusted-child-stderr",
-        )
-
-    monkeypatch.setattr(runtime.subprocess, "run", fake_run)
-
-    payload = runtime.run_okx_demo_canary(
+    assert runtime.run_okx_demo_canary(
         allow_demo_order=True,
-        instrument="BTC-USDT-SWAP",
-    )
-
-    assert captured["command"] == [
-        "/venv/bin/python",
-        "-m",
-        "app.adapters.okx_demo.demo_canary",
-        "--allow-demo-order",
-        "--instrument",
-        "BTC-USDT-SWAP",
-    ]
-    assert captured["environment"]["FREQTRADE_AI_ALLOW_DEMO_ORDER"] == "true"
-    assert {
-        name: captured["environment"][name]
-        for name in runtime.OKX_DEMO_REQUIRED_ENV_NAMES
-    } == {
-        "OKX_DEMO_API_KEY": "canary-key",
-        "OKX_DEMO_API_SECRET": "canary-secret",
-        "OKX_DEMO_API_PASSPHRASE": "canary-passphrase",
-        "OKX_DEMO_ACCOUNT_FINGERPRINT": "a" * 64,
-    }
-    assert payload["status"] == "PASSED"
-    assert not any(
-        value in str(payload)
-        for value in (
-            "canary-key",
-            "canary-secret",
-            "canary-passphrase",
-            "a" * 64,
-            "untrusted-child-stderr",
-        )
-    )
-    assert credential_bundle == {}
-    assert "okx_canary" not in runtime.PID_FILES
+        instrument="NOT-ALLOWLISTED",
+    )["status"] == "BLOCKED"
 
 
 def test_okx_canary_parent_rejects_extra_or_raw_child_evidence(monkeypatch):
     runtime = load_runtime_module()
-    credential_bundle = {
-        "OKX_DEMO_API_KEY": "canary-key",
-        "OKX_DEMO_API_SECRET": "canary-secret",
-        "OKX_DEMO_API_PASSPHRASE": "canary-passphrase",
-        "OKX_DEMO_ACCOUNT_FINGERPRINT": "a" * 64,
-    }
-    monkeypatch.setattr(
-        runtime,
-        "read_okx_demo_credentials",
-        lambda: (
-            credential_bundle,
-            {"status": "READY", "configured": True, "source": "keychain"},
-        ),
+    payload = runtime._validate_okx_demo_canary_payload(
+        {
+            "status": "BLOCKED",
+            "execution_target": "OKX_DEMO",
+            "artifact_id": "b" * 32,
+            "instrument": "BTC-USDT-SWAP",
+            "evidence": {
+                "cl_ord_id_sha256": "c" * 64,
+                "order_id_sha256": None,
+                "cleanup_cl_ord_id_sha256": None,
+                "simulated_trading_header": True,
+                "sequence": [],
+            },
+            "reason_code": "HISTORICAL_VALIDATOR_ONLY",
+        }
     )
-    monkeypatch.setattr(runtime, "backend_python", lambda: Path("/venv/bin/python"))
-    monkeypatch.setattr(
-        runtime.subprocess,
-        "run",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            returncode=0,
-            stdout=json.dumps(
-                {
-                    "status": "PASSED",
-                    "execution_target": "OKX_DEMO",
-                    "artifact_id": "b" * 32,
-                    "instrument": "BTC-USDT-SWAP",
-                    "evidence": {
-                        "cl_ord_id_sha256": "c" * 64,
-                        "order_id_sha256": "d" * 64,
-                        "cleanup_cl_ord_id_sha256": None,
-                        "simulated_trading_header": True,
-                        "sequence": ["final_scope_empty"],
-                        "raw_response": "private-order-id",
-                    },
-                }
-            ),
-            stderr="",
-        ),
-    )
-
-    payload = runtime.run_okx_demo_canary(
-        allow_demo_order=True,
-        instrument="BTC-USDT-SWAP",
-    )
-
-    assert payload["status"] == "RECOVERY_REQUIRED"
-    assert "private-order-id" not in str(payload)
+    assert payload["status"] == "BLOCKED"
 
 
 def test_doctor_uses_explicit_freqtrade_binary(monkeypatch, tmp_path):
@@ -1488,8 +1526,8 @@ def test_start_uses_explicit_per_stage_readiness_budgets(
     assert process_waits == [
         (tmp_path, "worker", runtime.WORKER_STARTUP_TIMEOUT_SECONDS)
     ]
-    assert runtime.BACKEND_STARTUP_TIMEOUT_SECONDS == 120
-    assert runtime.STARTUP_COMMAND_BUDGET_SECONDS == 710
+    assert runtime.BACKEND_STARTUP_TIMEOUT_SECONDS == 240
+    assert runtime.STARTUP_COMMAND_BUDGET_SECONDS == 830
     assert payload["startup"]["status"] == "READY"
     assert set(payload["startup"]["stage_elapsed_ms"]) == (
         runtime.SAFE_STARTUP_STAGES
@@ -1607,6 +1645,56 @@ def test_verify_fails_closed_when_worker_is_not_running(monkeypatch, capsys):
         "backend, worker, frontend, and OKX runtime must all be running"
         in capsys.readouterr().out
     )
+
+
+def test_verify_uses_canonical_readiness_budgets(monkeypatch, tmp_path):
+    runtime = load_runtime_module()
+    runtime.REPO_ROOT = tmp_path.resolve()
+    runtime.DEFAULT_RUNTIME_ENV_FILE = tmp_path / "missing-runtime.env"
+    state_dir = runtime.REPO_ROOT / "runtime"
+    waits = []
+    services = [
+        {"service": service, "running": True}
+        for service in ("backend", "worker", "frontend", "okx_runtime")
+    ]
+    monkeypatch.setattr(
+        runtime,
+        "current_status",
+        lambda _state_dir: {
+            "environment": "local",
+            "services": services,
+            "execution_target": {"status": "READY", "active": "OKX_DEMO"},
+            "credentials": {
+                "okx_demo": {"status": "READY"},
+                "local_action": {"status": "READY"},
+            },
+            "database": {"schema": "verified"},
+            "okx_runtime": {"status": "READY"},
+        },
+    )
+    monkeypatch.setattr(runtime, "ensure_schema", lambda _url: None)
+    monkeypatch.setattr(
+        runtime,
+        "wait_for_url",
+        lambda url, description, timeout_seconds=20: waits.append(
+            (url, description, timeout_seconds)
+        ),
+    )
+
+    assert runtime.main(["verify", "--runtime-dir", str(state_dir)]) == 0
+
+    assert waits == [
+        (
+            "http://127.0.0.1:{}/readyz".format(runtime.BACKEND_PORT),
+            "backend readiness",
+            runtime.BACKEND_STARTUP_TIMEOUT_SECONDS,
+        ),
+        (
+            "http://127.0.0.1:{}/".format(runtime.FRONTEND_PORT),
+            "frontend",
+            runtime.FRONTEND_STARTUP_TIMEOUT_SECONDS,
+        ),
+    ]
 
 
 def test_worker_queue_must_be_idle(monkeypatch):
@@ -1734,6 +1822,146 @@ def test_partial_start_failure_cleans_all_services(monkeypatch, tmp_path):
     assert stopped == list(runtime.SERVICE_STOP_ORDER)
 
 
+def test_okx_startup_failure_diagnostic_survives_cleanup(
+    monkeypatch,
+    tmp_path,
+):
+    runtime = load_runtime_module()
+    install_ready_okx_runtime(monkeypatch, runtime)
+    started = []
+    stopped = []
+    monkeypatch.setattr(
+        runtime,
+        "backend_python",
+        lambda: Path("/venv/bin/python"),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "frontend_vite",
+        lambda: Path("/frontend/vite"),
+    )
+    monkeypatch.setattr(runtime, "port_available", lambda _port: True)
+    monkeypatch.setattr(runtime, "ensure_schema", lambda _url: None)
+    monkeypatch.setattr(runtime, "ensure_worker_queue_idle", lambda _url: None)
+    monkeypatch.setattr(runtime, "wait_for_url", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        runtime,
+        "wait_for_process",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        runtime,
+        "start_service",
+        lambda service, *_args, **_kwargs: started.append(service),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "wait_for_okx_runtime",
+        lambda _state_dir: (_ for _ in ()).throw(
+            runtime.RuntimeBlocked(
+                "safe generic failure",
+                okx_runtime_failure_stage="writer-capability",
+                okx_runtime_failure_category="WRITER",
+                okx_runtime_failure_type="IntegrityError",
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "stop_service",
+        lambda _state_dir, service: (
+            stopped.append(service)
+            or {"service": service, "status": "stopped"}
+        ),
+    )
+
+    with pytest.raises(runtime.RuntimeBlocked) as raised:
+        runtime.start(tmp_path)
+
+    assert raised.value.safe_stage == "okx-runtime-readiness"
+    assert (
+        raised.value.okx_runtime_failure_stage
+        == "writer-capability"
+    )
+    assert raised.value.okx_runtime_failure_type == "IntegrityError"
+    assert raised.value.okx_runtime_failure_category == "WRITER"
+    assert started == list(runtime.SERVICE_START_ORDER)
+    assert stopped == list(runtime.SERVICE_STOP_ORDER)
+
+
+def test_parent_clears_stale_failure_before_child_can_exit_without_main(
+    monkeypatch,
+    tmp_path,
+):
+    runtime = load_runtime_module()
+    install_ready_okx_runtime(monkeypatch, runtime)
+    stale_path = tmp_path / runtime.OKX_RUNTIME_FAILURE_FILE
+    stale_path.write_text(
+        json.dumps(
+            {
+                "status": "BLOCKED",
+                "stage": "read-attestation",
+                "category": "ATTESTATION",
+                "cause_type": "OkxDemoCredentialsUnavailable",
+            }
+        ),
+        encoding="utf-8",
+    )
+    stale_path.chmod(0o600)
+    started = []
+    monkeypatch.setattr(
+        runtime,
+        "backend_python",
+        lambda: Path("/venv/bin/python"),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "frontend_vite",
+        lambda: Path("/frontend/vite"),
+    )
+    monkeypatch.setattr(runtime, "port_available", lambda _port: True)
+    monkeypatch.setattr(runtime, "ensure_schema", lambda _url: None)
+    monkeypatch.setattr(runtime, "ensure_worker_queue_idle", lambda _url: None)
+    monkeypatch.setattr(runtime, "wait_for_url", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        runtime,
+        "wait_for_process",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        runtime,
+        "start_service",
+        lambda service, *_args, **_kwargs: started.append(service),
+    )
+
+    def child_exited_before_main(_state_dir):
+        assert not stale_path.exists()
+        assert runtime.okx_runtime_failure(tmp_path) == {}
+        raise runtime.RuntimeBlocked("child exited before main")
+
+    monkeypatch.setattr(
+        runtime,
+        "wait_for_okx_runtime",
+        child_exited_before_main,
+    )
+    monkeypatch.setattr(
+        runtime,
+        "stop_service",
+        lambda _state_dir, service: {
+            "service": service,
+            "status": "stopped",
+        },
+    )
+
+    with pytest.raises(runtime.RuntimeBlocked) as captured:
+        runtime.start(tmp_path)
+
+    assert started == list(runtime.SERVICE_START_ORDER)
+    assert captured.value.okx_runtime_failure_stage is None
+    assert captured.value.okx_runtime_failure_category is None
+    assert captured.value.okx_runtime_failure_type is None
+
+
 def test_cleanup_stale_runtime_removes_dead_pid_and_readiness(
     monkeypatch,
     tmp_path,
@@ -1844,6 +2072,95 @@ def test_okx_runtime_startup_fails_closed_when_child_exits(
 
     with pytest.raises(runtime.RuntimeBlocked, match="did not establish"):
         runtime.wait_for_okx_runtime(tmp_path)
+
+
+def test_okx_runtime_startup_propagates_only_safe_failure_stage_and_type(
+    monkeypatch,
+    tmp_path,
+):
+    runtime = load_runtime_module()
+    moments = iter((0.0, 1.0))
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: next(moments))
+    monkeypatch.setattr(
+        runtime,
+        "okx_runtime_readiness",
+        lambda _state_dir: {"status": "BLOCKED"},
+    )
+    monkeypatch.setattr(
+        runtime,
+        "process_status",
+        lambda _state_dir, _service: {"running": False},
+    )
+    failure_path = tmp_path / runtime.OKX_RUNTIME_FAILURE_FILE
+    failure_path.write_text(
+        json.dumps(
+            {
+                "status": "BLOCKED",
+                "stage": "read-attestation",
+                "category": "ATTESTATION",
+                "cause_type": "OkxDemoCredentialsUnavailable",
+            }
+        ),
+        encoding="utf-8",
+    )
+    failure_path.chmod(0o600)
+
+    with pytest.raises(runtime.RuntimeBlocked) as captured:
+        runtime.wait_for_okx_runtime(tmp_path)
+
+    assert captured.value.okx_runtime_failure_stage == "read-attestation"
+    assert captured.value.okx_runtime_failure_category == "ATTESTATION"
+    assert (
+        captured.value.okx_runtime_failure_type
+        == "OkxDemoCredentialsUnavailable"
+    )
+
+
+def test_okx_runtime_failure_rejects_unsafe_or_unexpected_evidence(tmp_path):
+    runtime = load_runtime_module()
+    failure_path = tmp_path / runtime.OKX_RUNTIME_FAILURE_FILE
+    failure_path.write_text(
+        json.dumps(
+            {
+                "status": "BLOCKED",
+                "stage": "writer-capability",
+                "category": "WRITER",
+                "cause_type": "IntegrityError",
+                "secret": "must-not-be-read",
+            }
+        ),
+        encoding="utf-8",
+    )
+    failure_path.chmod(0o600)
+    assert runtime.okx_runtime_failure(tmp_path) == {}
+
+    failure_path.write_text(
+        json.dumps(
+            {
+                "status": "BLOCKED",
+                "stage": "writer-capability",
+                "category": "WRITER",
+                "cause_type": "IntegrityError",
+            }
+        ),
+        encoding="utf-8",
+    )
+    failure_path.chmod(0o644)
+    assert runtime.okx_runtime_failure(tmp_path) == {}
+
+    failure_path.write_text(
+        json.dumps(
+            {
+                "status": "BLOCKED",
+                "stage": "read-attestation",
+                "category": "ATTESTATION",
+                "cause_type": "SensitiveButValidIdentifier",
+            }
+        ),
+        encoding="utf-8",
+    )
+    failure_path.chmod(0o600)
+    assert runtime.okx_runtime_failure(tmp_path) == {}
 
 
 def test_okx_runtime_startup_fails_closed_after_bounded_timeout(

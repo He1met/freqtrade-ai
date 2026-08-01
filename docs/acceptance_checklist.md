@@ -39,6 +39,21 @@ source marker、fail-closed 和安全边界证据。真实 DeepSeek 调用只允
 明确授权后运行 `python3 scripts/phase9_deepseek_single_e2e.py --allow-real-call --json`；
 默认 PR 验证不得泄露或持久化真实 key。
 
+## 默认桌面验收视口
+
+前端默认视觉与功能验收统一使用固定的 `1440×900` CSS viewport，不得将其写成可选示例。
+必须在该视口确认主要内容、按钮、表格、弹窗和导航正常，且无明显遮挡或横向溢出。
+
+默认不在每个功能任务中重复测试其他窗口宽度、完整响应式矩阵或移动端。仅在以下任一情况
+成立时增加其他宽度验收：
+
+- Issue 或验收标准明确要求响应式或移动端；
+- 改动直接涉及布局断点、侧栏、表格宽度或弹窗自适应；
+- 已在 `1440×900` 观察到溢出、遮挡或缩放异常；
+- 用户另行明确要求。
+
+该规则用于减少重复视觉检查，把资源优先投入第一笔 `OKX_DEMO` 完整闭环。
+
 ## PR 验收清单
 
 - [ ] backend pytest：如涉及 backend、schema、repository、service、API 或 smoke，运行

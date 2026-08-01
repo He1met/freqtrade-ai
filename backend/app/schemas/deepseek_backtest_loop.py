@@ -14,10 +14,28 @@ from app.schemas.strategy_generation_run import StrategyGenerationApiResponse, S
 DeepSeekBacktestLoopStatus = Literal["succeeded", "failed", "blocked"]
 
 
+class StrategyValidationWindowRequest(BaseModel):
+    window_kind: Literal["OOS", "WALK_FORWARD"]
+    timerange: str = Field(pattern=r"^\d{8}-\d{8}$")
+    expected_market_data_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    market_state: Optional[Literal["bull", "bear", "range"]] = None
+
+    @model_validator(mode="after")
+    def validate_market_state(self) -> "StrategyValidationWindowRequest":
+        if self.window_kind == "OOS" and self.market_state is not None:
+            raise ValueError("OOS validation window must not claim a market state")
+        if self.window_kind == "WALK_FORWARD" and self.market_state is None:
+            raise ValueError("walk-forward validation window requires a market state slot")
+        return self
+
+
 class DeepSeekBacktestLoopRequest(BaseModel):
     prompt_summary: str = Field(min_length=1, max_length=4000)
     allow_real_call: bool = False
     backtest_profile: dict = Field(default_factory=dict)
+    validation_windows: list[StrategyValidationWindowRequest] = Field(
+        default_factory=list
+    )
     timeout_seconds: Optional[int] = Field(default=None, gt=0, le=3600)
 
 

@@ -877,14 +877,14 @@ def test_runtime_resumes_unresolved_placement_before_selecting_new_approval(
     class Writer:
         calls = []
 
-        def place(self, approved, *, submission_grant):
-            self.calls.append((approved, submission_grant))
+        def reconcile_unresolved(self, attempt_id):
+            self.calls.append(attempt_id)
 
     writer = Writer()
     adapter.run_cycle(read_client=object(), writer=writer, db=db)
 
     assert len(writer.calls) == 1
-    assert writer.calls[0][0].approval_id == 41
+    assert writer.calls == [1]
 
 
 def _active_runtime_deployment(db) -> StrategyDeployment:

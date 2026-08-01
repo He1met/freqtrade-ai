@@ -47,7 +47,7 @@ from app.models.execution_lineage import (
     TradeIntent,
 )
 from app.models.full_chain import FullChainRun, FullChainStageRun
-from app.models.order_writer import OkxOrderWriteAttempt
+from app.models.order_writer import OkxDemoSubmissionGrant, OkxOrderWriteAttempt
 from app.models.okx_demo_reconciliation import (
     OkxDemoExchangeEvent,
     OkxDemoReconciliationState,
@@ -65,6 +65,13 @@ from app.services.okx_demo_reconciliation import (
     OkxDemoReconciliationBlocked,
     OkxDemoReconciliationService,
     SCHEMA_VERSION as RECONCILIATION_EVENT_SCHEMA_VERSION,
+)
+from app.services.okx_demo_submission_grant import (
+    acquire_one_shot_runtime_lock,
+    CANARY_PROVENANCE,
+    release_one_shot_runtime_lock,
+    submission_grant_request_digest,
+    try_one_shot_transaction_lock,
 )
 
 
@@ -240,6 +247,7 @@ def _seed_approved_order(
     session: Session,
     *,
     create_order: bool = True,
+    controlled_canary: bool = False,
 ) -> tuple[int, int]:
     ensure_execution_scope_catalog(session)
     capability = _issue_attested_session_capability(
@@ -258,6 +266,23 @@ def _seed_approved_order(
             "authenticated": kind == "account",
             "expires_at": (NOW + timedelta(minutes=5)).isoformat(),
         }
+        if kind == "instrument":
+            content.update(
+                instrument_id="BTC-USDT-SWAP",
+                min_size="1",
+                lot_size="1",
+                contract_value=("0.0001" if controlled_canary else "1"),
+                state="live",
+                contract_shape="linear",
+            )
+        elif kind == "market":
+            content.update(
+                instrument_id="BTC-USDT-SWAP",
+                reference_price="57000",
+                bbo={"ask_price": "57000"},
+                mark={"price": "57000"},
+                as_of=NOW.isoformat(),
+            )
         normalized = _normalize_attested_snapshot(
             capability,
             kind=kind,
@@ -283,7 +308,7 @@ def _seed_approved_order(
     canonical_input = {"request": "postgresql-writer-test"}
     canonical_hash = canonical_digest(canonical_input)
     lineage = {"test_lineage": True}
-    notional = Decimal("57000")
+    notional = Decimal("5.7" if controlled_canary else "57000")
     approved_payload_hash = canonical_digest(
         {
             "authorization_schema_version": "RISK_V1",
@@ -1063,6 +1088,207 @@ def test_postgresql_concurrent_lease_has_one_winner(
     assert sorted(results) == ["ACQUIRED", "BLOCKED"]
 
 
+def test_postgresql_one_shot_advisory_lock_fences_api_transaction(
+    postgres_writer_engine,
+) -> None:
+    with Session(postgres_writer_engine) as runtime_session, Session(
+        postgres_writer_engine
+    ) as api_session:
+        assert acquire_one_shot_runtime_lock(runtime_session) is True
+        assert try_one_shot_transaction_lock(api_session) is False
+        api_session.rollback()
+        assert release_one_shot_runtime_lock(runtime_session) is True
+        runtime_session.commit()
+        assert try_one_shot_transaction_lock(api_session) is True
+        api_session.rollback()
+
+
+def test_postgresql_one_shot_grant_has_one_atomic_journal_winner(
+    postgres_writer_engine,
+) -> None:
+    upgrade_database(postgres_writer_engine)
+    with Session(postgres_writer_engine) as session:
+        approval_id, _order_id = _seed_approved_order(
+            session,
+            create_order=False,
+            controlled_canary=True,
+        )
+        approval = session.get(ApprovedExecution, approval_id)
+        run = ReconciliationRun(
+            execution_target_id="OKX_DEMO",
+            status="RECONCILED",
+            summary_snapshot={},
+            database_ids={"order_snapshots": [], "position_snapshots": []},
+            artifact_status="READY",
+            authoritative_observed_at=NOW,
+            source_type="api_aggregate",
+            core_data=True,
+            started_at=NOW,
+            completed_at=NOW,
+            created_at=NOW,
+        )
+        session.add(run)
+        session.flush()
+        run.database_ids = dict(run.database_ids, reconciliation_run=[run.id])
+        state = session.scalars(
+            select(OkxDemoReconciliationState)
+            .where(
+                OkxDemoReconciliationState.execution_target_id == "OKX_DEMO"
+            )
+            .with_for_update()
+        ).first()
+        if state is None:
+            state = OkxDemoReconciliationState(execution_target_id="OKX_DEMO")
+            session.add(state)
+        state.status = "RECONCILED"
+        state.opening_frozen = False
+        state.block_reason = None
+        state.last_event_observed_at = NOW
+        state.last_reconciliation_run_id = run.id
+        grant_id = uuid4().hex
+        session.add(
+            OkxDemoSubmissionGrant(
+                grant_id=grant_id,
+                execution_target_id="OKX_DEMO",
+                approval_id=approval_id,
+                reconciliation_run_id=run.id,
+                canonical_hash=approval.canonical_hash,
+                policy_digest=approval.policy_digest,
+                approved_payload_hash=approval.approved_payload_hash,
+                client_order_id=approval.client_order_id,
+                instrument_id="BTC-USDT-SWAP",
+                canary_quantity=Decimal("1"),
+                canary_notional=Decimal("5.7"),
+                request_digest=submission_grant_request_digest(
+                    approval_id=approval_id,
+                    reconciliation_run_id=run.id,
+                    canonical_hash=approval.canonical_hash,
+                    policy_digest=approval.policy_digest,
+                    approved_payload_hash=approval.approved_payload_hash,
+                    client_order_id=approval.client_order_id,
+                    instrument_id="BTC-USDT-SWAP",
+                    canary_quantity=Decimal("1"),
+                    canary_notional=Decimal("5.7"),
+                ),
+                provenance=CANARY_PROVENANCE,
+                status="ACTIVE",
+                issued_at=NOW - timedelta(seconds=1),
+                expires_at=NOW + timedelta(seconds=10),
+            )
+        )
+        client_order_id = approval.client_order_id
+        session.commit()
+
+    barrier = Barrier(2)
+    instrument = InstrumentSpec(
+        inst_id="BTC-USDT-SWAP",
+        inst_type="SWAP",
+        base_ccy="BTC",
+        quote_ccy="USDT",
+        settle_ccy="USDT",
+        contract_type="linear",
+        contract_value="0.0001",
+        contract_value_ccy="BTC",
+        lot_size="1",
+        min_size="1",
+        tick_size="0.1",
+        state="live",
+    )
+
+    def contend(sequence: int) -> str:
+        with Session(postgres_writer_engine) as session:
+            store = SqlAlchemyOrderWriterStore(session, now_provider=lambda: NOW)
+            claimed = store.load_approved_execution(approval_id)
+            authorization = OrderSubmissionAuthorization(
+                grant_id=grant_id,
+                authorization_mode="ONE_SHOT",
+                execution_target_id="OKX_DEMO",
+                authorization_schema_version="RISK_V1",
+                canonical_hash=claimed.canonical_hash,
+                policy_digest=claimed.policy_digest,
+                approved_payload_hash=claimed.approved_payload_hash,
+                allow_real_funds=False,
+                simulated_trading=True,
+                order_submission_enabled=True,
+                writer_instance_id="PgGrantWriter{:02d}".format(sequence),
+                approval_id=approval_id,
+                client_order_id=claimed.client_order_id,
+                issued_at=NOW - timedelta(seconds=1),
+                expires_at=NOW + timedelta(seconds=10),
+            )
+            command = normalize_order_command(
+                claimed,
+                submission_grant=authorization,
+                instrument=instrument,
+                now=NOW,
+            )
+            barrier.wait()
+            try:
+                store.acquire_lease(
+                    grant_id=grant_id,
+                    authorization_mode="ONE_SHOT",
+                    writer_instance_id=authorization.writer_instance_id,
+                    approval_id=approval_id,
+                    canonical_hash=claimed.canonical_hash,
+                    policy_digest=claimed.policy_digest,
+                    approved_payload_hash=claimed.approved_payload_hash,
+                    now=NOW,
+                    expires_at=authorization.expires_at,
+                )
+                store.prepare_place(
+                    command,
+                    operation="PLACE",
+                    operation_id=client_order_id,
+                    request_digest="7" * 64,
+                    safe_request_snapshot=command.request_body,
+                )
+                return "PREPARED"
+            except OkxDemoWriteBlocked as exc:
+                return "BLOCKED: {}".format(exc)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(contend, (1, 2)))
+
+    assert sum(result == "PREPARED" for result in results) == 1, results
+    assert sum(result.startswith("BLOCKED: ") for result in results) == 1, results
+    with postgres_writer_engine.connect() as connection:
+        assert connection.execute(
+            text(
+                "SELECT status FROM okx_demo_submission_grants "
+                "WHERE grant_id = :grant_id"
+            ),
+            {"grant_id": grant_id},
+        ).scalar_one() == "CONSUMED"
+        assert connection.execute(
+            text(
+                "SELECT count(*) FROM okx_order_write_attempts "
+                "WHERE approval_id = :approval_id AND operation = 'PLACE'"
+            ),
+            {"approval_id": approval_id},
+        ).scalar_one() == 1
+    with pytest.raises(SQLAlchemyError):
+        with postgres_writer_engine.begin() as connection:
+            connection.execute(text("SET LOCAL ROLE freqtrade"))
+            connection.execute(
+                text(
+                    "UPDATE okx_demo_submission_grants "
+                    "SET canonical_hash = :tampered WHERE grant_id = :grant_id"
+                ),
+                {"tampered": "f" * 64, "grant_id": grant_id},
+            )
+    with pytest.raises(SQLAlchemyError):
+        with postgres_writer_engine.begin() as connection:
+            connection.execute(text("SET LOCAL ROLE freqtrade"))
+            connection.execute(
+                text(
+                    "UPDATE okx_demo_submission_grants "
+                    "SET status = 'ACTIVE', consumed_at = NULL "
+                    "WHERE grant_id = :grant_id"
+                ),
+                {"grant_id": grant_id},
+            )
+
+
 def _postgres_position_event(quantity: str, sequence: int) -> dict:
     return {
         "schema_version": RECONCILIATION_EVENT_SCHEMA_VERSION,
@@ -1454,6 +1680,7 @@ def test_postgresql_runtime_role_completes_real_writer_happy_lifecycle(
         session.execute(text("SET LOCAL ROLE freqtrade"))
         claimed = store.load_approved_execution(approval_id)
         authorization = OrderSubmissionAuthorization(
+            grant_id="1" * 32,
             execution_target_id="OKX_DEMO",
             authorization_schema_version="RISK_V1",
             canonical_hash=claimed.canonical_hash,
@@ -1464,7 +1691,9 @@ def test_postgresql_runtime_role_completes_real_writer_happy_lifecycle(
             order_submission_enabled=True,
             writer_instance_id="PgRuntimeWriter01",
             approval_id=approval_id,
-            expires_at=NOW + timedelta(minutes=1),
+            client_order_id=claimed.client_order_id,
+            issued_at=NOW - timedelta(seconds=1),
+            expires_at=NOW + timedelta(seconds=10),
         )
         command = normalize_order_command(
             claimed,
@@ -1567,6 +1796,32 @@ def test_postgresql_runtime_role_releases_expired_approval_budget(
     postgres_writer_engine,
 ) -> None:
     upgrade_database(postgres_writer_engine)
+    with postgres_writer_engine.connect() as connection:
+        assert connection.execute(
+            text(
+                "SELECT bool_and(owner.rolname = 'freqtrade_ai_attestor') "
+                "FROM pg_class AS relation JOIN pg_roles AS owner "
+                "ON owner.oid = relation.relowner "
+                "WHERE relation.relname IN ("
+                "'approved_executions','trade_intents','risk_decisions')"
+            )
+        ).scalar_one() is True
+        assert connection.execute(
+            text(
+                "SELECT has_column_privilege('freqtrade_ai_attestor', "
+                "'full_chain_runs', 'status', 'UPDATE') AND "
+                "has_column_privilege('freqtrade_ai_attestor', "
+                "'risk_budgets', 'reserved_notional', 'UPDATE') AND "
+                "NOT EXISTS (SELECT 1 FROM pg_class AS relation "
+                "CROSS JOIN LATERAL aclexplode(COALESCE("
+                "relation.relacl, acldefault('r', relation.relowner))) AS acl "
+                "WHERE relation.relname IN ('full_chain_runs','risk_budgets') "
+                "AND acl.grantee = (SELECT oid FROM pg_roles "
+                "WHERE rolname = 'freqtrade_ai_attestor') "
+                "AND acl.privilege_type IN "
+                "('SELECT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER'))"
+            )
+        ).scalar_one() is True
     with Session(postgres_writer_engine) as session:
         approval_id, _ = _seed_approved_order(
             session,

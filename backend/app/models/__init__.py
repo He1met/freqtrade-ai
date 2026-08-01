@@ -23,7 +23,11 @@ from app.models.full_chain import (
     StrategyCandidateApproval,
 )
 from app.models.local_test_db import LocalTestBatch, LocalTestDbEvent
-from app.models.order_writer import OkxOrderWriteAttempt, OkxOrderWriterLease
+from app.models.order_writer import (
+    OkxDemoSubmissionGrant,
+    OkxOrderWriteAttempt,
+    OkxOrderWriterLease,
+)
 from app.models.okx_demo_reconciliation import (
     OkxDemoAccountSnapshot,
     OkxDemoExchangeEvent,
@@ -64,6 +68,7 @@ __all__ = [
     "LocalTestDbEvent",
     "OkxOrderWriteAttempt",
     "OkxOrderWriterLease",
+    "OkxDemoSubmissionGrant",
     "OkxDemoAccountSnapshot",
     "OkxDemoExchangeEvent",
     "OkxDemoFillSnapshot",

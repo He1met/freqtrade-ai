@@ -84,6 +84,7 @@ SECRET_TOKEN_PATTERN = re.compile(
 )
 AUTHORIZATION_METADATA_SAFE_VALUES = {
     "secret_id": frozenset({"ACTIVE"}),
+    "authorization_mode": frozenset({"MANIFEST", "ONE_SHOT"}),
     "authorization_schema_version": frozenset({"RISK_V1", "LEGACY"}),
     "authorization_status": frozenset(
         {
@@ -296,9 +297,19 @@ def _is_allowed_secret_reference(key: str, raw_value: str, line: str) -> bool:
         return True
     if _looks_like_code_expression(value):
         return True
-    if key_normalized in AUTHORIZATION_METADATA_SAFE_VALUES:
+    metadata_key = key_normalized
+    if metadata_key not in AUTHORIZATION_METADATA_SAFE_VALUES:
+        metadata_key = next(
+            (
+                candidate
+                for candidate in AUTHORIZATION_METADATA_SAFE_VALUES
+                if metadata_key.endswith("_" + candidate)
+            ),
+            "",
+        )
+    if metadata_key:
         return _is_safe_authorization_metadata_value(
-            key_normalized,
+            metadata_key,
             raw_value,
             value,
             line,
@@ -333,15 +344,28 @@ def _is_safe_authorization_metadata_value(
         r"""['"`]?(?P<value>[A-Z][A-Z0-9_]*)['"`]?\s*[;),]?""",
         raw_value.strip(),
     )
+    comparison_literal = re.fullmatch(
+        r"""=+\s*['\"`]?(?P<value>[A-Z][A-Z0-9_]*)['\"`]?\s*[:;),]?""",
+        raw_value.strip(),
+    )
     if (
         strict_literal is not None
         and strict_literal.group("value") in safe_values
+    ):
+        return True
+    if (
+        comparison_literal is not None
+        and comparison_literal.group("value") in safe_values
     ):
         return True
 
     if (
         key_normalized == "authorization_schema_version"
         and value == "intent.authorization_schema_version"
+    ):
+        return True
+    if key_normalized == "authorization_mode" and value.endswith(
+        ".authorization_mode"
     ):
         return True
     return False

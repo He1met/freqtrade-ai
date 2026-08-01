@@ -1,11 +1,17 @@
+import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from threading import Barrier
+from typing import Optional
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.db.migrations import upgrade_database
+from app.db.session import create_database_engine, create_session_factory
 from app.models import (
     ApprovedExecution,
     BacktestResult,
@@ -15,8 +21,11 @@ from app.models import (
     FullChainRun,
     FullChainStageRun,
     ReconciliationRun,
+    ResearchJobAttempt,
+    ResearchWorkerControl,
     RiskDecision,
     Strategy,
+    StrategyCandidateApproval,
     StrategyGenerationRun,
     StrategyScore,
     StrategyValidationPlan,
@@ -37,6 +46,7 @@ from app.services.strategy_validation_matrix import StrategyValidationMatrixServ
 
 
 NOW = datetime(2026, 7, 27, 8, 0, tzinfo=timezone.utc)
+POSTGRES_WORKER_URL = os.environ.get("POSTGRES_WORKER_URL")
 
 
 @pytest.fixture
@@ -56,6 +66,25 @@ def db(monkeypatch):
     with factory() as session:
         ensure_execution_scope_catalog(session)
         yield session
+    engine.dispose()
+
+
+@pytest.fixture
+def postgres_factory():
+    if not POSTGRES_WORKER_URL:
+        pytest.skip(
+            "POSTGRES_WORKER_URL is required for the PostgreSQL approval gate"
+        )
+    engine = create_database_engine(POSTGRES_WORKER_URL)
+    with engine.begin() as connection:
+        connection.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
+        connection.execute(text("CREATE SCHEMA public"))
+    upgrade_database(engine)
+    factory = create_session_factory(engine)
+    yield factory
+    with engine.begin() as connection:
+        connection.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
+        connection.execute(text("CREATE SCHEMA public"))
     engine.dispose()
 
 
@@ -554,6 +583,265 @@ def test_okx_demo_candidate_is_automatically_approved_with_auditable_gates(db) -
     assert resumed_job.status == "PENDING"
     assert resumed_job.stage == "CANDIDATE_APPROVED"
     assert resumed_job.lease_token is None
+
+
+def test_okx_demo_auto_approval_rolls_back_every_state_on_commit_failure(db) -> None:
+    job = claimed_job(db)
+    repository = FullChainRepository(db)
+    chain = repository.open_for_claimed_job(job.id, job.lease_token, now=NOW)
+    lineage = prepare_and_complete_research(
+        db,
+        repository,
+        chain,
+        job.lease_token,
+    )
+    repository.prepare_stage(
+        chain.id,
+        "CANDIDATE_APPROVAL",
+        job.lease_token,
+        idempotency_key="automatic-candidate-rollback",
+        input_snapshot={
+            "approval_mode": "AUTOMATIC",
+            "execution_target_id": "OKX_DEMO",
+            "strategy_version_id": lineage[2].id,
+            "backtest_result_id": lineage[5].id,
+            "strategy_score_id": lineage[6].id,
+        },
+        now=NOW,
+    )
+
+    def fail_commit(_session) -> None:
+        raise RuntimeError("simulated atomic approval commit failure")
+
+    event.listen(db, "before_commit", fail_commit)
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match="simulated atomic approval commit failure",
+        ):
+            repository.auto_approve_candidate(
+                chain.id,
+                job.lease_token,
+                now=NOW,
+            )
+    finally:
+        event.remove(db, "before_commit", fail_commit)
+
+    db.expire_all()
+    persisted_chain = db.get(FullChainRun, chain.id)
+    persisted_job = ResearchJobRepository(db).get(job.id)
+    checkpoint = (
+        db.query(FullChainStageRun)
+        .filter(
+            FullChainStageRun.full_chain_run_id == chain.id,
+            FullChainStageRun.stage == "CANDIDATE_APPROVAL",
+        )
+        .one()
+    )
+    control = db.get(ResearchWorkerControl, 1)
+    assert db.query(StrategyCandidateApproval).count() == 0
+    assert persisted_chain is not None
+    assert persisted_chain.candidate_approval_id is None
+    assert persisted_chain.status == "RUNNING"
+    assert persisted_chain.current_stage == "CANDIDATE_APPROVAL"
+    assert checkpoint.status == "PREPARED"
+    assert checkpoint.database_ids == {}
+    assert persisted_job is not None
+    assert persisted_job.status == "RUNNING"
+    assert persisted_job.lease_token == job.lease_token
+    assert control is not None
+    assert control.active_job_id == job.id
+    assert control.active_lease_token == job.lease_token
+
+
+def test_okx_demo_auto_approval_rejects_stale_lease_without_partial_state(db) -> None:
+    job = claimed_job(db)
+    repository = FullChainRepository(db)
+    chain = repository.open_for_claimed_job(job.id, job.lease_token, now=NOW)
+    lineage = prepare_and_complete_research(
+        db,
+        repository,
+        chain,
+        job.lease_token,
+    )
+    repository.prepare_stage(
+        chain.id,
+        "CANDIDATE_APPROVAL",
+        job.lease_token,
+        idempotency_key="automatic-candidate-stale-lease",
+        input_snapshot={
+            "strategy_version_id": lineage[2].id,
+            "backtest_result_id": lineage[5].id,
+            "strategy_score_id": lineage[6].id,
+        },
+        now=NOW,
+    )
+
+    with pytest.raises(FullChainBlocked, match="lease.*fenced"):
+        repository.auto_approve_candidate(
+            chain.id,
+            "stale-lease-token",
+            now=NOW,
+        )
+
+    db.expire_all()
+    checkpoint = (
+        db.query(FullChainStageRun)
+        .filter(
+            FullChainStageRun.full_chain_run_id == chain.id,
+            FullChainStageRun.stage == "CANDIDATE_APPROVAL",
+        )
+        .one()
+    )
+    persisted_job = ResearchJobRepository(db).get(job.id)
+    assert db.query(StrategyCandidateApproval).count() == 0
+    assert checkpoint.status == "PREPARED"
+    assert persisted_job is not None
+    assert persisted_job.status == "RUNNING"
+    assert persisted_job.lease_token == job.lease_token
+
+
+def test_okx_demo_auto_approval_rejects_attempt_mismatch(db) -> None:
+    job = claimed_job(db)
+    repository = FullChainRepository(db)
+    chain = repository.open_for_claimed_job(job.id, job.lease_token, now=NOW)
+    lineage = prepare_and_complete_research(
+        db,
+        repository,
+        chain,
+        job.lease_token,
+    )
+    repository.prepare_stage(
+        chain.id,
+        "CANDIDATE_APPROVAL",
+        job.lease_token,
+        idempotency_key="automatic-candidate-attempt-mismatch",
+        input_snapshot={
+            "strategy_version_id": lineage[2].id,
+            "backtest_result_id": lineage[5].id,
+            "strategy_score_id": lineage[6].id,
+        },
+        now=NOW,
+    )
+    persisted_job = ResearchJobRepository(db).get(job.id)
+    assert persisted_job is not None
+    persisted_job.attempt_count = 2
+    db.add(
+        ResearchJobAttempt(
+            research_job_id=job.id,
+            attempt_number=2,
+            execution_scope_id="LOCAL_DRY_RUN",
+            status="RUNNING",
+            started_at=NOW,
+        )
+    )
+    db.commit()
+
+    with pytest.raises(FullChainBlocked, match="Attempt.*fenced"):
+        repository.auto_approve_candidate(
+            chain.id,
+            job.lease_token,
+            now=NOW,
+        )
+
+    db.expire_all()
+    assert db.query(StrategyCandidateApproval).count() == 0
+    assert (
+        db.query(FullChainStageRun)
+        .filter(
+            FullChainStageRun.full_chain_run_id == chain.id,
+            FullChainStageRun.stage == "CANDIDATE_APPROVAL",
+        )
+        .one()
+        .status
+        == "PREPARED"
+    )
+
+
+def test_postgresql_concurrent_okx_demo_auto_approval_has_one_fenced_winner(
+    postgres_factory,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        StrategyValidationMatrixService,
+        "assert_current_for_promotion",
+        lambda self, plan: plan.promotion_evidence,
+    )
+    with postgres_factory() as setup:
+        job = claimed_job(setup)
+        repository = FullChainRepository(setup)
+        chain = repository.open_for_claimed_job(
+            job.id,
+            job.lease_token,
+            now=NOW,
+        )
+        lineage = prepare_and_complete_research(
+            setup,
+            repository,
+            chain,
+            job.lease_token,
+        )
+        repository.prepare_stage(
+            chain.id,
+            "CANDIDATE_APPROVAL",
+            job.lease_token,
+            idempotency_key="postgres-concurrent-auto-approval",
+            input_snapshot={
+                "strategy_version_id": lineage[2].id,
+                "backtest_result_id": lineage[5].id,
+                "strategy_score_id": lineage[6].id,
+            },
+            now=NOW,
+        )
+        job_id = job.id
+        chain_id = chain.id
+        lease_token = job.lease_token
+
+    barrier = Barrier(2)
+
+    def approve() -> tuple[str, Optional[int]]:
+        with postgres_factory() as session:
+            barrier.wait()
+            try:
+                approval = FullChainRepository(
+                    session
+                ).auto_approve_candidate(
+                    chain_id,
+                    lease_token,
+                    now=NOW,
+                )
+                return "APPROVED", approval.id
+            except (FullChainBlocked, FullChainConflict):
+                return "FENCED", None
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(lambda _index: approve(), range(2)))
+
+    assert sorted(status for status, _approval_id in outcomes) == [
+        "APPROVED",
+        "FENCED",
+    ]
+    with postgres_factory() as verify:
+        approvals = verify.query(StrategyCandidateApproval).all()
+        assert len(approvals) == 1
+        assert approvals[0].status == "APPROVED"
+        persisted_job = ResearchJobRepository(verify).get(job_id)
+        assert persisted_job is not None
+        assert persisted_job.status == "PENDING"
+        assert persisted_job.stage == "CANDIDATE_APPROVED"
+        assert persisted_job.lease_token is None
+        checkpoint = (
+            verify.query(FullChainStageRun)
+            .filter(
+                FullChainStageRun.full_chain_run_id == chain_id,
+                FullChainStageRun.stage == "CANDIDATE_APPROVAL",
+            )
+            .one()
+        )
+        assert checkpoint.status == "SUCCESS"
+        assert checkpoint.database_ids == {
+            "candidate_approval_id": approvals[0].id
+        }
 
 
 def test_okx_demo_auto_approval_keeps_promotion_fail_closed(db) -> None:

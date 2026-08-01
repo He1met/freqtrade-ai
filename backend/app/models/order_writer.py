@@ -1,4 +1,5 @@
 from datetime import datetime
+from decimal import Decimal
 from typing import Optional
 
 from sqlalchemy import (
@@ -9,6 +10,7 @@ from sqlalchemy import (
     Index,
     Integer,
     JSON,
+    Numeric,
     String,
     UniqueConstraint,
     text,
@@ -24,6 +26,84 @@ NONTERMINAL_PREDICATE = (
     "'RESIDUAL_CLOSE_REQUIRED')"
 )
 PLACEMENT_PREDICATE = "operation = 'PLACE'"
+
+
+class OkxDemoSubmissionGrant(Base):
+    """Durable, single-use capability consumed by the canonical writer."""
+
+    __tablename__ = "okx_demo_submission_grants"
+    __table_args__ = (
+        CheckConstraint(
+            "execution_target_id = 'OKX_DEMO'",
+            name="okx_demo_submission_grants_target_check",
+        ),
+        CheckConstraint(
+            "status IN ('ACTIVE', 'CONSUMED', 'EXPIRED', 'FAILED')",
+            name="okx_demo_submission_grants_status_check",
+        ),
+        CheckConstraint(
+            "length(grant_id) = 32 AND length(canonical_hash) = 64 "
+            "AND length(policy_digest) = 64 "
+            "AND length(approved_payload_hash) = 64 "
+            "AND length(request_digest) = 64",
+            name="okx_demo_submission_grants_digest_check",
+        ),
+        CheckConstraint(
+            "provenance = 'CONTROLLED_CANARY_NON_PRODUCTION'",
+            name="okx_demo_submission_grants_provenance_check",
+        ),
+        CheckConstraint(
+            "expires_at > issued_at",
+            name="okx_demo_submission_grants_time_check",
+        ),
+        CheckConstraint(
+            "canary_quantity > 0 AND canary_notional > 0 "
+            "AND canary_notional <= 20",
+            name="okx_demo_submission_grants_risk_check",
+        ),
+        UniqueConstraint(
+            "approval_id",
+            name="okx_demo_submission_grants_approval_unique",
+        ),
+        Index(
+            "okx_demo_submission_grants_one_active_target_idx",
+            "execution_target_id",
+            unique=True,
+            sqlite_where=text("status = 'ACTIVE'"),
+            postgresql_where=text("status = 'ACTIVE'"),
+        ),
+    )
+
+    grant_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    execution_target_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("execution_scopes.scope_id"),
+        nullable=False,
+    )
+    approval_id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey("approved_executions.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    reconciliation_run_id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey("reconciliation_runs.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    canonical_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    policy_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    approved_payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    client_order_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    instrument_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    canary_quantity: Mapped[Decimal] = mapped_column(Numeric(36, 18), nullable=False)
+    canary_notional: Mapped[Decimal] = mapped_column(Numeric(36, 18), nullable=False)
+    request_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    provenance: Mapped[str] = mapped_column(String(48), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    writer_instance_id: Mapped[Optional[str]] = mapped_column(String(64))
+    issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
 
 class OkxOrderWriterLease(Base):

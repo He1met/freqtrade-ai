@@ -1,11 +1,13 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from app.adapters.okx_demo import runtime_service
+from app.adapters.okx_demo.credentials import OkxDemoCredentialsUnavailable
 from app.services.okx_demo_reconciliation import OkxDemoReconciliationBlocked
 from app.adapters.okx_demo.write_semantics import OkxDemoWriteBlocked
 
@@ -206,6 +208,10 @@ class FakeAdapter:
         self.events.append("observe")
         return reconciliation("DRIFTED")
 
+    def run_active_one_shot(self, **_kwargs):
+        self.events.append("one-shot-check")
+        return "NONE"
+
     def run_cycle(self, *, writer, **_kwargs):
         self.events.append(("cycle", writer._openings_allowed))
 
@@ -264,6 +270,16 @@ def test_runtime_orders_reconciliation_before_writer_and_keeps_drift_alive(
     monkeypatch.setattr(runtime_service, "Session", lambda bind: db)
     monkeypatch.setattr(
         runtime_service,
+        "acquire_one_shot_runtime_lock",
+        lambda _db: (adapter.events.append("coordination-lock") or True),
+    )
+    monkeypatch.setattr(
+        runtime_service,
+        "release_one_shot_runtime_lock",
+        lambda _db: (adapter.events.append("coordination-unlock") or False),
+    )
+    monkeypatch.setattr(
+        runtime_service,
         "create_okx_demo_server_session",
         lambda _environment, lock_path: (
             events.append(("session-created", lock_path)) or server
@@ -285,8 +301,11 @@ def test_runtime_orders_reconciliation_before_writer_and_keeps_drift_alive(
 
     assert adapter.events == [
         "startup-reconcile",
+        "coordination-lock",
+        "one-shot-check",
         "observe",
         ("cycle", False),
+        "coordination-unlock",
     ]
     assert events[0][0] == "session-created"
     assert events[1] == "writer-created"
@@ -326,8 +345,12 @@ def test_runtime_cleanup_does_not_mask_primary_failure(
     )
 
     with pytest.raises(
-        runtime_service.OkxDemoRuntimeBlocked,
-        match="primary failure",
+        runtime_service.OkxDemoRuntimeStartupBlocked,
+        match=(
+            r"stage=startup-reconciliation, "
+            r"category=RECONCILIATION, "
+            r"cause_type=OkxDemoRuntimeBlocked"
+        ),
     ):
         runtime_service.serve(
             environment={"DATABASE_URL": "postgresql+psycopg:///freqtrade_ai"},
@@ -336,6 +359,109 @@ def test_runtime_cleanup_does_not_mask_primary_failure(
             engine_factory=lambda *_args, **_kwargs: engine,
             now_provider=lambda: NOW,
         )
+
+
+def test_factory_failure_preserves_fine_stage_category_and_allowed_type(
+    monkeypatch,
+    tmp_path: Path,
+):
+    adapter = FakeAdapter()
+    monkeypatch.setattr(
+        runtime_service,
+        "create_okx_demo_server_session",
+        lambda _environment, lock_path: (_ for _ in ()).throw(
+            runtime_service.OkxDemoServerSessionBlocked(
+                stage="read-attestation",
+                category="ATTESTATION",
+                cause=OkxDemoCredentialsUnavailable("must-not-cross"),
+            )
+        ),
+    )
+
+    with pytest.raises(
+        runtime_service.OkxDemoRuntimeStartupBlocked,
+    ) as captured:
+        runtime_service.serve(
+            environment={"DATABASE_URL": "postgresql+psycopg:///freqtrade_ai"},
+            runtime_path=tmp_path,
+            reconciliation_factory=lambda: adapter,
+        )
+
+    assert captured.value.stage == "read-attestation"
+    assert captured.value.category == "ATTESTATION"
+    assert (
+        captured.value.cause_type
+        == "OkxDemoCredentialsUnavailable"
+    )
+    assert "must-not-cross" not in str(captured.value)
+    assert adapter.closed is True
+
+
+def test_runtime_writer_startup_failure_preserves_stage_without_secret(
+    monkeypatch,
+    tmp_path: Path,
+):
+    class SensitiveWriterFailure(RuntimeError):
+        pass
+
+    class FailingServerSession(FakeServerSession):
+        def create_order_writer(self, _db):
+            raise SensitiveWriterFailure(
+                "api-key=secret signature=private "
+                "postgresql://operator:password@localhost/db"
+            )
+
+    events = []
+    server = FailingServerSession(events)
+    db = FakeDatabaseSession()
+    connection = SimpleNamespace(close=lambda: None)
+    engine = SimpleNamespace(connect=lambda: connection, dispose=lambda: None)
+    monkeypatch.setattr(runtime_service, "Session", lambda bind: db)
+    monkeypatch.setattr(
+        runtime_service,
+        "create_okx_demo_server_session",
+        lambda _environment, lock_path: server,
+    )
+
+    with pytest.raises(
+        runtime_service.OkxDemoRuntimeStartupBlocked,
+    ) as captured:
+        runtime_service.serve(
+            environment={"DATABASE_URL": "postgresql+psycopg:///freqtrade_ai"},
+            runtime_path=tmp_path,
+            reconciliation_factory=FakeAdapter,
+            engine_factory=lambda *_args, **_kwargs: engine,
+            now_provider=lambda: NOW,
+        )
+
+    assert captured.value.stage == "writer-capability"
+    assert captured.value.category == "UNEXPECTED"
+    assert captured.value.cause_type == "UnexpectedError"
+    rendered = str(captured.value)
+    assert "secret" not in rendered
+    assert "signature" not in rendered
+    assert "password" not in rendered
+
+    failure_path = tmp_path / runtime_service.FAILURE_FILENAME
+    legacy_temporary = failure_path.with_suffix(".tmp")
+    legacy_temporary.write_text("unsafe legacy temporary\n", encoding="utf-8")
+    legacy_temporary.chmod(0o644)
+    assert runtime_service._write_startup_failure(
+        failure_path,
+        captured.value,
+    )
+    assert failure_path.stat().st_mode & 0o077 == 0
+    assert json.loads(failure_path.read_text(encoding="utf-8")) == {
+        "status": "BLOCKED",
+        "stage": "writer-capability",
+        "category": "UNEXPECTED",
+        "cause_type": "UnexpectedError",
+    }
+    assert legacy_temporary.stat().st_mode & 0o077 == 0o044
+    assert legacy_temporary.read_text(encoding="utf-8") == (
+        "unsafe legacy temporary\n"
+    )
+    assert "secret" not in failure_path.read_text(encoding="utf-8")
 
 
 def test_invalid_reconciliation_rolls_back_persisted_evidence():

@@ -26,6 +26,10 @@ from app.services.okx_demo_reconciliation import (
     RECOVERY_STREAMS,
     SCHEMA_VERSION,
 )
+from app.services.okx_demo_submission_grant import (
+    OkxDemoSubmissionGrantBlocked,
+    require_canary_reconciliation,
+)
 from app.models.okx_demo_reconciliation import (
     OkxDemoExchangeEvent,
     OkxDemoReconciliationState,
@@ -38,7 +42,7 @@ from app.models.execution_lineage import (
     TradeIntent,
 )
 from app.models.full_chain import FullChainRun, FullChainStageRun
-from app.models.order_writer import OkxOrderWriteAttempt
+from app.models.order_writer import OkxDemoSubmissionGrant, OkxOrderWriteAttempt
 from app.models.strategy_deployment import SignalEvaluation, StrategyDeployment
 from app.repositories.strategy_deployments import StrategyDeploymentRepository
 from app.services.okx_demo_execution_orchestrator import (
@@ -167,20 +171,7 @@ class OkxDemoRuntimeReconciliationAdapter:
                     "unresolved runtime recovery operation is unsupported"
                 )
             elif attempt.operation in {"PLACE", "CLOSE", "SET_LEVERAGE"}:
-                if not getattr(self, "_order_submission_enabled", False):
-                    return
-                approved = _approved_execution_by_id(
-                    db,
-                    approval_id=attempt.approval_id,
-                )
-                if approved is None:
-                    raise OkxDemoReconciliationBlocked(
-                        "unresolved runtime placement approval is unavailable"
-                    )
-                writer.place(
-                    approved,
-                    submission_grant=self._submission_authorization(approved),
-                )
+                writer.reconcile_unresolved(attempt.id)
             else:
                 raise OkxDemoReconciliationBlocked(
                     "unresolved runtime placement operation is unsupported"
@@ -223,9 +214,9 @@ class OkxDemoRuntimeReconciliationAdapter:
             db=db,
         ):
             return
+        now = _aware(self._now_provider())
         if not getattr(self, "_order_submission_enabled", False):
             return
-        now = _aware(self._now_provider())
         if not _fresh_reconciliation_allows_opening(db, now=now):
             raise OkxDemoReconciliationBlocked(
                 "fresh reconciled runtime state is required before new submission"
@@ -237,6 +228,65 @@ class OkxDemoRuntimeReconciliationAdapter:
             approved,
             submission_grant=self._submission_authorization(approved),
         )
+
+    def run_active_one_shot(
+        self,
+        *,
+        writer: Any,
+        db: Session,
+        openings_allowed: bool,
+    ) -> str:
+        """Consume the run-bound grant before observe can advance its state."""
+
+        now = _aware(self._now_provider())
+        grant = _active_one_shot_submission_grant(db, now=now)
+        if grant is None:
+            return "NONE"
+        manifest = get_settings().execution_target_manifest
+        target = manifest.active_target
+        if (
+            not openings_allowed
+            or manifest.active_target_id != "OKX_DEMO"
+            or target.simulated_trading is not True
+            or target.allow_real_funds is not False
+            or target.order_submission_enabled is not False
+        ):
+            grant.status = "FAILED"
+            grant.consumed_at = now
+            return "FAILED"
+        try:
+            require_canary_reconciliation(
+                db,
+                reconciliation_run_id=grant.reconciliation_run_id,
+                now=now,
+                for_update=True,
+            )
+        except OkxDemoSubmissionGrantBlocked:
+            grant.status = "FAILED"
+            grant.consumed_at = now
+            return "FAILED"
+        approved = _approved_execution_by_id(
+            db,
+            approval_id=grant.approval_id,
+        )
+        if approved is None:
+            grant.status = "FAILED"
+            grant.consumed_at = now
+            return "FAILED"
+        writer.place(
+            approved,
+            submission_grant=self._submission_authorization(
+                approved,
+                persisted_grant=grant,
+            ),
+        )
+        db.refresh(grant)
+        if grant.status != "CONSUMED":
+            if grant.status == "ACTIVE":
+                grant.status = "FAILED"
+                grant.consumed_at = now
+            return "FAILED"
+        return "CONSUMED"
 
     def _process_one_signal_evaluation(
         self,
@@ -290,10 +340,17 @@ class OkxDemoRuntimeReconciliationAdapter:
     def _submission_authorization(
         self,
         approved: ClaimedApprovedExecution,
+        *,
+        persisted_grant: Optional[OkxDemoSubmissionGrant] = None,
     ) -> OrderSubmissionAuthorization:
         now = _aware(self._now_provider())
         expires_at = min(
             approved.expires_at,
+            (
+                _database_aware(persisted_grant.expires_at)
+                if persisted_grant is not None
+                else approved.expires_at
+            ),
             now + timedelta(seconds=DEMO_GRANT_TTL_SECONDS),
         )
         if expires_at <= now:
@@ -301,6 +358,14 @@ class OkxDemoRuntimeReconciliationAdapter:
                 "approved execution expired before runtime submission"
             )
         return OrderSubmissionAuthorization(
+            authorization_mode=(
+                "ONE_SHOT" if persisted_grant is not None else "MANIFEST"
+            ),
+            grant_id=(
+                persisted_grant.grant_id
+                if persisted_grant is not None
+                else uuid4().hex
+            ),
             execution_target_id="OKX_DEMO",
             authorization_schema_version="RISK_V1",
             canonical_hash=approved.canonical_hash,
@@ -311,6 +376,12 @@ class OkxDemoRuntimeReconciliationAdapter:
             order_submission_enabled=True,
             writer_instance_id=self._writer_instance_id,
             approval_id=approved.approval_id,
+            client_order_id=approved.client_order_id,
+            issued_at=(
+                _database_aware(persisted_grant.issued_at)
+                if persisted_grant is not None
+                else now
+            ),
             expires_at=expires_at,
         )
 
@@ -998,6 +1069,36 @@ def _next_unconsumed_approved_execution(
             "ACTIONABLE evaluation result does not bind exact execution lineage"
         )
     return _project_approved_execution(approved, intent, decision)
+
+
+def _active_one_shot_submission_grant(
+    db: Session,
+    *,
+    now: datetime,
+) -> Optional[OkxDemoSubmissionGrant]:
+    grants = list(
+        db.scalars(
+            select(OkxDemoSubmissionGrant)
+            .where(
+                OkxDemoSubmissionGrant.execution_target_id == "OKX_DEMO",
+                OkxDemoSubmissionGrant.status == "ACTIVE",
+            )
+            .order_by(OkxDemoSubmissionGrant.issued_at)
+            .with_for_update()
+        )
+    )
+    if len(grants) > 1:
+        raise OkxDemoReconciliationBlocked(
+            "multiple active one-shot submission grants exist"
+        )
+    if not grants:
+        return None
+    grant = grants[0]
+    if _database_aware(grant.expires_at) <= now:
+        grant.status = "EXPIRED"
+        grant.consumed_at = now
+        return None
+    return grant
 
 
 def _approved_execution_by_id(

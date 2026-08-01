@@ -1394,7 +1394,7 @@ def _execute_canary(
         )
 
 
-def run_canary(
+def _historical_run_canary(
     environment: Optional[Mapping[str, str]] = None,
     *,
     transport: Optional[CanaryTransport] = None,
@@ -1451,6 +1451,21 @@ def run_canary(
         writer_lock.close()
 
 
+def run_canary(*_args: Any, **_kwargs: Any) -> Dict[str, Any]:
+    """Retired direct transport entrypoint.
+
+    Real OKX_DEMO submission is exclusively owned by the canonical runtime's
+    DB-backed one-shot grant and writer.  The former transport lifecycle is
+    retained only as a private historical test helper above; it is never
+    reachable through this public module API.
+    """
+
+    del _args, _kwargs
+    raise OkxDemoCanaryBlocked(
+        "DIRECT_CANARY_DISABLED_USE_CANONICAL_RUNTIME_ONE_SHOT_GRANT"
+    )
+
+
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--allow-demo-order", action="store_true")
@@ -1464,26 +1479,14 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    args = parse_args(argv)
-    if not args.allow_demo_order:
-        payload = {
-            "status": "BLOCKED",
-            "execution_target": "OKX_DEMO",
-            "reason_code": "EXPLICIT_DEMO_ORDER_AUTHORIZATION_REQUIRED",
-        }
-        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
-        return 2
-    try:
-        payload = run_canary(
-            instrument=args.instrument,
-            position_side=args.position_side,
-        )
-    except OkxDemoCanaryBlocked as exc:
-        payload = {
-            "status": "BLOCKED",
-            "execution_target": "OKX_DEMO",
-            "reason_code": str(exc),
-        }
+    # Parse for a stable CLI surface, but never let any flag reach credentials,
+    # transport, artifact, or exchange code.  The old direct canary is retired.
+    parse_args(argv)
+    payload = {
+        "status": "BLOCKED",
+        "execution_target": "OKX_DEMO",
+        "reason_code": "DIRECT_CANARY_DISABLED_USE_CANONICAL_RUNTIME_ONE_SHOT_GRANT",
+    }
     print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
     if payload["status"] == "PASSED":
         return 0

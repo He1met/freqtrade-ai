@@ -55,8 +55,9 @@ STRATEGY_DEPLOYMENT_BASE_VERSION = "20260729_19"
 EXECUTION_FULL_CHAIN_BASE_VERSION = "20260729_20"
 RECONCILIATION_INDEX_BASE_VERSION = "20260729_21"
 SINGLE_ACTIVE_DEPLOYMENT_BASE_VERSION = "20260730_22"
-RESEARCH_RECOVERY_BASE_VERSION = "20260730_23"
-SCHEMA_VERSION = "20260730_24"
+ONE_SHOT_SUBMISSION_GRANT_BASE_VERSION = "20260730_23"
+STRATEGY_VALIDATION_BASE_VERSION = "20260801_24"
+SCHEMA_VERSION = "20260801_25"
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 ATTESTATION_PROOF_KEY_ENV = "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"
 
@@ -443,6 +444,12 @@ CRITICAL_CHECK_DEFINITIONS = {
     "okx_order_write_attempts_single_post_check",
     "okx_order_write_attempts_fencing_sequence_check",
     "okx_order_write_attempts_digest_check",
+    "okx_demo_submission_grants_target_check",
+    "okx_demo_submission_grants_status_check",
+    "okx_demo_submission_grants_digest_check",
+    "okx_demo_submission_grants_provenance_check",
+    "okx_demo_submission_grants_time_check",
+    "okx_demo_submission_grants_risk_check",
     "exchange_orders_okx_demo_target_check",
     "exchange_orders_client_order_id_format_check",
     "exchange_fills_okx_demo_target_check",
@@ -686,6 +693,12 @@ def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
             "beforeupdateon",
             "invalidrecoverygranttransition",
             "old.grant_digestisdistinctfromnew.grant_digest",
+            "old.status<>'active'",
+        ),
+        "okx_demo_submission_grants_guard": (
+            "beforeupdateon",
+            "invalidone-shotsubmissiongranttransition",
+            "one-shotsubmissiongrantidentityisimmutable",
             "old.status<>'active'",
         ),
         "exchange_orders_guard": (
@@ -1781,6 +1794,8 @@ def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
                 )
     if "freqtrade" in roles:
         problems.extend(_runtime_application_acl_problems(bind, schema_name))
+        problems.extend(_one_shot_submission_grant_acl_problems(bind, schema_name))
+        problems.extend(_expired_approval_attestor_acl_problems(bind, schema_name))
         problems.extend(_strategy_validation_acl_problems(bind, schema_name))
     return problems
 
@@ -3157,6 +3172,81 @@ def _add_order_writer(connection: Connection) -> None:
     )
 
 
+def _grant_expired_approval_attestor_acl(connection: Connection) -> None:
+    schema_name = connection.execute(text("SELECT current_schema() ")).scalar_one()
+    required_columns = {
+        "approved_executions": {
+            "id",
+            "trade_intent_id",
+            "risk_decision_id",
+            "execution_target_id",
+            "status",
+            "expires_at",
+            "reserved_notional",
+            "evidence_snapshot",
+        },
+        "trade_intents": {"id", "expires_at"},
+        "risk_decisions": {
+            "id",
+            "execution_target_id",
+            "decision",
+            "evidence_snapshot",
+        },
+        "full_chain_runs": {
+            "approved_execution_id",
+            "execution_target_id",
+            "status",
+            "terminal_reason",
+            "completed_at",
+        },
+        "risk_budgets": {
+            "execution_target_id",
+            "reserved_notional",
+            "approved_positions",
+        },
+    }
+    inspector = inspect(connection)
+    existing_tables = set(inspector.get_table_names(schema=schema_name))
+    for table_name, columns in required_columns.items():
+        if table_name not in existing_tables:
+            return
+        actual = {
+            column["name"]
+            for column in inspector.get_columns(table_name, schema=schema_name)
+        }
+        if not columns.issubset(actual):
+            # Earlier versioned upgrades add these columns later in the same
+            # transaction.  Deferring this ACL step keeps those upgrades
+            # atomic without issuing GRANTs against a pre-lineage table.
+            return
+    quoted_schema = connection.dialect.identifier_preparer.quote(schema_name)
+    connection.execute(
+        text(
+            """
+            REVOKE SELECT, UPDATE ON __SCHEMA__.risk_budgets
+                FROM freqtrade_ai_attestor;
+            GRANT SELECT (id, trade_intent_id, risk_decision_id,
+                          execution_target_id, status, expires_at,
+                          reserved_notional, evidence_snapshot),
+                  UPDATE (status, evidence_snapshot)
+                ON __SCHEMA__.approved_executions TO freqtrade_ai_attestor;
+            GRANT SELECT (id, expires_at)
+                ON __SCHEMA__.trade_intents TO freqtrade_ai_attestor;
+            GRANT SELECT (id, execution_target_id, decision, evidence_snapshot),
+                  UPDATE (evidence_snapshot)
+                ON __SCHEMA__.risk_decisions TO freqtrade_ai_attestor;
+            GRANT SELECT (approved_execution_id, execution_target_id),
+                  UPDATE (status, terminal_reason, completed_at)
+                ON __SCHEMA__.full_chain_runs TO freqtrade_ai_attestor;
+            GRANT SELECT (execution_target_id, reserved_notional,
+                          approved_positions),
+                  UPDATE (reserved_notional, approved_positions)
+                ON __SCHEMA__.risk_budgets TO freqtrade_ai_attestor;
+            """.replace("__SCHEMA__", quoted_schema)
+        )
+    )
+
+
 def _add_okx_demo_reconciliation(connection: Connection) -> None:
     """Install the append-only #448 evidence and fail-closed opening gate."""
 
@@ -3445,7 +3535,30 @@ def _add_okx_demo_reconciliation(connection: Connection) -> None:
     connection.execute(
         text(
             """
-            GRANT SELECT, UPDATE ON __SCHEMA__.risk_budgets
+            REVOKE SELECT, UPDATE ON __SCHEMA__.risk_budgets
+                FROM freqtrade_ai_attestor;
+            GRANT SELECT (id, trade_intent_id, risk_decision_id,
+                          execution_target_id, status, expires_at,
+                          reserved_notional, evidence_snapshot),
+                  UPDATE (status, evidence_snapshot)
+                ON __SCHEMA__.approved_executions
+                TO freqtrade_ai_attestor;
+            GRANT SELECT (id, expires_at)
+                ON __SCHEMA__.trade_intents
+                TO freqtrade_ai_attestor;
+            GRANT SELECT (id, execution_target_id, decision,
+                          evidence_snapshot),
+                  UPDATE (evidence_snapshot)
+                ON __SCHEMA__.risk_decisions
+                TO freqtrade_ai_attestor;
+            GRANT SELECT (approved_execution_id, execution_target_id),
+                  UPDATE (status, terminal_reason, completed_at)
+                ON __SCHEMA__.full_chain_runs
+                TO freqtrade_ai_attestor;
+            GRANT SELECT (execution_target_id, reserved_notional,
+                          approved_positions),
+                  UPDATE (reserved_notional, approved_positions)
+                ON __SCHEMA__.risk_budgets
                 TO freqtrade_ai_attestor;
             CREATE OR REPLACE FUNCTION release_expired_okx_demo_approval(
                 p_approval_id BIGINT
@@ -3460,7 +3573,13 @@ def _add_okx_demo_reconciliation(connection: Connection) -> None:
                 PERFORM pg_advisory_xact_lock(
                     hashtext('OKX_DEMO-risk-budget')
                 );
-                SELECT approved.*,
+                SELECT approved.id,
+                       approved.trade_intent_id,
+                       approved.risk_decision_id,
+                       approved.execution_target_id,
+                       approved.status,
+                       approved.expires_at,
+                       approved.reserved_notional,
                        intent.expires_at AS intent_expires_at
                 INTO v_approval
                 FROM __SCHEMA__.approved_executions AS approved
@@ -4085,6 +4204,8 @@ def _add_full_chain(connection: Connection) -> None:
         )
     )
     _add_okx_demo_soak(connection)
+    _ensure_one_shot_submission_grant(connection)
+    _grant_expired_approval_attestor_acl(connection)
 
 
 def _upgrade_strategy_candidate_approvals(connection: Connection) -> None:
@@ -4183,6 +4304,80 @@ def _grant_runtime_application_acl(connection: Connection) -> None:
                     )
                 )
             )
+
+
+def _add_one_shot_submission_grant_boundary(connection: Connection) -> None:
+    """Install the narrow ACL and irreversible DB transition guard."""
+
+    connection.execute(
+        text(
+            """
+            CREATE OR REPLACE FUNCTION guard_okx_demo_submission_grant()
+            RETURNS trigger LANGUAGE plpgsql
+            SECURITY DEFINER SET search_path = pg_catalog AS $$
+            BEGIN
+                IF OLD.status <> 'ACTIVE'
+                   OR NEW.status NOT IN ('CONSUMED', 'EXPIRED', 'FAILED') THEN
+                    RAISE EXCEPTION 'invalid one-shot submission grant transition';
+                END IF;
+                IF OLD.grant_id IS DISTINCT FROM NEW.grant_id
+                   OR OLD.execution_target_id IS DISTINCT FROM NEW.execution_target_id
+                   OR OLD.approval_id IS DISTINCT FROM NEW.approval_id
+                   OR OLD.reconciliation_run_id IS DISTINCT FROM NEW.reconciliation_run_id
+                   OR OLD.canonical_hash IS DISTINCT FROM NEW.canonical_hash
+                   OR OLD.policy_digest IS DISTINCT FROM NEW.policy_digest
+                   OR OLD.approved_payload_hash IS DISTINCT FROM NEW.approved_payload_hash
+                   OR OLD.client_order_id IS DISTINCT FROM NEW.client_order_id
+                   OR OLD.instrument_id IS DISTINCT FROM NEW.instrument_id
+                   OR OLD.canary_quantity IS DISTINCT FROM NEW.canary_quantity
+                   OR OLD.canary_notional IS DISTINCT FROM NEW.canary_notional
+                   OR OLD.request_digest IS DISTINCT FROM NEW.request_digest
+                   OR OLD.provenance IS DISTINCT FROM NEW.provenance
+                   OR OLD.issued_at IS DISTINCT FROM NEW.issued_at
+                   OR OLD.expires_at IS DISTINCT FROM NEW.expires_at THEN
+                    RAISE EXCEPTION 'one-shot submission grant identity is immutable';
+                END IF;
+                IF NEW.consumed_at IS NULL THEN
+                    RAISE EXCEPTION 'terminal one-shot grant requires consumed_at';
+                END IF;
+                RETURN NEW;
+            END;
+            $$;
+            ALTER FUNCTION guard_okx_demo_submission_grant()
+                OWNER TO freqtrade_ai_attestor;
+            REVOKE ALL ON FUNCTION guard_okx_demo_submission_grant()
+                FROM PUBLIC, freqtrade;
+            ALTER TABLE okx_demo_submission_grants
+                OWNER TO freqtrade_ai_attestor;
+            DROP TRIGGER IF EXISTS okx_demo_submission_grants_guard
+                ON okx_demo_submission_grants;
+            CREATE TRIGGER okx_demo_submission_grants_guard
+                BEFORE UPDATE ON okx_demo_submission_grants
+                FOR EACH ROW EXECUTE FUNCTION guard_okx_demo_submission_grant();
+            REVOKE ALL ON TABLE okx_demo_submission_grants FROM PUBLIC, freqtrade;
+            GRANT SELECT, INSERT ON TABLE okx_demo_submission_grants TO freqtrade;
+            GRANT UPDATE (status, writer_instance_id, consumed_at)
+                ON TABLE okx_demo_submission_grants TO freqtrade;
+            """
+        )
+    )
+
+
+def _ensure_one_shot_submission_grant(connection: Connection) -> bool:
+    """Create the FK-backed grant only after every parent table exists."""
+
+    schema_name = connection.execute(text("SELECT current_schema() ")).scalar_one()
+    required = {"execution_scopes", "approved_executions", "reconciliation_runs"}
+    if not required.issubset(
+        inspect(connection).get_table_names(schema=schema_name)
+    ):
+        return False
+    Base.metadata.tables["okx_demo_submission_grants"].create(
+        bind=connection,
+        checkfirst=True,
+    )
+    _add_one_shot_submission_grant_boundary(connection)
+    return True
 
 
 def _runtime_application_acl_problems(
@@ -4340,6 +4535,200 @@ def _runtime_application_acl_problems(
                 "PUBLIC runtime application sequence privilege present: "
                 + sequence_identity
             )
+    return problems
+
+
+def _one_shot_submission_grant_acl_problems(
+    connection: Connection,
+    schema_name: str,
+) -> list[str]:
+    table_name = "{}.okx_demo_submission_grants".format(schema_name)
+    # Older installations can enter schema-problem inspection before the
+    # optional one-shot boundary has been created.  Report no grant-specific
+    # problem for that pre-boundary state; the migration helper will create it
+    # when all of its parent lineage tables are available.  More importantly,
+    # do not turn a fail-closed diagnostic into a NoResultError.
+    if not connection.execute(
+        text("SELECT to_regclass(:table_name) IS NOT NULL"),
+        {"table_name": table_name},
+    ).scalar_one():
+        return []
+    can_select, can_insert, can_update_table, can_unsafe = connection.execute(
+        text(
+            "SELECT has_table_privilege('freqtrade', :table, 'SELECT'), "
+            "has_table_privilege('freqtrade', :table, 'INSERT'), "
+            "has_table_privilege('freqtrade', :table, 'UPDATE'), "
+            "has_table_privilege('freqtrade', :table, "
+            "'DELETE,TRUNCATE,REFERENCES,TRIGGER')"
+        ),
+        {"table": table_name},
+    ).one()
+    problems = []
+    if not (can_select and can_insert) or can_update_table or can_unsafe:
+        problems.append("one-shot submission grant table ACL mismatch")
+    boundary = connection.execute(
+        text(
+            "SELECT table_owner.rolname, "
+            "EXISTS (SELECT 1 FROM aclexplode(COALESCE("
+            "relation.relacl, acldefault('r', relation.relowner))) AS acl "
+            "WHERE acl.grantee = 0), function_owner.rolname, "
+            "function.prosecdef, function.proconfig, "
+            "EXISTS (SELECT 1 FROM aclexplode(COALESCE("
+            "function.proacl, acldefault('f', function.proowner))) AS acl "
+            "WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE') "
+            "FROM pg_class AS relation "
+            "JOIN pg_roles AS table_owner ON table_owner.oid = relation.relowner "
+            "JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace "
+            "JOIN pg_proc AS function ON function.pronamespace = namespace.oid "
+            "AND function.proname = 'guard_okx_demo_submission_grant' "
+            "JOIN pg_roles AS function_owner ON function_owner.oid = function.proowner "
+            "WHERE relation.oid = to_regclass(:table)"
+        ),
+        {"table": table_name},
+    ).first()
+    if boundary is None:
+        return ["one-shot submission grant owner boundary mismatch"]
+    owner, public_acl, function_owner, security_definer, function_config, public_execute = boundary
+    if (
+        owner != "freqtrade_ai_attestor"
+        or public_acl
+        or function_owner != "freqtrade_ai_attestor"
+        or security_definer is not True
+        or "search_path=pg_catalog" not in (function_config or [])
+        or public_execute
+    ):
+        problems.append("one-shot submission grant owner boundary mismatch")
+    allowed_updates = {"status", "writer_instance_id", "consumed_at"}
+    for column in inspect(connection).get_columns(
+        "okx_demo_submission_grants", schema=schema_name
+    ):
+        can_update = connection.execute(
+            text(
+                "SELECT has_column_privilege('freqtrade', :table, :column, 'UPDATE')"
+            ),
+            {"table": table_name, "column": column["name"]},
+        ).scalar_one()
+        if bool(can_update) != (column["name"] in allowed_updates):
+            problems.append(
+                "one-shot submission grant column ACL mismatch: " + column["name"]
+            )
+    return problems
+
+
+def _expired_approval_attestor_acl_problems(
+    connection: Connection,
+    schema_name: str,
+) -> list[str]:
+    """Verify the NOLOGIN owner and its narrow SECURITY DEFINER entrypoint.
+
+    PostgreSQL owners always have implicit full privileges, so lineage tables
+    rely on the NOLOGIN attestor boundary.  Ordinary application tables retain
+    their owner and grant the attestor only the columns used by this function.
+    """
+
+    owner_tables = {
+        "approved_executions",
+        "trade_intents",
+        "risk_decisions",
+    }
+    delegated_columns = {
+        "full_chain_runs": {
+            "SELECT": {"approved_execution_id", "execution_target_id"},
+            "UPDATE": {"status", "terminal_reason", "completed_at"},
+        },
+        "risk_budgets": {
+            "SELECT": {"execution_target_id", "reserved_notional", "approved_positions"},
+            "UPDATE": {"reserved_notional", "approved_positions"},
+        },
+    }
+    required_tables = owner_tables | set(delegated_columns)
+    if not required_tables.issubset(
+        set(inspect(connection).get_table_names(schema=schema_name))
+    ):
+        return []
+    problems = []
+    for table_name in sorted(owner_tables | set(delegated_columns)):
+        qualified = "{}.{}".format(schema_name, table_name)
+        owner, public_unsafe, runtime_unsafe, attestor_table_acl = connection.execute(
+            text(
+                "SELECT owner.rolname, "
+                "EXISTS (SELECT 1 FROM aclexplode(COALESCE("
+                "relation.relacl, acldefault('r', relation.relowner))) AS acl "
+                "WHERE acl.grantee = 0 AND acl.privilege_type IN "
+                "('DELETE','TRUNCATE','REFERENCES','TRIGGER')), "
+                "EXISTS (SELECT 1 FROM aclexplode(COALESCE("
+                "relation.relacl, acldefault('r', relation.relowner))) AS acl "
+                "WHERE acl.grantee = (SELECT oid FROM pg_roles "
+                "WHERE rolname = 'freqtrade') AND acl.privilege_type IN "
+                "('DELETE','TRUNCATE','REFERENCES','TRIGGER')), "
+                "EXISTS (SELECT 1 FROM aclexplode(COALESCE("
+                "relation.relacl, acldefault('r', relation.relowner))) AS acl "
+                "WHERE acl.grantee = (SELECT oid FROM pg_roles "
+                "WHERE rolname = 'freqtrade_ai_attestor') "
+                "AND acl.privilege_type IN "
+                "('SELECT','UPDATE','INSERT','DELETE','TRUNCATE',"
+                "'REFERENCES','TRIGGER')) "
+                "FROM pg_class AS relation JOIN pg_roles AS owner "
+                "ON owner.oid = relation.relowner "
+                "WHERE relation.oid = to_regclass(:table)"
+            ),
+            {"table": qualified},
+        ).one()
+        if table_name in owner_tables and owner != "freqtrade_ai_attestor":
+            problems.append("expired approval table owner mismatch: " + table_name)
+        if public_unsafe or runtime_unsafe:
+            problems.append("expired approval unsafe table ACL: " + table_name)
+        if table_name in delegated_columns:
+            if owner == "freqtrade_ai_attestor" or attestor_table_acl:
+                problems.append(
+                    "expired approval delegated table ACL is too broad: " + table_name
+                )
+            for column in inspect(connection).get_columns(
+                table_name, schema=schema_name
+            ):
+                for privilege in ("SELECT", "UPDATE"):
+                    actual = connection.execute(
+                        text(
+                            "SELECT has_column_privilege("
+                            "'freqtrade_ai_attestor', :table, :column, :privilege)"
+                        ),
+                        {
+                            "table": qualified,
+                            "column": column["name"],
+                            "privilege": privilege,
+                        },
+                    ).scalar_one()
+                    expected = column["name"] in delegated_columns[table_name][privilege]
+                    if bool(actual) != expected:
+                        problems.append(
+                            "expired approval delegated column ACL mismatch: "
+                            "{}.{} {}".format(table_name, column["name"], privilege)
+                        )
+    boundary = connection.execute(
+        text(
+            "SELECT owner.rolname, function.prosecdef, function.proconfig, "
+            "has_function_privilege('freqtrade', function.oid, 'EXECUTE'), "
+            "EXISTS (SELECT 1 FROM aclexplode(COALESCE(function.proacl, "
+            "acldefault('f', function.proowner))) AS acl "
+            "WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE') "
+            "FROM pg_proc AS function "
+            "JOIN pg_namespace AS namespace ON namespace.oid = function.pronamespace "
+            "JOIN pg_roles AS owner ON owner.oid = function.proowner "
+            "WHERE namespace.nspname = :schema_name "
+            "AND function.proname = 'release_expired_okx_demo_approval'"
+        ),
+        {"schema_name": schema_name},
+    ).first()
+    if (
+        boundary is None
+        or boundary[0] != "freqtrade_ai_attestor"
+        or boundary[1] is not True
+        or "search_path={}, pg_catalog".format(schema_name)
+        not in [value.replace('"', "") for value in (boundary[2] or [])]
+        or boundary[3] is not True
+        or boundary[4] is True
+    ):
+        problems.append("expired approval function boundary mismatch")
     return problems
 
 
@@ -4829,7 +5218,8 @@ def upgrade_database(engine: Engine) -> str:
                 EXECUTION_FULL_CHAIN_BASE_VERSION,
                 RECONCILIATION_INDEX_BASE_VERSION,
                 SINGLE_ACTIVE_DEPLOYMENT_BASE_VERSION,
-                RESEARCH_RECOVERY_BASE_VERSION,
+                ONE_SHOT_SUBMISSION_GRANT_BASE_VERSION,
+                STRATEGY_VALIDATION_BASE_VERSION,
             }
             if current_version in supported_upgrade_versions:
                 connection.execute(
@@ -4840,8 +5230,23 @@ def upgrade_database(engine: Engine) -> str:
                     )
                 )
                 _add_okx_demo_recovery_batch_index(connection)
+                _ensure_one_shot_submission_grant(connection)
+                if {
+                    "approved_executions",
+                    "trade_intents",
+                    "risk_decisions",
+                    "full_chain_runs",
+                    "risk_budgets",
+                }.issubset(
+                    inspect(connection).get_table_names(
+                        schema=connection.execute(
+                            text("SELECT current_schema()")
+                        ).scalar_one()
+                    )
+                ):
+                    _grant_expired_approval_attestor_acl(connection)
                 _add_strategy_validation_matrix(connection)
-            if current_version == RESEARCH_RECOVERY_BASE_VERSION:
+            if current_version == STRATEGY_VALIDATION_BASE_VERSION:
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -5244,6 +5649,21 @@ def upgrade_database(engine: Engine) -> str:
                     {"version": SCHEMA_VERSION},
                 )
                 return SCHEMA_VERSION
+            if current_version == ONE_SHOT_SUBMISSION_GRANT_BASE_VERSION:
+                _ensure_one_shot_submission_grant(connection)
+                _grant_expired_approval_attestor_acl(connection)
+                _grant_runtime_application_acl(connection)
+                problems = schema_problems(connection)
+                if problems:
+                    raise SchemaMigrationBlocked(
+                        "One-shot submission grant upgrade does not match ORM metadata: "
+                        + "; ".join(problems)
+                    )
+                connection.execute(
+                    text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+                    {"version": SCHEMA_VERSION},
+                )
+                return SCHEMA_VERSION
             if current_version is not None:
                 raise SchemaMigrationBlocked(
                     f"Unsupported schema version {current_version!r}; expected {SCHEMA_VERSION!r}."
@@ -5265,7 +5685,12 @@ def upgrade_database(engine: Engine) -> str:
 
             Base.metadata.create_all(bind=connection)
             _add_trusted_snapshot_boundary(connection)
+            # The one-shot grant trigger/table are owned by the least-privilege
+            # attestor role.  Establish that role boundary before installing
+            # the grant ACL so a fresh PostgreSQL database cannot fail closed
+            # merely because the role has not existed yet.
             _add_attested_session_boundary(connection)
+            _ensure_one_shot_submission_grant(connection)
             _add_order_writer(connection)
             _add_okx_demo_reconciliation(connection)
             _add_okx_demo_runtime_recovery_binding(connection)

@@ -60,6 +60,7 @@ def instrument_item():
 
 def order_item(**overrides):
     value = {
+        "grant_id": "1" * 32,
         "inst_id": "BTC-USDT-SWAP",
         "order_id": "exchange-order-1",
         "client_order_id": "WriterOrder001",
@@ -111,6 +112,7 @@ def approved(**overrides):
 
 def submission_grant(**overrides):
     value = {
+        "grant_id": "1" * 32,
         "execution_target_id": "OKX_DEMO",
         "authorization_schema_version": "RISK_V1",
         "canonical_hash": "b" * 64,
@@ -121,7 +123,9 @@ def submission_grant(**overrides):
         "order_submission_enabled": True,
         "writer_instance_id": "WriterInstance01",
         "approval_id": 3,
-        "expires_at": NOW + timedelta(seconds=30),
+        "client_order_id": "WriterOrder001",
+        "issued_at": NOW - timedelta(seconds=1),
+        "expires_at": NOW + timedelta(seconds=10),
     }
     value.update(overrides)
     return OrderSubmissionAuthorization(**value)
@@ -198,6 +202,8 @@ class FakeStore:
     def acquire_lease(
         self,
         *,
+        grant_id,
+        authorization_mode,
         writer_instance_id,
         approval_id,
         canonical_hash,
@@ -210,6 +216,18 @@ class FakeStore:
 
     def acquire_recovery_lease(self, grant_database_id, *, now):
         self.lease_calls.append(("recovery", grant_database_id, now))
+
+    def claim_unresolved_for_reconciliation(
+        self,
+        attempt_id,
+        *,
+        now,
+        expires_at,
+    ):
+        assert self.current is not None
+        assert self.current.attempt_id == attempt_id
+        self.lease_calls.append(("reconcile", attempt_id, now, expires_at))
+        return self.current
 
     def load_recovery_order(self, grant_database_id):
         assert grant_database_id > 0
@@ -452,6 +470,30 @@ def test_limit_place_is_prepared_before_post_and_reconciled() -> None:
         "ACKNOWLEDGE",
         "RECONCILE",
     ]
+
+
+def test_reconcile_unresolved_place_is_get_only_and_never_posts() -> None:
+    attempt = WriteAttemptRecord(
+        attempt_id=71,
+        exchange_order_row_id=101,
+        operation="PLACE",
+        operation_id="WriterOrder001",
+        client_order_id="WriterOrder001",
+        instrument_id="BTC-USDT-SWAP",
+        state=WriteState.PREPARED,
+        request_digest="a" * 64,
+        safe_request_snapshot={},
+        attempt_count=1,
+    )
+    store = FakeStore(unresolved=attempt, unresolved_order=managed_order())
+    read = FakeReadClient(orders=[[order_item()]])
+    write = FakeWriteTransport()
+
+    result = writer(read, write, store).reconcile_unresolved(attempt.attempt_id)
+
+    assert result.status == "RECONCILED"
+    assert write.calls == []
+    assert store.lease_calls[0][0:2] == ("reconcile", attempt.attempt_id)
 
 
 @pytest.mark.parametrize("state", ["live", "partially_filled", "filled"])

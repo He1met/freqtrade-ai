@@ -36,6 +36,30 @@ reconciliation. Missing evidence blocks automatically. The manifest cannot be
 weakened to `OKX_LIVE`, real funds, optional risk checks, multiple writers, or
 non-reconciled writes.
 
+## Research promotion into the Demo runtime
+
+The DB-backed research worker opens a `RESEARCH` full-chain run and prepares
+the `GENERATION` checkpoint before a real DeepSeek call. A successful response
+can advance only by loading the exact persisted generation, strategy version,
+backtest result, and score database rows under the same ResearchJob lease.
+
+Promotion requires a plan declared before validation execution: one independent
+OOS window and at least three non-overlapping walk-forward windows covering
+persisted bull, bear, and range market moves. Every window has its own
+BacktestRun/Task/Result, Freqtrade execution ID, manifest, and config/result/
+strategy/market-data checksums. Validation results never replace the primary
+StrategyScore. A single-result trade slice, request label, aggregate ranking
+score, fixture, or manually supplied JSON cannot become production promotion
+evidence. Missing, ambiguous, overlapping, or drifted evidence closes the
+candidate path as `BLOCKED`.
+
+Only the locked `OKX_DEMO` automation policy may approve a passing candidate.
+The worker then releases its lease and reclaims the same attempt at `SIGNAL`;
+the deployment continuation loads the immutable approval and publishes
+idempotently. A database partial unique index permits at most one ACTIVE
+deployment for the target. Neither step enables order submission or real
+funds.
+
 ## Required evidence
 
 Every request must carry a consistent:
