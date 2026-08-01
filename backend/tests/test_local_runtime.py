@@ -1235,8 +1235,40 @@ def test_okx_canary_without_explicit_flag_is_zero_keychain_and_zero_child(
     assert payload == {
         "status": "BLOCKED",
         "execution_target": "OKX_DEMO",
-        "reason": "explicit --allow-demo-order authorization is required",
+        "reason": "direct OKX Demo canary is permanently disabled; use canonical runtime one-shot grant",
     }
+
+
+def test_okx_canary_cli_tombstone_is_exit_two_and_zero_capability(
+    monkeypatch,
+    capsys,
+):
+    runtime = load_runtime_module()
+    monkeypatch.setattr(
+        runtime,
+        "read_okx_demo_credentials",
+        lambda: pytest.fail("tombstone must not read Keychain"),
+    )
+    monkeypatch.setattr(
+        runtime.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail(
+            "tombstone must not start a child or network path"
+        ),
+    )
+
+    exit_code = runtime.main(
+        [
+            "okx-demo-canary",
+            "--allow-demo-order",
+            "--instrument",
+            "NOT-ALLOWLISTED",
+            "--json",
+        ]
+    )
+
+    assert exit_code == 2
+    assert json.loads(capsys.readouterr().out)["status"] == "BLOCKED"
 
 
 def test_okx_canary_with_missing_keychain_bundle_is_zero_child(monkeypatch):
@@ -1268,150 +1300,53 @@ def test_okx_canary_with_missing_keychain_bundle_is_zero_child(monkeypatch):
     )
 
     assert payload["status"] == "BLOCKED"
-    assert payload["reason"] == "bundle unavailable"
+    assert payload["reason"] == (
+        "direct OKX Demo canary is permanently disabled; "
+        "use canonical runtime one-shot grant"
+    )
 
 
 def test_okx_canary_child_receives_exact_bundle_and_returns_only_safe_evidence(
     monkeypatch,
 ):
     runtime = load_runtime_module()
-    credential_bundle = {
-        "OKX_DEMO_API_KEY": "canary-key",
-        "OKX_DEMO_API_SECRET": "canary-secret",
-        "OKX_DEMO_API_PASSPHRASE": "canary-passphrase",
-        "OKX_DEMO_ACCOUNT_FINGERPRINT": "a" * 64,
-    }
-    captured = {}
     monkeypatch.setattr(
         runtime,
         "read_okx_demo_credentials",
-        lambda: (
-            credential_bundle,
-            {"status": "READY", "configured": True, "source": "keychain"},
+        lambda: pytest.fail("retired canary must never read Keychain"),
+    )
+    monkeypatch.setattr(
+        runtime.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail(
+            "retired canary must never start a subprocess or network child"
         ),
     )
-    monkeypatch.setattr(runtime, "backend_python", lambda: Path("/venv/bin/python"))
-
-    def fake_run(command, **kwargs):
-        captured["command"] = command
-        captured["environment"] = dict(kwargs["env"])
-        return SimpleNamespace(
-            returncode=0,
-            stdout=json.dumps(
-                {
-                    "status": "PASSED",
-                    "execution_target": "OKX_DEMO",
-                    "artifact_id": "b" * 32,
-                    "instrument": "BTC-USDT-SWAP",
-                    "evidence": {
-                        "cl_ord_id_sha256": "c" * 64,
-                        "order_id_sha256": "d" * 64,
-                        "cleanup_cl_ord_id_sha256": None,
-                        "simulated_trading_header": True,
-                        "sequence": [
-                            "account_attested",
-                            "initial_scope_empty",
-                            "limit_order_accepted",
-                            "order_queried",
-                            "cancel_requested",
-                            "cancel_state_queried",
-                            "final_scope_empty",
-                        ],
-                    },
-                }
-            ),
-            stderr="untrusted-child-stderr",
-        )
-
-    monkeypatch.setattr(runtime.subprocess, "run", fake_run)
-
-    payload = runtime.run_okx_demo_canary(
+    assert runtime.run_okx_demo_canary(
         allow_demo_order=True,
-        instrument="BTC-USDT-SWAP",
-    )
-
-    assert captured["command"] == [
-        "/venv/bin/python",
-        "-m",
-        "app.adapters.okx_demo.demo_canary",
-        "--allow-demo-order",
-        "--instrument",
-        "BTC-USDT-SWAP",
-    ]
-    assert captured["environment"]["FREQTRADE_AI_ALLOW_DEMO_ORDER"] == "true"
-    assert {
-        name: captured["environment"][name]
-        for name in runtime.OKX_DEMO_REQUIRED_ENV_NAMES
-    } == {
-        "OKX_DEMO_API_KEY": "canary-key",
-        "OKX_DEMO_API_SECRET": "canary-secret",
-        "OKX_DEMO_API_PASSPHRASE": "canary-passphrase",
-        "OKX_DEMO_ACCOUNT_FINGERPRINT": "a" * 64,
-    }
-    assert payload["status"] == "PASSED"
-    assert not any(
-        value in str(payload)
-        for value in (
-            "canary-key",
-            "canary-secret",
-            "canary-passphrase",
-            "a" * 64,
-            "untrusted-child-stderr",
-        )
-    )
-    assert credential_bundle == {}
-    assert "okx_canary" not in runtime.PID_FILES
+        instrument="NOT-ALLOWLISTED",
+    )["status"] == "BLOCKED"
 
 
 def test_okx_canary_parent_rejects_extra_or_raw_child_evidence(monkeypatch):
     runtime = load_runtime_module()
-    credential_bundle = {
-        "OKX_DEMO_API_KEY": "canary-key",
-        "OKX_DEMO_API_SECRET": "canary-secret",
-        "OKX_DEMO_API_PASSPHRASE": "canary-passphrase",
-        "OKX_DEMO_ACCOUNT_FINGERPRINT": "a" * 64,
-    }
-    monkeypatch.setattr(
-        runtime,
-        "read_okx_demo_credentials",
-        lambda: (
-            credential_bundle,
-            {"status": "READY", "configured": True, "source": "keychain"},
-        ),
+    payload = runtime._validate_okx_demo_canary_payload(
+        {
+            "status": "BLOCKED",
+            "execution_target": "OKX_DEMO",
+            "artifact_id": "b" * 32,
+            "instrument": "BTC-USDT-SWAP",
+            "evidence": {
+                "cl_ord_id_sha256": "c" * 64,
+                "order_id_sha256": None,
+                "cleanup_cl_ord_id_sha256": None,
+                "simulated_trading_header": True,
+                "sequence": [],
+            },
+            "reason_code": "HISTORICAL_VALIDATOR_ONLY",
+        }
     )
-    monkeypatch.setattr(runtime, "backend_python", lambda: Path("/venv/bin/python"))
-    monkeypatch.setattr(
-        runtime.subprocess,
-        "run",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            returncode=0,
-            stdout=json.dumps(
-                {
-                    "status": "PASSED",
-                    "execution_target": "OKX_DEMO",
-                    "artifact_id": "b" * 32,
-                    "instrument": "BTC-USDT-SWAP",
-                    "evidence": {
-                        "cl_ord_id_sha256": "c" * 64,
-                        "order_id_sha256": "d" * 64,
-                        "cleanup_cl_ord_id_sha256": None,
-                        "simulated_trading_header": True,
-                        "sequence": ["final_scope_empty"],
-                        "raw_response": "private-order-id",
-                    },
-                }
-            ),
-            stderr="",
-        ),
-    )
-
-    payload = runtime.run_okx_demo_canary(
-        allow_demo_order=True,
-        instrument="BTC-USDT-SWAP",
-    )
-
-    assert payload["status"] == "RECOVERY_REQUIRED"
-    assert "private-order-id" not in str(payload)
+    assert payload["status"] == "BLOCKED"
 
 
 def test_doctor_uses_explicit_freqtrade_binary(monkeypatch, tmp_path):

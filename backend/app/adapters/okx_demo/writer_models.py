@@ -2,9 +2,17 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from decimal import Decimal
+import threading
 from typing import Any, Literal, Optional, Protocol
 
-from pydantic import BaseModel, Field, ValidationError, field_serializer, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    PrivateAttr,
+    ValidationError,
+    field_serializer,
+    model_validator,
+)
 
 from app.adapters.okx_demo.models import InstrumentSpec
 from app.adapters.okx_demo.write_semantics import (
@@ -49,6 +57,8 @@ class StrictModel(BaseModel):
 
 
 class OrderSubmissionAuthorization(StrictModel):
+    authorization_mode: Literal["MANIFEST", "ONE_SHOT"] = "MANIFEST"
+    grant_id: str = Field(pattern=r"^[0-9a-f]{32}$")
     execution_target_id: Literal["OKX_DEMO"]
     authorization_schema_version: Literal["RISK_V1"]
     canonical_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -59,12 +69,19 @@ class OrderSubmissionAuthorization(StrictModel):
     order_submission_enabled: Literal[True]
     writer_instance_id: str = Field(pattern=r"^[A-Za-z0-9]{8,64}$")
     approval_id: int = Field(gt=0)
+    client_order_id: str
+    issued_at: datetime
     expires_at: datetime
+    _consume_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    _consumed: bool = PrivateAttr(default=False)
 
     @model_validator(mode="after")
     def validate_expiry(self):
-        if self.expires_at.tzinfo is None:
+        if self.issued_at.tzinfo is None or self.expires_at.tzinfo is None:
             raise ValueError("writer authorization grant expiry must be timezone-aware")
+        if self.expires_at <= self.issued_at:
+            raise ValueError("writer authorization grant expiry must follow issue time")
+        validate_client_order_id(self.client_order_id)
         return self
 
     def require_active(
@@ -74,6 +91,7 @@ class OrderSubmissionAuthorization(StrictModel):
         canonical_hash: str,
         policy_digest: str,
         approved_payload_hash: str,
+        client_order_id: str,
         now: datetime,
     ) -> None:
         if now.tzinfo is None:
@@ -92,8 +110,41 @@ class OrderSubmissionAuthorization(StrictModel):
             raise OkxDemoWriteBlocked(
                 "writer authorization grant is bound to a different approved payload"
             )
+        if self.client_order_id != client_order_id:
+            raise OkxDemoWriteBlocked(
+                "writer authorization grant is bound to a different client order id"
+            )
+        if now.astimezone(timezone.utc) < self.issued_at.astimezone(timezone.utc):
+            raise OkxDemoWriteBlocked("writer authorization grant is not active yet")
         if now.astimezone(timezone.utc) >= self.expires_at.astimezone(timezone.utc):
             raise OkxDemoWriteBlocked("writer authorization grant is expired")
+
+    def consume(
+        self,
+        *,
+        approval_id: int,
+        canonical_hash: str,
+        policy_digest: str,
+        approved_payload_hash: str,
+        client_order_id: str,
+        now: datetime,
+    ) -> None:
+        """Atomically burn this capability before any journal or network work."""
+
+        with self._consume_lock:
+            if self._consumed:
+                raise OkxDemoWriteBlocked(
+                    "writer authorization grant was already consumed"
+                )
+            self.require_active(
+                approval_id=approval_id,
+                canonical_hash=canonical_hash,
+                policy_digest=policy_digest,
+                approved_payload_hash=approved_payload_hash,
+                client_order_id=client_order_id,
+                now=now,
+            )
+            self._consumed = True
 
 
 class ApprovedExecutionView(StrictModel):
@@ -174,6 +225,8 @@ class ApprovedExecutionView(StrictModel):
 
 
 class NormalizedOrderCommand(StrictModel):
+    authorization_mode: Literal["MANIFEST", "ONE_SHOT"]
+    grant_id: str
     execution_target_id: Literal["OKX_DEMO"] = "OKX_DEMO"
     trade_intent_id: int
     risk_decision_id: int
@@ -239,6 +292,10 @@ def normalize_order_command(
         canonical_hash=approved.canonical_hash,
         policy_digest=approved.policy_digest,
         approved_payload_hash=approved.approved_payload_hash,
+        # The writer burns the grant against the persisted approval's exact
+        # clOrdId before normalization.  Deterministic reduce-only cleanup may
+        # derive a suffix without turning the grant into a second capability.
+        client_order_id=submission_grant.client_order_id,
         now=now,
     )
     if now.tzinfo is None:
@@ -284,6 +341,8 @@ def normalize_order_command(
     if attached:
         body["attachAlgoOrds"] = attached
     return NormalizedOrderCommand(
+        authorization_mode=submission_grant.authorization_mode,
+        grant_id=submission_grant.grant_id,
         trade_intent_id=approved.trade_intent_id,
         risk_decision_id=approved.risk_decision_id,
         approval_id=approved.approval_id,

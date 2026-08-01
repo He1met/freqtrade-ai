@@ -446,28 +446,20 @@ LaunchAgent。后续 #449
 
 ### OKX Demo 最小下单金丝雀
 
-金丝雀默认 `BLOCKED`，且不读取 Keychain、不启动凭据子进程、不发网络请求。只有操作者
-在一次性命令中显式传入 `--allow-demo-order` 才能进入四项 Keychain、账户指纹和 Demo
-身份预检：
+旧的直接 transport canary 已永久退役，任何 CLI 或
+`python -m app.adapters.okx_demo.demo_canary` 入口均在读取 Keychain、启动子进程、写
+artifact 或发网络请求前返回 `BLOCKED`。`--allow-demo-order` 不再是有效授权，也不得
+作为验收证据。
 
 ```bash
-make okx-demo-canary CANARY_FLAGS=--allow-demo-order
+make okx-demo-canary
+# BLOCKED: DIRECT_CANARY_DISABLED_USE_CANONICAL_RUNTIME_ONE_SHOT_GRANT
 ```
 
-该命令只允许 `BTC-USDT-SWAP`，基于实时 `tickSz`、`lotSz`、`minSz`、`ctVal` 计算最小
-合法张数，并在买一价下方 5% 提交 `isolated`、`net`、`post_only` 限价买单。固定流程为
-基线空订单/空持仓检查、下单、查询、撤单、再次查询、最终 pending/fills/position 对账。
-所有写超时都先按预先持久化的唯一 `clOrdId` 查询，绝不盲目重发。若发生意外成交，
-命令会先撤销剩余委托，再按净持仓方向提交 `reduceOnly` 市价清理；即使清理成功，本次
-结果也只能是 `FAILED`，无法确认清空则为 `RECOVERY_REQUIRED`。
-任何 place/cancel/cleanup 写结果无法确认时，artifact 会保持
-`RECOVERY_REQUIRED`。下一次显式命令只能先按原 `clOrdId` 恢复并验证原单终态、
-pending、fills 和 position，不会生成新的下单请求；恢复完成后还需再次执行命令才会
-创建新金丝雀。
-
-证据文件只保存在 `.freqtrade-ai/runtime/okx-demo-canary/`，仅包含 artifact ID、标识符
-SHA-256、固定步骤枚举和结果码，不包含 `ordId`、`clOrdId`、账户 ID、凭据、签名或原始
-交易所响应。完整安全边界和验收语义见
+受控 canary 只能由 canonical `OKX_DEMO` LaunchAgent/runtime 在所有硬门 READY 后，
+通过 DB-backed one-shot submission grant → writer → ExchangeOrder → reconciliation
+闭环执行；grant 绑定 approved execution、完整 risk-chain、最新空对账、最小风险上限和
+幂等 journal。具体门禁与 `CONTROLLED_CANARY_NON_PRODUCTION` provenance 见
 [`docs/okx_demo_canary.md`](docs/okx_demo_canary.md)。
 
 唯一数据库 URL 必须是 localhost 上的 `freqtrade_ai`：

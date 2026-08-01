@@ -35,6 +35,10 @@ from app.adapters.okx_demo.writer_models import (
     approved_execution_view,
 )
 from app.services.okx_demo_reconciliation import OkxDemoReconciliationBlocked
+from app.services.okx_demo_submission_grant import (
+    acquire_one_shot_runtime_lock,
+    release_one_shot_runtime_lock,
+)
 
 
 RECONCILIATION_MODULE = "app.adapters.okx_demo.reconciliation_runtime"
@@ -190,6 +194,14 @@ class RuntimeReconciliationAdapter(Protocol):
         writer: "_RuntimeWriterCapability",
         db: Session,
     ) -> None: ...
+
+    def run_active_one_shot(
+        self,
+        *,
+        writer: "_RuntimeWriterCapability",
+        db: Session,
+        openings_allowed: bool,
+    ) -> str: ...
 
     def close(self) -> None: ...
 
@@ -383,6 +395,9 @@ class _RuntimeWriterCapability:
         return self._writer.recovery_reduce_only(
             recovery_grant_database_id=recovery_grant_database_id
         )
+
+    def reconcile_unresolved(self, attempt_id: int) -> WriterResult:
+        return self._writer.reconcile_unresolved(attempt_id)
 
     def amend(
         self,
@@ -584,38 +599,59 @@ def serve(
             },
         )
         while not STOP_EVENT.wait(POLL_SECONDS):
-            observed = _reconcile_transaction(
-                db,
-                lambda: adapter.observe(
-                    read_client=server_session.read,
-                    db=db,
-                ),
-                now=now_provider(),
-            )
             externally_frozen = (
                 runtime_path / OPENINGS_FREEZE_FILENAME
             ).is_file()
-            writer.set_openings_allowed(
-                observed.safe_to_open and not externally_frozen
-            )
-            _write_readiness(
-                ready_path,
-                {
-                    "status": (
-                        "READY"
-                        if observed.safe_to_open and not externally_frozen
-                        else "BLOCKED_OPENINGS"
-                    ),
-                    "execution_target": "OKX_DEMO",
-                    "adapter": "ATTESTED",
-                    "reconciliation": (
-                        observed.status if not externally_frozen else "UNKNOWN"
-                    ),
-                    "writer": "UNIQUE",
-                    "pid": os.getpid(),
-                },
-            )
+            coordination_acquired = acquire_one_shot_runtime_lock(db)
+            if not coordination_acquired:
+                db.rollback()
+                writer.set_openings_allowed(False)
+                raise OkxDemoRuntimeBlocked(
+                    "one-shot coordination lock is busy"
+                )
             try:
+                one_shot_result = adapter.run_active_one_shot(
+                    writer=writer,
+                    db=db,
+                    openings_allowed=not externally_frozen,
+                )
+                if one_shot_result == "FAILED":
+                    db.commit()
+                    writer.set_openings_allowed(False)
+                    raise OkxDemoRuntimeBlocked(
+                        "one-shot grant failed closed before submission"
+                    )
+                if one_shot_result == "CONSUMED":
+                    db.commit()
+                    continue
+                observed = _reconcile_transaction(
+                    db,
+                    lambda: adapter.observe(
+                        read_client=server_session.read,
+                        db=db,
+                    ),
+                    now=now_provider(),
+                )
+                writer.set_openings_allowed(
+                    observed.safe_to_open and not externally_frozen
+                )
+                _write_readiness(
+                    ready_path,
+                    {
+                        "status": (
+                            "READY"
+                            if observed.safe_to_open and not externally_frozen
+                            else "BLOCKED_OPENINGS"
+                        ),
+                        "execution_target": "OKX_DEMO",
+                        "adapter": "ATTESTED",
+                        "reconciliation": (
+                            observed.status if not externally_frozen else "UNKNOWN"
+                        ),
+                        "writer": "UNIQUE",
+                        "pid": os.getpid(),
+                    },
+                )
                 adapter.run_cycle(
                     read_client=server_session.read,
                     writer=writer,
@@ -625,6 +661,9 @@ def serve(
             except Exception:
                 db.rollback()
                 raise
+            finally:
+                if release_one_shot_runtime_lock(db):
+                    db.commit()
     finally:
         primary_error = sys.exc_info()[1]
         cleanup_error = None

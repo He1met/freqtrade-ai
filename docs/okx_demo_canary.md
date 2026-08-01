@@ -1,32 +1,34 @@
-# OKX Demo minimal order canary
+# OKX Demo canary（直连入口已永久封禁）
 
-Issue [#444](https://github.com/He1met/freqtrade-ai/issues/444) owns one
-controlled, one-shot order lifecycle against `OKX_DEMO`. The implementation is
-safe by default: without explicit authorization it returns `BLOCKED` before
-Keychain access, child-process creation, network access, or artifact creation.
+旧的 Issue [#444](https://github.com/He1met/freqtrade-ai/issues/444) 直连
+transport 生命周期已退役。`python -m app.adapters.okx_demo.demo_canary`、
+`make okx-demo-canary` 以及 `--allow-demo-order` 都只返回
+`BLOCKED / DIRECT_CANARY_DISABLED_USE_CANONICAL_RUNTIME_ONE_SHOT_GRANT`，不会
+读取 Keychain、创建子进程、写 artifact、访问网络或触碰交易所。此封禁是
+fail-closed 边界，不是可通过参数绕过的确认步骤。
 
-> 当前唯一账户约束已切换为 `long_short_mode`（双向持仓）。现有 canary 的
-> `posSide=net` 生命周期不能安全用于双向账户，因此在双向账户上会于任何写请求前
-> 返回 `BLOCKED / DUAL_SIDE_CANARY_NOT_IMPLEMENTED`。Issue #476 完成双侧
-> 对账与清理前，`--allow-demo-order` 不可作为可执行验收。
+> 当前账户为 `long_short_mode`（双向持仓）；任何 canary 都必须先通过当前
+> `OKX_DEMO`、账户 fingerprint/权限、ATTESTED/RECOVERED/UNIQUE/READY、完整
+> risk-chain、最新空订单/仓位对账、最小风险上限和幂等 journal 等硬门。
 
 ## Operator command
 
 ```bash
 make okx-demo-canary
-# BLOCKED: no Keychain read and no network
-
-make okx-demo-canary CANARY_FLAGS=--allow-demo-order
-# May proceed only when all Keychain and account gates pass.
+# BLOCKED: direct transport canary is permanently retired
 ```
 
-The command starts a short-lived child with only the four fixed OKX Demo
-Keychain values and non-secret target selectors. It does not inherit proxy
-variables, custom CA paths, shell exchange credentials, or dotenv values. The
-HTTP client is fixed to `https://openapi.okx.com`, disables proxies and
-redirects, and adds `x-simulated-trading: 1` to every request.
+受控 canary 只能由唯一 canonical LaunchAgent/runtime 通过 DB-backed
+one-shot submission grant 驱动：`TradeIntent/ApprovedExecution`（明确标记
+`CONTROLLED_CANARY_NON_PRODUCTION`）→ grant → writer → `ExchangeOrder` →
+回报/成交 → reconciliation → restart idempotency。全局
+`order_submission_enabled=false` 必须保持不变；没有完整候选可信链时保持
+`BLOCKED`，不得用历史快照、mock 或 HTTP 200 冒充成功。
 
-## Exact lifecycle
+## Historical lifecycle (offline evidence only)
+
+下列内容仅描述退役实现的离线安全语义，不能作为当前可执行操作、验收或
+权限授权依据。
 
 1. Acquire the single-writer lock and persist a unique legal `clOrdId` intent.
 2. （历史 net-mode 生命周期）Attest the pinned Demo account, exact

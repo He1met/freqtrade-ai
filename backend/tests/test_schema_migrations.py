@@ -84,4 +84,4 @@ def test_schema_version_is_explicit_and_stable() -> None:
     assert STRATEGY_DEPLOYMENT_BASE_VERSION == "20260729_19"
     assert RECONCILIATION_INDEX_BASE_VERSION == "20260729_21"
     assert SINGLE_ACTIVE_DEPLOYMENT_BASE_VERSION == "20260730_22"
-    assert SCHEMA_VERSION == "20260730_23"
+    assert SCHEMA_VERSION == "20260801_24"

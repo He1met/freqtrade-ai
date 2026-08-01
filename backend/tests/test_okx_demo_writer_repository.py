@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine, event, select
@@ -21,11 +22,16 @@ from app.models.execution_lineage import (
     OkxDemoAttestedSession,
     OkxDemoTrustedSnapshot,
     ResearchJobAttempt,
+    ReconciliationRun,
     RiskDecision,
     RiskBudget,
     TradeIntent,
 )
-from app.models.order_writer import OkxOrderWriteAttempt, OkxOrderWriterLease
+from app.models.order_writer import (
+    OkxDemoSubmissionGrant,
+    OkxOrderWriteAttempt,
+    OkxOrderWriterLease,
+)
 from app.models.okx_demo_reconciliation import OkxDemoReconciliationState
 from app.models.research_job import ResearchJob
 from app.repositories.execution_lineage import ensure_execution_scope_catalog
@@ -34,6 +40,12 @@ from app.services.risk_chain import (
     _normalize_attested_snapshot,
     _write_attested_snapshot,
     canonical_digest,
+)
+from app.services.okx_demo_submission_grant import (
+    CANARY_PROVENANCE,
+    OkxDemoSubmissionGrantBlocked,
+    OkxDemoSubmissionGrantService,
+    submission_grant_request_digest,
 )
 
 
@@ -71,6 +83,23 @@ def db():
                 "authenticated": kind == "account",
                 "expires_at": (NOW + timedelta(minutes=5)).isoformat(),
             }
+            if kind == "instrument":
+                content.update(
+                    instrument_id="BTC-USDT-SWAP",
+                    min_size="0.02",
+                    lot_size="0.01",
+                    contract_value="0.01",
+                    state="live",
+                    contract_shape="linear",
+                )
+            elif kind == "market":
+                content.update(
+                    instrument_id="BTC-USDT-SWAP",
+                    reference_price="57000",
+                    bbo={"ask_price": "57000"},
+                    mark={"price": "57000"},
+                    as_of=NOW.isoformat(),
+                )
             normalized = _normalize_attested_snapshot(
                 capability,
                 kind=kind,
@@ -285,6 +314,39 @@ def instrument():
     )
 
 
+def _add_empty_reconciliation(session, *, observed_at=NOW, order_ids=None):
+    run = ReconciliationRun(
+        execution_target_id="OKX_DEMO",
+        status="RECONCILED",
+        summary_snapshot={},
+        database_ids={
+            "order_snapshots": [] if order_ids is None else order_ids,
+            "position_snapshots": [],
+        },
+        artifact_status="READY",
+        authoritative_observed_at=observed_at,
+        source_type="api_aggregate",
+        core_data=True,
+        started_at=observed_at,
+        completed_at=observed_at,
+        created_at=observed_at,
+    )
+    session.add(run)
+    session.flush()
+    run.database_ids = dict(run.database_ids, reconciliation_run=[run.id])
+    session.add(
+        OkxDemoReconciliationState(
+            execution_target_id="OKX_DEMO",
+            status="RECONCILED",
+            opening_frozen=False,
+            last_event_observed_at=observed_at,
+            last_reconciliation_run_id=run.id,
+        )
+    )
+    session.commit()
+    return run.id
+
+
 def submission_grant(
     approval_id,
     writer="WriterInstance01",
@@ -294,6 +356,7 @@ def submission_grant(
     approved_payload_hash="5" * 64,
 ):
     return OrderSubmissionAuthorization(
+        grant_id="1" * 32,
         execution_target_id="OKX_DEMO",
         authorization_schema_version="RISK_V1",
         canonical_hash=canonical_hash,
@@ -304,7 +367,9 @@ def submission_grant(
         order_submission_enabled=True,
         writer_instance_id=writer,
         approval_id=approval_id,
-        expires_at=expires or NOW + timedelta(minutes=1),
+        client_order_id="WriterOrder001",
+        issued_at=NOW - timedelta(seconds=1),
+        expires_at=expires or NOW + timedelta(seconds=10),
     )
 
 
@@ -338,6 +403,8 @@ def acquire(
     approved_payload_hash = approval.approved_payload_hash
     session.commit()
     store.acquire_lease(
+        grant_id="1" * 32,
+        authorization_mode="MANIFEST",
         writer_instance_id=writer_instance_id,
         approval_id=approval_id,
         canonical_hash=canonical_hash,
@@ -415,6 +482,422 @@ def test_sqlite_claim_is_approval_backed_and_transitions_are_committed(db) -> No
     assert persisted.state == "RECONCILED"
     assert persisted.attempt_count == 1
     assert persisted.safe_response_snapshot == {"sCode": "0", "state": "live"}
+
+
+def test_one_shot_grant_is_consumed_with_prepared_journal(db) -> None:
+    session, approval_id = db
+    store = SqlAlchemyOrderWriterStore(session, now_provider=lambda: NOW)
+    claimed = store.load_approved_execution(approval_id)
+    run = ReconciliationRun(
+        execution_target_id="OKX_DEMO",
+        status="RECONCILED",
+        summary_snapshot={},
+        database_ids={"order_snapshots": [], "position_snapshots": []},
+        artifact_status="READY",
+        authoritative_observed_at=NOW,
+        source_type="api_aggregate",
+        core_data=True,
+        started_at=NOW,
+        completed_at=NOW,
+        created_at=NOW,
+    )
+    session.add(run)
+    session.flush()
+    run.database_ids = dict(run.database_ids, reconciliation_run=[run.id])
+    session.add(
+        OkxDemoReconciliationState(
+            execution_target_id="OKX_DEMO",
+            status="RECONCILED",
+            opening_frozen=False,
+            last_event_observed_at=NOW,
+            last_reconciliation_run_id=run.id,
+        )
+    )
+    request_digest = submission_grant_request_digest(
+        approval_id=approval_id,
+        reconciliation_run_id=run.id,
+        canonical_hash=claimed.canonical_hash,
+        policy_digest=claimed.policy_digest,
+        approved_payload_hash=claimed.approved_payload_hash,
+        client_order_id=claimed.client_order_id,
+        instrument_id="BTC-USDT-SWAP",
+        canary_quantity=Decimal("0.02"),
+        canary_notional=Decimal("11.4"),
+    )
+    grant = OkxDemoSubmissionGrant(
+        grant_id="9" * 32,
+        execution_target_id="OKX_DEMO",
+        approval_id=approval_id,
+        reconciliation_run_id=run.id,
+        canonical_hash=claimed.canonical_hash,
+        policy_digest=claimed.policy_digest,
+        approved_payload_hash=claimed.approved_payload_hash,
+        client_order_id=claimed.client_order_id,
+        instrument_id="BTC-USDT-SWAP",
+        canary_quantity=Decimal("0.02"),
+        canary_notional=Decimal("11.4"),
+        request_digest=request_digest,
+        provenance=CANARY_PROVENANCE,
+        status="ACTIVE",
+        issued_at=NOW - timedelta(seconds=1),
+        expires_at=NOW + timedelta(seconds=10),
+    )
+    session.add(grant)
+    session.commit()
+    grant_id = "9" * 32
+    authorization = submission_grant(
+        approval_id,
+        expires=NOW + timedelta(seconds=10),
+        canonical_hash=claimed.canonical_hash,
+        policy_digest=claimed.policy_digest,
+        approved_payload_hash=claimed.approved_payload_hash,
+    ).model_copy(
+        update={
+            "authorization_mode": "ONE_SHOT",
+            "grant_id": grant_id,
+            "client_order_id": claimed.client_order_id,
+        }
+    )
+    command = normalize_order_command(
+        claimed,
+        submission_grant=authorization,
+        instrument=instrument(),
+        now=NOW,
+    )
+    store.acquire_lease(
+        grant_id=grant_id,
+        authorization_mode="ONE_SHOT",
+        writer_instance_id="WriterInstance01",
+        approval_id=approval_id,
+        canonical_hash=claimed.canonical_hash,
+        policy_digest=claimed.policy_digest,
+        approved_payload_hash=claimed.approved_payload_hash,
+        now=NOW,
+        expires_at=NOW + timedelta(seconds=10),
+    )
+    assert session.get(OkxDemoSubmissionGrant, grant_id).status == "ACTIVE"
+    session.commit()
+
+    _, attempt = store.prepare_place(
+        command,
+        operation="PLACE",
+        operation_id=command.client_order_id,
+        request_digest="8" * 64,
+        safe_request_snapshot=command.request_body,
+    )
+
+    persisted = session.get(OkxDemoSubmissionGrant, grant_id)
+    assert persisted.status == "CONSUMED"
+    assert persisted.writer_instance_id == "WriterInstance01"
+    assert persisted.consumed_at.replace(tzinfo=timezone.utc) == NOW
+    assert session.get(OkxOrderWriteAttempt, attempt.attempt_id) is not None
+
+
+def test_restart_claims_exact_unresolved_attempt_after_lease_expiry(db) -> None:
+    session, approval_id = db
+    first = SqlAlchemyOrderWriterStore(session, now_provider=lambda: NOW)
+    acquire(
+        first,
+        session,
+        approval_id,
+        writer_instance_id="WriterInstance01",
+        now=NOW,
+        expires_at=NOW + timedelta(seconds=10),
+    )
+    command = claimed_command(first, approval_id)
+    _, prepared = first.prepare_place(
+        command,
+        operation="PLACE",
+        operation_id=command.client_order_id,
+        request_digest="6" * 64,
+        safe_request_snapshot=command.request_body,
+    )
+    restarted_at = NOW + timedelta(seconds=11)
+    restarted = SqlAlchemyOrderWriterStore(
+        session,
+        now_provider=lambda: restarted_at,
+    )
+
+    claimed = restarted.claim_unresolved_for_reconciliation(
+        prepared.attempt_id,
+        now=restarted_at,
+        expires_at=restarted_at + timedelta(seconds=10),
+    )
+
+    assert claimed.attempt_id == prepared.attempt_id
+    assert claimed.operation == "PLACE"
+    assert claimed.lease_generation == 2
+
+
+def test_unresolved_claim_rejects_wrong_identity_and_active_other_holder(db) -> None:
+    session, approval_id = db
+    first = SqlAlchemyOrderWriterStore(session, now_provider=lambda: NOW)
+    acquire(
+        first,
+        session,
+        approval_id,
+        writer_instance_id="WriterInstance01",
+        now=NOW,
+        expires_at=NOW + timedelta(seconds=10),
+    )
+    command = claimed_command(first, approval_id)
+    _, prepared = first.prepare_place(
+        command,
+        operation="PLACE",
+        operation_id=command.client_order_id,
+        request_digest="6" * 64,
+        safe_request_snapshot=command.request_body,
+    )
+    contender = SqlAlchemyOrderWriterStore(session, now_provider=lambda: NOW)
+
+    with pytest.raises(OkxDemoWriteBlocked, match="matching unresolved"):
+        contender.claim_unresolved_for_reconciliation(
+            prepared.attempt_id + 1,
+            now=NOW,
+            expires_at=NOW + timedelta(seconds=10),
+        )
+    with pytest.raises(OkxDemoWriteBlocked, match="another OKX_DEMO writer"):
+        contender.claim_unresolved_for_reconciliation(
+            prepared.attempt_id,
+            now=NOW,
+            expires_at=NOW + timedelta(seconds=10),
+        )
+
+
+def test_service_arms_run_bound_non_production_grant(db, monkeypatch) -> None:
+    session, approval_id = db
+    run_id = _add_empty_reconciliation(session)
+    approval = session.get(ApprovedExecution, approval_id)
+    monkeypatch.setattr(
+        "app.services.okx_demo_submission_grant.get_settings",
+        lambda: SimpleNamespace(
+            demo_automation_policy=SimpleNamespace(
+                demo_risk_policy=SimpleNamespace(
+                    allowed_instruments=("BTC-USDT-SWAP",)
+                )
+            ),
+            execution_target_manifest=SimpleNamespace(
+                active_target_id="OKX_DEMO",
+                active_target=SimpleNamespace(
+                    simulated_trading=True,
+                    allow_real_funds=False,
+                    order_submission_enabled=False,
+                ),
+            )
+        ),
+    )
+
+    grant = OkxDemoSubmissionGrantService(
+        session,
+        now_provider=lambda: NOW,
+    ).arm(
+        approval_id=approval_id,
+        canonical_hash=approval.canonical_hash,
+        policy_digest=approval.policy_digest,
+        approved_payload_hash=approval.approved_payload_hash,
+        client_order_id=approval.client_order_id,
+    )
+
+    assert grant.reconciliation_run_id == run_id
+    assert grant.provenance == CANARY_PROVENANCE
+    assert grant.request_digest == submission_grant_request_digest(
+        approval_id=approval_id,
+        reconciliation_run_id=run_id,
+        canonical_hash=approval.canonical_hash,
+        policy_digest=approval.policy_digest,
+        approved_payload_hash=approval.approved_payload_hash,
+        client_order_id=approval.client_order_id,
+        instrument_id="BTC-USDT-SWAP",
+        canary_quantity=Decimal("0.02"),
+        canary_notional=Decimal("11.4"),
+    )
+    assert grant.expires_at.replace(tzinfo=timezone.utc) == NOW + timedelta(
+        seconds=10
+    )
+
+
+@pytest.mark.parametrize(
+    ("observed_at", "order_ids"),
+    [
+        (NOW - timedelta(seconds=31), None),
+        (NOW, [901]),
+    ],
+)
+def test_service_rejects_stale_or_nonempty_reconciliation(
+    db,
+    monkeypatch,
+    observed_at,
+    order_ids,
+) -> None:
+    session, approval_id = db
+    _add_empty_reconciliation(
+        session,
+        observed_at=observed_at,
+        order_ids=order_ids,
+    )
+    approval = session.get(ApprovedExecution, approval_id)
+    monkeypatch.setattr(
+        "app.services.okx_demo_submission_grant.get_settings",
+        lambda: SimpleNamespace(
+            demo_automation_policy=SimpleNamespace(
+                demo_risk_policy=SimpleNamespace(
+                    allowed_instruments=("BTC-USDT-SWAP",)
+                )
+            ),
+            execution_target_manifest=SimpleNamespace(
+                active_target_id="OKX_DEMO",
+                active_target=SimpleNamespace(
+                    simulated_trading=True,
+                    allow_real_funds=False,
+                    order_submission_enabled=False,
+                ),
+            )
+        ),
+    )
+
+    with pytest.raises(OkxDemoSubmissionGrantBlocked):
+        OkxDemoSubmissionGrantService(
+            session,
+            now_provider=lambda: NOW,
+        ).arm(
+            approval_id=approval_id,
+            canonical_hash=approval.canonical_hash,
+            policy_digest=approval.policy_digest,
+            approved_payload_hash=approval.approved_payload_hash,
+            client_order_id=approval.client_order_id,
+        )
+
+
+def test_service_rejects_any_unresolved_writer_attempt(db, monkeypatch) -> None:
+    session, approval_id = db
+    store = SqlAlchemyOrderWriterStore(session, now_provider=lambda: NOW)
+    acquire(
+        store,
+        session,
+        approval_id,
+        writer_instance_id="WriterInstance01",
+        now=NOW,
+        expires_at=NOW + timedelta(minutes=1),
+    )
+    command = claimed_command(store, approval_id)
+    store.prepare_place(
+        command,
+        operation="PLACE",
+        operation_id=command.client_order_id,
+        request_digest="a" * 64,
+        safe_request_snapshot=command.request_body,
+    )
+    _add_empty_reconciliation(session)
+    approval = session.get(ApprovedExecution, approval_id)
+    monkeypatch.setattr(
+        "app.services.okx_demo_submission_grant.get_settings",
+        lambda: SimpleNamespace(
+            demo_automation_policy=SimpleNamespace(
+                demo_risk_policy=SimpleNamespace(
+                    allowed_instruments=("BTC-USDT-SWAP",)
+                )
+            ),
+            execution_target_manifest=SimpleNamespace(
+                active_target_id="OKX_DEMO",
+                active_target=SimpleNamespace(
+                    simulated_trading=True,
+                    allow_real_funds=False,
+                    order_submission_enabled=False,
+                ),
+            ),
+        ),
+    )
+
+    with pytest.raises(
+        OkxDemoSubmissionGrantBlocked,
+        match="unresolved writer attempt",
+    ):
+        OkxDemoSubmissionGrantService(session, now_provider=lambda: NOW).arm(
+            approval_id=approval_id,
+            canonical_hash=approval.canonical_hash,
+            policy_digest=approval.policy_digest,
+            approved_payload_hash=approval.approved_payload_hash,
+            client_order_id=approval.client_order_id,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "snapshot_digest",
+        "session",
+        "evidence_ref",
+        "non_finite",
+        "malformed_time",
+        "future_market",
+    ),
+)
+def test_service_revalidates_exact_attested_risk_bundle(
+    db,
+    monkeypatch,
+    mutation,
+) -> None:
+    session, approval_id = db
+    _add_empty_reconciliation(session)
+    approval = session.get(ApprovedExecution, approval_id)
+    intent = session.get(TradeIntent, approval.trade_intent_id)
+    market = session.scalars(
+        select(OkxDemoTrustedSnapshot).where(
+            OkxDemoTrustedSnapshot.snapshot_id == approval.market_snapshot_id
+        )
+    ).one()
+    if mutation == "snapshot_digest":
+        market.digest = "0" * 64
+    elif mutation == "session":
+        attested_session = session.get(
+            OkxDemoAttestedSession,
+            market.attested_session_id,
+        )
+        attested_session.revoked_at = NOW
+        attested_session.revoke_reason = "WRITE_FAILURE"
+    elif mutation == "evidence_ref":
+        request_snapshot = dict(intent.request_snapshot)
+        evidence = dict(request_snapshot["snapshot_evidence"])
+        evidence["market"] = dict(evidence["market"], digest="0" * 64)
+        request_snapshot["snapshot_evidence"] = evidence
+        intent.request_snapshot = request_snapshot
+    else:
+        content = dict(market.content_json)
+        if mutation == "non_finite":
+            content["reference_price"] = "NaN"
+        elif mutation == "malformed_time":
+            content["as_of"] = "not-a-time"
+        else:
+            content["as_of"] = (NOW + timedelta(minutes=1)).isoformat()
+        market.content_json = content
+        market.digest = canonical_digest(content)
+    monkeypatch.setattr(
+        "app.services.okx_demo_submission_grant.get_settings",
+        lambda: SimpleNamespace(
+            demo_automation_policy=SimpleNamespace(
+                demo_risk_policy=SimpleNamespace(
+                    allowed_instruments=("BTC-USDT-SWAP",)
+                )
+            ),
+            execution_target_manifest=SimpleNamespace(
+                active_target_id="OKX_DEMO",
+                active_target=SimpleNamespace(
+                    simulated_trading=True,
+                    allow_real_funds=False,
+                    order_submission_enabled=False,
+                ),
+            ),
+        ),
+    )
+
+    with pytest.raises(OkxDemoSubmissionGrantBlocked):
+        OkxDemoSubmissionGrantService(session, now_provider=lambda: NOW).arm(
+            approval_id=approval_id,
+            canonical_hash=approval.canonical_hash,
+            policy_digest=approval.policy_digest,
+            approved_payload_hash=approval.approved_payload_hash,
+            client_order_id=approval.client_order_id,
+        )
 
 
 def test_reconciliation_drift_freezes_place_but_allows_cancel(db) -> None:
@@ -655,6 +1138,8 @@ def test_revoked_attested_session_invalidates_claim_before_lease(db) -> None:
 
     with pytest.raises(OkxDemoWriteBlocked, match="no longer active"):
         store.acquire_lease(
+            grant_id="1" * 32,
+            authorization_mode="MANIFEST",
             writer_instance_id="WriterInstance01",
             approval_id=approval_id,
             canonical_hash=claimed.canonical_hash,
@@ -722,6 +1207,8 @@ def test_invalidated_approval_preserves_existing_write_journal(db) -> None:
 
     with pytest.raises(OkxDemoWriteBlocked, match="no longer active"):
         store.acquire_lease(
+            grant_id="1" * 32,
+            authorization_mode="MANIFEST",
             writer_instance_id="WriterInstance01",
             approval_id=approval_id,
             canonical_hash=claimed.canonical_hash,

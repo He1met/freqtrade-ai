@@ -208,6 +208,10 @@ class FakeAdapter:
         self.events.append("observe")
         return reconciliation("DRIFTED")
 
+    def run_active_one_shot(self, **_kwargs):
+        self.events.append("one-shot-check")
+        return "NONE"
+
     def run_cycle(self, *, writer, **_kwargs):
         self.events.append(("cycle", writer._openings_allowed))
 
@@ -266,6 +270,16 @@ def test_runtime_orders_reconciliation_before_writer_and_keeps_drift_alive(
     monkeypatch.setattr(runtime_service, "Session", lambda bind: db)
     monkeypatch.setattr(
         runtime_service,
+        "acquire_one_shot_runtime_lock",
+        lambda _db: (adapter.events.append("coordination-lock") or True),
+    )
+    monkeypatch.setattr(
+        runtime_service,
+        "release_one_shot_runtime_lock",
+        lambda _db: (adapter.events.append("coordination-unlock") or False),
+    )
+    monkeypatch.setattr(
+        runtime_service,
         "create_okx_demo_server_session",
         lambda _environment, lock_path: (
             events.append(("session-created", lock_path)) or server
@@ -287,8 +301,11 @@ def test_runtime_orders_reconciliation_before_writer_and_keeps_drift_alive(
 
     assert adapter.events == [
         "startup-reconcile",
+        "coordination-lock",
+        "one-shot-check",
         "observe",
         ("cycle", False),
+        "coordination-unlock",
     ]
     assert events[0][0] == "session-created"
     assert events[1] == "writer-created"

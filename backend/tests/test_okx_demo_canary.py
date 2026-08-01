@@ -11,6 +11,19 @@ CLIENT_ORDER_ID = "FTAICANARYOFFLINE001"
 ORDER_ID = "private-order-id"
 
 
+@pytest.fixture(autouse=True)
+def historical_canary_entrypoint(monkeypatch):
+    """Keep the legacy transport suite explicitly offline-only.
+
+    The production module entrypoint is permanently blocked; these tests cover
+    the retired state-machine semantics through its private historical helper.
+    The public boundary is asserted separately in
+    ``test_okx_demo_canary_entrypoint.py``.
+    """
+
+    monkeypatch.setattr(canary, "run_canary", canary._historical_run_canary)
+
+
 def environment() -> dict[str, str]:
     account = account_payload()["data"][0]
     return {

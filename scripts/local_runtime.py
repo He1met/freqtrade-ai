@@ -1398,85 +1398,14 @@ def run_okx_demo_canary(
     allow_demo_order: bool,
     instrument: str,
 ) -> Dict[str, Any]:
-    """Run the explicit one-shot Demo order canary in its credential child."""
+    """Permanent tombstone for the retired direct-transport canary path."""
 
-    if not allow_demo_order:
-        return {
-            "status": "BLOCKED",
-            "execution_target": "OKX_DEMO",
-            "reason": "explicit --allow-demo-order authorization is required",
-        }
-    if instrument not in OKX_DEMO_CANARY_ALLOWED_INSTRUMENTS:
-        return {
-            "status": "BLOCKED",
-            "execution_target": "OKX_DEMO",
-            "reason": "OKX Demo canary instrument is not allowlisted",
-        }
-    credentials, credential_status = read_okx_demo_credentials()
-    if credentials is None:
-        return {
-            "status": "BLOCKED",
-            "execution_target": "OKX_DEMO",
-            "credentials": credential_status,
-            "reason": credential_status["reason"],
-        }
-    try:
-        completed = subprocess.run(
-            [
-                str(backend_python()),
-                "-m",
-                "app.adapters.okx_demo.demo_canary",
-                "--allow-demo-order",
-                "--instrument",
-                instrument,
-            ],
-            cwd=str(REPO_ROOT / "backend"),
-            env=service_environment(
-                "okx_canary",
-                DEFAULT_DATABASE_URL,
-                None,
-                credentials,
-                allow_demo_order=True,
-            ),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=90,
-            stdin=subprocess.DEVNULL,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return {
-            "status": "BLOCKED",
-            "execution_target": "OKX_DEMO",
-            "credentials": credential_status,
-            "reason": "OKX Demo canary child failed or timed out",
-        }
-    finally:
-        credentials.clear()
-    try:
-        validated = _validate_okx_demo_canary_payload(json.loads(completed.stdout))
-    except (TypeError, json.JSONDecodeError, RuntimeBlocked):
-        return {
-            "status": "RECOVERY_REQUIRED",
-            "execution_target": "OKX_DEMO",
-            "credentials": credential_status,
-            "reason": "OKX Demo canary returned invalid or unsafe evidence",
-        }
-    expected_exit = {
-        "PASSED": 0,
-        "FAILED": 1,
-        "BLOCKED": 2,
-        "RECOVERY_REQUIRED": 2,
-    }[validated["status"]]
-    if completed.returncode != expected_exit:
-        return {
-            "status": "RECOVERY_REQUIRED",
-            "execution_target": "OKX_DEMO",
-            "credentials": credential_status,
-            "reason": "OKX Demo canary exit status did not match its evidence",
-        }
-    validated["credentials"] = credential_status
-    return validated
+    del allow_demo_order, instrument
+    return {
+        "status": "BLOCKED",
+        "execution_target": "OKX_DEMO",
+        "reason": "direct OKX Demo canary is permanently disabled; use canonical runtime one-shot grant",
+    }
 
 
 def start_service(
