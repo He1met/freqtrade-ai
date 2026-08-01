@@ -5466,9 +5466,13 @@ def upgrade_database(engine: Engine) -> str:
                 _drop_empty_legacy_tables(connection, existing_tables)
 
             Base.metadata.create_all(bind=connection)
-            _ensure_one_shot_submission_grant(connection)
             _add_trusted_snapshot_boundary(connection)
+            # The one-shot grant trigger/table are owned by the least-privilege
+            # attestor role.  Establish that role boundary before installing
+            # the grant ACL so a fresh PostgreSQL database cannot fail closed
+            # merely because the role has not existed yet.
             _add_attested_session_boundary(connection)
+            _ensure_one_shot_submission_grant(connection)
             _add_order_writer(connection)
             _add_okx_demo_reconciliation(connection)
             _add_okx_demo_runtime_recovery_binding(connection)
