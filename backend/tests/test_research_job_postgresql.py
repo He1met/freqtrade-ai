@@ -12,6 +12,7 @@ from app.db.migrations import (
     PREVIOUS_SCHEMA_VERSION,
     SCHEMA_VERSION,
     STRATEGY_DEPLOYMENT_BASE_VERSION,
+    STRATEGY_VALIDATION_BASE_VERSION,
     TARGET_LINEAGE_BASE_VERSION,
     VERSION_TABLE,
     upgrade_database,
@@ -120,6 +121,44 @@ def test_strategy_deployment_queue_upgrades_from_previous_schema(
     readiness = verify_schema(postgres_engine)
     assert readiness.ready is True
     assert readiness.problems == ()
+    with postgres_engine.connect() as connection:
+        trigger_names = {
+            row[0]
+            for row in connection.execute(
+                text(
+                    "SELECT tgname FROM pg_trigger "
+                    "WHERE tgname IN ("
+                    "'strategy_validation_plans_immutable', "
+                    "'strategy_validation_windows_immutable') "
+                    "AND NOT tgisinternal"
+                )
+            )
+        }
+        plan_table_update, plan_status_update, plan_digest_update = connection.execute(
+            text(
+                "SELECT "
+                "has_table_privilege('freqtrade', "
+                "'strategy_validation_plans', 'UPDATE'), "
+                "has_column_privilege('freqtrade', "
+                "'strategy_validation_plans', 'status', 'UPDATE'), "
+                "has_column_privilege('freqtrade', "
+                "'strategy_validation_plans', 'plan_digest', 'UPDATE')"
+            )
+        ).one()
+        execution_unique = {
+            frozenset(item["column_names"])
+            for item in inspect(connection).get_unique_constraints(
+                "strategy_validation_windows"
+            )
+        }
+    assert trigger_names == {
+        "strategy_validation_plans_immutable",
+        "strategy_validation_windows_immutable",
+    }
+    assert plan_table_update is False
+    assert plan_status_update is True
+    assert plan_digest_update is False
+    assert frozenset({"execution_id"}) in execution_unique
 
     inspector = inspect(postgres_engine)
     assert {"strategy_deployments", "signal_evaluations"}.issubset(
@@ -137,6 +176,30 @@ def test_strategy_deployment_queue_upgrades_from_previous_schema(
     single_consumer = indexes["signal_evaluations_single_consumer_idx"]
     assert single_consumer["unique"] is True
     assert "status" in str(single_consumer.get("dialect_options"))
+
+
+def test_validation_matrix_fresh_and_upgrade_schema_match_orm(
+    postgres_engine,
+) -> None:
+    assert upgrade_database(postgres_engine) == SCHEMA_VERSION
+    assert {
+        "strategy_validation_plans",
+        "strategy_validation_windows",
+    }.issubset(set(inspect(postgres_engine).get_table_names()))
+
+    with postgres_engine.begin() as connection:
+        connection.execute(text("DROP TABLE strategy_validation_windows"))
+        connection.execute(text("DROP TABLE strategy_validation_plans"))
+        connection.execute(text(f"DELETE FROM {VERSION_TABLE}"))
+        connection.execute(
+            text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+            {"version": STRATEGY_VALIDATION_BASE_VERSION},
+        )
+
+    assert upgrade_database(postgres_engine) == SCHEMA_VERSION
+    readiness = verify_schema(postgres_engine)
+    assert readiness.ready is True
+    assert readiness.problems == ()
 
 
 def _create_frozen_pre_lineage_research_jobs(connection) -> None:

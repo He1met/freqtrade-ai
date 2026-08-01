@@ -342,6 +342,13 @@ class BacktestArtifactIngestService:
             "result_path": str(result_path),
             "status": manifest.get("status") if manifest is not None else None,
             "manifest_version": manifest.get("manifest_version") if manifest is not None else None,
+            "provider": "freqtrade" if manifest is not None else None,
+            "execution_id": manifest.get("execution_id") if manifest is not None else None,
+            "checksums": manifest.get("checksums") if manifest is not None else None,
+            "datadir": manifest.get("datadir") if manifest is not None else None,
+            "manifest_checksum": self._sha256(manifest_path)
+            if manifest_path is not None and manifest_path.is_file()
+            else None,
             "config_path": manifest.get("config_path") if manifest is not None else task.config_path,
             "return_code": manifest.get("return_code") if manifest is not None else None,
             "blocked_reason": manifest.get("blocked_reason") if manifest is not None else None,
@@ -353,6 +360,18 @@ class BacktestArtifactIngestService:
             "stderr": manifest.get("stderr") if manifest is not None else None,
         }
         parser_metadata["artifact_manifest"] = redact_dry_run_status_payload(artifact_manifest)
+        if (
+            manifest is not None
+            and manifest_path is not None
+            and manifest_path.is_file()
+        ):
+            parser_metadata["ingest_receipt"] = backtest_ingest_receipt(
+                manifest_checksum=self._sha256(manifest_path),
+                backtest_run_id=task.backtest_run_id,
+                backtest_task_id=task.id,
+                strategy_version_id=task.run.strategy_version_id,
+                execution_id=str(manifest.get("execution_id") or ""),
+            )
         metrics_snapshot["parser_metadata"] = parser_metadata
         return parsed_result.model_copy(
             update={
@@ -360,7 +379,6 @@ class BacktestArtifactIngestService:
                 "metrics_snapshot": metrics_snapshot,
             }
         )
-
     def _record_blocked(
         self,
         task: BacktestTask,
@@ -560,3 +578,26 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
     except ValueError:
         return False
     return True
+
+
+def backtest_ingest_receipt(
+    *,
+    manifest_checksum: str,
+    backtest_run_id: int,
+    backtest_task_id: int,
+    strategy_version_id: int,
+    execution_id: str,
+) -> str:
+    """Canonical server-side receipt for one accepted session-backed ingest."""
+
+    payload = {
+        "manifest_checksum": manifest_checksum,
+        "backtest_run_id": backtest_run_id,
+        "backtest_task_id": backtest_task_id,
+        "strategy_version_id": strategy_version_id,
+        "execution_id": execution_id,
+        "ingest_boundary": "local_backtest_artifact_ingest-v2",
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()

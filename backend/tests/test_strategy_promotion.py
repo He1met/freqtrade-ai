@@ -1,6 +1,6 @@
 import pytest
 
-from app.models import BacktestResult, StrategyScore
+from app.models import BacktestResult, StrategyScore, StrategyValidationPlan
 from app.services.strategy_promotion import (
     StrategyPromotionBlocked,
     assess_strategy_promotion,
@@ -25,6 +25,13 @@ def _result(**overrides):
                     "passed": True,
                     "market_states": ["bull", "bear", "range"],
                 },
+                "validation_matrix": {
+                    "plan_id": 31,
+                    "plan_digest": "a" * 64,
+                    "evidence_digest": "b" * 64,
+                    "window_result_ids": [101, 102, 103, 104],
+                    "provider": "freqtrade",
+                },
             }
         },
     }
@@ -42,12 +49,24 @@ def _score(**overrides):
     return StrategyScore(**values)
 
 
-def test_validated_strategy_has_explicit_promotion_evidence() -> None:
-    assessment = assess_strategy_promotion(_result(), _score())
+def _plan() -> StrategyValidationPlan:
+    return StrategyValidationPlan(
+        id=31,
+        strategy_version_id=1,
+        promotion_backtest_result_id=11,
+        provider_name="freqtrade",
+        strategy_code_digest="c" * 64,
+        plan_digest="a" * 64,
+        plan_snapshot={},
+        status="PASSED",
+        evidence_digest="b" * 64,
+        promotion_evidence={"window_result_ids": [101, 102, 103, 104]},
+    )
 
-    assert assessment["policy"]["policy_version"] == "strategy-promotion-v1"
-    assert assessment["net_of_costs"] is True
-    assert assessment["walk_forward"]["market_states"] == ["bear", "bull", "range"]
+
+def test_detached_validation_metadata_cannot_impersonate_persisted_matrix() -> None:
+    with pytest.raises(StrategyPromotionBlocked, match="session-backed"):
+        assess_strategy_promotion(_result(), _score(), validation_plan=_plan())
 
 
 @pytest.mark.parametrize(
@@ -61,7 +80,9 @@ def test_validated_strategy_has_explicit_promotion_evidence() -> None:
 )
 def test_promotion_rejects_incomplete_or_unsafe_research(result_overrides, message) -> None:
     with pytest.raises(StrategyPromotionBlocked, match=message):
-        assess_strategy_promotion(_result(**result_overrides), _score())
+        assess_strategy_promotion(
+            _result(**result_overrides), _score(), validation_plan=_plan()
+        )
 
 
 def test_promotion_requires_profitable_oos_and_multiple_market_states() -> None:
@@ -71,8 +92,15 @@ def test_promotion_requires_profitable_oos_and_multiple_market_states() -> None:
                 "net_of_costs": True,
                 "out_of_sample": {"passed": True, "profit_pct": 0, "total_trades": 40},
                 "walk_forward": {"passed": True, "market_states": ["bull", "bear"]},
+                "validation_matrix": {
+                    "plan_id": 31,
+                    "plan_digest": "a" * 64,
+                    "evidence_digest": "b" * 64,
+                    "window_result_ids": [101, 102, 103, 104],
+                    "provider": "freqtrade",
+                },
             }
         }
     )
-    with pytest.raises(StrategyPromotionBlocked, match="out-of-sample result is not profitable"):
-        assess_strategy_promotion(result, _score())
+    with pytest.raises(StrategyPromotionBlocked, match="session-backed"):
+        assess_strategy_promotion(result, _score(), validation_plan=_plan())

@@ -28,6 +28,7 @@ from app.models import (
     StrategyCandidateApproval,
     StrategyGenerationRun,
     StrategyScore,
+    StrategyValidationPlan,
     StrategyVersion,
     TradeIntent,
 )
@@ -41,6 +42,7 @@ from app.repositories.full_chain import (
     require_authoritative_reconciliation,
 )
 from app.repositories.research_jobs import ResearchJobRepository
+from app.services.strategy_validation_matrix import StrategyValidationMatrixService
 
 
 NOW = datetime(2026, 7, 27, 8, 0, tzinfo=timezone.utc)
@@ -48,7 +50,12 @@ POSTGRES_WORKER_URL = os.environ.get("POSTGRES_WORKER_URL")
 
 
 @pytest.fixture
-def db():
+def db(monkeypatch):
+    monkeypatch.setattr(
+        StrategyValidationMatrixService,
+        "assert_current_for_promotion",
+        lambda self, plan: plan.promotion_evidence,
+    )
     engine = create_engine(
         "sqlite://",
         connect_args={"check_same_thread": False},
@@ -162,6 +169,38 @@ def seed_research_lineage(db):
     )
     db.add(result)
     db.flush()
+    validation_plan = StrategyValidationPlan(
+        strategy_version_id=version.id,
+        promotion_backtest_result_id=result.id,
+        provider_name="freqtrade",
+        strategy_code_digest=version.code_hash,
+        plan_digest="e" * 64,
+        plan_snapshot={"test_scope": "downstream approval mechanics"},
+        status="PASSED",
+        evidence_digest="f" * 64,
+        promotion_evidence={
+            "window_result_ids": [
+                result.id * 10 + index for index in range(1, 5)
+            ]
+        },
+    )
+    db.add(validation_plan)
+    db.flush()
+    result.metrics_snapshot = {
+        **result.metrics_snapshot,
+        "promotion_evidence": {
+            **result.metrics_snapshot["promotion_evidence"],
+            "validation_matrix": {
+                "plan_id": validation_plan.id,
+                "plan_digest": validation_plan.plan_digest,
+                "evidence_digest": validation_plan.evidence_digest,
+                "window_result_ids": validation_plan.promotion_evidence[
+                    "window_result_ids"
+                ],
+                "provider": "freqtrade",
+            },
+        },
+    }
     score = StrategyScore(
         strategy_id=strategy.id,
         strategy_version_id=version.id,
