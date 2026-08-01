@@ -10,7 +10,7 @@ help:
 	@printf '%s\n' 'OKX Demo onboarding: make okx-demo-pin-account (one-time; refuses overwrite)'
 	@printf '%s\n' 'OKX Demo: make okx-demo-preflight (authenticated read-only; never submits orders)'
 	@printf '%s\n' 'OKX Demo compatibility: make okx-demo-compatibility (offline-first; uses the shared FREQTRADE_BINARY resolver)'
-	@printf '%s\n' 'OKX Demo canary: make okx-demo-canary CANARY_FLAGS=--allow-demo-order'
+	@printf '%s\n' 'OKX Demo direct canary: permanently BLOCKED; canonical runtime one-shot grant owns any controlled canary'
 	@printf '%s\n' 'OKX Demo E2E: make okx-demo-e2e-offline (controlled mode stays blocked until #449/#450 integration)'
 	@printf '%s\n' 'macOS autostart: make autostart-install | autostart-status | autostart-logs | autostart-restart | autostart-uninstall'
 	@printf '%s\n' 'The managed runtime uses only local PostgreSQL database freqtrade_ai.'

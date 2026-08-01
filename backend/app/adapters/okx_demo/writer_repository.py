@@ -42,11 +42,23 @@ from app.models.okx_demo_reconciliation import (
     OkxDemoReconciliationState,
     OkxDemoRecoveryGrant,
 )
-from app.models.order_writer import OkxOrderWriteAttempt, OkxOrderWriterLease
+from app.models.order_writer import (
+    OkxDemoSubmissionGrant,
+    OkxOrderWriteAttempt,
+    OkxOrderWriterLease,
+)
 from app.services.risk_chain import RiskChainBlocked, RiskChainService, canonical_digest
 from app.services.okx_demo_reconciliation import (
     OkxDemoReconciliationBlocked,
     OkxDemoReconciliationService,
+)
+from app.services.okx_demo_submission_grant import (
+    CANARY_PROVENANCE,
+    _decimal_text,
+    _require_minimum_canary_risk,
+    OkxDemoSubmissionGrantBlocked,
+    require_canary_reconciliation,
+    submission_grant_request_digest,
 )
 
 
@@ -75,6 +87,7 @@ class SqlAlchemyOrderWriterStore:
         self._pinned_connection = pinned_connection
         self._holder_digest: Optional[str] = None
         self._lease_generation: Optional[int] = None
+        self._writer_instance_id: Optional[str] = None
         self._process_token_digest = hashlib.sha256(
             secrets.token_bytes(32)
         ).hexdigest()
@@ -399,6 +412,8 @@ class SqlAlchemyOrderWriterStore:
         approved_payload_hash: str,
         now: datetime,
         expires_at: datetime,
+        grant_id: str = "",
+        authorization_mode: str = "MANIFEST",
     ) -> None:
         now = _aware_utc(now)
         expires_at = _aware_utc(expires_at)
@@ -416,6 +431,17 @@ class SqlAlchemyOrderWriterStore:
                 for_update=True,
             )
             self._validate_approval(approved, intent, decision, now=now)
+            if authorization_mode == "ONE_SHOT":
+                self._validate_one_shot_grant(
+                    grant_id=grant_id,
+                    approved=approved,
+                    canonical_hash=canonical_hash,
+                    policy_digest=policy_digest,
+                    approved_payload_hash=approved_payload_hash,
+                    now=now,
+                )
+            elif authorization_mode != "MANIFEST":
+                raise OkxDemoWriteBlocked("writer authorization mode is invalid")
             if (
                 canonical_hash != approved.canonical_hash
                 or policy_digest != approved.policy_digest
@@ -483,6 +509,7 @@ class SqlAlchemyOrderWriterStore:
             self.db.commit()
             self._holder_digest = digest
             self._lease_generation = lease_generation
+            self._writer_instance_id = writer_instance_id
         except OkxDemoWriteBlocked:
             self.db.rollback()
             raise
@@ -515,6 +542,90 @@ class SqlAlchemyOrderWriterStore:
         self.db.commit()
         return record
 
+    def claim_unresolved_for_reconciliation(
+        self,
+        attempt_id: int,
+        *,
+        now: datetime,
+        expires_at: datetime,
+    ) -> WriteAttemptRecord:
+        now = _aware_utc(now)
+        expires_at = _aware_utc(expires_at)
+        if expires_at <= now:
+            raise OkxDemoWriteBlocked(
+                "unresolved reconciliation lease expiry is invalid"
+            )
+        digest = self._process_token_digest
+        try:
+            self._lock_lease_key()
+            self._require_target_contract()
+            rows = list(
+                self.db.scalars(
+                    select(OkxOrderWriteAttempt)
+                    .where(
+                        OkxOrderWriteAttempt.execution_target_id == OKX_DEMO,
+                        OkxOrderWriteAttempt.state.in_(UNRESOLVED_STATES),
+                    )
+                    .order_by(OkxOrderWriteAttempt.id)
+                    .with_for_update()
+                )
+            )
+            if len(rows) != 1 or rows[0].id != attempt_id:
+                raise OkxDemoWriteBlocked(
+                    "exactly one matching unresolved writer attempt is required"
+                )
+            attempt = rows[0]
+            if (
+                attempt.operation not in {"PLACE", "CLOSE", "SET_LEVERAGE"}
+                or attempt.recovery_grant_database_id is not None
+            ):
+                raise OkxDemoWriteBlocked(
+                    "unresolved attempt is not eligible for read-only reconciliation"
+                )
+            lease = self.db.scalars(
+                select(OkxOrderWriterLease)
+                .where(OkxOrderWriterLease.execution_target_id == OKX_DEMO)
+                .with_for_update()
+            ).first()
+            if lease is None:
+                lease = OkxOrderWriterLease(
+                    execution_target_id=OKX_DEMO,
+                    holder_token_digest=digest,
+                    generation=1,
+                    acquired_at=now,
+                    heartbeat_at=now,
+                    expires_at=expires_at,
+                )
+                self.db.add(lease)
+                self.db.flush()
+            elif lease.holder_token_digest == digest:
+                lease.heartbeat_at = now
+                lease.expires_at = expires_at
+            elif _aware_utc(lease.expires_at) <= now:
+                lease.holder_token_digest = digest
+                lease.generation += 1
+                lease.acquired_at = now
+                lease.heartbeat_at = now
+                lease.expires_at = expires_at
+            else:
+                raise OkxDemoWriteBlocked(
+                    "another OKX_DEMO writer holds the database lease"
+                )
+            attempt.lease_generation = lease.generation
+            record = self._record(attempt)
+            self.db.commit()
+            self._holder_digest = digest
+            self._lease_generation = lease.generation
+            return record
+        except OkxDemoWriteBlocked:
+            self.db.rollback()
+            raise
+        except IntegrityError:
+            self.db.rollback()
+            raise OkxDemoWriteBlocked(
+                "unresolved reconciliation claim raced with another writer"
+            ) from None
+
     def prepare_place(
         self,
         command: NormalizedOrderCommand,
@@ -534,6 +645,18 @@ class SqlAlchemyOrderWriterStore:
             now = self._now()
             self._validate_approval(approved, intent, decision, now=now)
             self._validate_command(command, approved, intent, decision)
+            if command.authorization_mode == "ONE_SHOT":
+                grant = self._validate_one_shot_grant(
+                    grant_id=command.grant_id,
+                    approved=approved,
+                    canonical_hash=command.canonical_hash,
+                    policy_digest=command.policy_digest,
+                    approved_payload_hash=command.approved_payload_hash,
+                    now=now,
+                )
+                grant.status = "CONSUMED"
+                grant.writer_instance_id = self._writer_instance_id
+                grant.consumed_at = now
             prior_placement = self.db.scalars(
                 select(OkxOrderWriteAttempt).where(
                     OkxOrderWriteAttempt.approval_id == approved.id,
@@ -1077,6 +1200,85 @@ class SqlAlchemyOrderWriterStore:
             raise OkxDemoWriteBlocked(
                 "writer command differs from persisted approval"
             )
+
+    def _validate_one_shot_grant(
+        self,
+        *,
+        grant_id: str,
+        approved: ApprovedExecution,
+        canonical_hash: str,
+        policy_digest: str,
+        approved_payload_hash: str,
+        now: datetime,
+    ) -> OkxDemoSubmissionGrant:
+        grant = self.db.scalars(
+            select(OkxDemoSubmissionGrant)
+            .where(OkxDemoSubmissionGrant.grant_id == grant_id)
+            .with_for_update()
+        ).first()
+        if grant is None:
+            raise OkxDemoWriteBlocked("one-shot submission grant is missing")
+        if _aware_utc(grant.expires_at) <= now:
+            raise OkxDemoWriteBlocked("one-shot submission grant is expired")
+        if (
+            grant.status != "ACTIVE"
+            or grant.execution_target_id != OKX_DEMO
+            or grant.approval_id != approved.id
+            or grant.canonical_hash != canonical_hash
+            or grant.policy_digest != policy_digest
+            or grant.approved_payload_hash != approved_payload_hash
+            or grant.client_order_id != approved.client_order_id
+            or grant.provenance != CANARY_PROVENANCE
+            or grant.request_digest
+            != submission_grant_request_digest(
+                approval_id=approved.id,
+                reconciliation_run_id=grant.reconciliation_run_id,
+                canonical_hash=canonical_hash,
+                policy_digest=policy_digest,
+                approved_payload_hash=approved_payload_hash,
+                client_order_id=approved.client_order_id,
+                instrument_id=grant.instrument_id,
+                canary_quantity=Decimal(grant.canary_quantity),
+                canary_notional=Decimal(grant.canary_notional),
+            )
+        ):
+            raise OkxDemoWriteBlocked(
+                "one-shot submission grant does not match the persisted approval"
+            )
+        try:
+            require_canary_reconciliation(
+                self.db,
+                reconciliation_run_id=grant.reconciliation_run_id,
+                now=now,
+                for_update=True,
+            )
+        except OkxDemoSubmissionGrantBlocked:
+            raise OkxDemoWriteBlocked(
+                "one-shot submission reconciliation is no longer safe"
+            ) from None
+        intent = self.db.get(TradeIntent, approved.trade_intent_id)
+        try:
+            quantity, notional = _require_minimum_canary_risk(
+                self.db,
+                approved=approved,
+                intent=intent,
+                now=now,
+            )
+        except OkxDemoSubmissionGrantBlocked:
+            raise OkxDemoWriteBlocked(
+                "one-shot submission risk boundary is no longer safe"
+            ) from None
+        if (
+            grant.instrument_id != intent.instrument_id
+            or _decimal_text(Decimal(grant.canary_quantity))
+            != _decimal_text(quantity)
+            or _decimal_text(Decimal(grant.canary_notional))
+            != _decimal_text(notional)
+        ):
+            raise OkxDemoWriteBlocked(
+                "one-shot submission risk binding changed"
+            )
+        return grant
 
     @staticmethod
     def _validate_cleanup_command(

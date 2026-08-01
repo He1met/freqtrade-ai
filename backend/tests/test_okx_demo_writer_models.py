@@ -77,6 +77,7 @@ def approved(**overrides):
 
 def submission_grant(**overrides):
     values = {
+        "grant_id": "1" * 32,
         "execution_target_id": "OKX_DEMO",
         "authorization_schema_version": "RISK_V1",
         "canonical_hash": "b" * 64,
@@ -87,7 +88,9 @@ def submission_grant(**overrides):
         "order_submission_enabled": True,
         "writer_instance_id": "WriterInstance01",
         "approval_id": 3,
-        "expires_at": NOW + timedelta(seconds=30),
+        "client_order_id": "WriterOrder001",
+        "issued_at": NOW - timedelta(seconds=1),
+        "expires_at": NOW + timedelta(seconds=10),
     }
     values.update(overrides)
     return OrderSubmissionAuthorization(**values)

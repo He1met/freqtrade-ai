@@ -48,6 +48,10 @@ TRANSITIONS = {
     ): WriteState.RESIDUAL_CLOSE_REQUIRED,
     (
         WriteState.RESIDUAL_CLOSE_REQUIRED,
+        WriteEvent.RESIDUAL_DETECTED,
+    ): WriteState.RESIDUAL_CLOSE_REQUIRED,
+    (
+        WriteState.RESIDUAL_CLOSE_REQUIRED,
         WriteEvent.RECONCILE,
     ): WriteState.RECONCILED,
 }

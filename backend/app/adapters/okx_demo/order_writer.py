@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import hashlib
 import json
@@ -88,6 +88,14 @@ class WriterResult:
 
 
 class OrderWriterStore(Protocol):
+    def claim_unresolved_for_reconciliation(
+        self,
+        attempt_id: int,
+        *,
+        now: datetime,
+        expires_at: datetime,
+    ) -> WriteAttemptRecord: ...
+
     def acquire_recovery_lease(
         self,
         grant_database_id: int,
@@ -112,6 +120,8 @@ class OrderWriterStore(Protocol):
         approved_payload_hash: str,
         now: datetime,
         expires_at: datetime,
+        grant_id: str = "",
+        authorization_mode: str = "MANIFEST",
     ) -> None: ...
 
     def unresolved(self) -> Optional[WriteAttemptRecord]: ...
@@ -185,11 +195,12 @@ class OkxDemoOrderWriter:
     ) -> WriterResult:
         view = approved_execution_view(approved)
         now = self._now()
-        submission_grant.require_active(
+        submission_grant.consume(
             approval_id=view.approval_id,
             canonical_hash=view.canonical_hash,
             policy_digest=view.policy_digest,
             approved_payload_hash=view.approved_payload_hash,
+            client_order_id=view.client_order_id,
             now=now,
         )
         if now >= view.expires_at.astimezone(timezone.utc):
@@ -252,6 +263,21 @@ class OkxDemoOrderWriter:
             require_terminal=operation == "CLOSE",
         )
 
+    def reconcile_unresolved(self, attempt_id: int) -> WriterResult:
+        """Claim one durable journal row and perform GET-only reconciliation."""
+
+        now = self._now()
+        attempt = self._store.claim_unresolved_for_reconciliation(
+            attempt_id,
+            now=now,
+            expires_at=now + timedelta(seconds=10),
+        )
+        if attempt.attempt_id != attempt_id:
+            raise OkxDemoWriteBlocked(
+                "unresolved reconciliation claim changed identity"
+            )
+        return self._recover(attempt)
+
     def cancel(
         self,
         order: ManagedOrder,
@@ -259,6 +285,14 @@ class OkxDemoOrderWriter:
         submission_grant: OrderSubmissionAuthorization,
     ) -> WriterResult:
         now = self._now()
+        submission_grant.consume(
+            approval_id=order.approval_id,
+            canonical_hash=order.canonical_hash,
+            policy_digest=order.policy_digest,
+            approved_payload_hash=order.approved_payload_hash,
+            client_order_id=order.client_order_id,
+            now=now,
+        )
         self._authorize_existing(order, submission_grant, now=now)
         self._acquire_lease(submission_grant, now)
         unresolved = self._store.unresolved()
@@ -377,6 +411,14 @@ class OkxDemoOrderWriter:
         new_price: Optional[Decimal] = None,
     ) -> WriterResult:
         now = self._now()
+        submission_grant.consume(
+            approval_id=order.approval_id,
+            canonical_hash=order.canonical_hash,
+            policy_digest=order.policy_digest,
+            approved_payload_hash=order.approved_payload_hash,
+            client_order_id=order.client_order_id,
+            now=now,
+        )
         self._authorize_existing(order, submission_grant, now=now)
         self._acquire_lease(submission_grant, now)
         unresolved = self._store.unresolved()
@@ -691,6 +733,10 @@ class OkxDemoOrderWriter:
             command.leverage,
         ):
             return None, None
+        if command.authorization_mode == "ONE_SHOT":
+            raise OkxDemoWriteBlocked(
+                "one-shot submission requires preconfigured leverage"
+            )
         body = {
             "instId": command.instrument_id,
             "lever": _decimal_text(command.leverage),
@@ -927,6 +973,7 @@ class OkxDemoOrderWriter:
             canonical_hash=order.canonical_hash,
             policy_digest=order.policy_digest,
             approved_payload_hash=order.approved_payload_hash,
+            client_order_id=order.client_order_id,
             now=now,
         )
 
@@ -942,6 +989,8 @@ class OkxDemoOrderWriter:
         now: datetime,
     ) -> None:
         self._store.acquire_lease(
+            grant_id=submission_grant.grant_id,
+            authorization_mode=submission_grant.authorization_mode,
             writer_instance_id=submission_grant.writer_instance_id,
             approval_id=submission_grant.approval_id,
             canonical_hash=submission_grant.canonical_hash,

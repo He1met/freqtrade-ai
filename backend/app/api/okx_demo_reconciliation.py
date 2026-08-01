@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -18,9 +19,63 @@ from app.models import (
     ReconciliationRun,
 )
 from app.models.execution_lineage import OKX_DEMO_TARGET_ID
+from app.services.okx_demo_submission_grant import (
+    OkxDemoSubmissionGrantBlocked,
+    OkxDemoSubmissionGrantService,
+)
+from app.services.operator_authorization import (
+    OperatorRequestHeaders,
+    operator_request_coordinator,
+    operator_request_headers,
+)
 
 
 router = APIRouter(prefix="/api/okx-demo", tags=["okx-demo-reconciliation"])
+
+
+class OneShotGrantRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    approval_id: int = Field(gt=0)
+    canonical_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    policy_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    approved_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    client_order_id: str = Field(min_length=1, max_length=32)
+
+
+@router.post("/submission-grants/one-shot", status_code=202)
+def arm_one_shot_submission_grant(
+    payload: OneShotGrantRequest,
+    db: Session = Depends(get_db),
+    operator_headers: OperatorRequestHeaders = Depends(operator_request_headers),
+) -> dict[str, Any]:
+    def execute() -> dict[str, Any]:
+        try:
+            grant = OkxDemoSubmissionGrantService(db).arm(
+                **payload.model_dump()
+            )
+        except OkxDemoSubmissionGrantBlocked as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"operation_status": "BLOCKED", "message": str(exc)},
+            ) from exc
+        return {
+            "operation_status": "ARMED",
+            "execution_target_id": "OKX_DEMO",
+            "grant_id": grant.grant_id,
+            "approval_id": grant.approval_id,
+            "expires_at": grant.expires_at.isoformat(),
+            "credential_values_recorded": False,
+        }
+
+    return operator_request_coordinator.execute(
+        operator_headers,
+        operation="okx-demo-one-shot-submission-grant",
+        # Reuse the existing explicit single-attempt consent header.  This is
+        # not a provider call, but it is equally consequential.
+        provider_call=True,
+        request_payload=payload.model_dump(mode="json"),
+        handler=execute,
+    )
 
 
 @router.get("/reconciliation/latest")
