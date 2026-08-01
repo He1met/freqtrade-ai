@@ -5,6 +5,7 @@ import hashlib
 from pathlib import Path
 from typing import Any, Optional
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.adapters.freqtrade.exceptions import FreqtradeResultParseError
@@ -12,6 +13,7 @@ from app.adapters.freqtrade.result_parser import FreqtradeResultParser
 from app.core.config import get_settings
 from app.core.paths import resolve_repo_path
 from app.models.backtest import BacktestResult, BacktestTask
+from app.models.strategy_validation import StrategyValidationWindow
 from app.models.strategy_score import StrategyScore
 from app.repositories import BacktestRepository
 from app.schemas import (
@@ -193,9 +195,22 @@ class BacktestArtifactIngestService:
             if result is None:
                 raise RuntimeError("backtest result was not saved")
             self.repository.db.flush()
-            score = StrategyScoringService(self.repository.db).score_backtest_result(result.id, commit=False)
-            if score is None:
-                raise RuntimeError("strategy score could not be generated from backtest result metrics")
+            validation_window_id = self.repository.db.scalar(
+                select(StrategyValidationWindow.id).where(
+                    StrategyValidationWindow.backtest_run_id
+                    == task.backtest_run_id,
+                    StrategyValidationWindow.backtest_task_id == task.id,
+                )
+            )
+            score = None
+            if validation_window_id is None:
+                score = StrategyScoringService(
+                    self.repository.db
+                ).score_backtest_result(result.id, commit=False)
+                if score is None:
+                    raise RuntimeError(
+                        "strategy score could not be generated from backtest result metrics"
+                    )
             updated_task = self.repository.update_task_status(
                 task.id,
                 BacktestTaskStatusUpdate(status="succeeded", result_path=str(result_path), error_message=self._artifact_note("SUCCEEDED", None, manifest_path, result_path)),
@@ -206,7 +221,8 @@ class BacktestArtifactIngestService:
                 raise RuntimeError("backtest task disappeared during artifact ingest")
             self.repository.db.commit()
             self.repository.db.refresh(result)
-            self.repository.db.refresh(score)
+            if score is not None:
+                self.repository.db.refresh(score)
             self.repository.db.refresh(updated_task)
         except Exception as exc:
             self.repository.db.rollback()
@@ -342,6 +358,13 @@ class BacktestArtifactIngestService:
             "result_path": str(result_path),
             "status": manifest.get("status") if manifest is not None else None,
             "manifest_version": manifest.get("manifest_version") if manifest is not None else None,
+            "provider": "freqtrade" if manifest is not None else None,
+            "execution_id": manifest.get("execution_id") if manifest is not None else None,
+            "checksums": manifest.get("checksums") if manifest is not None else None,
+            "datadir": manifest.get("datadir") if manifest is not None else None,
+            "manifest_checksum": self._sha256(manifest_path)
+            if manifest_path is not None and manifest_path.is_file()
+            else None,
             "config_path": manifest.get("config_path") if manifest is not None else task.config_path,
             "return_code": manifest.get("return_code") if manifest is not None else None,
             "blocked_reason": manifest.get("blocked_reason") if manifest is not None else None,
@@ -353,6 +376,18 @@ class BacktestArtifactIngestService:
             "stderr": manifest.get("stderr") if manifest is not None else None,
         }
         parser_metadata["artifact_manifest"] = redact_dry_run_status_payload(artifact_manifest)
+        if (
+            manifest is not None
+            and manifest_path is not None
+            and manifest_path.is_file()
+        ):
+            parser_metadata["ingest_receipt"] = backtest_ingest_receipt(
+                manifest_checksum=self._sha256(manifest_path),
+                backtest_run_id=task.backtest_run_id,
+                backtest_task_id=task.id,
+                strategy_version_id=task.run.strategy_version_id,
+                execution_id=str(manifest.get("execution_id") or ""),
+            )
         metrics_snapshot["parser_metadata"] = parser_metadata
         return parsed_result.model_copy(
             update={
@@ -360,7 +395,6 @@ class BacktestArtifactIngestService:
                 "metrics_snapshot": metrics_snapshot,
             }
         )
-
     def _record_blocked(
         self,
         task: BacktestTask,
@@ -560,3 +594,26 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
     except ValueError:
         return False
     return True
+
+
+def backtest_ingest_receipt(
+    *,
+    manifest_checksum: str,
+    backtest_run_id: int,
+    backtest_task_id: int,
+    strategy_version_id: int,
+    execution_id: str,
+) -> str:
+    """Canonical server-side receipt for one accepted session-backed ingest."""
+
+    payload = {
+        "manifest_checksum": manifest_checksum,
+        "backtest_run_id": backtest_run_id,
+        "backtest_task_id": backtest_task_id,
+        "strategy_version_id": strategy_version_id,
+        "execution_id": execution_id,
+        "ingest_boundary": "local_backtest_artifact_ingest-v2",
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()

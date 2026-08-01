@@ -1,11 +1,9 @@
 import os
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from threading import Barrier, Lock, Thread
 
 import pytest
-from sqlalchemy import inspect, text
-from sqlalchemy.exc import DataError, IntegrityError
-
 from app.core.exceptions import ConfigurationError
 from app.db.migrations import (
     EARLY_TARGET_LINEAGE_VERSION,
@@ -14,6 +12,7 @@ from app.db.migrations import (
     PREVIOUS_SCHEMA_VERSION,
     SCHEMA_VERSION,
     STRATEGY_DEPLOYMENT_BASE_VERSION,
+    STRATEGY_VALIDATION_BASE_VERSION,
     TARGET_LINEAGE_BASE_VERSION,
     VERSION_TABLE,
     upgrade_database,
@@ -24,8 +23,8 @@ from app.models import BacktestRun, Base, ResearchJob, Strategy, StrategyGenerat
 from app.models.execution_lineage import (
     LOCAL_DRY_RUN_SCOPE_ID,
     OKX_DEMO_TARGET_ID,
-    TradeIntent,
     UNKNOWN_LEGACY_SCOPE_ID,
+    TradeIntent,
 )
 from app.repositories import (
     BacktestRepository,
@@ -38,7 +37,8 @@ from app.repositories import (
 )
 from app.schemas import BacktestRunCreate, StrategyCreate, StrategyVersionCreate
 from app.schemas.strategy_generation_run import StrategyGenerationRunCreate
-
+from sqlalchemy import inspect, text
+from sqlalchemy.exc import DataError, IntegrityError
 
 POSTGRES_WORKER_URL = os.environ.get("POSTGRES_WORKER_URL")
 pytestmark = pytest.mark.skipif(
@@ -121,6 +121,44 @@ def test_strategy_deployment_queue_upgrades_from_previous_schema(
     readiness = verify_schema(postgres_engine)
     assert readiness.ready is True
     assert readiness.problems == ()
+    with postgres_engine.connect() as connection:
+        trigger_names = {
+            row[0]
+            for row in connection.execute(
+                text(
+                    "SELECT tgname FROM pg_trigger "
+                    "WHERE tgname IN ("
+                    "'strategy_validation_plans_immutable', "
+                    "'strategy_validation_windows_immutable') "
+                    "AND NOT tgisinternal"
+                )
+            )
+        }
+        plan_table_update, plan_status_update, plan_digest_update = connection.execute(
+            text(
+                "SELECT "
+                "has_table_privilege('freqtrade', "
+                "'strategy_validation_plans', 'UPDATE'), "
+                "has_column_privilege('freqtrade', "
+                "'strategy_validation_plans', 'status', 'UPDATE'), "
+                "has_column_privilege('freqtrade', "
+                "'strategy_validation_plans', 'plan_digest', 'UPDATE')"
+            )
+        ).one()
+        execution_unique = {
+            frozenset(item["column_names"])
+            for item in inspect(connection).get_unique_constraints(
+                "strategy_validation_windows"
+            )
+        }
+    assert trigger_names == {
+        "strategy_validation_plans_immutable",
+        "strategy_validation_windows_immutable",
+    }
+    assert plan_table_update is False
+    assert plan_status_update is True
+    assert plan_digest_update is False
+    assert frozenset({"execution_id"}) in execution_unique
 
     inspector = inspect(postgres_engine)
     assert {"strategy_deployments", "signal_evaluations"}.issubset(
@@ -138,6 +176,30 @@ def test_strategy_deployment_queue_upgrades_from_previous_schema(
     single_consumer = indexes["signal_evaluations_single_consumer_idx"]
     assert single_consumer["unique"] is True
     assert "status" in str(single_consumer.get("dialect_options"))
+
+
+def test_validation_matrix_fresh_and_upgrade_schema_match_orm(
+    postgres_engine,
+) -> None:
+    assert upgrade_database(postgres_engine) == SCHEMA_VERSION
+    assert {
+        "strategy_validation_plans",
+        "strategy_validation_windows",
+    }.issubset(set(inspect(postgres_engine).get_table_names()))
+
+    with postgres_engine.begin() as connection:
+        connection.execute(text("DROP TABLE strategy_validation_windows"))
+        connection.execute(text("DROP TABLE strategy_validation_plans"))
+        connection.execute(text(f"DELETE FROM {VERSION_TABLE}"))
+        connection.execute(
+            text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+            {"version": STRATEGY_VALIDATION_BASE_VERSION},
+        )
+
+    assert upgrade_database(postgres_engine) == SCHEMA_VERSION
+    readiness = verify_schema(postgres_engine)
+    assert readiness.ready is True
+    assert readiness.problems == ()
 
 
 def _create_frozen_pre_lineage_research_jobs(connection) -> None:
@@ -527,6 +589,154 @@ def test_postgresql_two_workers_claim_only_one_global_job(postgres_engine) -> No
         running = next(job for job in jobs if job.status == "RUNNING")
         assert running.attempt_count == 1
         assert running.lease_token is not None
+
+
+def test_postgresql_terminal_cas_rejects_expired_and_concurrent_lease(
+    postgres_engine,
+) -> None:
+    assert upgrade_database(postgres_engine) == SCHEMA_VERSION
+    session_factory = create_session_factory(postgres_engine)
+    now = datetime.now(timezone.utc)
+    with session_factory() as db:
+        repository = ResearchJobRepository(db)
+        expired_id = repository.create(
+            job_type="deepseek_backtest",
+            operation="strategy_generation.deepseek_backtest_loop",
+            idempotency_key_digest="expired-terminal-cas",
+            request_hash="expired-terminal-cas",
+            request_payload={"prompt_summary": "expired CAS"},
+        ).id
+        expired = repository.claim_next(
+            owner="expired-pg-worker",
+            lease_seconds=10,
+            now=now,
+        )
+        assert expired is not None and expired.id == expired_id
+        assert expired.lease_token
+        assert repository.complete(
+            expired.id,
+            expired.lease_token,
+            status="FAILED",
+            stage="FAILED",
+            links={},
+            evidence_snapshot={
+                "status": "FAILED",
+                "acceptance_ready": False,
+            },
+            error_message="expired lease",
+            provider_completed=False,
+            now=now + timedelta(seconds=10),
+        ) is None
+        assert repository.expire_stale(
+            now + timedelta(seconds=10),
+        ) is not None
+
+        concurrent_id = repository.create(
+            job_type="deepseek_backtest",
+            operation="strategy_generation.deepseek_backtest_loop",
+            idempotency_key_digest="concurrent-terminal-cas",
+            request_hash="concurrent-terminal-cas",
+            request_payload={"prompt_summary": "concurrent CAS"},
+        ).id
+        concurrent = repository.claim_next(
+            owner="concurrent-pg-worker",
+            lease_seconds=60,
+        )
+        assert concurrent is not None and concurrent.id == concurrent_id
+        assert concurrent.lease_token
+        lease_token = concurrent.lease_token
+
+    barrier = Barrier(2)
+    results: list[bool] = []
+    errors: list[Exception] = []
+    result_lock = Lock()
+
+    def terminalize() -> None:
+        try:
+            barrier.wait(timeout=5)
+            with session_factory() as db:
+                completed = ResearchJobRepository(db).complete(
+                    concurrent_id,
+                    lease_token,
+                    status="FAILED",
+                    stage="FAILED",
+                    links={},
+                    evidence_snapshot={
+                        "status": "FAILED",
+                        "acceptance_ready": False,
+                    },
+                    error_message="concurrent terminal CAS",
+                    provider_completed=False,
+                )
+                with result_lock:
+                    results.append(completed is not None)
+        except Exception as exc:  # pragma: no cover - asserted below
+            with result_lock:
+                errors.append(exc)
+
+    threads = [Thread(target=terminalize) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert errors == []
+    assert all(not thread.is_alive() for thread in threads)
+    assert sorted(results) == [False, True]
+
+    with session_factory() as db:
+        repository = ResearchJobRepository(db)
+        checkpoint_id = repository.create(
+            job_type="deepseek_backtest",
+            operation="strategy_generation.deepseek_backtest_loop",
+            idempotency_key_digest="concurrent-checkpoint-cas",
+            request_hash="concurrent-checkpoint-cas",
+            request_payload={"prompt_summary": "concurrent checkpoint CAS"},
+        ).id
+        checkpoint_job = repository.claim_next(
+            owner="checkpoint-pg-worker",
+            lease_seconds=60,
+        )
+        assert checkpoint_job is not None and checkpoint_job.id == checkpoint_id
+        assert checkpoint_job.lease_token
+        checkpoint_token = checkpoint_job.lease_token
+        assert repository.mark_provider_attempt(
+            checkpoint_id,
+            checkpoint_token,
+        )
+
+    checkpoint_barrier = Barrier(2)
+    checkpoint_results: list[bool] = []
+    checkpoint_errors: list[Exception] = []
+
+    def checkpoint() -> None:
+        try:
+            checkpoint_barrier.wait(timeout=5)
+            with session_factory() as db:
+                persisted = ResearchJobRepository(db).checkpoint_research_result(
+                    checkpoint_id,
+                    checkpoint_token,
+                    links={},
+                    evidence_snapshot={
+                        "status": "RUNNING",
+                        "acceptance_ready": False,
+                    },
+                )
+                with result_lock:
+                    checkpoint_results.append(persisted is not None)
+        except Exception as exc:  # pragma: no cover - asserted below
+            with result_lock:
+                checkpoint_errors.append(exc)
+
+    checkpoint_threads = [Thread(target=checkpoint) for _ in range(2)]
+    for thread in checkpoint_threads:
+        thread.start()
+    for thread in checkpoint_threads:
+        thread.join(timeout=10)
+
+    assert checkpoint_errors == []
+    assert all(not thread.is_alive() for thread in checkpoint_threads)
+    assert sorted(checkpoint_results) == [False, True]
 
 
 def test_target_lineage_migration_marks_existing_rows_unknown_legacy(postgres_engine) -> None:
