@@ -782,6 +782,7 @@ def test_worker_runs_controlled_service_chain_and_reconciles_all_database_ids(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.delenv("FREQTRADE_AI_CI_OFFLINE", raising=False)
     factory = session_factory(tmp_path)
     datadir = write_market_data(tmp_path)
     install_fake_freqtrade(tmp_path, monkeypatch)

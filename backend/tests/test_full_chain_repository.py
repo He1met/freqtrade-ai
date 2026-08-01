@@ -760,7 +760,13 @@ def test_okx_demo_auto_approval_rejects_attempt_mismatch(db) -> None:
 
 def test_postgresql_concurrent_okx_demo_auto_approval_has_one_fenced_winner(
     postgres_factory,
+    monkeypatch,
 ) -> None:
+    monkeypatch.setattr(
+        StrategyValidationMatrixService,
+        "assert_current_for_promotion",
+        lambda self, plan: plan.promotion_evidence,
+    )
     with postgres_factory() as setup:
         job = claimed_job(setup)
         repository = FullChainRepository(setup)
