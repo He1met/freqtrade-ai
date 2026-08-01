@@ -2425,10 +2425,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 wait_for_url(
                     "http://127.0.0.1:{}/readyz".format(BACKEND_PORT),
                     "backend readiness",
+                    timeout_seconds=BACKEND_STARTUP_TIMEOUT_SECONDS,
                 )
                 wait_for_url(
                     "http://127.0.0.1:{}/".format(FRONTEND_PORT),
                     "frontend",
+                    timeout_seconds=FRONTEND_STARTUP_TIMEOUT_SECONDS,
                 )
                 payload = {
                     **status,
