@@ -13,7 +13,10 @@ from app.adapters.freqtrade.cli_runner import (
     FreqtradeCommandResult,
 )
 from app.adapters.freqtrade.exceptions import FreqtradeCommandError
-from app.adapters.freqtrade.market_data_index import SUPPORTED_DATA_SUFFIXES
+from app.adapters.freqtrade.market_data_index import (
+    FreqtradeMarketDataIndex,
+    SUPPORTED_DATA_SUFFIXES,
+)
 from app.schemas.dry_run_status import redact_secret_text
 from app.models.execution_lineage import LOCAL_DRY_RUN_SCOPE_ID
 
@@ -50,6 +53,9 @@ class FreqtradeBacktestArtifactManifest:
     strategy_version_id: Optional[int] = None
     execution_id: Optional[str] = None
     checksums: Optional[dict[str, str]] = None
+    pair: Optional[str] = None
+    timeframe: Optional[str] = None
+    market_data_files: Optional[list[dict[str, str]]] = None
     execution_scope_id: str = LOCAL_DRY_RUN_SCOPE_ID
 
     def to_dict(self) -> dict[str, object]:
@@ -74,6 +80,9 @@ class FreqtradeBacktestArtifactManifest:
             "strategy_version_id": self.strategy_version_id,
             "execution_id": self.execution_id,
             "checksums": self.checksums,
+            "pair": self.pair,
+            "timeframe": self.timeframe,
+            "market_data_files": self.market_data_files,
             "execution_scope_id": self.execution_scope_id,
         }
 
@@ -160,6 +169,8 @@ class FreqtradeBacktestRunner:
         task_id: Optional[int] = None,
         strategy_version_id: Optional[int] = None,
         execution_id: Optional[str] = None,
+        pair: Optional[str] = None,
+        timeframe: Optional[str] = None,
     ) -> FreqtradeBacktestArtifactManifest:
         command = self._build_backtesting_command(
             config_path,
@@ -172,7 +183,18 @@ class FreqtradeBacktestRunner:
         )
         command_args = self._cli_runner.build_args(command)
 
+        market_data_files = _matching_market_data_files(datadir, pair, timeframe)
         blocked_reason = self._local_data_blocker(datadir)
+        if blocked_reason is None and datadir is not None and (pair or timeframe):
+            if not pair or not timeframe:
+                blocked_reason = (
+                    "pair and timeframe are required for local market-data evidence"
+                )
+            elif not market_data_files:
+                blocked_reason = (
+                    "no matching local market data files found for "
+                    f"{pair} {timeframe}"
+                )
         if blocked_reason is not None:
             return self._write_manifest(
                 status="BLOCKED",
@@ -191,6 +213,7 @@ class FreqtradeBacktestRunner:
                 blocked_reason=blocked_reason,
                 run_id=run_id, task_id=task_id, strategy_version_id=strategy_version_id,
                 execution_id=execution_id,
+                pair=pair, timeframe=timeframe, market_data_files=market_data_files,
             )
 
         result_path.parent.mkdir(parents=True, exist_ok=True)
@@ -215,6 +238,7 @@ class FreqtradeBacktestRunner:
                 ),
                 run_id=run_id, task_id=task_id, strategy_version_id=strategy_version_id,
                 execution_id=execution_id,
+                pair=pair, timeframe=timeframe, market_data_files=market_data_files,
             )
 
         self._materialize_backtest_result_json(result_path)
@@ -236,6 +260,7 @@ class FreqtradeBacktestRunner:
                 failed_reason=f"Freqtrade result JSON was not generated: {result_path}",
                 run_id=run_id, task_id=task_id, strategy_version_id=strategy_version_id,
                 execution_id=execution_id,
+                pair=pair, timeframe=timeframe, market_data_files=market_data_files,
             )
 
         return self._write_manifest(
@@ -254,6 +279,7 @@ class FreqtradeBacktestRunner:
             userdir=userdir,
             run_id=run_id, task_id=task_id, strategy_version_id=strategy_version_id,
             execution_id=execution_id,
+            pair=pair, timeframe=timeframe, market_data_files=market_data_files,
         )
 
     def _build_backtesting_command(
@@ -387,7 +413,12 @@ class FreqtradeBacktestRunner:
         task_id: Optional[int] = None,
         strategy_version_id: Optional[int] = None,
         execution_id: Optional[str] = None,
+        pair: Optional[str] = None,
+        timeframe: Optional[str] = None,
+        market_data_files: Optional[list[dict[str, str]]] = None,
     ) -> FreqtradeBacktestArtifactManifest:
+        if market_data_files is None:
+            market_data_files = _matching_market_data_files(datadir, pair, timeframe)
         manifest = FreqtradeBacktestArtifactManifest(
             manifest_version=2,
             status=status,
@@ -408,11 +439,15 @@ class FreqtradeBacktestRunner:
             task_id=task_id,
             strategy_version_id=strategy_version_id,
             execution_id=execution_id,
+            pair=pair,
+            timeframe=timeframe,
+            market_data_files=market_data_files or None,
             checksums=_artifact_checksums(
                 config_path,
                 result_path,
                 strategy_file_path or strategy_path,
                 datadir,
+                market_data_files=market_data_files,
             )
             if status == "SUCCESS" else None,
         )
@@ -432,6 +467,8 @@ def _artifact_checksums(
     result_path: Path,
     strategy_path: Optional[Path],
     datadir: Optional[Path] = None,
+    *,
+    market_data_files: Optional[list[dict[str, str]]] = None,
 ) -> dict[str, str]:
     """Return byte-level evidence only for artifacts that must exist on SUCCESS."""
     paths = {"config": config_path, "result": result_path, "strategy": strategy_path}
@@ -440,18 +477,54 @@ def _artifact_checksums(
         if path is None or not path.is_file():
             continue
         checksums[name] = hashlib.sha256(path.read_bytes()).hexdigest()
-    if datadir is not None and datadir.is_dir():
-        digest = hashlib.sha256()
-        data_files = sorted(
-            path
-            for path in datadir.rglob("*")
-            if path.is_file()
-            and any(path.name.lower().endswith(suffix) for suffix in SUPPORTED_DATA_SUFFIXES)
-        )
-        for path in data_files:
-            digest.update(str(path.relative_to(datadir)).encode("utf-8"))
-            digest.update(b"\0")
-            digest.update(hashlib.sha256(path.read_bytes()).digest())
-        if data_files:
-            checksums["market_data"] = digest.hexdigest()
+    market_data_digest = _market_data_files_digest(market_data_files)
+    if datadir is not None and datadir.is_dir() and market_data_digest:
+        checksums["market_data"] = market_data_digest
     return checksums
+
+
+def _market_data_files_digest(
+    market_data_files: Optional[list[dict[str, str]]],
+) -> Optional[str]:
+    if not market_data_files:
+        return None
+    digest = hashlib.sha256()
+    try:
+        for item in market_data_files:
+            path = item["path"]
+            checksum = item["checksum"]
+            if not path or len(checksum) != 64:
+                return None
+            digest.update(path.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(bytes.fromhex(checksum))
+    except (KeyError, TypeError, ValueError):
+        return None
+    return digest.hexdigest()
+
+
+def _matching_market_data_files(
+    datadir: Optional[Path],
+    pair: Optional[str],
+    timeframe: Optional[str],
+) -> list[dict[str, str]]:
+    """Return only the exact task pair/timeframe files under ``datadir``."""
+
+    if datadir is None or not datadir.is_dir() or not pair or not timeframe:
+        return []
+    index = FreqtradeMarketDataIndex(market_data_dir=datadir)
+    matched: list[dict[str, str]] = []
+    for path in sorted(datadir.rglob("*")):
+        if not path.is_file() or not any(
+            path.name.lower().endswith(suffix) for suffix in SUPPORTED_DATA_SUFFIXES
+        ):
+            continue
+        if index._parse_data_filename(path.name) != (pair, timeframe):
+            continue
+        matched.append(
+            {
+                "path": str(path.relative_to(datadir)),
+                "checksum": hashlib.sha256(path.read_bytes()).hexdigest(),
+            }
+        )
+    return matched

@@ -30,6 +30,7 @@ from app.services.strategy_validation_matrix import (
     StrategyValidationMatrixService,
     ValidationWindowSpec,
     _market_data_digest,
+    _market_data_lineage,
 )
 
 
@@ -160,7 +161,12 @@ def _attach_real_results(
     tmp_path.mkdir(parents=True, exist_ok=True)
     datadir = tmp_path / "market"
     _write_market_data(datadir, data_format=market_data_format)
-    market_digest = _market_data_digest(datadir)
+    market_data_files = _market_data_lineage(
+        datadir, pair="BTC/USDT:USDT", timeframe="15m"
+    )
+    market_digest = _market_data_digest(
+        datadir, pair="BTC/USDT:USDT", timeframe="15m"
+    )
     assert market_digest is not None
     backtests = BacktestRepository(db)
     execution_ids = []
@@ -213,6 +219,9 @@ def _attach_real_results(
                     "config_path": str(config_path),
                     "strategy_path": plan.strategy_version.file_path,
                     "datadir": str(datadir),
+                    "pair": task.pair,
+                    "timeframe": task.timeframe,
+                    "market_data_files": market_data_files,
                     "checksums": checksums,
                     "return_code": 0,
                     "command_args": [
@@ -252,6 +261,9 @@ def _attach_real_results(
                         "result_path": str(result_path),
                         "config_path": str(config_path),
                         "datadir": str(datadir),
+                        "pair": task.pair,
+                        "timeframe": task.timeframe,
+                        "market_data_files": market_data_files,
                         "manifest_checksum": _sha(manifest_path),
                         "checksums": checksums,
                     },
@@ -274,7 +286,9 @@ def test_independent_matrix_persists_four_runs_and_is_required_for_promotion(
     version, primary = _seed_primary(db, tmp_path)
     datadir = tmp_path / "declared-market"
     _write_market_data(datadir)
-    market_digest = _market_data_digest(datadir)
+    market_digest = _market_data_digest(
+        datadir, pair="BTC/USDT:USDT", timeframe="15m"
+    )
     assert market_digest is not None
     service = StrategyValidationMatrixService(db)
     plan = service.declare(
@@ -322,7 +336,9 @@ def test_independent_matrix_reads_real_feather_and_persists_regime_evidence(
     version, primary = _seed_primary(db, tmp_path)
     datadir = tmp_path / "declared-market"
     _write_market_data(datadir, data_format="feather")
-    market_digest = _market_data_digest(datadir)
+    market_digest = _market_data_digest(
+        datadir, pair="BTC/USDT:USDT", timeframe="15m"
+    )
     assert market_digest is not None
     service = StrategyValidationMatrixService(db)
     plan = service.declare(
@@ -345,6 +361,104 @@ def test_independent_matrix_reads_real_feather_and_persists_regime_evidence(
         assert evidence["source"] == "persisted_market_data"
         assert evidence["source_artifacts"] == ["BTC_USDT_USDT-15m.feather"]
         assert evidence["observation_count"] >= 2
+
+
+def test_market_regime_ignores_other_pairs_and_timeframes(
+    db: Session, tmp_path: Path
+) -> None:
+    version, primary = _seed_primary(db, tmp_path)
+    declared_datadir = tmp_path / "declared-market"
+    _write_market_data(declared_datadir)
+    digest = _market_data_digest(
+        declared_datadir, pair="BTC/USDT:USDT", timeframe="15m"
+    )
+    assert digest is not None
+    service = StrategyValidationMatrixService(db)
+    plan = service.declare(
+        promotion_backtest_result_id=primary.id,
+        strategy_version_id=version.id,
+        windows=_specs(digest),
+    )
+    validation_root = tmp_path / "mixed-validation"
+    _attach_real_results(db, plan, validation_root)
+    runtime_datadir = validation_root / "market"
+    pollution = [
+        {"date": "2024-01-01T00:00:00Z", "close": 1000},
+        {"date": "2024-04-30T23:45:00Z", "close": 1},
+    ]
+    (runtime_datadir / "ETH_USDT_USDT-15m.json").write_text(
+        json.dumps(pollution), encoding="utf-8"
+    )
+    (runtime_datadir / "BTC_USDT_USDT-1h.json").write_text(
+        json.dumps(pollution), encoding="utf-8"
+    )
+
+    evaluated = service.evaluate(plan.id)
+
+    assert evaluated.status == "PASSED"
+    for window in evaluated.windows:
+        assert window.market_state_evidence["pair"] == "BTC/USDT:USDT"
+        assert window.market_state_evidence["timeframe"] == "15m"
+        assert window.market_state_evidence["source_artifacts"] == [
+            "BTC_USDT_USDT-15m.json"
+        ]
+
+
+def test_missing_or_drifted_market_lineage_blocks_validation(
+    db: Session, tmp_path: Path
+) -> None:
+    version, primary = _seed_primary(db, tmp_path)
+    declared_datadir = tmp_path / "declared-market"
+    _write_market_data(declared_datadir)
+    digest = _market_data_digest(
+        declared_datadir, pair="BTC/USDT:USDT", timeframe="15m"
+    )
+    assert digest is not None
+    service = StrategyValidationMatrixService(db)
+    plan = service.declare(
+        promotion_backtest_result_id=primary.id,
+        strategy_version_id=version.id,
+        windows=_specs(digest),
+    )
+    validation_root = tmp_path / "lineage-validation"
+    _attach_real_results(db, plan, validation_root)
+    first = plan.windows[0]
+    result = db.query(BacktestResult).filter_by(
+        backtest_run_id=first.backtest_run_id
+    ).one()
+    snapshot = dict(result.metrics_snapshot)
+    metadata = dict(snapshot["parser_metadata"])
+    manifest = dict(metadata["artifact_manifest"])
+    manifest.pop("market_data_files", None)
+    metadata["artifact_manifest"] = manifest
+    snapshot["parser_metadata"] = metadata
+    result.metrics_snapshot = snapshot
+    db.commit()
+
+    blocked = service.evaluate(plan.id)
+
+    assert blocked.status == "BLOCKED"
+    assert "exact market-data file lineage is missing" in (
+        blocked.blocked_reason or ""
+    )
+
+    db.rollback()
+    version2, primary2 = _seed_primary(db, tmp_path, suffix="drift")
+    plan2 = service.declare(
+        promotion_backtest_result_id=primary2.id,
+        strategy_version_id=version2.id,
+        windows=_specs(digest),
+    )
+    validation_root2 = tmp_path / "lineage-drift-validation"
+    _attach_real_results(db, plan2, validation_root2)
+    (validation_root2 / "market" / "BTC_USDT_USDT-15m.json").write_text(
+        "drifted", encoding="utf-8"
+    )
+
+    drifted = service.evaluate(plan2.id)
+
+    assert drifted.status == "BLOCKED"
+    assert "file lineage drift" in (drifted.blocked_reason or "")
 
 
 def test_plan_rejects_missing_market_state_and_overlapping_windows(
@@ -489,7 +603,9 @@ def test_primary_lineage_reuse_and_untrusted_market_label_are_blocked(
     version, primary = _seed_primary(db, tmp_path)
     datadir = tmp_path / "declared-market"
     _write_market_data(datadir)
-    digest = _market_data_digest(datadir)
+    digest = _market_data_digest(
+        datadir, pair="BTC/USDT:USDT", timeframe="15m"
+    )
     assert digest is not None
     service = StrategyValidationMatrixService(db)
     plan = service.declare(

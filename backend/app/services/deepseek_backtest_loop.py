@@ -228,6 +228,8 @@ class DeepSeekBacktestLoopService:
             task_id=claimed_task.id,
             strategy_version_id=version.id,
             execution_id=f"backtest-run-{claimed_task.backtest_run_id}-task-{claimed_task.id}",
+            pair=claimed_task.pair,
+            timeframe=claimed_task.timeframe,
         )
         execution = self._execution_read(manifest)
 
@@ -439,6 +441,8 @@ class DeepSeekBacktestLoopService:
                 task_id=task.id,
                 strategy_version_id=version.id,
                 execution_id=f"validation-run-{run.id}-task-{task.id}",
+                pair=task.pair,
+                timeframe=task.timeframe,
             )
             if manifest.status != "SUCCESS":
                 self._mark_execution_terminal(task.id, manifest)

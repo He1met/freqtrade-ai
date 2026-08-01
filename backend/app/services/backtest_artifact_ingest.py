@@ -8,6 +8,10 @@ from typing import Any, Optional
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.adapters.freqtrade.backtest_runner import (
+    _matching_market_data_files,
+    _market_data_files_digest,
+)
 from app.adapters.freqtrade.exceptions import FreqtradeResultParseError
 from app.adapters.freqtrade.result_parser import FreqtradeResultParser
 from app.core.config import get_settings
@@ -326,6 +330,19 @@ class BacktestArtifactIngestService:
         strategy_path = self._path_from_text(manifest.get("strategy_path"))
         if strategy_path != self._path_from_text(task.run.strategy_version.file_path):
             return "artifact manifest strategy_path does not match the persisted strategy version"
+        if manifest.get("pair") != task.pair or manifest.get("timeframe") != task.timeframe:
+            return "artifact manifest pair/timeframe does not match the persisted backtest task"
+        datadir = self._path_from_text(manifest.get("datadir"))
+        market_data_files = manifest.get("market_data_files")
+        if datadir is None or not isinstance(market_data_files, list) or not market_data_files:
+            return "artifact manifest is missing exact market-data lineage"
+        expected_market_data_files = _matching_market_data_files(
+            datadir, task.pair, task.timeframe
+        )
+        if market_data_files != expected_market_data_files:
+            return "artifact manifest market-data lineage does not match the task"
+        if checksums.get("market_data") != _market_data_files_digest(market_data_files):
+            return "artifact market-data checksum does not match the task lineage"
         return None
 
     def _sha256(self, path: Path) -> str:
@@ -362,6 +379,11 @@ class BacktestArtifactIngestService:
             "execution_id": manifest.get("execution_id") if manifest is not None else None,
             "checksums": manifest.get("checksums") if manifest is not None else None,
             "datadir": manifest.get("datadir") if manifest is not None else None,
+            "pair": manifest.get("pair") if manifest is not None else task.pair,
+            "timeframe": manifest.get("timeframe") if manifest is not None else task.timeframe,
+            "market_data_files": manifest.get("market_data_files")
+            if manifest is not None
+            else None,
             "manifest_checksum": self._sha256(manifest_path)
             if manifest_path is not None and manifest_path.is_file()
             else None,

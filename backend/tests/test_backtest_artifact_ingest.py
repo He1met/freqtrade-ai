@@ -10,6 +10,10 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
+from app.adapters.freqtrade.backtest_runner import (
+    _matching_market_data_files,
+    _market_data_files_digest,
+)
 from app.db.session import create_database_engine, create_session_factory, get_db
 from app.main import app
 from app.models import Base
@@ -121,8 +125,12 @@ def _write_manifest(
     strategy_version_id: Optional[int] = None,
     strategy_path: Optional[Path] = None,
     config_path: Optional[Path] = None,
+    datadir: Optional[Path] = None,
 ) -> None:
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    market_data_files = _matching_market_data_files(
+        datadir, "BTC/USDT:USDT", "15m"
+    )
     manifest_path.write_text(
         json.dumps(
             {
@@ -150,11 +158,16 @@ def _write_manifest(
                 "strategy_version_id": strategy_version_id,
                 "execution_id": f"test-run-{run_id}-task-{task_id}" if run_id is not None else None,
                 "strategy_path": str(strategy_path) if strategy_path is not None else None,
+                "datadir": str(datadir) if datadir is not None else None,
+                "pair": "BTC/USDT:USDT" if run_id is not None else None,
+                "timeframe": "15m" if run_id is not None else None,
+                "market_data_files": market_data_files or None,
                 "checksums": (
                     {
                         "config": hashlib.sha256(config_path.read_bytes()).hexdigest(),
                         "result": hashlib.sha256(result_path.read_bytes()).hexdigest(),
                         "strategy": hashlib.sha256(strategy_path.read_bytes()).hexdigest(),
+                        "market_data": _market_data_files_digest(market_data_files),
                     }
                     if run_id is not None and config_path is not None and strategy_path is not None else None
                 ),
@@ -176,6 +189,17 @@ def test_api_ingests_success_manifest_and_persists_reconcilable_result(
         run_id, task_id = _create_task(setup_session, strategy_version_id)
         config_path = safe_artifact_dir / "backtest-config.json"
         strategy_path = safe_artifact_dir / "strategy.py"
+        datadir = safe_artifact_dir / "market"
+        datadir.mkdir()
+        (datadir / "BTC_USDT_USDT-15m.json").write_text(
+            json.dumps(
+                [
+                    {"date": "2024-01-01T00:00:00Z", "close": 100},
+                    {"date": "2024-01-31T23:45:00Z", "close": 110},
+                ]
+            ),
+            encoding="utf-8",
+        )
         config_path.write_text("{}", encoding="utf-8")
         strategy_path.write_text("class MvpRsiStrategy: pass\n", encoding="utf-8")
         task = BacktestRepository(setup_session).get_task(task_id)
@@ -198,6 +222,7 @@ def test_api_ingests_success_manifest_and_persists_reconcilable_result(
         strategy_version_id=strategy_version_id,
         strategy_path=strategy_path,
         config_path=config_path,
+        datadir=datadir,
     )
 
     def override_get_db():

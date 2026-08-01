@@ -167,3 +167,74 @@ def test_backtest_runner_writes_blocked_manifest_without_running_cli(tmp_path) -
     assert stored["status"] == "BLOCKED"
     assert stored["blocked_reason"] == manifest.blocked_reason
     assert calls == []
+
+
+def test_backtest_runner_scopes_manifest_to_requested_pair_and_timeframe(tmp_path) -> None:
+    calls = []
+
+    def fake_executor(args, cwd, timeout_seconds):
+        calls.append(args)
+        result_dir = Path(args[args.index("--backtest-directory") + 1])
+        result_dir.mkdir(parents=True, exist_ok=True)
+        zip_path = result_dir / "backtest-result-scoped.zip"
+        with zipfile.ZipFile(zip_path, "w") as archive:
+            archive.writestr("backtest-result-scoped.json", '{"strategy": {}}')
+        (result_dir / ".last_result.json").write_text(
+            json.dumps({"latest_backtest": zip_path.name}), encoding="utf-8"
+        )
+        return subprocess.CompletedProcess(args=list(args), returncode=0, stdout="", stderr="")
+
+    datadir = tmp_path / "data"
+    datadir.mkdir()
+    (datadir / "BTC_USDT_USDT-15m.json").write_text("btc-15m", encoding="utf-8")
+    (datadir / "ETH_USDT_USDT-15m.json").write_text("eth-15m", encoding="utf-8")
+    (datadir / "BTC_USDT_USDT-1h.json").write_text("btc-1h", encoding="utf-8")
+    result_path = tmp_path / "result.json"
+    manifest_path = tmp_path / "manifest.json"
+
+    manifest = FreqtradeBacktestRunner(
+        FreqtradeCliRunner(executor=fake_executor)
+    ).run_backtest_with_artifact_manifest(
+        tmp_path / "config.json",
+        "MvpRsiStrategy",
+        result_path=result_path,
+        manifest_path=manifest_path,
+        datadir=datadir,
+        pair="BTC/USDT:USDT",
+        timeframe="15m",
+    )
+
+    assert manifest.status == "SUCCESS"
+    assert manifest.pair == "BTC/USDT:USDT"
+    assert manifest.timeframe == "15m"
+    assert [item["path"] for item in (manifest.market_data_files or [])] == [
+        "BTC_USDT_USDT-15m.json"
+    ]
+    assert len(calls) == 1
+
+
+def test_backtest_runner_blocks_when_requested_pair_data_is_missing(tmp_path) -> None:
+    calls = []
+
+    def fake_executor(args, cwd, timeout_seconds):
+        calls.append(args)
+        return subprocess.CompletedProcess(args=list(args), returncode=0, stdout="", stderr="")
+
+    datadir = tmp_path / "data"
+    datadir.mkdir()
+    (datadir / "ETH_USDT_USDT-15m.json").write_text("eth", encoding="utf-8")
+    manifest = FreqtradeBacktestRunner(
+        FreqtradeCliRunner(executor=fake_executor)
+    ).run_backtest_with_artifact_manifest(
+        tmp_path / "config.json",
+        "MvpRsiStrategy",
+        result_path=tmp_path / "result.json",
+        manifest_path=tmp_path / "manifest.json",
+        datadir=datadir,
+        pair="BTC/USDT:USDT",
+        timeframe="15m",
+    )
+
+    assert manifest.status == "BLOCKED"
+    assert "no matching local market data files" in (manifest.blocked_reason or "")
+    assert calls == []

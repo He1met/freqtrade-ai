@@ -18,7 +18,10 @@ from typing import Literal, Optional
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.adapters.freqtrade.market_data_index import SUPPORTED_DATA_SUFFIXES
+from app.adapters.freqtrade.backtest_runner import (
+    _matching_market_data_files,
+    _market_data_files_digest,
+)
 from app.models import (
     BacktestResult,
     BacktestRun,
@@ -457,6 +460,16 @@ class StrategyValidationMatrixService:
         datadir = manifest.get("datadir")
         if not all(isinstance(value, str) and value for value in (manifest_path, result_path, config_path, datadir)):
             return "artifact paths are incomplete", {}
+        if manifest.get("pair") != task.pair or manifest.get("timeframe") != task.timeframe:
+            return "artifact manifest pair/timeframe does not match the persisted task", {}
+        market_data_files = manifest.get("market_data_files")
+        if not isinstance(market_data_files, list) or not market_data_files:
+            return "exact market-data file lineage is missing", {}
+        actual_market_files = _market_data_lineage(
+            Path(datadir), pair=task.pair, timeframe=task.timeframe
+        )
+        if market_data_files != actual_market_files:
+            return "market-data pair/timeframe file lineage drift detected", {}
         actual_manifest_checksum = _sha256_file_or_none(Path(manifest_path))
         if actual_manifest_checksum != manifest.get("manifest_checksum"):
             return "artifact manifest checksum drift detected", {}
@@ -484,6 +497,9 @@ class StrategyValidationMatrixService:
             "config_path": config_path,
             "strategy_path": strategy_path,
             "datadir": datadir,
+            "pair": task.pair,
+            "timeframe": task.timeframe,
+            "market_data_files": market_data_files,
             "checksums": checksums,
             "return_code": 0,
         }
@@ -503,7 +519,7 @@ class StrategyValidationMatrixService:
             "config": _sha256_file_or_none(Path(config_path)),
             "result": _sha256_file_or_none(Path(result_path)),
             "strategy": _sha256_file_or_none(Path(strategy_path)),
-            "market_data": _market_data_digest(Path(datadir)),
+            "market_data": _market_data_files_digest(market_data_files),
         }
         for name, digest in actual.items():
             if digest != checksums.get(name):
@@ -519,6 +535,9 @@ class StrategyValidationMatrixService:
             Path(datadir),
             timerange=window.timerange,
             market_data_digest=checksums["market_data"],
+            pair=task.pair,
+            timeframe=task.timeframe,
+            market_data_files=market_data_files,
         )
         if regime is None:
             return "market-regime classification evidence is unavailable", {}
@@ -651,23 +670,24 @@ def _valid_digest(value: object) -> bool:
     return isinstance(value, str) and SHA256_RE.fullmatch(value) is not None
 
 
-def _market_data_digest(datadir: Path) -> Optional[str]:
-    if not datadir.is_dir():
-        return None
-    digest = hashlib.sha256()
-    files = sorted(
-        path
-        for path in datadir.rglob("*")
-        if path.is_file()
-        and any(path.name.lower().endswith(suffix) for suffix in SUPPORTED_DATA_SUFFIXES)
+def _market_data_lineage(
+    datadir: Path,
+    *,
+    pair: str,
+    timeframe: str,
+) -> list[dict[str, str]]:
+    return _matching_market_data_files(datadir, pair, timeframe)
+
+
+def _market_data_digest(
+    datadir: Path,
+    *,
+    pair: str,
+    timeframe: str,
+) -> Optional[str]:
+    return _market_data_files_digest(
+        _market_data_lineage(datadir, pair=pair, timeframe=timeframe)
     )
-    if not files:
-        return None
-    for path in files:
-        digest.update(str(path.relative_to(datadir)).encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(hashlib.sha256(path.read_bytes()).digest())
-    return digest.hexdigest()
 
 
 def _read_json_object(path: Path) -> Optional[dict[str, object]]:
@@ -696,6 +716,9 @@ def _classify_market_regime(
     *,
     timerange: str,
     market_data_digest: str,
+    pair: str,
+    timeframe: str,
+    market_data_files: list[dict[str, str]],
 ) -> Optional[dict[str, object]]:
     """Derive the regime from persisted market files, never from a caller label."""
 
@@ -704,11 +727,12 @@ def _classify_market_regime(
         return None
     points: list[tuple[str, float]] = []
     source_paths: list[str] = []
-    for path in sorted(datadir.rglob("*")):
-        if not path.is_file() or not any(
-            path.name.lower().endswith(suffix) for suffix in SUPPORTED_DATA_SUFFIXES
-        ):
-            continue
+    if market_data_files != _market_data_lineage(
+        datadir, pair=pair, timeframe=timeframe
+    ):
+        return None
+    for item in market_data_files:
+        path = datadir / item["path"]
         loaded = _load_market_points(path)
         if loaded:
             source_paths.append(str(path.relative_to(datadir)))
@@ -738,6 +762,8 @@ def _classify_market_regime(
     return {
         "source": "persisted_market_data",
         "source_artifacts": source_paths,
+        "pair": pair,
+        "timeframe": timeframe,
         "algorithm": "window-close-return-v1",
         "parameters": parameters,
         "market_data_digest": market_data_digest,

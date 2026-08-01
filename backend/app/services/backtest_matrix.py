@@ -34,6 +34,8 @@ class BacktestMatrixRunner(Protocol):
         datadir: Optional[Path] = None,
         strategy_path: Optional[Path] = None,
         userdir: Optional[Path] = None,
+        pair: Optional[str] = None,
+        timeframe: Optional[str] = None,
     ) -> FreqtradeBacktestArtifactManifest:
         ...
 
@@ -156,6 +158,8 @@ class BacktestMatrixExecutionService:
                 timeout_seconds=timeout_seconds,
                 datadir=matching_data.path.parent,
                 strategy_path=Path(profile.strategy.path) if profile.strategy.path else None,
+                pair=profile.pair,
+                timeframe=profile.timeframe,
             )
             tasks.append(
                 BacktestMatrixTaskResult(
