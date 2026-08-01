@@ -132,3 +132,109 @@ def test_strategy_blueprint_rejects_invalid_minimal_roi_range() -> None:
         StrategyBlueprint(**payload)
 
     assert "minimal_roi values must not exceed 10.0" in str(exc_info.value)
+
+
+def test_strategy_blueprint_accepts_indicator_relation_and_temporal_rules() -> None:
+    payload = valid_blueprint_payload()
+    payload["indicators"].append(
+        {"name": "ema_slow", "kind": "ema", "period": 26}
+    )
+    payload["entry_rules"] = [
+        {
+            "indicator": "ema_fast",
+            "operator": "crosses_above",
+            "compare_indicator": "ema_slow",
+            "lookback": 2,
+        },
+        {"indicator": "ema_fast", "operator": "rising", "lookback": 3},
+    ]
+
+    blueprint = StrategyBlueprint(**payload)
+
+    assert blueprint.entry_rules[0].compare_indicator == "ema_slow"
+    assert blueprint.entry_rules[0].lookback == 2
+    assert blueprint.entry_rules[1].operator == "rising"
+
+
+def test_strategy_blueprint_accepts_explicit_regime_gates() -> None:
+    payload = valid_blueprint_payload()
+    payload["indicators"].append(
+        {"name": "ema_slow", "kind": "ema", "period": 26}
+    )
+    payload["entry_rules"] = [
+        {"indicator": "rsi", "operator": ">", "value": 50, "regime": "bull"}
+    ]
+    payload["regime_rules"] = [
+        {
+            "regime": "bull",
+            "rules": [
+                {
+                    "indicator": "ema_fast",
+                    "operator": ">",
+                    "compare_indicator": "ema_slow",
+                }
+            ],
+        },
+        {
+            "regime": "bear",
+            "rules": [
+                {
+                    "indicator": "ema_fast",
+                    "operator": "<",
+                    "compare_indicator": "ema_slow",
+                }
+            ],
+        },
+    ]
+
+    blueprint = StrategyBlueprint(**payload)
+
+    assert [item.regime for item in blueprint.regime_rules] == ["bull", "bear"]
+
+
+@pytest.mark.parametrize(
+    ("rule", "message"),
+    [
+        ({"indicator": "rsi", "operator": "crosses_above", "value": 50}, "crossing rules"),
+        ({"indicator": "rsi", "operator": "rising", "value": 50}, "trend rules"),
+        ({"indicator": "rsi", "operator": ">", "lookback": 2, "value": 50}, "lookback"),
+        ({"indicator": "rsi", "operator": ">", "value": "50"}, "float"),
+        (
+            {
+                "indicator": "rsi",
+                "operator": "rising",
+                "lookback": "2",
+            },
+            "integer",
+        ),
+    ],
+)
+def test_strategy_blueprint_rejects_unsafe_expression_shapes(rule, message) -> None:
+    payload = valid_blueprint_payload()
+    payload["entry_rules"] = [rule]
+
+    with pytest.raises(ValidationError, match=message):
+        StrategyBlueprint(**payload)
+
+
+def test_strategy_blueprint_rejects_undefined_regime_and_duplicate_regime() -> None:
+    payload = valid_blueprint_payload()
+    payload["entry_rules"] = [
+        {"indicator": "rsi", "operator": ">", "value": 50, "regime": "range"}
+    ]
+    with pytest.raises(ValidationError, match="rule regime is not defined"):
+        StrategyBlueprint(**payload)
+
+    payload["entry_rules"][0].pop("regime")
+    payload["regime_rules"] = [
+        {
+            "regime": "bull",
+            "rules": [{"indicator": "rsi", "operator": ">", "value": 50}],
+        },
+        {
+            "regime": "bull",
+            "rules": [{"indicator": "rsi", "operator": "<", "value": 50}],
+        },
+    ]
+    with pytest.raises(ValidationError, match="regime rules must be unique"):
+        StrategyBlueprint(**payload)

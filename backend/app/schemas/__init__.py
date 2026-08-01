@@ -143,6 +143,8 @@ from app.schemas.strategy import (
 )
 from app.schemas.strategy_blueprint import (
     IndicatorBlueprint,
+    MarketRegime,
+    RegimeRule,
     SignalRule,
     StrategyBlueprint,
 )
@@ -291,6 +293,8 @@ __all__ = [
     "LiveCandidateSafety",
     "LiveCandidateStrategy",
     "IndicatorBlueprint",
+    "MarketRegime",
+    "RegimeRule",
     "SignalRule",
     "StrategyCreate",
     "StrategyBlueprint",

@@ -5,9 +5,14 @@ import json
 import re
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, localcontext
-from typing import Callable, Optional
+from typing import Optional
 
-from app.schemas.strategy_blueprint import SignalRule, StrategyBlueprint
+from app.schemas.strategy_blueprint import (
+    MarketRegime,
+    RegimeRule,
+    SignalRule,
+    StrategyBlueprint,
+)
 from app.schemas.strategy_signal import (
     BlueprintSignalEvaluation,
     BlueprintSignalEvaluationRequest,
@@ -16,7 +21,7 @@ from app.schemas.strategy_signal import (
 from app.services.strategy_renderer import StrategyCodeRenderer
 
 
-EVALUATOR_VERSION = "blueprint-signal-v1"
+EVALUATOR_VERSION = "blueprint-signal-v2"
 INDICATOR_ENGINE_VERSION = "decimal-talib-golden-v1"
 STARTUP_CANDLE_COUNT = 50
 RULE_BOUNDARY_RELATIVE_TOLERANCE = Decimal("1e-12")
@@ -82,15 +87,25 @@ class BlueprintSignalEvaluator:
                 )
             latest_values[name] = value
 
+        active_regime = _evaluate_regime(
+            blueprint.regime_rules,
+            series_by_name,
+            index=len(candles) - 1,
+        )
+
         enter_long, long_evidence = _evaluate_rules(
             "long",
             blueprint.entry_rules,
-            latest_values,
+            series_by_name,
+            index=len(candles) - 1,
+            active_regime=active_regime,
         )
         enter_short, short_evidence = _evaluate_rules(
             "short",
             blueprint.short_entry_rules if blueprint.can_short else [],
-            latest_values,
+            series_by_name,
+            index=len(candles) - 1,
+            active_regime=active_regime,
         )
         if enter_long and enter_short:
             raise BlueprintSignalEvaluationBlocked(
@@ -119,6 +134,7 @@ class BlueprintSignalEvaluator:
             "decision": {
                 "enter_long": enter_long,
                 "enter_short": enter_short,
+                "market_regime": active_regime,
                 "indicator_values": indicator_snapshot,
                 "rule_evidence": rule_evidence,
                 "candle_open_at": _datetime_text(latest.open_time),
@@ -150,6 +166,7 @@ class BlueprintSignalEvaluator:
             evaluated_at=evaluated_at,
             enter_long=enter_long,
             enter_short=enter_short,
+            market_regime=active_regime,
             indicator_values=indicator_snapshot,
             rule_evidence=rule_evidence,
             candle_count=len(candles),
@@ -161,9 +178,19 @@ class BlueprintSignalEvaluator:
         # RSI consumes one more close than its period because it evaluates price
         # deltas. Requiring the same margin for every indicator keeps the input
         # contract simple and exceeds the generated strategy's startup floor.
+        all_rules = [
+            *blueprint.entry_rules,
+            *blueprint.exit_rules,
+            *blueprint.short_entry_rules,
+            *blueprint.short_exit_rules,
+            *[rule for item in blueprint.regime_rules for rule in item.rules],
+        ]
+        max_lookback = max((rule.lookback for rule in all_rules), default=1)
         return max(
             STARTUP_CANDLE_COUNT,
-            max(indicator.period for indicator in blueprint.indicators) + 1,
+            max(indicator.period for indicator in blueprint.indicators)
+            + max_lookback
+            + 1,
         )
 
     @staticmethod
@@ -307,24 +334,118 @@ def _rsi_value(average_gain: Decimal, average_loss: Decimal) -> Decimal:
     )
 
 
+def _evaluate_regime(
+    regime_rules: list[RegimeRule],
+    series_by_name: dict[str, IndicatorSeries],
+    *,
+    index: int,
+) -> Optional[MarketRegime]:
+    if not regime_rules:
+        return None
+    matches: list[MarketRegime] = []
+    for regime_rule in regime_rules:
+        matched, _ = _evaluate_rules(
+            f"regime:{regime_rule.regime}",
+            regime_rule.rules,
+            series_by_name,
+            index=index,
+            active_regime=None,
+        )
+        if matched:
+            matches.append(regime_rule.regime)
+    if len(matches) != 1:
+        if not matches:
+            raise BlueprintSignalEvaluationBlocked(
+                "latest closed candle does not match exactly one declared market regime"
+            )
+        raise BlueprintSignalEvaluationBlocked(
+            "latest closed candle matches multiple declared market regimes"
+        )
+    return matches[0]
+
+
 def _evaluate_rules(
     side: str,
     rules: list[SignalRule],
-    indicator_values: dict[str, Decimal],
+    series_by_name: dict[str, IndicatorSeries],
+    *,
+    index: int,
+    active_regime: Optional[MarketRegime],
 ) -> tuple[bool, list[dict[str, object]]]:
-    operators: dict[str, Callable[[Decimal, Decimal], bool]] = {
-        "<": lambda left, right: left < right,
-        "<=": lambda left, right: left <= right,
-        ">": lambda left, right: left > right,
-        ">=": lambda left, right: left >= right,
-        "==": lambda left, right: left == right,
-    }
     if not rules:
         return False, []
     decisions = []
     evidence = []
     for rule in rules:
-        value = indicator_values[rule.indicator]
+        if rule.regime is not None and rule.regime != active_regime:
+            decisions.append(False)
+            evidence.append(
+                {
+                    "side": side,
+                    "indicator": rule.indicator,
+                    "operator": rule.operator,
+                    "regime": rule.regime,
+                    "active_regime": active_regime,
+                    "matched": False,
+                }
+            )
+            continue
+        matched, rule_evidence = _evaluate_rule(
+            rule,
+            series_by_name,
+            index=index,
+        )
+        if rule.regime is not None:
+            rule_evidence.update(
+                {
+                    "regime": rule.regime,
+                    "active_regime": active_regime,
+                }
+            )
+        decisions.append(matched)
+        evidence.append(
+            {
+                "side": side,
+                **rule_evidence,
+                "matched": matched,
+            }
+        )
+    return all(decisions), evidence
+
+
+def _evaluate_rule(
+    rule: SignalRule,
+    series_by_name: dict[str, IndicatorSeries],
+    *,
+    index: int,
+) -> tuple[bool, dict[str, object]]:
+    value = _series_value(series_by_name, rule.indicator, index)
+    evidence: dict[str, object] = {
+        "indicator": rule.indicator,
+        "operator": rule.operator,
+        "observed_value": _decimal_text(value),
+    }
+    if rule.operator in {"<", "<=", ">", ">=", "=="}:
+        if rule.compare_indicator is not None:
+            compare_value = _series_value(
+                series_by_name,
+                rule.compare_indicator,
+                index,
+            )
+            evidence.update(
+                {
+                    "compare_indicator": rule.compare_indicator,
+                    "observed_compare_value": _decimal_text(compare_value),
+                }
+            )
+            matched = {
+                "<": value < compare_value,
+                "<=": value <= compare_value,
+                ">": value > compare_value,
+                ">=": value >= compare_value,
+                "==": value == compare_value,
+            }[rule.operator]
+            return matched, evidence
         threshold = Decimal(str(rule.value))
         tolerance = max(
             Decimal("1e-12"),
@@ -334,19 +455,90 @@ def _evaluate_rules(
             raise BlueprintSignalEvaluationBlocked(
                 f"indicator {rule.indicator} is inside the TA-Lib comparison boundary"
             )
-        matched = operators[rule.operator](value, threshold)
-        decisions.append(matched)
-        evidence.append(
+        matched = {
+            "<": value < threshold,
+            "<=": value <= threshold,
+            ">": value > threshold,
+            ">=": value >= threshold,
+            "==": value == threshold,
+        }[rule.operator]
+        evidence["threshold"] = _decimal_text(threshold)
+        return matched, evidence
+
+    previous = _series_value(
+        series_by_name,
+        rule.indicator,
+        index - rule.lookback,
+    )
+    if rule.operator in {"crosses_above", "crosses_below"}:
+        compare_value = _series_value(
+            series_by_name,
+            rule.compare_indicator,
+            index,
+        )
+        previous_compare_value = _series_value(
+            series_by_name,
+            rule.compare_indicator,
+            index - rule.lookback,
+        )
+        evidence.update(
             {
-                "side": side,
-                "indicator": rule.indicator,
-                "operator": rule.operator,
-                "threshold": _decimal_text(threshold),
-                "observed_value": _decimal_text(value),
-                "matched": matched,
+                "compare_indicator": rule.compare_indicator,
+                "observed_compare_value": _decimal_text(compare_value),
+                "previous_value": _decimal_text(previous),
+                "previous_compare_value": _decimal_text(previous_compare_value),
+                "lookback": rule.lookback,
             }
         )
-    return all(decisions), evidence
+        if rule.operator == "crosses_above":
+            return (
+                value > compare_value and previous <= previous_compare_value,
+                evidence,
+            )
+        return (
+            value < compare_value and previous >= previous_compare_value,
+            evidence,
+        )
+    evidence.update(
+        {
+            "previous_value": _decimal_text(previous),
+            "lookback": rule.lookback,
+        }
+    )
+    if rule.operator == "rising":
+        return value > previous, evidence
+    if rule.operator == "falling":
+        return value < previous, evidence
+    raise BlueprintSignalEvaluationBlocked(
+        f"unsupported signal operator: {rule.operator}"
+    )
+
+
+def _series_value(
+    series_by_name: dict[str, IndicatorSeries],
+    name: Optional[str],
+    index: int,
+) -> Decimal:
+    if name is None:
+        raise BlueprintSignalEvaluationBlocked(
+            "relation rule is missing compare_indicator"
+        )
+    if index < 0:
+        raise BlueprintSignalEvaluationBlocked(
+            "lookback exceeds available closed candle history"
+        )
+    series = series_by_name.get(name)
+    if series is None or index >= len(series) or series[index] is None:
+        raise BlueprintSignalEvaluationBlocked(
+            f"indicator {name} is unavailable at the required closed candle"
+        )
+    value = series[index]
+    assert value is not None
+    if not value.is_finite():
+        raise BlueprintSignalEvaluationBlocked(
+            f"indicator {name} is non-finite at the required closed candle"
+        )
+    return value
 
 
 def _canonical_candle(candle: ClosedCandle) -> dict[str, object]:
