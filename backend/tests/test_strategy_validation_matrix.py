@@ -126,29 +126,40 @@ def _specs(market_digest: str) -> list[ValidationWindowSpec]:
     ]
 
 
-def _write_market_data(datadir: Path) -> None:
+def _write_market_data(datadir: Path, *, data_format: str = "json") -> None:
     datadir.mkdir()
+    rows = [
+        {"date": "2024-01-01T00:00:00Z", "close": 100},
+        {"date": "2024-01-31T23:45:00Z", "close": 102},
+        {"date": "2024-02-01T00:00:00Z", "close": 100},
+        {"date": "2024-02-29T23:45:00Z", "close": 110},
+        {"date": "2024-03-01T00:00:00Z", "close": 110},
+        {"date": "2024-03-31T23:45:00Z", "close": 90},
+        {"date": "2024-04-01T00:00:00Z", "close": 100},
+        {"date": "2024-04-30T23:45:00Z", "close": 102},
+    ]
+    if data_format == "feather":
+        import pandas as pd
+
+        pd.DataFrame(rows).to_feather(datadir / "BTC_USDT_USDT-15m.feather")
+        return
+    if data_format != "json":
+        raise ValueError("unsupported market-data test format")
     (datadir / "BTC_USDT_USDT-15m.json").write_text(
-        json.dumps(
-            [
-                {"date": "2024-01-01T00:00:00Z", "close": 100},
-                {"date": "2024-01-31T23:45:00Z", "close": 102},
-                {"date": "2024-02-01T00:00:00Z", "close": 100},
-                {"date": "2024-02-29T23:45:00Z", "close": 110},
-                {"date": "2024-03-01T00:00:00Z", "close": 110},
-                {"date": "2024-03-31T23:45:00Z", "close": 90},
-                {"date": "2024-04-01T00:00:00Z", "close": 100},
-                {"date": "2024-04-30T23:45:00Z", "close": 102},
-            ]
-        ),
-        encoding="utf-8",
+        json.dumps(rows), encoding="utf-8"
     )
 
 
-def _attach_real_results(db: Session, plan, tmp_path: Path) -> None:
+def _attach_real_results(
+    db: Session,
+    plan,
+    tmp_path: Path,
+    *,
+    market_data_format: str = "json",
+) -> None:
     tmp_path.mkdir(parents=True, exist_ok=True)
     datadir = tmp_path / "market"
-    _write_market_data(datadir)
+    _write_market_data(datadir, data_format=market_data_format)
     market_digest = _market_data_digest(datadir)
     assert market_digest is not None
     backtests = BacktestRepository(db)
@@ -303,6 +314,37 @@ def test_independent_matrix_persists_four_runs_and_is_required_for_promotion(
     with pytest.raises(StrategyPromotionBlocked, match="stale or invalid"):
         assess_strategy_promotion(primary, score, strategy_version=version)
     assert service.evaluate(plan.id).status == "BLOCKED"
+
+
+def test_independent_matrix_reads_real_feather_and_persists_regime_evidence(
+    db: Session, tmp_path: Path
+) -> None:
+    version, primary = _seed_primary(db, tmp_path)
+    datadir = tmp_path / "declared-market"
+    _write_market_data(datadir, data_format="feather")
+    market_digest = _market_data_digest(datadir)
+    assert market_digest is not None
+    service = StrategyValidationMatrixService(db)
+    plan = service.declare(
+        promotion_backtest_result_id=primary.id,
+        strategy_version_id=version.id,
+        windows=_specs(market_digest),
+    )
+    _attach_real_results(
+        db,
+        plan,
+        tmp_path / "feather-validation",
+        market_data_format="feather",
+    )
+
+    plan = service.evaluate(plan.id)
+
+    assert plan.status == "PASSED"
+    for window in plan.windows:
+        evidence = window.market_state_evidence
+        assert evidence["source"] == "persisted_market_data"
+        assert evidence["source_artifacts"] == ["BTC_USDT_USDT-15m.feather"]
+        assert evidence["observation_count"] >= 2
 
 
 def test_plan_rejects_missing_market_state_and_overlapping_windows(
