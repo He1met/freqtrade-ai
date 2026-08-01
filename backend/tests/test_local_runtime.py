@@ -40,6 +40,39 @@ def load_runtime_module():
     return module
 
 
+def test_wait_for_url_uses_a_bounded_slow_probe_timeout(monkeypatch):
+    runtime = load_runtime_module()
+    calls = []
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def fake_urlopen(url, *, timeout):
+        calls.append((url, timeout))
+        return Response()
+
+    monkeypatch.setattr(runtime, "urlopen", fake_urlopen)
+
+    runtime.wait_for_url(
+        "http://127.0.0.1:8000/readyz",
+        "backend readiness",
+        timeout_seconds=45,
+    )
+
+    assert calls == [
+        (
+            "http://127.0.0.1:8000/readyz",
+            runtime.READINESS_PROBE_TIMEOUT_SECONDS,
+        )
+    ]
+
+
 def test_supervisor_capability_short_process_avoids_heavy_app_imports_and_gc():
     harness = """
 import importlib.util
