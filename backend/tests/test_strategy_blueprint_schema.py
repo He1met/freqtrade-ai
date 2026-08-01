@@ -164,6 +164,14 @@ def test_strategy_blueprint_accepts_explicit_regime_gates() -> None:
     payload["entry_rules"] = [
         {"indicator": "rsi", "operator": ">", "value": 50, "regime": "bull"}
     ]
+    payload["exit_rules"] = [
+        {
+            "indicator": "ema_fast",
+            "operator": ">",
+            "value": 1.0,
+            "regime": "bull",
+        }
+    ]
     payload["regime_rules"] = [
         {
             "regime": "bull",
@@ -237,4 +245,23 @@ def test_strategy_blueprint_rejects_undefined_regime_and_duplicate_regime() -> N
         },
     ]
     with pytest.raises(ValidationError, match="regime rules must be unique"):
+        StrategyBlueprint(**payload)
+
+
+def test_strategy_blueprint_rejects_mixed_regime_gated_and_global_rules() -> None:
+    payload = valid_blueprint_payload()
+    payload["entry_rules"] = [
+        {"indicator": "rsi", "operator": ">", "value": 50, "regime": "bull"}
+    ]
+    payload["regime_rules"] = [
+        {
+            "regime": "bull",
+            "rules": [{"indicator": "rsi", "operator": ">", "value": 50}],
+        }
+    ]
+
+    with pytest.raises(
+        ValidationError,
+        match="require every signal rule to declare a regime",
+    ):
         StrategyBlueprint(**payload)

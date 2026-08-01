@@ -193,6 +193,17 @@ class StrategyBlueprint(BaseModel):
                 raise ValueError(f"rsi rule value must be between 0 and 100: {rule.indicator}")
             if indicator.kind in {"ema", "sma"} and rule.value <= 0:
                 raise ValueError(f"moving average rule value must be positive: {rule.indicator}")
+        signal_rules = [
+            rule
+            for rules in rule_groups.values()
+            for rule in rules
+        ]
+        if self.regime_rules and (
+            not signal_rules or any(rule.regime is None for rule in signal_rules)
+        ):
+            raise ValueError(
+                "regime_rules require every signal rule to declare a regime"
+            )
         if self.can_short and not self.short_entry_rules:
             raise ValueError(
                 "can_short strategies require short_entry_rules"

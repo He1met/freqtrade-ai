@@ -490,6 +490,7 @@ def test_regime_rules_gate_signals_and_require_one_match() -> None:
                 "indicator": "ema_fast",
                 "operator": ">",
                 "compare_indicator": "ema_slow",
+                "regime": "bull",
             }
         ],
         regime_rules=[

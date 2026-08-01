@@ -468,6 +468,9 @@ def test_real_llm_provider_normalizes_regime_rule_object_and_indicator_relation(
     convertible["entry_rules"] = [
         {"indicator": "rsi", "operator": ">", "value": 50, "regime": "bull"}
     ]
+    convertible["exit_rules"] = [
+        {"indicator": "rsi", "operator": "<", "value": 50, "regime": "bull"}
+    ]
     convertible["regime_rules"] = {
         "bull": {
             "indicator": "ema_fast",
