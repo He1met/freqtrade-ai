@@ -41,8 +41,12 @@ class FakeMatrixRunner:
         datadir=None,
         strategy_path=None,
         userdir=None,
+        pair=None,
+        timeframe=None,
     ):
-        self.calls.append((config_path, strategy_name, result_path, manifest_path, datadir))
+        self.calls.append(
+            (config_path, strategy_name, result_path, manifest_path, datadir, pair, timeframe)
+        )
         status = self.statuses.get(str(result_path), "SUCCESS")
         if status == "SUCCESS":
             result_path.parent.mkdir(parents=True, exist_ok=True)
@@ -99,6 +103,7 @@ def test_executes_fixture_matrix_and_blocks_missing_data(tmp_path) -> None:
     assert summary.blocked == 1
     assert len(runner.calls) == 1
     assert runner.calls[0][4] == okx_dir
+    assert runner.calls[0][5:] == ("BTC/USDT:USDT", "15m")
     blocked_task = summary.tasks[1]
     assert blocked_task.status == "BLOCKED"
     assert "no available local market data for okx ETH/USDT:USDT 15m" in (

@@ -75,6 +75,8 @@ class FakeBacktestRunner:
         datadir: Optional[Path] = None,
         strategy_path: Optional[Path] = None,
         userdir: Optional[Path] = None,
+        pair: Optional[str] = None,
+        timeframe: Optional[str] = None,
     ) -> FreqtradeBacktestArtifactManifest:
         self.calls.append(
             {
@@ -83,6 +85,8 @@ class FakeBacktestRunner:
                 "result_path": str(result_path),
                 "manifest_path": str(manifest_path),
                 "datadir": str(datadir) if datadir is not None else None,
+                "pair": pair,
+                "timeframe": timeframe,
                 "timeout_seconds": timeout_seconds,
             }
         )
@@ -133,6 +137,8 @@ class FakeBacktestRunner:
             datadir=datadir,
             strategy_path=strategy_path,
             userdir=userdir,
+            pair=pair,
+            timeframe=timeframe,
         )
         manifest.write()
         return manifest
