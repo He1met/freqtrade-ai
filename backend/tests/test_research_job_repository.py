@@ -5,8 +5,6 @@ from pathlib import Path
 from threading import Barrier, Lock, Thread
 
 import pytest
-from sqlalchemy.orm import Session
-
 from app.db.session import create_database_engine, create_session_factory
 from app.models import Base
 from app.repositories import ResearchJobRepository
@@ -15,7 +13,7 @@ from app.services.research_job_queue import (
     ResearchJobConflict,
     ResearchJobQueueService,
 )
-
+from sqlalchemy.orm import Session
 
 FIXED_NOW = datetime(2026, 7, 22, 12, 0, tzinfo=timezone.utc)
 
@@ -343,6 +341,161 @@ def test_heartbeat_expiry_and_lease_token_fencing(session_factory) -> None:
             provider_completed=False,
             now=expiry_time,
         ) is None
+
+
+def test_stale_recovery_reuses_attempt_only_before_provider_call(session_factory) -> None:
+    with session_factory() as db:
+        repository = ResearchJobRepository(db)
+        job_id = enqueue(db, "safe-generation-recovery").id
+        claimed = repository.claim_next(
+            owner="crashed-before-provider",
+            lease_seconds=10,
+            now=FIXED_NOW,
+        )
+        assert claimed is not None
+        assert repository.expire_stale(
+            FIXED_NOW + timedelta(seconds=10)
+        ) is not None
+        recovered = repository.prepare_stale_recovery(
+            job_id,
+            recovery_stage="GENERATION_RETRY",
+        )
+        assert recovered is not None
+        assert recovered.status == "PENDING"
+        assert recovered.stage == "GENERATION_RETRY"
+
+        resumed = repository.claim_next(
+            owner="recovery-worker",
+            lease_seconds=30,
+            now=FIXED_NOW + timedelta(seconds=11),
+        )
+        assert resumed is not None
+        assert resumed.id == job_id
+        assert resumed.stage == "GENERATION_RETRY"
+        assert resumed.attempt_count == 1
+
+
+def test_expired_lease_cannot_complete_checkpoint_or_start_provider(
+    session_factory,
+) -> None:
+    with session_factory() as db:
+        repository = ResearchJobRepository(db)
+        job_id = enqueue(db, "expired-lease-cas").id
+        claimed = repository.claim_next(
+            owner="expired-worker",
+            lease_seconds=10,
+            now=FIXED_NOW,
+        )
+        assert claimed is not None and claimed.lease_token
+        expired_at = FIXED_NOW + timedelta(seconds=10)
+
+        assert repository.mark_provider_attempt(
+            job_id,
+            claimed.lease_token,
+            now=expired_at,
+        ) is False
+        assert repository.checkpoint_research_result(
+            job_id,
+            claimed.lease_token,
+            links={},
+            evidence_snapshot={
+                "status": "RUNNING",
+                "acceptance_ready": False,
+            },
+            now=expired_at,
+        ) is None
+        assert repository.complete(
+            job_id,
+            claimed.lease_token,
+            status="FAILED",
+            stage="FAILED",
+            links={},
+            evidence_snapshot={
+                "status": "FAILED",
+                "acceptance_ready": False,
+            },
+            error_message="expired lease must not commit",
+            provider_completed=False,
+            now=expired_at,
+        ) is None
+        still_running = repository.get(job_id)
+        assert still_running is not None
+        assert still_running.status == "RUNNING"
+        assert still_running.lease_token == claimed.lease_token
+
+
+def test_persisted_result_checkpoint_is_single_transition(session_factory) -> None:
+    with session_factory() as db:
+        repository = ResearchJobRepository(db)
+        job_id = enqueue(db, "single-result-checkpoint").id
+        claimed = repository.claim_next(
+            owner="checkpoint-worker",
+            lease_seconds=30,
+            now=FIXED_NOW,
+        )
+        assert claimed is not None and claimed.lease_token
+        assert repository.mark_provider_attempt(
+            job_id,
+            claimed.lease_token,
+            now=FIXED_NOW,
+        )
+        first = repository.checkpoint_research_result(
+            job_id,
+            claimed.lease_token,
+            links={},
+            evidence_snapshot={
+                "status": "RUNNING",
+                "acceptance_ready": False,
+            },
+            now=FIXED_NOW + timedelta(seconds=1),
+        )
+        assert first is not None
+        assert first.stage == "PERSISTED_RESULT"
+        assert repository.checkpoint_research_result(
+            job_id,
+            claimed.lease_token,
+            links={},
+            evidence_snapshot={
+                "status": "RUNNING",
+                "acceptance_ready": False,
+            },
+            now=FIXED_NOW + timedelta(seconds=2),
+        ) is None
+
+
+def test_unknown_provider_outcome_cannot_be_requeued_by_recovery_api(
+    session_factory,
+) -> None:
+    with session_factory() as db:
+        repository = ResearchJobRepository(db)
+        job_id = enqueue(db, "unknown-provider-recovery").id
+        claimed = repository.claim_next(
+            owner="crashed-during-provider",
+            lease_seconds=10,
+            now=FIXED_NOW,
+        )
+        assert claimed is not None and claimed.lease_token
+        assert repository.mark_provider_attempt(
+            job_id,
+            claimed.lease_token,
+            now=FIXED_NOW,
+        )
+        assert repository.expire_stale(
+            FIXED_NOW + timedelta(seconds=10)
+        ) is not None
+
+        assert repository.prepare_stale_recovery(
+            job_id,
+            recovery_stage="GENERATION_RETRY",
+        ) is None
+        assert repository.prepare_stale_recovery(
+            job_id,
+            recovery_stage="PERSISTED_RESULT_RECOVERY",
+        ) is None
+        stale = repository.get(job_id)
+        assert stale is not None
+        assert stale.status == "STALE"
+        assert stale.stage == "LEASE_EXPIRED"
 
 
 def test_pending_cancel_is_terminal_without_a_lease(session_factory) -> None:

@@ -7,16 +7,16 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.backtest import BacktestResult, BacktestRun, BacktestTask
-from app.models.research_job import ResearchJob, ResearchWorkerControl
 from app.models.execution_lineage import (
     LOCAL_DRY_RUN_SCOPE_ID,
     ResearchJobAttempt,
 )
+from app.models.full_chain import FullChainRun, FullChainStageRun
+from app.models.research_job import ResearchJob, ResearchWorkerControl
 from app.models.strategy import Strategy, StrategyVersion
 from app.models.strategy_generation_run import StrategyGenerationRun
 from app.models.strategy_score import StrategyScore
 from app.repositories.execution_lineage import ensure_execution_scope_catalog
-
 
 TERMINAL_JOB_STATUSES = {
     "SUCCESS",
@@ -24,6 +24,12 @@ TERMINAL_JOB_STATUSES = {
     "BLOCKED",
     "CANCELLED",
     "STALE",
+}
+RECOVERY_JOB_STAGES = {
+    "CANDIDATE_APPROVED",
+    "GENERATION_RETRY",
+    "PERSISTED_RESULT_RECOVERY",
+    "SIGNAL_RECOVERY",
 }
 
 
@@ -197,7 +203,7 @@ class ResearchJobRepository:
                     or_(
                         ResearchJob.attempt_count < ResearchJob.max_attempts,
                         and_(
-                            ResearchJob.stage == "CANDIDATE_APPROVED",
+                            ResearchJob.stage.in_(RECOVERY_JOB_STAGES),
                             ResearchJob.attempt_count >= 1,
                         ),
                     ),
@@ -220,16 +226,24 @@ class ResearchJobRepository:
                 )
                 return None
 
-            resuming_approval = (
-                job.stage == "CANDIDATE_APPROVED" and job.attempt_count >= 1
+            recovery_stage = job.stage
+            resuming_existing_attempt = (
+                recovery_stage in RECOVERY_JOB_STAGES
+                and job.attempt_count >= 1
             )
             job.status = "RUNNING"
-            job.stage = "SIGNAL" if resuming_approval else "GENERATION"
+            job.stage = (
+                "SIGNAL"
+                if recovery_stage in {"CANDIDATE_APPROVED", "SIGNAL_RECOVERY"}
+                else recovery_stage
+                if resuming_existing_attempt
+                else "GENERATION"
+            )
             job.lease_owner = owner
             job.lease_token = lease_token
             job.heartbeat_at = current_time
             job.lease_expires_at = current_time + timedelta(seconds=lease_seconds)
-            if resuming_approval:
+            if resuming_existing_attempt:
                 attempt = self.db.scalars(
                     select(ResearchJobAttempt)
                     .where(
@@ -237,13 +251,15 @@ class ResearchJobRepository:
                         ResearchJobAttempt.execution_scope_id
                         == self.execution_scope_id,
                         ResearchJobAttempt.attempt_number == job.attempt_count,
-                        ResearchJobAttempt.status == "AWAITING_APPROVAL",
+                        ResearchJobAttempt.status.in_(
+                            {"AWAITING_APPROVAL", "STALE"}
+                        ),
                     )
                     .limit(1)
                 ).first()
                 if attempt is None:
                     raise ResearchJobLinkageBlocked(
-                        "candidate-approved job has no matching waiting attempt"
+                        "recoverable job has no matching prior attempt"
                     )
                 attempt.status = "RUNNING"
                 attempt.completed_at = None
@@ -271,6 +287,143 @@ class ResearchJobRepository:
 
         self.db.refresh(job)
         return job
+
+    def checkpoint_research_result(
+        self,
+        job_id: int,
+        lease_token: str,
+        *,
+        links: dict[str, Optional[int]],
+        evidence_snapshot: dict,
+        now: Optional[datetime] = None,
+    ) -> Optional[ResearchJob]:
+        """Persist Provider/backtest output before full-chain advancement."""
+
+        self._require_executable_scope()
+        current_time = now or datetime.now(timezone.utc)
+        job = self.get(job_id)
+        if (
+            job is None
+            or job.status != "RUNNING"
+            or job.lease_token != lease_token
+            or job.stage not in {"GENERATION", "GENERATION_RETRY", "PROVIDER_CALL"}
+            or job.lease_expires_at is None
+            or _as_utc(job.lease_expires_at)
+            <= _as_utc(current_time)
+        ):
+            return None
+        validated_links = self._validate_completion_links(job, links)
+        result = self.db.execute(
+            update(ResearchJob)
+            .where(
+                ResearchJob.id == job_id,
+                ResearchJob.execution_scope_id == self.execution_scope_id,
+                ResearchJob.status == "RUNNING",
+                ResearchJob.lease_token == lease_token,
+                ResearchJob.stage.in_(
+                    {"GENERATION", "GENERATION_RETRY", "PROVIDER_CALL"}
+                ),
+                ResearchJob.lease_expires_at > current_time,
+            )
+            .values(
+                **validated_links,
+                provider_completed_at=current_time,
+                stage="PERSISTED_RESULT",
+                evidence_snapshot=evidence_snapshot,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount != 1:
+            self.db.rollback()
+            return None
+        self.db.commit()
+        return self.get(job_id)
+
+    def prepare_stale_recovery(
+        self,
+        job_id: int,
+        *,
+        recovery_stage: str,
+        commit: bool = True,
+    ) -> Optional[ResearchJob]:
+        """Requeue one stale attempt only under an explicit safe recovery mode."""
+
+        self._require_executable_scope()
+        if recovery_stage not in {
+            "GENERATION_RETRY",
+            "PERSISTED_RESULT_RECOVERY",
+            "SIGNAL_RECOVERY",
+        }:
+            raise ValueError("invalid research recovery stage")
+        job = self.get(job_id)
+        if job is None:
+            return None
+        recovery_guards = (
+            (
+                ResearchJob.provider_attempted_at.is_(None),
+                ResearchJob.provider_completed_at.is_(None),
+                ResearchJob.strategy_generation_run_id.is_(None),
+                ResearchJob.strategy_id.is_(None),
+                ResearchJob.strategy_version_id.is_(None),
+                ResearchJob.backtest_run_id.is_(None),
+                ResearchJob.backtest_task_id.is_(None),
+                ResearchJob.backtest_result_id.is_(None),
+                ResearchJob.strategy_score_id.is_(None),
+            )
+            if recovery_stage == "GENERATION_RETRY"
+            else (
+                ResearchJob.provider_attempted_at.is_not(None),
+                ResearchJob.provider_completed_at.is_not(None),
+                ResearchJob.strategy_generation_run_id.is_not(None),
+                ResearchJob.strategy_id.is_not(None),
+                ResearchJob.strategy_version_id.is_not(None),
+                ResearchJob.backtest_run_id.is_not(None),
+                ResearchJob.backtest_task_id.is_not(None),
+                ResearchJob.backtest_result_id.is_not(None),
+                ResearchJob.strategy_score_id.is_not(None),
+            )
+            if recovery_stage == "PERSISTED_RESULT_RECOVERY"
+            else (
+                ResearchJob.strategy_generation_run_id.is_not(None),
+                ResearchJob.strategy_id.is_not(None),
+                ResearchJob.strategy_version_id.is_not(None),
+                ResearchJob.backtest_run_id.is_not(None),
+                ResearchJob.backtest_task_id.is_not(None),
+                ResearchJob.backtest_result_id.is_not(None),
+                ResearchJob.strategy_score_id.is_not(None),
+            )
+        )
+        result = self.db.execute(
+            update(ResearchJob)
+            .where(
+                ResearchJob.id == job_id,
+                ResearchJob.execution_scope_id == self.execution_scope_id,
+                ResearchJob.status == "STALE",
+                ResearchJob.stage == "LEASE_EXPIRED",
+                ResearchJob.lease_token.is_(None),
+                *recovery_guards,
+            )
+            .values(
+                status="PENDING",
+                stage=recovery_stage,
+                completed_at=None,
+                error_message=None,
+                evidence_snapshot={
+                    **job.evidence_snapshot,
+                    "status": "PENDING",
+                    "acceptance_ready": False,
+                    "recovery_stage": recovery_stage,
+                },
+            )
+        )
+        if result.rowcount != 1:
+            self.db.rollback()
+            return None
+        if commit:
+            self.db.commit()
+        else:
+            self.db.flush()
+        return self.get(job_id)
 
     def heartbeat(
         self,
@@ -318,8 +471,10 @@ class ResearchJobRepository:
                 ResearchJob.lease_token == lease_token,
                 ResearchJob.provider_attempted_at.is_(None),
                 ResearchJob.cancel_requested.is_(False),
+                ResearchJob.lease_expires_at > current_time,
             )
             .values(provider_attempted_at=current_time, stage="PROVIDER_CALL")
+            .execution_options(synchronize_session=False)
         )
         self.db.commit()
         return result.rowcount == 1
@@ -336,19 +491,22 @@ class ResearchJobRepository:
         error_message: Optional[str],
         provider_completed: bool,
         now: Optional[datetime] = None,
+        commit: bool = True,
     ) -> Optional[ResearchJob]:
         self._require_executable_scope()
         if status not in TERMINAL_JOB_STATUSES:
             raise ValueError(f"invalid terminal job status: {status}")
+        current_time = now or datetime.now(timezone.utc)
         job = self.get(job_id)
         if (
             job is None
             or job.status != "RUNNING"
             or job.lease_token != lease_token
+            or job.lease_expires_at is None
+            or _as_utc(job.lease_expires_at) <= _as_utc(current_time)
         ):
             return None
         validated_links = self._validate_completion_links(job, links)
-        current_time = now or datetime.now(timezone.utc)
         values = {
             "status": status,
             "stage": stage,
@@ -370,8 +528,10 @@ class ResearchJobRepository:
                 ResearchJob.execution_scope_id == self.execution_scope_id,
                 ResearchJob.status == "RUNNING",
                 ResearchJob.lease_token == lease_token,
+                ResearchJob.lease_expires_at > current_time,
             )
             .values(**values)
+            .execution_options(synchronize_session=False)
         )
         if result.rowcount != 1:
             self.db.rollback()
@@ -391,7 +551,10 @@ class ResearchJobRepository:
             attempt.evidence_snapshot = evidence_snapshot
             attempt.error_message = error_message
         self._release_control(job_id, lease_token)
-        self.db.commit()
+        if commit:
+            self.db.commit()
+        else:
+            self.db.flush()
         return self.get(job_id)
 
     def cancel(self, job_id: int, reason: str) -> Optional[ResearchJob]:
@@ -601,11 +764,53 @@ class ResearchJobRepository:
         ):
             return None
         lease_token = job.lease_token
+        chain = self.db.scalar(
+            select(FullChainRun).where(
+                FullChainRun.research_job_id == job.id,
+                FullChainRun.run_kind == "RESEARCH",
+            )
+        )
+        checkpoint = (
+            self.db.scalar(
+                select(FullChainStageRun)
+                .where(
+                    FullChainStageRun.full_chain_run_id == chain.id,
+                    FullChainStageRun.status == "PREPARED",
+                )
+                .order_by(FullChainStageRun.id.desc())
+                .limit(1)
+            )
+            if chain is not None
+            else None
+        )
+        previous_stage = job.stage
+        previous_chain_status = chain.status if chain is not None else None
         stale_reason = (
             "Provider outcome is unknown after lease expiry; automatic retry is forbidden."
             if job.provider_attempted_at is not None and job.provider_completed_at is None
             else "Worker lease expired before a safe terminal checkpoint."
         )
+        stale_evidence = {
+            **job.evidence_snapshot,
+            "status": "STALE",
+            "acceptance_ready": False,
+            "recovery_allowed": (
+                previous_stage == "SIGNAL"
+                or job.provider_attempted_at is None
+                or job.provider_completed_at is not None
+            ),
+            "previous_stage": previous_stage,
+            "failed_reason": stale_reason,
+            **(
+                {
+                    "full_chain_run_id": chain.id,
+                    "full_chain_status": "STALE",
+                    "previous_full_chain_status": previous_chain_status,
+                }
+                if chain is not None
+                else {}
+            ),
+        }
         result = self.db.execute(
             update(ResearchJob)
             .where(
@@ -619,12 +824,7 @@ class ResearchJobRepository:
                 status="STALE",
                 stage="LEASE_EXPIRED",
                 error_message=stale_reason,
-                evidence_snapshot={
-                    **job.evidence_snapshot,
-                    "status": "STALE",
-                    "acceptance_ready": False,
-                    "failed_reason": stale_reason,
-                },
+                evidence_snapshot=stale_evidence,
                 completed_at=current_time,
                 lease_owner=None,
                 lease_token=None,
@@ -649,12 +849,22 @@ class ResearchJobRepository:
             attempt.status = "STALE"
             attempt.completed_at = current_time
             attempt.error_message = stale_reason
-            attempt.evidence_snapshot = {
-                **job.evidence_snapshot,
-                "status": "STALE",
-                "acceptance_ready": False,
-                "failed_reason": stale_reason,
-            }
+            attempt.evidence_snapshot = stale_evidence
+        if chain is not None and chain.status not in {
+            "SUCCESS",
+            "FAILED",
+            "BLOCKED",
+            "CANCELLED",
+            "STALE",
+        }:
+            chain.status = "STALE"
+            chain.terminal_reason = stale_reason
+            chain.completed_at = current_time
+        if checkpoint is not None:
+            checkpoint.status = "STALE"
+            checkpoint.error_code = "RESEARCH_LEASE_EXPIRED"
+            checkpoint.error_message = stale_reason
+            checkpoint.completed_at = current_time
         self._release_control(job.id, lease_token)
         self.db.commit()
         return self.get(job.id)
