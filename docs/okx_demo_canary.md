@@ -118,7 +118,8 @@ schema `20260802_26` 将 canary 的三条敏感 lineage 写入收敛为唯一
 `trade_intents`、`risk_decisions`、`approved_executions` 及其 sequence 都没有
 INSERT/UPDATE/DELETE/USAGE 权限。函数在同一事务内重验 Demo target、非生产
 provenance、完整 hash、空 durable boundary、fresh reconciliation、full-chain
-绑定、attested snapshots、TTL 与固定风险上限；任一不匹配整笔回滚。
+绑定、attested snapshots、TTL 与固定风险上限，并尝试取得与 service/runtime 相同
+的 one-shot transaction advisory lock；任一不匹配或锁占用都整笔回滚。
 
 如果唯一 `FRESH_EXECUTION_ONLY_RECOVERY` handoff 已经成功保存新快照，但其
 lineage 原子写在提交前失败并回滚，且这批快照随后明确过期，只允许使用新的

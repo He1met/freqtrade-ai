@@ -7,6 +7,7 @@ import os
 from threading import Barrier
 import time
 from types import SimpleNamespace
+from typing import Optional
 from uuid import uuid4
 
 import pytest
@@ -101,6 +102,8 @@ def _seed_canary_lineage_boundary(
     session: Session,
     *,
     now: datetime,
+    content_mutation: Optional[tuple[str, str, object]] = None,
+    reconciliation_mutation: Optional[tuple[str, object]] = None,
 ):
     ensure_execution_scope_catalog(session)
     capability = _issue_attested_session_capability(
@@ -145,6 +148,17 @@ def _seed_canary_lineage_boundary(
     }
     for content in contents.values():
         content["expires_at"] = (now + timedelta(seconds=30)).isoformat()
+    if content_mutation is not None:
+        kind, field, value = content_mutation
+        if field == "bbo.ask_price":
+            if value is None:
+                contents[kind]["bbo"].pop("ask_price", None)
+            else:
+                contents[kind]["bbo"]["ask_price"] = value
+        elif value is None:
+            contents[kind].pop(field, None)
+        else:
+            contents[kind][field] = value
     snapshots = {}
     for kind, content in contents.items():
         normalized = _normalize_attested_snapshot(
@@ -173,6 +187,12 @@ def _seed_canary_lineage_boundary(
     session.add(run)
     session.flush()
     run.database_ids = dict(run.database_ids, reconciliation_run=[run.id])
+    if reconciliation_mutation is not None:
+        field, value = reconciliation_mutation
+        if field == "database_ids":
+            run.database_ids = value
+        else:
+            setattr(run, field, value)
     state = session.scalars(
         select(OkxDemoReconciliationState).where(
             OkxDemoReconciliationState.execution_target_id == "OKX_DEMO"
@@ -794,6 +814,128 @@ def test_postgresql_canary_lineage_function_body_tamper_fails_readiness(
     )
 
 
+@pytest.mark.parametrize(
+    "content_mutation",
+    (
+        ("instrument", "instId", None),
+        ("account", "authenticated", None),
+        ("instrument", "minSz", "not-a-number"),
+        ("market", "bbo.ask_price", None),
+    ),
+)
+def test_postgresql_canary_lineage_rejects_missing_or_malformed_snapshot_content(
+    postgres_writer_engine,
+    content_mutation,
+) -> None:
+    upgrade_database(postgres_writer_engine)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    with Session(postgres_writer_engine) as admin_session:
+        snapshots, reconciliation_run_id, order = _seed_canary_lineage_boundary(
+            admin_session,
+            now=now,
+            content_mutation=(
+                None
+                if content_mutation == ("account", "authenticated", None)
+                else content_mutation
+            ),
+        )
+        snapshot_ids = {kind: row.database_id for kind, row in snapshots.items()}
+    if content_mutation == ("account", "authenticated", None):
+        with postgres_writer_engine.begin() as connection:
+            connection.execute(
+                text("ALTER TABLE okx_demo_trusted_snapshots DISABLE TRIGGER USER")
+            )
+            connection.execute(
+                text(
+                    "UPDATE okx_demo_trusted_snapshots "
+                    "SET content_json = (content_json::jsonb - 'authenticated')::json "
+                    "WHERE kind = 'account'"
+                )
+            )
+            connection.execute(
+                text("ALTER TABLE okx_demo_trusted_snapshots ENABLE TRIGGER USER")
+            )
+    with pytest.raises(SQLAlchemyError):
+        with Session(postgres_writer_engine) as runtime_session:
+            runtime_session.execute(text("SET LOCAL ROLE freqtrade"))
+            runtime_snapshots = {
+                kind: runtime_session.get(OkxDemoTrustedSnapshot, database_id)
+                for kind, database_id in snapshot_ids.items()
+            }
+            OkxDemoCanaryPreparationService(
+                runtime_session,
+                now_provider=lambda: now,
+            )._persist_lineage(
+                key_digest=hashlib.sha256(repr(content_mutation).encode()).hexdigest(),
+                now=now,
+                reconciliation_run_id=reconciliation_run_id,
+                snapshots=runtime_snapshots,
+                order=order,
+            )
+    with postgres_writer_engine.connect() as connection:
+        assert connection.execute(text("SELECT count(*) FROM trade_intents")).scalar_one() == 0
+        assert connection.execute(text("SELECT count(*) FROM risk_decisions")).scalar_one() == 0
+        assert connection.execute(text("SELECT count(*) FROM approved_executions")).scalar_one() == 0
+
+
+@pytest.mark.parametrize(
+    "reconciliation_mutation",
+    (
+        ("authoritative_observed_at", None),
+        ("completed_at", NOW - timedelta(seconds=31)),
+        ("authoritative_observed_at", NOW + timedelta(seconds=6)),
+        (
+            "database_ids",
+            {"reconciliation_run": [], "order_snapshots": [], "position_snapshots": []},
+        ),
+        (
+            "database_ids",
+            {"reconciliation_run": [1], "order_snapshots": [1], "position_snapshots": []},
+        ),
+        (
+            "database_ids",
+            {"reconciliation_run": [1], "order_snapshots": [], "position_snapshots": [1]},
+        ),
+    ),
+)
+def test_postgresql_canary_lineage_rejects_incomplete_reconciliation_contract(
+    postgres_writer_engine,
+    reconciliation_mutation,
+) -> None:
+    upgrade_database(postgres_writer_engine)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    field, value = reconciliation_mutation
+    if isinstance(value, datetime):
+        delta = value - NOW
+        value = now + delta
+    with Session(postgres_writer_engine) as admin_session:
+        snapshots, reconciliation_run_id, order = _seed_canary_lineage_boundary(
+            admin_session,
+            now=now,
+            reconciliation_mutation=(field, value),
+        )
+        snapshot_ids = {kind: row.database_id for kind, row in snapshots.items()}
+    with pytest.raises(SQLAlchemyError):
+        with Session(postgres_writer_engine) as runtime_session:
+            runtime_session.execute(text("SET LOCAL ROLE freqtrade"))
+            runtime_snapshots = {
+                kind: runtime_session.get(OkxDemoTrustedSnapshot, database_id)
+                for kind, database_id in snapshot_ids.items()
+            }
+            OkxDemoCanaryPreparationService(
+                runtime_session,
+                now_provider=lambda: now,
+            )._persist_lineage(
+                key_digest=hashlib.sha256(repr(reconciliation_mutation).encode()).hexdigest(),
+                now=now,
+                reconciliation_run_id=reconciliation_run_id,
+                snapshots=runtime_snapshots,
+                order=order,
+            )
+    with postgres_writer_engine.connect() as connection:
+        assert connection.execute(text("SELECT count(*) FROM trade_intents")).scalar_one() == 0
+
+
 def test_postgresql_canary_lineage_function_atomic_idempotency_and_mismatch_rollback(
     postgres_writer_engine,
 ) -> None:
@@ -848,6 +990,27 @@ def test_postgresql_canary_lineage_function_atomic_idempotency_and_mismatch_roll
             ).one()
         )
 
+    lock_holder = postgres_writer_engine.connect()
+    lock_transaction = lock_holder.begin()
+    try:
+        lock_holder.execute(
+            text("SELECT pg_advisory_xact_lock(:key)"),
+            {"key": 0x4654414F4E455348},
+        )
+        with pytest.raises(SQLAlchemyError, match="coordination lock is busy"):
+            with postgres_writer_engine.begin() as connection:
+                connection.execute(text("SET LOCAL ROLE freqtrade"))
+                connection.execute(
+                    text(
+                        "SELECT create_okx_demo_canary_lineage("
+                        "CAST(:payload AS jsonb))"
+                    ),
+                    {"payload": json.dumps(payload, sort_keys=True)},
+                )
+    finally:
+        lock_transaction.rollback()
+        lock_holder.close()
+
     with postgres_writer_engine.begin() as connection:
         connection.execute(text("SET LOCAL ROLE freqtrade"))
         replay = connection.execute(
@@ -857,6 +1020,68 @@ def test_postgresql_canary_lineage_function_atomic_idempotency_and_mismatch_roll
             {"payload": json.dumps(payload, sort_keys=True)},
         ).scalar_one()
         assert replay == expected_ids
+
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE risk_decisions SET evidence_snapshot = "
+                "jsonb_set(evidence_snapshot::jsonb, '{provenance}', "
+                "'\"TAMPERED\"'::jsonb)::json"
+            )
+        )
+    with pytest.raises(SQLAlchemyError, match="idempotency conflict"):
+        with postgres_writer_engine.begin() as connection:
+            connection.execute(text("SET LOCAL ROLE freqtrade"))
+            connection.execute(
+                text(
+                    "SELECT create_okx_demo_canary_lineage(CAST(:payload AS jsonb))"
+                ),
+                {"payload": json.dumps(payload, sort_keys=True)},
+            )
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE risk_decisions SET evidence_snapshot = "
+                "jsonb_set(evidence_snapshot::jsonb, '{provenance}', "
+                "'\"CONTROLLED_CANARY_NON_PRODUCTION\"'::jsonb)::json"
+            )
+        )
+        connection.execute(
+            text("ALTER TABLE approved_executions DISABLE TRIGGER USER")
+        )
+        connection.execute(
+            text(
+                "UPDATE approved_executions SET evidence_snapshot = "
+                "jsonb_set(evidence_snapshot::jsonb, '{non_production}', "
+                "'false'::jsonb)::json"
+            )
+        )
+        connection.execute(
+            text("ALTER TABLE approved_executions ENABLE TRIGGER USER")
+        )
+    with pytest.raises(SQLAlchemyError, match="idempotency conflict"):
+        with postgres_writer_engine.begin() as connection:
+            connection.execute(text("SET LOCAL ROLE freqtrade"))
+            connection.execute(
+                text(
+                    "SELECT create_okx_demo_canary_lineage(CAST(:payload AS jsonb))"
+                ),
+                {"payload": json.dumps(payload, sort_keys=True)},
+            )
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(
+            text("ALTER TABLE approved_executions DISABLE TRIGGER USER")
+        )
+        connection.execute(
+            text(
+                "UPDATE approved_executions SET evidence_snapshot = "
+                "jsonb_set(evidence_snapshot::jsonb, '{non_production}', "
+                "'true'::jsonb)::json"
+            )
+        )
+        connection.execute(
+            text("ALTER TABLE approved_executions ENABLE TRIGGER USER")
+        )
 
     mutations = {
         "target": ("execution_target", "OKX_LIVE"),

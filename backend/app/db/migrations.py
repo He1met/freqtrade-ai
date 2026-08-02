@@ -295,7 +295,12 @@ DECLARE
     inserted_intent_id bigint;
     inserted_decision_id bigint;
     inserted_approval_id bigint;
+    is_replay boolean := FALSE;
 BEGIN
+    IF NOT pg_try_advisory_xact_lock(5067747289570038600) THEN
+        RAISE EXCEPTION 'controlled canary coordination lock is busy';
+    END IF;
+
     IF jsonb_typeof(p_payload) <> 'object'
        OR NOT p_payload ?& allowed_keys
        OR EXISTS (
@@ -461,10 +466,61 @@ BEGIN
            OR existing_intent.client_order_id <> p_payload->>'client_order_id'
            OR existing_intent.request_snapshot::jsonb
                 IS DISTINCT FROM p_payload->'request_snapshot'
+           OR existing_intent.execution_target_id <> 'OKX_DEMO'
+           OR existing_intent.authorization_schema_version <> 'RISK_V1'
            OR existing_intent.status <> 'APPROVED'
-           OR decision_row.id IS NULL OR decision_row.decision <> 'APPROVED'
-           OR approval_row.id IS NULL OR approval_row.status <> 'ACTIVE'
+           OR decision_row.id IS NULL
+           OR decision_row.execution_target_id <> 'OKX_DEMO'
+           OR decision_row.trade_intent_id <> existing_intent.id
+           OR decision_row.authorization_schema_version <> 'RISK_V1'
+           OR decision_row.policy_digest <> p_payload->>'policy_digest'
+           OR decision_row.decision <> 'APPROVED'
+           OR decision_row.policy_version <> 'controlled-canary-v1'
+           OR decision_row.evidence_snapshot::jsonb->>'provenance'
+                IS DISTINCT FROM 'CONTROLLED_CANARY_NON_PRODUCTION'
+           OR decision_row.evidence_snapshot::jsonb->'non_production'
+                IS DISTINCT FROM 'true'::jsonb
+           OR decision_row.evidence_snapshot::jsonb->>'input_digest'
+                IS DISTINCT FROM p_payload->>'canonical_hash'
+           OR decision_row.evidence_snapshot::jsonb->>'policy_digest'
+                IS DISTINCT FROM p_payload->>'policy_digest'
+           OR decision_row.evidence_snapshot::jsonb->>'notional'
+                IS DISTINCT FROM p_payload->>'notional'
+           OR decision_row.evidence_snapshot::jsonb->'lineage'
+                IS DISTINCT FROM p_payload->'request_snapshot'
+                    ->'canonical_input'->'lineage'
+           OR approval_row.id IS NULL
+           OR approval_row.execution_target_id <> 'OKX_DEMO'
+           OR approval_row.trade_intent_id <> existing_intent.id
+           OR approval_row.risk_decision_id <> decision_row.id
+           OR approval_row.intent_id <> p_payload->>'intent_id'
+           OR approval_row.client_order_id <> p_payload->>'client_order_id'
+           OR approval_row.authorization_schema_version <> 'RISK_V1'
+           OR approval_row.canonical_hash <> p_payload->>'canonical_hash'
+           OR approval_row.policy_digest <> p_payload->>'policy_digest'
+           OR approval_row.approved_payload_hash
+                <> p_payload->>'approved_payload_hash'
+           OR approval_row.instrument_snapshot_id
+                <> p_payload->>'instrument_snapshot_id'
+           OR approval_row.market_snapshot_id <> p_payload->>'market_snapshot_id'
+           OR approval_row.account_snapshot_id <> p_payload->>'account_snapshot_id'
+           OR approval_row.decision <> 'APPROVED'
+           OR approval_row.intent_status <> 'APPROVED'
+           OR approval_row.reserved_notional IS DISTINCT FROM notional
+           OR approval_row.order_submission_authorized IS NOT FALSE
+           OR approval_row.claim_required IS NOT TRUE
+           OR approval_row.status <> 'ACTIVE'
+           OR approval_row.expires_at IS DISTINCT FROM expires_at
            OR approval_row.expires_at <= statement_timestamp()
+           OR approval_row.evidence_snapshot::jsonb->>'provenance'
+                IS DISTINCT FROM 'CONTROLLED_CANARY_NON_PRODUCTION'
+           OR approval_row.evidence_snapshot::jsonb->'non_production'
+                IS DISTINCT FROM 'true'::jsonb
+           OR approval_row.evidence_snapshot::jsonb->'lineage'
+                IS DISTINCT FROM p_payload->'request_snapshot'
+                    ->'canonical_input'->'lineage'
+           OR approval_row.evidence_snapshot::jsonb->'snapshot_evidence'
+                IS DISTINCT FROM p_payload->'request_snapshot'->'snapshot_evidence'
            OR chain_row.id IS NULL
            OR chain_row.run_kind <> 'RESEARCH'
            OR chain_row.research_scope_id <> 'LOCAL_DRY_RUN'
@@ -477,11 +533,7 @@ BEGIN
         THEN
             RAISE EXCEPTION 'controlled canary lineage idempotency conflict';
         END IF;
-        RETURN jsonb_build_object(
-            'trade_intent_id', existing_intent.id,
-            'risk_decision_id', decision_row.id,
-            'approved_execution_id', approval_row.id
-        );
+        is_replay := TRUE;
     END IF;
 
     SELECT id, run_kind, research_scope_id, execution_target_id,
@@ -510,9 +562,11 @@ BEGIN
        OR chain_row.candidate_approval_id IS NOT NULL
        OR chain_row.signal_snapshot_id IS NOT NULL
        OR chain_row.signal_evaluation_id IS NOT NULL
-       OR chain_row.trade_intent_id IS NOT NULL
-       OR chain_row.risk_decision_id IS NOT NULL
-       OR chain_row.approved_execution_id IS NOT NULL
+       OR (NOT is_replay AND (
+            chain_row.trade_intent_id IS NOT NULL
+            OR chain_row.risk_decision_id IS NOT NULL
+            OR chain_row.approved_execution_id IS NOT NULL
+       ))
        OR chain_row.exchange_order_id IS NOT NULL
     THEN
         RAISE EXCEPTION 'controlled canary full-chain binding mismatch';
@@ -532,14 +586,24 @@ BEGIN
           AND run.artifact_status = 'READY'
           AND run.source_type = 'api_aggregate'
           AND run.core_data IS TRUE
+          AND run.completed_at IS NOT NULL
+          AND run.authoritative_observed_at IS NOT NULL
           AND run.completed_at >= statement_timestamp() - INTERVAL '30 seconds'
-          AND run.completed_at <= statement_timestamp()
+          AND run.completed_at <= statement_timestamp() + INTERVAL '5 seconds'
+          AND run.authoritative_observed_at
+                >= statement_timestamp() - INTERVAL '30 seconds'
+          AND run.authoritative_observed_at
+                <= statement_timestamp() + INTERVAL '5 seconds'
+          AND run.database_ids::jsonb->'reconciliation_run'
+                = jsonb_build_array(run.id)
+          AND run.database_ids::jsonb->'order_snapshots' = '[]'::jsonb
+          AND run.database_ids::jsonb->'position_snapshots' = '[]'::jsonb
     )
     THEN
         RAISE EXCEPTION 'controlled canary reconciliation is not fresh';
     END IF;
 
-    IF EXISTS (
+    IF NOT is_replay AND (EXISTS (
         SELECT 1 FROM SCHEMA_TOKEN.trade_intents AS prior_intent
         WHERE prior_intent.execution_target_id = 'OKX_DEMO'
     ) OR EXISTS (
@@ -558,7 +622,7 @@ BEGIN
         SELECT 1 FROM SCHEMA_TOKEN.exchange_positions AS prior_position
         WHERE prior_position.execution_target_id = 'OKX_DEMO'
           AND prior_position.quantity <> 0
-    )
+    ))
     THEN
         RAISE EXCEPTION 'controlled canary durable boundary is occupied';
     END IF;
@@ -587,6 +651,20 @@ BEGIN
        OR instrument_row.core_data IS NOT TRUE
        OR market_row.core_data IS NOT TRUE
        OR account_row.core_data IS NOT TRUE
+       OR instrument_row.content_json::jsonb->>'instId'
+            IS DISTINCT FROM 'BTC-USDT-SWAP'
+       OR market_row.content_json::jsonb->>'instrument_id'
+            IS DISTINCT FROM 'BTC-USDT-SWAP'
+       OR account_row.content_json::jsonb->'authenticated'
+            IS DISTINCT FROM 'true'::jsonb
+       OR (instrument_row.content_json::jsonb->>'ctVal'
+            ~ '^[0-9]+(\\.[0-9]+)?$') IS DISTINCT FROM TRUE
+       OR (instrument_row.content_json::jsonb->>'minSz'
+            ~ '^[0-9]+(\\.[0-9]+)?$') IS DISTINCT FROM TRUE
+       OR (instrument_row.content_json::jsonb->>'lotSz'
+            ~ '^[0-9]+(\\.[0-9]+)?$') IS DISTINCT FROM TRUE
+       OR (market_row.content_json::jsonb->'bbo'->>'ask_price'
+            ~ '^[0-9]+(\\.[0-9]+)?$') IS DISTINCT FROM TRUE
        OR instrument_row.attested_session_id <> market_row.attested_session_id
        OR instrument_row.attested_session_id <> account_row.attested_session_id
        OR instrument_row.expires_at <= statement_timestamp()
@@ -625,14 +703,23 @@ BEGIN
             (market_row.content_json->'bbo'->>'ask_price')::numeric,
             limit_price
         );
-    IF instrument_row.content_json->>'instId' <> 'BTC-USDT-SWAP'
-       OR market_row.content_json->>'instrument_id' <> 'BTC-USDT-SWAP'
-       OR account_row.content_json->>'authenticated' <> 'true'
+    IF (instrument_row.content_json->>'ctVal')::numeric <= 0
+       OR (instrument_row.content_json->>'minSz')::numeric <= 0
+       OR (instrument_row.content_json->>'lotSz')::numeric <= 0
+       OR (market_row.content_json->'bbo'->>'ask_price')::numeric <= 0
        OR quantity < (instrument_row.content_json->>'minSz')::numeric
        OR mod(quantity, (instrument_row.content_json->>'lotSz')::numeric) <> 0
        OR computed_notional IS DISTINCT FROM notional
     THEN
         RAISE EXCEPTION 'controlled canary order derivation mismatch';
+    END IF;
+
+    IF is_replay THEN
+        RETURN jsonb_build_object(
+            'trade_intent_id', existing_intent.id,
+            'risk_decision_id', decision_row.id,
+            'approved_execution_id', approval_row.id
+        );
     END IF;
 
     INSERT INTO SCHEMA_TOKEN.trade_intents (
