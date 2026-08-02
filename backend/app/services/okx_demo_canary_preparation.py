@@ -54,6 +54,7 @@ from app.services.risk_chain import _trusted_snapshot_id, canonical_digest
 CANARY_PROVENANCE = "CONTROLLED_CANARY_NON_PRODUCTION"
 CANARY_OPERATION = "okx_demo.execution_chain_canary"
 CANARY_POLICY_VERSION = "controlled-canary-v1"
+FRESH_EXECUTION_ONLY_ENTRY = "FRESH_EXECUTION_ONLY"
 CANARY_TTL_SECONDS = 10
 UNRESOLVED_WRITER_STATES = (
     "PREPARED",
@@ -70,8 +71,16 @@ class OkxDemoCanaryPreparationBlocked(RuntimeError):
 class OkxDemoCanaryPreparationWaiting(OkxDemoCanaryPreparationBlocked):
     """The canonical runtime was asked to capture a fresh attested bundle."""
 
-    def __init__(self, job_id: int) -> None:
+    def __init__(
+        self,
+        job_id: int,
+        *,
+        entry_kind: Optional[str] = None,
+        supersedes_job_ids: tuple[int, ...] = (),
+    ) -> None:
         self.job_id = job_id
+        self.entry_kind = entry_kind
+        self.supersedes_job_ids = supersedes_job_ids
         super().__init__(
             "canonical runtime attestation is pending; retry canary finalization"
         )
@@ -97,6 +106,8 @@ class CanaryPreparationResult:
     notional: Decimal
     expires_at: datetime
     idempotency_key_digest: str
+    entry_kind: Optional[str] = None
+    supersedes_job_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -122,6 +133,38 @@ class OkxDemoCanaryPreparationService:
         self._now_provider = now_provider
 
     def prepare(self, *, idempotency_key: str) -> CanaryPreparationResult:
+        """Finalize the original supported execution-only canary entry."""
+
+        return self._prepare(
+            idempotency_key=idempotency_key,
+            allow_terminal_history=False,
+        )
+
+    def prepare_fresh_execution_only(
+        self,
+        *,
+        idempotency_key: str,
+    ) -> CanaryPreparationResult:
+        """Start/finalize one fresh execution-only entry after old failures.
+
+        This is intentionally a separate operator entry.  The original
+        ``/canary/prepare`` remains fail-closed when any other ResearchJob is
+        present.  This path only admits immutable, terminal attestation
+        failures from the old strategy-coupled canary chain and records their
+        ids in the new request payload; it never rewrites or retries them.
+        """
+
+        return self._prepare(
+            idempotency_key=idempotency_key,
+            allow_terminal_history=True,
+        )
+
+    def _prepare(
+        self,
+        *,
+        idempotency_key: str,
+        allow_terminal_history: bool,
+    ) -> CanaryPreparationResult:
         key = _safe_key(idempotency_key)
         key_digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
         now = _aware(self._now_provider())
@@ -144,10 +187,22 @@ class OkxDemoCanaryPreparationService:
                 "controlled canary requires OKX_DEMO with global submission disabled"
             )
 
+        # Do not enqueue a fresh runtime request when the durable execution
+        # boundary is already occupied.  Once this exact key has a prepared
+        # canary lineage, the normal idempotent replay path below may return
+        # it; a different key must fail before any new handoff is written.
+        if allow_terminal_history and not self._has_trade_intent_for_key(key_digest):
+            self._require_no_previous_canary()
+            self._require_no_unresolved_writer_attempt()
+
         # The backend API does not own OKX credentials.  Ask the already
         # running canonical runtime to capture the live attested bundle and
         # return a typed waiting result until that handoff is durable.
-        self._ensure_runtime_snapshot_request(key_digest=key_digest, now=now)
+        self._ensure_runtime_snapshot_request(
+            key_digest=key_digest,
+            now=now,
+            allow_terminal_history=allow_terminal_history,
+        )
 
         try:
             with self.db.begin():
@@ -381,7 +436,13 @@ class OkxDemoCanaryPreparationService:
             idempotency_key_digest=key_digest,
         )
 
-    def _ensure_runtime_snapshot_request(self, *, key_digest: str, now: datetime) -> None:
+    def _ensure_runtime_snapshot_request(
+        self,
+        *,
+        key_digest: str,
+        now: datetime,
+        allow_terminal_history: bool = False,
+    ) -> None:
         has_fresh_snapshots = self._has_fresh_snapshot_rows(now)
         if self.db.in_transaction():
             self.db.rollback()
@@ -392,7 +453,7 @@ class OkxDemoCanaryPreparationService:
                 ResearchJob.idempotency_key_digest == key_digest,
             )
         ).first()
-        other_request = self.db.scalars(
+        other_requests = self.db.scalars(
             select(ResearchJob)
             .where(
                 ResearchJob.execution_scope_id == LOCAL_DRY_RUN_SCOPE_ID,
@@ -400,8 +461,16 @@ class OkxDemoCanaryPreparationService:
                 ResearchJob.idempotency_key_digest != key_digest,
             )
             .order_by(ResearchJob.created_at, ResearchJob.id)
-        ).first()
-        if other_request is not None:
+        ).all()
+        supersedes_job_ids: list[int] = []
+        if allow_terminal_history:
+            if not other_requests:
+                self.db.rollback()
+                raise OkxDemoCanaryPreparationBlocked(
+                    "fresh execution-only entry requires immutable terminal canary history"
+                )
+            supersedes_job_ids = self._terminal_history_for_fresh_entry(other_requests)
+        elif other_requests:
             self.db.rollback()
             raise OkxDemoCanaryPreparationBlocked(
                 "another controlled canary request already owns the idempotency boundary"
@@ -415,14 +484,28 @@ class OkxDemoCanaryPreparationService:
                     )
                 self.db.rollback()
                 return
+            if existing.status == "SUCCESS" and existing.stage == "CANARY_PREPARED":
+                # Let the transaction below return the durable lineage on a
+                # cross-process/restart replay of the same idempotency key.
+                self.db.rollback()
+                return
             if existing.status in {"FAILED", "BLOCKED", "CANCELLED", "STALE"}:
                 self.db.rollback()
                 raise OkxDemoCanaryPreparationBlocked(
                     "canonical runtime attestation request is terminal: {}".format(existing.stage)
                 )
             self.db.rollback()
-            raise OkxDemoCanaryPreparationWaiting(existing.id)
-        if has_fresh_snapshots:
+            entry_kind, supersedes = _fresh_entry_metadata(existing.request_payload)
+            raise OkxDemoCanaryPreparationWaiting(
+                existing.id,
+                entry_kind=entry_kind,
+                supersedes_job_ids=supersedes,
+            )
+        # A fresh entry always asks the sole runtime for a new execution-only
+        # handoff, even if ordinary reconciliation rows happen to be fresh;
+        # this makes the new lineage auditable and avoids borrowing a prior
+        # request's snapshots.  Preserve the legacy fast path otherwise.
+        if has_fresh_snapshots and not allow_terminal_history:
             self.db.rollback()
             return
         # Serialize the request boundary with the canonical runtime.  The
@@ -441,6 +524,13 @@ class OkxDemoCanaryPreparationService:
             "bundle_kind": "EXECUTION_ONLY",
             "non_production": True,
         }
+        if allow_terminal_history:
+            payload.update(
+                {
+                    "entry_kind": FRESH_EXECUTION_ONLY_ENTRY,
+                    "supersedes_job_ids": supersedes_job_ids,
+                }
+            )
         job = ResearchJob(
             execution_scope_id=LOCAL_DRY_RUN_SCOPE_ID,
             job_type="okx_demo_controlled_canary",
@@ -457,7 +547,73 @@ class OkxDemoCanaryPreparationService:
         )
         self.db.add(job)
         self.db.commit()
-        raise OkxDemoCanaryPreparationWaiting(job.id)
+        entry_kind, supersedes = _fresh_entry_metadata(payload)
+        raise OkxDemoCanaryPreparationWaiting(
+            job.id,
+            entry_kind=entry_kind,
+            supersedes_job_ids=supersedes,
+        )
+
+    def _terminal_history_for_fresh_entry(
+        self,
+        jobs: list[ResearchJob],
+    ) -> list[int]:
+        """Return immutable old attestation failures eligible for supersession.
+
+        The historical #603 signal-bundle request and its #605 execution-only
+        retry are both retained as evidence.  No other terminal state is
+        eligible: a prior fresh entry, successful snapshot handoff, pending
+        request, or unknown failure must remain a hard stop.
+        """
+
+        supersedes: list[int] = []
+        for job in jobs:
+            payload = job.request_payload if isinstance(job.request_payload, dict) else {}
+            if payload.get("entry_kind") == FRESH_EXECUTION_ONLY_ENTRY:
+                raise OkxDemoCanaryPreparationBlocked(
+                    "a fresh execution-only canary entry already exists"
+                )
+            if not self._is_terminal_attestation_failure(job, payload):
+                raise OkxDemoCanaryPreparationBlocked(
+                    "another controlled canary request already owns the idempotency boundary"
+                )
+            supersedes.append(job.id)
+        return supersedes
+
+    @staticmethod
+    def _is_terminal_attestation_failure(
+        job: ResearchJob,
+        payload: Mapping[str, Any],
+    ) -> bool:
+        if job.status != "BLOCKED" or job.stage != "CANARY_SNAPSHOT_BLOCKED":
+            return False
+        if (
+            payload.get("provenance") != CANARY_PROVENANCE
+            or payload.get("execution_target") != OKX_DEMO_TARGET_ID
+            or payload.get("instrument_id") not in CANARY_INSTRUMENTS
+        ):
+            return False
+        # Accept both the old signal-bundle request and the #607
+        # execution-only request as immutable history.  The new request below
+        # is always execution-only and never copies the old fields.
+        is_execution_only = payload.get("bundle_kind") == "EXECUTION_ONLY"
+        is_legacy_signal = (
+            payload.get("timeframe") in {"1m", "5m", "15m"}
+            and isinstance(payload.get("candle_limit"), int)
+            and payload.get("candle_limit", 0) > 0
+        )
+        if not (is_execution_only or is_legacy_signal):
+            return False
+        evidence = job.evidence_snapshot if isinstance(job.evidence_snapshot, dict) else {}
+        error = evidence.get("attestation_error")
+        if isinstance(error, dict):
+            return (
+                error.get("kind") == "INVALID_SIGNAL_BUNDLE"
+                and error.get("retryable") is False
+            )
+        # #603 stored only the redacted exception type.  It is eligible only
+        # when no richer error evidence exists, preserving that source row.
+        return job.error_message == OkxReadAdapterError.__name__
 
     def _has_fresh_snapshot_rows(self, now: datetime) -> bool:
         for kind in ("instrument", "market", "account"):
@@ -505,6 +661,17 @@ class OkxDemoCanaryPreparationService:
                 "existing canary research lineage is incomplete"
             )
         return intent, decision, approved, chain, job, attempt
+
+    def _has_trade_intent_for_key(self, key_digest: str) -> bool:
+        return (
+            self.db.scalars(
+                select(TradeIntent.id).where(
+                    TradeIntent.execution_target_id == OKX_DEMO_TARGET_ID,
+                    TradeIntent.idempotency_key_digest == key_digest,
+                )
+            ).first()
+            is not None
+        )
 
     def _require_no_previous_canary(self) -> None:
         rows = self.db.scalars(
@@ -729,12 +896,13 @@ class OkxDemoCanaryPreparationService:
             "provenance": CANARY_PROVENANCE,
             "operation": CANARY_OPERATION,
             "execution_target": OKX_DEMO_TARGET_ID,
+            "bundle_kind": "EXECUTION_ONLY",
+            "non_production": True,
             "instrument_id": order["instrument_id"],
             "quantity": format(order["quantity"], "f"),
             "notional": format(order["notional"], "f"),
             "snapshot_evidence": evidence,
         }
-        request_hash = canonical_digest(research_payload)
         job = self.db.scalars(
             select(ResearchJob).where(
                 ResearchJob.execution_scope_id == LOCAL_DRY_RUN_SCOPE_ID,
@@ -742,6 +910,20 @@ class OkxDemoCanaryPreparationService:
                 ResearchJob.idempotency_key_digest == key_digest,
             )
         ).first()
+        # Preserve the fresh-entry lineage when the runtime handoff job is
+        # promoted to the prepared lineage.  Historical jobs retain their
+        # original request shape; no old row is rewritten.
+        if job is not None:
+            handoff_payload = job.request_payload if isinstance(job.request_payload, dict) else {}
+            if handoff_payload.get("entry_kind") == FRESH_EXECUTION_ONLY_ENTRY:
+                research_payload["entry_kind"] = FRESH_EXECUTION_ONLY_ENTRY
+                research_payload["supersedes_job_ids"] = list(
+                    handoff_payload.get("supersedes_job_ids") or []
+                )
+        entry_kind, supersedes_job_ids = _fresh_entry_metadata(
+            job.request_payload if job is not None else research_payload
+        )
+        request_hash = canonical_digest(research_payload)
         if job is None:
             job = ResearchJob(
                 execution_scope_id=LOCAL_DRY_RUN_SCOPE_ID,
@@ -982,6 +1164,8 @@ class OkxDemoCanaryPreparationService:
             notional=order["notional"],
             expires_at=order["expires_at"],
             idempotency_key_digest=key_digest,
+            entry_kind=entry_kind,
+            supersedes_job_ids=supersedes_job_ids,
         )
 
     def _result_from_lineage(
@@ -996,6 +1180,7 @@ class OkxDemoCanaryPreparationService:
         if approved.expires_at is None or _aware(approved.expires_at) <= now:
             raise OkxDemoCanaryPreparationBlocked("canary idempotency lineage has expired")
         notional = Decimal(str(approved.reserved_notional))
+        entry_kind, supersedes_job_ids = _fresh_entry_metadata(job.request_payload)
         return CanaryPreparationResult(
             operation_status="PREPARED",
             provenance=CANARY_PROVENANCE,
@@ -1015,6 +1200,8 @@ class OkxDemoCanaryPreparationService:
             notional=notional,
             expires_at=_aware(approved.expires_at),
             idempotency_key_digest=intent.idempotency_key_digest or "",
+            entry_kind=entry_kind,
+            supersedes_job_ids=supersedes_job_ids,
         )
 
     def _reconciliation_run_id_for_approval(self, approval_id: int) -> int:
@@ -1097,6 +1284,7 @@ def process_pending_canary_attestation(
         job.evidence_snapshot = {
             "provenance": CANARY_PROVENANCE,
             "non_production": True,
+            **_fresh_entry_evidence(payload),
             "snapshot_evidence": references,
             "bundle_observed_at": _aware(bundle.observed_at).isoformat(),
         }
@@ -1110,6 +1298,7 @@ def process_pending_canary_attestation(
         job.evidence_snapshot = {
             "provenance": CANARY_PROVENANCE,
             "non_production": True,
+            **_fresh_entry_evidence(payload),
             "attestation_error": {
                 "error_type": type(exc).__name__,
                 "kind": exc.kind,
@@ -1127,12 +1316,44 @@ def process_pending_canary_attestation(
         job.evidence_snapshot = {
             "provenance": CANARY_PROVENANCE,
             "non_production": True,
+            **_fresh_entry_evidence(payload),
             "attestation_error": {
                 "error_type": type(exc).__name__,
                 "retryable": False,
             },
         }
         return True
+
+
+def _fresh_entry_evidence(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Copy only non-sensitive fresh-entry lineage into runtime evidence."""
+
+    if payload.get("entry_kind") != FRESH_EXECUTION_ONLY_ENTRY:
+        return {}
+    supersedes = payload.get("supersedes_job_ids")
+    if not isinstance(supersedes, list) or any(
+        not isinstance(job_id, int) or job_id <= 0 for job_id in supersedes
+    ):
+        return {"entry_kind": FRESH_EXECUTION_ONLY_ENTRY, "supersedes_job_ids": []}
+    return {
+        "entry_kind": FRESH_EXECUTION_ONLY_ENTRY,
+        "supersedes_job_ids": list(supersedes),
+    }
+
+
+def _fresh_entry_metadata(payload: Any) -> tuple[Optional[str], tuple[int, ...]]:
+    """Read the bounded, non-sensitive fresh-entry lineage metadata."""
+
+    if not isinstance(payload, dict) or payload.get("entry_kind") != FRESH_EXECUTION_ONLY_ENTRY:
+        return None, ()
+    supersedes = payload.get("supersedes_job_ids")
+    if not isinstance(supersedes, list) or any(
+        not isinstance(job_id, int) or job_id <= 0 for job_id in supersedes
+    ):
+        raise OkxDemoCanaryPreparationBlocked(
+            "fresh execution-only canary lineage is malformed"
+        )
+    return FRESH_EXECUTION_ONLY_ENTRY, tuple(supersedes)
 
 
 def _safe_key(value: str) -> str:

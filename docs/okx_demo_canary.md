@@ -45,6 +45,16 @@ one-shot submission grant 驱动：`TradeIntent/ApprovedExecution`（明确标�
    `StrategyDeployment` 或 `SignalEvaluation` 的非生产 lineage；随后只可使用
    #595 DB-backed one-shot grant 和唯一 runtime writer。
 
+如果旧的 #603 signal-bundle 请求及其一次性 retry 已经以
+`BLOCKED/CANARY_SNAPSHOT_BLOCKED` 终止，原 `/canary/prepare` 会继续保持
+fail-closed。经 operator 单次授权后，可用全新的 `Idempotency-Key` 调用
+`POST /api/okx-demo/canary/prepare-execution-only`。该入口只接受明确的
+`INVALID_SIGNAL_BUNDLE`/非 retryable 终态（以及保存异常类型的旧记录），把只读的
+旧 `ResearchJob` IDs 写入新请求的 `supersedes_job_ids` lineage，并要求新的
+`EXECUTION_ONLY` runtime attestation；旧记录、pending 请求、active grant、writer
+attempt 或既有 `TradeIntent` 仍会直接阻断。相同 key 可安全重放，第二个 fresh key
+或已存在的 fresh entry 不会创建第二个 runtime handoff。
+
 如果 runtime 的 attestation read 以可重试的 `OkxReadAdapterError` 终止，原始
 `ResearchJob` 会保持 `BLOCKED`，只保存脱敏异常类型与 retryability。operator
 可用新的 `Idempotency-Key` 调用 `POST /api/okx-demo/canary/retry` 创建最多一个

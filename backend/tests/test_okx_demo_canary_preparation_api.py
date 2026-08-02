@@ -16,9 +16,11 @@ from app.models import (
     Base,
     FullChainRun,
     OkxDemoAttestedSession,
+    OkxDemoSubmissionGrant,
     OkxDemoTrustedSnapshot,
     ResearchJob,
     ResearchJobAttempt,
+    TradeIntent,
 )
 from app.repositories.execution_lineage import ensure_execution_scope_catalog
 from app.services.okx_demo_canary_preparation import (
@@ -149,6 +151,38 @@ def test_canary_retry_endpoint_is_idempotent_and_returns_successor(client, monke
     assert first.json()["retry_of_job_id"] == 15
     assert first.json() == replay.json()
     assert calls == ["canary-retry-endpoint-1"]
+
+
+def test_fresh_execution_only_endpoint_reports_superseded_history(client, monkeypatch):
+    api, _calls = client
+
+    def prepare_fresh(_self, *, idempotency_key):
+        assert idempotency_key == "fresh-entry-endpoint-1"
+        raise OkxDemoCanaryPreparationWaiting(
+            702,
+            entry_kind="FRESH_EXECUTION_ONLY",
+            supersedes_job_ids=(15, 16),
+        )
+
+    monkeypatch.setattr(
+        OkxDemoCanaryPreparationService,
+        "prepare_fresh_execution_only",
+        prepare_fresh,
+    )
+    headers = {
+        "X-Operator-Token": "operator-test-token",
+        "Idempotency-Key": "fresh-entry-endpoint-1",
+        "X-Provider-Authorization": "once",
+    }
+    response = api.post(
+        "/api/okx-demo/canary/prepare-execution-only",
+        headers=headers,
+        json={},
+    )
+    assert response.status_code == 202
+    assert response.json()["entry_kind"] == "FRESH_EXECUTION_ONLY"
+    assert response.json()["attestation_request_job_id"] == 702
+    assert response.json()["supersedes_job_ids"] == [15, 16]
 
 
 def test_canary_prepare_rejects_caller_order_overrides(client):
@@ -312,6 +346,7 @@ def _blocked_attestation_job(
     key: str,
     error_message: str = "OkxReadAdapterError",
     evidence=None,
+    request_payload=None,
 ):
     job = ResearchJob(
         execution_scope_id="LOCAL_DRY_RUN",
@@ -319,7 +354,8 @@ def _blocked_attestation_job(
         operation=CANARY_OPERATION,
         idempotency_key_digest=hashlib.sha256(key.encode()).hexdigest(),
         request_hash="9" * 64,
-        request_payload={
+        request_payload=request_payload
+        or {
             "provenance": CANARY_PROVENANCE,
             "execution_target": "OKX_DEMO",
             "instrument_id": "BTC-USDT-SWAP",
@@ -452,6 +488,312 @@ def test_terminal_read_error_cannot_be_retried(db_session, monkeypatch):
         OkxDemoCanaryPreparationService(
             db_session, now_provider=lambda: NOW
         ).retry_attestation(idempotency_key="terminal-attestation-2")
+
+
+def test_fresh_execution_only_entry_preserves_terminal_history_and_is_single_flight(
+    db_session, monkeypatch
+):
+    monkeypatch.setenv("FREQTRADE_AI_EXECUTION_TARGET", "OKX_DEMO")
+    monkeypatch.setenv("FREQTRADE_AI_SIMULATED_TRADING", "true")
+    monkeypatch.setenv("FREQTRADE_AI_ALLOW_REAL_FUNDS", "false")
+    legacy = _blocked_attestation_job(
+        db_session,
+        key="legacy-signal-entry-1",
+        request_payload={
+            "provenance": CANARY_PROVENANCE,
+            "execution_target": "OKX_DEMO",
+            "instrument_id": "BTC-USDT-SWAP",
+            "timeframe": "1m",
+            "candle_limit": 2,
+            "non_production": True,
+        },
+    )
+    terminal = _blocked_attestation_job(
+        db_session,
+        key="terminal-execution-entry-1",
+        evidence={
+            "provenance": CANARY_PROVENANCE,
+            "attestation_error": {
+                "error_type": "OkxReadAdapterError",
+                "kind": "INVALID_SIGNAL_BUNDLE",
+                "status": "BLOCKED",
+                "retryable": False,
+            },
+        },
+    )
+    legacy_payload = dict(legacy.request_payload)
+    terminal_evidence = dict(terminal.evidence_snapshot)
+    legacy_request_hash = legacy.request_hash
+    terminal_request_hash = terminal.request_hash
+
+    with pytest.raises(OkxDemoCanaryPreparationWaiting) as waiting:
+        OkxDemoCanaryPreparationService(
+            db_session, now_provider=lambda: NOW
+        ).prepare_fresh_execution_only(idempotency_key="fresh-entry-1")
+    fresh = db_session.get(ResearchJob, waiting.value.job_id)
+    assert fresh is not None
+    assert fresh.request_payload["entry_kind"] == "FRESH_EXECUTION_ONLY"
+    assert fresh.request_payload["bundle_kind"] == "EXECUTION_ONLY"
+    assert "timeframe" not in fresh.request_payload
+    assert "candle_limit" not in fresh.request_payload
+    assert fresh.request_payload["supersedes_job_ids"] == [legacy.id, terminal.id]
+    assert db_session.get(ResearchJob, legacy.id).request_payload == legacy_payload
+    assert db_session.get(ResearchJob, terminal.id).evidence_snapshot == terminal_evidence
+    assert db_session.get(ResearchJob, legacy.id).request_hash == legacy_request_hash
+    assert db_session.get(ResearchJob, terminal.id).request_hash == terminal_request_hash
+
+    with pytest.raises(OkxDemoCanaryPreparationBlocked, match="fresh execution-only"):
+        OkxDemoCanaryPreparationService(
+            db_session, now_provider=lambda: NOW
+        ).prepare_fresh_execution_only(idempotency_key="fresh-entry-2")
+    with pytest.raises(OkxDemoCanaryPreparationWaiting) as replay:
+        OkxDemoCanaryPreparationService(
+            db_session, now_provider=lambda: NOW
+        ).prepare_fresh_execution_only(idempotency_key="fresh-entry-1")
+    assert replay.value.job_id == fresh.id
+
+
+def test_fresh_entry_runtime_handoff_persists_only_execution_lineage(db_session):
+    legacy = _blocked_attestation_job(
+        db_session,
+        key="legacy-runtime-entry",
+        request_payload={
+            "provenance": CANARY_PROVENANCE,
+            "execution_target": "OKX_DEMO",
+            "instrument_id": "BTC-USDT-SWAP",
+            "timeframe": "1m",
+            "candle_limit": 2,
+            "non_production": True,
+        },
+    )
+    terminal = _blocked_attestation_job(
+        db_session,
+        key="terminal-runtime-entry",
+        evidence={
+            "provenance": CANARY_PROVENANCE,
+            "attestation_error": {
+                "error_type": "OkxReadAdapterError",
+                "kind": "INVALID_SIGNAL_BUNDLE",
+                "status": "BLOCKED",
+                "retryable": False,
+            },
+        },
+    )
+    service = OkxDemoCanaryPreparationService(db_session, now_provider=lambda: NOW)
+    with pytest.raises(OkxDemoCanaryPreparationWaiting) as waiting:
+        service.prepare_fresh_execution_only(idempotency_key="fresh-runtime-entry")
+    job = db_session.get(ResearchJob, waiting.value.job_id)
+
+    class Reference:
+        def __init__(self, database_id, snapshot_id, digest):
+            self.database_id = database_id
+            self.snapshot_id = snapshot_id
+            self.digest = digest
+
+    class Bundle:
+        observed_at = NOW
+        expires_at = NOW + timedelta(seconds=30)
+        instrument = Reference(1, "instrument-fresh", "c" * 64)
+        market = Reference(2, "market-fresh", "d" * 64)
+        account = Reference(3, "account-fresh", "e" * 64)
+
+    class RuntimeRead:
+        def capture_execution_attestation(self, db, *, inst_id):
+            assert inst_id == "BTC-USDT-SWAP"
+            return Bundle()
+
+    assert process_pending_canary_attestation(
+        read_client=RuntimeRead(), db=db_session, now=NOW
+    ) is True
+    db_session.commit()
+    db_session.refresh(job)
+    assert job.status == "SUCCESS"
+    assert job.stage == "CANARY_SNAPSHOTS_READY"
+    assert job.evidence_snapshot["entry_kind"] == "FRESH_EXECUTION_ONLY"
+    assert job.evidence_snapshot["supersedes_job_ids"] == [legacy.id, terminal.id]
+    assert "candle" not in str(job.evidence_snapshot).lower()
+
+
+def test_fresh_execution_only_entry_finalization_retains_lineage_metadata(
+    db_session, monkeypatch
+):
+    monkeypatch.setenv("FREQTRADE_AI_EXECUTION_TARGET", "OKX_DEMO")
+    monkeypatch.setenv("FREQTRADE_AI_SIMULATED_TRADING", "true")
+    monkeypatch.setenv("FREQTRADE_AI_ALLOW_REAL_FUNDS", "false")
+    legacy = _blocked_attestation_job(
+        db_session,
+        key="legacy-signal-entry-2",
+        request_payload={
+            "provenance": CANARY_PROVENANCE,
+            "execution_target": "OKX_DEMO",
+            "instrument_id": "BTC-USDT-SWAP",
+            "timeframe": "5m",
+            "candle_limit": 2,
+            "non_production": True,
+        },
+    )
+    terminal = _blocked_attestation_job(
+        db_session,
+        key="terminal-execution-entry-2",
+        evidence={
+            "provenance": CANARY_PROVENANCE,
+            "attestation_error": {
+                "error_type": "OkxReadAdapterError",
+                "kind": "INVALID_SIGNAL_BUNDLE",
+                "status": "BLOCKED",
+                "retryable": False,
+            },
+        },
+    )
+    snapshots = _seed_attested_snapshots(db_session)
+    _patch_lineage_dependencies(monkeypatch, snapshots)
+    service = OkxDemoCanaryPreparationService(
+        db_session, now_provider=lambda: NOW
+    )
+    with pytest.raises(OkxDemoCanaryPreparationWaiting) as waiting:
+        service.prepare_fresh_execution_only(idempotency_key="fresh-entry-finalize")
+    handoff = db_session.get(ResearchJob, waiting.value.job_id)
+    handoff.status = "SUCCESS"
+    handoff.stage = "CANARY_SNAPSHOTS_READY"
+    handoff.attempt_count = 1
+    handoff.completed_at = NOW
+    handoff.evidence_snapshot = {
+        "provenance": CANARY_PROVENANCE,
+        "entry_kind": "FRESH_EXECUTION_ONLY",
+        "supersedes_job_ids": [legacy.id, terminal.id],
+    }
+    db_session.commit()
+
+    result = service.prepare_fresh_execution_only(idempotency_key="fresh-entry-finalize")
+    assert result.entry_kind == "FRESH_EXECUTION_ONLY"
+    assert result.supersedes_job_ids == (legacy.id, terminal.id)
+    prepared = db_session.get(ResearchJob, handoff.id)
+    assert prepared.request_payload["entry_kind"] == "FRESH_EXECUTION_ONLY"
+    assert prepared.request_payload["supersedes_job_ids"] == [legacy.id, terminal.id]
+    assert db_session.get(ResearchJob, legacy.id).status == "BLOCKED"
+    assert db_session.get(ResearchJob, terminal.id).status == "BLOCKED"
+    monkeypatch.setattr(
+        service,
+        "_reconciliation_run_id_for_approval",
+        lambda _approval_id: 1,
+    )
+    replay = service.prepare_fresh_execution_only(idempotency_key="fresh-entry-finalize")
+    assert replay.trade_intent_id == result.trade_intent_id
+    assert replay.research_job_id == result.research_job_id
+
+
+def test_fresh_execution_only_entry_rejects_non_demo_manifest(db_session, monkeypatch):
+    class Target:
+        simulated_trading = True
+        allow_real_funds = False
+        order_submission_enabled = False
+
+    class Manifest:
+        active_target_id = "OKX_LIVE"
+        active_target = Target()
+
+    monkeypatch.setattr(
+        "app.services.okx_demo_canary_preparation.get_settings",
+        lambda: type("Settings", (), {"execution_target_manifest": Manifest()})(),
+    )
+    with pytest.raises(OkxDemoCanaryPreparationBlocked, match="OKX_DEMO"):
+        OkxDemoCanaryPreparationService(
+            db_session, now_provider=lambda: NOW
+        ).prepare_fresh_execution_only(idempotency_key="fresh-non-demo")
+
+
+def test_fresh_entry_rejects_unknown_terminal_error_without_new_job(db_session):
+    _blocked_attestation_job(
+        db_session,
+        key="unknown-terminal-entry",
+        evidence={
+            "provenance": CANARY_PROVENANCE,
+            "attestation_error": {
+                "error_type": "OkxReadAdapterError",
+                "kind": "UNAUTHORIZED",
+                "status": "BLOCKED",
+                "retryable": False,
+            },
+        },
+    )
+    with pytest.raises(OkxDemoCanaryPreparationBlocked, match="idempotency boundary"):
+        OkxDemoCanaryPreparationService(
+            db_session, now_provider=lambda: NOW
+        ).prepare_fresh_execution_only(idempotency_key="fresh-unknown-terminal")
+    assert db_session.query(ResearchJob).filter_by(operation=CANARY_OPERATION).count() == 1
+
+
+def test_fresh_entry_requires_immutable_terminal_history(db_session):
+    with pytest.raises(OkxDemoCanaryPreparationBlocked, match="immutable terminal"):
+        OkxDemoCanaryPreparationService(
+            db_session, now_provider=lambda: NOW
+        ).prepare_fresh_execution_only(idempotency_key="fresh-without-history")
+    assert db_session.query(ResearchJob).filter_by(operation=CANARY_OPERATION).count() == 0
+
+
+def test_fresh_entry_preflight_rejects_active_grant_before_runtime_handoff(db_session):
+    db_session.add(
+        OkxDemoSubmissionGrant(
+            grant_id="a" * 32,
+            execution_target_id="OKX_DEMO",
+            approval_id=9001,
+            reconciliation_run_id=9002,
+            canonical_hash="b" * 64,
+            policy_digest="c" * 64,
+            approved_payload_hash="d" * 64,
+            client_order_id="ACTIVEGRANT001",
+            instrument_id="BTC-USDT-SWAP",
+            canary_quantity=Decimal("1"),
+            canary_notional=Decimal("1"),
+            request_digest="e" * 64,
+            provenance=CANARY_PROVENANCE,
+            status="ACTIVE",
+            issued_at=NOW - timedelta(seconds=1),
+            expires_at=NOW + timedelta(seconds=10),
+        )
+    )
+    db_session.commit()
+    with pytest.raises(OkxDemoCanaryPreparationBlocked, match="grant"):
+        OkxDemoCanaryPreparationService(
+            db_session, now_provider=lambda: NOW
+        ).prepare_fresh_execution_only(idempotency_key="fresh-active-grant")
+    assert db_session.query(ResearchJob).filter_by(operation=CANARY_OPERATION).count() == 0
+
+
+def test_fresh_entry_preflight_rejects_existing_canary_trade_intent(db_session):
+    db_session.add(
+        TradeIntent(
+            execution_target_id="OKX_DEMO",
+            authorization_schema_version="RISK_V1",
+            intent_id="f" * 64,
+            canonical_hash="1" * 64,
+            policy_digest="2" * 64,
+            approved_payload_hash="3" * 64,
+            idempotency_key_digest="4" * 64,
+            client_order_id="PRIORCANARY001",
+            instrument_id="BTC-USDT-SWAP",
+            side="buy",
+            position_side="long",
+            order_type="limit",
+            quantity=Decimal("1"),
+            limit_price=Decimal("100"),
+            reference_price=Decimal("100"),
+            leverage=Decimal("1"),
+            margin_mode="isolated",
+            stop_loss=Decimal("95"),
+            take_profit=Decimal("105"),
+            reduce_only=False,
+            status="APPROVED",
+            request_snapshot={"provenance": CANARY_PROVENANCE},
+            expires_at=NOW + timedelta(seconds=10),
+        )
+    )
+    db_session.commit()
+    with pytest.raises(OkxDemoCanaryPreparationBlocked, match="prior controlled canary"):
+        OkxDemoCanaryPreparationService(
+            db_session, now_provider=lambda: NOW
+        ).prepare_fresh_execution_only(idempotency_key="fresh-prior-intent")
+    assert db_session.query(ResearchJob).filter_by(operation=CANARY_OPERATION).count() == 0
 
 
 def _seed_attested_snapshots(db_session):
