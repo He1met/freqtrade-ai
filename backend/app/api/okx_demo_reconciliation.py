@@ -268,7 +268,7 @@ def refresh_fresh_execution_only_canary(
                 "operation_status": "WAITING_FOR_RUNTIME_ATTESTATION",
                 "execution_target_id": "OKX_DEMO",
                 "provenance": "CONTROLLED_CANARY_NON_PRODUCTION",
-                "entry_kind": "FRESH_EXECUTION_ONLY_REFRESH",
+                "entry_kind": exc.entry_kind or "FRESH_EXECUTION_ONLY_REFRESH",
                 "non_production": True,
                 "attestation_request_job_id": exc.job_id,
                 "supersedes_job_ids": list(exc.supersedes_job_ids),
@@ -283,7 +283,7 @@ def refresh_fresh_execution_only_canary(
                 detail={"operation_status": "BLOCKED", "message": str(exc)},
             ) from exc
         response = _canary_preparation_response(result)
-        response["entry_kind"] = "FRESH_EXECUTION_ONLY_REFRESH"
+        response["entry_kind"] = result.entry_kind or "FRESH_EXECUTION_ONLY_REFRESH"
         return response
 
     return operator_request_coordinator.execute(

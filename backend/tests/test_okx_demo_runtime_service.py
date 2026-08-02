@@ -320,6 +320,77 @@ def test_runtime_orders_reconciliation_before_writer_and_keeps_drift_alive(
     assert db.rollbacks == 0
 
 
+def test_runtime_releases_coordination_window_after_canary_attestation(
+    monkeypatch,
+    tmp_path: Path,
+):
+    events = []
+    adapter = FakeAdapter()
+    server = FakeServerSession(events)
+    db = FakeDatabaseSession()
+    readiness = []
+    connection = SimpleNamespace(close=lambda: events.append("connection-closed"))
+    engine = SimpleNamespace(
+        connect=lambda: connection,
+        dispose=lambda: events.append("engine-disposed"),
+    )
+    canary_calls = []
+    monkeypatch.setattr(runtime_service, "STOP_EVENT", FakeStopEvent())
+    monkeypatch.setattr(runtime_service, "Session", lambda bind: db)
+    monkeypatch.setattr(
+        runtime_service,
+        "acquire_one_shot_runtime_lock",
+        lambda _db: (adapter.events.append("coordination-lock") or True),
+    )
+    monkeypatch.setattr(
+        runtime_service,
+        "process_pending_canary_attestation",
+        lambda **_kwargs: (canary_calls.append("attest") or True),
+    )
+    monkeypatch.setattr(
+        runtime_service,
+        "release_one_shot_runtime_lock",
+        lambda _db: (adapter.events.append("coordination-unlock") or True),
+    )
+    monkeypatch.setattr(
+        runtime_service,
+        "create_okx_demo_server_session",
+        lambda _environment, lock_path: (
+            events.append(("session-created", lock_path)) or server
+        ),
+    )
+    monkeypatch.setattr(
+        runtime_service,
+        "_write_readiness",
+        lambda _path, payload: readiness.append(dict(payload)),
+    )
+
+    runtime_service.serve(
+        environment={"DATABASE_URL": "postgresql+psycopg:///freqtrade_ai"},
+        runtime_path=tmp_path,
+        reconciliation_factory=lambda: adapter,
+        engine_factory=lambda *_args, **_kwargs: engine,
+        now_provider=lambda: NOW,
+    )
+
+    assert canary_calls == ["attest"]
+    assert adapter.events == [
+        "startup-reconcile",
+        "coordination-lock",
+        "coordination-unlock",
+    ]
+    assert "one-shot-check" not in adapter.events
+    assert "observe" not in adapter.events
+    assert not any(
+        isinstance(event, tuple) and event[0] == "cycle"
+        for event in adapter.events
+    )
+    # One commit persists the attestation and one completes the unlock query;
+    # the next polling turn then exits without a long reconciliation cycle.
+    assert db.commits == 3
+    assert db.rollbacks == 0
+
+
 def test_runtime_cleanup_does_not_mask_primary_failure(
     monkeypatch,
     tmp_path: Path,

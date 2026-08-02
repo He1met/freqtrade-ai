@@ -28,6 +28,7 @@ from app.services.okx_demo_canary_preparation import (
     CANARY_OPERATION,
     FRESH_EXECUTION_ONLY_ENTRY,
     FRESH_EXECUTION_ONLY_REFRESH,
+    FRESH_EXECUTION_ONLY_REFRESH_RETRY,
     OkxDemoCanaryPreparationBlocked,
     OkxDemoCanaryPreparationService,
     OkxDemoCanaryPreparationWaiting,
@@ -821,6 +822,133 @@ def test_refresh_rejects_second_key_pending_and_unsafe_activity(db_session, monk
             idempotency_key="fresh-refresh-unsafe-1"
         )
     assert db_session.get(ResearchJob, source.id).status == "SUCCESS"
+
+
+def _successful_refresh_successor(
+    db_session,
+    source: ResearchJob,
+    *,
+    entry_kind: str = FRESH_EXECUTION_ONLY_REFRESH,
+    key: str = "successful-refresh",
+    expires_at: datetime = NOW - timedelta(seconds=1),
+):
+    source_payload = dict(source.request_payload)
+    supersedes = list(source_payload["supersedes_job_ids"]) + [source.id]
+    payload = {
+        "provenance": CANARY_PROVENANCE,
+        "execution_target": "OKX_DEMO",
+        "instrument_id": "BTC-USDT-SWAP",
+        "bundle_kind": "EXECUTION_ONLY",
+        "non_production": True,
+        "entry_kind": entry_kind,
+        "refresh_of_job_id": source.id,
+        "supersedes_job_ids": supersedes,
+    }
+    evidence = {
+        "provenance": CANARY_PROVENANCE,
+        "non_production": True,
+        "entry_kind": entry_kind,
+        "refresh_of_job_id": source.id,
+        "supersedes_job_ids": supersedes,
+        "snapshot_evidence": {
+            kind: {
+                "snapshot_id": "stale-{}".format(kind),
+                "digest": str(index) * 64,
+                "expires_at": expires_at.isoformat(),
+            }
+            for index, kind in enumerate(("instrument", "market", "account"), start=1)
+        },
+    }
+    job = ResearchJob(
+        execution_scope_id="LOCAL_DRY_RUN",
+        job_type="okx_demo_controlled_canary",
+        operation=CANARY_OPERATION,
+        idempotency_key_digest=hashlib.sha256(key.encode()).hexdigest(),
+        request_hash="b" * 64,
+        request_payload=payload,
+        status="SUCCESS",
+        stage="CANARY_SNAPSHOTS_READY",
+        attempt_count=1,
+        max_attempts=1,
+        evidence_snapshot=evidence,
+        started_at=NOW,
+        completed_at=NOW,
+    )
+    db_session.add(job)
+    db_session.commit()
+    return job
+
+
+def test_refresh_allows_one_bounded_retry_from_stale_successor(
+    db_session, monkeypatch
+):
+    monkeypatch.setenv("FREQTRADE_AI_EXECUTION_TARGET", "OKX_DEMO")
+    monkeypatch.setenv("FREQTRADE_AI_SIMULATED_TRADING", "true")
+    monkeypatch.setenv("FREQTRADE_AI_ALLOW_REAL_FUNDS", "false")
+    source = _successful_fresh_source(db_session)
+    stale_refresh = _successful_refresh_successor(db_session, source)
+
+    with pytest.raises(OkxDemoCanaryPreparationWaiting) as waiting:
+        OkxDemoCanaryPreparationService(
+            db_session, now_provider=lambda: NOW
+        ).prepare_fresh_execution_only_refresh(
+            idempotency_key="fresh-refresh-retry-1"
+        )
+
+    retry = db_session.get(ResearchJob, waiting.value.job_id)
+    assert retry is not None
+    assert retry.request_payload["entry_kind"] == FRESH_EXECUTION_ONLY_REFRESH_RETRY
+    assert retry.request_payload["refresh_of_job_id"] == stale_refresh.id
+    assert retry.request_payload["supersedes_job_ids"] == [
+        *source.request_payload["supersedes_job_ids"],
+        source.id,
+        stale_refresh.id,
+    ]
+    assert db_session.get(ResearchJob, source.id).status == "SUCCESS"
+    assert db_session.get(ResearchJob, stale_refresh.id).status == "SUCCESS"
+
+
+def test_refresh_retry_cap_rejects_third_successor_and_missing_expiry(
+    db_session, monkeypatch
+):
+    monkeypatch.setenv("FREQTRADE_AI_EXECUTION_TARGET", "OKX_DEMO")
+    monkeypatch.setenv("FREQTRADE_AI_SIMULATED_TRADING", "true")
+    monkeypatch.setenv("FREQTRADE_AI_ALLOW_REAL_FUNDS", "false")
+    source = _successful_fresh_source(db_session)
+    first = _successful_refresh_successor(db_session, source)
+    second = _successful_refresh_successor(
+        db_session,
+        first,
+        entry_kind=FRESH_EXECUTION_ONLY_REFRESH_RETRY,
+        key="successful-refresh-retry",
+    )
+    with pytest.raises(OkxDemoCanaryPreparationBlocked, match="limit reached"):
+        OkxDemoCanaryPreparationService(
+            db_session, now_provider=lambda: NOW
+        ).prepare_fresh_execution_only_refresh(
+            idempotency_key="fresh-refresh-retry-3"
+        )
+    assert db_session.get(ResearchJob, first.id).status == "SUCCESS"
+    assert db_session.get(ResearchJob, second.id).status == "SUCCESS"
+
+    # A successful refresh without explicit expiry evidence cannot be used as
+    # a source for another attempt; missing evidence is not treated as stale.
+    db_session.delete(second)
+    db_session.commit()
+    first.evidence_snapshot = {
+        **first.evidence_snapshot,
+        "snapshot_evidence": {
+            kind: {"snapshot_id": "missing-expiry", "digest": "d" * 64}
+            for kind in ("instrument", "market", "account")
+        },
+    }
+    db_session.commit()
+    with pytest.raises(OkxDemoCanaryPreparationBlocked, match="expiry evidence"):
+        OkxDemoCanaryPreparationService(
+            db_session, now_provider=lambda: NOW
+        ).prepare_fresh_execution_only_refresh(
+            idempotency_key="fresh-refresh-retry-missing-expiry"
+        )
 
 
 def test_refresh_rejects_source_without_non_production_marker(db_session, monkeypatch):

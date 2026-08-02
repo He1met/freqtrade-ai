@@ -73,13 +73,27 @@ retry successor 失败后也不会继续链式重试。
 `EXECUTION_ONLY`（不读 candles/strategy/signal）快照；operator 用同一 refresh
 key 重放该入口以完成 finalize。原 job 的 status、request_hash、request_payload
 和 evidence 永远不变；pending/未知/重复 refresh、非 Demo manifest、active
-grant、任何 writer 或订单状态均 fail-closed。
+ grant、任何 writer 或订单状态均 fail-closed。
+
+若该 refresh successor 自身也在 finalization 前过期，允许且仅允许一次额外的
+有界重试 successor：新的 request 使用
+`entry_kind=FRESH_EXECUTION_ONLY_REFRESH_RETRY`，`refresh_of_job_id` 指向过期
+refresh job，并继承完整 `supersedes_job_ids` lineage。只有原 refresh evidence
+明确包含 instrument/market/account 的过期时间才可创建该 successor；缺失或仍然
+新鲜的 expiry 证据直接 fail-closed。达到两个 refresh successors 后不再创建新
+job，所有旧 job 与 evidence 保持不可变，避免无限 refresh 链。
 
 该入口仍固定 `OKX_DEMO`、`simulated_trading=true`、`allow_real_funds=false`、
 `order_submission_enabled=false`、`BTC-USDT-SWAP` 交易所最小合法数量及不超过
 20 USDT 的 notional。grant 原子消费、超时/撤单/必要时 reduce-only 清理、终态
 对账、许可撤销和重启不重复下单均必须有真实证据；它不能批准、部署或代表
 任何 DeepSeek/社区策略候选。
+
+runtime 在成功持久化任一待处理的 execution-only attestation 后，会先提交并
+释放 one-shot coordination advisory lock，再跳过该轮长的 observe/network cycle。
+下一轮仍由同一个 runtime/writer 恢复常规 reconciliation；这只缩短 operator
+finalize 的锁等待，不改变快照 freshness、OKX_DEMO、全局 submission=false 或
+策略风险门。
 
 ## Historical lifecycle (offline evidence only)
 
