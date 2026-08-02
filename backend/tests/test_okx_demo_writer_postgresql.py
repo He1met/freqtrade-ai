@@ -2,8 +2,10 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import hashlib
+import importlib.util
 import json
 import os
+from pathlib import Path
 from threading import Barrier
 import time
 from types import SimpleNamespace
@@ -17,7 +19,8 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.adapters.okx_demo.write_semantics import OkxDemoWriteBlocked
-from app.adapters.okx_demo.models import InstrumentSpec
+from app.adapters.okx_demo.models import InstrumentSpec, OkxReadSnapshot, SnapshotMetadata
+from app.adapters.okx_demo.order_writer import OkxDemoOrderWriter
 from app.adapters.okx_demo.writer_models import (
     OrderSubmissionAuthorization,
     normalize_order_command,
@@ -30,6 +33,7 @@ from app.adapters.okx_demo.reconciliation_runtime import (
 from app.db.migrations import (
     CANARY_LINEAGE_WRITE_BASE_VERSION,
     CANARY_FINAL_EXPIRY_BASE_VERSION,
+    CANARY_LIFECYCLE_BASE_VERSION,
     FULL_CHAIN_BASE_VERSION,
     ORDER_WRITER_BASE_VERSION,
     RECONCILIATION_BASE_VERSION,
@@ -37,11 +41,17 @@ from app.db.migrations import (
     RUNTIME_APP_ACL_BASE_VERSION,
     RUNTIME_APPLICATION_TABLES,
     SCHEMA_VERSION,
+    OPERATOR_TOKEN_ENV,
     SOAK_BASE_VERSION,
     SchemaMigrationBlocked,
     VERSION_TABLE,
     _add_order_writer,
+    _add_canary_consent_handoff_boundary,
     schema_problems,
+    harden_operator_consent_access_boundary,
+    harden_attestation_access_boundary,
+    revoke_operator_consents_for_key_hardening,
+    revoke_attested_sessions_for_key_hardening,
     upgrade_database,
     verify_connection_schema,
     verify_schema,
@@ -58,6 +68,7 @@ from app.models.execution_lineage import (
 )
 from app.models.full_chain import FullChainRun, FullChainStageRun
 from app.models.order_writer import (
+    OkxDemoCanaryConsentHandoff,
     OkxDemoCanaryLifecycle,
     OkxDemoSubmissionGrant,
     OkxOrderWriteAttempt,
@@ -87,12 +98,17 @@ from app.services.okx_demo_reconciliation import (
 from app.services.okx_demo_canary_preparation import (
     CANARY_OPERATION,
     OkxDemoCanaryPreparationService,
+    process_pending_canary_consent_handoff,
 )
 from app.services.okx_demo_submission_grant import (
     acquire_one_shot_runtime_lock,
+    arm_finalized_canary_consent,
     CANARY_PROVENANCE,
+    fail_canary_grant_before_prepare,
     OkxDemoSubmissionGrantService,
+    OkxDemoSubmissionGrantBlocked,
     release_one_shot_runtime_lock,
+    revoke_restarted_canary_grant,
     require_canary_reconciliation,
     submission_grant_request_digest,
     try_one_shot_transaction_lock,
@@ -102,6 +118,14 @@ from app.services.okx_demo_submission_grant import (
 # PostgreSQL attestation functions validate against statement_timestamp();
 # keep integration evidence fresh instead of coupling the suite to one date.
 NOW = datetime.now(timezone.utc).replace(microsecond=0)
+
+BACKUP_SCRIPT_PATH = Path(__file__).resolve().parents[2] / "scripts" / "postgres_backup.py"
+BACKUP_SPEC = importlib.util.spec_from_file_location(
+    "postgres_backup_pg_integration", BACKUP_SCRIPT_PATH
+)
+assert BACKUP_SPEC is not None and BACKUP_SPEC.loader is not None
+postgres_backup = importlib.util.module_from_spec(BACKUP_SPEC)
+BACKUP_SPEC.loader.exec_module(postgres_backup)
 
 
 def _canonical_json(value) -> str:
@@ -116,6 +140,7 @@ def _seed_canary_lineage_boundary(
     now: datetime,
     content_mutation: Optional[tuple[str, str, object]] = None,
     reconciliation_mutation: Optional[tuple[str, object]] = None,
+    snapshot_ttl_seconds: int = 30,
 ):
     ensure_execution_scope_catalog(session)
     capability = _issue_attested_session_capability(
@@ -160,7 +185,9 @@ def _seed_canary_lineage_boundary(
         },
     }
     for content in contents.values():
-        content["expires_at"] = (now + timedelta(seconds=30)).isoformat()
+        content["expires_at"] = (
+            now + timedelta(seconds=snapshot_ttl_seconds)
+        ).isoformat()
     if content_mutation is not None:
         kind, field, value = content_mutation
         if field == "bbo.ask_price":
@@ -179,7 +206,7 @@ def _seed_canary_lineage_boundary(
             kind=kind,
             content=content,
             observed_at=now,
-            expires_at=now + timedelta(seconds=30),
+            expires_at=now + timedelta(seconds=snapshot_ttl_seconds),
         )
         snapshots[kind] = _write_attested_snapshot(
             session, capability, normalized, now=now
@@ -234,6 +261,53 @@ def _seed_canary_lineage_boundary(
         "expires_at": now + timedelta(seconds=8),
     }
     return snapshots, run.id, order
+
+
+def _capture_runtime_attested_bundle(
+    session: Session,
+    *,
+    capability,
+    observed_at: datetime,
+    ttl_seconds: int = 30,
+):
+    contents = {
+        "instrument": {
+            "execution_target": "OKX_DEMO", "source": "okx_demo_rest",
+            "resource": "instrument", "stale": False,
+            "instId": "BTC-USDT-SWAP", "minSz": "1", "lotSz": "1",
+            "ctVal": "0.0001", "ctValCcy": "BTC", "tickSz": "0.1",
+            "state": "live", "contract_shape": "linear",
+        },
+        "market": {
+            "execution_target": "OKX_DEMO", "source": "okx_demo_rest",
+            "resource": "market", "stale": False,
+            "instrument_id": "BTC-USDT-SWAP", "reference_price": "57000",
+            "bbo": {"bid_price": "57000", "ask_price": "57000"},
+            "mark": {"price": "57000"}, "as_of": observed_at.isoformat(),
+        },
+        "account": {
+            "execution_target": "OKX_DEMO", "source": "okx_demo_rest",
+            "resource": "account", "stale": False, "authenticated": True,
+            "leverage_by_position_side": {"long": "1", "short": "1"},
+        },
+    }
+    expires_at = observed_at + timedelta(seconds=ttl_seconds)
+    for content in contents.values():
+        content["expires_at"] = expires_at.isoformat()
+    rows = {}
+    for kind, content in contents.items():
+        normalized = _normalize_attested_snapshot(
+            capability,
+            kind=kind,
+            content=content,
+            observed_at=observed_at,
+            expires_at=expires_at,
+        )
+        rows[kind] = _write_attested_snapshot(
+            session, capability, normalized, now=observed_at
+        )
+    session.flush()
+    return SimpleNamespace(**rows)
 
 
 def _canary_function_payload(
@@ -689,6 +763,89 @@ def _seed_approved_order(
     return approval.id, order.id if order is not None else 0
 
 
+def _bind_legal_consent_handoff_fixture(
+    session: Session,
+    grant: OkxDemoSubmissionGrant,
+    *,
+    now: datetime,
+) -> None:
+    """Give legacy lifecycle fixtures the same mandatory v28 grant lineage."""
+
+    source = session.get(ResearchJob, 22)
+    if source is None:
+        source = ResearchJob(
+            id=22,
+            execution_scope_id="LOCAL_DRY_RUN",
+            job_type="controlled_canary_source",
+            operation=CANARY_OPERATION,
+            idempotency_key_digest=canonical_digest({"source": grant.grant_id}),
+            request_hash=canonical_digest({"source-request": grant.grant_id}),
+            request_payload={"entry_kind": "FRESH_EXECUTION_ONLY_FINAL_EXPIRY_RECOVERY"},
+            status="SUCCESS",
+            stage="CANARY_SNAPSHOTS_READY",
+            attempt_count=1,
+            max_attempts=1,
+            evidence_snapshot={"provenance": CANARY_PROVENANCE},
+            started_at=now - timedelta(seconds=2),
+            completed_at=now - timedelta(seconds=1),
+            created_at=now - timedelta(seconds=2),
+        )
+        session.add(source)
+        session.flush()
+    audit = ResearchJob(
+        execution_scope_id="LOCAL_DRY_RUN",
+        job_type="controlled_canary_consent_audit",
+        operation="okx_demo_canary_consent_execution_audit",
+        idempotency_key_digest=canonical_digest({"audit": grant.grant_id}),
+        request_hash=canonical_digest({"audit-request": grant.grant_id}),
+        request_payload={},
+        status="SUCCESS",
+        stage="CONSENT_FINALIZED",
+        attempt_count=1,
+        max_attempts=1,
+        evidence_snapshot={"provenance": CANARY_PROVENANCE},
+        started_at=now - timedelta(seconds=1),
+        completed_at=now,
+        created_at=now - timedelta(seconds=1),
+    )
+    session.add(audit)
+    session.flush()
+    handoff_status = {
+        "ACTIVE": "GRANT_ISSUED",
+        "CONSUMED": "CONSUMED",
+        "FAILED": "FAILED",
+        "EXPIRED": "EXPIRED",
+    }[grant.status]
+    handoff_id = uuid4().hex
+    grant.handoff_id = handoff_id
+    session.add(OkxDemoCanaryConsentHandoff(
+        handoff_id=handoff_id,
+        execution_target_id="OKX_DEMO",
+        source_job_id=22,
+        source_ancestry=list(range(15, 23)),
+        source_fingerprint=canonical_digest({"fingerprint": grant.grant_id}),
+        idempotency_key_digest=canonical_digest({"handoff": grant.grant_id}),
+        consent_nonce=canonical_digest({"nonce": grant.grant_id}),
+        consent_payload_digest=canonical_digest({"payload": grant.grant_id}),
+        consent_digest=canonical_digest({"consent": grant.grant_id}),
+        provenance=CANARY_PROVENANCE,
+        instrument_id=grant.instrument_id,
+        max_notional=Decimal("20"),
+        status=handoff_status,
+        runtime_instance_id="FixtureRuntime627",
+        reconciliation_run_id=grant.reconciliation_run_id,
+        snapshot_binding={},
+        audit_job_id=audit.id,
+        approval_id=grant.approval_id,
+        grant_id=grant.grant_id,
+        consented_at=now - timedelta(seconds=2),
+        consent_deadline_at=now + timedelta(minutes=1),
+        finalized_at=now - timedelta(seconds=1),
+        created_at=now - timedelta(seconds=2),
+        updated_at=now,
+    ))
+
+
 def _bind_completed_risk_stage(
     session: Session,
     intent: TradeIntent,
@@ -846,6 +1003,116 @@ def test_postgresql_upgrade_25_to_26_installs_canary_lineage_boundary(
     assert verify_schema(postgres_writer_engine).ready is True
 
 
+def test_postgresql_v27_to_v28_preserves_exact_jobs_15_through_22(
+    postgres_writer_engine,
+) -> None:
+    upgrade_database(postgres_writer_engine)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    with Session(postgres_writer_engine) as session:
+        _seed_final_consent_source(session, now=now)
+        legacy_approval_id, _ = _seed_approved_order(
+            session,
+            create_order=False,
+            controlled_canary=True,
+            seed_now=now,
+        )
+        _snapshots, legacy_run_id, _order = _seed_canary_lineage_boundary(
+            session, now=now
+        )
+        legacy_approval = session.get(ApprovedExecution, legacy_approval_id)
+        legacy_identity = {
+            "approval_id": legacy_approval_id,
+            "run_id": legacy_run_id,
+            "canonical_hash": legacy_approval.canonical_hash,
+            "policy_digest": legacy_approval.policy_digest,
+            "payload_hash": legacy_approval.approved_payload_hash,
+            "client_order_id": legacy_approval.client_order_id,
+        }
+        before = session.execute(text(
+            "SELECT id,request_hash,request_payload::jsonb,status,stage,"
+            "evidence_snapshot::jsonb,completed_at FROM research_jobs "
+            "WHERE id BETWEEN 15 AND 22 ORDER BY id"
+        )).all()
+    with postgres_writer_engine.begin() as connection:
+        connection.exec_driver_sql(
+            "DROP TRIGGER IF EXISTS freeze_okx_demo_canary_source ON research_jobs;"
+            "DROP TRIGGER IF EXISTS require_okx_demo_grant_handoff "
+            "ON okx_demo_submission_grants;"
+            "DROP FUNCTION IF EXISTS request_okx_demo_canary_consent(text,text,text,text) CASCADE;"
+            "DROP FUNCTION IF EXISTS pending_okx_demo_canary_consent() CASCADE;"
+            "DROP FUNCTION IF EXISTS claim_okx_demo_canary_consent(text,text,bigint,jsonb) CASCADE;"
+            "DROP FUNCTION IF EXISTS finalize_okx_demo_canary_consent(text,text,bigint,bigint,bigint,bigint,jsonb) CASCADE;"
+            "DROP FUNCTION IF EXISTS finalized_okx_demo_canary_consent(text) CASCADE;"
+            "DROP FUNCTION IF EXISTS issue_okx_demo_submission_grant(jsonb) CASCADE;"
+            "DROP FUNCTION IF EXISTS revoke_restarted_okx_demo_canary_grant(text,text) CASCADE;"
+            "DROP FUNCTION IF EXISTS fail_okx_demo_canary_grant_before_prepare(text) CASCADE;"
+            "DROP FUNCTION IF EXISTS settle_okx_demo_canary_handoff(text) CASCADE;"
+            "DROP FUNCTION IF EXISTS expire_okx_demo_canary_approval(bigint,text) CASCADE;"
+            "DROP FUNCTION IF EXISTS revoke_all_okx_demo_canary_consents_for_hardening() CASCADE;"
+            "DROP FUNCTION IF EXISTS canonical_jsonb_text(jsonb) CASCADE;"
+            "DROP FUNCTION IF EXISTS canonical_decimal_text(numeric) CASCADE;"
+            "DROP FUNCTION IF EXISTS freeze_okx_demo_canary_source() CASCADE;"
+            "DROP FUNCTION IF EXISTS require_okx_demo_grant_handoff() CASCADE;"
+            "ALTER TABLE okx_demo_submission_grants DROP COLUMN IF EXISTS handoff_id;"
+            "DROP TABLE IF EXISTS okx_demo_canary_consent_handoffs CASCADE;"
+            "DROP TABLE IF EXISTS okx_demo_operator_consent_secrets CASCADE"
+        )
+        connection.execute(text("DELETE FROM freqtrade_ai_schema_migrations"))
+        connection.execute(text(
+            "INSERT INTO freqtrade_ai_schema_migrations(version) VALUES(:version)"
+        ), {"version": CANARY_LIFECYCLE_BASE_VERSION})
+        connection.execute(text(
+            "INSERT INTO okx_demo_submission_grants("
+            "grant_id,execution_target_id,approval_id,reconciliation_run_id,"
+            "canonical_hash,policy_digest,approved_payload_hash,client_order_id,"
+            "instrument_id,canary_quantity,canary_notional,request_digest,"
+            "provenance,status,issued_at,expires_at) VALUES("
+            "'62700000000000000000000000000000','OKX_DEMO',:approval_id,:run_id,"
+            ":canonical_hash,:policy_digest,:payload_hash,:client_order_id,"
+            "'BTC-USDT-SWAP',1,5.7,:request_digest,:provenance,'ACTIVE',:issued,:expires)"
+        ), {
+            **legacy_identity,
+            "request_digest": "6" * 64,
+            "provenance": CANARY_PROVENANCE,
+            "issued": now,
+            "expires": now + timedelta(minutes=1),
+        })
+        connection.execute(text(
+            "INSERT INTO research_jobs(id,execution_scope_id,job_type,operation,"
+            "idempotency_key_digest,request_hash,request_payload,status,stage,"
+            "attempt_count,max_attempts,cancel_requested,evidence_snapshot,created_at) "
+            "SELECT 23,execution_scope_id,job_type,operation,:digest,request_hash,"
+            "'{}'::jsonb,'PENDING',stage,attempt_count,max_attempts,FALSE,"
+            "evidence_snapshot,created_at FROM research_jobs WHERE id=22"
+        ), {"digest": "5" * 64})
+    with pytest.raises(
+        SchemaMigrationBlocked,
+        match="refuses existing successor canary source job 23",
+    ):
+        upgrade_database(postgres_writer_engine)
+    with postgres_writer_engine.begin() as connection:
+        assert connection.execute(text(
+            "SELECT status FROM okx_demo_submission_grants "
+            "WHERE grant_id='62700000000000000000000000000000'"
+        )).scalar_one() == "ACTIVE"
+        connection.execute(text("DELETE FROM research_jobs WHERE id=23"))
+    assert upgrade_database(postgres_writer_engine) == SCHEMA_VERSION
+    with Session(postgres_writer_engine) as session:
+        after = session.execute(text(
+            "SELECT id,request_hash,request_payload::jsonb,status,stage,"
+            "evidence_snapshot::jsonb,completed_at FROM research_jobs "
+            "WHERE id BETWEEN 15 AND 22 ORDER BY id"
+        )).all()
+        assert after == before
+        assert len(after) == 8
+        assert session.execute(text(
+            "SELECT status FROM okx_demo_submission_grants "
+            "WHERE grant_id='62700000000000000000000000000000'"
+        )).scalar_one() == "FAILED"
+        assert session.get(ApprovedExecution, legacy_approval_id).status == "EXPIRED"
+    assert verify_schema(postgres_writer_engine).ready is True
+
+
 def test_postgresql_upgrade_26_to_27_installs_canary_lifecycle_boundary(
     postgres_writer_engine,
 ) -> None:
@@ -968,8 +1235,7 @@ def test_postgresql_canary_lifecycle_create_reject_and_unopened_revoke(
         state.last_event_observed_at = now
         state.last_reconciliation_run_id = run.id
         grant_id = uuid4().hex
-        session.add(
-            OkxDemoSubmissionGrant(
+        grant = OkxDemoSubmissionGrant(
                 grant_id=grant_id,
                 execution_target_id="OKX_DEMO",
                 approval_id=approval.id,
@@ -987,7 +1253,8 @@ def test_postgresql_canary_lifecycle_create_reject_and_unopened_revoke(
                 issued_at=now - timedelta(seconds=1),
                 expires_at=now + timedelta(minutes=1),
             )
-        )
+        _bind_legal_consent_handoff_fixture(session, grant, now=now)
+        session.add(grant)
         session.commit()
         run_id = run.id
 
@@ -1324,6 +1591,7 @@ def test_postgresql_canary_recovery_issuer_fences_repeat_and_unresolved_attempt(
             expires_at=now + timedelta(minutes=1),
             consumed_at=now - timedelta(seconds=1),
         )
+        _bind_legal_consent_handoff_fixture(session, grant, now=now)
         session.add(grant)
         session.flush()
         session.add(
@@ -2075,6 +2343,7 @@ def test_postgresql_canary_residual_cleanup_paths(
             status="CONSUMED", issued_at=now - timedelta(seconds=2),
             expires_at=now + timedelta(minutes=1), consumed_at=now - timedelta(seconds=1),
         )
+        _bind_legal_consent_handoff_fixture(session, grant, now=now)
         session.add(grant)
         session.flush()
         session.add(OkxDemoCanaryLifecycle(
@@ -4023,8 +4292,7 @@ def test_postgresql_one_shot_grant_has_one_atomic_journal_winner(
         state.last_event_observed_at = race_now
         state.last_reconciliation_run_id = run.id
         grant_id = uuid4().hex
-        session.add(
-            OkxDemoSubmissionGrant(
+        grant = OkxDemoSubmissionGrant(
                 grant_id=grant_id,
                 execution_target_id="OKX_DEMO",
                 approval_id=approval_id,
@@ -4052,7 +4320,8 @@ def test_postgresql_one_shot_grant_has_one_atomic_journal_winner(
                 issued_at=race_now - timedelta(seconds=1),
                 expires_at=race_now + timedelta(seconds=10),
             )
-        )
+        _bind_legal_consent_handoff_fixture(session, grant, now=race_now)
+        session.add(grant)
         client_order_id = approval.client_order_id
         session.commit()
 
@@ -4282,41 +4551,23 @@ def test_postgresql_runtime_role_can_validate_canary_lineage_without_update_acl(
             for_update=True,
         ).id == run.id
 
-        # The grant arm traverses approved/intent/decision lineage, the state
-        # row, and the run row under the same transaction-scoped advisory lock.
-        # Before #616 the first FOR UPDATE failed here with
-        # InsufficientPrivilege; this call now exercises the real runtime role.
-        grant = OkxDemoSubmissionGrantService(
-            runtime_session,
-            now_provider=lambda: NOW,
-        ).arm(
-            approval_id=approval_id,
-            canonical_hash=approval.canonical_hash,
-            policy_digest=approval.policy_digest,
-            approved_payload_hash=approval.approved_payload_hash,
-            client_order_id=approval.client_order_id,
-        )
-        assert grant.execution_target_id == "OKX_DEMO"
-        assert grant.status == "ACTIVE"
-
-        # The writer's one-shot lineage recheck uses its own advisory writer
-        # key and must likewise avoid FOR UPDATE on the grant table.
-        runtime_session.execute(text("SET LOCAL ROLE freqtrade"))
-        runtime_approval = runtime_session.get(ApprovedExecution, approval_id)
-        writer_store = SqlAlchemyOrderWriterStore(
-            runtime_session,
-            now_provider=lambda: NOW,
-        )
-        writer_store._lock_lease_key()
-        validated = writer_store._validate_one_shot_grant(
-            grant_id=grant.grant_id,
-            approved=runtime_approval,
-            canonical_hash=grant.canonical_hash,
-            policy_digest=grant.policy_digest,
-            approved_payload_hash=grant.approved_payload_hash,
-            now=NOW,
-        )
-        assert validated.grant_id == grant.grant_id
+        # A direct legacy arm is now fail-closed before any grant-table DML;
+        # the finalized handoff path exercises the same SELECT-only lineage
+        # traversal in the v28 integration matrix below.
+        with pytest.raises(
+            OkxDemoSubmissionGrantBlocked,
+            match="require finalized operator consent",
+        ):
+            OkxDemoSubmissionGrantService(
+                runtime_session,
+                now_provider=lambda: NOW,
+            ).arm(
+                approval_id=approval_id,
+                canonical_hash=approval.canonical_hash,
+                policy_digest=approval.policy_digest,
+                approved_payload_hash=approval.approved_payload_hash,
+                client_order_id=approval.client_order_id,
+            )
 
 
 def _postgres_position_event(quantity: str, sequence: int) -> dict:
@@ -4337,6 +4588,1052 @@ def _postgres_position_event(quantity: str, sequence: int) -> dict:
             "avgPx": "50000" if quantity != "0" else "",
         },
     }
+
+
+def _seed_final_consent_source(session: Session, *, now: datetime) -> None:
+    ensure_execution_scope_catalog(session)
+    expired = (now - timedelta(seconds=1)).isoformat()
+    for job_id in range(15, 23):
+        is_source = job_id == 22
+        payload = {
+            "provenance": CANARY_PROVENANCE,
+            "execution_target": "OKX_DEMO",
+            "instrument_id": "BTC-USDT-SWAP",
+            "bundle_kind": "EXECUTION_ONLY",
+            "non_production": True,
+        }
+        if is_source:
+            payload.update(
+                {
+                    "entry_kind": "FRESH_EXECUTION_ONLY_FINAL_EXPIRY_RECOVERY",
+                    "recovery_of_job_id": 21,
+                    "supersedes_job_ids": list(range(15, 22)),
+                    "recovery_boundary": "POST_PERSISTENCE_RECOVERY_SNAPSHOT_EXPIRY",
+                }
+            )
+        session.add(
+            ResearchJob(
+                id=job_id,
+                execution_scope_id="LOCAL_DRY_RUN",
+                job_type="okx_demo_controlled_canary",
+                operation=CANARY_OPERATION,
+                idempotency_key_digest=hashlib.sha256(
+                    "source-{}".format(job_id).encode()
+                ).hexdigest(),
+                request_hash=canonical_digest(payload),
+                request_payload=payload,
+                status="SUCCESS" if is_source else "BLOCKED",
+                stage="CANARY_SNAPSHOTS_READY" if is_source else "CANARY_SNAPSHOT_BLOCKED",
+                attempt_count=1,
+                max_attempts=1,
+                evidence_snapshot=(
+                    {
+                        "provenance": CANARY_PROVENANCE,
+                        "snapshot_evidence": {
+                            kind: {
+                                "snapshot_id": "expired-{}".format(kind),
+                                "digest": hashlib.sha256(kind.encode()).hexdigest(),
+                                "expires_at": expired,
+                            }
+                            for kind in ("instrument", "market", "account")
+                        },
+                    }
+                    if is_source
+                    else {"provenance": CANARY_PROVENANCE}
+                ),
+                started_at=now - timedelta(minutes=1),
+                completed_at=now - timedelta(seconds=2),
+            )
+        )
+    session.commit()
+
+
+def _finalize_and_arm_v28_handoff(engine, monkeypatch, *, key: str):
+    upgrade_database(engine)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    with Session(engine) as admin:
+        _seed_final_consent_source(admin, now=now)
+        _snapshots, run_id, _order = _seed_canary_lineage_boundary(admin, now=now)
+        batch = OkxDemoRecoveryBatch(
+            execution_target_id="OKX_DEMO",
+            recovery_batch_id=uuid4().hex,
+            authenticated=True,
+            pagination_complete=True,
+            complete_streams=["ACCOUNT", "FILL", "ORDER", "POSITION"],
+            high_watermarks={
+                kind: now.isoformat()
+                for kind in ("ACCOUNT", "FILL", "ORDER", "POSITION")
+            },
+            overlap_started_at=now - timedelta(seconds=1),
+            observed_at=now,
+            completed_at=now,
+            event_count=0,
+            evidence_digest="8" * 64,
+        )
+        admin.add(batch)
+        admin.flush()
+        run = admin.get(ReconciliationRun, run_id)
+        run.artifact_sha256 = "9" * 64
+        run.database_ids = {
+            "reconciliation_run": [run_id],
+            "recovery_batches": [batch.database_id],
+            "order_snapshots": [],
+            "position_snapshots": [],
+        }
+        admin.commit()
+    with Session(engine) as runtime:
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        request = OkxDemoCanaryPreparationService(
+            runtime
+        ).request_final_attestation_consent(
+            idempotency_key=key,
+            operator_token="synthetic-test-operator-token",
+        )
+    capability = _issue_attested_session_capability(
+        attestation_hmac_key=b"t" * 32,
+        pinned_fingerprint_sha256="8" * 64,
+        created_at=now - timedelta(seconds=1),
+        expires_at=now + timedelta(minutes=2),
+    )
+
+    class Read:
+        def capture_execution_attestation(self, db, *, inst_id):
+            assert inst_id == "BTC-USDT-SWAP"
+            return _capture_runtime_attested_bundle(
+                db,
+                capability=capability,
+                observed_at=datetime.now(timezone.utc),
+            )
+
+    runtime_id = "RuntimePrepared627"
+    with engine.connect() as connection, Session(bind=connection) as runtime:
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        assert acquire_one_shot_runtime_lock(runtime) is True
+        result = process_pending_canary_consent_handoff(
+            read_client=Read(), db=runtime, runtime_instance_id=runtime_id,
+            fresh_reconciliation=lambda: SimpleNamespace(reconciliation_run_id=run_id),
+            safety_check=lambda: True, now=now,
+        )
+        assert result is not None
+        runtime.commit()
+        assert release_one_shot_runtime_lock(runtime) is True
+        runtime.commit()
+    monkeypatch.setattr(
+        "app.services.okx_demo_submission_grant.get_settings",
+        lambda: SimpleNamespace(
+            demo_automation_policy=SimpleNamespace(
+                demo_risk_policy=SimpleNamespace(allowed_instruments=("BTC-USDT-SWAP",))
+            ),
+            execution_target_manifest=SimpleNamespace(
+                active_target_id="OKX_DEMO",
+                active_target=SimpleNamespace(
+                    simulated_trading=True, allow_real_funds=False,
+                    order_submission_enabled=False,
+                ),
+            ),
+        ),
+    )
+    with engine.connect() as connection, Session(bind=connection) as runtime:
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        assert acquire_one_shot_runtime_lock(runtime) is True
+        grant = arm_finalized_canary_consent(runtime, runtime_instance_id=runtime_id)
+        assert grant is not None
+        grant_id, approval_id = grant.grant_id, grant.approval_id
+        assert release_one_shot_runtime_lock(runtime) is True
+        runtime.commit()
+    return now, request.handoff_id, grant_id, approval_id
+
+
+def test_postgresql_v28_consent_exact_finalize_and_restart_revoke(
+    postgres_writer_engine, monkeypatch
+) -> None:
+    upgrade_database(postgres_writer_engine)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    with Session(postgres_writer_engine) as admin:
+        _seed_final_consent_source(admin, now=now)
+        _snapshots, reconciliation_run_id, _order = _seed_canary_lineage_boundary(
+            admin, now=now
+        )
+        baseline_snapshot_count = admin.query(OkxDemoTrustedSnapshot).count()
+        source_before = admin.execute(
+            text(
+                "SELECT request_hash,request_payload::jsonb,status,stage,"
+                "evidence_snapshot::jsonb,completed_at FROM research_jobs WHERE id=22"
+            )
+        ).one()
+
+    with Session(postgres_writer_engine) as runtime:
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        with pytest.raises(SQLAlchemyError, match="immutable canary source job 22"):
+            runtime.execute(text(
+                "UPDATE research_jobs SET stage=stage WHERE id=22"
+            ))
+        runtime.rollback()
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        with pytest.raises(SQLAlchemyError, match="successor canary source is forbidden"):
+            runtime.execute(text(
+                "INSERT INTO research_jobs(id,execution_scope_id,job_type,operation,"
+                "idempotency_key_digest,request_hash,request_payload,status,stage,"
+                "attempt_count,max_attempts,evidence_snapshot,started_at,completed_at,created_at) "
+                "SELECT 23,execution_scope_id,job_type,operation,"
+                ":digest,request_hash,request_payload,status,stage,attempt_count,max_attempts,"
+                "evidence_snapshot,started_at,completed_at,created_at FROM research_jobs WHERE id=22"
+            ), {"digest": "9" * 64})
+        runtime.rollback()
+        for successor_status, entry_kind in (
+            ("PENDING", "UNRELATED"),
+            ("RUNNING", "FRESH_EXECUTION_ONLY_FINAL_EXPIRY_RECOVERY"),
+            ("FAILED", None),
+        ):
+            runtime.execute(text("SET LOCAL ROLE freqtrade"))
+            with pytest.raises(
+                SQLAlchemyError, match="successor canary source is forbidden"
+            ):
+                runtime.execute(text(
+                    "INSERT INTO research_jobs(id,execution_scope_id,job_type,operation,"
+                    "idempotency_key_digest,request_hash,request_payload,status,stage,"
+                    "attempt_count,max_attempts,evidence_snapshot,created_at) "
+                    "SELECT 23,execution_scope_id,job_type,operation,:digest,request_hash,"
+                    "CAST(:payload AS jsonb),:status,stage,attempt_count,max_attempts,"
+                    "evidence_snapshot,created_at FROM research_jobs WHERE id=22"
+                ), {
+                    "digest": hashlib.sha256(
+                        "{}:{}".format(successor_status, entry_kind).encode()
+                    ).hexdigest(),
+                    "payload": json.dumps({"entry_kind": entry_kind}),
+                    "status": successor_status,
+                })
+            runtime.rollback()
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        runtime.execute(text(
+            "INSERT INTO research_jobs(id,execution_scope_id,job_type,operation,"
+            "idempotency_key_digest,request_hash,request_payload,status,stage,"
+            "attempt_count,max_attempts,cancel_requested,evidence_snapshot,created_at) "
+            "SELECT 23,execution_scope_id,job_type,'unrelated.operation',:digest,"
+            "request_hash,'{}'::jsonb,status,stage,attempt_count,max_attempts,FALSE,"
+            "evidence_snapshot,created_at FROM research_jobs WHERE id=22"
+        ), {"digest": "7" * 64})
+        runtime.commit()
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        with pytest.raises(
+            SQLAlchemyError, match="successor canary source is forbidden"
+        ):
+            runtime.execute(text(
+                "UPDATE research_jobs SET operation=:operation WHERE id=23"
+            ), {"operation": CANARY_OPERATION})
+        runtime.rollback()
+
+    def insert_successor(job_id: int) -> str:
+        with Session(postgres_writer_engine) as contender:
+            contender.execute(text("SET LOCAL ROLE freqtrade"))
+            try:
+                contender.execute(text(
+                    "INSERT INTO research_jobs(id,execution_scope_id,job_type,operation,"
+                    "idempotency_key_digest,request_hash,request_payload,status,stage,"
+                    "attempt_count,max_attempts,evidence_snapshot,created_at) "
+                    "SELECT :job_id,execution_scope_id,job_type,operation,:digest,"
+                    "request_hash,'{}'::jsonb,'PENDING',stage,attempt_count,max_attempts,"
+                    "evidence_snapshot,created_at FROM research_jobs WHERE id=22"
+                ), {
+                    "job_id": job_id,
+                    "digest": hashlib.sha256(str(job_id).encode()).hexdigest(),
+                })
+                contender.commit()
+                return "INSERTED"
+            except SQLAlchemyError:
+                contender.rollback()
+                return "BLOCKED"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        assert list(executor.map(insert_successor, (24, 25))) == [
+            "BLOCKED", "BLOCKED"
+        ]
+
+    forged_key = "f" * 64
+    forged_payload = _canonical_json({
+        "authorization": "once",
+        "consent_policy": "immutable-job-22-final-attestation-v1",
+        "execution_target": "OKX_DEMO",
+        "idempotency_key_digest": forged_key,
+        "instrument_id": "BTC-USDT-SWAP",
+        "max_notional": "20",
+        "operation": "okx-demo-canary-consent-finalize",
+        "source_ancestry": [15, 16, 17, 18, 19, 20, 21, 22],
+        "source_job_id": 22,
+    })
+    with Session(postgres_writer_engine) as runtime:
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        with pytest.raises(SQLAlchemyError, match="invalid controlled canary operator proof"):
+            runtime.execute(text(
+                "SELECT request_okx_demo_canary_consent("
+                ":key,:nonce,:payload,:proof)"
+            ), {
+                "key": forged_key,
+                "nonce": "e" * 64,
+                "payload": forged_payload,
+                "proof": "0" * 64,
+            })
+        runtime.rollback()
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        with pytest.raises(SQLAlchemyError):
+            runtime.execute(text("SELECT * FROM okx_demo_operator_consent_secrets"))
+        runtime.rollback()
+
+    with Session(postgres_writer_engine) as runtime:
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        requested = OkxDemoCanaryPreparationService(
+            runtime
+        ).request_final_attestation_consent(
+            idempotency_key="issue-627-consent",
+            operator_token="synthetic-test-operator-token",
+        )
+        assert requested.operation_status == "REQUESTED"
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        with pytest.raises(SQLAlchemyError):
+            runtime.execute(text("SELECT * FROM okx_demo_canary_consent_handoffs"))
+        runtime.rollback()
+
+    monkeypatch.setenv(OPERATOR_TOKEN_ENV, "synthetic-rotated-operator-token")
+    with pytest.raises(SchemaMigrationBlocked, match="active handoff"):
+        harden_operator_consent_access_boundary(postgres_writer_engine)
+    monkeypatch.setenv(OPERATOR_TOKEN_ENV, "synthetic-test-operator-token")
+
+    with postgres_writer_engine.connect() as locker_connection, \
+         postgres_writer_engine.connect() as contender_connection, \
+         Session(bind=locker_connection) as locker, \
+         Session(bind=contender_connection) as contender:
+        locker.execute(text("SET LOCAL ROLE freqtrade"))
+        assert acquire_one_shot_runtime_lock(locker) is True
+        contender.execute(text("SET LOCAL ROLE freqtrade"))
+        with pytest.raises(SQLAlchemyError, match="coordination lock is busy"):
+            contender.execute(
+                text(
+                    "SELECT claim_okx_demo_canary_consent("
+                    ":handoff,:runtime,:run,'{}'::jsonb)"
+                ),
+                {
+                    "handoff": requested.handoff_id,
+                    "runtime": "RuntimeContender1",
+                    "run": reconciliation_run_id,
+                },
+            )
+        contender.rollback()
+        assert release_one_shot_runtime_lock(locker) is True
+        locker.commit()
+
+    capture_capability = _issue_attested_session_capability(
+        attestation_hmac_key=b"t" * 32,
+        pinned_fingerprint_sha256="b" * 64,
+        created_at=now - timedelta(seconds=1),
+        expires_at=now + timedelta(minutes=2),
+    )
+    distractor_capability = _issue_attested_session_capability(
+        attestation_hmac_key=b"t" * 32,
+        pinned_fingerprint_sha256="c" * 64,
+        created_at=now - timedelta(seconds=1),
+        expires_at=now + timedelta(minutes=2),
+    )
+    captured_database_ids = []
+    class RuntimeRead:
+        def capture_execution_attestation(self, db, *, inst_id):
+            assert inst_id == "BTC-USDT-SWAP"
+            observed_at = datetime.now(timezone.utc)
+            exact = _capture_runtime_attested_bundle(
+                db, capability=capture_capability, observed_at=observed_at
+            )
+            captured_database_ids.append(
+                tuple(getattr(exact, kind).database_id for kind in ("instrument", "market", "account"))
+            )
+            # Same observed_at but later database ids: a global-latest lookup
+            # would select this different attested session.
+            _capture_runtime_attested_bundle(
+                db, capability=distractor_capability, observed_at=observed_at
+            )
+            return exact
+
+    runtime_id = "RuntimeIssue627A"
+    persist_lineage = OkxDemoCanaryPreparationService._persist_lineage
+    monkeypatch.setattr(
+        OkxDemoCanaryPreparationService,
+        "_persist_lineage",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("synthetic crash after exact claim")
+        ),
+    )
+    with postgres_writer_engine.connect() as crash_connection, Session(
+        bind=crash_connection
+    ) as crashed_runtime:
+        crashed_runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        assert acquire_one_shot_runtime_lock(crashed_runtime) is True
+        with pytest.raises(RuntimeError, match="synthetic crash after exact claim"):
+            process_pending_canary_consent_handoff(
+                read_client=RuntimeRead(),
+                db=crashed_runtime,
+                runtime_instance_id=runtime_id,
+                fresh_reconciliation=lambda: SimpleNamespace(
+                    reconciliation_run_id=reconciliation_run_id
+                ),
+                safety_check=lambda: True,
+                now=now,
+            )
+        crashed_runtime.rollback()
+        assert release_one_shot_runtime_lock(crashed_runtime) is True
+        crashed_runtime.commit()
+    monkeypatch.setattr(
+        OkxDemoCanaryPreparationService, "_persist_lineage", persist_lineage
+    )
+    with Session(postgres_writer_engine) as admin:
+        assert admin.query(OkxDemoTrustedSnapshot).count() == baseline_snapshot_count
+        assert admin.query(TradeIntent).count() == 0
+
+    with postgres_writer_engine.connect() as runtime_connection, Session(
+        bind=runtime_connection
+    ) as runtime:
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        assert acquire_one_shot_runtime_lock(runtime) is True
+        finalized = process_pending_canary_consent_handoff(
+            read_client=RuntimeRead(),
+            db=runtime,
+            runtime_instance_id=runtime_id,
+            fresh_reconciliation=lambda: SimpleNamespace(
+                reconciliation_run_id=reconciliation_run_id
+            ),
+            safety_check=lambda: True,
+            now=now,
+        )
+        assert finalized is not None
+        runtime.commit()  # commit A: lineage only
+        assert release_one_shot_runtime_lock(runtime) is True
+        runtime.commit()
+
+    with Session(postgres_writer_engine) as runtime:
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        with pytest.raises(SQLAlchemyError):
+            runtime.execute(text(
+                "UPDATE okx_demo_trusted_snapshots SET digest=:digest "
+                "WHERE database_id=:database_id"
+            ), {
+                "digest": "f" * 64,
+                "database_id": captured_database_ids[-1][0],
+            })
+        runtime.rollback()
+    with Session(postgres_writer_engine) as admin:
+        handoff = admin.get(OkxDemoCanaryConsentHandoff, requested.handoff_id)
+        bound_ids = tuple(
+            int(handoff.snapshot_binding[kind]["database_id"])
+            for kind in ("instrument", "market", "account")
+        )
+        assert bound_ids == captured_database_ids[-1]
+        global_latest = tuple(admin.execute(text(
+            "SELECT database_id FROM okx_demo_trusted_snapshots WHERE kind=:kind "
+            "ORDER BY observed_at DESC,database_id DESC LIMIT 1"
+        ), {"kind": kind}).scalar_one() for kind in ("instrument", "market", "account"))
+        assert global_latest != bound_ids
+
+    monkeypatch.setattr(
+        "app.services.okx_demo_submission_grant.get_settings",
+        lambda: SimpleNamespace(
+            demo_automation_policy=SimpleNamespace(
+                demo_risk_policy=SimpleNamespace(
+                    allowed_instruments=("BTC-USDT-SWAP",)
+                )
+            ),
+            execution_target_manifest=SimpleNamespace(
+                active_target_id="OKX_DEMO",
+                active_target=SimpleNamespace(
+                    simulated_trading=True,
+                    allow_real_funds=False,
+                    order_submission_enabled=False,
+                ),
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.okx_demo_submission_grant.GRANT_TTL_SECONDS", 1
+    )
+    takeover_runtime_id = "RuntimeIssue627B"
+    with postgres_writer_engine.connect() as arm_connection, Session(
+        bind=arm_connection
+    ) as runtime:
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        assert acquire_one_shot_runtime_lock(runtime) is True
+        grant = arm_finalized_canary_consent(
+            runtime, runtime_instance_id=takeover_runtime_id
+        )
+        assert grant is not None and grant.status == "ACTIVE"
+        grant_id = grant.grant_id
+        assert release_one_shot_runtime_lock(runtime) is True
+        runtime.commit()
+
+    time.sleep(1.1)
+    with postgres_writer_engine.connect() as restart_connection, Session(
+        bind=restart_connection
+    ) as restarted:
+        restarted.execute(text("SET LOCAL ROLE freqtrade"))
+        assert acquire_one_shot_runtime_lock(restarted) is True
+        assert arm_finalized_canary_consent(
+            restarted, runtime_instance_id="RuntimeIssue627C"
+        ) is None
+        assert release_one_shot_runtime_lock(restarted) is True
+        restarted.commit()
+
+    with Session(postgres_writer_engine) as admin:
+        source_after = admin.execute(
+            text(
+                "SELECT request_hash,request_payload::jsonb,status,stage,"
+                "evidence_snapshot::jsonb,completed_at FROM research_jobs WHERE id=22"
+            )
+        ).one()
+        handoff = admin.get(OkxDemoCanaryConsentHandoff, requested.handoff_id)
+        assert source_after == source_before
+        assert handoff.status == "EXPIRED"
+        assert handoff.runtime_instance_id == takeover_runtime_id
+        assert handoff.failure_code == "GRANT_RECONCILIATION_TERMINAL"
+        assert admin.query(TradeIntent).count() == 1
+        assert admin.query(ApprovedExecution).count() == 1
+        assert admin.query(OkxOrderWriteAttempt).count() == 0
+        assert admin.query(OkxDemoCanaryLifecycle).count() == 0
+        assert admin.get(OkxDemoSubmissionGrant, grant_id).status == "EXPIRED"
+        assert admin.get(ApprovedExecution, handoff.approval_id).status == "EXPIRED"
+        reserved, positions = admin.execute(text(
+            "SELECT COALESCE(sum(reserved_notional),0),"
+            "COALESCE(sum(approved_positions),0) FROM risk_budgets "
+            "WHERE execution_target_id='OKX_DEMO'"
+        )).one()
+        assert reserved == 0
+        assert positions == 0
+    monkeypatch.setenv(OPERATOR_TOKEN_ENV, "synthetic-rotated-operator-token")
+    harden_operator_consent_access_boundary(postgres_writer_engine)
+
+
+def test_postgresql_v28_migration_lock_closes_successor_trigger_window(
+    postgres_writer_engine,
+) -> None:
+    upgrade_database(postgres_writer_engine)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    with Session(postgres_writer_engine) as admin:
+        _seed_final_consent_source(admin, now=now)
+    with postgres_writer_engine.begin() as admin:
+        admin.execute(text(
+            "DROP TRIGGER freeze_okx_demo_canary_source ON research_jobs"
+        ))
+
+    barrier = Barrier(2)
+    def race_successor_insert() -> str:
+        with postgres_writer_engine.connect() as contender:
+            transaction = contender.begin()
+            contender.execute(text("SET LOCAL statement_timeout='5s'"))
+            barrier.wait()
+            try:
+                contender.execute(text(
+                    "INSERT INTO research_jobs(id,execution_scope_id,job_type,operation,"
+                    "idempotency_key_digest,request_hash,request_payload,status,stage,"
+                    "attempt_count,max_attempts,cancel_requested,evidence_snapshot,created_at) "
+                    "SELECT 23,execution_scope_id,job_type,operation,:digest,request_hash,"
+                    "'{}'::jsonb,'PENDING',stage,attempt_count,max_attempts,FALSE,"
+                    "evidence_snapshot,created_at FROM research_jobs WHERE id=22"
+                ), {"digest": "4" * 64})
+                transaction.commit()
+                return "INSERTED"
+            except SQLAlchemyError:
+                transaction.rollback()
+                return "BLOCKED"
+
+    with postgres_writer_engine.connect() as migrator:
+        transaction = migrator.begin()
+        migrator.execute(text(
+            "LOCK TABLE research_jobs IN SHARE ROW EXCLUSIVE MODE"
+        ))
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(race_successor_insert)
+            barrier.wait()
+            time.sleep(0.1)
+            assert future.done() is False
+            _add_canary_consent_handoff_boundary(migrator)
+            transaction.commit()
+            assert future.result(timeout=5) == "BLOCKED"
+    with postgres_writer_engine.connect() as admin:
+        assert admin.execute(text(
+            "SELECT count(*) FROM research_jobs WHERE id=23"
+        )).scalar_one() == 0
+
+
+def test_postgresql_v28_five_second_expiry_rolls_back_without_lineage(
+    postgres_writer_engine,
+) -> None:
+    upgrade_database(postgres_writer_engine)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    with Session(postgres_writer_engine) as admin:
+        _seed_final_consent_source(admin, now=now)
+        _snapshots, run_id, _order = _seed_canary_lineage_boundary(
+            admin, now=now, snapshot_ttl_seconds=5
+        )
+        baseline_snapshot_count = admin.query(OkxDemoTrustedSnapshot).count()
+    with Session(postgres_writer_engine) as runtime:
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        requested = OkxDemoCanaryPreparationService(
+            runtime
+        ).request_final_attestation_consent(
+            idempotency_key="issue-627-five-second",
+            operator_token="synthetic-test-operator-token",
+        )
+
+    slow_capability = _issue_attested_session_capability(
+        attestation_hmac_key=b"t" * 32,
+        pinned_fingerprint_sha256="d" * 64,
+        created_at=now - timedelta(seconds=1),
+        expires_at=now + timedelta(minutes=2),
+    )
+    class SlowRead:
+        def capture_execution_attestation(self, db, *, inst_id):
+            assert inst_id == "BTC-USDT-SWAP"
+            bundle = _capture_runtime_attested_bundle(
+                db,
+                capability=slow_capability,
+                observed_at=datetime.now(timezone.utc),
+                ttl_seconds=5,
+            )
+            time.sleep(5.2)
+            return bundle
+
+    with Session(postgres_writer_engine) as runtime:
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        assert acquire_one_shot_runtime_lock(runtime) is True
+        with pytest.raises(SQLAlchemyError, match="exact fresh attested snapshot"):
+            process_pending_canary_consent_handoff(
+                read_client=SlowRead(),
+                db=runtime,
+                runtime_instance_id="RuntimeIssue627TTL",
+                fresh_reconciliation=lambda: SimpleNamespace(
+                    reconciliation_run_id=run_id
+                ),
+                safety_check=lambda: True,
+                now=now,
+            )
+        runtime.rollback()
+        assert release_one_shot_runtime_lock(runtime) is True
+        runtime.commit()
+
+    with Session(postgres_writer_engine) as admin:
+        handoff = admin.get(OkxDemoCanaryConsentHandoff, requested.handoff_id)
+        assert handoff.status == "REQUESTED"
+        assert admin.query(TradeIntent).count() == 0
+        assert admin.query(ApprovedExecution).count() == 0
+        assert admin.query(OkxDemoSubmissionGrant).count() == 0
+        assert admin.query(OkxOrderWriteAttempt).count() == 0
+        assert admin.query(OkxDemoCanaryLifecycle).count() == 0
+        assert admin.query(OkxDemoTrustedSnapshot).count() == baseline_snapshot_count
+
+
+def test_postgresql_v28_missing_consent_key_requires_explicit_terminalization(
+    postgres_writer_engine, monkeypatch
+) -> None:
+    upgrade_database(postgres_writer_engine)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    with Session(postgres_writer_engine) as admin:
+        _seed_final_consent_source(admin, now=now)
+    with Session(postgres_writer_engine) as runtime:
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        requested = OkxDemoCanaryPreparationService(
+            runtime
+        ).request_final_attestation_consent(
+            idempotency_key="issue-627-restore-missing-key",
+            operator_token="synthetic-test-operator-token",
+        )
+
+    # Both secret tables are intentionally excluded from backup.  Model the
+    # post-restore state before provisioning a new host-local verifier key.
+    with postgres_writer_engine.begin() as admin:
+        admin.execute(text("DELETE FROM okx_demo_operator_consent_secrets"))
+    monkeypatch.setenv(OPERATOR_TOKEN_ENV, "synthetic-restored-operator-token")
+    with pytest.raises(SchemaMigrationBlocked, match="active handoff"):
+        harden_operator_consent_access_boundary(postgres_writer_engine)
+
+    assert revoke_operator_consents_for_key_hardening(
+        postgres_writer_engine
+    ) == 1
+    with Session(postgres_writer_engine) as admin:
+        handoff = admin.get(OkxDemoCanaryConsentHandoff, requested.handoff_id)
+        assert handoff.status == "EXPIRED"
+        assert handoff.failure_code == "KEY_HARDENING_REAUTHORIZATION_REQUIRED"
+        assert handoff.approval_id is None
+        assert handoff.grant_id is None
+        assert admin.query(OkxDemoSubmissionGrant).count() == 0
+
+    harden_operator_consent_access_boundary(postgres_writer_engine)
+    assert verify_schema(postgres_writer_engine).ready is True
+
+
+def test_postgresql_v28_terminal_history_real_atomic_dump_restore_and_reharden(
+    postgres_writer_engine, monkeypatch, tmp_path
+) -> None:
+    _now, handoff_id, grant_id, _approval_id = _finalize_and_arm_v28_handoff(
+        postgres_writer_engine,
+        monkeypatch,
+        key="issue-627-real-restore-terminal-history",
+    )
+    with Session(postgres_writer_engine) as runtime:
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        assert fail_canary_grant_before_prepare(runtime, grant_id=grant_id) is True
+        runtime.commit()
+    requested_id = uuid4().hex
+    requested_now = datetime.now(timezone.utc)
+    with Session(postgres_writer_engine) as admin:
+        admin.add(OkxDemoCanaryConsentHandoff(
+            handoff_id=requested_id,
+            execution_target_id="OKX_DEMO",
+            source_job_id=21,
+            source_ancestry=list(range(15, 22)),
+            source_fingerprint=canonical_digest({"restore-source": requested_id}),
+            idempotency_key_digest=canonical_digest({"restore-key": requested_id}),
+            consent_nonce=canonical_digest({"restore-nonce": requested_id}),
+            consent_payload_digest=canonical_digest({"restore-payload": requested_id}),
+            consent_digest=canonical_digest({"restore-consent": requested_id}),
+            provenance=CANARY_PROVENANCE,
+            instrument_id="BTC-USDT-SWAP",
+            max_notional=Decimal("20"),
+            status="REQUESTED",
+            snapshot_binding={},
+            consented_at=requested_now,
+            consent_deadline_at=requested_now + timedelta(minutes=1),
+            created_at=requested_now,
+            updated_at=requested_now,
+        ))
+        admin.commit()
+
+    source_url = postgres_writer_engine.url.render_as_string(hide_password=False)
+    monkeypatch.setattr(
+        postgres_backup, "peer_admin_database_url", lambda database_url: database_url
+    )
+    backup_path, manifest_path = postgres_backup.create_backup(
+        database_url=source_url,
+        output_dir=tmp_path,
+        pg_dump_binary="/opt/homebrew/bin/pg_dump",
+    )
+
+    destination_name = "test_okx_restore_{}".format(uuid4().hex)
+    admin_url = make_url(source_url).set(database="postgres")
+    admin_engine = create_engine(admin_url, isolation_level="AUTOCOMMIT")
+    destination_engine = None
+    try:
+        with admin_engine.begin() as admin:
+            admin.execute(text('CREATE DATABASE "{}" TEMPLATE template0'.format(
+                destination_name
+            )))
+        destination_engine = create_engine(
+            make_url(source_url).set(database=destination_name)
+        )
+        assert upgrade_database(destination_engine) == SCHEMA_VERSION
+        destination_url = destination_engine.url.render_as_string(
+            hide_password=False
+        )
+        with destination_engine.begin() as destination:
+            table_names = [
+                name for name in inspect(destination).get_table_names()
+                if name != VERSION_TABLE
+            ]
+            quoted = ",".join(
+                destination.dialect.identifier_preparer.quote(name)
+                for name in table_names
+            )
+            destination.exec_driver_sql("TRUNCATE {} CASCADE".format(quoted))
+
+        for secret_table in (
+            "okx_demo_attestation_secrets",
+            "okx_demo_operator_consent_secrets",
+        ):
+            with destination_engine.begin() as destination:
+                destination.execute(text(
+                    "INSERT INTO {}(secret_id,hmac_key) "
+                    "VALUES('ACTIVE',decode(repeat('01',32),'hex'))".format(
+                        secret_table
+                    )
+                ))
+            with pytest.raises(
+                postgres_backup.BackupBlocked,
+                match="restore target contains managed data: {}".format(
+                    secret_table
+                ),
+            ):
+                postgres_backup.restore_backup(
+                    database_url=destination_url,
+                    backup_path=backup_path,
+                    manifest_path=manifest_path,
+                    psql_binary="/opt/homebrew/bin/psql",
+                )
+            with destination_engine.begin() as destination:
+                destination.execute(text("DELETE FROM {}".format(secret_table)))
+
+        with destination_engine.begin() as destination:
+            destination.execute(text(
+                "INSERT INTO research_worker_control(id,paused,updated_at) "
+                "VALUES(1,FALSE,clock_timestamp())"
+            ))
+        with pytest.raises(
+            postgres_backup.BackupBlocked,
+            match="restore target contains managed data",
+        ):
+            postgres_backup.restore_backup(
+                database_url=destination_url,
+                backup_path=backup_path,
+                manifest_path=manifest_path,
+                psql_binary="/opt/homebrew/bin/psql",
+            )
+        with destination_engine.begin() as destination:
+            assert destination.execute(text(
+                "SELECT count(*) FROM research_worker_control"
+            )).scalar_one() == 1
+            destination.execute(text("DELETE FROM research_worker_control"))
+            destination.execute(text(
+                "UPDATE freqtrade_ai_schema_migrations SET version='wrong-version'"
+            ))
+        with pytest.raises(
+            postgres_backup.BackupBlocked,
+            match="restore target is not an exact v28 schema",
+        ):
+            postgres_backup.restore_backup(
+                database_url=destination_url,
+                backup_path=backup_path,
+                manifest_path=manifest_path,
+                psql_binary="/opt/homebrew/bin/psql",
+            )
+        with destination_engine.begin() as destination:
+            assert destination.execute(text(
+                "SELECT version FROM freqtrade_ai_schema_migrations"
+            )).scalar_one() == "wrong-version"
+            destination.execute(text(
+                "UPDATE freqtrade_ai_schema_migrations SET version=:version"
+            ), {"version": SCHEMA_VERSION})
+
+        delayed_backup_path = tmp_path / "delayed-restore.sql"
+        delayed_backup_path.write_bytes(
+            b"SELECT pg_sleep(2);\n" + backup_path.read_bytes()
+        )
+        delayed_manifest_path = tmp_path / "delayed-restore.manifest.json"
+        delayed_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        delayed_manifest["backup_file"] = delayed_backup_path.name
+        delayed_manifest["sha256"] = hashlib.sha256(
+            delayed_backup_path.read_bytes()
+        ).hexdigest()
+        delayed_manifest_path.write_text(
+            json.dumps(delayed_manifest), encoding="utf-8"
+        )
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            restore_future = executor.submit(
+                postgres_backup.restore_backup,
+                database_url=destination_url,
+                backup_path=delayed_backup_path,
+                manifest_path=delayed_manifest_path,
+                psql_binary="/opt/homebrew/bin/psql",
+            )
+            lock_observed = False
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                with destination_engine.connect() as observer:
+                    lock_observed = observer.execute(text(
+                        "SELECT EXISTS ("
+                        "SELECT 1 FROM pg_locks l "
+                        "JOIN pg_class c ON c.oid=l.relation "
+                        "WHERE l.database=(SELECT oid FROM pg_database "
+                        "WHERE datname=current_database()) "
+                        "AND c.relname='research_worker_control' "
+                        "AND l.mode='AccessExclusiveLock' AND l.granted "
+                        "AND l.pid<>pg_backend_pid())"
+                    )).scalar_one()
+                if lock_observed:
+                    break
+                time.sleep(0.02)
+            assert lock_observed is True
+            with pytest.raises(SQLAlchemyError, match="statement timeout"):
+                with destination_engine.begin() as concurrent_writer:
+                    concurrent_writer.execute(text(
+                        "SET LOCAL statement_timeout='250ms'"
+                    ))
+                    concurrent_writer.execute(text(
+                        "INSERT INTO research_worker_control"
+                        "(id,paused,updated_at) "
+                        "VALUES(1,FALSE,clock_timestamp())"
+                    ))
+            restore_future.result(timeout=10)
+        with Session(destination_engine) as restored:
+            assert restored.get(
+                OkxDemoCanaryConsentHandoff, handoff_id
+            ).status == "FAILED"
+            assert restored.get(OkxDemoSubmissionGrant, grant_id).status == "FAILED"
+        with destination_engine.connect() as restored:
+            assert restored.execute(text(
+                "SELECT count(*) FROM okx_demo_operator_consent_secrets"
+            )).scalar_one() == 0
+        with Session(destination_engine) as runtime:
+            runtime.execute(text("SET LOCAL ROLE freqtrade"))
+            with pytest.raises(
+                SQLAlchemyError,
+                match="active operator consent proof key unavailable",
+            ):
+                runtime.execute(text("SELECT pending_okx_demo_canary_consent()"))
+            runtime.rollback()
+
+        # Secret-excluding restore always requires an explicit owner audit,
+        # and a nonterminal restored request cannot be advanced or replayed.
+        monkeypatch.setenv(OPERATOR_TOKEN_ENV, "synthetic-restored-operator-token")
+        with pytest.raises(SchemaMigrationBlocked, match="active handoff"):
+            harden_operator_consent_access_boundary(destination_engine)
+        assert revoke_operator_consents_for_key_hardening(destination_engine) == 1
+        harden_operator_consent_access_boundary(destination_engine)
+        assert revoke_attested_sessions_for_key_hardening(destination_engine) > 0
+        harden_attestation_access_boundary(destination_engine)
+        assert verify_schema(destination_engine).ready is True
+        with Session(destination_engine) as restored:
+            assert restored.get(
+                OkxDemoCanaryConsentHandoff, requested_id
+            ).status == "EXPIRED"
+            restored.execute(text("SET LOCAL ROLE freqtrade"))
+            assert restored.execute(text(
+                "SELECT pending_okx_demo_canary_consent()"
+            )).scalar_one() is None
+    finally:
+        if destination_engine is not None:
+            destination_engine.dispose()
+        with admin_engine.begin() as admin:
+            admin.execute(text(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                "WHERE datname=:database AND pid<>pg_backend_pid()"
+            ), {"database": destination_name})
+            admin.execute(text('DROP DATABASE IF EXISTS "{}"'.format(
+                destination_name
+            )))
+        admin_engine.dispose()
+
+
+def test_postgresql_v28_writer_failure_before_prepare_terminalizes_atomically(
+    postgres_writer_engine, monkeypatch
+) -> None:
+    _now, handoff_id, grant_id, approval_id = _finalize_and_arm_v28_handoff(
+        postgres_writer_engine,
+        monkeypatch,
+        key="issue-627-before-prepared-failure",
+    )
+    with Session(postgres_writer_engine) as runtime:
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        assert fail_canary_grant_before_prepare(runtime, grant_id=grant_id) is True
+        runtime.commit()
+    with Session(postgres_writer_engine) as admin:
+        assert admin.get(OkxDemoSubmissionGrant, grant_id).status == "FAILED"
+        handoff = admin.get(OkxDemoCanaryConsentHandoff, handoff_id)
+        assert handoff.status == "FAILED"
+        assert handoff.failure_code == "WRITER_FAILED_BEFORE_PREPARED"
+        assert admin.get(ApprovedExecution, approval_id).status == "EXPIRED"
+        reserved, positions = admin.execute(text(
+            "SELECT COALESCE(sum(reserved_notional),0),"
+            "COALESCE(sum(approved_positions),0) FROM risk_budgets "
+            "WHERE execution_target_id='OKX_DEMO'"
+        )).one()
+        assert reserved == 0
+        assert positions == 0
+
+
+def test_postgresql_v28_prepared_restart_is_get_only_and_post_at_most_once(
+    postgres_writer_engine, monkeypatch
+) -> None:
+    now, handoff_id, grant_id, approval_id = _finalize_and_arm_v28_handoff(
+        postgres_writer_engine, monkeypatch, key="issue-627-prepared-restart"
+    )
+    instrument = InstrumentSpec(
+        inst_id="BTC-USDT-SWAP", inst_type="SWAP", base_ccy="BTC",
+        quote_ccy="USDT", settle_ccy="USDT", contract_type="linear",
+        contract_value="0.0001", contract_value_ccy="BTC",
+        lot_size="1", min_size="1", tick_size="0.1", state="live",
+    )
+    with Session(postgres_writer_engine) as session:
+        grant = session.get(OkxDemoSubmissionGrant, grant_id)
+        submit_now = max(now, grant.issued_at + timedelta(milliseconds=1))
+        assert submit_now < grant.expires_at
+        store = SqlAlchemyOrderWriterStore(
+            session, now_provider=lambda: submit_now
+        )
+        claimed = store.load_approved_execution(approval_id)
+        authorization = OrderSubmissionAuthorization(
+            grant_id=grant_id, authorization_mode="ONE_SHOT",
+            execution_target_id="OKX_DEMO", authorization_schema_version="RISK_V1",
+            canonical_hash=claimed.canonical_hash, policy_digest=claimed.policy_digest,
+            approved_payload_hash=claimed.approved_payload_hash,
+            allow_real_funds=False, simulated_trading=True,
+            order_submission_enabled=True, writer_instance_id="PreparedWriter627A",
+            approval_id=approval_id, client_order_id=claimed.client_order_id,
+            issued_at=grant.issued_at, expires_at=grant.expires_at,
+        )
+        command = normalize_order_command(
+            claimed,
+            submission_grant=authorization,
+            instrument=instrument,
+            now=submit_now,
+        )
+        store.acquire_lease(
+            grant_id=grant_id, authorization_mode="ONE_SHOT",
+            writer_instance_id=authorization.writer_instance_id,
+            approval_id=approval_id, canonical_hash=claimed.canonical_hash,
+            policy_digest=claimed.policy_digest,
+            approved_payload_hash=claimed.approved_payload_hash,
+            now=submit_now, expires_at=submit_now + timedelta(seconds=1),
+        )
+        order, prepared = store.prepare_place(
+            command, operation="PLACE", operation_id=claimed.client_order_id,
+            request_digest=hashlib.sha256(
+                _canonical_json(command.request_body).encode()
+            ).hexdigest(),
+            safe_request_snapshot=command.request_body,
+        )
+
+    with Session(postgres_writer_engine) as runtime:
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        assert fail_canary_grant_before_prepare(runtime, grant_id=grant_id) is False
+        runtime.commit()
+
+    restart_now = submit_now + timedelta(seconds=2)
+    post_calls = []
+
+    class ReadOnlyRecovery:
+        def order(self, inst_id, *, order_id=None, client_order_id=None):
+            return OkxReadSnapshot(
+                metadata=SnapshotMetadata(
+                    resource="order", fetched_at=restart_now,
+                    expires_at=restart_now + timedelta(seconds=30),
+                    stale=False, authenticated=True,
+                ),
+                items=[{
+                    "inst_id": inst_id, "order_id": "demo-recovered-627",
+                    "client_order_id": client_order_id, "state": "live",
+                    "side": "buy", "position_side": "long",
+                    "margin_mode": "isolated", "order_type": "limit",
+                    "reduce_only": False, "price": Decimal("57000"),
+                    "size": Decimal("1"),
+                }],
+            )
+
+    class NoPostTransport:
+        def post(self, **kwargs):
+            post_calls.append(kwargs)
+            raise AssertionError("restart recovery must never POST")
+
+    with Session(postgres_writer_engine) as session:
+        restarted_store = SqlAlchemyOrderWriterStore(
+            session, now_provider=lambda: restart_now
+        )
+        result = OkxDemoOrderWriter(
+            read_client=ReadOnlyRecovery(), write_transport=NoPostTransport(),
+            store=restarted_store, now_provider=lambda: restart_now,
+        ).reconcile_unresolved(prepared.attempt_id)
+        assert result.status == "RECONCILED"
+    with Session(postgres_writer_engine) as admin:
+        assert post_calls == []
+        assert admin.get(OkxDemoSubmissionGrant, grant_id).status == "CONSUMED"
+        assert admin.get(OkxDemoCanaryConsentHandoff, handoff_id).status == "CONSUMED"
+        attempt = admin.get(OkxOrderWriteAttempt, prepared.attempt_id)
+        assert attempt.attempt_count == 1
+        assert attempt.state == "RECONCILED"
+        assert admin.query(OkxOrderWriteAttempt).filter_by(
+            approval_id=approval_id, operation="PLACE"
+        ).count() == 1
 
 
 def test_postgresql_concurrent_same_timestamp_different_digest_has_one_winner(

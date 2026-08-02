@@ -25,6 +25,160 @@ NONTERMINAL_PREDICATE = (
     "state IN ('PREPARED', 'ACKNOWLEDGED', 'RECOVERY_REQUIRED', "
     "'RESIDUAL_CLOSE_REQUIRED')"
 )
+
+
+class OkxDemoCanaryConsentHandoff(Base):
+    """Owner-managed one-use consent bridging job 22 to fresh execution evidence."""
+
+    __tablename__ = "okx_demo_canary_consent_handoffs"
+    __table_args__ = (
+        CheckConstraint(
+            "execution_target_id = 'OKX_DEMO'",
+            name="okx_demo_canary_consent_target_check",
+        ),
+        CheckConstraint(
+            "instrument_id = 'BTC-USDT-SWAP'",
+            name="okx_demo_canary_consent_instrument_check",
+        ),
+        CheckConstraint(
+            "provenance = 'CONTROLLED_CANARY_NON_PRODUCTION'",
+            name="okx_demo_canary_consent_provenance_check",
+        ),
+        CheckConstraint(
+            "status IN ('REQUESTED','FINALIZED','GRANT_ISSUED',"
+            "'CONSUMED','REVOKED','FAILED','EXPIRED')",
+            name="okx_demo_canary_consent_status_check",
+        ),
+        CheckConstraint(
+            "max_notional > 0 AND max_notional <= 20",
+            name="okx_demo_canary_consent_risk_check",
+        ),
+        CheckConstraint(
+            "consented_at < consent_deadline_at",
+            name="okx_demo_canary_consent_deadline_check",
+        ),
+        CheckConstraint(
+            "length(source_fingerprint) = 64",
+            name="okx_demo_canary_consent_source_fingerprint_check",
+        ),
+        CheckConstraint(
+            "length(idempotency_key_digest) = 64 AND length(consent_nonce) = 64 "
+            "AND length(consent_payload_digest) = 64 AND length(consent_digest) = 64",
+            name="okx_demo_canary_consent_proof_identity_check",
+        ),
+        CheckConstraint(
+            "(status IN ('REQUESTED','EXPIRED') AND runtime_instance_id IS NULL "
+            "AND reconciliation_run_id IS NULL AND audit_job_id IS NULL "
+            "AND approval_id IS NULL AND grant_id IS NULL AND finalized_at IS NULL) OR "
+            "(status IN ('FINALIZED','GRANT_ISSUED','CONSUMED','REVOKED','FAILED','EXPIRED') "
+            "AND runtime_instance_id IS NOT NULL "
+            "AND reconciliation_run_id IS NOT NULL AND audit_job_id IS NOT NULL "
+            "AND approval_id IS NOT NULL AND finalized_at IS NOT NULL)",
+            name="okx_demo_canary_consent_status_shape_check",
+        ),
+        UniqueConstraint(
+            "source_job_id",
+            name="okx_demo_canary_consent_source_unique",
+        ),
+        UniqueConstraint(
+            "idempotency_key_digest",
+            name="okx_demo_canary_consent_idempotency_unique",
+        ),
+        UniqueConstraint(
+            "consent_digest",
+            name="okx_demo_canary_consent_digest_unique",
+        ),
+        UniqueConstraint(
+            "consent_nonce",
+            name="okx_demo_canary_consent_nonce_unique",
+        ),
+    )
+
+    handoff_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    execution_target_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_job_id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey(
+            "research_jobs.id",
+            ondelete="RESTRICT",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        nullable=False,
+    )
+    source_ancestry: Mapped[list] = mapped_column(JSON, nullable=False)
+    source_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    idempotency_key_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    consent_nonce: Mapped[str] = mapped_column(String(64), nullable=False)
+    consent_payload_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    consent_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    provenance: Mapped[str] = mapped_column(String(48), nullable=False)
+    instrument_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    max_notional: Mapped[Decimal] = mapped_column(Numeric(36, 18), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    runtime_instance_id: Mapped[Optional[str]] = mapped_column(String(64))
+    reconciliation_run_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey(
+            "reconciliation_runs.id",
+            ondelete="RESTRICT",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+    )
+    attested_session_id: Mapped[Optional[str]] = mapped_column(String(64))
+    snapshot_binding: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    bundle_digest: Mapped[Optional[str]] = mapped_column(String(64))
+    bundle_observed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    bundle_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    audit_job_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey(
+            "research_jobs.id",
+            ondelete="RESTRICT",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+    )
+    full_chain_run_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey(
+            "full_chain_runs.id",
+            ondelete="RESTRICT",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+    )
+    approval_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey(
+            "approved_executions.id",
+            ondelete="RESTRICT",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+    )
+    grant_id: Mapped[Optional[str]] = mapped_column(
+        String(32),
+        ForeignKey(
+            "okx_demo_submission_grants.grant_id",
+            ondelete="RESTRICT",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        unique=True,
+    )
+    consented_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consent_deadline_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finalized_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    failure_code: Mapped[Optional[str]] = mapped_column(String(80))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
 PLACEMENT_PREDICATE = "operation = 'PLACE'"
 
 
@@ -75,6 +229,16 @@ class OkxDemoSubmissionGrant(Base):
     )
 
     grant_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    handoff_id: Mapped[Optional[str]] = mapped_column(
+        String(32),
+        ForeignKey(
+            "okx_demo_canary_consent_handoffs.handoff_id",
+            ondelete="RESTRICT",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        unique=True,
+    )
     execution_target_id: Mapped[str] = mapped_column(
         String(64),
         ForeignKey("execution_scopes.scope_id"),

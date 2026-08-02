@@ -60,6 +60,7 @@ from app.services.okx_demo_submission_grant import (
     OkxDemoSubmissionGrantBlocked,
     canary_lineage_read_query,
     require_canary_reconciliation,
+    settle_canary_consent_handoff,
     submission_grant_request_digest,
 )
 
@@ -808,6 +809,13 @@ class SqlAlchemyOrderWriterStore:
                         "evidence_digest": opening_digest,
                     },
                 ).scalar_one()
+                settled = settle_canary_consent_handoff(
+                    self.db, grant_id=grant.grant_id
+                )
+                if settled not in {None, "CONSUMED"}:
+                    raise OkxDemoWriteBlocked(
+                        "controlled canary consent did not close monotonically"
+                    )
             self.db.commit()
             return (
                 self._managed_order(order_row, intent, approved.id),

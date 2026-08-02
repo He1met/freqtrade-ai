@@ -30,6 +30,7 @@ from app.services.okx_demo_submission_grant import (
     OkxDemoSubmissionGrantBlocked,
     canary_lineage_read_query,
     require_canary_reconciliation,
+    revoke_restarted_canary_grant,
 )
 from app.models.okx_demo_reconciliation import (
     OkxDemoExchangeEvent,
@@ -111,6 +112,10 @@ class OkxDemoRuntimeReconciliationAdapter:
         self._last_completed_at: Optional[datetime] = None
         self._stream_generation = 0
         self._closed = False
+
+    @property
+    def runtime_instance_id(self) -> str:
+        return self._writer_instance_id
 
     def reconcile_before_writer(
         self,
@@ -595,6 +600,12 @@ class OkxDemoRuntimeReconciliationAdapter:
         grant = _active_one_shot_submission_grant(db, now=now)
         if grant is None:
             return "NONE"
+        if revoke_restarted_canary_grant(
+            db,
+            grant_id=grant.grant_id,
+            runtime_instance_id=self._writer_instance_id,
+        ):
+            return "FAILED"
         manifest = get_settings().execution_target_manifest
         target = manifest.active_target
         if (

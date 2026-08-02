@@ -16,6 +16,7 @@ from typing import Any, Callable, Mapping, Optional, Protocol, Sequence
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
+from app.core.config import get_settings
 
 from app.adapters.okx_demo.order_writer import (
     ManagedOrder,
@@ -37,9 +38,15 @@ from app.adapters.okx_demo.writer_models import (
 from app.services.okx_demo_reconciliation import OkxDemoReconciliationBlocked
 from app.services.okx_demo_submission_grant import (
     acquire_one_shot_runtime_lock,
+    arm_finalized_canary_consent,
+    fail_canary_grant_before_prepare,
     release_one_shot_runtime_lock,
+    settle_canary_consent_handoff,
 )
-from app.services.okx_demo_canary_preparation import process_pending_canary_attestation
+from app.services.okx_demo_canary_preparation import (
+    process_pending_canary_attestation,
+    process_pending_canary_consent_handoff,
+)
 
 
 RECONCILIATION_MODULE = "app.adapters.okx_demo.reconciliation_runtime"
@@ -174,6 +181,9 @@ class _ValidatedReconciliation:
 
 class RuntimeReconciliationAdapter(Protocol):
     """Narrow #448 boundary; #449 owns processes, not reconciliation models."""
+
+    @property
+    def runtime_instance_id(self) -> str: ...
 
     def reconcile_before_writer(
         self,
@@ -628,6 +638,105 @@ def serve(
                 )
             coordination_lock_released = False
             try:
+                def consent_safety_check() -> bool:
+                    current_manifest = get_settings().execution_target_manifest
+                    current_target = current_manifest.active_target
+                    return (
+                        not (runtime_path / OPENINGS_FREEZE_FILENAME).is_file()
+                        and current_manifest.active_target_id == "OKX_DEMO"
+                        and current_target.simulated_trading is True
+                        and current_target.allow_real_funds is False
+                        and current_target.order_submission_enabled is False
+                    )
+
+                recovered_grant = arm_finalized_canary_consent(
+                    db, runtime_instance_id=adapter.runtime_instance_id
+                )
+                if recovered_grant is not None:
+                    try:
+                        recovered_result = adapter.run_active_one_shot(
+                            writer=writer,
+                            db=db,
+                            openings_allowed=consent_safety_check(),
+                        )
+                    except Exception:
+                        # The recovered Commit B path has the same boundary as
+                        # the immediate path: revoke only before a durable
+                        # placement journal exists.  PREPARED remains GET-only.
+                        db.rollback()
+                        fail_canary_grant_before_prepare(
+                            db, grant_id=recovered_grant.grant_id
+                        )
+                        db.commit()
+                        writer.set_openings_allowed(False)
+                        raise
+                    recovered_status = settle_canary_consent_handoff(
+                        db, grant_id=recovered_grant.grant_id
+                    )
+                    db.commit()
+                    if recovered_result != "CONSUMED" or recovered_status != "CONSUMED":
+                        writer.set_openings_allowed(False)
+                        raise OkxDemoRuntimeBlocked(
+                            "recovered consent grant failed closed"
+                        )
+                    continue
+                consent_finalized = process_pending_canary_consent_handoff(
+                    read_client=server_session.read,
+                    db=db,
+                    runtime_instance_id=adapter.runtime_instance_id,
+                    fresh_reconciliation=lambda: adapter.observe(
+                        read_client=server_session.read,
+                        db=db,
+                    ),
+                    safety_check=consent_safety_check,
+                    now=now_provider(),
+                )
+                if consent_finalized is not None:
+                    # Commit A makes the exact fresh lineage durable with no
+                    # grant.  Only this same runtime identity may issue and
+                    # immediately consume the post-commit grant.
+                    db.commit()
+                    grant = arm_finalized_canary_consent(
+                        db,
+                        runtime_instance_id=adapter.runtime_instance_id,
+                    )
+                    if grant is None:
+                        raise OkxDemoRuntimeBlocked(
+                            "finalized canary consent did not issue a grant"
+                        )
+                    try:
+                        one_shot_result = adapter.run_active_one_shot(
+                            writer=writer,
+                            db=db,
+                            openings_allowed=consent_safety_check(),
+                        )
+                    except Exception:
+                        # Commit B already made the grant durable.  Revoke it
+                        # only if no placement journal was committed.  A
+                        # PREPARED attempt is deliberately left for GET-only
+                        # recovery by this or a restarted runtime.
+                        db.rollback()
+                        fail_canary_grant_before_prepare(
+                            db, grant_id=grant.grant_id
+                        )
+                        db.commit()
+                        writer.set_openings_allowed(False)
+                        raise
+                    handoff_status = settle_canary_consent_handoff(
+                        db, grant_id=grant.grant_id
+                    )
+                    if one_shot_result != "CONSUMED":
+                        db.commit()
+                        writer.set_openings_allowed(False)
+                        raise OkxDemoRuntimeBlocked(
+                            "consent-bound one-shot grant failed before submission"
+                        )
+                    if handoff_status != "CONSUMED":
+                        raise OkxDemoRuntimeBlocked(
+                            "consent-bound one-shot handoff did not close"
+                        )
+                    db.commit()
+                    continue
                 # The backend API never owns OKX credentials.  A controlled
                 # canary preparation is a DB-backed request that this sole
                 # attested runtime fulfills before the one-shot grant path.

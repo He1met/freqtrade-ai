@@ -90,6 +90,8 @@ class OkxDemoSubmissionGrantService:
         policy_digest: str,
         approved_payload_hash: str,
         client_order_id: str,
+        handoff_id: Optional[str] = None,
+        runtime_instance_id: Optional[str] = None,
     ) -> OkxDemoSubmissionGrant:
         manifest = get_settings().execution_target_manifest
         target = manifest.active_target
@@ -104,6 +106,12 @@ class OkxDemoSubmissionGrantService:
             )
         now = self._aware(self._now_provider())
         try:
+            if self.db.get_bind().dialect.name == "postgresql" and (
+                not handoff_id or not runtime_instance_id
+            ):
+                raise OkxDemoSubmissionGrantBlocked(
+                    "all controlled canary grants require finalized operator consent"
+                )
             if not try_one_shot_transaction_lock(self.db):
                 raise OkxDemoSubmissionGrantBlocked(
                     "canonical runtime is reconciling; retry the one-shot grant"
@@ -241,7 +249,41 @@ class OkxDemoSubmissionGrantService:
                 issued_at=now,
                 expires_at=expires_at,
             )
-            self.db.add(grant)
+            if self.db.get_bind().dialect.name == "postgresql":
+                payload = {
+                    "grant_id": grant.grant_id,
+                    "approval_id": grant.approval_id,
+                    "reconciliation_run_id": grant.reconciliation_run_id,
+                    "canonical_hash": grant.canonical_hash,
+                    "policy_digest": grant.policy_digest,
+                    "approved_payload_hash": grant.approved_payload_hash,
+                    "client_order_id": grant.client_order_id,
+                    "instrument_id": grant.instrument_id,
+                    "canary_quantity": _decimal_text(grant.canary_quantity),
+                    "canary_notional": _decimal_text(grant.canary_notional),
+                    "request_digest": grant.request_digest,
+                    "expires_at": expires_at.isoformat(),
+                }
+                payload.update(
+                    {
+                        "handoff_id": handoff_id,
+                        "runtime_instance_id": runtime_instance_id,
+                    }
+                )
+                grant_id = self.db.execute(
+                    text(
+                        "SELECT issue_okx_demo_submission_grant("
+                        "CAST(:payload AS jsonb))"
+                    ),
+                    {"payload": json.dumps(payload, sort_keys=True)},
+                ).scalar_one()
+                grant = self.db.get(OkxDemoSubmissionGrant, grant_id)
+                if grant is None:
+                    raise OkxDemoSubmissionGrantBlocked(
+                        "one-shot grant owner function did not persist"
+                    )
+            else:
+                self.db.add(grant)
             self.db.commit()
             return grant
         except OkxDemoSubmissionGrantBlocked:
@@ -280,6 +322,76 @@ class OkxDemoSubmissionGrantService:
         if value.tzinfo is None:
             return value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc)
+
+
+def arm_finalized_canary_consent(
+    db: Session, *, runtime_instance_id: str
+) -> Optional[OkxDemoSubmissionGrant]:
+    """Issue v28's grant after the independently committed finalization."""
+
+    if db.get_bind().dialect.name != "postgresql":
+        return None
+    pending = db.execute(
+        text("SELECT finalized_okx_demo_canary_consent(:runtime)"),
+        {"runtime": runtime_instance_id},
+    ).scalar_one()
+    if pending is None or pending.get("status") != "FINALIZED":
+        # Owner reconciliation may have terminalized an expired A/B or B/TTL
+        # gap.  Commit that fail-closed fact instead of rolling it back.
+        db.commit()
+        return None
+    return OkxDemoSubmissionGrantService(db).arm(
+        approval_id=int(pending["approval_id"]),
+        canonical_hash=str(pending["canonical_hash"]),
+        policy_digest=str(pending["policy_digest"]),
+        approved_payload_hash=str(pending["approved_payload_hash"]),
+        client_order_id=str(pending["client_order_id"]),
+        handoff_id=str(pending["handoff_id"]),
+        runtime_instance_id=runtime_instance_id,
+    )
+
+
+def revoke_restarted_canary_grant(
+    db: Session, *, grant_id: str, runtime_instance_id: str
+) -> bool:
+    """Fail an ACTIVE consent grant observed by any later runtime identity."""
+
+    if db.get_bind().dialect.name != "postgresql":
+        return False
+    return bool(
+        db.execute(
+            text(
+                "SELECT revoke_restarted_okx_demo_canary_grant("
+                ":grant,:runtime)"
+            ),
+            {"grant": grant_id, "runtime": runtime_instance_id},
+        ).scalar_one()
+    )
+
+
+def fail_canary_grant_before_prepare(db: Session, *, grant_id: str) -> bool:
+    """Terminalize a committed grant only while no placement journal exists."""
+
+    if db.get_bind().dialect.name != "postgresql":
+        return False
+    return bool(
+        db.execute(
+            text("SELECT fail_okx_demo_canary_grant_before_prepare(:grant)"),
+            {"grant": grant_id},
+        ).scalar_one()
+    )
+
+
+def settle_canary_consent_handoff(db: Session, *, grant_id: str) -> Optional[str]:
+    """Close the owner-managed handoff from exact persisted grant state."""
+
+    if db.get_bind().dialect.name != "postgresql":
+        return None
+    value = db.execute(
+        text("SELECT settle_okx_demo_canary_handoff(:grant_id)"),
+        {"grant_id": grant_id},
+    ).scalar_one_or_none()
+    return None if value is None else str(value)
 
 
 def require_canary_reconciliation(
