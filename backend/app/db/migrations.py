@@ -4503,8 +4503,10 @@ def _add_okx_demo_reconciliation(connection: Connection) -> None:
     for table_name in table_names:
         qualified_table = "{}.{}".format(quoted_schema, quote(table_name))
         quoted_columns = ", ".join(
-            quote(column.name)
-            for column in Base.metadata.tables[table_name].columns
+            quote(column["name"])
+            for column in inspect(connection).get_columns(
+                table_name, schema=schema_name
+            )
         )
         runtime_privileges = "SELECT, INSERT"
         connection.execute(

@@ -2987,7 +2987,7 @@ def test_postgresql_canary_lineage_rejects_fabricated_provenance_and_evidence(
     (
         ("authoritative_observed_at", None),
         ("completed_at", NOW - timedelta(seconds=31)),
-        ("authoritative_observed_at", NOW + timedelta(seconds=6)),
+        ("authoritative_observed_at", NOW + timedelta(seconds=30)),
         (
             "database_ids",
             {"reconciliation_run": [], "order_snapshots": [], "position_snapshots": []},

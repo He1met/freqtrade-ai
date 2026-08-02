@@ -402,6 +402,10 @@ def test_20260727_02_upgrades_to_risk_chain_atomically(postgres_engine) -> None:
             "full_chain_runs",
         ):
             connection.execute(text('DROP TABLE "{}"'.format(table_name)))
+        connection.execute(
+            text("ALTER TABLE okx_demo_recovery_grants DROP COLUMN lifecycle_id")
+        )
+        connection.execute(text("DROP TABLE okx_demo_canary_lifecycles"))
         connection.execute(text("DROP TABLE okx_demo_submission_grants"))
         connection.execute(text("DROP TABLE approved_executions"))
         connection.execute(text("DROP TABLE risk_budgets"))
