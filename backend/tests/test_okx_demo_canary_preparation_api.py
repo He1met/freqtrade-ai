@@ -1750,6 +1750,35 @@ def test_final_expiry_recovery_requires_explicitly_expired_source(
     )
 
 
+def test_final_expiry_recovery_requires_all_three_snapshots_expired(
+    db_session, monkeypatch
+):
+    monkeypatch.setenv("FREQTRADE_AI_EXECUTION_TARGET", "OKX_DEMO")
+    monkeypatch.setenv("FREQTRADE_AI_SIMULATED_TRADING", "true")
+    monkeypatch.setenv("FREQTRADE_AI_ALLOW_REAL_FUNDS", "false")
+    post = _successful_post_persistence_lineage(db_session)[-1]
+    evidence = dict(post.evidence_snapshot)
+    snapshots = {
+        kind: dict(reference)
+        for kind, reference in evidence["snapshot_evidence"].items()
+    }
+    snapshots["account"]["expires_at"] = (NOW + timedelta(seconds=1)).isoformat()
+    evidence["snapshot_evidence"] = snapshots
+    post.evidence_snapshot = evidence
+    db_session.commit()
+
+    with pytest.raises(OkxDemoCanaryPreparationBlocked, match="still fresh"):
+        OkxDemoCanaryPreparationService(
+            db_session, now_provider=lambda: NOW
+        ).prepare_final_expiry_recovery(idempotency_key="final-expiry-partial")
+    assert (
+        db_session.query(ResearchJob)
+        .filter_by(operation=CANARY_OPERATION)
+        .count()
+        == 7
+    )
+
+
 def test_final_expiry_recovery_rejects_pending_unknown_history_without_residue(
     db_session, monkeypatch
 ):
