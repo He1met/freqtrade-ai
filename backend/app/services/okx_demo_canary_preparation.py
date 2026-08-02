@@ -1442,11 +1442,34 @@ class OkxDemoCanaryPreparationService:
             raise OkxDemoCanaryPreparationBlocked(
                 "final expiry recovery ancestry is malformed"
             )
-        if not self._refresh_snapshots_expired(source, now):
+        if not self._all_snapshot_references_expired(source, now):
             raise OkxDemoCanaryPreparationBlocked(
                 "post-persistence recovery snapshots are still fresh; finalize it"
             )
         return source
+
+    @staticmethod
+    def _all_snapshot_references_expired(
+        job: ResearchJob,
+        now: datetime,
+    ) -> bool:
+        """Require every instrument/market/account reference to be expired."""
+
+        evidence = job.evidence_snapshot if isinstance(job.evidence_snapshot, dict) else {}
+        snapshots = evidence.get("snapshot_evidence")
+        if not isinstance(snapshots, dict):
+            raise OkxDemoCanaryPreparationBlocked(
+                "final expiry evidence is missing"
+            )
+        expiries: list[datetime] = []
+        for kind in ("instrument", "market", "account"):
+            reference = snapshots.get(kind)
+            if not isinstance(reference, dict) or "expires_at" not in reference:
+                raise OkxDemoCanaryPreparationBlocked(
+                    "final expiry evidence is missing"
+                )
+            expiries.append(_aware(reference["expires_at"]))
+        return all(expires_at <= now for expires_at in expiries)
 
     @staticmethod
     def _is_final_expiry_source(
