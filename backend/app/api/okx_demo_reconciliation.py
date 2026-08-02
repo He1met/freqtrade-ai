@@ -25,6 +25,7 @@ from app.services.okx_demo_submission_grant import (
 )
 from app.services.okx_demo_canary_preparation import (
     OkxDemoCanaryPreparationBlocked,
+    OkxDemoCanaryPreparationRuntimeBusy,
     OkxDemoCanaryPreparationWaiting,
     OkxDemoCanaryPreparationService,
 )
@@ -263,6 +264,21 @@ def refresh_fresh_execution_only_canary(
             ).prepare_fresh_execution_only_refresh(
                 idempotency_key=operator_headers.idempotency_key or "",
             )
+        except OkxDemoCanaryPreparationRuntimeBusy as exc:
+            response = {
+                "operation_status": "WAITING_FOR_RUNTIME_ATTESTATION",
+                "execution_target_id": "OKX_DEMO",
+                "provenance": "CONTROLLED_CANARY_NON_PRODUCTION",
+                "entry_kind": exc.entry_kind or "FRESH_EXECUTION_ONLY_REFRESH",
+                "non_production": True,
+                "supersedes_job_ids": list(exc.supersedes_job_ids),
+                "credential_values_recorded": False,
+            }
+            if exc.job_id is not None:
+                response["attestation_request_job_id"] = exc.job_id
+            if exc.refresh_of_job_id is not None:
+                response["refresh_of_job_id"] = exc.refresh_of_job_id
+            return response
         except OkxDemoCanaryPreparationWaiting as exc:
             response = {
                 "operation_status": "WAITING_FOR_RUNTIME_ATTESTATION",

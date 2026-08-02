@@ -104,6 +104,33 @@ class OkxDemoCanaryPreparationWaiting(OkxDemoCanaryPreparationBlocked):
         )
 
 
+class OkxDemoCanaryPreparationRuntimeBusy(OkxDemoCanaryPreparationBlocked):
+    """A refresh handoff lost the transaction-scoped runtime lock.
+
+    This is deliberately distinct from a terminal safety block.  The
+    refresh endpoint can turn it into a non-terminal WAITING response so its
+    idempotency key remains available for a later retry after reconciliation
+    releases the canonical runtime lock.  No ResearchJob is implied when
+    creation loses the race before a successor is persisted.
+    """
+
+    def __init__(
+        self,
+        *,
+        job_id: Optional[int] = None,
+        entry_kind: Optional[str] = None,
+        supersedes_job_ids: tuple[int, ...] = (),
+        refresh_of_job_id: Optional[int] = None,
+    ) -> None:
+        self.job_id = job_id
+        self.entry_kind = entry_kind
+        self.supersedes_job_ids = supersedes_job_ids
+        self.refresh_of_job_id = refresh_of_job_id
+        super().__init__(
+            "canonical runtime is reconciling; retry canary refresh"
+        )
+
+
 @dataclass(frozen=True)
 class CanaryPreparationResult:
     operation_status: str
@@ -244,8 +271,8 @@ class OkxDemoCanaryPreparationService:
             # transaction-scoped lock used by runtime reconciliation/grant.
             with self.db.begin():
                 if not try_one_shot_transaction_lock(self.db):
-                    raise OkxDemoCanaryPreparationBlocked(
-                        "canonical runtime is reconciling; retry canary refresh"
+                    raise OkxDemoCanaryPreparationRuntimeBusy(
+                        entry_kind=FRESH_EXECUTION_ONLY_REFRESH,
                     )
                 # Re-read after acquiring the lock so a concurrent request
                 # cannot create a second refresh successor.
@@ -319,8 +346,11 @@ class OkxDemoCanaryPreparationService:
         try:
             with self.db.begin():
                 if not try_one_shot_transaction_lock(self.db):
-                    raise OkxDemoCanaryPreparationBlocked(
-                        "canonical runtime is reconciling; retry canary refresh"
+                    raise OkxDemoCanaryPreparationRuntimeBusy(
+                        job_id=existing.id,
+                        entry_kind=entry_kind,
+                        supersedes_job_ids=supersedes,
+                        refresh_of_job_id=refresh_of,
                     )
                 existing = self._canary_job_for_key(key_digest)
                 if existing is None:
