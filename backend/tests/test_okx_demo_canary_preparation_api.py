@@ -951,6 +951,26 @@ def test_refresh_retry_cap_rejects_third_successor_and_missing_expiry(
         )
 
 
+def test_refresh_lineage_requires_depth_specific_entry_kind(db_session, monkeypatch):
+    monkeypatch.setenv("FREQTRADE_AI_EXECUTION_TARGET", "OKX_DEMO")
+    monkeypatch.setenv("FREQTRADE_AI_SIMULATED_TRADING", "true")
+    monkeypatch.setenv("FREQTRADE_AI_ALLOW_REAL_FUNDS", "false")
+    source = _successful_fresh_source(db_session)
+    malformed = _successful_refresh_successor(
+        db_session,
+        source,
+        entry_kind=FRESH_EXECUTION_ONLY_REFRESH_RETRY,
+        key="malformed-refresh-kind",
+    )
+    with pytest.raises(OkxDemoCanaryPreparationBlocked, match="limit reached"):
+        OkxDemoCanaryPreparationService(
+            db_session, now_provider=lambda: NOW
+        ).prepare_fresh_execution_only_refresh(
+            idempotency_key="fresh-refresh-kind-check"
+        )
+    assert db_session.get(ResearchJob, malformed.id).status == "SUCCESS"
+
+
 def test_refresh_rejects_source_without_non_production_marker(db_session, monkeypatch):
     monkeypatch.setenv("FREQTRADE_AI_EXECUTION_TARGET", "OKX_DEMO")
     monkeypatch.setenv("FREQTRADE_AI_SIMULATED_TRADING", "true")

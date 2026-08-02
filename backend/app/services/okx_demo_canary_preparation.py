@@ -966,6 +966,14 @@ class OkxDemoCanaryPreparationService:
         if parent_depth is None:
             return None
         depth = parent_depth + 1
+        if parent_depth == 0:
+            expected_kind = FRESH_EXECUTION_ONLY_REFRESH
+        elif parent_depth == 1:
+            expected_kind = FRESH_EXECUTION_ONLY_REFRESH_RETRY
+        else:
+            expected_kind = None
+        if payload.get("entry_kind") != expected_kind:
+            return None
         if depth > MAX_FRESH_EXECUTION_REFRESH_SUCCESSORS:
             return None
         return depth
