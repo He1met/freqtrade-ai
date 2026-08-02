@@ -24,6 +24,7 @@ from app.models.full_chain import (
 )
 from app.models.local_test_db import LocalTestBatch, LocalTestDbEvent
 from app.models.order_writer import (
+    OkxDemoCanaryLifecycle,
     OkxDemoSubmissionGrant,
     OkxOrderWriteAttempt,
     OkxOrderWriterLease,
@@ -67,6 +68,7 @@ __all__ = [
     "LocalTestBatch",
     "LocalTestDbEvent",
     "OkxOrderWriteAttempt",
+    "OkxDemoCanaryLifecycle",
     "OkxOrderWriterLease",
     "OkxDemoSubmissionGrant",
     "OkxDemoAccountSnapshot",

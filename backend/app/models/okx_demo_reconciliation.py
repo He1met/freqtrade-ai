@@ -14,6 +14,7 @@ from sqlalchemy import (
     Numeric,
     String,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
@@ -374,6 +375,14 @@ class OkxDemoRecoveryGrant(Base):
             "status",
             "expires_at",
         ),
+        Index(
+            "okx_demo_recovery_grants_one_active_lifecycle_action_idx",
+            "lifecycle_id",
+            "action",
+            unique=True,
+            sqlite_where=text("lifecycle_id IS NOT NULL AND status = 'ACTIVE'"),
+            postgresql_where=text("lifecycle_id IS NOT NULL AND status = 'ACTIVE'"),
+        ),
     )
 
     database_id: Mapped[int] = mapped_column(
@@ -388,6 +397,10 @@ class OkxDemoRecoveryGrant(Base):
         BigInteger().with_variant(Integer, "sqlite"),
         ForeignKey("reconciliation_runs.id", ondelete="RESTRICT"),
         nullable=False,
+    )
+    lifecycle_id: Mapped[Optional[str]] = mapped_column(
+        String(32),
+        ForeignKey("okx_demo_canary_lifecycles.lifecycle_id", ondelete="RESTRICT"),
     )
     exchange_order_row_id: Mapped[Optional[int]] = mapped_column(
         BigInteger().with_variant(Integer, "sqlite"),

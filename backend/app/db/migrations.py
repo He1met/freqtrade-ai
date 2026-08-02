@@ -58,7 +58,8 @@ SINGLE_ACTIVE_DEPLOYMENT_BASE_VERSION = "20260730_22"
 ONE_SHOT_SUBMISSION_GRANT_BASE_VERSION = "20260730_23"
 STRATEGY_VALIDATION_BASE_VERSION = "20260801_24"
 CANARY_LINEAGE_WRITE_BASE_VERSION = "20260801_25"
-SCHEMA_VERSION = "20260802_26"
+CANARY_FINAL_EXPIRY_BASE_VERSION = "20260802_26"
+SCHEMA_VERSION = "20260802_27"
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 ATTESTATION_PROOF_KEY_ENV = "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"
 
@@ -1110,7 +1111,17 @@ def _normalized_index_definition(value: object) -> Optional[str]:
     rendered = _normalized_sql_definition(value)
     if rendered is None:
         return None
-    rendered = re.sub(r"\(([a-z_][a-z0-9_]*)\)", r"\1", rendered)
+    rendered = rendered.replace("!=", "<>")
+    while True:
+        unwrapped = re.sub(
+            r"\(([a-z_][a-z0-9_]*(?:(?:<>|=)[^()]*|isnotnull|isnull))\)",
+            r"\1",
+            rendered,
+        )
+        unwrapped = re.sub(r"\(([a-z_][a-z0-9_]*)\)", r"\1", unwrapped)
+        if unwrapped == rendered:
+            break
+        rendered = unwrapped
     rendered = re.sub(
         r"([a-z_][a-z0-9_]*)=any\(\(?array\[(.*?)\]\)?\)",
         r"\1in(\2)",
@@ -2410,14 +2421,15 @@ def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
             in reconciliation_sequences
         }
         for expected_name in sorted(reconciliation_sequence_names):
-            if reconciliation_sequence_acl.get(expected_name) != (
+            expected_acl = (
                 "freqtrade_ai_attestor",
                 True,
                 True,
                 False,
                 False,
                 False,
-            ):
+            )
+            if reconciliation_sequence_acl.get(expected_name) != expected_acl:
                 problems.append(
                     "reconciliation sequence ACL mismatch: " + expected_name
                 )
@@ -2594,6 +2606,7 @@ def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
     if "freqtrade" in roles:
         problems.extend(_runtime_application_acl_problems(bind, schema_name))
         problems.extend(_one_shot_submission_grant_acl_problems(bind, schema_name))
+        problems.extend(_canary_lifecycle_acl_problems(bind, schema_name))
         problems.extend(_expired_approval_attestor_acl_problems(bind, schema_name))
         problems.extend(_strategy_validation_acl_problems(bind, schema_name))
     return problems
@@ -4921,9 +4934,9 @@ def _add_okx_demo_runtime_recovery_binding(connection: Connection) -> None:
                 v_recovery_grant_id BIGINT;
             BEGIN
                 IF TG_OP = 'INSERT' THEN
-                    IF NEW.client_order_id ~ '^rcv[0-9]{20}$' THEN
+                    IF NEW.client_order_id ~ '^rcv[0-9]{20}(C[1-3])?$' THEN
                         v_recovery_grant_id :=
-                            substring(NEW.client_order_id from 4)::BIGINT;
+                            substring(NEW.client_order_id from 4 for 20)::BIGINT;
                         IF NEW.execution_target_id <> 'OKX_DEMO'
                            OR NEW.status <> 'PREPARED'
                            OR NEW.exchange_order_id IS NOT NULL
@@ -4948,6 +4961,46 @@ def _add_okx_demo_runtime_recovery_binding(connection: Connection) -> None:
                                  AND intent.execution_target_id = 'OKX_DEMO'
                                  AND intent.instrument_id =
                                      recovery_grant.instrument_id
+                                 AND (
+                                   NEW.client_order_id !~ 'C[1-3]$'
+                                   OR EXISTS (
+                                     SELECT 1
+                                     FROM __SCHEMA__.okx_demo_canary_lifecycles l
+                                     JOIN __SCHEMA__.okx_order_write_attempts parent
+                                       ON parent.approval_id=l.cleanup_approval_id
+                                      AND parent.operation='CLOSE'
+                                      AND parent.state='RESIDUAL_CLOSE_REQUIRED'
+                                      AND parent.close_sequence+1=substring(NEW.client_order_id from 25)::integer
+                                     JOIN __SCHEMA__.exchange_orders parent_order
+                                       ON parent_order.id=parent.exchange_order_row_id
+                                      AND parent_order.trade_intent_id=l.cleanup_trade_intent_id
+                                     JOIN __SCHEMA__.okx_demo_recovery_grants old_grant
+                                       ON old_grant.database_id=parent.recovery_grant_database_id
+                                      AND old_grant.lifecycle_id=l.lifecycle_id
+                                      AND old_grant.status='CONSUMED'
+                                    WHERE l.lifecycle_id=recovery_grant.lifecycle_id
+                                      AND l.cleanup_phase='CLEANUP_PENDING'
+                                      AND l.outcome='FAILED'
+                                      AND NEW.trade_intent_id=l.cleanup_trade_intent_id
+                                      AND intent.reduce_only IS TRUE
+                                      AND intent.order_type='market'
+                                      AND recovery_grant.max_quantity=(intent.quantity-(
+                                        SELECT COALESCE(sum(COALESCE(NULLIF(a.safe_response_snapshot::jsonb->>'accumulated_fill_size','')::numeric,0)),0)
+                                        FROM __SCHEMA__.okx_order_write_attempts a
+                                        JOIN __SCHEMA__.exchange_orders eo ON eo.id=a.exchange_order_row_id
+                                        WHERE eo.trade_intent_id=l.cleanup_trade_intent_id AND a.operation='CLOSE'))
+                                      AND NEW.request_snapshot::jsonb=jsonb_build_object(
+                                        'instId',intent.instrument_id,'tdMode','isolated',
+                                        'side',CASE WHEN intent.position_side='long' THEN 'sell' ELSE 'buy' END,
+                                        'posSide',intent.position_side,'ordType','market',
+                                        'sz',recovery_grant.max_quantity::text,
+                                        'clOrdId',NEW.client_order_id,'reduceOnly',TRUE)
+                                      AND NOT EXISTS(
+                                        SELECT 1 FROM __SCHEMA__.okx_order_write_attempts other
+                                        WHERE other.state IN('PREPARED','ACKNOWLEDGED','RECOVERY_REQUIRED','RESIDUAL_CLOSE_REQUIRED')
+                                          AND other.id<>parent.id)
+                                   )
+                                 )
                            )
                         THEN
                             RAISE EXCEPTION
@@ -5489,6 +5542,123 @@ def _one_shot_submission_grant_acl_problems(
         if bool(can_update) != (column["name"] in allowed_updates):
             problems.append(
                 "one-shot submission grant column ACL mismatch: " + column["name"]
+            )
+    return problems
+
+
+def _canary_lifecycle_acl_problems(connection: Connection, schema_name: str) -> list[str]:
+    if "okx_demo_canary_lifecycles" not in inspect(connection).get_table_names(schema=schema_name):
+        return ["controlled canary lifecycle table missing"]
+    problems: list[str] = []
+    for signature, fragments in {
+        "lock_okx_demo_reconciliation_state()": (
+            "FOR UPDATE",
+            "controlled recovery state lock is missing",
+        ),
+        "create_okx_demo_canary_lifecycle(character varying)": (
+            "CONTROLLED_CANARY_NON_PRODUCTION",
+            "baseline_position_quantity",
+            "lifecycle_id IS NULL AND status='ACTIVE'",
+        ),
+        "create_okx_demo_canary_cleanup_intent(character varying,bigint,bigint)": ("canary cleanup grant binding rejected", "cleanup_trade_intent_id"),
+        "bridge_okx_demo_managed_fill(bigint)": (
+            "managed fill evidence rejected",
+            "authenticated IS NOT TRUE",
+            "managed fill lineage conflict",
+        ),
+        "prepare_okx_demo_canary_residual_child(bigint,bigint)": (
+            "residual canary child context rejected",
+            "lock_okx_demo_reconciliation_state",
+            "RESIDUAL_CLOSE_REQUIRED",
+            "SUPERSEDED_BY_CLOSE_CLEANUP",
+        ),
+        "can_resume_okx_demo_canary_recovery(bigint)": (
+            "require_current_okx_demo_canary_recovery_run",
+            "lifecycle_id IS DISTINCT FROM lifecycle",
+        ),
+        "transition_okx_demo_canary_lifecycle(character varying,text,bigint,bigint,character varying,bigint)": ("BIND_OPENING", "RECORD_FILLS", "EXHAUST_RECOVERY", "TERMINALIZE"),
+        "issue_okx_demo_canary_recovery_grant(character varying,bigint,text,bigint)": ("canary recovery grant context rejected", "lifecycle_id"),
+    }.items():
+        row = connection.execute(text(
+            "SELECT owner.rolname,p.prosecdef,p.proconfig,has_function_privilege('freqtrade',p.oid,'EXECUTE'), "
+            "EXISTS(SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee=0 AND a.privilege_type='EXECUTE'),p.prosrc "
+            "FROM pg_proc p JOIN pg_roles owner ON owner.oid=p.proowner "
+            "WHERE p.oid=to_regprocedure(:signature)"
+        ), {"signature": f"{schema_name}.{signature}"}).first()
+        if row is None or row[0] != "freqtrade_ai_attestor" or row[1] is not True or "search_path=pg_catalog" not in (row[2] or []) or row[3] is not True or row[4] is True or any(fragment not in row[5] for fragment in fragments):
+            problems.append("controlled canary lifecycle function boundary mismatch: " + signature)
+    for trigger_name, function_name, security_definer, trigger_event, fragments in (
+        (
+            "okx_demo_canary_recovery_insert_guard",
+            "guard_okx_demo_canary_recovery_insert",
+            False,
+            "BEFORE INSERT ON",
+            (
+                "NEW.lifecycle_id IS NOT NULL",
+                "current_user IS DISTINCT FROM 'freqtrade_ai_attestor'",
+                "lock_okx_demo_reconciliation_state",
+                "generic recovery grant conflicts with controlled canary lifecycle",
+            ),
+        ),
+        (
+            "okx_demo_recovery_lifecycle_identity_guard",
+            "guard_okx_demo_recovery_lifecycle_identity",
+            True,
+            "BEFORE UPDATE ON",
+            ("OLD.lifecycle_id IS DISTINCT FROM NEW.lifecycle_id",),
+        ),
+    ):
+        row = connection.execute(text(
+            "SELECT p.proname,owner.rolname,p.prosecdef,p.proconfig,t.tgenabled,p.prosrc,pg_get_triggerdef(t.oid) "
+            "FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid "
+            "JOIN pg_roles owner ON owner.oid=p.proowner "
+            "WHERE t.tgrelid=to_regclass(:table) AND t.tgname=:trigger AND NOT t.tgisinternal"
+        ), {
+            "table": f"{schema_name}.okx_demo_recovery_grants",
+            "trigger": trigger_name,
+        }).first()
+        if (
+            row is None
+            or row[0] != function_name
+            or row[1] != "freqtrade_ai_attestor"
+            or row[2] is not security_definer
+            or "search_path=pg_catalog" not in (row[3] or [])
+            or row[4] != "O"
+            or any(fragment not in row[5] for fragment in fragments)
+            or trigger_event not in row[6]
+            or "FOR EACH ROW EXECUTE FUNCTION" not in row[6]
+        ):
+            problems.append("controlled canary lifecycle trigger boundary mismatch: " + trigger_name)
+    lifecycle_dml, recovery_insert = connection.execute(text(
+        "SELECT has_table_privilege('freqtrade',:lifecycle,'INSERT,UPDATE,DELETE'),has_table_privilege('freqtrade',:recovery,'INSERT')"
+    ), {"lifecycle": f"{schema_name}.okx_demo_canary_lifecycles", "recovery": f"{schema_name}.okx_demo_recovery_grants"}).one()
+    if lifecycle_dml or not recovery_insert:
+        problems.append("controlled canary lifecycle runtime ACL mismatch")
+    allowed_selects = {
+        "lifecycle_id", "execution_target_id", "opening_trade_intent_id",
+        "cleanup_trade_intent_id",
+        "cleanup_phase", "outcome", "deadline_at", "fencing_version",
+        "opening_exchange_order_row_id", "cleanup_exchange_order_row_id",
+        "baseline_evidence_digest", "attributed_fill_quantity", "max_quantity",
+        "fill_attribution_digest", "failure_code", "final_evidence_digest",
+        "terminal_at", "revoked_at",
+    }
+    for column in inspect(connection).get_columns(
+        "okx_demo_canary_lifecycles", schema=schema_name
+    ):
+        can_select = connection.execute(
+            text(
+                "SELECT has_column_privilege('freqtrade',:table,:column,'SELECT')"
+            ),
+            {
+                "table": f"{schema_name}.okx_demo_canary_lifecycles",
+                "column": column["name"],
+            },
+        ).scalar_one()
+        if bool(can_select) != (column["name"] in allowed_selects):
+            problems.append(
+                "controlled canary lifecycle column SELECT ACL mismatch: "
+                + column["name"]
             )
     return problems
 
@@ -6072,6 +6242,761 @@ def _add_strategy_validation_matrix(connection: Connection) -> None:
     )
 
 
+def _add_controlled_canary_lifecycle_boundary(connection: Connection) -> None:
+    """Install v27 durable canary identity with function-only runtime writes."""
+
+    Base.metadata.tables["okx_demo_canary_lifecycles"].create(
+        bind=connection, checkfirst=True
+    )
+    columns = {
+        column["name"]
+        for column in inspect(connection).get_columns("okx_demo_recovery_grants")
+    }
+    if "lifecycle_id" not in columns:
+        connection.execute(text("ALTER TABLE okx_demo_recovery_grants ADD COLUMN lifecycle_id VARCHAR(32) REFERENCES okx_demo_canary_lifecycles(lifecycle_id) ON DELETE RESTRICT"))
+    connection.execute(text("""
+        ALTER TABLE okx_demo_canary_lifecycles
+          DROP CONSTRAINT IF EXISTS okx_demo_canary_lifecycle_phase_check;
+        ALTER TABLE okx_demo_canary_lifecycles
+          ADD CONSTRAINT okx_demo_canary_lifecycle_phase_check
+          CHECK (cleanup_phase IN ('ARMED','OPENING_SUBMITTED','CANCEL_PENDING',
+            'CLEANUP_PENDING','RECOVERY_EXHAUSTED','TERMINAL','REVOKED'));
+    """))
+    connection.execute(text("""
+        CREATE UNIQUE INDEX IF NOT EXISTS
+          okx_demo_recovery_grants_one_active_lifecycle_action_idx
+        ON okx_demo_recovery_grants (lifecycle_id, action)
+        WHERE lifecycle_id IS NOT NULL AND status = 'ACTIVE'
+    """))
+    schema_name = connection.execute(text("SELECT current_schema() ")).scalar_one()
+    quoted_schema = '"{}"'.format(schema_name.replace('"', '""'))
+    connection.execute(text("""
+        CREATE OR REPLACE FUNCTION lock_okx_demo_reconciliation_state()
+        RETURNS bigint LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+        DECLARE state_id bigint;
+        BEGIN
+          SELECT database_id INTO state_id
+            FROM SCHEMA_TOKEN.okx_demo_reconciliation_states
+            WHERE execution_target_id='OKX_DEMO' FOR UPDATE;
+          IF NOT FOUND THEN
+            RAISE EXCEPTION 'controlled recovery state lock is missing';
+          END IF;
+          RETURN state_id;
+        END $$;
+        ALTER FUNCTION lock_okx_demo_reconciliation_state() OWNER TO freqtrade_ai_attestor;
+        REVOKE ALL ON FUNCTION lock_okx_demo_reconciliation_state() FROM PUBLIC;
+        GRANT EXECUTE ON FUNCTION lock_okx_demo_reconciliation_state() TO freqtrade;
+        CREATE OR REPLACE FUNCTION create_okx_demo_canary_lifecycle(
+            p_grant_id varchar)
+        RETURNS varchar LANGUAGE plpgsql SECURITY DEFINER
+        SET search_path = pg_catalog AS $$
+        DECLARE g SCHEMA_TOKEN.okx_demo_submission_grants%ROWTYPE;
+                a SCHEMA_TOKEN.approved_executions%ROWTYPE;
+                i SCHEMA_TOKEN.trade_intents%ROWTYPE;
+                r SCHEMA_TOKEN.reconciliation_runs%ROWTYPE;
+                s SCHEMA_TOKEN.okx_demo_reconciliation_states%ROWTYPE;
+                expected_digest text; computed_deadline timestamptz;
+        BEGIN
+          SELECT * INTO g FROM SCHEMA_TOKEN.okx_demo_submission_grants WHERE grant_id=p_grant_id FOR UPDATE;
+          IF NOT FOUND THEN RAISE EXCEPTION 'controlled canary grant missing'; END IF;
+          SELECT * INTO a FROM SCHEMA_TOKEN.approved_executions WHERE id=g.approval_id;
+          IF NOT FOUND THEN RAISE EXCEPTION 'controlled canary approval missing'; END IF;
+          SELECT * INTO i FROM SCHEMA_TOKEN.trade_intents WHERE id=a.trade_intent_id;
+          IF NOT FOUND THEN RAISE EXCEPTION 'controlled canary intent missing'; END IF;
+          SELECT * INTO r FROM SCHEMA_TOKEN.reconciliation_runs WHERE id=g.reconciliation_run_id;
+          IF NOT FOUND THEN RAISE EXCEPTION 'controlled canary baseline missing'; END IF;
+          SELECT * INTO s FROM SCHEMA_TOKEN.okx_demo_reconciliation_states
+            WHERE execution_target_id='OKX_DEMO' FOR UPDATE;
+          IF NOT FOUND THEN RAISE EXCEPTION 'controlled canary reconciliation state missing'; END IF;
+          expected_digest := encode(public.digest(convert_to(concat_ws('|',r.id::text,r.artifact_sha256,r.authoritative_observed_at::text,r.completed_at::text),'UTF8'),'sha256'),'hex');
+          computed_deadline := LEAST(statement_timestamp()+interval '30 seconds',g.expires_at,a.expires_at,i.expires_at);
+          IF g.status IS DISTINCT FROM 'ACTIVE' OR g.execution_target_id IS DISTINCT FROM 'OKX_DEMO'
+             OR g.provenance IS DISTINCT FROM 'CONTROLLED_CANARY_NON_PRODUCTION'
+             OR g.approval_id IS DISTINCT FROM a.id OR g.client_order_id IS DISTINCT FROM a.client_order_id
+             OR g.client_order_id IS DISTINCT FROM i.client_order_id OR g.instrument_id IS DISTINCT FROM i.instrument_id
+             OR g.canary_quantity IS DISTINCT FROM i.quantity OR a.trade_intent_id IS DISTINCT FROM i.id
+             OR a.execution_target_id IS DISTINCT FROM 'OKX_DEMO' OR a.status IS DISTINCT FROM 'ACTIVE'
+             OR a.order_submission_authorized IS DISTINCT FROM FALSE OR a.claim_required IS NOT TRUE
+             OR i.execution_target_id IS DISTINCT FROM 'OKX_DEMO' OR i.status IS DISTINCT FROM 'APPROVED'
+             OR i.reduce_only IS NOT FALSE OR i.instrument_id IS DISTINCT FROM 'BTC-USDT-SWAP'
+             OR i.side IS DISTINCT FROM 'buy' OR i.position_side IS DISTINCT FROM 'long'
+             OR i.client_order_id IS NULL OR i.quantity IS NULL OR i.quantity<=0
+             OR r.execution_target_id IS DISTINCT FROM 'OKX_DEMO' OR r.status IS DISTINCT FROM 'RECONCILED'
+             OR r.artifact_status IS DISTINCT FROM 'READY' OR r.source_type IS DISTINCT FROM 'api_aggregate' OR r.core_data IS NOT TRUE
+             OR s.last_reconciliation_run_id IS DISTINCT FROM r.id
+             OR s.status IS DISTINCT FROM 'RECONCILED' OR s.opening_frozen IS NOT FALSE
+             OR r.completed_at IS NULL OR r.authoritative_observed_at IS NULL
+             OR r.completed_at < statement_timestamp()-interval '30 seconds'
+             OR r.authoritative_observed_at < statement_timestamp()-interval '30 seconds'
+             OR r.completed_at > statement_timestamp()+interval '5 seconds'
+             OR r.authoritative_observed_at > statement_timestamp()+interval '5 seconds'
+             OR jsonb_typeof(r.database_ids::jsonb) IS DISTINCT FROM 'object'
+             OR (r.database_ids::jsonb)->'reconciliation_run' IS DISTINCT FROM jsonb_build_array(r.id)
+             OR (r.database_ids::jsonb)->'order_snapshots' IS DISTINCT FROM '[]'::jsonb
+             OR (r.database_ids::jsonb)->'position_snapshots' IS DISTINCT FROM '[]'::jsonb
+             OR jsonb_typeof((r.database_ids::jsonb)->'recovery_batches') IS DISTINCT FROM 'array'
+             OR jsonb_array_length((r.database_ids::jsonb)->'recovery_batches') IS DISTINCT FROM 1
+             OR NOT EXISTS (SELECT 1 FROM SCHEMA_TOKEN.okx_demo_recovery_batches b
+                 WHERE b.database_id=((r.database_ids::jsonb)->'recovery_batches'->>0)::bigint
+                   AND b.execution_target_id='OKX_DEMO' AND b.authenticated AND b.pagination_complete
+                   AND b.complete_streams::jsonb IS NOT DISTINCT FROM '["ACCOUNT","FILL","ORDER","POSITION"]'::jsonb
+                   AND (SELECT array_agg(k ORDER BY k) FROM jsonb_object_keys(b.high_watermarks::jsonb) k)
+                       IS NOT DISTINCT FROM ARRAY['ACCOUNT','FILL','ORDER','POSITION']::text[]
+                   AND b.completed_at>=statement_timestamp()-interval '30 seconds'
+                   AND b.observed_at>=statement_timestamp()-interval '30 seconds')
+             OR EXISTS (SELECT 1 FROM SCHEMA_TOKEN.okx_demo_recovery_batches b
+                 WHERE b.database_id=((r.database_ids::jsonb)->'recovery_batches'->>0)::bigint
+                   AND (b.completed_at>statement_timestamp()+interval '5 seconds'
+                     OR b.observed_at>statement_timestamp()+interval '5 seconds'))
+             OR (r.artifact_sha256~'^[0-9a-f]{64}$') IS NOT TRUE
+             OR computed_deadline IS NULL OR computed_deadline<=statement_timestamp()
+             OR EXISTS (SELECT 1 FROM SCHEMA_TOKEN.okx_demo_recovery_grants
+                 WHERE lifecycle_id IS NULL AND status='ACTIVE')
+             OR EXISTS (SELECT 1 FROM SCHEMA_TOKEN.okx_demo_canary_lifecycles WHERE cleanup_phase NOT IN ('TERMINAL','REVOKED'))
+          THEN RAISE EXCEPTION 'unsafe controlled canary lifecycle baseline'; END IF;
+          INSERT INTO SCHEMA_TOKEN.okx_demo_canary_lifecycles(
+            lifecycle_id,execution_target_id,submission_grant_id,opening_approval_id,
+            opening_trade_intent_id,baseline_reconciliation_run_id,
+            baseline_position_quantity,baseline_evidence_digest,
+            attributed_fill_quantity,max_quantity,outcome,cleanup_phase,
+            deadline_at,fencing_version,created_at,updated_at)
+          VALUES(g.grant_id,'OKX_DEMO',g.grant_id,a.id,i.id,r.id,0,
+            expected_digest,
+            0,g.canary_quantity,'PENDING','ARMED',
+            computed_deadline,1,statement_timestamp(),statement_timestamp());
+          RETURN g.grant_id;
+        END $$;
+        ALTER FUNCTION create_okx_demo_canary_lifecycle(varchar) OWNER TO freqtrade_ai_attestor;
+        REVOKE ALL ON FUNCTION create_okx_demo_canary_lifecycle(varchar) FROM PUBLIC;
+        GRANT EXECUTE ON FUNCTION create_okx_demo_canary_lifecycle(varchar) TO freqtrade;
+        CREATE OR REPLACE FUNCTION require_current_okx_demo_canary_run(p_run_id bigint)
+        RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+        DECLARE r SCHEMA_TOKEN.reconciliation_runs%ROWTYPE;
+                s SCHEMA_TOKEN.okx_demo_reconciliation_states%ROWTYPE;
+        BEGIN
+          SELECT * INTO r FROM SCHEMA_TOKEN.reconciliation_runs WHERE id=p_run_id;
+          IF NOT FOUND THEN RETURN FALSE; END IF;
+          SELECT * INTO s FROM SCHEMA_TOKEN.okx_demo_reconciliation_states WHERE execution_target_id='OKX_DEMO';
+          IF NOT FOUND THEN RETURN FALSE; END IF;
+          RETURN r.execution_target_id='OKX_DEMO' AND r.status IN('RECONCILED','RECOVERED')
+            AND r.artifact_status='READY' AND r.source_type='api_aggregate' AND r.core_data
+            AND r.artifact_sha256~'^[0-9a-f]{64}$'
+            AND r.completed_at IS NOT NULL AND r.authoritative_observed_at IS NOT NULL
+            AND r.completed_at>=statement_timestamp()-interval '30 seconds'
+            AND r.authoritative_observed_at>=statement_timestamp()-interval '30 seconds'
+            AND r.completed_at<=statement_timestamp()+interval '5 seconds'
+            AND r.authoritative_observed_at<=statement_timestamp()+interval '5 seconds'
+            AND s.last_reconciliation_run_id=r.id AND s.status IN('RECONCILED','RECOVERED') AND NOT s.opening_frozen
+            AND jsonb_typeof(r.database_ids::jsonb)='object'
+            AND (r.database_ids::jsonb)->'reconciliation_run' IS NOT DISTINCT FROM jsonb_build_array(r.id)
+            AND jsonb_array_length((r.database_ids::jsonb)->'recovery_batches')=1
+            AND EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_recovery_batches b
+              WHERE b.database_id=((r.database_ids::jsonb)->'recovery_batches'->>0)::bigint
+                AND b.execution_target_id='OKX_DEMO' AND b.authenticated AND b.pagination_complete
+                AND b.complete_streams::jsonb IS NOT DISTINCT FROM '["ACCOUNT","FILL","ORDER","POSITION"]'::jsonb
+                AND (SELECT array_agg(k ORDER BY k) FROM jsonb_object_keys(b.high_watermarks::jsonb) k)
+                    IS NOT DISTINCT FROM ARRAY['ACCOUNT','FILL','ORDER','POSITION']::text[]
+                AND b.completed_at>=statement_timestamp()-interval '30 seconds'
+                AND b.observed_at>=statement_timestamp()-interval '30 seconds'
+                AND b.completed_at<=statement_timestamp()+interval '5 seconds'
+                AND b.observed_at<=statement_timestamp()+interval '5 seconds');
+        END $$;
+        ALTER FUNCTION require_current_okx_demo_canary_run(bigint) OWNER TO freqtrade_ai_attestor;
+        REVOKE ALL ON FUNCTION require_current_okx_demo_canary_run(bigint) FROM PUBLIC,freqtrade;
+        CREATE OR REPLACE FUNCTION require_current_okx_demo_canary_recovery_run(p_run_id bigint,p_lifecycle varchar)
+        RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+        DECLARE r SCHEMA_TOKEN.reconciliation_runs%ROWTYPE; s SCHEMA_TOKEN.okx_demo_reconciliation_states%ROWTYPE;
+                l SCHEMA_TOKEN.okx_demo_canary_lifecycles%ROWTYPE; oi SCHEMA_TOKEN.trade_intents%ROWTYPE;
+                opening_ord text; opening_client text;
+        BEGIN
+          SELECT * INTO r FROM SCHEMA_TOKEN.reconciliation_runs WHERE id=p_run_id; IF NOT FOUND THEN RETURN FALSE; END IF;
+          SELECT * INTO s FROM SCHEMA_TOKEN.okx_demo_reconciliation_states WHERE execution_target_id='OKX_DEMO'; IF NOT FOUND THEN RETURN FALSE; END IF;
+          SELECT * INTO l FROM SCHEMA_TOKEN.okx_demo_canary_lifecycles WHERE lifecycle_id=p_lifecycle; IF NOT FOUND THEN RETURN FALSE; END IF;
+          SELECT * INTO oi FROM SCHEMA_TOKEN.trade_intents WHERE id=l.opening_trade_intent_id; IF NOT FOUND THEN RETURN FALSE; END IF;
+          SELECT exchange_order_id,client_order_id INTO opening_ord,opening_client FROM SCHEMA_TOKEN.exchange_orders WHERE id=l.opening_exchange_order_row_id;
+          RETURN r.status='DRIFTED' AND s.status='DRIFTED' AND s.opening_frozen AND s.last_reconciliation_run_id=r.id
+            AND r.execution_target_id='OKX_DEMO' AND r.artifact_status='READY' AND r.artifact_sha256~'^[0-9a-f]{64}$' AND r.source_type='api_aggregate' AND r.core_data
+            AND r.completed_at>=statement_timestamp()-interval '30 seconds' AND r.authoritative_observed_at>=statement_timestamp()-interval '30 seconds'
+            AND r.completed_at<=statement_timestamp()+interval '5 seconds' AND r.authoritative_observed_at<=statement_timestamp()+interval '5 seconds'
+            AND jsonb_typeof(r.summary_snapshot::jsonb)='object'
+            AND (r.summary_snapshot::jsonb)->>'execution_target'='OKX_DEMO'
+            AND (r.summary_snapshot::jsonb)->>'source_type'='api_aggregate'
+            AND (r.summary_snapshot::jsonb)->>'status'='DRIFTED'
+            AND (r.summary_snapshot::jsonb)->'core_data'='true'::jsonb
+            AND (r.summary_snapshot::jsonb)->'opening_frozen'='true'::jsonb
+            AND (r.summary_snapshot::jsonb)->'database_ids' IS NOT DISTINCT FROM r.database_ids::jsonb
+            AND jsonb_typeof((r.summary_snapshot::jsonb)->'findings')='array'
+            AND jsonb_array_length((r.summary_snapshot::jsonb)->'findings')>0
+            AND (r.database_ids::jsonb)->'reconciliation_run' IS NOT DISTINCT FROM jsonb_build_array(r.id)
+            AND EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_order_snapshots x
+                WHERE x.database_id IN(SELECT jsonb_array_elements_text((r.database_ids::jsonb)->'order_snapshots')::bigint)
+                  AND x.exchange_order_id=opening_ord AND x.client_order_id=opening_client)
+            AND NOT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_order_snapshots x WHERE x.database_id IN(SELECT jsonb_array_elements_text((r.database_ids::jsonb)->'order_snapshots')::bigint) AND NOT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.exchange_orders eo WHERE (eo.id=l.opening_exchange_order_row_id OR eo.trade_intent_id=l.cleanup_trade_intent_id) AND eo.exchange_order_id=x.exchange_order_id AND eo.client_order_id=x.client_order_id))
+            AND NOT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_fill_snapshots x WHERE x.database_id IN(SELECT jsonb_array_elements_text((r.database_ids::jsonb)->'fill_snapshots')::bigint) AND NOT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.exchange_orders eo WHERE (eo.id=l.opening_exchange_order_row_id OR eo.trade_intent_id=l.cleanup_trade_intent_id) AND eo.exchange_order_id=x.exchange_order_id))
+            AND NOT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_position_snapshots x WHERE x.database_id IN(SELECT jsonb_array_elements_text((r.database_ids::jsonb)->'position_snapshots')::bigint) AND (x.instrument_id IS DISTINCT FROM oi.instrument_id OR x.position_side IS DISTINCT FROM oi.position_side))
+            AND jsonb_array_length((r.database_ids::jsonb)->'recovery_batches')=1
+            AND EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_recovery_batches b WHERE b.database_id=((r.database_ids::jsonb)->'recovery_batches'->>0)::bigint AND b.execution_target_id='OKX_DEMO' AND b.authenticated AND b.pagination_complete AND b.complete_streams::jsonb IS NOT DISTINCT FROM '["ACCOUNT","FILL","ORDER","POSITION"]'::jsonb AND (SELECT array_agg(k ORDER BY k) FROM jsonb_object_keys(b.high_watermarks::jsonb) k) IS NOT DISTINCT FROM ARRAY['ACCOUNT','FILL','ORDER','POSITION']::text[] AND b.completed_at>=statement_timestamp()-interval '30 seconds' AND b.observed_at>=statement_timestamp()-interval '30 seconds' AND b.completed_at<=statement_timestamp()+interval '5 seconds' AND b.observed_at<=statement_timestamp()+interval '5 seconds')
+            AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements(COALESCE((r.summary_snapshot::jsonb)->'findings','[]'::jsonb)) f WHERE (((f->>'code'='POSITION_DRIFT' AND f->>'identity'=oi.instrument_id||':'||oi.position_side) OR (f->>'code' IN('CONTROLLED_CANARY_DEADLINE_CANCEL_REQUIRED','CONTROLLED_CANARY_FILL_ATTRIBUTED','CONTROLLED_CANARY_CLEANUP_REQUIRED') AND f->>'identity'='canary:'||substr(encode(public.digest(convert_to(l.lifecycle_id,'UTF8'),'sha256'),'hex'),1,16)))) IS NOT TRUE);
+        END $$;
+        ALTER FUNCTION require_current_okx_demo_canary_recovery_run(bigint,varchar) OWNER TO freqtrade_ai_attestor;
+        REVOKE ALL ON FUNCTION require_current_okx_demo_canary_recovery_run(bigint,varchar) FROM PUBLIC,freqtrade;
+        CREATE OR REPLACE FUNCTION can_resume_okx_demo_canary_recovery(p_run_id bigint)
+        RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+        DECLARE lifecycle varchar; lifecycle_count bigint;
+        BEGIN
+          SELECT min(lifecycle_id),count(*) INTO lifecycle,lifecycle_count
+            FROM SCHEMA_TOKEN.okx_demo_canary_lifecycles
+            WHERE cleanup_phase NOT IN('TERMINAL','REVOKED');
+          RETURN lifecycle_count=1
+            AND SCHEMA_TOKEN.require_current_okx_demo_canary_recovery_run(
+                p_run_id,lifecycle) IS TRUE
+            AND NOT EXISTS(
+                SELECT 1 FROM SCHEMA_TOKEN.okx_demo_recovery_grants
+                WHERE status='ACTIVE' AND lifecycle_id IS DISTINCT FROM lifecycle);
+        END $$;
+        ALTER FUNCTION can_resume_okx_demo_canary_recovery(bigint) OWNER TO freqtrade_ai_attestor;
+        REVOKE ALL ON FUNCTION can_resume_okx_demo_canary_recovery(bigint) FROM PUBLIC;
+        GRANT EXECUTE ON FUNCTION can_resume_okx_demo_canary_recovery(bigint) TO freqtrade;
+        CREATE OR REPLACE FUNCTION create_okx_demo_canary_cleanup_intent(
+          p_lifecycle varchar,p_grant_id bigint,p_expected_version bigint)
+        RETURNS bigint LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+        DECLARE l SCHEMA_TOKEN.okx_demo_canary_lifecycles%ROWTYPE;
+                g SCHEMA_TOKEN.okx_demo_recovery_grants%ROWTYPE;
+                oi SCHEMA_TOKEN.trade_intents%ROWTYPE;
+                oa SCHEMA_TOKEN.approved_executions%ROWTYPE;
+                existing SCHEMA_TOKEN.trade_intents%ROWTYPE;
+                cleanup_id bigint; cleanup_decision_id bigint; new_cleanup_approval_id bigint;
+                cleanup_side text; cleanup_client text;
+                identity_digest text;
+        BEGIN
+          SELECT * INTO l FROM SCHEMA_TOKEN.okx_demo_canary_lifecycles
+            WHERE lifecycle_id=p_lifecycle FOR UPDATE;
+          IF NOT FOUND OR p_expected_version IS NULL
+             OR l.fencing_version IS DISTINCT FROM p_expected_version
+             OR l.cleanup_phase IS DISTINCT FROM 'CLEANUP_PENDING'
+             OR l.outcome IS DISTINCT FROM 'FAILED' OR l.attributed_fill_quantity<=0
+          THEN RAISE EXCEPTION 'canary cleanup intent context rejected'; END IF;
+          SELECT * INTO g FROM SCHEMA_TOKEN.okx_demo_recovery_grants
+            WHERE database_id=p_grant_id;
+          SELECT * INTO oi FROM SCHEMA_TOKEN.trade_intents
+            WHERE id=l.opening_trade_intent_id;
+          SELECT * INTO oa FROM SCHEMA_TOKEN.approved_executions
+            WHERE id=l.opening_approval_id;
+          IF g.database_id IS NULL OR oi.id IS NULL OR oa.id IS NULL
+             OR g.lifecycle_id IS DISTINCT FROM l.lifecycle_id
+             OR g.action IS DISTINCT FROM 'REDUCE_ONLY' OR g.status IS DISTINCT FROM 'ACTIVE'
+             OR g.reconciliation_run_id IS NULL
+             OR g.instrument_id IS DISTINCT FROM oi.instrument_id
+             OR g.position_side IS DISTINCT FROM oi.position_side
+             OR g.max_quantity IS DISTINCT FROM l.attributed_fill_quantity
+             OR g.expires_at<=statement_timestamp()
+             OR SCHEMA_TOKEN.require_current_okx_demo_canary_recovery_run(g.reconciliation_run_id,l.lifecycle_id) IS NOT TRUE
+          THEN RAISE EXCEPTION 'canary cleanup grant binding rejected'; END IF;
+          cleanup_side:=CASE WHEN oi.position_side='long' THEN 'sell'
+                             WHEN oi.position_side='short' THEN 'buy' ELSE NULL END;
+          cleanup_client:='rcv'||lpad(g.database_id::text,20,'0');
+          identity_digest:=encode(public.digest(convert_to(concat_ws('|',l.lifecycle_id,g.database_id::text,
+            oi.instrument_id,oi.position_side,cleanup_side,l.attributed_fill_quantity::text),'UTF8'),'sha256'),'hex');
+          IF cleanup_side IS NULL THEN RAISE EXCEPTION 'canary cleanup direction rejected'; END IF;
+          IF l.cleanup_trade_intent_id IS NOT NULL THEN
+            SELECT * INTO existing FROM SCHEMA_TOKEN.trade_intents WHERE id=l.cleanup_trade_intent_id;
+            IF NOT FOUND OR existing.client_order_id IS DISTINCT FROM cleanup_client
+               OR existing.instrument_id IS DISTINCT FROM oi.instrument_id
+               OR existing.position_side IS DISTINCT FROM oi.position_side
+               OR existing.side IS DISTINCT FROM cleanup_side
+               OR existing.quantity IS DISTINCT FROM l.attributed_fill_quantity
+               OR existing.reduce_only IS NOT TRUE OR existing.order_type IS DISTINCT FROM 'market'
+            THEN RAISE EXCEPTION 'persisted canary cleanup intent mismatch'; END IF;
+            IF l.cleanup_approval_id IS NULL OR NOT EXISTS(
+              SELECT 1 FROM SCHEMA_TOKEN.approved_executions a
+               WHERE a.id=l.cleanup_approval_id AND a.trade_intent_id=existing.id
+                 AND a.status='ACTIVE' AND a.expires_at=g.expires_at)
+            THEN RAISE EXCEPTION 'persisted canary cleanup approval mismatch'; END IF;
+            RETURN l.cleanup_approval_id;
+          END IF;
+          INSERT INTO SCHEMA_TOKEN.trade_intents(
+            execution_target_id,authorization_schema_version,intent_id,canonical_hash,
+            policy_digest,approved_payload_hash,idempotency_key_digest,client_order_id,
+            instrument_id,side,position_side,order_type,quantity,reference_price,
+            leverage,margin_mode,reduce_only,status,request_snapshot,expires_at)
+          VALUES('OKX_DEMO','RISK_V1',identity_digest,identity_digest,identity_digest,
+            identity_digest,identity_digest,cleanup_client,oi.instrument_id,cleanup_side,
+            oi.position_side,'market',l.attributed_fill_quantity,oi.reference_price,
+            oi.leverage,'isolated',TRUE,'APPROVED',jsonb_build_object(
+              'provenance','CONTROLLED_CANARY_NON_PRODUCTION','lifecycle_id_hash',
+              substr(encode(public.digest(convert_to(l.lifecycle_id,'UTF8'),'sha256'),'hex'),1,16),
+              'recovery_grant_database_id',g.database_id,'reduce_only',TRUE)::json,g.expires_at)
+          RETURNING id INTO cleanup_id;
+          INSERT INTO SCHEMA_TOKEN.risk_decisions(
+            execution_target_id,trade_intent_id,authorization_schema_version,
+            policy_digest,decision,policy_version,evidence_snapshot)
+          VALUES('OKX_DEMO',cleanup_id,'RISK_V1',identity_digest,'APPROVED',
+            'controlled-canary-cleanup-v1',jsonb_build_object(
+              'provenance','CONTROLLED_CANARY_NON_PRODUCTION',
+              'recovery_grant_database_id',g.database_id)::json)
+          RETURNING id INTO cleanup_decision_id;
+          INSERT INTO SCHEMA_TOKEN.approved_executions(
+            execution_target_id,trade_intent_id,risk_decision_id,intent_id,
+            client_order_id,authorization_schema_version,canonical_hash,
+            policy_digest,approved_payload_hash,instrument_snapshot_id,
+            market_snapshot_id,account_snapshot_id,decision,intent_status,
+            reserved_notional,order_submission_authorized,claim_required,status,
+            expires_at,evidence_snapshot)
+          VALUES('OKX_DEMO',cleanup_id,cleanup_decision_id,identity_digest,
+            cleanup_client,'RISK_V1',identity_digest,identity_digest,identity_digest,
+            oa.instrument_snapshot_id,oa.market_snapshot_id,oa.account_snapshot_id,
+            'APPROVED','APPROVED',oa.reserved_notional,FALSE,TRUE,'ACTIVE',g.expires_at,
+            jsonb_build_object('provenance','CONTROLLED_CANARY_NON_PRODUCTION',
+              'recovery_grant_database_id',g.database_id)::json)
+          RETURNING id INTO new_cleanup_approval_id;
+          UPDATE SCHEMA_TOKEN.okx_demo_canary_lifecycles
+             SET cleanup_trade_intent_id=cleanup_id,cleanup_approval_id=new_cleanup_approval_id,
+                 fencing_version=fencing_version+1,
+                 updated_at=statement_timestamp()
+           WHERE lifecycle_id=l.lifecycle_id;
+          RETURN new_cleanup_approval_id;
+        END $$;
+        ALTER FUNCTION create_okx_demo_canary_cleanup_intent(varchar,bigint,bigint) OWNER TO freqtrade_ai_attestor;
+        REVOKE ALL ON FUNCTION create_okx_demo_canary_cleanup_intent(varchar,bigint,bigint) FROM PUBLIC;
+        GRANT EXECUTE ON FUNCTION create_okx_demo_canary_cleanup_intent(varchar,bigint,bigint) TO freqtrade;
+        CREATE OR REPLACE FUNCTION bridge_okx_demo_managed_fill(p_fill_snapshot_id bigint)
+        RETURNS bigint LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+        DECLARE fs SCHEMA_TOKEN.okx_demo_fill_snapshots%ROWTYPE;
+                ev SCHEMA_TOKEN.okx_demo_exchange_events%ROWTYPE;
+                batch SCHEMA_TOKEN.okx_demo_recovery_batches%ROWTYPE;
+                managed_count bigint; managed_order_id bigint;
+                existing SCHEMA_TOKEN.exchange_fills%ROWTYPE; inserted_id bigint;
+                evidence jsonb;
+        BEGIN
+          SELECT * INTO fs FROM SCHEMA_TOKEN.okx_demo_fill_snapshots
+            WHERE database_id=p_fill_snapshot_id;
+          IF NOT FOUND THEN RAISE EXCEPTION 'managed fill snapshot missing'; END IF;
+          SELECT * INTO ev FROM SCHEMA_TOKEN.okx_demo_exchange_events
+            WHERE database_id=fs.event_database_id;
+          SELECT * INTO batch FROM SCHEMA_TOKEN.okx_demo_recovery_batches
+            WHERE database_id=ev.recovery_batch_database_id;
+          IF ev.database_id IS NULL OR batch.database_id IS NULL
+             OR fs.execution_target_id IS DISTINCT FROM 'OKX_DEMO'
+             OR ev.execution_target_id IS DISTINCT FROM 'OKX_DEMO'
+             OR batch.execution_target_id IS DISTINCT FROM 'OKX_DEMO'
+             OR ev.entity_kind IS DISTINCT FROM 'FILL'
+             OR ev.payload_digest!~'^[0-9a-f]{64}$'
+             OR ev.payload::jsonb IS DISTINCT FROM fs.authoritative_snapshot::jsonb
+             OR ev.payload->>'fillId' IS DISTINCT FROM fs.exchange_fill_id
+             OR ev.payload->>'ordId' IS DISTINCT FROM fs.exchange_order_id
+             OR ev.payload->>'instId' IS DISTINCT FROM fs.instrument_id
+             OR (ev.payload->>'fillPx')::numeric IS DISTINCT FROM fs.price
+             OR (ev.payload->>'fillSz')::numeric IS DISTINCT FROM fs.quantity
+             OR NULLIF(ev.payload->>'fee','')::numeric IS DISTINCT FROM fs.fee
+             OR batch.authenticated IS NOT TRUE OR batch.pagination_complete IS NOT TRUE
+             OR batch.complete_streams::jsonb IS DISTINCT FROM '["ACCOUNT","FILL","ORDER","POSITION"]'::jsonb
+             OR (SELECT array_agg(k ORDER BY k) FROM jsonb_object_keys(batch.high_watermarks::jsonb) k)
+                IS DISTINCT FROM ARRAY['ACCOUNT','FILL','ORDER','POSITION']::text[]
+             OR batch.observed_at>batch.completed_at OR batch.event_count<=0
+          THEN RAISE EXCEPTION 'managed fill evidence rejected'; END IF;
+          SELECT count(*),min(id) INTO managed_count,managed_order_id
+            FROM SCHEMA_TOKEN.exchange_orders
+           WHERE execution_target_id='OKX_DEMO'
+             AND exchange_order_id=fs.exchange_order_id;
+          IF managed_count=0 THEN RETURN NULL; END IF;
+          IF managed_count<>1 THEN RAISE EXCEPTION 'managed fill order identity ambiguous'; END IF;
+          evidence:=jsonb_build_object(
+            'source','okx_demo_reconciliation',
+            'fill_snapshot_database_id',fs.database_id,
+            'event_database_id',ev.database_id,
+            'payload_digest',ev.payload_digest,
+            'authoritative_snapshot',fs.authoritative_snapshot::jsonb,
+            'observed_at',fs.observed_at);
+          SELECT * INTO existing FROM SCHEMA_TOKEN.exchange_fills
+           WHERE execution_target_id='OKX_DEMO'
+             AND exchange_fill_id=fs.exchange_fill_id FOR UPDATE;
+          IF FOUND THEN
+            IF existing.exchange_order_row_id IS DISTINCT FROM managed_order_id
+               OR existing.price IS DISTINCT FROM fs.price
+               OR existing.quantity IS DISTINCT FROM fs.quantity
+               OR existing.fee IS DISTINCT FROM fs.fee
+               OR existing.snapshot::jsonb IS DISTINCT FROM evidence
+            THEN RAISE EXCEPTION 'managed fill lineage conflict'; END IF;
+            RETURN existing.id;
+          END IF;
+          INSERT INTO SCHEMA_TOKEN.exchange_fills(
+            execution_target_id,exchange_order_row_id,exchange_fill_id,
+            price,quantity,fee,snapshot)
+          VALUES('OKX_DEMO',managed_order_id,fs.exchange_fill_id,
+            fs.price,fs.quantity,fs.fee,evidence::json)
+          RETURNING id INTO inserted_id;
+          RETURN inserted_id;
+        END $$;
+        ALTER FUNCTION bridge_okx_demo_managed_fill(bigint) OWNER TO freqtrade_ai_attestor;
+        REVOKE ALL ON FUNCTION bridge_okx_demo_managed_fill(bigint) FROM PUBLIC;
+        GRANT EXECUTE ON FUNCTION bridge_okx_demo_managed_fill(bigint) TO freqtrade;
+        CREATE OR REPLACE FUNCTION prepare_okx_demo_canary_residual_child(
+          p_parent_attempt_id bigint,p_grant_id bigint)
+        RETURNS TABLE(order_id bigint,attempt_id bigint)
+        LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+        DECLARE parent SCHEMA_TOKEN.okx_order_write_attempts%ROWTYPE;
+                old_grant SCHEMA_TOKEN.okx_demo_recovery_grants%ROWTYPE;
+                fresh_grant SCHEMA_TOKEN.okx_demo_recovery_grants%ROWTYPE;
+                lifecycle SCHEMA_TOKEN.okx_demo_canary_lifecycles%ROWTYPE;
+                intent SCHEMA_TOKEN.trade_intents%ROWTYPE;
+                lease SCHEMA_TOKEN.okx_order_writer_leases%ROWTYPE;
+                filled numeric; remaining numeric; next_sequence integer;
+                child_client text; child_body jsonb; child_digest text;
+                new_order_id bigint; new_attempt_id bigint;
+        BEGIN
+          PERFORM SCHEMA_TOKEN.lock_okx_demo_reconciliation_state();
+          SELECT * INTO parent FROM SCHEMA_TOKEN.okx_order_write_attempts
+           WHERE id=p_parent_attempt_id FOR UPDATE;
+          SELECT * INTO fresh_grant FROM SCHEMA_TOKEN.okx_demo_recovery_grants
+           WHERE database_id=p_grant_id FOR UPDATE;
+          SELECT * INTO old_grant FROM SCHEMA_TOKEN.okx_demo_recovery_grants
+           WHERE database_id=parent.recovery_grant_database_id;
+          SELECT * INTO lifecycle FROM SCHEMA_TOKEN.okx_demo_canary_lifecycles
+           WHERE lifecycle_id=fresh_grant.lifecycle_id FOR UPDATE;
+          SELECT * INTO intent FROM SCHEMA_TOKEN.trade_intents
+           WHERE id=lifecycle.cleanup_trade_intent_id;
+          SELECT * INTO lease FROM SCHEMA_TOKEN.okx_order_writer_leases
+           WHERE execution_target_id='OKX_DEMO' FOR UPDATE;
+          next_sequence:=parent.close_sequence+1;
+          SELECT COALESCE(sum(COALESCE(NULLIF(a.safe_response_snapshot::jsonb->>'accumulated_fill_size','')::numeric,0)),0)
+            INTO filled FROM SCHEMA_TOKEN.okx_order_write_attempts a
+            JOIN SCHEMA_TOKEN.exchange_orders eo ON eo.id=a.exchange_order_row_id
+           WHERE eo.trade_intent_id=intent.id AND a.operation='CLOSE';
+          remaining:=intent.quantity-filled;
+          IF parent.id IS NULL OR fresh_grant.database_id IS NULL OR old_grant.database_id IS NULL
+             OR lifecycle.lifecycle_id IS NULL OR intent.id IS NULL OR lease.execution_target_id IS NULL
+             OR parent.operation IS DISTINCT FROM 'CLOSE'
+             OR parent.state IS DISTINCT FROM 'RESIDUAL_CLOSE_REQUIRED'
+             OR next_sequence NOT BETWEEN 1 AND 3
+             OR parent.lease_generation IS DISTINCT FROM lease.generation
+             OR lease.expires_at<=statement_timestamp()
+             OR old_grant.status IS DISTINCT FROM 'CONSUMED'
+             OR old_grant.lifecycle_id IS DISTINCT FROM lifecycle.lifecycle_id
+             OR fresh_grant.database_id=old_grant.database_id
+             OR fresh_grant.lifecycle_id IS DISTINCT FROM lifecycle.lifecycle_id
+             OR fresh_grant.action IS DISTINCT FROM 'REDUCE_ONLY'
+             OR fresh_grant.status IS DISTINCT FROM 'ACTIVE'
+             OR fresh_grant.expires_at<=statement_timestamp()
+             OR lifecycle.cleanup_phase IS DISTINCT FROM 'CLEANUP_PENDING'
+             OR lifecycle.outcome IS DISTINCT FROM 'FAILED'
+             OR parent.approval_id IS DISTINCT FROM lifecycle.cleanup_approval_id
+             OR intent.execution_target_id IS DISTINCT FROM 'OKX_DEMO'
+             OR intent.reduce_only IS NOT TRUE OR intent.order_type IS DISTINCT FROM 'market'
+             OR fresh_grant.instrument_id IS DISTINCT FROM intent.instrument_id
+             OR fresh_grant.position_side IS DISTINCT FROM intent.position_side
+             OR remaining<=0 OR fresh_grant.max_quantity IS DISTINCT FROM remaining
+             OR SCHEMA_TOKEN.require_current_okx_demo_canary_recovery_run(
+                  fresh_grant.reconciliation_run_id,lifecycle.lifecycle_id) IS NOT TRUE
+          THEN RAISE EXCEPTION 'residual canary child context rejected'; END IF;
+          child_client:='rcv'||lpad(fresh_grant.database_id::text,20,'0')||'C'||next_sequence::text;
+          child_body:=jsonb_build_object(
+            'instId',intent.instrument_id,'tdMode','isolated',
+            'side',CASE WHEN intent.position_side='long' THEN 'sell' ELSE 'buy' END,
+            'posSide',intent.position_side,'ordType','market','sz',remaining::text,
+            'clOrdId',child_client,'reduceOnly',TRUE);
+          child_digest:=encode(public.digest(convert_to(child_body::text,'UTF8'),'sha256'),'hex');
+          INSERT INTO SCHEMA_TOKEN.exchange_orders(
+            execution_target_id,trade_intent_id,client_order_id,status,
+            request_snapshot,response_snapshot)
+          VALUES('OKX_DEMO',intent.id,child_client,'PREPARED',child_body::json,'{}'::json)
+          RETURNING id INTO new_order_id;
+          UPDATE SCHEMA_TOKEN.okx_order_write_attempts
+             SET state='RECONCILED',order_state='residual_cleanup_started',
+                 reason_code='SUPERSEDED_BY_CLOSE_CLEANUP',updated_at=statement_timestamp()
+           WHERE id=parent.id;
+          UPDATE SCHEMA_TOKEN.okx_demo_recovery_grants
+             SET status='CONSUMED',consumed_at=statement_timestamp()
+           WHERE database_id=fresh_grant.database_id AND status='ACTIVE';
+          IF NOT FOUND THEN RAISE EXCEPTION 'fresh residual grant consume failed'; END IF;
+          INSERT INTO SCHEMA_TOKEN.okx_order_write_attempts(
+            execution_target_id,exchange_order_row_id,approval_id,recovery_grant_database_id,
+            operation,operation_id,client_order_id,instrument_id,state,request_digest,
+            safe_request_snapshot,safe_response_snapshot,attempt_count,lease_generation,
+            parent_attempt_id,close_sequence,last_attempt_at,created_at,updated_at)
+          VALUES('OKX_DEMO',new_order_id,lifecycle.cleanup_approval_id,fresh_grant.database_id,
+            'CLOSE',child_client,child_client,intent.instrument_id,'PREPARED',child_digest,
+            child_body::json,'{}'::json,1,lease.generation,parent.id,next_sequence,
+            statement_timestamp(),statement_timestamp(),statement_timestamp())
+          RETURNING id INTO new_attempt_id;
+          RETURN QUERY SELECT new_order_id,new_attempt_id;
+        END $$;
+        ALTER FUNCTION prepare_okx_demo_canary_residual_child(bigint,bigint) OWNER TO freqtrade_ai_attestor;
+        REVOKE ALL ON FUNCTION prepare_okx_demo_canary_residual_child(bigint,bigint) FROM PUBLIC;
+        GRANT EXECUTE ON FUNCTION prepare_okx_demo_canary_residual_child(bigint,bigint) TO freqtrade;
+        CREATE OR REPLACE FUNCTION transition_okx_demo_canary_lifecycle(
+          p_lifecycle varchar,p_action text,p_order_id bigint,p_run_id bigint,
+          p_evidence_digest varchar,p_expected_version bigint)
+        RETURNS bigint LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+        DECLARE l SCHEMA_TOKEN.okx_demo_canary_lifecycles%ROWTYPE;
+                o SCHEMA_TOKEN.exchange_orders%ROWTYPE;
+                i SCHEMA_TOKEN.trade_intents%ROWTYPE;
+                r SCHEMA_TOKEN.reconciliation_runs%ROWTYPE;
+                exhaustion_attempt SCHEMA_TOKEN.okx_order_write_attempts%ROWTYPE;
+                exact_fill numeric; remaining numeric; authoritative_remaining numeric;
+                next_outcome text; next_version bigint;
+                computed_digest text; opening_state text; opening_filled numeric;
+        BEGIN
+          SELECT * INTO l FROM SCHEMA_TOKEN.okx_demo_canary_lifecycles WHERE lifecycle_id=p_lifecycle FOR UPDATE;
+          IF NOT FOUND OR p_expected_version IS NULL OR l.fencing_version IS DISTINCT FROM p_expected_version OR p_evidence_digest IS NULL OR p_evidence_digest!~'^[0-9a-f]{64}$' THEN RAISE EXCEPTION 'stale or invalid canary lifecycle transition'; END IF;
+          IF p_action='BIND_OPENING' THEN
+            SELECT * INTO o FROM SCHEMA_TOKEN.exchange_orders WHERE id=p_order_id;
+            IF NOT FOUND OR l.cleanup_phase IS DISTINCT FROM 'ARMED'
+               OR o.trade_intent_id IS DISTINCT FROM l.opening_trade_intent_id
+               OR o.client_order_id IS DISTINCT FROM (SELECT client_order_id FROM SCHEMA_TOKEN.trade_intents WHERE id=l.opening_trade_intent_id)
+               OR NOT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_submission_grants g WHERE g.grant_id=l.submission_grant_id AND g.status='CONSUMED' AND g.approval_id=l.opening_approval_id AND g.consumed_at IS NOT NULL)
+               OR NOT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_order_write_attempts a WHERE a.exchange_order_row_id=o.id AND a.approval_id=l.opening_approval_id AND a.operation='PLACE' AND a.attempt_count=1 AND a.recovery_grant_database_id IS NULL AND a.created_at<=l.deadline_at)
+               OR p_evidence_digest IS DISTINCT FROM (SELECT encode(public.digest(convert_to(concat_ws('|',o.id::text,o.client_order_id,ti.instrument_id,a.request_digest),'UTF8'),'sha256'),'hex') FROM SCHEMA_TOKEN.trade_intents ti JOIN SCHEMA_TOKEN.okx_order_write_attempts a ON a.exchange_order_row_id=o.id WHERE ti.id=o.trade_intent_id AND a.operation='PLACE')
+            THEN RAISE EXCEPTION 'opening order lifecycle binding rejected'; END IF;
+            UPDATE SCHEMA_TOKEN.okx_demo_canary_lifecycles SET opening_exchange_order_row_id=o.id,opening_order_identity_digest=p_evidence_digest,cleanup_phase='OPENING_SUBMITTED',fencing_version=fencing_version+1,updated_at=statement_timestamp() WHERE lifecycle_id=p_lifecycle RETURNING fencing_version INTO next_version;
+          ELSIF p_action='RECORD_FILLS' THEN
+            SELECT * INTO r FROM SCHEMA_TOKEN.reconciliation_runs WHERE id=p_run_id;
+            IF NOT FOUND OR SCHEMA_TOKEN.require_current_okx_demo_canary_recovery_run(p_run_id,p_lifecycle) IS NOT TRUE
+               OR l.opening_exchange_order_row_id IS NULL
+               OR (SELECT exchange_order_id FROM SCHEMA_TOKEN.exchange_orders WHERE id=l.opening_exchange_order_row_id) IS NULL
+            THEN RAISE EXCEPTION 'fill attribution run rejected'; END IF;
+            SELECT os.status,os.filled_quantity INTO opening_state,opening_filled FROM SCHEMA_TOKEN.okx_demo_order_snapshots os
+              JOIN SCHEMA_TOKEN.exchange_orders eo ON eo.id=l.opening_exchange_order_row_id
+              WHERE os.database_id IN(SELECT jsonb_array_elements_text((r.database_ids::jsonb)->'order_snapshots')::bigint)
+                AND os.exchange_order_id=eo.exchange_order_id AND os.client_order_id=eo.client_order_id;
+            IF NOT FOUND THEN RAISE EXCEPTION 'exact opening order snapshot missing'; END IF;
+            SELECT COALESCE(sum(f.quantity),0) INTO exact_fill FROM SCHEMA_TOKEN.okx_demo_fill_snapshots f
+              WHERE f.database_id IN (SELECT jsonb_array_elements_text((r.database_ids::jsonb)->'fill_snapshots')::bigint)
+                AND f.exchange_order_id=(SELECT exchange_order_id FROM SCHEMA_TOKEN.exchange_orders WHERE id=l.opening_exchange_order_row_id);
+            computed_digest:=encode(public.digest(convert_to(concat_ws('|',l.lifecycle_id,r.id::text,r.artifact_sha256,exact_fill::text,opening_state,COALESCE((SELECT string_agg(value::text,',' ORDER BY value::text) FROM jsonb_array_elements_text((r.database_ids::jsonb)->'fill_snapshots') value),'')),'UTF8'),'sha256'),'hex');
+            IF l.cleanup_phase NOT IN('OPENING_SUBMITTED','CANCEL_PENDING','CLEANUP_PENDING')
+               OR opening_filled<0 OR opening_filled>l.max_quantity
+               OR exact_fill IS DISTINCT FROM opening_filled
+               OR exact_fill<l.attributed_fill_quantity OR exact_fill>l.max_quantity
+               OR p_evidence_digest IS DISTINCT FROM computed_digest
+            THEN RAISE EXCEPTION 'fill attribution transition rejected'; END IF;
+            next_outcome:=CASE WHEN exact_fill>0 THEN 'FAILED' ELSE l.outcome END;
+            UPDATE SCHEMA_TOKEN.okx_demo_canary_lifecycles SET attributed_fill_quantity=exact_fill,fill_attribution_digest=computed_digest,outcome=next_outcome,failure_code=CASE WHEN exact_fill>0 THEN 'CANARY_FILLED' ELSE failure_code END,cleanup_phase=CASE WHEN statement_timestamp()>=deadline_at AND opening_state IN('live','partially_filled') THEN 'CANCEL_PENDING' WHEN statement_timestamp()>=deadline_at AND exact_fill=0 AND opening_state IN('filled','canceled','mmp_canceled') THEN 'CANCEL_PENDING' WHEN exact_fill>0 AND opening_state IN('filled','canceled','mmp_canceled') THEN 'CLEANUP_PENDING' ELSE cleanup_phase END,fencing_version=fencing_version+1,updated_at=statement_timestamp() WHERE lifecycle_id=p_lifecycle RETURNING fencing_version INTO next_version;
+          ELSIF p_action='BIND_CLEANUP' THEN
+            SELECT * INTO o FROM SCHEMA_TOKEN.exchange_orders WHERE id=p_order_id;
+            IF NOT FOUND THEN RAISE EXCEPTION 'cleanup order missing'; END IF;
+            SELECT * INTO i FROM SCHEMA_TOKEN.trade_intents WHERE id=o.trade_intent_id;
+            IF NOT FOUND OR SCHEMA_TOKEN.require_current_okx_demo_canary_recovery_run(p_run_id,p_lifecycle) IS NOT TRUE
+               OR l.cleanup_phase IS DISTINCT FROM 'CLEANUP_PENDING' OR l.outcome IS DISTINCT FROM 'FAILED'
+               OR i.id IS DISTINCT FROM l.cleanup_trade_intent_id OR l.cleanup_approval_id IS NULL
+               OR i.execution_target_id IS DISTINCT FROM 'OKX_DEMO' OR i.reduce_only IS NOT TRUE
+               OR i.instrument_id IS DISTINCT FROM (SELECT instrument_id FROM SCHEMA_TOKEN.trade_intents WHERE id=l.opening_trade_intent_id)
+               OR i.position_side IS DISTINCT FROM (SELECT position_side FROM SCHEMA_TOKEN.trade_intents WHERE id=l.opening_trade_intent_id)
+               OR i.side IS DISTINCT FROM (CASE
+                    WHEN (SELECT position_side FROM SCHEMA_TOKEN.trade_intents WHERE id=l.opening_trade_intent_id)='long' THEN 'sell'
+                    WHEN (SELECT position_side FROM SCHEMA_TOKEN.trade_intents WHERE id=l.opening_trade_intent_id)='short' THEN 'buy'
+                    ELSE NULL END)
+               OR i.quantity IS DISTINCT FROM l.attributed_fill_quantity
+               OR NOT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_order_snapshots os JOIN SCHEMA_TOKEN.exchange_orders eo ON eo.id=l.opening_exchange_order_row_id JOIN SCHEMA_TOKEN.reconciliation_runs rr ON rr.id=p_run_id WHERE os.database_id IN(SELECT jsonb_array_elements_text((rr.database_ids::jsonb)->'order_snapshots')::bigint) AND os.exchange_order_id=eo.exchange_order_id AND os.client_order_id=eo.client_order_id AND os.status IN('filled','canceled','mmp_canceled'))
+               OR NOT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_order_write_attempts a JOIN SCHEMA_TOKEN.okx_demo_recovery_grants g ON g.database_id=a.recovery_grant_database_id WHERE a.exchange_order_row_id=o.id AND a.approval_id=l.cleanup_approval_id AND a.operation='CLOSE' AND a.state='PREPARED' AND a.attempt_count=1 AND g.lifecycle_id=l.lifecycle_id AND g.reconciliation_run_id=p_run_id AND g.action='REDUCE_ONLY' AND g.status='CONSUMED' AND g.exchange_order_row_id IS NULL AND g.instrument_id=i.instrument_id AND g.position_side=i.position_side AND g.max_quantity=l.attributed_fill_quantity)
+               OR NOT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_position_snapshots p JOIN SCHEMA_TOKEN.reconciliation_runs rr ON rr.id=p_run_id WHERE p.database_id IN(SELECT jsonb_array_elements_text((rr.database_ids::jsonb)->'position_snapshots')::bigint) AND p.instrument_id=i.instrument_id AND p.position_side=i.position_side AND abs(p.quantity)=l.attributed_fill_quantity)
+               OR p_evidence_digest IS DISTINCT FROM encode(public.digest(convert_to(concat_ws('|',l.lifecycle_id,o.id::text,i.id::text,i.quantity::text,p_run_id::text),'UTF8'),'sha256'),'hex')
+            THEN RAISE EXCEPTION 'cleanup lifecycle binding rejected'; END IF;
+            UPDATE SCHEMA_TOKEN.okx_demo_canary_lifecycles SET cleanup_trade_intent_id=i.id,cleanup_exchange_order_row_id=o.id,fencing_version=fencing_version+1,updated_at=statement_timestamp() WHERE lifecycle_id=p_lifecycle RETURNING fencing_version INTO next_version;
+          ELSIF p_action='EXHAUST_RECOVERY' THEN
+            SELECT * INTO exhaustion_attempt FROM SCHEMA_TOKEN.okx_order_write_attempts
+             WHERE id=p_order_id FOR UPDATE;
+            SELECT * INTO r FROM SCHEMA_TOKEN.reconciliation_runs WHERE id=p_run_id;
+            SELECT * INTO i FROM SCHEMA_TOKEN.trade_intents WHERE id=l.cleanup_trade_intent_id;
+            SELECT i.quantity-COALESCE(sum(COALESCE(NULLIF(x.safe_response_snapshot::jsonb->>'accumulated_fill_size','')::numeric,0)),0)
+              INTO remaining FROM SCHEMA_TOKEN.okx_order_write_attempts x
+              JOIN SCHEMA_TOKEN.exchange_orders eo ON eo.id=x.exchange_order_row_id
+             WHERE eo.trade_intent_id=l.cleanup_trade_intent_id AND x.operation='CLOSE';
+            SELECT abs(p.quantity) INTO authoritative_remaining
+              FROM SCHEMA_TOKEN.okx_demo_position_snapshots p
+             WHERE p.database_id IN(SELECT jsonb_array_elements_text((r.database_ids::jsonb)->'position_snapshots')::bigint)
+               AND p.instrument_id=i.instrument_id AND p.position_side=i.position_side;
+            computed_digest:=encode(public.digest(convert_to(concat_ws('|',
+              l.lifecycle_id,exhaustion_attempt.id::text,r.id::text,r.artifact_sha256,remaining::text,
+              'CLEANUP_LIMIT_REACHED'),'UTF8'),'sha256'),'hex');
+            IF NOT FOUND OR l.cleanup_phase IS DISTINCT FROM 'CLEANUP_PENDING'
+               OR l.outcome IS DISTINCT FROM 'FAILED'
+               OR r.id IS NULL OR i.id IS NULL
+               OR SCHEMA_TOKEN.require_current_okx_demo_canary_recovery_run(
+                    p_run_id,p_lifecycle) IS NOT TRUE
+               OR remaining<=0 OR authoritative_remaining IS DISTINCT FROM remaining
+               OR exhaustion_attempt.operation IS DISTINCT FROM 'CLOSE'
+               OR exhaustion_attempt.state IS DISTINCT FROM 'RESIDUAL_CLOSE_REQUIRED'
+               OR exhaustion_attempt.close_sequence IS DISTINCT FROM 3
+               OR NOT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.exchange_orders eo
+                    WHERE eo.id=exhaustion_attempt.exchange_order_row_id
+                      AND eo.trade_intent_id=l.cleanup_trade_intent_id)
+               OR NOT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_recovery_grants g
+                    WHERE g.database_id=exhaustion_attempt.recovery_grant_database_id
+                      AND g.lifecycle_id=l.lifecycle_id AND g.status='CONSUMED')
+               OR EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_recovery_grants g
+                    WHERE g.lifecycle_id=l.lifecycle_id AND g.status='ACTIVE')
+               OR p_evidence_digest IS DISTINCT FROM computed_digest
+            THEN RAISE EXCEPTION 'canary cleanup exhaustion rejected'; END IF;
+            UPDATE SCHEMA_TOKEN.okx_demo_canary_lifecycles
+               SET cleanup_phase='RECOVERY_EXHAUSTED',failure_code='CLEANUP_LIMIT_REACHED',
+                   fencing_version=fencing_version+1,updated_at=statement_timestamp()
+             WHERE lifecycle_id=p_lifecycle RETURNING fencing_version INTO next_version;
+          ELSIF p_action IN('TERMINALIZE','REVOKE_UNOPENED') THEN
+            SELECT * INTO r FROM SCHEMA_TOKEN.reconciliation_runs WHERE id=p_run_id;
+            IF NOT FOUND OR (SCHEMA_TOKEN.require_current_okx_demo_canary_run(p_run_id) IS NOT TRUE
+               AND SCHEMA_TOKEN.require_current_okx_demo_canary_recovery_run(p_run_id,p_lifecycle) IS NOT TRUE)
+            THEN RAISE EXCEPTION 'terminal lifecycle run rejected'; END IF;
+            computed_digest:=encode(public.digest(convert_to(concat_ws('|',l.lifecycle_id,r.id::text,r.artifact_sha256,l.outcome,l.attributed_fill_quantity::text),'UTF8'),'sha256'),'hex');
+            IF p_evidence_digest IS DISTINCT FROM computed_digest THEN RAISE EXCEPTION 'terminal lifecycle digest rejected'; END IF;
+            IF p_action='REVOKE_UNOPENED' THEN
+              IF l.cleanup_phase IS DISTINCT FROM 'ARMED' OR l.opening_exchange_order_row_id IS NOT NULL
+                 OR EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_order_write_attempts a WHERE a.approval_id=l.opening_approval_id AND a.operation='PLACE')
+                 OR NOT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_submission_grants g WHERE g.grant_id=l.submission_grant_id AND g.status='ACTIVE')
+              THEN RAISE EXCEPTION 'unopened lifecycle revocation rejected'; END IF;
+              UPDATE SCHEMA_TOKEN.okx_demo_submission_grants SET status='FAILED',consumed_at=statement_timestamp() WHERE grant_id=l.submission_grant_id AND status='ACTIVE';
+            ELSE
+              IF statement_timestamp()<l.deadline_at OR l.cleanup_phase NOT IN('OPENING_SUBMITTED','CANCEL_PENDING','CLEANUP_PENDING') OR l.opening_exchange_order_row_id IS NULL
+                 OR NOT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_order_snapshots os JOIN SCHEMA_TOKEN.exchange_orders eo ON eo.id=l.opening_exchange_order_row_id WHERE os.database_id IN(SELECT jsonb_array_elements_text((r.database_ids::jsonb)->'order_snapshots')::bigint) AND os.exchange_order_id=eo.exchange_order_id AND os.client_order_id=eo.client_order_id AND os.status IN('filled','canceled','mmp_canceled') AND os.filled_quantity=l.attributed_fill_quantity)
+                 OR EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_position_snapshots p JOIN SCHEMA_TOKEN.trade_intents oi ON oi.id=l.opening_trade_intent_id WHERE p.database_id IN(SELECT jsonb_array_elements_text((r.database_ids::jsonb)->'position_snapshots')::bigint) AND p.instrument_id=oi.instrument_id AND p.position_side=oi.position_side AND p.quantity<>0)
+	                 OR EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_order_snapshots os
+	                      WHERE os.database_id IN(SELECT jsonb_array_elements_text((r.database_ids::jsonb)->'order_snapshots')::bigint)
+	                        AND NOT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.exchange_orders eo
+	                          WHERE (eo.id=l.opening_exchange_order_row_id OR eo.trade_intent_id=l.cleanup_trade_intent_id)
+	                            AND eo.exchange_order_id=os.exchange_order_id AND eo.client_order_id=os.client_order_id))
+                 OR EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_fill_snapshots fs
+	                      WHERE fs.database_id IN(SELECT jsonb_array_elements_text((r.database_ids::jsonb)->'fill_snapshots')::bigint)
+	                        AND NOT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.exchange_orders eo
+	                          WHERE (eo.id=l.opening_exchange_order_row_id OR eo.trade_intent_id=l.cleanup_trade_intent_id)
+	                            AND eo.exchange_order_id=fs.exchange_order_id))
+                 OR (l.attributed_fill_quantity>0 AND (
+                      (SELECT COALESCE(sum(fs.quantity),0) FROM SCHEMA_TOKEN.okx_demo_fill_snapshots fs
+                        JOIN SCHEMA_TOKEN.exchange_orders eo ON eo.id=l.opening_exchange_order_row_id
+                        WHERE fs.database_id IN(SELECT jsonb_array_elements_text((r.database_ids::jsonb)->'fill_snapshots')::bigint)
+                          AND fs.exchange_order_id=eo.exchange_order_id) IS DISTINCT FROM l.attributed_fill_quantity
+                      OR
+	                      (SELECT COALESCE(sum(fs.quantity),0) FROM SCHEMA_TOKEN.okx_demo_fill_snapshots fs
+	                        JOIN SCHEMA_TOKEN.exchange_orders eo ON eo.trade_intent_id=l.cleanup_trade_intent_id
+	                        WHERE fs.database_id IN(SELECT jsonb_array_elements_text((r.database_ids::jsonb)->'fill_snapshots')::bigint)
+	                          AND fs.exchange_order_id=eo.exchange_order_id) IS DISTINCT FROM l.attributed_fill_quantity))
+                 OR EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_position_snapshots ps
+                      JOIN SCHEMA_TOKEN.trade_intents oi ON oi.id=l.opening_trade_intent_id
+                      WHERE ps.database_id IN(SELECT jsonb_array_elements_text((r.database_ids::jsonb)->'position_snapshots')::bigint)
+                        AND (ps.instrument_id IS DISTINCT FROM oi.instrument_id OR ps.position_side IS DISTINCT FROM oi.position_side))
+	                 OR (l.attributed_fill_quantity>0 AND (l.cleanup_exchange_order_row_id IS NULL
+	                      OR EXISTS(SELECT 1 FROM SCHEMA_TOKEN.exchange_orders ce
+	                         WHERE ce.trade_intent_id=l.cleanup_trade_intent_id
+	                           AND NOT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_order_snapshots cs
+	                             WHERE cs.database_id IN(SELECT jsonb_array_elements_text((r.database_ids::jsonb)->'order_snapshots')::bigint)
+	                               AND cs.exchange_order_id=ce.exchange_order_id AND cs.client_order_id=ce.client_order_id
+	                               AND cs.reduce_only AND cs.status IN('filled','canceled','mmp_canceled')))
+	                      OR (SELECT COALESCE(sum(cs.filled_quantity),0) FROM SCHEMA_TOKEN.okx_demo_order_snapshots cs
+	                            JOIN SCHEMA_TOKEN.exchange_orders ce ON ce.trade_intent_id=l.cleanup_trade_intent_id
+	                           WHERE cs.database_id IN(SELECT jsonb_array_elements_text((r.database_ids::jsonb)->'order_snapshots')::bigint)
+	                             AND cs.exchange_order_id=ce.exchange_order_id AND cs.client_order_id=ce.client_order_id)
+	                         IS DISTINCT FROM l.attributed_fill_quantity))
+	                 OR EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_order_write_attempts a
+	                      JOIN SCHEMA_TOKEN.exchange_orders eo ON eo.id=a.exchange_order_row_id
+	                     WHERE (eo.id=l.opening_exchange_order_row_id OR eo.trade_intent_id=l.cleanup_trade_intent_id)
+	                       AND a.state IN('PREPARED','ACKNOWLEDGED','RECOVERY_REQUIRED','RESIDUAL_CLOSE_REQUIRED'))
+              THEN RAISE EXCEPTION 'terminal lifecycle evidence rejected'; END IF;
+            END IF;
+            UPDATE SCHEMA_TOKEN.okx_demo_recovery_grants SET status='EXPIRED' WHERE lifecycle_id=p_lifecycle AND status='ACTIVE';
+            UPDATE SCHEMA_TOKEN.okx_demo_canary_lifecycles SET outcome=CASE WHEN p_action='REVOKE_UNOPENED' THEN 'FAILED' WHEN outcome='FAILED' THEN 'FAILED' WHEN attributed_fill_quantity=0 THEN 'PASSED' ELSE 'FAILED' END,failure_code=CASE WHEN p_action='REVOKE_UNOPENED' THEN 'AUTHORIZATION_REVOKED' ELSE failure_code END,cleanup_phase=CASE WHEN p_action='REVOKE_UNOPENED' THEN 'REVOKED' ELSE 'TERMINAL' END,final_reconciliation_run_id=r.id,final_evidence_digest=computed_digest,terminal_at=statement_timestamp(),revoked_at=statement_timestamp(),fencing_version=fencing_version+1,updated_at=statement_timestamp() WHERE lifecycle_id=p_lifecycle RETURNING fencing_version INTO next_version;
+          ELSE RAISE EXCEPTION 'unsupported canary lifecycle transition'; END IF;
+          RETURN next_version;
+        END $$;
+        ALTER FUNCTION transition_okx_demo_canary_lifecycle(varchar,text,bigint,bigint,varchar,bigint) OWNER TO freqtrade_ai_attestor;
+        REVOKE ALL ON FUNCTION transition_okx_demo_canary_lifecycle(varchar,text,bigint,bigint,varchar,bigint) FROM PUBLIC;
+        GRANT EXECUTE ON FUNCTION transition_okx_demo_canary_lifecycle(varchar,text,bigint,bigint,varchar,bigint) TO freqtrade;
+        CREATE OR REPLACE FUNCTION guard_okx_demo_canary_recovery_insert()
+        RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog AS $$
+        BEGIN
+          PERFORM SCHEMA_TOKEN.lock_okx_demo_reconciliation_state();
+          IF NEW.lifecycle_id IS NOT NULL AND current_user IS DISTINCT FROM 'freqtrade_ai_attestor'
+          THEN RAISE EXCEPTION 'lifecycle recovery grants require controlled issuer'; END IF;
+          IF NEW.lifecycle_id IS NULL AND EXISTS(
+              SELECT 1 FROM SCHEMA_TOKEN.okx_demo_canary_lifecycles
+              WHERE cleanup_phase NOT IN('TERMINAL','REVOKED'))
+          THEN RAISE EXCEPTION 'generic recovery grant conflicts with controlled canary lifecycle'; END IF;
+          RETURN NEW;
+        END $$;
+        ALTER FUNCTION guard_okx_demo_canary_recovery_insert() OWNER TO freqtrade_ai_attestor;
+        REVOKE ALL ON FUNCTION guard_okx_demo_canary_recovery_insert() FROM PUBLIC,freqtrade;
+        DROP TRIGGER IF EXISTS okx_demo_canary_recovery_insert_guard ON okx_demo_recovery_grants;
+        CREATE TRIGGER okx_demo_canary_recovery_insert_guard BEFORE INSERT ON okx_demo_recovery_grants FOR EACH ROW EXECUTE FUNCTION guard_okx_demo_canary_recovery_insert();
+        CREATE OR REPLACE FUNCTION issue_okx_demo_canary_recovery_grant(
+          p_lifecycle varchar,p_run_id bigint,p_action text,p_expected_version bigint)
+        RETURNS bigint LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+        DECLARE l SCHEMA_TOKEN.okx_demo_canary_lifecycles%ROWTYPE; oi SCHEMA_TOKEN.trade_intents%ROWTYPE;
+                r SCHEMA_TOKEN.reconciliation_runs%ROWTYPE;
+                quantity numeric; order_row bigint; inserted_id bigint; digest text; effective_expiry timestamptz;
+        BEGIN
+          SELECT * INTO l FROM SCHEMA_TOKEN.okx_demo_canary_lifecycles WHERE lifecycle_id=p_lifecycle FOR UPDATE;
+          SELECT * INTO r FROM SCHEMA_TOKEN.reconciliation_runs WHERE id=p_run_id;
+          IF NOT FOUND THEN RAISE EXCEPTION 'canary recovery run missing'; END IF;
+          effective_expiry:=LEAST(statement_timestamp()+interval '10 seconds',r.completed_at+interval '30 seconds',r.authoritative_observed_at+interval '30 seconds');
+          IF NOT FOUND OR p_expected_version IS NULL OR l.fencing_version IS DISTINCT FROM p_expected_version
+             OR SCHEMA_TOKEN.require_current_okx_demo_canary_recovery_run(p_run_id,p_lifecycle) IS NOT TRUE
+             OR effective_expiry<=statement_timestamp()
+             OR (p_action='CANCEL' AND NOT EXISTS(
+                  SELECT 1 FROM jsonb_array_elements((r.summary_snapshot::jsonb)->'findings') f
+                   WHERE f->>'code'='CONTROLLED_CANARY_DEADLINE_CANCEL_REQUIRED'
+                     AND f->>'identity'='canary:'||substr(encode(public.digest(convert_to(l.lifecycle_id,'UTF8'),'sha256'),'hex'),1,16)))
+             OR (p_action='CANCEL' AND NOT EXISTS(
+                  SELECT 1 FROM SCHEMA_TOKEN.okx_demo_order_snapshots os
+                   JOIN SCHEMA_TOKEN.exchange_orders eo ON eo.id=l.opening_exchange_order_row_id
+                   WHERE os.database_id IN(SELECT jsonb_array_elements_text((r.database_ids::jsonb)->'order_snapshots')::bigint)
+                     AND os.exchange_order_id=eo.exchange_order_id
+                     AND os.client_order_id=eo.client_order_id
+                     AND os.status IN('live','partially_filled')))
+             OR (p_action='REDUCE_ONLY' AND NOT EXISTS(
+                  SELECT 1 FROM jsonb_array_elements((r.summary_snapshot::jsonb)->'findings') f
+                   WHERE f->>'code'='CONTROLLED_CANARY_CLEANUP_REQUIRED'
+                     AND f->>'identity'='canary:'||substr(encode(public.digest(convert_to(l.lifecycle_id,'UTF8'),'sha256'),'hex'),1,16)))
+             OR EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_recovery_grants g WHERE g.lifecycle_id=l.lifecycle_id AND g.action=p_action AND g.status='ACTIVE')
+             OR EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_recovery_grants g
+                  JOIN SCHEMA_TOKEN.okx_order_write_attempts a
+                    ON a.recovery_grant_database_id=g.database_id
+                 WHERE g.lifecycle_id=l.lifecycle_id
+                   AND g.action=p_action
+                   AND a.state IN('PREPARED','ACKNOWLEDGED','RECOVERY_REQUIRED','RESIDUAL_CLOSE_REQUIRED')
+                   AND NOT (p_action='REDUCE_ONLY'
+                     AND a.state='RESIDUAL_CLOSE_REQUIRED'
+                     AND a.close_sequence<3
+                     AND g.status='CONSUMED'
+                     AND EXISTS(SELECT 1 FROM SCHEMA_TOKEN.exchange_orders eo
+                       WHERE eo.id=a.exchange_order_row_id
+                         AND eo.trade_intent_id=l.cleanup_trade_intent_id)))
+          THEN RAISE EXCEPTION 'canary recovery grant context rejected'; END IF;
+          SELECT * INTO oi FROM SCHEMA_TOKEN.trade_intents WHERE id=l.opening_trade_intent_id;
+          IF p_action='CANCEL' AND l.cleanup_phase='CANCEL_PENDING' THEN quantity:=0; order_row:=l.opening_exchange_order_row_id;
+          ELSIF p_action='REDUCE_ONLY' AND l.cleanup_phase='CLEANUP_PENDING' AND l.outcome='FAILED' THEN
+            SELECT abs(p.quantity) INTO quantity FROM SCHEMA_TOKEN.okx_demo_position_snapshots p JOIN SCHEMA_TOKEN.reconciliation_runs rr ON rr.id=p_run_id WHERE p.database_id IN(SELECT jsonb_array_elements_text((rr.database_ids::jsonb)->'position_snapshots')::bigint) AND p.instrument_id=oi.instrument_id AND p.position_side=oi.position_side;
+            IF NOT FOUND OR quantity<=0 OR quantity>l.attributed_fill_quantity THEN RAISE EXCEPTION 'canary cleanup quantity rejected'; END IF; order_row:=NULL;
+          ELSE RAISE EXCEPTION 'canary recovery action rejected'; END IF;
+          digest:=encode(public.digest(convert_to(concat_ws('|',l.lifecycle_id,p_run_id::text,p_action,COALESCE(order_row::text,''),quantity::text,effective_expiry::text),'UTF8'),'sha256'),'hex');
+          INSERT INTO SCHEMA_TOKEN.okx_demo_recovery_grants(execution_target_id,reconciliation_run_id,lifecycle_id,exchange_order_row_id,grant_digest,action,instrument_id,position_side,max_quantity,status,expires_at)
+          VALUES('OKX_DEMO',p_run_id,l.lifecycle_id,order_row,digest,p_action,oi.instrument_id,oi.position_side,quantity,'ACTIVE',effective_expiry) RETURNING database_id INTO inserted_id;
+          UPDATE SCHEMA_TOKEN.okx_demo_canary_lifecycles SET fencing_version=fencing_version+1,updated_at=statement_timestamp() WHERE lifecycle_id=l.lifecycle_id;
+          RETURN inserted_id;
+        END $$;
+        ALTER FUNCTION issue_okx_demo_canary_recovery_grant(varchar,bigint,text,bigint) OWNER TO freqtrade_ai_attestor;
+        REVOKE ALL ON FUNCTION issue_okx_demo_canary_recovery_grant(varchar,bigint,text,bigint) FROM PUBLIC;
+        GRANT EXECUTE ON FUNCTION issue_okx_demo_canary_recovery_grant(varchar,bigint,text,bigint) TO freqtrade;
+        ALTER TABLE okx_demo_canary_lifecycles OWNER TO freqtrade_ai_attestor;
+        REVOKE ALL ON TABLE okx_demo_canary_lifecycles FROM PUBLIC, freqtrade;
+        REVOKE INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER ON TABLE okx_demo_canary_lifecycles FROM freqtrade;
+        CREATE OR REPLACE FUNCTION guard_okx_demo_recovery_lifecycle_identity()
+        RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+        BEGIN
+          IF TG_OP='UPDATE' AND OLD.lifecycle_id IS DISTINCT FROM NEW.lifecycle_id
+          THEN RAISE EXCEPTION 'recovery lifecycle identity is immutable'; END IF;
+          RETURN NEW;
+        END $$;
+        ALTER FUNCTION guard_okx_demo_recovery_lifecycle_identity() OWNER TO freqtrade_ai_attestor;
+        REVOKE ALL ON FUNCTION guard_okx_demo_recovery_lifecycle_identity() FROM PUBLIC,freqtrade;
+        DROP TRIGGER IF EXISTS okx_demo_recovery_lifecycle_identity_guard ON okx_demo_recovery_grants;
+        CREATE TRIGGER okx_demo_recovery_lifecycle_identity_guard BEFORE UPDATE ON okx_demo_recovery_grants FOR EACH ROW EXECUTE FUNCTION guard_okx_demo_recovery_lifecycle_identity();
+        GRANT SELECT (
+          lifecycle_id,execution_target_id,opening_trade_intent_id,cleanup_trade_intent_id,
+          cleanup_phase,outcome,deadline_at,
+          fencing_version,opening_exchange_order_row_id,cleanup_exchange_order_row_id,
+          baseline_evidence_digest,attributed_fill_quantity,max_quantity,fill_attribution_digest,
+          failure_code,final_evidence_digest,terminal_at,revoked_at)
+          ON okx_demo_canary_lifecycles TO freqtrade;
+    """.replace("SCHEMA_TOKEN", quoted_schema)))
+
+
 def upgrade_database(engine: Engine) -> str:
     """Upgrade a local PostgreSQL database atomically to ``SCHEMA_VERSION``.
 
@@ -6122,6 +7047,7 @@ def upgrade_database(engine: Engine) -> str:
                 ONE_SHOT_SUBMISSION_GRANT_BASE_VERSION,
                 STRATEGY_VALIDATION_BASE_VERSION,
                 CANARY_LINEAGE_WRITE_BASE_VERSION,
+                CANARY_FINAL_EXPIRY_BASE_VERSION,
             }
             if current_version in supported_upgrade_versions:
                 connection.execute(
@@ -6155,6 +7081,31 @@ def upgrade_database(engine: Engine) -> str:
                     inspect(connection).get_table_names(schema=schema_name)
                 ):
                     _add_canary_lineage_write_boundary(connection)
+                lifecycle_dependencies = {
+                    "approved_executions", "trade_intents", "risk_decisions",
+                    "exchange_orders", "reconciliation_runs",
+                    "okx_demo_submission_grants", "okx_demo_recovery_grants",
+                    "okx_demo_reconciliation_states", "okx_demo_recovery_batches",
+                    "okx_demo_order_snapshots", "okx_demo_fill_snapshots",
+                    "okx_demo_position_snapshots", "okx_order_write_attempts",
+                    "okx_demo_trusted_snapshots",
+                }
+                if lifecycle_dependencies.issubset(
+                    inspect(connection).get_table_names(schema=schema_name)
+                ):
+                    _add_controlled_canary_lifecycle_boundary(connection)
+            if current_version == CANARY_FINAL_EXPIRY_BASE_VERSION:
+                problems = schema_problems(connection)
+                if problems:
+                    raise SchemaMigrationBlocked(
+                        "Controlled canary lifecycle upgrade does not match ORM metadata: "
+                        + "; ".join(problems)
+                    )
+                connection.execute(
+                    text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+                    {"version": SCHEMA_VERSION},
+                )
+                return SCHEMA_VERSION
             if current_version == CANARY_LINEAGE_WRITE_BASE_VERSION:
                 problems = schema_problems(connection)
                 if problems:
@@ -6333,6 +7284,7 @@ def upgrade_database(engine: Engine) -> str:
                 Base.metadata.create_all(bind=connection)
                 _add_okx_demo_reconciliation(connection)
                 _add_okx_demo_runtime_recovery_binding(connection)
+                _add_controlled_canary_lifecycle_boundary(connection)
                 _add_full_chain(connection)
                 problems = schema_problems(connection)
                 if problems:
@@ -6355,6 +7307,7 @@ def upgrade_database(engine: Engine) -> str:
                 Base.metadata.create_all(bind=connection)
                 _add_okx_demo_reconciliation(connection)
                 _add_okx_demo_runtime_recovery_binding(connection)
+                _add_controlled_canary_lifecycle_boundary(connection)
                 _add_full_chain(connection)
                 problems = schema_problems(connection)
                 if problems:
@@ -6376,6 +7329,7 @@ def upgrade_database(engine: Engine) -> str:
                 Base.metadata.create_all(bind=connection)
                 _add_okx_demo_reconciliation(connection)
                 _add_okx_demo_runtime_recovery_binding(connection)
+                _add_controlled_canary_lifecycle_boundary(connection)
                 _add_full_chain(connection)
                 problems = schema_problems(connection)
                 if problems:
@@ -6396,6 +7350,7 @@ def upgrade_database(engine: Engine) -> str:
                 Base.metadata.create_all(bind=connection)
                 _add_okx_demo_reconciliation(connection)
                 _add_okx_demo_runtime_recovery_binding(connection)
+                _add_controlled_canary_lifecycle_boundary(connection)
                 _add_full_chain(connection)
                 problems = schema_problems(connection)
                 if problems:
@@ -6415,6 +7370,7 @@ def upgrade_database(engine: Engine) -> str:
                 Base.metadata.create_all(bind=connection)
                 _add_okx_demo_reconciliation(connection)
                 _add_okx_demo_runtime_recovery_binding(connection)
+                _add_controlled_canary_lifecycle_boundary(connection)
                 _add_full_chain(connection)
                 problems = schema_problems(connection)
                 if problems:
@@ -6433,6 +7389,7 @@ def upgrade_database(engine: Engine) -> str:
                 Base.metadata.create_all(bind=connection)
                 _add_okx_demo_reconciliation(connection)
                 _add_okx_demo_runtime_recovery_binding(connection)
+                _add_controlled_canary_lifecycle_boundary(connection)
                 _add_full_chain(connection)
                 problems = schema_problems(connection)
                 if problems:
@@ -6451,6 +7408,7 @@ def upgrade_database(engine: Engine) -> str:
                 Base.metadata.create_all(bind=connection)
                 _add_okx_demo_reconciliation(connection)
                 _add_okx_demo_runtime_recovery_binding(connection)
+                _add_controlled_canary_lifecycle_boundary(connection)
                 _add_full_chain(connection)
                 problems = schema_problems(connection)
                 if problems:
@@ -6469,6 +7427,7 @@ def upgrade_database(engine: Engine) -> str:
                 Base.metadata.create_all(bind=connection)
                 _add_okx_demo_reconciliation(connection)
                 _add_okx_demo_runtime_recovery_binding(connection)
+                _add_controlled_canary_lifecycle_boundary(connection)
                 _add_full_chain(connection)
                 problems = schema_problems(connection)
                 if problems:
@@ -6486,6 +7445,7 @@ def upgrade_database(engine: Engine) -> str:
                 Base.metadata.create_all(bind=connection)
                 _add_okx_demo_reconciliation(connection)
                 _add_okx_demo_runtime_recovery_binding(connection)
+                _add_controlled_canary_lifecycle_boundary(connection)
                 _add_full_chain(connection)
                 problems = schema_problems(connection)
                 if problems:
@@ -6502,6 +7462,7 @@ def upgrade_database(engine: Engine) -> str:
                 Base.metadata.create_all(bind=connection)
                 _add_okx_demo_reconciliation(connection)
                 _add_okx_demo_runtime_recovery_binding(connection)
+                _add_controlled_canary_lifecycle_boundary(connection)
                 _add_full_chain(connection)
                 problems = schema_problems(connection)
                 if problems:
@@ -6518,6 +7479,7 @@ def upgrade_database(engine: Engine) -> str:
                 Base.metadata.create_all(bind=connection)
                 _add_okx_demo_reconciliation(connection)
                 _add_okx_demo_runtime_recovery_binding(connection)
+                _add_controlled_canary_lifecycle_boundary(connection)
                 _add_full_chain(connection)
                 problems = schema_problems(connection)
                 if problems:
@@ -6617,6 +7579,7 @@ def upgrade_database(engine: Engine) -> str:
             _add_okx_demo_runtime_recovery_binding(connection)
             _add_full_chain(connection)
             _add_strategy_validation_matrix(connection)
+            _add_controlled_canary_lifecycle_boundary(connection)
             problems = schema_problems(connection)
             if problems:
                 raise SchemaMigrationBlocked(

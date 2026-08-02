@@ -5,6 +5,7 @@ from app.db.migrations import (
     ATTESTATION_ACL_BASE_VERSION,
     ATTESTED_SESSION_BASE_VERSION,
     CANARY_LINEAGE_WRITE_BASE_VERSION,
+    CANARY_FINAL_EXPIRY_BASE_VERSION,
     EARLY_TARGET_LINEAGE_VERSION,
     DUAL_SIDE_BASE_VERSION,
     FULL_CHAIN_BASE_VERSION,
@@ -32,6 +33,7 @@ from app.db.migrations import (
     psql_database_url,
     schema_problems,
     verify_schema,
+    _add_controlled_canary_lifecycle_boundary,
 )
 from app.db.session import create_database_engine
 
@@ -88,4 +90,26 @@ def test_schema_version_is_explicit_and_stable() -> None:
     assert SINGLE_ACTIVE_DEPLOYMENT_BASE_VERSION == "20260730_22"
     assert STRATEGY_VALIDATION_BASE_VERSION == "20260801_24"
     assert CANARY_LINEAGE_WRITE_BASE_VERSION == "20260801_25"
-    assert SCHEMA_VERSION == "20260802_26"
+    assert CANARY_FINAL_EXPIRY_BASE_VERSION == "20260802_26"
+    assert SCHEMA_VERSION == "20260802_27"
+
+
+def test_v27_canary_lifecycle_sql_is_fail_closed() -> None:
+    import inspect as pyinspect
+
+    source = pyinspect.getsource(_add_controlled_canary_lifecycle_boundary)
+    for fragment in (
+        "p_expected_version IS NULL",
+        "IS DISTINCT FROM p_expected_version",
+        "require_current_okx_demo_canary_recovery_run",
+        "opening_state IN('live','partially_filled') THEN 'CANCEL_PENDING'",
+        "a.operation='PLACE' AND a.attempt_count=1",
+        "g.lifecycle_id=l.lifecycle_id AND g.reconciliation_run_id=p_run_id",
+        "outcome='FAILED' THEN 'FAILED'",
+        "UPDATE SCHEMA_TOKEN.okx_demo_submission_grants SET status='FAILED'",
+        "UPDATE SCHEMA_TOKEN.okx_demo_recovery_grants SET status='EXPIRED'",
+        "current_user IS DISTINCT FROM 'freqtrade_ai_attestor'",
+        "okx_demo_recovery_grants_one_active_lifecycle_action_idx",
+        "a.state IN('PREPARED','ACKNOWLEDGED','RECOVERY_REQUIRED','RESIDUAL_CLOSE_REQUIRED')",
+    ):
+        assert fragment in source

@@ -9,8 +9,8 @@ import os
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
 
-from sqlalchemy import select, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import or_, select, text
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.core.config import REPO_ROOT
@@ -19,6 +19,7 @@ from app.models import (
     ExchangeOrder,
     ExchangePosition,
     OkxDemoAccountSnapshot,
+    OkxDemoCanaryLifecycle,
     OkxDemoExchangeEvent,
     OkxDemoFillSnapshot,
     OkxDemoOrderSnapshot,
@@ -446,6 +447,17 @@ class OkxDemoReconciliationService:
             self._compare_fills(latest_fills, findings)
             self._compare_positions(latest_positions, findings)
             self._compare_account(latest_account, latest_positions, findings)
+            self._controlled_canary_findings(
+                latest_orders,
+                latest_fills,
+                latest_positions,
+                findings,
+                now=now,
+            )
+            self._redact_controlled_canary_finding_identities(
+                latest_fills,
+                findings,
+            )
             if any(item["severity"] == "BLOCKED" for item in findings):
                 status = "DRIFTED"
             elif recovered and complete_batch is not None:
@@ -596,6 +608,213 @@ class OkxDemoReconciliationService:
             artifact_sha256=artifact_sha256,
             findings=tuple(findings),
         )
+
+    def _controlled_canary_findings(
+        self,
+        authoritative_orders: Mapping[str, OkxDemoOrderSnapshot],
+        authoritative_fills: Mapping[str, OkxDemoFillSnapshot],
+        authoritative_positions: Mapping[str, OkxDemoPositionSnapshot],
+        findings: list[dict[str, Any]],
+        *,
+        now: datetime,
+    ) -> None:
+        """Derive canary action findings from this authoritative batch only."""
+
+        if self.db.get_bind().dialect.name == "postgresql":
+            lifecycles = self.db.execute(
+                text(
+                    "SELECT lifecycle_id,cleanup_phase,deadline_at,"
+                    "opening_exchange_order_row_id,opening_trade_intent_id "
+                    "FROM okx_demo_canary_lifecycles "
+                    "WHERE execution_target_id='OKX_DEMO' "
+                    "AND cleanup_phase NOT IN ('TERMINAL','REVOKED') "
+                    "ORDER BY lifecycle_id"
+                )
+            ).all()
+        else:
+            lifecycles = list(
+                self.db.scalars(
+                    select(OkxDemoCanaryLifecycle)
+                    .where(
+                        OkxDemoCanaryLifecycle.execution_target_id
+                        == OKX_DEMO_TARGET_ID,
+                        OkxDemoCanaryLifecycle.cleanup_phase.not_in(
+                            ("TERMINAL", "REVOKED")
+                        ),
+                    )
+                    .order_by(OkxDemoCanaryLifecycle.created_at)
+                )
+            )
+        if not lifecycles:
+            return
+        if len(lifecycles) != 1:
+            findings.append(
+                _finding(
+                    "CONTROLLED_CANARY_LIFECYCLE_CONFLICT",
+                    "BLOCKED",
+                    "canary",
+                )
+            )
+            return
+        lifecycle = lifecycles[0]
+        identity = "canary:{}".format(
+            hashlib.sha256(lifecycle.lifecycle_id.encode()).hexdigest()[:16]
+        )
+        opening = (
+            self.db.get(ExchangeOrder, lifecycle.opening_exchange_order_row_id)
+            if lifecycle.opening_exchange_order_row_id is not None
+            else None
+        )
+        intent = self.db.get(TradeIntent, lifecycle.opening_trade_intent_id)
+        snapshot = (
+            authoritative_orders.get(opening.exchange_order_id)
+            if opening is not None and opening.exchange_order_id is not None
+            else None
+        )
+        if opening is None or intent is None or snapshot is None:
+            return
+        if snapshot.client_order_id != opening.client_order_id:
+            findings.append(
+                _finding(
+                    "CONTROLLED_CANARY_SNAPSHOT_MISMATCH",
+                    "BLOCKED",
+                    identity,
+                )
+            )
+            return
+        filled = Decimal(snapshot.filled_quantity)
+        exact_fill = sum(
+            (
+                Decimal(item.quantity)
+                for item in authoritative_fills.values()
+                if item.exchange_order_id == opening.exchange_order_id
+            ),
+            Decimal("0"),
+        )
+        if exact_fill != filled:
+            findings.append(
+                _finding(
+                    "CONTROLLED_CANARY_SNAPSHOT_MISMATCH",
+                    "BLOCKED",
+                    identity,
+                )
+            )
+            return
+        if filled > 0:
+            findings.append(
+                _finding(
+                    "CONTROLLED_CANARY_FILL_ATTRIBUTED",
+                    "BLOCKED",
+                    identity,
+                )
+            )
+        opening_state = str(snapshot.status).lower()
+        if (
+            _aware(lifecycle.deadline_at) <= _aware(now)
+            and opening_state in {"live", "partially_filled"}
+        ):
+            findings.append(
+                _finding(
+                    "CONTROLLED_CANARY_DEADLINE_CANCEL_REQUIRED",
+                    "BLOCKED",
+                    identity,
+                )
+            )
+        position = authoritative_positions.get(
+            "{}:{}".format(intent.instrument_id, intent.position_side)
+        )
+        position_quantity = (
+            abs(Decimal(position.quantity))
+            if position is not None
+            else Decimal("0")
+        )
+        if (
+            filled > 0
+            and opening_state in {"filled", "canceled", "mmp_canceled"}
+            and position_quantity > 0
+        ):
+            findings.append(
+                _finding(
+                    "CONTROLLED_CANARY_CLEANUP_REQUIRED",
+                    "BLOCKED",
+                    identity,
+                )
+            )
+
+    def _redact_controlled_canary_finding_identities(
+        self,
+        authoritative_fills: Mapping[str, OkxDemoFillSnapshot],
+        findings: list[dict[str, Any]],
+    ) -> None:
+        """Replace canary order/fill/client/lifecycle identities before artifact IO."""
+
+        if self.db.get_bind().dialect.name == "postgresql":
+            lifecycle = self.db.execute(
+                text(
+                    "SELECT lifecycle_id,opening_exchange_order_row_id,"
+                    "cleanup_trade_intent_id FROM okx_demo_canary_lifecycles "
+                    "WHERE execution_target_id='OKX_DEMO' "
+                    "AND cleanup_phase NOT IN ('TERMINAL','REVOKED') LIMIT 1"
+                )
+            ).first()
+        else:
+            lifecycle = self.db.scalars(
+                select(OkxDemoCanaryLifecycle).where(
+                    OkxDemoCanaryLifecycle.execution_target_id
+                    == OKX_DEMO_TARGET_ID,
+                    OkxDemoCanaryLifecycle.cleanup_phase.not_in(
+                        ("TERMINAL", "REVOKED")
+                    ),
+                )
+            ).first()
+        if lifecycle is None:
+            return
+        order_predicates = []
+        if lifecycle.opening_exchange_order_row_id is not None:
+            order_predicates.append(
+                ExchangeOrder.id == lifecycle.opening_exchange_order_row_id
+            )
+        if lifecycle.cleanup_trade_intent_id is not None:
+            order_predicates.append(
+                ExchangeOrder.trade_intent_id
+                == lifecycle.cleanup_trade_intent_id
+            )
+        orders = (
+            list(
+                self.db.scalars(
+                    select(ExchangeOrder).where(or_(*order_predicates))
+                )
+            )
+            if order_predicates
+            else []
+        )
+        raw_identities = {lifecycle.lifecycle_id}
+        exchange_order_ids = set()
+        for order in orders:
+            raw_identities.add(order.client_order_id)
+            if order.exchange_order_id:
+                raw_identities.add(order.exchange_order_id)
+                exchange_order_ids.add(order.exchange_order_id)
+        for fill in authoritative_fills.values():
+            if fill.exchange_order_id in exchange_order_ids:
+                raw_identities.add(fill.exchange_fill_id)
+        identity_sensitive_codes = {
+            "AUTHORITATIVE_OPEN_ORDER_MISSING_LOCALLY",
+            "LOCAL_OPEN_ORDER_MISSING_AUTHORITATIVELY",
+            "AUTHORITATIVE_FILL_MISSING_LOCALLY",
+            "AUTHORITATIVE_FILL_ORDER_AMBIGUOUS",
+            "AUTHORITATIVE_FILL_EVIDENCE_INVALID",
+            "AUTHORITATIVE_FILL_LINEAGE_CONFLICT",
+        }
+        for finding in findings:
+            raw = str(finding.get("identity", ""))
+            if (
+                raw in raw_identities
+                or finding.get("code") in identity_sensitive_codes
+            ) and not raw.startswith(("canary:", "canary-ref:")):
+                finding["identity"] = "canary-ref:{}".format(
+                    hashlib.sha256(raw.encode()).hexdigest()[:16]
+                )
 
     def _persist_snapshot(self, event: OkxDemoExchangeEvent) -> Any:
         payload = event.payload
@@ -957,19 +1176,29 @@ class OkxDemoReconciliationService:
                 "observed_at": _aware(fill_snapshot.observed_at).isoformat(),
             }
             try:
-                repository.record_fill_idempotently(
-                    exchange_order_row_id=orders[0].id,
-                    exchange_fill_id=fill_snapshot.exchange_fill_id,
-                    price=Decimal(fill_snapshot.price),
-                    quantity=Decimal(fill_snapshot.quantity),
-                    fee=(
-                        None
-                        if fill_snapshot.fee is None
-                        else Decimal(fill_snapshot.fee)
-                    ),
-                    snapshot=evidence,
-                )
-            except ValueError:
+                if self.db.get_bind().dialect.name == "postgresql":
+                    with self.db.begin_nested():
+                        self.db.execute(
+                            text(
+                                "SELECT bridge_okx_demo_managed_fill("
+                                ":fill_snapshot_id)"
+                            ),
+                            {"fill_snapshot_id": fill_snapshot.database_id},
+                        ).scalar_one()
+                else:
+                    repository.record_fill_idempotently(
+                        exchange_order_row_id=orders[0].id,
+                        exchange_fill_id=fill_snapshot.exchange_fill_id,
+                        price=Decimal(fill_snapshot.price),
+                        quantity=Decimal(fill_snapshot.quantity),
+                        fee=(
+                            None
+                            if fill_snapshot.fee is None
+                            else Decimal(fill_snapshot.fee)
+                        ),
+                        snapshot=evidence,
+                    )
+            except (ValueError, SQLAlchemyError):
                 findings.append(
                     _finding(
                         "AUTHORITATIVE_FILL_LINEAGE_CONFLICT",
@@ -1023,12 +1252,15 @@ class OkxDemoReconciliationService:
         return state
 
     def _read_state(self) -> OkxDemoReconciliationState:
-        state = self.db.scalars(
-            select(OkxDemoReconciliationState).where(
-                OkxDemoReconciliationState.execution_target_id
-                == OKX_DEMO_TARGET_ID
-            )
-        ).first()
+        query = select(OkxDemoReconciliationState).where(
+            OkxDemoReconciliationState.execution_target_id
+            == OKX_DEMO_TARGET_ID
+        )
+        if self.db.get_bind().dialect.name == "postgresql":
+            self.db.execute(
+                text("SELECT lock_okx_demo_reconciliation_state()")
+            ).scalar_one()
+        state = self.db.scalars(query).first()
         if state is None:
             if self.db.get_bind().dialect.name == "postgresql":
                 raise OkxDemoReconciliationBlocked(
@@ -1096,6 +1328,31 @@ class OkxDemoReconciliationService:
             or not complete_snapshot
             or expires_at <= now
         ):
+            return []
+        # An unfinished controlled canary owns the only recovery authority.
+        # Its grants are issued later by the lifecycle SECURITY DEFINER
+        # function after this exact artifact is finalized.  Never create a
+        # broader lifecycle-less grant from the same snapshots.
+        unfinished_canary = (
+            self.db.execute(
+                text(
+                    "SELECT lifecycle_id FROM okx_demo_canary_lifecycles "
+                    "WHERE execution_target_id='OKX_DEMO' "
+                    "AND cleanup_phase NOT IN ('TERMINAL','REVOKED') LIMIT 1"
+                )
+            ).first()
+            if self.db.get_bind().dialect.name == "postgresql"
+            else self.db.scalars(
+                select(OkxDemoCanaryLifecycle.lifecycle_id).where(
+                    OkxDemoCanaryLifecycle.execution_target_id
+                    == OKX_DEMO_TARGET_ID,
+                    OkxDemoCanaryLifecycle.cleanup_phase.not_in(
+                        ("TERMINAL", "REVOKED")
+                    ),
+                )
+            ).first()
+        )
+        if unfinished_canary is not None:
             return []
         grants = []
         local_orders = self.db.scalars(

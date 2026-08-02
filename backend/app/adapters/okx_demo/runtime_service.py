@@ -169,6 +169,7 @@ def _startup_call(stage: str, callback: Callable[[], Any]) -> Any:
 class _ValidatedReconciliation:
     status: str
     safe_to_open: bool
+    reconciliation_run_id: int
 
 
 class RuntimeReconciliationAdapter(Protocol):
@@ -203,6 +204,13 @@ class RuntimeReconciliationAdapter(Protocol):
         db: Session,
         openings_allowed: bool,
     ) -> str: ...
+
+    def can_resume_controlled_canary(
+        self,
+        db: Session,
+        *,
+        reconciliation_run_id: int,
+    ) -> bool: ...
 
     def close(self) -> None: ...
 
@@ -327,6 +335,7 @@ def _validate_reconciliation(
     return _ValidatedReconciliation(
         status=status,
         safe_to_open=status in {"RECONCILED", "RECOVERED"},
+        reconciliation_run_id=run_id,
     )
 
 
@@ -575,7 +584,14 @@ def serve(
                 now=now_provider(),
             ),
         )
-        if startup.status not in {"RECONCILED", "RECOVERED"}:
+        recovery_only = (
+            startup.status == "DRIFTED"
+            and adapter.can_resume_controlled_canary(
+                db,
+                reconciliation_run_id=startup.reconciliation_run_id,
+            )
+        )
+        if startup.status not in {"RECONCILED", "RECOVERED"} and not recovery_only:
             raise OkxDemoRuntimeBlocked(
                 "OKX_DEMO startup requires exact reconciliation"
             )
@@ -587,11 +603,11 @@ def serve(
                 server_session.create_order_writer(db)
             ),
         )
-        writer.set_openings_allowed(True)
+        writer.set_openings_allowed(not recovery_only)
         _write_readiness(
             ready_path,
             {
-                "status": "READY",
+                "status": "RECOVERY_ONLY" if recovery_only else "READY",
                 "execution_target": "OKX_DEMO",
                 "adapter": "ATTESTED",
                 "reconciliation": startup.status,
