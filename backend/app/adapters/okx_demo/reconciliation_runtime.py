@@ -28,6 +28,7 @@ from app.services.okx_demo_reconciliation import (
 )
 from app.services.okx_demo_submission_grant import (
     OkxDemoSubmissionGrantBlocked,
+    canary_lineage_read_query,
     require_canary_reconciliation,
 )
 from app.models.okx_demo_reconciliation import (
@@ -1076,15 +1077,22 @@ def _active_one_shot_submission_grant(
     *,
     now: datetime,
 ) -> Optional[OkxDemoSubmissionGrant]:
+    # The caller holds the canonical runtime session advisory lock.  The
+    # expired-grant transition below remains in this transaction and is still
+    # guarded by the grant trigger/narrow UPDATE columns; a PostgreSQL row
+    # lock would incorrectly require table-level UPDATE on this read path.
     grants = list(
         db.scalars(
-            select(OkxDemoSubmissionGrant)
-            .where(
-                OkxDemoSubmissionGrant.execution_target_id == "OKX_DEMO",
-                OkxDemoSubmissionGrant.status == "ACTIVE",
+            canary_lineage_read_query(
+                db,
+                select(OkxDemoSubmissionGrant)
+                .where(
+                    OkxDemoSubmissionGrant.execution_target_id == "OKX_DEMO",
+                    OkxDemoSubmissionGrant.status == "ACTIVE",
+                )
+                .order_by(OkxDemoSubmissionGrant.issued_at),
+                for_update=True,
             )
-            .order_by(OkxDemoSubmissionGrant.issued_at)
-            .with_for_update()
         )
     )
     if len(grants) > 1:

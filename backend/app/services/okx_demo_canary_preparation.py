@@ -46,6 +46,7 @@ from app.services.okx_demo_submission_grant import (
     CANARY_NOTIONAL_CAP,
     MAX_RECONCILIATION_AGE_SECONDS,
     OkxDemoSubmissionGrantBlocked,
+    canary_lineage_read_query,
     require_canary_reconciliation,
     try_one_shot_transaction_lock,
 )
@@ -823,13 +824,16 @@ class OkxDemoCanaryPreparationService:
         """
 
         jobs = self.db.scalars(
-            select(ResearchJob)
-            .where(
-                ResearchJob.execution_scope_id == LOCAL_DRY_RUN_SCOPE_ID,
-                ResearchJob.operation == CANARY_OPERATION,
+            canary_lineage_read_query(
+                self.db,
+                select(ResearchJob)
+                .where(
+                    ResearchJob.execution_scope_id == LOCAL_DRY_RUN_SCOPE_ID,
+                    ResearchJob.operation == CANARY_OPERATION,
+                )
+                .order_by(ResearchJob.created_at, ResearchJob.id),
+                for_update=True,
             )
-            .order_by(ResearchJob.created_at, ResearchJob.id)
-            .with_for_update()
         ).all()
         source: Optional[ResearchJob] = None
         refresh_sources: list[ResearchJob] = []
