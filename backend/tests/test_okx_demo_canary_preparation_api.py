@@ -135,6 +135,41 @@ def test_canary_prepare_rejects_caller_order_overrides(client):
     assert calls == []
 
 
+def test_canary_finalize_retries_waiting_same_key_after_runtime_handoff(client, monkeypatch):
+    api, _calls = client
+    calls = []
+    outcomes = [
+        OkxDemoCanaryPreparationWaiting(700),
+        _result(),
+    ]
+
+    def prepare(_self, *, idempotency_key):
+        calls.append(idempotency_key)
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(OkxDemoCanaryPreparationService, "prepare", prepare)
+    headers = {
+        "X-Operator-Token": "operator-test-token",
+        "Idempotency-Key": "canary-finalize-retry",
+        "X-Provider-Authorization": "once",
+    }
+
+    waiting = api.post("/api/okx-demo/canary/finalize", headers=headers, json={})
+    prepared = api.post("/api/okx-demo/canary/finalize", headers=headers, json={})
+    replay = api.post("/api/okx-demo/canary/finalize", headers=headers, json={})
+
+    assert waiting.status_code == 202
+    assert waiting.json()["operation_status"] == "WAITING_FOR_RUNTIME_ATTESTATION"
+    assert prepared.status_code == 202
+    assert prepared.json()["operation_status"] == "PREPARED"
+    assert replay.status_code == 202
+    assert replay.json() == prepared.json()
+    assert calls == ["canary-finalize-retry", "canary-finalize-retry"]
+
+
 @pytest.fixture()
 def db_session():
     engine = create_engine(

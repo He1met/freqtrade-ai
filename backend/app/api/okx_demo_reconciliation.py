@@ -79,6 +79,15 @@ def _canary_preparation_response(result: Any) -> dict[str, Any]:
     }
 
 
+def _cache_canary_result(result: Any) -> bool:
+    """Keep non-terminal runtime handoffs retryable under one idempotency key."""
+
+    return not (
+        isinstance(result, dict)
+        and result.get("operation_status") == "WAITING_FOR_RUNTIME_ATTESTATION"
+    )
+
+
 @router.post("/canary/prepare", status_code=202)
 def prepare_controlled_canary(
     payload: CanaryPreparationRequest,
@@ -120,6 +129,7 @@ def prepare_controlled_canary(
         provider_call=True,
         request_payload=payload.model_dump(mode="json"),
         handler=execute,
+        cache_result=_cache_canary_result,
     )
 
 
@@ -158,6 +168,7 @@ def finalize_controlled_canary(
         provider_call=True,
         request_payload=payload.model_dump(mode="json"),
         handler=execute,
+        cache_result=_cache_canary_result,
     )
 
 

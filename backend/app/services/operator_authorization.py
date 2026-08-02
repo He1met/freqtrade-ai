@@ -68,6 +68,7 @@ class OperatorRequestCoordinator:
         provider_call: bool,
         request_payload: Any,
         handler: Callable[[], Any],
+        cache_result: Optional[Callable[[Any], bool]] = None,
     ) -> Any:
         key = self._authorize_and_validate(headers, operation=operation, provider_call=provider_call)
         cache_key = (operation, key)
@@ -145,7 +146,13 @@ class OperatorRequestCoordinator:
             self._audit(operation, "FAILED", digest, provider_call, reason="unhandled_error")
             raise
 
-        self._finish(cache_key, _CachedOutcome(result=copy.deepcopy(result)), provider_call)
+        should_cache = cache_result(result) if cache_result is not None else True
+        self._finish(
+            cache_key,
+            _CachedOutcome(result=copy.deepcopy(result)),
+            provider_call,
+            cache_outcome=should_cache,
+        )
         self._audit(operation, "SUCCESS", digest, provider_call)
         return result
 
@@ -213,16 +220,19 @@ class OperatorRequestCoordinator:
         cache_key: tuple[str, str],
         outcome: _CachedOutcome,
         provider_call: bool,
+        *,
+        cache_outcome: bool = True,
     ) -> None:
         with self._lock:
             self._inflight.discard(cache_key)
             if provider_call and self._provider_inflight == cache_key:
                 self._provider_inflight = None
-            self._outcomes[cache_key] = outcome
-            while len(self._outcomes) > self._max_cached_outcomes:
-                oldest_key = next(iter(self._outcomes))
-                self._outcomes.pop(oldest_key, None)
-                self._request_digests.pop(oldest_key, None)
+            if cache_outcome:
+                self._outcomes[cache_key] = outcome
+                while len(self._outcomes) > self._max_cached_outcomes:
+                    oldest_key = next(iter(self._outcomes))
+                    self._outcomes.pop(oldest_key, None)
+                    self._request_digests.pop(oldest_key, None)
 
     @staticmethod
     def _replay(outcome: _CachedOutcome) -> Any:
