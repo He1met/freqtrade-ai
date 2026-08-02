@@ -38,6 +38,7 @@ from app.adapters.okx_demo.models import (
     AccountConfig,
     Balance,
     Candle,
+    ExecutionAttestationBundle,
     FundingRate,
     InstrumentSpec,
     LeverageInfo,
@@ -201,6 +202,12 @@ class OkxDemoReadClient(Protocol):
         timeframe: str,
         candle_limit: int = 100,
     ) -> TrustedSignalBundle: ...
+    def capture_execution_attestation(
+        self,
+        db: Session,
+        *,
+        inst_id: str,
+    ) -> ExecutionAttestationBundle: ...
 
 
 class OkxDemoReadAdapter:
@@ -1874,6 +1881,358 @@ def create_attested_okx_demo_read_adapter(
                     kind="INVALID_SIGNAL_BUNDLE",
                     status="BLOCKED",
                     message=message,
+                )
+
+            def capture_execution_attestation(
+                self,
+                db: Session,
+                *,
+                inst_id: str,
+            ) -> ExecutionAttestationBundle:
+                """Capture only the evidence needed by the bounded canary.
+
+                This path is intentionally separate from
+                ``capture_trusted_signal_bundle``.  It fetches no candles and
+                creates no signal evaluation, strategy lineage, or deployment
+                evidence.  It still uses the same attested session, read
+                adapter, snapshot writer, fingerprint, expiry, and
+                reconciliation contracts as the production signal path.
+                """
+
+                from app.core.config import get_settings
+
+                allowed_instruments = set(
+                    get_settings()
+                    .demo_automation_policy.demo_risk_policy.allowed_instruments
+                )
+                if inst_id not in allowed_instruments:
+                    raise OkxReadAdapterError(
+                        kind="INVALID_REQUEST",
+                        status="BLOCKED",
+                        message="instrument is not allowlisted by the OKX Demo risk policy",
+                    )
+                if not SWAP_ID_PATTERN.fullmatch(inst_id):
+                    raise OkxReadAdapterError(
+                        kind="INVALID_REQUEST",
+                        status="BLOCKED",
+                        message="execution attestation instrument id is invalid",
+                    )
+
+                instrument_snapshot = self._engine.instruments(inst_id)
+                book_snapshot = self._engine.orderbook(inst_id, depth=1)
+                mark_snapshot = self._engine.mark_price(inst_id)
+                config_snapshot = self._engine.account_config()
+                positions_snapshot = self._engine.positions(inst_id)
+                leverage_snapshot = self._engine.leverage(inst_id)
+                fetched_snapshots = (
+                    instrument_snapshot,
+                    book_snapshot,
+                    mark_snapshot,
+                    config_snapshot,
+                    positions_snapshot,
+                    leverage_snapshot,
+                )
+
+                observed_at = _utc_now()
+                if observed_at.tzinfo is None:
+                    raise OkxReadAdapterError(
+                        kind="INVALID_RESPONSE",
+                        status="BLOCKED",
+                        message="execution attestation clock is not timezone-aware",
+                    )
+                observed_at = observed_at.astimezone(timezone.utc)
+                for snapshot in fetched_snapshots:
+                    if (
+                        snapshot.metadata.execution_target != "OKX_DEMO"
+                        or snapshot.metadata.source != "okx_demo_rest"
+                        or snapshot.metadata.stale
+                        or snapshot.metadata.expires_at <= observed_at
+                        or snapshot.metadata.fetched_at > observed_at
+                    ):
+                        raise OkxReadAdapterError(
+                            kind="STALE_DATA",
+                            status="BLOCKED",
+                            message="execution attestation contains stale evidence",
+                        )
+                for snapshot in (config_snapshot, positions_snapshot, leverage_snapshot):
+                    if snapshot.metadata.authenticated is not True:
+                        raise OkxReadAdapterError(
+                            kind="UNAUTHORIZED",
+                            status="BLOCKED",
+                            message="execution attestation account evidence is unauthenticated",
+                        )
+
+                if len(instrument_snapshot.items) != 1:
+                    raise OkxReadAdapterError(
+                        kind="INVALID_RESPONSE",
+                        status="BLOCKED",
+                        message="execution attestation requires exactly one instrument",
+                    )
+                instrument = InstrumentSpec.model_validate(
+                    instrument_snapshot.items[0]
+                )
+                if (
+                    instrument.inst_id != inst_id
+                    or instrument.state != "live"
+                    or instrument.contract_type not in {"linear", "inverse"}
+                ):
+                    raise OkxReadAdapterError(
+                        kind="INVALID_RESPONSE",
+                        status="BLOCKED",
+                        message="execution attestation instrument is not active",
+                    )
+
+                if len(book_snapshot.items) != 1:
+                    raise OkxReadAdapterError(
+                        kind="INVALID_RESPONSE",
+                        status="BLOCKED",
+                        message="execution attestation requires exactly one order book",
+                    )
+                order_book = OrderBook.model_validate(book_snapshot.items[0])
+                if (
+                    order_book.inst_id != inst_id
+                    or not order_book.bids
+                    or not order_book.asks
+                ):
+                    raise OkxReadAdapterError(
+                        kind="INVALID_RESPONSE",
+                        status="BLOCKED",
+                        message="execution attestation order book has no complete BBO",
+                    )
+                best_bid = max(order_book.bids, key=lambda item: item.price)
+                best_ask = min(order_book.asks, key=lambda item: item.price)
+                if (
+                    best_bid.price <= 0
+                    or best_ask.price <= 0
+                    or best_bid.size <= 0
+                    or best_ask.size <= 0
+                    or best_bid.price >= best_ask.price
+                ):
+                    raise OkxReadAdapterError(
+                        kind="INVALID_RESPONSE",
+                        status="BLOCKED",
+                        message="execution attestation BBO is crossed or locked",
+                    )
+
+                if len(mark_snapshot.items) != 1:
+                    raise OkxReadAdapterError(
+                        kind="INVALID_RESPONSE",
+                        status="BLOCKED",
+                        message="execution attestation requires exactly one mark price",
+                    )
+                mark_price = ReferencePrice.model_validate(mark_snapshot.items[0])
+                if (
+                    mark_price.inst_id != inst_id
+                    or mark_price.price_kind != "mark"
+                    or mark_price.price <= 0
+                ):
+                    raise OkxReadAdapterError(
+                        kind="INVALID_RESPONSE",
+                        status="BLOCKED",
+                        message="execution attestation mark price is invalid",
+                    )
+
+                if len(config_snapshot.items) != 1:
+                    raise OkxReadAdapterError(
+                        kind="INVALID_RESPONSE",
+                        status="BLOCKED",
+                        message="execution attestation requires exactly one account config",
+                    )
+                account_config = AccountConfig.model_validate(config_snapshot.items[0])
+                if account_config.position_mode != "long_short_mode":
+                    raise OkxReadAdapterError(
+                        kind="INVALID_RESPONSE",
+                        status="BLOCKED",
+                        message="OKX Demo account is not in long_short_mode",
+                    )
+
+                positions = [
+                    Position.model_validate(item)
+                    for item in positions_snapshot.items
+                ]
+                if any(
+                    item.inst_id != inst_id
+                    or item.margin_mode != "isolated"
+                    or item.position_side not in {"long", "short"}
+                    or item.contracts < 0
+                    or (item.mark_price is not None and item.mark_price <= 0)
+                    or (item.leverage is not None and item.leverage <= 0)
+                    for item in positions
+                ):
+                    raise OkxReadAdapterError(
+                        kind="INVALID_RESPONSE",
+                        status="BLOCKED",
+                        message="execution attestation positions are invalid",
+                    )
+                leverages = [
+                    LeverageInfo.model_validate(item)
+                    for item in leverage_snapshot.items
+                ]
+                leverage_by_side: dict[str, Decimal] = {}
+                for item in leverages:
+                    if (
+                        item.inst_id != inst_id
+                        or item.margin_mode != "isolated"
+                        or item.position_side not in {"long", "short"}
+                        or item.leverage <= 0
+                        or item.position_side in leverage_by_side
+                    ):
+                        raise OkxReadAdapterError(
+                            kind="INVALID_RESPONSE",
+                            status="BLOCKED",
+                            message="execution attestation leverage evidence is invalid",
+                        )
+                    leverage_by_side[item.position_side] = item.leverage
+                if set(leverage_by_side) != {"long", "short"}:
+                    raise OkxReadAdapterError(
+                        kind="INVALID_RESPONSE",
+                        status="BLOCKED",
+                        message="execution attestation leverage must cover long and short",
+                    )
+
+                exposure_by_side = {"long": Decimal("0"), "short": Decimal("0")}
+                positions_by_side = {"long": 0, "short": 0}
+                position_summaries = []
+                for position in positions:
+                    if position.contracts == 0:
+                        continue
+                    pricing = position.mark_price or mark_price.price
+                    exposure = (
+                        position.contracts * instrument.contract_value * pricing
+                        if instrument.contract_type == "linear"
+                        else position.contracts * instrument.contract_value
+                    )
+                    exposure_by_side[position.position_side] += exposure
+                    positions_by_side[position.position_side] += 1
+                    position_summaries.append(
+                        TrustedPositionSummary(
+                            position_side=position.position_side,
+                            contracts=position.contracts,
+                            mark_price=position.mark_price,
+                            leverage=position.leverage,
+                            timestamp=position.timestamp,
+                        )
+                    )
+
+                common_expiry = min(
+                    *(snapshot.metadata.expires_at for snapshot in fetched_snapshots),
+                    self._attested_session.expires_at,
+                )
+                market_as_of = max(order_book.timestamp, mark_price.timestamp)
+                account_as_of = max(
+                    config_snapshot.metadata.fetched_at,
+                    positions_snapshot.metadata.fetched_at,
+                    leverage_snapshot.metadata.fetched_at,
+                )
+                if (
+                    market_as_of > observed_at + timedelta(seconds=FUTURE_SKEW_SECONDS)
+                    or observed_at - market_as_of > timedelta(seconds=30)
+                ):
+                    raise OkxReadAdapterError(
+                        kind="STALE_DATA",
+                        status="BLOCKED",
+                        message="execution attestation market evidence is stale",
+                    )
+                if observed_at >= common_expiry:
+                    raise OkxReadAdapterError(
+                        kind="STALE_DATA",
+                        status="BLOCKED",
+                        message="execution attestation expired before persistence",
+                    )
+
+                instrument_content = TrustedInstrumentSnapshotContent(
+                    instId=instrument.inst_id,
+                    ctVal=instrument.contract_value,
+                    ctValCcy=instrument.contract_value_ccy,
+                    lotSz=instrument.lot_size,
+                    minSz=instrument.min_size,
+                    tickSz=instrument.tick_size,
+                    contract_shape=instrument.contract_type,
+                    state=instrument.state,
+                    expires_at=common_expiry,
+                )
+                market_content = {
+                    "execution_target": "OKX_DEMO",
+                    "source": "okx_demo_rest",
+                    "resource": "market",
+                    "stale": False,
+                    "authenticated": False,
+                    "execution_only": True,
+                    "instrument_id": inst_id,
+                    "reference_price": str(mark_price.price),
+                    "as_of": market_as_of.isoformat(),
+                    "bbo": TrustedBbo(
+                        bid_price=best_bid.price,
+                        bid_size=best_bid.size,
+                        ask_price=best_ask.price,
+                        ask_size=best_ask.size,
+                        timestamp=order_book.timestamp,
+                    ).model_dump(mode="json"),
+                    "mark": TrustedMarkPrice(
+                        price=mark_price.price,
+                        timestamp=mark_price.timestamp,
+                    ).model_dump(mode="json"),
+                    "expires_at": common_expiry.isoformat(),
+                }
+                account_content = TrustedAccountSnapshotContent(
+                    current_exposure=sum(exposure_by_side.values(), Decimal("0")),
+                    open_positions=sum(positions_by_side.values()),
+                    exposure_by_position_side=exposure_by_side,
+                    open_positions_by_position_side=positions_by_side,
+                    leverage_by_position_side=leverage_by_side,
+                    positions=tuple(position_summaries),
+                    as_of=account_as_of,
+                    expires_at=common_expiry,
+                )
+
+                self._attested_session.bind_database(db)
+                self._attested_session._renew_if_needed(observed_at)
+                contents = {
+                    "instrument": instrument_content.model_dump(mode="json"),
+                    "market": market_content,
+                    "account": account_content.model_dump(mode="json"),
+                }
+                rows = {}
+                try:
+                    with db.begin_nested():
+                        for kind, content in contents.items():
+                            normalized = _normalize_attested_snapshot(
+                                self._attested_session._risk_capability,
+                                kind=kind,
+                                content=content,
+                                observed_at=observed_at,
+                                expires_at=common_expiry,
+                            )
+                            rows[kind] = _write_attested_snapshot(
+                                db,
+                                self._attested_session._risk_capability,
+                                normalized,
+                                now=observed_at,
+                            )
+                except BaseException:
+                    try:
+                        self._attested_session.revoke("WRITE_FAILURE", db=db)
+                    except OkxDemoCredentialsUnavailable:
+                        pass
+                    raise
+
+                def reference(kind: str) -> TrustedSnapshotReference:
+                    row = rows[kind]
+                    return TrustedSnapshotReference(
+                        kind=kind,
+                        database_id=row.database_id,
+                        snapshot_id=row.snapshot_id,
+                        digest=row.digest,
+                        expires_at=common_expiry,
+                    )
+
+                return ExecutionAttestationBundle(
+                    instrument_id=inst_id,
+                    observed_at=observed_at,
+                    expires_at=common_expiry,
+                    instrument=reference("instrument"),
+                    market=reference("market"),
+                    account=reference("account"),
                 )
 
             def close(self) -> None:

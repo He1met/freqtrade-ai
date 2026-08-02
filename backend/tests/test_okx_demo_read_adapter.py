@@ -19,6 +19,7 @@ from app.adapters.okx_demo import (
     create_attested_okx_demo_read_adapter,
 )
 from app.adapters.okx_demo.models import (
+    ExecutionAttestationBundle,
     OkxReadSnapshot,
     SnapshotMetadata,
     TrustedSignalBundle,
@@ -1677,6 +1678,106 @@ def test_attested_client_captures_typed_atomic_signal_bundle(monkeypatch) -> Non
         db.close()
 
 
+def test_attested_client_captures_execution_only_bundle_without_candles(
+    monkeypatch,
+) -> None:
+    account = attested_account()
+    install_attestation(monkeypatch, account)
+    monkeypatch.setattr(read_boundary, "_utc_now", lambda: NOW)
+    client = create_attested_okx_demo_read_adapter(
+        ephemeral_environment(account)
+    )
+    snapshots = trusted_bundle_engine_snapshots()
+    install_trusted_bundle_engine(client, snapshots)
+
+    def candles_must_not_be_called(*_args, **_kwargs):
+        raise AssertionError("execution-only attestation must not fetch candles")
+
+    monkeypatch.setattr(client._engine, "candles", candles_must_not_be_called)
+    db = trusted_bundle_db()
+    try:
+        bundle = client.capture_execution_attestation(
+            db,
+            inst_id="BTC-USDT-SWAP",
+        )
+        db.commit()
+
+        assert isinstance(bundle, ExecutionAttestationBundle)
+        assert bundle.schema_version == "execution-1"
+        assert bundle.instrument_id == "BTC-USDT-SWAP"
+        rows = {
+            row.kind: row
+            for row in db.scalars(select(OkxDemoTrustedSnapshot)).all()
+        }
+        assert set(rows) == {"instrument", "market", "account"}
+        assert rows["market"].content_json["execution_only"] is True
+        assert "confirmed_candles" not in rows["market"].content_json
+        assert rows["account"].content_json["authenticated"] is True
+        assert rows["account"].content_json["pinned_account_fingerprint"]
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("failure", ["stale", "unauthenticated", "empty_bbo"])
+def test_execution_only_attestation_fail_closes_malformed_market_or_account(
+    monkeypatch,
+    failure: str,
+) -> None:
+    account = attested_account()
+    install_attestation(monkeypatch, account)
+    monkeypatch.setattr(read_boundary, "_utc_now", lambda: NOW)
+    client = create_attested_okx_demo_read_adapter(
+        ephemeral_environment(account)
+    )
+    snapshots = trusted_bundle_engine_snapshots()
+    if failure == "stale":
+        snapshots["orderbook"] = snapshots["orderbook"].model_copy(
+            update={
+                "metadata": snapshots["orderbook"].metadata.model_copy(
+                    update={"stale": True}
+                )
+            }
+        )
+    elif failure == "unauthenticated":
+        snapshots["positions"] = snapshots["positions"].model_copy(
+            update={
+                "metadata": snapshots["positions"].metadata.model_copy(
+                    update={"authenticated": False}
+                )
+            }
+        )
+    else:
+        snapshots["orderbook"] = snapshots["orderbook"].model_copy(
+            update={
+                "items": [
+                    {
+                        "inst_id": "BTC-USDT-SWAP",
+                        "bids": [],
+                        "asks": [],
+                        "timestamp": NOW - timedelta(seconds=1),
+                    }
+                ]
+            }
+        )
+    install_trusted_bundle_engine(client, snapshots)
+    db = trusted_bundle_db()
+    try:
+        with pytest.raises(OkxReadAdapterError) as exc_info:
+            client.capture_execution_attestation(
+                db,
+                inst_id="BTC-USDT-SWAP",
+            )
+        assert exc_info.value.status == "BLOCKED"
+        assert exc_info.value.kind in {
+            "STALE_DATA",
+            "UNAUTHORIZED",
+            "INVALID_RESPONSE",
+        }
+        assert db.scalars(select(OkxDemoTrustedSnapshot)).all() == []
+    finally:
+        db.close()
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [
@@ -1796,6 +1897,8 @@ def test_only_attested_production_client_exposes_typed_bundle_capture(
     offline, _transport = adapter([])
 
     assert callable(production.capture_trusted_signal_bundle)
+    assert callable(production.capture_execution_attestation)
     assert not hasattr(offline, "capture_trusted_signal_bundle")
+    assert not hasattr(offline, "capture_execution_attestation")
     assert not hasattr(production, "persist")
     assert not hasattr(production, "persist_snapshot")

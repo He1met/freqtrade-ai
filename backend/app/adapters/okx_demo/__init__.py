@@ -7,6 +7,7 @@ from app.adapters.okx_demo.credentials import (
 from app.adapters.okx_demo.errors import OkxReadAdapterError
 from app.adapters.okx_demo.models import (
     ContractConversion,
+    ExecutionAttestationBundle,
     InstrumentSpec,
     OkxReadSnapshot,
     SnapshotMetadata,
@@ -28,6 +29,7 @@ from app.adapters.okx_demo.transport import (
 
 __all__ = [
     "ContractConversion",
+    "ExecutionAttestationBundle",
     "InstrumentSpec",
     "OkxDemoCredentialProvider",
     "OkxDemoCredentialsUnavailable",

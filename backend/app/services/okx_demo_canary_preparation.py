@@ -248,8 +248,11 @@ class OkxDemoCanaryPreparationService:
                 {
                     "retry_of_job_id": source.id,
                     "retry_attempt": 1,
+                    "bundle_kind": "EXECUTION_ONLY",
                 }
             )
+            payload.pop("timeframe", None)
+            payload.pop("candle_limit", None)
             successor = ResearchJob(
                 execution_scope_id=LOCAL_DRY_RUN_SCOPE_ID,
                 job_type="okx_demo_controlled_canary",
@@ -435,8 +438,7 @@ class OkxDemoCanaryPreparationService:
             "provenance": CANARY_PROVENANCE,
             "execution_target": OKX_DEMO_TARGET_ID,
             "instrument_id": "BTC-USDT-SWAP",
-            "timeframe": "1m",
-            "candle_limit": 2,
+            "bundle_kind": "EXECUTION_ONLY",
             "non_production": True,
         }
         job = ResearchJob(
@@ -1063,18 +1065,16 @@ def process_pending_canary_attestation(
         payload.get("provenance") != CANARY_PROVENANCE
         or payload.get("execution_target") != OKX_DEMO_TARGET_ID
         or payload.get("instrument_id") not in CANARY_INSTRUMENTS
-        or payload.get("timeframe") not in {"1m", "5m", "15m"}
+        or payload.get("bundle_kind") != "EXECUTION_ONLY"
     ):
         job.status = "BLOCKED"
         job.stage = "CANARY_SNAPSHOT_BLOCKED"
         job.error_message = "canary attestation request payload is invalid"
         return True
     try:
-        bundle = read_client.capture_trusted_signal_bundle(
+        bundle = read_client.capture_execution_attestation(
             db,
             inst_id=payload["instrument_id"],
-            timeframe=payload["timeframe"],
-            candle_limit=int(payload.get("candle_limit", 100)),
         )
         references = {
             name: {
