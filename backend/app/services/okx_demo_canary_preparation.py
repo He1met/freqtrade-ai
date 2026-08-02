@@ -64,9 +64,20 @@ UNRESOLVED_WRITER_STATES = (
     "RESIDUAL_CLOSE_REQUIRED",
 )
 FRESH_EXECUTION_ONLY_REFRESH = "FRESH_EXECUTION_ONLY_REFRESH"
+FRESH_EXECUTION_ONLY_REFRESH_RETRY = "FRESH_EXECUTION_ONLY_REFRESH_RETRY"
 FRESH_EXECUTION_ENTRY_KINDS = frozenset(
-    {FRESH_EXECUTION_ONLY_ENTRY, FRESH_EXECUTION_ONLY_REFRESH}
+    {
+        FRESH_EXECUTION_ONLY_ENTRY,
+        FRESH_EXECUTION_ONLY_REFRESH,
+        FRESH_EXECUTION_ONLY_REFRESH_RETRY,
+    }
 )
+FRESH_EXECUTION_REFRESH_KINDS = frozenset(
+    {FRESH_EXECUTION_ONLY_REFRESH, FRESH_EXECUTION_ONLY_REFRESH_RETRY}
+)
+# A successful fresh entry may have one refresh successor and that successor
+# may have one final bounded retry.  No third refresh is ever admitted.
+MAX_FRESH_EXECUTION_REFRESH_SUCCESSORS = 2
 
 
 class OkxDemoCanaryPreparationBlocked(RuntimeError):
@@ -204,10 +215,7 @@ class OkxDemoCanaryPreparationService:
             entry_kind, supersedes, refresh_of = _fresh_entry_lineage(
                 existing.request_payload
             )
-            if (
-                entry_kind != FRESH_EXECUTION_ONLY_REFRESH
-                or refresh_of is None
-            ):
+            if entry_kind not in FRESH_EXECUTION_REFRESH_KINDS or refresh_of is None:
                 raise OkxDemoCanaryPreparationBlocked(
                     "canary refresh idempotency key is bound to another entry"
                 )
@@ -246,7 +254,7 @@ class OkxDemoCanaryPreparationService:
                     raise OkxDemoCanaryPreparationBlocked(
                         "canary refresh raced with another request"
                     )
-                source = self._refresh_source_job()
+                source = self._refresh_source_job(now=now)
                 self._require_no_canary_activity_for_refresh()
                 source_payload = source.request_payload
                 source_supersedes = source_payload.get("supersedes_job_ids")
@@ -258,13 +266,19 @@ class OkxDemoCanaryPreparationService:
                         "fresh canary source lineage is malformed"
                     )
                 supersedes_job_ids = list(dict.fromkeys([*source_supersedes, source.id]))
+                source_entry_kind = source_payload.get("entry_kind")
+                entry_kind = (
+                    FRESH_EXECUTION_ONLY_REFRESH_RETRY
+                    if source_entry_kind == FRESH_EXECUTION_ONLY_REFRESH
+                    else FRESH_EXECUTION_ONLY_REFRESH
+                )
                 payload = {
                     "provenance": CANARY_PROVENANCE,
                     "execution_target": OKX_DEMO_TARGET_ID,
                     "instrument_id": "BTC-USDT-SWAP",
                     "bundle_kind": "EXECUTION_ONLY",
                     "non_production": True,
-                    "entry_kind": FRESH_EXECUTION_ONLY_REFRESH,
+                    "entry_kind": entry_kind,
                     "refresh_of_job_id": source.id,
                     "supersedes_job_ids": supersedes_job_ids,
                 }
@@ -282,7 +296,7 @@ class OkxDemoCanaryPreparationService:
                     evidence_snapshot={
                         "provenance": CANARY_PROVENANCE,
                         "non_production": True,
-                        "entry_kind": FRESH_EXECUTION_ONLY_REFRESH,
+                        "entry_kind": entry_kind,
                         "refresh_of_job_id": source.id,
                         "supersedes_job_ids": supersedes_job_ids,
                     },
@@ -293,7 +307,7 @@ class OkxDemoCanaryPreparationService:
                 job_id = job.id
             raise OkxDemoCanaryPreparationWaiting(
                 job_id,
-                entry_kind=FRESH_EXECUTION_ONLY_REFRESH,
+                entry_kind=entry_kind,
                 supersedes_job_ids=tuple(supersedes_job_ids),
                 refresh_of_job_id=source.id,
             )
@@ -316,7 +330,7 @@ class OkxDemoCanaryPreparationService:
                 entry_kind, supersedes, refresh_of = _fresh_entry_lineage(
                     existing.request_payload
                 )
-                if entry_kind != FRESH_EXECUTION_ONLY_REFRESH or refresh_of is None:
+                if entry_kind not in FRESH_EXECUTION_REFRESH_KINDS or refresh_of is None:
                     raise OkxDemoCanaryPreparationBlocked(
                         "canary refresh lineage is malformed"
                     )
@@ -769,8 +783,14 @@ class OkxDemoCanaryPreparationService:
             supersedes.append(job.id)
         return supersedes
 
-    def _refresh_source_job(self) -> ResearchJob:
-        """Find the one successful fresh handoff eligible for re-attestation."""
+    def _refresh_source_job(self, *, now: datetime) -> ResearchJob:
+        """Find the bounded successful handoff eligible for re-attestation.
+
+        The first refresh is sourced from the original fresh entry.  A single
+        additional retry may be sourced from that refresh only after its
+        immutable snapshot evidence has expired.  This keeps a stale live
+        handoff recoverable without turning refresh into an unbounded chain.
+        """
 
         jobs = self.db.scalars(
             select(ResearchJob)
@@ -782,13 +802,10 @@ class OkxDemoCanaryPreparationService:
             .with_for_update()
         ).all()
         source: Optional[ResearchJob] = None
+        refresh_sources: list[ResearchJob] = []
         for job in jobs:
             payload = job.request_payload if isinstance(job.request_payload, dict) else {}
             entry_kind = payload.get("entry_kind")
-            if entry_kind == FRESH_EXECUTION_ONLY_REFRESH:
-                raise OkxDemoCanaryPreparationBlocked(
-                    "a canary refresh successor already exists"
-                )
             if entry_kind == FRESH_EXECUTION_ONLY_ENTRY:
                 if source is not None:
                     raise OkxDemoCanaryPreparationBlocked(
@@ -800,10 +817,47 @@ class OkxDemoCanaryPreparationService:
                     )
                 source = job
                 continue
+            if entry_kind in FRESH_EXECUTION_REFRESH_KINDS:
+                if (
+                    job.status == "AWAITING_APPROVAL"
+                    and job.stage == "CANARY_SNAPSHOT_REQUESTED"
+                ):
+                    raise OkxDemoCanaryPreparationBlocked(
+                        "a canary refresh successor already exists"
+                    )
+                if not self._is_refresh_successor(job, payload):
+                    raise OkxDemoCanaryPreparationBlocked(
+                        "unknown or pending canary refresh history blocks refresh"
+                    )
+                refresh_sources.append(job)
+                continue
             if not self._is_terminal_attestation_failure(job, payload):
                 raise OkxDemoCanaryPreparationBlocked(
                     "unknown or pending canary history blocks refresh"
                 )
+        if len(refresh_sources) >= MAX_FRESH_EXECUTION_REFRESH_SUCCESSORS:
+            raise OkxDemoCanaryPreparationBlocked(
+                "canary refresh successor limit reached"
+            )
+        if refresh_sources:
+            # Each successful refresh is immutable.  A second key can only
+            # continue from the latest single successor, and only when that
+            # successor's own attested snapshots are demonstrably expired.
+            if source is None or len(refresh_sources) != 1:
+                raise OkxDemoCanaryPreparationBlocked(
+                    "canary refresh lineage has multiple successful successors"
+                )
+            refresh_source = refresh_sources[0]
+            depth = self._refresh_handoff_depth(refresh_source)
+            if depth is None or depth >= MAX_FRESH_EXECUTION_REFRESH_SUCCESSORS:
+                raise OkxDemoCanaryPreparationBlocked(
+                    "canary refresh successor limit reached"
+                )
+            if not self._refresh_snapshots_expired(refresh_source, now):
+                raise OkxDemoCanaryPreparationBlocked(
+                    "existing canary refresh handoff is still fresh; finalize it"
+                )
+            return refresh_source
         if source is None:
             raise OkxDemoCanaryPreparationBlocked(
                 "a successful fresh execution-only canary handoff is required"
@@ -816,7 +870,9 @@ class OkxDemoCanaryPreparationService:
         payload: Mapping[str, Any],
     ) -> bool:
         if (
-            job.status != "SUCCESS"
+            job.execution_scope_id != LOCAL_DRY_RUN_SCOPE_ID
+            or job.operation != CANARY_OPERATION
+            or job.status != "SUCCESS"
             or job.stage != "CANARY_SNAPSHOTS_READY"
             or payload.get("provenance") != CANARY_PROVENANCE
             or payload.get("execution_target") != OKX_DEMO_TARGET_ID
@@ -843,12 +899,121 @@ class OkxDemoCanaryPreparationService:
             and isinstance(evidence.get("snapshot_evidence"), dict)
         )
 
+    @staticmethod
+    def _is_refresh_successor(
+        job: ResearchJob,
+        payload: Mapping[str, Any],
+    ) -> bool:
+        """Validate one immutable successful refresh successor shape."""
+
+        if (
+            job.execution_scope_id != LOCAL_DRY_RUN_SCOPE_ID
+            or job.operation != CANARY_OPERATION
+            or job.status != "SUCCESS"
+            or job.stage != "CANARY_SNAPSHOTS_READY"
+            or payload.get("provenance") != CANARY_PROVENANCE
+            or payload.get("execution_target") != OKX_DEMO_TARGET_ID
+            or payload.get("instrument_id") not in CANARY_INSTRUMENTS
+            or payload.get("bundle_kind") != "EXECUTION_ONLY"
+            or payload.get("entry_kind") not in FRESH_EXECUTION_REFRESH_KINDS
+            or payload.get("non_production") is not True
+            or "timeframe" in payload
+            or "candle_limit" in payload
+        ):
+            return False
+        refresh_of = payload.get("refresh_of_job_id")
+        supersedes = payload.get("supersedes_job_ids")
+        if (
+            not isinstance(refresh_of, int)
+            or refresh_of <= 0
+            or not isinstance(supersedes, list)
+            or not supersedes
+            or any(not isinstance(job_id, int) or job_id <= 0 for job_id in supersedes)
+            or refresh_of not in supersedes
+        ):
+            return False
+        evidence = job.evidence_snapshot if isinstance(job.evidence_snapshot, dict) else {}
+        return (
+            evidence.get("provenance") == CANARY_PROVENANCE
+            and evidence.get("non_production") is True
+            and evidence.get("entry_kind") == payload.get("entry_kind")
+            and evidence.get("refresh_of_job_id") == refresh_of
+            and evidence.get("supersedes_job_ids") == supersedes
+            and isinstance(evidence.get("snapshot_evidence"), dict)
+        )
+
+    def _refresh_handoff_depth(
+        self,
+        job: ResearchJob,
+        *,
+        seen: Optional[set[int]] = None,
+    ) -> Optional[int]:
+        """Return refresh depth, rejecting cycles and malformed parents."""
+
+        seen = set() if seen is None else seen
+        if job.id in seen:
+            return None
+        seen.add(job.id)
+        payload = job.request_payload if isinstance(job.request_payload, dict) else {}
+        if self._is_refresh_source(job, payload):
+            return 0
+        if not self._is_refresh_successor(job, payload):
+            return None
+        parent = self.db.get(ResearchJob, payload["refresh_of_job_id"])
+        if parent is None:
+            return None
+        parent_payload = (
+            parent.request_payload
+            if isinstance(parent.request_payload, dict)
+            else {}
+        )
+        parent_supersedes = parent_payload.get("supersedes_job_ids")
+        supersedes = payload.get("supersedes_job_ids")
+        if (
+            not isinstance(parent_supersedes, list)
+            or not isinstance(supersedes, list)
+            or list(dict.fromkeys([*parent_supersedes, parent.id])) != supersedes
+        ):
+            return None
+        parent_depth = self._refresh_handoff_depth(parent, seen=seen)
+        if parent_depth is None:
+            return None
+        depth = parent_depth + 1
+        if parent_depth == 0:
+            expected_kind = FRESH_EXECUTION_ONLY_REFRESH
+        elif parent_depth == 1:
+            expected_kind = FRESH_EXECUTION_ONLY_REFRESH_RETRY
+        else:
+            expected_kind = None
+        if payload.get("entry_kind") != expected_kind:
+            return None
+        if depth > MAX_FRESH_EXECUTION_REFRESH_SUCCESSORS:
+            return None
+        return depth
+
+    @staticmethod
+    def _refresh_snapshots_expired(job: ResearchJob, now: datetime) -> bool:
+        """Require explicit immutable expiry evidence before another retry."""
+
+        evidence = job.evidence_snapshot if isinstance(job.evidence_snapshot, dict) else {}
+        snapshots = evidence.get("snapshot_evidence")
+        if not isinstance(snapshots, dict) or not snapshots:
+            raise OkxDemoCanaryPreparationBlocked(
+                "canary refresh expiry evidence is missing"
+            )
+        expiries: list[datetime] = []
+        for kind in ("instrument", "market", "account"):
+            reference = snapshots.get(kind)
+            if not isinstance(reference, dict) or "expires_at" not in reference:
+                raise OkxDemoCanaryPreparationBlocked(
+                    "canary refresh expiry evidence is missing"
+                )
+            expiries.append(_aware(reference["expires_at"]))
+        return any(expires_at <= now for expires_at in expiries)
+
     def _require_refresh_source_job(self, source_job_id: int) -> ResearchJob:
         source = self.db.get(ResearchJob, source_job_id)
-        payload = source.request_payload if source is not None and isinstance(
-            source.request_payload, dict
-        ) else {}
-        if source is None or not self._is_refresh_source(source, payload):
+        if source is None or self._refresh_handoff_depth(source) is None:
             raise OkxDemoCanaryPreparationBlocked(
                 "refresh source job is no longer an immutable successful handoff"
             )
@@ -1678,7 +1843,7 @@ def _fresh_entry_evidence(payload: Mapping[str, Any]) -> dict[str, Any]:
             "supersedes_job_ids": list(supersedes),
         }
     refresh_of = payload.get("refresh_of_job_id")
-    if entry_kind == FRESH_EXECUTION_ONLY_REFRESH and isinstance(refresh_of, int) and refresh_of > 0:
+    if entry_kind in FRESH_EXECUTION_REFRESH_KINDS and isinstance(refresh_of, int) and refresh_of > 0:
         evidence["refresh_of_job_id"] = refresh_of
     return evidence
 
@@ -1699,7 +1864,7 @@ def _fresh_entry_lineage(
             "fresh execution-only canary lineage is malformed"
         )
     refresh_of = payload.get("refresh_of_job_id")
-    if entry_kind == FRESH_EXECUTION_ONLY_REFRESH and (
+    if entry_kind in FRESH_EXECUTION_REFRESH_KINDS and (
         not isinstance(refresh_of, int) or refresh_of <= 0
     ):
         raise OkxDemoCanaryPreparationBlocked(

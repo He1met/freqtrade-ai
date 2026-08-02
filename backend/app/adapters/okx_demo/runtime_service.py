@@ -610,6 +610,7 @@ def serve(
                 raise OkxDemoRuntimeBlocked(
                     "one-shot coordination lock is busy"
                 )
+            coordination_lock_released = False
             try:
                 # The backend API never owns OKX credentials.  A controlled
                 # canary preparation is a DB-backed request that this sole
@@ -621,6 +622,28 @@ def serve(
                 )
                 if canary_attestation_processed:
                     db.commit()
+                    # A fresh execution-only attestation has a deliberately
+                    # short TTL.  Hand the coordination window back to the
+                    # operator immediately after persisting it instead of
+                    # holding the session lock across the normal network
+                    # reconciliation cycle.  The next loop iteration restores
+                    # the usual observe/cycle behavior under the same single
+                    # runtime and writer.
+                    try:
+                        lock_released = release_one_shot_runtime_lock(db)
+                    finally:
+                        # The unlock call either released the session lock or
+                        # raised after discovering that ownership was lost.
+                        # In both cases the outer cleanup must not issue a
+                        # second unlock on the same handoff.
+                        coordination_lock_released = True
+                    if not lock_released:
+                        raise OkxDemoRuntimeBlocked(
+                            "canonical runtime lost one-shot coordination lock"
+                        )
+                    db.commit()
+                    writer.set_openings_allowed(False)
+                    continue
                 one_shot_result = adapter.run_active_one_shot(
                     writer=writer,
                     db=db,
@@ -673,7 +696,7 @@ def serve(
                 db.rollback()
                 raise
             finally:
-                if release_one_shot_runtime_lock(db):
+                if not coordination_lock_released and release_one_shot_runtime_lock(db):
                     db.commit()
     finally:
         primary_error = sys.exc_info()[1]
