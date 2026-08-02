@@ -10,6 +10,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.db.session import get_db
+from app.adapters.okx_demo.errors import OkxReadAdapterError
 from app.main import app
 from app.models import (
     Base,
@@ -118,6 +119,36 @@ def test_canary_prepare_returns_non_production_lineage(client):
     assert body["notional"] == "10"
     assert body["credential_values_recorded"] is False
     assert calls == ["canary-prepare-1"]
+
+
+def test_canary_retry_endpoint_is_idempotent_and_returns_successor(client, monkeypatch):
+    api, _calls = client
+    calls = []
+
+    def retry(_self, *, idempotency_key):
+        calls.append(idempotency_key)
+        return SimpleNamespace(
+            operation_status="WAITING_FOR_RUNTIME_ATTESTATION",
+            research_job_id=701,
+            retry_of_job_id=15,
+            idempotency_key_digest="f" * 64,
+        )
+
+    monkeypatch.setattr(OkxDemoCanaryPreparationService, "retry_attestation", retry)
+    headers = {
+        "X-Operator-Token": "operator-test-token",
+        "Idempotency-Key": "canary-retry-endpoint-1",
+        "X-Provider-Authorization": "once",
+    }
+    first = api.post("/api/okx-demo/canary/retry", headers=headers, json={})
+    replay = api.post("/api/okx-demo/canary/retry", headers=headers, json={})
+    assert first.status_code == 202
+    assert replay.status_code == 202
+    assert first.json()["operation_status"] == "WAITING_FOR_RUNTIME_ATTESTATION"
+    assert first.json()["attestation_request_job_id"] == 701
+    assert first.json()["retry_of_job_id"] == 15
+    assert first.json() == replay.json()
+    assert calls == ["canary-retry-endpoint-1"]
 
 
 def test_canary_prepare_rejects_caller_order_overrides(client):
@@ -272,6 +303,156 @@ def test_runtime_handoff_persists_only_attested_bundle_references(db_session):
         "market",
         "account",
     }
+
+
+def _blocked_attestation_job(
+    db_session,
+    *,
+    key: str,
+    error_message: str = "OkxReadAdapterError",
+    evidence=None,
+):
+    job = ResearchJob(
+        execution_scope_id="LOCAL_DRY_RUN",
+        job_type="okx_demo_controlled_canary",
+        operation=CANARY_OPERATION,
+        idempotency_key_digest=hashlib.sha256(key.encode()).hexdigest(),
+        request_hash="9" * 64,
+        request_payload={
+            "provenance": CANARY_PROVENANCE,
+            "execution_target": "OKX_DEMO",
+            "instrument_id": "BTC-USDT-SWAP",
+            "timeframe": "1m",
+            "candle_limit": 2,
+        },
+        status="BLOCKED",
+        stage="CANARY_SNAPSHOT_BLOCKED",
+        attempt_count=1,
+        max_attempts=1,
+        evidence_snapshot=evidence or {"provenance": CANARY_PROVENANCE},
+        error_message=error_message,
+        started_at=NOW,
+        completed_at=NOW,
+    )
+    db_session.add(job)
+    db_session.commit()
+    return job
+
+
+def test_transient_read_failure_is_redacted_and_allows_one_successor(
+    db_session, monkeypatch
+):
+    monkeypatch.setenv("FREQTRADE_AI_EXECUTION_TARGET", "OKX_DEMO")
+    monkeypatch.setenv("FREQTRADE_AI_SIMULATED_TRADING", "true")
+    monkeypatch.setenv("FREQTRADE_AI_ALLOW_REAL_FUNDS", "false")
+    key = "transient-attestation-1"
+    job = ResearchJob(
+        execution_scope_id="LOCAL_DRY_RUN",
+        job_type="okx_demo_controlled_canary",
+        operation=CANARY_OPERATION,
+        idempotency_key_digest=hashlib.sha256(key.encode()).hexdigest(),
+        request_hash="a" * 64,
+        request_payload={
+            "provenance": CANARY_PROVENANCE,
+            "execution_target": "OKX_DEMO",
+            "instrument_id": "BTC-USDT-SWAP",
+            "timeframe": "1m",
+            "candle_limit": 2,
+        },
+        status="AWAITING_APPROVAL",
+        stage="CANARY_SNAPSHOT_REQUESTED",
+        attempt_count=0,
+        max_attempts=1,
+        evidence_snapshot={"provenance": CANARY_PROVENANCE},
+        started_at=NOW,
+    )
+    db_session.add(job)
+    db_session.commit()
+
+    class TransientRead:
+        def capture_trusted_signal_bundle(self, *_args, **_kwargs):
+            raise OkxReadAdapterError(
+                kind="RATE_LIMITED",
+                status="FAILED",
+                message="provider payload must not persist",
+                retryable=True,
+                http_status=429,
+            )
+
+    assert process_pending_canary_attestation(
+        read_client=TransientRead(), db=db_session, now=NOW
+    ) is True
+    db_session.commit()
+    db_session.refresh(job)
+    assert job.status == "BLOCKED"
+    assert job.error_message == "OkxReadAdapterError"
+    assert job.evidence_snapshot["attestation_error"] == {
+        "error_type": "OkxReadAdapterError",
+        "kind": "RATE_LIMITED",
+        "status": "FAILED",
+        "retryable": True,
+    }
+    assert "provider payload" not in str(job.evidence_snapshot)
+
+    retry = OkxDemoCanaryPreparationService(
+        db_session, now_provider=lambda: NOW
+    ).retry_attestation(idempotency_key="transient-attestation-2")
+    assert retry.operation_status == "WAITING_FOR_RUNTIME_ATTESTATION"
+    assert retry.retry_of_job_id == job.id
+    successor = db_session.get(ResearchJob, retry.research_job_id)
+    assert successor is not None
+    assert successor.status == "AWAITING_APPROVAL"
+    assert successor.request_payload["retry_of_job_id"] == job.id
+    assert db_session.get(ResearchJob, job.id).status == "BLOCKED"
+
+    replay = OkxDemoCanaryPreparationService(
+        db_session, now_provider=lambda: NOW
+    ).retry_attestation(idempotency_key="transient-attestation-2")
+    assert replay.research_job_id == retry.research_job_id
+    with pytest.raises(OkxDemoCanaryPreparationBlocked, match="successor already"):
+        OkxDemoCanaryPreparationService(
+            db_session, now_provider=lambda: NOW
+        ).retry_attestation(idempotency_key="transient-attestation-3")
+
+
+def test_legacy_read_error_allows_one_explicit_retry_without_rewriting_source(
+    db_session, monkeypatch
+):
+    monkeypatch.setenv("FREQTRADE_AI_EXECUTION_TARGET", "OKX_DEMO")
+    monkeypatch.setenv("FREQTRADE_AI_SIMULATED_TRADING", "true")
+    monkeypatch.setenv("FREQTRADE_AI_ALLOW_REAL_FUNDS", "false")
+    source = _blocked_attestation_job(db_session, key="legacy-attestation-1")
+    retry = OkxDemoCanaryPreparationService(
+        db_session, now_provider=lambda: NOW
+    ).retry_attestation(idempotency_key="legacy-attestation-2")
+    assert retry.retry_of_job_id == source.id
+    db_session.refresh(source)
+    assert source.status == "BLOCKED"
+    assert source.error_message == "OkxReadAdapterError"
+    assert source.evidence_snapshot == {"provenance": CANARY_PROVENANCE}
+
+
+def test_terminal_read_error_cannot_be_retried(db_session, monkeypatch):
+    monkeypatch.setenv("FREQTRADE_AI_EXECUTION_TARGET", "OKX_DEMO")
+    monkeypatch.setenv("FREQTRADE_AI_SIMULATED_TRADING", "true")
+    monkeypatch.setenv("FREQTRADE_AI_ALLOW_REAL_FUNDS", "false")
+    _blocked_attestation_job(
+        db_session,
+        key="terminal-attestation-1",
+        evidence={
+            "provenance": CANARY_PROVENANCE,
+            "attestation_error": {
+                "error_type": "OkxReadAdapterError",
+                "kind": "UNAUTHORIZED",
+                "status": "BLOCKED",
+                "retryable": False,
+            },
+        },
+    )
+    with pytest.raises(OkxDemoCanaryPreparationBlocked, match="no retryable"):
+        OkxDemoCanaryPreparationService(
+            db_session, now_provider=lambda: NOW
+        ).retry_attestation(idempotency_key="terminal-attestation-2")
 
 
 def _seed_attested_snapshots(db_session):

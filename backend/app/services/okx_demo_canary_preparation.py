@@ -24,6 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.adapters.okx_demo.errors import OkxReadAdapterError
 from app.core.config import get_settings
 from app.models.execution_lineage import (
     ApprovedExecution,
@@ -95,6 +96,16 @@ class CanaryPreparationResult:
     quantity: Decimal
     notional: Decimal
     expires_at: datetime
+    idempotency_key_digest: str
+
+
+@dataclass(frozen=True)
+class CanaryAttestationRetryResult:
+    """Durable successor request created after a retryable read failure."""
+
+    operation_status: str
+    research_job_id: int
+    retry_of_job_id: int
     idempotency_key_digest: str
 
 
@@ -176,6 +187,196 @@ class OkxDemoCanaryPreparationService:
             raise OkxDemoCanaryPreparationBlocked(
                 "canary preparation raced with another idempotency key"
             ) from None
+
+    def retry_attestation(self, *, idempotency_key: str) -> CanaryAttestationRetryResult:
+        """Queue one auditable successor for a transient runtime read failure.
+
+        The original blocked ResearchJob is intentionally never changed or
+        deleted.  Only an ``OkxReadAdapterError`` that the adapter marked as
+        retryable can be succeeded by this explicit operator action.  A
+        successor is unique to the new idempotency key and a second successor,
+        any pending request, grant, or canary lineage remains fail-closed.
+        """
+
+        key = _safe_key(idempotency_key)
+        key_digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        now = _aware(self._now_provider())
+        if self.db.in_transaction():
+            self.db.rollback()
+
+        manifest = get_settings().execution_target_manifest
+        target = manifest.active_target
+        if (
+            manifest.active_target_id != OKX_DEMO_TARGET_ID
+            or target.simulated_trading is not True
+            or target.allow_real_funds is not False
+            or target.order_submission_enabled is not False
+        ):
+            raise OkxDemoCanaryPreparationBlocked(
+                "controlled canary retry requires OKX_DEMO with global submission disabled"
+            )
+
+        with self.db.begin():
+            if not try_one_shot_transaction_lock(self.db):
+                raise OkxDemoCanaryPreparationBlocked(
+                    "canonical runtime is reconciling; retry canary attestation later"
+                )
+            existing = self._canary_job_for_key(key_digest)
+            if existing is not None:
+                return self._retry_result(existing, key_digest=key_digest)
+
+            # No strategy-independent retry may coexist with an already
+            # prepared/placed canary or an unresolved writer attempt.
+            self._require_no_previous_canary()
+            self._require_no_unresolved_writer_attempt()
+            source = self._retryable_blocked_job()
+            if source is None:
+                raise OkxDemoCanaryPreparationBlocked(
+                    "no retryable canary attestation failure is available"
+                )
+            if self._retry_successor(source.id) is not None:
+                raise OkxDemoCanaryPreparationBlocked(
+                    "a retry successor already exists for the blocked canary request"
+                )
+            if self._has_pending_canary_request():
+                raise OkxDemoCanaryPreparationBlocked(
+                    "another controlled canary request is still pending"
+                )
+
+            payload = dict(source.request_payload or {})
+            payload.update(
+                {
+                    "retry_of_job_id": source.id,
+                    "retry_attempt": 1,
+                }
+            )
+            successor = ResearchJob(
+                execution_scope_id=LOCAL_DRY_RUN_SCOPE_ID,
+                job_type="okx_demo_controlled_canary",
+                operation=CANARY_OPERATION,
+                idempotency_key_digest=key_digest,
+                request_hash=canonical_digest(payload),
+                request_payload=payload,
+                status="AWAITING_APPROVAL",
+                stage="CANARY_SNAPSHOT_REQUESTED",
+                attempt_count=0,
+                max_attempts=1,
+                evidence_snapshot={
+                    "provenance": CANARY_PROVENANCE,
+                    "non_production": True,
+                    "retry_of_job_id": source.id,
+                    "retry_attempt": 1,
+                },
+                started_at=now,
+            )
+            self.db.add(successor)
+            self.db.flush()
+            return CanaryAttestationRetryResult(
+                operation_status="WAITING_FOR_RUNTIME_ATTESTATION",
+                research_job_id=successor.id,
+                retry_of_job_id=source.id,
+                idempotency_key_digest=key_digest,
+            )
+
+    def _canary_job_for_key(self, key_digest: str) -> Optional[ResearchJob]:
+        return self.db.scalars(
+            select(ResearchJob).where(
+                ResearchJob.execution_scope_id == LOCAL_DRY_RUN_SCOPE_ID,
+                ResearchJob.operation == CANARY_OPERATION,
+                ResearchJob.idempotency_key_digest == key_digest,
+            )
+        ).first()
+
+    def _retryable_blocked_job(self) -> Optional[ResearchJob]:
+        jobs = self.db.scalars(
+            select(ResearchJob)
+            .where(
+                ResearchJob.execution_scope_id == LOCAL_DRY_RUN_SCOPE_ID,
+                ResearchJob.operation == CANARY_OPERATION,
+                ResearchJob.status == "BLOCKED",
+                ResearchJob.stage == "CANARY_SNAPSHOT_BLOCKED",
+            )
+            .order_by(ResearchJob.created_at.desc(), ResearchJob.id.desc())
+        ).all()
+        for job in jobs:
+            payload = job.request_payload if isinstance(job.request_payload, dict) else {}
+            if payload.get("provenance") != CANARY_PROVENANCE:
+                continue
+            # A successor is deliberately one-shot: do not chain retries from
+            # a retry itself, even when its later error was transient.
+            if payload.get("retry_of_job_id") is not None:
+                continue
+            evidence = job.evidence_snapshot if isinstance(job.evidence_snapshot, dict) else {}
+            error = evidence.get("attestation_error")
+            if isinstance(error, dict):
+                if error.get("retryable") is not True:
+                    continue
+            elif job.error_message == OkxReadAdapterError.__name__:
+                # #603 predated the redacted retryability fields and only
+                # persisted the safe exception type.  Permit this one legacy
+                # successor after all current Demo/lineage gates pass; the
+                # canonical runtime will classify the live read on retry and
+                # persist kind/status without exposing provider payloads.
+                pass
+            else:
+                continue
+            return job
+        return None
+
+    def _retry_successor(self, source_job_id: int) -> Optional[ResearchJob]:
+        jobs = self.db.scalars(
+            select(ResearchJob).where(
+                ResearchJob.execution_scope_id == LOCAL_DRY_RUN_SCOPE_ID,
+                ResearchJob.operation == CANARY_OPERATION,
+            )
+        ).all()
+        for job in jobs:
+            payload = job.request_payload if isinstance(job.request_payload, dict) else {}
+            if payload.get("retry_of_job_id") == source_job_id:
+                return job
+        return None
+
+    def _has_pending_canary_request(self) -> bool:
+        jobs = self.db.scalars(
+            select(ResearchJob).where(
+                ResearchJob.execution_scope_id == LOCAL_DRY_RUN_SCOPE_ID,
+                ResearchJob.operation == CANARY_OPERATION,
+            )
+        ).all()
+        for job in jobs:
+            if job.status in {"PENDING", "RUNNING", "AWAITING_APPROVAL"}:
+                return True
+            if job.stage == "CANARY_SNAPSHOT_REQUESTED" and job.status not in {
+                "BLOCKED",
+                "FAILED",
+                "CANCELLED",
+                "STALE",
+            }:
+                return True
+        return False
+
+    @staticmethod
+    def _retry_result(job: ResearchJob, *, key_digest: str) -> CanaryAttestationRetryResult:
+        payload = job.request_payload if isinstance(job.request_payload, dict) else {}
+        source_id = payload.get("retry_of_job_id")
+        if not isinstance(source_id, int) or source_id <= 0:
+            raise OkxDemoCanaryPreparationBlocked(
+                "canary retry idempotency lineage is incomplete"
+            )
+        if job.status == "AWAITING_APPROVAL" and job.stage == "CANARY_SNAPSHOT_REQUESTED":
+            status = "WAITING_FOR_RUNTIME_ATTESTATION"
+        elif job.status == "SUCCESS" and job.stage == "CANARY_SNAPSHOTS_READY":
+            status = "CANARY_SNAPSHOTS_READY"
+        else:
+            raise OkxDemoCanaryPreparationBlocked(
+                "canary retry request is terminal: {}".format(job.stage)
+            )
+        return CanaryAttestationRetryResult(
+            operation_status=status,
+            research_job_id=job.id,
+            retry_of_job_id=source_id,
+            idempotency_key_digest=key_digest,
+        )
 
     def _ensure_runtime_snapshot_request(self, *, key_digest: str, now: datetime) -> None:
         has_fresh_snapshots = self._has_fresh_snapshot_rows(now)
@@ -900,12 +1101,37 @@ def process_pending_canary_attestation(
             "bundle_observed_at": _aware(bundle.observed_at).isoformat(),
         }
         return True
+    except OkxReadAdapterError as exc:
+        job.status = "BLOCKED"
+        job.stage = "CANARY_SNAPSHOT_BLOCKED"
+        job.completed_at = current
+        # Keep credential/provider payloads out of the durable audit record.
+        job.error_message = type(exc).__name__
+        job.evidence_snapshot = {
+            "provenance": CANARY_PROVENANCE,
+            "non_production": True,
+            "attestation_error": {
+                "error_type": type(exc).__name__,
+                "kind": exc.kind,
+                "status": exc.status,
+                "retryable": bool(exc.retryable),
+            },
+        }
+        return True
     except Exception as exc:
         job.status = "BLOCKED"
         job.stage = "CANARY_SNAPSHOT_BLOCKED"
         job.completed_at = current
         # Keep credential/provider payloads out of the durable audit record.
         job.error_message = type(exc).__name__
+        job.evidence_snapshot = {
+            "provenance": CANARY_PROVENANCE,
+            "non_production": True,
+            "attestation_error": {
+                "error_type": type(exc).__name__,
+                "retryable": False,
+            },
+        }
         return True
 
 

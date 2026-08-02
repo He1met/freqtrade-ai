@@ -43,6 +43,13 @@ one-shot submission grant 驱动：`TradeIntent/ApprovedExecution`（明确标�
    `StrategyDeployment` 或 `SignalEvaluation` 的非生产 lineage；随后只可使用
    #595 DB-backed one-shot grant 和唯一 runtime writer。
 
+如果 runtime 的 attestation read 以可重试的 `OkxReadAdapterError` 终止，原始
+`ResearchJob` 会保持 `BLOCKED`，只保存脱敏异常类型与 retryability。operator
+可用新的 `Idempotency-Key` 调用 `POST /api/okx-demo/canary/retry` 创建最多一个
+successor handoff；该入口不重置或删除原记录、不创建 grant，也不允许第二个
+pending request。`UNAUTHORIZED`、身份漂移、无效响应等明确终态不会被重试，
+retry successor 失败后也不会继续链式重试。
+
 该入口仍固定 `OKX_DEMO`、`simulated_trading=true`、`allow_real_funds=false`、
 `order_submission_enabled=false`、`BTC-USDT-SWAP` 交易所最小合法数量及不超过
 20 USDT 的 notional。grant 原子消费、超时/撤单/必要时 reduce-only 清理、终态

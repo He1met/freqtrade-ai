@@ -88,6 +88,12 @@ def _cache_canary_result(result: Any) -> bool:
     )
 
 
+def _cache_canary_retry_result(_result: Any) -> bool:
+    """A retry handoff is terminal for its key even while runtime is pending."""
+
+    return True
+
+
 @router.post("/canary/prepare", status_code=202)
 def prepare_controlled_canary(
     payload: CanaryPreparationRequest,
@@ -169,6 +175,50 @@ def finalize_controlled_canary(
         request_payload=payload.model_dump(mode="json"),
         handler=execute,
         cache_result=_cache_canary_result,
+    )
+
+
+@router.post("/canary/retry", status_code=202)
+def retry_controlled_canary_attestation(
+    payload: CanaryPreparationRequest,
+    db: Session = Depends(get_db),
+    operator_headers: OperatorRequestHeaders = Depends(operator_request_headers),
+) -> dict[str, Any]:
+    """Queue one successor after a transient runtime attestation failure.
+
+    The retry key must be new.  This endpoint only creates a durable runtime
+    handoff; it never creates a grant, enables submission, or changes the
+    original blocked ResearchJob.
+    """
+
+    def execute() -> dict[str, Any]:
+        try:
+            result = OkxDemoCanaryPreparationService(db).retry_attestation(
+                idempotency_key=operator_headers.idempotency_key or "",
+            )
+        except OkxDemoCanaryPreparationBlocked as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"operation_status": "BLOCKED", "message": str(exc)},
+            ) from exc
+        return {
+            "operation_status": result.operation_status,
+            "execution_target_id": "OKX_DEMO",
+            "provenance": "CONTROLLED_CANARY_NON_PRODUCTION",
+            "non_production": True,
+            "attestation_request_job_id": result.research_job_id,
+            "retry_of_job_id": result.retry_of_job_id,
+            "idempotency_key_digest": result.idempotency_key_digest,
+            "credential_values_recorded": False,
+        }
+
+    return operator_request_coordinator.execute(
+        operator_headers,
+        operation="okx-demo-controlled-canary-retry",
+        provider_call=True,
+        request_payload=payload.model_dump(mode="json"),
+        handler=execute,
+        cache_result=_cache_canary_retry_result,
     )
 
 
