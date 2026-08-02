@@ -1417,6 +1417,7 @@ def test_postgresql_runtime_role_can_validate_canary_lineage_without_update_acl(
 
         # The writer's one-shot lineage recheck uses its own advisory writer
         # key and must likewise avoid FOR UPDATE on the grant table.
+        runtime_session.execute(text("SET LOCAL ROLE freqtrade"))
         runtime_approval = runtime_session.get(ApprovedExecution, approval_id)
         writer_store = SqlAlchemyOrderWriterStore(
             runtime_session,
