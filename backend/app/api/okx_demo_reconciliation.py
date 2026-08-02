@@ -23,6 +23,11 @@ from app.services.okx_demo_submission_grant import (
     OkxDemoSubmissionGrantBlocked,
     OkxDemoSubmissionGrantService,
 )
+from app.services.okx_demo_canary_preparation import (
+    OkxDemoCanaryPreparationBlocked,
+    OkxDemoCanaryPreparationWaiting,
+    OkxDemoCanaryPreparationService,
+)
 from app.services.operator_authorization import (
     OperatorRequestHeaders,
     operator_request_coordinator,
@@ -40,6 +45,120 @@ class OneShotGrantRequest(BaseModel):
     policy_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     approved_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     client_order_id: str = Field(min_length=1, max_length=32)
+
+
+class CanaryPreparationRequest(BaseModel):
+    """No caller-controlled order fields are accepted for the canary."""
+
+    model_config = {"extra": "forbid"}
+
+
+def _canary_preparation_response(result: Any) -> dict[str, Any]:
+    return {
+        "operation_status": result.operation_status,
+        "execution_target_id": "OKX_DEMO",
+        "provenance": result.provenance,
+        "non_production": True,
+        "approval_id": result.approval_id,
+        "trade_intent_id": result.trade_intent_id,
+        "risk_decision_id": result.risk_decision_id,
+        "full_chain_run_id": result.full_chain_run_id,
+        "research_job_id": result.research_job_id,
+        "research_job_attempt_id": result.research_job_attempt_id,
+        "reconciliation_run_id": result.reconciliation_run_id,
+        "canonical_hash": result.canonical_hash,
+        "policy_digest": result.policy_digest,
+        "approved_payload_hash": result.approved_payload_hash,
+        "client_order_id": result.client_order_id,
+        "instrument_id": result.instrument_id,
+        "quantity": format(result.quantity, "f"),
+        "notional": format(result.notional, "f"),
+        "expires_at": result.expires_at.isoformat(),
+        "idempotency_key_digest": result.idempotency_key_digest,
+        "credential_values_recorded": False,
+    }
+
+
+@router.post("/canary/prepare", status_code=202)
+def prepare_controlled_canary(
+    payload: CanaryPreparationRequest,
+    db: Session = Depends(get_db),
+    operator_headers: OperatorRequestHeaders = Depends(operator_request_headers),
+) -> dict[str, Any]:
+    """Persist a non-production canary lineage before arming #595's grant.
+
+    This endpoint deliberately does not create a submission grant and never
+    enables global order submission.  The caller must use the existing
+    one-shot grant endpoint with the returned, exact hashes; the canonical
+    runtime then remains the only writer.
+    """
+
+    def execute() -> dict[str, Any]:
+        try:
+            result = OkxDemoCanaryPreparationService(db).prepare(
+                idempotency_key=operator_headers.idempotency_key or "",
+            )
+        except OkxDemoCanaryPreparationWaiting as exc:
+            return {
+                "operation_status": "WAITING_FOR_RUNTIME_ATTESTATION",
+                "execution_target_id": "OKX_DEMO",
+                "provenance": "CONTROLLED_CANARY_NON_PRODUCTION",
+                "non_production": True,
+                "attestation_request_job_id": exc.job_id,
+                "credential_values_recorded": False,
+            }
+        except OkxDemoCanaryPreparationBlocked as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"operation_status": "BLOCKED", "message": str(exc)},
+            ) from exc
+        return _canary_preparation_response(result)
+
+    return operator_request_coordinator.execute(
+        operator_headers,
+        operation="okx-demo-controlled-canary-prepare",
+        provider_call=True,
+        request_payload=payload.model_dump(mode="json"),
+        handler=execute,
+    )
+
+
+@router.post("/canary/finalize", status_code=202)
+def finalize_controlled_canary(
+    payload: CanaryPreparationRequest,
+    db: Session = Depends(get_db),
+    operator_headers: OperatorRequestHeaders = Depends(operator_request_headers),
+) -> dict[str, Any]:
+    """Finalize the same idempotent canary after runtime snapshot handoff."""
+
+    def execute() -> dict[str, Any]:
+        try:
+            result = OkxDemoCanaryPreparationService(db).prepare(
+                idempotency_key=operator_headers.idempotency_key or "",
+            )
+        except OkxDemoCanaryPreparationWaiting as exc:
+            return {
+                "operation_status": "WAITING_FOR_RUNTIME_ATTESTATION",
+                "execution_target_id": "OKX_DEMO",
+                "provenance": "CONTROLLED_CANARY_NON_PRODUCTION",
+                "non_production": True,
+                "attestation_request_job_id": exc.job_id,
+                "credential_values_recorded": False,
+            }
+        except OkxDemoCanaryPreparationBlocked as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"operation_status": "BLOCKED", "message": str(exc)},
+            ) from exc
+        return _canary_preparation_response(result)
+
+    return operator_request_coordinator.execute(
+        operator_headers,
+        operation="okx-demo-controlled-canary-finalize",
+        provider_call=True,
+        request_payload=payload.model_dump(mode="json"),
+        handler=execute,
+    )
 
 
 @router.post("/submission-grants/one-shot", status_code=202)

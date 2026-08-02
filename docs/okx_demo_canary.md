@@ -25,6 +25,30 @@ one-shot submission grant 驱动：`TradeIntent/ApprovedExecution`（明确标�
 `order_submission_enabled=false` 必须保持不变；没有完整候选可信链时保持
 `BLOCKED`，不得用历史快照、mock 或 HTTP 200 冒充成功。
 
+### Strategy-independent execution-chain canary
+
+为只验收 writer→交易所回报→本地持久化→reconciliation→重启幂等而不伪造
+策略晋级，受支持入口为：
+
+1. `POST /api/okx-demo/canary/prepare`（operator token、`Idempotency-Key` 与
+   `X-Provider-Authorization: once`）。它只创建带有
+   `CONTROLLED_CANARY_NON_PRODUCTION` 的 attestation request，不接受调用方的
+   品种、数量或价格覆盖。
+2. 唯一 canonical runtime 在同一 coordination lock 下调用已 attested 的
+   `capture_trusted_signal_bundle`，实时持久 instrument/market/account 快照。
+   backend API 不读取 Keychain，也不自行构造快照。
+3. 主任务/受控 operator 在确认 runtime 成功后调用
+   `POST /api/okx-demo/canary/finalize`（沿用同一 `Idempotency-Key`）创建无
+   `StrategyVersion`、`CandidateApproval`、
+   `StrategyDeployment` 或 `SignalEvaluation` 的非生产 lineage；随后只可使用
+   #595 DB-backed one-shot grant 和唯一 runtime writer。
+
+该入口仍固定 `OKX_DEMO`、`simulated_trading=true`、`allow_real_funds=false`、
+`order_submission_enabled=false`、`BTC-USDT-SWAP` 交易所最小合法数量及不超过
+20 USDT 的 notional。grant 原子消费、超时/撤单/必要时 reduce-only 清理、终态
+对账、许可撤销和重启不重复下单均必须有真实证据；它不能批准、部署或代表
+任何 DeepSeek/社区策略候选。
+
 ## Historical lifecycle (offline evidence only)
 
 下列内容仅描述退役实现的离线安全语义，不能作为当前可执行操作、验收或
