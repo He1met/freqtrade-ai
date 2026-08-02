@@ -45,6 +45,50 @@ def test_replays_completed_idempotent_request_without_running_handler_twice() ->
     assert calls == ["called"]
 
 
+def test_does_not_cache_retryable_result_but_replays_terminal_result() -> None:
+    coordinator = OperatorRequestCoordinator()
+    calls = []
+    outcomes = [
+        {"operation_status": "WAITING_FOR_RUNTIME_ATTESTATION"},
+        {"operation_status": "PREPARED", "database_id": 42},
+    ]
+
+    def handler():
+        calls.append("called")
+        return outcomes.pop(0)
+
+    cache_result = lambda result: result["operation_status"] != "WAITING_FOR_RUNTIME_ATTESTATION"
+    waiting = coordinator.execute(
+        headers("retryable-request-key", provider=True),
+        operation="test.retryable",
+        provider_call=True,
+        request_payload={},
+        handler=handler,
+        cache_result=cache_result,
+    )
+    prepared = coordinator.execute(
+        headers("retryable-request-key", provider=True),
+        operation="test.retryable",
+        provider_call=True,
+        request_payload={},
+        handler=handler,
+        cache_result=cache_result,
+    )
+    replay = coordinator.execute(
+        headers("retryable-request-key", provider=True),
+        operation="test.retryable",
+        provider_call=True,
+        request_payload={},
+        handler=handler,
+        cache_result=cache_result,
+    )
+
+    assert waiting["operation_status"] == "WAITING_FOR_RUNTIME_ATTESTATION"
+    assert prepared["operation_status"] == "PREPARED"
+    assert replay == prepared
+    assert calls == ["called", "called"]
+
+
 def test_rejects_idempotency_key_reuse_with_different_payload() -> None:
     coordinator = OperatorRequestCoordinator()
     coordinator.execute(

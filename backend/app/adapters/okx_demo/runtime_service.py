@@ -39,6 +39,7 @@ from app.services.okx_demo_submission_grant import (
     acquire_one_shot_runtime_lock,
     release_one_shot_runtime_lock,
 )
+from app.services.okx_demo_canary_preparation import process_pending_canary_attestation
 
 
 RECONCILIATION_MODULE = "app.adapters.okx_demo.reconciliation_runtime"
@@ -610,6 +611,16 @@ def serve(
                     "one-shot coordination lock is busy"
                 )
             try:
+                # The backend API never owns OKX credentials.  A controlled
+                # canary preparation is a DB-backed request that this sole
+                # attested runtime fulfills before the one-shot grant path.
+                canary_attestation_processed = process_pending_canary_attestation(
+                    read_client=server_session.read,
+                    db=db,
+                    now=now_provider(),
+                )
+                if canary_attestation_processed:
+                    db.commit()
                 one_shot_result = adapter.run_active_one_shot(
                     writer=writer,
                     db=db,
