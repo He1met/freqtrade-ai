@@ -30,6 +30,7 @@ from app.services.okx_demo_canary_preparation import (
     FRESH_EXECUTION_ONLY_REFRESH,
     FRESH_EXECUTION_ONLY_REFRESH_RETRY,
     OkxDemoCanaryPreparationBlocked,
+    OkxDemoCanaryPreparationRuntimeBusy,
     OkxDemoCanaryPreparationService,
     OkxDemoCanaryPreparationWaiting,
     process_pending_canary_attestation,
@@ -218,6 +219,96 @@ def test_refresh_execution_only_endpoint_reports_source_lineage(client, monkeypa
     assert response.json()["entry_kind"] == FRESH_EXECUTION_ONLY_REFRESH
     assert response.json()["refresh_of_job_id"] == 17
     assert response.json()["supersedes_job_ids"] == [15, 16, 17]
+
+
+def test_refresh_runtime_lock_contention_is_retryable_for_same_key(client, monkeypatch):
+    api, _calls = client
+    calls = []
+    prepared_result = _result()
+    prepared_result.entry_kind = FRESH_EXECUTION_ONLY_REFRESH
+    outcomes = [
+        OkxDemoCanaryPreparationRuntimeBusy(),
+        prepared_result,
+    ]
+
+    def refresh(_self, *, idempotency_key):
+        calls.append(idempotency_key)
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(
+        OkxDemoCanaryPreparationService,
+        "prepare_fresh_execution_only_refresh",
+        refresh,
+    )
+    headers = {
+        "X-Operator-Token": "operator-test-token",
+        "Idempotency-Key": "fresh-refresh-lock-retry-1",
+        "X-Provider-Authorization": "once",
+    }
+
+    waiting = api.post(
+        "/api/okx-demo/canary/refresh-execution-only",
+        headers=headers,
+        json={},
+    )
+    prepared = api.post(
+        "/api/okx-demo/canary/refresh-execution-only",
+        headers=headers,
+        json={},
+    )
+    replay = api.post(
+        "/api/okx-demo/canary/refresh-execution-only",
+        headers=headers,
+        json={},
+    )
+
+    assert waiting.status_code == 202
+    assert waiting.json()["operation_status"] == "WAITING_FOR_RUNTIME_ATTESTATION"
+    assert "attestation_request_job_id" not in waiting.json()
+    assert prepared.status_code == 202
+    assert prepared.json()["operation_status"] == "PREPARED"
+    assert replay.status_code == 202
+    assert replay.json() == prepared.json()
+    assert calls == ["fresh-refresh-lock-retry-1", "fresh-refresh-lock-retry-1"]
+
+
+def test_refresh_terminal_block_remains_cached_for_same_key(client, monkeypatch):
+    api, _calls = client
+    calls = []
+
+    def refresh(_self, *, idempotency_key):
+        calls.append(idempotency_key)
+        raise OkxDemoCanaryPreparationBlocked("fresh canary source is unsafe")
+
+    monkeypatch.setattr(
+        OkxDemoCanaryPreparationService,
+        "prepare_fresh_execution_only_refresh",
+        refresh,
+    )
+    headers = {
+        "X-Operator-Token": "operator-test-token",
+        "Idempotency-Key": "fresh-refresh-terminal-1",
+        "X-Provider-Authorization": "once",
+    }
+
+    first = api.post(
+        "/api/okx-demo/canary/refresh-execution-only",
+        headers=headers,
+        json={},
+    )
+    replay = api.post(
+        "/api/okx-demo/canary/refresh-execution-only",
+        headers=headers,
+        json={},
+    )
+
+    assert first.status_code == 409
+    assert replay.status_code == 409
+    assert replay.json() == first.json()
+    assert calls == ["fresh-refresh-terminal-1"]
 
 
 def test_canary_prepare_rejects_caller_order_overrides(client):
@@ -822,6 +913,61 @@ def test_refresh_rejects_second_key_pending_and_unsafe_activity(db_session, monk
             idempotency_key="fresh-refresh-unsafe-1"
         )
     assert db_session.get(ResearchJob, source.id).status == "SUCCESS"
+
+
+def test_refresh_runtime_lock_contention_does_not_create_or_terminally_fail(
+    db_session, monkeypatch
+):
+    monkeypatch.setenv("FREQTRADE_AI_EXECUTION_TARGET", "OKX_DEMO")
+    monkeypatch.setenv("FREQTRADE_AI_SIMULATED_TRADING", "true")
+    monkeypatch.setenv("FREQTRADE_AI_ALLOW_REAL_FUNDS", "false")
+    source = _successful_fresh_source(db_session)
+    before_count = db_session.query(ResearchJob).filter_by(
+        operation=CANARY_OPERATION
+    ).count()
+    monkeypatch.setattr(
+        "app.services.okx_demo_canary_preparation.try_one_shot_transaction_lock",
+        lambda _db: False,
+    )
+
+    with pytest.raises(OkxDemoCanaryPreparationRuntimeBusy) as creation_busy:
+        OkxDemoCanaryPreparationService(
+            db_session, now_provider=lambda: NOW
+        ).prepare_fresh_execution_only_refresh(
+            idempotency_key="fresh-refresh-lock-creation"
+        )
+    assert creation_busy.value.job_id is None
+    assert creation_busy.value.entry_kind == FRESH_EXECUTION_ONLY_REFRESH
+    assert (
+        db_session.query(ResearchJob).filter_by(operation=CANARY_OPERATION).count()
+        == before_count
+    )
+    assert db_session.get(ResearchJob, source.id).status == "SUCCESS"
+
+    refresh = _successful_refresh_successor(
+        db_session,
+        source,
+        key="fresh-refresh-lock-finalize",
+        expires_at=NOW + timedelta(seconds=30),
+    )
+    before_count = db_session.query(ResearchJob).filter_by(operation=CANARY_OPERATION).count()
+    with pytest.raises(OkxDemoCanaryPreparationRuntimeBusy) as finalize_busy:
+        OkxDemoCanaryPreparationService(
+            db_session, now_provider=lambda: NOW
+        ).prepare_fresh_execution_only_refresh(
+            idempotency_key="fresh-refresh-lock-finalize"
+        )
+    assert finalize_busy.value.job_id == refresh.id
+    assert finalize_busy.value.entry_kind == FRESH_EXECUTION_ONLY_REFRESH
+    assert finalize_busy.value.refresh_of_job_id == source.id
+    assert finalize_busy.value.supersedes_job_ids == tuple(
+        refresh.request_payload["supersedes_job_ids"]
+    )
+    assert (
+        db_session.query(ResearchJob).filter_by(operation=CANARY_OPERATION).count()
+        == before_count
+    )
+    assert db_session.get(ResearchJob, refresh.id).status == "SUCCESS"
 
 
 def _successful_refresh_successor(
