@@ -1,6 +1,8 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import hashlib
+import json
 import os
 from threading import Barrier
 import time
@@ -22,6 +24,7 @@ from app.adapters.okx_demo.writer_models import (
 from app.adapters.okx_demo.writer_repository import SqlAlchemyOrderWriterStore
 from app.adapters.okx_demo.writer_state import WriteEvent
 from app.db.migrations import (
+    CANARY_LINEAGE_WRITE_BASE_VERSION,
     FULL_CHAIN_BASE_VERSION,
     ORDER_WRITER_BASE_VERSION,
     RECONCILIATION_BASE_VERSION,
@@ -41,6 +44,7 @@ from app.db.migrations import (
 from app.models.execution_lineage import (
     ApprovedExecution,
     ExchangeOrder,
+    OkxDemoTrustedSnapshot,
     ReconciliationRun,
     ResearchJobAttempt,
     RiskBudget,
@@ -68,6 +72,7 @@ from app.services.okx_demo_reconciliation import (
     SCHEMA_VERSION as RECONCILIATION_EVENT_SCHEMA_VERSION,
 )
 from app.services.okx_demo_canary_preparation import (
+    CANARY_OPERATION,
     OkxDemoCanaryPreparationService,
 )
 from app.services.okx_demo_submission_grant import (
@@ -84,6 +89,197 @@ from app.services.okx_demo_submission_grant import (
 # PostgreSQL attestation functions validate against statement_timestamp();
 # keep integration evidence fresh instead of coupling the suite to one date.
 NOW = datetime.now(timezone.utc).replace(microsecond=0)
+
+
+def _canonical_json(value) -> str:
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+
+
+def _seed_canary_lineage_boundary(
+    session: Session,
+    *,
+    now: datetime,
+):
+    ensure_execution_scope_catalog(session)
+    capability = _issue_attested_session_capability(
+        attestation_hmac_key=b"t" * 32,
+        pinned_fingerprint_sha256="a" * 64,
+        created_at=now - timedelta(seconds=1),
+        expires_at=now + timedelta(minutes=2),
+    )
+    contents = {
+        "instrument": {
+            "execution_target": "OKX_DEMO",
+            "source": "okx_demo_rest",
+            "resource": "instrument",
+            "stale": False,
+            "instId": "BTC-USDT-SWAP",
+            "minSz": "1",
+            "lotSz": "1",
+            "ctVal": "0.0001",
+            "ctValCcy": "BTC",
+            "tickSz": "0.1",
+            "state": "live",
+            "contract_shape": "linear",
+        },
+        "market": {
+            "execution_target": "OKX_DEMO",
+            "source": "okx_demo_rest",
+            "resource": "market",
+            "stale": False,
+            "instrument_id": "BTC-USDT-SWAP",
+            "reference_price": "57000",
+            "bbo": {"ask_price": "57000"},
+            "mark": {"price": "57000"},
+            "as_of": now.isoformat(),
+        },
+        "account": {
+            "execution_target": "OKX_DEMO",
+            "source": "okx_demo_rest",
+            "resource": "account",
+            "stale": False,
+            "authenticated": True,
+        },
+    }
+    for content in contents.values():
+        content["expires_at"] = (now + timedelta(seconds=30)).isoformat()
+    snapshots = {}
+    for kind, content in contents.items():
+        normalized = _normalize_attested_snapshot(
+            capability,
+            kind=kind,
+            content=content,
+            observed_at=now,
+            expires_at=now + timedelta(seconds=30),
+        )
+        snapshots[kind] = _write_attested_snapshot(
+            session, capability, normalized, now=now
+        )
+    run = ReconciliationRun(
+        execution_target_id="OKX_DEMO",
+        status="RECONCILED",
+        summary_snapshot={},
+        database_ids={"order_snapshots": [], "position_snapshots": []},
+        artifact_status="READY",
+        authoritative_observed_at=now,
+        source_type="api_aggregate",
+        core_data=True,
+        started_at=now,
+        completed_at=now,
+        created_at=now,
+    )
+    session.add(run)
+    session.flush()
+    run.database_ids = dict(run.database_ids, reconciliation_run=[run.id])
+    state = session.scalars(
+        select(OkxDemoReconciliationState).where(
+            OkxDemoReconciliationState.execution_target_id == "OKX_DEMO"
+        )
+    ).one()
+    state.status = "RECONCILED"
+    state.opening_frozen = False
+    state.block_reason = None
+    state.last_event_observed_at = now
+    state.last_reconciliation_run_id = run.id
+    session.commit()
+    order = {
+        "instrument_id": "BTC-USDT-SWAP",
+        "side": "buy",
+        "position_side": "long",
+        "order_type": "limit",
+        "quantity": Decimal("1"),
+        "limit_price": Decimal("57000"),
+        "reference_price": Decimal("57000"),
+        "leverage": Decimal("1"),
+        "margin_mode": "isolated",
+        "stop_loss": Decimal("54150"),
+        "take_profit": Decimal("59850"),
+        "reduce_only": False,
+        "notional": Decimal("5.7"),
+        "expires_at": now + timedelta(seconds=8),
+    }
+    return snapshots, run.id, order
+
+
+def _canary_function_payload(
+    session: Session,
+    *,
+    key_digest: str,
+    reconciliation_run_id: int,
+) -> dict:
+    intent = session.scalars(
+        select(TradeIntent).where(
+            TradeIntent.idempotency_key_digest == key_digest
+        )
+    ).one()
+    decision = session.scalars(
+        select(RiskDecision).where(RiskDecision.trade_intent_id == intent.id)
+    ).one()
+    chain = session.scalars(
+        select(FullChainRun).where(FullChainRun.trade_intent_id == intent.id)
+    ).one()
+    canonical_input = intent.request_snapshot["canonical_input"]
+    policy = {
+        "provenance": "CONTROLLED_CANARY_NON_PRODUCTION",
+        "allowed_instruments": ["BTC-USDT-SWAP"],
+        "allowed_sides": ["buy"],
+        "allowed_order_types": ["limit"],
+        "max_leverage": canonical_input["leverage"],
+        "max_order_notional": "20",
+        "max_total_exposure": "20",
+        "max_positions": 1,
+        "max_price_deviation_pct": "0.01",
+        "min_strategy_score": "0",
+        "scoring_version": "controlled-canary-v1",
+    }
+    approved_payload = {
+        "canonical_input": canonical_input,
+        "notional": format(decision.evidence_snapshot["notional"]),
+        "provenance": "CONTROLLED_CANARY_NON_PRODUCTION",
+    }
+    intent_identity = {
+        "provenance": "CONTROLLED_CANARY_NON_PRODUCTION",
+        "idempotency_key_digest": key_digest,
+        "canonical_hash": intent.canonical_hash,
+    }
+    evidence = intent.request_snapshot["snapshot_evidence"]
+    return {
+        "execution_target": "OKX_DEMO",
+        "provenance": "CONTROLLED_CANARY_NON_PRODUCTION",
+        "non_production": True,
+        "full_chain_run_id": chain.id,
+        "reconciliation_run_id": reconciliation_run_id,
+        "intent_id": intent.intent_id,
+        "canonical_hash": intent.canonical_hash,
+        "policy_digest": intent.policy_digest,
+        "approved_payload_hash": intent.approved_payload_hash,
+        "idempotency_key_digest": key_digest,
+        "client_order_id": intent.client_order_id,
+        "instrument_id": intent.instrument_id,
+        "side": intent.side,
+        "position_side": intent.position_side,
+        "order_type": intent.order_type,
+        "quantity": canonical_input["quantity"],
+        "limit_price": canonical_input["limit_price"],
+        "reference_price": canonical_input["reference_price"],
+        "leverage": canonical_input["leverage"],
+        "margin_mode": intent.margin_mode,
+        "stop_loss": canonical_input["stop_loss"],
+        "take_profit": canonical_input["take_profit"],
+        "reduce_only": intent.reduce_only,
+        "notional": decision.evidence_snapshot["notional"],
+        "request_snapshot": intent.request_snapshot,
+        "expires_at": intent.expires_at.isoformat(),
+        "canonical_input_serialized": _canonical_json(canonical_input),
+        "policy_serialized": _canonical_json(policy),
+        "approved_payload_serialized": _canonical_json(approved_payload),
+        "intent_identity_serialized": _canonical_json(intent_identity),
+        "instrument_snapshot_id": evidence["instrument"]["snapshot_id"],
+        "market_snapshot_id": evidence["market"]["snapshot_id"],
+        "account_snapshot_id": evidence["account"]["snapshot_id"],
+    }
 
 
 @pytest.fixture
@@ -497,6 +693,233 @@ def test_postgresql_fresh_schema_and_any_predicate_verify(
 
     assert readiness.ready is True
     assert readiness.problems == ()
+
+
+def test_postgresql_canary_lineage_function_is_the_only_runtime_write_boundary(
+    postgres_writer_engine,
+) -> None:
+    upgrade_database(postgres_writer_engine)
+    with postgres_writer_engine.connect() as connection:
+        function_acl = connection.execute(
+            text(
+                "SELECT owner.rolname, function.prosecdef, function.proconfig, "
+                "has_function_privilege('freqtrade', function.oid, 'EXECUTE'), "
+                "EXISTS (SELECT 1 FROM aclexplode(function.proacl) acl "
+                "WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE') "
+                "FROM pg_proc function JOIN pg_roles owner "
+                "ON owner.oid = function.proowner "
+                "WHERE function.oid = "
+                "'create_okx_demo_canary_lineage(jsonb)'::regprocedure"
+            )
+        ).one()
+        assert tuple(function_acl) == (
+            "freqtrade_ai_attestor",
+            True,
+            ["search_path=pg_catalog"],
+            True,
+            False,
+        )
+        for table_name in (
+            "trade_intents",
+            "risk_decisions",
+            "approved_executions",
+        ):
+            assert connection.execute(
+                text(
+                    "SELECT has_table_privilege('freqtrade', :table, 'INSERT'), "
+                    "has_table_privilege('freqtrade', :table, 'UPDATE'), "
+                    "has_table_privilege('freqtrade', :table, 'DELETE')"
+                ),
+                {"table": table_name},
+            ).one() == (False, False, False)
+            sequence_name = connection.execute(
+                text("SELECT pg_get_serial_sequence(:table, 'id')"),
+                {"table": table_name},
+            ).scalar_one()
+            assert connection.execute(
+                text(
+                    "SELECT has_sequence_privilege('freqtrade', :sequence, 'USAGE'), "
+                    "has_sequence_privilege('freqtrade', :sequence, 'SELECT'), "
+                    "has_sequence_privilege('freqtrade', :sequence, 'UPDATE')"
+                ),
+                {"sequence": sequence_name},
+            ).one() == (False, False, False)
+
+    for statement in (
+        "INSERT INTO trade_intents DEFAULT VALUES",
+        "UPDATE trade_intents SET status = status",
+        "SELECT nextval(pg_get_serial_sequence('trade_intents', 'id'))",
+    ):
+        with pytest.raises(SQLAlchemyError):
+            with postgres_writer_engine.begin() as connection:
+                connection.execute(text("SET LOCAL ROLE freqtrade"))
+                connection.execute(text(statement))
+
+
+def test_postgresql_upgrade_25_to_26_installs_canary_lineage_boundary(
+    postgres_writer_engine,
+) -> None:
+    upgrade_database(postgres_writer_engine)
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(
+            text("DROP FUNCTION create_okx_demo_canary_lineage(jsonb)")
+        )
+        connection.execute(text("DELETE FROM {}".format(VERSION_TABLE)))
+        connection.execute(
+            text(
+                "INSERT INTO {} (version) VALUES (:version)".format(
+                    VERSION_TABLE
+                )
+            ),
+            {"version": CANARY_LINEAGE_WRITE_BASE_VERSION},
+        )
+    assert upgrade_database(postgres_writer_engine) == SCHEMA_VERSION
+    assert verify_schema(postgres_writer_engine).ready is True
+
+
+def test_postgresql_canary_lineage_function_body_tamper_fails_readiness(
+    postgres_writer_engine,
+) -> None:
+    upgrade_database(postgres_writer_engine)
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(
+            text(
+                "CREATE OR REPLACE FUNCTION create_okx_demo_canary_lineage(p_payload jsonb) "
+                "RETURNS jsonb LANGUAGE sql SECURITY DEFINER "
+                "SET search_path = pg_catalog AS $$ SELECT '{}'::jsonb $$"
+            )
+        )
+    assert "controlled canary lineage function boundary mismatch" in schema_problems(
+        postgres_writer_engine
+    )
+
+
+def test_postgresql_canary_lineage_function_atomic_idempotency_and_mismatch_rollback(
+    postgres_writer_engine,
+) -> None:
+    upgrade_database(postgres_writer_engine)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    with Session(postgres_writer_engine) as admin_session:
+        snapshots, reconciliation_run_id, order = _seed_canary_lineage_boundary(
+            admin_session,
+            now=now,
+        )
+        snapshot_database_ids = {
+            kind: row.database_id for kind, row in snapshots.items()
+        }
+
+    key_digest = hashlib.sha256(b"postgres-canary-lineage").hexdigest()
+    with Session(postgres_writer_engine) as runtime_session:
+        runtime_session.execute(text("SET LOCAL ROLE freqtrade"))
+        snapshots = {
+            kind: runtime_session.get(OkxDemoTrustedSnapshot, database_id)
+            for kind, database_id in snapshot_database_ids.items()
+        }
+        result = OkxDemoCanaryPreparationService(
+            runtime_session,
+            now_provider=lambda: now,
+        )._persist_lineage(
+            key_digest=key_digest,
+            now=now,
+            reconciliation_run_id=reconciliation_run_id,
+            snapshots=snapshots,
+            order=order,
+        )
+        runtime_session.commit()
+        expected_ids = {
+            "trade_intent_id": result.trade_intent_id,
+            "risk_decision_id": result.risk_decision_id,
+            "approved_execution_id": result.approval_id,
+        }
+
+    with Session(postgres_writer_engine) as admin_session:
+        payload = _canary_function_payload(
+            admin_session,
+            key_digest=key_digest,
+            reconciliation_run_id=reconciliation_run_id,
+        )
+        baseline = tuple(
+            admin_session.execute(
+                text(
+                    "SELECT (SELECT count(*) FROM trade_intents), "
+                    "(SELECT count(*) FROM risk_decisions), "
+                    "(SELECT count(*) FROM approved_executions)"
+                )
+            ).one()
+        )
+
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(text("SET LOCAL ROLE freqtrade"))
+        replay = connection.execute(
+            text(
+                "SELECT create_okx_demo_canary_lineage(CAST(:payload AS jsonb))"
+            ),
+            {"payload": json.dumps(payload, sort_keys=True)},
+        ).scalar_one()
+        assert replay == expected_ids
+
+    mutations = {
+        "target": ("execution_target", "OKX_LIVE"),
+        "provenance": ("provenance", "DEEPSEEK"),
+        "hash": ("canonical_hash", "f" * 64),
+        "ttl": (
+            "expires_at",
+            (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
+        ),
+    }
+    for _name, (field, value) in mutations.items():
+        altered = dict(payload)
+        altered[field] = value
+        with pytest.raises(SQLAlchemyError):
+            with postgres_writer_engine.begin() as connection:
+                connection.execute(text("SET LOCAL ROLE freqtrade"))
+                connection.execute(
+                    text(
+                        "SELECT create_okx_demo_canary_lineage("
+                        "CAST(:payload AS jsonb))"
+                    ),
+                    {"payload": json.dumps(altered, sort_keys=True)},
+                )
+
+    altered_snapshot = json.loads(json.dumps(payload))
+    altered_snapshot["request_snapshot"]["snapshot_evidence"]["market"][
+        "digest"
+    ] = "0" * 64
+    with pytest.raises(SQLAlchemyError):
+        with postgres_writer_engine.begin() as connection:
+            connection.execute(text("SET LOCAL ROLE freqtrade"))
+            connection.execute(
+                text(
+                    "SELECT create_okx_demo_canary_lineage(CAST(:payload AS jsonb))"
+                ),
+                {"payload": json.dumps(altered_snapshot, sort_keys=True)},
+            )
+
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(
+            text("UPDATE full_chain_runs SET status = 'BLOCKED' WHERE id = :id"),
+            {"id": payload["full_chain_run_id"]},
+        )
+    with pytest.raises(SQLAlchemyError):
+        with postgres_writer_engine.begin() as connection:
+            connection.execute(text("SET LOCAL ROLE freqtrade"))
+            connection.execute(
+                text(
+                    "SELECT create_okx_demo_canary_lineage(CAST(:payload AS jsonb))"
+                ),
+                {"payload": json.dumps(payload, sort_keys=True)},
+            )
+
+    with postgres_writer_engine.connect() as connection:
+        assert tuple(
+            connection.execute(
+                text(
+                    "SELECT (SELECT count(*) FROM trade_intents), "
+                    "(SELECT count(*) FROM risk_decisions), "
+                    "(SELECT count(*) FROM approved_executions)"
+                )
+            ).one()
+        ) == baseline
 
 
 def test_postgresql_upgrade_from_09_installs_fail_closed_reconciliation(
@@ -1335,6 +1758,7 @@ def test_postgresql_runtime_role_can_validate_canary_lineage_without_update_acl(
         state.last_event_observed_at = NOW
         state.last_reconciliation_run_id = run.id
         session.commit()
+        reconciliation_run_id = run.id
         approval = session.get(ApprovedExecution, approval_id)
 
     # Keep the least-privilege boundary explicit: these tables are readable by
@@ -1390,10 +1814,10 @@ def test_postgresql_runtime_role_can_validate_canary_lineage_without_update_acl(
             runtime_session,
             now_provider=lambda: NOW,
         )
-        assert preparation._fresh_empty_reconciliation(NOW) == run.id
+        assert preparation._fresh_empty_reconciliation(NOW) == reconciliation_run_id
         assert require_canary_reconciliation(
             runtime_session,
-            reconciliation_run_id=run.id,
+            reconciliation_run_id=reconciliation_run_id,
             now=NOW,
             for_update=True,
         ).id == run.id
@@ -1432,7 +1856,7 @@ def test_postgresql_runtime_role_can_validate_canary_lineage_without_update_acl(
             approved_payload_hash=grant.approved_payload_hash,
             now=NOW,
         )
-        assert validated.database_id == grant.database_id
+        assert validated.grant_id == grant.grant_id
 
 
 def _postgres_position_event(quantity: str, sequence: int) -> dict:

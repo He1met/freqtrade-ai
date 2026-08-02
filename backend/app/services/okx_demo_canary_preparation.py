@@ -18,9 +18,10 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_UP
 import hashlib
+import json
 from typing import Any, Mapping, Optional
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -71,18 +72,27 @@ FRESH_EXECUTION_ONLY_REFRESH_RETRY = "FRESH_EXECUTION_ONLY_REFRESH_RETRY"
 # It is admitted only for the immutable depth-two lineage left by the
 # pre-#616 finalize ACL failure and is single-use across all idempotency keys.
 FRESH_EXECUTION_ONLY_RECOVERY = "FRESH_EXECUTION_ONLY_RECOVERY"
+FRESH_EXECUTION_ONLY_POST_PERSISTENCE_RECOVERY = (
+    "FRESH_EXECUTION_ONLY_POST_PERSISTENCE_RECOVERY"
+)
 FRESH_EXECUTION_ENTRY_KINDS = frozenset(
     {
         FRESH_EXECUTION_ONLY_ENTRY,
         FRESH_EXECUTION_ONLY_REFRESH,
         FRESH_EXECUTION_ONLY_REFRESH_RETRY,
         FRESH_EXECUTION_ONLY_RECOVERY,
+        FRESH_EXECUTION_ONLY_POST_PERSISTENCE_RECOVERY,
     }
 )
 FRESH_EXECUTION_REFRESH_KINDS = frozenset(
     {FRESH_EXECUTION_ONLY_REFRESH, FRESH_EXECUTION_ONLY_REFRESH_RETRY}
 )
-FRESH_EXECUTION_RECOVERY_KINDS = frozenset({FRESH_EXECUTION_ONLY_RECOVERY})
+FRESH_EXECUTION_RECOVERY_KINDS = frozenset(
+    {
+        FRESH_EXECUTION_ONLY_RECOVERY,
+        FRESH_EXECUTION_ONLY_POST_PERSISTENCE_RECOVERY,
+    }
+)
 # A successful fresh entry may have one refresh successor and that successor
 # may have one final bounded retry.  No third refresh is ever admitted.
 MAX_FRESH_EXECUTION_REFRESH_SUCCESSORS = 2
@@ -409,6 +419,8 @@ class OkxDemoCanaryPreparationService:
         self,
         *,
         idempotency_key: str,
+        _entry_kind: str = FRESH_EXECUTION_ONLY_RECOVERY,
+        _recovery_boundary: str = "PRE_616_FINALIZE_ACL_FAILURE",
     ) -> CanaryPreparationResult:
         """Recover one exhausted refresh lineage without opening a third refresh.
 
@@ -420,6 +432,20 @@ class OkxDemoCanaryPreparationService:
         existing recovery entry (including a different idempotency key) is a
         hard stop.
         """
+
+        if (_entry_kind, _recovery_boundary) not in {
+            (
+                FRESH_EXECUTION_ONLY_RECOVERY,
+                "PRE_616_FINALIZE_ACL_FAILURE",
+            ),
+            (
+                FRESH_EXECUTION_ONLY_POST_PERSISTENCE_RECOVERY,
+                "POST_PERSISTENCE_LINEAGE_WRITE_FAILURE",
+            ),
+        }:
+            raise OkxDemoCanaryPreparationBlocked(
+                "unsupported canary recovery boundary"
+            )
 
         key = _safe_key(idempotency_key)
         key_digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
@@ -445,7 +471,7 @@ class OkxDemoCanaryPreparationService:
                 existing.request_payload
             )
             recovery_of = _fresh_recovery_of(existing.request_payload)
-            if entry_kind not in FRESH_EXECUTION_RECOVERY_KINDS or recovery_of is None:
+            if entry_kind != _entry_kind or recovery_of is None:
                 raise OkxDemoCanaryPreparationBlocked(
                     "canary recovery idempotency key is bound to another entry"
                 )
@@ -471,14 +497,18 @@ class OkxDemoCanaryPreparationService:
             with self.db.begin():
                 if not try_one_shot_transaction_lock(self.db):
                     raise OkxDemoCanaryPreparationRuntimeBusy(
-                        entry_kind=FRESH_EXECUTION_ONLY_RECOVERY,
+                        entry_kind=_entry_kind,
                     )
                 existing = self._canary_job_for_key(key_digest)
                 if existing is not None:
                     raise OkxDemoCanaryPreparationBlocked(
                         "canary recovery raced with another request"
                     )
-                source = self._recovery_source_job(now=now)
+                source = (
+                    self._recovery_source_job(now=now)
+                    if _entry_kind == FRESH_EXECUTION_ONLY_RECOVERY
+                    else self._post_persistence_recovery_source_job(now=now)
+                )
                 self._require_no_canary_activity_for_refresh()
                 source_payload = source.request_payload
                 source_supersedes = source_payload.get("supersedes_job_ids")
@@ -496,10 +526,10 @@ class OkxDemoCanaryPreparationService:
                     "instrument_id": "BTC-USDT-SWAP",
                     "bundle_kind": "EXECUTION_ONLY",
                     "non_production": True,
-                    "entry_kind": FRESH_EXECUTION_ONLY_RECOVERY,
+                    "entry_kind": _entry_kind,
                     "recovery_of_job_id": source.id,
                     "supersedes_job_ids": supersedes_job_ids,
-                    "recovery_boundary": "PRE_616_FINALIZE_ACL_FAILURE",
+                    "recovery_boundary": _recovery_boundary,
                 }
                 job = ResearchJob(
                     execution_scope_id=LOCAL_DRY_RUN_SCOPE_ID,
@@ -515,10 +545,10 @@ class OkxDemoCanaryPreparationService:
                     evidence_snapshot={
                         "provenance": CANARY_PROVENANCE,
                         "non_production": True,
-                        "entry_kind": FRESH_EXECUTION_ONLY_RECOVERY,
+                        "entry_kind": _entry_kind,
                         "recovery_of_job_id": source.id,
                         "supersedes_job_ids": supersedes_job_ids,
-                        "recovery_boundary": "PRE_616_FINALIZE_ACL_FAILURE",
+                        "recovery_boundary": _recovery_boundary,
                     },
                     started_at=now,
                 )
@@ -527,7 +557,7 @@ class OkxDemoCanaryPreparationService:
                 job_id = job.id
             raise OkxDemoCanaryPreparationWaiting(
                 job_id,
-                entry_kind=FRESH_EXECUTION_ONLY_RECOVERY,
+                entry_kind=_entry_kind,
                 supersedes_job_ids=tuple(supersedes_job_ids),
                 recovery_of_job_id=source.id,
             )
@@ -555,15 +585,22 @@ class OkxDemoCanaryPreparationService:
                     existing.request_payload
                 )
                 recovery_of = _fresh_recovery_of(existing.request_payload)
-                if entry_kind not in FRESH_EXECUTION_RECOVERY_KINDS or recovery_of is None:
+                if entry_kind != _entry_kind or recovery_of is None:
                     raise OkxDemoCanaryPreparationBlocked(
                         "canary recovery lineage is malformed"
                     )
-                self._require_recovery_source_job(
-                    recovery_of,
-                    now=now,
-                    ignore_recovery_job_id=existing.id,
-                )
+                if _entry_kind == FRESH_EXECUTION_ONLY_RECOVERY:
+                    self._require_recovery_source_job(
+                        recovery_of,
+                        now=now,
+                        ignore_recovery_job_id=existing.id,
+                    )
+                else:
+                    self._post_persistence_recovery_source_job(
+                        now=now,
+                        expected_source_job_id=recovery_of,
+                        ignore_successor_job_id=existing.id,
+                    )
                 existing_lineage = self._existing_canary(key_digest)
                 if existing_lineage is not None:
                     return self._result_from_lineage(existing_lineage, now=now)
@@ -591,6 +628,18 @@ class OkxDemoCanaryPreparationService:
             self.db.rollback()
             raise
 
+    def prepare_post_persistence_recovery(
+        self,
+        *,
+        idempotency_key: str,
+    ) -> CanaryPreparationResult:
+        """Create the sole fresh successor after job20's write rollback."""
+
+        return self.prepare_fresh_execution_only_recovery(
+            idempotency_key=idempotency_key,
+            _entry_kind=FRESH_EXECUTION_ONLY_POST_PERSISTENCE_RECOVERY,
+            _recovery_boundary="POST_PERSISTENCE_LINEAGE_WRITE_FAILURE",
+        )
     def _prepare(
         self,
         *,
@@ -1199,6 +1248,136 @@ class OkxDemoCanaryPreparationService:
                 "canary recovery source is not the immutable final refresh"
             )
         return source
+
+    def _post_persistence_recovery_source_job(
+        self,
+        *,
+        now: datetime,
+        expected_source_job_id: Optional[int] = None,
+        ignore_successor_job_id: Optional[int] = None,
+    ) -> ResearchJob:
+        """Return the one expired job20-shaped recovery handoff.
+
+        All other canary history must remain one of the already-validated
+        terminal/source/refresh shapes.  A second post-persistence successor
+        is rejected regardless of idempotency key.
+        """
+
+        jobs = self.db.scalars(
+            canary_lineage_read_query(
+                self.db,
+                select(ResearchJob)
+                .where(
+                    ResearchJob.execution_scope_id == LOCAL_DRY_RUN_SCOPE_ID,
+                    ResearchJob.operation == CANARY_OPERATION,
+                )
+                .order_by(ResearchJob.created_at, ResearchJob.id),
+                for_update=True,
+            )
+        ).all()
+        source: Optional[ResearchJob] = None
+        for job in jobs:
+            payload = job.request_payload if isinstance(job.request_payload, dict) else {}
+            entry_kind = payload.get("entry_kind")
+            if entry_kind == FRESH_EXECUTION_ONLY_POST_PERSISTENCE_RECOVERY:
+                if job.id != ignore_successor_job_id:
+                    raise OkxDemoCanaryPreparationBlocked(
+                        "a post-persistence recovery successor already exists"
+                    )
+                continue
+            if entry_kind == FRESH_EXECUTION_ONLY_RECOVERY:
+                if source is not None or not self._is_post_persistence_source(job, payload):
+                    raise OkxDemoCanaryPreparationBlocked(
+                        "post-persistence recovery source is malformed"
+                    )
+                source = job
+                continue
+            if entry_kind == FRESH_EXECUTION_ONLY_ENTRY:
+                if not self._is_refresh_source(job, payload):
+                    raise OkxDemoCanaryPreparationBlocked(
+                        "post-persistence history contains a malformed fresh source"
+                    )
+                continue
+            if entry_kind in FRESH_EXECUTION_REFRESH_KINDS:
+                if not self._is_refresh_successor(job, payload):
+                    raise OkxDemoCanaryPreparationBlocked(
+                        "post-persistence history contains a malformed refresh"
+                    )
+                continue
+            if not self._is_terminal_attestation_failure(job, payload):
+                raise OkxDemoCanaryPreparationBlocked(
+                    "unknown or pending canary history blocks post-persistence recovery"
+                )
+        if source is None:
+            raise OkxDemoCanaryPreparationBlocked(
+                "an immutable failed-persistence recovery handoff is required"
+            )
+        if expected_source_job_id is not None and source.id != expected_source_job_id:
+            raise OkxDemoCanaryPreparationBlocked(
+                "post-persistence recovery source changed"
+            )
+        source_payload = source.request_payload
+        parent_id = source_payload.get("recovery_of_job_id")
+        parent = self.db.get(ResearchJob, parent_id)
+        if parent is None or self._refresh_handoff_depth(parent) != 2:
+            raise OkxDemoCanaryPreparationBlocked(
+                "post-persistence source does not follow the final refresh"
+            )
+        parent_payload = parent.request_payload if isinstance(parent.request_payload, dict) else {}
+        expected_supersedes = list(
+            dict.fromkeys([*(parent_payload.get("supersedes_job_ids") or []), parent.id])
+        )
+        if source_payload.get("supersedes_job_ids") != expected_supersedes:
+            raise OkxDemoCanaryPreparationBlocked(
+                "post-persistence recovery ancestry is malformed"
+            )
+        if not self._refresh_snapshots_expired(source, now):
+            raise OkxDemoCanaryPreparationBlocked(
+                "post-persistence source snapshots are still fresh; finalize it"
+            )
+        return source
+
+    @staticmethod
+    def _is_post_persistence_source(
+        job: ResearchJob,
+        payload: Mapping[str, Any],
+    ) -> bool:
+        if (
+            job.execution_scope_id != LOCAL_DRY_RUN_SCOPE_ID
+            or job.operation != CANARY_OPERATION
+            or job.status != "SUCCESS"
+            or job.stage != "CANARY_SNAPSHOTS_READY"
+            or payload.get("provenance") != CANARY_PROVENANCE
+            or payload.get("execution_target") != OKX_DEMO_TARGET_ID
+            or payload.get("instrument_id") not in CANARY_INSTRUMENTS
+            or payload.get("bundle_kind") != "EXECUTION_ONLY"
+            or payload.get("entry_kind") != FRESH_EXECUTION_ONLY_RECOVERY
+            or payload.get("non_production") is not True
+            or payload.get("recovery_boundary") != "PRE_616_FINALIZE_ACL_FAILURE"
+            or "timeframe" in payload
+            or "candle_limit" in payload
+        ):
+            return False
+        recovery_of = payload.get("recovery_of_job_id")
+        supersedes = payload.get("supersedes_job_ids")
+        if (
+            not isinstance(recovery_of, int)
+            or recovery_of <= 0
+            or not isinstance(supersedes, list)
+            or recovery_of not in supersedes
+            or any(not isinstance(job_id, int) or job_id <= 0 for job_id in supersedes)
+        ):
+            return False
+        evidence = job.evidence_snapshot if isinstance(job.evidence_snapshot, dict) else {}
+        return (
+            evidence.get("provenance") == CANARY_PROVENANCE
+            and evidence.get("non_production") is True
+            and evidence.get("entry_kind") == FRESH_EXECUTION_ONLY_RECOVERY
+            and evidence.get("recovery_of_job_id") == recovery_of
+            and evidence.get("supersedes_job_ids") == supersedes
+            and evidence.get("recovery_boundary") == "PRE_616_FINALIZE_ACL_FAILURE"
+            and isinstance(evidence.get("snapshot_evidence"), dict)
+        )
 
     @staticmethod
     def _is_refresh_source(
@@ -1885,11 +2064,12 @@ class OkxDemoCanaryPreparationService:
             "provenance": CANARY_PROVENANCE,
         }
         canonical_hash = canonical_digest(canonical_input)
-        intent_id = canonical_digest({
+        intent_identity = {
             "provenance": CANARY_PROVENANCE,
             "idempotency_key_digest": key_digest,
             "canonical_hash": canonical_hash,
-        })
+        }
+        intent_id = canonical_digest(intent_identity)
         client_order_id = "FAICANARY" + intent_id[:23]
         intent = TradeIntent(
             execution_target_id=OKX_DEMO_TARGET_ID,
@@ -1920,62 +2100,127 @@ class OkxDemoCanaryPreparationService:
             },
             expires_at=order["expires_at"],
         )
-        intent.approved_payload_hash = canonical_digest({
+        approved_payload = {
             "canonical_input": canonical_input,
             "notional": format(order["notional"], "f"),
             "provenance": CANARY_PROVENANCE,
-        })
-        self.db.add(intent)
-        self.db.flush()
-        decision = RiskDecision(
-            execution_target_id=OKX_DEMO_TARGET_ID,
-            trade_intent_id=intent.id,
-            authorization_schema_version="RISK_V1",
-            policy_digest=policy_digest,
-            decision="APPROVED",
-            policy_version=CANARY_POLICY_VERSION,
-            evidence_snapshot={
-                "reasons": [],
-                "input_digest": canonical_hash,
+        }
+        intent.approved_payload_hash = canonical_digest(approved_payload)
+        bind = self.db.get_bind()
+        if bind.dialect.name == "postgresql":
+            privileged_payload = {
+                "execution_target": OKX_DEMO_TARGET_ID,
+                "provenance": CANARY_PROVENANCE,
+                "non_production": True,
+                "full_chain_run_id": chain.id,
+                "reconciliation_run_id": reconciliation_run_id,
+                "intent_id": intent.intent_id,
+                "canonical_hash": canonical_hash,
                 "policy_digest": policy_digest,
-                "lineage": lineage,
+                "approved_payload_hash": intent.approved_payload_hash,
+                "idempotency_key_digest": key_digest,
+                "client_order_id": client_order_id,
+                "instrument_id": order["instrument_id"],
+                "side": order["side"],
+                "position_side": order["position_side"],
+                "order_type": order["order_type"],
+                "quantity": format(order["quantity"], "f"),
+                "limit_price": format(order["limit_price"], "f"),
+                "reference_price": format(order["reference_price"], "f"),
+                "leverage": format(order["leverage"], "f"),
+                "margin_mode": order["margin_mode"],
+                "stop_loss": format(order["stop_loss"], "f"),
+                "take_profit": format(order["take_profit"], "f"),
+                "reduce_only": order["reduce_only"],
                 "notional": format(order["notional"], "f"),
-                "provenance": CANARY_PROVENANCE,
-                "non_production": True,
-                "llm_authority": False,
-            },
-        )
-        self.db.add(decision)
-        self.db.flush()
-        approved = ApprovedExecution(
-            execution_target_id=OKX_DEMO_TARGET_ID,
-            trade_intent_id=intent.id,
-            risk_decision_id=decision.id,
-            intent_id=intent.intent_id,
-            client_order_id=client_order_id,
-            authorization_schema_version="RISK_V1",
-            canonical_hash=canonical_hash,
-            policy_digest=policy_digest,
-            approved_payload_hash=intent.approved_payload_hash,
-            instrument_snapshot_id=snapshots["instrument"].snapshot_id,
-            market_snapshot_id=snapshots["market"].snapshot_id,
-            account_snapshot_id=snapshots["account"].snapshot_id,
-            decision="APPROVED",
-            intent_status="APPROVED",
-            reserved_notional=order["notional"],
-            order_submission_authorized=False,
-            claim_required=True,
-            status="ACTIVE",
-            expires_at=order["expires_at"],
-            evidence_snapshot={
-                "provenance": CANARY_PROVENANCE,
-                "non_production": True,
-                "lineage": lineage,
-                "snapshot_evidence": evidence,
-            },
-        )
-        self.db.add(approved)
-        self.db.flush()
+                "request_snapshot": intent.request_snapshot,
+                "canonical_input_serialized": _canonical_json(canonical_input),
+                "policy_serialized": _canonical_json(policy),
+                "approved_payload_serialized": _canonical_json(approved_payload),
+                "intent_identity_serialized": _canonical_json(intent_identity),
+                "expires_at": _aware(order["expires_at"]).isoformat(),
+                "instrument_snapshot_id": snapshots["instrument"].snapshot_id,
+                "market_snapshot_id": snapshots["market"].snapshot_id,
+                "account_snapshot_id": snapshots["account"].snapshot_id,
+            }
+            persisted_ids = self.db.execute(
+                text(
+                    "SELECT create_okx_demo_canary_lineage("
+                    "CAST(:payload AS jsonb))"
+                ),
+                {"payload": json.dumps(privileged_payload, sort_keys=True)},
+            ).scalar_one()
+            if not isinstance(persisted_ids, dict):
+                raise OkxDemoCanaryPreparationBlocked(
+                    "controlled canary lineage write returned invalid evidence"
+                )
+            try:
+                intent_database_id = int(persisted_ids["trade_intent_id"])
+                decision_database_id = int(persisted_ids["risk_decision_id"])
+                approval_database_id = int(persisted_ids["approved_execution_id"])
+            except (KeyError, TypeError, ValueError):
+                raise OkxDemoCanaryPreparationBlocked(
+                    "controlled canary lineage write returned invalid evidence"
+                ) from None
+            intent = self.db.get(TradeIntent, intent_database_id)
+            decision = self.db.get(RiskDecision, decision_database_id)
+            approved = self.db.get(ApprovedExecution, approval_database_id)
+            if intent is None or decision is None or approved is None:
+                raise OkxDemoCanaryPreparationBlocked(
+                    "controlled canary lineage write did not persist"
+                )
+        else:
+            self.db.add(intent)
+            self.db.flush()
+            decision = RiskDecision(
+                execution_target_id=OKX_DEMO_TARGET_ID,
+                trade_intent_id=intent.id,
+                authorization_schema_version="RISK_V1",
+                policy_digest=policy_digest,
+                decision="APPROVED",
+                policy_version=CANARY_POLICY_VERSION,
+                evidence_snapshot={
+                    "reasons": [],
+                    "input_digest": canonical_hash,
+                    "policy_digest": policy_digest,
+                    "lineage": lineage,
+                    "notional": format(order["notional"], "f"),
+                    "provenance": CANARY_PROVENANCE,
+                    "non_production": True,
+                    "llm_authority": False,
+                },
+            )
+            self.db.add(decision)
+            self.db.flush()
+            approved = ApprovedExecution(
+                execution_target_id=OKX_DEMO_TARGET_ID,
+                trade_intent_id=intent.id,
+                risk_decision_id=decision.id,
+                intent_id=intent.intent_id,
+                client_order_id=client_order_id,
+                authorization_schema_version="RISK_V1",
+                canonical_hash=canonical_hash,
+                policy_digest=policy_digest,
+                approved_payload_hash=intent.approved_payload_hash,
+                instrument_snapshot_id=snapshots["instrument"].snapshot_id,
+                market_snapshot_id=snapshots["market"].snapshot_id,
+                account_snapshot_id=snapshots["account"].snapshot_id,
+                decision="APPROVED",
+                intent_status="APPROVED",
+                reserved_notional=order["notional"],
+                order_submission_authorized=False,
+                claim_required=True,
+                status="ACTIVE",
+                expires_at=order["expires_at"],
+                evidence_snapshot={
+                    "provenance": CANARY_PROVENANCE,
+                    "non_production": True,
+                    "lineage": lineage,
+                    "snapshot_evidence": evidence,
+                },
+            )
+            self.db.add(approved)
+            self.db.flush()
         chain.trade_intent_id = intent.id
         chain.risk_decision_id = decision.id
         chain.approved_execution_id = approved.id
@@ -2208,7 +2453,10 @@ def _fresh_entry_evidence(payload: Mapping[str, Any]) -> dict[str, Any]:
     recovery_of = payload.get("recovery_of_job_id")
     if entry_kind in FRESH_EXECUTION_RECOVERY_KINDS and isinstance(recovery_of, int) and recovery_of > 0:
         evidence["recovery_of_job_id"] = recovery_of
-        if payload.get("recovery_boundary") == "PRE_616_FINALIZE_ACL_FAILURE":
+        if payload.get("recovery_boundary") in {
+            "PRE_616_FINALIZE_ACL_FAILURE",
+            "POST_PERSISTENCE_LINEAGE_WRITE_FAILURE",
+        }:
             evidence["recovery_boundary"] = payload["recovery_boundary"]
     return evidence
 
@@ -2246,7 +2494,20 @@ def _fresh_entry_lineage(
         raise OkxDemoCanaryPreparationBlocked(
             "canary recovery lineage is missing recovery_of_job_id"
         )
-    if entry_kind != FRESH_EXECUTION_ONLY_RECOVERY and recovery_of is not None:
+    expected_recovery_boundary = {
+        FRESH_EXECUTION_ONLY_RECOVERY: "PRE_616_FINALIZE_ACL_FAILURE",
+        FRESH_EXECUTION_ONLY_POST_PERSISTENCE_RECOVERY: (
+            "POST_PERSISTENCE_LINEAGE_WRITE_FAILURE"
+        ),
+    }.get(entry_kind)
+    if (
+        expected_recovery_boundary is not None
+        and payload.get("recovery_boundary") != expected_recovery_boundary
+    ):
+        raise OkxDemoCanaryPreparationBlocked(
+            "canary recovery lineage boundary is malformed"
+        )
+    if entry_kind not in FRESH_EXECUTION_RECOVERY_KINDS and recovery_of is not None:
         raise OkxDemoCanaryPreparationBlocked(
             "non-recovery fresh entry cannot carry recovery lineage"
         )
@@ -2268,7 +2529,7 @@ def _fresh_recovery_of(payload: Any) -> Optional[int]:
     """Return the immutable recovery parent after validating fresh lineage."""
 
     entry_kind, _supersedes, _refresh_of = _fresh_entry_lineage(payload)
-    if entry_kind != FRESH_EXECUTION_ONLY_RECOVERY:
+    if entry_kind not in FRESH_EXECUTION_RECOVERY_KINDS:
         return None
     recovery_of = payload.get("recovery_of_job_id") if isinstance(payload, dict) else None
     return recovery_of if isinstance(recovery_of, int) else None
@@ -2280,6 +2541,17 @@ def _safe_key(value: str) -> str:
     if any(not (char.isalnum() or char in "._:-") for char in value):
         raise OkxDemoCanaryPreparationBlocked("canary idempotency key is invalid")
     return value
+
+
+def _canonical_json(value: Any) -> str:
+    """Serialize the fixed canary payload exactly as ``canonical_digest`` does."""
+
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
 
 
 def _decimal(value: Any, name: str, *, positive: bool = False) -> Decimal:
