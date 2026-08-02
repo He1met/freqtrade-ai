@@ -426,6 +426,12 @@ BEGIN
             IS DISTINCT FROM 'OKX_DEMO'
        OR p_payload->'request_snapshot'->'canonical_input'->>'full_chain_run_id'
             IS DISTINCT FROM full_chain_run_id::text
+       OR p_payload->'request_snapshot'->'canonical_input'->'candidate_approval_id'
+            IS DISTINCT FROM 'null'::jsonb
+       OR p_payload->'request_snapshot'->'canonical_input'->'signal_snapshot_id'
+            IS DISTINCT FROM 'null'::jsonb
+       OR (p_payload->'request_snapshot'->'canonical_input'->>'signal_digest'
+            ~ '^[0-9a-f]{64}$') IS DISTINCT FROM TRUE
        OR p_payload->'request_snapshot'->'canonical_input'->>'instrument_id'
             IS DISTINCT FROM 'BTC-USDT-SWAP'
        OR p_payload->'request_snapshot'->'canonical_input'->>'side'
@@ -450,18 +456,16 @@ BEGIN
             IS DISTINCT FROM p_payload->>'stop_loss'
        OR p_payload->'request_snapshot'->'canonical_input'->>'take_profit'
             IS DISTINCT FROM p_payload->>'take_profit'
-       OR p_payload->'request_snapshot'->'canonical_input'->'lineage'->>'provenance'
-            IS DISTINCT FROM 'CONTROLLED_CANARY_NON_PRODUCTION'
-       OR EXISTS (
-           SELECT 1
-           FROM unnest(ARRAY[
-               'strategy_id', 'strategy_version_id', 'backtest_run_id',
-               'backtest_task_id', 'backtest_result_id', 'strategy_score_id'
-           ]) AS lineage_field(name)
-           WHERE p_payload->'request_snapshot'->'canonical_input'
-                     ->'lineage'->lineage_field.name
-                 IS DISTINCT FROM 'null'::jsonb
-       )
+       OR p_payload->'request_snapshot'->'canonical_input'->'lineage'
+            IS DISTINCT FROM jsonb_build_object(
+                'provenance', 'CONTROLLED_CANARY_NON_PRODUCTION',
+                'strategy_id', NULL,
+                'strategy_version_id', NULL,
+                'backtest_run_id', NULL,
+                'backtest_task_id', NULL,
+                'backtest_result_id', NULL,
+                'strategy_score_id', NULL
+            )
     THEN
         RAISE EXCEPTION 'controlled canary lineage safety contract failed';
     END IF;
@@ -768,6 +772,54 @@ BEGIN
             IS DISTINCT FROM market_row.digest
        OR p_payload->'request_snapshot'#>>'{snapshot_evidence,account,digest}'
             IS DISTINCT FROM account_row.digest
+       OR (p_payload->'request_snapshot'#>>'{snapshot_evidence,instrument,database_id}'
+            ~ '^[1-9][0-9]*$') IS DISTINCT FROM TRUE
+       OR (p_payload->'request_snapshot'#>>'{snapshot_evidence,market,database_id}'
+            ~ '^[1-9][0-9]*$') IS DISTINCT FROM TRUE
+       OR (p_payload->'request_snapshot'#>>'{snapshot_evidence,account,database_id}'
+            ~ '^[1-9][0-9]*$') IS DISTINCT FROM TRUE
+       OR (p_payload->'request_snapshot'#>>'{snapshot_evidence,instrument,database_id}')::bigint
+            IS DISTINCT FROM instrument_row.database_id
+       OR (p_payload->'request_snapshot'#>>'{snapshot_evidence,market,database_id}')::bigint
+            IS DISTINCT FROM market_row.database_id
+       OR (p_payload->'request_snapshot'#>>'{snapshot_evidence,account,database_id}')::bigint
+            IS DISTINCT FROM account_row.database_id
+       OR (p_payload->'request_snapshot'#>>'{snapshot_evidence,instrument,expires_at}')::timestamptz
+            IS DISTINCT FROM instrument_row.expires_at
+       OR (p_payload->'request_snapshot'#>>'{snapshot_evidence,market,expires_at}')::timestamptz
+            IS DISTINCT FROM market_row.expires_at
+       OR (p_payload->'request_snapshot'#>>'{snapshot_evidence,account,expires_at}')::timestamptz
+            IS DISTINCT FROM account_row.expires_at
+       OR p_payload->'request_snapshot'->'canonical_input'->'snapshot_ids'
+            IS DISTINCT FROM jsonb_build_object(
+                'instrument', instrument_row.snapshot_id,
+                'market', market_row.snapshot_id,
+                'account', account_row.snapshot_id
+            )
+       OR p_payload->'request_snapshot'->'snapshot_evidence'
+            IS DISTINCT FROM jsonb_build_object(
+                'instrument', jsonb_build_object(
+                    'snapshot_id', instrument_row.snapshot_id,
+                    'database_id', instrument_row.database_id,
+                    'digest', instrument_row.digest,
+                    'expires_at', p_payload->'request_snapshot'
+                        #>>'{snapshot_evidence,instrument,expires_at}'
+                ),
+                'market', jsonb_build_object(
+                    'snapshot_id', market_row.snapshot_id,
+                    'database_id', market_row.database_id,
+                    'digest', market_row.digest,
+                    'expires_at', p_payload->'request_snapshot'
+                        #>>'{snapshot_evidence,market,expires_at}'
+                ),
+                'account', jsonb_build_object(
+                    'snapshot_id', account_row.snapshot_id,
+                    'database_id', account_row.database_id,
+                    'digest', account_row.digest,
+                    'expires_at', p_payload->'request_snapshot'
+                        #>>'{snapshot_evidence,account,expires_at}'
+                )
+            )
     THEN
         RAISE EXCEPTION 'controlled canary attested snapshot binding failed';
     END IF;
@@ -795,6 +847,11 @@ BEGIN
        OR best_ask <= 0
        OR mark_price <= 0
        OR snapshot_leverage <= 0
+       OR (market_row.content_json->>'reference_price')::numeric
+            IS DISTINCT FROM mark_price
+       OR reference_price IS DISTINCT FROM (
+            market_row.content_json->>'reference_price'
+       )::numeric
        OR reference_price IS DISTINCT FROM mark_price
        OR leverage IS DISTINCT FROM snapshot_leverage
        OR quantity IS DISTINCT FROM derived_quantity

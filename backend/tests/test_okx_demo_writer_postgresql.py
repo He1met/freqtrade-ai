@@ -303,6 +303,41 @@ def _canary_function_payload(
     }
 
 
+def _rehash_canary_payload(payload: dict) -> dict:
+    altered = json.loads(json.dumps(payload))
+    canonical_input = altered["request_snapshot"]["canonical_input"]
+    altered["canonical_input_serialized"] = _canonical_json(canonical_input)
+    altered["canonical_hash"] = hashlib.sha256(
+        altered["canonical_input_serialized"].encode()
+    ).hexdigest()
+    policy = json.loads(altered["policy_serialized"])
+    policy["max_leverage"] = canonical_input["leverage"]
+    altered["policy_serialized"] = _canonical_json(policy)
+    altered["policy_digest"] = hashlib.sha256(
+        altered["policy_serialized"].encode()
+    ).hexdigest()
+    approved_payload = {
+        "canonical_input": canonical_input,
+        "notional": altered["notional"],
+        "provenance": "CONTROLLED_CANARY_NON_PRODUCTION",
+    }
+    altered["approved_payload_serialized"] = _canonical_json(approved_payload)
+    altered["approved_payload_hash"] = hashlib.sha256(
+        altered["approved_payload_serialized"].encode()
+    ).hexdigest()
+    identity = {
+        "provenance": "CONTROLLED_CANARY_NON_PRODUCTION",
+        "idempotency_key_digest": altered["idempotency_key_digest"],
+        "canonical_hash": altered["canonical_hash"],
+    }
+    altered["intent_identity_serialized"] = _canonical_json(identity)
+    altered["intent_id"] = hashlib.sha256(
+        altered["intent_identity_serialized"].encode()
+    ).hexdigest()
+    altered["client_order_id"] = "FAICANARY" + altered["intent_id"][:23]
+    return altered
+
+
 @pytest.fixture
 def postgres_writer_engine():
     database_url = os.environ.get("POSTGRES_WORKER_URL")
@@ -822,6 +857,7 @@ def test_postgresql_canary_lineage_function_body_tamper_fails_readiness(
         ("account", "authenticated", None),
         ("instrument", "minSz", "not-a-number"),
         ("market", "bbo.ask_price", None),
+        ("market", "reference_price", "56000"),
         ("instrument", "state", "suspend"),
         ("instrument", "source", "tampered"),
         ("market", "stale", True),
@@ -949,6 +985,150 @@ def test_postgresql_canary_lineage_function_rederives_order_from_snapshots(
                 snapshots=runtime_snapshots,
                 order=crafted_order,
             )
+
+    with postgres_writer_engine.connect() as connection:
+        assert connection.execute(text("SELECT count(*) FROM trade_intents")).scalar_one() == 0
+        assert connection.execute(text("SELECT count(*) FROM risk_decisions")).scalar_one() == 0
+        assert connection.execute(text("SELECT count(*) FROM approved_executions")).scalar_one() == 0
+
+
+def test_postgresql_canary_lineage_rejects_fabricated_provenance_and_evidence(
+    postgres_writer_engine,
+) -> None:
+    upgrade_database(postgres_writer_engine)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    with Session(postgres_writer_engine) as admin_session:
+        snapshots, reconciliation_run_id, order = _seed_canary_lineage_boundary(
+            admin_session,
+            now=now,
+        )
+        snapshot_ids = {kind: row.database_id for kind, row in snapshots.items()}
+    key_digest = hashlib.sha256(b"crafted-canary-evidence").hexdigest()
+    with Session(postgres_writer_engine) as runtime_session:
+        runtime_session.execute(text("SET LOCAL ROLE freqtrade"))
+        runtime_snapshots = {
+            kind: runtime_session.get(OkxDemoTrustedSnapshot, database_id)
+            for kind, database_id in snapshot_ids.items()
+        }
+        OkxDemoCanaryPreparationService(
+            runtime_session,
+            now_provider=lambda: now,
+        )._persist_lineage(
+            key_digest=key_digest,
+            now=now,
+            reconciliation_run_id=reconciliation_run_id,
+            snapshots=runtime_snapshots,
+            order=order,
+        )
+        runtime_session.commit()
+    with Session(postgres_writer_engine) as admin_session:
+        payload = _canary_function_payload(
+            admin_session,
+            key_digest=key_digest,
+            reconciliation_run_id=reconciliation_run_id,
+        )
+    # Return only this isolated temporary database to the pre-write boundary so
+    # direct function calls exercise the attested binding rather than replay.
+    with postgres_writer_engine.begin() as connection:
+        for table_name in (
+            "full_chain_runs",
+            "approved_executions",
+            "risk_decisions",
+            "trade_intents",
+        ):
+            connection.execute(
+                text("ALTER TABLE {} DISABLE TRIGGER USER".format(table_name))
+            )
+        connection.execute(
+            text(
+                "UPDATE full_chain_runs SET trade_intent_id = NULL, "
+                "risk_decision_id = NULL, approved_execution_id = NULL"
+            )
+        )
+        connection.execute(text("DELETE FROM approved_executions"))
+        connection.execute(text("DELETE FROM risk_decisions"))
+        connection.execute(text("DELETE FROM trade_intents"))
+        for table_name in (
+            "trade_intents",
+            "risk_decisions",
+            "approved_executions",
+            "full_chain_runs",
+        ):
+            connection.execute(
+                text("ALTER TABLE {} ENABLE TRIGGER USER".format(table_name))
+            )
+
+    canonical_mutations = []
+    extra_lineage = json.loads(json.dumps(payload))
+    extra_lineage["request_snapshot"]["canonical_input"]["lineage"][
+        "strategy_id"
+    ] = 1
+    canonical_mutations.append(extra_lineage)
+    missing_lineage = json.loads(json.dumps(payload))
+    missing_lineage["request_snapshot"]["canonical_input"]["lineage"].pop(
+        "backtest_task_id"
+    )
+    canonical_mutations.append(missing_lineage)
+    candidate_approval = json.loads(json.dumps(payload))
+    candidate_approval["request_snapshot"]["canonical_input"][
+        "candidate_approval_id"
+    ] = 1
+    canonical_mutations.append(candidate_approval)
+    signal_snapshot = json.loads(json.dumps(payload))
+    signal_snapshot["request_snapshot"]["canonical_input"][
+        "signal_snapshot_id"
+    ] = 1
+    canonical_mutations.append(signal_snapshot)
+    bad_signal_digest = json.loads(json.dumps(payload))
+    bad_signal_digest["request_snapshot"]["canonical_input"][
+        "signal_digest"
+    ] = None
+    canonical_mutations.append(bad_signal_digest)
+    for mutation in canonical_mutations:
+        altered = _rehash_canary_payload(mutation)
+        with pytest.raises(SQLAlchemyError, match="lineage safety contract"):
+            with postgres_writer_engine.begin() as connection:
+                connection.execute(text("SET LOCAL ROLE freqtrade"))
+                connection.execute(
+                    text(
+                        "SELECT create_okx_demo_canary_lineage("
+                        "CAST(:payload AS jsonb))"
+                    ),
+                    {"payload": json.dumps(altered, sort_keys=True)},
+                )
+
+    evidence_mutations = []
+    wrong_database_id = json.loads(json.dumps(payload))
+    wrong_database_id["request_snapshot"]["snapshot_evidence"]["market"][
+        "database_id"
+    ] += 1
+    evidence_mutations.append(wrong_database_id)
+    wrong_expiry = json.loads(json.dumps(payload))
+    wrong_expiry["request_snapshot"]["snapshot_evidence"]["account"][
+        "expires_at"
+    ] = (now + timedelta(seconds=29)).isoformat()
+    evidence_mutations.append(wrong_expiry)
+    extra_evidence = json.loads(json.dumps(payload))
+    extra_evidence["request_snapshot"]["snapshot_evidence"]["instrument"][
+        "fabricated"
+    ] = True
+    evidence_mutations.append(extra_evidence)
+    extra_snapshot_id = json.loads(json.dumps(payload))
+    extra_snapshot_id["request_snapshot"]["canonical_input"]["snapshot_ids"][
+        "fabricated"
+    ] = "snapshot:fake"
+    evidence_mutations.append(_rehash_canary_payload(extra_snapshot_id))
+    for altered in evidence_mutations:
+        with pytest.raises(SQLAlchemyError, match="attested snapshot binding"):
+            with postgres_writer_engine.begin() as connection:
+                connection.execute(text("SET LOCAL ROLE freqtrade"))
+                connection.execute(
+                    text(
+                        "SELECT create_okx_demo_canary_lineage("
+                        "CAST(:payload AS jsonb))"
+                    ),
+                    {"payload": json.dumps(altered, sort_keys=True)},
+                )
 
     with postgres_writer_engine.connect() as connection:
         assert connection.execute(text("SELECT count(*) FROM trade_intents")).scalar_one() == 0
