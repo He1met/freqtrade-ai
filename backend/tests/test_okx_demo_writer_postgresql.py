@@ -4,6 +4,7 @@ from decimal import Decimal
 import os
 from threading import Barrier
 import time
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -66,10 +67,15 @@ from app.services.okx_demo_reconciliation import (
     OkxDemoReconciliationService,
     SCHEMA_VERSION as RECONCILIATION_EVENT_SCHEMA_VERSION,
 )
+from app.services.okx_demo_canary_preparation import (
+    OkxDemoCanaryPreparationService,
+)
 from app.services.okx_demo_submission_grant import (
     acquire_one_shot_runtime_lock,
     CANARY_PROVENANCE,
+    OkxDemoSubmissionGrantService,
     release_one_shot_runtime_lock,
+    require_canary_reconciliation,
     submission_grant_request_digest,
     try_one_shot_transaction_lock,
 )
@@ -1287,6 +1293,146 @@ def test_postgresql_one_shot_grant_has_one_atomic_journal_winner(
                 ),
                 {"grant_id": grant_id},
             )
+
+
+def test_postgresql_runtime_role_can_validate_canary_lineage_without_update_acl(
+    postgres_writer_engine,
+    monkeypatch,
+) -> None:
+    """Canary read checks use advisory serialization, not table UPDATE ACL."""
+
+    upgrade_database(postgres_writer_engine)
+    with Session(postgres_writer_engine) as session:
+        approval_id, _order_id = _seed_approved_order(
+            session,
+            create_order=False,
+            controlled_canary=True,
+        )
+        run = ReconciliationRun(
+            execution_target_id="OKX_DEMO",
+            status="RECONCILED",
+            summary_snapshot={},
+            database_ids={"order_snapshots": [], "position_snapshots": []},
+            artifact_status="READY",
+            authoritative_observed_at=NOW,
+            source_type="api_aggregate",
+            core_data=True,
+            started_at=NOW,
+            completed_at=NOW,
+            created_at=NOW,
+        )
+        session.add(run)
+        session.flush()
+        run.database_ids = dict(run.database_ids, reconciliation_run=[run.id])
+        state = session.scalars(
+            select(OkxDemoReconciliationState).where(
+                OkxDemoReconciliationState.execution_target_id == "OKX_DEMO"
+            )
+        ).one()
+        state.status = "RECONCILED"
+        state.opening_frozen = False
+        state.block_reason = None
+        state.last_event_observed_at = NOW
+        state.last_reconciliation_run_id = run.id
+        session.commit()
+        approval = session.get(ApprovedExecution, approval_id)
+
+    # Keep the least-privilege boundary explicit: these tables are readable by
+    # the runtime role but do not grant table-level UPDATE merely for a read
+    # lock.  The one-shot grant table permits only its narrow transition
+    # columns, which is checked separately by schema verification.
+    with postgres_writer_engine.connect() as connection:
+        for table_name in (
+            "okx_demo_reconciliation_states",
+            "reconciliation_runs",
+            "approved_executions",
+            "trade_intents",
+            "risk_decisions",
+            "okx_demo_submission_grants",
+        ):
+            assert connection.execute(
+                text(
+                    "SELECT has_table_privilege('freqtrade', :table_name, 'SELECT')"
+                ),
+                {"table_name": table_name},
+            ).scalar_one() is True
+            assert connection.execute(
+                text(
+                    "SELECT has_table_privilege('freqtrade', :table_name, 'UPDATE')"
+                ),
+                {"table_name": table_name},
+            ).scalar_one() is False
+
+    monkeypatch.setattr(
+        "app.services.okx_demo_submission_grant.get_settings",
+        lambda: SimpleNamespace(
+            demo_automation_policy=SimpleNamespace(
+                demo_risk_policy=SimpleNamespace(
+                    allowed_instruments=("BTC-USDT-SWAP",)
+                )
+            ),
+            execution_target_manifest=SimpleNamespace(
+                active_target_id="OKX_DEMO",
+                active_target=SimpleNamespace(
+                    simulated_trading=True,
+                    allow_real_funds=False,
+                    order_submission_enabled=False,
+                ),
+            ),
+        ),
+    )
+
+    with Session(postgres_writer_engine) as runtime_session:
+        runtime_session.execute(text("SET LOCAL ROLE freqtrade"))
+        # This is the exact refresh-preparation read path.  It must not emit
+        # SELECT ... FOR UPDATE against the reconciliation tables.
+        preparation = OkxDemoCanaryPreparationService(
+            runtime_session,
+            now_provider=lambda: NOW,
+        )
+        assert preparation._fresh_empty_reconciliation(NOW) == run.id
+        assert require_canary_reconciliation(
+            runtime_session,
+            reconciliation_run_id=run.id,
+            now=NOW,
+            for_update=True,
+        ).id == run.id
+
+        # The grant arm traverses approved/intent/decision lineage, the state
+        # row, and the run row under the same transaction-scoped advisory lock.
+        # Before #616 the first FOR UPDATE failed here with
+        # InsufficientPrivilege; this call now exercises the real runtime role.
+        grant = OkxDemoSubmissionGrantService(
+            runtime_session,
+            now_provider=lambda: NOW,
+        ).arm(
+            approval_id=approval_id,
+            canonical_hash=approval.canonical_hash,
+            policy_digest=approval.policy_digest,
+            approved_payload_hash=approval.approved_payload_hash,
+            client_order_id=approval.client_order_id,
+        )
+        assert grant.execution_target_id == "OKX_DEMO"
+        assert grant.status == "ACTIVE"
+
+        # The writer's one-shot lineage recheck uses its own advisory writer
+        # key and must likewise avoid FOR UPDATE on the grant table.
+        runtime_session.execute(text("SET LOCAL ROLE freqtrade"))
+        runtime_approval = runtime_session.get(ApprovedExecution, approval_id)
+        writer_store = SqlAlchemyOrderWriterStore(
+            runtime_session,
+            now_provider=lambda: NOW,
+        )
+        writer_store._lock_lease_key()
+        validated = writer_store._validate_one_shot_grant(
+            grant_id=grant.grant_id,
+            approved=runtime_approval,
+            canonical_hash=grant.canonical_hash,
+            policy_digest=grant.policy_digest,
+            approved_payload_hash=grant.approved_payload_hash,
+            now=NOW,
+        )
+        assert validated.database_id == grant.database_id
 
 
 def _postgres_position_event(quantity: str, sequence: int) -> dict:

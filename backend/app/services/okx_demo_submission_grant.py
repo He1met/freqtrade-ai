@@ -44,6 +44,33 @@ UNRESOLVED_WRITER_STATES = (
 )
 
 
+def canary_lineage_read_query(db: Session, statement, *, for_update: bool):
+    """Apply a compatibility row lock only on dialects that can use it.
+
+    The canonical PostgreSQL runtime role deliberately has ``SELECT`` (and,
+    where needed, narrow column ``UPDATE``) on the canary lineage tables, but
+    not table-level ``UPDATE``.  PostgreSQL therefore rejects every
+    ``SELECT .. FOR UPDATE``/``FOR SHARE`` variant for those tables.  Every
+    production caller here already holds either the transaction-scoped
+    ``ONE_SHOT_COORDINATION_LOCK_KEY`` or the writer advisory lock, so the
+    advisory lock is the least-privilege serialization boundary on PostgreSQL.
+    Keep the row-lock behavior for SQLite and other test/non-production
+    dialects so their existing concurrency assertions remain meaningful.
+    """
+
+    if not for_update:
+        return statement
+    bind = getattr(db, "bind", None)
+    if bind is None:
+        try:
+            bind = db.get_bind()
+        except Exception:
+            bind = None
+    if bind is not None and getattr(bind.dialect, "name", None) == "postgresql":
+        return statement
+    return statement.with_for_update()
+
+
 class OkxDemoSubmissionGrantBlocked(Exception):
     pass
 
@@ -91,22 +118,26 @@ class OkxDemoSubmissionGrantService:
                 raise OkxDemoSubmissionGrantBlocked(
                     "unresolved writer attempt blocks one-shot grant"
                 )
-            row = self.db.execute(
+            row_statement = (
                 select(ApprovedExecution, TradeIntent, RiskDecision)
                 .join(TradeIntent, TradeIntent.id == ApprovedExecution.trade_intent_id)
                 .join(RiskDecision, RiskDecision.id == ApprovedExecution.risk_decision_id)
                 .where(ApprovedExecution.id == approval_id)
-                .with_for_update()
+            )
+            row = self.db.execute(
+                canary_lineage_read_query(self.db, row_statement, for_update=True)
             ).first()
             if row is None:
                 raise OkxDemoSubmissionGrantBlocked("approved execution is unavailable")
             approved, intent, decision = row
             state = self.db.scalars(
-                select(OkxDemoReconciliationState)
-                .where(
-                    OkxDemoReconciliationState.execution_target_id == "OKX_DEMO"
+                canary_lineage_read_query(
+                    self.db,
+                    select(OkxDemoReconciliationState).where(
+                        OkxDemoReconciliationState.execution_target_id == "OKX_DEMO"
+                    ),
+                    for_update=True,
                 )
-                .with_for_update()
             ).first()
             if state is None or state.last_reconciliation_run_id is None:
                 raise OkxDemoSubmissionGrantBlocked(
@@ -223,14 +254,20 @@ class OkxDemoSubmissionGrantService:
             ) from None
 
     def _expire_stale(self, now: datetime) -> None:
+        # ``arm`` already owns ONE_SHOT_COORDINATION_LOCK_KEY for this
+        # transaction.  Keep expiry and its guarded column update atomic, but
+        # do not request a PostgreSQL row lock that the runtime role cannot
+        # acquire under its least-privilege ACL.
         rows = list(
             self.db.scalars(
-                select(OkxDemoSubmissionGrant)
-                .where(
-                    OkxDemoSubmissionGrant.execution_target_id == "OKX_DEMO",
-                    OkxDemoSubmissionGrant.status == "ACTIVE",
+                canary_lineage_read_query(
+                    self.db,
+                    select(OkxDemoSubmissionGrant).where(
+                        OkxDemoSubmissionGrant.execution_target_id == "OKX_DEMO",
+                        OkxDemoSubmissionGrant.status == "ACTIVE",
+                    ),
+                    for_update=True,
                 )
-                .with_for_update()
             )
         )
         for row in rows:
@@ -252,6 +289,10 @@ def require_canary_reconciliation(
     now: datetime,
     for_update: bool,
 ) -> ReconciliationRun:
+    # ``for_update`` is retained at call sites as a statement of intent: on
+    # PostgreSQL the caller's coordination advisory lock provides the conflict
+    # boundary, while this read-only assertion must stay executable by the
+    # SELECT-only runtime role.
     state_query = select(OkxDemoReconciliationState).where(
         OkxDemoReconciliationState.execution_target_id == "OKX_DEMO"
     )
@@ -260,8 +301,16 @@ def require_canary_reconciliation(
         ReconciliationRun.execution_target_id == "OKX_DEMO",
     )
     if for_update:
-        state_query = state_query.with_for_update()
-        run_query = run_query.with_for_update()
+        state_query = canary_lineage_read_query(
+            db,
+            state_query,
+            for_update=True,
+        )
+        run_query = canary_lineage_read_query(
+            db,
+            run_query,
+            for_update=True,
+        )
     state = db.scalars(state_query).first()
     run = db.scalars(run_query).first()
     active_now = OkxDemoSubmissionGrantService._aware(now)

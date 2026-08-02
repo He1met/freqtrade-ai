@@ -57,6 +57,7 @@ from app.services.okx_demo_submission_grant import (
     _decimal_text,
     _require_minimum_canary_risk,
     OkxDemoSubmissionGrantBlocked,
+    canary_lineage_read_query,
     require_canary_reconciliation,
     submission_grant_request_digest,
 )
@@ -1211,10 +1212,18 @@ class SqlAlchemyOrderWriterStore:
         approved_payload_hash: str,
         now: datetime,
     ) -> OkxDemoSubmissionGrant:
+        # acquire_lease serializes the writer with its advisory key and the
+        # caller consumes the grant in the same guarded transaction.  Do not
+        # add a PostgreSQL row lock here: the runtime role intentionally has
+        # only the grant's narrow transition-column UPDATE privilege.
         grant = self.db.scalars(
-            select(OkxDemoSubmissionGrant)
-            .where(OkxDemoSubmissionGrant.grant_id == grant_id)
-            .with_for_update()
+            canary_lineage_read_query(
+                self.db,
+                select(OkxDemoSubmissionGrant).where(
+                    OkxDemoSubmissionGrant.grant_id == grant_id
+                ),
+                for_update=True,
+            )
         ).first()
         if grant is None:
             raise OkxDemoWriteBlocked("one-shot submission grant is missing")
