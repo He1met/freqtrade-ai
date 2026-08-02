@@ -83,6 +83,9 @@ def _canary_preparation_response(result: Any) -> dict[str, Any]:
         response["supersedes_job_ids"] = list(
             getattr(result, "supersedes_job_ids", ())
         )
+    refresh_of_job_id = getattr(result, "refresh_of_job_id", None)
+    if refresh_of_job_id is not None:
+        response["refresh_of_job_id"] = refresh_of_job_id
     return response
 
 
@@ -132,6 +135,8 @@ def prepare_controlled_canary(
             if exc.entry_kind is not None:
                 response["entry_kind"] = exc.entry_kind
                 response["supersedes_job_ids"] = list(exc.supersedes_job_ids)
+            if exc.refresh_of_job_id is not None:
+                response["refresh_of_job_id"] = exc.refresh_of_job_id
             return response
         except OkxDemoCanaryPreparationBlocked as exc:
             raise HTTPException(
@@ -231,6 +236,59 @@ def prepare_fresh_execution_only_canary(
     return operator_request_coordinator.execute(
         operator_headers,
         operation="okx-demo-controlled-canary-fresh-execution-only",
+        provider_call=True,
+        request_payload=payload.model_dump(mode="json"),
+        handler=execute,
+        cache_result=_cache_canary_result,
+    )
+
+
+@router.post("/canary/refresh-execution-only", status_code=202)
+def refresh_fresh_execution_only_canary(
+    payload: CanaryPreparationRequest,
+    db: Session = Depends(get_db),
+    operator_headers: OperatorRequestHeaders = Depends(operator_request_headers),
+) -> dict[str, Any]:
+    """Re-attest an expired successful fresh canary handoff.
+
+    A new idempotency key creates one immutable ResearchJob successor.  The
+    same key is used after the runtime handoff to finalize it; this endpoint
+    never changes the source job or enables order submission.
+    """
+
+    def execute() -> dict[str, Any]:
+        try:
+            result = OkxDemoCanaryPreparationService(
+                db
+            ).prepare_fresh_execution_only_refresh(
+                idempotency_key=operator_headers.idempotency_key or "",
+            )
+        except OkxDemoCanaryPreparationWaiting as exc:
+            response = {
+                "operation_status": "WAITING_FOR_RUNTIME_ATTESTATION",
+                "execution_target_id": "OKX_DEMO",
+                "provenance": "CONTROLLED_CANARY_NON_PRODUCTION",
+                "entry_kind": "FRESH_EXECUTION_ONLY_REFRESH",
+                "non_production": True,
+                "attestation_request_job_id": exc.job_id,
+                "supersedes_job_ids": list(exc.supersedes_job_ids),
+                "credential_values_recorded": False,
+            }
+            if exc.refresh_of_job_id is not None:
+                response["refresh_of_job_id"] = exc.refresh_of_job_id
+            return response
+        except OkxDemoCanaryPreparationBlocked as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"operation_status": "BLOCKED", "message": str(exc)},
+            ) from exc
+        response = _canary_preparation_response(result)
+        response["entry_kind"] = "FRESH_EXECUTION_ONLY_REFRESH"
+        return response
+
+    return operator_request_coordinator.execute(
+        operator_headers,
+        operation="okx-demo-controlled-canary-refresh-execution-only",
         provider_call=True,
         request_payload=payload.model_dump(mode="json"),
         handler=execute,
