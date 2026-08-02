@@ -553,6 +553,67 @@ def test_fresh_execution_only_entry_preserves_terminal_history_and_is_single_fli
     assert replay.value.job_id == fresh.id
 
 
+def test_fresh_entry_runtime_handoff_persists_only_execution_lineage(db_session):
+    legacy = _blocked_attestation_job(
+        db_session,
+        key="legacy-runtime-entry",
+        request_payload={
+            "provenance": CANARY_PROVENANCE,
+            "execution_target": "OKX_DEMO",
+            "instrument_id": "BTC-USDT-SWAP",
+            "timeframe": "1m",
+            "candle_limit": 2,
+            "non_production": True,
+        },
+    )
+    terminal = _blocked_attestation_job(
+        db_session,
+        key="terminal-runtime-entry",
+        evidence={
+            "provenance": CANARY_PROVENANCE,
+            "attestation_error": {
+                "error_type": "OkxReadAdapterError",
+                "kind": "INVALID_SIGNAL_BUNDLE",
+                "status": "BLOCKED",
+                "retryable": False,
+            },
+        },
+    )
+    service = OkxDemoCanaryPreparationService(db_session, now_provider=lambda: NOW)
+    with pytest.raises(OkxDemoCanaryPreparationWaiting) as waiting:
+        service.prepare_fresh_execution_only(idempotency_key="fresh-runtime-entry")
+    job = db_session.get(ResearchJob, waiting.value.job_id)
+
+    class Reference:
+        def __init__(self, database_id, snapshot_id, digest):
+            self.database_id = database_id
+            self.snapshot_id = snapshot_id
+            self.digest = digest
+
+    class Bundle:
+        observed_at = NOW
+        expires_at = NOW + timedelta(seconds=30)
+        instrument = Reference(1, "instrument-fresh", "c" * 64)
+        market = Reference(2, "market-fresh", "d" * 64)
+        account = Reference(3, "account-fresh", "e" * 64)
+
+    class RuntimeRead:
+        def capture_execution_attestation(self, db, *, inst_id):
+            assert inst_id == "BTC-USDT-SWAP"
+            return Bundle()
+
+    assert process_pending_canary_attestation(
+        read_client=RuntimeRead(), db=db_session, now=NOW
+    ) is True
+    db_session.commit()
+    db_session.refresh(job)
+    assert job.status == "SUCCESS"
+    assert job.stage == "CANARY_SNAPSHOTS_READY"
+    assert job.evidence_snapshot["entry_kind"] == "FRESH_EXECUTION_ONLY"
+    assert job.evidence_snapshot["supersedes_job_ids"] == [legacy.id, terminal.id]
+    assert "candle" not in str(job.evidence_snapshot).lower()
+
+
 def test_fresh_execution_only_entry_finalization_retains_lineage_metadata(
     db_session, monkeypatch
 ):
