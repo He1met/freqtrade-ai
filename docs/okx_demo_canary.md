@@ -79,8 +79,9 @@ refresh 在创建 successor 或 finalize 时若只是暂时拿不到 canonical r
 transaction-scoped advisory lock，会返回非终态
 `WAITING_FOR_RUNTIME_ATTESTATION`，且不会把该结果缓存为同一
 `Idempotency-Key` 的终态错误；待 reconciliation 释放锁后可继续使用原 key 重试。
-该等待不代表已创建新的 ResearchJob，也不延长任何快照 TTL。stale/invalid/unknown
-证据、非 Demo 配置、active grant/writer/order 等真实安全失败仍返回并缓存
+创建阶段的该等待不代表已创建新的 ResearchJob；finalize 阶段只引用既有 successor，
+也不延长任何快照 TTL。stale/invalid/unknown 证据、非 Demo 配置、active
+grant/writer/order 等真实安全失败仍返回并缓存
 `409/BLOCKED`，其他 operator 入口的错误缓存语义不变。
 
 若该 refresh successor 自身也在 finalization 前过期，允许且仅允许一次额外的
