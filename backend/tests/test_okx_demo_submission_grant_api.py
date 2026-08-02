@@ -18,6 +18,12 @@ REQUEST = {
     "approved_payload_hash": "c" * 64,
     "client_order_id": "ControlledCanaryOrder000000001",
 }
+LEGACY_ENDPOINT_BLOCKED = {
+    "detail": {
+        "operation_status": "BLOCKED",
+        "message": "Legacy one-shot arming is disabled; use consent-finalize.",
+    }
+}
 
 
 @pytest.fixture()
@@ -50,7 +56,7 @@ def client(monkeypatch):
         app.dependency_overrides.clear()
 
 
-def test_one_shot_grant_requires_operator_token(client) -> None:
+def test_legacy_one_shot_grant_is_disabled_before_token_validation(client) -> None:
     api, calls = client
     response = api.post(
         "/api/okx-demo/submission-grants/one-shot",
@@ -60,11 +66,12 @@ def test_one_shot_grant_requires_operator_token(client) -> None:
         },
         json=REQUEST,
     )
-    assert response.status_code == 401
+    assert response.status_code == 409
+    assert response.json() == LEGACY_ENDPOINT_BLOCKED
     assert calls == []
 
 
-def test_one_shot_grant_requires_explicit_once_consent(client) -> None:
+def test_legacy_one_shot_grant_is_disabled_without_consent_header(client) -> None:
     api, calls = client
     response = api.post(
         "/api/okx-demo/submission-grants/one-shot",
@@ -75,10 +82,11 @@ def test_one_shot_grant_requires_explicit_once_consent(client) -> None:
         json=REQUEST,
     )
     assert response.status_code == 409
+    assert response.json() == LEGACY_ENDPOINT_BLOCKED
     assert calls == []
 
 
-def test_one_shot_grant_arms_exact_payload_with_all_headers(client) -> None:
+def test_legacy_one_shot_grant_remains_disabled_with_all_headers(client) -> None:
     api, calls = client
     response = api.post(
         "/api/okx-demo/submission-grants/one-shot",
@@ -89,13 +97,6 @@ def test_one_shot_grant_arms_exact_payload_with_all_headers(client) -> None:
         },
         json=REQUEST,
     )
-    assert response.status_code == 202
-    assert calls == [REQUEST]
-    assert response.json() == {
-        "operation_status": "ARMED",
-        "execution_target_id": "OKX_DEMO",
-        "grant_id": "d" * 32,
-        "approval_id": 41,
-        "expires_at": (NOW + timedelta(seconds=10)).isoformat(),
-        "credential_values_recorded": False,
-    }
+    assert response.status_code == 409
+    assert response.json() == LEGACY_ENDPOINT_BLOCKED
+    assert calls == []

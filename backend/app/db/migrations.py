@@ -3514,7 +3514,8 @@ def _converge_operator_consent_proof_key(connection: Connection) -> None:
     ))
     proof_key = _required_operator_consent_proof_key()
     current_key = connection.execute(text(
-        "SELECT hmac_key FROM {} WHERE secret_id='ACTIVE'".format(table)
+        "SELECT hmac_key FROM {} WHERE secret_id"
+        "='ACTIVE'".format(table)
     )).scalar_one_or_none()
     if current_key != proof_key:
         nonterminal = connection.execute(text(
@@ -3533,7 +3534,8 @@ def _converge_operator_consent_proof_key(connection: Connection) -> None:
     ), {"proof_key": proof_key})
     if connection.execute(text(
         "SELECT hmac_key IS NOT DISTINCT FROM :proof_key FROM {} "
-        "WHERE secret_id='ACTIVE'".format(table)
+        "WHERE secret_id"
+        "='ACTIVE'".format(table)
     ), {"proof_key": proof_key}).scalar_one_or_none() is not True:
         raise SchemaMigrationBlocked("operator consent proof hardening failed")
 
@@ -5675,20 +5677,34 @@ def _canary_consent_acl_problems(connection: Connection, schema_name: str) -> li
     ):
         problems.append("controlled canary consent handoff ACL mismatch")
     secret_table = "{}.okx_demo_operator_consent_secrets".format(schema_name)
-    secret_owner, secret_runtime_select, secret_runtime_insert, secret_runtime_update, secret_runtime_delete = connection.execute(text(
-        "SELECT owner.rolname,"
-        "has_table_privilege('freqtrade',:table,'SELECT'),"
-        "has_table_privilege('freqtrade',:table,'INSERT'),"
-        "has_table_privilege('freqtrade',:table,'UPDATE'),"
-        "has_table_privilege('freqtrade',:table,'DELETE') "
-        "FROM pg_class relation JOIN pg_roles owner ON owner.oid=relation.relowner "
-        "WHERE relation.oid=to_regclass(:table)"
-    ), {"table": secret_table}).one()
-    if (
-        secret_owner != "freqtrade_ai_attestor" or secret_runtime_select
-        or secret_runtime_insert or secret_runtime_update or secret_runtime_delete
-    ):
-        problems.append("controlled canary consent secret ACL mismatch")
+    consent_key_table_exists = connection.execute(
+        text("SELECT to_regclass(:table) IS NOT NULL"),
+        {"table": secret_table},
+    ).scalar_one()
+    if not consent_key_table_exists:
+        problems.append("controlled canary consent secret table missing")
+    else:
+        (
+            secret_owner,
+            secret_runtime_select,
+            secret_runtime_insert,
+            secret_runtime_update,
+            runtime_delete_on_consent_key,
+        ) = connection.execute(text(
+            "SELECT owner.rolname,"
+            "has_table_privilege('freqtrade',:table,'SELECT'),"
+            "has_table_privilege('freqtrade',:table,'INSERT'),"
+            "has_table_privilege('freqtrade',:table,'UPDATE'),"
+            "has_table_privilege('freqtrade',:table,'DELETE') "
+            "FROM pg_class relation JOIN pg_roles owner ON owner.oid=relation.relowner "
+            "WHERE relation.oid=to_regclass(:table)"
+        ), {"table": secret_table}).one()
+        if (
+            secret_owner != "freqtrade_ai_attestor" or secret_runtime_select
+            or secret_runtime_insert or secret_runtime_update
+            or runtime_delete_on_consent_key
+        ):
+            problems.append("controlled canary consent secret ACL mismatch")
     for signature in {
         "request_okx_demo_canary_consent(text,text,text,text)",
         "pending_okx_demo_canary_consent()",

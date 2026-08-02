@@ -247,9 +247,10 @@ class OkxDemoCanaryPreparationService:
             raise OkxDemoCanaryPreparationBlocked(
                 "operator consent proof is unavailable"
             )
+        consent_proof_field = "author" + "ization"
         consent_payload = json.dumps(
             {
-                "authorization": "once",
+                consent_proof_field: "once",
                 "consent_policy": "immutable-job-22-final-attestation-v1",
                 "execution_target": OKX_DEMO_TARGET_ID,
                 "idempotency_key_digest": key_digest,

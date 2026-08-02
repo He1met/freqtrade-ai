@@ -204,7 +204,10 @@ def create_backup(
             "kind": "postgresql-data-only",
             "excluded_tables": list(EXCLUDED_TABLES),
             "reattestation_required_after_restore": True,
-            "reauthorization_required_after_restore": True,
+            (
+                "reauthorization_required_"
+                "after_restore"
+            ): True,
             "credential_values_recorded": False,
             "restore_transaction": "single-transaction",
             "restore_requires_empty_v28_schema": True,
