@@ -138,6 +138,23 @@ intent/approval/grant/writer attempt/order/非零 position、未知 history 或�
 对账、许可撤销和重启不重复下单均必须有真实证据；它不能批准、部署或代表
 任何 DeepSeek/社区策略候选。
 
+如果且仅如果上述唯一 post-persistence successor 已达到
+`SUCCESS/CANARY_SNAPSHOTS_READY`、其三类 attested snapshots 随后都明确过期，
+并且 durable execution boundary 仍完全为空，可用全新的 `Idempotency-Key` 调用
+一次 `POST /api/okx-demo/canary/recover-final-expiry`。该最终入口固定
+`entry_kind=FRESH_EXECUTION_ONLY_FINAL_EXPIRY_RECOVERY`、
+`recovery_boundary=POST_PERSISTENCE_RECOVERY_SNAPSHOT_EXPIRY`、
+`max_attempts=1`，累积保留完整 supersedes lineage，并要求 canonical runtime
+重新取得全新 attestation。它不延长或复用 job21 的快照，不改变 schema/ACL，
+也不创建 grant 或订单。任何第二个 final successor、pending/unknown history、
+既有 intent/approval/grant/writer attempt/order/非零 position 都 fail-closed。
+
+有界操作顺序为：确认唯一 runtime/writer 与空 durable boundary → 以一个新 key
+调用 final-expiry 入口 → 等待同一 job 的全新 runtime attestation → 使用同一 key
+完成 schema-26 原子 lineage finalization。此后仍须重新执行全部 preflight，只有
+one-shot grant 的独立硬门全部 READY 才能由 canonical writer 提交最多一笔最小
+OKX Demo 订单；本入口本身不是下单授权。
+
 runtime 在成功持久化任一待处理的 execution-only attestation 后，会先提交并
 释放 one-shot coordination advisory lock，再跳过该轮长的 observe/network cycle。
 下一轮仍由同一个 runtime/writer 恢复常规 reconciliation；这只缩短 operator
