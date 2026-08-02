@@ -823,6 +823,23 @@ def test_refresh_rejects_second_key_pending_and_unsafe_activity(db_session, monk
     assert db_session.get(ResearchJob, source.id).status == "SUCCESS"
 
 
+def test_refresh_rejects_source_without_non_production_marker(db_session, monkeypatch):
+    monkeypatch.setenv("FREQTRADE_AI_EXECUTION_TARGET", "OKX_DEMO")
+    monkeypatch.setenv("FREQTRADE_AI_SIMULATED_TRADING", "true")
+    monkeypatch.setenv("FREQTRADE_AI_ALLOW_REAL_FUNDS", "false")
+    source = _successful_fresh_source(db_session)
+    payload = dict(source.request_payload)
+    payload["non_production"] = False
+    source.request_payload = payload
+    db_session.commit()
+    service = OkxDemoCanaryPreparationService(db_session, now_provider=lambda: NOW)
+    with pytest.raises(OkxDemoCanaryPreparationBlocked, match="source is not ready"):
+        service.prepare_fresh_execution_only_refresh(
+            idempotency_key="fresh-refresh-no-non-production"
+        )
+    assert db_session.query(ResearchJob).filter_by(operation=CANARY_OPERATION).count() == 1
+
+
 def test_fresh_entry_runtime_handoff_persists_only_execution_lineage(db_session):
     legacy = _blocked_attestation_job(
         db_session,

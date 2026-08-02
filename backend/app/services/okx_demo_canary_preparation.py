@@ -823,6 +823,7 @@ class OkxDemoCanaryPreparationService:
             or payload.get("instrument_id") not in CANARY_INSTRUMENTS
             or payload.get("bundle_kind") != "EXECUTION_ONLY"
             or payload.get("entry_kind") != FRESH_EXECUTION_ONLY_ENTRY
+            or payload.get("non_production") is not True
             or payload.get("refresh_of_job_id") is not None
             or "timeframe" in payload
             or "candle_limit" in payload
@@ -836,6 +837,7 @@ class OkxDemoCanaryPreparationService:
         evidence = job.evidence_snapshot if isinstance(job.evidence_snapshot, dict) else {}
         return (
             evidence.get("provenance") == CANARY_PROVENANCE
+            and evidence.get("non_production") is True
             and evidence.get("entry_kind") == FRESH_EXECUTION_ONLY_ENTRY
             and evidence.get("supersedes_job_ids") == supersedes
             and isinstance(evidence.get("snapshot_evidence"), dict)
