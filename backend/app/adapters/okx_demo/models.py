@@ -465,3 +465,40 @@ class TrustedSignalBundle(ImmutableStableModel):
         ):
             raise ValueError("trusted signal bundle references are inconsistent")
         return self
+
+
+class ExecutionAttestationBundle(ImmutableStableModel):
+    """Strategy-independent references for one bounded execution canary.
+
+    This contract deliberately has no candles, strategy, candidate, signal, or
+    deployment fields.  It is only enough to bind an instrument/market/account
+    snapshot to the existing Demo writer gate; a normal signal bundle remains
+    validated by :class:`TrustedSignalBundle` above.
+    """
+
+    schema_version: Literal["execution-1"] = "execution-1"
+    execution_target: Literal["OKX_DEMO"] = "OKX_DEMO"
+    instrument_id: str = Field(pattern=r"^[A-Z0-9]+-[A-Z0-9]+-SWAP$")
+    observed_at: datetime
+    expires_at: datetime
+    instrument: TrustedSnapshotReference
+    market: TrustedSnapshotReference
+    account: TrustedSnapshotReference
+
+    @model_validator(mode="after")
+    def validate_bundle_references(self) -> "ExecutionAttestationBundle":
+        if (
+            self.instrument.kind != "instrument"
+            or self.market.kind != "market"
+            or self.account.kind != "account"
+            or {
+                self.instrument.expires_at,
+                self.market.expires_at,
+                self.account.expires_at,
+                self.expires_at,
+            }
+            != {self.expires_at}
+            or self.observed_at >= self.expires_at
+        ):
+            raise ValueError("execution attestation references are inconsistent")
+        return self

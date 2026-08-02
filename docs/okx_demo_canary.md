@@ -35,7 +35,9 @@ one-shot submission grant 驱动：`TradeIntent/ApprovedExecution`（明确标�
    `CONTROLLED_CANARY_NON_PRODUCTION` 的 attestation request，不接受调用方的
    品种、数量或价格覆盖。
 2. 唯一 canonical runtime 在同一 coordination lock 下调用已 attested 的
-   `capture_trusted_signal_bundle`，实时持久 instrument/market/account 快照。
+   `capture_execution_attestation`，实时持久 instrument/market/account 快照。
+   该 execution-only bundle 不读取 candles、不生成 signal evaluation，且仍
+   复用 read adapter 的 fingerprint、expiry、source 与原子快照持久化边界。
    backend API 不读取 Keychain，也不自行构造快照。
 3. 主任务/受控 operator 在确认 runtime 成功后调用
    `POST /api/okx-demo/canary/finalize`（沿用同一 `Idempotency-Key`）创建无

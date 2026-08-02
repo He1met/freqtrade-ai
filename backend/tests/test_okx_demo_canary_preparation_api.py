@@ -231,7 +231,9 @@ def test_prepare_without_attested_snapshots_queues_runtime_handoff(db_session, m
     assert job.status == "AWAITING_APPROVAL"
     assert job.stage == "CANARY_SNAPSHOT_REQUESTED"
     assert job.request_payload["provenance"] == CANARY_PROVENANCE
-    assert job.request_payload["candle_limit"] == 2
+    assert job.request_payload["bundle_kind"] == "EXECUTION_ONLY"
+    assert "candle_limit" not in job.request_payload
+    assert "timeframe" not in job.request_payload
 
 
 def test_different_idempotency_key_cannot_create_second_pending_request(db_session, monkeypatch):
@@ -259,8 +261,7 @@ def test_runtime_handoff_persists_only_attested_bundle_references(db_session):
             "provenance": CANARY_PROVENANCE,
             "execution_target": "OKX_DEMO",
             "instrument_id": "BTC-USDT-SWAP",
-            "timeframe": "1m",
-            "candle_limit": 2,
+            "bundle_kind": "EXECUTION_ONLY",
         },
         status="AWAITING_APPROVAL",
         stage="CANARY_SNAPSHOT_REQUESTED",
@@ -286,8 +287,8 @@ def test_runtime_handoff_persists_only_attested_bundle_references(db_session):
         account = Reference(3, "account-snapshot", "e" * 64)
 
     class RuntimeRead:
-        def capture_trusted_signal_bundle(self, db, *, inst_id, timeframe, candle_limit):
-            assert (inst_id, timeframe, candle_limit) == ("BTC-USDT-SWAP", "1m", 2)
+        def capture_execution_attestation(self, db, *, inst_id):
+            assert inst_id == "BTC-USDT-SWAP"
             return Bundle()
 
     assert process_pending_canary_attestation(
@@ -322,8 +323,7 @@ def _blocked_attestation_job(
             "provenance": CANARY_PROVENANCE,
             "execution_target": "OKX_DEMO",
             "instrument_id": "BTC-USDT-SWAP",
-            "timeframe": "1m",
-            "candle_limit": 2,
+            "bundle_kind": "EXECUTION_ONLY",
         },
         status="BLOCKED",
         stage="CANARY_SNAPSHOT_BLOCKED",
@@ -356,8 +356,7 @@ def test_transient_read_failure_is_redacted_and_allows_one_successor(
             "provenance": CANARY_PROVENANCE,
             "execution_target": "OKX_DEMO",
             "instrument_id": "BTC-USDT-SWAP",
-            "timeframe": "1m",
-            "candle_limit": 2,
+            "bundle_kind": "EXECUTION_ONLY",
         },
         status="AWAITING_APPROVAL",
         stage="CANARY_SNAPSHOT_REQUESTED",
@@ -370,7 +369,7 @@ def test_transient_read_failure_is_redacted_and_allows_one_successor(
     db_session.commit()
 
     class TransientRead:
-        def capture_trusted_signal_bundle(self, *_args, **_kwargs):
+        def capture_execution_attestation(self, *_args, **_kwargs):
             raise OkxReadAdapterError(
                 kind="RATE_LIMITED",
                 status="FAILED",
