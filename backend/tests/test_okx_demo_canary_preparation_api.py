@@ -662,6 +662,14 @@ def test_fresh_entry_rejects_unknown_terminal_error_without_new_job(db_session):
     assert db_session.query(ResearchJob).filter_by(operation=CANARY_OPERATION).count() == 1
 
 
+def test_fresh_entry_requires_immutable_terminal_history(db_session):
+    with pytest.raises(OkxDemoCanaryPreparationBlocked, match="immutable terminal"):
+        OkxDemoCanaryPreparationService(
+            db_session, now_provider=lambda: NOW
+        ).prepare_fresh_execution_only(idempotency_key="fresh-without-history")
+    assert db_session.query(ResearchJob).filter_by(operation=CANARY_OPERATION).count() == 0
+
+
 def test_fresh_entry_preflight_rejects_active_grant_before_runtime_handoff(db_session):
     db_session.add(
         OkxDemoSubmissionGrant(

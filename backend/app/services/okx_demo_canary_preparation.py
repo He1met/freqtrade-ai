@@ -463,7 +463,12 @@ class OkxDemoCanaryPreparationService:
             .order_by(ResearchJob.created_at, ResearchJob.id)
         ).all()
         supersedes_job_ids: list[int] = []
-        if other_requests and allow_terminal_history:
+        if allow_terminal_history:
+            if not other_requests:
+                self.db.rollback()
+                raise OkxDemoCanaryPreparationBlocked(
+                    "fresh execution-only entry requires immutable terminal canary history"
+                )
             supersedes_job_ids = self._terminal_history_for_fresh_entry(other_requests)
         elif other_requests:
             self.db.rollback()
