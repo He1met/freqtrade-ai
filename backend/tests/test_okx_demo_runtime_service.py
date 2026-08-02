@@ -15,6 +15,15 @@ from app.adapters.okx_demo.write_semantics import OkxDemoWriteBlocked
 NOW = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
 
 
+@pytest.fixture(autouse=True)
+def _no_recoverable_consent(monkeypatch):
+    monkeypatch.setattr(
+        runtime_service,
+        "arm_finalized_canary_consent",
+        lambda _db, *, runtime_instance_id: None,
+    )
+
+
 def reconciliation(
     status: str = "RECONCILED",
     *,
@@ -201,6 +210,7 @@ class FakeAdapter:
         self.closed = False
         self.startup_status = startup_status
         self.resumable = resumable
+        self.runtime_instance_id = "Runtime00000001"
 
     def reconcile_before_writer(self, **_kwargs):
         self.events.append("startup-reconcile")
@@ -444,6 +454,303 @@ def test_runtime_releases_coordination_window_after_canary_attestation(
     # the next polling turn then exits without a long reconciliation cycle.
     assert db.commits == 3
     assert db.rollbacks == 0
+
+
+def test_runtime_commits_consent_lineage_before_same_identity_grant(monkeypatch, tmp_path):
+    events = []
+
+    class ConsentAdapter(FakeAdapter):
+        def run_active_one_shot(self, **_kwargs):
+            self.events.append("one-shot-consumed")
+            return "CONSUMED"
+
+    adapter = ConsentAdapter()
+    server = FakeServerSession(events)
+    db = FakeDatabaseSession()
+    connection = SimpleNamespace(close=lambda: None)
+    engine = SimpleNamespace(connect=lambda: connection, dispose=lambda: None)
+    monkeypatch.setattr(runtime_service, "STOP_EVENT", FakeStopEvent())
+    monkeypatch.setattr(runtime_service, "Session", lambda bind: db)
+    monkeypatch.setattr(runtime_service, "acquire_one_shot_runtime_lock", lambda _db: True)
+    monkeypatch.setattr(runtime_service, "release_one_shot_runtime_lock", lambda _db: False)
+    monkeypatch.setattr(runtime_service, "create_okx_demo_server_session", lambda *_args, **_kwargs: server)
+    monkeypatch.setattr(runtime_service, "_write_readiness", lambda *_args, **_kwargs: None)
+    def finalize_consent(**kwargs):
+        kwargs["fresh_reconciliation"]()
+        events.append(("finalized", kwargs["runtime_instance_id"]))
+        return SimpleNamespace(handoff_id="a" * 32)
+
+    monkeypatch.setattr(
+        runtime_service,
+        "process_pending_canary_consent_handoff",
+        finalize_consent,
+    )
+    arm_calls = []
+    def arm_after_commit(_db, *, runtime_instance_id):
+        arm_calls.append(runtime_instance_id)
+        if len(arm_calls) == 1:
+            return None
+        events.append(("armed", runtime_instance_id))
+        return SimpleNamespace(grant_id="b" * 32)
+
+    monkeypatch.setattr(
+        runtime_service,
+        "arm_finalized_canary_consent",
+        arm_after_commit,
+    )
+    monkeypatch.setattr(
+        runtime_service,
+        "settle_canary_consent_handoff",
+        lambda _db, *, grant_id: "CONSUMED",
+    )
+
+    runtime_service.serve(
+        environment={"DATABASE_URL": "postgresql+psycopg:///isolated"},
+        runtime_path=tmp_path,
+        reconciliation_factory=lambda: adapter,
+        engine_factory=lambda *_args, **_kwargs: engine,
+        now_provider=lambda: NOW,
+    )
+
+    consent_events = [event for event in events if isinstance(event, tuple)]
+    assert consent_events[:2] == [
+        ("finalized", "Runtime00000001"),
+        ("armed", "Runtime00000001"),
+    ]
+    assert adapter.events == ["startup-reconcile", "observe", "one-shot-consumed"]
+    assert db.commits >= 3
+
+
+@pytest.mark.parametrize(
+    ("journal_state", "terminalized"),
+    [("BEFORE_PREPARED", True), ("PREPARED", False)],
+)
+def test_recovered_grant_writer_exception_uses_owner_terminalization_boundary(
+    monkeypatch, tmp_path, journal_state, terminalized
+):
+    events = []
+    failure_calls = []
+
+    class FailingRecoveredAdapter(FakeAdapter):
+        def run_active_one_shot(self, **_kwargs):
+            raise RuntimeError("synthetic recovered writer failure")
+
+    adapter = FailingRecoveredAdapter()
+    server = FakeServerSession(events)
+    db = FakeDatabaseSession()
+    engine = SimpleNamespace(
+        connect=lambda: SimpleNamespace(close=lambda: None),
+        dispose=lambda: None,
+    )
+    safe_target = SimpleNamespace(
+        simulated_trading=True,
+        allow_real_funds=False,
+        order_submission_enabled=False,
+    )
+    monkeypatch.setattr(
+        runtime_service,
+        "get_settings",
+        lambda: SimpleNamespace(execution_target_manifest=SimpleNamespace(
+            active_target_id="OKX_DEMO", active_target=safe_target
+        )),
+    )
+    monkeypatch.setattr(runtime_service, "STOP_EVENT", FakeStopEvent())
+    monkeypatch.setattr(runtime_service, "Session", lambda bind: db)
+    monkeypatch.setattr(runtime_service, "acquire_one_shot_runtime_lock", lambda _db: True)
+    monkeypatch.setattr(runtime_service, "release_one_shot_runtime_lock", lambda _db: True)
+    monkeypatch.setattr(runtime_service, "create_okx_demo_server_session", lambda *_a, **_k: server)
+    monkeypatch.setattr(runtime_service, "_write_readiness", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        runtime_service,
+        "arm_finalized_canary_consent",
+        lambda _db, *, runtime_instance_id: SimpleNamespace(grant_id="c" * 32),
+    )
+    def terminalize(_db, *, grant_id):
+        failure_calls.append((journal_state, grant_id))
+        return terminalized
+
+    monkeypatch.setattr(
+        runtime_service, "fail_canary_grant_before_prepare", terminalize
+    )
+    settle_calls = []
+    monkeypatch.setattr(
+        runtime_service,
+        "settle_canary_consent_handoff",
+        lambda *_a, **_k: settle_calls.append("settled"),
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic recovered writer failure"):
+        runtime_service.serve(
+            environment={"DATABASE_URL": "postgresql+psycopg:///isolated"},
+            runtime_path=tmp_path,
+            reconciliation_factory=lambda: adapter,
+            engine_factory=lambda *_a, **_k: engine,
+            now_provider=lambda: NOW,
+        )
+
+    assert failure_calls == [(journal_state, "c" * 32)]
+    assert settle_calls == []
+    assert db.rollbacks >= 1
+    assert db.commits >= 2
+
+
+@pytest.mark.parametrize("unsafe_source", ["manifest", "openings-freeze"])
+def test_runtime_commit_a_safety_change_blocks_immediate_canary_post(
+    monkeypatch, tmp_path, unsafe_source
+):
+    events = []
+    post_calls = []
+    safe_target = SimpleNamespace(
+        simulated_trading=True,
+        allow_real_funds=False,
+        order_submission_enabled=False,
+    )
+    unsafe_target = SimpleNamespace(
+        simulated_trading=True,
+        allow_real_funds=True,
+        order_submission_enabled=False,
+    )
+    manifest = {"value": SimpleNamespace(
+        active_target_id="OKX_DEMO", active_target=safe_target
+    )}
+
+    class ConsentAdapter(FakeAdapter):
+        def run_active_one_shot(self, *, openings_allowed, **_kwargs):
+            if openings_allowed:
+                post_calls.append("POST")
+            return "NONE"
+
+    adapter = ConsentAdapter()
+    server = FakeServerSession(events)
+    db = FakeDatabaseSession()
+    engine = SimpleNamespace(
+        connect=lambda: SimpleNamespace(close=lambda: None),
+        dispose=lambda: None,
+    )
+    monkeypatch.setattr(
+        runtime_service,
+        "get_settings",
+        lambda: SimpleNamespace(execution_target_manifest=manifest["value"]),
+    )
+    monkeypatch.setattr(runtime_service, "STOP_EVENT", FakeStopEvent())
+    monkeypatch.setattr(runtime_service, "Session", lambda bind: db)
+    monkeypatch.setattr(runtime_service, "acquire_one_shot_runtime_lock", lambda _db: True)
+    monkeypatch.setattr(runtime_service, "release_one_shot_runtime_lock", lambda _db: True)
+    monkeypatch.setattr(runtime_service, "create_okx_demo_server_session", lambda *_a, **_k: server)
+    monkeypatch.setattr(runtime_service, "_write_readiness", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        runtime_service,
+        "process_pending_canary_consent_handoff",
+        lambda **_kwargs: SimpleNamespace(handoff_id="a" * 32),
+    )
+    arm_calls = []
+    def arm_after_commit(_db, *, runtime_instance_id):
+        arm_calls.append(runtime_instance_id)
+        if len(arm_calls) == 1:
+            return None
+        if unsafe_source == "manifest":
+            manifest["value"] = SimpleNamespace(
+                active_target_id="OKX_DEMO", active_target=unsafe_target
+            )
+        else:
+            (tmp_path / runtime_service.OPENINGS_FREEZE_FILENAME).touch()
+        return SimpleNamespace(grant_id="b" * 32)
+
+    monkeypatch.setattr(runtime_service, "arm_finalized_canary_consent", arm_after_commit)
+    monkeypatch.setattr(runtime_service, "settle_canary_consent_handoff", lambda *_a, **_k: "FAILED")
+
+    with pytest.raises(
+        runtime_service.OkxDemoRuntimeBlocked,
+        match="failed before submission",
+    ):
+        runtime_service.serve(
+            environment={"DATABASE_URL": "postgresql+psycopg:///isolated"},
+            runtime_path=tmp_path,
+            reconciliation_factory=lambda: adapter,
+            engine_factory=lambda *_a, **_k: engine,
+            now_provider=lambda: NOW,
+        )
+
+    assert post_calls == []
+
+
+@pytest.mark.parametrize("unsafe_source", ["manifest", "openings-freeze"])
+def test_runtime_consent_safety_callback_rechecks_both_finalize_gates(
+    monkeypatch, tmp_path, unsafe_source
+):
+    events = []
+    adapter = FakeAdapter()
+    server = FakeServerSession(events)
+    db = FakeDatabaseSession()
+    connection = SimpleNamespace(close=lambda: None)
+    engine = SimpleNamespace(connect=lambda: connection, dispose=lambda: None)
+    safe_target = SimpleNamespace(
+        simulated_trading=True,
+        allow_real_funds=False,
+        order_submission_enabled=False,
+    )
+    unsafe_target = SimpleNamespace(
+        simulated_trading=True,
+        allow_real_funds=True,
+        order_submission_enabled=False,
+    )
+    manifest = {"value": SimpleNamespace(
+        active_target_id="OKX_DEMO", active_target=safe_target
+    )}
+    monkeypatch.setattr(
+        runtime_service,
+        "get_settings",
+        lambda: SimpleNamespace(execution_target_manifest=manifest["value"]),
+    )
+    monkeypatch.setattr(runtime_service, "STOP_EVENT", FakeStopEvent())
+    monkeypatch.setattr(runtime_service, "Session", lambda bind: db)
+    monkeypatch.setattr(
+        runtime_service, "acquire_one_shot_runtime_lock", lambda _db: True
+    )
+    monkeypatch.setattr(
+        runtime_service, "release_one_shot_runtime_lock", lambda _db: True
+    )
+    monkeypatch.setattr(
+        runtime_service,
+        "create_okx_demo_server_session",
+        lambda *_args, **_kwargs: server,
+    )
+    monkeypatch.setattr(
+        runtime_service, "_write_readiness", lambda *_args, **_kwargs: None
+    )
+
+    safety_results = []
+    def exercise_both_gates(**kwargs):
+        safety_results.append(kwargs["safety_check"]())
+        if unsafe_source == "manifest":
+            manifest["value"] = SimpleNamespace(
+                active_target_id="OKX_DEMO", active_target=unsafe_target
+            )
+        else:
+            (tmp_path / runtime_service.OPENINGS_FREEZE_FILENAME).touch()
+        safety_results.append(kwargs["safety_check"]())
+        return None
+
+    monkeypatch.setattr(
+        runtime_service,
+        "process_pending_canary_consent_handoff",
+        exercise_both_gates,
+    )
+    monkeypatch.setattr(
+        runtime_service,
+        "process_pending_canary_attestation",
+        lambda **_kwargs: False,
+    )
+
+    runtime_service.serve(
+        environment={"DATABASE_URL": "postgresql+psycopg:///isolated"},
+        runtime_path=tmp_path,
+        reconciliation_factory=lambda: adapter,
+        engine_factory=lambda *_args, **_kwargs: engine,
+        now_provider=lambda: NOW,
+    )
+
+    assert safety_results == [True, False]
 
 
 def test_runtime_cleanup_does_not_mask_primary_failure(

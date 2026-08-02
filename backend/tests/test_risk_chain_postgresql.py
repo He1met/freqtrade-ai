@@ -388,6 +388,20 @@ def test_20260727_02_upgrades_to_risk_chain_atomically(postgres_engine) -> None:
     with postgres_engine.begin() as connection:
         connection.execute(
             text(
+                "ALTER TABLE okx_demo_canary_consent_handoffs "
+                "DROP CONSTRAINT "
+                "okx_demo_canary_consent_handoffs_full_chain_run_id_fkey, "
+                "DROP CONSTRAINT "
+                "okx_demo_canary_consent_handoffs_approval_id_fkey, "
+                "DROP CONSTRAINT "
+                "okx_demo_canary_consent_handoffs_grant_id_fkey; "
+                "ALTER TABLE okx_demo_submission_grants "
+                "DROP CONSTRAINT "
+                "okx_demo_submission_grants_handoff_id_fkey"
+            )
+        )
+        connection.execute(
+            text(
                 "ALTER TABLE full_chain_runs "
                 "DROP CONSTRAINT IF EXISTS "
                 "full_chain_runs_signal_evaluation_id_fkey"
@@ -683,6 +697,7 @@ def test_readiness_fails_closed_before_peer_admin_hardening(
         problem.startswith("attestation function boundary mismatch:")
         for problem in problems
     )
+    assert "controlled canary consent secret table missing" in problems
 
 
 @pytest.mark.parametrize(

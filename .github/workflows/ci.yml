@@ -82,6 +82,7 @@ jobs:
 
           environment = dict(os.environ)
           environment["FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"] = secrets.token_hex(32)
+          environment["FREQTRADE_AI_OPERATOR_TOKEN"] = secrets.token_urlsafe(32)
           for action in ("upgrade", "verify"):
               subprocess.run(
                   [

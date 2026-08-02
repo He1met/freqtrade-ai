@@ -868,6 +868,17 @@ def test_frozen_old_research_job_ddl_upgrades_data_and_removes_global_unique(
 ) -> None:
     Base.metadata.create_all(postgres_engine)
     with postgres_engine.begin() as connection:
+        connection.execute(
+            text(
+                "ALTER TABLE okx_demo_canary_consent_handoffs "
+                "DROP CONSTRAINT "
+                "okx_demo_canary_consent_handoffs_source_job_id_fkey, "
+                "DROP CONSTRAINT "
+                "okx_demo_canary_consent_handoffs_audit_job_id_fkey, "
+                "DROP CONSTRAINT "
+                "okx_demo_canary_consent_handoffs_full_chain_run_id_fkey"
+            )
+        )
         _detach_signal_evaluations_from_full_chain(connection)
         connection.execute(text("DROP TABLE signal_evaluations"))
         connection.execute(text("DROP TABLE strategy_deployments"))

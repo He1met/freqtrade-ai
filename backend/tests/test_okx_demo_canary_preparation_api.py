@@ -380,6 +380,44 @@ def test_final_expiry_endpoint_reports_single_successor(client, monkeypatch):
     assert response.json()["supersedes_job_ids"] == [15, 16, 17, 18, 19, 20, 21]
 
 
+def test_consent_finalize_endpoint_persists_one_bounded_request(client, monkeypatch):
+    api, _calls = client
+    calls = []
+
+    def request(_self, *, idempotency_key, operator_token):
+        calls.append(idempotency_key)
+        assert operator_token == "operator-test-token"
+        return SimpleNamespace(
+            operation_status="REQUESTED",
+            handoff_id="a" * 32,
+            source_job_id=22,
+            consent_deadline_at=NOW + timedelta(seconds=60),
+        )
+
+    monkeypatch.setattr(
+        OkxDemoCanaryPreparationService,
+        "request_final_attestation_consent",
+        request,
+    )
+    headers = {
+        "X-Operator-Token": "operator-test-token",
+        "Idempotency-Key": "final-consent-627",
+        "X-Provider-Authorization": "once",
+    }
+    first = api.post(
+        "/api/okx-demo/canary/consent-finalize", headers=headers, json={}
+    )
+    replay = api.post(
+        "/api/okx-demo/canary/consent-finalize", headers=headers, json={}
+    )
+    assert first.status_code == replay.status_code == 202
+    assert first.json() == replay.json()
+    assert first.json()["operation_status"] == "REQUESTED"
+    assert first.json()["source_job_id"] == 22
+    assert first.json()["credential_values_recorded"] is False
+    assert calls == ["final-consent-627"]
+
+
 def test_refresh_terminal_block_remains_cached_for_same_key(client, monkeypatch):
     api, _calls = client
     calls = []

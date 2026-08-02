@@ -552,12 +552,63 @@ def recover_final_expiry_canary(
     )
 
 
+@router.post("/canary/consent-finalize", status_code=202)
+def consent_final_attestation_canary(
+    payload: CanaryPreparationRequest,
+    db: Session = Depends(get_db),
+    operator_headers: OperatorRequestHeaders = Depends(operator_request_headers),
+) -> dict[str, Any]:
+    """Persist the sole consent-bound handoff; the canonical runtime finalizes it."""
+
+    def execute() -> dict[str, Any]:
+        try:
+            result = OkxDemoCanaryPreparationService(
+                db
+            ).request_final_attestation_consent(
+                idempotency_key=operator_headers.idempotency_key or "",
+                operator_token=operator_headers.operator_token or "",
+            )
+        except OkxDemoCanaryPreparationBlocked as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"operation_status": "BLOCKED", "message": str(exc)},
+            ) from exc
+        return {
+            "operation_status": result.operation_status,
+            "execution_target_id": "OKX_DEMO",
+            "provenance": "CONTROLLED_CANARY_NON_PRODUCTION",
+            "non_production": True,
+            "handoff_id": result.handoff_id,
+            "source_job_id": result.source_job_id,
+            "consent_deadline_at": result.consent_deadline_at.isoformat(),
+            "credential_values_recorded": False,
+        }
+
+    return operator_request_coordinator.execute(
+        operator_headers,
+        operation="okx-demo-canary-consent-finalize",
+        provider_call=True,
+        request_payload=payload.model_dump(mode="json"),
+        handler=execute,
+    )
+
+
 @router.post("/submission-grants/one-shot", status_code=202)
 def arm_one_shot_submission_grant(
     payload: OneShotGrantRequest,
     db: Session = Depends(get_db),
     operator_headers: OperatorRequestHeaders = Depends(operator_request_headers),
 ) -> dict[str, Any]:
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "operation_status": "BLOCKED",
+            "message": "Legacy one-shot arming is disabled; use consent-finalize.",
+        },
+    )
+
+    # Retained below as unreachable compatibility documentation until the
+    # endpoint is removed in a separately versioned API change.
     def execute() -> dict[str, Any]:
         try:
             grant = OkxDemoSubmissionGrantService(db).arm(

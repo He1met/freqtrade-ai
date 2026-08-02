@@ -6,6 +6,7 @@ from app.db.migrations import (
     ATTESTED_SESSION_BASE_VERSION,
     CANARY_LINEAGE_WRITE_BASE_VERSION,
     CANARY_FINAL_EXPIRY_BASE_VERSION,
+    CANARY_LIFECYCLE_BASE_VERSION,
     EARLY_TARGET_LINEAGE_VERSION,
     DUAL_SIDE_BASE_VERSION,
     FULL_CHAIN_BASE_VERSION,
@@ -34,6 +35,7 @@ from app.db.migrations import (
     schema_problems,
     verify_schema,
     _add_controlled_canary_lifecycle_boundary,
+    _add_canary_consent_handoff_boundary,
 )
 from app.db.session import create_database_engine
 
@@ -91,7 +93,29 @@ def test_schema_version_is_explicit_and_stable() -> None:
     assert STRATEGY_VALIDATION_BASE_VERSION == "20260801_24"
     assert CANARY_LINEAGE_WRITE_BASE_VERSION == "20260801_25"
     assert CANARY_FINAL_EXPIRY_BASE_VERSION == "20260802_26"
-    assert SCHEMA_VERSION == "20260802_27"
+    assert CANARY_LIFECYCLE_BASE_VERSION == "20260802_27"
+    assert SCHEMA_VERSION == "20260802_28"
+
+
+def test_v28_consent_handoff_sql_is_owner_managed_and_exact() -> None:
+    import inspect as pyinspect
+
+    source = pyinspect.getsource(_add_canary_consent_handoff_boundary)
+    for fragment in (
+        "source.id=22",
+        "'[15,16,17,18,19,20,21,22]'::jsonb",
+        "consent_deadline_at<=statement_timestamp()",
+        "exact fresh attested snapshot binding failed",
+        "instrument.database_id",
+        "instrument.attested_session_id IS DISTINCT FROM market.attested_session_id",
+        "REVOKE INSERT ON TABLE",
+        "RUNTIME_RESTART_BEFORE_PREPARED",
+        "SECURITY DEFINER SET search_path=pg_catalog",
+        "okx_demo_operator_consent_secrets",
+        "public.hmac(",
+        "p_payload||'|'||p_nonce",
+    ):
+        assert fragment in source
 
 
 def test_v27_canary_lifecycle_sql_is_fail_closed() -> None:

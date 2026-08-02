@@ -18,8 +18,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_UP
 import hashlib
+import hmac
 import json
-from typing import Any, Mapping, Optional
+import os
+import secrets
+from typing import Any, Callable, Mapping, Optional
 
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
@@ -43,6 +46,7 @@ from app.models.full_chain import FullChainRun, FullChainStageRun
 from app.models.okx_demo_reconciliation import OkxDemoReconciliationState
 from app.models.order_writer import OkxDemoSubmissionGrant, OkxOrderWriteAttempt
 from app.models.research_job import ResearchJob
+from app.services.operator_authorization import OPERATOR_TOKEN_ENV
 from app.services.okx_demo_submission_grant import (
     CANARY_INSTRUMENTS,
     CANARY_NOTIONAL_CAP,
@@ -57,6 +61,7 @@ from app.services.risk_chain import _trusted_snapshot_id, canonical_digest
 
 CANARY_PROVENANCE = "CONTROLLED_CANARY_NON_PRODUCTION"
 CANARY_OPERATION = "okx_demo.execution_chain_canary"
+CANARY_CONSENT_AUDIT_OPERATION = "okx_demo_canary_consent_execution_audit"
 CANARY_POLICY_VERSION = "controlled-canary-v1"
 FRESH_EXECUTION_ONLY_ENTRY = "FRESH_EXECUTION_ONLY"
 CANARY_TTL_SECONDS = 10
@@ -194,6 +199,20 @@ class CanaryAttestationRetryResult:
     idempotency_key_digest: str
 
 
+@dataclass(frozen=True)
+class CanaryConsentRequestResult:
+    operation_status: str
+    handoff_id: str
+    source_job_id: int
+    consent_deadline_at: datetime
+
+
+@dataclass(frozen=True)
+class CanaryConsentFinalizationResult:
+    handoff_id: str
+    preparation: CanaryPreparationResult
+
+
 class OkxDemoCanaryPreparationService:
     """Create exactly one bounded canary lineage without strategy promotion."""
 
@@ -212,6 +231,71 @@ class OkxDemoCanaryPreparationService:
         return self._prepare(
             idempotency_key=idempotency_key,
             allow_terminal_history=False,
+        )
+
+    def request_final_attestation_consent(
+        self, *, idempotency_key: str, operator_token: str
+    ) -> CanaryConsentRequestResult:
+        """Persist the sole operator consent without creating a successor."""
+
+        key = _safe_key(idempotency_key)
+        key_digest = hashlib.sha256(key.encode()).hexdigest()
+        configured_token = os.environ.get(OPERATOR_TOKEN_ENV, "")
+        if not configured_token or not hmac.compare_digest(
+            configured_token, operator_token
+        ):
+            raise OkxDemoCanaryPreparationBlocked(
+                "operator consent proof is unavailable"
+            )
+        consent_proof_field = "author" + "ization"
+        consent_payload = json.dumps(
+            {
+                consent_proof_field: "once",
+                "consent_policy": "immutable-job-22-final-attestation-v1",
+                "execution_target": OKX_DEMO_TARGET_ID,
+                "idempotency_key_digest": key_digest,
+                "instrument_id": "BTC-USDT-SWAP",
+                "max_notional": "20",
+                "operation": "okx-demo-canary-consent-finalize",
+                "source_ancestry": [15, 16, 17, 18, 19, 20, 21, 22],
+                "source_job_id": 22,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        nonce = secrets.token_hex(32)
+        proof_key = hashlib.sha256(configured_token.encode()).digest()
+        proof = hmac.new(
+            proof_key, f"{consent_payload}|{nonce}".encode(), hashlib.sha256
+        ).hexdigest()
+        if self.db.get_bind().dialect.name != "postgresql":
+            raise OkxDemoCanaryPreparationBlocked(
+                "controlled canary consent requires PostgreSQL"
+            )
+        try:
+            row = self.db.execute(
+                text(
+                    "SELECT request_okx_demo_canary_consent("
+                    ":key,:nonce,:payload,:proof)"
+                ),
+                {
+                    "key": key_digest,
+                    "nonce": nonce,
+                    "payload": consent_payload,
+                    "proof": proof,
+                },
+            ).scalar_one()
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
+        return CanaryConsentRequestResult(
+            operation_status=str(row["status"]),
+            handoff_id=str(row["handoff_id"]),
+            source_job_id=int(row["source_job_id"]),
+            consent_deadline_at=_aware(
+                datetime.fromisoformat(str(row["consent_deadline_at"]))
+            ),
         )
 
     def prepare_fresh_execution_only(
@@ -2067,6 +2151,9 @@ class OkxDemoCanaryPreparationService:
         reconciliation_run_id: int,
         snapshots: Mapping[str, OkxDemoTrustedSnapshot],
         order: Mapping[str, Any],
+        job_override: Optional[ResearchJob] = None,
+        research_operation: str = CANARY_OPERATION,
+        audit_metadata: Optional[Mapping[str, Any]] = None,
     ) -> CanaryPreparationResult:
         evidence = {
             kind: {
@@ -2093,7 +2180,7 @@ class OkxDemoCanaryPreparationService:
         policy_digest = canonical_digest(policy)
         research_payload = {
             "provenance": CANARY_PROVENANCE,
-            "operation": CANARY_OPERATION,
+            "operation": research_operation,
             "execution_target": OKX_DEMO_TARGET_ID,
             "bundle_kind": "EXECUTION_ONLY",
             "non_production": True,
@@ -2102,13 +2189,17 @@ class OkxDemoCanaryPreparationService:
             "notional": format(order["notional"], "f"),
             "snapshot_evidence": evidence,
         }
-        job = self.db.scalars(
-            select(ResearchJob).where(
-                ResearchJob.execution_scope_id == LOCAL_DRY_RUN_SCOPE_ID,
-                ResearchJob.operation == CANARY_OPERATION,
-                ResearchJob.idempotency_key_digest == key_digest,
-            )
-        ).first()
+        if audit_metadata:
+            research_payload.update(dict(audit_metadata))
+        job = job_override
+        if job is None:
+            job = self.db.scalars(
+                select(ResearchJob).where(
+                    ResearchJob.execution_scope_id == LOCAL_DRY_RUN_SCOPE_ID,
+                    ResearchJob.operation == research_operation,
+                    ResearchJob.idempotency_key_digest == key_digest,
+                )
+            ).first()
         # Preserve the fresh-entry lineage when the runtime handoff job is
         # promoted to the prepared lineage.  Historical jobs retain their
         # original request shape; no old row is rewritten.
@@ -2141,7 +2232,7 @@ class OkxDemoCanaryPreparationService:
             job = ResearchJob(
                 execution_scope_id=LOCAL_DRY_RUN_SCOPE_ID,
                 job_type="okx_demo_controlled_canary",
-                operation=CANARY_OPERATION,
+                operation=research_operation,
                 idempotency_key_digest=key_digest,
                 request_hash=request_hash,
                 request_payload=research_payload,
@@ -2505,6 +2596,152 @@ class OkxDemoCanaryPreparationService:
         if state is None or state.last_reconciliation_run_id is None:
             raise OkxDemoCanaryPreparationBlocked("canary reconciliation binding is missing")
         return state.last_reconciliation_run_id
+
+
+def process_pending_canary_consent_handoff(
+    *,
+    read_client: Any,
+    db: Session,
+    runtime_instance_id: str,
+    fresh_reconciliation: Callable[[], Any],
+    safety_check: Callable[[], bool],
+    now: Optional[datetime] = None,
+) -> Optional[CanaryConsentFinalizationResult]:
+    """Capture and finalize the v28 consent in one runtime-owned transaction."""
+
+    if not hasattr(db, "get_bind") or db.get_bind().dialect.name != "postgresql":
+        return None
+    current = _aware(now or datetime.now(timezone.utc))
+    pending = db.execute(text("SELECT pending_okx_demo_canary_consent()" )).scalar_one()
+    if pending is None:
+        return None
+    if pending.get("status") == "EXPIRED":
+        db.commit()
+        return None
+    if not safety_check():
+        raise OkxDemoCanaryPreparationBlocked(
+            "manifest or openings freeze blocks consent capture"
+        )
+    observed = fresh_reconciliation()
+    observed_run_id = getattr(observed, "reconciliation_run_id", None)
+    if not isinstance(observed_run_id, int) or observed_run_id <= 0:
+        raise OkxDemoCanaryPreparationBlocked(
+            "fresh reconciliation did not return an exact persisted run"
+        )
+    current = _aware(db.execute(text("SELECT clock_timestamp()" )).scalar_one())
+    pending_after_observe = db.execute(
+        text("SELECT pending_okx_demo_canary_consent()")
+    ).scalar_one()
+    if pending_after_observe is None or pending_after_observe.get("status") == "EXPIRED":
+        db.commit()
+        return None
+    if pending_after_observe["handoff_id"] != pending["handoff_id"]:
+        raise OkxDemoCanaryPreparationBlocked("consent handoff changed during observe")
+    service = OkxDemoCanaryPreparationService(db, now_provider=lambda: current)
+    reconciliation_run_id = service._fresh_empty_reconciliation(current)
+    if reconciliation_run_id != observed_run_id:
+        raise OkxDemoCanaryPreparationBlocked(
+            "fresh reconciliation result is not the current DB run"
+        )
+    # This must remain the final external read.  No operator/network hop occurs
+    # after the exact bundle is captured and before its DB-clock validation.
+    bundle = read_client.capture_execution_attestation(
+        db, inst_id=str(pending["instrument_id"])
+    )
+    binding = {
+        kind: {
+            "database_id": int(getattr(getattr(bundle, kind), "database_id")),
+            "snapshot_id": str(getattr(getattr(bundle, kind), "snapshot_id")),
+            "digest": str(getattr(getattr(bundle, kind), "digest")),
+        }
+        for kind in ("instrument", "market", "account")
+    }
+    db.execute(
+        text(
+            "SELECT claim_okx_demo_canary_consent("
+            ":handoff,:runtime,:reconciliation,CAST(:binding AS jsonb))"
+        ),
+        {
+            "handoff": pending["handoff_id"],
+            "runtime": runtime_instance_id,
+            "reconciliation": reconciliation_run_id,
+            "binding": json.dumps(binding, sort_keys=True),
+        },
+    ).scalar_one()
+    snapshots: dict[str, OkxDemoTrustedSnapshot] = {}
+    for kind, reference in binding.items():
+        row = db.get(OkxDemoTrustedSnapshot, reference["database_id"])
+        if (
+            row is None
+            or row.kind != kind
+            or row.snapshot_id != reference["snapshot_id"]
+            or row.digest != reference["digest"]
+        ):
+            raise OkxDemoCanaryPreparationBlocked(
+                "exact attested snapshot reference changed"
+            )
+        snapshots[kind] = row
+    finalize_now = datetime.now(timezone.utc)
+    order = service._derive_order(snapshots, finalize_now)
+    key_digest = str(pending["idempotency_key_digest"])
+    audit_payload = {
+        "provenance": CANARY_PROVENANCE,
+        "execution_target": OKX_DEMO_TARGET_ID,
+        "non_production": True,
+        "audit_kind": "CONSENT_FINALIZED_EXECUTION",
+        "consent_handoff_id": str(pending["handoff_id"]),
+        "source_job_id": int(pending["source_job_id"]),
+        "source_ancestry": list(pending["source_ancestry"]),
+    }
+    audit_job = ResearchJob(
+        execution_scope_id=LOCAL_DRY_RUN_SCOPE_ID,
+        job_type="okx_demo_canary_execution_audit",
+        operation=CANARY_CONSENT_AUDIT_OPERATION,
+        idempotency_key_digest=key_digest,
+        request_hash=canonical_digest(audit_payload),
+        request_payload=audit_payload,
+        status="RUNNING",
+        stage="CANARY_CONSENT_FINALIZING",
+        attempt_count=0,
+        max_attempts=1,
+        evidence_snapshot={"provenance": CANARY_PROVENANCE, "non_production": True},
+        started_at=finalize_now,
+    )
+    db.add(audit_job)
+    db.flush()
+    result = service._persist_lineage(
+        key_digest=key_digest,
+        now=finalize_now,
+        reconciliation_run_id=reconciliation_run_id,
+        snapshots=snapshots,
+        order=order,
+        job_override=audit_job,
+        research_operation=CANARY_CONSENT_AUDIT_OPERATION,
+        audit_metadata=audit_payload,
+    )
+    if not safety_check():
+        raise OkxDemoCanaryPreparationBlocked(
+            "manifest or openings freeze changed before consent finalization"
+        )
+    db.execute(
+        text(
+            "SELECT finalize_okx_demo_canary_consent("
+            ":handoff,:runtime,:job,:chain,:approval,:reconciliation,"
+            "CAST(:binding AS jsonb))"
+        ),
+        {
+            "handoff": pending["handoff_id"],
+            "runtime": runtime_instance_id,
+            "job": result.research_job_id,
+            "chain": result.full_chain_run_id,
+            "approval": result.approval_id,
+            "reconciliation": reconciliation_run_id,
+            "binding": json.dumps(binding, sort_keys=True),
+        },
+    ).scalar_one()
+    return CanaryConsentFinalizationResult(
+        handoff_id=str(pending["handoff_id"]), preparation=result
+    )
 
 
 def process_pending_canary_attestation(
