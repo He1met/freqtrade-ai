@@ -962,6 +962,19 @@ class OkxDemoCanaryPreparationService:
         parent = self.db.get(ResearchJob, payload["refresh_of_job_id"])
         if parent is None:
             return None
+        parent_payload = (
+            parent.request_payload
+            if isinstance(parent.request_payload, dict)
+            else {}
+        )
+        parent_supersedes = parent_payload.get("supersedes_job_ids")
+        supersedes = payload.get("supersedes_job_ids")
+        if (
+            not isinstance(parent_supersedes, list)
+            or not isinstance(supersedes, list)
+            or list(dict.fromkeys([*parent_supersedes, parent.id])) != supersedes
+        ):
+            return None
         parent_depth = self._refresh_handoff_depth(parent, seen=seen)
         if parent_depth is None:
             return None
