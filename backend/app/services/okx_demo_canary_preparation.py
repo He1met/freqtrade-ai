@@ -891,6 +891,8 @@ class OkxDemoCanaryPreparationService:
             "provenance": CANARY_PROVENANCE,
             "operation": CANARY_OPERATION,
             "execution_target": OKX_DEMO_TARGET_ID,
+            "bundle_kind": "EXECUTION_ONLY",
+            "non_production": True,
             "instrument_id": order["instrument_id"],
             "quantity": format(order["quantity"], "f"),
             "notional": format(order["notional"], "f"),
