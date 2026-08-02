@@ -26,6 +26,8 @@ from app.repositories.execution_lineage import ensure_execution_scope_catalog
 from app.services.okx_demo_canary_preparation import (
     CANARY_PROVENANCE,
     CANARY_OPERATION,
+    FRESH_EXECUTION_ONLY_ENTRY,
+    FRESH_EXECUTION_ONLY_REFRESH,
     OkxDemoCanaryPreparationBlocked,
     OkxDemoCanaryPreparationService,
     OkxDemoCanaryPreparationWaiting,
@@ -183,6 +185,38 @@ def test_fresh_execution_only_endpoint_reports_superseded_history(client, monkey
     assert response.json()["entry_kind"] == "FRESH_EXECUTION_ONLY"
     assert response.json()["attestation_request_job_id"] == 702
     assert response.json()["supersedes_job_ids"] == [15, 16]
+
+
+def test_refresh_execution_only_endpoint_reports_source_lineage(client, monkeypatch):
+    api, _calls = client
+
+    def refresh(_self, *, idempotency_key):
+        assert idempotency_key == "fresh-refresh-endpoint-1"
+        raise OkxDemoCanaryPreparationWaiting(
+            703,
+            entry_kind=FRESH_EXECUTION_ONLY_REFRESH,
+            supersedes_job_ids=(15, 16, 17),
+            refresh_of_job_id=17,
+        )
+
+    monkeypatch.setattr(
+        OkxDemoCanaryPreparationService,
+        "prepare_fresh_execution_only_refresh",
+        refresh,
+    )
+    response = api.post(
+        "/api/okx-demo/canary/refresh-execution-only",
+        headers={
+            "X-Operator-Token": "operator-test-token",
+            "Idempotency-Key": "fresh-refresh-endpoint-1",
+            "X-Provider-Authorization": "once",
+        },
+        json={},
+    )
+    assert response.status_code == 202
+    assert response.json()["entry_kind"] == FRESH_EXECUTION_ONLY_REFRESH
+    assert response.json()["refresh_of_job_id"] == 17
+    assert response.json()["supersedes_job_ids"] == [15, 16, 17]
 
 
 def test_canary_prepare_rejects_caller_order_overrides(client):
@@ -375,6 +409,47 @@ def _blocked_attestation_job(
     return job
 
 
+def _successful_fresh_source(db_session, *, legacy_ids=(15, 16)):
+    payload = {
+        "provenance": CANARY_PROVENANCE,
+        "execution_target": "OKX_DEMO",
+        "instrument_id": "BTC-USDT-SWAP",
+        "bundle_kind": "EXECUTION_ONLY",
+        "non_production": True,
+        "entry_kind": FRESH_EXECUTION_ONLY_ENTRY,
+        "supersedes_job_ids": list(legacy_ids),
+    }
+    evidence = {
+        "provenance": CANARY_PROVENANCE,
+        "non_production": True,
+        "entry_kind": FRESH_EXECUTION_ONLY_ENTRY,
+        "supersedes_job_ids": list(legacy_ids),
+        "snapshot_evidence": {
+            "instrument": {"snapshot_id": "old-instrument", "digest": "1" * 64},
+            "market": {"snapshot_id": "old-market", "digest": "2" * 64},
+            "account": {"snapshot_id": "old-account", "digest": "3" * 64},
+        },
+    }
+    source = ResearchJob(
+        execution_scope_id="LOCAL_DRY_RUN",
+        job_type="okx_demo_controlled_canary",
+        operation=CANARY_OPERATION,
+        idempotency_key_digest=hashlib.sha256(b"fresh-source").hexdigest(),
+        request_hash="a" * 64,
+        request_payload=payload,
+        status="SUCCESS",
+        stage="CANARY_SNAPSHOTS_READY",
+        attempt_count=1,
+        max_attempts=1,
+        evidence_snapshot=evidence,
+        started_at=NOW,
+        completed_at=NOW,
+    )
+    db_session.add(source)
+    db_session.commit()
+    return source
+
+
 def test_transient_read_failure_is_redacted_and_allows_one_successor(
     db_session, monkeypatch
 ):
@@ -551,6 +626,218 @@ def test_fresh_execution_only_entry_preserves_terminal_history_and_is_single_fli
             db_session, now_provider=lambda: NOW
         ).prepare_fresh_execution_only(idempotency_key="fresh-entry-1")
     assert replay.value.job_id == fresh.id
+
+
+def test_refresh_re_attests_expired_fresh_source_and_finalizes_same_key(
+    db_session, monkeypatch
+):
+    monkeypatch.setenv("FREQTRADE_AI_EXECUTION_TARGET", "OKX_DEMO")
+    monkeypatch.setenv("FREQTRADE_AI_SIMULATED_TRADING", "true")
+    monkeypatch.setenv("FREQTRADE_AI_ALLOW_REAL_FUNDS", "false")
+    legacy = _blocked_attestation_job(
+        db_session,
+        key="refresh-legacy-15",
+        request_payload={
+            "provenance": CANARY_PROVENANCE,
+            "execution_target": "OKX_DEMO",
+            "instrument_id": "BTC-USDT-SWAP",
+            "timeframe": "1m",
+            "candle_limit": 2,
+            "non_production": True,
+        },
+    )
+    terminal = _blocked_attestation_job(
+        db_session,
+        key="refresh-terminal-16",
+        evidence={
+            "provenance": CANARY_PROVENANCE,
+            "attestation_error": {
+                "error_type": "OkxReadAdapterError",
+                "kind": "INVALID_SIGNAL_BUNDLE",
+                "status": "BLOCKED",
+                "retryable": False,
+            },
+        },
+    )
+    source = _successful_fresh_source(
+        db_session,
+        legacy_ids=(legacy.id, terminal.id),
+    )
+    source_status = source.status
+    source_stage = source.stage
+    source_hash = source.request_hash
+    source_payload = dict(source.request_payload)
+    source_evidence = dict(source.evidence_snapshot)
+    # Simulate the source snapshot TTL having elapsed by advancing the
+    # operator clock; the database check constraint intentionally prevents
+    # mutating a trusted row into an invalid expires_at value.
+    snapshots = _seed_attested_snapshots(db_session)
+    refresh_now = NOW + timedelta(minutes=2)
+    current_now = [refresh_now]
+
+    service = OkxDemoCanaryPreparationService(
+        db_session, now_provider=lambda: current_now[0]
+    )
+    assert service._has_fresh_snapshot_rows(refresh_now) is False
+    with pytest.raises(OkxDemoCanaryPreparationWaiting) as waiting:
+        service.prepare_fresh_execution_only_refresh(
+            idempotency_key="fresh-refresh-service-1"
+        )
+    refresh = db_session.get(ResearchJob, waiting.value.job_id)
+    assert refresh is not None
+    assert refresh.request_payload["entry_kind"] == FRESH_EXECUTION_ONLY_REFRESH
+    assert refresh.request_payload["refresh_of_job_id"] == source.id
+    assert refresh.request_payload["supersedes_job_ids"] == [
+        legacy.id,
+        terminal.id,
+        source.id,
+    ]
+    assert "timeframe" not in refresh.request_payload
+    assert "candle_limit" not in refresh.request_payload
+    assert db_session.get(ResearchJob, source.id).status == source_status
+    assert db_session.get(ResearchJob, source.id).stage == source_stage
+    assert db_session.get(ResearchJob, source.id).request_hash == source_hash
+    assert db_session.get(ResearchJob, source.id).request_payload == source_payload
+    assert db_session.get(ResearchJob, source.id).evidence_snapshot == source_evidence
+
+    class Reference:
+        def __init__(self, database_id, snapshot_id, digest):
+            self.database_id = database_id
+            self.snapshot_id = snapshot_id
+            self.digest = digest
+
+    class Bundle:
+        observed_at = NOW
+        expires_at = NOW + timedelta(seconds=30)
+        instrument = Reference(10, "refresh-instrument", "4" * 64)
+        market = Reference(11, "refresh-market", "5" * 64)
+        account = Reference(12, "refresh-account", "6" * 64)
+
+    class RuntimeRead:
+        def capture_execution_attestation(self, db, *, inst_id):
+            assert inst_id == "BTC-USDT-SWAP"
+            return Bundle()
+
+    assert process_pending_canary_attestation(
+        read_client=RuntimeRead(), db=db_session, now=refresh_now
+    ) is True
+    db_session.commit()
+    db_session.refresh(refresh)
+    assert refresh.status == "SUCCESS"
+    assert refresh.stage == "CANARY_SNAPSHOTS_READY"
+    assert refresh.evidence_snapshot["entry_kind"] == FRESH_EXECUTION_ONLY_REFRESH
+    assert refresh.evidence_snapshot["refresh_of_job_id"] == source.id
+    assert refresh.evidence_snapshot["supersedes_job_ids"] == [
+        legacy.id,
+        terminal.id,
+        source.id,
+    ]
+    assert "candle" not in str(refresh.evidence_snapshot).lower()
+
+    _patch_lineage_dependencies(monkeypatch, snapshots)
+    current_now[0] = NOW
+    result = service.prepare_fresh_execution_only_refresh(
+        idempotency_key="fresh-refresh-service-1"
+    )
+    assert result.operation_status == "PREPARED"
+    assert result.entry_kind == FRESH_EXECUTION_ONLY_REFRESH
+    assert result.refresh_of_job_id == source.id
+    assert result.supersedes_job_ids == (legacy.id, terminal.id, source.id)
+    db_session.refresh(source)
+    assert source.status == source_status
+    assert source.stage == source_stage
+    assert source.request_hash == source_hash
+    assert source.request_payload == source_payload
+    assert source.evidence_snapshot == source_evidence
+
+    monkeypatch.setattr(
+        service,
+        "_reconciliation_run_id_for_approval",
+        lambda _approval_id: 1,
+    )
+    replay = service.prepare_fresh_execution_only_refresh(
+        idempotency_key="fresh-refresh-service-1"
+    )
+    assert replay.research_job_id == result.research_job_id
+    assert replay.trade_intent_id == result.trade_intent_id
+
+
+def test_refresh_rejects_second_key_pending_and_unsafe_activity(db_session, monkeypatch):
+    monkeypatch.setenv("FREQTRADE_AI_EXECUTION_TARGET", "OKX_DEMO")
+    monkeypatch.setenv("FREQTRADE_AI_SIMULATED_TRADING", "true")
+    monkeypatch.setenv("FREQTRADE_AI_ALLOW_REAL_FUNDS", "false")
+    source = _successful_fresh_source(db_session)
+    service = OkxDemoCanaryPreparationService(db_session, now_provider=lambda: NOW)
+    with pytest.raises(OkxDemoCanaryPreparationWaiting) as waiting:
+        service.prepare_fresh_execution_only_refresh(
+            idempotency_key="fresh-refresh-pending-1"
+        )
+    pending = db_session.get(ResearchJob, waiting.value.job_id)
+    assert pending is not None
+    with pytest.raises(OkxDemoCanaryPreparationBlocked, match="successor already"):
+        service.prepare_fresh_execution_only_refresh(
+            idempotency_key="fresh-refresh-pending-2"
+        )
+    with pytest.raises(OkxDemoCanaryPreparationWaiting) as replay:
+        service.prepare_fresh_execution_only_refresh(
+            idempotency_key="fresh-refresh-pending-1"
+        )
+    assert replay.value.job_id == pending.id
+
+    # A fresh source plus any pre-existing execution lineage is unsafe even
+    # before a successor is enqueued.
+    db_session.delete(pending)
+    db_session.commit()
+    db_session.add(
+        TradeIntent(
+            execution_target_id="OKX_DEMO",
+            authorization_schema_version="RISK_V1",
+            intent_id="f" * 64,
+            canonical_hash="1" * 64,
+            policy_digest="2" * 64,
+            approved_payload_hash="3" * 64,
+            idempotency_key_digest="4" * 64,
+            client_order_id="REFRESHUNSAFE001",
+            instrument_id="BTC-USDT-SWAP",
+            side="buy",
+            position_side="long",
+            order_type="limit",
+            quantity=Decimal("1"),
+            limit_price=Decimal("100"),
+            reference_price=Decimal("100"),
+            leverage=Decimal("1"),
+            margin_mode="isolated",
+            stop_loss=Decimal("95"),
+            take_profit=Decimal("105"),
+            reduce_only=False,
+            status="APPROVED",
+            request_snapshot={"provenance": CANARY_PROVENANCE},
+            expires_at=NOW + timedelta(seconds=10),
+        )
+    )
+    db_session.commit()
+    with pytest.raises(OkxDemoCanaryPreparationBlocked, match="TradeIntent"):
+        service.prepare_fresh_execution_only_refresh(
+            idempotency_key="fresh-refresh-unsafe-1"
+        )
+    assert db_session.get(ResearchJob, source.id).status == "SUCCESS"
+
+
+def test_refresh_rejects_source_without_non_production_marker(db_session, monkeypatch):
+    monkeypatch.setenv("FREQTRADE_AI_EXECUTION_TARGET", "OKX_DEMO")
+    monkeypatch.setenv("FREQTRADE_AI_SIMULATED_TRADING", "true")
+    monkeypatch.setenv("FREQTRADE_AI_ALLOW_REAL_FUNDS", "false")
+    source = _successful_fresh_source(db_session)
+    payload = dict(source.request_payload)
+    payload["non_production"] = False
+    source.request_payload = payload
+    db_session.commit()
+    service = OkxDemoCanaryPreparationService(db_session, now_provider=lambda: NOW)
+    with pytest.raises(OkxDemoCanaryPreparationBlocked, match="source is not ready"):
+        service.prepare_fresh_execution_only_refresh(
+            idempotency_key="fresh-refresh-no-non-production"
+        )
+    assert db_session.query(ResearchJob).filter_by(operation=CANARY_OPERATION).count() == 1
 
 
 def test_fresh_entry_runtime_handoff_persists_only_execution_lineage(db_session):

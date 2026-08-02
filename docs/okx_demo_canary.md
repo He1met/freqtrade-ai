@@ -62,6 +62,19 @@ successor handoff；该入口不重置或删除原记录、不创建 grant，也
 pending request。`UNAUTHORIZED`、身份漂移、无效响应等明确终态不会被重试，
 retry successor 失败后也不会继续链式重试。
 
+如果 `prepare-execution-only` 已经返回
+`SUCCESS/CANARY_SNAPSHOTS_READY`，但短 TTL 快照在 finalization 前过期，不能
+修改原 job、延长 `expires_at` 或借用旧快照。operator 必须使用新的
+`Idempotency-Key` 调用 `POST /api/okx-demo/canary/refresh-execution-only`；该
+入口只接受唯一、无 TradeIntent/ApprovedExecution/grant/writer attempt/order 的
+`FRESH_EXECUTION_ONLY` 成功 handoff，并创建带有
+`entry_kind=FRESH_EXECUTION_ONLY_REFRESH`、`refresh_of_job_id` 和继承加源 job
+的 `supersedes_job_ids` 的新 ResearchJob。唯一 canonical runtime 再捕获
+`EXECUTION_ONLY`（不读 candles/strategy/signal）快照；operator 用同一 refresh
+key 重放该入口以完成 finalize。原 job 的 status、request_hash、request_payload
+和 evidence 永远不变；pending/未知/重复 refresh、非 Demo manifest、active
+grant、任何 writer 或订单状态均 fail-closed。
+
 该入口仍固定 `OKX_DEMO`、`simulated_trading=true`、`allow_real_funds=false`、
 `order_submission_enabled=false`、`BTC-USDT-SWAP` 交易所最小合法数量及不超过
 20 USDT 的 notional。grant 原子消费、超时/撤单/必要时 reduce-only 清理、终态
