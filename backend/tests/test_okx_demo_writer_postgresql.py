@@ -134,7 +134,7 @@ def _seed_canary_lineage_boundary(
             "stale": False,
             "instrument_id": "BTC-USDT-SWAP",
             "reference_price": "57000",
-            "bbo": {"ask_price": "57000"},
+            "bbo": {"bid_price": "57000", "ask_price": "57000"},
             "mark": {"price": "57000"},
             "as_of": now.isoformat(),
         },
@@ -144,6 +144,7 @@ def _seed_canary_lineage_boundary(
             "resource": "account",
             "stale": False,
             "authenticated": True,
+            "leverage_by_position_side": {"long": "1", "short": "1"},
         },
     }
     for content in contents.values():
@@ -821,6 +822,9 @@ def test_postgresql_canary_lineage_function_body_tamper_fails_readiness(
         ("account", "authenticated", None),
         ("instrument", "minSz", "not-a-number"),
         ("market", "bbo.ask_price", None),
+        ("instrument", "state", "suspend"),
+        ("instrument", "source", "tampered"),
+        ("market", "stale", True),
     ),
 )
 def test_postgresql_canary_lineage_rejects_missing_or_malformed_snapshot_content(
@@ -835,12 +839,22 @@ def test_postgresql_canary_lineage_rejects_missing_or_malformed_snapshot_content
             now=now,
             content_mutation=(
                 None
-                if content_mutation == ("account", "authenticated", None)
+                if content_mutation
+                in {
+                    ("account", "authenticated", None),
+                    ("instrument", "source", "tampered"),
+                    ("market", "stale", True),
+                }
                 else content_mutation
             ),
         )
         snapshot_ids = {kind: row.database_id for kind, row in snapshots.items()}
-    if content_mutation == ("account", "authenticated", None):
+    if content_mutation in {
+        ("account", "authenticated", None),
+        ("instrument", "source", "tampered"),
+        ("market", "stale", True),
+    }:
+        kind, field, value = content_mutation
         with postgres_writer_engine.begin() as connection:
             connection.execute(
                 text("ALTER TABLE okx_demo_trusted_snapshots DISABLE TRIGGER USER")
@@ -848,9 +862,17 @@ def test_postgresql_canary_lineage_rejects_missing_or_malformed_snapshot_content
             connection.execute(
                 text(
                     "UPDATE okx_demo_trusted_snapshots "
-                    "SET content_json = (content_json::jsonb - 'authenticated')::json "
-                    "WHERE kind = 'account'"
-                )
+                    "SET content_json = CASE "
+                    "WHEN :remove THEN (content_json::jsonb - :field)::json "
+                    "ELSE jsonb_set(content_json::jsonb, ARRAY[:field], "
+                    "CAST(:value AS jsonb))::json END WHERE kind = :kind"
+                ),
+                {
+                    "remove": value is None,
+                    "field": field,
+                    "value": json.dumps(value),
+                    "kind": kind,
+                },
             )
             connection.execute(
                 text("ALTER TABLE okx_demo_trusted_snapshots ENABLE TRIGGER USER")
@@ -872,6 +894,62 @@ def test_postgresql_canary_lineage_rejects_missing_or_malformed_snapshot_content
                 snapshots=runtime_snapshots,
                 order=order,
             )
+    with postgres_writer_engine.connect() as connection:
+        assert connection.execute(text("SELECT count(*) FROM trade_intents")).scalar_one() == 0
+        assert connection.execute(text("SELECT count(*) FROM risk_decisions")).scalar_one() == 0
+        assert connection.execute(text("SELECT count(*) FROM approved_executions")).scalar_one() == 0
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("quantity", Decimal("2")),
+        ("leverage", Decimal("2")),
+        ("limit_price", Decimal("56999.9")),
+        ("stop_loss", Decimal("54000")),
+        ("take_profit", Decimal("60000")),
+    ),
+)
+def test_postgresql_canary_lineage_function_rederives_order_from_snapshots(
+    postgres_writer_engine,
+    field,
+    value,
+) -> None:
+    """A fully re-hashed caller-selected order must still fail in PostgreSQL."""
+
+    upgrade_database(postgres_writer_engine)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    with Session(postgres_writer_engine) as admin_session:
+        snapshots, reconciliation_run_id, order = _seed_canary_lineage_boundary(
+            admin_session,
+            now=now,
+        )
+        snapshot_ids = {kind: row.database_id for kind, row in snapshots.items()}
+    crafted_order = dict(order)
+    crafted_order[field] = value
+    if field == "quantity":
+        crafted_order["notional"] = value * Decimal("0.0001") * Decimal("57000")
+
+    with pytest.raises(SQLAlchemyError, match="order derivation mismatch"):
+        with Session(postgres_writer_engine) as runtime_session:
+            runtime_session.execute(text("SET LOCAL ROLE freqtrade"))
+            runtime_snapshots = {
+                kind: runtime_session.get(OkxDemoTrustedSnapshot, database_id)
+                for kind, database_id in snapshot_ids.items()
+            }
+            OkxDemoCanaryPreparationService(
+                runtime_session,
+                now_provider=lambda: now,
+            )._persist_lineage(
+                key_digest=hashlib.sha256(
+                    "crafted-order:{}:{}".format(field, value).encode()
+                ).hexdigest(),
+                now=now,
+                reconciliation_run_id=reconciliation_run_id,
+                snapshots=runtime_snapshots,
+                order=crafted_order,
+            )
+
     with postgres_writer_engine.connect() as connection:
         assert connection.execute(text("SELECT count(*) FROM trade_intents")).scalar_one() == 0
         assert connection.execute(text("SELECT count(*) FROM risk_decisions")).scalar_one() == 0
@@ -1085,7 +1163,9 @@ def test_postgresql_canary_lineage_function_atomic_idempotency_and_mismatch_roll
 
     mutations = {
         "target": ("execution_target", "OKX_LIVE"),
+        "null_target": ("execution_target", None),
         "provenance": ("provenance", "DEEPSEEK"),
+        "null_provenance": ("provenance", None),
         "hash": ("canonical_hash", "f" * 64),
         "ttl": (
             "expires_at",
@@ -1119,6 +1199,29 @@ def test_postgresql_canary_lineage_function_atomic_idempotency_and_mismatch_roll
                 ),
                 {"payload": json.dumps(altered_snapshot, sort_keys=True)},
             )
+
+    nested_null_paths = (
+        ("canonical_input", "execution_target"),
+        ("canonical_input", "quantity"),
+        ("snapshot_evidence", "instrument", "snapshot_id"),
+        ("snapshot_evidence", "market", "digest"),
+    )
+    for path in nested_null_paths:
+        altered_null = json.loads(json.dumps(payload))
+        target = altered_null["request_snapshot"]
+        for component in path[:-1]:
+            target = target[component]
+        target[path[-1]] = None
+        with pytest.raises(SQLAlchemyError):
+            with postgres_writer_engine.begin() as connection:
+                connection.execute(text("SET LOCAL ROLE freqtrade"))
+                connection.execute(
+                    text(
+                        "SELECT create_okx_demo_canary_lineage("
+                        "CAST(:payload AS jsonb))"
+                    ),
+                    {"payload": json.dumps(altered_null, sort_keys=True)},
+                )
 
     with postgres_writer_engine.begin() as connection:
         connection.execute(

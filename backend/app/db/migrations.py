@@ -291,6 +291,16 @@ DECLARE
     stop_loss numeric;
     take_profit numeric;
     notional numeric;
+    minimum_size numeric;
+    lot_size numeric;
+    contract_value numeric;
+    tick_size numeric;
+    best_bid numeric;
+    best_ask numeric;
+    mark_price numeric;
+    snapshot_leverage numeric;
+    derived_quantity numeric;
+    derived_limit_price numeric;
     computed_notional numeric;
     inserted_intent_id bigint;
     inserted_decision_id bigint;
@@ -301,44 +311,59 @@ BEGIN
         RAISE EXCEPTION 'controlled canary coordination lock is busy';
     END IF;
 
-    IF jsonb_typeof(p_payload) <> 'object'
+    IF jsonb_typeof(p_payload) IS DISTINCT FROM 'object'
        OR NOT p_payload ?& allowed_keys
        OR EXISTS (
            SELECT 1 FROM jsonb_object_keys(p_payload) AS supplied(key)
            WHERE supplied.key <> ALL (allowed_keys)
        )
-       OR p_payload->>'execution_target' <> 'OKX_DEMO'
-       OR p_payload->>'provenance' <> 'CONTROLLED_CANARY_NON_PRODUCTION'
+       OR p_payload->>'execution_target' IS DISTINCT FROM 'OKX_DEMO'
+       OR p_payload->>'provenance'
+            IS DISTINCT FROM 'CONTROLLED_CANARY_NON_PRODUCTION'
        OR p_payload->'non_production' IS DISTINCT FROM 'true'::jsonb
-       OR p_payload->>'instrument_id' <> 'BTC-USDT-SWAP'
-       OR p_payload->>'side' <> 'buy'
-       OR p_payload->>'position_side' <> 'long'
-       OR p_payload->>'order_type' <> 'limit'
-       OR p_payload->>'margin_mode' <> 'isolated'
+       OR p_payload->>'instrument_id' IS DISTINCT FROM 'BTC-USDT-SWAP'
+       OR p_payload->>'side' IS DISTINCT FROM 'buy'
+       OR p_payload->>'position_side' IS DISTINCT FROM 'long'
+       OR p_payload->>'order_type' IS DISTINCT FROM 'limit'
+       OR p_payload->>'margin_mode' IS DISTINCT FROM 'isolated'
        OR p_payload->'reduce_only' IS DISTINCT FROM 'false'::jsonb
-       OR p_payload->>'full_chain_run_id' !~ '^[1-9][0-9]*$'
-       OR p_payload->>'reconciliation_run_id' !~ '^[1-9][0-9]*$'
-       OR p_payload->>'intent_id' !~ '^[0-9a-f]{64}$'
-       OR p_payload->>'canonical_hash' !~ '^[0-9a-f]{64}$'
-       OR p_payload->>'policy_digest' !~ '^[0-9a-f]{64}$'
-       OR p_payload->>'approved_payload_hash' !~ '^[0-9a-f]{64}$'
-       OR p_payload->>'idempotency_key_digest' !~ '^[0-9a-f]{64}$'
-       OR p_payload->>'client_order_id' !~ '^FAICANARY[0-9a-f]{23}$'
+       OR (p_payload->>'full_chain_run_id' ~ '^[1-9][0-9]*$')
+            IS DISTINCT FROM TRUE
+       OR (p_payload->>'reconciliation_run_id' ~ '^[1-9][0-9]*$')
+            IS DISTINCT FROM TRUE
+       OR (p_payload->>'intent_id' ~ '^[0-9a-f]{64}$') IS DISTINCT FROM TRUE
+       OR (p_payload->>'canonical_hash' ~ '^[0-9a-f]{64}$')
+            IS DISTINCT FROM TRUE
+       OR (p_payload->>'policy_digest' ~ '^[0-9a-f]{64}$')
+            IS DISTINCT FROM TRUE
+       OR (p_payload->>'approved_payload_hash' ~ '^[0-9a-f]{64}$')
+            IS DISTINCT FROM TRUE
+       OR (p_payload->>'idempotency_key_digest' ~ '^[0-9a-f]{64}$')
+            IS DISTINCT FROM TRUE
+       OR (p_payload->>'client_order_id' ~ '^FAICANARY[0-9a-f]{23}$')
+            IS DISTINCT FROM TRUE
        OR p_payload->>'client_order_id'
-            <> 'FAICANARY' || left(p_payload->>'intent_id', 23)
-       OR p_payload->>'quantity' !~ '^[0-9]+(\\.[0-9]+)?$'
-       OR p_payload->>'limit_price' !~ '^[0-9]+(\\.[0-9]+)?$'
-       OR p_payload->>'reference_price' !~ '^[0-9]+(\\.[0-9]+)?$'
-       OR p_payload->>'leverage' !~ '^[0-9]+(\\.[0-9]+)?$'
-       OR p_payload->>'stop_loss' !~ '^[0-9]+(\\.[0-9]+)?$'
-       OR p_payload->>'take_profit' !~ '^[0-9]+(\\.[0-9]+)?$'
-       OR p_payload->>'notional' !~ '^[0-9]+(\\.[0-9]+)?$'
-       OR jsonb_typeof(p_payload->'request_snapshot') <> 'object'
+            IS DISTINCT FROM 'FAICANARY' || left(p_payload->>'intent_id', 23)
+       OR (p_payload->>'quantity' ~ '^[0-9]+(\\.[0-9]+)?$')
+            IS DISTINCT FROM TRUE
+       OR (p_payload->>'limit_price' ~ '^[0-9]+(\\.[0-9]+)?$')
+            IS DISTINCT FROM TRUE
+       OR (p_payload->>'reference_price' ~ '^[0-9]+(\\.[0-9]+)?$')
+            IS DISTINCT FROM TRUE
+       OR (p_payload->>'leverage' ~ '^[0-9]+(\\.[0-9]+)?$')
+            IS DISTINCT FROM TRUE
+       OR (p_payload->>'stop_loss' ~ '^[0-9]+(\\.[0-9]+)?$')
+            IS DISTINCT FROM TRUE
+       OR (p_payload->>'take_profit' ~ '^[0-9]+(\\.[0-9]+)?$')
+            IS DISTINCT FROM TRUE
+       OR (p_payload->>'notional' ~ '^[0-9]+(\\.[0-9]+)?$')
+            IS DISTINCT FROM TRUE
+       OR jsonb_typeof(p_payload->'request_snapshot') IS DISTINCT FROM 'object'
        OR (p_payload->>'canonical_input_serialized')::jsonb
             IS DISTINCT FROM p_payload->'request_snapshot'->'canonical_input'
        OR encode(public.digest(
             convert_to(p_payload->>'canonical_input_serialized', 'UTF8'), 'sha256'
-          ), 'hex') <> p_payload->>'canonical_hash'
+          ), 'hex') IS DISTINCT FROM p_payload->>'canonical_hash'
        OR (p_payload->>'policy_serialized')::jsonb IS DISTINCT FROM jsonb_build_object(
             'provenance', 'CONTROLLED_CANARY_NON_PRODUCTION',
             'allowed_instruments', jsonb_build_array('BTC-USDT-SWAP'),
@@ -351,7 +376,7 @@ BEGIN
           )
        OR encode(public.digest(
             convert_to(p_payload->>'policy_serialized', 'UTF8'), 'sha256'
-          ), 'hex') <> p_payload->>'policy_digest'
+          ), 'hex') IS DISTINCT FROM p_payload->>'policy_digest'
        OR (p_payload->>'approved_payload_serialized')::jsonb
             IS DISTINCT FROM jsonb_build_object(
                 'canonical_input', p_payload->'request_snapshot'->'canonical_input',
@@ -360,7 +385,7 @@ BEGIN
             )
        OR encode(public.digest(
             convert_to(p_payload->>'approved_payload_serialized', 'UTF8'), 'sha256'
-          ), 'hex') <> p_payload->>'approved_payload_hash'
+          ), 'hex') IS DISTINCT FROM p_payload->>'approved_payload_hash'
        OR (p_payload->>'intent_identity_serialized')::jsonb
             IS DISTINCT FROM jsonb_build_object(
                 'provenance', 'CONTROLLED_CANARY_NON_PRODUCTION',
@@ -369,7 +394,7 @@ BEGIN
             )
        OR encode(public.digest(
             convert_to(p_payload->>'intent_identity_serialized', 'UTF8'), 'sha256'
-          ), 'hex') <> p_payload->>'intent_id'
+          ), 'hex') IS DISTINCT FROM p_payload->>'intent_id'
     THEN
         RAISE EXCEPTION 'invalid controlled canary lineage payload';
     END IF;
@@ -392,37 +417,41 @@ BEGIN
        OR expires_at <= statement_timestamp()
        OR expires_at > statement_timestamp() + INTERVAL '10 seconds'
        OR p_payload->'request_snapshot'->>'provenance'
-            <> 'CONTROLLED_CANARY_NON_PRODUCTION'
+            IS DISTINCT FROM 'CONTROLLED_CANARY_NON_PRODUCTION'
        OR p_payload->'request_snapshot'->'non_production'
             IS DISTINCT FROM 'true'::jsonb
        OR p_payload->'request_snapshot'->'canonical_input'->>'provenance'
-            <> 'CONTROLLED_CANARY_NON_PRODUCTION'
+            IS DISTINCT FROM 'CONTROLLED_CANARY_NON_PRODUCTION'
        OR p_payload->'request_snapshot'->'canonical_input'->>'execution_target'
-            <> 'OKX_DEMO'
+            IS DISTINCT FROM 'OKX_DEMO'
        OR p_payload->'request_snapshot'->'canonical_input'->>'full_chain_run_id'
-            <> full_chain_run_id::text
+            IS DISTINCT FROM full_chain_run_id::text
        OR p_payload->'request_snapshot'->'canonical_input'->>'instrument_id'
-            <> 'BTC-USDT-SWAP'
-       OR p_payload->'request_snapshot'->'canonical_input'->>'side' <> 'buy'
-       OR p_payload->'request_snapshot'->'canonical_input'->>'position_side' <> 'long'
-       OR p_payload->'request_snapshot'->'canonical_input'->>'order_type' <> 'limit'
-       OR p_payload->'request_snapshot'->'canonical_input'->>'margin_mode' <> 'isolated'
+            IS DISTINCT FROM 'BTC-USDT-SWAP'
+       OR p_payload->'request_snapshot'->'canonical_input'->>'side'
+            IS DISTINCT FROM 'buy'
+       OR p_payload->'request_snapshot'->'canonical_input'->>'position_side'
+            IS DISTINCT FROM 'long'
+       OR p_payload->'request_snapshot'->'canonical_input'->>'order_type'
+            IS DISTINCT FROM 'limit'
+       OR p_payload->'request_snapshot'->'canonical_input'->>'margin_mode'
+            IS DISTINCT FROM 'isolated'
        OR p_payload->'request_snapshot'->'canonical_input'->'reduce_only'
             IS DISTINCT FROM 'false'::jsonb
        OR p_payload->'request_snapshot'->'canonical_input'->>'quantity'
-            <> p_payload->>'quantity'
+            IS DISTINCT FROM p_payload->>'quantity'
        OR p_payload->'request_snapshot'->'canonical_input'->>'limit_price'
-            <> p_payload->>'limit_price'
+            IS DISTINCT FROM p_payload->>'limit_price'
        OR p_payload->'request_snapshot'->'canonical_input'->>'reference_price'
-            <> p_payload->>'reference_price'
+            IS DISTINCT FROM p_payload->>'reference_price'
        OR p_payload->'request_snapshot'->'canonical_input'->>'leverage'
-            <> p_payload->>'leverage'
+            IS DISTINCT FROM p_payload->>'leverage'
        OR p_payload->'request_snapshot'->'canonical_input'->>'stop_loss'
-            <> p_payload->>'stop_loss'
+            IS DISTINCT FROM p_payload->>'stop_loss'
        OR p_payload->'request_snapshot'->'canonical_input'->>'take_profit'
-            <> p_payload->>'take_profit'
+            IS DISTINCT FROM p_payload->>'take_profit'
        OR p_payload->'request_snapshot'->'canonical_input'->'lineage'->>'provenance'
-            <> 'CONTROLLED_CANARY_NON_PRODUCTION'
+            IS DISTINCT FROM 'CONTROLLED_CANARY_NON_PRODUCTION'
        OR EXISTS (
            SELECT 1
            FROM unnest(ARRAY[
@@ -458,24 +487,25 @@ BEGIN
         INTO chain_row
         FROM SCHEMA_TOKEN.full_chain_runs
         WHERE id = full_chain_run_id;
-        IF existing_intent.intent_id <> p_payload->>'intent_id'
-           OR existing_intent.canonical_hash <> p_payload->>'canonical_hash'
-           OR existing_intent.policy_digest <> p_payload->>'policy_digest'
+        IF existing_intent.intent_id IS DISTINCT FROM p_payload->>'intent_id'
+           OR existing_intent.canonical_hash IS DISTINCT FROM p_payload->>'canonical_hash'
+           OR existing_intent.policy_digest IS DISTINCT FROM p_payload->>'policy_digest'
            OR existing_intent.approved_payload_hash
-                <> p_payload->>'approved_payload_hash'
-           OR existing_intent.client_order_id <> p_payload->>'client_order_id'
+                IS DISTINCT FROM p_payload->>'approved_payload_hash'
+           OR existing_intent.client_order_id
+                IS DISTINCT FROM p_payload->>'client_order_id'
            OR existing_intent.request_snapshot::jsonb
                 IS DISTINCT FROM p_payload->'request_snapshot'
-           OR existing_intent.execution_target_id <> 'OKX_DEMO'
-           OR existing_intent.authorization_schema_version <> 'RISK_V1'
-           OR existing_intent.status <> 'APPROVED'
+           OR existing_intent.execution_target_id IS DISTINCT FROM 'OKX_DEMO'
+           OR existing_intent.authorization_schema_version IS DISTINCT FROM 'RISK_V1'
+           OR existing_intent.status IS DISTINCT FROM 'APPROVED'
            OR decision_row.id IS NULL
-           OR decision_row.execution_target_id <> 'OKX_DEMO'
-           OR decision_row.trade_intent_id <> existing_intent.id
-           OR decision_row.authorization_schema_version <> 'RISK_V1'
-           OR decision_row.policy_digest <> p_payload->>'policy_digest'
-           OR decision_row.decision <> 'APPROVED'
-           OR decision_row.policy_version <> 'controlled-canary-v1'
+           OR decision_row.execution_target_id IS DISTINCT FROM 'OKX_DEMO'
+           OR decision_row.trade_intent_id IS DISTINCT FROM existing_intent.id
+           OR decision_row.authorization_schema_version IS DISTINCT FROM 'RISK_V1'
+           OR decision_row.policy_digest IS DISTINCT FROM p_payload->>'policy_digest'
+           OR decision_row.decision IS DISTINCT FROM 'APPROVED'
+           OR decision_row.policy_version IS DISTINCT FROM 'controlled-canary-v1'
            OR decision_row.evidence_snapshot::jsonb->>'provenance'
                 IS DISTINCT FROM 'CONTROLLED_CANARY_NON_PRODUCTION'
            OR decision_row.evidence_snapshot::jsonb->'non_production'
@@ -490,26 +520,28 @@ BEGIN
                 IS DISTINCT FROM p_payload->'request_snapshot'
                     ->'canonical_input'->'lineage'
            OR approval_row.id IS NULL
-           OR approval_row.execution_target_id <> 'OKX_DEMO'
-           OR approval_row.trade_intent_id <> existing_intent.id
-           OR approval_row.risk_decision_id <> decision_row.id
-           OR approval_row.intent_id <> p_payload->>'intent_id'
-           OR approval_row.client_order_id <> p_payload->>'client_order_id'
-           OR approval_row.authorization_schema_version <> 'RISK_V1'
-           OR approval_row.canonical_hash <> p_payload->>'canonical_hash'
-           OR approval_row.policy_digest <> p_payload->>'policy_digest'
+           OR approval_row.execution_target_id IS DISTINCT FROM 'OKX_DEMO'
+           OR approval_row.trade_intent_id IS DISTINCT FROM existing_intent.id
+           OR approval_row.risk_decision_id IS DISTINCT FROM decision_row.id
+           OR approval_row.intent_id IS DISTINCT FROM p_payload->>'intent_id'
+           OR approval_row.client_order_id IS DISTINCT FROM p_payload->>'client_order_id'
+           OR approval_row.authorization_schema_version IS DISTINCT FROM 'RISK_V1'
+           OR approval_row.canonical_hash IS DISTINCT FROM p_payload->>'canonical_hash'
+           OR approval_row.policy_digest IS DISTINCT FROM p_payload->>'policy_digest'
            OR approval_row.approved_payload_hash
-                <> p_payload->>'approved_payload_hash'
+                IS DISTINCT FROM p_payload->>'approved_payload_hash'
            OR approval_row.instrument_snapshot_id
-                <> p_payload->>'instrument_snapshot_id'
-           OR approval_row.market_snapshot_id <> p_payload->>'market_snapshot_id'
-           OR approval_row.account_snapshot_id <> p_payload->>'account_snapshot_id'
-           OR approval_row.decision <> 'APPROVED'
-           OR approval_row.intent_status <> 'APPROVED'
+                IS DISTINCT FROM p_payload->>'instrument_snapshot_id'
+           OR approval_row.market_snapshot_id
+                IS DISTINCT FROM p_payload->>'market_snapshot_id'
+           OR approval_row.account_snapshot_id
+                IS DISTINCT FROM p_payload->>'account_snapshot_id'
+           OR approval_row.decision IS DISTINCT FROM 'APPROVED'
+           OR approval_row.intent_status IS DISTINCT FROM 'APPROVED'
            OR approval_row.reserved_notional IS DISTINCT FROM notional
            OR approval_row.order_submission_authorized IS NOT FALSE
            OR approval_row.claim_required IS NOT TRUE
-           OR approval_row.status <> 'ACTIVE'
+           OR approval_row.status IS DISTINCT FROM 'ACTIVE'
            OR approval_row.expires_at IS DISTINCT FROM expires_at
            OR approval_row.expires_at <= statement_timestamp()
            OR approval_row.evidence_snapshot::jsonb->>'provenance'
@@ -522,14 +554,14 @@ BEGIN
            OR approval_row.evidence_snapshot::jsonb->'snapshot_evidence'
                 IS DISTINCT FROM p_payload->'request_snapshot'->'snapshot_evidence'
            OR chain_row.id IS NULL
-           OR chain_row.run_kind <> 'RESEARCH'
-           OR chain_row.research_scope_id <> 'LOCAL_DRY_RUN'
-           OR chain_row.execution_target_id <> 'OKX_DEMO'
-           OR chain_row.status <> 'EXECUTING'
-           OR chain_row.current_stage <> 'EXECUTION'
-           OR chain_row.trade_intent_id <> existing_intent.id
-           OR chain_row.risk_decision_id <> decision_row.id
-           OR chain_row.approved_execution_id <> approval_row.id
+           OR chain_row.run_kind IS DISTINCT FROM 'RESEARCH'
+           OR chain_row.research_scope_id IS DISTINCT FROM 'LOCAL_DRY_RUN'
+           OR chain_row.execution_target_id IS DISTINCT FROM 'OKX_DEMO'
+           OR chain_row.status IS DISTINCT FROM 'EXECUTING'
+           OR chain_row.current_stage IS DISTINCT FROM 'EXECUTION'
+           OR chain_row.trade_intent_id IS DISTINCT FROM existing_intent.id
+           OR chain_row.risk_decision_id IS DISTINCT FROM decision_row.id
+           OR chain_row.approved_execution_id IS DISTINCT FROM approval_row.id
         THEN
             RAISE EXCEPTION 'controlled canary lineage idempotency conflict';
         END IF;
@@ -547,11 +579,11 @@ BEGIN
     FROM SCHEMA_TOKEN.full_chain_runs
     WHERE id = full_chain_run_id;
     IF NOT FOUND
-       OR chain_row.run_kind <> 'RESEARCH'
-       OR chain_row.research_scope_id <> 'LOCAL_DRY_RUN'
-       OR chain_row.execution_target_id <> 'OKX_DEMO'
-       OR chain_row.status <> 'EXECUTING'
-       OR chain_row.current_stage <> 'EXECUTION'
+       OR chain_row.run_kind IS DISTINCT FROM 'RESEARCH'
+       OR chain_row.research_scope_id IS DISTINCT FROM 'LOCAL_DRY_RUN'
+       OR chain_row.execution_target_id IS DISTINCT FROM 'OKX_DEMO'
+       OR chain_row.status IS DISTINCT FROM 'EXECUTING'
+       OR chain_row.current_stage IS DISTINCT FROM 'EXECUTION'
        OR chain_row.strategy_generation_run_id IS NOT NULL
        OR chain_row.strategy_id IS NOT NULL
        OR chain_row.strategy_version_id IS NOT NULL
@@ -642,17 +674,44 @@ BEGIN
     IF instrument_row.database_id IS NULL
        OR market_row.database_id IS NULL
        OR account_row.database_id IS NULL
-       OR instrument_row.execution_target_id <> 'OKX_DEMO'
-       OR market_row.execution_target_id <> 'OKX_DEMO'
-       OR account_row.execution_target_id <> 'OKX_DEMO'
-       OR instrument_row.source_type <> 'api_aggregate'
-       OR market_row.source_type <> 'api_aggregate'
-       OR account_row.source_type <> 'api_aggregate'
+       OR instrument_row.execution_target_id IS DISTINCT FROM 'OKX_DEMO'
+       OR market_row.execution_target_id IS DISTINCT FROM 'OKX_DEMO'
+       OR account_row.execution_target_id IS DISTINCT FROM 'OKX_DEMO'
+       OR instrument_row.source_type IS DISTINCT FROM 'api_aggregate'
+       OR market_row.source_type IS DISTINCT FROM 'api_aggregate'
+       OR account_row.source_type IS DISTINCT FROM 'api_aggregate'
        OR instrument_row.core_data IS NOT TRUE
        OR market_row.core_data IS NOT TRUE
        OR account_row.core_data IS NOT TRUE
+       OR instrument_row.content_json::jsonb->>'execution_target'
+            IS DISTINCT FROM 'OKX_DEMO'
+       OR market_row.content_json::jsonb->>'execution_target'
+            IS DISTINCT FROM 'OKX_DEMO'
+       OR account_row.content_json::jsonb->>'execution_target'
+            IS DISTINCT FROM 'OKX_DEMO'
+       OR instrument_row.content_json::jsonb->>'source'
+            IS DISTINCT FROM 'okx_demo_rest'
+       OR market_row.content_json::jsonb->>'source'
+            IS DISTINCT FROM 'okx_demo_rest'
+       OR account_row.content_json::jsonb->>'source'
+            IS DISTINCT FROM 'okx_demo_rest'
+       OR instrument_row.content_json::jsonb->>'resource'
+            IS DISTINCT FROM 'instrument'
+       OR market_row.content_json::jsonb->>'resource'
+            IS DISTINCT FROM 'market'
+       OR account_row.content_json::jsonb->>'resource'
+            IS DISTINCT FROM 'account'
+       OR instrument_row.content_json::jsonb->'stale'
+            IS DISTINCT FROM 'false'::jsonb
+       OR market_row.content_json::jsonb->'stale'
+            IS DISTINCT FROM 'false'::jsonb
+       OR account_row.content_json::jsonb->'stale'
+            IS DISTINCT FROM 'false'::jsonb
        OR instrument_row.content_json::jsonb->>'instId'
             IS DISTINCT FROM 'BTC-USDT-SWAP'
+       OR instrument_row.content_json::jsonb->>'state' IS DISTINCT FROM 'live'
+       OR (instrument_row.content_json::jsonb->>'contract_shape'
+            IN ('linear', 'inverse')) IS DISTINCT FROM TRUE
        OR market_row.content_json::jsonb->>'instrument_id'
             IS DISTINCT FROM 'BTC-USDT-SWAP'
        OR account_row.content_json::jsonb->'authenticated'
@@ -663,10 +722,27 @@ BEGIN
             ~ '^[0-9]+(\\.[0-9]+)?$') IS DISTINCT FROM TRUE
        OR (instrument_row.content_json::jsonb->>'lotSz'
             ~ '^[0-9]+(\\.[0-9]+)?$') IS DISTINCT FROM TRUE
+       OR (instrument_row.content_json::jsonb->>'tickSz'
+            ~ '^[0-9]+(\\.[0-9]+)?$') IS DISTINCT FROM TRUE
+       OR (market_row.content_json::jsonb->>'reference_price'
+            ~ '^[0-9]+(\\.[0-9]+)?$') IS DISTINCT FROM TRUE
+       OR (market_row.content_json::jsonb->'bbo'->>'bid_price'
+            ~ '^[0-9]+(\\.[0-9]+)?$') IS DISTINCT FROM TRUE
        OR (market_row.content_json::jsonb->'bbo'->>'ask_price'
             ~ '^[0-9]+(\\.[0-9]+)?$') IS DISTINCT FROM TRUE
-       OR instrument_row.attested_session_id <> market_row.attested_session_id
-       OR instrument_row.attested_session_id <> account_row.attested_session_id
+       OR (market_row.content_json::jsonb->'mark'->>'price'
+            ~ '^[0-9]+(\\.[0-9]+)?$') IS DISTINCT FROM TRUE
+       OR (account_row.content_json::jsonb->'leverage_by_position_side'->>'long'
+            ~ '^[0-9]+(\\.[0-9]+)?$') IS DISTINCT FROM TRUE
+       OR (market_row.content_json::jsonb->>'as_of') IS NULL
+       OR (market_row.content_json::jsonb->>'as_of')::timestamptz
+            < statement_timestamp() - INTERVAL '30 seconds'
+       OR (market_row.content_json::jsonb->>'as_of')::timestamptz
+            > statement_timestamp() + INTERVAL '5 seconds'
+       OR instrument_row.attested_session_id
+            IS DISTINCT FROM market_row.attested_session_id
+       OR instrument_row.attested_session_id
+            IS DISTINCT FROM account_row.attested_session_id
        OR instrument_row.expires_at <= statement_timestamp()
        OR market_row.expires_at <= statement_timestamp()
        OR account_row.expires_at <= statement_timestamp()
@@ -681,35 +757,53 @@ BEGIN
              AND session.expires_at > statement_timestamp()
        )
        OR p_payload->'request_snapshot'#>>'{snapshot_evidence,instrument,snapshot_id}'
-            <> instrument_row.snapshot_id
+            IS DISTINCT FROM instrument_row.snapshot_id
        OR p_payload->'request_snapshot'#>>'{snapshot_evidence,market,snapshot_id}'
-            <> market_row.snapshot_id
+            IS DISTINCT FROM market_row.snapshot_id
        OR p_payload->'request_snapshot'#>>'{snapshot_evidence,account,snapshot_id}'
-            <> account_row.snapshot_id
+            IS DISTINCT FROM account_row.snapshot_id
        OR p_payload->'request_snapshot'#>>'{snapshot_evidence,instrument,digest}'
-            <> instrument_row.digest
+            IS DISTINCT FROM instrument_row.digest
        OR p_payload->'request_snapshot'#>>'{snapshot_evidence,market,digest}'
-            <> market_row.digest
+            IS DISTINCT FROM market_row.digest
        OR p_payload->'request_snapshot'#>>'{snapshot_evidence,account,digest}'
-            <> account_row.digest
+            IS DISTINCT FROM account_row.digest
     THEN
         RAISE EXCEPTION 'controlled canary attested snapshot binding failed';
     END IF;
 
-    computed_notional := quantity
-        * (instrument_row.content_json->>'ctVal')::numeric
-        * greatest(
-            reference_price,
-            (market_row.content_json->'bbo'->>'ask_price')::numeric,
-            limit_price
-        );
-    IF (instrument_row.content_json->>'ctVal')::numeric <= 0
-       OR (instrument_row.content_json->>'minSz')::numeric <= 0
-       OR (instrument_row.content_json->>'lotSz')::numeric <= 0
-       OR (market_row.content_json->'bbo'->>'ask_price')::numeric <= 0
-       OR quantity < (instrument_row.content_json->>'minSz')::numeric
-       OR mod(quantity, (instrument_row.content_json->>'lotSz')::numeric) <> 0
+    minimum_size := (instrument_row.content_json->>'minSz')::numeric;
+    lot_size := (instrument_row.content_json->>'lotSz')::numeric;
+    contract_value := (instrument_row.content_json->>'ctVal')::numeric;
+    tick_size := (instrument_row.content_json->>'tickSz')::numeric;
+    best_bid := (market_row.content_json->'bbo'->>'bid_price')::numeric;
+    best_ask := (market_row.content_json->'bbo'->>'ask_price')::numeric;
+    mark_price := (market_row.content_json->'mark'->>'price')::numeric;
+    snapshot_leverage := (
+        account_row.content_json->'leverage_by_position_side'->>'long'
+    )::numeric;
+    derived_quantity := ceil(minimum_size / lot_size) * lot_size;
+    derived_limit_price := floor(best_bid / tick_size) * tick_size;
+    computed_notional := derived_quantity
+        * contract_value
+        * greatest(reference_price, best_ask, derived_limit_price);
+    IF contract_value <= 0
+       OR minimum_size <= 0
+       OR lot_size <= 0
+       OR tick_size <= 0
+       OR best_bid <= 0
+       OR best_ask <= 0
+       OR mark_price <= 0
+       OR snapshot_leverage <= 0
+       OR reference_price IS DISTINCT FROM mark_price
+       OR leverage IS DISTINCT FROM snapshot_leverage
+       OR quantity IS DISTINCT FROM derived_quantity
+       OR limit_price IS DISTINCT FROM derived_limit_price
+       OR stop_loss IS DISTINCT FROM reference_price * 0.95
+       OR take_profit IS DISTINCT FROM reference_price * 1.05
+       OR abs(limit_price - reference_price) / reference_price > 0.01
        OR computed_notional IS DISTINCT FROM notional
+       OR computed_notional > 20
     THEN
         RAISE EXCEPTION 'controlled canary order derivation mismatch';
     END IF;
