@@ -523,6 +523,8 @@ def test_fresh_execution_only_entry_preserves_terminal_history_and_is_single_fli
     )
     legacy_payload = dict(legacy.request_payload)
     terminal_evidence = dict(terminal.evidence_snapshot)
+    legacy_request_hash = legacy.request_hash
+    terminal_request_hash = terminal.request_hash
 
     with pytest.raises(OkxDemoCanaryPreparationWaiting) as waiting:
         OkxDemoCanaryPreparationService(
@@ -537,6 +539,8 @@ def test_fresh_execution_only_entry_preserves_terminal_history_and_is_single_fli
     assert fresh.request_payload["supersedes_job_ids"] == [legacy.id, terminal.id]
     assert db_session.get(ResearchJob, legacy.id).request_payload == legacy_payload
     assert db_session.get(ResearchJob, terminal.id).evidence_snapshot == terminal_evidence
+    assert db_session.get(ResearchJob, legacy.id).request_hash == legacy_request_hash
+    assert db_session.get(ResearchJob, terminal.id).request_hash == terminal_request_hash
 
     with pytest.raises(OkxDemoCanaryPreparationBlocked, match="fresh execution-only"):
         OkxDemoCanaryPreparationService(
