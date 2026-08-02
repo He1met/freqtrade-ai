@@ -14,6 +14,7 @@ from app.models import (
     ExchangeFill,
     ExchangeOrder,
     ExchangePosition,
+    OkxDemoCanaryLifecycle,
     OkxDemoExchangeEvent,
     OkxDemoPositionSnapshot,
     OkxDemoReconciliationState,
@@ -307,6 +308,124 @@ def test_position_drift_is_blocked_without_overwriting_local_funds_state(
         assert hashlib.sha256(payload).hexdigest() == run.artifact_sha256
         assert artifact["database_ids"] == run.database_ids
         assert artifact["execution_target"] == OKX_DEMO_TARGET_ID
+
+
+def test_controlled_canary_finding_is_artifact_backed_and_suppresses_generic_grants(
+    session_factory,
+    tmp_path,
+) -> None:
+    now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
+    lifecycle_id = "9" * 32
+    with session_factory.begin() as db:
+        ensure_execution_scope_catalog(db)
+        order = _managed_order(db)
+        db.add(
+            OkxDemoCanaryLifecycle(
+                lifecycle_id=lifecycle_id,
+                execution_target_id="OKX_DEMO",
+                submission_grant_id="8" * 32,
+                opening_approval_id=71,
+                opening_trade_intent_id=order.trade_intent_id,
+                opening_exchange_order_row_id=order.id,
+                baseline_reconciliation_run_id=72,
+                baseline_position_quantity=Decimal("0"),
+                baseline_evidence_digest="a" * 64,
+                opening_order_identity_digest="b" * 64,
+                attributed_fill_quantity=Decimal("0"),
+                max_quantity=Decimal("1"),
+                outcome="PENDING",
+                cleanup_phase="OPENING_SUBMITTED",
+                deadline_at=now - timedelta(seconds=1),
+                fencing_version=2,
+                created_at=now - timedelta(seconds=2),
+                updated_at=now - timedelta(seconds=1),
+            )
+        )
+    with session_factory.begin() as db:
+        service = OkxDemoReconciliationService(
+            db,
+            evidence_root=tmp_path / "evidence",
+            allowed_evidence_root=tmp_path,
+        )
+        service.ingest_recovery_batch(
+            [
+                _event(
+                    "ORDER",
+                    "managed-order-1",
+                    {
+                        **_order(),
+                        "state": "partially_filled",
+                        "accFillSz": "0.4",
+                    },
+                    now,
+                ),
+                _event(
+                    "FILL",
+                    "raw-canary-fill-id",
+                    {
+                        "fillId": "raw-canary-fill-id",
+                        "ordId": "managed-order-1",
+                        "instId": "BTC-USDT-SWAP",
+                        "fillPx": "50000",
+                        "fillSz": "0.4",
+                        "fee": "-0.01",
+                    },
+                    now,
+                ),
+                _event(
+                    "ORDER",
+                    "raw-foreign-canary-order",
+                    {
+                        **_order(
+                            order_id="raw-foreign-canary-order",
+                            client_order_id="RawForeignCanaryClient",
+                        ),
+                        "state": "live",
+                        "accFillSz": "0",
+                    },
+                    now,
+                    source_sequence=2,
+                ),
+                _event(
+                    "POSITION",
+                    "BTC-USDT-SWAP:long",
+                    _position("0"),
+                    now,
+                ),
+                _event("ACCOUNT", "account", _account(), now),
+            ],
+            recovery_batch_id="controlled-canary-deadline",
+            high_watermarks=_high_watermarks(),
+            overlap_started_at=now - timedelta(seconds=1),
+            observed_at=now,
+            completed_at=now,
+        )
+        result = service.reconcile(now=now)
+        assert result.status == "DRIFTED"
+        assert result.database_ids["recovery_grants"] == []
+        expected_identity = "canary:{}".format(
+            hashlib.sha256(lifecycle_id.encode()).hexdigest()[:16]
+        )
+        assert {
+            "code": "CONTROLLED_CANARY_DEADLINE_CANCEL_REQUIRED",
+            "severity": "BLOCKED",
+            "identity": expected_identity,
+        } in result.findings
+        artifact = json.loads(open(result.artifact_path, encoding="utf-8").read())
+        assert artifact["findings"] == list(result.findings)
+        artifact_text = json.dumps(artifact)
+        assert lifecycle_id not in artifact_text
+        assert "managed-order-1" not in artifact_text
+        assert "ManagedFill1" not in artifact_text
+        assert "raw-canary-fill-id" not in artifact_text
+        assert "raw-foreign-canary-order" not in artifact_text
+        assert "RawForeignCanaryClient" not in artifact_text
+        assert any(
+            item["code"] == "AUTHORITATIVE_OPEN_ORDER_MISSING_LOCALLY"
+            and item["identity"].startswith("canary-ref:")
+            for item in artifact["findings"]
+        )
+        assert db.scalars(select(OkxDemoRecoveryGrant)).all() == []
 
 
 def test_net_mode_position_snapshot_is_rejected_before_persistence(

@@ -196,13 +196,15 @@ class FakeStopEvent:
 
 
 class FakeAdapter:
-    def __init__(self):
+    def __init__(self, *, startup_status="RECONCILED", resumable=False):
         self.events = []
         self.closed = False
+        self.startup_status = startup_status
+        self.resumable = resumable
 
     def reconcile_before_writer(self, **_kwargs):
         self.events.append("startup-reconcile")
-        return reconciliation()
+        return reconciliation(self.startup_status)
 
     def observe(self, **_kwargs):
         self.events.append("observe")
@@ -211,6 +213,10 @@ class FakeAdapter:
     def run_active_one_shot(self, **_kwargs):
         self.events.append("one-shot-check")
         return "NONE"
+
+    def can_resume_controlled_canary(self, _db, *, reconciliation_run_id):
+        self.events.append(("can-resume", reconciliation_run_id))
+        return self.resumable
 
     def run_cycle(self, *, writer, **_kwargs):
         self.events.append(("cycle", writer._openings_allowed))
@@ -224,10 +230,11 @@ class FakeServerSession:
         self.read = object()
         self.events = events
         self.closed = False
+        self.writer = FakeWriter()
 
     def create_order_writer(self, _db):
         self.events.append("writer-created")
-        return FakeWriter()
+        return self.writer
 
     def close(self):
         self.closed = True
@@ -318,6 +325,54 @@ def test_runtime_orders_reconciliation_before_writer_and_keeps_drift_alive(
     assert db.closed is True
     assert db.commits == 3
     assert db.rollbacks == 0
+
+
+def test_runtime_restart_allows_only_exact_controlled_canary_recovery(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    events = []
+    adapter = FakeAdapter(startup_status="DRIFTED", resumable=True)
+    server = FakeServerSession(events)
+    db = FakeDatabaseSession()
+    readiness = []
+    connection = SimpleNamespace(close=lambda: None)
+    engine = SimpleNamespace(connect=lambda: connection, dispose=lambda: None)
+    monkeypatch.setattr(runtime_service, "STOP_EVENT", FakeStopEvent())
+    monkeypatch.setattr(runtime_service, "Session", lambda bind: db)
+    monkeypatch.setattr(
+        runtime_service,
+        "acquire_one_shot_runtime_lock",
+        lambda _db: True,
+    )
+    monkeypatch.setattr(
+        runtime_service,
+        "release_one_shot_runtime_lock",
+        lambda _db: False,
+    )
+    monkeypatch.setattr(
+        runtime_service,
+        "create_okx_demo_server_session",
+        lambda _environment, lock_path: server,
+    )
+    monkeypatch.setattr(
+        runtime_service,
+        "_write_readiness",
+        lambda _path, payload: readiness.append(dict(payload)),
+    )
+
+    runtime_service.serve(
+        environment={"DATABASE_URL": "postgresql+psycopg:///freqtrade_ai"},
+        runtime_path=tmp_path,
+        reconciliation_factory=lambda: adapter,
+        engine_factory=lambda *_args, **_kwargs: engine,
+        now_provider=lambda: NOW,
+    )
+
+    assert ("can-resume", 41) in adapter.events
+    assert ("cycle", False) in adapter.events
+    assert readiness[0]["status"] == "RECOVERY_ONLY"
+    assert server.writer.calls == []
 
 
 def test_runtime_releases_coordination_window_after_canary_attestation(

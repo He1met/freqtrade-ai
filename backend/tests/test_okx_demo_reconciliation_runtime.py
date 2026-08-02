@@ -20,7 +20,7 @@ from app.models.okx_demo_reconciliation import (
     OkxDemoReconciliationState,
     OkxDemoRecoveryGrant,
 )
-from app.models.order_writer import OkxOrderWriteAttempt
+from app.models.order_writer import OkxDemoCanaryLifecycle, OkxOrderWriteAttempt
 from app.models.strategy_deployment import StrategyDeployment
 from app.services.okx_demo_reconciliation import OkxDemoReconciliationBlocked
 
@@ -873,6 +873,13 @@ def test_runtime_resumes_unresolved_placement_before_selecting_new_approval(
             "new approval selection must not run before unresolved recovery"
         ),
     )
+    monkeypatch.setattr(
+        adapter,
+        "_advance_controlled_canary",
+        lambda *_args, **_kwargs: pytest.fail(
+            "lifecycle advancement must not run before unresolved recovery"
+        ),
+    )
 
     class Writer:
         calls = []
@@ -885,6 +892,259 @@ def test_runtime_resumes_unresolved_placement_before_selecting_new_approval(
 
     assert len(writer.calls) == 1
     assert writer.calls == [1]
+
+
+def test_runtime_stops_after_one_controlled_canary_transition(
+    db,
+    monkeypatch,
+) -> None:
+    adapter = object.__new__(OkxDemoRuntimeReconciliationAdapter)
+    adapter._now_provider = lambda: NOW
+    transitions = []
+    monkeypatch.setattr(
+        adapter,
+        "_advance_controlled_canary",
+        lambda *_args, **_kwargs: transitions.append("advanced") or True,
+    )
+    monkeypatch.setattr(
+        "app.adapters.okx_demo.reconciliation_runtime."
+        "_next_unconsumed_approved_execution",
+        lambda *_args, **_kwargs: pytest.fail(
+            "opening selection must not follow a lifecycle transition"
+        ),
+    )
+
+    class Writer:
+        def __getattr__(self, name):
+            pytest.fail("writer action {} must wait for the next cycle".format(name))
+
+    adapter.run_cycle(read_client=object(), writer=Writer(), db=db)
+    assert transitions == ["advanced"]
+
+
+def test_runtime_residual_canary_waits_for_fresh_grant_then_uses_it(
+    db,
+    monkeypatch,
+) -> None:
+    db.add(
+        ExecutionScope(
+            scope_id="OKX_DEMO",
+            scope_kind="EXCHANGE_TARGET",
+            exchange_capable=True,
+            executable=False,
+            exchange_writes=False,
+            order_submission_authorized=False,
+        )
+    )
+    run = ReconciliationRun(
+        execution_target_id="OKX_DEMO",
+        status="DRIFTED",
+        summary_snapshot={},
+        database_ids={},
+        artifact_status="READY",
+        artifact_sha256="a" * 64,
+        authoritative_observed_at=NOW,
+        source_type="api_aggregate",
+        core_data=True,
+        started_at=NOW,
+        completed_at=NOW,
+    )
+    db.add(run)
+    db.flush()
+    state = OkxDemoReconciliationState(
+        execution_target_id="OKX_DEMO",
+        status="DRIFTED",
+        opening_frozen=True,
+        block_reason="controlled canary cleanup",
+        last_reconciliation_run_id=run.id,
+    )
+    old_grant = OkxDemoRecoveryGrant(
+        execution_target_id="OKX_DEMO",
+        reconciliation_run_id=run.id,
+        lifecycle_id="L" * 32,
+        grant_digest="b" * 64,
+        action="REDUCE_ONLY",
+        instrument_id="BTC-USDT-SWAP",
+        position_side="long",
+        max_quantity=Decimal("1"),
+        status="CONSUMED",
+        expires_at=NOW + timedelta(minutes=1),
+        consumed_at=NOW,
+    )
+    db.add_all((state, old_grant))
+    db.flush()
+    db.add(
+        OkxOrderWriteAttempt(
+            execution_target_id="OKX_DEMO",
+            exchange_order_row_id=901,
+            approval_id=41,
+            recovery_grant_database_id=old_grant.database_id,
+            operation="CLOSE",
+            operation_id="rcv00000000000000000001",
+            client_order_id="rcv00000000000000000001",
+            instrument_id="BTC-USDT-SWAP",
+            state="RESIDUAL_CLOSE_REQUIRED",
+            request_digest="c" * 64,
+            safe_request_snapshot={},
+            safe_response_snapshot={"accumulated_fill_size": "0.4"},
+            attempt_count=1,
+            lease_generation=1,
+            close_sequence=0,
+            last_attempt_at=NOW,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    db.commit()
+    adapter = object.__new__(OkxDemoRuntimeReconciliationAdapter)
+    advances = []
+    monkeypatch.setattr(
+        adapter,
+        "_advance_controlled_canary",
+        lambda *_args, **_kwargs: advances.append("issued") or True,
+    )
+
+    class Writer:
+        calls = []
+
+        def recovery_reduce_only(self, *, recovery_grant_database_id):
+            self.calls.append(recovery_grant_database_id)
+
+    writer = Writer()
+    adapter.run_cycle(read_client=object(), writer=writer, db=db)
+    assert advances == ["issued"]
+    assert writer.calls == []
+
+    fresh_grant = OkxDemoRecoveryGrant(
+        execution_target_id="OKX_DEMO",
+        reconciliation_run_id=run.id,
+        lifecycle_id="L" * 32,
+        grant_digest="d" * 64,
+        action="REDUCE_ONLY",
+        instrument_id="BTC-USDT-SWAP",
+        position_side="long",
+        max_quantity=Decimal("0.6"),
+        status="ACTIVE",
+        expires_at=NOW + timedelta(minutes=1),
+    )
+    db.add(fresh_grant)
+    db.commit()
+    adapter.run_cycle(read_client=object(), writer=writer, db=db)
+    assert writer.calls == [fresh_grant.database_id]
+
+
+def test_runtime_recovery_exhausted_restart_is_handled_noop(db) -> None:
+    db.add(
+        ExecutionScope(
+            scope_id="OKX_DEMO",
+            scope_kind="EXCHANGE_TARGET",
+            exchange_capable=True,
+            executable=False,
+            exchange_writes=False,
+            order_submission_authorized=False,
+        )
+    )
+    run = ReconciliationRun(
+        execution_target_id="OKX_DEMO",
+        status="DRIFTED",
+        summary_snapshot={},
+        database_ids={},
+        artifact_status="READY",
+        artifact_sha256="a" * 64,
+        authoritative_observed_at=NOW,
+        source_type="api_aggregate",
+        core_data=True,
+        started_at=NOW,
+        completed_at=NOW,
+    )
+    db.add(run)
+    db.flush()
+    lifecycle_id = "E" * 32
+    db.add(
+        OkxDemoCanaryLifecycle(
+            lifecycle_id=lifecycle_id,
+            execution_target_id="OKX_DEMO",
+            submission_grant_id="S" * 32,
+            opening_approval_id=1,
+            opening_trade_intent_id=1,
+            opening_exchange_order_row_id=1,
+            baseline_reconciliation_run_id=run.id,
+            baseline_position_quantity=Decimal("0"),
+            baseline_evidence_digest="b" * 64,
+            opening_order_identity_digest="c" * 64,
+            fill_attribution_digest="d" * 64,
+            attributed_fill_quantity=Decimal("1"),
+            max_quantity=Decimal("1"),
+            cleanup_trade_intent_id=2,
+            cleanup_approval_id=2,
+            cleanup_exchange_order_row_id=2,
+            outcome="FAILED",
+            cleanup_phase="RECOVERY_EXHAUSTED",
+            failure_code="CLEANUP_LIMIT_REACHED",
+            deadline_at=NOW - timedelta(seconds=1),
+            fencing_version=9,
+            created_at=NOW - timedelta(minutes=1),
+            updated_at=NOW,
+        )
+    )
+    grant = OkxDemoRecoveryGrant(
+        execution_target_id="OKX_DEMO",
+        reconciliation_run_id=run.id,
+        lifecycle_id=lifecycle_id,
+        grant_digest="f" * 64,
+        action="REDUCE_ONLY",
+        instrument_id="BTC-USDT-SWAP",
+        position_side="long",
+        max_quantity=Decimal("0.1"),
+        status="CONSUMED",
+        expires_at=NOW + timedelta(minutes=1),
+        consumed_at=NOW,
+    )
+    state = OkxDemoReconciliationState(
+        execution_target_id="OKX_DEMO",
+        status="DRIFTED",
+        opening_frozen=True,
+        block_reason="CLEANUP_LIMIT_REACHED",
+        last_reconciliation_run_id=run.id,
+    )
+    db.add_all((grant, state))
+    db.flush()
+    db.add(
+        OkxOrderWriteAttempt(
+            execution_target_id="OKX_DEMO",
+            exchange_order_row_id=3,
+            approval_id=2,
+            recovery_grant_database_id=grant.database_id,
+            operation="CLOSE",
+            operation_id="rcv00000000000000000003C3",
+            client_order_id="rcv00000000000000000003C3",
+            instrument_id="BTC-USDT-SWAP",
+            state="RESIDUAL_CLOSE_REQUIRED",
+            request_digest="1" * 64,
+            safe_request_snapshot={},
+            safe_response_snapshot={"accumulated_fill_size": "0.1"},
+            attempt_count=1,
+            lease_generation=1,
+            close_sequence=3,
+            last_attempt_at=NOW,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    db.commit()
+    adapter = object.__new__(OkxDemoRuntimeReconciliationAdapter)
+
+    class Writer:
+        def __getattr__(self, name):
+            pytest.fail("RECOVERY_EXHAUSTED restart must not call {}".format(name))
+
+    adapter.run_cycle(read_client=object(), writer=Writer(), db=db)
+    adapter.run_cycle(read_client=object(), writer=Writer(), db=db)
+    assert db.scalars(
+        select(OkxDemoRecoveryGrant).where(
+            OkxDemoRecoveryGrant.status == "ACTIVE"
+        )
+    ).all() == []
 
 
 def _active_runtime_deployment(db) -> StrategyDeployment:

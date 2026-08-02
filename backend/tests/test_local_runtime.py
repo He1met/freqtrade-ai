@@ -2034,6 +2034,51 @@ def test_okx_runtime_readiness_reports_blocked_openings_without_secrets(
     }
 
 
+def test_okx_runtime_readiness_accepts_recovery_only_without_opening_ready(
+    monkeypatch,
+    tmp_path,
+):
+    runtime = load_runtime_module()
+    pid = 4322
+    (tmp_path / runtime.OKX_RUNTIME_READY_FILE).write_text(
+        json.dumps(
+            {
+                "status": "RECOVERY_ONLY",
+                "execution_target": "OKX_DEMO",
+                "adapter": "ATTESTED",
+                "reconciliation": "DRIFTED",
+                "writer": "UNIQUE",
+                "pid": pid,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / runtime.OKX_RUNTIME_READY_FILE).chmod(0o600)
+    monkeypatch.setattr(
+        runtime,
+        "process_status",
+        lambda *_args: {"pid": pid, "running": True},
+    )
+    monkeypatch.setattr(runtime, "is_managed_process", lambda *_args: True)
+    monkeypatch.setattr(runtime, "_writer_lock_holder", lambda *_args: pid)
+
+    readiness = runtime.okx_runtime_readiness(tmp_path)
+    assert readiness["status"] == "RECOVERY_ONLY"
+    assert readiness["reconciliation"] == "DRIFTED"
+
+
+def test_okx_runtime_startup_returns_for_recovery_only(monkeypatch, tmp_path):
+    runtime = load_runtime_module()
+    moments = iter((0.0, 1.0))
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: next(moments))
+    monkeypatch.setattr(
+        runtime,
+        "okx_runtime_readiness",
+        lambda _state_dir: {"status": "RECOVERY_ONLY"},
+    )
+    runtime.wait_for_okx_runtime(tmp_path)
+
+
 def test_okx_runtime_startup_allows_authenticated_recovery_after_twenty_seconds(
     monkeypatch,
     tmp_path,

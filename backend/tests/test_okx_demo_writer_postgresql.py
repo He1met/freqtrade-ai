@@ -24,8 +24,12 @@ from app.adapters.okx_demo.writer_models import (
 )
 from app.adapters.okx_demo.writer_repository import SqlAlchemyOrderWriterStore
 from app.adapters.okx_demo.writer_state import WriteEvent
+from app.adapters.okx_demo.reconciliation_runtime import (
+    OkxDemoRuntimeReconciliationAdapter,
+)
 from app.db.migrations import (
     CANARY_LINEAGE_WRITE_BASE_VERSION,
+    CANARY_FINAL_EXPIRY_BASE_VERSION,
     FULL_CHAIN_BASE_VERSION,
     ORDER_WRITER_BASE_VERSION,
     RECONCILIATION_BASE_VERSION,
@@ -53,10 +57,18 @@ from app.models.execution_lineage import (
     TradeIntent,
 )
 from app.models.full_chain import FullChainRun, FullChainStageRun
-from app.models.order_writer import OkxDemoSubmissionGrant, OkxOrderWriteAttempt
+from app.models.order_writer import (
+    OkxDemoCanaryLifecycle,
+    OkxDemoSubmissionGrant,
+    OkxOrderWriteAttempt,
+)
 from app.models.okx_demo_reconciliation import (
     OkxDemoExchangeEvent,
+    OkxDemoFillSnapshot,
+    OkxDemoOrderSnapshot,
+    OkxDemoPositionSnapshot,
     OkxDemoReconciliationState,
+    OkxDemoRecoveryBatch,
     OkxDemoRecoveryGrant,
 )
 from app.models.research_job import ResearchJob
@@ -506,13 +518,14 @@ def _seed_approved_order(
     *,
     create_order: bool = True,
     controlled_canary: bool = False,
+    seed_now: datetime = NOW,
 ) -> tuple[int, int]:
     ensure_execution_scope_catalog(session)
     capability = _issue_attested_session_capability(
         attestation_hmac_key=b"t" * 32,
         pinned_fingerprint_sha256="f" * 64,
-        created_at=NOW - timedelta(seconds=1),
-        expires_at=NOW + timedelta(minutes=10),
+        created_at=seed_now - timedelta(seconds=1),
+        expires_at=seed_now + timedelta(minutes=10),
     )
     snapshots = {}
     for kind in ("instrument", "market", "account"):
@@ -522,7 +535,7 @@ def _seed_approved_order(
             "resource": kind,
             "stale": False,
             "authenticated": kind == "account",
-            "expires_at": (NOW + timedelta(minutes=5)).isoformat(),
+            "expires_at": (seed_now + timedelta(minutes=5)).isoformat(),
         }
         if kind == "instrument":
             content.update(
@@ -539,27 +552,27 @@ def _seed_approved_order(
                 reference_price="57000",
                 bbo={"ask_price": "57000"},
                 mark={"price": "57000"},
-                as_of=NOW.isoformat(),
+                as_of=seed_now.isoformat(),
             )
         normalized = _normalize_attested_snapshot(
             capability,
             kind=kind,
             content=content,
-            observed_at=NOW,
-            expires_at=NOW + timedelta(minutes=5),
+            observed_at=seed_now,
+            expires_at=seed_now + timedelta(minutes=5),
         )
         snapshots[kind] = _write_attested_snapshot(
             session,
             capability,
             normalized,
-            now=NOW,
+            now=seed_now,
         )
     snapshot_evidence = {
         kind: {
             "snapshot_id": row.snapshot_id,
             "database_id": row.database_id,
             "digest": row.digest,
-            "expires_at": (NOW + timedelta(minutes=5)).isoformat(),
+            "expires_at": (seed_now + timedelta(minutes=5)).isoformat(),
         }
         for kind, row in snapshots.items()
     }
@@ -617,7 +630,7 @@ def _seed_approved_order(
             "canonical_input": canonical_input,
             "snapshot_evidence": snapshot_evidence,
         },
-        expires_at=NOW + timedelta(minutes=5),
+        expires_at=seed_now + timedelta(minutes=5),
     )
     session.add(intent)
     session.flush()
@@ -654,9 +667,9 @@ def _seed_approved_order(
         order_submission_authorized=False,
         claim_required=True,
         status="ACTIVE",
-        expires_at=NOW + timedelta(minutes=5),
+        expires_at=seed_now + timedelta(minutes=5),
         evidence_snapshot={},
-        created_at=NOW,
+        created_at=seed_now,
     )
     session.add(approval)
     session.flush()
@@ -833,6 +846,1817 @@ def test_postgresql_upgrade_25_to_26_installs_canary_lineage_boundary(
     assert verify_schema(postgres_writer_engine).ready is True
 
 
+def test_postgresql_upgrade_26_to_27_installs_canary_lifecycle_boundary(
+    postgres_writer_engine,
+) -> None:
+    upgrade_database(postgres_writer_engine)
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(text("DROP TRIGGER IF EXISTS okx_demo_recovery_lifecycle_identity_guard ON okx_demo_recovery_grants"))
+        connection.execute(text("ALTER TABLE okx_demo_recovery_grants DROP COLUMN lifecycle_id"))
+        connection.execute(text("DROP TABLE okx_demo_canary_lifecycles"))
+        connection.execute(text("DELETE FROM {}".format(VERSION_TABLE)))
+        connection.execute(
+            text("INSERT INTO {} (version) VALUES (:version)".format(VERSION_TABLE)),
+            {"version": CANARY_FINAL_EXPIRY_BASE_VERSION},
+        )
+    assert upgrade_database(postgres_writer_engine) == SCHEMA_VERSION
+    with postgres_writer_engine.connect() as connection:
+        assert connection.execute(text("SELECT to_regclass('okx_demo_canary_lifecycles') IS NOT NULL")).scalar_one()
+        assert "lifecycle_id" in {
+            row["name"] for row in inspect(connection).get_columns("okx_demo_recovery_grants")
+        }
+        indexes = {
+            row["name"]: row
+            for row in inspect(connection).get_indexes("okx_demo_recovery_grants")
+        }
+        assert indexes[
+            "okx_demo_recovery_grants_one_active_lifecycle_action_idx"
+        ]["unique"] is True
+
+
+def test_postgresql_canary_lifecycle_is_function_only_for_runtime(
+    postgres_writer_engine,
+) -> None:
+    upgrade_database(postgres_writer_engine)
+    with postgres_writer_engine.connect() as connection:
+        for signature in (
+            "lock_okx_demo_reconciliation_state()",
+            "create_okx_demo_canary_lifecycle(character varying)",
+            "create_okx_demo_canary_cleanup_intent(character varying,bigint,bigint)",
+            "can_resume_okx_demo_canary_recovery(bigint)",
+            "transition_okx_demo_canary_lifecycle(character varying,text,bigint,bigint,character varying,bigint)",
+            "issue_okx_demo_canary_recovery_grant(character varying,bigint,text,bigint)",
+        ):
+            row = connection.execute(text(
+                "SELECT owner.rolname,p.prosecdef,p.proconfig,has_function_privilege('freqtrade',p.oid,'EXECUTE') "
+                "FROM pg_proc p JOIN pg_roles owner ON owner.oid=p.proowner WHERE p.oid=CAST(:signature AS regprocedure)"
+            ), {"signature": signature}).one()
+            assert tuple(row) == ("freqtrade_ai_attestor", True, ["search_path=pg_catalog"], True)
+        assert connection.execute(text(
+            "SELECT has_table_privilege('freqtrade','okx_demo_canary_lifecycles','INSERT,UPDATE,DELETE'), "
+            "has_table_privilege('freqtrade','okx_demo_recovery_grants','INSERT')"
+        )).one() == (False, True)
+    for statement in (
+        "INSERT INTO okx_demo_canary_lifecycles DEFAULT VALUES",
+        "UPDATE okx_demo_canary_lifecycles SET fencing_version=fencing_version+1",
+    ):
+        with pytest.raises(SQLAlchemyError):
+            with postgres_writer_engine.begin() as connection:
+                connection.execute(text("SET LOCAL ROLE freqtrade"))
+                connection.execute(text(statement))
+
+
+def test_postgresql_canary_lifecycle_create_reject_and_unopened_revoke(
+    postgres_writer_engine,
+) -> None:
+    """Exercise the real v27 function path without contacting OKX."""
+
+    upgrade_database(postgres_writer_engine)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    with Session(postgres_writer_engine) as session:
+        approval_id, _ = _seed_approved_order(
+            session,
+            create_order=False,
+            controlled_canary=True,
+        )
+        approval = session.get(ApprovedExecution, approval_id)
+        batch = OkxDemoRecoveryBatch(
+            execution_target_id="OKX_DEMO",
+            recovery_batch_id=uuid4().hex,
+            authenticated=True,
+            pagination_complete=True,
+            complete_streams=["ACCOUNT", "FILL", "ORDER", "POSITION"],
+            high_watermarks={kind: now.isoformat() for kind in ("ACCOUNT", "FILL", "ORDER", "POSITION")},
+            overlap_started_at=now - timedelta(seconds=1),
+            observed_at=now,
+            completed_at=now,
+            event_count=0,
+            evidence_digest="8" * 64,
+        )
+        session.add(batch)
+        session.flush()
+        run = ReconciliationRun(
+            execution_target_id="OKX_DEMO",
+            status="RECONCILED",
+            summary_snapshot={},
+            database_ids={},
+            artifact_sha256="9" * 64,
+            artifact_status="READY",
+            authoritative_observed_at=now,
+            source_type="api_aggregate",
+            core_data=True,
+            started_at=now,
+            completed_at=now,
+            created_at=now,
+        )
+        session.add(run)
+        session.flush()
+        run.database_ids = {
+            "reconciliation_run": [run.id],
+            "recovery_batches": [batch.database_id],
+            "order_snapshots": [],
+            "position_snapshots": [],
+        }
+        state = session.scalars(
+            select(OkxDemoReconciliationState).where(
+                OkxDemoReconciliationState.execution_target_id == "OKX_DEMO"
+            )
+        ).one()
+        state.status = "RECONCILED"
+        state.opening_frozen = False
+        state.block_reason = None
+        state.last_event_observed_at = now
+        state.last_reconciliation_run_id = run.id
+        grant_id = uuid4().hex
+        session.add(
+            OkxDemoSubmissionGrant(
+                grant_id=grant_id,
+                execution_target_id="OKX_DEMO",
+                approval_id=approval.id,
+                reconciliation_run_id=run.id,
+                canonical_hash=approval.canonical_hash,
+                policy_digest=approval.policy_digest,
+                approved_payload_hash=approval.approved_payload_hash,
+                client_order_id=approval.client_order_id,
+                instrument_id="BTC-USDT-SWAP",
+                canary_quantity=Decimal("1"),
+                canary_notional=Decimal("5.7"),
+                request_digest="a" * 64,
+                provenance=CANARY_PROVENANCE,
+                status="ACTIVE",
+                issued_at=now - timedelta(seconds=1),
+                expires_at=now + timedelta(minutes=1),
+            )
+        )
+        session.commit()
+        run_id = run.id
+
+    with postgres_writer_engine.connect() as connection:
+        baseline_digest = connection.execute(
+            text(
+                "SELECT encode(public.digest(convert_to(concat_ws('|',id::text,"
+                "artifact_sha256,authoritative_observed_at::text,completed_at::text),"
+                "'UTF8'),'sha256'),'hex') FROM reconciliation_runs WHERE id=:run_id"
+            ),
+            {"run_id": run_id},
+        ).scalar_one()
+
+    future = now + timedelta(seconds=10)
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(text(
+            "UPDATE reconciliation_runs SET authoritative_observed_at=:future,completed_at=:future WHERE id=:run_id"
+        ), {"future": future, "run_id": run_id})
+    with pytest.raises(SQLAlchemyError, match="unsafe controlled canary lifecycle baseline"):
+        with postgres_writer_engine.begin() as connection:
+            connection.execute(text("SET LOCAL ROLE freqtrade"))
+            connection.execute(text(
+                "SELECT create_okx_demo_canary_lifecycle(:grant_id)"
+            ), {"grant_id": grant_id})
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(text(
+            "UPDATE reconciliation_runs SET authoritative_observed_at=:now,completed_at=:now WHERE id=:run_id"
+        ), {"now": now, "run_id": run_id})
+
+    with pytest.raises(SQLAlchemyError, match="controlled canary grant missing"):
+        with postgres_writer_engine.begin() as connection:
+            connection.execute(text("SET LOCAL ROLE freqtrade"))
+            connection.execute(
+                text("SELECT create_okx_demo_canary_lifecycle(:grant_id)"),
+                {"grant_id": "f" * 32},
+            )
+
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(text("SET LOCAL ROLE freqtrade"))
+        assert connection.execute(
+            text("SELECT create_okx_demo_canary_lifecycle(:grant_id)"),
+            {"grant_id": grant_id},
+        ).scalar_one() == grant_id
+        assert connection.execute(
+            text(
+                "SELECT baseline_evidence_digest FROM okx_demo_canary_lifecycles "
+                "WHERE lifecycle_id=:lifecycle"
+            ),
+            {"lifecycle": grant_id},
+        ).scalar_one() == baseline_digest
+
+    with pytest.raises(SQLAlchemyError, match="controlled issuer"):
+        with postgres_writer_engine.begin() as connection:
+            connection.execute(text("SET LOCAL ROLE freqtrade"))
+            connection.execute(
+                text(
+                    "INSERT INTO okx_demo_recovery_grants("
+                    "execution_target_id,reconciliation_run_id,lifecycle_id,grant_digest,"
+                    "action,instrument_id,position_side,max_quantity,status,expires_at) "
+                    "VALUES('OKX_DEMO',:run_id,:lifecycle,'b'||repeat('0',63),'CANCEL',"
+                    "'BTC-USDT-SWAP','long',0,'ACTIVE',statement_timestamp()+interval '5 seconds')"
+                ),
+                {"run_id": run_id, "lifecycle": grant_id},
+            )
+
+    with postgres_writer_engine.connect() as connection:
+        terminal_digest = connection.execute(
+            text(
+                "SELECT encode(public.digest(convert_to(concat_ws('|',l.lifecycle_id,"
+                "r.id::text,r.artifact_sha256,l.outcome,l.attributed_fill_quantity::text),"
+                "'UTF8'),'sha256'),'hex') FROM okx_demo_canary_lifecycles l "
+                "JOIN reconciliation_runs r ON r.id=:run_id WHERE l.lifecycle_id=:lifecycle"
+            ),
+            {"run_id": run_id, "lifecycle": grant_id},
+        ).scalar_one()
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(text("SET LOCAL ROLE freqtrade"))
+        version = connection.execute(
+            text(
+                "SELECT transition_okx_demo_canary_lifecycle("
+                ":lifecycle,'REVOKE_UNOPENED',NULL,:run_id,:digest,1)"
+            ),
+            {"lifecycle": grant_id, "run_id": run_id, "digest": terminal_digest},
+        ).scalar_one()
+        assert version == 2
+    with postgres_writer_engine.connect() as connection:
+        assert tuple(connection.execute(
+            text(
+                "SELECT l.outcome,l.cleanup_phase,g.status FROM okx_demo_canary_lifecycles l "
+                "JOIN okx_demo_submission_grants g ON g.grant_id=l.submission_grant_id "
+                "WHERE l.lifecycle_id=:lifecycle"
+            ),
+            {"lifecycle": grant_id},
+        ).one()) == ("FAILED", "REVOKED", "FAILED")
+
+
+@pytest.mark.parametrize(
+    "trigger_name",
+    (
+        "okx_demo_canary_recovery_insert_guard",
+        "okx_demo_recovery_lifecycle_identity_guard",
+    ),
+)
+def test_postgresql_canary_lifecycle_trigger_tamper_fails_readiness(
+    postgres_writer_engine,
+    trigger_name,
+) -> None:
+    upgrade_database(postgres_writer_engine)
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(text(
+            "DROP TRIGGER {} ON okx_demo_recovery_grants".format(trigger_name)
+        ))
+    assert "controlled canary lifecycle trigger boundary mismatch: {}".format(
+        trigger_name
+    ) in schema_problems(postgres_writer_engine)
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    (
+        "REVOKE SELECT (opening_trade_intent_id) ON "
+        "okx_demo_canary_lifecycles FROM freqtrade",
+        "GRANT SELECT (opening_approval_id) ON "
+        "okx_demo_canary_lifecycles TO freqtrade",
+    ),
+)
+def test_postgresql_canary_lifecycle_column_acl_tamper_fails_readiness(
+    postgres_writer_engine,
+    tamper,
+) -> None:
+    upgrade_database(postgres_writer_engine)
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(text(tamper))
+    assert any(
+        "controlled canary lifecycle column SELECT ACL mismatch" in item
+        for item in schema_problems(postgres_writer_engine)
+    )
+
+
+def test_postgresql_canary_recovery_issuer_fences_repeat_and_unresolved_attempt(
+    postgres_writer_engine,
+    tmp_path,
+) -> None:
+    upgrade_database(postgres_writer_engine)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    lifecycle_id = uuid4().hex
+    with Session(postgres_writer_engine) as session:
+        approval_id, seeded_order_id = _seed_approved_order(
+            session,
+            create_order=True,
+            controlled_canary=True,
+        )
+        approval = session.get(ApprovedExecution, approval_id)
+        intent = session.get(TradeIntent, approval.trade_intent_id)
+        order = session.get(ExchangeOrder, seeded_order_id)
+        store = SqlAlchemyOrderWriterStore(session, now_provider=lambda: now)
+        store.acquire_lease(
+            writer_instance_id="CanaryIssuerFixture01",
+            approval_id=approval.id,
+            canonical_hash=approval.canonical_hash,
+            policy_digest=approval.policy_digest,
+            approved_payload_hash=approval.approved_payload_hash,
+            now=now,
+            expires_at=now + timedelta(minutes=1),
+        )
+        session.add(
+            OkxOrderWriteAttempt(
+                execution_target_id="OKX_DEMO",
+                exchange_order_row_id=order.id,
+                approval_id=approval.id,
+                recovery_grant_database_id=None,
+                operation="PLACE",
+                operation_id=order.client_order_id,
+                client_order_id=order.client_order_id,
+                instrument_id=intent.instrument_id,
+                state="PREPARED",
+                request_digest="4" * 64,
+                safe_request_snapshot={},
+                safe_response_snapshot={},
+                attempt_count=1,
+                lease_generation=1,
+                close_sequence=0,
+                last_attempt_at=now,
+                created_at=now - timedelta(seconds=3),
+            )
+        )
+        session.flush()
+        prepared = store.unresolved()
+        assert prepared is not None
+        acknowledged = store.transition(
+            prepared,
+            event=WriteEvent.ACKNOWLEDGE,
+            exchange_order_id="okx-canary-opening-1",
+        )
+        store.transition(
+            acknowledged,
+            event=WriteEvent.RECONCILE,
+            order_state="live",
+            safe_response_snapshot={"order_id": "okx-canary-opening-1", "state": "live"},
+        )
+        session.flush()
+        session.refresh(order)
+        recovery_batch_id = uuid4().hex
+        reconciliation = OkxDemoReconciliationService(
+            session,
+            evidence_root=tmp_path / "managed" / "reconciliation",
+            allowed_evidence_root=tmp_path / "managed",
+        )
+        reconciliation.ingest_recovery_batch(
+            [{
+                "schema_version": RECONCILIATION_EVENT_SCHEMA_VERSION,
+                "execution_target": "OKX_DEMO",
+                "source": "REST",
+                "entity_kind": "ORDER",
+                "entity_key": order.exchange_order_id,
+                "source_sequence": 1,
+                "stream_generation": 1,
+                "observed_at": now.isoformat(),
+                "received_at": now.isoformat(),
+                "payload": {
+                    "ordId": order.exchange_order_id,
+                    "clOrdId": order.client_order_id,
+                    "instId": intent.instrument_id,
+                    "state": "live",
+                    "sz": "1",
+                    "accFillSz": "0",
+                    "avgPx": "",
+                    "reduceOnly": False,
+                },
+            }],
+            recovery_batch_id=recovery_batch_id,
+            high_watermarks={kind: now.isoformat() for kind in ("ACCOUNT", "FILL", "ORDER", "POSITION")},
+            overlap_started_at=now - timedelta(seconds=1),
+            observed_at=now,
+            completed_at=now,
+        )
+        batch = session.scalars(
+            select(OkxDemoRecoveryBatch).where(
+                OkxDemoRecoveryBatch.recovery_batch_id == recovery_batch_id
+            )
+        ).one()
+        snapshot = session.scalars(
+            select(OkxDemoOrderSnapshot).where(
+                OkxDemoOrderSnapshot.exchange_order_id == order.exchange_order_id
+            )
+        ).one()
+        reconciliation.ingest_event({
+            "schema_version": RECONCILIATION_EVENT_SCHEMA_VERSION,
+            "execution_target": "OKX_DEMO",
+            "source": "REST",
+            "entity_kind": "ORDER",
+            "entity_key": order.exchange_order_id,
+            "source_sequence": 2,
+            "stream_generation": 1,
+            "observed_at": (now + timedelta(milliseconds=100)).isoformat(),
+            "received_at": (now + timedelta(milliseconds=100)).isoformat(),
+            "payload": {
+                "ordId": order.exchange_order_id,
+                "clOrdId": order.client_order_id,
+                "instId": intent.instrument_id,
+                "state": "partially_filled",
+                "sz": "1",
+                "accFillSz": "1",
+                "avgPx": "57000",
+                "reduceOnly": False,
+            },
+        })
+        mismatch_snapshot = session.scalars(
+            select(OkxDemoOrderSnapshot).where(
+                OkxDemoOrderSnapshot.exchange_order_id == order.exchange_order_id
+            ).order_by(OkxDemoOrderSnapshot.database_id.desc())
+        ).first()
+        run = ReconciliationRun(
+            execution_target_id="OKX_DEMO",
+            status="DRIFTED",
+            summary_snapshot={},
+            database_ids={},
+            artifact_sha256="e" * 64,
+            artifact_status="READY",
+            authoritative_observed_at=now,
+            source_type="api_aggregate",
+            core_data=True,
+            started_at=now,
+            completed_at=now,
+            created_at=now,
+        )
+        session.add(run)
+        session.flush()
+        run.database_ids = {
+            "reconciliation_run": [run.id],
+            "recovery_batches": [batch.database_id],
+            "order_snapshots": [snapshot.database_id],
+            "fill_snapshots": [],
+            "position_snapshots": [],
+        }
+        canary_identity = "canary:" + hashlib.sha256(
+            lifecycle_id.encode()
+        ).hexdigest()[:16]
+        run.summary_snapshot = {
+            "execution_target": "OKX_DEMO",
+            "source_type": "api_aggregate",
+            "status": "DRIFTED",
+            "core_data": True,
+            "opening_frozen": True,
+            "database_ids": run.database_ids,
+            "findings": [],
+        }
+        state = session.scalars(
+            select(OkxDemoReconciliationState).where(
+                OkxDemoReconciliationState.execution_target_id == "OKX_DEMO"
+            )
+        ).one()
+        state.status = "DRIFTED"
+        state.opening_frozen = True
+        state.block_reason = "CONTROLLED_CANARY_DEADLINE_CANCEL_REQUIRED"
+        state.last_event_observed_at = now
+        state.last_reconciliation_run_id = run.id
+        grant = OkxDemoSubmissionGrant(
+            grant_id=lifecycle_id,
+            execution_target_id="OKX_DEMO",
+            approval_id=approval.id,
+            reconciliation_run_id=run.id,
+            canonical_hash=approval.canonical_hash,
+            policy_digest=approval.policy_digest,
+            approved_payload_hash=approval.approved_payload_hash,
+            client_order_id=approval.client_order_id,
+            instrument_id=intent.instrument_id,
+            canary_quantity=Decimal("1"),
+            canary_notional=Decimal("5.7"),
+            request_digest="f" * 64,
+            provenance=CANARY_PROVENANCE,
+            status="CONSUMED",
+            issued_at=now - timedelta(seconds=2),
+            expires_at=now + timedelta(minutes=1),
+            consumed_at=now - timedelta(seconds=1),
+        )
+        session.add(grant)
+        session.flush()
+        session.add(
+            OkxDemoCanaryLifecycle(
+                lifecycle_id=lifecycle_id,
+                execution_target_id="OKX_DEMO",
+                submission_grant_id=lifecycle_id,
+                opening_approval_id=approval.id,
+                opening_trade_intent_id=intent.id,
+                opening_exchange_order_row_id=None,
+                baseline_reconciliation_run_id=run.id,
+                baseline_position_quantity=Decimal("0"),
+                baseline_evidence_digest="1" * 64,
+                opening_order_identity_digest=None,
+                attributed_fill_quantity=Decimal("0"),
+                max_quantity=Decimal("1"),
+                outcome="PENDING",
+                cleanup_phase="ARMED",
+                deadline_at=now + timedelta(seconds=10),
+                fencing_version=1,
+                created_at=now - timedelta(seconds=4),
+                updated_at=now,
+            )
+        )
+        session.commit()
+        run_id = run.id
+        order_id = order.id
+        snapshot_database_id = snapshot.database_id
+        original_database_ids = dict(run.database_ids)
+        mismatch_database_ids = dict(
+            original_database_ids,
+            order_snapshots=[mismatch_snapshot.database_id],
+        )
+
+    with postgres_writer_engine.connect() as connection:
+        opening_digest = connection.execute(
+            text(
+                "SELECT encode(public.digest(convert_to(concat_ws('|',o.id::text,"
+                "o.client_order_id,i.instrument_id,a.request_digest),'UTF8'),'sha256'),'hex') "
+                "FROM exchange_orders o JOIN trade_intents i ON i.id=o.trade_intent_id "
+                "JOIN okx_order_write_attempts a ON a.exchange_order_row_id=o.id "
+                "WHERE o.id=:order_id AND a.operation='PLACE'"
+            ),
+            {"order_id": order_id},
+        ).scalar_one()
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(text("SET LOCAL ROLE freqtrade"))
+        assert connection.execute(
+            text(
+                "SELECT transition_okx_demo_canary_lifecycle("
+                ":lifecycle,'BIND_OPENING',:order_id,NULL,:digest,1)"
+            ),
+            {"lifecycle": lifecycle_id, "order_id": order_id, "digest": opening_digest},
+        ).scalar_one() == 2
+
+    def insert_conflicting_generic_grant() -> str:
+        try:
+            with postgres_writer_engine.begin() as connection:
+                connection.execute(text("SET LOCAL ROLE freqtrade"))
+                connection.execute(text(
+                    "INSERT INTO okx_demo_recovery_grants("
+                    "execution_target_id,reconciliation_run_id,lifecycle_id,"
+                    "exchange_order_row_id,grant_digest,action,instrument_id,"
+                    "position_side,max_quantity,status,expires_at) VALUES("
+                    "'OKX_DEMO',:run_id,NULL,:order_id,:digest,'CANCEL',"
+                    "'BTC-USDT-SWAP','long',0,'ACTIVE',:expires_at)"
+                ), {
+                    "run_id": run_id,
+                    "order_id": order_id,
+                    "digest": "2" * 64,
+                    "expires_at": now + timedelta(minutes=1),
+                })
+            return "INSERTED"
+        except SQLAlchemyError as exc:
+            return "BLOCKED:{}".format(exc)
+
+    with postgres_writer_engine.connect() as locker:
+        transaction = locker.begin()
+        locker.execute(text("SELECT lock_okx_demo_reconciliation_state()"))
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(insert_conflicting_generic_grant)
+            time.sleep(0.1)
+            assert future.done() is False
+            transaction.commit()
+            assert future.result().startswith("BLOCKED:")
+
+    with Session(postgres_writer_engine) as session:
+        normal_run = ReconciliationRun(
+            execution_target_id="OKX_DEMO",
+            status="RECONCILED",
+            summary_snapshot={},
+            database_ids={},
+            artifact_sha256="6" * 64,
+            artifact_status="READY",
+            authoritative_observed_at=now,
+            source_type="api_aggregate",
+            core_data=True,
+            started_at=now,
+            completed_at=now,
+            created_at=now,
+        )
+        session.add(normal_run)
+        session.flush()
+        normal_run.database_ids = {
+            **original_database_ids,
+            "reconciliation_run": [normal_run.id],
+        }
+        state = session.scalars(select(OkxDemoReconciliationState).where(
+            OkxDemoReconciliationState.execution_target_id == "OKX_DEMO"
+        )).one()
+        state.status = "RECONCILED"
+        state.opening_frozen = False
+        state.last_reconciliation_run_id = normal_run.id
+        session.commit()
+        normal_run_id = normal_run.id
+    adapter = object.__new__(OkxDemoRuntimeReconciliationAdapter)
+    adapter._now_provider = lambda: now
+    with Session(postgres_writer_engine) as session:
+        session.execute(text("SET LOCAL ROLE freqtrade"))
+        assert adapter._advance_controlled_canary(session) is True
+        assert session.execute(text(
+            "SELECT fencing_version FROM okx_demo_canary_lifecycles "
+            "WHERE lifecycle_id=:lifecycle"
+        ), {"lifecycle": lifecycle_id}).scalar_one() == 2
+        session.rollback()
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(text(
+            "ALTER TABLE okx_demo_recovery_grants DISABLE TRIGGER "
+            "okx_demo_canary_recovery_insert_guard"
+        ))
+        connection.execute(text(
+            "INSERT INTO okx_demo_recovery_grants("
+            "execution_target_id,reconciliation_run_id,lifecycle_id,"
+            "exchange_order_row_id,grant_digest,action,instrument_id,"
+            "position_side,max_quantity,status,expires_at) VALUES("
+            "'OKX_DEMO',:run_id,NULL,:order_id,:digest,'CANCEL',"
+            "'BTC-USDT-SWAP','long',0,'ACTIVE',:expires_at)"
+        ), {
+            "run_id": normal_run_id,
+            "order_id": order_id,
+            "digest": "3" * 64,
+            "expires_at": now + timedelta(minutes=1),
+        })
+        connection.execute(text(
+            "ALTER TABLE okx_demo_recovery_grants ENABLE TRIGGER "
+            "okx_demo_canary_recovery_insert_guard"
+        ))
+    with Session(postgres_writer_engine) as session:
+        session.execute(text("SET LOCAL ROLE freqtrade"))
+        with pytest.raises(
+            OkxDemoReconciliationBlocked,
+            match="generic recovery authority conflicts",
+        ):
+            adapter._advance_controlled_canary(session)
+        session.rollback()
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(text(
+            "DELETE FROM okx_demo_recovery_grants WHERE grant_digest=:digest"
+        ), {"digest": "3" * 64})
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(text(
+            "UPDATE okx_demo_canary_lifecycles SET deadline_at=:deadline "
+            "WHERE lifecycle_id=:lifecycle"
+        ), {"deadline": now - timedelta(seconds=2), "lifecycle": lifecycle_id})
+        connection.execute(text(
+            "UPDATE okx_demo_reconciliation_states SET status='DRIFTED',"
+            "opening_frozen=true,last_reconciliation_run_id=:run_id "
+            "WHERE execution_target_id='OKX_DEMO'"
+        ), {"run_id": run_id})
+
+    # Exercise the real least-privilege reconciliation service after the
+    # lifecycle exists.  Its controlled finding must be in the finalized
+    # artifact, while the generic issuer remains completely suppressed.
+    with Session(postgres_writer_engine) as session:
+        session.execute(text("SET LOCAL ROLE freqtrade"))
+        service_now = datetime.now(timezone.utc).replace(microsecond=0)
+        service = OkxDemoReconciliationService(
+            session,
+            evidence_root=tmp_path / "runtime-role" / "reconciliation",
+            allowed_evidence_root=tmp_path / "runtime-role",
+        )
+        service.ingest_recovery_batch(
+            [
+                {
+                    "schema_version": RECONCILIATION_EVENT_SCHEMA_VERSION,
+                    "execution_target": "OKX_DEMO",
+                    "source": "REST",
+                    "entity_kind": "ORDER",
+                    "entity_key": "okx-canary-opening-1",
+                    "source_sequence": 10,
+                    "stream_generation": 2,
+                    "observed_at": service_now.isoformat(),
+                    "received_at": service_now.isoformat(),
+                    "payload": {
+                        "ordId": "okx-canary-opening-1",
+                        "clOrdId": "PgWriterOrder001",
+                        "instId": "BTC-USDT-SWAP",
+                        "state": "live",
+                        "sz": "1",
+                        "accFillSz": "0",
+                        "avgPx": "",
+                        "reduceOnly": False,
+                    },
+                },
+                {
+                    **_postgres_position_event("0", 10),
+                    "source": "REST",
+                    "stream_generation": 2,
+                    "observed_at": service_now.isoformat(),
+                    "received_at": service_now.isoformat(),
+                },
+                {
+                    "schema_version": RECONCILIATION_EVENT_SCHEMA_VERSION,
+                    "execution_target": "OKX_DEMO",
+                    "source": "REST",
+                    "entity_kind": "ACCOUNT",
+                    "entity_key": "account",
+                    "source_sequence": 10,
+                    "stream_generation": 2,
+                    "observed_at": service_now.isoformat(),
+                    "received_at": service_now.isoformat(),
+                    "payload": {
+                        "accountFingerprint": "a" * 64,
+                        "equity": "10000",
+                        "availableBalance": "9000",
+                        "marginBalance": "1000",
+                    },
+                },
+            ],
+            recovery_batch_id=uuid4().hex,
+            high_watermarks={
+                kind: service_now.isoformat()
+                for kind in ("ACCOUNT", "FILL", "ORDER", "POSITION")
+            },
+            overlap_started_at=service_now - timedelta(seconds=1),
+            observed_at=service_now,
+            completed_at=service_now,
+        )
+        service_result = service.reconcile(now=service_now)
+        session.commit()
+        assert service_result.status == "DRIFTED"
+        assert service_result.database_ids["recovery_grants"] == []
+        assert [item["code"] for item in service_result.findings] == [
+            "CONTROLLED_CANARY_DEADLINE_CANCEL_REQUIRED"
+        ]
+        artifact = json.loads(
+            open(service_result.artifact_path, encoding="utf-8").read()
+        )
+        assert artifact["findings"] == list(service_result.findings)
+        assert lifecycle_id not in json.dumps(artifact)
+        assert adapter.can_resume_controlled_canary(
+            session,
+            reconciliation_run_id=service_result.reconciliation_run_database_id,
+        ) is True
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE okx_demo_reconciliation_states SET status='DRIFTED',"
+                "opening_frozen=true,last_reconciliation_run_id=:run_id "
+                "WHERE execution_target_id='OKX_DEMO'"
+            ),
+            {"run_id": run_id},
+        )
+
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE reconciliation_runs SET summary_snapshot=jsonb_set("
+                "summary_snapshot::jsonb,'{findings}',CAST(:findings AS jsonb))::json "
+                "WHERE id=:run_id"
+            ),
+            {
+                "run_id": run_id,
+                "findings": json.dumps([{
+                    "code": "CONTROLLED_CANARY_DEADLINE_CANCEL_REQUIRED",
+                    "identity": canary_identity,
+                }]),
+            },
+        )
+
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(text(
+            "UPDATE reconciliation_runs SET database_ids=CAST(:ids AS json),"
+            "summary_snapshot=jsonb_set(summary_snapshot::jsonb,'{database_ids}',CAST(:ids AS jsonb))::json "
+            "WHERE id=:run_id"
+        ), {"run_id": run_id, "ids": json.dumps(mismatch_database_ids)})
+    with postgres_writer_engine.connect() as connection:
+        mismatch_digest = connection.execute(text(
+            "SELECT encode(public.digest(convert_to(concat_ws('|',CAST(:lifecycle AS text),"
+            "r.id::text,r.artifact_sha256,'0',os.status,''),'UTF8'),'sha256'),'hex') "
+            "FROM reconciliation_runs r JOIN okx_demo_order_snapshots os "
+            "ON os.database_id=CAST(r.database_ids::jsonb->'order_snapshots'->>0 AS bigint) "
+            "WHERE r.id=:run_id"
+        ), {"lifecycle": lifecycle_id, "run_id": run_id}).scalar_one()
+    with pytest.raises(SQLAlchemyError, match="fill attribution transition rejected"):
+        with postgres_writer_engine.begin() as connection:
+            connection.execute(text("SET LOCAL ROLE freqtrade"))
+            connection.execute(text(
+                "SELECT transition_okx_demo_canary_lifecycle("
+                ":lifecycle,'RECORD_FILLS',NULL,:run_id,:digest,2)"
+            ), {"lifecycle": lifecycle_id, "run_id": run_id, "digest": mismatch_digest})
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(text(
+            "UPDATE reconciliation_runs SET database_ids=CAST(:ids AS json),"
+            "summary_snapshot=jsonb_set(summary_snapshot::jsonb,'{database_ids}',CAST(:ids AS jsonb))::json "
+            "WHERE id=:run_id"
+        ), {"run_id": run_id, "ids": json.dumps(original_database_ids)})
+
+    adapter = object.__new__(OkxDemoRuntimeReconciliationAdapter)
+    adapter._now_provider = lambda: now
+    with Session(postgres_writer_engine) as session:
+        session.execute(text("SET LOCAL ROLE freqtrade"))
+        runtime_snapshot = session.scalars(
+            select(OkxDemoOrderSnapshot).where(
+                OkxDemoOrderSnapshot.database_id == snapshot_database_id
+            )
+        ).one()
+        derived_findings = []
+        OkxDemoReconciliationService(session)._controlled_canary_findings(
+            {runtime_snapshot.exchange_order_id: runtime_snapshot},
+            {},
+            {},
+            derived_findings,
+            now=now,
+        )
+        assert [item["code"] for item in derived_findings] == [
+            "CONTROLLED_CANARY_DEADLINE_CANCEL_REQUIRED"
+        ]
+        assert adapter._advance_controlled_canary(session) is True
+        session.commit()
+        lifecycle = session.execute(
+            text(
+                "SELECT cleanup_phase,fencing_version "
+                "FROM okx_demo_canary_lifecycles "
+                "WHERE lifecycle_id=:lifecycle_id"
+            ),
+            {"lifecycle_id": lifecycle_id},
+        ).one()
+        assert lifecycle.cleanup_phase == "CANCEL_PENDING"
+        assert lifecycle.fencing_version == 3
+    with pytest.raises(SQLAlchemyError, match="stale or invalid"):
+        with postgres_writer_engine.begin() as connection:
+            connection.execute(text("SET LOCAL ROLE freqtrade"))
+            connection.execute(
+                text(
+                    "SELECT transition_okx_demo_canary_lifecycle("
+                    ":lifecycle,'RECORD_FILLS',NULL,:run_id,:digest,2)"
+                ),
+                {
+                    "lifecycle": lifecycle_id,
+                    "run_id": run_id,
+                    "digest": "0" * 64,
+                },
+            )
+
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE reconciliation_runs SET summary_snapshot=jsonb_set("
+                "summary_snapshot::jsonb,'{findings}','[]'::jsonb)::json WHERE id=:run_id"
+            ),
+            {"run_id": run_id},
+        )
+
+    with pytest.raises(SQLAlchemyError, match="canary recovery grant context rejected"):
+        with postgres_writer_engine.begin() as connection:
+            connection.execute(text("SET LOCAL ROLE freqtrade"))
+            connection.execute(
+                text(
+                    "SELECT issue_okx_demo_canary_recovery_grant("
+                    ":lifecycle,:run_id,'CANCEL',3)"
+                ),
+                {"lifecycle": lifecycle_id, "run_id": run_id},
+            )
+
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE reconciliation_runs SET summary_snapshot=jsonb_set("
+                "summary_snapshot::jsonb,'{findings}',CAST(:findings AS jsonb))::json "
+                "WHERE id=:run_id"
+            ),
+            {
+                "run_id": run_id,
+                "findings": json.dumps([{"code": "FOREIGN_DRIFT", "identity": "foreign"}]),
+            },
+        )
+    with pytest.raises(SQLAlchemyError, match="canary recovery grant context rejected"):
+        with postgres_writer_engine.begin() as connection:
+            connection.execute(text("SET LOCAL ROLE freqtrade"))
+            connection.execute(
+                text(
+                    "SELECT issue_okx_demo_canary_recovery_grant("
+                    ":lifecycle,:run_id,'CANCEL',3)"
+                ),
+                {"lifecycle": lifecycle_id, "run_id": run_id},
+            )
+
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE reconciliation_runs SET summary_snapshot=jsonb_set("
+                "summary_snapshot::jsonb,'{findings}',CAST(:findings AS jsonb))::json "
+                "WHERE id=:run_id"
+            ),
+            {
+                "run_id": run_id,
+                "findings": json.dumps([{
+                    "code": "CONTROLLED_CANARY_DEADLINE_CANCEL_REQUIRED",
+                    "identity": canary_identity,
+                }]),
+            },
+        )
+    issuer_barrier = Barrier(2)
+
+    def issue_cancel_concurrently() -> tuple[str, object]:
+        issuer_barrier.wait()
+        try:
+            with postgres_writer_engine.begin() as connection:
+                connection.execute(text("SET LOCAL ROLE freqtrade"))
+                return ("ISSUED", connection.execute(
+                    text(
+                        "SELECT issue_okx_demo_canary_recovery_grant("
+                        ":lifecycle,:run_id,'CANCEL',3)"
+                    ),
+                    {"lifecycle": lifecycle_id, "run_id": run_id},
+                ).scalar_one())
+        except SQLAlchemyError as exc:
+            return ("BLOCKED", str(exc))
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        issuer_results = list(executor.map(lambda _: issue_cancel_concurrently(), range(2)))
+    assert [item[0] for item in issuer_results].count("ISSUED") == 1
+    assert [item[0] for item in issuer_results].count("BLOCKED") == 1
+    recovery_id = next(item[1] for item in issuer_results if item[0] == "ISSUED")
+    with postgres_writer_engine.connect() as connection:
+        status, version, expires_at = connection.execute(
+            text(
+                "SELECT g.status,l.fencing_version,g.expires_at "
+                "FROM okx_demo_recovery_grants g JOIN okx_demo_canary_lifecycles l "
+                "ON l.lifecycle_id=g.lifecycle_id WHERE g.database_id=:grant_id"
+            ),
+            {"grant_id": recovery_id},
+        ).one()
+        assert (status, version) == ("ACTIVE", 4)
+        assert expires_at <= datetime.now(timezone.utc) + timedelta(seconds=10)
+
+    for expected_version in (3, 4):
+        with pytest.raises(SQLAlchemyError, match="canary recovery grant context rejected"):
+            with postgres_writer_engine.begin() as connection:
+                connection.execute(text("SET LOCAL ROLE freqtrade"))
+                connection.execute(
+                    text(
+                        "SELECT issue_okx_demo_canary_recovery_grant("
+                        ":lifecycle,:run_id,'CANCEL',:version)"
+                    ),
+                    {"lifecycle": lifecycle_id, "run_id": run_id, "version": expected_version},
+                )
+
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(text("DELETE FROM okx_order_writer_leases"))
+    with Session(postgres_writer_engine) as session:
+        session.execute(text("SET LOCAL ROLE freqtrade"))
+        store = SqlAlchemyOrderWriterStore(session, now_provider=lambda: now)
+        store.acquire_recovery_lease(recovery_id, now=now)
+        managed = store.load_recovery_order(recovery_id)
+        prepared_cancel = store.prepare_existing(
+            managed,
+            operation="CANCEL",
+            operation_id=managed.client_order_id,
+            request_digest="3" * 64,
+            safe_request_snapshot={
+                "instId": managed.instrument_id,
+                "clOrdId": managed.client_order_id,
+            },
+            recovery_grant_database_id=recovery_id,
+        )
+    with pytest.raises(SQLAlchemyError, match="canary recovery grant context rejected"):
+        with postgres_writer_engine.begin() as connection:
+            connection.execute(text("SET LOCAL ROLE freqtrade"))
+            connection.execute(
+                text(
+                    "SELECT issue_okx_demo_canary_recovery_grant("
+                    ":lifecycle,:run_id,'CANCEL',4)"
+                ),
+                {"lifecycle": lifecycle_id, "run_id": run_id},
+            )
+
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(text("DELETE FROM okx_order_writer_leases"))
+    with Session(postgres_writer_engine) as session:
+        session.execute(text("SET LOCAL ROLE freqtrade"))
+        store = SqlAlchemyOrderWriterStore(session, now_provider=lambda: now)
+        store.acquire_recovery_lease(recovery_id, now=now)
+        resumed = store.unresolved()
+        assert resumed is not None
+        acknowledged = store.transition(
+            resumed,
+            event=WriteEvent.ACKNOWLEDGE,
+            exchange_order_id="okx-canary-opening-1",
+        )
+        store.transition(
+            acknowledged,
+            event=WriteEvent.RECONCILE,
+            order_state="canceled",
+            safe_response_snapshot={"order_id": "okx-canary-opening-1", "state": "canceled"},
+        )
+
+    final_now = service_now + timedelta(seconds=1)
+    with Session(postgres_writer_engine) as session:
+        final_batch_id = uuid4().hex
+        reconciliation = OkxDemoReconciliationService(
+            session,
+            evidence_root=tmp_path / "managed-final" / "reconciliation",
+            allowed_evidence_root=tmp_path / "managed-final",
+        )
+        reconciliation.ingest_recovery_batch(
+            [{
+                "schema_version": RECONCILIATION_EVENT_SCHEMA_VERSION,
+                "execution_target": "OKX_DEMO",
+                "source": "REST",
+                "entity_kind": "ORDER",
+                "entity_key": "okx-canary-opening-1",
+                "source_sequence": 11,
+                "stream_generation": 3,
+                "observed_at": final_now.isoformat(),
+                "received_at": final_now.isoformat(),
+                "payload": {
+                    "ordId": "okx-canary-opening-1",
+                    "clOrdId": "PgWriterOrder001",
+                    "instId": "BTC-USDT-SWAP",
+                    "state": "canceled",
+                    "sz": "1",
+                    "accFillSz": "0",
+                    "avgPx": "",
+                    "reduceOnly": False,
+                },
+            }],
+            recovery_batch_id=final_batch_id,
+            high_watermarks={kind: final_now.isoformat() for kind in ("ACCOUNT", "FILL", "ORDER", "POSITION")},
+            overlap_started_at=final_now - timedelta(seconds=1),
+            observed_at=final_now,
+            completed_at=final_now,
+        )
+        final_batch = session.scalars(select(OkxDemoRecoveryBatch).where(
+            OkxDemoRecoveryBatch.recovery_batch_id == final_batch_id
+        )).one()
+        final_snapshot = session.scalars(select(OkxDemoOrderSnapshot).where(
+            OkxDemoOrderSnapshot.exchange_order_id == "okx-canary-opening-1"
+        ).order_by(OkxDemoOrderSnapshot.database_id.desc())).first()
+        final_run = ReconciliationRun(
+            execution_target_id="OKX_DEMO",
+            status="RECONCILED",
+            summary_snapshot={},
+            database_ids={},
+            artifact_sha256="6" * 64,
+            artifact_status="READY",
+            authoritative_observed_at=final_now,
+            source_type="api_aggregate",
+            core_data=True,
+            started_at=final_now,
+            completed_at=final_now,
+            created_at=final_now,
+        )
+        session.add(final_run)
+        session.flush()
+        final_run.database_ids = {
+            "reconciliation_run": [final_run.id],
+            "recovery_batches": [final_batch.database_id],
+            "order_snapshots": [final_snapshot.database_id],
+            "fill_snapshots": [],
+            "position_snapshots": [],
+        }
+        state = session.scalars(select(OkxDemoReconciliationState).where(
+            OkxDemoReconciliationState.execution_target_id == "OKX_DEMO"
+        )).one()
+        state.status = "RECONCILED"
+        state.opening_frozen = False
+        state.block_reason = None
+        state.last_reconciliation_run_id = final_run.id
+        state.last_event_observed_at = final_now
+        session.commit()
+        final_run_id = final_run.id
+
+    with postgres_writer_engine.connect() as connection:
+        terminal_digest = connection.execute(text(
+            "SELECT encode(public.digest(convert_to(concat_ws('|',l.lifecycle_id,"
+            "r.id::text,r.artifact_sha256,l.outcome,l.attributed_fill_quantity::text),"
+            "'UTF8'),'sha256'),'hex') FROM okx_demo_canary_lifecycles l "
+            "JOIN reconciliation_runs r ON r.id=:run_id WHERE l.lifecycle_id=:lifecycle"
+        ), {"run_id": final_run_id, "lifecycle": lifecycle_id}).scalar_one()
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(text("SET LOCAL ROLE freqtrade"))
+        assert connection.execute(text(
+            "SELECT transition_okx_demo_canary_lifecycle("
+            ":lifecycle,'TERMINALIZE',NULL,:run_id,:digest,4)"
+        ), {"lifecycle": lifecycle_id, "run_id": final_run_id, "digest": terminal_digest}).scalar_one() == 5
+    with postgres_writer_engine.connect() as connection:
+        assert tuple(connection.execute(text(
+            "SELECT outcome,cleanup_phase FROM okx_demo_canary_lifecycles WHERE lifecycle_id=:lifecycle"
+        ), {"lifecycle": lifecycle_id}).one()) == ("PASSED", "TERMINAL")
+
+
+@pytest.mark.parametrize(
+    "residual_scenario",
+    ("terminal_after_child", "stale_child_atomic_rollback", "exhaustion_rejections"),
+)
+def test_postgresql_canary_residual_cleanup_paths(
+    postgres_writer_engine,
+    tmp_path,
+    residual_scenario,
+) -> None:
+    """Prove exact partial-fill cleanup lineage reaches FAILED terminal."""
+
+    upgrade_database(postgres_writer_engine)
+    now = datetime.now(timezone.utc)
+    lifecycle_id = uuid4().hex
+    with Session(postgres_writer_engine) as session:
+        approval_id, order_id = _seed_approved_order(
+            session, create_order=True, controlled_canary=True
+        )
+        approval = session.get(ApprovedExecution, approval_id)
+        opening_intent = session.get(TradeIntent, approval.trade_intent_id)
+        opening_order = session.get(ExchangeOrder, order_id)
+        opening_order.exchange_order_id = "okx-canary-partial-opening"
+        opening_order.status = "canceled"
+        approval_hashes = {
+            "canonical_hash": approval.canonical_hash,
+            "policy_digest": approval.policy_digest,
+            "approved_payload_hash": approval.approved_payload_hash,
+        }
+        opening_intent_id = opening_intent.id
+        session.commit()
+
+    opening_client = "PgWriterOrder001"
+    opening_event = {
+        "schema_version": RECONCILIATION_EVENT_SCHEMA_VERSION,
+        "execution_target": "OKX_DEMO",
+        "source": "REST",
+        "entity_kind": "ORDER",
+        "entity_key": "okx-canary-partial-opening",
+        "source_sequence": 1,
+        "stream_generation": 1,
+        "observed_at": now.isoformat(),
+        "received_at": now.isoformat(),
+        "payload": {
+            "ordId": "okx-canary-partial-opening",
+            "clOrdId": opening_client,
+            "instId": "BTC-USDT-SWAP",
+            "state": "canceled",
+            "sz": "1",
+            "accFillSz": "1",
+            "avgPx": "57000",
+            "reduceOnly": False,
+        },
+    }
+    fill_event = {
+        "schema_version": RECONCILIATION_EVENT_SCHEMA_VERSION,
+        "execution_target": "OKX_DEMO",
+        "source": "REST",
+        "entity_kind": "FILL",
+        "entity_key": "partial-fill-1",
+        "source_sequence": 1,
+        "stream_generation": 1,
+        "observed_at": now.isoformat(),
+        "received_at": now.isoformat(),
+        "payload": {
+            "fillId": "partial-fill-1",
+            "ordId": "okx-canary-partial-opening",
+            "instId": "BTC-USDT-SWAP",
+            "fillPx": "57000",
+            "fillSz": "1",
+            "fee": "0",
+        },
+    }
+    position_event = {
+        **_postgres_position_event("1", 1),
+        "source": "REST",
+        "observed_at": now.isoformat(),
+        "received_at": now.isoformat(),
+    }
+    with Session(postgres_writer_engine) as session:
+        batch_id = uuid4().hex
+        service = OkxDemoReconciliationService(
+            session,
+            evidence_root=tmp_path / "partial" / "reconciliation",
+            allowed_evidence_root=tmp_path / "partial",
+        )
+        service.ingest_recovery_batch(
+            [opening_event, fill_event, position_event],
+            recovery_batch_id=batch_id,
+            high_watermarks={kind: now.isoformat() for kind in ("ACCOUNT", "FILL", "ORDER", "POSITION")},
+            overlap_started_at=now - timedelta(seconds=1),
+            observed_at=now,
+            completed_at=now,
+        )
+        batch = session.scalars(select(OkxDemoRecoveryBatch).where(
+            OkxDemoRecoveryBatch.recovery_batch_id == batch_id
+        )).one()
+        order_snapshot = session.scalars(select(OkxDemoOrderSnapshot).where(
+            OkxDemoOrderSnapshot.exchange_order_id == "okx-canary-partial-opening"
+        )).one()
+        fill_snapshot = session.scalars(select(OkxDemoFillSnapshot).where(
+            OkxDemoFillSnapshot.exchange_order_id == "okx-canary-partial-opening"
+        )).one()
+        position_snapshot = session.scalars(select(OkxDemoPositionSnapshot).where(
+            OkxDemoPositionSnapshot.instrument_id == "BTC-USDT-SWAP"
+        )).one()
+        run = ReconciliationRun(
+            execution_target_id="OKX_DEMO", status="DRIFTED", summary_snapshot={},
+            database_ids={}, artifact_sha256="7" * 64, artifact_status="READY",
+            authoritative_observed_at=now, source_type="api_aggregate", core_data=True,
+            started_at=now, completed_at=now, created_at=now,
+        )
+        session.add(run)
+        session.flush()
+        database_ids = {
+            "reconciliation_run": [run.id],
+            "recovery_batches": [batch.database_id],
+            "order_snapshots": [order_snapshot.database_id],
+            "fill_snapshots": [fill_snapshot.database_id],
+            "position_snapshots": [position_snapshot.database_id],
+        }
+        canary_identity = "canary:" + hashlib.sha256(lifecycle_id.encode()).hexdigest()[:16]
+        run.database_ids = database_ids
+        run.summary_snapshot = {
+            "execution_target": "OKX_DEMO", "source_type": "api_aggregate",
+            "status": "DRIFTED", "core_data": True, "opening_frozen": True,
+            "database_ids": database_ids,
+            "findings": [{"code": "CONTROLLED_CANARY_CLEANUP_REQUIRED", "identity": canary_identity}],
+        }
+        state = session.scalars(select(OkxDemoReconciliationState).where(
+            OkxDemoReconciliationState.execution_target_id == "OKX_DEMO"
+        )).one()
+        state.status = "DRIFTED"
+        state.opening_frozen = True
+        state.block_reason = "CONTROLLED_CANARY_CLEANUP_REQUIRED"
+        state.last_reconciliation_run_id = run.id
+        state.last_event_observed_at = now
+        grant = OkxDemoSubmissionGrant(
+            grant_id=lifecycle_id, execution_target_id="OKX_DEMO",
+            approval_id=approval_id, reconciliation_run_id=run.id,
+                canonical_hash=approval_hashes["canonical_hash"],
+                policy_digest=approval_hashes["policy_digest"],
+                approved_payload_hash=approval_hashes["approved_payload_hash"],
+            client_order_id=opening_client, instrument_id="BTC-USDT-SWAP",
+            canary_quantity=Decimal("1"), canary_notional=Decimal("5.7"),
+            request_digest="8" * 64, provenance=CANARY_PROVENANCE,
+            status="CONSUMED", issued_at=now - timedelta(seconds=2),
+            expires_at=now + timedelta(minutes=1), consumed_at=now - timedelta(seconds=1),
+        )
+        session.add(grant)
+        session.flush()
+        session.add(OkxDemoCanaryLifecycle(
+            lifecycle_id=lifecycle_id, execution_target_id="OKX_DEMO",
+            submission_grant_id=lifecycle_id, opening_approval_id=approval_id,
+            opening_trade_intent_id=opening_intent_id,
+            opening_exchange_order_row_id=order_id,
+            baseline_reconciliation_run_id=run.id,
+            baseline_position_quantity=Decimal("0"), baseline_evidence_digest="9" * 64,
+            opening_order_identity_digest="a" * 64,
+            fill_attribution_digest="b" * 64, attributed_fill_quantity=Decimal("1"),
+            max_quantity=Decimal("1"), outcome="FAILED", failure_code="CANARY_FILLED",
+            cleanup_phase="CLEANUP_PENDING", deadline_at=now - timedelta(seconds=1),
+            fencing_version=1, created_at=now - timedelta(seconds=2), updated_at=now,
+        ))
+        session.commit()
+        run_id = run.id
+
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(text("SET LOCAL ROLE freqtrade"))
+        reduce_grant_id = connection.execute(text(
+            "SELECT issue_okx_demo_canary_recovery_grant("
+            ":lifecycle,:run_id,'REDUCE_ONLY',1)"
+        ), {"lifecycle": lifecycle_id, "run_id": run_id}).scalar_one()
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(text("DELETE FROM okx_order_writer_leases"))
+    with Session(postgres_writer_engine) as session:
+        session.execute(text("SET LOCAL ROLE freqtrade"))
+        store = SqlAlchemyOrderWriterStore(session, now_provider=lambda: now)
+        store.acquire_recovery_lease(reduce_grant_id, now=now)
+        cleanup_order, cleanup_attempt, cleanup_body = store.prepare_recovery_close(
+            reduce_grant_id
+        )
+        cleanup_order_id = cleanup_order.exchange_order_row_id
+        assert cleanup_body["reduceOnly"] is True
+    with postgres_writer_engine.connect() as connection:
+        lifecycle = connection.execute(
+            text(
+                "SELECT cleanup_trade_intent_id,cleanup_approval_id,"
+                "cleanup_exchange_order_row_id,fencing_version "
+                "FROM okx_demo_canary_lifecycles "
+                "WHERE lifecycle_id=:lifecycle"
+            ),
+            {"lifecycle": lifecycle_id},
+        ).one()
+        assert lifecycle.cleanup_trade_intent_id is not None
+        assert lifecycle.cleanup_approval_id is not None
+        assert lifecycle.cleanup_exchange_order_row_id == cleanup_order_id
+        assert lifecycle.fencing_version == 4
+        assert connection.execute(
+            text(
+                "SELECT count(*) FROM okx_demo_recovery_grants "
+                "WHERE lifecycle_id=:lifecycle AND action='REDUCE_ONLY'"
+            ),
+            {"lifecycle": lifecycle_id},
+        ).scalar_one() == 1
+    with pytest.raises(SQLAlchemyError, match="canary recovery grant context rejected"):
+        with postgres_writer_engine.begin() as connection:
+            connection.execute(text("SET LOCAL ROLE freqtrade"))
+            connection.execute(
+                text(
+                    "SELECT issue_okx_demo_canary_recovery_grant("
+                    ":lifecycle,:run_id,'REDUCE_ONLY',4)"
+                ),
+                {"lifecycle": lifecycle_id, "run_id": run_id},
+            )
+
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(text("DELETE FROM okx_order_writer_leases"))
+    with Session(postgres_writer_engine) as session:
+        session.execute(text("SET LOCAL ROLE freqtrade"))
+        store = SqlAlchemyOrderWriterStore(session, now_provider=lambda: now)
+        store.acquire_recovery_lease(reduce_grant_id, now=now)
+        resumed = store.unresolved()
+        acknowledged = store.transition(resumed, event=WriteEvent.ACKNOWLEDGE,
+                                        exchange_order_id="okx-canary-cleanup-1")
+        residual = store.transition(
+            acknowledged,
+            event=WriteEvent.RESIDUAL_DETECTED,
+            order_state="partially_filled",
+            safe_response_snapshot={
+                "order_id": "okx-canary-cleanup-1",
+                "state": "partially_filled",
+                "accumulated_fill_size": "0.4",
+            },
+        )
+
+    # A fresh authenticated batch is the only authority for the residual 0.6.
+    residual_now = now + timedelta(seconds=1)
+    cleanup_client = "rcv{:020d}".format(reduce_grant_id)
+    with Session(postgres_writer_engine) as session:
+        session.execute(text("SET LOCAL ROLE freqtrade"))
+        service = OkxDemoReconciliationService(
+            session,
+            evidence_root=tmp_path / "residual" / "reconciliation",
+            allowed_evidence_root=tmp_path / "residual",
+        )
+        service.ingest_recovery_batch(
+            [
+                {
+                    **opening_event,
+                    "source_sequence": 10,
+                    "stream_generation": 2,
+                    "observed_at": residual_now.isoformat(),
+                    "received_at": residual_now.isoformat(),
+                },
+                {
+                    **opening_event,
+                    "entity_key": "okx-canary-cleanup-1",
+                    "source_sequence": 11,
+                    "stream_generation": 2,
+                    "observed_at": residual_now.isoformat(),
+                    "received_at": residual_now.isoformat(),
+                    "payload": {
+                        "ordId": "okx-canary-cleanup-1",
+                        "clOrdId": cleanup_client,
+                        "instId": "BTC-USDT-SWAP",
+                        "state": "partially_filled",
+                        "sz": "1",
+                        "accFillSz": "0.4",
+                        "avgPx": "57000",
+                        "reduceOnly": True,
+                    },
+                },
+                {
+                    **fill_event,
+                    "source_sequence": 10,
+                    "stream_generation": 2,
+                    "observed_at": residual_now.isoformat(),
+                    "received_at": residual_now.isoformat(),
+                },
+                {
+                    **fill_event,
+                    "entity_key": "cleanup-fill-residual",
+                    "source_sequence": 11,
+                    "stream_generation": 2,
+                    "observed_at": residual_now.isoformat(),
+                    "received_at": residual_now.isoformat(),
+                    "payload": {
+                        **fill_event["payload"],
+                        "fillId": "cleanup-fill-residual",
+                        "ordId": "okx-canary-cleanup-1",
+                        "fillSz": "0.4",
+                    },
+                },
+                {
+                    **_postgres_position_event("0.6", 10),
+                    "source": "REST",
+                    "stream_generation": 2,
+                    "observed_at": residual_now.isoformat(),
+                    "received_at": residual_now.isoformat(),
+                },
+                {
+                    "schema_version": RECONCILIATION_EVENT_SCHEMA_VERSION,
+                    "execution_target": "OKX_DEMO",
+                    "source": "REST",
+                    "entity_kind": "ACCOUNT",
+                    "entity_key": "account",
+                    "source_sequence": 10,
+                    "stream_generation": 2,
+                    "observed_at": residual_now.isoformat(),
+                    "received_at": residual_now.isoformat(),
+                    "payload": {
+                        "accountFingerprint": "a" * 64,
+                        "equity": "10000",
+                        "availableBalance": "9000",
+                        "marginBalance": "1000",
+                    },
+                },
+            ],
+            recovery_batch_id=uuid4().hex,
+            high_watermarks={
+                kind: residual_now.isoformat()
+                for kind in ("ACCOUNT", "FILL", "ORDER", "POSITION")
+            },
+            overlap_started_at=residual_now - timedelta(seconds=1),
+            observed_at=residual_now,
+            completed_at=residual_now,
+        )
+        residual_result = service.reconcile(now=residual_now)
+        assert residual_result.status == "DRIFTED"
+        assert {
+            item["code"] for item in residual_result.findings
+        } <= {
+            "CONTROLLED_CANARY_FILL_ATTRIBUTED",
+            "CONTROLLED_CANARY_CLEANUP_REQUIRED",
+            "POSITION_DRIFT",
+        }
+        residual_run_id = residual_result.reconciliation_run_database_id
+        residual_position_id = residual_result.database_ids["position_snapshots"][0]
+        if residual_scenario != "exhaustion_rejections":
+            adapter = object.__new__(OkxDemoRuntimeReconciliationAdapter)
+            adapter._now_provider = lambda: residual_now
+            assert adapter._advance_controlled_canary(session) is True
+        session.commit()
+        if residual_scenario != "exhaustion_rejections":
+            fresh_reduce_grant_id = session.scalars(
+                select(OkxDemoRecoveryGrant)
+                .where(
+                    OkxDemoRecoveryGrant.lifecycle_id == lifecycle_id,
+                    OkxDemoRecoveryGrant.action == "REDUCE_ONLY",
+                    OkxDemoRecoveryGrant.status == "ACTIVE",
+                )
+                .order_by(OkxDemoRecoveryGrant.database_id.desc())
+            ).one().database_id
+    if residual_scenario == "stale_child_atomic_rollback":
+        residual_attempt_id = residual.attempt_id
+        with postgres_writer_engine.connect() as connection:
+            before = tuple(connection.execute(text(
+                "SELECT (SELECT count(*) FROM trade_intents),"
+                "(SELECT count(*) FROM approved_executions),"
+                "(SELECT count(*) FROM exchange_orders),"
+                "(SELECT count(*) FROM okx_order_write_attempts)"
+            )).one())
+        with postgres_writer_engine.begin() as connection:
+            connection.execute(text("DELETE FROM okx_order_writer_leases"))
+
+        def prepare_after_state_switch() -> str:
+            try:
+                with Session(postgres_writer_engine) as session:
+                    session.execute(text("SET LOCAL ROLE freqtrade"))
+                    store = SqlAlchemyOrderWriterStore(
+                        session, now_provider=lambda: residual_now
+                    )
+                    store.acquire_recovery_lease(
+                        fresh_reduce_grant_id, now=residual_now
+                    )
+                    parent = store.unresolved()
+                    assert parent is not None
+                    assert parent.attempt_id == residual_attempt_id
+                    store.prepare_recovery_close_cleanup(
+                        parent, fresh_reduce_grant_id
+                    )
+                    session.commit()
+                return "PREPARED"
+            except OkxDemoWriteBlocked as exc:
+                return "BLOCKED:{}".format(exc)
+
+        with postgres_writer_engine.connect() as state_writer:
+            state_transaction = state_writer.begin()
+            state_writer.execute(
+                text("SELECT lock_okx_demo_reconciliation_state()")
+            )
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(prepare_after_state_switch)
+                time.sleep(0.1)
+                if future.done():
+                    future.result()
+                assert future.done() is False
+                state_writer.execute(text(
+                    "UPDATE okx_demo_reconciliation_states "
+                    "SET last_reconciliation_run_id=:stale_run "
+                    "WHERE execution_target_id='OKX_DEMO'"
+                ), {"stale_run": run_id})
+                state_transaction.commit()
+                assert future.result().startswith("BLOCKED:")
+        with postgres_writer_engine.connect() as connection:
+            after = tuple(connection.execute(text(
+                "SELECT (SELECT count(*) FROM trade_intents),"
+                "(SELECT count(*) FROM approved_executions),"
+                "(SELECT count(*) FROM exchange_orders),"
+                "(SELECT count(*) FROM okx_order_write_attempts)"
+            )).one())
+            assert after == before
+            assert connection.execute(text(
+                "SELECT status FROM okx_demo_recovery_grants WHERE database_id=:grant"
+            ), {"grant": fresh_reduce_grant_id}).scalar_one() == "ACTIVE"
+            assert connection.execute(text(
+                "SELECT state FROM okx_order_write_attempts WHERE id=:attempt"
+            ), {"attempt": residual_attempt_id}).scalar_one() == "RESIDUAL_CLOSE_REQUIRED"
+        return
+
+    if residual_scenario == "exhaustion_rejections":
+        with postgres_writer_engine.begin() as connection:
+            connection.execute(text(
+                "UPDATE okx_order_write_attempts SET close_sequence=3 WHERE id=:attempt"
+            ), {"attempt": residual.attempt_id})
+
+        def exhaustion_digest(connection):
+            return connection.execute(text(
+                "SELECT encode(public.digest(convert_to(concat_ws('|',l.lifecycle_id,"
+                "CAST(:attempt AS text),r.id::text,r.artifact_sha256,(ti.quantity-(SELECT "
+                "COALESCE(sum(COALESCE(NULLIF(a.safe_response_snapshot::jsonb->>"
+                "'accumulated_fill_size','')::numeric,0)),0) FROM okx_order_write_attempts a "
+                "JOIN exchange_orders eo ON eo.id=a.exchange_order_row_id WHERE "
+                "eo.trade_intent_id=l.cleanup_trade_intent_id AND a.operation='CLOSE'))::text,"
+                "'CLEANUP_LIMIT_REACHED'),'UTF8'),'sha256'),'hex') "
+                "FROM okx_demo_canary_lifecycles l JOIN trade_intents ti "
+                "ON ti.id=l.cleanup_trade_intent_id JOIN reconciliation_runs r ON r.id=:run "
+                "WHERE l.lifecycle_id=:lifecycle"
+            ), {"attempt": residual.attempt_id, "run": residual_run_id,
+                "lifecycle": lifecycle_id}).scalar_one()
+
+        with postgres_writer_engine.connect() as connection:
+            digest = exhaustion_digest(connection)
+        with postgres_writer_engine.begin() as connection:
+            connection.execute(text(
+                "UPDATE okx_demo_reconciliation_states SET last_reconciliation_run_id=:stale "
+                "WHERE execution_target_id='OKX_DEMO'"
+            ), {"stale": run_id})
+        with pytest.raises(SQLAlchemyError, match="canary cleanup exhaustion rejected"):
+            with postgres_writer_engine.begin() as connection:
+                connection.execute(text("SET LOCAL ROLE freqtrade"))
+                connection.execute(text(
+                    "SELECT transition_okx_demo_canary_lifecycle(:lifecycle,"
+                    "'EXHAUST_RECOVERY',:attempt,:run,:digest,4)"
+                ), {"lifecycle": lifecycle_id, "attempt": residual.attempt_id,
+                    "run": residual_run_id, "digest": digest})
+        with postgres_writer_engine.begin() as connection:
+            connection.execute(text(
+                "UPDATE okx_demo_reconciliation_states SET last_reconciliation_run_id=:run "
+                "WHERE execution_target_id='OKX_DEMO'"
+            ), {"run": residual_run_id})
+        for unsafe_quantity in (Decimal("0"), Decimal("0.5")):
+            with postgres_writer_engine.begin() as connection:
+                connection.execute(text(
+                    "ALTER TABLE okx_demo_position_snapshots DISABLE TRIGGER "
+                    "okx_demo_position_snapshots_immutable"
+                ))
+                connection.execute(text(
+                    "UPDATE okx_demo_position_snapshots SET quantity=:quantity "
+                    "WHERE database_id=:snapshot"
+                ), {"quantity": unsafe_quantity, "snapshot": residual_position_id})
+                connection.execute(text(
+                    "ALTER TABLE okx_demo_position_snapshots ENABLE TRIGGER "
+                    "okx_demo_position_snapshots_immutable"
+                ))
+            with pytest.raises(SQLAlchemyError, match="canary cleanup exhaustion rejected"):
+                with postgres_writer_engine.begin() as connection:
+                    connection.execute(text("SET LOCAL ROLE freqtrade"))
+                    connection.execute(text(
+                        "SELECT transition_okx_demo_canary_lifecycle(:lifecycle,"
+                        "'EXHAUST_RECOVERY',:attempt,:run,:digest,4)"
+                    ), {"lifecycle": lifecycle_id, "attempt": residual.attempt_id,
+                        "run": residual_run_id, "digest": digest})
+            with postgres_writer_engine.connect() as connection:
+                assert connection.execute(text(
+                    "SELECT cleanup_phase FROM okx_demo_canary_lifecycles "
+                    "WHERE lifecycle_id=:lifecycle"
+                ), {"lifecycle": lifecycle_id}).scalar_one() == "CLEANUP_PENDING"
+        with postgres_writer_engine.begin() as connection:
+            connection.execute(text(
+                "ALTER TABLE okx_demo_position_snapshots DISABLE TRIGGER "
+                "okx_demo_position_snapshots_immutable"
+            ))
+            connection.execute(text(
+                "UPDATE okx_demo_position_snapshots SET quantity=0.6 "
+                "WHERE database_id=:snapshot"
+            ), {"snapshot": residual_position_id})
+            connection.execute(text(
+                "ALTER TABLE okx_demo_position_snapshots ENABLE TRIGGER "
+                "okx_demo_position_snapshots_immutable"
+            ))
+        with Session(postgres_writer_engine) as session:
+            session.execute(text("SET LOCAL ROLE freqtrade"))
+            adapter = object.__new__(OkxDemoRuntimeReconciliationAdapter)
+            adapter._now_provider = lambda: residual_now
+            assert adapter._advance_controlled_canary(session) is True
+            session.commit()
+        with postgres_writer_engine.connect() as connection:
+            assert tuple(connection.execute(text(
+                "SELECT cleanup_phase,failure_code FROM okx_demo_canary_lifecycles "
+                "WHERE lifecycle_id=:lifecycle"
+            ), {"lifecycle": lifecycle_id}).one()) == (
+                "RECOVERY_EXHAUSTED", "CLEANUP_LIMIT_REACHED"
+            )
+            assert connection.execute(text(
+                "SELECT count(*) FROM okx_demo_recovery_grants "
+                "WHERE lifecycle_id=:lifecycle AND status='ACTIVE'"
+            ), {"lifecycle": lifecycle_id}).scalar_one() == 0
+        return
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(text("DELETE FROM okx_order_writer_leases"))
+    with Session(postgres_writer_engine) as session:
+        session.execute(text("SET LOCAL ROLE freqtrade"))
+        store = SqlAlchemyOrderWriterStore(session, now_provider=lambda: now)
+        store.acquire_recovery_lease(fresh_reduce_grant_id, now=now)
+        child_order, child_attempt, child_body = (
+            store.prepare_recovery_close_cleanup(
+                residual,
+                fresh_reduce_grant_id,
+            )
+        )
+        assert Decimal(child_body["sz"]) == Decimal("0.6")
+        assert child_attempt.parent_attempt_id == residual.attempt_id
+        assert child_attempt.close_sequence == 1
+        assert (
+            child_attempt.recovery_grant_database_id
+            == fresh_reduce_grant_id
+        )
+        child_order_id = child_order.exchange_order_row_id
+        acknowledged_child = store.transition(
+            child_attempt,
+            event=WriteEvent.ACKNOWLEDGE,
+            exchange_order_id="okx-canary-cleanup-2",
+        )
+        store.transition(
+            acknowledged_child,
+            event=WriteEvent.RECONCILE,
+            order_state="filled",
+            safe_response_snapshot={
+                "order_id": "okx-canary-cleanup-2",
+                "state": "filled",
+                "accumulated_fill_size": "0.6",
+            },
+        )
+    with postgres_writer_engine.connect() as connection:
+        assert connection.execute(
+            text(
+                "SELECT count(*) FROM okx_order_write_attempts "
+                "WHERE recovery_grant_database_id IN (:old_grant,:new_grant)"
+            ),
+            {"old_grant": reduce_grant_id, "new_grant": fresh_reduce_grant_id},
+        ).scalar_one() == 2
+
+    final_now = now + timedelta(seconds=2)
+    final_opening = {**opening_event, "source_sequence": 2,
+                     "stream_generation": 3,
+                     "observed_at": final_now.isoformat(), "received_at": final_now.isoformat()}
+    cleanup_event = {
+        **opening_event,
+        "entity_key": "okx-canary-cleanup-1",
+        "source_sequence": 3,
+        "stream_generation": 3,
+        "observed_at": final_now.isoformat(), "received_at": final_now.isoformat(),
+        "payload": {
+            "ordId": "okx-canary-cleanup-1", "clOrdId": cleanup_client,
+            "instId": "BTC-USDT-SWAP", "state": "canceled", "sz": "1",
+            "accFillSz": "0.4", "avgPx": "57000", "reduceOnly": True,
+        },
+    }
+    child_cleanup_client = "rcv{:020d}C1".format(fresh_reduce_grant_id)
+    child_cleanup_event = {
+        **cleanup_event,
+        "entity_key": "okx-canary-cleanup-2",
+        "source_sequence": 4,
+        "stream_generation": 3,
+        "payload": {
+            **cleanup_event["payload"],
+            "ordId": "okx-canary-cleanup-2",
+            "clOrdId": child_cleanup_client,
+            "state": "filled",
+            "sz": "0.6",
+            "accFillSz": "0.6",
+        },
+    }
+    final_opening_fill = {
+        **fill_event,
+        "source_sequence": 2,
+        "stream_generation": 3,
+        "observed_at": final_now.isoformat(),
+        "received_at": final_now.isoformat(),
+    }
+    cleanup_fill = {
+        **fill_event,
+        "entity_key": "cleanup-fill-1",
+        "source_sequence": 3,
+        "stream_generation": 3,
+        "observed_at": final_now.isoformat(),
+        "received_at": final_now.isoformat(),
+        "payload": {
+            **fill_event["payload"],
+            "fillId": "cleanup-fill-1",
+            "ordId": "okx-canary-cleanup-1",
+            "fillSz": "0.4",
+        },
+    }
+    child_cleanup_fill = {
+        **cleanup_fill,
+        "entity_key": "cleanup-fill-2",
+        "source_sequence": 4,
+        "payload": {
+            **cleanup_fill["payload"],
+            "fillId": "cleanup-fill-2",
+            "ordId": "okx-canary-cleanup-2",
+            "fillSz": "0.6",
+        },
+    }
+    zero_position = {**_postgres_position_event("0", 2), "source": "REST",
+                     "stream_generation": 3,
+                     "observed_at": final_now.isoformat(), "received_at": final_now.isoformat()}
+    with Session(postgres_writer_engine) as session:
+        final_batch_id = uuid4().hex
+        service = OkxDemoReconciliationService(
+            session, evidence_root=tmp_path / "partial-final" / "reconciliation",
+            allowed_evidence_root=tmp_path / "partial-final",
+        )
+        service.ingest_recovery_batch(
+            [
+                final_opening,
+                cleanup_event,
+                child_cleanup_event,
+                final_opening_fill,
+                cleanup_fill,
+                child_cleanup_fill,
+                zero_position,
+            ], recovery_batch_id=final_batch_id,
+            high_watermarks={kind: final_now.isoformat() for kind in ("ACCOUNT", "FILL", "ORDER", "POSITION")},
+            overlap_started_at=final_now - timedelta(seconds=1), observed_at=final_now,
+            completed_at=final_now,
+        )
+        final_batch = session.scalars(select(OkxDemoRecoveryBatch).where(
+            OkxDemoRecoveryBatch.recovery_batch_id == final_batch_id
+        )).one()
+        final_orders = session.scalars(select(OkxDemoOrderSnapshot).where(
+            OkxDemoOrderSnapshot.observed_at == final_now
+        )).all()
+        final_position = session.scalars(select(OkxDemoPositionSnapshot).where(
+            OkxDemoPositionSnapshot.observed_at == final_now
+        )).one()
+        final_fills = session.scalars(select(OkxDemoFillSnapshot).where(
+            OkxDemoFillSnapshot.observed_at == final_now
+        )).all()
+        final_fill_ids = [row.database_id for row in final_fills]
+        final_run = ReconciliationRun(
+            execution_target_id="OKX_DEMO", status="RECONCILED", summary_snapshot={},
+            database_ids={}, artifact_sha256="c" * 64, artifact_status="READY",
+            authoritative_observed_at=final_now, source_type="api_aggregate", core_data=True,
+            started_at=final_now, completed_at=final_now, created_at=final_now,
+        )
+        session.add(final_run)
+        session.flush()
+        final_run.database_ids = {
+            "reconciliation_run": [final_run.id], "recovery_batches": [final_batch.database_id],
+            "order_snapshots": [row.database_id for row in final_orders],
+            "fill_snapshots": [],
+            "position_snapshots": [final_position.database_id],
+        }
+        state = session.scalars(select(OkxDemoReconciliationState).where(
+            OkxDemoReconciliationState.execution_target_id == "OKX_DEMO"
+        )).one()
+        state.status = "RECONCILED"
+        state.opening_frozen = False
+        state.block_reason = None
+        state.last_reconciliation_run_id = final_run.id
+        state.last_event_observed_at = final_now
+        session.commit()
+        final_run_id = final_run.id
+    with postgres_writer_engine.connect() as connection:
+        terminal_digest = connection.execute(text(
+            "SELECT encode(public.digest(convert_to(concat_ws('|',l.lifecycle_id,"
+            "r.id::text,r.artifact_sha256,l.outcome,l.attributed_fill_quantity::text),"
+            "'UTF8'),'sha256'),'hex') FROM okx_demo_canary_lifecycles l "
+            "JOIN reconciliation_runs r ON r.id=:run_id WHERE l.lifecycle_id=:lifecycle"
+        ), {"run_id": final_run_id, "lifecycle": lifecycle_id}).scalar_one()
+        terminal_version = connection.execute(text(
+            "SELECT fencing_version FROM okx_demo_canary_lifecycles WHERE lifecycle_id=:lifecycle"
+        ), {"lifecycle": lifecycle_id}).scalar_one()
+    with pytest.raises(SQLAlchemyError, match="terminal lifecycle evidence rejected"):
+        with postgres_writer_engine.begin() as connection:
+            connection.execute(text("SET LOCAL ROLE freqtrade"))
+            connection.execute(text(
+                "SELECT transition_okx_demo_canary_lifecycle("
+                ":lifecycle,'TERMINALIZE',NULL,:run_id,:digest,:version)"
+            ), {"lifecycle": lifecycle_id, "run_id": final_run_id,
+                "digest": terminal_digest, "version": terminal_version})
+    with postgres_writer_engine.begin() as connection:
+        database_ids = connection.execute(
+            text("SELECT database_ids FROM reconciliation_runs WHERE id=:run_id"),
+            {"run_id": final_run_id},
+        ).scalar_one()
+        database_ids["fill_snapshots"] = final_fill_ids
+        connection.execute(
+            text(
+                "UPDATE reconciliation_runs SET database_ids=CAST(:ids AS json) "
+                "WHERE id=:run_id"
+            ),
+            {"run_id": final_run_id, "ids": json.dumps(database_ids)},
+        )
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(text("SET LOCAL ROLE freqtrade"))
+        connection.execute(text(
+            "SELECT transition_okx_demo_canary_lifecycle("
+            ":lifecycle,'TERMINALIZE',NULL,:run_id,:digest,:version)"
+        ), {"lifecycle": lifecycle_id, "run_id": final_run_id,
+            "digest": terminal_digest, "version": terminal_version})
+    with postgres_writer_engine.connect() as connection:
+        assert tuple(connection.execute(text(
+            "SELECT outcome,cleanup_phase FROM okx_demo_canary_lifecycles WHERE lifecycle_id=:lifecycle"
+        ), {"lifecycle": lifecycle_id}).one()) == ("FAILED", "TERMINAL")
+
+
 def test_postgresql_canary_lineage_function_body_tamper_fails_readiness(
     postgres_writer_engine,
 ) -> None:
@@ -910,6 +2734,7 @@ def test_postgresql_canary_lineage_rejects_missing_or_malformed_snapshot_content
                     "kind": kind,
                 },
             )
+
             connection.execute(
                 text("ALTER TABLE okx_demo_trusted_snapshots ENABLE TRIGGER USER")
             )
@@ -1162,7 +2987,7 @@ def test_postgresql_canary_lineage_rejects_fabricated_provenance_and_evidence(
     (
         ("authoritative_observed_at", None),
         ("completed_at", NOW - timedelta(seconds=31)),
-        ("authoritative_observed_at", NOW + timedelta(seconds=6)),
+        ("authoritative_observed_at", NOW + timedelta(seconds=30)),
         (
             "database_ids",
             {"reconciliation_run": [], "order_snapshots": [], "position_snapshots": []},
@@ -2132,25 +3957,52 @@ def test_postgresql_one_shot_grant_has_one_atomic_journal_winner(
     postgres_writer_engine,
 ) -> None:
     upgrade_database(postgres_writer_engine)
+    race_now = datetime.now(timezone.utc)
     with Session(postgres_writer_engine) as session:
         approval_id, _order_id = _seed_approved_order(
             session,
             create_order=False,
             controlled_canary=True,
+            seed_now=race_now,
         )
         approval = session.get(ApprovedExecution, approval_id)
+        batch = OkxDemoRecoveryBatch(
+            execution_target_id="OKX_DEMO",
+            recovery_batch_id="one-shot-race-baseline",
+            authenticated=True,
+            pagination_complete=True,
+            complete_streams=["ACCOUNT", "FILL", "ORDER", "POSITION"],
+            high_watermarks={
+                "ACCOUNT": "a" * 64,
+                "FILL": "b" * 64,
+                "ORDER": "c" * 64,
+                "POSITION": "d" * 64,
+            },
+            overlap_started_at=race_now - timedelta(seconds=1),
+            observed_at=race_now,
+            completed_at=race_now,
+            event_count=0,
+            evidence_digest="e" * 64,
+        )
+        session.add(batch)
+        session.flush()
         run = ReconciliationRun(
             execution_target_id="OKX_DEMO",
             status="RECONCILED",
             summary_snapshot={},
-            database_ids={"order_snapshots": [], "position_snapshots": []},
+            database_ids={
+                "order_snapshots": [],
+                "position_snapshots": [],
+                "recovery_batches": [batch.database_id],
+            },
+            artifact_sha256="f" * 64,
             artifact_status="READY",
-            authoritative_observed_at=NOW,
+            authoritative_observed_at=race_now,
             source_type="api_aggregate",
             core_data=True,
-            started_at=NOW,
-            completed_at=NOW,
-            created_at=NOW,
+            started_at=race_now,
+            completed_at=race_now,
+            created_at=race_now,
         )
         session.add(run)
         session.flush()
@@ -2168,7 +4020,7 @@ def test_postgresql_one_shot_grant_has_one_atomic_journal_winner(
         state.status = "RECONCILED"
         state.opening_frozen = False
         state.block_reason = None
-        state.last_event_observed_at = NOW
+        state.last_event_observed_at = race_now
         state.last_reconciliation_run_id = run.id
         grant_id = uuid4().hex
         session.add(
@@ -2197,8 +4049,8 @@ def test_postgresql_one_shot_grant_has_one_atomic_journal_winner(
                 ),
                 provenance=CANARY_PROVENANCE,
                 status="ACTIVE",
-                issued_at=NOW - timedelta(seconds=1),
-                expires_at=NOW + timedelta(seconds=10),
+                issued_at=race_now - timedelta(seconds=1),
+                expires_at=race_now + timedelta(seconds=10),
             )
         )
         client_order_id = approval.client_order_id
@@ -2222,7 +4074,9 @@ def test_postgresql_one_shot_grant_has_one_atomic_journal_winner(
 
     def contend(sequence: int) -> str:
         with Session(postgres_writer_engine) as session:
-            store = SqlAlchemyOrderWriterStore(session, now_provider=lambda: NOW)
+            store = SqlAlchemyOrderWriterStore(
+                session, now_provider=lambda: race_now
+            )
             claimed = store.load_approved_execution(approval_id)
             authorization = OrderSubmissionAuthorization(
                 grant_id=grant_id,
@@ -2238,14 +4092,14 @@ def test_postgresql_one_shot_grant_has_one_atomic_journal_winner(
                 writer_instance_id="PgGrantWriter{:02d}".format(sequence),
                 approval_id=approval_id,
                 client_order_id=claimed.client_order_id,
-                issued_at=NOW - timedelta(seconds=1),
-                expires_at=NOW + timedelta(seconds=10),
+                issued_at=race_now - timedelta(seconds=1),
+                expires_at=race_now + timedelta(seconds=10),
             )
             command = normalize_order_command(
                 claimed,
                 submission_grant=authorization,
                 instrument=instrument,
-                now=NOW,
+                now=race_now,
             )
             barrier.wait()
             try:
@@ -2257,7 +4111,7 @@ def test_postgresql_one_shot_grant_has_one_atomic_journal_winner(
                     canonical_hash=claimed.canonical_hash,
                     policy_digest=claimed.policy_digest,
                     approved_payload_hash=claimed.approved_payload_hash,
-                    now=NOW,
+                    now=race_now,
                     expires_at=authorization.expires_at,
                 )
                 store.prepare_place(
@@ -2291,6 +4145,16 @@ def test_postgresql_one_shot_grant_has_one_atomic_journal_winner(
             ),
             {"approval_id": approval_id},
         ).scalar_one() == 1
+        lifecycle = connection.execute(
+            text(
+                "SELECT submission_grant_id,cleanup_phase,fencing_version,"
+                "opening_exchange_order_row_id FROM okx_demo_canary_lifecycles"
+            )
+        ).one()
+        assert lifecycle.submission_grant_id == grant_id
+        assert lifecycle.cleanup_phase == "OPENING_SUBMITTED"
+        assert lifecycle.fencing_version == 2
+        assert lifecycle.opening_exchange_order_row_id is not None
     with pytest.raises(SQLAlchemyError):
         with postgres_writer_engine.begin() as connection:
             connection.execute(text("SET LOCAL ROLE freqtrade"))

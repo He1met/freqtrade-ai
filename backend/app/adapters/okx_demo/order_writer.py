@@ -157,6 +157,12 @@ class OrderWriterStore(Protocol):
         safe_request_snapshot: Mapping[str, Any],
     ) -> tuple[ManagedOrder, WriteAttemptRecord]: ...
 
+    def prepare_recovery_close_cleanup(
+        self,
+        parent: WriteAttemptRecord,
+        recovery_grant_database_id: int,
+    ) -> tuple[ManagedOrder, WriteAttemptRecord, Mapping[str, Any]]: ...
+
     def transition(
         self,
         attempt: WriteAttemptRecord,
@@ -382,6 +388,21 @@ class OkxDemoOrderWriter:
         )
         unresolved = self._store.unresolved()
         if unresolved is not None:
+            if (
+                unresolved.operation == "CLOSE"
+                and unresolved.state == WriteState.RESIDUAL_CLOSE_REQUIRED
+            ):
+                order, attempt, body = self._store.prepare_recovery_close_cleanup(
+                    unresolved,
+                    recovery_grant_database_id,
+                )
+                return self._post_and_reconcile(
+                    attempt=attempt,
+                    order=order,
+                    path="/api/v5/trade/order",
+                    body=body,
+                    require_terminal=True,
+                )
             if (
                 unresolved.recovery_grant_database_id
                 != recovery_grant_database_id

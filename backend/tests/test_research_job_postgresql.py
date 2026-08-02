@@ -361,6 +361,7 @@ def test_incremental_worker_migration_preserves_existing_runtime_rows(postgres_e
             "full_chain_runs",
             "full_chain_signal_snapshots",
             "full_chain_stage_runs",
+            "okx_demo_canary_lifecycles",
             "okx_order_write_attempts",
             "okx_order_writer_leases",
             "okx_demo_account_snapshots",
@@ -378,7 +379,9 @@ def test_incremental_worker_migration_preserves_existing_runtime_rows(postgres_e
             "research_worker_control",
             "risk_decisions",
             "risk_budgets",
+            "signal_evaluations",
             "strategy_candidate_approvals",
+            "strategy_deployments",
             "trade_intents",
         }
     ]

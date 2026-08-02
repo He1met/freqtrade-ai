@@ -1559,6 +1559,9 @@ def okx_runtime_readiness(state_dir: Path) -> Dict[str, Any]:
     ) or (
         status == "BLOCKED_OPENINGS"
         and reconciliation in {"DRIFTED", "STALE", "UNKNOWN"}
+    ) or (
+        status == "RECOVERY_ONLY"
+        and reconciliation == "DRIFTED"
     )
     if (
         not valid_state
@@ -1703,7 +1706,10 @@ def wait_for_okx_runtime(
 ) -> None:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
-        if okx_runtime_readiness(state_dir).get("status") == "READY":
+        if okx_runtime_readiness(state_dir).get("status") in {
+            "READY",
+            "RECOVERY_ONLY",
+        }:
             return
         if not process_status(state_dir, "okx_runtime")["running"]:
             break
@@ -2189,10 +2195,13 @@ def current_status(state_dir: Path) -> Dict[str, Any]:
         and result["credentials"]["local_action"].get("status") == "READY"
         and result["database"].get("schema") == "verified"
         and result["okx_runtime"].get("status")
-        in {"READY", "BLOCKED_OPENINGS"}
+        in {"READY", "BLOCKED_OPENINGS", "RECOVERY_ONLY"}
     )
-    if ready and result["okx_runtime"].get("status") == "BLOCKED_OPENINGS":
-        result["status"] = "BLOCKED_OPENINGS"
+    if ready and result["okx_runtime"].get("status") in {
+        "BLOCKED_OPENINGS",
+        "RECOVERY_ONLY",
+    }:
+        result["status"] = result["okx_runtime"]["status"]
     else:
         result["status"] = "RUNNING" if ready else "DEGRADED"
     return result
@@ -2342,10 +2351,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         status["credentials"]["okx_demo"].get("status")
                         != "READY"
                         and status["okx_runtime"].get("status")
-                        != "BLOCKED_OPENINGS"
+                        not in {"BLOCKED_OPENINGS", "RECOVERY_ONLY"}
                     )
                     or status["okx_runtime"].get("status")
-                    not in {"READY", "BLOCKED_OPENINGS"}
+                    not in {"READY", "BLOCKED_OPENINGS", "RECOVERY_ONLY"}
                 ):
                     raise RuntimeBlocked(
                         "OKX target, Keychain capability, reconciliation, schema/ACL, "
@@ -2364,9 +2373,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 payload = {
                     **status,
                     "status": (
-                        "BLOCKED_OPENINGS"
+                        status["okx_runtime"]["status"]
                         if status["okx_runtime"].get("status")
-                        == "BLOCKED_OPENINGS"
+                        in {"BLOCKED_OPENINGS", "RECOVERY_ONLY"}
                         else "VERIFIED"
                     ),
                 }

@@ -9,7 +9,7 @@ from typing import Any, Mapping, Optional
 
 from sqlalchemy import select, text
 from sqlalchemy.engine import Connection
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.adapters.okx_demo.order_writer import (
@@ -43,6 +43,7 @@ from app.models.okx_demo_reconciliation import (
     OkxDemoRecoveryGrant,
 )
 from app.models.order_writer import (
+    OkxDemoCanaryLifecycle,
     OkxDemoSubmissionGrant,
     OkxOrderWriteAttempt,
     OkxOrderWriterLease,
@@ -311,15 +312,49 @@ class SqlAlchemyOrderWriterStore:
                 raise OkxDemoWriteBlocked(
                     "recovery close authoritative position is invalid"
                 )
-            intent = self.db.scalars(
-                select(TradeIntent)
-                .where(
-                    TradeIntent.execution_target_id == OKX_DEMO,
-                    TradeIntent.instrument_id == grant.instrument_id,
-                    TradeIntent.position_side == grant.position_side,
+            if grant.lifecycle_id is not None:
+                lifecycle = self.db.execute(
+                    text(
+                        "SELECT lifecycle_id,fencing_version "
+                        "FROM okx_demo_canary_lifecycles "
+                        "WHERE lifecycle_id=:lifecycle_id"
+                    ),
+                    {"lifecycle_id": grant.lifecycle_id},
+                ).first()
+                if lifecycle is None:
+                    raise OkxDemoWriteBlocked(
+                        "canary recovery close lifecycle is missing"
+                    )
+                cleanup_approval_id = self.db.execute(
+                    text(
+                        "SELECT create_okx_demo_canary_cleanup_intent("
+                        ":lifecycle_id,:grant_id,:expected_version)"
+                    ),
+                    {
+                        "lifecycle_id": lifecycle.lifecycle_id,
+                        "grant_id": grant.database_id,
+                        "expected_version": lifecycle.fencing_version,
+                    },
+                ).scalar_one()
+                cleanup_approval = self.db.get(
+                    ApprovedExecution,
+                    cleanup_approval_id,
                 )
-                .order_by(TradeIntent.id.desc())
-            ).first()
+                intent = (
+                    self.db.get(TradeIntent, cleanup_approval.trade_intent_id)
+                    if cleanup_approval is not None
+                    else None
+                )
+            else:
+                intent = self.db.scalars(
+                    select(TradeIntent)
+                    .where(
+                        TradeIntent.execution_target_id == OKX_DEMO,
+                        TradeIntent.instrument_id == grant.instrument_id,
+                        TradeIntent.position_side == grant.position_side,
+                    )
+                    .order_by(TradeIntent.id.desc())
+                ).first()
             approval = (
                 self.db.scalars(
                     select(ApprovedExecution)
@@ -332,6 +367,10 @@ class SqlAlchemyOrderWriterStore:
             if intent is None:
                 raise OkxDemoWriteBlocked(
                     "recovery close has no persisted local lineage"
+                )
+            if grant.lifecycle_id is not None and approval is None:
+                raise OkxDemoWriteBlocked(
+                    "canary recovery close approval is missing"
                 )
             lineage_id = approval.id if approval is not None else intent.id
             client_order_id = "rcv{:020d}".format(grant.database_id)
@@ -387,6 +426,41 @@ class SqlAlchemyOrderWriterStore:
                 raise OkxDemoWriteBlocked(
                     "recovery close grant identity changed"
                 )
+            if grant.lifecycle_id is not None:
+                self.db.flush()
+                bound_version = self.db.execute(
+                    text(
+                        "SELECT fencing_version "
+                        "FROM okx_demo_canary_lifecycles "
+                        "WHERE lifecycle_id=:lifecycle_id"
+                    ),
+                    {"lifecycle_id": grant.lifecycle_id},
+                ).scalar_one()
+                cleanup_digest = hashlib.sha256(
+                    "|".join(
+                        (
+                            grant.lifecycle_id,
+                            str(order_row.id),
+                            str(intent.id),
+                            format(Decimal(intent.quantity), "f"),
+                            str(run.id),
+                        )
+                    ).encode()
+                ).hexdigest()
+                self.db.execute(
+                    text(
+                        "SELECT transition_okx_demo_canary_lifecycle("
+                        ":lifecycle_id,'BIND_CLEANUP',:order_id,:run_id,"
+                        ":digest,:version)"
+                    ),
+                    {
+                        "lifecycle_id": grant.lifecycle_id,
+                        "order_id": order_row.id,
+                        "run_id": run.id,
+                        "digest": cleanup_digest,
+                        "version": bound_version,
+                    },
+                ).scalar_one()
             self.db.commit()
             return (
                 self._managed_order(order_row, intent, lineage_id),
@@ -396,7 +470,7 @@ class SqlAlchemyOrderWriterStore:
         except (
             OkxDemoWriteBlocked,
             OkxDemoReconciliationBlocked,
-            IntegrityError,
+            SQLAlchemyError,
         ):
             self.db.rollback()
             raise OkxDemoWriteBlocked(
@@ -638,6 +712,7 @@ class SqlAlchemyOrderWriterStore:
     ) -> tuple[ManagedOrder, WriteAttemptRecord]:
         self._require_lease()
         try:
+            canary_lifecycle_id: Optional[str] = None
             self._require_reconciliation_allows(operation)
             approved, intent, decision = self._approval_lineage(
                 command.approval_id,
@@ -655,6 +730,19 @@ class SqlAlchemyOrderWriterStore:
                     approved_payload_hash=command.approved_payload_hash,
                     now=now,
                 )
+                # PostgreSQL is the only credential-bearing runtime backend.
+                # Arm the durable lifecycle while the one-shot grant is still
+                # ACTIVE, then bind the exact persisted journal below in this
+                # same transaction.  A failure rolls back both the lifecycle
+                # and grant consumption, before any exchange POST can occur.
+                if self.db.get_bind().dialect.name == "postgresql":
+                    canary_lifecycle_id = self.db.execute(
+                        text(
+                            "SELECT create_okx_demo_canary_lifecycle("
+                            ":grant_id)"
+                        ),
+                        {"grant_id": grant.grant_id},
+                    ).scalar_one()
                 grant.status = "CONSUMED"
                 grant.writer_instance_id = self._writer_instance_id
                 grant.consumed_at = now
@@ -696,12 +784,36 @@ class SqlAlchemyOrderWriterStore:
                 safe_request_snapshot=safe_request_snapshot,
                 now=now,
             )
+            if canary_lifecycle_id is not None:
+                self.db.flush()
+                opening_digest = hashlib.sha256(
+                    "|".join(
+                        (
+                            str(order_row.id),
+                            order_row.client_order_id,
+                            intent.instrument_id,
+                            request_digest,
+                        )
+                    ).encode()
+                ).hexdigest()
+                self.db.execute(
+                    text(
+                        "SELECT transition_okx_demo_canary_lifecycle("
+                        ":lifecycle_id,'BIND_OPENING',:order_id,NULL,"
+                        ":evidence_digest,1)"
+                    ),
+                    {
+                        "lifecycle_id": canary_lifecycle_id,
+                        "order_id": order_row.id,
+                        "evidence_digest": opening_digest,
+                    },
+                ).scalar_one()
             self.db.commit()
             return (
                 self._managed_order(order_row, intent, approved.id),
                 self._record(attempt),
             )
-        except (OkxDemoWriteBlocked, IntegrityError):
+        except (OkxDemoWriteBlocked, SQLAlchemyError):
             self.db.rollback()
             raise OkxDemoWriteBlocked(
                 "approved execution cannot be claimed for this operation"
@@ -879,6 +991,174 @@ class SqlAlchemyOrderWriterStore:
             self.db.rollback()
             raise OkxDemoWriteBlocked(
                 "residual close cleanup could not be prepared"
+            ) from None
+
+    def prepare_recovery_close_cleanup(
+        self,
+        parent: WriteAttemptRecord,
+        recovery_grant_database_id: int,
+    ) -> tuple[ManagedOrder, WriteAttemptRecord, Mapping[str, Any]]:
+        """Persist one bounded residual child under a fresh lifecycle grant."""
+
+        self._require_lease()
+        try:
+            now = self._now()
+            parent_row = self.db.scalars(
+                select(OkxOrderWriteAttempt)
+                .where(OkxOrderWriteAttempt.id == parent.attempt_id)
+                .with_for_update()
+            ).one()
+            new_grant = self.db.scalars(
+                select(OkxDemoRecoveryGrant)
+                .where(
+                    OkxDemoRecoveryGrant.database_id
+                    == recovery_grant_database_id
+                )
+                .with_for_update()
+            ).one()
+            old_grant = self.db.get(
+                OkxDemoRecoveryGrant,
+                parent_row.recovery_grant_database_id,
+            )
+            lifecycle = (
+                self.db.scalars(
+                    select(OkxDemoCanaryLifecycle)
+                    .where(
+                        OkxDemoCanaryLifecycle.lifecycle_id
+                        == new_grant.lifecycle_id
+                    )
+                    .with_for_update()
+                ).first()
+                if new_grant.lifecycle_id is not None
+                else None
+            )
+            if (
+                parent_row.operation != "CLOSE"
+                or parent_row.state
+                != WriteState.RESIDUAL_CLOSE_REQUIRED.value
+                or parent_row.lease_generation != self._lease_generation
+                or parent_row.close_sequence + 1 > 3
+                or old_grant is None
+                or old_grant.status != "CONSUMED"
+                or lifecycle is None
+                or lifecycle.cleanup_phase != "CLEANUP_PENDING"
+                or lifecycle.outcome != "FAILED"
+                or lifecycle.cleanup_trade_intent_id is None
+                or lifecycle.cleanup_approval_id is None
+                or old_grant.lifecycle_id != lifecycle.lifecycle_id
+                or new_grant.database_id == old_grant.database_id
+                or new_grant.action != "REDUCE_ONLY"
+                or new_grant.status != "ACTIVE"
+                or new_grant.lifecycle_id != lifecycle.lifecycle_id
+                or _aware_utc(new_grant.expires_at) <= now
+            ):
+                raise OkxDemoWriteBlocked(
+                    "residual canary cleanup grant is not claimable"
+                )
+            intent = self.db.get(TradeIntent, lifecycle.cleanup_trade_intent_id)
+            approval = self.db.get(
+                ApprovedExecution,
+                lifecycle.cleanup_approval_id,
+            )
+            if (
+                intent is None
+                or approval is None
+                or parent_row.approval_id != approval.id
+                or approval.trade_intent_id != intent.id
+                or intent.execution_target_id != OKX_DEMO
+                or not intent.reduce_only
+                or intent.order_type != "market"
+                or intent.instrument_id != new_grant.instrument_id
+                or intent.position_side != new_grant.position_side
+            ):
+                raise OkxDemoWriteBlocked(
+                    "residual canary cleanup lineage is inconsistent"
+                )
+            prior = list(
+                self.db.scalars(
+                    select(OkxOrderWriteAttempt)
+                    .join(
+                        ExchangeOrder,
+                        ExchangeOrder.id
+                        == OkxOrderWriteAttempt.exchange_order_row_id,
+                    )
+                    .where(
+                        ExchangeOrder.trade_intent_id == intent.id,
+                        OkxOrderWriteAttempt.operation == "CLOSE",
+                    )
+                )
+            )
+            filled = sum(
+                (
+                    Decimal(
+                        str(
+                            (row.safe_response_snapshot or {}).get(
+                                "accumulated_fill_size", "0"
+                            )
+                        )
+                    )
+                    for row in prior
+                ),
+                Decimal("0"),
+            )
+            remaining = Decimal(intent.quantity) - filled
+            if (
+                remaining <= 0
+                or remaining != Decimal(new_grant.max_quantity)
+            ):
+                raise OkxDemoWriteBlocked(
+                    "fresh residual grant does not equal exact remaining quantity"
+                )
+            next_sequence = parent_row.close_sequence + 1
+            client_order_id = "rcv{:020d}C{}".format(
+                new_grant.database_id,
+                next_sequence,
+            )
+            side = "sell" if intent.position_side == "long" else "buy"
+            body = {
+                "instId": intent.instrument_id,
+                "tdMode": "isolated",
+                "side": side,
+                "posSide": intent.position_side,
+                "ordType": "market",
+                "sz": format(remaining.normalize(), "f"),
+                "clOrdId": client_order_id,
+                "reduceOnly": True,
+            }
+            prepared = self.db.execute(
+                text(
+                    "SELECT order_id,attempt_id FROM "
+                    "prepare_okx_demo_canary_residual_child("
+                    ":parent_attempt_id,:grant_id)"
+                ),
+                {
+                    "parent_attempt_id": parent_row.id,
+                    "grant_id": new_grant.database_id,
+                },
+            ).one()
+            child_order = self.db.get(ExchangeOrder, prepared.order_id)
+            child = self.db.get(OkxOrderWriteAttempt, prepared.attempt_id)
+            if (
+                child_order is None
+                or child is None
+                or child_order.client_order_id != client_order_id
+                or child.recovery_grant_database_id != new_grant.database_id
+                or child.parent_attempt_id != parent_row.id
+                or child.close_sequence != next_sequence
+                or Decimal(
+                    str((child.safe_request_snapshot or {}).get("sz", "0"))
+                )
+                != remaining
+            ):
+                raise OkxDemoWriteBlocked(
+                    "controlled residual child result changed identity"
+                )
+            self.db.commit()
+            return self._managed_order(child_order, intent, approval.id), self._record(child), body
+        except (OkxDemoWriteBlocked, OkxDemoReconciliationBlocked, SQLAlchemyError):
+            self.db.rollback()
+            raise OkxDemoWriteBlocked(
+                "residual canary cleanup could not be prepared atomically"
             ) from None
 
     def transition(

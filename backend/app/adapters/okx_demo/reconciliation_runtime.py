@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 from uuid import uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from app.adapters.okx_demo.read_adapter import OkxDemoReadClient
@@ -43,7 +43,10 @@ from app.models.execution_lineage import (
     TradeIntent,
 )
 from app.models.full_chain import FullChainRun, FullChainStageRun
-from app.models.order_writer import OkxDemoSubmissionGrant, OkxOrderWriteAttempt
+from app.models.order_writer import (
+    OkxDemoSubmissionGrant,
+    OkxOrderWriteAttempt,
+)
 from app.models.strategy_deployment import SignalEvaluation, StrategyDeployment
 from app.repositories.strategy_deployments import StrategyDeploymentRepository
 from app.services.okx_demo_execution_orchestrator import (
@@ -151,6 +154,66 @@ class OkxDemoRuntimeReconciliationAdapter:
             attempt = pending[0]
             if (
                 attempt.recovery_grant_database_id is not None
+                and attempt.operation == "CLOSE"
+                and attempt.state == "RESIDUAL_CLOSE_REQUIRED"
+            ):
+                prior_grant = db.get(
+                    OkxDemoRecoveryGrant,
+                    attempt.recovery_grant_database_id,
+                )
+                lifecycle_phase = (
+                    db.execute(
+                        text(
+                            "SELECT cleanup_phase FROM "
+                            "okx_demo_canary_lifecycles "
+                            "WHERE lifecycle_id=:lifecycle_id"
+                        ),
+                        {"lifecycle_id": prior_grant.lifecycle_id},
+                    ).scalar_one_or_none()
+                    if prior_grant is not None
+                    and prior_grant.lifecycle_id is not None
+                    else None
+                )
+                if lifecycle_phase == "RECOVERY_EXHAUSTED":
+                    return
+                fresh_grant = (
+                    db.scalars(
+                        select(OkxDemoRecoveryGrant)
+                        .join(
+                            OkxDemoReconciliationState,
+                            OkxDemoReconciliationState.execution_target_id
+                            == OkxDemoRecoveryGrant.execution_target_id,
+                        )
+                        .where(
+                            OkxDemoRecoveryGrant.lifecycle_id
+                            == (
+                                prior_grant.lifecycle_id
+                                if prior_grant is not None
+                                else None
+                            ),
+                            OkxDemoRecoveryGrant.action == "REDUCE_ONLY",
+                            OkxDemoRecoveryGrant.status == "ACTIVE",
+                            OkxDemoRecoveryGrant.reconciliation_run_id
+                            == OkxDemoReconciliationState.last_reconciliation_run_id,
+                        )
+                        .order_by(OkxDemoRecoveryGrant.database_id.desc())
+                    ).first()
+                    if prior_grant is not None
+                    and prior_grant.lifecycle_id is not None
+                    else None
+                )
+                if fresh_grant is None:
+                    if self._advance_controlled_canary(db):
+                        return
+                    raise OkxDemoReconciliationBlocked(
+                        "residual canary cleanup lacks fresh recovery authority"
+                    )
+                writer.recovery_reduce_only(
+                    recovery_grant_database_id=fresh_grant.database_id
+                )
+                return
+            if (
+                attempt.recovery_grant_database_id is not None
                 and attempt.operation == "CANCEL"
             ):
                 writer.recovery_cancel(
@@ -178,6 +241,8 @@ class OkxDemoRuntimeReconciliationAdapter:
                     "unresolved runtime placement operation is unsupported"
                 )
             return
+        if self._advance_controlled_canary(db):
+            return
         grants = list(
             db.scalars(
                 select(OkxDemoRecoveryGrant)
@@ -195,6 +260,19 @@ class OkxDemoRuntimeReconciliationAdapter:
                 .order_by(OkxDemoRecoveryGrant.database_id)
             )
         )
+        unfinished_lifecycle_id = self._unfinished_canary_lifecycle_id(db)
+        if unfinished_lifecycle_id is not None:
+            if any(
+                grant.lifecycle_id != unfinished_lifecycle_id
+                for grant in grants
+            ):
+                raise OkxDemoReconciliationBlocked(
+                    "generic recovery authority conflicts with controlled canary"
+                )
+        elif any(grant.lifecycle_id is not None for grant in grants):
+            raise OkxDemoReconciliationBlocked(
+                "orphan controlled canary recovery authority exists"
+            )
         for grant in grants:
             if grant.action == "CANCEL":
                 writer.recovery_cancel(
@@ -229,6 +307,280 @@ class OkxDemoRuntimeReconciliationAdapter:
             approved,
             submission_grant=self._submission_authorization(approved),
         )
+
+    def _advance_controlled_canary(self, db: Session) -> bool:
+        """Advance one durable, evidence-bound lifecycle step per cycle."""
+
+        if db.get_bind().dialect.name != "postgresql":
+            return False
+        now = _aware(self._now_provider())
+        lifecycle_id = self._unfinished_canary_lifecycle_id(db)
+        if lifecycle_id is None:
+            return False
+        lifecycle = db.execute(
+            text(
+                "SELECT lifecycle_id,cleanup_phase,fencing_version,"
+                "cleanup_exchange_order_row_id,cleanup_trade_intent_id,"
+                "attributed_fill_quantity,"
+                "outcome,deadline_at FROM okx_demo_canary_lifecycles "
+                "WHERE execution_target_id='OKX_DEMO' "
+                "AND cleanup_phase NOT IN ('TERMINAL','REVOKED') "
+                "AND lifecycle_id=:lifecycle_id"
+            ),
+            {"lifecycle_id": lifecycle_id},
+        ).one()
+        conflicting_grant = db.scalars(
+            select(OkxDemoRecoveryGrant.database_id).where(
+                OkxDemoRecoveryGrant.execution_target_id == "OKX_DEMO",
+                OkxDemoRecoveryGrant.status == "ACTIVE",
+                OkxDemoRecoveryGrant.lifecycle_id.is_distinct_from(
+                    lifecycle.lifecycle_id
+                ),
+            )
+        ).first()
+        if conflicting_grant is not None:
+            raise OkxDemoReconciliationBlocked(
+                "generic recovery authority conflicts with controlled canary"
+            )
+        state = db.scalars(
+            select(OkxDemoReconciliationState).where(
+                OkxDemoReconciliationState.execution_target_id == "OKX_DEMO"
+            )
+        ).first()
+        run = (
+            db.get(ReconciliationRun, state.last_reconciliation_run_id)
+            if state is not None and state.last_reconciliation_run_id is not None
+            else None
+        )
+        if (
+            run is None
+            or run.artifact_status != "READY"
+            or not isinstance(run.artifact_sha256, str)
+            or len(run.artifact_sha256) != 64
+        ):
+            raise OkxDemoReconciliationBlocked(
+                "controlled canary requires a finalized current artifact"
+            )
+        active_grant = db.scalars(
+            select(OkxDemoRecoveryGrant).where(
+                OkxDemoRecoveryGrant.lifecycle_id == lifecycle.lifecycle_id,
+                OkxDemoRecoveryGrant.status == "ACTIVE",
+            )
+        ).first()
+        if active_grant is not None:
+            return False
+
+        if lifecycle.cleanup_phase in {"OPENING_SUBMITTED", "CANCEL_PENDING"}:
+            snapshot = db.execute(
+                text(
+                    "SELECT encode(public.digest(convert_to(concat_ws('|',"
+                    "l.lifecycle_id,r.id::text,r.artifact_sha256,"
+                    "COALESCE(sum(f.quantity),0)::text,os.status,"
+                    "COALESCE(string_agg(f.database_id::text,',' ORDER BY "
+                    "f.database_id::text),'')),'UTF8'),'sha256'),'hex') AS digest,"
+                    "os.status,os.filled_quantity "
+                    "FROM okx_demo_canary_lifecycles l "
+                    "JOIN exchange_orders eo ON eo.id=l.opening_exchange_order_row_id "
+                    "JOIN reconciliation_runs r ON r.id=:run_id "
+                    "JOIN okx_demo_order_snapshots os ON os.database_id IN "
+                    "(SELECT jsonb_array_elements_text((r.database_ids::jsonb)->"
+                    "'order_snapshots')::bigint) AND os.exchange_order_id=eo.exchange_order_id "
+                    "AND os.client_order_id=eo.client_order_id "
+                    "LEFT JOIN okx_demo_fill_snapshots f ON f.database_id IN "
+                    "(SELECT jsonb_array_elements_text((r.database_ids::jsonb)->"
+                    "'fill_snapshots')::bigint) AND f.exchange_order_id=eo.exchange_order_id "
+                    "WHERE l.lifecycle_id=:lifecycle_id "
+                    "GROUP BY l.lifecycle_id,r.id,r.artifact_sha256,"
+                    "os.status,os.filled_quantity"
+                ),
+                {
+                    "run_id": run.id,
+                    "lifecycle_id": lifecycle.lifecycle_id,
+                },
+            ).first()
+            if snapshot is None:
+                raise OkxDemoReconciliationBlocked(
+                    "current canary opening snapshot is missing"
+                )
+            opening_state = str(snapshot.status).lower()
+            opening_fill = Decimal(snapshot.filled_quantity)
+            normal_run = run.status in {"RECONCILED", "RECOVERED"}
+            if lifecycle.cleanup_phase == "OPENING_SUBMITTED" and normal_run:
+                if opening_fill != 0:
+                    raise OkxDemoReconciliationBlocked(
+                        "normal canary run cannot conceal an attributed fill"
+                    )
+                if _database_aware(lifecycle.deadline_at) > now:
+                    return True
+                if opening_state in {"filled", "canceled", "mmp_canceled"}:
+                    return self._terminalize_controlled_canary(
+                        db, lifecycle=lifecycle, run=run
+                    )
+                raise OkxDemoReconciliationBlocked(
+                    "normal canary run lacks the required deadline finding"
+                )
+            if lifecycle.cleanup_phase == "CANCEL_PENDING":
+                if opening_state in {"live", "partially_filled"}:
+                    db.execute(
+                        text(
+                            "SELECT issue_okx_demo_canary_recovery_grant("
+                            ":lifecycle_id,:run_id,'CANCEL',:version)"
+                        ),
+                        {
+                            "lifecycle_id": lifecycle.lifecycle_id,
+                            "run_id": run.id,
+                            "version": lifecycle.fencing_version,
+                        },
+                    ).scalar_one()
+                    return True
+                if (
+                    opening_state in {"filled", "canceled", "mmp_canceled"}
+                    and opening_fill == 0
+                    and Decimal(lifecycle.attributed_fill_quantity) == 0
+                ):
+                    return self._terminalize_controlled_canary(
+                        db, lifecycle=lifecycle, run=run
+                    )
+            db.execute(
+                text(
+                    "SELECT transition_okx_demo_canary_lifecycle("
+                    ":lifecycle_id,'RECORD_FILLS',NULL,:run_id,"
+                    ":digest,:version)"
+                ),
+                {
+                    "lifecycle_id": lifecycle.lifecycle_id,
+                    "run_id": run.id,
+                    "digest": snapshot.digest,
+                    "version": lifecycle.fencing_version,
+                },
+            ).scalar_one()
+            return True
+
+        if lifecycle.cleanup_phase == "CLEANUP_PENDING":
+            residual_cleanup = db.execute(
+                text(
+                    "SELECT a.id,a.close_sequence FROM okx_order_write_attempts a "
+                    "JOIN exchange_orders eo ON eo.id=a.exchange_order_row_id "
+                    "WHERE eo.trade_intent_id=:cleanup_intent_id "
+                    "AND a.operation='CLOSE' "
+                    "AND a.state='RESIDUAL_CLOSE_REQUIRED' "
+                    "ORDER BY a.close_sequence DESC,a.id DESC LIMIT 1"
+                ),
+                {"cleanup_intent_id": lifecycle.cleanup_trade_intent_id or -1},
+            ).first()
+            if (
+                residual_cleanup is not None
+                and residual_cleanup.close_sequence >= 3
+            ):
+                remaining = db.execute(
+                    text(
+                        "SELECT ti.quantity-COALESCE(sum(COALESCE(NULLIF("
+                        "a.safe_response_snapshot::jsonb->>'accumulated_fill_size','')"
+                        "::numeric,0)),0) FROM trade_intents ti "
+                        "LEFT JOIN exchange_orders eo ON eo.trade_intent_id=ti.id "
+                        "LEFT JOIN okx_order_write_attempts a "
+                        "ON a.exchange_order_row_id=eo.id AND a.operation='CLOSE' "
+                        "WHERE ti.id=:intent_id GROUP BY ti.quantity"
+                    ),
+                    {"intent_id": lifecycle.cleanup_trade_intent_id},
+                ).scalar_one()
+                exhaustion_digest = hashlib.sha256(
+                    "|".join(
+                        (
+                            lifecycle.lifecycle_id,
+                            str(residual_cleanup.id),
+                            str(run.id),
+                            run.artifact_sha256,
+                            str(remaining),
+                            "CLEANUP_LIMIT_REACHED",
+                        )
+                    ).encode()
+                ).hexdigest()
+                db.execute(
+                    text(
+                        "SELECT transition_okx_demo_canary_lifecycle("
+                        ":lifecycle_id,'EXHAUST_RECOVERY',:attempt_id,:run_id,"
+                        ":digest,:version)"
+                    ),
+                    {
+                        "lifecycle_id": lifecycle.lifecycle_id,
+                        "attempt_id": residual_cleanup.id,
+                        "run_id": run.id,
+                        "digest": exhaustion_digest,
+                        "version": lifecycle.fencing_version,
+                    },
+                ).scalar_one()
+                return True
+            if (
+                lifecycle.cleanup_exchange_order_row_id is None
+                or residual_cleanup is not None
+            ):
+                db.execute(
+                    text(
+                        "SELECT issue_okx_demo_canary_recovery_grant("
+                        ":lifecycle_id,:run_id,'REDUCE_ONLY',:version)"
+                    ),
+                    {
+                        "lifecycle_id": lifecycle.lifecycle_id,
+                        "run_id": run.id,
+                        "version": lifecycle.fencing_version,
+                    },
+                ).scalar_one()
+                return True
+            return self._terminalize_controlled_canary(
+                db, lifecycle=lifecycle, run=run
+            )
+        return False
+
+    @staticmethod
+    def _unfinished_canary_lifecycle_id(db: Session) -> Optional[str]:
+        if db.get_bind().dialect.name != "postgresql":
+            return None
+        rows = db.execute(
+            text(
+                "SELECT lifecycle_id FROM okx_demo_canary_lifecycles "
+                "WHERE execution_target_id='OKX_DEMO' "
+                "AND cleanup_phase NOT IN ('TERMINAL','REVOKED') "
+                "ORDER BY lifecycle_id"
+            )
+        ).all()
+        if len(rows) > 1:
+            raise OkxDemoReconciliationBlocked(
+                "multiple unfinished controlled canary lifecycles exist"
+            )
+        return rows[0].lifecycle_id if rows else None
+
+    @staticmethod
+    def _terminalize_controlled_canary(
+        db: Session,
+        *,
+        lifecycle: Any,
+        run: ReconciliationRun,
+    ) -> bool:
+        digest = hashlib.sha256(
+            "|".join(
+                (
+                    lifecycle.lifecycle_id,
+                    str(run.id),
+                    run.artifact_sha256,
+                    lifecycle.outcome,
+                    format(Decimal(lifecycle.attributed_fill_quantity), "f"),
+                )
+            ).encode()
+        ).hexdigest()
+        db.execute(
+            text(
+                "SELECT transition_okx_demo_canary_lifecycle("
+                ":lifecycle_id,'TERMINALIZE',NULL,:run_id,:digest,:version)"
+            ),
+            {
+                "lifecycle_id": lifecycle.lifecycle_id,
+                "run_id": run.id,
+                "digest": digest,
+                "version": lifecycle.fencing_version,
+            },
+        ).scalar_one()
+        return True
 
     def run_active_one_shot(
         self,
@@ -288,6 +640,23 @@ class OkxDemoRuntimeReconciliationAdapter:
                 grant.consumed_at = now
             return "FAILED"
         return "CONSUMED"
+
+    def can_resume_controlled_canary(
+        self,
+        db: Session,
+        *,
+        reconciliation_run_id: int,
+    ) -> bool:
+        if db.get_bind().dialect.name != "postgresql":
+            return False
+        return bool(
+            db.execute(
+                text(
+                    "SELECT can_resume_okx_demo_canary_recovery(:run_id)"
+                ),
+                {"run_id": reconciliation_run_id},
+            ).scalar_one()
+        )
 
     def _process_one_signal_evaluation(
         self,
