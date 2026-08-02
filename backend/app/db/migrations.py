@@ -3503,7 +3503,7 @@ def _required_operator_consent_proof_key() -> bytes:
 def _converge_operator_consent_proof_key(connection: Connection) -> None:
     """Admin-only key provisioning; runtime roles have no secret-table access."""
 
-    schema_name = connection.execute(text("SELECT current_schema()" )).scalar_one()
+    schema_name = connection.execute(text("SELECT current_schema()")).scalar_one()
     quoted_schema = connection.dialect.identifier_preparer.quote_schema(schema_name)
     table = "{}.okx_demo_operator_consent_secrets".format(quoted_schema)
     connection.execute(text(
@@ -7993,6 +7993,71 @@ def _add_canary_consent_handoff_boundary(connection: Connection) -> None:
     ))
 
 
+def _finalize_current_canary_boundaries(connection: Connection) -> list[str]:
+    """Converge every supported upgrade path on the complete v28 boundary."""
+
+    required_tables = {
+        "approved_executions",
+        "exchange_orders",
+        "full_chain_runs",
+        "okx_demo_attestation_secrets",
+        "okx_demo_fill_snapshots",
+        "okx_demo_order_snapshots",
+        "okx_demo_position_snapshots",
+        "okx_demo_reconciliation_states",
+        "okx_demo_recovery_batches",
+        "okx_demo_recovery_grants",
+        "okx_demo_submission_grants",
+        "okx_demo_trusted_snapshots",
+        "okx_order_write_attempts",
+        "reconciliation_runs",
+        "research_jobs",
+        "risk_budgets",
+        "risk_decisions",
+        "trade_intents",
+    }
+    schema_name = connection.execute(text("SELECT current_schema()" )).scalar_one()
+    actual_tables = set(inspect(connection).get_table_names(schema=schema_name))
+    missing_tables = sorted(required_tables - actual_tables)
+    if missing_tables:
+        raise SchemaMigrationBlocked(
+            "v28 canary boundary dependencies are incomplete: "
+            + ", ".join(missing_tables)
+        )
+    grant_foreign_keys = {
+        tuple(foreign_key["constrained_columns"])
+        for foreign_key in inspect(connection).get_foreign_keys(
+            "okx_demo_submission_grants",
+            schema=schema_name,
+        )
+    }
+    for column, target, ondelete in (
+        ("execution_target_id", "execution_scopes(scope_id)", ""),
+        ("approval_id", "approved_executions(id)", " ON DELETE RESTRICT"),
+        (
+            "reconciliation_run_id",
+            "reconciliation_runs(id)",
+            " ON DELETE RESTRICT",
+        ),
+    ):
+        if (column,) not in grant_foreign_keys:
+            connection.execute(
+                text(
+                    "ALTER TABLE okx_demo_submission_grants "
+                    "ADD CONSTRAINT okx_demo_submission_grants_{}_fkey "
+                    "FOREIGN KEY ({}) REFERENCES {}{}".format(
+                        column,
+                        column,
+                        target,
+                        ondelete,
+                    )
+                )
+            )
+    _add_controlled_canary_lifecycle_boundary(connection)
+    _add_canary_consent_handoff_boundary(connection)
+    return schema_problems(connection)
+
+
 def upgrade_database(engine: Engine) -> str:
     """Upgrade a local PostgreSQL database atomically to ``SCHEMA_VERSION``.
 
@@ -8078,25 +8143,11 @@ def upgrade_database(engine: Engine) -> str:
                     inspect(connection).get_table_names(schema=schema_name)
                 ):
                     _add_canary_lineage_write_boundary(connection)
-                lifecycle_dependencies = {
-                    "approved_executions", "trade_intents", "risk_decisions",
-                    "exchange_orders", "reconciliation_runs", "full_chain_runs",
-                    "okx_demo_submission_grants", "okx_demo_recovery_grants",
-                    "okx_demo_reconciliation_states", "okx_demo_recovery_batches",
-                    "okx_demo_order_snapshots", "okx_demo_fill_snapshots",
-                    "okx_demo_position_snapshots", "okx_order_write_attempts",
-                    "okx_demo_trusted_snapshots",
-                }
-                if lifecycle_dependencies.issubset(
-                    inspect(connection).get_table_names(schema=schema_name)
-                ):
-                    _add_controlled_canary_lifecycle_boundary(connection)
-                    _add_canary_consent_handoff_boundary(connection)
             if current_version in {
                 CANARY_FINAL_EXPIRY_BASE_VERSION,
                 CANARY_LIFECYCLE_BASE_VERSION,
             }:
-                problems = schema_problems(connection)
+                problems = _finalize_current_canary_boundaries(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
                         "Controlled canary lifecycle upgrade does not match ORM metadata: "
@@ -8108,7 +8159,7 @@ def upgrade_database(engine: Engine) -> str:
                 )
                 return SCHEMA_VERSION
             if current_version == CANARY_LINEAGE_WRITE_BASE_VERSION:
-                problems = schema_problems(connection)
+                problems = _finalize_current_canary_boundaries(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
                         "Canary lineage write upgrade does not match ORM metadata: "
@@ -8120,7 +8171,7 @@ def upgrade_database(engine: Engine) -> str:
                 )
                 return SCHEMA_VERSION
             if current_version == STRATEGY_VALIDATION_BASE_VERSION:
-                problems = schema_problems(connection)
+                problems = _finalize_current_canary_boundaries(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
                         "Strategy validation matrix upgrade does not match ORM metadata: "
@@ -8133,7 +8184,7 @@ def upgrade_database(engine: Engine) -> str:
                 return SCHEMA_VERSION
             if current_version == RECONCILIATION_INDEX_BASE_VERSION:
                 _add_strategy_deployment_queue(connection)
-                problems = schema_problems(connection)
+                problems = _finalize_current_canary_boundaries(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
                         "Reconciliation index upgrade does not match ORM metadata: "
@@ -8146,7 +8197,7 @@ def upgrade_database(engine: Engine) -> str:
                 return SCHEMA_VERSION
             if current_version == SINGLE_ACTIVE_DEPLOYMENT_BASE_VERSION:
                 _add_single_active_strategy_deployment_index(connection)
-                problems = schema_problems(connection)
+                problems = _finalize_current_canary_boundaries(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
                         "Single active deployment upgrade does not match ORM metadata: "
@@ -8160,7 +8211,7 @@ def upgrade_database(engine: Engine) -> str:
             if current_version == FILL_SNAPSHOT_REPEAT_BASE_VERSION:
                 _add_strategy_deployment_queue(connection)
                 _grant_runtime_application_acl(connection)
-                problems = schema_problems(connection)
+                problems = _finalize_current_canary_boundaries(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
                         "Fill snapshot repeat upgrade does not match ORM metadata: "
@@ -8175,7 +8226,7 @@ def upgrade_database(engine: Engine) -> str:
                 _add_okx_demo_reconciliation(connection)
                 _add_strategy_deployment_queue(connection)
                 _grant_runtime_application_acl(connection)
-                problems = schema_problems(connection)
+                problems = _finalize_current_canary_boundaries(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
                         "Reconciliation batch freshness upgrade does not match "
@@ -8190,7 +8241,7 @@ def upgrade_database(engine: Engine) -> str:
                 _add_okx_demo_reconciliation(connection)
                 _add_strategy_deployment_queue(connection)
                 _grant_runtime_application_acl(connection)
-                problems = schema_problems(connection)
+                problems = _finalize_current_canary_boundaries(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
                         "Recovery wall-clock upgrade does not match ORM metadata: "
@@ -8206,7 +8257,7 @@ def upgrade_database(engine: Engine) -> str:
                 _upgrade_strategy_candidate_approvals(connection)
                 _add_strategy_deployment_queue(connection)
                 _grant_runtime_application_acl(connection)
-                problems = schema_problems(connection)
+                problems = _finalize_current_canary_boundaries(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
                         "Dual-side upgrade does not match ORM metadata: "
@@ -8221,7 +8272,7 @@ def upgrade_database(engine: Engine) -> str:
                 _upgrade_strategy_candidate_approvals(connection)
                 _add_strategy_deployment_queue(connection)
                 _grant_runtime_application_acl(connection)
-                problems = schema_problems(connection)
+                problems = _finalize_current_canary_boundaries(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
                         "Strategy promotion upgrade does not match ORM metadata: "
@@ -8236,7 +8287,7 @@ def upgrade_database(engine: Engine) -> str:
                 _add_strategy_deployment_queue(connection)
                 _upgrade_execution_full_chain(connection)
                 _grant_runtime_application_acl(connection)
-                problems = schema_problems(connection)
+                problems = _finalize_current_canary_boundaries(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
                         "Strategy deployment queue upgrade does not match ORM metadata: "
@@ -8250,7 +8301,7 @@ def upgrade_database(engine: Engine) -> str:
             if current_version == EXECUTION_FULL_CHAIN_BASE_VERSION:
                 _upgrade_execution_full_chain(connection)
                 _grant_runtime_application_acl(connection)
-                problems = schema_problems(connection)
+                problems = _finalize_current_canary_boundaries(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
                         "Execution full-chain upgrade does not match ORM metadata: "
@@ -8287,7 +8338,7 @@ def upgrade_database(engine: Engine) -> str:
                 _add_okx_demo_runtime_recovery_binding(connection)
                 _add_controlled_canary_lifecycle_boundary(connection)
                 _add_full_chain(connection)
-                problems = schema_problems(connection)
+                problems = _finalize_current_canary_boundaries(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
                         "Incremental schema upgrade does not match ORM metadata: "
@@ -8310,7 +8361,7 @@ def upgrade_database(engine: Engine) -> str:
                 _add_okx_demo_runtime_recovery_binding(connection)
                 _add_controlled_canary_lifecycle_boundary(connection)
                 _add_full_chain(connection)
-                problems = schema_problems(connection)
+                problems = _finalize_current_canary_boundaries(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
                         "Early target-lineage schema upgrade does not match ORM metadata: "
@@ -8332,7 +8383,7 @@ def upgrade_database(engine: Engine) -> str:
                 _add_okx_demo_runtime_recovery_binding(connection)
                 _add_controlled_canary_lifecycle_boundary(connection)
                 _add_full_chain(connection)
-                problems = schema_problems(connection)
+                problems = _finalize_current_canary_boundaries(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
                         "Risk-chain schema upgrade does not match ORM metadata: "
@@ -8353,7 +8404,7 @@ def upgrade_database(engine: Engine) -> str:
                 _add_okx_demo_runtime_recovery_binding(connection)
                 _add_controlled_canary_lifecycle_boundary(connection)
                 _add_full_chain(connection)
-                problems = schema_problems(connection)
+                problems = _finalize_current_canary_boundaries(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
                         "Risk-chain hardening upgrade does not match ORM metadata: "
@@ -8373,7 +8424,7 @@ def upgrade_database(engine: Engine) -> str:
                 _add_okx_demo_runtime_recovery_binding(connection)
                 _add_controlled_canary_lifecycle_boundary(connection)
                 _add_full_chain(connection)
-                problems = schema_problems(connection)
+                problems = _finalize_current_canary_boundaries(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
                         "Trusted snapshot boundary upgrade does not match ORM metadata: "
@@ -8392,7 +8443,7 @@ def upgrade_database(engine: Engine) -> str:
                 _add_okx_demo_runtime_recovery_binding(connection)
                 _add_controlled_canary_lifecycle_boundary(connection)
                 _add_full_chain(connection)
-                problems = schema_problems(connection)
+                problems = _finalize_current_canary_boundaries(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
                         "Attested session boundary upgrade does not match ORM metadata: "
@@ -8411,7 +8462,7 @@ def upgrade_database(engine: Engine) -> str:
                 _add_okx_demo_runtime_recovery_binding(connection)
                 _add_controlled_canary_lifecycle_boundary(connection)
                 _add_full_chain(connection)
-                problems = schema_problems(connection)
+                problems = _finalize_current_canary_boundaries(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
                         "HMAC attestation boundary upgrade does not match ORM metadata: "
@@ -8430,7 +8481,7 @@ def upgrade_database(engine: Engine) -> str:
                 _add_okx_demo_runtime_recovery_binding(connection)
                 _add_controlled_canary_lifecycle_boundary(connection)
                 _add_full_chain(connection)
-                problems = schema_problems(connection)
+                problems = _finalize_current_canary_boundaries(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
                         "Approval snapshot lineage upgrade does not match ORM metadata: "
@@ -8449,7 +8500,7 @@ def upgrade_database(engine: Engine) -> str:
                 _add_controlled_canary_lifecycle_boundary(connection)
                 _add_full_chain(connection)
                 _add_canary_consent_handoff_boundary(connection)
-                problems = schema_problems(connection)
+                problems = _finalize_current_canary_boundaries(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
                         "Order-writer schema upgrade does not match ORM metadata: "
@@ -8467,7 +8518,7 @@ def upgrade_database(engine: Engine) -> str:
                 _add_controlled_canary_lifecycle_boundary(connection)
                 _add_full_chain(connection)
                 _add_canary_consent_handoff_boundary(connection)
-                problems = schema_problems(connection)
+                problems = _finalize_current_canary_boundaries(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
                         "Reconciliation schema upgrade does not match ORM metadata: "
@@ -8484,7 +8535,7 @@ def upgrade_database(engine: Engine) -> str:
                 _add_okx_demo_runtime_recovery_binding(connection)
                 _add_controlled_canary_lifecycle_boundary(connection)
                 _add_full_chain(connection)
-                problems = schema_problems(connection)
+                problems = _finalize_current_canary_boundaries(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
                         "Runtime recovery schema upgrade does not match ORM metadata: "
@@ -8498,7 +8549,7 @@ def upgrade_database(engine: Engine) -> str:
             if current_version == FULL_CHAIN_BASE_VERSION:
                 _add_full_chain(connection)
                 _add_canary_consent_handoff_boundary(connection)
-                problems = schema_problems(connection)
+                problems = _finalize_current_canary_boundaries(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
                         "Full-chain schema upgrade does not match ORM metadata: "
@@ -8511,7 +8562,7 @@ def upgrade_database(engine: Engine) -> str:
                 return SCHEMA_VERSION
             if current_version == SOAK_BASE_VERSION:
                 _add_okx_demo_soak(connection)
-                problems = schema_problems(connection)
+                problems = _finalize_current_canary_boundaries(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
                         "OKX Demo soak schema upgrade does not match ORM metadata: "
@@ -8525,7 +8576,7 @@ def upgrade_database(engine: Engine) -> str:
             if current_version == RUNTIME_APP_ACL_BASE_VERSION:
                 _add_strategy_deployment_queue(connection)
                 _grant_runtime_application_acl(connection)
-                problems = schema_problems(connection)
+                problems = _finalize_current_canary_boundaries(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
                         "Runtime application ACL upgrade does not match ORM metadata: "
@@ -8540,7 +8591,7 @@ def upgrade_database(engine: Engine) -> str:
                 _ensure_one_shot_submission_grant(connection)
                 _grant_expired_approval_attestor_acl(connection)
                 _grant_runtime_application_acl(connection)
-                problems = schema_problems(connection)
+                problems = _finalize_current_canary_boundaries(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
                         "One-shot submission grant upgrade does not match ORM metadata: "
@@ -8585,7 +8636,7 @@ def upgrade_database(engine: Engine) -> str:
             _add_strategy_validation_matrix(connection)
             _add_controlled_canary_lifecycle_boundary(connection)
             _add_canary_consent_handoff_boundary(connection)
-            problems = schema_problems(connection)
+            problems = _finalize_current_canary_boundaries(connection)
             if problems:
                 raise SchemaMigrationBlocked(
                     "Generated schema does not match ORM metadata: " + "; ".join(problems)
