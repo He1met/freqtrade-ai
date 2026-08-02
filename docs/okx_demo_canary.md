@@ -92,6 +92,25 @@ refresh job，并继承完整 `supersedes_job_ids` lineage。只有原 refresh e
 新鲜的 expiry 证据直接 fail-closed。达到两个 refresh successors 后不再创建新
 job，所有旧 job 与 evidence 保持不可变，避免无限 refresh 链。
 
+如果该有界链正好是在 #616 修复前因 PostgreSQL runtime-role 只读 lineage
+锁权限失败、且最终 `FRESH_EXECUTION_ONLY_REFRESH_RETRY` handoff 也在
+finalize 前过期，operator 只能使用一次全新的 `Idempotency-Key` 调用
+`POST /api/okx-demo/canary/recover-execution-only`。该入口不是第三次普通
+refresh：它要求历史中恰好一个 `FRESH_EXECUTION_ONLY` source、恰好两个按
+depth=1/2 排列且均已成功的 refresh successor，最终 successor 必须保存明确
+的 instrument/market/account 过期时间，并且旧 terminal history 的 ID 必须与
+source 的 `supersedes_job_ids` 完全一致。它创建唯一
+`entry_kind=FRESH_EXECUTION_ONLY_RECOVERY` successor，记录
+`recovery_of_job_id`、完整累计 lineage 和固定
+`recovery_boundary=PRE_616_FINALIZE_ACL_FAILURE`；jobs 15--19 的
+status、request、hash 和 evidence 永远不变。
+
+任一 pending/unknown history、第二个 recovery key、非 Demo manifest、active
+grant、writer attempt、订单或持仓都会 fail-closed。recovery successor 仍须
+由唯一 runtime 重新捕获全新的 execution-only attestation，再沿用原有
+`finalize`、one-shot grant、writer、交易所终态和 reconciliation 门；不接受
+旧快照、不会打开全局 submission，也不会形成无界 recovery 链。
+
 该入口仍固定 `OKX_DEMO`、`simulated_trading=true`、`allow_real_funds=false`、
 `order_submission_enabled=false`、`BTC-USDT-SWAP` 交易所最小合法数量及不超过
 20 USDT 的 notional。grant 原子消费、超时/撤单/必要时 reduce-only 清理、终态

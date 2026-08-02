@@ -24,6 +24,7 @@ from app.services.okx_demo_submission_grant import (
     OkxDemoSubmissionGrantService,
 )
 from app.services.okx_demo_canary_preparation import (
+    FRESH_EXECUTION_ONLY_RECOVERY,
     OkxDemoCanaryPreparationBlocked,
     OkxDemoCanaryPreparationRuntimeBusy,
     OkxDemoCanaryPreparationWaiting,
@@ -87,6 +88,9 @@ def _canary_preparation_response(result: Any) -> dict[str, Any]:
     refresh_of_job_id = getattr(result, "refresh_of_job_id", None)
     if refresh_of_job_id is not None:
         response["refresh_of_job_id"] = refresh_of_job_id
+    recovery_of_job_id = getattr(result, "recovery_of_job_id", None)
+    if recovery_of_job_id is not None:
+        response["recovery_of_job_id"] = recovery_of_job_id
     return response
 
 
@@ -353,6 +357,74 @@ def retry_controlled_canary_attestation(
         request_payload=payload.model_dump(mode="json"),
         handler=execute,
         cache_result=_cache_canary_retry_result,
+    )
+
+
+@router.post("/canary/recover-execution-only", status_code=202)
+def recover_fresh_execution_only_canary(
+    payload: CanaryPreparationRequest,
+    db: Session = Depends(get_db),
+    operator_headers: OperatorRequestHeaders = Depends(operator_request_headers),
+) -> dict[str, Any]:
+    """Create the one bounded recovery successor after the #616 ACL failure.
+
+    This is not a third normal refresh.  The service only accepts the exact
+    immutable depth-two execution-only lineage and retains the existing
+    grant/writer gates for any later order attempt.
+    """
+
+    def execute() -> dict[str, Any]:
+        try:
+            result = OkxDemoCanaryPreparationService(
+                db
+            ).prepare_fresh_execution_only_recovery(
+                idempotency_key=operator_headers.idempotency_key or "",
+            )
+        except OkxDemoCanaryPreparationRuntimeBusy as exc:
+            response = {
+                "operation_status": "WAITING_FOR_RUNTIME_ATTESTATION",
+                "execution_target_id": "OKX_DEMO",
+                "provenance": "CONTROLLED_CANARY_NON_PRODUCTION",
+                "entry_kind": exc.entry_kind or FRESH_EXECUTION_ONLY_RECOVERY,
+                "non_production": True,
+                "supersedes_job_ids": list(exc.supersedes_job_ids),
+                "credential_values_recorded": False,
+            }
+            if exc.job_id is not None:
+                response["attestation_request_job_id"] = exc.job_id
+            if exc.recovery_of_job_id is not None:
+                response["recovery_of_job_id"] = exc.recovery_of_job_id
+            return response
+        except OkxDemoCanaryPreparationWaiting as exc:
+            response = {
+                "operation_status": "WAITING_FOR_RUNTIME_ATTESTATION",
+                "execution_target_id": "OKX_DEMO",
+                "provenance": "CONTROLLED_CANARY_NON_PRODUCTION",
+                "entry_kind": exc.entry_kind or FRESH_EXECUTION_ONLY_RECOVERY,
+                "non_production": True,
+                "attestation_request_job_id": exc.job_id,
+                "supersedes_job_ids": list(exc.supersedes_job_ids),
+                "credential_values_recorded": False,
+            }
+            if exc.recovery_of_job_id is not None:
+                response["recovery_of_job_id"] = exc.recovery_of_job_id
+            return response
+        except OkxDemoCanaryPreparationBlocked as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"operation_status": "BLOCKED", "message": str(exc)},
+            ) from exc
+        response = _canary_preparation_response(result)
+        response["entry_kind"] = result.entry_kind or FRESH_EXECUTION_ONLY_RECOVERY
+        return response
+
+    return operator_request_coordinator.execute(
+        operator_headers,
+        operation="okx-demo-controlled-canary-recover-execution-only",
+        provider_call=True,
+        request_payload=payload.model_dump(mode="json"),
+        handler=execute,
+        cache_result=_cache_canary_result,
     )
 
 

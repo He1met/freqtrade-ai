@@ -18,6 +18,7 @@ from app.models import (
     OkxDemoAttestedSession,
     OkxDemoSubmissionGrant,
     OkxDemoTrustedSnapshot,
+    ExchangePosition,
     ResearchJob,
     ResearchJobAttempt,
     TradeIntent,
@@ -27,6 +28,7 @@ from app.services.okx_demo_canary_preparation import (
     CANARY_PROVENANCE,
     CANARY_OPERATION,
     FRESH_EXECUTION_ONLY_ENTRY,
+    FRESH_EXECUTION_ONLY_RECOVERY,
     FRESH_EXECUTION_ONLY_REFRESH,
     FRESH_EXECUTION_ONLY_REFRESH_RETRY,
     OkxDemoCanaryPreparationBlocked,
@@ -273,6 +275,39 @@ def test_refresh_runtime_lock_contention_is_retryable_for_same_key(client, monke
     assert replay.status_code == 202
     assert replay.json() == prepared.json()
     assert calls == ["fresh-refresh-lock-retry-1", "fresh-refresh-lock-retry-1"]
+
+
+def test_recovery_endpoint_reports_bounded_lineage(client, monkeypatch):
+    api, _calls = client
+
+    def recover(_self, *, idempotency_key):
+        assert idempotency_key == "fresh-recovery-endpoint-1"
+        raise OkxDemoCanaryPreparationWaiting(
+            704,
+            entry_kind=FRESH_EXECUTION_ONLY_RECOVERY,
+            supersedes_job_ids=(15, 16, 17, 18, 19),
+            recovery_of_job_id=19,
+        )
+
+    monkeypatch.setattr(
+        OkxDemoCanaryPreparationService,
+        "prepare_fresh_execution_only_recovery",
+        recover,
+    )
+    response = api.post(
+        "/api/okx-demo/canary/recover-execution-only",
+        headers={
+            "X-Operator-Token": "operator-test-token",
+            "Idempotency-Key": "fresh-recovery-endpoint-1",
+            "X-Provider-Authorization": "once",
+        },
+        json={},
+    )
+    assert response.status_code == 202
+    assert response.json()["operation_status"] == "WAITING_FOR_RUNTIME_ATTESTATION"
+    assert response.json()["entry_kind"] == FRESH_EXECUTION_ONLY_RECOVERY
+    assert response.json()["recovery_of_job_id"] == 19
+    assert response.json()["supersedes_job_ids"] == [15, 16, 17, 18, 19]
 
 
 def test_refresh_terminal_block_remains_cached_for_same_key(client, monkeypatch):
@@ -880,6 +915,23 @@ def test_refresh_rejects_second_key_pending_and_unsafe_activity(db_session, monk
     # before a successor is enqueued.
     db_session.delete(pending)
     db_session.commit()
+    position = ExchangePosition(
+        execution_target_id="OKX_DEMO",
+        instrument_id="BTC-USDT-SWAP",
+        position_side="long",
+        quantity=Decimal("1"),
+        average_price=Decimal("100"),
+        snapshot={"source": "test"},
+        observed_at=NOW,
+    )
+    db_session.add(position)
+    db_session.commit()
+    with pytest.raises(OkxDemoCanaryPreparationBlocked, match="position"):
+        service.prepare_fresh_execution_only_refresh(
+            idempotency_key="fresh-refresh-unsafe-position"
+        )
+    db_session.delete(position)
+    db_session.commit()
     db_session.add(
         TradeIntent(
             execution_target_id="OKX_DEMO",
@@ -1095,6 +1147,252 @@ def test_refresh_retry_cap_rejects_third_successor_and_missing_expiry(
         ).prepare_fresh_execution_only_refresh(
             idempotency_key="fresh-refresh-retry-missing-expiry"
         )
+
+
+def test_recovery_creates_one_successor_after_exhausted_refresh_lineage(
+    db_session, monkeypatch
+):
+    monkeypatch.setenv("FREQTRADE_AI_EXECUTION_TARGET", "OKX_DEMO")
+    monkeypatch.setenv("FREQTRADE_AI_SIMULATED_TRADING", "true")
+    monkeypatch.setenv("FREQTRADE_AI_ALLOW_REAL_FUNDS", "false")
+    legacy = _blocked_attestation_job(
+        db_session,
+        key="recovery-legacy-15",
+        request_payload={
+            "provenance": CANARY_PROVENANCE,
+            "execution_target": "OKX_DEMO",
+            "instrument_id": "BTC-USDT-SWAP",
+            "timeframe": "1m",
+            "candle_limit": 2,
+            "non_production": True,
+        },
+    )
+    terminal = _blocked_attestation_job(
+        db_session,
+        key="recovery-terminal-16",
+        evidence={
+            "provenance": CANARY_PROVENANCE,
+            "attestation_error": {
+                "error_type": "OkxReadAdapterError",
+                "kind": "INVALID_SIGNAL_BUNDLE",
+                "status": "BLOCKED",
+                "retryable": False,
+            },
+        },
+    )
+    source = _successful_fresh_source(
+        db_session,
+        legacy_ids=(legacy.id, terminal.id),
+    )
+    first = _successful_refresh_successor(db_session, source)
+    second = _successful_refresh_successor(
+        db_session,
+        first,
+        entry_kind=FRESH_EXECUTION_ONLY_REFRESH_RETRY,
+        key="recovery-refresh-retry-19",
+    )
+    source_snapshot = {
+        "status": source.status,
+        "stage": source.stage,
+        "request_hash": source.request_hash,
+        "request_payload": dict(source.request_payload),
+        "evidence_snapshot": dict(source.evidence_snapshot),
+    }
+
+    service = OkxDemoCanaryPreparationService(db_session, now_provider=lambda: NOW)
+    with pytest.raises(OkxDemoCanaryPreparationWaiting) as waiting:
+        service.prepare_fresh_execution_only_recovery(
+            idempotency_key="recovery-successor-20"
+        )
+    recovery = db_session.get(ResearchJob, waiting.value.job_id)
+    assert recovery is not None
+    assert recovery.request_payload["entry_kind"] == FRESH_EXECUTION_ONLY_RECOVERY
+    assert recovery.request_payload["recovery_of_job_id"] == second.id
+    assert recovery.request_payload["supersedes_job_ids"] == [
+        legacy.id,
+        terminal.id,
+        source.id,
+        first.id,
+        second.id,
+    ]
+    assert recovery.request_payload["recovery_boundary"] == (
+        "PRE_616_FINALIZE_ACL_FAILURE"
+    )
+    assert {
+        "status": source.status,
+        "stage": source.stage,
+        "request_hash": source.request_hash,
+        "request_payload": dict(source.request_payload),
+        "evidence_snapshot": dict(source.evidence_snapshot),
+    } == source_snapshot
+
+    # The bounded recovery entry does not reopen the ordinary refresh chain.
+    with pytest.raises(OkxDemoCanaryPreparationBlocked, match="unknown or pending"):
+        service.prepare_fresh_execution_only_refresh(
+            idempotency_key="recovery-must-not-be-third-refresh"
+        )
+    assert db_session.query(ResearchJob).filter_by(
+        operation=CANARY_OPERATION
+    ).count() == 6
+
+    with pytest.raises(OkxDemoCanaryPreparationBlocked, match="recovery successor"):
+        service.prepare_fresh_execution_only_recovery(
+            idempotency_key="recovery-successor-21"
+        )
+    with pytest.raises(OkxDemoCanaryPreparationWaiting) as replay:
+        service.prepare_fresh_execution_only_recovery(
+            idempotency_key="recovery-successor-20"
+        )
+    assert replay.value.job_id == recovery.id
+
+
+def test_recovery_rejects_incomplete_or_nonexpired_lineage(db_session, monkeypatch):
+    monkeypatch.setenv("FREQTRADE_AI_EXECUTION_TARGET", "OKX_DEMO")
+    monkeypatch.setenv("FREQTRADE_AI_SIMULATED_TRADING", "true")
+    monkeypatch.setenv("FREQTRADE_AI_ALLOW_REAL_FUNDS", "false")
+    legacy = _blocked_attestation_job(
+        db_session,
+        key="recovery-incomplete-legacy",
+        request_payload={
+            "provenance": CANARY_PROVENANCE,
+            "execution_target": "OKX_DEMO",
+            "instrument_id": "BTC-USDT-SWAP",
+            "timeframe": "1m",
+            "candle_limit": 2,
+            "non_production": True,
+        },
+    )
+    terminal = _blocked_attestation_job(
+        db_session,
+        key="recovery-incomplete-terminal",
+        evidence={"provenance": CANARY_PROVENANCE},
+    )
+    source = _successful_fresh_source(
+        db_session,
+        legacy_ids=(legacy.id, terminal.id),
+    )
+    first = _successful_refresh_successor(db_session, source)
+    with pytest.raises(OkxDemoCanaryPreparationBlocked, match="two exhausted"):
+        OkxDemoCanaryPreparationService(
+            db_session, now_provider=lambda: NOW
+        ).prepare_fresh_execution_only_recovery(
+            idempotency_key="recovery-incomplete-1"
+        )
+
+    # A depth-two lineage with fresh final evidence is not recoverable.  A
+    # recovery entry cannot be used to extend a still-live handoff.
+    _successful_refresh_successor(
+        db_session,
+        first,
+        entry_kind=FRESH_EXECUTION_ONLY_REFRESH_RETRY,
+        key="recovery-fresh-retry",
+        expires_at=NOW + timedelta(minutes=1),
+    )
+    with pytest.raises(OkxDemoCanaryPreparationBlocked, match="expiry evidence"):
+        OkxDemoCanaryPreparationService(
+            db_session, now_provider=lambda: NOW
+        ).prepare_fresh_execution_only_recovery(
+            idempotency_key="recovery-fresh-2"
+        )
+
+
+def test_recovery_runtime_handoff_finalizes_same_key_without_mutating_history(
+    db_session, monkeypatch
+):
+    monkeypatch.setenv("FREQTRADE_AI_EXECUTION_TARGET", "OKX_DEMO")
+    monkeypatch.setenv("FREQTRADE_AI_SIMULATED_TRADING", "true")
+    monkeypatch.setenv("FREQTRADE_AI_ALLOW_REAL_FUNDS", "false")
+    legacy = _blocked_attestation_job(
+        db_session,
+        key="recovery-finalize-legacy",
+        request_payload={
+            "provenance": CANARY_PROVENANCE,
+            "execution_target": "OKX_DEMO",
+            "instrument_id": "BTC-USDT-SWAP",
+            "timeframe": "1m",
+            "candle_limit": 2,
+            "non_production": True,
+        },
+    )
+    terminal = _blocked_attestation_job(
+        db_session,
+        key="recovery-finalize-terminal",
+        evidence={"provenance": CANARY_PROVENANCE},
+    )
+    source = _successful_fresh_source(
+        db_session,
+        legacy_ids=(legacy.id, terminal.id),
+    )
+    first = _successful_refresh_successor(db_session, source)
+    second = _successful_refresh_successor(
+        db_session,
+        first,
+        entry_kind=FRESH_EXECUTION_ONLY_REFRESH_RETRY,
+        key="recovery-finalize-retry",
+    )
+    original = {
+        job.id: (job.status, job.stage, job.request_hash, dict(job.request_payload))
+        for job in (legacy, terminal, source, first, second)
+    }
+    service = OkxDemoCanaryPreparationService(db_session, now_provider=lambda: NOW)
+    key = "recovery-finalize-20"
+    with pytest.raises(OkxDemoCanaryPreparationWaiting) as waiting:
+        service.prepare_fresh_execution_only_recovery(idempotency_key=key)
+    recovery = db_session.get(ResearchJob, waiting.value.job_id)
+    assert recovery is not None
+
+    class Reference:
+        def __init__(self, database_id, snapshot_id, digest):
+            self.database_id = database_id
+            self.snapshot_id = snapshot_id
+            self.digest = digest
+
+    class Bundle:
+        observed_at = NOW
+        expires_at = NOW + timedelta(seconds=30)
+        instrument = Reference(21, "recovery-instrument", "4" * 64)
+        market = Reference(22, "recovery-market", "5" * 64)
+        account = Reference(23, "recovery-account", "6" * 64)
+
+    class RuntimeRead:
+        def capture_execution_attestation(self, db, *, inst_id):
+            assert inst_id == "BTC-USDT-SWAP"
+            return Bundle()
+
+    assert process_pending_canary_attestation(
+        read_client=RuntimeRead(), db=db_session, now=NOW
+    ) is True
+    db_session.commit()
+    db_session.refresh(recovery)
+    assert recovery.status == "SUCCESS"
+    assert recovery.stage == "CANARY_SNAPSHOTS_READY"
+    assert recovery.evidence_snapshot["entry_kind"] == FRESH_EXECUTION_ONLY_RECOVERY
+    assert recovery.evidence_snapshot["recovery_of_job_id"] == second.id
+    assert recovery.evidence_snapshot["recovery_boundary"] == (
+        "PRE_616_FINALIZE_ACL_FAILURE"
+    )
+
+    snapshots = _seed_attested_snapshots(db_session)
+    _patch_lineage_dependencies(monkeypatch, snapshots)
+    result = service.prepare_fresh_execution_only_recovery(idempotency_key=key)
+    assert result.operation_status == "PREPARED"
+    assert result.entry_kind == FRESH_EXECUTION_ONLY_RECOVERY
+    assert result.recovery_of_job_id == second.id
+    assert result.supersedes_job_ids == (
+        legacy.id,
+        terminal.id,
+        source.id,
+        first.id,
+        second.id,
+    )
+    for job in (legacy, terminal, source, first, second):
+        current = db_session.get(ResearchJob, job.id)
+        assert (
+            current.status,
+            current.stage,
+            current.request_hash,
+            dict(current.request_payload),
+        ) == original[job.id]
 
 
 def test_refresh_lineage_requires_depth_specific_entry_kind(db_session, monkeypatch):

@@ -29,6 +29,7 @@ from app.core.config import get_settings
 from app.models.execution_lineage import (
     ApprovedExecution,
     ExchangeOrder,
+    ExchangePosition,
     LOCAL_DRY_RUN_SCOPE_ID,
     OKX_DEMO_TARGET_ID,
     OkxDemoAttestedSession,
@@ -66,16 +67,22 @@ UNRESOLVED_WRITER_STATES = (
 )
 FRESH_EXECUTION_ONLY_REFRESH = "FRESH_EXECUTION_ONLY_REFRESH"
 FRESH_EXECUTION_ONLY_REFRESH_RETRY = "FRESH_EXECUTION_ONLY_REFRESH_RETRY"
+# A recovery is deliberately a separate operator entry, not a third refresh.
+# It is admitted only for the immutable depth-two lineage left by the
+# pre-#616 finalize ACL failure and is single-use across all idempotency keys.
+FRESH_EXECUTION_ONLY_RECOVERY = "FRESH_EXECUTION_ONLY_RECOVERY"
 FRESH_EXECUTION_ENTRY_KINDS = frozenset(
     {
         FRESH_EXECUTION_ONLY_ENTRY,
         FRESH_EXECUTION_ONLY_REFRESH,
         FRESH_EXECUTION_ONLY_REFRESH_RETRY,
+        FRESH_EXECUTION_ONLY_RECOVERY,
     }
 )
 FRESH_EXECUTION_REFRESH_KINDS = frozenset(
     {FRESH_EXECUTION_ONLY_REFRESH, FRESH_EXECUTION_ONLY_REFRESH_RETRY}
 )
+FRESH_EXECUTION_RECOVERY_KINDS = frozenset({FRESH_EXECUTION_ONLY_RECOVERY})
 # A successful fresh entry may have one refresh successor and that successor
 # may have one final bounded retry.  No third refresh is ever admitted.
 MAX_FRESH_EXECUTION_REFRESH_SUCCESSORS = 2
@@ -95,11 +102,13 @@ class OkxDemoCanaryPreparationWaiting(OkxDemoCanaryPreparationBlocked):
         entry_kind: Optional[str] = None,
         supersedes_job_ids: tuple[int, ...] = (),
         refresh_of_job_id: Optional[int] = None,
+        recovery_of_job_id: Optional[int] = None,
     ) -> None:
         self.job_id = job_id
         self.entry_kind = entry_kind
         self.supersedes_job_ids = supersedes_job_ids
         self.refresh_of_job_id = refresh_of_job_id
+        self.recovery_of_job_id = recovery_of_job_id
         super().__init__(
             "canonical runtime attestation is pending; retry canary finalization"
         )
@@ -122,11 +131,13 @@ class OkxDemoCanaryPreparationRuntimeBusy(OkxDemoCanaryPreparationBlocked):
         entry_kind: Optional[str] = None,
         supersedes_job_ids: tuple[int, ...] = (),
         refresh_of_job_id: Optional[int] = None,
+        recovery_of_job_id: Optional[int] = None,
     ) -> None:
         self.job_id = job_id
         self.entry_kind = entry_kind
         self.supersedes_job_ids = supersedes_job_ids
         self.refresh_of_job_id = refresh_of_job_id
+        self.recovery_of_job_id = recovery_of_job_id
         super().__init__(
             "canonical runtime is reconciling; retry canary refresh"
         )
@@ -155,6 +166,7 @@ class CanaryPreparationResult:
     entry_kind: Optional[str] = None
     supersedes_job_ids: tuple[int, ...] = ()
     refresh_of_job_id: Optional[int] = None
+    recovery_of_job_id: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -378,6 +390,192 @@ class OkxDemoCanaryPreparationService:
                         entry_kind=entry_kind,
                         supersedes_job_ids=supersedes,
                         refresh_of_job_id=refresh_of,
+                    )
+                reconciliation_run_id = self._fresh_empty_reconciliation(now)
+                snapshots = self._fresh_snapshots(now)
+                order = self._derive_order(snapshots, now)
+                return self._persist_lineage(
+                    key_digest=key_digest,
+                    now=now,
+                    reconciliation_run_id=reconciliation_run_id,
+                    snapshots=snapshots,
+                    order=order,
+                )
+        except OkxDemoCanaryPreparationBlocked:
+            self.db.rollback()
+            raise
+
+    def prepare_fresh_execution_only_recovery(
+        self,
+        *,
+        idempotency_key: str,
+    ) -> CanaryPreparationResult:
+        """Recover one exhausted refresh lineage without opening a third refresh.
+
+        This is an explicit, single-use operator entry for the immutable
+        depth-two execution-only lineage that could not be finalized before
+        the #616 PostgreSQL runtime-role ACL fix.  It is intentionally not a
+        continuation of ``prepare_fresh_execution_only_refresh``: no normal
+        refresh source is accepted, no old snapshot is reused, and any
+        existing recovery entry (including a different idempotency key) is a
+        hard stop.
+        """
+
+        key = _safe_key(idempotency_key)
+        key_digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        now = _aware(self._now_provider())
+        if self.db.in_transaction():
+            self.db.rollback()
+
+        manifest = get_settings().execution_target_manifest
+        target = manifest.active_target
+        if (
+            manifest.active_target_id != OKX_DEMO_TARGET_ID
+            or target.simulated_trading is not True
+            or target.allow_real_funds is not False
+            or target.order_submission_enabled is not False
+        ):
+            raise OkxDemoCanaryPreparationBlocked(
+                "controlled canary recovery requires OKX_DEMO with global submission disabled"
+            )
+
+        existing = self._canary_job_for_key(key_digest)
+        if existing is not None:
+            entry_kind, supersedes, _refresh_of = _fresh_entry_lineage(
+                existing.request_payload
+            )
+            recovery_of = _fresh_recovery_of(existing.request_payload)
+            if entry_kind not in FRESH_EXECUTION_RECOVERY_KINDS or recovery_of is None:
+                raise OkxDemoCanaryPreparationBlocked(
+                    "canary recovery idempotency key is bound to another entry"
+                )
+            if existing.status == "AWAITING_APPROVAL" and existing.stage == "CANARY_SNAPSHOT_REQUESTED":
+                self.db.rollback()
+                raise OkxDemoCanaryPreparationWaiting(
+                    existing.id,
+                    entry_kind=entry_kind,
+                    supersedes_job_ids=supersedes,
+                    recovery_of_job_id=recovery_of,
+                )
+            if existing.status == "SUCCESS" and existing.stage == "CANARY_PREPARED":
+                # A prepared replay is returned from the durable lineage in
+                # the transaction below.  It never borrows the old snapshots.
+                pass
+            elif existing.status != "SUCCESS" or existing.stage != "CANARY_SNAPSHOTS_READY":
+                self.db.rollback()
+                raise OkxDemoCanaryPreparationBlocked(
+                    "canary recovery request is terminal: {}".format(existing.stage)
+                )
+        else:
+            self.db.rollback()
+            with self.db.begin():
+                if not try_one_shot_transaction_lock(self.db):
+                    raise OkxDemoCanaryPreparationRuntimeBusy(
+                        entry_kind=FRESH_EXECUTION_ONLY_RECOVERY,
+                    )
+                existing = self._canary_job_for_key(key_digest)
+                if existing is not None:
+                    raise OkxDemoCanaryPreparationBlocked(
+                        "canary recovery raced with another request"
+                    )
+                source = self._recovery_source_job(now=now)
+                self._require_no_canary_activity_for_refresh()
+                source_payload = source.request_payload
+                source_supersedes = source_payload.get("supersedes_job_ids")
+                if not isinstance(source_supersedes, list) or any(
+                    not isinstance(job_id, int) or job_id <= 0
+                    for job_id in source_supersedes
+                ):
+                    raise OkxDemoCanaryPreparationBlocked(
+                        "canary recovery source lineage is malformed"
+                    )
+                supersedes_job_ids = list(dict.fromkeys([*source_supersedes, source.id]))
+                payload = {
+                    "provenance": CANARY_PROVENANCE,
+                    "execution_target": OKX_DEMO_TARGET_ID,
+                    "instrument_id": "BTC-USDT-SWAP",
+                    "bundle_kind": "EXECUTION_ONLY",
+                    "non_production": True,
+                    "entry_kind": FRESH_EXECUTION_ONLY_RECOVERY,
+                    "recovery_of_job_id": source.id,
+                    "supersedes_job_ids": supersedes_job_ids,
+                    "recovery_boundary": "PRE_616_FINALIZE_ACL_FAILURE",
+                }
+                job = ResearchJob(
+                    execution_scope_id=LOCAL_DRY_RUN_SCOPE_ID,
+                    job_type="okx_demo_controlled_canary",
+                    operation=CANARY_OPERATION,
+                    idempotency_key_digest=key_digest,
+                    request_hash=canonical_digest(payload),
+                    request_payload=payload,
+                    status="AWAITING_APPROVAL",
+                    stage="CANARY_SNAPSHOT_REQUESTED",
+                    attempt_count=0,
+                    max_attempts=1,
+                    evidence_snapshot={
+                        "provenance": CANARY_PROVENANCE,
+                        "non_production": True,
+                        "entry_kind": FRESH_EXECUTION_ONLY_RECOVERY,
+                        "recovery_of_job_id": source.id,
+                        "supersedes_job_ids": supersedes_job_ids,
+                        "recovery_boundary": "PRE_616_FINALIZE_ACL_FAILURE",
+                    },
+                    started_at=now,
+                )
+                self.db.add(job)
+                self.db.flush()
+                job_id = job.id
+            raise OkxDemoCanaryPreparationWaiting(
+                job_id,
+                entry_kind=FRESH_EXECUTION_ONLY_RECOVERY,
+                supersedes_job_ids=tuple(supersedes_job_ids),
+                recovery_of_job_id=source.id,
+            )
+
+        # Finalization/replay is still serialized by the canonical
+        # transaction-scoped advisory lock.  The source lineage and all
+        # current snapshots are revalidated; no expired snapshot from jobs
+        # 15-19 can enter the new approval lineage.
+        self.db.rollback()
+        try:
+            with self.db.begin():
+                if not try_one_shot_transaction_lock(self.db):
+                    raise OkxDemoCanaryPreparationRuntimeBusy(
+                        job_id=existing.id,
+                        entry_kind=entry_kind,
+                        supersedes_job_ids=supersedes,
+                        recovery_of_job_id=recovery_of,
+                    )
+                existing = self._canary_job_for_key(key_digest)
+                if existing is None:
+                    raise OkxDemoCanaryPreparationBlocked(
+                        "canary recovery lineage disappeared"
+                    )
+                entry_kind, supersedes, _refresh_of = _fresh_entry_lineage(
+                    existing.request_payload
+                )
+                recovery_of = _fresh_recovery_of(existing.request_payload)
+                if entry_kind not in FRESH_EXECUTION_RECOVERY_KINDS or recovery_of is None:
+                    raise OkxDemoCanaryPreparationBlocked(
+                        "canary recovery lineage is malformed"
+                    )
+                self._require_recovery_source_job(
+                    recovery_of,
+                    now=now,
+                    ignore_recovery_job_id=existing.id,
+                )
+                existing_lineage = self._existing_canary(key_digest)
+                if existing_lineage is not None:
+                    return self._result_from_lineage(existing_lineage, now=now)
+                self._require_no_canary_activity_for_refresh(
+                    allow_key_digest=key_digest
+                )
+                if existing.status != "SUCCESS" or existing.stage != "CANARY_SNAPSHOTS_READY":
+                    raise OkxDemoCanaryPreparationWaiting(
+                        existing.id,
+                        entry_kind=entry_kind,
+                        supersedes_job_ids=supersedes,
+                        recovery_of_job_id=recovery_of,
                     )
                 reconciliation_run_id = self._fresh_empty_reconciliation(now)
                 snapshots = self._fresh_snapshots(now)
@@ -898,6 +1096,110 @@ class OkxDemoCanaryPreparationService:
             )
         return source
 
+    def _recovery_source_job(
+        self,
+        *,
+        now: datetime,
+        ignore_recovery_job_id: Optional[int] = None,
+    ) -> ResearchJob:
+        """Find the one immutable, expired depth-two lineage for recovery.
+
+        Recovery is deliberately narrower than a normal refresh.  The
+        complete history must contain exactly one fresh source, exactly two
+        successful refresh successors at depths one and two, and only the
+        terminal attestation failures already superseded by that source.
+        Any pending/unknown row or second recovery entry blocks the path.
+        """
+
+        jobs = self.db.scalars(
+            canary_lineage_read_query(
+                self.db,
+                select(ResearchJob)
+                .where(
+                    ResearchJob.execution_scope_id == LOCAL_DRY_RUN_SCOPE_ID,
+                    ResearchJob.operation == CANARY_OPERATION,
+                )
+                .order_by(ResearchJob.created_at, ResearchJob.id),
+                for_update=True,
+            )
+        ).all()
+        sources: list[ResearchJob] = []
+        refreshes: list[ResearchJob] = []
+        terminal_failures: list[ResearchJob] = []
+        for job in jobs:
+            payload = job.request_payload if isinstance(job.request_payload, dict) else {}
+            entry_kind = payload.get("entry_kind")
+            if entry_kind == FRESH_EXECUTION_ONLY_ENTRY:
+                if not self._is_refresh_source(job, payload):
+                    raise OkxDemoCanaryPreparationBlocked(
+                        "canary recovery source is not an immutable successful handoff"
+                    )
+                sources.append(job)
+                continue
+            if entry_kind in FRESH_EXECUTION_REFRESH_KINDS:
+                if not self._is_refresh_successor(job, payload):
+                    raise OkxDemoCanaryPreparationBlocked(
+                        "canary recovery refresh lineage is malformed"
+                    )
+                refreshes.append(job)
+                continue
+            if entry_kind in FRESH_EXECUTION_RECOVERY_KINDS:
+                if job.id != ignore_recovery_job_id:
+                    raise OkxDemoCanaryPreparationBlocked(
+                        "a canary recovery successor already exists"
+                    )
+                continue
+            if not self._is_terminal_attestation_failure(job, payload):
+                raise OkxDemoCanaryPreparationBlocked(
+                    "unknown or pending canary history blocks recovery"
+                )
+            terminal_failures.append(job)
+
+        if len(sources) != 1 or len(refreshes) != MAX_FRESH_EXECUTION_REFRESH_SUCCESSORS:
+            raise OkxDemoCanaryPreparationBlocked(
+                "recovery requires one fresh source and two exhausted refresh successors"
+            )
+        source = sources[0]
+        source_payload = source.request_payload
+        source_supersedes = source_payload.get("supersedes_job_ids")
+        terminal_ids = [job.id for job in terminal_failures]
+        if source_supersedes != terminal_ids:
+            raise OkxDemoCanaryPreparationBlocked(
+                "recovery terminal history does not match immutable source lineage"
+            )
+
+        depths = [self._refresh_handoff_depth(job) for job in refreshes]
+        if sorted(depth for depth in depths if depth is not None) != [1, 2]:
+            raise OkxDemoCanaryPreparationBlocked(
+                "recovery refresh lineage depth is incomplete"
+            )
+        latest = next(
+            (job for job, depth in zip(refreshes, depths) if depth == 2),
+            None,
+        )
+        if latest is None or not self._refresh_snapshots_expired(latest, now):
+            raise OkxDemoCanaryPreparationBlocked(
+                "recovery requires explicit expiry evidence on the final refresh"
+            )
+        return latest
+
+    def _require_recovery_source_job(
+        self,
+        source_job_id: int,
+        *,
+        now: datetime,
+        ignore_recovery_job_id: Optional[int] = None,
+    ) -> ResearchJob:
+        source = self._recovery_source_job(
+            now=now,
+            ignore_recovery_job_id=ignore_recovery_job_id,
+        )
+        if source.id != source_job_id:
+            raise OkxDemoCanaryPreparationBlocked(
+                "canary recovery source is not the immutable final refresh"
+            )
+        return source
+
     @staticmethod
     def _is_refresh_source(
         job: ResearchJob,
@@ -1099,6 +1401,17 @@ class OkxDemoCanaryPreparationService:
         ).first() is not None:
             raise OkxDemoCanaryPreparationBlocked(
                 "a prior exchange order blocks canary refresh"
+            )
+        if self.db.scalars(
+            select(ExchangePosition.id)
+            .where(
+                ExchangePosition.execution_target_id == OKX_DEMO_TARGET_ID,
+                ExchangePosition.quantity != 0,
+            )
+            .limit(1)
+        ).first() is not None:
+            raise OkxDemoCanaryPreparationBlocked(
+                "a prior exchange position blocks canary refresh"
             )
         if allow_key_digest is not None:
             current = self._canary_job_for_key(allow_key_digest)
@@ -1451,9 +1764,19 @@ class OkxDemoCanaryPreparationService:
                     research_payload["refresh_of_job_id"] = handoff_payload[
                         "refresh_of_job_id"
                     ]
+                if handoff_payload.get("recovery_of_job_id") is not None:
+                    research_payload["recovery_of_job_id"] = handoff_payload[
+                        "recovery_of_job_id"
+                    ]
+                if handoff_payload.get("recovery_boundary") is not None:
+                    research_payload["recovery_boundary"] = handoff_payload[
+                        "recovery_boundary"
+                    ]
+        lineage_payload = job.request_payload if job is not None else research_payload
         entry_kind, supersedes_job_ids, refresh_of_job_id = _fresh_entry_lineage(
-            job.request_payload if job is not None else research_payload
+            lineage_payload
         )
+        recovery_of_job_id = _fresh_recovery_of(lineage_payload)
         request_hash = canonical_digest(research_payload)
         if job is None:
             job = ResearchJob(
@@ -1698,6 +2021,7 @@ class OkxDemoCanaryPreparationService:
             entry_kind=entry_kind,
             supersedes_job_ids=supersedes_job_ids,
             refresh_of_job_id=refresh_of_job_id,
+            recovery_of_job_id=recovery_of_job_id,
         )
 
     def _result_from_lineage(
@@ -1715,6 +2039,7 @@ class OkxDemoCanaryPreparationService:
         entry_kind, supersedes_job_ids, refresh_of_job_id = _fresh_entry_lineage(
             job.request_payload
         )
+        recovery_of_job_id = _fresh_recovery_of(job.request_payload)
         return CanaryPreparationResult(
             operation_status="PREPARED",
             provenance=CANARY_PROVENANCE,
@@ -1737,6 +2062,7 @@ class OkxDemoCanaryPreparationService:
             entry_kind=entry_kind,
             supersedes_job_ids=supersedes_job_ids,
             refresh_of_job_id=refresh_of_job_id,
+            recovery_of_job_id=recovery_of_job_id,
         )
 
     def _reconciliation_run_id_for_approval(self, approval_id: int) -> int:
@@ -1879,6 +2205,11 @@ def _fresh_entry_evidence(payload: Mapping[str, Any]) -> dict[str, Any]:
     refresh_of = payload.get("refresh_of_job_id")
     if entry_kind in FRESH_EXECUTION_REFRESH_KINDS and isinstance(refresh_of, int) and refresh_of > 0:
         evidence["refresh_of_job_id"] = refresh_of
+    recovery_of = payload.get("recovery_of_job_id")
+    if entry_kind in FRESH_EXECUTION_RECOVERY_KINDS and isinstance(recovery_of, int) and recovery_of > 0:
+        evidence["recovery_of_job_id"] = recovery_of
+        if payload.get("recovery_boundary") == "PRE_616_FINALIZE_ACL_FAILURE":
+            evidence["recovery_boundary"] = payload["recovery_boundary"]
     return evidence
 
 
@@ -1908,6 +2239,21 @@ def _fresh_entry_lineage(
         raise OkxDemoCanaryPreparationBlocked(
             "fresh execution-only entry cannot carry refresh lineage"
         )
+    recovery_of = payload.get("recovery_of_job_id")
+    if entry_kind in FRESH_EXECUTION_RECOVERY_KINDS and (
+        not isinstance(recovery_of, int) or recovery_of <= 0
+    ):
+        raise OkxDemoCanaryPreparationBlocked(
+            "canary recovery lineage is missing recovery_of_job_id"
+        )
+    if entry_kind != FRESH_EXECUTION_ONLY_RECOVERY and recovery_of is not None:
+        raise OkxDemoCanaryPreparationBlocked(
+            "non-recovery fresh entry cannot carry recovery lineage"
+        )
+    if entry_kind in FRESH_EXECUTION_RECOVERY_KINDS and refresh_of is not None:
+        raise OkxDemoCanaryPreparationBlocked(
+            "canary recovery entry cannot carry refresh lineage"
+        )
     return entry_kind, tuple(supersedes), refresh_of
 
 
@@ -1916,6 +2262,16 @@ def _fresh_entry_metadata(payload: Any) -> tuple[Optional[str], tuple[int, ...]]
 
     entry_kind, supersedes, _refresh_of = _fresh_entry_lineage(payload)
     return entry_kind, supersedes
+
+
+def _fresh_recovery_of(payload: Any) -> Optional[int]:
+    """Return the immutable recovery parent after validating fresh lineage."""
+
+    entry_kind, _supersedes, _refresh_of = _fresh_entry_lineage(payload)
+    if entry_kind != FRESH_EXECUTION_ONLY_RECOVERY:
+        return None
+    recovery_of = payload.get("recovery_of_job_id") if isinstance(payload, dict) else None
+    return recovery_of if isinstance(recovery_of, int) else None
 
 
 def _safe_key(value: str) -> str:
