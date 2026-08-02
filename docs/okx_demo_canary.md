@@ -31,7 +31,7 @@ one-shot submission grant 驱动：`TradeIntent/ApprovedExecution`（明确标�
 策略晋级，受支持入口为：
 
 1. `POST /api/okx-demo/canary/prepare`（operator token、`Idempotency-Key` 与
-   `X-Provider-Authorization: once`）。它只创建带有
+   `X-Provider-Authorization` header，single-use consent）。它只创建带有
    `CONTROLLED_CANARY_NON_PRODUCTION` 的 attestation request，不接受调用方的
    品种、数量或价格覆盖。
 2. 唯一 canonical runtime 在同一 coordination lock 下调用已 attested 的
