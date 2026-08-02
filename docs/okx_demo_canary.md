@@ -111,6 +111,27 @@ grant、writer attempt、订单或持仓都会 fail-closed。recovery successor 
 `finalize`、one-shot grant、writer、交易所终态和 reconciliation 门；不接受
 旧快照、不会打开全局 submission，也不会形成无界 recovery 链。
 
+schema `20260802_26` 将 canary 的三条敏感 lineage 写入收敛为唯一
+`create_okx_demo_canary_lineage(jsonb)` 原子函数。函数固定由 NOLOGIN
+`freqtrade_ai_attestor` 持有，使用 `SECURITY DEFINER` 与
+`search_path=pg_catalog`；runtime role `freqtrade` 只有该函数的 `EXECUTE`，对
+`trade_intents`、`risk_decisions`、`approved_executions` 及其 sequence 都没有
+INSERT/UPDATE/DELETE/USAGE 权限。函数在同一事务内重验 Demo target、非生产
+provenance、完整 hash、空 durable boundary、fresh reconciliation、full-chain
+绑定、attested snapshots、TTL 与固定风险上限，并尝试取得与 service/runtime 相同
+的 one-shot transaction advisory lock；任一不匹配或锁占用都整笔回滚。
+
+如果唯一 `FRESH_EXECUTION_ONLY_RECOVERY` handoff 已经成功保存新快照，但其
+lineage 原子写在提交前失败并回滚，且这批快照随后明确过期，只允许使用新的
+`Idempotency-Key` 调用一次
+`POST /api/okx-demo/canary/recover-post-persistence`。该入口按 immutable
+shape/ancestry 识别源 job（不依赖固定数据库 ID），创建固定
+`entry_kind=FRESH_EXECUTION_ONLY_POST_PERSISTENCE_RECOVERY`、
+`recovery_boundary=POST_PERSISTENCE_LINEAGE_WRITE_FAILURE` 的唯一 successor，
+再由 canonical runtime 捕获全新 attestation。第二个 successor、任何既有
+intent/approval/grant/writer attempt/order/非零 position、未知 history 或复用旧
+快照全部 fail-closed；jobs 15--20 保持不可变。
+
 该入口仍固定 `OKX_DEMO`、`simulated_trading=true`、`allow_real_funds=false`、
 `order_submission_enabled=false`、`BTC-USDT-SWAP` 交易所最小合法数量及不超过
 20 USDT 的 notional。grant 原子消费、超时/撤单/必要时 reduce-only 清理、终态

@@ -24,6 +24,7 @@ from app.services.okx_demo_submission_grant import (
     OkxDemoSubmissionGrantService,
 )
 from app.services.okx_demo_canary_preparation import (
+    FRESH_EXECUTION_ONLY_POST_PERSISTENCE_RECOVERY,
     FRESH_EXECUTION_ONLY_RECOVERY,
     OkxDemoCanaryPreparationBlocked,
     OkxDemoCanaryPreparationRuntimeBusy,
@@ -421,6 +422,67 @@ def recover_fresh_execution_only_canary(
     return operator_request_coordinator.execute(
         operator_headers,
         operation="okx-demo-controlled-canary-recover-execution-only",
+        provider_call=True,
+        request_payload=payload.model_dump(mode="json"),
+        handler=execute,
+        cache_result=_cache_canary_result,
+    )
+
+
+@router.post("/canary/recover-post-persistence", status_code=202)
+def recover_post_persistence_canary(
+    payload: CanaryPreparationRequest,
+    db: Session = Depends(get_db),
+    operator_headers: OperatorRequestHeaders = Depends(operator_request_headers),
+) -> dict[str, Any]:
+    """Create the only fresh successor after job20's atomic write rollback."""
+
+    def execute() -> dict[str, Any]:
+        try:
+            result = OkxDemoCanaryPreparationService(
+                db
+            ).prepare_post_persistence_recovery(
+                idempotency_key=operator_headers.idempotency_key or "",
+            )
+        except OkxDemoCanaryPreparationRuntimeBusy as exc:
+            response = {
+                "operation_status": "WAITING_FOR_RUNTIME_ATTESTATION",
+                "execution_target_id": "OKX_DEMO",
+                "provenance": "CONTROLLED_CANARY_NON_PRODUCTION",
+                "entry_kind": exc.entry_kind
+                or FRESH_EXECUTION_ONLY_POST_PERSISTENCE_RECOVERY,
+                "non_production": True,
+                "supersedes_job_ids": list(exc.supersedes_job_ids),
+                "credential_values_recorded": False,
+            }
+            if exc.job_id is not None:
+                response["attestation_request_job_id"] = exc.job_id
+            if exc.recovery_of_job_id is not None:
+                response["recovery_of_job_id"] = exc.recovery_of_job_id
+            return response
+        except OkxDemoCanaryPreparationWaiting as exc:
+            return {
+                "operation_status": "WAITING_FOR_RUNTIME_ATTESTATION",
+                "execution_target_id": "OKX_DEMO",
+                "provenance": "CONTROLLED_CANARY_NON_PRODUCTION",
+                "entry_kind": exc.entry_kind
+                or FRESH_EXECUTION_ONLY_POST_PERSISTENCE_RECOVERY,
+                "non_production": True,
+                "attestation_request_job_id": exc.job_id,
+                "recovery_of_job_id": exc.recovery_of_job_id,
+                "supersedes_job_ids": list(exc.supersedes_job_ids),
+                "credential_values_recorded": False,
+            }
+        except OkxDemoCanaryPreparationBlocked as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"operation_status": "BLOCKED", "message": str(exc)},
+            ) from exc
+        return _canary_preparation_response(result)
+
+    return operator_request_coordinator.execute(
+        operator_headers,
+        operation="okx-demo-controlled-canary-recover-post-persistence",
         provider_call=True,
         request_payload=payload.model_dump(mode="json"),
         handler=execute,

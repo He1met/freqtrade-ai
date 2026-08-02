@@ -28,6 +28,7 @@ from app.services.okx_demo_canary_preparation import (
     CANARY_PROVENANCE,
     CANARY_OPERATION,
     FRESH_EXECUTION_ONLY_ENTRY,
+    FRESH_EXECUTION_ONLY_POST_PERSISTENCE_RECOVERY,
     FRESH_EXECUTION_ONLY_RECOVERY,
     FRESH_EXECUTION_ONLY_REFRESH,
     FRESH_EXECUTION_ONLY_REFRESH_RETRY,
@@ -308,6 +309,40 @@ def test_recovery_endpoint_reports_bounded_lineage(client, monkeypatch):
     assert response.json()["entry_kind"] == FRESH_EXECUTION_ONLY_RECOVERY
     assert response.json()["recovery_of_job_id"] == 19
     assert response.json()["supersedes_job_ids"] == [15, 16, 17, 18, 19]
+
+
+def test_post_persistence_endpoint_reports_single_successor(client, monkeypatch):
+    api, _calls = client
+
+    def recover(_self, *, idempotency_key):
+        assert idempotency_key == "post-persistence-endpoint-1"
+        raise OkxDemoCanaryPreparationWaiting(
+            905,
+            entry_kind=FRESH_EXECUTION_ONLY_POST_PERSISTENCE_RECOVERY,
+            supersedes_job_ids=(15, 16, 17, 18, 19, 20),
+            recovery_of_job_id=20,
+        )
+
+    monkeypatch.setattr(
+        OkxDemoCanaryPreparationService,
+        "prepare_post_persistence_recovery",
+        recover,
+    )
+    response = api.post(
+        "/api/okx-demo/canary/recover-post-persistence",
+        headers={
+            "X-Operator-Token": "operator-test-token",
+            "Idempotency-Key": "post-persistence-endpoint-1",
+            "X-Provider-Authorization": "once",
+        },
+        json={},
+    )
+    assert response.status_code == 202
+    assert response.json()["entry_kind"] == (
+        FRESH_EXECUTION_ONLY_POST_PERSISTENCE_RECOVERY
+    )
+    assert response.json()["recovery_of_job_id"] == 20
+    assert response.json()["supersedes_job_ids"] == [15, 16, 17, 18, 19, 20]
 
 
 def test_refresh_terminal_block_remains_cached_for_same_key(client, monkeypatch):
@@ -1077,6 +1112,62 @@ def _successful_refresh_successor(
     return job
 
 
+def _successful_recovery_successor(
+    db_session,
+    source: ResearchJob,
+    *,
+    key: str = "successful-recovery",
+    expires_at: datetime = NOW - timedelta(seconds=1),
+):
+    source_payload = dict(source.request_payload)
+    supersedes = list(source_payload["supersedes_job_ids"]) + [source.id]
+    payload = {
+        "provenance": CANARY_PROVENANCE,
+        "execution_target": "OKX_DEMO",
+        "instrument_id": "BTC-USDT-SWAP",
+        "bundle_kind": "EXECUTION_ONLY",
+        "non_production": True,
+        "entry_kind": FRESH_EXECUTION_ONLY_RECOVERY,
+        "recovery_of_job_id": source.id,
+        "supersedes_job_ids": supersedes,
+        "recovery_boundary": "PRE_616_FINALIZE_ACL_FAILURE",
+    }
+    evidence = {
+        "provenance": CANARY_PROVENANCE,
+        "non_production": True,
+        "entry_kind": FRESH_EXECUTION_ONLY_RECOVERY,
+        "recovery_of_job_id": source.id,
+        "supersedes_job_ids": supersedes,
+        "recovery_boundary": "PRE_616_FINALIZE_ACL_FAILURE",
+        "snapshot_evidence": {
+            kind: {
+                "snapshot_id": "recovery-{}".format(kind),
+                "digest": str(index) * 64,
+                "expires_at": expires_at.isoformat(),
+            }
+            for index, kind in enumerate(("instrument", "market", "account"), start=1)
+        },
+    }
+    job = ResearchJob(
+        execution_scope_id="LOCAL_DRY_RUN",
+        job_type="okx_demo_controlled_canary",
+        operation=CANARY_OPERATION,
+        idempotency_key_digest=hashlib.sha256(key.encode()).hexdigest(),
+        request_hash="c" * 64,
+        request_payload=payload,
+        status="SUCCESS",
+        stage="CANARY_SNAPSHOTS_READY",
+        attempt_count=1,
+        max_attempts=1,
+        evidence_snapshot=evidence,
+        started_at=NOW,
+        completed_at=NOW,
+    )
+    db_session.add(job)
+    db_session.commit()
+    return job
+
+
 def test_refresh_allows_one_bounded_retry_from_stale_successor(
     db_session, monkeypatch
 ):
@@ -1393,6 +1484,180 @@ def test_recovery_runtime_handoff_finalizes_same_key_without_mutating_history(
             current.request_hash,
             dict(current.request_payload),
         ) == original[job.id]
+
+
+def test_post_persistence_recovery_is_single_use_and_shape_driven(
+    db_session, monkeypatch
+):
+    monkeypatch.setenv("FREQTRADE_AI_EXECUTION_TARGET", "OKX_DEMO")
+    monkeypatch.setenv("FREQTRADE_AI_SIMULATED_TRADING", "true")
+    monkeypatch.setenv("FREQTRADE_AI_ALLOW_REAL_FUNDS", "false")
+    legacy = _blocked_attestation_job(
+        db_session,
+        key="post-persistence-legacy",
+        request_payload={
+            "provenance": CANARY_PROVENANCE,
+            "execution_target": "OKX_DEMO",
+            "instrument_id": "BTC-USDT-SWAP",
+            "timeframe": "1m",
+            "candle_limit": 2,
+            "non_production": True,
+        },
+    )
+    terminal = _blocked_attestation_job(
+        db_session,
+        key="post-persistence-terminal",
+        evidence={"provenance": CANARY_PROVENANCE},
+    )
+    source = _successful_fresh_source(
+        db_session,
+        legacy_ids=(legacy.id, terminal.id),
+    )
+    first = _successful_refresh_successor(db_session, source)
+    second = _successful_refresh_successor(
+        db_session,
+        first,
+        entry_kind=FRESH_EXECUTION_ONLY_REFRESH_RETRY,
+        key="post-persistence-refresh-retry",
+    )
+    recovery = _successful_recovery_successor(db_session, second)
+    assert recovery.id != 20  # selection is by immutable shape, never a fixed id.
+
+    service = OkxDemoCanaryPreparationService(db_session, now_provider=lambda: NOW)
+    with pytest.raises(OkxDemoCanaryPreparationWaiting) as waiting:
+        service.prepare_post_persistence_recovery(
+            idempotency_key="post-persistence-successor"
+        )
+    successor = db_session.get(ResearchJob, waiting.value.job_id)
+    assert successor.request_payload["entry_kind"] == (
+        FRESH_EXECUTION_ONLY_POST_PERSISTENCE_RECOVERY
+    )
+    assert successor.request_payload["recovery_of_job_id"] == recovery.id
+    assert successor.request_payload["supersedes_job_ids"] == [
+        legacy.id,
+        terminal.id,
+        source.id,
+        first.id,
+        second.id,
+        recovery.id,
+    ]
+    assert successor.request_payload["recovery_boundary"] == (
+        "POST_PERSISTENCE_LINEAGE_WRITE_FAILURE"
+    )
+
+    with pytest.raises(OkxDemoCanaryPreparationBlocked, match="already exists"):
+        service.prepare_post_persistence_recovery(
+            idempotency_key="post-persistence-second-successor"
+        )
+    with pytest.raises(OkxDemoCanaryPreparationWaiting) as replay:
+        service.prepare_post_persistence_recovery(
+            idempotency_key="post-persistence-successor"
+        )
+    assert replay.value.job_id == successor.id
+
+
+def test_post_persistence_recovery_rejects_existing_execution_activity(
+    db_session, monkeypatch
+):
+    monkeypatch.setenv("FREQTRADE_AI_EXECUTION_TARGET", "OKX_DEMO")
+    monkeypatch.setenv("FREQTRADE_AI_SIMULATED_TRADING", "true")
+    monkeypatch.setenv("FREQTRADE_AI_ALLOW_REAL_FUNDS", "false")
+    legacy = _blocked_attestation_job(
+        db_session,
+        key="post-activity-legacy",
+        request_payload={
+            "provenance": CANARY_PROVENANCE,
+            "execution_target": "OKX_DEMO",
+            "instrument_id": "BTC-USDT-SWAP",
+            "timeframe": "1m",
+            "candle_limit": 2,
+            "non_production": True,
+        },
+    )
+    terminal = _blocked_attestation_job(
+        db_session,
+        key="post-activity-terminal",
+        evidence={"provenance": CANARY_PROVENANCE},
+    )
+    source = _successful_fresh_source(
+        db_session,
+        legacy_ids=(legacy.id, terminal.id),
+    )
+    first = _successful_refresh_successor(db_session, source)
+    second = _successful_refresh_successor(
+        db_session,
+        first,
+        entry_kind=FRESH_EXECUTION_ONLY_REFRESH_RETRY,
+        key="post-activity-refresh-retry",
+    )
+    _successful_recovery_successor(db_session, second, key="post-activity-recovery")
+    db_session.add(
+        TradeIntent(
+            execution_target_id="OKX_DEMO",
+            authorization_schema_version="RISK_V1",
+            intent_id="f" * 64,
+            canonical_hash="e" * 64,
+            policy_digest="d" * 64,
+            idempotency_key_digest="c" * 64,
+            client_order_id="FAICANARY" + "b" * 23,
+            instrument_id="BTC-USDT-SWAP",
+            side="buy",
+            position_side="long",
+            order_type="limit",
+            quantity=Decimal("1"),
+            limit_price=Decimal("10"),
+            reference_price=Decimal("10"),
+            leverage=Decimal("1"),
+            margin_mode="isolated",
+            reduce_only=False,
+            status="APPROVED",
+            request_snapshot={},
+            expires_at=NOW + timedelta(seconds=10),
+        )
+    )
+    db_session.commit()
+
+    with pytest.raises(OkxDemoCanaryPreparationBlocked, match="prior TradeIntent"):
+        OkxDemoCanaryPreparationService(
+            db_session, now_provider=lambda: NOW
+        ).prepare_post_persistence_recovery(
+            idempotency_key="post-activity-successor"
+        )
+
+
+@pytest.mark.parametrize(
+    ("blocked_index", "message"),
+    (
+        (0, "TradeIntent"),
+        (1, "ApprovedExecution"),
+        (2, "submission grant"),
+        (3, "writer attempt"),
+        (4, "exchange order"),
+        (5, "exchange position"),
+    ),
+)
+def test_post_persistence_shared_activity_gate_rejects_every_durable_boundary(
+    blocked_index, message
+):
+    class ScalarResult:
+        def __init__(self, value):
+            self.value = value
+
+        def first(self):
+            return self.value
+
+    class BoundarySession:
+        def __init__(self):
+            self.index = 0
+
+        def scalars(self, _query):
+            value = 1 if self.index == blocked_index else None
+            self.index += 1
+            return ScalarResult(value)
+
+    service = OkxDemoCanaryPreparationService(BoundarySession())
+    with pytest.raises(OkxDemoCanaryPreparationBlocked, match=message):
+        service._require_no_canary_activity_for_refresh()
 
 
 def test_refresh_lineage_requires_depth_specific_entry_kind(db_session, monkeypatch):

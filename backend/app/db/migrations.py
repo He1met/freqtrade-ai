@@ -57,7 +57,8 @@ RECONCILIATION_INDEX_BASE_VERSION = "20260729_21"
 SINGLE_ACTIVE_DEPLOYMENT_BASE_VERSION = "20260730_22"
 ONE_SHOT_SUBMISSION_GRANT_BASE_VERSION = "20260730_23"
 STRATEGY_VALIDATION_BASE_VERSION = "20260801_24"
-SCHEMA_VERSION = "20260801_25"
+CANARY_LINEAGE_WRITE_BASE_VERSION = "20260801_25"
+SCHEMA_VERSION = "20260802_26"
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 ATTESTATION_PROOF_KEY_ENV = "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"
 
@@ -83,6 +84,23 @@ RUNTIME_APPLICATION_TABLES = (
     "strategy_deployments",
     "signal_evaluations",
     "risk_budgets",
+)
+
+CANARY_LINEAGE_BOUNDARY_TABLES = frozenset(
+    {
+        "trade_intents",
+        "risk_decisions",
+        "approved_executions",
+        "full_chain_runs",
+        "reconciliation_runs",
+        "okx_demo_reconciliation_states",
+        "okx_demo_attested_sessions",
+        "okx_demo_trusted_snapshots",
+        "okx_demo_submission_grants",
+        "okx_order_write_attempts",
+        "exchange_orders",
+        "exchange_positions",
+    }
 )
 
 
@@ -236,6 +254,758 @@ BEGIN
     ) THEN
         RAISE EXCEPTION 'attested session revocation rejected';
     END IF;
+END;
+"""
+
+
+CANARY_LINEAGE_FUNCTION_BODY = """
+DECLARE
+    allowed_keys CONSTANT text[] := ARRAY[
+        'execution_target', 'provenance', 'non_production',
+        'full_chain_run_id', 'reconciliation_run_id',
+        'intent_id', 'canonical_hash', 'policy_digest',
+        'approved_payload_hash', 'idempotency_key_digest',
+        'client_order_id', 'instrument_id', 'side', 'position_side',
+        'order_type', 'quantity', 'limit_price', 'reference_price',
+        'leverage', 'margin_mode', 'stop_loss', 'take_profit',
+        'reduce_only', 'notional', 'request_snapshot', 'expires_at',
+        'canonical_input_serialized', 'policy_serialized',
+        'approved_payload_serialized', 'intent_identity_serialized',
+        'instrument_snapshot_id', 'market_snapshot_id',
+        'account_snapshot_id'
+    ];
+    chain_row record;
+    existing_intent SCHEMA_TOKEN.trade_intents%ROWTYPE;
+    decision_row SCHEMA_TOKEN.risk_decisions%ROWTYPE;
+    approval_row SCHEMA_TOKEN.approved_executions%ROWTYPE;
+    instrument_row SCHEMA_TOKEN.okx_demo_trusted_snapshots%ROWTYPE;
+    market_row SCHEMA_TOKEN.okx_demo_trusted_snapshots%ROWTYPE;
+    account_row SCHEMA_TOKEN.okx_demo_trusted_snapshots%ROWTYPE;
+    full_chain_run_id bigint;
+    reconciliation_run_id bigint;
+    expires_at timestamptz;
+    quantity numeric;
+    limit_price numeric;
+    reference_price numeric;
+    leverage numeric;
+    stop_loss numeric;
+    take_profit numeric;
+    notional numeric;
+    minimum_size numeric;
+    lot_size numeric;
+    contract_value numeric;
+    tick_size numeric;
+    best_bid numeric;
+    best_ask numeric;
+    mark_price numeric;
+    snapshot_leverage numeric;
+    derived_quantity numeric;
+    derived_limit_price numeric;
+    computed_notional numeric;
+    expected_signal_digest text;
+    expected_lineage jsonb;
+    expected_canonical_input jsonb;
+    expected_request_snapshot jsonb;
+    inserted_intent_id bigint;
+    inserted_decision_id bigint;
+    inserted_approval_id bigint;
+    is_replay boolean := FALSE;
+BEGIN
+    IF NOT pg_try_advisory_xact_lock(5067747289570038600) THEN
+        RAISE EXCEPTION 'controlled canary coordination lock is busy';
+    END IF;
+
+    IF jsonb_typeof(p_payload) IS DISTINCT FROM 'object'
+       OR NOT p_payload ?& allowed_keys
+       OR EXISTS (
+           SELECT 1 FROM jsonb_object_keys(p_payload) AS supplied(key)
+           WHERE supplied.key <> ALL (allowed_keys)
+       )
+       OR p_payload->>'execution_target' IS DISTINCT FROM 'OKX_DEMO'
+       OR p_payload->>'provenance'
+            IS DISTINCT FROM 'CONTROLLED_CANARY_NON_PRODUCTION'
+       OR p_payload->'non_production' IS DISTINCT FROM 'true'::jsonb
+       OR p_payload->>'instrument_id' IS DISTINCT FROM 'BTC-USDT-SWAP'
+       OR p_payload->>'side' IS DISTINCT FROM 'buy'
+       OR p_payload->>'position_side' IS DISTINCT FROM 'long'
+       OR p_payload->>'order_type' IS DISTINCT FROM 'limit'
+       OR p_payload->>'margin_mode' IS DISTINCT FROM 'isolated'
+       OR p_payload->'reduce_only' IS DISTINCT FROM 'false'::jsonb
+       OR (p_payload->>'full_chain_run_id' ~ '^[1-9][0-9]*$')
+            IS DISTINCT FROM TRUE
+       OR (p_payload->>'reconciliation_run_id' ~ '^[1-9][0-9]*$')
+            IS DISTINCT FROM TRUE
+       OR (p_payload->>'intent_id' ~ '^[0-9a-f]{64}$') IS DISTINCT FROM TRUE
+       OR (p_payload->>'canonical_hash' ~ '^[0-9a-f]{64}$')
+            IS DISTINCT FROM TRUE
+       OR (p_payload->>'policy_digest' ~ '^[0-9a-f]{64}$')
+            IS DISTINCT FROM TRUE
+       OR (p_payload->>'approved_payload_hash' ~ '^[0-9a-f]{64}$')
+            IS DISTINCT FROM TRUE
+       OR (p_payload->>'idempotency_key_digest' ~ '^[0-9a-f]{64}$')
+            IS DISTINCT FROM TRUE
+       OR (p_payload->>'client_order_id' ~ '^FAICANARY[0-9a-f]{23}$')
+            IS DISTINCT FROM TRUE
+       OR p_payload->>'client_order_id'
+            IS DISTINCT FROM 'FAICANARY' || left(p_payload->>'intent_id', 23)
+       OR (p_payload->>'quantity' ~ '^[0-9]+(\\.[0-9]+)?$')
+            IS DISTINCT FROM TRUE
+       OR (p_payload->>'limit_price' ~ '^[0-9]+(\\.[0-9]+)?$')
+            IS DISTINCT FROM TRUE
+       OR (p_payload->>'reference_price' ~ '^[0-9]+(\\.[0-9]+)?$')
+            IS DISTINCT FROM TRUE
+       OR (p_payload->>'leverage' ~ '^[0-9]+(\\.[0-9]+)?$')
+            IS DISTINCT FROM TRUE
+       OR (p_payload->>'stop_loss' ~ '^[0-9]+(\\.[0-9]+)?$')
+            IS DISTINCT FROM TRUE
+       OR (p_payload->>'take_profit' ~ '^[0-9]+(\\.[0-9]+)?$')
+            IS DISTINCT FROM TRUE
+       OR (p_payload->>'notional' ~ '^[0-9]+(\\.[0-9]+)?$')
+            IS DISTINCT FROM TRUE
+       OR jsonb_typeof(p_payload->'request_snapshot') IS DISTINCT FROM 'object'
+       OR (p_payload->>'canonical_input_serialized')::jsonb
+            IS DISTINCT FROM p_payload->'request_snapshot'->'canonical_input'
+       OR encode(public.digest(
+            convert_to(p_payload->>'canonical_input_serialized', 'UTF8'), 'sha256'
+          ), 'hex') IS DISTINCT FROM p_payload->>'canonical_hash'
+       OR (p_payload->>'policy_serialized')::jsonb IS DISTINCT FROM jsonb_build_object(
+            'provenance', 'CONTROLLED_CANARY_NON_PRODUCTION',
+            'allowed_instruments', jsonb_build_array('BTC-USDT-SWAP'),
+            'allowed_sides', jsonb_build_array('buy'),
+            'allowed_order_types', jsonb_build_array('limit'),
+            'max_leverage', p_payload->>'leverage',
+            'max_order_notional', '20', 'max_total_exposure', '20',
+            'max_positions', 1, 'max_price_deviation_pct', '0.01',
+            'min_strategy_score', '0', 'scoring_version', 'controlled-canary-v1'
+          )
+       OR encode(public.digest(
+            convert_to(p_payload->>'policy_serialized', 'UTF8'), 'sha256'
+          ), 'hex') IS DISTINCT FROM p_payload->>'policy_digest'
+       OR (p_payload->>'approved_payload_serialized')::jsonb
+            IS DISTINCT FROM jsonb_build_object(
+                'canonical_input', p_payload->'request_snapshot'->'canonical_input',
+                'notional', p_payload->>'notional',
+                'provenance', 'CONTROLLED_CANARY_NON_PRODUCTION'
+            )
+       OR encode(public.digest(
+            convert_to(p_payload->>'approved_payload_serialized', 'UTF8'), 'sha256'
+          ), 'hex') IS DISTINCT FROM p_payload->>'approved_payload_hash'
+       OR (p_payload->>'intent_identity_serialized')::jsonb
+            IS DISTINCT FROM jsonb_build_object(
+                'provenance', 'CONTROLLED_CANARY_NON_PRODUCTION',
+                'idempotency_key_digest', p_payload->>'idempotency_key_digest',
+                'canonical_hash', p_payload->>'canonical_hash'
+            )
+       OR encode(public.digest(
+            convert_to(p_payload->>'intent_identity_serialized', 'UTF8'), 'sha256'
+          ), 'hex') IS DISTINCT FROM p_payload->>'intent_id'
+    THEN
+        RAISE EXCEPTION 'invalid controlled canary lineage payload';
+    END IF;
+
+    full_chain_run_id := (p_payload->>'full_chain_run_id')::bigint;
+    reconciliation_run_id := (p_payload->>'reconciliation_run_id')::bigint;
+    expires_at := (p_payload->>'expires_at')::timestamptz;
+    quantity := (p_payload->>'quantity')::numeric;
+    limit_price := (p_payload->>'limit_price')::numeric;
+    reference_price := (p_payload->>'reference_price')::numeric;
+    leverage := (p_payload->>'leverage')::numeric;
+    stop_loss := (p_payload->>'stop_loss')::numeric;
+    take_profit := (p_payload->>'take_profit')::numeric;
+    notional := (p_payload->>'notional')::numeric;
+    expected_signal_digest := encode(public.digest(convert_to(format(
+        '{"full_chain_run_id":%s,"instrument_id":"BTC-USDT-SWAP",'
+        '"provenance":"CONTROLLED_CANARY_NON_PRODUCTION",'
+        '"quantity":"%s","side":"buy"}',
+        full_chain_run_id,
+        p_payload->>'quantity'
+    ), 'UTF8'), 'sha256'), 'hex');
+    expected_lineage := jsonb_build_object(
+        'provenance', 'CONTROLLED_CANARY_NON_PRODUCTION',
+        'strategy_id', NULL,
+        'strategy_version_id', NULL,
+        'backtest_run_id', NULL,
+        'backtest_task_id', NULL,
+        'backtest_result_id', NULL,
+        'strategy_score_id', NULL
+    );
+    expected_canonical_input := jsonb_build_object(
+        'execution_target', 'OKX_DEMO',
+        'full_chain_run_id', full_chain_run_id,
+        'candidate_approval_id', NULL,
+        'signal_snapshot_id', NULL,
+        'signal_digest', expected_signal_digest,
+        'lineage', expected_lineage,
+        'snapshot_ids', jsonb_build_object(
+            'instrument', p_payload->>'instrument_snapshot_id',
+            'market', p_payload->>'market_snapshot_id',
+            'account', p_payload->>'account_snapshot_id'
+        ),
+        'instrument_id', 'BTC-USDT-SWAP',
+        'side', 'buy',
+        'position_side', 'long',
+        'order_type', 'limit',
+        'quantity', p_payload->>'quantity',
+        'limit_price', p_payload->>'limit_price',
+        'reference_price', p_payload->>'reference_price',
+        'leverage', p_payload->>'leverage',
+        'margin_mode', 'isolated',
+        'stop_loss', p_payload->>'stop_loss',
+        'take_profit', p_payload->>'take_profit',
+        'reduce_only', FALSE,
+        'provenance', 'CONTROLLED_CANARY_NON_PRODUCTION'
+    );
+    expected_request_snapshot := jsonb_build_object(
+        'canonical_input', expected_canonical_input,
+        'snapshot_evidence', p_payload->'request_snapshot'->'snapshot_evidence',
+        'provenance', 'CONTROLLED_CANARY_NON_PRODUCTION',
+        'non_production', TRUE
+    );
+
+    IF quantity <= 0 OR limit_price <= 0 OR reference_price <= 0
+       OR leverage <= 0 OR stop_loss <= 0 OR take_profit <= 0
+       OR stop_loss >= reference_price OR take_profit <= reference_price
+       OR notional <= 0 OR notional > 20
+       OR expires_at <= statement_timestamp()
+       OR expires_at > statement_timestamp() + INTERVAL '10 seconds'
+       OR p_payload->'request_snapshot'->>'provenance'
+            IS DISTINCT FROM 'CONTROLLED_CANARY_NON_PRODUCTION'
+       OR p_payload->'request_snapshot'->'non_production'
+            IS DISTINCT FROM 'true'::jsonb
+       OR p_payload->'request_snapshot'->'canonical_input'->>'provenance'
+            IS DISTINCT FROM 'CONTROLLED_CANARY_NON_PRODUCTION'
+       OR p_payload->'request_snapshot'->'canonical_input'->>'execution_target'
+            IS DISTINCT FROM 'OKX_DEMO'
+       OR p_payload->'request_snapshot'->'canonical_input'->>'full_chain_run_id'
+            IS DISTINCT FROM full_chain_run_id::text
+       OR p_payload->'request_snapshot'->'canonical_input'->'candidate_approval_id'
+            IS DISTINCT FROM 'null'::jsonb
+       OR p_payload->'request_snapshot'->'canonical_input'->'signal_snapshot_id'
+            IS DISTINCT FROM 'null'::jsonb
+       OR (p_payload->'request_snapshot'->'canonical_input'->>'signal_digest'
+            ~ '^[0-9a-f]{64}$') IS DISTINCT FROM TRUE
+       OR p_payload->'request_snapshot'->'canonical_input'->>'signal_digest'
+            IS DISTINCT FROM expected_signal_digest
+       OR p_payload->'request_snapshot'->'canonical_input'->>'instrument_id'
+            IS DISTINCT FROM 'BTC-USDT-SWAP'
+       OR p_payload->'request_snapshot'->'canonical_input'->>'side'
+            IS DISTINCT FROM 'buy'
+       OR p_payload->'request_snapshot'->'canonical_input'->>'position_side'
+            IS DISTINCT FROM 'long'
+       OR p_payload->'request_snapshot'->'canonical_input'->>'order_type'
+            IS DISTINCT FROM 'limit'
+       OR p_payload->'request_snapshot'->'canonical_input'->>'margin_mode'
+            IS DISTINCT FROM 'isolated'
+       OR p_payload->'request_snapshot'->'canonical_input'->'reduce_only'
+            IS DISTINCT FROM 'false'::jsonb
+       OR p_payload->'request_snapshot'->'canonical_input'->>'quantity'
+            IS DISTINCT FROM p_payload->>'quantity'
+       OR p_payload->'request_snapshot'->'canonical_input'->>'limit_price'
+            IS DISTINCT FROM p_payload->>'limit_price'
+       OR p_payload->'request_snapshot'->'canonical_input'->>'reference_price'
+            IS DISTINCT FROM p_payload->>'reference_price'
+       OR p_payload->'request_snapshot'->'canonical_input'->>'leverage'
+            IS DISTINCT FROM p_payload->>'leverage'
+       OR p_payload->'request_snapshot'->'canonical_input'->>'stop_loss'
+            IS DISTINCT FROM p_payload->>'stop_loss'
+       OR p_payload->'request_snapshot'->'canonical_input'->>'take_profit'
+            IS DISTINCT FROM p_payload->>'take_profit'
+       OR p_payload->'request_snapshot'->'canonical_input'->'lineage'
+            IS DISTINCT FROM expected_lineage
+       OR p_payload->'request_snapshot'->'canonical_input'
+            IS DISTINCT FROM expected_canonical_input
+       OR p_payload->'request_snapshot' IS DISTINCT FROM expected_request_snapshot
+    THEN
+        RAISE EXCEPTION 'controlled canary lineage safety contract failed';
+    END IF;
+
+    SELECT * INTO existing_intent
+    FROM SCHEMA_TOKEN.trade_intents
+    WHERE execution_target_id = 'OKX_DEMO'
+      AND idempotency_key_digest = p_payload->>'idempotency_key_digest';
+    IF FOUND THEN
+        SELECT * INTO decision_row
+        FROM SCHEMA_TOKEN.risk_decisions
+        WHERE trade_intent_id = existing_intent.id;
+        SELECT * INTO approval_row
+        FROM SCHEMA_TOKEN.approved_executions
+        WHERE trade_intent_id = existing_intent.id;
+        SELECT id, run_kind, research_scope_id, execution_target_id,
+               status, current_stage, strategy_generation_run_id,
+               strategy_id, strategy_version_id, backtest_run_id,
+               backtest_task_id, backtest_result_id, strategy_score_id,
+               candidate_approval_id, signal_snapshot_id, signal_evaluation_id,
+               trade_intent_id, risk_decision_id, approved_execution_id,
+               exchange_order_id
+        INTO chain_row
+        FROM SCHEMA_TOKEN.full_chain_runs
+        WHERE id = full_chain_run_id;
+        IF existing_intent.intent_id IS DISTINCT FROM p_payload->>'intent_id'
+           OR existing_intent.canonical_hash IS DISTINCT FROM p_payload->>'canonical_hash'
+           OR existing_intent.policy_digest IS DISTINCT FROM p_payload->>'policy_digest'
+           OR existing_intent.approved_payload_hash
+                IS DISTINCT FROM p_payload->>'approved_payload_hash'
+           OR existing_intent.client_order_id
+                IS DISTINCT FROM p_payload->>'client_order_id'
+           OR existing_intent.request_snapshot::jsonb
+                IS DISTINCT FROM p_payload->'request_snapshot'
+           OR existing_intent.execution_target_id IS DISTINCT FROM 'OKX_DEMO'
+           OR existing_intent.authorization_schema_version IS DISTINCT FROM 'RISK_V1'
+           OR existing_intent.status IS DISTINCT FROM 'APPROVED'
+           OR decision_row.id IS NULL
+           OR decision_row.execution_target_id IS DISTINCT FROM 'OKX_DEMO'
+           OR decision_row.trade_intent_id IS DISTINCT FROM existing_intent.id
+           OR decision_row.authorization_schema_version IS DISTINCT FROM 'RISK_V1'
+           OR decision_row.policy_digest IS DISTINCT FROM p_payload->>'policy_digest'
+           OR decision_row.decision IS DISTINCT FROM 'APPROVED'
+           OR decision_row.policy_version IS DISTINCT FROM 'controlled-canary-v1'
+           OR decision_row.evidence_snapshot::jsonb IS DISTINCT FROM jsonb_build_object(
+                'reasons', '[]'::jsonb,
+                'input_digest', p_payload->>'canonical_hash',
+                'policy_digest', p_payload->>'policy_digest',
+                'lineage', expected_lineage,
+                'notional', p_payload->>'notional',
+                'provenance', 'CONTROLLED_CANARY_NON_PRODUCTION',
+                'non_production', TRUE,
+                'llm_authority', FALSE
+           )
+           OR decision_row.evidence_snapshot::jsonb->>'provenance'
+                IS DISTINCT FROM 'CONTROLLED_CANARY_NON_PRODUCTION'
+           OR decision_row.evidence_snapshot::jsonb->'non_production'
+                IS DISTINCT FROM 'true'::jsonb
+           OR decision_row.evidence_snapshot::jsonb->>'input_digest'
+                IS DISTINCT FROM p_payload->>'canonical_hash'
+           OR decision_row.evidence_snapshot::jsonb->>'policy_digest'
+                IS DISTINCT FROM p_payload->>'policy_digest'
+           OR decision_row.evidence_snapshot::jsonb->>'notional'
+                IS DISTINCT FROM p_payload->>'notional'
+           OR decision_row.evidence_snapshot::jsonb->'lineage'
+                IS DISTINCT FROM p_payload->'request_snapshot'
+                    ->'canonical_input'->'lineage'
+           OR approval_row.id IS NULL
+           OR approval_row.execution_target_id IS DISTINCT FROM 'OKX_DEMO'
+           OR approval_row.trade_intent_id IS DISTINCT FROM existing_intent.id
+           OR approval_row.risk_decision_id IS DISTINCT FROM decision_row.id
+           OR approval_row.intent_id IS DISTINCT FROM p_payload->>'intent_id'
+           OR approval_row.client_order_id IS DISTINCT FROM p_payload->>'client_order_id'
+           OR approval_row.authorization_schema_version IS DISTINCT FROM 'RISK_V1'
+           OR approval_row.canonical_hash IS DISTINCT FROM p_payload->>'canonical_hash'
+           OR approval_row.policy_digest IS DISTINCT FROM p_payload->>'policy_digest'
+           OR approval_row.approved_payload_hash
+                IS DISTINCT FROM p_payload->>'approved_payload_hash'
+           OR approval_row.instrument_snapshot_id
+                IS DISTINCT FROM p_payload->>'instrument_snapshot_id'
+           OR approval_row.market_snapshot_id
+                IS DISTINCT FROM p_payload->>'market_snapshot_id'
+           OR approval_row.account_snapshot_id
+                IS DISTINCT FROM p_payload->>'account_snapshot_id'
+           OR approval_row.decision IS DISTINCT FROM 'APPROVED'
+           OR approval_row.intent_status IS DISTINCT FROM 'APPROVED'
+           OR approval_row.reserved_notional IS DISTINCT FROM notional
+           OR approval_row.order_submission_authorized IS NOT FALSE
+           OR approval_row.claim_required IS NOT TRUE
+           OR approval_row.status IS DISTINCT FROM 'ACTIVE'
+           OR approval_row.expires_at IS DISTINCT FROM expires_at
+           OR approval_row.expires_at <= statement_timestamp()
+           OR approval_row.evidence_snapshot::jsonb IS DISTINCT FROM jsonb_build_object(
+                'provenance', 'CONTROLLED_CANARY_NON_PRODUCTION',
+                'non_production', TRUE,
+                'lineage', expected_lineage,
+                'snapshot_evidence', p_payload->'request_snapshot'
+                    ->'snapshot_evidence'
+           )
+           OR approval_row.evidence_snapshot::jsonb->>'provenance'
+                IS DISTINCT FROM 'CONTROLLED_CANARY_NON_PRODUCTION'
+           OR approval_row.evidence_snapshot::jsonb->'non_production'
+                IS DISTINCT FROM 'true'::jsonb
+           OR approval_row.evidence_snapshot::jsonb->'lineage'
+                IS DISTINCT FROM p_payload->'request_snapshot'
+                    ->'canonical_input'->'lineage'
+           OR approval_row.evidence_snapshot::jsonb->'snapshot_evidence'
+                IS DISTINCT FROM p_payload->'request_snapshot'->'snapshot_evidence'
+           OR chain_row.id IS NULL
+           OR chain_row.run_kind IS DISTINCT FROM 'RESEARCH'
+           OR chain_row.research_scope_id IS DISTINCT FROM 'LOCAL_DRY_RUN'
+           OR chain_row.execution_target_id IS DISTINCT FROM 'OKX_DEMO'
+           OR chain_row.status IS DISTINCT FROM 'EXECUTING'
+           OR chain_row.current_stage IS DISTINCT FROM 'EXECUTION'
+           OR chain_row.trade_intent_id IS DISTINCT FROM existing_intent.id
+           OR chain_row.risk_decision_id IS DISTINCT FROM decision_row.id
+           OR chain_row.approved_execution_id IS DISTINCT FROM approval_row.id
+        THEN
+            RAISE EXCEPTION 'controlled canary lineage idempotency conflict';
+        END IF;
+        is_replay := TRUE;
+    END IF;
+
+    SELECT id, run_kind, research_scope_id, execution_target_id,
+           status, current_stage, strategy_generation_run_id,
+           strategy_id, strategy_version_id, backtest_run_id,
+           backtest_task_id, backtest_result_id, strategy_score_id,
+           candidate_approval_id, signal_snapshot_id, signal_evaluation_id,
+           trade_intent_id, risk_decision_id, approved_execution_id,
+           exchange_order_id
+    INTO chain_row
+    FROM SCHEMA_TOKEN.full_chain_runs
+    WHERE id = full_chain_run_id;
+    IF NOT FOUND
+       OR chain_row.run_kind IS DISTINCT FROM 'RESEARCH'
+       OR chain_row.research_scope_id IS DISTINCT FROM 'LOCAL_DRY_RUN'
+       OR chain_row.execution_target_id IS DISTINCT FROM 'OKX_DEMO'
+       OR chain_row.status IS DISTINCT FROM 'EXECUTING'
+       OR chain_row.current_stage IS DISTINCT FROM 'EXECUTION'
+       OR chain_row.strategy_generation_run_id IS NOT NULL
+       OR chain_row.strategy_id IS NOT NULL
+       OR chain_row.strategy_version_id IS NOT NULL
+       OR chain_row.backtest_run_id IS NOT NULL
+       OR chain_row.backtest_task_id IS NOT NULL
+       OR chain_row.backtest_result_id IS NOT NULL
+       OR chain_row.strategy_score_id IS NOT NULL
+       OR chain_row.candidate_approval_id IS NOT NULL
+       OR chain_row.signal_snapshot_id IS NOT NULL
+       OR chain_row.signal_evaluation_id IS NOT NULL
+       OR (NOT is_replay AND (
+            chain_row.trade_intent_id IS NOT NULL
+            OR chain_row.risk_decision_id IS NOT NULL
+            OR chain_row.approved_execution_id IS NOT NULL
+       ))
+       OR chain_row.exchange_order_id IS NOT NULL
+    THEN
+        RAISE EXCEPTION 'controlled canary full-chain binding mismatch';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM SCHEMA_TOKEN.okx_demo_reconciliation_states AS state
+        JOIN SCHEMA_TOKEN.reconciliation_runs AS run
+          ON run.id = state.last_reconciliation_run_id
+        WHERE state.execution_target_id = 'OKX_DEMO'
+          AND state.opening_frozen IS FALSE
+          AND state.status IN ('RECONCILED', 'RECOVERED')
+          AND run.id = reconciliation_run_id
+          AND run.execution_target_id = 'OKX_DEMO'
+          AND run.status IN ('RECONCILED', 'RECOVERED')
+          AND run.artifact_status = 'READY'
+          AND run.source_type = 'api_aggregate'
+          AND run.core_data IS TRUE
+          AND run.completed_at IS NOT NULL
+          AND run.authoritative_observed_at IS NOT NULL
+          AND run.completed_at >= statement_timestamp() - INTERVAL '30 seconds'
+          AND run.completed_at <= statement_timestamp() + INTERVAL '5 seconds'
+          AND run.authoritative_observed_at
+                >= statement_timestamp() - INTERVAL '30 seconds'
+          AND run.authoritative_observed_at
+                <= statement_timestamp() + INTERVAL '5 seconds'
+          AND run.database_ids::jsonb->'reconciliation_run'
+                = jsonb_build_array(run.id)
+          AND run.database_ids::jsonb->'order_snapshots' = '[]'::jsonb
+          AND run.database_ids::jsonb->'position_snapshots' = '[]'::jsonb
+    )
+    THEN
+        RAISE EXCEPTION 'controlled canary reconciliation is not fresh';
+    END IF;
+
+    IF NOT is_replay AND (EXISTS (
+        SELECT 1 FROM SCHEMA_TOKEN.trade_intents AS prior_intent
+        WHERE prior_intent.execution_target_id = 'OKX_DEMO'
+    ) OR EXISTS (
+        SELECT 1 FROM SCHEMA_TOKEN.approved_executions AS prior_approval
+        WHERE prior_approval.execution_target_id = 'OKX_DEMO'
+    ) OR EXISTS (
+        SELECT 1 FROM SCHEMA_TOKEN.okx_demo_submission_grants AS prior_grant
+        WHERE prior_grant.execution_target_id = 'OKX_DEMO'
+    ) OR EXISTS (
+        SELECT 1 FROM SCHEMA_TOKEN.okx_order_write_attempts AS prior_attempt
+        WHERE prior_attempt.execution_target_id = 'OKX_DEMO'
+    ) OR EXISTS (
+        SELECT 1 FROM SCHEMA_TOKEN.exchange_orders AS prior_order
+        WHERE prior_order.execution_target_id = 'OKX_DEMO'
+    ) OR EXISTS (
+        SELECT 1 FROM SCHEMA_TOKEN.exchange_positions AS prior_position
+        WHERE prior_position.execution_target_id = 'OKX_DEMO'
+          AND prior_position.quantity <> 0
+    ))
+    THEN
+        RAISE EXCEPTION 'controlled canary durable boundary is occupied';
+    END IF;
+
+    SELECT * INTO instrument_row
+    FROM SCHEMA_TOKEN.okx_demo_trusted_snapshots
+    WHERE snapshot_id = p_payload->>'instrument_snapshot_id'
+      AND kind = 'instrument';
+    SELECT * INTO market_row
+    FROM SCHEMA_TOKEN.okx_demo_trusted_snapshots
+    WHERE snapshot_id = p_payload->>'market_snapshot_id'
+      AND kind = 'market';
+    SELECT * INTO account_row
+    FROM SCHEMA_TOKEN.okx_demo_trusted_snapshots
+    WHERE snapshot_id = p_payload->>'account_snapshot_id'
+      AND kind = 'account';
+    IF instrument_row.database_id IS NULL
+       OR market_row.database_id IS NULL
+       OR account_row.database_id IS NULL
+       OR instrument_row.execution_target_id IS DISTINCT FROM 'OKX_DEMO'
+       OR market_row.execution_target_id IS DISTINCT FROM 'OKX_DEMO'
+       OR account_row.execution_target_id IS DISTINCT FROM 'OKX_DEMO'
+       OR instrument_row.source_type IS DISTINCT FROM 'api_aggregate'
+       OR market_row.source_type IS DISTINCT FROM 'api_aggregate'
+       OR account_row.source_type IS DISTINCT FROM 'api_aggregate'
+       OR instrument_row.core_data IS NOT TRUE
+       OR market_row.core_data IS NOT TRUE
+       OR account_row.core_data IS NOT TRUE
+       OR instrument_row.content_json::jsonb->>'execution_target'
+            IS DISTINCT FROM 'OKX_DEMO'
+       OR market_row.content_json::jsonb->>'execution_target'
+            IS DISTINCT FROM 'OKX_DEMO'
+       OR account_row.content_json::jsonb->>'execution_target'
+            IS DISTINCT FROM 'OKX_DEMO'
+       OR instrument_row.content_json::jsonb->>'source'
+            IS DISTINCT FROM 'okx_demo_rest'
+       OR market_row.content_json::jsonb->>'source'
+            IS DISTINCT FROM 'okx_demo_rest'
+       OR account_row.content_json::jsonb->>'source'
+            IS DISTINCT FROM 'okx_demo_rest'
+       OR instrument_row.content_json::jsonb->>'resource'
+            IS DISTINCT FROM 'instrument'
+       OR market_row.content_json::jsonb->>'resource'
+            IS DISTINCT FROM 'market'
+       OR account_row.content_json::jsonb->>'resource'
+            IS DISTINCT FROM 'account'
+       OR instrument_row.content_json::jsonb->'stale'
+            IS DISTINCT FROM 'false'::jsonb
+       OR market_row.content_json::jsonb->'stale'
+            IS DISTINCT FROM 'false'::jsonb
+       OR account_row.content_json::jsonb->'stale'
+            IS DISTINCT FROM 'false'::jsonb
+       OR instrument_row.content_json::jsonb->>'instId'
+            IS DISTINCT FROM 'BTC-USDT-SWAP'
+       OR instrument_row.content_json::jsonb->>'state' IS DISTINCT FROM 'live'
+       OR (instrument_row.content_json::jsonb->>'contract_shape'
+            IN ('linear', 'inverse')) IS DISTINCT FROM TRUE
+       OR market_row.content_json::jsonb->>'instrument_id'
+            IS DISTINCT FROM 'BTC-USDT-SWAP'
+       OR account_row.content_json::jsonb->'authenticated'
+            IS DISTINCT FROM 'true'::jsonb
+       OR (instrument_row.content_json::jsonb->>'ctVal'
+            ~ '^[0-9]+(\\.[0-9]+)?$') IS DISTINCT FROM TRUE
+       OR (instrument_row.content_json::jsonb->>'minSz'
+            ~ '^[0-9]+(\\.[0-9]+)?$') IS DISTINCT FROM TRUE
+       OR (instrument_row.content_json::jsonb->>'lotSz'
+            ~ '^[0-9]+(\\.[0-9]+)?$') IS DISTINCT FROM TRUE
+       OR (instrument_row.content_json::jsonb->>'tickSz'
+            ~ '^[0-9]+(\\.[0-9]+)?$') IS DISTINCT FROM TRUE
+       OR (market_row.content_json::jsonb->>'reference_price'
+            ~ '^[0-9]+(\\.[0-9]+)?$') IS DISTINCT FROM TRUE
+       OR (market_row.content_json::jsonb->'bbo'->>'bid_price'
+            ~ '^[0-9]+(\\.[0-9]+)?$') IS DISTINCT FROM TRUE
+       OR (market_row.content_json::jsonb->'bbo'->>'ask_price'
+            ~ '^[0-9]+(\\.[0-9]+)?$') IS DISTINCT FROM TRUE
+       OR (market_row.content_json::jsonb->'mark'->>'price'
+            ~ '^[0-9]+(\\.[0-9]+)?$') IS DISTINCT FROM TRUE
+       OR (account_row.content_json::jsonb->'leverage_by_position_side'->>'long'
+            ~ '^[0-9]+(\\.[0-9]+)?$') IS DISTINCT FROM TRUE
+       OR (market_row.content_json::jsonb->>'as_of') IS NULL
+       OR (market_row.content_json::jsonb->>'as_of')::timestamptz
+            < statement_timestamp() - INTERVAL '30 seconds'
+       OR (market_row.content_json::jsonb->>'as_of')::timestamptz
+            > statement_timestamp() + INTERVAL '5 seconds'
+       OR instrument_row.attested_session_id
+            IS DISTINCT FROM market_row.attested_session_id
+       OR instrument_row.attested_session_id
+            IS DISTINCT FROM account_row.attested_session_id
+       OR instrument_row.expires_at <= statement_timestamp()
+       OR market_row.expires_at <= statement_timestamp()
+       OR account_row.expires_at <= statement_timestamp()
+       OR expires_at > instrument_row.expires_at
+       OR expires_at > market_row.expires_at
+       OR expires_at > account_row.expires_at
+       OR NOT EXISTS (
+           SELECT 1 FROM SCHEMA_TOKEN.okx_demo_attested_sessions AS session
+           WHERE session.session_id = instrument_row.attested_session_id
+             AND session.execution_target_id = 'OKX_DEMO'
+             AND session.revoked_at IS NULL
+             AND session.expires_at > statement_timestamp()
+       )
+       OR p_payload->'request_snapshot'#>>'{snapshot_evidence,instrument,snapshot_id}'
+            IS DISTINCT FROM instrument_row.snapshot_id
+       OR p_payload->'request_snapshot'#>>'{snapshot_evidence,market,snapshot_id}'
+            IS DISTINCT FROM market_row.snapshot_id
+       OR p_payload->'request_snapshot'#>>'{snapshot_evidence,account,snapshot_id}'
+            IS DISTINCT FROM account_row.snapshot_id
+       OR p_payload->'request_snapshot'#>>'{snapshot_evidence,instrument,digest}'
+            IS DISTINCT FROM instrument_row.digest
+       OR p_payload->'request_snapshot'#>>'{snapshot_evidence,market,digest}'
+            IS DISTINCT FROM market_row.digest
+       OR p_payload->'request_snapshot'#>>'{snapshot_evidence,account,digest}'
+            IS DISTINCT FROM account_row.digest
+       OR (p_payload->'request_snapshot'#>>'{snapshot_evidence,instrument,database_id}'
+            ~ '^[1-9][0-9]*$') IS DISTINCT FROM TRUE
+       OR (p_payload->'request_snapshot'#>>'{snapshot_evidence,market,database_id}'
+            ~ '^[1-9][0-9]*$') IS DISTINCT FROM TRUE
+       OR (p_payload->'request_snapshot'#>>'{snapshot_evidence,account,database_id}'
+            ~ '^[1-9][0-9]*$') IS DISTINCT FROM TRUE
+       OR (p_payload->'request_snapshot'#>>'{snapshot_evidence,instrument,database_id}')::bigint
+            IS DISTINCT FROM instrument_row.database_id
+       OR (p_payload->'request_snapshot'#>>'{snapshot_evidence,market,database_id}')::bigint
+            IS DISTINCT FROM market_row.database_id
+       OR (p_payload->'request_snapshot'#>>'{snapshot_evidence,account,database_id}')::bigint
+            IS DISTINCT FROM account_row.database_id
+       OR (p_payload->'request_snapshot'#>>'{snapshot_evidence,instrument,expires_at}')::timestamptz
+            IS DISTINCT FROM instrument_row.expires_at
+       OR (p_payload->'request_snapshot'#>>'{snapshot_evidence,market,expires_at}')::timestamptz
+            IS DISTINCT FROM market_row.expires_at
+       OR (p_payload->'request_snapshot'#>>'{snapshot_evidence,account,expires_at}')::timestamptz
+            IS DISTINCT FROM account_row.expires_at
+       OR p_payload->'request_snapshot'->'canonical_input'->'snapshot_ids'
+            IS DISTINCT FROM jsonb_build_object(
+                'instrument', instrument_row.snapshot_id,
+                'market', market_row.snapshot_id,
+                'account', account_row.snapshot_id
+            )
+       OR p_payload->'request_snapshot'->'snapshot_evidence'
+            IS DISTINCT FROM jsonb_build_object(
+                'instrument', jsonb_build_object(
+                    'snapshot_id', instrument_row.snapshot_id,
+                    'database_id', instrument_row.database_id,
+                    'digest', instrument_row.digest,
+                    'expires_at', p_payload->'request_snapshot'
+                        #>>'{snapshot_evidence,instrument,expires_at}'
+                ),
+                'market', jsonb_build_object(
+                    'snapshot_id', market_row.snapshot_id,
+                    'database_id', market_row.database_id,
+                    'digest', market_row.digest,
+                    'expires_at', p_payload->'request_snapshot'
+                        #>>'{snapshot_evidence,market,expires_at}'
+                ),
+                'account', jsonb_build_object(
+                    'snapshot_id', account_row.snapshot_id,
+                    'database_id', account_row.database_id,
+                    'digest', account_row.digest,
+                    'expires_at', p_payload->'request_snapshot'
+                        #>>'{snapshot_evidence,account,expires_at}'
+                )
+            )
+    THEN
+        RAISE EXCEPTION 'controlled canary attested snapshot binding failed';
+    END IF;
+
+    minimum_size := (instrument_row.content_json->>'minSz')::numeric;
+    lot_size := (instrument_row.content_json->>'lotSz')::numeric;
+    contract_value := (instrument_row.content_json->>'ctVal')::numeric;
+    tick_size := (instrument_row.content_json->>'tickSz')::numeric;
+    best_bid := (market_row.content_json->'bbo'->>'bid_price')::numeric;
+    best_ask := (market_row.content_json->'bbo'->>'ask_price')::numeric;
+    mark_price := (market_row.content_json->'mark'->>'price')::numeric;
+    snapshot_leverage := (
+        account_row.content_json->'leverage_by_position_side'->>'long'
+    )::numeric;
+    derived_quantity := ceil(minimum_size / lot_size) * lot_size;
+    derived_limit_price := floor(best_bid / tick_size) * tick_size;
+    computed_notional := derived_quantity
+        * contract_value
+        * greatest(reference_price, best_ask, derived_limit_price);
+    IF contract_value <= 0
+       OR minimum_size <= 0
+       OR lot_size <= 0
+       OR tick_size <= 0
+       OR best_bid <= 0
+       OR best_ask <= 0
+       OR mark_price <= 0
+       OR snapshot_leverage <= 0
+       OR (market_row.content_json->>'reference_price')::numeric
+            IS DISTINCT FROM mark_price
+       OR reference_price IS DISTINCT FROM (
+            market_row.content_json->>'reference_price'
+       )::numeric
+       OR reference_price IS DISTINCT FROM mark_price
+       OR leverage IS DISTINCT FROM snapshot_leverage
+       OR quantity IS DISTINCT FROM derived_quantity
+       OR limit_price IS DISTINCT FROM derived_limit_price
+       OR stop_loss IS DISTINCT FROM reference_price * 0.95
+       OR take_profit IS DISTINCT FROM reference_price * 1.05
+       OR abs(limit_price - reference_price) / reference_price > 0.01
+       OR computed_notional IS DISTINCT FROM notional
+       OR computed_notional > 20
+    THEN
+        RAISE EXCEPTION 'controlled canary order derivation mismatch';
+    END IF;
+
+    IF is_replay THEN
+        RETURN jsonb_build_object(
+            'trade_intent_id', existing_intent.id,
+            'risk_decision_id', decision_row.id,
+            'approved_execution_id', approval_row.id
+        );
+    END IF;
+
+    INSERT INTO SCHEMA_TOKEN.trade_intents (
+        execution_target_id, authorization_schema_version, intent_id,
+        canonical_hash, policy_digest, approved_payload_hash,
+        idempotency_key_digest, client_order_id, instrument_id, side,
+        position_side, order_type, quantity, limit_price, reference_price,
+        leverage, margin_mode, stop_loss, take_profit, reduce_only, status,
+        request_snapshot, expires_at
+    ) VALUES (
+        'OKX_DEMO', 'RISK_V1', p_payload->>'intent_id',
+        p_payload->>'canonical_hash', p_payload->>'policy_digest',
+        p_payload->>'approved_payload_hash',
+        p_payload->>'idempotency_key_digest', p_payload->>'client_order_id',
+        'BTC-USDT-SWAP', 'buy', 'long', 'limit', quantity, limit_price,
+        reference_price, leverage, 'isolated', stop_loss, take_profit,
+        FALSE, 'APPROVED', (p_payload->'request_snapshot')::json, expires_at
+    ) RETURNING id INTO inserted_intent_id;
+
+    INSERT INTO SCHEMA_TOKEN.risk_decisions (
+        execution_target_id, trade_intent_id, authorization_schema_version,
+        policy_digest, decision, policy_version, evidence_snapshot
+    ) VALUES (
+        'OKX_DEMO', inserted_intent_id, 'RISK_V1',
+        p_payload->>'policy_digest', 'APPROVED', 'controlled-canary-v1',
+        jsonb_build_object(
+            'reasons', '[]'::jsonb,
+            'input_digest', p_payload->>'canonical_hash',
+            'policy_digest', p_payload->>'policy_digest',
+            'lineage', p_payload->'request_snapshot'->'canonical_input'->'lineage',
+            'notional', p_payload->>'notional',
+            'provenance', 'CONTROLLED_CANARY_NON_PRODUCTION',
+            'non_production', TRUE,
+            'llm_authority', FALSE
+        )::json
+    ) RETURNING id INTO inserted_decision_id;
+
+    INSERT INTO SCHEMA_TOKEN.approved_executions (
+        execution_target_id, trade_intent_id, risk_decision_id, intent_id,
+        client_order_id, authorization_schema_version, canonical_hash,
+        policy_digest, approved_payload_hash, instrument_snapshot_id,
+        market_snapshot_id, account_snapshot_id, decision, intent_status,
+        reserved_notional, order_submission_authorized, claim_required,
+        status, expires_at, evidence_snapshot
+    ) VALUES (
+        'OKX_DEMO', inserted_intent_id, inserted_decision_id,
+        p_payload->>'intent_id', p_payload->>'client_order_id', 'RISK_V1',
+        p_payload->>'canonical_hash', p_payload->>'policy_digest',
+        p_payload->>'approved_payload_hash',
+        p_payload->>'instrument_snapshot_id',
+        p_payload->>'market_snapshot_id',
+        p_payload->>'account_snapshot_id',
+        'APPROVED', 'APPROVED', notional, FALSE, TRUE, 'ACTIVE', expires_at,
+        jsonb_build_object(
+            'provenance', 'CONTROLLED_CANARY_NON_PRODUCTION',
+            'non_production', TRUE,
+            'lineage', p_payload->'request_snapshot'->'canonical_input'->'lineage',
+            'snapshot_evidence', p_payload->'request_snapshot'->'snapshot_evidence'
+        )::json
+    ) RETURNING id INTO inserted_approval_id;
+
+    RETURN jsonb_build_object(
+        'trade_intent_id', inserted_intent_id,
+        'risk_decision_id', inserted_decision_id,
+        'approved_execution_id', inserted_approval_id
+    );
+EXCEPTION
+    WHEN unique_violation THEN
+        RAISE EXCEPTION 'controlled canary lineage identity conflict';
 END;
 """
 
@@ -1682,7 +2452,8 @@ def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
                       'revoke_okx_demo_attested_session',
                       'finalize_okx_demo_reconciliation_run',
                       'apply_okx_demo_reconciliation_gate',
-                      'freeze_okx_demo_reconciliation_gate'
+                      'freeze_okx_demo_reconciliation_gate',
+                      'create_okx_demo_canary_lineage'
                   )
                 """
             ),
@@ -1749,6 +2520,34 @@ def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
                         function_name
                     )
                 )
+        (
+            canary_owner,
+            canary_security_definer,
+            canary_config,
+            canary_runtime_execute,
+            canary_public_execute,
+            canary_source,
+        ) = function_security.get(
+            "create_okx_demo_canary_lineage",
+            (None, False, [], False, True, ""),
+        )
+        expected_canary_hash = _canonical_function_body(
+            CANARY_LINEAGE_FUNCTION_BODY.replace(
+                "SCHEMA_TOKEN",
+                schema_name,
+            ),
+            schema_name,
+        )
+        if (
+            canary_owner != "freqtrade_ai_attestor"
+            or canary_security_definer is not True
+            or "search_path=pg_catalog" not in canary_config
+            or canary_runtime_execute is not True
+            or canary_public_execute is True
+            or _canonical_function_body(canary_source, schema_name)
+            != expected_canary_hash
+        ):
+            problems.append("controlled canary lineage function boundary mismatch")
         reconciliation_function_fragments = {
             "finalize_okx_demo_reconciliation_run": (
                 "artifact_status <> 'PENDING'",
@@ -3193,9 +3992,28 @@ def _grant_expired_approval_attestor_acl(connection: Connection) -> None:
             "evidence_snapshot",
         },
         "full_chain_runs": {
+            "id",
+            "research_job_id",
+            "research_job_attempt_id",
+            "run_kind",
+            "signal_evaluation_id",
+            "research_scope_id",
             "approved_execution_id",
             "execution_target_id",
             "status",
+            "current_stage",
+            "strategy_generation_run_id",
+            "strategy_id",
+            "strategy_version_id",
+            "backtest_run_id",
+            "backtest_task_id",
+            "backtest_result_id",
+            "strategy_score_id",
+            "candidate_approval_id",
+            "signal_snapshot_id",
+            "trade_intent_id",
+            "risk_decision_id",
+            "exchange_order_id",
             "terminal_reason",
             "completed_at",
         },
@@ -3235,7 +4053,16 @@ def _grant_expired_approval_attestor_acl(connection: Connection) -> None:
             GRANT SELECT (id, execution_target_id, decision, evidence_snapshot),
                   UPDATE (evidence_snapshot)
                 ON __SCHEMA__.risk_decisions TO freqtrade_ai_attestor;
-            GRANT SELECT (approved_execution_id, execution_target_id),
+            GRANT SELECT (id, research_job_id, research_job_attempt_id,
+                          run_kind, signal_evaluation_id, research_scope_id,
+                          execution_target_id, status, current_stage,
+                          strategy_generation_run_id, strategy_id,
+                          strategy_version_id, backtest_run_id,
+                          backtest_task_id, backtest_result_id,
+                          strategy_score_id, candidate_approval_id,
+                          signal_snapshot_id, trade_intent_id,
+                          risk_decision_id, approved_execution_id,
+                          exchange_order_id),
                   UPDATE (status, terminal_reason, completed_at)
                 ON __SCHEMA__.full_chain_runs TO freqtrade_ai_attestor;
             GRANT SELECT (execution_target_id, reserved_notional,
@@ -4206,6 +5033,7 @@ def _add_full_chain(connection: Connection) -> None:
     _add_okx_demo_soak(connection)
     _ensure_one_shot_submission_grant(connection)
     _grant_expired_approval_attestor_acl(connection)
+    _add_canary_lineage_write_boundary(connection)
 
 
 def _upgrade_strategy_candidate_approvals(connection: Connection) -> None:
@@ -4378,6 +5206,56 @@ def _ensure_one_shot_submission_grant(connection: Connection) -> bool:
     )
     _add_one_shot_submission_grant_boundary(connection)
     return True
+
+
+def _add_canary_lineage_write_boundary(connection: Connection) -> None:
+    """Install one fixed owner-mediated write path for controlled canary lineage."""
+
+    schema_name, effective_schemas = connection.execute(
+        text("SELECT current_schema(), current_schemas(false)")
+    ).one()
+    if not schema_name or list(effective_schemas or ()) != [schema_name]:
+        raise SchemaMigrationBlocked(
+            "Canary lineage boundary requires exactly one effective schema"
+        )
+    missing = CANARY_LINEAGE_BOUNDARY_TABLES - set(
+        inspect(connection).get_table_names(schema=schema_name)
+    )
+    if missing:
+        raise SchemaMigrationBlocked(
+            "Canary lineage boundary tables are missing: "
+            + ", ".join(sorted(missing))
+        )
+    quoted_schema = connection.dialect.identifier_preparer.quote_schema(schema_name)
+    function_sql = """
+        CREATE OR REPLACE FUNCTION SCHEMA_TOKEN.create_okx_demo_canary_lineage(
+            p_payload jsonb
+        ) RETURNS jsonb
+        LANGUAGE plpgsql SECURITY DEFINER
+        SET search_path = pg_catalog
+        AS $$CANARY_BODY$$;
+    """
+    connection.execute(
+        text(
+            function_sql.replace("CANARY_BODY", CANARY_LINEAGE_FUNCTION_BODY).replace(
+                "SCHEMA_TOKEN", quoted_schema
+            )
+        )
+    )
+    connection.execute(
+        text(
+            "ALTER FUNCTION {}.create_okx_demo_canary_lineage(jsonb) "
+            "OWNER TO freqtrade_ai_attestor; "
+            "REVOKE ALL ON FUNCTION {}.create_okx_demo_canary_lineage(jsonb) "
+            "FROM PUBLIC, freqtrade; "
+            "GRANT EXECUTE ON FUNCTION {}.create_okx_demo_canary_lineage(jsonb) "
+            "TO freqtrade".format(
+                quoted_schema,
+                quoted_schema,
+                quoted_schema,
+            )
+        )
+    )
 
 
 def _runtime_application_acl_problems(
@@ -4633,7 +5511,30 @@ def _expired_approval_attestor_acl_problems(
     }
     delegated_columns = {
         "full_chain_runs": {
-            "SELECT": {"approved_execution_id", "execution_target_id"},
+            "SELECT": {
+                "id",
+                "research_job_id",
+                "research_job_attempt_id",
+                "run_kind",
+                "signal_evaluation_id",
+                "research_scope_id",
+                "execution_target_id",
+                "status",
+                "current_stage",
+                "strategy_generation_run_id",
+                "strategy_id",
+                "strategy_version_id",
+                "backtest_run_id",
+                "backtest_task_id",
+                "backtest_result_id",
+                "strategy_score_id",
+                "candidate_approval_id",
+                "signal_snapshot_id",
+                "trade_intent_id",
+                "risk_decision_id",
+                "approved_execution_id",
+                "exchange_order_id",
+            },
             "UPDATE": {"status", "terminal_reason", "completed_at"},
         },
         "risk_budgets": {
@@ -5220,6 +6121,7 @@ def upgrade_database(engine: Engine) -> str:
                 SINGLE_ACTIVE_DEPLOYMENT_BASE_VERSION,
                 ONE_SHOT_SUBMISSION_GRANT_BASE_VERSION,
                 STRATEGY_VALIDATION_BASE_VERSION,
+                CANARY_LINEAGE_WRITE_BASE_VERSION,
             }
             if current_version in supported_upgrade_versions:
                 connection.execute(
@@ -5246,6 +6148,25 @@ def upgrade_database(engine: Engine) -> str:
                 ):
                     _grant_expired_approval_attestor_acl(connection)
                 _add_strategy_validation_matrix(connection)
+                schema_name = connection.execute(
+                    text("SELECT current_schema()")
+                ).scalar_one()
+                if CANARY_LINEAGE_BOUNDARY_TABLES.issubset(
+                    inspect(connection).get_table_names(schema=schema_name)
+                ):
+                    _add_canary_lineage_write_boundary(connection)
+            if current_version == CANARY_LINEAGE_WRITE_BASE_VERSION:
+                problems = schema_problems(connection)
+                if problems:
+                    raise SchemaMigrationBlocked(
+                        "Canary lineage write upgrade does not match ORM metadata: "
+                        + "; ".join(problems)
+                    )
+                connection.execute(
+                    text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+                    {"version": SCHEMA_VERSION},
+                )
+                return SCHEMA_VERSION
             if current_version == STRATEGY_VALIDATION_BASE_VERSION:
                 problems = schema_problems(connection)
                 if problems:
