@@ -75,6 +75,9 @@ FRESH_EXECUTION_ONLY_RECOVERY = "FRESH_EXECUTION_ONLY_RECOVERY"
 FRESH_EXECUTION_ONLY_POST_PERSISTENCE_RECOVERY = (
     "FRESH_EXECUTION_ONLY_POST_PERSISTENCE_RECOVERY"
 )
+FRESH_EXECUTION_ONLY_FINAL_EXPIRY_RECOVERY = (
+    "FRESH_EXECUTION_ONLY_FINAL_EXPIRY_RECOVERY"
+)
 FRESH_EXECUTION_ENTRY_KINDS = frozenset(
     {
         FRESH_EXECUTION_ONLY_ENTRY,
@@ -82,6 +85,7 @@ FRESH_EXECUTION_ENTRY_KINDS = frozenset(
         FRESH_EXECUTION_ONLY_REFRESH_RETRY,
         FRESH_EXECUTION_ONLY_RECOVERY,
         FRESH_EXECUTION_ONLY_POST_PERSISTENCE_RECOVERY,
+        FRESH_EXECUTION_ONLY_FINAL_EXPIRY_RECOVERY,
     }
 )
 FRESH_EXECUTION_REFRESH_KINDS = frozenset(
@@ -91,6 +95,7 @@ FRESH_EXECUTION_RECOVERY_KINDS = frozenset(
     {
         FRESH_EXECUTION_ONLY_RECOVERY,
         FRESH_EXECUTION_ONLY_POST_PERSISTENCE_RECOVERY,
+        FRESH_EXECUTION_ONLY_FINAL_EXPIRY_RECOVERY,
     }
 )
 # A successful fresh entry may have one refresh successor and that successor
@@ -442,6 +447,10 @@ class OkxDemoCanaryPreparationService:
                 FRESH_EXECUTION_ONLY_POST_PERSISTENCE_RECOVERY,
                 "POST_PERSISTENCE_LINEAGE_WRITE_FAILURE",
             ),
+            (
+                FRESH_EXECUTION_ONLY_FINAL_EXPIRY_RECOVERY,
+                "POST_PERSISTENCE_RECOVERY_SNAPSHOT_EXPIRY",
+            ),
         }:
             raise OkxDemoCanaryPreparationBlocked(
                 "unsupported canary recovery boundary"
@@ -504,11 +513,12 @@ class OkxDemoCanaryPreparationService:
                     raise OkxDemoCanaryPreparationBlocked(
                         "canary recovery raced with another request"
                     )
-                source = (
-                    self._recovery_source_job(now=now)
-                    if _entry_kind == FRESH_EXECUTION_ONLY_RECOVERY
-                    else self._post_persistence_recovery_source_job(now=now)
-                )
+                if _entry_kind == FRESH_EXECUTION_ONLY_RECOVERY:
+                    source = self._recovery_source_job(now=now)
+                elif _entry_kind == FRESH_EXECUTION_ONLY_POST_PERSISTENCE_RECOVERY:
+                    source = self._post_persistence_recovery_source_job(now=now)
+                else:
+                    source = self._final_expiry_recovery_source_job(now=now)
                 self._require_no_canary_activity_for_refresh()
                 source_payload = source.request_payload
                 source_supersedes = source_payload.get("supersedes_job_ids")
@@ -595,8 +605,14 @@ class OkxDemoCanaryPreparationService:
                         now=now,
                         ignore_recovery_job_id=existing.id,
                     )
-                else:
+                elif _entry_kind == FRESH_EXECUTION_ONLY_POST_PERSISTENCE_RECOVERY:
                     self._post_persistence_recovery_source_job(
+                        now=now,
+                        expected_source_job_id=recovery_of,
+                        ignore_successor_job_id=existing.id,
+                    )
+                else:
+                    self._final_expiry_recovery_source_job(
                         now=now,
                         expected_source_job_id=recovery_of,
                         ignore_successor_job_id=existing.id,
@@ -640,6 +656,20 @@ class OkxDemoCanaryPreparationService:
             _entry_kind=FRESH_EXECUTION_ONLY_POST_PERSISTENCE_RECOVERY,
             _recovery_boundary="POST_PERSISTENCE_LINEAGE_WRITE_FAILURE",
         )
+
+    def prepare_final_expiry_recovery(
+        self,
+        *,
+        idempotency_key: str,
+    ) -> CanaryPreparationResult:
+        """Create the sole final successor after job21-shaped snapshot expiry."""
+
+        return self.prepare_fresh_execution_only_recovery(
+            idempotency_key=idempotency_key,
+            _entry_kind=FRESH_EXECUTION_ONLY_FINAL_EXPIRY_RECOVERY,
+            _recovery_boundary="POST_PERSISTENCE_RECOVERY_SNAPSHOT_EXPIRY",
+        )
+
     def _prepare(
         self,
         *,
@@ -1255,6 +1285,7 @@ class OkxDemoCanaryPreparationService:
         now: datetime,
         expected_source_job_id: Optional[int] = None,
         ignore_successor_job_id: Optional[int] = None,
+        ignore_final_successor_job_id: Optional[int] = None,
     ) -> ResearchJob:
         """Return the one expired job20-shaped recovery handoff.
 
@@ -1279,6 +1310,12 @@ class OkxDemoCanaryPreparationService:
         for job in jobs:
             payload = job.request_payload if isinstance(job.request_payload, dict) else {}
             entry_kind = payload.get("entry_kind")
+            if entry_kind == FRESH_EXECUTION_ONLY_FINAL_EXPIRY_RECOVERY:
+                if job.id != ignore_final_successor_job_id:
+                    raise OkxDemoCanaryPreparationBlocked(
+                        "a final expiry recovery successor already exists"
+                    )
+                continue
             if entry_kind == FRESH_EXECUTION_ONLY_POST_PERSISTENCE_RECOVERY:
                 if job.id != ignore_successor_job_id:
                     raise OkxDemoCanaryPreparationBlocked(
@@ -1336,6 +1373,126 @@ class OkxDemoCanaryPreparationService:
                 "post-persistence source snapshots are still fresh; finalize it"
             )
         return source
+
+    def _final_expiry_recovery_source_job(
+        self,
+        *,
+        now: datetime,
+        expected_source_job_id: Optional[int] = None,
+        ignore_successor_job_id: Optional[int] = None,
+    ) -> ResearchJob:
+        """Return the sole expired post-persistence recovery handoff.
+
+        The complete earlier lineage is revalidated through the existing
+        post-persistence source validator.  This admits exactly one final
+        successor and never treats its expired snapshot references as usable.
+        """
+
+        jobs = self.db.scalars(
+            canary_lineage_read_query(
+                self.db,
+                select(ResearchJob)
+                .where(
+                    ResearchJob.execution_scope_id == LOCAL_DRY_RUN_SCOPE_ID,
+                    ResearchJob.operation == CANARY_OPERATION,
+                )
+                .order_by(ResearchJob.created_at, ResearchJob.id),
+                for_update=True,
+            )
+        ).all()
+        source: Optional[ResearchJob] = None
+        for job in jobs:
+            payload = job.request_payload if isinstance(job.request_payload, dict) else {}
+            entry_kind = payload.get("entry_kind")
+            if entry_kind == FRESH_EXECUTION_ONLY_FINAL_EXPIRY_RECOVERY:
+                if job.id != ignore_successor_job_id:
+                    raise OkxDemoCanaryPreparationBlocked(
+                        "a final expiry recovery successor already exists"
+                    )
+                continue
+            if entry_kind == FRESH_EXECUTION_ONLY_POST_PERSISTENCE_RECOVERY:
+                if source is not None or not self._is_final_expiry_source(job, payload):
+                    raise OkxDemoCanaryPreparationBlocked(
+                        "final expiry recovery source is malformed"
+                    )
+                source = job
+
+        if source is None:
+            raise OkxDemoCanaryPreparationBlocked(
+                "an immutable post-persistence recovery handoff is required"
+            )
+        if expected_source_job_id is not None and source.id != expected_source_job_id:
+            raise OkxDemoCanaryPreparationBlocked(
+                "final expiry recovery source changed"
+            )
+
+        parent_id = source.request_payload.get("recovery_of_job_id")
+        parent = self._post_persistence_recovery_source_job(
+            now=now,
+            expected_source_job_id=parent_id,
+            ignore_successor_job_id=source.id,
+            ignore_final_successor_job_id=ignore_successor_job_id,
+        )
+        expected_supersedes = list(
+            dict.fromkeys(
+                [*(parent.request_payload.get("supersedes_job_ids") or []), parent.id]
+            )
+        )
+        if source.request_payload.get("supersedes_job_ids") != expected_supersedes:
+            raise OkxDemoCanaryPreparationBlocked(
+                "final expiry recovery ancestry is malformed"
+            )
+        if not self._refresh_snapshots_expired(source, now):
+            raise OkxDemoCanaryPreparationBlocked(
+                "post-persistence recovery snapshots are still fresh; finalize it"
+            )
+        return source
+
+    @staticmethod
+    def _is_final_expiry_source(
+        job: ResearchJob,
+        payload: Mapping[str, Any],
+    ) -> bool:
+        if (
+            job.execution_scope_id != LOCAL_DRY_RUN_SCOPE_ID
+            or job.operation != CANARY_OPERATION
+            or job.status != "SUCCESS"
+            or job.stage != "CANARY_SNAPSHOTS_READY"
+            or payload.get("provenance") != CANARY_PROVENANCE
+            or payload.get("execution_target") != OKX_DEMO_TARGET_ID
+            or payload.get("instrument_id") not in CANARY_INSTRUMENTS
+            or payload.get("bundle_kind") != "EXECUTION_ONLY"
+            or payload.get("entry_kind")
+            != FRESH_EXECUTION_ONLY_POST_PERSISTENCE_RECOVERY
+            or payload.get("non_production") is not True
+            or payload.get("recovery_boundary")
+            != "POST_PERSISTENCE_LINEAGE_WRITE_FAILURE"
+            or "timeframe" in payload
+            or "candle_limit" in payload
+        ):
+            return False
+        recovery_of = payload.get("recovery_of_job_id")
+        supersedes = payload.get("supersedes_job_ids")
+        if (
+            not isinstance(recovery_of, int)
+            or recovery_of <= 0
+            or not isinstance(supersedes, list)
+            or recovery_of not in supersedes
+            or any(not isinstance(job_id, int) or job_id <= 0 for job_id in supersedes)
+        ):
+            return False
+        evidence = job.evidence_snapshot if isinstance(job.evidence_snapshot, dict) else {}
+        return (
+            evidence.get("provenance") == CANARY_PROVENANCE
+            and evidence.get("non_production") is True
+            and evidence.get("entry_kind")
+            == FRESH_EXECUTION_ONLY_POST_PERSISTENCE_RECOVERY
+            and evidence.get("recovery_of_job_id") == recovery_of
+            and evidence.get("supersedes_job_ids") == supersedes
+            and evidence.get("recovery_boundary")
+            == "POST_PERSISTENCE_LINEAGE_WRITE_FAILURE"
+            and isinstance(evidence.get("snapshot_evidence"), dict)
+        )
 
     @staticmethod
     def _is_post_persistence_source(
@@ -2456,6 +2613,7 @@ def _fresh_entry_evidence(payload: Mapping[str, Any]) -> dict[str, Any]:
         if payload.get("recovery_boundary") in {
             "PRE_616_FINALIZE_ACL_FAILURE",
             "POST_PERSISTENCE_LINEAGE_WRITE_FAILURE",
+            "POST_PERSISTENCE_RECOVERY_SNAPSHOT_EXPIRY",
         }:
             evidence["recovery_boundary"] = payload["recovery_boundary"]
     return evidence
@@ -2498,6 +2656,9 @@ def _fresh_entry_lineage(
         FRESH_EXECUTION_ONLY_RECOVERY: "PRE_616_FINALIZE_ACL_FAILURE",
         FRESH_EXECUTION_ONLY_POST_PERSISTENCE_RECOVERY: (
             "POST_PERSISTENCE_LINEAGE_WRITE_FAILURE"
+        ),
+        FRESH_EXECUTION_ONLY_FINAL_EXPIRY_RECOVERY: (
+            "POST_PERSISTENCE_RECOVERY_SNAPSHOT_EXPIRY"
         ),
     }.get(entry_kind)
     if (

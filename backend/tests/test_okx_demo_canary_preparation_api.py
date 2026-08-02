@@ -28,6 +28,7 @@ from app.services.okx_demo_canary_preparation import (
     CANARY_PROVENANCE,
     CANARY_OPERATION,
     FRESH_EXECUTION_ONLY_ENTRY,
+    FRESH_EXECUTION_ONLY_FINAL_EXPIRY_RECOVERY,
     FRESH_EXECUTION_ONLY_POST_PERSISTENCE_RECOVERY,
     FRESH_EXECUTION_ONLY_RECOVERY,
     FRESH_EXECUTION_ONLY_REFRESH,
@@ -343,6 +344,40 @@ def test_post_persistence_endpoint_reports_single_successor(client, monkeypatch)
     )
     assert response.json()["recovery_of_job_id"] == 20
     assert response.json()["supersedes_job_ids"] == [15, 16, 17, 18, 19, 20]
+
+
+def test_final_expiry_endpoint_reports_single_successor(client, monkeypatch):
+    api, _calls = client
+
+    def recover(_self, *, idempotency_key):
+        assert idempotency_key == "final-expiry-endpoint-1"
+        raise OkxDemoCanaryPreparationWaiting(
+            906,
+            entry_kind=FRESH_EXECUTION_ONLY_FINAL_EXPIRY_RECOVERY,
+            supersedes_job_ids=(15, 16, 17, 18, 19, 20, 21),
+            recovery_of_job_id=21,
+        )
+
+    monkeypatch.setattr(
+        OkxDemoCanaryPreparationService,
+        "prepare_final_expiry_recovery",
+        recover,
+    )
+    response = api.post(
+        "/api/okx-demo/canary/recover-final-expiry",
+        headers={
+            "X-Operator-Token": "operator-test-token",
+            "Idempotency-Key": "final-expiry-endpoint-1",
+            "X-Provider-Authorization": "once",
+        },
+        json={},
+    )
+    assert response.status_code == 202
+    assert response.json()["entry_kind"] == (
+        FRESH_EXECUTION_ONLY_FINAL_EXPIRY_RECOVERY
+    )
+    assert response.json()["recovery_of_job_id"] == 21
+    assert response.json()["supersedes_job_ids"] == [15, 16, 17, 18, 19, 20, 21]
 
 
 def test_refresh_terminal_block_remains_cached_for_same_key(client, monkeypatch):
@@ -1168,6 +1203,104 @@ def _successful_recovery_successor(
     return job
 
 
+def _successful_post_persistence_successor(
+    db_session,
+    source: ResearchJob,
+    *,
+    key: str = "successful-post-persistence-recovery",
+    expires_at: datetime = NOW - timedelta(seconds=1),
+):
+    source_payload = dict(source.request_payload)
+    supersedes = list(source_payload["supersedes_job_ids"]) + [source.id]
+    payload = {
+        "provenance": CANARY_PROVENANCE,
+        "execution_target": "OKX_DEMO",
+        "instrument_id": "BTC-USDT-SWAP",
+        "bundle_kind": "EXECUTION_ONLY",
+        "non_production": True,
+        "entry_kind": FRESH_EXECUTION_ONLY_POST_PERSISTENCE_RECOVERY,
+        "recovery_of_job_id": source.id,
+        "supersedes_job_ids": supersedes,
+        "recovery_boundary": "POST_PERSISTENCE_LINEAGE_WRITE_FAILURE",
+    }
+    evidence = {
+        "provenance": CANARY_PROVENANCE,
+        "non_production": True,
+        "entry_kind": FRESH_EXECUTION_ONLY_POST_PERSISTENCE_RECOVERY,
+        "recovery_of_job_id": source.id,
+        "supersedes_job_ids": supersedes,
+        "recovery_boundary": "POST_PERSISTENCE_LINEAGE_WRITE_FAILURE",
+        "snapshot_evidence": {
+            kind: {
+                "snapshot_id": "post-persistence-{}".format(kind),
+                "digest": str(index) * 64,
+                "expires_at": expires_at.isoformat(),
+            }
+            for index, kind in enumerate(("instrument", "market", "account"), start=1)
+        },
+    }
+    job = ResearchJob(
+        execution_scope_id="LOCAL_DRY_RUN",
+        job_type="okx_demo_controlled_canary",
+        operation=CANARY_OPERATION,
+        idempotency_key_digest=hashlib.sha256(key.encode()).hexdigest(),
+        request_hash="d" * 64,
+        request_payload=payload,
+        status="SUCCESS",
+        stage="CANARY_SNAPSHOTS_READY",
+        attempt_count=1,
+        max_attempts=1,
+        evidence_snapshot=evidence,
+        started_at=NOW,
+        completed_at=NOW,
+    )
+    db_session.add(job)
+    db_session.commit()
+    return job
+
+
+def _successful_post_persistence_lineage(
+    db_session,
+    *,
+    post_expires_at: datetime = NOW - timedelta(seconds=1),
+):
+    legacy = _blocked_attestation_job(
+        db_session,
+        key="final-expiry-legacy",
+        request_payload={
+            "provenance": CANARY_PROVENANCE,
+            "execution_target": "OKX_DEMO",
+            "instrument_id": "BTC-USDT-SWAP",
+            "timeframe": "1m",
+            "candle_limit": 2,
+            "non_production": True,
+        },
+    )
+    terminal = _blocked_attestation_job(
+        db_session,
+        key="final-expiry-terminal",
+        evidence={"provenance": CANARY_PROVENANCE},
+    )
+    source = _successful_fresh_source(
+        db_session,
+        legacy_ids=(legacy.id, terminal.id),
+    )
+    first = _successful_refresh_successor(db_session, source)
+    second = _successful_refresh_successor(
+        db_session,
+        first,
+        entry_kind=FRESH_EXECUTION_ONLY_REFRESH_RETRY,
+        key="final-expiry-refresh-retry",
+    )
+    recovery = _successful_recovery_successor(db_session, second)
+    post = _successful_post_persistence_successor(
+        db_session,
+        recovery,
+        expires_at=post_expires_at,
+    )
+    return legacy, terminal, source, first, second, recovery, post
+
+
 def test_refresh_allows_one_bounded_retry_from_stale_successor(
     db_session, monkeypatch
 ):
@@ -1554,6 +1687,154 @@ def test_post_persistence_recovery_is_single_use_and_shape_driven(
             idempotency_key="post-persistence-successor"
         )
     assert replay.value.job_id == successor.id
+
+
+def test_final_expiry_recovery_is_single_use_cumulative_and_idempotent(
+    db_session, monkeypatch
+):
+    monkeypatch.setenv("FREQTRADE_AI_EXECUTION_TARGET", "OKX_DEMO")
+    monkeypatch.setenv("FREQTRADE_AI_SIMULATED_TRADING", "true")
+    monkeypatch.setenv("FREQTRADE_AI_ALLOW_REAL_FUNDS", "false")
+    lineage = _successful_post_persistence_lineage(db_session)
+    post = lineage[-1]
+    service = OkxDemoCanaryPreparationService(db_session, now_provider=lambda: NOW)
+
+    with pytest.raises(OkxDemoCanaryPreparationWaiting) as waiting:
+        service.prepare_final_expiry_recovery(idempotency_key="final-expiry-successor")
+    successor = db_session.get(ResearchJob, waiting.value.job_id)
+    assert successor.request_payload == {
+        "provenance": CANARY_PROVENANCE,
+        "execution_target": "OKX_DEMO",
+        "instrument_id": "BTC-USDT-SWAP",
+        "bundle_kind": "EXECUTION_ONLY",
+        "non_production": True,
+        "entry_kind": FRESH_EXECUTION_ONLY_FINAL_EXPIRY_RECOVERY,
+        "recovery_of_job_id": post.id,
+        "supersedes_job_ids": [job.id for job in lineage],
+        "recovery_boundary": "POST_PERSISTENCE_RECOVERY_SNAPSHOT_EXPIRY",
+    }
+    assert successor.max_attempts == 1
+
+    with pytest.raises(OkxDemoCanaryPreparationBlocked, match="already exists"):
+        service.prepare_final_expiry_recovery(
+            idempotency_key="final-expiry-second-successor"
+        )
+    with pytest.raises(OkxDemoCanaryPreparationWaiting) as replay:
+        service.prepare_final_expiry_recovery(idempotency_key="final-expiry-successor")
+    assert replay.value.job_id == successor.id
+
+
+def test_final_expiry_recovery_requires_explicitly_expired_source(
+    db_session, monkeypatch
+):
+    monkeypatch.setenv("FREQTRADE_AI_EXECUTION_TARGET", "OKX_DEMO")
+    monkeypatch.setenv("FREQTRADE_AI_SIMULATED_TRADING", "true")
+    monkeypatch.setenv("FREQTRADE_AI_ALLOW_REAL_FUNDS", "false")
+    _successful_post_persistence_lineage(
+        db_session,
+        post_expires_at=NOW + timedelta(seconds=1),
+    )
+    with pytest.raises(OkxDemoCanaryPreparationBlocked, match="still fresh"):
+        OkxDemoCanaryPreparationService(
+            db_session, now_provider=lambda: NOW
+        ).prepare_final_expiry_recovery(idempotency_key="final-expiry-too-fresh")
+    assert (
+        db_session.query(ResearchJob)
+        .filter(
+            ResearchJob.operation == CANARY_OPERATION,
+            ResearchJob.request_payload["entry_kind"].as_string()
+            == FRESH_EXECUTION_ONLY_FINAL_EXPIRY_RECOVERY,
+        )
+        .count()
+        == 0
+    )
+
+
+def test_final_expiry_recovery_rejects_pending_unknown_history_without_residue(
+    db_session, monkeypatch
+):
+    monkeypatch.setenv("FREQTRADE_AI_EXECUTION_TARGET", "OKX_DEMO")
+    monkeypatch.setenv("FREQTRADE_AI_SIMULATED_TRADING", "true")
+    monkeypatch.setenv("FREQTRADE_AI_ALLOW_REAL_FUNDS", "false")
+    lineage = _successful_post_persistence_lineage(db_session)
+    pending = ResearchJob(
+        execution_scope_id="LOCAL_DRY_RUN",
+        job_type="okx_demo_controlled_canary",
+        operation=CANARY_OPERATION,
+        idempotency_key_digest="9" * 64,
+        request_hash="8" * 64,
+        request_payload={"provenance": CANARY_PROVENANCE},
+        status="AWAITING_APPROVAL",
+        stage="CANARY_SNAPSHOT_REQUESTED",
+        attempt_count=0,
+        max_attempts=1,
+        evidence_snapshot={"provenance": CANARY_PROVENANCE},
+        started_at=NOW,
+    )
+    db_session.add(pending)
+    db_session.commit()
+    before = db_session.query(ResearchJob).count()
+
+    with pytest.raises(OkxDemoCanaryPreparationBlocked, match="unknown or pending"):
+        OkxDemoCanaryPreparationService(
+            db_session, now_provider=lambda: NOW
+        ).prepare_final_expiry_recovery(idempotency_key="final-expiry-pending")
+    assert db_session.query(ResearchJob).count() == before == len(lineage) + 1
+
+
+def test_final_expiry_runtime_attestation_then_atomic_lineage_finalization(
+    db_session, monkeypatch
+):
+    monkeypatch.setenv("FREQTRADE_AI_EXECUTION_TARGET", "OKX_DEMO")
+    monkeypatch.setenv("FREQTRADE_AI_SIMULATED_TRADING", "true")
+    monkeypatch.setenv("FREQTRADE_AI_ALLOW_REAL_FUNDS", "false")
+    lineage = _successful_post_persistence_lineage(db_session)
+    service = OkxDemoCanaryPreparationService(db_session, now_provider=lambda: NOW)
+    key = "final-expiry-runtime"
+    with pytest.raises(OkxDemoCanaryPreparationWaiting) as waiting:
+        service.prepare_final_expiry_recovery(idempotency_key=key)
+    successor = db_session.get(ResearchJob, waiting.value.job_id)
+
+    class Reference:
+        def __init__(self, database_id, snapshot_id, digest):
+            self.database_id = database_id
+            self.snapshot_id = snapshot_id
+            self.digest = digest
+
+    class Bundle:
+        observed_at = NOW
+        expires_at = NOW + timedelta(seconds=30)
+        instrument = Reference(1, "final-instrument", "a" * 64)
+        market = Reference(2, "final-market", "b" * 64)
+        account = Reference(3, "final-account", "c" * 64)
+
+    class RuntimeRead:
+        def capture_execution_attestation(self, db, *, inst_id):
+            assert inst_id == "BTC-USDT-SWAP"
+            return Bundle()
+
+    assert process_pending_canary_attestation(
+        read_client=RuntimeRead(), db=db_session, now=NOW
+    ) is True
+    db_session.commit()
+    db_session.refresh(successor)
+    assert successor.status == "SUCCESS"
+    assert successor.stage == "CANARY_SNAPSHOTS_READY"
+    assert successor.evidence_snapshot["entry_kind"] == (
+        FRESH_EXECUTION_ONLY_FINAL_EXPIRY_RECOVERY
+    )
+    assert successor.evidence_snapshot["recovery_of_job_id"] == lineage[-1].id
+    assert successor.evidence_snapshot["recovery_boundary"] == (
+        "POST_PERSISTENCE_RECOVERY_SNAPSHOT_EXPIRY"
+    )
+
+    snapshots = _seed_attested_snapshots(db_session)
+    _patch_lineage_dependencies(monkeypatch, snapshots)
+    result = service.prepare_final_expiry_recovery(idempotency_key=key)
+    assert result.operation_status == "PREPARED"
+    assert result.entry_kind == FRESH_EXECUTION_ONLY_FINAL_EXPIRY_RECOVERY
+    assert result.recovery_of_job_id == lineage[-1].id
+    assert result.supersedes_job_ids == tuple(job.id for job in lineage)
 
 
 def test_post_persistence_recovery_rejects_existing_execution_activity(
