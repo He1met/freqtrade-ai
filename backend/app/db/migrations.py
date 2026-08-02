@@ -302,6 +302,10 @@ DECLARE
     derived_quantity numeric;
     derived_limit_price numeric;
     computed_notional numeric;
+    expected_signal_digest text;
+    expected_lineage jsonb;
+    expected_canonical_input jsonb;
+    expected_request_snapshot jsonb;
     inserted_intent_id bigint;
     inserted_decision_id bigint;
     inserted_approval_id bigint;
@@ -409,6 +413,54 @@ BEGIN
     stop_loss := (p_payload->>'stop_loss')::numeric;
     take_profit := (p_payload->>'take_profit')::numeric;
     notional := (p_payload->>'notional')::numeric;
+    expected_signal_digest := encode(public.digest(convert_to(format(
+        '{"full_chain_run_id":%s,"instrument_id":"BTC-USDT-SWAP",'
+        '"provenance":"CONTROLLED_CANARY_NON_PRODUCTION",'
+        '"quantity":"%s","side":"buy"}',
+        full_chain_run_id,
+        p_payload->>'quantity'
+    ), 'UTF8'), 'sha256'), 'hex');
+    expected_lineage := jsonb_build_object(
+        'provenance', 'CONTROLLED_CANARY_NON_PRODUCTION',
+        'strategy_id', NULL,
+        'strategy_version_id', NULL,
+        'backtest_run_id', NULL,
+        'backtest_task_id', NULL,
+        'backtest_result_id', NULL,
+        'strategy_score_id', NULL
+    );
+    expected_canonical_input := jsonb_build_object(
+        'execution_target', 'OKX_DEMO',
+        'full_chain_run_id', full_chain_run_id,
+        'candidate_approval_id', NULL,
+        'signal_snapshot_id', NULL,
+        'signal_digest', expected_signal_digest,
+        'lineage', expected_lineage,
+        'snapshot_ids', jsonb_build_object(
+            'instrument', p_payload->>'instrument_snapshot_id',
+            'market', p_payload->>'market_snapshot_id',
+            'account', p_payload->>'account_snapshot_id'
+        ),
+        'instrument_id', 'BTC-USDT-SWAP',
+        'side', 'buy',
+        'position_side', 'long',
+        'order_type', 'limit',
+        'quantity', p_payload->>'quantity',
+        'limit_price', p_payload->>'limit_price',
+        'reference_price', p_payload->>'reference_price',
+        'leverage', p_payload->>'leverage',
+        'margin_mode', 'isolated',
+        'stop_loss', p_payload->>'stop_loss',
+        'take_profit', p_payload->>'take_profit',
+        'reduce_only', FALSE,
+        'provenance', 'CONTROLLED_CANARY_NON_PRODUCTION'
+    );
+    expected_request_snapshot := jsonb_build_object(
+        'canonical_input', expected_canonical_input,
+        'snapshot_evidence', p_payload->'request_snapshot'->'snapshot_evidence',
+        'provenance', 'CONTROLLED_CANARY_NON_PRODUCTION',
+        'non_production', TRUE
+    );
 
     IF quantity <= 0 OR limit_price <= 0 OR reference_price <= 0
        OR leverage <= 0 OR stop_loss <= 0 OR take_profit <= 0
@@ -432,6 +484,8 @@ BEGIN
             IS DISTINCT FROM 'null'::jsonb
        OR (p_payload->'request_snapshot'->'canonical_input'->>'signal_digest'
             ~ '^[0-9a-f]{64}$') IS DISTINCT FROM TRUE
+       OR p_payload->'request_snapshot'->'canonical_input'->>'signal_digest'
+            IS DISTINCT FROM expected_signal_digest
        OR p_payload->'request_snapshot'->'canonical_input'->>'instrument_id'
             IS DISTINCT FROM 'BTC-USDT-SWAP'
        OR p_payload->'request_snapshot'->'canonical_input'->>'side'
@@ -457,15 +511,10 @@ BEGIN
        OR p_payload->'request_snapshot'->'canonical_input'->>'take_profit'
             IS DISTINCT FROM p_payload->>'take_profit'
        OR p_payload->'request_snapshot'->'canonical_input'->'lineage'
-            IS DISTINCT FROM jsonb_build_object(
-                'provenance', 'CONTROLLED_CANARY_NON_PRODUCTION',
-                'strategy_id', NULL,
-                'strategy_version_id', NULL,
-                'backtest_run_id', NULL,
-                'backtest_task_id', NULL,
-                'backtest_result_id', NULL,
-                'strategy_score_id', NULL
-            )
+            IS DISTINCT FROM expected_lineage
+       OR p_payload->'request_snapshot'->'canonical_input'
+            IS DISTINCT FROM expected_canonical_input
+       OR p_payload->'request_snapshot' IS DISTINCT FROM expected_request_snapshot
     THEN
         RAISE EXCEPTION 'controlled canary lineage safety contract failed';
     END IF;
@@ -510,6 +559,16 @@ BEGIN
            OR decision_row.policy_digest IS DISTINCT FROM p_payload->>'policy_digest'
            OR decision_row.decision IS DISTINCT FROM 'APPROVED'
            OR decision_row.policy_version IS DISTINCT FROM 'controlled-canary-v1'
+           OR decision_row.evidence_snapshot::jsonb IS DISTINCT FROM jsonb_build_object(
+                'reasons', '[]'::jsonb,
+                'input_digest', p_payload->>'canonical_hash',
+                'policy_digest', p_payload->>'policy_digest',
+                'lineage', expected_lineage,
+                'notional', p_payload->>'notional',
+                'provenance', 'CONTROLLED_CANARY_NON_PRODUCTION',
+                'non_production', TRUE,
+                'llm_authority', FALSE
+           )
            OR decision_row.evidence_snapshot::jsonb->>'provenance'
                 IS DISTINCT FROM 'CONTROLLED_CANARY_NON_PRODUCTION'
            OR decision_row.evidence_snapshot::jsonb->'non_production'
@@ -548,6 +607,13 @@ BEGIN
            OR approval_row.status IS DISTINCT FROM 'ACTIVE'
            OR approval_row.expires_at IS DISTINCT FROM expires_at
            OR approval_row.expires_at <= statement_timestamp()
+           OR approval_row.evidence_snapshot::jsonb IS DISTINCT FROM jsonb_build_object(
+                'provenance', 'CONTROLLED_CANARY_NON_PRODUCTION',
+                'non_production', TRUE,
+                'lineage', expected_lineage,
+                'snapshot_evidence', p_payload->'request_snapshot'
+                    ->'snapshot_evidence'
+           )
            OR approval_row.evidence_snapshot::jsonb->>'provenance'
                 IS DISTINCT FROM 'CONTROLLED_CANARY_NON_PRODUCTION'
            OR approval_row.evidence_snapshot::jsonb->'non_production'

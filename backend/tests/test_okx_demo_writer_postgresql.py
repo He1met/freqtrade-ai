@@ -1084,6 +1084,32 @@ def test_postgresql_canary_lineage_rejects_fabricated_provenance_and_evidence(
         "signal_digest"
     ] = None
     canonical_mutations.append(bad_signal_digest)
+    wrong_signal_digest = json.loads(json.dumps(payload))
+    wrong_signal_digest["request_snapshot"]["canonical_input"][
+        "signal_digest"
+    ] = "f" * 64
+    canonical_mutations.append(wrong_signal_digest)
+    extra_canonical_key = json.loads(json.dumps(payload))
+    extra_canonical_key["request_snapshot"]["canonical_input"][
+        "fabricated"
+    ] = True
+    canonical_mutations.append(extra_canonical_key)
+    missing_canonical_key = json.loads(json.dumps(payload))
+    missing_canonical_key["request_snapshot"]["canonical_input"].pop(
+        "take_profit"
+    )
+    canonical_mutations.append(missing_canonical_key)
+    extra_request_key = json.loads(json.dumps(payload))
+    extra_request_key["request_snapshot"]["fabricated"] = True
+    canonical_mutations.append(extra_request_key)
+    missing_request_key = json.loads(json.dumps(payload))
+    missing_request_key["request_snapshot"].pop("non_production")
+    canonical_mutations.append(missing_request_key)
+    extra_snapshot_id = json.loads(json.dumps(payload))
+    extra_snapshot_id["request_snapshot"]["canonical_input"]["snapshot_ids"][
+        "fabricated"
+    ] = "snapshot:fake"
+    canonical_mutations.append(extra_snapshot_id)
     for mutation in canonical_mutations:
         altered = _rehash_canary_payload(mutation)
         with pytest.raises(SQLAlchemyError, match="lineage safety contract"):
@@ -1113,11 +1139,6 @@ def test_postgresql_canary_lineage_rejects_fabricated_provenance_and_evidence(
         "fabricated"
     ] = True
     evidence_mutations.append(extra_evidence)
-    extra_snapshot_id = json.loads(json.dumps(payload))
-    extra_snapshot_id["request_snapshot"]["canonical_input"]["snapshot_ids"][
-        "fabricated"
-    ] = "snapshot:fake"
-    evidence_mutations.append(_rehash_canary_payload(extra_snapshot_id))
     for altered in evidence_mutations:
         with pytest.raises(SQLAlchemyError, match="attested snapshot binding"):
             with postgres_writer_engine.begin() as connection:
@@ -1278,6 +1299,73 @@ def test_postgresql_canary_lineage_function_atomic_idempotency_and_mismatch_roll
             {"payload": json.dumps(payload, sort_keys=True)},
         ).scalar_one()
         assert replay == expected_ids
+
+    exact_evidence_tampers = (
+        (
+            "risk_decisions",
+            "evidence_snapshot::jsonb || jsonb_build_object('fabricated', TRUE)",
+            "evidence_snapshot::jsonb - 'fabricated'",
+        ),
+        (
+            "risk_decisions",
+            "jsonb_set(evidence_snapshot::jsonb, '{reasons}', "
+            "'[\"fabricated\"]'::jsonb)",
+            "jsonb_set(evidence_snapshot::jsonb, '{reasons}', '[]'::jsonb)",
+        ),
+        (
+            "risk_decisions",
+            "jsonb_set(evidence_snapshot::jsonb, '{llm_authority}', 'true'::jsonb)",
+            "jsonb_set(evidence_snapshot::jsonb, '{llm_authority}', 'false'::jsonb)",
+        ),
+        (
+            "approved_executions",
+            "evidence_snapshot::jsonb || jsonb_build_object('fabricated', TRUE)",
+            "evidence_snapshot::jsonb - 'fabricated'",
+        ),
+    )
+    for table_name, mutation, restoration in exact_evidence_tampers:
+        with postgres_writer_engine.begin() as connection:
+            connection.execute(
+                text(
+                    "ALTER TABLE {} DISABLE TRIGGER USER".format(table_name)
+                )
+            )
+            connection.execute(
+                text(
+                    "UPDATE {} SET evidence_snapshot = ({})::json".format(
+                        table_name, mutation
+                    )
+                )
+            )
+            connection.execute(
+                text("ALTER TABLE {} ENABLE TRIGGER USER".format(table_name))
+            )
+        with pytest.raises(SQLAlchemyError, match="idempotency conflict"):
+            with postgres_writer_engine.begin() as connection:
+                connection.execute(text("SET LOCAL ROLE freqtrade"))
+                connection.execute(
+                    text(
+                        "SELECT create_okx_demo_canary_lineage("
+                        "CAST(:payload AS jsonb))"
+                    ),
+                    {"payload": json.dumps(payload, sort_keys=True)},
+                )
+        with postgres_writer_engine.begin() as connection:
+            connection.execute(
+                text(
+                    "ALTER TABLE {} DISABLE TRIGGER USER".format(table_name)
+                )
+            )
+            connection.execute(
+                text(
+                    "UPDATE {} SET evidence_snapshot = ({})::json".format(
+                        table_name, restoration
+                    )
+                )
+            )
+            connection.execute(
+                text("ALTER TABLE {} ENABLE TRIGGER USER".format(table_name))
+            )
 
     with postgres_writer_engine.begin() as connection:
         connection.execute(
