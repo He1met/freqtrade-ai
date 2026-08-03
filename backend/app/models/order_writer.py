@@ -90,6 +90,7 @@ class OkxDemoCanaryConsentHandoff(Base):
         Index(
             "okx_demo_canary_one_accepted_successor_idx",
             "execution_target_id",
+            "terminal_receipt_id",
             unique=True,
             postgresql_where=text("terminal_receipt_id IS NOT NULL"),
             sqlite_where=text("terminal_receipt_id IS NOT NULL"),
@@ -310,7 +311,10 @@ class OkxDemoAcceptedNotFoundTerminalization(Base):
     __tablename__ = "okx_demo_accepted_not_found_terminalizations"
     __table_args__ = (
         CheckConstraint(
-            "acceptance_kind='USER_ACCEPTED_NOT_FOUND_NO_FILL_V1'",
+            "receipt_depth=1 AND parent_terminal_receipt_id IS NULL AND "
+            "acceptance_kind='USER_ACCEPTED_NOT_FOUND_NO_FILL_V1' OR "
+            "receipt_depth=2 AND parent_terminal_receipt_id IS NOT NULL AND "
+            "acceptance_kind='USER_ACCEPTED_NOT_FOUND_NO_FILL_V2'",
             name="okx_demo_accepted_not_found_kind_check",
         ),
         CheckConstraint(
@@ -320,10 +324,15 @@ class OkxDemoAcceptedNotFoundTerminalization(Base):
             name="okx_demo_accepted_not_found_fact_check",
         ),
         CheckConstraint(
-            "source_job_id=22 AND length(request_digest)=64 "
+            "source_job_id=22 AND receipt_depth IN (1,2) "
+            "AND length(request_digest)=64 "
             "AND length(evidence_digest)=64 "
             "AND length(acceptance_digest)=64",
             name="okx_demo_accepted_not_found_identity_check",
+        ),
+        UniqueConstraint(
+            "receipt_depth",
+            name="okx_demo_accepted_not_found_receipt_depth_key",
         ),
     )
 
@@ -336,6 +345,18 @@ class OkxDemoAcceptedNotFoundTerminalization(Base):
         BigInteger().with_variant(Integer, "sqlite"),
         ForeignKey("research_jobs.id", ondelete="RESTRICT"),
         nullable=False,
+    )
+    receipt_depth: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default=text("1")
+    )
+    parent_terminal_receipt_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey(
+            "okx_demo_accepted_not_found_terminalizations.id",
+            ondelete="RESTRICT",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
         unique=True,
     )
     predecessor_handoff_id: Mapped[str] = mapped_column(
