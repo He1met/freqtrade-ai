@@ -4,6 +4,7 @@ from typing import Optional
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -86,6 +87,13 @@ class OkxDemoCanaryConsentHandoff(Base):
             postgresql_where=text(CANARY_ACTIVE_CONSENT_PREDICATE),
             sqlite_where=text(CANARY_ACTIVE_CONSENT_PREDICATE),
         ),
+        Index(
+            "okx_demo_canary_one_accepted_successor_idx",
+            "execution_target_id",
+            unique=True,
+            postgresql_where=text("terminal_receipt_id IS NOT NULL"),
+            sqlite_where=text("terminal_receipt_id IS NOT NULL"),
+        ),
         UniqueConstraint(
             "idempotency_key_digest",
             name="okx_demo_canary_consent_idempotency_unique",
@@ -116,6 +124,16 @@ class OkxDemoCanaryConsentHandoff(Base):
         String(32),
         ForeignKey(
             "okx_demo_canary_consent_handoffs.handoff_id",
+            ondelete="RESTRICT",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        unique=True,
+    )
+    terminal_receipt_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey(
+            "okx_demo_accepted_not_found_terminalizations.id",
             ondelete="RESTRICT",
             deferrable=True,
             initially="DEFERRED",
@@ -286,6 +304,91 @@ class OkxDemoSubmissionGrant(Base):
     consumed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
 
+class OkxDemoAcceptedNotFoundTerminalization(Base):
+    """Append-only owner receipt for the user's narrow NOT_FOUND acceptance."""
+
+    __tablename__ = "okx_demo_accepted_not_found_terminalizations"
+    __table_args__ = (
+        CheckConstraint(
+            "acceptance_kind='USER_ACCEPTED_NOT_FOUND_NO_FILL_V1'",
+            name="okx_demo_accepted_not_found_kind_check",
+        ),
+        CheckConstraint(
+            "absolute_submission_claim IS FALSE AND exchange_result_code='51603' "
+            "AND exchange_result_state='NOT_FOUND' AND fill_count=0 "
+            "AND attempt_count=1 AND restart_resubmission_count=0",
+            name="okx_demo_accepted_not_found_fact_check",
+        ),
+        CheckConstraint(
+            "source_job_id=22 AND length(request_digest)=64 "
+            "AND length(evidence_digest)=64 "
+            "AND length(acceptance_digest)=64",
+            name="okx_demo_accepted_not_found_identity_check",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
+    source_job_id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey("research_jobs.id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+    )
+    predecessor_handoff_id: Mapped[str] = mapped_column(
+        String(32),
+        ForeignKey("okx_demo_canary_consent_handoffs.handoff_id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+    )
+    predecessor_grant_id: Mapped[str] = mapped_column(
+        String(32),
+        ForeignKey("okx_demo_submission_grants.grant_id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+    )
+    lifecycle_id: Mapped[str] = mapped_column(
+        String(32),
+        ForeignKey("okx_demo_canary_lifecycles.lifecycle_id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+    )
+    attempt_id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey("okx_order_write_attempts.id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+    )
+    exchange_order_row_id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey("exchange_orders.id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+    )
+    acceptance_kind: Mapped[str] = mapped_column(String(48), nullable=False)
+    absolute_submission_claim: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    exchange_result_code: Mapped[str] = mapped_column(String(16), nullable=False)
+    exchange_result_state: Mapped[str] = mapped_column(String(24), nullable=False)
+    fill_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    restart_resubmission_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    request_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    evidence_observed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    evidence_snapshot: Mapped[dict] = mapped_column(JSON, nullable=False)
+    evidence_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    acceptance_digest: Mapped[str] = mapped_column(
+        String(64), nullable=False, unique=True
+    )
+    accepted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class OkxDemoCanaryLifecycle(Base):
     __tablename__ = "okx_demo_canary_lifecycles"
     __table_args__ = (
@@ -297,7 +400,7 @@ class OkxDemoCanaryLifecycle(Base):
         CheckConstraint("(cleanup_phase='ARMED' AND opening_exchange_order_row_id IS NULL AND opening_order_identity_digest IS NULL AND attributed_fill_quantity=0 AND cleanup_exchange_order_row_id IS NULL AND outcome='PENDING') OR cleanup_phase<>'ARMED'", name="okx_demo_canary_lifecycle_armed_shape_check"),
         CheckConstraint("cleanup_phase NOT IN ('OPENING_SUBMITTED','CANCEL_PENDING','CLEANUP_PENDING','RECOVERY_EXHAUSTED') OR (opening_exchange_order_row_id IS NOT NULL AND opening_order_identity_digest IS NOT NULL)", name="okx_demo_canary_lifecycle_active_shape_check"),
         CheckConstraint("cleanup_phase NOT IN ('CLEANUP_PENDING','RECOVERY_EXHAUSTED') OR outcome='FAILED'", name="okx_demo_canary_lifecycle_cleanup_failed_check"),
-        CheckConstraint("cleanup_phase<>'TERMINAL' OR (outcome IN ('PASSED','FAILED') AND terminal_at IS NOT NULL AND revoked_at IS NOT NULL AND final_reconciliation_run_id IS NOT NULL AND final_evidence_digest IS NOT NULL)", name="okx_demo_canary_lifecycle_terminal_shape_check"),
+        CheckConstraint("cleanup_phase<>'TERMINAL' OR (outcome IN ('PASSED','FAILED') AND terminal_at IS NOT NULL AND revoked_at IS NOT NULL AND final_evidence_digest IS NOT NULL AND ((accepted_terminalization_id IS NULL AND final_reconciliation_run_id IS NOT NULL) OR (accepted_terminalization_id IS NOT NULL AND final_reconciliation_run_id IS NULL)))", name="okx_demo_canary_lifecycle_terminal_shape_check"),
         CheckConstraint("cleanup_phase<>'REVOKED' OR (outcome='FAILED' AND opening_exchange_order_row_id IS NULL AND attributed_fill_quantity=0 AND terminal_at IS NOT NULL AND revoked_at IS NOT NULL AND final_reconciliation_run_id IS NOT NULL AND final_evidence_digest IS NOT NULL)", name="okx_demo_canary_lifecycle_revoked_shape_check"),
         CheckConstraint("cleanup_phase IN ('TERMINAL','REVOKED') OR (terminal_at IS NULL AND revoked_at IS NULL)", name="okx_demo_canary_lifecycle_nonterminal_shape_check"),
         CheckConstraint("(outcome='FAILED')=(failure_code IS NOT NULL)", name="okx_demo_canary_lifecycle_failure_code_check"),
@@ -326,6 +429,16 @@ class OkxDemoCanaryLifecycle(Base):
     cleanup_approval_id: Mapped[Optional[int]] = mapped_column(BigInteger().with_variant(Integer,"sqlite"), ForeignKey("approved_executions.id", ondelete="RESTRICT"))
     cleanup_exchange_order_row_id: Mapped[Optional[int]] = mapped_column(BigInteger().with_variant(Integer,"sqlite"), ForeignKey("exchange_orders.id", ondelete="RESTRICT"))
     final_reconciliation_run_id: Mapped[Optional[int]] = mapped_column(BigInteger().with_variant(Integer,"sqlite"), ForeignKey("reconciliation_runs.id", ondelete="RESTRICT"))
+    accepted_terminalization_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey(
+            "okx_demo_accepted_not_found_terminalizations.id",
+            ondelete="RESTRICT",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        unique=True,
+    )
     final_evidence_digest: Mapped[Optional[str]] = mapped_column(String(64))
     outcome: Mapped[str] = mapped_column(String(16), nullable=False)
     cleanup_phase: Mapped[str] = mapped_column(String(24), nullable=False)
@@ -384,7 +497,8 @@ class OkxOrderWriteAttempt(Base):
         ),
         CheckConstraint(
             "state IN ('PREPARED', 'DISPATCHED', 'ACKNOWLEDGED', 'REJECTED', "
-            "'RECOVERY_REQUIRED', 'RESIDUAL_CLOSE_REQUIRED', 'RECONCILED')",
+            "'RECOVERY_REQUIRED', 'RESIDUAL_CLOSE_REQUIRED', 'RECONCILED', "
+            "'USER_ACCEPTED_NOT_FOUND_NO_FILL')",
             name="okx_order_write_attempts_state_check",
         ),
         CheckConstraint(

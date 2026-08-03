@@ -362,6 +362,7 @@ def test_incremental_worker_migration_preserves_existing_runtime_rows(postgres_e
             "full_chain_signal_snapshots",
             "full_chain_stage_runs",
             "okx_demo_canary_lifecycles",
+            "okx_demo_accepted_not_found_terminalizations",
             "okx_order_write_attempts",
             "okx_order_writer_leases",
             "okx_demo_account_snapshots",
@@ -880,6 +881,9 @@ def test_frozen_old_research_job_ddl_upgrades_data_and_removes_global_unique(
             )
         )
         _detach_signal_evaluations_from_full_chain(connection)
+        connection.execute(text(
+            "DROP TABLE okx_demo_accepted_not_found_terminalizations CASCADE"
+        ))
         connection.execute(text("DROP TABLE signal_evaluations"))
         connection.execute(text("DROP TABLE strategy_deployments"))
         for table_name in (
