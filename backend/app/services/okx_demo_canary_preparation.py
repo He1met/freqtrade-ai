@@ -2663,8 +2663,12 @@ def process_pending_canary_consent_handoff(
     capture_stage("SAFETY_PRECHECK", require_initial_safety)
     def reconcile_and_validate() -> int:
         observed = fresh_reconciliation()
-        run_id = getattr(observed, "reconciliation_run_id", None)
-        if not isinstance(run_id, int) or run_id <= 0:
+        run_id = (
+            observed.get("reconciliation_run_id")
+            if isinstance(observed, Mapping)
+            else getattr(observed, "reconciliation_run_id", None)
+        )
+        if type(run_id) is not int or run_id <= 0:
             raise OkxDemoCanaryPreparationBlocked(
                 "fresh reconciliation did not return an exact persisted run"
             )
