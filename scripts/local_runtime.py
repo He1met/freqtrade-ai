@@ -1545,6 +1545,7 @@ def okx_runtime_readiness(state_dir: Path) -> Dict[str, Any]:
         "adapter",
         "reconciliation",
         "writer",
+        "automation_guard",
         "pid",
     }:
         return {
@@ -1553,15 +1554,31 @@ def okx_runtime_readiness(state_dir: Path) -> Dict[str, Any]:
         }
     status = payload.get("status")
     reconciliation = payload.get("reconciliation")
+    automation_guard = payload.get("automation_guard")
+    known_guard_states = {
+        "RUNNING",
+        "BLOCKED",
+        "COOLDOWN",
+        "MANUAL_RESET_REQUIRED",
+    }
     valid_state = (
         status == "READY"
         and reconciliation in {"RECONCILED", "RECOVERED"}
+        and automation_guard == "RUNNING"
     ) or (
         status == "BLOCKED_OPENINGS"
-        and reconciliation in {"DRIFTED", "STALE", "UNKNOWN"}
+        and reconciliation in {
+            "RECONCILED",
+            "RECOVERED",
+            "DRIFTED",
+            "STALE",
+            "UNKNOWN",
+        }
+        and automation_guard in known_guard_states
     ) or (
         status == "RECOVERY_ONLY"
         and reconciliation == "DRIFTED"
+        and automation_guard in known_guard_states
     )
     if (
         not valid_state
@@ -1581,6 +1598,7 @@ def okx_runtime_readiness(state_dir: Path) -> Dict[str, Any]:
         "adapter": "ATTESTED",
         "reconciliation": reconciliation,
         "writer": "UNIQUE",
+        "automation_guard": automation_guard,
     }
 
 
@@ -1708,6 +1726,7 @@ def wait_for_okx_runtime(
     while time.monotonic() < deadline:
         if okx_runtime_readiness(state_dir).get("status") in {
             "READY",
+            "BLOCKED_OPENINGS",
             "RECOVERY_ONLY",
         }:
             return
