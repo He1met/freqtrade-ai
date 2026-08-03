@@ -442,6 +442,52 @@ def test_postgresql_concurrent_publish_has_exactly_three_active_slots(
         engine.dispose()
 
 
+def test_postgresql_runtime_claim_locks_only_signal_evaluation(
+    monkeypatch,
+) -> None:
+    database_url = os.environ.get("POSTGRES_WORKER_URL")
+    if not database_url:
+        pytest.skip("POSTGRES_WORKER_URL is required for the runtime ACL gate")
+    monkeypatch.setattr(
+        StrategyValidationMatrixService,
+        "assert_current_for_promotion",
+        lambda self, plan: plan.promotion_evidence,
+    )
+    engine = create_database_engine(database_url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
+            connection.execute(text("CREATE SCHEMA public"))
+        upgrade_database(engine)
+        factory = create_session_factory(engine)
+        with factory() as db:
+            approval = seed_approved_candidate(db, suffix="RuntimeAcl")
+            deployment = publish(db, approval.id)
+            evaluation = StrategyDeploymentRepository(db).enqueue_evaluation(
+                deployment.id,
+                closed_candle_at=NOW,
+            )
+
+        with factory() as runtime_db:
+            runtime_db.execute(text("SET ROLE freqtrade"))
+            claimed = StrategyDeploymentRepository(runtime_db).claim_next(
+                owner="okx-runtime",
+                lease_seconds=60,
+                now=NOW + timedelta(seconds=1),
+            )
+            assert claimed is not None
+            assert claimed.id == evaluation.id
+            assert claimed.status == "LEASED"
+            runtime_db.execute(text("RESET ROLE"))
+            runtime_db.commit()
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
+            connection.execute(text("CREATE SCHEMA public"))
+        upgrade_database(engine)
+        engine.dispose()
+
+
 def test_postgresql_owner_demo_selection_is_auditable_and_idempotent(
     monkeypatch,
     tmp_path: Path,
