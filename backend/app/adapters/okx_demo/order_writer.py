@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import secrets
@@ -11,6 +11,7 @@ import time
 from typing import Any, Literal, Mapping, Optional, Protocol
 
 from app.adapters.okx_demo.models import InstrumentSpec
+from app.adapters.okx_demo.errors import OkxReadAdapterError
 from app.adapters.okx_demo.read_adapter import OkxDemoReadClient
 from app.adapters.okx_demo.write_semantics import (
     OkxDemoRecoveryRequired,
@@ -706,6 +707,19 @@ class OkxDemoOrderWriter:
         try:
             item = self._order(order)
             state = str(item["state"])
+            if attempt.operation in {"PLACE", "CLOSE"}:
+                identity_contracts = Decimal(
+                    str(attempt.safe_request_snapshot["sz"])
+                )
+            elif attempt.operation == "AMEND" and expected_contracts is not None:
+                identity_contracts = expected_contracts
+            else:
+                identity_contracts = None
+            if (
+                identity_contracts is not None
+                and Decimal(str(item["size"])) != identity_contracts
+            ):
+                raise OkxDemoRecoveryRequired("ORDER_SIZE_IDENTITY_MISMATCH")
             if require_terminal and state not in TERMINAL_ORDER_STATES:
                 raise OkxDemoRecoveryRequired("ORDER_NOT_TERMINAL")
             if expected_contracts is not None and Decimal(str(item["size"])) != expected_contracts:
@@ -744,23 +758,42 @@ class OkxDemoOrderWriter:
             return _result(attempt, order, order_item=item)
         except (
             KeyError,
+            InvalidOperation,
             TypeError,
             ValueError,
             OkxDemoRecoveryRequired,
             OkxDemoWriteBlocked,
             RuntimeError,
-        ):
+        ) as exc:
+            exact_order_not_found = (
+                isinstance(exc, OkxReadAdapterError) and exc.okx_code == "51603"
+            )
+            reason_code = (
+                "EXACT_ORDER_NOT_FOUND"
+                if exact_order_not_found
+                else "READ_RECONCILIATION_FAILED"
+            )
+            safe_response_snapshot = (
+                {
+                    "exact_order_get": "NOT_FOUND",
+                    "okx_code": "51603",
+                }
+                if exact_order_not_found
+                else None
+            )
             if attempt.state != WriteState.RECOVERY_REQUIRED:
                 attempt = self._store.transition(
                     attempt,
                     event=WriteEvent.OUTCOME_UNKNOWN,
-                    reason_code="READ_RECONCILIATION_FAILED",
+                    reason_code=reason_code,
+                    safe_response_snapshot=safe_response_snapshot,
                 )
             else:
                 attempt = self._store.transition(
                     attempt,
                     event=WriteEvent.RECOVERY_STILL_UNKNOWN,
-                    reason_code="READ_RECONCILIATION_FAILED",
+                    reason_code=reason_code,
+                    safe_response_snapshot=safe_response_snapshot,
                 )
             return _result(
                 attempt,

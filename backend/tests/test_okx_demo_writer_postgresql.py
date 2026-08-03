@@ -18,6 +18,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.adapters.okx_demo.errors import OkxReadAdapterError
 from app.adapters.okx_demo.write_semantics import OkxDemoWriteBlocked
 from app.adapters.okx_demo.models import InstrumentSpec, OkxReadSnapshot, SnapshotMetadata
 from app.adapters.okx_demo.order_writer import OkxDemoOrderWriter
@@ -6154,12 +6155,23 @@ def test_postgresql_v28_prepared_restart_is_get_only_and_post_at_most_once(
     restart_now = submit_now + timedelta(seconds=2)
     post_calls = []
 
+    class NotFoundRecovery:
+        def order(self, inst_id, *, order_id=None, client_order_id=None):
+            raise OkxReadAdapterError(
+                kind="BUSINESS_ERROR",
+                status="FAILED",
+                message="OKX returned a read business error",
+                okx_code="51603",
+            )
+
+    second_restart_now = restart_now + timedelta(seconds=11)
+
     class ReadOnlyRecovery:
         def order(self, inst_id, *, order_id=None, client_order_id=None):
             return OkxReadSnapshot(
                 metadata=SnapshotMetadata(
-                    resource="order", fetched_at=restart_now,
-                    expires_at=restart_now + timedelta(seconds=30),
+                    resource="order", fetched_at=second_restart_now,
+                    expires_at=second_restart_now + timedelta(seconds=30),
                     stale=False, authenticated=True,
                 ),
                 items=[{
@@ -6182,8 +6194,26 @@ def test_postgresql_v28_prepared_restart_is_get_only_and_post_at_most_once(
             session, now_provider=lambda: restart_now
         )
         result = OkxDemoOrderWriter(
-            read_client=ReadOnlyRecovery(), write_transport=NoPostTransport(),
+            read_client=NotFoundRecovery(), write_transport=NoPostTransport(),
             store=restarted_store, now_provider=lambda: restart_now,
+        ).reconcile_unresolved(prepared.attempt_id)
+        assert result.status == "RECOVERY_REQUIRED"
+    with Session(postgres_writer_engine) as admin:
+        attempt = admin.get(OkxOrderWriteAttempt, prepared.attempt_id)
+        assert attempt.state == "RECOVERY_REQUIRED"
+        assert attempt.reason_code == "EXACT_ORDER_NOT_FOUND"
+        assert attempt.safe_response_snapshot == {
+            "exact_order_get": "NOT_FOUND",
+            "okx_code": "51603",
+        }
+
+    with Session(postgres_writer_engine) as session:
+        restarted_store = SqlAlchemyOrderWriterStore(
+            session, now_provider=lambda: second_restart_now
+        )
+        result = OkxDemoOrderWriter(
+            read_client=ReadOnlyRecovery(), write_transport=NoPostTransport(),
+            store=restarted_store, now_provider=lambda: second_restart_now,
         ).reconcile_unresolved(prepared.attempt_id)
         assert result.status == "RECONCILED"
     with Session(postgres_writer_engine) as admin:
