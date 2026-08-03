@@ -25,7 +25,7 @@ import secrets
 from typing import Any, Callable, Mapping, Optional
 
 from sqlalchemy import select, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.adapters.okx_demo.errors import OkxReadAdapterError
@@ -286,9 +286,11 @@ class OkxDemoCanaryPreparationService:
                 },
             ).scalar_one()
             self.db.commit()
-        except Exception:
+        except SQLAlchemyError as exc:
             self.db.rollback()
-            raise
+            raise OkxDemoCanaryPreparationBlocked(
+                "controlled canary consent request was rejected"
+            ) from exc
         return CanaryConsentRequestResult(
             operation_status=str(row["status"]),
             handoff_id=str(row["handoff_id"]),

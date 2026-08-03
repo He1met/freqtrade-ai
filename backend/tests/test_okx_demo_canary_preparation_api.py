@@ -388,7 +388,7 @@ def test_consent_finalize_endpoint_persists_one_bounded_request(client, monkeypa
         calls.append(idempotency_key)
         assert operator_token == "operator-test-token"
         return SimpleNamespace(
-            operation_status="REQUESTED",
+            operation_status="REQUESTED" if len(calls) == 1 else "EXPIRED",
             handoff_id="a" * 32,
             source_job_id=22,
             consent_deadline_at=NOW + timedelta(seconds=60),
@@ -410,12 +410,17 @@ def test_consent_finalize_endpoint_persists_one_bounded_request(client, monkeypa
     replay = api.post(
         "/api/okx-demo/canary/consent-finalize", headers=headers, json={}
     )
-    assert first.status_code == replay.status_code == 202
-    assert first.json() == replay.json()
+    terminal_replay = api.post(
+        "/api/okx-demo/canary/consent-finalize", headers=headers, json={}
+    )
+    assert first.status_code == replay.status_code == terminal_replay.status_code == 202
     assert first.json()["operation_status"] == "REQUESTED"
+    assert replay.json()["operation_status"] == "EXPIRED"
+    assert terminal_replay.json() == replay.json()
+    assert first.json()["handoff_id"] == replay.json()["handoff_id"]
     assert first.json()["source_job_id"] == 22
     assert first.json()["credential_values_recorded"] is False
-    assert calls == ["final-consent-627"]
+    assert calls == ["final-consent-627", "final-consent-627"]
 
 
 def test_refresh_terminal_block_remains_cached_for_same_key(client, monkeypatch):
