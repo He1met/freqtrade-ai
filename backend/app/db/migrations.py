@@ -61,7 +61,8 @@ CANARY_LINEAGE_WRITE_BASE_VERSION = "20260801_25"
 CANARY_FINAL_EXPIRY_BASE_VERSION = "20260802_26"
 CANARY_LIFECYCLE_BASE_VERSION = "20260802_27"
 CANARY_CONSENT_HANDOFF_BASE_VERSION = "20260802_28"
-SCHEMA_VERSION = "20260803_29"
+CANARY_CONSENT_FAILURE_AUDIT_BASE_VERSION = "20260803_29"
+SCHEMA_VERSION = "20260803_30"
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 ATTESTATION_PROOF_KEY_ENV = "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"
 OPERATOR_TOKEN_ENV = "FREQTRADE_AI_OPERATOR_TOKEN"
@@ -5709,6 +5710,7 @@ def _canary_consent_acl_problems(connection: Connection, schema_name: str) -> li
     for signature in {
         "request_okx_demo_canary_consent(text,text,text,text)",
         "pending_okx_demo_canary_consent()",
+        "fail_requested_okx_demo_canary_consent(text,text,text)",
         "claim_okx_demo_canary_consent(text,text,bigint,jsonb)",
         "finalize_okx_demo_canary_consent(text,text,bigint,bigint,bigint,bigint,jsonb)",
         "finalized_okx_demo_canary_consent(text)",
@@ -7521,6 +7523,40 @@ def _add_canary_consent_handoff_boundary(connection: Connection) -> None:
         'consent_deadline_at',h.consent_deadline_at);
     END $$;
 
+    CREATE OR REPLACE FUNCTION SCHEMA_TOKEN.fail_requested_okx_demo_canary_consent(
+      p_handoff_id text,p_failure_stage text,p_failure_category text)
+    RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+    DECLARE h SCHEMA_TOKEN.okx_demo_canary_consent_handoffs%ROWTYPE;
+    BEGIN
+      IF p_failure_stage NOT IN (
+           'SAFETY_PRECHECK','FRESH_RECONCILIATION','DB_CLOCK',
+           'HANDOFF_RECHECK','RECONCILIATION_VALIDATE','ATTESTATION_CAPTURE',
+           'ATTESTATION_BINDING','HANDOFF_CLAIM','LINEAGE_PERSIST',
+           'SAFETY_FINAL','HANDOFF_FINALIZE')
+         OR p_failure_category NOT IN (
+           'DATABASE','EXCHANGE_READ','SAFETY','UNEXPECTED') THEN
+        RAISE EXCEPTION 'invalid consent capture failure identity';
+      END IF;
+      SELECT * INTO h FROM SCHEMA_TOKEN.okx_demo_canary_consent_handoffs
+        WHERE handoff_id=p_handoff_id FOR UPDATE;
+      IF NOT FOUND OR h.status<>'REQUESTED' THEN RETURN FALSE; END IF;
+      IF EXISTS (SELECT 1 FROM SCHEMA_TOKEN.trade_intents
+          WHERE execution_target_id='OKX_DEMO'
+            AND request_snapshot::jsonb->>'provenance'='CONTROLLED_CANARY_NON_PRODUCTION')
+         OR EXISTS (SELECT 1 FROM SCHEMA_TOKEN.okx_demo_submission_grants)
+         OR EXISTS (SELECT 1 FROM SCHEMA_TOKEN.okx_order_write_attempts
+             WHERE execution_target_id='OKX_DEMO')
+         OR EXISTS (SELECT 1 FROM SCHEMA_TOKEN.okx_demo_canary_lifecycles) THEN
+        RAISE EXCEPTION 'consent capture failure boundary is occupied';
+      END IF;
+      UPDATE SCHEMA_TOKEN.okx_demo_canary_consent_handoffs
+        SET status='EXPIRED',
+            failure_code='CAPTURE_'||p_failure_stage||'_'||p_failure_category,
+            updated_at=statement_timestamp()
+        WHERE handoff_id=h.handoff_id AND status='REQUESTED';
+      RETURN FOUND;
+    END $$;
+
     CREATE OR REPLACE FUNCTION SCHEMA_TOKEN.claim_okx_demo_canary_consent(
       p_handoff_id text,p_runtime_id text,p_reconciliation_run_id bigint,p_binding jsonb)
     RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
@@ -8009,6 +8045,7 @@ def _add_canary_consent_handoff_boundary(connection: Connection) -> None:
     signatures = (
         "request_okx_demo_canary_consent(text,text,text,text)",
         "pending_okx_demo_canary_consent()",
+        "fail_requested_okx_demo_canary_consent(text,text,text)",
         "claim_okx_demo_canary_consent(text,text,bigint,jsonb)",
         "finalize_okx_demo_canary_consent(text,text,bigint,bigint,bigint,bigint,jsonb)",
         "finalized_okx_demo_canary_consent(text)",
@@ -8163,6 +8200,7 @@ def upgrade_database(engine: Engine) -> str:
                 CANARY_FINAL_EXPIRY_BASE_VERSION,
                 CANARY_LIFECYCLE_BASE_VERSION,
                 CANARY_CONSENT_HANDOFF_BASE_VERSION,
+                CANARY_CONSENT_FAILURE_AUDIT_BASE_VERSION,
             }
             if current_version in supported_upgrade_versions:
                 connection.execute(
@@ -8200,6 +8238,7 @@ def upgrade_database(engine: Engine) -> str:
                 CANARY_FINAL_EXPIRY_BASE_VERSION,
                 CANARY_LIFECYCLE_BASE_VERSION,
                 CANARY_CONSENT_HANDOFF_BASE_VERSION,
+                CANARY_CONSENT_FAILURE_AUDIT_BASE_VERSION,
             }:
                 problems = _finalize_current_canary_boundaries(connection)
                 if problems:

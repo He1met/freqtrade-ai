@@ -14,7 +14,7 @@ import tempfile
 import threading
 from typing import Any, Callable, Mapping, Optional, Protocol, Sequence
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 from app.core.config import get_settings
 
@@ -44,6 +44,7 @@ from app.services.okx_demo_submission_grant import (
     settle_canary_consent_handoff,
 )
 from app.services.okx_demo_canary_preparation import (
+    OkxDemoCanaryConsentCaptureFailed,
     process_pending_canary_attestation,
     process_pending_canary_consent_handoff,
 )
@@ -680,17 +681,43 @@ def serve(
                             "recovered consent grant failed closed"
                         )
                     continue
-                consent_finalized = process_pending_canary_consent_handoff(
-                    read_client=server_session.read,
-                    db=db,
-                    runtime_instance_id=adapter.runtime_instance_id,
-                    fresh_reconciliation=lambda: adapter.observe(
+                try:
+                    consent_finalized = process_pending_canary_consent_handoff(
                         read_client=server_session.read,
                         db=db,
-                    ),
-                    safety_check=consent_safety_check,
-                    now=now_provider(),
-                )
+                        runtime_instance_id=adapter.runtime_instance_id,
+                        fresh_reconciliation=lambda: adapter.observe(
+                            read_client=server_session.read,
+                            db=db,
+                        ),
+                        safety_check=consent_safety_check,
+                        now=now_provider(),
+                    )
+                except OkxDemoCanaryConsentCaptureFailed as exc:
+                    db.rollback()
+                    terminalized = db.execute(
+                        text(
+                            "SELECT fail_requested_okx_demo_canary_consent("
+                            ":handoff,:stage,:category)"
+                        ),
+                        {
+                            "handoff": exc.handoff_id,
+                            "stage": exc.stage,
+                            "category": exc.category,
+                        },
+                    ).scalar_one()
+                    db.commit()
+                    writer.set_openings_allowed(False)
+                    if terminalized is not True:
+                        raise OkxDemoRuntimeBlocked(
+                            "consent capture failure was not terminalized"
+                        ) from exc
+                    raise OkxDemoRuntimeBlocked(
+                        "consent capture failed closed "
+                        "[stage={}, category={}]".format(
+                            exc.stage, exc.category
+                        )
+                    ) from exc
                 if consent_finalized is not None:
                     # Commit A makes the exact fresh lineage durable with no
                     # grant.  Only this same runtime identity may issue and
