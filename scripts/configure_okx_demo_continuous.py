@@ -25,7 +25,7 @@ from app.services.okx_demo_strategy_selection import (  # noqa: E402
 
 STRATEGIES = (
     "DeepSeekRegimeCrossoverCandidateB",
-    "CodexOkxDemoDualRsiStrategy",
+    "Codex Okx Demo Dual RSI Strategy",
 )
 
 

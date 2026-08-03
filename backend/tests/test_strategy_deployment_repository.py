@@ -43,7 +43,10 @@ from app.repositories.full_chain import (
 )
 from app.services.strategy_promotion import promotion_candidate_digest
 from app.services.strategy_validation_matrix import StrategyValidationMatrixService
-from app.services.okx_demo_strategy_selection import OkxDemoStrategySelectionService
+from app.services.okx_demo_strategy_selection import (
+    OkxDemoStrategySelectionBlocked,
+    OkxDemoStrategySelectionService,
+)
 
 
 NOW = datetime(2026, 7, 29, 12, 0, tzinfo=timezone.utc)
@@ -476,12 +479,31 @@ def test_postgresql_owner_demo_selection_is_auditable_and_idempotent(
             strategy = db.get(Strategy, version.strategy_id)
             assert strategy is not None
             strategy.name = "DeepSeekRegimeCrossoverCandidateB"
+            strategy.current_version_id = version.id
+            version.generated_code = strategy_source.decode("utf-8")
+            version.blueprint = {
+                "class_name": "DeepSeekRegimeCrossoverCandidateB",
+                "timeframe": "5m",
+            }
+            selected_score = db.scalar(
+                select(StrategyScore).where(StrategyScore.strategy_version_id == version.id)
+            )
+            assert selected_score is not None
+            selected_result = db.get(BacktestResult, selected_score.backtest_result_id)
+            assert selected_result is not None
+            selected_run = db.get(BacktestRun, selected_result.backtest_run_id)
+            assert selected_run is not None
+            selected_run.config_snapshot = {
+                "strategy_version_id": version.id,
+                "strategy_file_path": str(source_path),
+            }
             plan = db.scalar(
                 select(StrategyValidationPlan).where(
                     StrategyValidationPlan.strategy_version_id == version.id
                 )
             )
             assert plan is not None
+            plan.status = "BLOCKED"
             db.commit()
             source_chain_for_release = db.get(
                 FullChainRun,
@@ -502,6 +524,26 @@ def test_postgresql_owner_demo_selection_is_auditable_and_idempotent(
                 provider_completed=False,
                 now=NOW,
             )
+            source_approval_id = source_approval.id
+            source_chain_id = source_chain_for_release.id
+            db.expunge(source_approval)
+            db.expunge(source_chain_for_release)
+            db.execute(
+                text(
+                    "UPDATE full_chain_runs SET candidate_approval_id=NULL "
+                    "WHERE id=:chain_id"
+                ),
+                {"chain_id": source_chain_id},
+            )
+            db.execute(
+                text("DELETE FROM strategy_candidate_approvals WHERE id=:approval_id"),
+                {"approval_id": source_approval_id},
+            )
+            db.execute(
+                text("DELETE FROM full_chain_runs WHERE id=:chain_id"),
+                {"chain_id": source_chain_id},
+            )
+            db.commit()
             conflict_source = b"class CodexOkxDemoDualRsiStrategy: pass\n"
             conflict_relative_path = Path(
                 "user_data/strategies/CodexOkxDemoDualRsiStrategy.py"
@@ -522,9 +564,64 @@ def test_postgresql_owner_demo_selection_is_auditable_and_idempotent(
             assert conflict_version is not None
             conflict_strategy = db.get(Strategy, conflict_version.strategy_id)
             assert conflict_strategy is not None
-            conflict_strategy.name = "CodexOkxDemoDualRsiStrategy"
+            conflict_strategy.name = "Codex Okx Demo Dual RSI Strategy"
+            conflict_strategy.current_version_id = conflict_version.id
+            conflict_version.generated_code = conflict_source.decode("utf-8")
+            conflict_version.blueprint = {
+                "class_name": "CodexOkxDemoDualRsiStrategy",
+                "timeframe": "5m",
+            }
+            conflict_score = db.scalar(
+                select(StrategyScore).where(
+                    StrategyScore.strategy_version_id == conflict_version.id
+                )
+            )
+            assert conflict_score is not None
+            conflict_result = db.get(BacktestResult, conflict_score.backtest_result_id)
+            assert conflict_result is not None
+            conflict_run = db.get(BacktestRun, conflict_result.backtest_run_id)
+            assert conflict_run is not None
+            conflict_run.config_snapshot = {
+                "strategy_version_id": conflict_version.id,
+                "strategy_file_path": str(conflict_path),
+            }
             db.commit()
             service = OkxDemoStrategySelectionService(db, project_root=tmp_path)
+
+            strategy.current_version_id = None
+            db.commit()
+            with pytest.raises(
+                OkxDemoStrategySelectionBlocked,
+                match="current-version pointer",
+            ):
+                service.publish(strategy.name, now=NOW)
+            db.rollback()
+            strategy.current_version_id = version.id
+            db.commit()
+
+            version.generated_code = "class Forged: pass\n"
+            db.commit()
+            with pytest.raises(
+                OkxDemoStrategySelectionBlocked,
+                match="database code hash",
+            ):
+                service.publish(strategy.name, now=NOW)
+            db.rollback()
+            version.generated_code = strategy_source.decode("utf-8")
+            version.blueprint = {"class_name": "Forged", "timeframe": "5m"}
+            db.commit()
+            with pytest.raises(
+                OkxDemoStrategySelectionBlocked,
+                match="blueprint class",
+            ):
+                service.publish(strategy.name, now=NOW)
+            db.rollback()
+            version.blueprint = {
+                "class_name": "DeepSeekRegimeCrossoverCandidateB",
+                "timeframe": "5m",
+            }
+            db.commit()
+
             update_started = Event()
             update_futures = []
             original_publish = StrategyDeploymentRepository.publish
@@ -567,20 +664,27 @@ def test_postgresql_owner_demo_selection_is_auditable_and_idempotent(
             assert replay.id == first.id
             assert first.status == "ACTIVE"
             assert first.active_slot == 1
-            source_chain = db.get(FullChainRun, source_approval.full_chain_run_id)
-            assert source_chain is not None
-            selection_chain = db.get(
-                FullChainRun,
-                db.get(StrategyCandidateApproval, first.candidate_approval_id).full_chain_run_id,
+            selected_approval = db.get(
+                StrategyCandidateApproval,
+                first.candidate_approval_id,
             )
+            assert selected_approval is not None
+            selection_chain = db.get(FullChainRun, selected_approval.full_chain_run_id)
             assert selection_chain is not None
-            assert selection_chain.research_job_id != source_chain.research_job_id
-            assert first.promotion_policy_version == "okx-demo-selection-v1"
+            assert selection_chain.strategy_generation_run_id is None
+            assert "validation_plan_id" not in selected_approval.promotion_evidence["selection"]
+            assert selected_approval.promotion_evidence["selection"]["source_full_chain_id"] is None
+            assert first.promotion_policy_version == "okx-demo-selection-v2"
             assert first.evidence_snapshot["allow_real_funds"] is False
             deployment_id = first.id
             selected_version_id = first.strategy_version_id
             selected_strategy_id = first.strategy_id
             selection_approval_id = first.candidate_approval_id
+            selected_score_id = selected_score.id
+            selected_result_id = selected_result.id
+            selected_run_id = selected_run.id
+            selected_task_id = selected_result.backtest_task_id
+            selection_chain_id = selection_chain.id
 
             db.execute(
                 text(
@@ -606,7 +710,7 @@ def test_postgresql_owner_demo_selection_is_auditable_and_idempotent(
             db.rollback()
             assert db.scalar(
                 select(ResearchJob).where(
-                    ResearchJob.operation == "okx_demo.selection.fixed_v1",
+                    ResearchJob.operation == "okx_demo.selection.fixed_v2",
                     ResearchJob.strategy_id == conflict_strategy.id,
                 )
             ) is None
@@ -635,6 +739,28 @@ def test_postgresql_owner_demo_selection_is_auditable_and_idempotent(
                 "UPDATE strategy_candidate_approvals SET status='REVOKED' "
                 "WHERE id=:approval_id",
                 {"approval_id": selection_approval_id},
+            ),
+            (
+                "UPDATE strategy_scores SET total_score=0 WHERE id=:score_id",
+                {"score_id": selected_score_id},
+            ),
+            (
+                "UPDATE backtest_results SET metrics_snapshot='{}'::json "
+                "WHERE id=:result_id",
+                {"result_id": selected_result_id},
+            ),
+            (
+                "UPDATE backtest_runs SET status='failed' WHERE id=:run_id",
+                {"run_id": selected_run_id},
+            ),
+            (
+                "UPDATE backtest_tasks SET status='failed' WHERE id=:task_id",
+                {"task_id": selected_task_id},
+            ),
+            (
+                "UPDATE full_chain_runs SET current_stage='RISK' "
+                "WHERE id=:chain_id",
+                {"chain_id": selection_chain_id},
             ),
         ):
             with pytest.raises(SQLAlchemyError):
