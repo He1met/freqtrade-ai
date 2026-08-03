@@ -49,6 +49,7 @@ from app.models.order_writer import (
     OkxOrderWriterLease,
 )
 from app.services.risk_chain import RiskChainBlocked, RiskChainService, canonical_digest
+from app.services.okx_demo_automation_guard import OkxDemoAutomationGuard
 from app.services.okx_demo_reconciliation import (
     OkxDemoReconciliationBlocked,
     OkxDemoReconciliationService,
@@ -801,6 +802,18 @@ class SqlAlchemyOrderWriterStore:
             ).first()
             if prior_placement is not None:
                 raise OkxDemoWriteBlocked("approved execution is already consumed")
+            if (
+                self.db.get_bind().dialect.name == "postgresql"
+                and command.authorization_mode in {"MANIFEST"}
+                and operation == "PLACE"
+                and not OkxDemoAutomationGuard.claim_dispatch(
+                    self.db,
+                    approved_execution_id=approved.id,
+                )
+            ):
+                raise OkxDemoWriteBlocked(
+                    "continuous Demo dispatch is not authorized by the global guard"
+                )
             order_row = self.db.scalars(
                 select(ExchangeOrder)
                 .where(

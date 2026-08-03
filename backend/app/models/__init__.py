@@ -40,6 +40,10 @@ from app.models.okx_demo_reconciliation import (
     OkxDemoRecoveryBatch,
     OkxDemoRecoveryGrant,
 )
+from app.models.okx_demo_automation import (
+    OkxDemoAutomationGuardEvent,
+    OkxDemoAutomationGuardState,
+)
 from app.models.okx_demo_soak import OkxDemoSoakEvent, OkxDemoSoakProbe, OkxDemoSoakRun
 from app.models.research_job import ResearchJob, ResearchWorkerControl
 from app.models.strategy import Strategy, StrategyVersion
@@ -74,6 +78,8 @@ __all__ = [
     "OkxOrderWriterLease",
     "OkxDemoSubmissionGrant",
     "OkxDemoAccountSnapshot",
+    "OkxDemoAutomationGuardEvent",
+    "OkxDemoAutomationGuardState",
     "OkxDemoExchangeEvent",
     "OkxDemoFillSnapshot",
     "OkxDemoOrderSnapshot",

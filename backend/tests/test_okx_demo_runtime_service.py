@@ -18,6 +18,29 @@ from app.services.okx_demo_canary_preparation import (
 NOW = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
 
 
+@pytest.mark.parametrize(
+    "guard_state", ["BLOCKED", "COOLDOWN", "MANUAL_RESET_REQUIRED"]
+)
+def test_runtime_readiness_blocks_when_automation_guard_is_not_running(
+    guard_state,
+) -> None:
+    assert runtime_service._automation_openings_ready(
+        reconciliation_safe=True,
+        guard_state=guard_state,
+        guard_opening_allowed=True,
+        externally_frozen=False,
+    ) is False
+
+
+def test_runtime_readiness_requires_complete_database_opening_guard() -> None:
+    assert runtime_service._automation_openings_ready(
+        reconciliation_safe=True,
+        guard_state="RUNNING",
+        guard_opening_allowed=False,
+        externally_frozen=False,
+    ) is False
+
+
 @pytest.fixture(autouse=True)
 def _no_recoverable_consent(monkeypatch):
     monkeypatch.setattr(
@@ -330,13 +353,13 @@ def test_runtime_orders_reconciliation_before_writer_and_keeps_drift_alive(
     assert events[0][0] == "session-created"
     assert events[1] == "writer-created"
     assert [item["status"] for item in readiness] == [
-        "READY",
+        "BLOCKED_OPENINGS",
         "BLOCKED_OPENINGS",
     ]
     assert adapter.closed is True
     assert server.closed is True
     assert db.closed is True
-    assert db.commits == 3
+    assert db.commits == 4
     assert db.rollbacks == 0
 
 
@@ -455,7 +478,7 @@ def test_runtime_releases_coordination_window_after_canary_attestation(
     )
     # One commit persists the attestation and one completes the unlock query;
     # the next polling turn then exits without a long reconciliation cycle.
-    assert db.commits == 3
+    assert db.commits == 4
     assert db.rollbacks == 0
 
 

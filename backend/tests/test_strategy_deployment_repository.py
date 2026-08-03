@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import hashlib
+import os
 from pathlib import Path
+from threading import Event
 
 import pytest
+from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError, PendingRollbackError, SQLAlchemyError
 
+from app.db.migrations import upgrade_database
 from app.db.session import create_database_engine, create_session_factory
 from app.models import (
     BacktestResult,
@@ -14,6 +20,7 @@ from app.models import (
     Base,
     FullChainRun,
     FullChainSignalSnapshot,
+    ResearchJob,
     ResearchJobAttempt,
     Strategy,
     StrategyCandidateApproval,
@@ -36,6 +43,7 @@ from app.repositories.full_chain import (
 )
 from app.services.strategy_promotion import promotion_candidate_digest
 from app.services.strategy_validation_matrix import StrategyValidationMatrixService
+from app.services.okx_demo_strategy_selection import OkxDemoStrategySelectionService
 
 
 NOW = datetime(2026, 7, 29, 12, 0, tzinfo=timezone.utc)
@@ -68,6 +76,8 @@ def seed_approved_candidate(
     *,
     expires_at: datetime | None = None,
     suffix: str = "",
+    code_hash: str = "c" * 64,
+    file_path: str | None = None,
 ):
     slug_suffix = f"-{suffix}" if suffix else ""
     strategy = Strategy(
@@ -82,8 +92,12 @@ def seed_approved_candidate(
         version_number=1,
         blueprint={"schema_version": "2", "strategy": {"name": strategy.name}},
         generated_code="class DeploymentStrategy: pass",
-        code_hash="c" * 64,
-        file_path=f"user_data/strategies/DeploymentStrategy{suffix}.py",
+        code_hash=code_hash,
+        file_path=(
+            file_path
+            if file_path is not None
+            else f"user_data/strategies/DeploymentStrategy{suffix}.py"
+        ),
         validation_status="passed",
     )
     db.add(version)
@@ -288,7 +302,7 @@ def test_publish_is_idempotent_and_persists_exact_candidate_binding(
         assert persisted.status == "ACTIVE"
 
 
-def test_publish_blocks_a_second_active_okx_demo_deployment(
+def test_publish_assigns_three_slots_and_blocks_a_fourth_active_deployment(
     session_factory,
 ) -> None:
     with session_factory() as db:
@@ -312,14 +326,327 @@ def test_publish_blocks_a_second_active_okx_demo_deployment(
         )
 
         second_approval = seed_approved_candidate(db, suffix="Two")
-        with pytest.raises(
-            StrategyDeploymentConflict,
-            match="already has a different ACTIVE",
-        ):
-            publish(db, second_approval.id)
+        second = publish(db, second_approval.id)
+        second_chain = db.get(FullChainRun, second_approval.full_chain_run_id)
+        assert second_chain is not None
+        second_job = jobs.get(second_chain.research_job_id)
+        assert second_job is not None and second_job.lease_token
+        jobs.complete(
+            second_job.id,
+            second_job.lease_token,
+            status="SUCCESS",
+            stage="DEPLOYED",
+            links={},
+            evidence_snapshot={"status": "SUCCESS"},
+            error_message=None,
+            provider_completed=False,
+            now=NOW,
+        )
+        third_approval = seed_approved_candidate(db, suffix="Three")
+        third = publish(db, third_approval.id)
+        third_chain = db.get(FullChainRun, third_approval.full_chain_run_id)
+        assert third_chain is not None
+        third_job = jobs.get(third_chain.research_job_id)
+        assert third_job is not None and third_job.lease_token
+        jobs.complete(
+            third_job.id,
+            third_job.lease_token,
+            status="SUCCESS",
+            stage="DEPLOYED",
+            links={},
+            evidence_snapshot={"status": "SUCCESS"},
+            error_message=None,
+            provider_completed=False,
+            now=NOW,
+        )
+        fourth_approval = seed_approved_candidate(db, suffix="Four")
+        with pytest.raises(StrategyDeploymentConflict, match="three ACTIVE"):
+            publish(db, fourth_approval.id)
 
-        persisted = db.query(StrategyDeployment).all()
-        assert [deployment.id for deployment in persisted] == [first.id]
+        persisted = db.query(StrategyDeployment).order_by(StrategyDeployment.id).all()
+        assert [deployment.id for deployment in persisted] == [
+            first.id,
+            second.id,
+            third.id,
+        ]
+        assert [deployment.active_slot for deployment in persisted] == [1, 2, 3]
+
+
+def test_postgresql_concurrent_publish_has_exactly_three_active_slots(
+    monkeypatch,
+) -> None:
+    database_url = os.environ.get("POSTGRES_WORKER_URL")
+    if not database_url:
+        pytest.skip("POSTGRES_WORKER_URL is required for the slot concurrency gate")
+    monkeypatch.setattr(
+        StrategyValidationMatrixService,
+        "assert_current_for_promotion",
+        lambda self, plan: plan.promotion_evidence,
+    )
+    engine = create_database_engine(database_url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
+            connection.execute(text("CREATE SCHEMA public"))
+        upgrade_database(engine)
+        factory = create_session_factory(engine)
+        approval_ids = []
+        for suffix in ("PgOne", "PgTwo", "PgThree", "PgFour"):
+            with factory() as db:
+                approval = seed_approved_candidate(db, suffix=suffix)
+                approval_ids.append(approval.id)
+                chain = db.get(FullChainRun, approval.full_chain_run_id)
+                assert chain is not None
+                jobs = ResearchJobRepository(db)
+                job = jobs.get(chain.research_job_id)
+                assert job is not None and job.lease_token
+                jobs.complete(
+                    job.id,
+                    job.lease_token,
+                    status="SUCCESS",
+                    stage="CANDIDATE_APPROVAL",
+                    links={},
+                    evidence_snapshot={"status": "SUCCESS"},
+                    error_message=None,
+                    provider_completed=False,
+                    now=NOW,
+                )
+
+        def publish_one(approval_id: int) -> tuple[str, int | None]:
+            with factory() as db:
+                try:
+                    deployment = publish(db, approval_id)
+                    return "ACTIVE", deployment.active_slot
+                except StrategyDeploymentConflict:
+                    return "BLOCKED", None
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            outcomes = list(executor.map(publish_one, approval_ids))
+        assert sorted(outcomes) == [
+            ("ACTIVE", 1),
+            ("ACTIVE", 2),
+            ("ACTIVE", 3),
+            ("BLOCKED", None),
+        ]
+        with factory() as db:
+            persisted = db.query(StrategyDeployment).filter_by(status="ACTIVE").all()
+            assert sorted(item.active_slot for item in persisted) == [1, 2, 3]
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
+            connection.execute(text("CREATE SCHEMA public"))
+        upgrade_database(engine)
+        engine.dispose()
+
+
+def test_postgresql_owner_demo_selection_is_auditable_and_idempotent(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    database_url = os.environ.get("POSTGRES_WORKER_URL")
+    if not database_url:
+        pytest.skip("POSTGRES_WORKER_URL is required for the selection gate")
+    monkeypatch.setattr(
+        StrategyValidationMatrixService,
+        "assert_current_for_promotion",
+        lambda self, plan: plan.promotion_evidence,
+    )
+    engine = create_database_engine(database_url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
+            connection.execute(text("CREATE SCHEMA public"))
+        upgrade_database(engine)
+        factory = create_session_factory(engine)
+        strategy_source = b"class DeepSeekRegimeCrossoverCandidateB: pass\n"
+        relative_path = Path("user_data/strategies/DeepSeekRegimeCrossoverCandidateB.py")
+        source_path = tmp_path / relative_path
+        source_path.parent.mkdir(parents=True)
+        source_path.write_bytes(strategy_source)
+        source_digest = hashlib.sha256(strategy_source).hexdigest()
+        with factory() as db:
+            source_approval = seed_approved_candidate(
+                db,
+                suffix="Selection",
+                code_hash=source_digest,
+                file_path=str(relative_path),
+            )
+            version = db.get(StrategyVersion, source_approval.strategy_version_id)
+            assert version is not None
+            strategy = db.get(Strategy, version.strategy_id)
+            assert strategy is not None
+            strategy.name = "DeepSeekRegimeCrossoverCandidateB"
+            plan = db.scalar(
+                select(StrategyValidationPlan).where(
+                    StrategyValidationPlan.strategy_version_id == version.id
+                )
+            )
+            assert plan is not None
+            db.commit()
+            source_chain_for_release = db.get(
+                FullChainRun,
+                source_approval.full_chain_run_id,
+            )
+            assert source_chain_for_release is not None
+            source_jobs = ResearchJobRepository(db)
+            source_job = source_jobs.get(source_chain_for_release.research_job_id)
+            assert source_job is not None and source_job.lease_token
+            source_jobs.complete(
+                source_job.id,
+                source_job.lease_token,
+                status="SUCCESS",
+                stage="CANDIDATE_APPROVAL",
+                links={},
+                evidence_snapshot={"status": "SUCCESS"},
+                error_message=None,
+                provider_completed=False,
+                now=NOW,
+            )
+            conflict_source = b"class CodexOkxDemoDualRsiStrategy: pass\n"
+            conflict_relative_path = Path(
+                "user_data/strategies/CodexOkxDemoDualRsiStrategy.py"
+            )
+            conflict_path = tmp_path / conflict_relative_path
+            conflict_path.write_bytes(conflict_source)
+            conflict_digest = hashlib.sha256(conflict_source).hexdigest()
+            conflict_source_approval = seed_approved_candidate(
+                db,
+                suffix="SelectionConflict",
+                code_hash=conflict_digest,
+                file_path=str(conflict_relative_path),
+            )
+            conflict_version = db.get(
+                StrategyVersion,
+                conflict_source_approval.strategy_version_id,
+            )
+            assert conflict_version is not None
+            conflict_strategy = db.get(Strategy, conflict_version.strategy_id)
+            assert conflict_strategy is not None
+            conflict_strategy.name = "CodexOkxDemoDualRsiStrategy"
+            db.commit()
+            service = OkxDemoStrategySelectionService(db, project_root=tmp_path)
+            update_started = Event()
+            update_futures = []
+            original_publish = StrategyDeploymentRepository.publish
+
+            def mutate_selected_version() -> None:
+                with engine.begin() as connection:
+                    connection.execute(text("SET LOCAL ROLE freqtrade"))
+                    update_started.set()
+                    connection.execute(
+                        text(
+                            "UPDATE strategy_versions SET generated_code='raced' "
+                            "WHERE id=:version_id"
+                        ),
+                        {"version_id": version.id},
+                    )
+
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                def publish_while_mutation_waits(repository, *args, **kwargs):
+                    future = executor.submit(mutate_selected_version)
+                    update_futures.append(future)
+                    assert update_started.wait(timeout=2)
+                    assert not future.done()
+                    return original_publish(repository, *args, **kwargs)
+
+                monkeypatch.setattr(
+                    StrategyDeploymentRepository,
+                    "publish",
+                    publish_while_mutation_waits,
+                )
+                first = service.publish(strategy.name, now=NOW)
+                assert len(update_futures) == 1
+                with pytest.raises(SQLAlchemyError):
+                    update_futures[0].result(timeout=2)
+            monkeypatch.setattr(
+                StrategyDeploymentRepository,
+                "publish",
+                original_publish,
+            )
+            replay = service.publish(strategy.name, now=NOW)
+            assert replay.id == first.id
+            assert first.status == "ACTIVE"
+            assert first.active_slot == 1
+            source_chain = db.get(FullChainRun, source_approval.full_chain_run_id)
+            assert source_chain is not None
+            selection_chain = db.get(
+                FullChainRun,
+                db.get(StrategyCandidateApproval, first.candidate_approval_id).full_chain_run_id,
+            )
+            assert selection_chain is not None
+            assert selection_chain.research_job_id != source_chain.research_job_id
+            assert first.promotion_policy_version == "okx-demo-selection-v1"
+            assert first.evidence_snapshot["allow_real_funds"] is False
+            deployment_id = first.id
+            selected_version_id = first.strategy_version_id
+            selected_strategy_id = first.strategy_id
+            selection_approval_id = first.candidate_approval_id
+
+            db.execute(
+                text(
+                    "CREATE OR REPLACE FUNCTION force_selection_deployment_conflict() "
+                    "RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
+                    "RAISE EXCEPTION 'forced selection conflict' USING ERRCODE='23505'; "
+                    "END $$"
+                )
+            )
+            db.execute(
+                text(
+                    "CREATE TRIGGER force_selection_deployment_conflict "
+                    "BEFORE INSERT ON strategy_deployments FOR EACH ROW "
+                    "EXECUTE FUNCTION force_selection_deployment_conflict()"
+                )
+            )
+            db.commit()
+            conflict_service = OkxDemoStrategySelectionService(db, project_root=tmp_path)
+            with pytest.raises(IntegrityError, match="forced selection conflict"):
+                conflict_service.publish(conflict_strategy.name, now=NOW)
+            with pytest.raises(PendingRollbackError):
+                db.execute(text("SELECT 1"))
+            db.rollback()
+            assert db.scalar(
+                select(ResearchJob).where(
+                    ResearchJob.operation == "okx_demo.selection.fixed_v1",
+                    ResearchJob.strategy_id == conflict_strategy.id,
+                )
+            ) is None
+            assert db.scalar(
+                select(StrategyDeployment).where(
+                    StrategyDeployment.strategy_id == conflict_strategy.id
+                )
+            ) is None
+        for statement, parameters in (
+            ("INSERT INTO strategy_deployments DEFAULT VALUES", {}),
+            (
+                "UPDATE strategy_deployments SET active_slot=2 "
+                "WHERE id=:deployment_id",
+                {"deployment_id": deployment_id},
+            ),
+            (
+                "UPDATE strategy_versions SET generated_code='forged' "
+                "WHERE id=:version_id",
+                {"version_id": selected_version_id},
+            ),
+            (
+                "UPDATE strategies SET name='ForgedStrategy' WHERE id=:strategy_id",
+                {"strategy_id": selected_strategy_id},
+            ),
+            (
+                "UPDATE strategy_candidate_approvals SET status='REVOKED' "
+                "WHERE id=:approval_id",
+                {"approval_id": selection_approval_id},
+            ),
+        ):
+            with pytest.raises(SQLAlchemyError):
+                with engine.begin() as connection:
+                    connection.execute(text("SET LOCAL ROLE freqtrade"))
+                    connection.execute(text(statement), parameters)
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
+            connection.execute(text("CREATE SCHEMA public"))
+        upgrade_database(engine)
+        engine.dispose()
 
 
 def test_leased_signal_checkpoint_survives_expiry_and_is_immutable(

@@ -77,10 +77,17 @@ demo_automation:
       - limit
     max_leverage: 2
     max_order_notional: 1000
-    max_total_exposure: 2000
-    max_positions: 2
+    max_total_exposure: 3000
+    max_positions: 3
     max_price_deviation_pct: 0.01
-    min_strategy_score: 70
+    min_strategy_score: 50
+    max_active_strategies: 3
+    max_orders_per_5_minutes: 6
+    max_orders_per_hour: 24
+    critical_failure_threshold: 3
+    critical_failure_window_minutes: 10
+    cooldown_minutes: 15
+    recovery_health_check_required: true
     scoring_version: phase2-quality-v1
 
 execution:

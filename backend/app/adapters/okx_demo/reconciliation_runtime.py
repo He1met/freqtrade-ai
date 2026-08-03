@@ -53,6 +53,7 @@ from app.repositories.strategy_deployments import StrategyDeploymentRepository
 from app.services.okx_demo_execution_orchestrator import (
     OkxDemoExecutionOrchestrator,
 )
+from app.services.okx_demo_automation_guard import OkxDemoAutomationGuard
 
 
 PAGE_LIMIT = 100
@@ -300,7 +301,10 @@ class OkxDemoRuntimeReconciliationAdapter:
         ):
             return
         now = _aware(self._now_provider())
-        if not getattr(self, "_order_submission_enabled", False):
+        if (
+            not getattr(self, "_order_submission_enabled", False)
+            and not OkxDemoAutomationGuard.opening_allowed(db)
+        ):
             return
         if not _fresh_reconciliation_allows_opening(db, now=now):
             raise OkxDemoReconciliationBlocked(

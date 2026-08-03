@@ -24,6 +24,7 @@ from app.adapters.okx_demo.order_writer import (
     WriterResult,
 )
 from app.adapters.okx_demo.credentials import OkxDemoCredentialsUnavailable
+from app.adapters.okx_demo.errors import OkxReadAdapterError
 from app.adapters.okx_demo.read_adapter import OkxDemoReadClient
 from app.adapters.okx_demo.server_factory import (
     OkxDemoServerSessionBlocked,
@@ -36,6 +37,7 @@ from app.adapters.okx_demo.writer_models import (
     approved_execution_view,
 )
 from app.services.okx_demo_reconciliation import OkxDemoReconciliationBlocked
+from app.services.okx_demo_automation_guard import OkxDemoAutomationGuard
 from app.services.okx_demo_submission_grant import (
     acquire_one_shot_runtime_lock,
     arm_finalized_canary_consent,
@@ -483,6 +485,7 @@ def _write_readiness(path: Path, payload: Mapping[str, Any]) -> None:
         "adapter",
         "reconciliation",
         "writer",
+        "automation_guard",
         "pid",
     }
     if set(payload) != allowed:
@@ -558,6 +561,36 @@ def _stop(_signum: int, _frame: Optional[object]) -> None:
     STOP_EVENT.set()
 
 
+def _automation_failure_class(exc: BaseException) -> Optional[str]:
+    message = str(exc).lower()
+    if "multiple unresolved" in message or "already consumed" in message:
+        return "DUPLICATE"
+    if isinstance(exc, OkxReadAdapterError) and exc.kind == "UNAUTHORIZED":
+        return "AUTHENTICATION"
+    if isinstance(exc, OkxDemoWriteBlocked):
+        return "SUBMISSION"
+    if isinstance(exc, OkxDemoReconciliationBlocked):
+        if any(token in message for token in ("drift", "mismatch", "inconsistent")):
+            return "RECONCILIATION"
+        return "RECONCILIATION_TRANSIENT"
+    return None
+
+
+def _automation_openings_ready(
+    *,
+    reconciliation_safe: bool,
+    guard_state: str,
+    guard_opening_allowed: bool,
+    externally_frozen: bool,
+) -> bool:
+    return (
+        reconciliation_safe
+        and guard_state == "RUNNING"
+        and guard_opening_allowed
+        and not externally_frozen
+    )
+
+
 def serve(
     *,
     environment: Mapping[str, str],
@@ -631,15 +664,32 @@ def serve(
                 server_session.create_order_writer(db)
             ),
         )
+        startup_guard = OkxDemoAutomationGuard.record_health(
+            db,
+            reconciliation_run_id=startup.reconciliation_run_id,
+        )
+        startup_automation_ready = (
+            not recovery_only
+            and startup_guard == "RUNNING"
+            and OkxDemoAutomationGuard.opening_allowed(db)
+        )
+        db.commit()
+        # The capability remains available for the separately grant-bound
+        # one-shot path; MANIFEST dispatch is still DB-blocked by the guard.
         writer.set_openings_allowed(not recovery_only)
         _write_readiness(
             ready_path,
             {
-                "status": "RECOVERY_ONLY" if recovery_only else "READY",
+                "status": (
+                    "RECOVERY_ONLY"
+                    if recovery_only
+                    else ("READY" if startup_automation_ready else "BLOCKED_OPENINGS")
+                ),
                 "execution_target": "OKX_DEMO",
                 "adapter": "ATTESTED",
                 "reconciliation": startup.status,
                 "writer": "UNIQUE",
+                "automation_guard": startup_guard,
                 "pid": os.getpid(),
             },
         )
@@ -854,6 +904,7 @@ def serve(
                     db.commit()
                     writer.set_openings_allowed(False)
                     continue
+                writer.set_openings_allowed(not externally_frozen)
                 one_shot_result = adapter.run_active_one_shot(
                     writer=writer,
                     db=db,
@@ -876,15 +927,30 @@ def serve(
                     ),
                     now=now_provider(),
                 )
-                writer.set_openings_allowed(
-                    observed.safe_to_open and not externally_frozen
+                guard_health = OkxDemoAutomationGuard.record_health(
+                    db,
+                    reconciliation_run_id=observed.reconciliation_run_id,
                 )
+                if not observed.safe_to_open:
+                    guard_health = OkxDemoAutomationGuard.record_failure(
+                        db,
+                        failure_class="RECONCILIATION",
+                        reconciliation_run_id=observed.reconciliation_run_id,
+                    )
+                guard_opening_allowed = OkxDemoAutomationGuard.opening_allowed(db)
+                openings_ready = _automation_openings_ready(
+                    reconciliation_safe=observed.safe_to_open,
+                    guard_state=guard_health,
+                    guard_opening_allowed=guard_opening_allowed,
+                    externally_frozen=externally_frozen,
+                )
+                writer.set_openings_allowed(openings_ready)
                 _write_readiness(
                     ready_path,
                     {
                         "status": (
                             "READY"
-                            if observed.safe_to_open and not externally_frozen
+                            if openings_ready
                             else "BLOCKED_OPENINGS"
                         ),
                         "execution_target": "OKX_DEMO",
@@ -893,6 +959,7 @@ def serve(
                             observed.status if not externally_frozen else "UNKNOWN"
                         ),
                         "writer": "UNIQUE",
+                        "automation_guard": guard_health,
                         "pid": os.getpid(),
                     },
                 )
@@ -902,8 +969,25 @@ def serve(
                     db=db,
                 )
                 db.commit()
-            except Exception:
+            except Exception as exc:
                 db.rollback()
+                failure_class = _automation_failure_class(exc)
+                if failure_class is not None:
+                    try:
+                        run_id = db.execute(
+                            text(
+                                "SELECT max(id) FROM reconciliation_runs "
+                                "WHERE execution_target_id='OKX_DEMO'"
+                            )
+                        ).scalar_one()
+                        OkxDemoAutomationGuard.record_failure(
+                            db,
+                            failure_class=failure_class,
+                            reconciliation_run_id=run_id,
+                        )
+                        db.commit()
+                    except Exception:
+                        db.rollback()
                 raise
             finally:
                 if not coordination_lock_released and release_one_shot_runtime_lock(db):

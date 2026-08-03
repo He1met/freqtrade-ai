@@ -13,6 +13,7 @@ from app.db.migrations import (
     ACCEPTED_NOT_FOUND_TERMINALIZATION_BASE_VERSION,
     BOUNDED_SECOND_ACCEPTANCE_BASE_VERSION,
     FINAL_ACCEPTANCE_BASE_VERSION,
+    CONTINUOUS_DEMO_BASE_VERSION,
     EARLY_TARGET_LINEAGE_VERSION,
     DUAL_SIDE_BASE_VERSION,
     FULL_CHAIN_BASE_VERSION,
@@ -46,6 +47,7 @@ from app.db.migrations import (
     _add_accepted_not_found_terminalization_boundary,
     _add_bounded_second_accepted_not_found_boundary,
     _add_final_accepted_not_found_boundary,
+    _add_continuous_demo_automation_boundary,
 )
 from app.db.session import create_database_engine
 
@@ -110,7 +112,27 @@ def test_schema_version_is_explicit_and_stable() -> None:
     assert ACCEPTED_NOT_FOUND_TERMINALIZATION_BASE_VERSION == "20260803_31"
     assert BOUNDED_SECOND_ACCEPTANCE_BASE_VERSION == "20260803_32"
     assert FINAL_ACCEPTANCE_BASE_VERSION == "20260804_33"
-    assert SCHEMA_VERSION == "20260804_34"
+    assert CONTINUOUS_DEMO_BASE_VERSION == "20260804_34"
+    assert SCHEMA_VERSION == "20260804_35"
+
+
+def test_v35_continuous_demo_boundary_is_fixed_and_owner_controlled() -> None:
+    import inspect as pyinspect
+
+    source = pyinspect.getsource(_add_continuous_demo_automation_boundary)
+    for fragment in (
+        "active_slot BETWEEN 1 AND 3",
+        "CONTINUOUS_DEMO_V1",
+        "max_orders_per_5_minutes',6",
+        "max_orders_per_hour',24",
+        "interval '10 minutes'",
+        "interval '15 minutes'",
+        "MANUAL_RESET_REQUIRED",
+        "absolute_submission_claim=false",
+        "REVOKE ALL ON TABLE",
+        "REVOKE ALL ON FUNCTION",
+    ):
+        assert fragment in source
 
 
 def test_v33_second_receipt_is_fixed_depth_owner_only_and_non_recursive() -> None:

@@ -20,10 +20,17 @@ class OkxDemoRiskPolicy(BaseModel):
     allowed_order_types: tuple[Literal["limit"]] = ("limit",)
     max_leverage: Literal[2] = 2
     max_order_notional: Literal[1000] = 1000
-    max_total_exposure: Literal[2000] = 2000
-    max_positions: Literal[2] = 2
+    max_total_exposure: Literal[3000] = 3000
+    max_positions: Literal[3] = 3
     max_price_deviation_pct: Literal[0.01] = 0.01
-    min_strategy_score: Literal[70] = 70
+    min_strategy_score: Literal[50] = 50
+    max_active_strategies: Literal[3] = 3
+    max_orders_per_5_minutes: Literal[6] = 6
+    max_orders_per_hour: Literal[24] = 24
+    critical_failure_threshold: Literal[3] = 3
+    critical_failure_window_minutes: Literal[10] = 10
+    cooldown_minutes: Literal[15] = 15
+    recovery_health_check_required: Literal[True] = True
     scoring_version: Literal["phase2-quality-v1"] = "phase2-quality-v1"
 
     model_config = {"extra": "forbid"}

@@ -35,10 +35,17 @@ def test_app_yaml_pins_okx_demo_automation_without_live_or_real_funds() -> None:
     assert policy.demo_risk_policy.allowed_order_types == ("limit",)
     assert policy.demo_risk_policy.max_leverage == 2
     assert policy.demo_risk_policy.max_order_notional == 1000
-    assert policy.demo_risk_policy.max_total_exposure == 2000
-    assert policy.demo_risk_policy.max_positions == 2
+    assert policy.demo_risk_policy.max_total_exposure == 3000
+    assert policy.demo_risk_policy.max_positions == 3
     assert policy.demo_risk_policy.max_price_deviation_pct == 0.01
-    assert policy.demo_risk_policy.min_strategy_score == 70
+    assert policy.demo_risk_policy.min_strategy_score == 50
+    assert policy.demo_risk_policy.max_active_strategies == 3
+    assert policy.demo_risk_policy.max_orders_per_5_minutes == 6
+    assert policy.demo_risk_policy.max_orders_per_hour == 24
+    assert policy.demo_risk_policy.critical_failure_threshold == 3
+    assert policy.demo_risk_policy.critical_failure_window_minutes == 10
+    assert policy.demo_risk_policy.cooldown_minutes == 15
+    assert policy.demo_risk_policy.recovery_health_check_required is True
     assert policy.demo_risk_policy.scoring_version == "phase2-quality-v1"
 
 
@@ -96,10 +103,17 @@ def test_missing_demo_automation_policy_fails_closed() -> None:
         ("allowed_order_types", ["market"]),
         ("max_leverage", 3),
         ("max_order_notional", 1001),
-        ("max_total_exposure", 2001),
-        ("max_positions", 3),
+        ("max_total_exposure", 3001),
+        ("max_positions", 4),
         ("max_price_deviation_pct", 0.02),
-        ("min_strategy_score", 69),
+        ("min_strategy_score", 49),
+        ("max_active_strategies", 4),
+        ("max_orders_per_5_minutes", 7),
+        ("max_orders_per_hour", 25),
+        ("critical_failure_threshold", 4),
+        ("critical_failure_window_minutes", 11),
+        ("cooldown_minutes", 16),
+        ("recovery_health_check_required", False),
         ("scoring_version", "fixture-score-v1"),
     ],
 )
