@@ -12,6 +12,7 @@ from app.db.migrations import (
     CANARY_ATOMIC_PREPARE_BASE_VERSION,
     ACCEPTED_NOT_FOUND_TERMINALIZATION_BASE_VERSION,
     BOUNDED_SECOND_ACCEPTANCE_BASE_VERSION,
+    FINAL_ACCEPTANCE_BASE_VERSION,
     EARLY_TARGET_LINEAGE_VERSION,
     DUAL_SIDE_BASE_VERSION,
     FULL_CHAIN_BASE_VERSION,
@@ -44,6 +45,7 @@ from app.db.migrations import (
     _add_atomic_canary_prepare_boundary,
     _add_accepted_not_found_terminalization_boundary,
     _add_bounded_second_accepted_not_found_boundary,
+    _add_final_accepted_not_found_boundary,
 )
 from app.db.session import create_database_engine
 
@@ -107,7 +109,8 @@ def test_schema_version_is_explicit_and_stable() -> None:
     assert CANARY_ATOMIC_PREPARE_BASE_VERSION == "20260803_30"
     assert ACCEPTED_NOT_FOUND_TERMINALIZATION_BASE_VERSION == "20260803_31"
     assert BOUNDED_SECOND_ACCEPTANCE_BASE_VERSION == "20260803_32"
-    assert SCHEMA_VERSION == "20260804_33"
+    assert FINAL_ACCEPTANCE_BASE_VERSION == "20260804_33"
+    assert SCHEMA_VERSION == "20260804_34"
 
 
 def test_v33_second_receipt_is_fixed_depth_owner_only_and_non_recursive() -> None:
@@ -115,7 +118,8 @@ def test_v33_second_receipt_is_fixed_depth_owner_only_and_non_recursive() -> Non
 
     source = pyinspect.getsource(_add_bounded_second_accepted_not_found_boundary)
     for fragment in (
-        "receipt_depth IN (1,2)",
+        "receipt_depth IN (1,2,3)",
+        "receipt.receipt_depth NOT IN (1,2)",
         "receipt_depth=2",
         "parent_terminal_receipt_id",
         "USER_ACCEPTED_NOT_FOUND_NO_FILL_V2",
@@ -130,6 +134,25 @@ def test_v33_second_receipt_is_fixed_depth_owner_only_and_non_recursive() -> Non
     ):
         assert fragment in source
     assert "last_attempt_at<clock_timestamp()-interval '5 minutes'" not in source
+
+
+def test_v34_final_receipt_is_owner_only_and_non_successorable() -> None:
+    import inspect as pyinspect
+
+    source = pyinspect.getsource(_add_final_accepted_not_found_boundary)
+    for fragment in (
+        "receipt_depth IN (1,2,3)",
+        "receipt_depth=3",
+        "USER_ACCEPTED_NOT_FOUND_NO_FILL_FINAL_V1",
+        "terminalize_final_accepted_not_found_no_fill",
+        "successor_allowed',false",
+        "absolute_submission_claim',false",
+        "parent.receipt_depth<>2",
+        "<>3",
+        "REVOKE ALL ON FUNCTION",
+        "FROM PUBLIC,freqtrade",
+    ):
+        assert fragment in source
 
 
 def test_v32_accepted_not_found_sql_is_owner_only_and_single_successor() -> None:

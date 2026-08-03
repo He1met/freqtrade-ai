@@ -49,6 +49,8 @@ from app.db.migrations import (
     SOAK_BASE_VERSION,
     SchemaMigrationBlocked,
     VERSION_TABLE,
+    _add_bounded_second_accepted_not_found_boundary,
+    _add_final_accepted_not_found_boundary,
     _add_order_writer,
     _add_canary_consent_handoff_boundary,
     schema_problems,
@@ -6793,6 +6795,203 @@ def test_postgresql_v32_owner_accepts_exact_not_found_once_and_allows_one_succes
             "SELECT count(*) FROM okx_demo_canary_consent_handoffs "
             "WHERE terminal_receipt_id=2"
         )).scalar_one() == 1
+
+    final_runtime_id = "RuntimeV34FinalAcceptedSuccessor"
+    with postgres_writer_engine.connect() as connection, Session(bind=connection) as runtime:
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        store = SqlAlchemyOrderWriterStore(runtime)
+        assert acquire_one_shot_runtime_lock(runtime) is True
+        final_prepared_result = process_pending_canary_consent_handoff(
+            read_client=read_type(30), db=runtime,
+            runtime_instance_id=final_runtime_id,
+            fresh_reconciliation=lambda: {"reconciliation_run_id": run_id},
+            safety_check=lambda: True,
+            atomic_holder_token_digest=store.atomic_process_token_digest,
+            now=datetime.now(timezone.utc),
+        )
+        assert final_prepared_result is not None
+        assert final_prepared_result.atomic_receipt is not None
+        final_prepared = SimpleNamespace(**dict(final_prepared_result.atomic_receipt))
+        assert runtime.execute(text(
+            "SELECT claim_atomic_okx_demo_canary_dispatch("
+            ":attempt,:runtime,:token,:generation,:digest)"
+        ), {
+            "attempt": final_prepared.attempt_id, "runtime": final_runtime_id,
+            "token": store.atomic_process_token,
+            "generation": final_prepared.lease_generation,
+            "digest": final_prepared.request_digest,
+        }).scalar_one() is not None
+        runtime.commit()
+        assert release_one_shot_runtime_lock(runtime) is True
+        runtime.commit()
+
+    with postgres_writer_engine.begin() as admin:
+        admin.execute(text(
+            "UPDATE okx_order_writer_leases SET acquired_at=clock_timestamp()-interval '3 seconds',"
+            "heartbeat_at=clock_timestamp()-interval '2 seconds',"
+            "expires_at=clock_timestamp()-interval '1 second'"
+        ))
+    with Session(postgres_writer_engine) as runtime:
+        result = OkxDemoOrderWriter(
+            read_client=SecondNotFound(),
+            write_transport=SimpleNamespace(post=lambda **_: pytest.fail("POST forbidden")),
+            store=SqlAlchemyOrderWriterStore(runtime),
+        ).reconcile_unresolved(final_prepared.attempt_id)
+        assert result.status == "RECOVERY_REQUIRED"
+
+    with postgres_writer_engine.connect() as admin:
+        final_not_before, database_now = admin.execute(text(
+            "SELECT GREATEST(g.expires_at,lease.expires_at),clock_timestamp() "
+            "FROM okx_demo_submission_grants g "
+            "JOIN okx_order_write_attempts a ON a.approval_id=g.approval_id "
+            "JOIN okx_order_writer_leases lease ON lease.execution_target_id='OKX_DEMO' "
+            "WHERE a.id=:attempt"
+        ), {"attempt": final_prepared.attempt_id}).one()
+    time.sleep(max(0.0, (final_not_before - database_now).total_seconds()) + 0.1)
+
+    with postgres_writer_engine.begin() as admin:
+        final_lifecycle_id, final_fencing, final_grant_id = admin.execute(text(
+            "SELECT l.lifecycle_id,l.fencing_version,l.submission_grant_id "
+            "FROM okx_demo_canary_lifecycles l "
+            "WHERE l.opening_exchange_order_row_id=:order_id"
+        ), {"order_id": final_prepared.exchange_order_row_id}).one()
+        admin.execute(text(
+            "UPDATE okx_demo_canary_consent_handoffs SET consent_deadline_at="
+            "clock_timestamp()-interval '1 second',consented_at="
+            "clock_timestamp()-interval '2 seconds',bundle_expires_at="
+            "clock_timestamp()-interval '1 second' WHERE handoff_id=:handoff"
+        ), {"handoff": final_successor.handoff_id})
+        admin.execute(text(
+            "UPDATE okx_demo_canary_lifecycles SET deadline_at="
+            "created_at+interval '1 microsecond' WHERE lifecycle_id=:lifecycle"
+        ), {"lifecycle": final_lifecycle_id})
+        admin.execute(text(
+            "UPDATE okx_order_write_attempts SET dispatch_not_after="
+            "clock_timestamp()-interval '1 second' WHERE id=:attempt"
+        ), {"attempt": final_prepared.attempt_id})
+        final_observed_at = admin.execute(text(
+            "SELECT last_attempt_at FROM okx_order_write_attempts WHERE id=:attempt"
+        ), {"attempt": final_prepared.attempt_id}).scalar_one()
+        final_evidence = {
+            "absolute_submission_claim": False,
+            "attempt_count": 1,
+            "client_order_id": final_prepared.client_order_id,
+            "exchange_result_code": "51603",
+            "exchange_result_state": "NOT_FOUND",
+            "fill_count": 0,
+            "instrument_id": "BTC-USDT-SWAP",
+            "query_kind": "exact_get",
+            "request_digest": final_prepared.request_digest,
+            "restart_resubmission_count": 0,
+        }
+        final_evidence_digest = admin.execute(text(
+            "SELECT encode(digest(convert_to(canonical_jsonb_text(CAST(:evidence AS jsonb)),"
+            "'UTF8'),'sha256'),'hex')"
+        ), {"evidence": json.dumps(final_evidence)}).scalar_one()
+        final_acceptance_digest = admin.execute(text(
+            "SELECT encode(digest(convert_to(canonical_jsonb_text(jsonb_build_object("
+            "'acceptance_kind','USER_ACCEPTED_NOT_FOUND_NO_FILL_FINAL_V1',"
+            "'absolute_submission_claim',false,'attempt_id',CAST(:attempt AS bigint),"
+            "'evidence_digest',CAST(:evidence_digest AS text),'evidence_observed_at',"
+            "CAST(:observed_at AS timestamptz),'exchange_order_row_id',"
+            "CAST(:order_id AS bigint),'lifecycle_id',CAST(:lifecycle AS text),"
+            "'parent_terminal_receipt_id',2,'predecessor_grant_id',CAST(:grant AS text),"
+            "'predecessor_handoff_id',CAST(:handoff AS text),'receipt_depth',3,"
+            "'request_digest',CAST(:request_digest AS text),'source_job_id',22,"
+            "'successor_allowed',false)),'UTF8'),'sha256'),'hex')"
+        ), {
+            "attempt": final_prepared.attempt_id,
+            "evidence_digest": final_evidence_digest,
+            "observed_at": final_observed_at,
+            "order_id": final_prepared.exchange_order_row_id,
+            "lifecycle": final_lifecycle_id,
+            "grant": final_grant_id,
+            "handoff": final_successor.handoff_id,
+            "request_digest": final_prepared.request_digest,
+        }).scalar_one()
+        final_payload = {
+            "acceptance_digest": final_acceptance_digest,
+            "attempt_id": final_prepared.attempt_id,
+            "evidence_digest": final_evidence_digest,
+            "evidence_observed_at": final_observed_at.isoformat(),
+            "evidence_snapshot": final_evidence,
+            "expected_fencing_version": final_fencing,
+            "lifecycle_id": final_lifecycle_id,
+            "parent_terminal_receipt_id": 2,
+        }
+
+    postgres_writer_engine.dispose()
+
+    def terminalize_final(_index: int):
+        with postgres_writer_engine.begin() as owner:
+            return owner.execute(text(
+                "SELECT terminalize_final_accepted_not_found_no_fill("
+                "CAST(:payload AS jsonb))"
+            ), {"payload": json.dumps(final_payload)}).scalar_one()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        final_receipts = list(executor.map(terminalize_final, (1, 2)))
+    assert {int(item["terminalization_id"]) for item in final_receipts} == {3}
+    assert sorted(bool(item["idempotent"]) for item in final_receipts) == [False, True]
+    assert all(item["absolute_submission_claim"] is False for item in final_receipts)
+    assert all(item["successor_allowed"] is False for item in final_receipts)
+
+    with pytest.raises(SQLAlchemyError):
+        with postgres_writer_engine.begin() as runtime:
+            runtime.execute(text("SET LOCAL ROLE freqtrade"))
+            runtime.execute(text(
+                "SELECT terminalize_final_accepted_not_found_no_fill("
+                "CAST(:payload AS jsonb))"
+            ), {"payload": json.dumps(final_payload)})
+
+    # A fresh connection models restart recovery: no additional attempt, POST,
+    # fill, position, grant, or successor is created after the final receipt.
+    postgres_writer_engine.dispose()
+    with postgres_writer_engine.connect() as restarted:
+        assert restarted.execute(text(
+            "SELECT count(*),sum(attempt_count) FROM okx_order_write_attempts"
+        )).one() == (3, 3)
+        assert restarted.execute(text(
+            "SELECT count(*) FROM okx_demo_accepted_not_found_terminalizations"
+        )).scalar_one() == 3
+        assert restarted.execute(text(
+            "SELECT count(*) FROM exchange_fills"
+        )).scalar_one() == 0
+        assert restarted.execute(text(
+            "SELECT count(*) FROM exchange_positions WHERE quantity<>0"
+        )).scalar_one() == 0
+        assert restarted.execute(text(
+            "SELECT count(*) FROM okx_demo_submission_grants WHERE status='ACTIVE'"
+        )).scalar_one() == 0
+        assert restarted.execute(text(
+            "SELECT okx_demo_canary_consent_eligibility()->>'eligibility_state'"
+        )).scalar_one() == "BLOCKED"
+        receipts_before_reinstall = restarted.execute(text(
+            "SELECT jsonb_agg(to_jsonb(receipt) ORDER BY receipt_depth) "
+            "FROM okx_demo_accepted_not_found_terminalizations receipt"
+        )).scalar_one()
+
+    # Future migrations replay the preceding installers before adding their own
+    # boundary.  Reinstall v33 then v34 over durable R1/R2/R3 evidence and prove
+    # that no receipt is rewritten and the owner-only ACL remains closed.
+    with postgres_writer_engine.begin() as owner:
+        _add_bounded_second_accepted_not_found_boundary(owner)
+        _add_final_accepted_not_found_boundary(owner)
+    assert schema_problems(postgres_writer_engine) == []
+    with postgres_writer_engine.connect() as restarted:
+        receipts_after_reinstall = restarted.execute(text(
+            "SELECT jsonb_agg(to_jsonb(receipt) ORDER BY receipt_depth) "
+            "FROM okx_demo_accepted_not_found_terminalizations receipt"
+        )).scalar_one()
+        assert receipts_after_reinstall == receipts_before_reinstall
+        assert restarted.execute(text(
+            "SELECT has_function_privilege('freqtrade',"
+            "'terminalize_final_accepted_not_found_no_fill(jsonb)','EXECUTE')"
+        )).scalar_one() is False
+        assert restarted.execute(text(
+            "SELECT has_table_privilege('freqtrade',"
+            "'okx_demo_accepted_not_found_terminalizations','INSERT,UPDATE,DELETE')"
+        )).scalar_one() is False
 
 
 def test_postgresql_v31_upgrades_to_v32_terminalization_boundary(

@@ -314,7 +314,9 @@ class OkxDemoAcceptedNotFoundTerminalization(Base):
             "receipt_depth=1 AND parent_terminal_receipt_id IS NULL AND "
             "acceptance_kind='USER_ACCEPTED_NOT_FOUND_NO_FILL_V1' OR "
             "receipt_depth=2 AND parent_terminal_receipt_id IS NOT NULL AND "
-            "acceptance_kind='USER_ACCEPTED_NOT_FOUND_NO_FILL_V2'",
+            "acceptance_kind='USER_ACCEPTED_NOT_FOUND_NO_FILL_V2' OR "
+            "receipt_depth=3 AND parent_terminal_receipt_id IS NOT NULL AND "
+            "acceptance_kind='USER_ACCEPTED_NOT_FOUND_NO_FILL_FINAL_V1'",
             name="okx_demo_accepted_not_found_kind_check",
         ),
         CheckConstraint(
@@ -324,7 +326,7 @@ class OkxDemoAcceptedNotFoundTerminalization(Base):
             name="okx_demo_accepted_not_found_fact_check",
         ),
         CheckConstraint(
-            "source_job_id=22 AND receipt_depth IN (1,2) "
+            "source_job_id=22 AND receipt_depth IN (1,2,3) "
             "AND length(request_digest)=64 "
             "AND length(evidence_digest)=64 "
             "AND length(acceptance_digest)=64",
