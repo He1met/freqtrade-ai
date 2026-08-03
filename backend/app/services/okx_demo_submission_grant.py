@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_UP
 import hashlib
 import json
-from typing import Optional
+from typing import Any, Optional
 from uuid import uuid4
 
 from sqlalchemy import select, text
@@ -38,6 +38,7 @@ CANARY_NOTIONAL_CAP = Decimal("20")
 ONE_SHOT_COORDINATION_LOCK_KEY = 0x4654414F4E455348
 UNRESOLVED_WRITER_STATES = (
     "PREPARED",
+    "DISPATCHED",
     "ACKNOWLEDGED",
     "RECOVERY_REQUIRED",
     "RESIDUAL_CLOSE_REQUIRED",
@@ -73,6 +74,122 @@ def canary_lineage_read_query(db: Session, statement, *, for_update: bool):
 
 class OkxDemoSubmissionGrantBlocked(Exception):
     pass
+
+
+def build_atomic_canary_payloads(
+    db: Session,
+    *,
+    handoff_id: str,
+    runtime_instance_id: str,
+    approval_id: int,
+    holder_token_digest: str,
+    now: datetime,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build data for the owner-only atomic prepare coordinator without committing."""
+
+    now = OkxDemoSubmissionGrantService._aware(now)
+    row = db.execute(
+        select(ApprovedExecution, TradeIntent, RiskDecision)
+        .join(TradeIntent, TradeIntent.id == ApprovedExecution.trade_intent_id)
+        .join(RiskDecision, RiskDecision.id == ApprovedExecution.risk_decision_id)
+        .where(ApprovedExecution.id == approval_id)
+    ).first()
+    state = db.scalars(
+        select(OkxDemoReconciliationState).where(
+            OkxDemoReconciliationState.execution_target_id == "OKX_DEMO"
+        )
+    ).first()
+    if row is None or state is None or state.last_reconciliation_run_id is None:
+        raise OkxDemoSubmissionGrantBlocked("atomic canary lineage is unavailable")
+    approved, intent, decision = row
+    run = db.get(ReconciliationRun, state.last_reconciliation_run_id)
+    if (
+        approved.status != "ACTIVE"
+        or intent.status != "APPROVED"
+        or decision.decision != "APPROVED"
+        or intent.order_type != "limit"
+        or intent.limit_price is None
+        or intent.reduce_only
+        or run is None
+    ):
+        raise OkxDemoSubmissionGrantBlocked("atomic canary lineage is unsafe")
+    canary_quantity, canary_notional = _require_minimum_canary_risk(
+        db, approved=approved, intent=intent, now=now
+    )
+    expires_at = min(
+        OkxDemoSubmissionGrantService._aware(approved.expires_at),
+        OkxDemoSubmissionGrantService._aware(intent.expires_at),
+        now + timedelta(seconds=GRANT_TTL_SECONDS),
+    )
+    grant_id = uuid4().hex
+    grant_request_digest = submission_grant_request_digest(
+        approval_id=approved.id,
+        reconciliation_run_id=run.id,
+        canonical_hash=approved.canonical_hash,
+        policy_digest=approved.policy_digest,
+        approved_payload_hash=approved.approved_payload_hash,
+        client_order_id=approved.client_order_id,
+        instrument_id=intent.instrument_id,
+        canary_quantity=canary_quantity,
+        canary_notional=canary_notional,
+    )
+    body: dict[str, Any] = {
+        "instId": intent.instrument_id,
+        "tdMode": "isolated",
+        "side": intent.side,
+        "posSide": intent.position_side,
+        "ordType": intent.order_type,
+        "sz": _decimal_text(intent.quantity),
+        "clOrdId": intent.client_order_id,
+        "px": _decimal_text(intent.limit_price),
+    }
+    if intent.take_profit is not None or intent.stop_loss is not None:
+        attached: dict[str, str] = {}
+        if intent.take_profit is not None:
+            attached.update(
+                attachAlgoClOrdId=intent.client_order_id[:30] + "TP",
+                tpTriggerPx=_decimal_text(intent.take_profit),
+                tpOrdPx="-1",
+                tpTriggerPxType="mark",
+            )
+        if intent.stop_loss is not None:
+            attached.update(
+                attachAlgoClOrdId=attached.get(
+                    "attachAlgoClOrdId", intent.client_order_id[:30] + "EX"
+                ),
+                slTriggerPx=_decimal_text(intent.stop_loss),
+                slOrdPx="-1",
+                slTriggerPxType="mark",
+            )
+        body["attachAlgoOrds"] = [attached]
+    request_digest = hashlib.sha256(
+        json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    grant_payload = {
+        "grant_id": grant_id,
+        "handoff_id": handoff_id,
+        "runtime_instance_id": runtime_instance_id,
+        "approval_id": approved.id,
+        "reconciliation_run_id": run.id,
+        "canonical_hash": approved.canonical_hash,
+        "policy_digest": approved.policy_digest,
+        "approved_payload_hash": approved.approved_payload_hash,
+        "client_order_id": approved.client_order_id,
+        "instrument_id": intent.instrument_id,
+        "canary_quantity": _decimal_text(canary_quantity),
+        "canary_notional": _decimal_text(canary_notional),
+        "request_digest": grant_request_digest,
+        "expires_at": expires_at.isoformat(),
+    }
+    prepare_payload = {
+        "grant_id": grant_id,
+        "handoff_id": handoff_id,
+        "runtime_instance_id": runtime_instance_id,
+        "holder_token_digest": holder_token_digest,
+        "request_digest": request_digest,
+        "request_body": body,
+    }
+    return grant_payload, prepare_payload
 
 
 class OkxDemoSubmissionGrantService:

@@ -5494,7 +5494,7 @@ def test_postgresql_v28_five_second_expiry_rolls_back_without_lineage(
     with Session(postgres_writer_engine) as runtime:
         runtime.execute(text("SET LOCAL ROLE freqtrade"))
         assert acquire_one_shot_runtime_lock(runtime) is True
-        with pytest.raises(SQLAlchemyError, match="exact fresh attested snapshot"):
+        with pytest.raises(OkxDemoCanaryConsentCaptureFailed) as captured:
             process_pending_canary_consent_handoff(
                 read_client=SlowRead(),
                 db=runtime,
@@ -5505,6 +5505,8 @@ def test_postgresql_v28_five_second_expiry_rolls_back_without_lineage(
                 safety_check=lambda: True,
                 now=now,
             )
+        assert captured.value.stage == "HANDOFF_CLAIM"
+        assert captured.value.category == "DATABASE"
         runtime.rollback()
         assert release_one_shot_runtime_lock(runtime) is True
         runtime.commit()
@@ -5518,6 +5520,271 @@ def test_postgresql_v28_five_second_expiry_rolls_back_without_lineage(
         assert admin.query(OkxOrderWriteAttempt).count() == 0
         assert admin.query(OkxDemoCanaryLifecycle).count() == 0
         assert admin.query(OkxDemoTrustedSnapshot).count() == baseline_snapshot_count
+
+
+def _prepare_v31_atomic_successor(engine, monkeypatch, *, suffix: str):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    with Session(engine) as admin:
+        _seed_final_consent_source(admin, now=now)
+        _snapshots, run_id, _order = _seed_canary_lineage_boundary(admin, now=now)
+        batch = OkxDemoRecoveryBatch(
+            execution_target_id="OKX_DEMO",
+            recovery_batch_id=uuid4().hex,
+            authenticated=True,
+            pagination_complete=True,
+            complete_streams=["ACCOUNT", "FILL", "ORDER", "POSITION"],
+            high_watermarks={
+                kind: now.isoformat()
+                for kind in ("ACCOUNT", "FILL", "ORDER", "POSITION")
+            },
+            overlap_started_at=now - timedelta(seconds=1),
+            observed_at=now,
+            completed_at=now,
+            event_count=0,
+            evidence_digest="8" * 64,
+        )
+        admin.add(batch)
+        admin.flush()
+        run = admin.get(ReconciliationRun, run_id)
+        run.artifact_sha256 = "9" * 64
+        run.database_ids = {
+            "reconciliation_run": [run_id],
+            "recovery_batches": [batch.database_id],
+            "order_snapshots": [],
+            "position_snapshots": [],
+        }
+        admin.commit()
+    with Session(engine) as runtime:
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        predecessor = OkxDemoCanaryPreparationService(
+            runtime
+        ).request_final_attestation_consent(
+            idempotency_key="v31-predecessor-" + suffix,
+            operator_token="synthetic-test-operator-token",
+        )
+    capability = _issue_attested_session_capability(
+        attestation_hmac_key=b"t" * 32,
+        pinned_fingerprint_sha256="e" * 64,
+        created_at=now - timedelta(seconds=1),
+        expires_at=now + timedelta(minutes=2),
+    )
+
+    class Read:
+        def __init__(self, ttl_seconds=5):
+            self.ttl_seconds = ttl_seconds
+
+        def capture_execution_attestation(self, db, *, inst_id):
+            assert inst_id == "BTC-USDT-SWAP"
+            return _capture_runtime_attested_bundle(
+                db,
+                capability=capability,
+                observed_at=datetime.now(timezone.utc),
+                ttl_seconds=self.ttl_seconds,
+            )
+
+    with Session(engine) as runtime:
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        assert acquire_one_shot_runtime_lock(runtime) is True
+        finalized = process_pending_canary_consent_handoff(
+            read_client=Read(30),
+            db=runtime,
+            runtime_instance_id="RuntimeV31Predecessor",
+            fresh_reconciliation=lambda: {"reconciliation_run_id": run_id},
+            safety_check=lambda: True,
+            now=now,
+        )
+        assert finalized is not None and finalized.atomic_receipt is None
+        runtime.commit()
+    with Session(engine) as admin:
+        handoff = admin.get(OkxDemoCanaryConsentHandoff, predecessor.handoff_id)
+        approval = admin.get(ApprovedExecution, handoff.approval_id)
+        handoff.status = "EXPIRED"
+        handoff.failure_code = "FINALIZED_EVIDENCE_EXPIRED"
+        handoff.revoked_at = datetime.now(timezone.utc)
+        approval.status = "EXPIRED"
+        for chain in admin.scalars(
+            select(FullChainRun).where(
+                FullChainRun.approved_execution_id == approval.id
+            )
+        ):
+            chain.status = "BLOCKED"
+            chain.terminal_reason = "finalized consent expired before grant"
+        budgets = admin.scalars(
+            select(RiskBudget).where(RiskBudget.execution_target_id == "OKX_DEMO")
+        ).all()
+        for budget in budgets:
+            budget.reserved_notional = Decimal("0")
+            budget.approved_positions = 0
+        admin.commit()
+    monkeypatch.setattr(
+        "app.services.okx_demo_submission_grant.get_settings",
+        lambda: SimpleNamespace(
+            demo_automation_policy=SimpleNamespace(
+                demo_risk_policy=SimpleNamespace(
+                    allowed_instruments=("BTC-USDT-SWAP",)
+                )
+            ),
+            execution_target_manifest=SimpleNamespace(
+                active_target_id="OKX_DEMO",
+                active_target=SimpleNamespace(
+                    simulated_trading=True,
+                    allow_real_funds=False,
+                    order_submission_enabled=False,
+                ),
+            ),
+        ),
+    )
+    with Session(engine) as runtime:
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        successor = OkxDemoCanaryPreparationService(
+            runtime
+        ).request_final_attestation_consent(
+            idempotency_key="v31-successor-" + suffix,
+            operator_token="synthetic-test-operator-token",
+        )
+    return now, run_id, predecessor, successor, Read
+
+
+def test_postgresql_v31_atomic_prepare_commit_and_dispatch_cas(
+    postgres_writer_engine, monkeypatch
+) -> None:
+    upgrade_database(postgres_writer_engine)
+    now, run_id, predecessor, successor, read_type = _prepare_v31_atomic_successor(
+        postgres_writer_engine, monkeypatch, suffix="commit"
+    )
+    with Session(postgres_writer_engine) as admin:
+        successor_row = admin.get(OkxDemoCanaryConsentHandoff, successor.handoff_id)
+        assert successor_row.supersedes_handoff_id == predecessor.handoff_id
+
+    with postgres_writer_engine.connect() as connection, Session(bind=connection) as runtime:
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        store = SqlAlchemyOrderWriterStore(runtime)
+        assert acquire_one_shot_runtime_lock(runtime) is True
+        prepared = process_pending_canary_consent_handoff(
+            read_client=read_type(),
+            db=runtime,
+            runtime_instance_id="RuntimeV31Atomic",
+            fresh_reconciliation=lambda: {"reconciliation_run_id": run_id},
+            safety_check=lambda: True,
+            atomic_holder_token_digest=store.atomic_process_token_digest,
+            now=now,
+        )
+        assert prepared is not None and prepared.atomic_receipt is not None
+        receipt = dict(prepared.atomic_receipt)
+        assert receipt["dispatch_guard_policy"] == "db-clock-monotonic-v2"
+        assert receipt["dispatch_guard_ms"] == 1000
+        assert receipt["dispatch_claim_min_remaining_ms"] == 500
+        assert receipt["post_start_reserve_ms"] == 100
+        runtime.rollback()
+
+    with Session(postgres_writer_engine) as admin:
+        assert admin.get(OkxDemoCanaryConsentHandoff, successor.handoff_id).status == "REQUESTED"
+        assert admin.query(OkxDemoSubmissionGrant).count() == 0
+        assert admin.query(OkxOrderWriteAttempt).count() == 0
+        assert admin.query(OkxDemoCanaryLifecycle).count() == 0
+
+    with postgres_writer_engine.connect() as connection, Session(bind=connection) as runtime:
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        store = SqlAlchemyOrderWriterStore(runtime)
+        assert acquire_one_shot_runtime_lock(runtime) is True
+        prepared = process_pending_canary_consent_handoff(
+            read_client=read_type(),
+            db=runtime,
+            runtime_instance_id="RuntimeV31Atomic",
+            fresh_reconciliation=lambda: {"reconciliation_run_id": run_id},
+            safety_check=lambda: True,
+            atomic_holder_token_digest=store.atomic_process_token_digest,
+            now=now,
+        )
+        receipt = dict(prepared.atomic_receipt)
+        runtime.commit()
+        wrong = runtime.execute(text(
+            "SELECT claim_atomic_okx_demo_canary_dispatch("
+            ":attempt,:runtime,:token,:generation,:digest)"
+        ), {
+            "attempt": receipt["attempt_id"], "runtime": "RuntimeV31Atomic",
+            "token": "0" * 64, "generation": receipt["lease_generation"],
+            "digest": receipt["request_digest"],
+        }).scalar_one()
+        assert wrong is None
+        runtime.rollback()
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        claimed = runtime.execute(text(
+            "SELECT claim_atomic_okx_demo_canary_dispatch("
+            ":attempt,:runtime,:token,:generation,:digest)"
+        ), {
+            "attempt": receipt["attempt_id"], "runtime": "RuntimeV31Atomic",
+            "token": store.atomic_process_token,
+            "generation": receipt["lease_generation"],
+            "digest": receipt["request_digest"],
+        }).scalar_one()
+        assert claimed is not None
+        runtime.commit()
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        assert store.validate_atomic_dispatch_authority(
+            attempt_id=int(receipt["attempt_id"]),
+            runtime_instance_id="RuntimeV31Atomic",
+            lease_generation=int(receipt["lease_generation"]),
+            request_digest=str(receipt["request_digest"]),
+            bundle_digest=str(receipt["bundle_digest"]),
+        ) >= 100
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        duplicate = runtime.execute(text(
+            "SELECT claim_atomic_okx_demo_canary_dispatch("
+            ":attempt,:runtime,:token,:generation,:digest)"
+        ), {
+            "attempt": receipt["attempt_id"], "runtime": "RuntimeV31Atomic",
+            "token": store.atomic_process_token,
+            "generation": receipt["lease_generation"],
+            "digest": receipt["request_digest"],
+        }).scalar_one()
+        assert duplicate is None
+        runtime.rollback()
+
+    with Session(postgres_writer_engine) as admin:
+        handoff = admin.get(OkxDemoCanaryConsentHandoff, successor.handoff_id)
+        attempt = admin.get(OkxOrderWriteAttempt, receipt["attempt_id"])
+        assert handoff.status == "CONSUMED"
+        assert attempt.state == "DISPATCHED"
+        assert admin.query(OkxDemoSubmissionGrant).one().status == "CONSUMED"
+        assert admin.query(OkxDemoCanaryLifecycle).one().cleanup_phase == "OPENING_SUBMITTED"
+
+
+def test_postgresql_v31_dispatch_guard_expiry_is_zero_claim(
+    postgres_writer_engine, monkeypatch
+) -> None:
+    upgrade_database(postgres_writer_engine)
+    now, run_id, _predecessor, _successor, read_type = _prepare_v31_atomic_successor(
+        postgres_writer_engine, monkeypatch, suffix="guard"
+    )
+    with postgres_writer_engine.connect() as connection, Session(bind=connection) as runtime:
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        store = SqlAlchemyOrderWriterStore(runtime)
+        assert acquire_one_shot_runtime_lock(runtime) is True
+        prepared = process_pending_canary_consent_handoff(
+            read_client=read_type(), db=runtime,
+            runtime_instance_id="RuntimeV31Guard",
+            fresh_reconciliation=lambda: {"reconciliation_run_id": run_id},
+            safety_check=lambda: True,
+            atomic_holder_token_digest=store.atomic_process_token_digest,
+            now=now,
+        )
+        receipt = dict(prepared.atomic_receipt)
+        runtime.commit()
+        time.sleep(1.1)
+        expired = runtime.execute(text(
+            "SELECT claim_atomic_okx_demo_canary_dispatch("
+            ":attempt,:runtime,:token,:generation,:digest)"
+        ), {
+            "attempt": receipt["attempt_id"], "runtime": "RuntimeV31Guard",
+            "token": store.atomic_process_token,
+            "generation": receipt["lease_generation"],
+            "digest": receipt["request_digest"],
+        }).scalar_one()
+        assert expired is None
+        runtime.rollback()
+    with Session(postgres_writer_engine) as admin:
+        assert admin.get(OkxOrderWriteAttempt, receipt["attempt_id"]).state == "PREPARED"
 
 
 def test_postgresql_v28_missing_consent_key_requires_explicit_terminalization(

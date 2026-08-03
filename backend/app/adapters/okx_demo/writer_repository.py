@@ -68,6 +68,7 @@ from app.services.okx_demo_submission_grant import (
 OKX_DEMO = "OKX_DEMO"
 UNRESOLVED_STATES = (
     WriteState.PREPARED.value,
+    WriteState.DISPATCHED.value,
     WriteState.ACKNOWLEDGED.value,
     WriteState.RECOVERY_REQUIRED.value,
     WriteState.RESIDUAL_CLOSE_REQUIRED.value,
@@ -91,9 +92,54 @@ class SqlAlchemyOrderWriterStore:
         self._holder_digest: Optional[str] = None
         self._lease_generation: Optional[int] = None
         self._writer_instance_id: Optional[str] = None
+        self._process_token = secrets.token_hex(32)
         self._process_token_digest = hashlib.sha256(
-            secrets.token_bytes(32)
+            self._process_token.encode()
         ).hexdigest()
+
+    @property
+    def atomic_process_token_digest(self) -> str:
+        return self._process_token_digest
+
+    @property
+    def atomic_process_token(self) -> str:
+        return self._process_token
+
+    def validate_atomic_dispatch_authority(
+        self,
+        *,
+        attempt_id: int,
+        runtime_instance_id: str,
+        lease_generation: int,
+        request_digest: str,
+        bundle_digest: str,
+    ) -> int:
+        """Re-read the exact DB lease and lineage immediately before POST."""
+
+        row = self.db.execute(
+            text(
+                "SELECT validate_atomic_okx_demo_dispatch_authority("
+                ":attempt,:runtime,:holder_proof,:generation,:request_digest,:bundle_digest)"
+            ),
+            {
+                "attempt": attempt_id,
+                "runtime": runtime_instance_id,
+                "generation": lease_generation,
+                "request_digest": request_digest,
+                "holder_proof": self._process_token,
+                "bundle_digest": bundle_digest,
+            },
+        ).scalar_one_or_none()
+        self.db.rollback()
+        if row is None or int(row) < 100:
+            raise OkxDemoWriteBlocked("atomic dispatch database authority is unavailable")
+        self._holder_digest = self._process_token_digest
+        self._lease_generation = lease_generation
+        self._writer_instance_id = runtime_instance_id
+        return int(row)
+
+    def load_atomic_attempt(self, attempt_id: int) -> WriteAttemptRecord:
+        return self._record(self._attempt(attempt_id))
 
     def load_approved_execution(self, approval_id: int) -> ClaimedApprovedExecution:
         try:

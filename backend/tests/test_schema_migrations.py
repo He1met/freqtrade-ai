@@ -9,6 +9,7 @@ from app.db.migrations import (
     CANARY_LIFECYCLE_BASE_VERSION,
     CANARY_CONSENT_HANDOFF_BASE_VERSION,
     CANARY_CONSENT_FAILURE_AUDIT_BASE_VERSION,
+    CANARY_ATOMIC_PREPARE_BASE_VERSION,
     EARLY_TARGET_LINEAGE_VERSION,
     DUAL_SIDE_BASE_VERSION,
     FULL_CHAIN_BASE_VERSION,
@@ -38,6 +39,7 @@ from app.db.migrations import (
     verify_schema,
     _add_controlled_canary_lifecycle_boundary,
     _add_canary_consent_handoff_boundary,
+    _add_atomic_canary_prepare_boundary,
 )
 from app.db.session import create_database_engine
 
@@ -98,7 +100,28 @@ def test_schema_version_is_explicit_and_stable() -> None:
     assert CANARY_LIFECYCLE_BASE_VERSION == "20260802_27"
     assert CANARY_CONSENT_HANDOFF_BASE_VERSION == "20260802_28"
     assert CANARY_CONSENT_FAILURE_AUDIT_BASE_VERSION == "20260803_29"
-    assert SCHEMA_VERSION == "20260803_30"
+    assert CANARY_ATOMIC_PREPARE_BASE_VERSION == "20260803_30"
+    assert SCHEMA_VERSION == "20260803_31"
+
+
+def test_v31_atomic_prepare_sql_is_single_commit_and_fail_closed() -> None:
+    import inspect as pyinspect
+
+    source = pyinspect.getsource(_add_atomic_canary_prepare_boundary)
+    for fragment in (
+        "commit_atomic_okx_demo_canary_prepare",
+        "dispatch_not_after",
+        "clock_timestamp()+interval '1 second'",
+        "dispatch_guard_policy','db-clock-monotonic-v2'",
+        "dispatch_claim_min_remaining_ms',500",
+        "post_start_reserve_ms',100",
+        "validate_atomic_okx_demo_dispatch_authority",
+        "state='DISPATCHED'",
+        "require_active_okx_demo_operator_consent_secret",
+        "REVOKE EXECUTE ON FUNCTION",
+        "supersedes_handoff_id",
+    ):
+        assert fragment in source
 
 
 def test_v28_consent_handoff_sql_is_owner_managed_and_exact() -> None:
@@ -138,6 +161,6 @@ def test_v27_canary_lifecycle_sql_is_fail_closed() -> None:
         "UPDATE SCHEMA_TOKEN.okx_demo_recovery_grants SET status='EXPIRED'",
         "current_user IS DISTINCT FROM 'freqtrade_ai_attestor'",
         "okx_demo_recovery_grants_one_active_lifecycle_action_idx",
-        "a.state IN('PREPARED','ACKNOWLEDGED','RECOVERY_REQUIRED','RESIDUAL_CLOSE_REQUIRED')",
+        "a.state IN('PREPARED','DISPATCHED','ACKNOWLEDGED','RECOVERY_REQUIRED','RESIDUAL_CLOSE_REQUIRED')",
     ):
         assert fragment in source

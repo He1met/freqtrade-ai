@@ -375,6 +375,23 @@ class _RuntimeWriterCapability:
     def set_openings_allowed(self, allowed: bool) -> None:
         self._openings_allowed = allowed
 
+    @property
+    def atomic_holder_token_digest(self) -> Optional[str]:
+        return getattr(self._writer, "atomic_holder_token_digest", None)
+
+    @property
+    def atomic_holder_token(self) -> str:
+        return self._writer.atomic_holder_token
+
+    def dispatch_atomic_once(
+        self, receipt: Mapping[str, Any], *, runtime_instance_id: str
+    ) -> WriterResult:
+        if not self._openings_allowed:
+            raise OkxDemoWriteBlocked("OKX_DEMO atomic opening is frozen")
+        return self._writer.dispatch_atomic_once(
+            receipt, runtime_instance_id=runtime_instance_id
+        )
+
     def place(
         self,
         approved: ApprovedExecution,
@@ -691,6 +708,7 @@ def serve(
                             db=db,
                         ),
                         safety_check=consent_safety_check,
+                        atomic_holder_token_digest=writer.atomic_holder_token_digest,
                         now=now_provider(),
                     )
                 except OkxDemoCanaryConsentCaptureFailed as exc:
@@ -719,10 +737,50 @@ def serve(
                         )
                     ) from exc
                 if consent_finalized is not None:
-                    # Commit A makes the exact fresh lineage durable with no
-                    # grant.  Only this same runtime identity may issue and
-                    # immediately consume the post-commit grant.
+                    # For v31, this explicit ACK makes lineage, consumed grant,
+                    # lifecycle, order and PREPARED attempt durable together.
                     db.commit()
+                    atomic_receipt = getattr(consent_finalized, "atomic_receipt", None)
+                    if atomic_receipt is not None:
+                        receipt = dict(atomic_receipt)
+                        if not consent_safety_check():
+                            writer.set_openings_allowed(False)
+                            raise OkxDemoRuntimeBlocked(
+                                "atomic canary safety changed before dispatch claim"
+                            )
+                        claimed = db.execute(
+                            text(
+                                "SELECT claim_atomic_okx_demo_canary_dispatch("
+                                ":attempt,:runtime,:holder_proof,:generation,:digest)"
+                            ),
+                            {
+                                "attempt": int(receipt["attempt_id"]),
+                                "runtime": adapter.runtime_instance_id,
+                                "holder_proof": writer.atomic_holder_token,
+                                "generation": int(receipt["lease_generation"]),
+                                "digest": str(receipt["request_digest"]),
+                            },
+                        ).scalar_one()
+                        # A missing/unknown commit ACK never reaches this point;
+                        # a failed DB-clock CAS is terminally zero-POST.
+                        db.commit()
+                        if claimed is None:
+                            writer.set_openings_allowed(False)
+                            raise OkxDemoRuntimeBlocked(
+                                "atomic canary dispatch guard expired before POST"
+                            )
+                        if not consent_safety_check():
+                            writer.set_openings_allowed(False)
+                            raise OkxDemoRuntimeBlocked(
+                                "atomic canary safety changed after dispatch claim"
+                            )
+                        dispatch_receipt = {**receipt, **dict(claimed)}
+                        capability = writer.seal_atomic_dispatch(
+                            dispatch_receipt,
+                            runtime_instance_id=adapter.runtime_instance_id,
+                        )
+                        writer.dispatch_atomic_once(capability)
+                        continue
                     grant = arm_finalized_canary_consent(
                         db,
                         runtime_instance_id=adapter.runtime_instance_id,

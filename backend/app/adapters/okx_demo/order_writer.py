@@ -5,6 +5,9 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import hashlib
 import json
+import secrets
+import threading
+import time
 from typing import Any, Literal, Mapping, Optional, Protocol
 
 from app.adapters.okx_demo.models import InstrumentSpec
@@ -31,6 +34,7 @@ from app.adapters.okx_demo.writer_state import WriteEvent, WriteState
 WriterOperation = Literal["SET_LEVERAGE", "PLACE", "CANCEL", "AMEND", "CLOSE"]
 TERMINAL_ORDER_STATES = frozenset({"filled", "canceled", "mmp_canceled"})
 MAX_CLOSE_CLEANUP_ATTEMPTS = 3
+ATOMIC_POST_START_RESERVE_MS = 100
 
 
 @dataclass(frozen=True)
@@ -87,7 +91,32 @@ class WriterResult:
     reason_code: Optional[str]
 
 
+@dataclass(frozen=True)
+class _AtomicDispatchCapability:
+    issuer_nonce: str
+    runtime_instance_id: str
+    receipt: Mapping[str, Any]
+
+
 class OrderWriterStore(Protocol):
+    @property
+    def atomic_process_token_digest(self) -> str: ...
+
+    @property
+    def atomic_process_token(self) -> str: ...
+
+    def validate_atomic_dispatch_authority(
+        self,
+        *,
+        attempt_id: int,
+        runtime_instance_id: str,
+        lease_generation: int,
+        request_digest: str,
+        bundle_digest: str,
+    ) -> int: ...
+
+    def load_atomic_attempt(self, attempt_id: int) -> WriteAttemptRecord: ...
+
     def claim_unresolved_for_reconciliation(
         self,
         attempt_id: int,
@@ -192,6 +221,105 @@ class OkxDemoOrderWriter:
         self._store = store
         self._now_provider = now_provider
         self.__offline_write_transport = write_transport
+        self._atomic_capability_nonce = secrets.token_hex(32)
+        self._atomic_dispatch_lock = threading.Lock()
+        self._atomic_consumed_attempts: set[int] = set()
+
+    @property
+    def atomic_holder_token_digest(self) -> str:
+        return self._store.atomic_process_token_digest
+
+    @property
+    def atomic_holder_token(self) -> str:
+        return self._store.atomic_process_token
+
+    def seal_atomic_dispatch(
+        self,
+        receipt: Mapping[str, Any],
+        *,
+        runtime_instance_id: str,
+    ) -> _AtomicDispatchCapability:
+        """Bind a DB-claimed receipt to this exact writer process."""
+        required = {
+            "attempt_id",
+            "exchange_order_row_id",
+            "client_order_id",
+            "instrument_id",
+            "request_body",
+            "request_digest",
+            "lease_generation",
+            "runtime_instance_id",
+            "holder_token_digest",
+            "bundle_digest",
+            "dispatch_remaining_ms",
+            "dispatch_claimed_at",
+        }
+        if not required.issubset(receipt):
+            raise OkxDemoWriteBlocked("atomic dispatch receipt is incomplete")
+        if receipt["runtime_instance_id"] != runtime_instance_id:
+            raise OkxDemoWriteBlocked("atomic dispatch runtime identity changed")
+        if receipt["holder_token_digest"] != self.atomic_holder_token_digest:
+            raise OkxDemoWriteBlocked("atomic dispatch process identity changed")
+        remaining_ms = int(receipt["dispatch_remaining_ms"])
+        if remaining_ms < 500 or remaining_ms > 1000:
+            raise OkxDemoWriteBlocked("atomic dispatch claim budget is invalid")
+        body = receipt["request_body"]
+        if not isinstance(body, Mapping) or _digest(body) != receipt["request_digest"]:
+            raise OkxDemoWriteBlocked("atomic dispatch receipt digest changed")
+        return _AtomicDispatchCapability(
+            issuer_nonce=self._atomic_capability_nonce,
+            runtime_instance_id=runtime_instance_id,
+            receipt=dict(receipt),
+        )
+
+    def dispatch_atomic_once(
+        self,
+        capability: _AtomicDispatchCapability,
+    ) -> WriterResult:
+        """Consume one process-bound capability and start at most one POST."""
+
+        if not isinstance(capability, _AtomicDispatchCapability):
+            raise OkxDemoWriteBlocked("atomic dispatch capability is invalid")
+        receipt = capability.receipt
+        body = receipt["request_body"]
+        attempt_id = int(receipt["attempt_id"])
+        with self._atomic_dispatch_lock:
+            if (
+                capability.issuer_nonce != self._atomic_capability_nonce
+                or attempt_id in self._atomic_consumed_attempts
+            ):
+                raise OkxDemoWriteBlocked("atomic dispatch capability was already consumed")
+            # Consume before any database or network operation.  A failure is
+            # deliberately terminal for this process and can only recover GET-only.
+            self._atomic_consumed_attempts.add(attempt_id)
+        validation_started = time.monotonic()
+        remaining_ms = self._store.validate_atomic_dispatch_authority(
+            attempt_id=attempt_id,
+            runtime_instance_id=capability.runtime_instance_id,
+            lease_generation=int(receipt["lease_generation"]),
+            request_digest=str(receipt["request_digest"]),
+            bundle_digest=str(receipt["bundle_digest"]),
+        )
+        attempt = self._store.load_atomic_attempt(int(receipt["attempt_id"]))
+        if (
+            attempt.state != WriteState.DISPATCHED
+            or attempt.exchange_order_row_id != int(receipt["exchange_order_row_id"])
+            or attempt.client_order_id != str(receipt["client_order_id"])
+            or attempt.instrument_id != str(receipt["instrument_id"])
+            or attempt.request_digest != str(receipt["request_digest"])
+            or dict(attempt.safe_request_snapshot) != dict(body)
+        ):
+            raise OkxDemoWriteBlocked("atomic dispatch journal identity changed")
+        order = self._store.order_for_attempt(attempt)
+        elapsed_ms = int((time.monotonic() - validation_started) * 1000)
+        if remaining_ms - elapsed_ms < ATOMIC_POST_START_RESERVE_MS:
+            raise OkxDemoWriteBlocked("atomic dispatch capability expired before POST")
+        return self._post_and_reconcile(
+            attempt=attempt,
+            order=order,
+            path="/api/v5/trade/order",
+            body=body,
+        )
 
     def place(
         self,
@@ -584,7 +712,7 @@ class OkxDemoOrderWriter:
                 raise OkxDemoRecoveryRequired("AMEND_SIZE_NOT_RECONCILED")
             if expected_price is not None and Decimal(str(item["price"])) != expected_price:
                 raise OkxDemoRecoveryRequired("AMEND_PRICE_NOT_RECONCILED")
-            if attempt.state == WriteState.PREPARED:
+            if attempt.state in {WriteState.PREPARED, WriteState.DISPATCHED}:
                 attempt = self._store.transition(
                     attempt,
                     event=WriteEvent.ACKNOWLEDGE,

@@ -142,6 +142,7 @@ class OkxDemoRuntimeReconciliationAdapter:
                     OkxOrderWriteAttempt.state.in_(
                         (
                             "PREPARED",
+                            "DISPATCHED",
                             "ACKNOWLEDGED",
                             "RECOVERY_REQUIRED",
                             "RESIDUAL_CLOSE_REQUIRED",

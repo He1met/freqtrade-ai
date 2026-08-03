@@ -7,6 +7,7 @@ from app.adapters.okx_demo.write_semantics import OkxDemoWriteBlocked
 
 class WriteState(str, Enum):
     PREPARED = "PREPARED"
+    DISPATCHED = "DISPATCHED"
     ACKNOWLEDGED = "ACKNOWLEDGED"
     REJECTED = "REJECTED"
     RECOVERY_REQUIRED = "RECOVERY_REQUIRED"
@@ -15,6 +16,7 @@ class WriteState(str, Enum):
 
 
 class WriteEvent(str, Enum):
+    DISPATCH = "DISPATCH"
     ACKNOWLEDGE = "ACKNOWLEDGE"
     EXPLICIT_REJECTION = "EXPLICIT_REJECTION"
     OUTCOME_UNKNOWN = "OUTCOME_UNKNOWN"
@@ -24,9 +26,13 @@ class WriteEvent(str, Enum):
 
 
 TRANSITIONS = {
+    (WriteState.PREPARED, WriteEvent.DISPATCH): WriteState.DISPATCHED,
     (WriteState.PREPARED, WriteEvent.ACKNOWLEDGE): WriteState.ACKNOWLEDGED,
     (WriteState.PREPARED, WriteEvent.EXPLICIT_REJECTION): WriteState.REJECTED,
     (WriteState.PREPARED, WriteEvent.OUTCOME_UNKNOWN): WriteState.RECOVERY_REQUIRED,
+    (WriteState.DISPATCHED, WriteEvent.ACKNOWLEDGE): WriteState.ACKNOWLEDGED,
+    (WriteState.DISPATCHED, WriteEvent.EXPLICIT_REJECTION): WriteState.REJECTED,
+    (WriteState.DISPATCHED, WriteEvent.OUTCOME_UNKNOWN): WriteState.RECOVERY_REQUIRED,
     (WriteState.ACKNOWLEDGED, WriteEvent.RECONCILE): WriteState.RECONCILED,
     (WriteState.ACKNOWLEDGED, WriteEvent.OUTCOME_UNKNOWN): WriteState.RECOVERY_REQUIRED,
     (
