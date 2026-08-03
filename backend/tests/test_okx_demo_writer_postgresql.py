@@ -4970,17 +4970,20 @@ def test_postgresql_v28_consent_exact_finalize_and_restart_revoke(
     ) as crashed_runtime:
         crashed_runtime.execute(text("SET LOCAL ROLE freqtrade"))
         assert acquire_one_shot_runtime_lock(crashed_runtime) is True
-        with pytest.raises(RuntimeError, match="synthetic crash after exact claim"):
+        with pytest.raises(OkxDemoCanaryConsentCaptureFailed) as failure:
             process_pending_canary_consent_handoff(
                 read_client=RuntimeRead(),
                 db=crashed_runtime,
                 runtime_instance_id=runtime_id,
-                fresh_reconciliation=lambda: SimpleNamespace(
-                    reconciliation_run_id=reconciliation_run_id
-                ),
+                fresh_reconciliation=lambda: {
+                    "reconciliation_run_id": reconciliation_run_id
+                },
                 safety_check=lambda: True,
                 now=now,
             )
+        assert failure.value.stage == "LINEAGE_PERSIST"
+        assert failure.value.category == "UNEXPECTED"
+        assert "synthetic crash after exact claim" not in str(failure.value)
         crashed_runtime.rollback()
         assert release_one_shot_runtime_lock(crashed_runtime) is True
         crashed_runtime.commit()
@@ -5000,9 +5003,13 @@ def test_postgresql_v28_consent_exact_finalize_and_restart_revoke(
             read_client=RuntimeRead(),
             db=runtime,
             runtime_instance_id=runtime_id,
-            fresh_reconciliation=lambda: SimpleNamespace(
-                reconciliation_run_id=reconciliation_run_id
-            ),
+            # The production reconciliation adapter returns a Mapping.  Keep
+            # this end-to-end PostgreSQL path on that exact contract.
+            fresh_reconciliation=lambda: {
+                "reconciliation_run_id": reconciliation_run_id,
+                "status": "RECOVERED",
+                "safe_to_open": True,
+            },
             safety_check=lambda: True,
             now=now,
         )
@@ -5232,7 +5239,7 @@ def test_postgresql_v30_precommit_failure_is_exact_atomic_and_restart_safe(
             result = runtime.execute(
                 text(
                     "SELECT fail_requested_okx_demo_canary_consent("
-                    ":handoff,'HANDOFF_RECHECK','DATABASE')"
+                    ":handoff,'FRESH_RECONCILIATION','SAFETY')"
                 ),
                 {"handoff": first.handoff_id},
             ).scalar_one()
@@ -5281,6 +5288,53 @@ def test_postgresql_v30_precommit_failure_is_exact_atomic_and_restart_safe(
         ).scalar_one() is True
         runtime.commit()
 
+    invalid_observations = (
+        {},
+        {"reconciliation_run_id": True},
+        {"reconciliation_run_id": "123"},
+        {"reconciliation_run_id": 0},
+        {"reconciliation_run_id": -1},
+        True,
+        "123",
+        None,
+    )
+    for index, observation in enumerate(invalid_observations):
+        with Session(postgres_writer_engine) as runtime:
+            runtime.execute(text("SET LOCAL ROLE freqtrade"))
+            requested = OkxDemoCanaryPreparationService(
+                runtime
+            ).request_final_attestation_consent(
+                idempotency_key=f"issue-627-v30-invalid-mapping-{index}",
+                operator_token="synthetic-test-operator-token",
+            )
+            runtime.execute(text("SET LOCAL ROLE freqtrade"))
+            with pytest.raises(OkxDemoCanaryConsentCaptureFailed) as failure:
+                process_pending_canary_consent_handoff(
+                    read_client=SimpleNamespace(),
+                    db=runtime,
+                    runtime_instance_id="RuntimeIssue627V30Mapping",
+                    fresh_reconciliation=lambda value=observation: value,
+                    safety_check=lambda: True,
+                    now=now,
+                )
+            assert failure.value.handoff_id == requested.handoff_id
+            assert failure.value.stage == "FRESH_RECONCILIATION"
+            assert failure.value.category == "SAFETY"
+            runtime.rollback()
+            runtime.execute(text("SET LOCAL ROLE freqtrade"))
+            assert runtime.execute(
+                text(
+                    "SELECT fail_requested_okx_demo_canary_consent("
+                    ":handoff,:stage,:category)"
+                ),
+                {
+                    "handoff": failure.value.handoff_id,
+                    "stage": failure.value.stage,
+                    "category": failure.value.category,
+                },
+            ).scalar_one() is True
+            runtime.commit()
+
     with Session(postgres_writer_engine) as restarted:
         restarted.execute(text("SET LOCAL ROLE freqtrade"))
         assert restarted.execute(
@@ -5292,9 +5346,10 @@ def test_postgresql_v30_precommit_failure_is_exact_atomic_and_restart_safe(
             "SELECT failure_code,status FROM okx_demo_canary_consent_handoffs"
         )).all())
         assert statuses == {
-            "CAPTURE_HANDOFF_RECHECK_DATABASE": "EXPIRED",
             "CAPTURE_FRESH_RECONCILIATION_UNEXPECTED": "EXPIRED",
+            "CAPTURE_FRESH_RECONCILIATION_SAFETY": "EXPIRED",
         }
+        assert admin.query(OkxDemoCanaryConsentHandoff).count() == 10
         assert admin.query(TradeIntent).count() == 0
         assert admin.query(ApprovedExecution).count() == 0
         assert admin.query(OkxDemoSubmissionGrant).count() == 0
