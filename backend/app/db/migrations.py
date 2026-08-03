@@ -66,7 +66,8 @@ CANARY_ATOMIC_PREPARE_BASE_VERSION = "20260803_30"
 ACCEPTED_NOT_FOUND_TERMINALIZATION_BASE_VERSION = "20260803_31"
 BOUNDED_SECOND_ACCEPTANCE_BASE_VERSION = "20260803_32"
 FINAL_ACCEPTANCE_BASE_VERSION = "20260804_33"
-SCHEMA_VERSION = "20260804_34"
+CONTINUOUS_DEMO_BASE_VERSION = "20260804_34"
+SCHEMA_VERSION = "20260804_35"
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 ATTESTATION_PROOF_KEY_ENV = "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"
 OPERATOR_TOKEN_ENV = "FREQTRADE_AI_OPERATOR_TOKEN"
@@ -90,7 +91,6 @@ RUNTIME_APPLICATION_TABLES = (
     "full_chain_stage_runs",
     "strategy_candidate_approvals",
     "full_chain_signal_snapshots",
-    "strategy_deployments",
     "signal_evaluations",
     "risk_budgets",
 )
@@ -2685,6 +2685,7 @@ def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
         problems.extend(_canary_lifecycle_acl_problems(bind, schema_name))
         problems.extend(_canary_consent_acl_problems(bind, schema_name))
         problems.extend(_accepted_not_found_boundary_problems(bind, schema_name))
+        problems.extend(_continuous_demo_automation_boundary_problems(bind, schema_name))
         problems.extend(_expired_approval_attestor_acl_problems(bind, schema_name))
         problems.extend(_strategy_validation_acl_problems(bind, schema_name))
     return problems
@@ -5779,6 +5780,154 @@ def _one_shot_submission_grant_acl_problems(
     return problems
 
 
+def _continuous_demo_automation_boundary_problems(
+    connection: Connection,
+    schema_name: str,
+) -> list[str]:
+    """Return owner/ACL/function drift in the standing Demo guard."""
+
+    problems: list[str] = []
+    deployment_table = f"{schema_name}.strategy_deployments"
+    deployment_acl = connection.execute(
+        text(
+            "SELECT owner.rolname,"
+            "has_table_privilege('freqtrade',:table,'SELECT'),"
+            "has_table_privilege('freqtrade',:table,'INSERT,UPDATE,DELETE') "
+            "FROM pg_class relation JOIN pg_roles owner "
+            "ON owner.oid=relation.relowner WHERE relation.oid=to_regclass(:table)"
+        ),
+        {"table": deployment_table},
+    ).first()
+    if (
+        deployment_acl is None
+        or deployment_acl[0] != "freqtrade_ai_attestor"
+        or deployment_acl[1] is not True
+        or deployment_acl[2] is True
+    ):
+        problems.append("continuous Demo deployment table ACL mismatch")
+    for table_name in (
+        "okx_demo_automation_guard_states",
+        "okx_demo_automation_guard_events",
+    ):
+        table = f"{schema_name}.{table_name}"
+        if not connection.execute(
+            text("SELECT to_regclass(:table) IS NOT NULL"), {"table": table}
+        ).scalar_one():
+            problems.append("continuous Demo guard table missing: " + table_name)
+            continue
+        owner, runtime_select, runtime_write, public_acl = connection.execute(
+            text(
+                "SELECT owner.rolname,"
+                "has_table_privilege('freqtrade',:table,'SELECT'),"
+                "has_table_privilege('freqtrade',:table,'INSERT,UPDATE,DELETE'),"
+                "EXISTS(SELECT 1 FROM pg_class relation CROSS JOIN LATERAL "
+                "aclexplode(COALESCE(relation.relacl,"
+                "acldefault('r',relation.relowner))) acl "
+                "WHERE relation.oid=to_regclass(:table) AND acl.grantee=0) "
+                "FROM pg_class relation JOIN pg_roles owner "
+                "ON owner.oid=relation.relowner "
+                "WHERE relation.oid=to_regclass(:table)"
+            ),
+            {"table": table},
+        ).one()
+        if (
+            owner != "freqtrade_ai_attestor"
+            or runtime_select is not True
+            or runtime_write is True
+            or public_acl is True
+        ):
+            problems.append("continuous Demo guard table ACL mismatch: " + table_name)
+
+    expected_functions = {
+        "okx_demo_continuous_opening_allowed(text)": True,
+        "claim_okx_demo_continuous_dispatch(bigint,text)": True,
+        "record_okx_demo_automation_failure(text,text,bigint,text)": True,
+        "record_okx_demo_automation_health(bigint,text)": True,
+        "enable_okx_demo_continuous_automation(text,bigint)": False,
+        "reset_okx_demo_continuous_automation(text,bigint)": False,
+    }
+    for signature, runtime_execute in expected_functions.items():
+        row = connection.execute(
+            text(
+                "SELECT owner.rolname,function.prosecdef,function.proconfig,"
+                "has_function_privilege('freqtrade',function.oid,'EXECUTE'),"
+                "EXISTS(SELECT 1 FROM aclexplode(COALESCE(function.proacl,"
+                "acldefault('f',function.proowner))) acl WHERE acl.grantee=0 "
+                "AND acl.privilege_type='EXECUTE') FROM pg_proc function "
+                "JOIN pg_roles owner ON owner.oid=function.proowner "
+                "WHERE function.oid=to_regprocedure(:signature)"
+            ),
+            {"signature": f"{schema_name}.{signature}"},
+        ).first()
+        if (
+            row is None
+            or row[0] != "freqtrade_ai_attestor"
+            or row[1] is not True
+            or "search_path=pg_catalog" not in (row[2] or [])
+            or bool(row[3]) is not runtime_execute
+            or row[4] is True
+        ):
+            problems.append("continuous Demo guard function ACL mismatch: " + signature)
+    trigger = connection.execute(
+        text(
+            "SELECT trigger.tgenabled,function_owner.rolname "
+            "FROM pg_trigger trigger JOIN pg_proc function "
+            "ON function.oid=trigger.tgfoid JOIN pg_roles function_owner "
+            "ON function_owner.oid=function.proowner "
+            "WHERE trigger.tgrelid=to_regclass(:table) "
+            "AND trigger.tgname='okx_demo_automation_events_immutable' "
+            "AND NOT trigger.tgisinternal"
+        ),
+        {"table": f"{schema_name}.okx_demo_automation_guard_events"},
+    ).first()
+    if trigger is None or trigger[0] != "O" or trigger[1] != "freqtrade_ai_attestor":
+        problems.append("continuous Demo guard append-only trigger mismatch")
+    for table_name, trigger_name in (
+        ("strategies", "active_demo_strategy_material_immutable"),
+        ("strategy_versions", "active_demo_strategy_version_immutable"),
+        ("strategy_candidate_approvals", "active_demo_selection_receipt_immutable"),
+    ):
+        material_trigger = connection.execute(
+            text(
+                "SELECT trigger.tgenabled,function_owner.rolname "
+                "FROM pg_trigger trigger JOIN pg_proc function "
+                "ON function.oid=trigger.tgfoid JOIN pg_roles function_owner "
+                "ON function_owner.oid=function.proowner "
+                "WHERE trigger.tgrelid=to_regclass(:table) "
+                "AND trigger.tgname=:trigger AND NOT trigger.tgisinternal"
+            ),
+            {
+                "table": f"{schema_name}.{table_name}",
+                "trigger": trigger_name,
+            },
+        ).first()
+        if (
+            material_trigger is None
+            or material_trigger[0] != "O"
+            or material_trigger[1] != "freqtrade_ai_attestor"
+        ):
+            problems.append(
+                "continuous Demo active material trigger mismatch: " + table_name
+            )
+    index_definition = connection.execute(
+        text(
+            "SELECT indexdef FROM pg_indexes WHERE schemaname=:schema "
+            "AND tablename='strategy_deployments' "
+            "AND indexname='strategy_deployments_active_slot_idx'"
+        ),
+        {"schema": schema_name},
+    ).scalar_one_or_none()
+    normalized_index = " ".join((index_definition or "").lower().split())
+    if (
+        "unique index" not in normalized_index
+        or "execution_target_id, active_slot" not in normalized_index
+        or "status" not in normalized_index
+        or "active" not in normalized_index
+    ):
+        problems.append("continuous Demo active-slot index mismatch")
+    return problems
+
+
 def _accepted_not_found_boundary_problems(
     connection: Connection,
     schema_name: str,
@@ -6425,12 +6574,16 @@ def _add_single_active_strategy_deployment_index(connection: Connection) -> None
             "Multiple ACTIVE OKX_DEMO strategy deployments require an explicit "
             "data-preserving resolution before migration"
         )
-    index = next(
-        index
-        for index in Base.metadata.tables["strategy_deployments"].indexes
-        if index.name == "strategy_deployments_single_active_idx"
+    # Keep the historical v22 boundary independent from current ORM metadata.
+    # Fresh databases still traverse v22 before the v35 three-slot migration.
+    connection.execute(
+        text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS "
+            "strategy_deployments_single_active_idx "
+            "ON strategy_deployments(execution_target_id) "
+            "WHERE status='ACTIVE'"
+        )
     )
-    index.create(bind=connection, checkfirst=True)
 
 
 def _add_deferred_execution_foreign_keys(connection: Connection) -> None:
@@ -10248,6 +10401,495 @@ def _add_atomic_canary_prepare_boundary(connection: Connection) -> None:
         ))
 
 
+def _add_continuous_demo_automation_boundary(connection: Connection) -> None:
+    """Install the fixed three-strategy Demo guard without generic permissions."""
+
+    schema_name = connection.execute(text("SELECT current_schema()" )).scalar_one()
+    quoted_schema = connection.dialect.identifier_preparer.quote_schema(schema_name)
+    for table_name in (
+        "okx_demo_automation_guard_states",
+        "okx_demo_automation_guard_events",
+    ):
+        Base.metadata.tables[table_name].create(bind=connection, checkfirst=True)
+    ddl = r"""
+    ALTER TABLE SCHEMA_TOKEN.strategy_deployments
+      ADD COLUMN IF NOT EXISTS active_slot integer,
+      ADD COLUMN IF NOT EXISTS risk_policy_digest varchar(64);
+    DO $$
+    DECLARE active_count integer;
+    BEGIN
+      SELECT count(*) INTO active_count FROM SCHEMA_TOKEN.strategy_deployments
+       WHERE status='ACTIVE';
+      IF active_count>3 THEN
+        RAISE EXCEPTION 'more than three ACTIVE OKX_DEMO deployments exist';
+      END IF;
+      WITH ranked AS (
+        SELECT id,row_number() OVER(ORDER BY id)::integer slot
+          FROM SCHEMA_TOKEN.strategy_deployments WHERE status='ACTIVE')
+      UPDATE SCHEMA_TOKEN.strategy_deployments d SET active_slot=ranked.slot
+        FROM ranked WHERE d.id=ranked.id AND d.active_slot IS NULL;
+      UPDATE SCHEMA_TOKEN.strategy_deployments SET active_slot=NULL
+       WHERE status='DISABLED' AND active_slot IS NOT NULL;
+    END $$;
+    DROP INDEX IF EXISTS SCHEMA_TOKEN.strategy_deployments_single_active_idx;
+    DROP INDEX IF EXISTS SCHEMA_TOKEN.strategy_deployments_active_slot_idx;
+    ALTER TABLE SCHEMA_TOKEN.strategy_deployments
+      DROP CONSTRAINT IF EXISTS strategy_deployments_active_slot_check,
+      ADD CONSTRAINT strategy_deployments_active_slot_check CHECK(
+        (status='ACTIVE' AND active_slot BETWEEN 1 AND 3)
+        OR (status='DISABLED' AND active_slot IS NULL));
+    CREATE UNIQUE INDEX strategy_deployments_active_slot_idx
+      ON SCHEMA_TOKEN.strategy_deployments(execution_target_id,active_slot)
+      WHERE status='ACTIVE';
+    ALTER TABLE SCHEMA_TOKEN.strategy_deployments OWNER TO freqtrade_ai_attestor;
+    REVOKE ALL ON TABLE SCHEMA_TOKEN.strategy_deployments FROM PUBLIC,freqtrade;
+    GRANT SELECT ON TABLE SCHEMA_TOKEN.strategy_deployments TO freqtrade;
+    ALTER SEQUENCE SCHEMA_TOKEN.strategy_deployments_id_seq
+      OWNER TO freqtrade_ai_attestor;
+    REVOKE ALL ON SEQUENCE SCHEMA_TOKEN.strategy_deployments_id_seq
+      FROM PUBLIC,freqtrade;
+    GRANT SELECT ON TABLE SCHEMA_TOKEN.signal_evaluations,
+      SCHEMA_TOKEN.strategy_candidate_approvals,
+      SCHEMA_TOKEN.strategies TO freqtrade_ai_attestor;
+
+    CREATE OR REPLACE FUNCTION SCHEMA_TOKEN.guard_active_demo_strategy_material()
+    RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog AS $$
+    DECLARE material_id bigint:=OLD.id; referenced boolean:=false;
+    BEGIN
+      IF TG_TABLE_NAME='strategies' THEN
+        SELECT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.strategy_deployments
+          WHERE status='ACTIVE' AND strategy_id=material_id) INTO referenced;
+      ELSIF TG_TABLE_NAME='strategy_versions' THEN
+        SELECT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.strategy_deployments
+          WHERE status='ACTIVE' AND strategy_version_id=material_id) INTO referenced;
+      ELSIF TG_TABLE_NAME='strategy_candidate_approvals' THEN
+        SELECT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.strategy_deployments
+          WHERE status='ACTIVE' AND candidate_approval_id=material_id) INTO referenced;
+      END IF;
+      IF referenced THEN
+        RAISE EXCEPTION 'ACTIVE OKX_DEMO deployment material is immutable';
+      END IF;
+      IF TG_OP='DELETE' THEN RETURN OLD; END IF;
+      RETURN NEW;
+    END $$;
+    DROP TRIGGER IF EXISTS active_demo_strategy_material_immutable
+      ON SCHEMA_TOKEN.strategies;
+    CREATE TRIGGER active_demo_strategy_material_immutable
+      BEFORE UPDATE OR DELETE ON SCHEMA_TOKEN.strategies FOR EACH ROW
+      EXECUTE FUNCTION SCHEMA_TOKEN.guard_active_demo_strategy_material();
+    DROP TRIGGER IF EXISTS active_demo_strategy_version_immutable
+      ON SCHEMA_TOKEN.strategy_versions;
+    CREATE TRIGGER active_demo_strategy_version_immutable
+      BEFORE UPDATE OR DELETE ON SCHEMA_TOKEN.strategy_versions FOR EACH ROW
+      EXECUTE FUNCTION SCHEMA_TOKEN.guard_active_demo_strategy_material();
+    DROP TRIGGER IF EXISTS active_demo_selection_receipt_immutable
+      ON SCHEMA_TOKEN.strategy_candidate_approvals;
+    CREATE TRIGGER active_demo_selection_receipt_immutable
+      BEFORE UPDATE OR DELETE ON SCHEMA_TOKEN.strategy_candidate_approvals FOR EACH ROW
+      EXECUTE FUNCTION SCHEMA_TOKEN.guard_active_demo_strategy_material();
+
+    CREATE OR REPLACE FUNCTION SCHEMA_TOKEN.guard_okx_demo_automation_event()
+    RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog AS $$
+    BEGIN RAISE EXCEPTION 'OKX_DEMO automation events are append-only'; END $$;
+    DROP TRIGGER IF EXISTS okx_demo_automation_events_immutable
+      ON SCHEMA_TOKEN.okx_demo_automation_guard_events;
+    CREATE TRIGGER okx_demo_automation_events_immutable
+      BEFORE UPDATE OR DELETE ON SCHEMA_TOKEN.okx_demo_automation_guard_events
+      FOR EACH ROW EXECUTE FUNCTION SCHEMA_TOKEN.guard_okx_demo_automation_event();
+
+    CREATE OR REPLACE FUNCTION SCHEMA_TOKEN.okx_demo_continuous_opening_allowed(
+      p_policy_digest text)
+    RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog AS $$
+      SELECT EXISTS(
+        SELECT 1 FROM SCHEMA_TOKEN.okx_demo_automation_guard_states state
+         JOIN SCHEMA_TOKEN.okx_demo_reconciliation_states reconciliation
+           ON reconciliation.execution_target_id=state.execution_target_id
+         JOIN SCHEMA_TOKEN.reconciliation_runs run
+           ON run.id=reconciliation.last_reconciliation_run_id
+        WHERE state.execution_target_id='OKX_DEMO'
+          AND state.authorization_mode IN ('CONTINUOUS_DEMO_V1')
+          AND state.operational_state='RUNNING'
+          AND state.policy_digest=p_policy_digest
+          AND state.deployment_set_digest=(
+            SELECT encode(public.digest(convert_to(COALESCE(string_agg(
+              deployment.id::text||':'||deployment.active_slot::text||':'||
+              deployment.candidate_approval_id::text||':'||
+              deployment.candidate_digest||':'||deployment.deployment_policy_digest||':'||
+              COALESCE(deployment.risk_policy_digest,''),
+              '|' ORDER BY deployment.active_slot),''),'UTF8'),'sha256'),'hex')
+            FROM SCHEMA_TOKEN.strategy_deployments deployment
+            WHERE deployment.execution_target_id='OKX_DEMO'
+              AND deployment.status='ACTIVE')
+          AND reconciliation.status IN ('RECONCILED','RECOVERED')
+          AND reconciliation.opening_frozen=false
+          AND run.execution_target_id='OKX_DEMO'
+          AND run.status IN ('RECONCILED','RECOVERED')
+          AND run.completed_at BETWEEN clock_timestamp()-interval '90 seconds'
+                                   AND clock_timestamp()+interval '5 seconds'
+          AND NOT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_order_write_attempts
+             WHERE execution_target_id='OKX_DEMO' AND state IN
+               ('PREPARED','DISPATCHED','ACKNOWLEDGED','RECOVERY_REQUIRED',
+                'RESIDUAL_CLOSE_REQUIRED')));
+    $$;
+
+    CREATE OR REPLACE FUNCTION SCHEMA_TOKEN.claim_okx_demo_continuous_dispatch(
+      p_approval_id bigint,p_policy_digest text)
+    RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+    DECLARE guard SCHEMA_TOKEN.okx_demo_automation_guard_states%ROWTYPE;
+            approval SCHEMA_TOKEN.approved_executions%ROWTYPE;
+            event_digest text; now_value timestamptz:=clock_timestamp();
+    BEGIN
+      PERFORM pg_advisory_xact_lock(543000003);
+      SELECT * INTO guard FROM SCHEMA_TOKEN.okx_demo_automation_guard_states
+       WHERE execution_target_id='OKX_DEMO' FOR UPDATE;
+      SELECT * INTO approval FROM SCHEMA_TOKEN.approved_executions
+       WHERE id=p_approval_id FOR UPDATE;
+      IF guard.execution_target_id IS NULL
+         OR guard.authorization_mode<>'CONTINUOUS_DEMO_V1'
+         OR guard.operational_state<>'RUNNING'
+         OR guard.policy_digest IS DISTINCT FROM p_policy_digest
+         OR approval.id IS NULL OR approval.status<>'ACTIVE'
+         OR approval.policy_digest IS DISTINCT FROM p_policy_digest
+         OR approval.expires_at<=now_value
+         OR NOT SCHEMA_TOKEN.okx_demo_continuous_opening_allowed(p_policy_digest)
+         OR (EXISTS(SELECT 1 FROM SCHEMA_TOKEN.strategy_deployments
+              WHERE execution_target_id='OKX_DEMO' AND status='ACTIVE')
+             AND NOT EXISTS(
+               SELECT 1 FROM SCHEMA_TOKEN.full_chain_runs execution_chain
+               JOIN SCHEMA_TOKEN.signal_evaluations evaluation
+                 ON evaluation.id=execution_chain.signal_evaluation_id
+               JOIN SCHEMA_TOKEN.strategy_deployments deployment
+                 ON deployment.id=evaluation.deployment_id
+               JOIN SCHEMA_TOKEN.strategy_candidate_approvals selection
+                 ON selection.id=deployment.candidate_approval_id
+               WHERE execution_chain.run_kind='EXECUTION'
+                 AND execution_chain.approved_execution_id=p_approval_id
+                 AND deployment.status='ACTIVE'
+                 AND selection.status='APPROVED'
+                 AND selection.promotion_policy_version='okx-demo-selection-v1'
+                 AND deployment.deployment_policy_digest IS NOT NULL
+                 AND deployment.risk_policy_digest=p_policy_digest))
+         OR EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_order_write_attempts
+              WHERE approval_id=p_approval_id AND operation IN ('PLACE','CLOSE'))
+         OR (SELECT count(*) FROM SCHEMA_TOKEN.okx_demo_automation_guard_events
+              WHERE event_kind='ACTION_DISPATCH'
+                AND observed_at>now_value-interval '5 minutes')>=6
+         OR (SELECT count(*) FROM SCHEMA_TOKEN.okx_demo_automation_guard_events
+              WHERE event_kind='ACTION_DISPATCH'
+                AND observed_at>now_value-interval '1 hour')>=24 THEN
+        RETURN false;
+      END IF;
+      event_digest:=encode(public.digest(convert_to(
+        'dispatch|'||p_approval_id::text||'|'||p_policy_digest,'UTF8'),'sha256'),'hex');
+      INSERT INTO SCHEMA_TOKEN.okx_demo_automation_guard_events(
+        execution_target_id,event_key,event_kind,failure_class,policy_digest,
+        approved_execution_id,reconciliation_run_id,evidence_snapshot,observed_at)
+      VALUES('OKX_DEMO',event_digest,'ACTION_DISPATCH',NULL,p_policy_digest,
+        p_approval_id,guard.last_healthy_reconciliation_run_id,
+        jsonb_build_object('max_orders_per_5_minutes',6,
+          'max_orders_per_hour',24,'allow_real_funds',false)::json,now_value)
+      ON CONFLICT(event_key) DO NOTHING;
+      RETURN FOUND;
+    END $$;
+
+    CREATE OR REPLACE FUNCTION SCHEMA_TOKEN.record_okx_demo_automation_failure(
+      p_failure_class text,p_event_key text,p_reconciliation_run_id bigint,
+      p_policy_digest text)
+    RETURNS text LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+    DECLARE guard SCHEMA_TOKEN.okx_demo_automation_guard_states%ROWTYPE;
+            now_value timestamptz:=clock_timestamp(); next_count integer;
+    BEGIN
+      IF p_failure_class NOT IN ('SUBMISSION','AUTHENTICATION',
+          'RECONCILIATION_TRANSIENT','RECONCILIATION','DUPLICATE')
+         OR p_event_key!~'^[0-9a-f]{64}$' THEN RETURN 'BLOCKED'; END IF;
+      PERFORM pg_advisory_xact_lock(543000003);
+      SELECT * INTO guard FROM SCHEMA_TOKEN.okx_demo_automation_guard_states
+       WHERE execution_target_id='OKX_DEMO' FOR UPDATE;
+      IF guard.execution_target_id IS NULL
+         OR guard.authorization_mode<>'CONTINUOUS_DEMO_V1'
+         OR guard.policy_digest IS DISTINCT FROM p_policy_digest THEN RETURN 'BLOCKED'; END IF;
+      INSERT INTO SCHEMA_TOKEN.okx_demo_automation_guard_events(
+        execution_target_id,event_key,event_kind,failure_class,policy_digest,
+        reconciliation_run_id,evidence_snapshot,observed_at)
+      VALUES('OKX_DEMO',p_event_key,'CRITICAL_FAILURE',p_failure_class,p_policy_digest,
+        p_reconciliation_run_id,jsonb_build_object('allow_real_funds',false)::json,now_value)
+      ON CONFLICT(event_key) DO NOTHING;
+      IF NOT FOUND THEN RETURN guard.operational_state; END IF;
+      IF p_failure_class IN ('RECONCILIATION','DUPLICATE') THEN
+        UPDATE SCHEMA_TOKEN.okx_demo_automation_guard_states
+           SET operational_state='MANUAL_RESET_REQUIRED',health_check_required=true,
+               manual_reset_reason=p_failure_class,critical_failure_count=3,
+               cooldown_until=NULL,fencing_version=fencing_version+1,
+               updated_at=now_value WHERE execution_target_id='OKX_DEMO';
+        INSERT INTO SCHEMA_TOKEN.okx_demo_automation_guard_events(
+          execution_target_id,event_key,event_kind,failure_class,policy_digest,
+          reconciliation_run_id,evidence_snapshot,observed_at)
+        VALUES('OKX_DEMO',encode(public.digest(convert_to(
+          'manual|'||p_event_key,'UTF8'),'sha256'),'hex'),'MANUAL_LATCHED',
+          p_failure_class,p_policy_digest,p_reconciliation_run_id,
+          jsonb_build_object('automatic_recovery',false,
+            'allow_real_funds',false)::json,now_value);
+        RETURN 'MANUAL_RESET_REQUIRED';
+      END IF;
+      IF guard.failure_window_started_at IS NULL
+         OR guard.failure_window_started_at<=now_value-interval '10 minutes' THEN
+        next_count:=1;
+        UPDATE SCHEMA_TOKEN.okx_demo_automation_guard_states
+           SET failure_window_started_at=now_value,critical_failure_count=1,
+               updated_at=now_value WHERE execution_target_id='OKX_DEMO';
+      ELSE
+        next_count:=guard.critical_failure_count+1;
+        UPDATE SCHEMA_TOKEN.okx_demo_automation_guard_states
+           SET critical_failure_count=LEAST(next_count,3),updated_at=now_value
+         WHERE execution_target_id='OKX_DEMO';
+      END IF;
+      IF next_count>=3 THEN
+        UPDATE SCHEMA_TOKEN.okx_demo_automation_guard_states
+           SET operational_state='COOLDOWN',cooldown_until=now_value+interval '15 minutes',
+               health_check_required=true,fencing_version=fencing_version+1,
+               updated_at=now_value WHERE execution_target_id='OKX_DEMO';
+        INSERT INTO SCHEMA_TOKEN.okx_demo_automation_guard_events(
+          execution_target_id,event_key,event_kind,failure_class,policy_digest,
+          reconciliation_run_id,evidence_snapshot,observed_at)
+        VALUES('OKX_DEMO',encode(public.digest(convert_to(
+          'cooldown|'||p_event_key,'UTF8'),'sha256'),'hex'),'COOLDOWN_ENTERED',
+          p_failure_class,p_policy_digest,p_reconciliation_run_id,
+          jsonb_build_object('failure_threshold',3,'window_minutes',10,
+            'cooldown_minutes',15,'allow_real_funds',false)::json,now_value);
+        RETURN 'COOLDOWN';
+      END IF;
+      RETURN 'RUNNING';
+    END $$;
+
+    CREATE OR REPLACE FUNCTION SCHEMA_TOKEN.record_okx_demo_automation_health(
+      p_reconciliation_run_id bigint,p_policy_digest text)
+    RETURNS text LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+    DECLARE guard SCHEMA_TOKEN.okx_demo_automation_guard_states%ROWTYPE;
+            run_status text; state_status text; frozen boolean;
+            current_run_id bigint; completed_at_value timestamptz;
+            now_value timestamptz:=clock_timestamp();
+    BEGIN
+      PERFORM pg_advisory_xact_lock(543000003);
+      SELECT * INTO guard FROM SCHEMA_TOKEN.okx_demo_automation_guard_states
+       WHERE execution_target_id='OKX_DEMO' FOR UPDATE;
+      SELECT status,completed_at INTO run_status,completed_at_value
+        FROM SCHEMA_TOKEN.reconciliation_runs
+       WHERE id=p_reconciliation_run_id AND execution_target_id='OKX_DEMO';
+      SELECT status,opening_frozen,last_reconciliation_run_id
+        INTO state_status,frozen,current_run_id
+       FROM SCHEMA_TOKEN.okx_demo_reconciliation_states
+       WHERE execution_target_id='OKX_DEMO';
+      IF guard.execution_target_id IS NULL
+         OR guard.authorization_mode<>'CONTINUOUS_DEMO_V1'
+         OR guard.policy_digest IS DISTINCT FROM p_policy_digest
+         OR run_status NOT IN ('RECONCILED','RECOVERED')
+         OR completed_at_value IS NULL
+         OR completed_at_value<now_value-interval '90 seconds'
+         OR completed_at_value>now_value+interval '5 seconds'
+         OR current_run_id IS DISTINCT FROM p_reconciliation_run_id
+         OR state_status NOT IN ('RECONCILED','RECOVERED') OR frozen
+         OR EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_order_write_attempts
+              WHERE execution_target_id='OKX_DEMO' AND state IN
+               ('PREPARED','DISPATCHED','ACKNOWLEDGED','RECOVERY_REQUIRED',
+                'RESIDUAL_CLOSE_REQUIRED')) THEN RETURN 'BLOCKED'; END IF;
+      IF guard.operational_state='COOLDOWN' AND guard.cooldown_until<=now_value THEN
+        UPDATE SCHEMA_TOKEN.okx_demo_automation_guard_states
+           SET operational_state='RUNNING',critical_failure_count=0,
+               failure_window_started_at=NULL,cooldown_until=NULL,
+               health_check_required=false,last_healthy_reconciliation_run_id=p_reconciliation_run_id,
+               fencing_version=fencing_version+1,updated_at=now_value
+         WHERE execution_target_id='OKX_DEMO';
+        INSERT INTO SCHEMA_TOKEN.okx_demo_automation_guard_events(
+          execution_target_id,event_key,event_kind,failure_class,policy_digest,
+          reconciliation_run_id,evidence_snapshot,observed_at)
+        VALUES('OKX_DEMO',encode(public.digest(convert_to(
+          'health|'||p_reconciliation_run_id::text||'|'||
+          guard.fencing_version::text,'UTF8'),'sha256'),'hex'),'HEALTH_RECOVERED',
+          NULL,p_policy_digest,p_reconciliation_run_id,
+          jsonb_build_object('health_check_required',true,
+            'allow_real_funds',false)::json,now_value);
+        RETURN 'RUNNING';
+      END IF;
+      IF guard.operational_state='RUNNING' THEN
+        UPDATE SCHEMA_TOKEN.okx_demo_automation_guard_states
+           SET last_healthy_reconciliation_run_id=p_reconciliation_run_id,updated_at=now_value
+         WHERE execution_target_id='OKX_DEMO';
+      END IF;
+      RETURN guard.operational_state;
+    END $$;
+
+    CREATE OR REPLACE FUNCTION SCHEMA_TOKEN.enable_okx_demo_continuous_automation(
+      p_policy_digest text,p_reconciliation_run_id bigint)
+    RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+    DECLARE new_fencing bigint; event_digest text; deployment_digest text;
+    BEGIN
+      PERFORM pg_advisory_xact_lock(543000003);
+      SELECT encode(public.digest(convert_to(COALESCE(string_agg(
+        deployment.id::text||':'||deployment.active_slot::text||':'||
+        deployment.candidate_approval_id::text||':'||deployment.candidate_digest||':'||
+        deployment.deployment_policy_digest||':'||
+        COALESCE(deployment.risk_policy_digest,''),
+        '|' ORDER BY deployment.active_slot),''),
+        'UTF8'),'sha256'),'hex') INTO deployment_digest
+      FROM SCHEMA_TOKEN.strategy_deployments deployment
+      WHERE deployment.execution_target_id='OKX_DEMO' AND deployment.status='ACTIVE';
+      IF p_policy_digest!~'^[0-9a-f]{64}$'
+         OR EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_automation_guard_states
+              WHERE execution_target_id='OKX_DEMO')
+         OR (SELECT status FROM SCHEMA_TOKEN.reconciliation_runs
+              WHERE id=p_reconciliation_run_id)<>'RECOVERED'
+         OR (SELECT completed_at FROM SCHEMA_TOKEN.reconciliation_runs
+              WHERE id=p_reconciliation_run_id AND execution_target_id='OKX_DEMO')
+              NOT BETWEEN clock_timestamp()-interval '90 seconds'
+                      AND clock_timestamp()+interval '5 seconds'
+         OR (SELECT last_reconciliation_run_id
+              FROM SCHEMA_TOKEN.okx_demo_reconciliation_states
+              WHERE execution_target_id='OKX_DEMO') IS DISTINCT FROM p_reconciliation_run_id
+         OR (SELECT opening_frozen
+              FROM SCHEMA_TOKEN.okx_demo_reconciliation_states
+              WHERE execution_target_id='OKX_DEMO') IS NOT FALSE
+         OR (SELECT count(*) FROM SCHEMA_TOKEN.strategy_deployments
+              WHERE status='ACTIVE') NOT BETWEEN 1 AND 3
+         OR EXISTS(
+              SELECT 1 FROM SCHEMA_TOKEN.strategy_deployments deployment
+              JOIN SCHEMA_TOKEN.strategy_candidate_approvals selection
+                ON selection.id=deployment.candidate_approval_id
+              JOIN SCHEMA_TOKEN.strategies strategy
+                ON strategy.id=deployment.strategy_id
+              WHERE deployment.status='ACTIVE' AND (
+                selection.status<>'APPROVED'
+                OR selection.promotion_policy_version<>'okx-demo-selection-v1'
+                OR deployment.risk_policy_digest IS DISTINCT FROM p_policy_digest
+                OR strategy.name NOT IN ('DeepSeekRegimeCrossoverCandidateB',
+                                         'CodexOkxDemoDualRsiStrategy')
+                OR COALESCE((selection.promotion_evidence::jsonb#>>
+                    '{selection,production_promotion_claim}')::boolean,true)
+                OR COALESCE((selection.promotion_evidence::jsonb#>>
+                    '{selection,allow_real_funds}')::boolean,true)
+                OR COALESCE((selection.promotion_evidence::jsonb#>>
+                    '{selection,minimum_score}')::numeric,-1)<>50))
+         OR (SELECT count(*) FROM SCHEMA_TOKEN.okx_demo_accepted_not_found_terminalizations)<>3
+         OR NOT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_accepted_not_found_terminalizations
+              WHERE receipt_depth=3 AND absolute_submission_claim=false)
+         OR EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_submission_grants WHERE status='ACTIVE')
+         OR EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_order_write_attempts
+              WHERE state IN ('PREPARED','DISPATCHED','ACKNOWLEDGED','RECOVERY_REQUIRED',
+                              'RESIDUAL_CLOSE_REQUIRED'))
+         OR EXISTS(SELECT 1 FROM SCHEMA_TOKEN.exchange_positions
+              WHERE execution_target_id='OKX_DEMO' AND quantity<>0)
+         OR EXISTS(SELECT 1 FROM SCHEMA_TOKEN.risk_budgets
+              WHERE execution_target_id='OKX_DEMO'
+                AND (reserved_notional<>0 OR approved_positions<>0)) THEN RETURN false; END IF;
+      INSERT INTO SCHEMA_TOKEN.okx_demo_automation_guard_states(
+        execution_target_id,authorization_mode,operational_state,policy_digest,
+        deployment_set_digest,
+        critical_failure_count,health_check_required,last_healthy_reconciliation_run_id,
+        fencing_version)
+      VALUES('OKX_DEMO','CONTINUOUS_DEMO_V1','RUNNING',p_policy_digest,
+        deployment_digest,0,false,
+        p_reconciliation_run_id,1)
+      RETURNING fencing_version INTO new_fencing;
+      event_digest:=encode(public.digest(convert_to(
+        'authorization|'||p_policy_digest||'|'||new_fencing::text,
+        'UTF8'),'sha256'),'hex');
+      INSERT INTO SCHEMA_TOKEN.okx_demo_automation_guard_events(
+        execution_target_id,event_key,event_kind,failure_class,policy_digest,
+        reconciliation_run_id,evidence_snapshot,observed_at)
+      VALUES('OKX_DEMO',event_digest,'AUTHORIZATION_ENABLED',NULL,p_policy_digest,
+        p_reconciliation_run_id,jsonb_build_object('max_active_strategies',3,
+          'max_positions',3,'max_order_notional',1000,'max_total_exposure',3000,
+          'max_leverage',2,'deployment_set_digest',deployment_digest,
+          'allow_real_funds',false)::json,clock_timestamp());
+      RETURN true;
+    END $$;
+
+    CREATE OR REPLACE FUNCTION SCHEMA_TOKEN.reset_okx_demo_continuous_automation(
+      p_policy_digest text,p_reconciliation_run_id bigint)
+    RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+    DECLARE guard SCHEMA_TOKEN.okx_demo_automation_guard_states%ROWTYPE;
+            event_digest text; now_value timestamptz:=clock_timestamp();
+    BEGIN
+      PERFORM pg_advisory_xact_lock(543000003);
+      SELECT * INTO guard FROM SCHEMA_TOKEN.okx_demo_automation_guard_states
+       WHERE execution_target_id='OKX_DEMO' FOR UPDATE;
+      IF guard.execution_target_id IS NULL
+         OR guard.authorization_mode<>'CONTINUOUS_DEMO_V1'
+         OR guard.operational_state<>'MANUAL_RESET_REQUIRED'
+         OR guard.policy_digest IS DISTINCT FROM p_policy_digest
+         OR (SELECT status FROM SCHEMA_TOKEN.reconciliation_runs
+              WHERE id=p_reconciliation_run_id AND execution_target_id='OKX_DEMO')
+              NOT IN ('RECONCILED','RECOVERED')
+         OR (SELECT last_reconciliation_run_id
+              FROM SCHEMA_TOKEN.okx_demo_reconciliation_states
+              WHERE execution_target_id='OKX_DEMO') IS DISTINCT FROM p_reconciliation_run_id
+         OR EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_order_write_attempts
+              WHERE execution_target_id='OKX_DEMO' AND state IN
+                ('PREPARED','DISPATCHED','ACKNOWLEDGED','RECOVERY_REQUIRED',
+                 'RESIDUAL_CLOSE_REQUIRED')) THEN RETURN false; END IF;
+      UPDATE SCHEMA_TOKEN.okx_demo_automation_guard_states
+         SET operational_state='RUNNING',critical_failure_count=0,
+             failure_window_started_at=NULL,cooldown_until=NULL,
+             health_check_required=false,manual_reset_reason=NULL,
+             last_healthy_reconciliation_run_id=p_reconciliation_run_id,
+             fencing_version=fencing_version+1,updated_at=now_value
+       WHERE execution_target_id='OKX_DEMO';
+      event_digest:=encode(public.digest(convert_to(
+        'manual-reset|'||p_reconciliation_run_id::text||'|'||
+        guard.fencing_version::text,'UTF8'),'sha256'),'hex');
+      INSERT INTO SCHEMA_TOKEN.okx_demo_automation_guard_events(
+        execution_target_id,event_key,event_kind,failure_class,policy_digest,
+        reconciliation_run_id,evidence_snapshot,observed_at)
+      VALUES('OKX_DEMO',event_digest,'MANUAL_RESET',NULL,p_policy_digest,
+        p_reconciliation_run_id,jsonb_build_object('owner_mediated',true,
+          'allow_real_funds',false)::json,now_value);
+      RETURN true;
+    END $$;
+    """.replace("SCHEMA_TOKEN", quoted_schema)
+    connection.execute(text(ddl))
+    owner_only = {
+        "enable_okx_demo_continuous_automation(text,bigint)",
+        "reset_okx_demo_continuous_automation(text,bigint)",
+        "guard_okx_demo_automation_event()",
+        "guard_active_demo_strategy_material()",
+    }
+    runtime_functions = {
+        "okx_demo_continuous_opening_allowed(text)",
+        "claim_okx_demo_continuous_dispatch(bigint,text)",
+        "record_okx_demo_automation_failure(text,text,bigint,text)",
+        "record_okx_demo_automation_health(bigint,text)",
+    }
+    for signature in owner_only | runtime_functions:
+        connection.execute(text(
+            "ALTER FUNCTION {0}.{1} OWNER TO freqtrade_ai_attestor; "
+            "REVOKE ALL ON FUNCTION {0}.{1} FROM PUBLIC,freqtrade; {2}"
+            .format(
+                quoted_schema,
+                signature,
+                (
+                    "GRANT EXECUTE ON FUNCTION {0}.{1} TO freqtrade"
+                    .format(quoted_schema, signature)
+                    if signature in runtime_functions else ""
+                ),
+            )
+        ))
+    for table_name in (
+        "okx_demo_automation_guard_states",
+        "okx_demo_automation_guard_events",
+    ):
+        connection.execute(text(
+            "ALTER TABLE {0}.{1} OWNER TO freqtrade_ai_attestor; "
+            "REVOKE ALL ON TABLE {0}.{1} FROM PUBLIC,freqtrade; "
+            "GRANT SELECT ON TABLE {0}.{1} TO freqtrade"
+            .format(quoted_schema, table_name)
+        ))
+    connection.execute(text(
+        "ALTER SEQUENCE {0}.okx_demo_automation_guard_events_id_seq "
+        "OWNER TO freqtrade_ai_attestor; REVOKE ALL ON SEQUENCE "
+        "{0}.okx_demo_automation_guard_events_id_seq FROM PUBLIC,freqtrade"
+        .format(quoted_schema)
+    ))
+
+
 def _finalize_current_canary_boundaries(connection: Connection) -> list[str]:
     """Converge every supported upgrade path on the complete current boundary."""
 
@@ -10323,6 +10965,7 @@ def _finalize_current_canary_boundaries(connection: Connection) -> list[str]:
     _add_bounded_second_accepted_not_found_boundary(connection)
     _add_final_accepted_not_found_boundary(connection)
     _add_atomic_canary_prepare_boundary(connection)
+    _add_continuous_demo_automation_boundary(connection)
     return schema_problems(connection)
 
 
@@ -10384,6 +11027,7 @@ def upgrade_database(engine: Engine) -> str:
                 ACCEPTED_NOT_FOUND_TERMINALIZATION_BASE_VERSION,
                 BOUNDED_SECOND_ACCEPTANCE_BASE_VERSION,
                 FINAL_ACCEPTANCE_BASE_VERSION,
+                CONTINUOUS_DEMO_BASE_VERSION,
             }
             if current_version in supported_upgrade_versions:
                 connection.execute(
@@ -10426,6 +11070,7 @@ def upgrade_database(engine: Engine) -> str:
                     ACCEPTED_NOT_FOUND_TERMINALIZATION_BASE_VERSION,
                     BOUNDED_SECOND_ACCEPTANCE_BASE_VERSION,
                     FINAL_ACCEPTANCE_BASE_VERSION,
+                    CONTINUOUS_DEMO_BASE_VERSION,
                 }:
                 problems = _finalize_current_canary_boundaries(connection)
                 if problems:

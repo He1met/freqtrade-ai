@@ -5,7 +5,7 @@ import re
 from typing import Optional
 from uuid import uuid4
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -122,10 +122,14 @@ class StrategyDeploymentRepository:
         instrument_id: str,
         timeframe: str,
         deployment_policy_digest: str,
+        risk_policy_digest: Optional[str] = None,
+        commit: bool = True,
         now: Optional[datetime] = None,
     ) -> StrategyDeployment:
         now = now or datetime.now(timezone.utc)
         _require_sha256(deployment_policy_digest, "deployment_policy_digest")
+        if risk_policy_digest is not None:
+            _require_sha256(risk_policy_digest, "risk_policy_digest")
         if not _INSTRUMENT_RE.fullmatch(instrument_id):
             raise StrategyDeploymentBlocked("instrument_id must be an OKX SWAP instrument")
         if not _TIMEFRAME_RE.fullmatch(timeframe):
@@ -168,6 +172,7 @@ class StrategyDeploymentRepository:
             approval.candidate_digest,
             approval.promotion_policy_version,
             deployment_policy_digest,
+            risk_policy_digest,
             instrument_id,
             timeframe,
         )
@@ -180,6 +185,7 @@ class StrategyDeploymentRepository:
                 existing.candidate_digest,
                 existing.promotion_policy_version,
                 existing.deployment_policy_digest,
+                existing.risk_policy_digest,
                 existing.instrument_id,
                 existing.timeframe,
             )
@@ -188,15 +194,23 @@ class StrategyDeploymentRepository:
                     "candidate approval already has a different deployment binding"
                 )
             return existing
-        active = self.db.scalar(
-            select(StrategyDeployment).where(
-                StrategyDeployment.execution_target_id == "OKX_DEMO",
-                StrategyDeployment.status == "ACTIVE",
-            )
+        if self.db.get_bind().dialect.name == "postgresql":
+            self.db.execute(text("SELECT pg_advisory_xact_lock(543000003)"))
+        active_slots = set(
+            self.db.scalars(
+                select(StrategyDeployment.active_slot).where(
+                    StrategyDeployment.execution_target_id == "OKX_DEMO",
+                    StrategyDeployment.status == "ACTIVE",
+                )
+            ).all()
         )
-        if active is not None:
+        active_slot = next(
+            (slot for slot in range(1, 4) if slot not in active_slots),
+            None,
+        )
+        if active_slot is None:
             raise StrategyDeploymentConflict(
-                "OKX_DEMO already has a different ACTIVE strategy deployment"
+                "OKX_DEMO already has three ACTIVE strategy deployments"
             )
 
         deployment = StrategyDeployment(
@@ -207,9 +221,11 @@ class StrategyDeploymentRepository:
             candidate_digest=approval.candidate_digest,
             promotion_policy_version=approval.promotion_policy_version,
             deployment_policy_digest=deployment_policy_digest,
+            risk_policy_digest=risk_policy_digest,
             instrument_id=instrument_id,
             timeframe=timeframe,
             status="ACTIVE",
+            active_slot=active_slot,
             evidence_snapshot={
                 "schema_version": "1",
                 "execution_target_id": "OKX_DEMO",
@@ -220,11 +236,19 @@ class StrategyDeploymentRepository:
                 "candidate_digest": approval.candidate_digest,
                 "promotion_policy_version": approval.promotion_policy_version,
                 "deployment_policy_digest": deployment_policy_digest,
+                "risk_policy_digest": risk_policy_digest,
                 "manual_confirmation_required": False,
                 "allow_real_funds": False,
+                "active_slot": active_slot,
             },
         )
         self.db.add(deployment)
+        if not commit:
+            # The caller owns the surrounding transaction.  In particular, do
+            # not rollback or reinterpret an integrity failure here because
+            # that would silently discard the caller's selection evidence.
+            self.db.flush()
+            return deployment
         try:
             self.db.commit()
         except IntegrityError:
@@ -235,15 +259,15 @@ class StrategyDeploymentRepository:
                 )
             )
             if replay is None:
-                active = self.db.scalar(
-                    select(StrategyDeployment).where(
+                active_count = self.db.scalar(
+                    select(func.count(StrategyDeployment.id)).where(
                         StrategyDeployment.execution_target_id == "OKX_DEMO",
                         StrategyDeployment.status == "ACTIVE",
                     )
                 )
-                if active is not None:
+                if int(active_count or 0) >= 3:
                     raise StrategyDeploymentConflict(
-                        "OKX_DEMO already has a different ACTIVE strategy deployment"
+                        "OKX_DEMO already has three ACTIVE strategy deployments"
                     )
                 raise
             replay_binding = (
@@ -254,6 +278,7 @@ class StrategyDeploymentRepository:
                 replay.candidate_digest,
                 replay.promotion_policy_version,
                 replay.deployment_policy_digest,
+                replay.risk_policy_digest,
                 replay.instrument_id,
                 replay.timeframe,
             )
@@ -660,6 +685,7 @@ class StrategyDeploymentRepository:
             return deployment
 
         deployment.status = "DISABLED"
+        deployment.active_slot = None
         deployment.disabled_reason = reason
         deployment.disabled_at = now
         self.db.execute(

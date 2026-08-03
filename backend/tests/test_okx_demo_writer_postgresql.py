@@ -62,6 +62,7 @@ from app.db.migrations import (
     verify_connection_schema,
     verify_schema,
 )
+from app.db.session import create_session_factory
 from app.models.execution_lineage import (
     ApprovedExecution,
     ExchangeFill,
@@ -97,6 +98,7 @@ from app.services.risk_chain import (
     _write_attested_snapshot,
     canonical_digest,
 )
+from app.services.okx_demo_automation_guard import OkxDemoAutomationGuard
 from app.services.okx_demo_reconciliation import (
     OkxDemoReconciliationBlocked,
     OkxDemoReconciliationService,
@@ -7485,13 +7487,12 @@ def test_postgresql_runtime_cannot_bypass_controlled_gate_or_run_provenance(
 
 def test_postgresql_runtime_role_completes_real_writer_happy_lifecycle(
     postgres_writer_engine,
+    monkeypatch,
 ) -> None:
-    upgrade_database(postgres_writer_engine)
+    monkeypatch.setattr(OkxDemoAutomationGuard, "policy_digest", lambda: "3" * 64)
+    test_now = datetime.now(timezone.utc)
+    approval_id, _ = _seed_continuous_demo_guard(postgres_writer_engine)
     with Session(postgres_writer_engine) as admin_session:
-        approval_id, _ = _seed_approved_order(
-            admin_session,
-            create_order=False,
-        )
         approval = admin_session.get(ApprovedExecution, approval_id)
         identity = {
             "canonical_hash": approval.canonical_hash,
@@ -7524,7 +7525,7 @@ def test_postgresql_runtime_role_completes_real_writer_happy_lifecycle(
     with Session(postgres_writer_engine) as session:
         store = SqlAlchemyOrderWriterStore(
             session,
-            now_provider=lambda: NOW,
+            now_provider=lambda: test_now,
         )
         session.execute(text("SET LOCAL ROLE freqtrade"))
         claimed = store.load_approved_execution(approval_id)
@@ -7541,22 +7542,22 @@ def test_postgresql_runtime_role_completes_real_writer_happy_lifecycle(
             writer_instance_id="PgRuntimeWriter01",
             approval_id=approval_id,
             client_order_id=claimed.client_order_id,
-            issued_at=NOW - timedelta(seconds=1),
-            expires_at=NOW + timedelta(seconds=10),
+            issued_at=test_now - timedelta(seconds=1),
+            expires_at=test_now + timedelta(seconds=10),
         )
         command = normalize_order_command(
             claimed,
             submission_grant=authorization,
             instrument=instrument,
-            now=NOW,
+            now=test_now,
         )
 
         session.execute(text("SET LOCAL ROLE freqtrade"))
         store.acquire_lease(
             writer_instance_id="PgRuntimeWriter01",
             approval_id=approval_id,
-            now=NOW,
-            expires_at=NOW + timedelta(minutes=1),
+            now=test_now,
+            expires_at=test_now + timedelta(minutes=1),
             **identity,
         )
         session.execute(text("SET LOCAL ROLE freqtrade"))
@@ -8197,3 +8198,254 @@ def test_reconciliation_batch_index_upgrades_in_place_and_supports_runtime_query
             )
         )
     assert index_name in plan
+
+
+def _seed_continuous_demo_guard(
+    postgres_writer_engine,
+    *,
+    policy_digest: str = "3" * 64,
+) -> tuple[int, int]:
+    """Seed only fresh read/reconciliation facts and the owner guard state."""
+
+    upgrade_database(postgres_writer_engine)
+    now = datetime.now(timezone.utc)
+    factory = create_session_factory(postgres_writer_engine)
+    with factory() as session:
+        approval_id, _ = _seed_approved_order(
+            session,
+            create_order=False,
+            seed_now=now,
+        )
+        run = ReconciliationRun(
+            execution_target_id="OKX_DEMO",
+            status="RECOVERED",
+            summary_snapshot={},
+            database_ids={},
+            artifact_status="READY",
+            authoritative_observed_at=now,
+            source_type="api_aggregate",
+            core_data=True,
+            started_at=now,
+            completed_at=now,
+            created_at=now,
+        )
+        session.add(run)
+        session.flush()
+        run.database_ids = {"reconciliation_run": [run.id]}
+        state = session.scalars(
+            select(OkxDemoReconciliationState).where(
+                OkxDemoReconciliationState.execution_target_id == "OKX_DEMO"
+            )
+        ).one_or_none()
+        if state is None:
+            state = OkxDemoReconciliationState(
+                execution_target_id="OKX_DEMO",
+                status="RECOVERED",
+                opening_frozen=False,
+            )
+            session.add(state)
+        state.status = "RECOVERED"
+        state.opening_frozen = False
+        state.block_reason = None
+        state.last_event_observed_at = now
+        state.last_reconciliation_run_id = run.id
+        session.commit()
+        run_id = run.id
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO okx_demo_automation_guard_states("
+                "execution_target_id,authorization_mode,operational_state,"
+                "policy_digest,deployment_set_digest,critical_failure_count,"
+                "health_check_required,"
+                "last_healthy_reconciliation_run_id,fencing_version) VALUES("
+                "'OKX_DEMO','CONTINUOUS_DEMO_V1','RUNNING',:digest,:set_digest,"
+                "0,false,"
+                ":run,1)"
+            ),
+            {
+                "digest": policy_digest,
+                "set_digest": hashlib.sha256(b"").hexdigest(),
+                "run": run_id,
+            },
+        )
+    return approval_id, run_id
+
+
+def test_postgresql_continuous_guard_claim_is_single_use_and_rate_limited(
+    postgres_writer_engine,
+) -> None:
+    policy_digest = "3" * 64
+    approval_id, _ = _seed_continuous_demo_guard(
+        postgres_writer_engine,
+        policy_digest=policy_digest,
+    )
+    with postgres_writer_engine.begin() as connection:
+        first = connection.execute(
+            text("SELECT claim_okx_demo_continuous_dispatch(:approval,:digest)"),
+            {"approval": approval_id, "digest": policy_digest},
+        ).scalar_one()
+        replay = connection.execute(
+            text("SELECT claim_okx_demo_continuous_dispatch(:approval,:digest)"),
+            {"approval": approval_id, "digest": policy_digest},
+        ).scalar_one()
+        actions = connection.execute(
+            text(
+                "SELECT count(*) FROM okx_demo_automation_guard_events "
+                "WHERE event_kind='ACTION_DISPATCH'"
+            )
+        ).scalar_one()
+    assert first is True
+    assert replay is False
+    assert actions == 1
+
+
+def test_postgresql_continuous_guard_blocks_deployment_set_digest_drift(
+    postgres_writer_engine,
+) -> None:
+    policy_digest = "3" * 64
+    _seed_continuous_demo_guard(
+        postgres_writer_engine,
+        policy_digest=policy_digest,
+    )
+    with postgres_writer_engine.begin() as connection:
+        assert connection.execute(
+            text("SELECT okx_demo_continuous_opening_allowed(:digest)"),
+            {"digest": policy_digest},
+        ).scalar_one() is True
+        connection.execute(
+            text(
+                "UPDATE okx_demo_automation_guard_states "
+                "SET deployment_set_digest=:drift "
+                "WHERE execution_target_id='OKX_DEMO'"
+            ),
+            {"drift": "f" * 64},
+        )
+        assert connection.execute(
+            text("SELECT okx_demo_continuous_opening_allowed(:digest)"),
+            {"digest": policy_digest},
+        ).scalar_one() is False
+
+
+@pytest.mark.parametrize(
+    ("event_count", "event_age"),
+    ((6, "1 minute"), (24, "10 minutes")),
+)
+def test_postgresql_continuous_guard_enforces_both_global_rate_windows(
+    postgres_writer_engine,
+    event_count: int,
+    event_age: str,
+) -> None:
+    policy_digest = "3" * 64
+    approval_id, run_id = _seed_continuous_demo_guard(
+        postgres_writer_engine,
+        policy_digest=policy_digest,
+    )
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO okx_demo_automation_guard_events("
+                "execution_target_id,event_key,event_kind,failure_class,"
+                "policy_digest,reconciliation_run_id,evidence_snapshot,observed_at) "
+                "SELECT 'OKX_DEMO',encode(public.digest(convert_to("
+                "'rate-'||item::text||'-'||:age,'UTF8'),'sha256'),'hex'),"
+                "'ACTION_DISPATCH',NULL,:digest,:run,'{}'::jsonb,"
+                "clock_timestamp()-CAST(:age AS interval) "
+                "FROM generate_series(1,:count) item"
+            ),
+            {
+                "age": event_age,
+                "count": event_count,
+                "digest": policy_digest,
+                "run": run_id,
+            },
+        )
+        allowed = connection.execute(
+            text("SELECT claim_okx_demo_continuous_dispatch(:approval,:digest)"),
+            {"approval": approval_id, "digest": policy_digest},
+        ).scalar_one()
+    assert allowed is False
+
+
+def test_postgresql_continuous_guard_cooldown_health_and_manual_latch(
+    postgres_writer_engine,
+) -> None:
+    policy_digest = "3" * 64
+    _, run_id = _seed_continuous_demo_guard(
+        postgres_writer_engine,
+        policy_digest=policy_digest,
+    )
+    with postgres_writer_engine.begin() as connection:
+        outcomes = [
+            connection.execute(
+                text(
+                    "SELECT record_okx_demo_automation_failure("
+                    "'AUTHENTICATION',:key,:run,:digest)"
+                ),
+                {
+                    "key": hashlib.sha256(f"auth-{index}".encode()).hexdigest(),
+                    "run": run_id,
+                    "digest": policy_digest,
+                },
+            ).scalar_one()
+            for index in range(3)
+        ]
+        assert outcomes == ["RUNNING", "RUNNING", "COOLDOWN"]
+        connection.execute(
+            text(
+                "UPDATE okx_demo_automation_guard_states "
+                "SET cooldown_until=clock_timestamp()-interval '1 second' "
+                "WHERE execution_target_id='OKX_DEMO'"
+            )
+        )
+        recovered = connection.execute(
+            text("SELECT record_okx_demo_automation_health(:run,:digest)"),
+            {"run": run_id, "digest": policy_digest},
+        ).scalar_one()
+        latched = connection.execute(
+            text(
+                "SELECT record_okx_demo_automation_failure("
+                "'RECONCILIATION',:key,:run,:digest)"
+            ),
+            {
+                "key": hashlib.sha256(b"reconciliation-drift").hexdigest(),
+                "run": run_id,
+                "digest": policy_digest,
+            },
+        ).scalar_one()
+        still_latched = connection.execute(
+            text("SELECT record_okx_demo_automation_health(:run,:digest)"),
+            {"run": run_id, "digest": policy_digest},
+        ).scalar_one()
+        event_kinds = connection.execute(
+            text(
+                "SELECT event_kind FROM okx_demo_automation_guard_events "
+                "ORDER BY id"
+            )
+        ).scalars().all()
+    assert recovered == "RUNNING"
+    assert latched == "MANUAL_RESET_REQUIRED"
+    assert still_latched == "MANUAL_RESET_REQUIRED"
+    assert "COOLDOWN_ENTERED" in event_kinds
+    assert "HEALTH_RECOVERED" in event_kinds
+    assert "MANUAL_LATCHED" in event_kinds
+
+
+def test_postgresql_continuous_guard_acl_tamper_fails_readiness(
+    postgres_writer_engine,
+) -> None:
+    upgrade_database(postgres_writer_engine)
+    assert verify_schema(postgres_writer_engine).ready is True
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(
+            text(
+                "GRANT EXECUTE ON FUNCTION "
+                "enable_okx_demo_continuous_automation(text,bigint) TO freqtrade"
+            )
+        )
+    readiness = verify_schema(postgres_writer_engine)
+    assert readiness.ready is False
+    assert any(
+        "continuous Demo guard function ACL mismatch" in problem
+        for problem in readiness.problems
+    )

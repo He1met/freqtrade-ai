@@ -50,11 +50,17 @@ class StrategyDeployment(Base):
             "created_at",
         ),
         Index(
-            "strategy_deployments_single_active_idx",
+            "strategy_deployments_active_slot_idx",
             "execution_target_id",
+            "active_slot",
             unique=True,
             postgresql_where=text("status = 'ACTIVE'"),
             sqlite_where=text("status = 'ACTIVE'"),
+        ),
+        CheckConstraint(
+            "(status = 'ACTIVE' AND active_slot BETWEEN 1 AND 3) OR "
+            "(status = 'DISABLED' AND active_slot IS NULL)",
+            name="strategy_deployments_active_slot_check",
         ),
     )
 
@@ -87,9 +93,11 @@ class StrategyDeployment(Base):
     candidate_digest: Mapped[str] = mapped_column(String(64), nullable=False)
     promotion_policy_version: Mapped[str] = mapped_column(String(80), nullable=False)
     deployment_policy_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    risk_policy_digest: Mapped[Optional[str]] = mapped_column(String(64))
     instrument_id: Mapped[str] = mapped_column(String(80), nullable=False)
     timeframe: Mapped[str] = mapped_column(String(16), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="ACTIVE")
+    active_slot: Mapped[Optional[int]] = mapped_column(Integer)
     evidence_snapshot: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     disabled_reason: Mapped[Optional[str]] = mapped_column(Text)
     disabled_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))

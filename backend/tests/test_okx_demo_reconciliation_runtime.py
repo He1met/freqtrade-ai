@@ -1159,6 +1159,7 @@ def _active_runtime_deployment(db) -> StrategyDeployment:
         instrument_id="BTC-USDT-SWAP",
         timeframe="5m",
         status="ACTIVE",
+        active_slot=1,
         evidence_snapshot={},
         created_at=NOW,
         updated_at=NOW,
