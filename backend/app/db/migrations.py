@@ -60,7 +60,8 @@ STRATEGY_VALIDATION_BASE_VERSION = "20260801_24"
 CANARY_LINEAGE_WRITE_BASE_VERSION = "20260801_25"
 CANARY_FINAL_EXPIRY_BASE_VERSION = "20260802_26"
 CANARY_LIFECYCLE_BASE_VERSION = "20260802_27"
-SCHEMA_VERSION = "20260802_28"
+CANARY_CONSENT_HANDOFF_BASE_VERSION = "20260802_28"
+SCHEMA_VERSION = "20260803_29"
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 ATTESTATION_PROOF_KEY_ENV = "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"
 OPERATOR_TOKEN_ENV = "FREQTRADE_AI_OPERATOR_TOKEN"
@@ -7184,7 +7185,7 @@ def _add_controlled_canary_lifecycle_boundary(connection: Connection) -> None:
 
 
 def _add_canary_consent_handoff_boundary(connection: Connection) -> None:
-    """Install v28's owner-only, consent-bound final attestation handoff."""
+    """Install the owner-only, consent-bound final attestation handoff."""
 
     Base.metadata.tables["okx_demo_canary_consent_handoffs"].create(
         bind=connection, checkfirst=True
@@ -7198,7 +7199,34 @@ def _add_canary_consent_handoff_boundary(connection: Connection) -> None:
         )
     quoted_schema = connection.dialect.identifier_preparer.quote_schema(schema_name)
     connection.execute(text(
-        "LOCK TABLE {}.research_jobs IN SHARE ROW EXCLUSIVE MODE".format(
+        "LOCK TABLE {}.okx_demo_canary_consent_handoffs "
+        "IN SHARE ROW EXCLUSIVE MODE NOWAIT".format(quoted_schema)
+    ))
+    duplicate_active_source = connection.execute(text(
+        "SELECT source_job_id FROM {}.okx_demo_canary_consent_handoffs "
+        "WHERE status IN ('REQUESTED','FINALIZED','GRANT_ISSUED') "
+        "GROUP BY source_job_id HAVING count(*)>1 ORDER BY source_job_id LIMIT 1"
+        .format(quoted_schema)
+    )).scalar_one_or_none()
+    if duplicate_active_source is not None:
+        raise SchemaMigrationBlocked(
+            "v29 refuses multiple active consent handoffs for source job {}".format(
+                duplicate_active_source
+            )
+        )
+    connection.execute(text(
+        "ALTER TABLE {}.okx_demo_canary_consent_handoffs DROP CONSTRAINT IF EXISTS "
+        "okx_demo_canary_consent_source_unique".format(quoted_schema)
+    ))
+    connection.execute(text(
+        "CREATE UNIQUE INDEX IF NOT EXISTS "
+        "okx_demo_canary_consent_active_source_unique ON "
+        "{}.okx_demo_canary_consent_handoffs(source_job_id) "
+        "WHERE status IN ('REQUESTED','FINALIZED','GRANT_ISSUED')"
+        .format(quoted_schema)
+    ))
+    connection.execute(text(
+        "LOCK TABLE {}.research_jobs IN SHARE ROW EXCLUSIVE MODE NOWAIT".format(
             quoted_schema
         )
     ))
@@ -7361,6 +7389,9 @@ def _add_canary_consent_handoff_boundary(connection: Connection) -> None:
             existing SCHEMA_TOKEN.okx_demo_canary_consent_handoffs%ROWTYPE;
             new_id text; v_consent_digest text; payload_digest text; proof_key bytea;
     BEGIN
+      IF NOT pg_try_advisory_xact_lock(5067747289570038601) THEN
+        RAISE EXCEPTION 'controlled canary consent request lock is busy';
+      END IF;
       IF p_idempotency_digest !~ '^[0-9a-f]{64}$'
          OR p_nonce !~ '^[0-9a-f]{64}$' OR p_proof !~ '^[0-9a-f]{64}$'
          OR p_payload::jsonb IS DISTINCT FROM jsonb_build_object(
@@ -7396,6 +7427,11 @@ def _add_canary_consent_handoff_boundary(connection: Connection) -> None:
         RETURN jsonb_build_object('handoff_id',existing.handoff_id,
           'status',existing.status,'source_job_id',existing.source_job_id,
           'consent_deadline_at',existing.consent_deadline_at);
+      END IF;
+      IF EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_canary_consent_handoffs
+          WHERE source_job_id=22
+            AND status IN ('REQUESTED','FINALIZED','GRANT_ISSUED')) THEN
+        RAISE EXCEPTION 'active controlled canary consent already exists';
       END IF;
       SELECT * INTO source FROM SCHEMA_TOKEN.research_jobs
        WHERE id=22
@@ -8010,7 +8046,7 @@ def _add_canary_consent_handoff_boundary(connection: Connection) -> None:
 
 
 def _finalize_current_canary_boundaries(connection: Connection) -> list[str]:
-    """Converge every supported upgrade path on the complete v28 boundary."""
+    """Converge every supported upgrade path on the complete current boundary."""
 
     required_tables = {
         "approved_executions",
@@ -8126,6 +8162,7 @@ def upgrade_database(engine: Engine) -> str:
                 CANARY_LINEAGE_WRITE_BASE_VERSION,
                 CANARY_FINAL_EXPIRY_BASE_VERSION,
                 CANARY_LIFECYCLE_BASE_VERSION,
+                CANARY_CONSENT_HANDOFF_BASE_VERSION,
             }
             if current_version in supported_upgrade_versions:
                 connection.execute(
@@ -8162,6 +8199,7 @@ def upgrade_database(engine: Engine) -> str:
             if current_version in {
                 CANARY_FINAL_EXPIRY_BASE_VERSION,
                 CANARY_LIFECYCLE_BASE_VERSION,
+                CANARY_CONSENT_HANDOFF_BASE_VERSION,
             }:
                 problems = _finalize_current_canary_boundaries(connection)
                 if problems:

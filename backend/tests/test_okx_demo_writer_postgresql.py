@@ -34,6 +34,7 @@ from app.db.migrations import (
     CANARY_LINEAGE_WRITE_BASE_VERSION,
     CANARY_FINAL_EXPIRY_BASE_VERSION,
     CANARY_LIFECYCLE_BASE_VERSION,
+    CANARY_CONSENT_HANDOFF_BASE_VERSION,
     FULL_CHAIN_BASE_VERSION,
     ORDER_WRITER_BASE_VERSION,
     RECONCILIATION_BASE_VERSION,
@@ -97,6 +98,7 @@ from app.services.okx_demo_reconciliation import (
 )
 from app.services.okx_demo_canary_preparation import (
     CANARY_OPERATION,
+    OkxDemoCanaryPreparationBlocked,
     OkxDemoCanaryPreparationService,
     process_pending_canary_consent_handoff,
 )
@@ -5104,6 +5106,105 @@ def test_postgresql_v28_consent_exact_finalize_and_restart_revoke(
         assert positions == 0
     monkeypatch.setenv(OPERATOR_TOKEN_ENV, "synthetic-rotated-operator-token")
     harden_operator_consent_access_boundary(postgres_writer_engine)
+
+
+def test_postgresql_v29_terminal_consent_allows_one_fresh_request_only(
+    postgres_writer_engine,
+) -> None:
+    upgrade_database(postgres_writer_engine)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    with Session(postgres_writer_engine) as admin:
+        _seed_final_consent_source(admin, now=now)
+
+    with Session(postgres_writer_engine) as runtime:
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        old = OkxDemoCanaryPreparationService(
+            runtime
+        ).request_final_attestation_consent(
+            idempotency_key="issue-627-terminal-old",
+            operator_token="synthetic-test-operator-token",
+        )
+    with postgres_writer_engine.begin() as admin:
+        admin.execute(
+            text(
+                "UPDATE okx_demo_canary_consent_handoffs "
+                "SET status='EXPIRED',failure_code='TEST_TERMINAL',"
+                "updated_at=statement_timestamp() WHERE handoff_id=:handoff_id"
+            ),
+            {"handoff_id": old.handoff_id},
+        )
+        terminal_before = admin.execute(
+            text(
+                "SELECT handoff_id,idempotency_key_digest,status,failure_code,created_at "
+                "FROM okx_demo_canary_consent_handoffs WHERE handoff_id=:handoff_id"
+            ),
+            {"handoff_id": old.handoff_id},
+        ).one()
+        admin.execute(
+            text("DROP INDEX okx_demo_canary_consent_active_source_unique")
+        )
+        admin.execute(
+            text(
+                "ALTER TABLE okx_demo_canary_consent_handoffs ADD CONSTRAINT "
+                "okx_demo_canary_consent_source_unique UNIQUE(source_job_id)"
+            )
+        )
+        admin.execute(text("DELETE FROM {}".format(VERSION_TABLE)))
+        admin.execute(
+            text("INSERT INTO {}(version) VALUES(:version)".format(VERSION_TABLE)),
+            {"version": CANARY_CONSENT_HANDOFF_BASE_VERSION},
+        )
+
+    assert upgrade_database(postgres_writer_engine) == SCHEMA_VERSION
+    assert schema_problems(postgres_writer_engine) == []
+    with postgres_writer_engine.begin() as admin:
+        assert admin.execute(
+            text(
+                "SELECT handoff_id,idempotency_key_digest,status,failure_code,created_at "
+                "FROM okx_demo_canary_consent_handoffs WHERE handoff_id=:handoff_id"
+            ),
+            {"handoff_id": old.handoff_id},
+        ).one() == terminal_before
+
+    def request(key: str) -> tuple[str, str]:
+        with Session(postgres_writer_engine) as runtime:
+            runtime.execute(text("SET LOCAL ROLE freqtrade"))
+            try:
+                result = OkxDemoCanaryPreparationService(
+                    runtime
+                ).request_final_attestation_consent(
+                    idempotency_key=key,
+                    operator_token="synthetic-test-operator-token",
+                )
+                return result.operation_status, result.handoff_id
+            except OkxDemoCanaryPreparationBlocked as exc:
+                return "BLOCKED", str(exc)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(
+            executor.map(
+                request,
+                ("issue-627-terminal-fresh-a", "issue-627-terminal-fresh-b"),
+            )
+        )
+    assert sorted(status for status, _detail in outcomes) == ["BLOCKED", "REQUESTED"]
+    assert all(
+        detail == "controlled canary consent request was rejected"
+        for status, detail in outcomes
+        if status == "BLOCKED"
+    )
+
+    old_retry_status, old_retry_handoff = request("issue-627-terminal-old")
+    assert (old_retry_status, old_retry_handoff) == ("EXPIRED", old.handoff_id)
+    with Session(postgres_writer_engine) as admin:
+        assert admin.query(OkxDemoCanaryConsentHandoff).count() == 2
+        assert admin.execute(
+            text(
+                "SELECT count(*) FROM okx_demo_canary_consent_handoffs "
+                "WHERE source_job_id=22 "
+                "AND status IN ('REQUESTED','FINALIZED','GRANT_ISSUED')"
+            )
+        ).scalar_one() == 1
 
 
 def test_postgresql_v28_migration_lock_closes_successor_trigger_window(

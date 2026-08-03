@@ -7,6 +7,7 @@ from app.db.migrations import (
     CANARY_LINEAGE_WRITE_BASE_VERSION,
     CANARY_FINAL_EXPIRY_BASE_VERSION,
     CANARY_LIFECYCLE_BASE_VERSION,
+    CANARY_CONSENT_HANDOFF_BASE_VERSION,
     EARLY_TARGET_LINEAGE_VERSION,
     DUAL_SIDE_BASE_VERSION,
     FULL_CHAIN_BASE_VERSION,
@@ -94,7 +95,8 @@ def test_schema_version_is_explicit_and_stable() -> None:
     assert CANARY_LINEAGE_WRITE_BASE_VERSION == "20260801_25"
     assert CANARY_FINAL_EXPIRY_BASE_VERSION == "20260802_26"
     assert CANARY_LIFECYCLE_BASE_VERSION == "20260802_27"
-    assert SCHEMA_VERSION == "20260802_28"
+    assert CANARY_CONSENT_HANDOFF_BASE_VERSION == "20260802_28"
+    assert SCHEMA_VERSION == "20260803_29"
 
 
 def test_v28_consent_handoff_sql_is_owner_managed_and_exact() -> None:

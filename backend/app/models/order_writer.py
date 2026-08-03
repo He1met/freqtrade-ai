@@ -25,6 +25,9 @@ NONTERMINAL_PREDICATE = (
     "state IN ('PREPARED', 'ACKNOWLEDGED', 'RECOVERY_REQUIRED', "
     "'RESIDUAL_CLOSE_REQUIRED')"
 )
+CANARY_ACTIVE_CONSENT_PREDICATE = (
+    "status IN ('REQUESTED', 'FINALIZED', 'GRANT_ISSUED')"
+)
 
 
 class OkxDemoCanaryConsentHandoff(Base):
@@ -76,9 +79,12 @@ class OkxDemoCanaryConsentHandoff(Base):
             "AND approval_id IS NOT NULL AND finalized_at IS NOT NULL)",
             name="okx_demo_canary_consent_status_shape_check",
         ),
-        UniqueConstraint(
+        Index(
+            "okx_demo_canary_consent_active_source_unique",
             "source_job_id",
-            name="okx_demo_canary_consent_source_unique",
+            unique=True,
+            postgresql_where=text(CANARY_ACTIVE_CONSENT_PREDICATE),
+            sqlite_where=text(CANARY_ACTIVE_CONSENT_PREDICATE),
         ),
         UniqueConstraint(
             "idempotency_key_digest",

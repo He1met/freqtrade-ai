@@ -111,6 +111,17 @@ def _cache_canary_retry_result(_result: Any) -> bool:
     return True
 
 
+def _cache_terminal_canary_consent_result(result: Any) -> bool:
+    """Cache consent responses only after the durable handoff is terminal."""
+
+    return isinstance(result, dict) and result.get("operation_status") in {
+        "CONSUMED",
+        "REVOKED",
+        "FAILED",
+        "EXPIRED",
+    }
+
+
 @router.post("/canary/prepare", status_code=202)
 def prepare_controlled_canary(
     payload: CanaryPreparationRequest,
@@ -590,6 +601,7 @@ def consent_final_attestation_canary(
         provider_call=True,
         request_payload=payload.model_dump(mode="json"),
         handler=execute,
+        cache_result=_cache_terminal_canary_consent_result,
     )
 
 
