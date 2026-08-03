@@ -1997,6 +1997,7 @@ def test_okx_runtime_readiness_reports_blocked_openings_without_secrets(
                 "adapter": "ATTESTED",
                 "reconciliation": "DRIFTED",
                 "writer": "UNIQUE",
+                "automation_guard": "MANUAL_RESET_REQUIRED",
                 "pid": pid,
             }
         ),
@@ -2031,6 +2032,7 @@ def test_okx_runtime_readiness_reports_blocked_openings_without_secrets(
         "adapter": "ATTESTED",
         "reconciliation": "DRIFTED",
         "writer": "UNIQUE",
+        "automation_guard": "MANUAL_RESET_REQUIRED",
     }
 
 
@@ -2048,6 +2050,7 @@ def test_okx_runtime_readiness_accepts_recovery_only_without_opening_ready(
                 "adapter": "ATTESTED",
                 "reconciliation": "DRIFTED",
                 "writer": "UNIQUE",
+                "automation_guard": "BLOCKED",
                 "pid": pid,
             }
         ),
@@ -2065,6 +2068,22 @@ def test_okx_runtime_readiness_accepts_recovery_only_without_opening_ready(
     readiness = runtime.okx_runtime_readiness(tmp_path)
     assert readiness["status"] == "RECOVERY_ONLY"
     assert readiness["reconciliation"] == "DRIFTED"
+
+
+def test_okx_runtime_startup_returns_for_guard_blocked_openings(monkeypatch, tmp_path):
+    runtime = load_runtime_module()
+    moments = iter((0.0, 1.0))
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: next(moments))
+    monkeypatch.setattr(
+        runtime,
+        "okx_runtime_readiness",
+        lambda _state_dir: {
+            "status": "BLOCKED_OPENINGS",
+            "reconciliation": "RECOVERED",
+            "automation_guard": "BLOCKED",
+        },
+    )
+    runtime.wait_for_okx_runtime(tmp_path)
 
 
 def test_okx_runtime_startup_returns_for_recovery_only(monkeypatch, tmp_path):
