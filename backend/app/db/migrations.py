@@ -65,7 +65,8 @@ CANARY_CONSENT_FAILURE_AUDIT_BASE_VERSION = "20260803_29"
 CANARY_ATOMIC_PREPARE_BASE_VERSION = "20260803_30"
 ACCEPTED_NOT_FOUND_TERMINALIZATION_BASE_VERSION = "20260803_31"
 BOUNDED_SECOND_ACCEPTANCE_BASE_VERSION = "20260803_32"
-SCHEMA_VERSION = "20260804_33"
+FINAL_ACCEPTANCE_BASE_VERSION = "20260804_33"
+SCHEMA_VERSION = "20260804_34"
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 ATTESTATION_PROOF_KEY_ENV = "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"
 OPERATOR_TOKEN_ENV = "FREQTRADE_AI_OPERATOR_TOKEN"
@@ -5819,6 +5820,15 @@ def _accepted_not_found_boundary_problems(
             False,
             ("receipt_depth',2", "absolute_submission_claim',false", "<>2"),
         ),
+        "terminalize_final_accepted_not_found_no_fill(jsonb)": (
+            False,
+            (
+                "USER_ACCEPTED_NOT_FOUND_NO_FILL_FINAL_V1",
+                "receipt_depth',3",
+                "successor_allowed',false",
+                "<>3",
+            ),
+        ),
         "okx_demo_canary_consent_eligibility()": (
             True,
             ("ACCEPTED_SUCCESSOR", "ORDER BY receipt_depth DESC", "BLOCKED"),
@@ -8866,10 +8876,10 @@ def _add_accepted_not_found_terminalization_boundary(connection: Connection) -> 
 def _add_bounded_second_accepted_not_found_boundary(connection: Connection) -> None:
     """Install v33's fixed second receipt and final-successor boundary.
 
-    This is deliberately not a recursive receipt design.  The only legal rows are
-    the existing depth-1 receipt and one depth-2 receipt for its already-created
-    successor.  A depth-2 receipt may be consumed by one last handoff; no depth-3
-    receipt can be represented.
+    This is deliberately not a recursive receipt design.  The v33 functions only
+    create depth-1/depth-2 receipts and allow one receipt-bound final handoff.  The
+    table constraint also preserves a later v34 depth-3 final receipt so replaying
+    this installer during a future upgrade cannot invalidate durable evidence.
     """
 
     schema_name = connection.execute(text("SELECT current_schema()" )).scalar_one()
@@ -8893,9 +8903,11 @@ def _add_bounded_second_accepted_not_found_boundary(connection: Connection) -> N
         (receipt_depth=1 AND parent_terminal_receipt_id IS NULL
           AND acceptance_kind='USER_ACCEPTED_NOT_FOUND_NO_FILL_V1')
         OR (receipt_depth=2 AND parent_terminal_receipt_id IS NOT NULL
-          AND acceptance_kind='USER_ACCEPTED_NOT_FOUND_NO_FILL_V2')),
+          AND acceptance_kind='USER_ACCEPTED_NOT_FOUND_NO_FILL_V2')
+        OR (receipt_depth=3 AND parent_terminal_receipt_id IS NOT NULL
+          AND acceptance_kind='USER_ACCEPTED_NOT_FOUND_NO_FILL_FINAL_V1')),
       ADD CONSTRAINT okx_demo_accepted_not_found_identity_check CHECK(
-        source_job_id=22 AND receipt_depth IN (1,2)
+        source_job_id=22 AND receipt_depth IN (1,2,3)
         AND length(request_digest)=64 AND length(evidence_digest)=64
         AND length(acceptance_digest)=64),
       ADD CONSTRAINT okx_demo_accepted_not_found_receipt_depth_key UNIQUE(receipt_depth),
@@ -9255,6 +9267,241 @@ def _add_bounded_second_accepted_not_found_boundary(connection: Connection) -> N
         "OWNER TO freqtrade_ai_attestor; REVOKE ALL ON TABLE "
         "{0}.okx_demo_accepted_not_found_terminalizations FROM PUBLIC,freqtrade"
         .format(quoted_schema)
+    ))
+
+
+def _add_final_accepted_not_found_boundary(connection: Connection) -> None:
+    """Install v34's owner-only, non-successorable final zero-fill receipt."""
+
+    schema_name = connection.execute(text("SELECT current_schema()" )).scalar_one()
+    quoted_schema = connection.dialect.identifier_preparer.quote_schema(schema_name)
+    ddl = r"""
+    ALTER TABLE SCHEMA_TOKEN.okx_demo_accepted_not_found_terminalizations
+      DROP CONSTRAINT IF EXISTS okx_demo_accepted_not_found_kind_check,
+      DROP CONSTRAINT IF EXISTS okx_demo_accepted_not_found_identity_check,
+      ADD CONSTRAINT okx_demo_accepted_not_found_kind_check CHECK(
+        (receipt_depth=1 AND parent_terminal_receipt_id IS NULL
+          AND acceptance_kind='USER_ACCEPTED_NOT_FOUND_NO_FILL_V1')
+        OR (receipt_depth=2 AND parent_terminal_receipt_id IS NOT NULL
+          AND acceptance_kind='USER_ACCEPTED_NOT_FOUND_NO_FILL_V2')
+        OR (receipt_depth=3 AND parent_terminal_receipt_id IS NOT NULL
+          AND acceptance_kind='USER_ACCEPTED_NOT_FOUND_NO_FILL_FINAL_V1')),
+      ADD CONSTRAINT okx_demo_accepted_not_found_identity_check CHECK(
+        source_job_id=22 AND receipt_depth IN (1,2,3)
+        AND length(request_digest)=64 AND length(evidence_digest)=64
+        AND length(acceptance_digest)=64);
+
+    CREATE OR REPLACE FUNCTION SCHEMA_TOKEN.terminalize_final_accepted_not_found_no_fill(
+      p_payload jsonb)
+    RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+    DECLARE attempt SCHEMA_TOKEN.okx_order_write_attempts%ROWTYPE;
+            order_row SCHEMA_TOKEN.exchange_orders%ROWTYPE;
+            lifecycle SCHEMA_TOKEN.okx_demo_canary_lifecycles%ROWTYPE;
+            grant_row SCHEMA_TOKEN.okx_demo_submission_grants%ROWTYPE;
+            handoff SCHEMA_TOKEN.okx_demo_canary_consent_handoffs%ROWTYPE;
+            parent SCHEMA_TOKEN.okx_demo_accepted_not_found_terminalizations%ROWTYPE;
+            lease SCHEMA_TOKEN.okx_order_writer_leases%ROWTYPE;
+            existing SCHEMA_TOKEN.okx_demo_accepted_not_found_terminalizations%ROWTYPE;
+            evidence jsonb; identity jsonb; v_evidence_digest text;
+            v_acceptance_digest text; new_receipt_id bigint;
+            v_approval_id bigint; v_approval_status text;
+            v_chain_id bigint; v_chain_status text;
+            v_chain_approval_id bigint; v_chain_target text;
+            observed_at timestamptz;
+    BEGIN
+      PERFORM pg_advisory_xact_lock(5067747289570038600);
+      IF jsonb_typeof(p_payload)<>'object'
+         OR (SELECT array_agg(key ORDER BY key) FROM jsonb_object_keys(p_payload) key)
+              IS DISTINCT FROM ARRAY['acceptance_digest','attempt_id',
+                'evidence_digest','evidence_observed_at','evidence_snapshot',
+                'expected_fencing_version','lifecycle_id','parent_terminal_receipt_id']::text[]
+         OR p_payload->>'acceptance_digest'!~'^[0-9a-f]{64}$'
+         OR p_payload->>'evidence_digest'!~'^[0-9a-f]{64}$' THEN
+        RAISE EXCEPTION 'invalid final accepted NOT_FOUND terminalization payload';
+      END IF;
+      observed_at:=(p_payload->>'evidence_observed_at')::timestamptz;
+      evidence:=p_payload->'evidence_snapshot';
+      SELECT * INTO parent FROM SCHEMA_TOKEN.okx_demo_accepted_not_found_terminalizations
+        WHERE id=(p_payload->>'parent_terminal_receipt_id')::bigint FOR UPDATE;
+      SELECT * INTO attempt FROM SCHEMA_TOKEN.okx_order_write_attempts
+        WHERE id=(p_payload->>'attempt_id')::bigint FOR UPDATE;
+      SELECT * INTO order_row FROM SCHEMA_TOKEN.exchange_orders
+        WHERE id=attempt.exchange_order_row_id FOR UPDATE;
+      SELECT * INTO lifecycle FROM SCHEMA_TOKEN.okx_demo_canary_lifecycles
+        WHERE lifecycle_id=p_payload->>'lifecycle_id' FOR UPDATE;
+      SELECT * INTO grant_row FROM SCHEMA_TOKEN.okx_demo_submission_grants
+        WHERE grant_id=lifecycle.submission_grant_id FOR UPDATE;
+      SELECT * INTO handoff FROM SCHEMA_TOKEN.okx_demo_canary_consent_handoffs
+        WHERE handoff_id=grant_row.handoff_id FOR UPDATE;
+      SELECT id,status INTO v_approval_id,v_approval_status
+        FROM SCHEMA_TOKEN.approved_executions WHERE id=grant_row.approval_id FOR UPDATE;
+      SELECT id,status,approved_execution_id,execution_target_id
+        INTO v_chain_id,v_chain_status,v_chain_approval_id,v_chain_target
+        FROM SCHEMA_TOKEN.full_chain_runs WHERE id=handoff.full_chain_run_id FOR UPDATE;
+      SELECT * INTO lease FROM SCHEMA_TOKEN.okx_order_writer_leases
+        WHERE execution_target_id='OKX_DEMO' FOR UPDATE;
+
+      SELECT * INTO existing
+        FROM SCHEMA_TOKEN.okx_demo_accepted_not_found_terminalizations
+       WHERE receipt_depth=3 OR acceptance_digest=p_payload->>'acceptance_digest'
+          OR attempt_id=attempt.id OR exchange_order_row_id=order_row.id
+          OR lifecycle_id=lifecycle.lifecycle_id OR predecessor_grant_id=grant_row.grant_id
+          OR predecessor_handoff_id=handoff.handoff_id FOR UPDATE;
+      IF FOUND THEN
+        IF existing.receipt_depth=3
+           AND existing.parent_terminal_receipt_id=parent.id
+           AND existing.acceptance_digest=p_payload->>'acceptance_digest'
+           AND existing.attempt_id=attempt.id
+           AND existing.exchange_order_row_id=order_row.id
+           AND existing.lifecycle_id=lifecycle.lifecycle_id
+           AND existing.evidence_digest=p_payload->>'evidence_digest' THEN
+          RETURN jsonb_build_object('terminalization_id',existing.id,
+            'receipt_depth',3,'acceptance_digest',existing.acceptance_digest,
+            'idempotent',true,'absolute_submission_claim',false,
+            'successor_allowed',false);
+        END IF;
+        RAISE EXCEPTION 'final accepted NOT_FOUND terminalization identity drift';
+      END IF;
+
+      IF parent.id IS NULL OR parent.receipt_depth<>2
+         OR parent.acceptance_kind<>'USER_ACCEPTED_NOT_FOUND_NO_FILL_V2'
+         OR NOT SCHEMA_TOKEN.exact_bounded_accepted_not_found_predecessor(
+                parent.predecessor_handoff_id)
+         OR attempt.id IS NULL OR order_row.id IS NULL OR lifecycle.lifecycle_id IS NULL
+         OR grant_row.grant_id IS NULL OR handoff.handoff_id IS NULL
+         OR lease.execution_target_id IS NULL OR handoff.source_job_id<>22
+         OR handoff.terminal_receipt_id IS DISTINCT FROM parent.id
+         OR handoff.supersedes_handoff_id IS DISTINCT FROM parent.predecessor_handoff_id
+         OR handoff.status<>'CONSUMED' OR grant_row.status<>'CONSUMED'
+         OR handoff.grant_id IS DISTINCT FROM grant_row.grant_id
+         OR v_approval_id IS NULL OR v_approval_status<>'ACTIVE'
+         OR v_approval_id<>grant_row.approval_id
+         OR v_chain_id IS NULL OR v_chain_status<>'EXECUTING'
+         OR v_chain_approval_id<>v_approval_id OR v_chain_target<>'OKX_DEMO'
+         OR attempt.operation<>'PLACE' OR attempt.state<>'RECOVERY_REQUIRED'
+         OR attempt.reason_code<>'EXACT_ORDER_NOT_FOUND' OR attempt.attempt_count<>1
+         OR attempt.safe_response_snapshot::jsonb IS DISTINCT FROM
+              jsonb_build_object('exact_order_get','NOT_FOUND','okx_code','51603')
+         OR attempt.recovery_grant_database_id IS NOT NULL
+         OR attempt.parent_attempt_id IS NOT NULL
+         OR order_row.exchange_order_id IS NOT NULL
+         OR order_row.id<>lifecycle.opening_exchange_order_row_id
+         OR lifecycle.cleanup_phase<>'OPENING_SUBMITTED'
+         OR lifecycle.outcome<>'PENDING' OR lifecycle.attributed_fill_quantity<>0
+         OR lifecycle.fencing_version<>(p_payload->>'expected_fencing_version')::bigint
+         OR handoff.consent_deadline_at>=clock_timestamp()
+         OR handoff.bundle_expires_at>=clock_timestamp()
+         OR grant_row.expires_at>=clock_timestamp()
+         OR lifecycle.deadline_at>=clock_timestamp() OR lease.expires_at>=clock_timestamp()
+         OR attempt.dispatch_not_after IS NULL OR attempt.dispatch_not_after>=clock_timestamp()
+         OR observed_at IS DISTINCT FROM attempt.last_attempt_at
+         OR attempt.last_attempt_at>clock_timestamp()+interval '5 seconds'
+         OR (SELECT count(*) FROM SCHEMA_TOKEN.okx_order_write_attempts
+               WHERE execution_target_id='OKX_DEMO')<>3
+         OR (SELECT count(*) FROM SCHEMA_TOKEN.exchange_orders
+               WHERE execution_target_id='OKX_DEMO')<>3
+         OR (SELECT count(*) FROM SCHEMA_TOKEN.okx_demo_canary_lifecycles)<>3
+         OR (SELECT count(*) FROM SCHEMA_TOKEN.okx_demo_accepted_not_found_terminalizations)<>2
+         OR EXISTS(SELECT 1 FROM SCHEMA_TOKEN.exchange_fills
+               WHERE execution_target_id='OKX_DEMO')
+         OR EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_order_write_attempts
+               WHERE parent_attempt_id=attempt.id)
+         OR EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_canary_consent_handoffs
+               WHERE supersedes_handoff_id=handoff.handoff_id) THEN
+        RAISE EXCEPTION 'final accepted NOT_FOUND terminalization precondition mismatch';
+      END IF;
+      IF EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_canary_consent_handoffs
+             WHERE status IN ('REQUESTED','FINALIZED','GRANT_ISSUED'))
+         OR EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_submission_grants WHERE status='ACTIVE')
+         OR EXISTS(SELECT 1 FROM SCHEMA_TOKEN.approved_executions
+             WHERE execution_target_id='OKX_DEMO' AND status='ACTIVE' AND id<>v_approval_id)
+         OR EXISTS(SELECT 1 FROM SCHEMA_TOKEN.full_chain_runs
+             WHERE execution_target_id='OKX_DEMO' AND status='EXECUTING' AND id<>v_chain_id)
+         OR EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_canary_lifecycles
+             WHERE lifecycle_id<>lifecycle.lifecycle_id
+               AND cleanup_phase NOT IN ('TERMINAL','REVOKED'))
+         OR EXISTS(SELECT 1 FROM SCHEMA_TOKEN.exchange_positions
+             WHERE execution_target_id='OKX_DEMO' AND quantity<>0)
+         OR EXISTS(SELECT 1 FROM SCHEMA_TOKEN.risk_budgets
+             WHERE execution_target_id='OKX_DEMO'
+               AND (reserved_notional<>0 OR approved_positions<>0)) THEN
+        RAISE EXCEPTION 'final accepted NOT_FOUND terminalization precondition mismatch';
+      END IF;
+      IF evidence IS DISTINCT FROM jsonb_build_object(
+           'absolute_submission_claim',false,'attempt_count',1,
+           'client_order_id',attempt.client_order_id,'exchange_result_code','51603',
+           'exchange_result_state','NOT_FOUND','fill_count',0,
+           'instrument_id',attempt.instrument_id,'query_kind','exact_get',
+           'request_digest',attempt.request_digest,'restart_resubmission_count',0) THEN
+        RAISE EXCEPTION 'final accepted NOT_FOUND evidence mismatch';
+      END IF;
+      v_evidence_digest:=encode(public.digest(convert_to(
+        SCHEMA_TOKEN.canonical_jsonb_text(evidence),'UTF8'),'sha256'),'hex');
+      identity:=jsonb_build_object(
+        'acceptance_kind','USER_ACCEPTED_NOT_FOUND_NO_FILL_FINAL_V1',
+        'absolute_submission_claim',false,'attempt_id',attempt.id,
+        'evidence_digest',v_evidence_digest,'evidence_observed_at',observed_at,
+        'exchange_order_row_id',order_row.id,'lifecycle_id',lifecycle.lifecycle_id,
+        'parent_terminal_receipt_id',parent.id,
+        'predecessor_grant_id',grant_row.grant_id,
+        'predecessor_handoff_id',handoff.handoff_id,'receipt_depth',3,
+        'request_digest',attempt.request_digest,'source_job_id',22,
+        'successor_allowed',false);
+      v_acceptance_digest:=encode(public.digest(convert_to(
+        SCHEMA_TOKEN.canonical_jsonb_text(identity),'UTF8'),'sha256'),'hex');
+      IF v_evidence_digest IS DISTINCT FROM p_payload->>'evidence_digest'
+         OR v_acceptance_digest IS DISTINCT FROM p_payload->>'acceptance_digest' THEN
+        RAISE EXCEPTION 'final accepted NOT_FOUND digest mismatch';
+      END IF;
+      INSERT INTO SCHEMA_TOKEN.okx_demo_accepted_not_found_terminalizations(
+        source_job_id,receipt_depth,parent_terminal_receipt_id,predecessor_handoff_id,
+        predecessor_grant_id,lifecycle_id,attempt_id,exchange_order_row_id,
+        acceptance_kind,absolute_submission_claim,exchange_result_code,
+        exchange_result_state,fill_count,attempt_count,restart_resubmission_count,
+        request_digest,evidence_observed_at,evidence_snapshot,evidence_digest,
+        acceptance_digest)
+      VALUES(22,3,parent.id,handoff.handoff_id,grant_row.grant_id,lifecycle.lifecycle_id,
+        attempt.id,order_row.id,'USER_ACCEPTED_NOT_FOUND_NO_FILL_FINAL_V1',false,
+        '51603','NOT_FOUND',0,1,0,attempt.request_digest,observed_at,evidence::json,
+        v_evidence_digest,v_acceptance_digest) RETURNING id INTO new_receipt_id;
+      UPDATE SCHEMA_TOKEN.okx_order_write_attempts
+         SET state='USER_ACCEPTED_NOT_FOUND_NO_FILL',
+             order_state='USER_ACCEPTED_NOT_FOUND_NO_FILL',updated_at=clock_timestamp()
+       WHERE id=attempt.id AND state='RECOVERY_REQUIRED' AND attempt_count=1;
+      IF NOT FOUND THEN RAISE EXCEPTION 'final accepted NOT_FOUND attempt CAS lost'; END IF;
+      UPDATE SCHEMA_TOKEN.exchange_orders
+         SET status='USER_ACCEPTED_NOT_FOUND_NO_FILL',updated_at=clock_timestamp()
+       WHERE id=order_row.id AND exchange_order_id IS NULL;
+      IF NOT FOUND THEN RAISE EXCEPTION 'final accepted NOT_FOUND order CAS lost'; END IF;
+      UPDATE SCHEMA_TOKEN.okx_demo_canary_lifecycles
+         SET outcome='FAILED',cleanup_phase='TERMINAL',
+             failure_code='USER_ACCEPTED_NOT_FOUND_NO_FILL',
+             final_reconciliation_run_id=NULL,accepted_terminalization_id=new_receipt_id,
+             final_evidence_digest=v_acceptance_digest,
+             terminal_at=clock_timestamp(),revoked_at=clock_timestamp(),
+             fencing_version=fencing_version+1,updated_at=clock_timestamp()
+       WHERE lifecycle_id=lifecycle.lifecycle_id AND cleanup_phase='OPENING_SUBMITTED'
+         AND fencing_version=(p_payload->>'expected_fencing_version')::bigint;
+      IF NOT FOUND THEN RAISE EXCEPTION 'final accepted NOT_FOUND lifecycle CAS lost'; END IF;
+      UPDATE SCHEMA_TOKEN.approved_executions SET status='EXPIRED'
+       WHERE id=v_approval_id AND status='ACTIVE';
+      IF NOT FOUND THEN RAISE EXCEPTION 'final accepted NOT_FOUND approval CAS lost'; END IF;
+      UPDATE SCHEMA_TOKEN.full_chain_runs
+         SET status='BLOCKED',terminal_reason='user accepted final NOT_FOUND no-fill terminal',
+             completed_at=clock_timestamp()
+       WHERE id=v_chain_id AND status='EXECUTING';
+      IF NOT FOUND THEN RAISE EXCEPTION 'final accepted NOT_FOUND full-chain CAS lost'; END IF;
+      RETURN jsonb_build_object('terminalization_id',new_receipt_id,'receipt_depth',3,
+        'acceptance_digest',v_acceptance_digest,'idempotent',false,
+        'absolute_submission_claim',false,'successor_allowed',false);
+    END $$;
+    """.replace("SCHEMA_TOKEN", quoted_schema)
+    connection.execute(text(ddl))
+    connection.execute(text(
+        "ALTER FUNCTION {0}.terminalize_final_accepted_not_found_no_fill(jsonb) "
+        "OWNER TO freqtrade_ai_attestor; REVOKE ALL ON FUNCTION "
+        "{0}.terminalize_final_accepted_not_found_no_fill(jsonb) "
+        "FROM PUBLIC,freqtrade".format(quoted_schema)
     ))
 
 
@@ -10074,6 +10321,7 @@ def _finalize_current_canary_boundaries(connection: Connection) -> list[str]:
     _add_accepted_not_found_terminalization_boundary(connection)
     _add_deferred_canary_terminalization_foreign_keys(connection)
     _add_bounded_second_accepted_not_found_boundary(connection)
+    _add_final_accepted_not_found_boundary(connection)
     _add_atomic_canary_prepare_boundary(connection)
     return schema_problems(connection)
 
@@ -10135,6 +10383,7 @@ def upgrade_database(engine: Engine) -> str:
                 CANARY_ATOMIC_PREPARE_BASE_VERSION,
                 ACCEPTED_NOT_FOUND_TERMINALIZATION_BASE_VERSION,
                 BOUNDED_SECOND_ACCEPTANCE_BASE_VERSION,
+                FINAL_ACCEPTANCE_BASE_VERSION,
             }
             if current_version in supported_upgrade_versions:
                 connection.execute(
@@ -10176,6 +10425,7 @@ def upgrade_database(engine: Engine) -> str:
                     CANARY_ATOMIC_PREPARE_BASE_VERSION,
                     ACCEPTED_NOT_FOUND_TERMINALIZATION_BASE_VERSION,
                     BOUNDED_SECOND_ACCEPTANCE_BASE_VERSION,
+                    FINAL_ACCEPTANCE_BASE_VERSION,
                 }:
                 problems = _finalize_current_canary_boundaries(connection)
                 if problems:
