@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from datetime import datetime, timedelta, timezone
 import hashlib
 from pathlib import Path
@@ -19,7 +20,6 @@ from app.models import (
     StrategyCandidateApproval,
     StrategyDeployment,
     StrategyScore,
-    StrategyValidationPlan,
     StrategyVersion,
 )
 from app.repositories.strategy_deployments import StrategyDeploymentRepository
@@ -34,10 +34,11 @@ class OkxDemoStrategySelectionBlocked(RuntimeError):
 class OkxDemoStrategySelectionService:
     """Owner-mediated selection of existing, already validated Demo strategies."""
 
-    POLICY_VERSION = "okx-demo-selection-v1"
-    ALLOWED_NAMES = frozenset(
-        {"DeepSeekRegimeCrossoverCandidateB", "CodexOkxDemoDualRsiStrategy"}
-    )
+    POLICY_VERSION = "okx-demo-selection-v2"
+    ALLOWED_STRATEGIES = {
+        "DeepSeekRegimeCrossoverCandidateB": "DeepSeekRegimeCrossoverCandidateB",
+        "Codex Okx Demo Dual RSI Strategy": "CodexOkxDemoDualRsiStrategy",
+    }
 
     def __init__(self, db: Session, *, project_root: Path):
         self.db = db
@@ -45,7 +46,7 @@ class OkxDemoStrategySelectionService:
 
     def publish(self, strategy_name: str, *, now: datetime | None = None) -> StrategyDeployment:
         current = now or datetime.now(timezone.utc)
-        if strategy_name not in self.ALLOWED_NAMES:
+        if strategy_name not in self.ALLOWED_STRATEGIES:
             raise OkxDemoStrategySelectionBlocked("strategy is not in the fixed Demo allowlist")
         if self.db.get_bind().dialect.name != "postgresql":
             raise OkxDemoStrategySelectionBlocked("selection requires PostgreSQL")
@@ -66,6 +67,8 @@ class OkxDemoStrategySelectionService:
         )
         if version is None or version.validation_status != "passed":
             raise OkxDemoStrategySelectionBlocked("current strategy version is not validated")
+        if strategy.current_version_id != version.id:
+            raise OkxDemoStrategySelectionBlocked("strategy current-version pointer is inconsistent")
         newer_count = self.db.scalar(
             select(func.count(StrategyVersion.id)).where(
                 StrategyVersion.strategy_id == strategy.id,
@@ -79,6 +82,21 @@ class OkxDemoStrategySelectionService:
             raise OkxDemoStrategySelectionBlocked("strategy source file is missing")
         if hashlib.sha256(source_path.read_bytes()).hexdigest() != version.code_hash:
             raise OkxDemoStrategySelectionBlocked("strategy source hash does not match")
+        if hashlib.sha256(version.generated_code.encode("utf-8")).hexdigest() != version.code_hash:
+            raise OkxDemoStrategySelectionBlocked("strategy database code hash does not match")
+        expected_class = self.ALLOWED_STRATEGIES[strategy_name]
+        if version.blueprint.get("class_name") != expected_class:
+            raise OkxDemoStrategySelectionBlocked("strategy blueprint class is inconsistent")
+        try:
+            class_names = {
+                node.name
+                for node in ast.walk(ast.parse(version.generated_code))
+                if isinstance(node, ast.ClassDef)
+            }
+        except SyntaxError as exc:
+            raise OkxDemoStrategySelectionBlocked("strategy database code is invalid") from exc
+        if expected_class not in class_names:
+            raise OkxDemoStrategySelectionBlocked("strategy class is missing from database code")
 
         score = self.db.scalar(
             select(StrategyScore)
@@ -116,33 +134,26 @@ class OkxDemoStrategySelectionService:
             if result is not None and result.backtest_task_id is not None
             else None
         )
-        plan = self.db.scalar(
-            select(StrategyValidationPlan)
-            .where(
-                StrategyValidationPlan.strategy_version_id == version.id,
-                StrategyValidationPlan.promotion_backtest_result_id == (
-                    result.id if result is not None else -1
-                ),
-                StrategyValidationPlan.status == "PASSED",
-                StrategyValidationPlan.strategy_code_digest == version.code_hash,
-            )
-            .order_by(StrategyValidationPlan.id.desc())
-            .with_for_update()
-        )
         if (
             result is None
             or run is None
             or task is None
-            or plan is None
             or run.strategy_version_id != version.id
             or run.status != "succeeded"
             or task.backtest_run_id != run.id
             or task.status != "succeeded"
+            or task.pair != "BTC/USDT:USDT"
+            or version.blueprint.get("timeframe") != task.timeframe
+            or str(run.config_snapshot.get("strategy_version_id")) != str(version.id)
+            or Path(str(run.config_snapshot.get("strategy_file_path", ""))).resolve()
+            != source_path
         ):
             raise OkxDemoStrategySelectionBlocked("validated backtest lineage is incomplete")
         source_chain = self.db.scalar(
             select(FullChainRun)
+            .join(ResearchJob, ResearchJob.id == FullChainRun.research_job_id)
             .where(
+                ResearchJob.operation.not_like("okx_demo.selection.%"),
                 FullChainRun.run_kind == "RESEARCH",
                 FullChainRun.strategy_id == strategy.id,
                 FullChainRun.strategy_version_id == version.id,
@@ -154,8 +165,6 @@ class OkxDemoStrategySelectionService:
             .order_by(FullChainRun.id.desc())
             .with_for_update()
         )
-        if source_chain is None:
-            raise OkxDemoStrategySelectionBlocked("research full-chain lineage is missing")
 
         selection = {
             "schema_version": "1",
@@ -167,16 +176,21 @@ class OkxDemoStrategySelectionService:
             "backtest_task_id": task.id,
             "backtest_result_id": result.id,
             "strategy_score_id": score.id,
-            "validation_plan_id": plan.id,
             "strategy_code_digest": version.code_hash,
+            "expected_strategy_class": expected_class,
+            "current_version_id": strategy.current_version_id,
             "minimum_score": 50,
             "actual_score": float(score.total_score),
             "validated_backtest_required": True,
+            "validation_basis": "DEMO_EXISTING_BACKTEST_V1",
+            "production_validation_plan_required": False,
             "production_promotion_claim": False,
             "allow_real_funds": False,
+            "source_provenance": "EXISTING_VALIDATED_ARTIFACTS",
+            "source_full_chain_id": source_chain.id if source_chain is not None else None,
         }
         candidate_digest = canonical_digest(selection)
-        operation = "okx_demo.selection.fixed_v1"
+        operation = "okx_demo.selection.fixed_v2"
         job_key = hashlib.sha256((operation + "|" + candidate_digest).encode()).hexdigest()
         existing_job = self.db.scalar(
             select(ResearchJob).where(
@@ -237,7 +251,11 @@ class OkxDemoStrategySelectionService:
             execution_target_id="OKX_DEMO",
             status="APPROVED",
             current_stage="CANDIDATE_APPROVAL",
-            strategy_generation_run_id=source_chain.strategy_generation_run_id,
+            strategy_generation_run_id=(
+                source_chain.strategy_generation_run_id
+                if source_chain is not None
+                else None
+            ),
             strategy_id=strategy.id,
             strategy_version_id=version.id,
             backtest_run_id=run.id,

@@ -14,6 +14,7 @@ from app.db.migrations import (
     BOUNDED_SECOND_ACCEPTANCE_BASE_VERSION,
     FINAL_ACCEPTANCE_BASE_VERSION,
     CONTINUOUS_DEMO_BASE_VERSION,
+    CONTINUOUS_DEMO_SELECTION_V2_BASE_VERSION,
     EARLY_TARGET_LINEAGE_VERSION,
     DUAL_SIDE_BASE_VERSION,
     FULL_CHAIN_BASE_VERSION,
@@ -113,16 +114,22 @@ def test_schema_version_is_explicit_and_stable() -> None:
     assert BOUNDED_SECOND_ACCEPTANCE_BASE_VERSION == "20260803_32"
     assert FINAL_ACCEPTANCE_BASE_VERSION == "20260804_33"
     assert CONTINUOUS_DEMO_BASE_VERSION == "20260804_34"
-    assert SCHEMA_VERSION == "20260804_35"
+    assert CONTINUOUS_DEMO_SELECTION_V2_BASE_VERSION == "20260804_35"
+    assert SCHEMA_VERSION == "20260804_36"
 
 
-def test_v35_continuous_demo_boundary_is_fixed_and_owner_controlled() -> None:
+def test_v36_continuous_demo_boundary_is_fixed_and_owner_controlled() -> None:
     import inspect as pyinspect
 
     source = pyinspect.getsource(_add_continuous_demo_automation_boundary)
     for fragment in (
         "active_slot BETWEEN 1 AND 3",
         "CONTINUOUS_DEMO_V1",
+        "okx-demo-selection-v2",
+        "Codex Okx Demo Dual RSI Strategy",
+        "active_demo_strategy_score_immutable",
+        "active_demo_backtest_result_immutable",
+        "active_demo_selection_chain_immutable",
         "max_orders_per_5_minutes',6",
         "max_orders_per_hour',24",
         "interval '10 minutes'",

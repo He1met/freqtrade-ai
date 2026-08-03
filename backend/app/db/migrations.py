@@ -67,7 +67,8 @@ ACCEPTED_NOT_FOUND_TERMINALIZATION_BASE_VERSION = "20260803_31"
 BOUNDED_SECOND_ACCEPTANCE_BASE_VERSION = "20260803_32"
 FINAL_ACCEPTANCE_BASE_VERSION = "20260804_33"
 CONTINUOUS_DEMO_BASE_VERSION = "20260804_34"
-SCHEMA_VERSION = "20260804_35"
+CONTINUOUS_DEMO_SELECTION_V2_BASE_VERSION = "20260804_35"
+SCHEMA_VERSION = "20260804_36"
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 ATTESTATION_PROOF_KEY_ENV = "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"
 OPERATOR_TOKEN_ENV = "FREQTRADE_AI_OPERATOR_TOKEN"
@@ -5886,6 +5887,11 @@ def _continuous_demo_automation_boundary_problems(
         ("strategies", "active_demo_strategy_material_immutable"),
         ("strategy_versions", "active_demo_strategy_version_immutable"),
         ("strategy_candidate_approvals", "active_demo_selection_receipt_immutable"),
+        ("strategy_scores", "active_demo_strategy_score_immutable"),
+        ("backtest_results", "active_demo_backtest_result_immutable"),
+        ("backtest_runs", "active_demo_backtest_run_immutable"),
+        ("backtest_tasks", "active_demo_backtest_task_immutable"),
+        ("full_chain_runs", "active_demo_selection_chain_immutable"),
     ):
         material_trigger = connection.execute(
             text(
@@ -10465,6 +10471,40 @@ def _add_continuous_demo_automation_boundary(connection: Connection) -> None:
       ELSIF TG_TABLE_NAME='strategy_candidate_approvals' THEN
         SELECT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.strategy_deployments
           WHERE status='ACTIVE' AND candidate_approval_id=material_id) INTO referenced;
+      ELSIF TG_TABLE_NAME='strategy_scores' THEN
+        SELECT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.strategy_deployments deployment
+          JOIN SCHEMA_TOKEN.strategy_candidate_approvals selection
+            ON selection.id=deployment.candidate_approval_id
+          WHERE deployment.status='ACTIVE' AND selection.strategy_score_id=material_id)
+          INTO referenced;
+      ELSIF TG_TABLE_NAME='backtest_results' THEN
+        SELECT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.strategy_deployments deployment
+          JOIN SCHEMA_TOKEN.strategy_candidate_approvals selection
+            ON selection.id=deployment.candidate_approval_id
+          WHERE deployment.status='ACTIVE' AND selection.backtest_result_id=material_id)
+          INTO referenced;
+      ELSIF TG_TABLE_NAME='full_chain_runs' THEN
+        SELECT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.strategy_deployments deployment
+          JOIN SCHEMA_TOKEN.strategy_candidate_approvals selection
+            ON selection.id=deployment.candidate_approval_id
+          WHERE deployment.status='ACTIVE' AND selection.full_chain_run_id=material_id)
+          INTO referenced;
+      ELSIF TG_TABLE_NAME='backtest_runs' THEN
+        SELECT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.strategy_deployments deployment
+          JOIN SCHEMA_TOKEN.strategy_candidate_approvals selection
+            ON selection.id=deployment.candidate_approval_id
+          JOIN SCHEMA_TOKEN.full_chain_runs chain
+            ON chain.id=selection.full_chain_run_id
+          WHERE deployment.status='ACTIVE' AND chain.backtest_run_id=material_id)
+          INTO referenced;
+      ELSIF TG_TABLE_NAME='backtest_tasks' THEN
+        SELECT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.strategy_deployments deployment
+          JOIN SCHEMA_TOKEN.strategy_candidate_approvals selection
+            ON selection.id=deployment.candidate_approval_id
+          JOIN SCHEMA_TOKEN.full_chain_runs chain
+            ON chain.id=selection.full_chain_run_id
+          WHERE deployment.status='ACTIVE' AND chain.backtest_task_id=material_id)
+          INTO referenced;
       END IF;
       IF referenced THEN
         RAISE EXCEPTION 'ACTIVE OKX_DEMO deployment material is immutable';
@@ -10486,6 +10526,31 @@ def _add_continuous_demo_automation_boundary(connection: Connection) -> None:
       ON SCHEMA_TOKEN.strategy_candidate_approvals;
     CREATE TRIGGER active_demo_selection_receipt_immutable
       BEFORE UPDATE OR DELETE ON SCHEMA_TOKEN.strategy_candidate_approvals FOR EACH ROW
+      EXECUTE FUNCTION SCHEMA_TOKEN.guard_active_demo_strategy_material();
+    DROP TRIGGER IF EXISTS active_demo_strategy_score_immutable
+      ON SCHEMA_TOKEN.strategy_scores;
+    CREATE TRIGGER active_demo_strategy_score_immutable
+      BEFORE UPDATE OR DELETE ON SCHEMA_TOKEN.strategy_scores FOR EACH ROW
+      EXECUTE FUNCTION SCHEMA_TOKEN.guard_active_demo_strategy_material();
+    DROP TRIGGER IF EXISTS active_demo_backtest_result_immutable
+      ON SCHEMA_TOKEN.backtest_results;
+    CREATE TRIGGER active_demo_backtest_result_immutable
+      BEFORE UPDATE OR DELETE ON SCHEMA_TOKEN.backtest_results FOR EACH ROW
+      EXECUTE FUNCTION SCHEMA_TOKEN.guard_active_demo_strategy_material();
+    DROP TRIGGER IF EXISTS active_demo_backtest_run_immutable
+      ON SCHEMA_TOKEN.backtest_runs;
+    CREATE TRIGGER active_demo_backtest_run_immutable
+      BEFORE UPDATE OR DELETE ON SCHEMA_TOKEN.backtest_runs FOR EACH ROW
+      EXECUTE FUNCTION SCHEMA_TOKEN.guard_active_demo_strategy_material();
+    DROP TRIGGER IF EXISTS active_demo_backtest_task_immutable
+      ON SCHEMA_TOKEN.backtest_tasks;
+    CREATE TRIGGER active_demo_backtest_task_immutable
+      BEFORE UPDATE OR DELETE ON SCHEMA_TOKEN.backtest_tasks FOR EACH ROW
+      EXECUTE FUNCTION SCHEMA_TOKEN.guard_active_demo_strategy_material();
+    DROP TRIGGER IF EXISTS active_demo_selection_chain_immutable
+      ON SCHEMA_TOKEN.full_chain_runs;
+    CREATE TRIGGER active_demo_selection_chain_immutable
+      BEFORE UPDATE OR DELETE ON SCHEMA_TOKEN.full_chain_runs FOR EACH ROW
       EXECUTE FUNCTION SCHEMA_TOKEN.guard_active_demo_strategy_material();
 
     CREATE OR REPLACE FUNCTION SCHEMA_TOKEN.guard_okx_demo_automation_event()
@@ -10566,7 +10631,7 @@ def _add_continuous_demo_automation_boundary(connection: Connection) -> None:
                  AND execution_chain.approved_execution_id=p_approval_id
                  AND deployment.status='ACTIVE'
                  AND selection.status='APPROVED'
-                 AND selection.promotion_policy_version='okx-demo-selection-v1'
+                 AND selection.promotion_policy_version='okx-demo-selection-v2'
                  AND deployment.deployment_policy_digest IS NOT NULL
                  AND deployment.risk_policy_digest=p_policy_digest))
          OR EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_order_write_attempts
@@ -10758,10 +10823,10 @@ def _add_continuous_demo_automation_boundary(connection: Connection) -> None:
                 ON strategy.id=deployment.strategy_id
               WHERE deployment.status='ACTIVE' AND (
                 selection.status<>'APPROVED'
-                OR selection.promotion_policy_version<>'okx-demo-selection-v1'
+                OR selection.promotion_policy_version<>'okx-demo-selection-v2'
                 OR deployment.risk_policy_digest IS DISTINCT FROM p_policy_digest
                 OR strategy.name NOT IN ('DeepSeekRegimeCrossoverCandidateB',
-                                         'CodexOkxDemoDualRsiStrategy')
+                                         'Codex Okx Demo Dual RSI Strategy')
                 OR COALESCE((selection.promotion_evidence::jsonb#>>
                     '{selection,production_promotion_claim}')::boolean,true)
                 OR COALESCE((selection.promotion_evidence::jsonb#>>
@@ -11028,6 +11093,7 @@ def upgrade_database(engine: Engine) -> str:
                 BOUNDED_SECOND_ACCEPTANCE_BASE_VERSION,
                 FINAL_ACCEPTANCE_BASE_VERSION,
                 CONTINUOUS_DEMO_BASE_VERSION,
+                CONTINUOUS_DEMO_SELECTION_V2_BASE_VERSION,
             }
             if current_version in supported_upgrade_versions:
                 connection.execute(
@@ -11071,6 +11137,7 @@ def upgrade_database(engine: Engine) -> str:
                     BOUNDED_SECOND_ACCEPTANCE_BASE_VERSION,
                     FINAL_ACCEPTANCE_BASE_VERSION,
                     CONTINUOUS_DEMO_BASE_VERSION,
+                    CONTINUOUS_DEMO_SELECTION_V2_BASE_VERSION,
                 }:
                 problems = _finalize_current_canary_boundaries(connection)
                 if problems:
