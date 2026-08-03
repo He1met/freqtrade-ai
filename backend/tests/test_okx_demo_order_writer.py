@@ -13,6 +13,7 @@ from app.adapters.okx_demo.order_writer import (
     OkxDemoOrderWriter,
     WriteAttemptRecord,
 )
+from app.adapters.okx_demo.errors import OkxReadAdapterError
 from app.adapters.okx_demo.write_semantics import (
     OkxDemoTransportError,
     OkxDemoWriteBlocked,
@@ -199,6 +200,7 @@ class FakeStore:
         self.current = unresolved
         self.unresolved_order = unresolved_order
         self.events = []
+        self.safe_response_snapshots = []
         self.next_attempt_id = 1
         self.next_order_id = 101
         self.lease_calls = []
@@ -423,6 +425,8 @@ class FakeStore:
         )
         self.current = updated
         self.events.append((event.value, updated.state.value, reason_code))
+        if safe_response_snapshot:
+            self.safe_response_snapshots.append(dict(safe_response_snapshot))
         return updated
 
     def order_for_attempt(self, attempt):
@@ -645,7 +649,7 @@ def test_reconcile_unresolved_place_is_get_only_and_never_posts() -> None:
         instrument_id="BTC-USDT-SWAP",
         state=WriteState.PREPARED,
         request_digest="a" * 64,
-        safe_request_snapshot={},
+        safe_request_snapshot={"sz": "0.02"},
         attempt_count=1,
     )
     store = FakeStore(unresolved=attempt, unresolved_order=managed_order())
@@ -892,6 +896,123 @@ def test_unresolved_unknown_stays_sticky_and_blocks_new_post() -> None:
     assert result.status == "RECOVERY_REQUIRED"
     assert write.calls == []
     assert store.current.state == WriteState.RECOVERY_REQUIRED
+
+
+def test_exact_order_not_found_is_audited_but_never_authorizes_a_post() -> None:
+    attempt = WriteAttemptRecord(
+        attempt_id=8,
+        exchange_order_row_id=101,
+        operation="PLACE",
+        operation_id="WriterOrder001",
+        client_order_id="WriterOrder001",
+        instrument_id="BTC-USDT-SWAP",
+        state=WriteState.RECOVERY_REQUIRED,
+        request_digest="b" * 64,
+        safe_request_snapshot={"instId": "BTC-USDT-SWAP", "sz": "0.02"},
+        attempt_count=1,
+    )
+    store = FakeStore(attempt, managed_order())
+    not_found = OkxReadAdapterError(
+        kind="BUSINESS_ERROR",
+        status="FAILED",
+        message="OKX returned a read business error",
+        okx_code="51603",
+    )
+    read = FakeReadClient(orders=[not_found, not_found])
+    write = FakeWriteTransport()
+    order_writer = writer(read, write, store)
+
+    first = order_writer.reconcile_unresolved(attempt.attempt_id)
+    second = order_writer.reconcile_unresolved(attempt.attempt_id)
+
+    assert first.status == second.status == "RECOVERY_REQUIRED"
+    assert write.calls == []
+    assert [event[2] for event in store.events] == [
+        "EXACT_ORDER_NOT_FOUND",
+        "EXACT_ORDER_NOT_FOUND",
+    ]
+    assert store.safe_response_snapshots == [
+        {"exact_order_get": "NOT_FOUND", "okx_code": "51603"},
+        {"exact_order_get": "NOT_FOUND", "okx_code": "51603"},
+    ]
+
+
+def test_residual_close_uses_durable_child_request_size_for_identity() -> None:
+    parent_sized_order = ManagedOrder(
+        **{
+            **managed_order().__dict__,
+            "side": "sell",
+            "order_type": "market",
+            "reduce_only": True,
+            "contracts": Decimal("0.02"),
+            "client_order_id": "WriterOrder001C1",
+        }
+    )
+    child_attempt = WriteAttemptRecord(
+        attempt_id=9,
+        exchange_order_row_id=102,
+        operation="CLOSE",
+        operation_id="WriterOrder001C1",
+        client_order_id="WriterOrder001C1",
+        instrument_id="BTC-USDT-SWAP",
+        state=WriteState.RECOVERY_REQUIRED,
+        request_digest="c" * 64,
+        safe_request_snapshot={"instId": "BTC-USDT-SWAP", "sz": "0.01"},
+        attempt_count=1,
+        close_sequence=1,
+        parent_attempt_id=8,
+    )
+    store = FakeStore(child_attempt, parent_sized_order)
+    read = FakeReadClient(
+        orders=[[
+            order_item(
+                state="filled",
+                client_order_id="WriterOrder001C1",
+                side="sell",
+                order_type="market",
+                reduce_only=True,
+                size=Decimal("0.01"),
+            )
+        ]],
+        positions=[[]],
+    )
+    write = FakeWriteTransport()
+
+    result = writer(read, write, store).reconcile_unresolved(
+        child_attempt.attempt_id
+    )
+
+    assert result.status == "RECONCILED"
+    assert write.calls == []
+
+
+@pytest.mark.parametrize("safe_size", [None, "not-a-decimal"])
+def test_place_without_valid_durable_request_size_stays_recovery_required(
+    safe_size,
+) -> None:
+    attempt = WriteAttemptRecord(
+        attempt_id=8,
+        exchange_order_row_id=101,
+        operation="PLACE",
+        operation_id="WriterOrder001",
+        client_order_id="WriterOrder001",
+        instrument_id="BTC-USDT-SWAP",
+        state=WriteState.RECOVERY_REQUIRED,
+        request_digest="b" * 64,
+        safe_request_snapshot={
+            "instId": "BTC-USDT-SWAP",
+            **({"sz": safe_size} if safe_size is not None else {}),
+        },
+        attempt_count=1,
+    )
+    store = FakeStore(attempt, managed_order())
+    read = FakeReadClient(orders=[[order_item(size=Decimal("9.99"))]])
+    write = FakeWriteTransport()
+
+    result = writer(read, write, store).reconcile_unresolved(attempt.attempt_id)
+
+    assert result.status == "RECOVERY_REQUIRED"
+    assert write.calls == []
 
 
 def test_cancel_ack_requires_terminal_order_state() -> None:
