@@ -21,6 +21,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 from typing import Any, Callable, Mapping, Optional
 
@@ -344,7 +345,13 @@ class OkxDemoCanaryPreparationService:
                     "proof": proof,
                 },
             ).scalar_one()
+            consent_deadline_at = _postgres_timestamptz(
+                row["consent_deadline_at"]
+            )
             self.db.commit()
+        except OkxDemoCanaryPreparationBlocked:
+            self.db.rollback()
+            raise
         except SQLAlchemyError as exc:
             self.db.rollback()
             raise OkxDemoCanaryPreparationBlocked(
@@ -354,9 +361,7 @@ class OkxDemoCanaryPreparationService:
             operation_status=str(row["status"]),
             handoff_id=str(row["handoff_id"]),
             source_job_id=int(row["source_job_id"]),
-            consent_deadline_at=_aware(
-                datetime.fromisoformat(str(row["consent_deadline_at"]))
-            ),
+            consent_deadline_at=consent_deadline_at,
         )
 
     def prepare_fresh_execution_only(
@@ -3185,3 +3190,53 @@ def _aware(value: Any) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+_POSTGRES_TIMESTAMPTZ_PATTERN = re.compile(
+    r"^(?P<date>\d{4}-\d{2}-\d{2})[ T]"
+    r"(?P<time>\d{2}:\d{2}:\d{2})"
+    r"(?:\.(?P<fraction>\d+))?"
+    r"(?P<timezone>Z|[+-]\d{2}(?::?\d{2})?)$"
+)
+
+
+def _postgres_timestamptz(value: Any) -> datetime:
+    """Strictly parse a PostgreSQL timestamptz without losing precision."""
+
+    if isinstance(value, datetime):
+        return _aware(value)
+    if not isinstance(value, str):
+        raise OkxDemoCanaryPreparationBlocked(
+            "PostgreSQL timestamptz is malformed"
+        )
+    matched = _POSTGRES_TIMESTAMPTZ_PATTERN.fullmatch(value)
+    if matched is None:
+        raise OkxDemoCanaryPreparationBlocked(
+            "PostgreSQL timestamptz is malformed"
+        )
+    fraction = matched.group("fraction")
+    if fraction is not None and len(fraction) > 6:
+        raise OkxDemoCanaryPreparationBlocked(
+            "PostgreSQL timestamptz is malformed"
+        )
+    normalized_fraction = ""
+    if fraction is not None:
+        normalized_fraction = "." + fraction.ljust(6, "0")
+    zone = matched.group("timezone")
+    if zone == "Z":
+        zone = "+00:00"
+    elif len(zone) == 3:
+        zone += ":00"
+    elif len(zone) == 5:
+        zone = f"{zone[:3]}:{zone[3:]}"
+    normalized = (
+        f"{matched.group('date')}T{matched.group('time')}"
+        f"{normalized_fraction}{zone}"
+    )
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        raise OkxDemoCanaryPreparationBlocked(
+            "PostgreSQL timestamptz is malformed"
+        ) from None
+    return parsed.astimezone(timezone.utc)
