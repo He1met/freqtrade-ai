@@ -280,16 +280,27 @@ class OkxDemoReadAdapter:
         bar: str = "1m",
         limit: int = 100,
     ) -> OkxReadSnapshot:
-        if not re.fullmatch(r"[1-9][0-9]*(?:m|H|D|W|M)(?:utc)?", bar):
+        interval = re.fullmatch(
+            r"([1-9][0-9]*)(m|H|D|W)(?:utc)?",
+            bar,
+        )
+        if interval is None:
             self._invalid_request("bar is not an allowed OKX candle interval")
         if not 1 <= limit <= 300:
             self._invalid_request("candle limit must be between 1 and 300")
+        interval_seconds = int(interval.group(1)) * {
+            "m": 60,
+            "H": 60 * 60,
+            "D": 24 * 60 * 60,
+            "W": 7 * 24 * 60 * 60,
+        }[interval.group(2)]
         return self._request(
             resource="candles",
             path="/api/v5/market/candles",
             query={"instId": self._swap_id(inst_id), "bar": bar, "limit": str(limit)},
             authenticated=False,
             parser=lambda data: [self._candle(item) for item in data],
+            freshness_ttl_seconds=interval_seconds + self._ttls["candles"],
         )
 
     def orderbook(self, inst_id: str, *, depth: int = 20) -> OkxReadSnapshot:
@@ -572,6 +583,7 @@ class OkxDemoReadAdapter:
         authenticated: bool,
         parser: Callable[[list[Any]], Sequence[BaseModel]],
         allow_empty: bool = False,
+        freshness_ttl_seconds: Optional[int] = None,
     ) -> OkxReadSnapshot:
         headers = {
             "Accept": "application/json",
@@ -689,7 +701,13 @@ class OkxDemoReadAdapter:
             if resource in {"orders_history", "fills_history"}
             else exchange_timestamp or received_at
         )
-        expires_at = freshness_anchor + timedelta(seconds=self._ttls[resource])
+        expires_at = freshness_anchor + timedelta(
+            seconds=(
+                freshness_ttl_seconds
+                if freshness_ttl_seconds is not None
+                else self._ttls[resource]
+            )
+        )
         stale = self._now() > expires_at
         if stale:
             raise OkxReadAdapterError(

@@ -1273,6 +1273,42 @@ def test_expired_market_data_is_blocked_not_returned_as_ready() -> None:
     assert exc_info.value.status == "BLOCKED"
 
 
+def test_current_long_interval_candle_uses_interval_aware_freshness() -> None:
+    candle_open = NOW - timedelta(minutes=14)
+    candle_ts = str(int(candle_open.timestamp() * 1000))
+    instance, _ = adapter(
+        [envelope([[candle_ts, "90", "110", "80", "100", "20", "2", "2000", "0"]])]
+    )
+
+    snapshot = instance.candles("BTC-USDT-SWAP", bar="15m", limit=1)
+
+    assert snapshot.metadata.exchange_timestamp == candle_open
+    assert snapshot.metadata.expires_at == candle_open + timedelta(minutes=17)
+
+
+def test_missing_long_interval_candle_still_fails_closed() -> None:
+    candle_ts = str(int((NOW - timedelta(minutes=18)).timestamp() * 1000))
+    instance, _ = adapter(
+        [envelope([[candle_ts, "90", "110", "80", "100", "20", "2", "2000", "1"]])]
+    )
+
+    with pytest.raises(OkxReadAdapterError) as exc_info:
+        instance.candles("BTC-USDT-SWAP", bar="15m", limit=1)
+
+    assert exc_info.value.kind == "STALE_DATA"
+    assert exc_info.value.status == "BLOCKED"
+
+
+def test_calendar_month_candle_is_rejected_without_exact_boundary_support() -> None:
+    instance, _ = adapter([])
+
+    with pytest.raises(OkxReadAdapterError) as exc_info:
+        instance.candles("BTC-USDT-SWAP", bar="1M", limit=1)
+
+    assert exc_info.value.kind == "INVALID_REQUEST"
+    assert exc_info.value.status == "BLOCKED"
+
+
 def test_future_exchange_timestamp_is_blocked_as_invalid_response() -> None:
     future_ts = str(int(datetime(2100, 1, 1, tzinfo=timezone.utc).timestamp() * 1000))
     instance, _ = adapter(
