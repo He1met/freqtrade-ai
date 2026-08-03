@@ -265,19 +265,36 @@ class OkxDemoCanaryPreparationService:
                 "controlled canary consent requires PostgreSQL"
             )
         try:
-            predecessor = self.db.execute(
-                text("SELECT eligible_atomic_okx_demo_canary_predecessor()")
+            eligibility = self.db.execute(
+                text("SELECT okx_demo_canary_consent_eligibility()")
             ).scalar_one()
         except SQLAlchemyError as exc:
             self.db.rollback()
             raise OkxDemoCanaryPreparationBlocked(
                 "controlled canary predecessor check was rejected"
             ) from exc
+        eligibility_state = str(eligibility.get("eligibility_state", "BLOCKED"))
+        if eligibility_state == "BLOCKED":
+            raise OkxDemoCanaryPreparationBlocked(
+                "accepted terminalization successor is unavailable"
+            )
+        if eligibility_state == "ACCEPTED_SUCCESSOR":
+            predecessor: Optional[Mapping[str, Any]] = eligibility
+        elif eligibility_state == "PRISTINE":
+            predecessor = eligibility.get("predecessor")
+        else:
+            raise OkxDemoCanaryPreparationBlocked(
+                "controlled canary eligibility state is invalid"
+            )
         consent_proof_field = "author" + "ization"
         policy = (
-            "atomic-prepared-v1"
-            if predecessor is not None
-            else "immutable-job-22-final-attestation-v1"
+            "accepted-not-found-successor-v1"
+            if eligibility_state == "ACCEPTED_SUCCESSOR"
+            else (
+                "atomic-prepared-v1"
+                if predecessor is not None
+                else "immutable-job-22-final-attestation-v1"
+            )
         )
         payload = {
                 consent_proof_field: "once",
@@ -292,6 +309,13 @@ class OkxDemoCanaryPreparationService:
         }
         if predecessor is not None:
             payload["supersedes_handoff_id"] = str(predecessor["handoff_id"])
+        if eligibility_state == "ACCEPTED_SUCCESSOR":
+            payload["terminal_receipt_id"] = int(
+                predecessor["terminal_receipt_id"]
+            )
+            payload["terminal_evidence_digest"] = str(
+                predecessor["terminal_evidence_digest"]
+            )
         consent_payload = json.dumps(
             payload,
             sort_keys=True,

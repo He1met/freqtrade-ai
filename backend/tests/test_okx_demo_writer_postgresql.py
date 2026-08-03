@@ -6228,6 +6228,461 @@ def test_postgresql_v28_prepared_restart_is_get_only_and_post_at_most_once(
         ).count() == 1
 
 
+def test_postgresql_v32_owner_accepts_exact_not_found_once_and_allows_one_successor(
+    postgres_writer_engine, monkeypatch
+) -> None:
+    upgrade_database(postgres_writer_engine)
+    now, run_id, predecessor, current, read_type = _prepare_v31_atomic_successor(
+        postgres_writer_engine, monkeypatch, suffix="accepted-not-found"
+    )
+    runtime_id = "RuntimeV32AcceptedNotFound"
+    with postgres_writer_engine.connect() as connection, Session(bind=connection) as runtime:
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        store = SqlAlchemyOrderWriterStore(runtime)
+        assert acquire_one_shot_runtime_lock(runtime) is True
+        finalized = process_pending_canary_consent_handoff(
+            read_client=read_type(30), db=runtime,
+            runtime_instance_id=runtime_id,
+            fresh_reconciliation=lambda: {"reconciliation_run_id": run_id},
+            safety_check=lambda: True,
+            atomic_holder_token_digest=store.atomic_process_token_digest,
+            now=now,
+        )
+        assert finalized is not None and finalized.atomic_receipt is not None
+        prepared = SimpleNamespace(**dict(finalized.atomic_receipt))
+        claimed = runtime.execute(text(
+            "SELECT claim_atomic_okx_demo_canary_dispatch("
+            ":attempt,:runtime,:token,:generation,:digest)"
+        ), {
+            "attempt": prepared.attempt_id, "runtime": runtime_id,
+            "token": store.atomic_process_token,
+            "generation": prepared.lease_generation,
+            "digest": prepared.request_digest,
+        }).scalar_one()
+        assert claimed is not None
+        runtime.commit()
+        assert release_one_shot_runtime_lock(runtime) is True
+        runtime.commit()
+    handoff_id = current.handoff_id
+    submit_now = datetime.now(timezone.utc)
+    with Session(postgres_writer_engine) as admin:
+        handoff = admin.get(OkxDemoCanaryConsentHandoff, handoff_id)
+        assert handoff.supersedes_handoff_id == predecessor.handoff_id
+        grant_id = handoff.grant_id
+        approval_id = handoff.approval_id
+
+    class NotFoundRecovery:
+        def order(self, inst_id, *, order_id=None, client_order_id=None):
+            raise OkxReadAdapterError(
+                kind="BUSINESS_ERROR", status="FAILED",
+                message="OKX returned a read business error", okx_code="51603",
+            )
+
+    class NoPostTransport:
+        def post(self, **_kwargs):
+            raise AssertionError("accepted NOT_FOUND recovery must never POST")
+
+    with postgres_writer_engine.begin() as admin:
+        admin.execute(text(
+            "UPDATE okx_order_writer_leases SET "
+            "acquired_at=clock_timestamp()-interval '3 seconds',"
+            "heartbeat_at=clock_timestamp()-interval '2 seconds',"
+            "expires_at=clock_timestamp()-interval '1 second' "
+            "WHERE execution_target_id='OKX_DEMO'"
+        ))
+    restart_now = submit_now + timedelta(seconds=2)
+    with Session(postgres_writer_engine) as session:
+        result = OkxDemoOrderWriter(
+            read_client=NotFoundRecovery(), write_transport=NoPostTransport(),
+            store=SqlAlchemyOrderWriterStore(
+                session, now_provider=lambda: restart_now
+            ), now_provider=lambda: restart_now,
+        ).reconcile_unresolved(prepared.attempt_id)
+        assert result.status == "RECOVERY_REQUIRED"
+
+    with postgres_writer_engine.connect() as admin:
+        lease_expires_at = admin.execute(text(
+            "SELECT expires_at FROM okx_order_writer_leases "
+            "WHERE execution_target_id='OKX_DEMO'"
+        )).scalar_one()
+        database_now = admin.execute(text("SELECT clock_timestamp()" )).scalar_one()
+    time.sleep(max(0.0, (lease_expires_at - database_now).total_seconds()) + 0.1)
+    with postgres_writer_engine.begin() as admin:
+        lifecycle_id, fencing_version = admin.execute(text(
+            "SELECT lifecycle_id,fencing_version FROM okx_demo_canary_lifecycles "
+            "WHERE opening_exchange_order_row_id=:order_id"
+        ), {"order_id": prepared.exchange_order_row_id}).one()
+        for statement, parameters in (
+            (
+                "UPDATE okx_demo_canary_consent_handoffs SET consent_deadline_at="
+                "clock_timestamp()-interval '1 second',consented_at="
+                "clock_timestamp()-interval '2 seconds',bundle_expires_at="
+                "clock_timestamp()-interval '1 second' WHERE handoff_id=:handoff",
+                {"handoff": handoff_id},
+            ),
+            (
+                "UPDATE okx_demo_canary_lifecycles SET deadline_at="
+                "clock_timestamp()-interval '1 second' WHERE lifecycle_id=:lifecycle",
+                {"lifecycle": lifecycle_id},
+            ),
+            (
+                "UPDATE okx_order_write_attempts SET dispatch_not_after="
+                "clock_timestamp()-interval '1 second' WHERE id=:attempt",
+                {"attempt": prepared.attempt_id},
+            ),
+        ):
+            admin.execute(text(statement), parameters)
+        evidence = {
+            "absolute_submission_claim": False,
+            "attempt_count": 1,
+            "client_order_id": prepared.client_order_id,
+            "exchange_result_code": "51603",
+            "exchange_result_state": "NOT_FOUND",
+            "fill_count": 0,
+            "instrument_id": "BTC-USDT-SWAP",
+            "query_kind": "exact_get",
+            "request_digest": prepared.request_digest,
+            "restart_resubmission_count": 0,
+        }
+        observed_at = admin.execute(text(
+            "SELECT last_attempt_at FROM okx_order_write_attempts WHERE id=:attempt"
+        ), {"attempt": prepared.attempt_id}).scalar_one()
+        evidence_digest = admin.execute(text(
+            "SELECT encode(digest(convert_to(canonical_jsonb_text(CAST(:evidence AS jsonb)),"
+            "'UTF8'),'sha256'),'hex')"
+        ), {"evidence": json.dumps(evidence)}).scalar_one()
+        acceptance_digest = admin.execute(text(
+            "SELECT encode(digest(convert_to(canonical_jsonb_text(jsonb_build_object("
+            "'acceptance_kind','USER_ACCEPTED_NOT_FOUND_NO_FILL_V1',"
+            "'absolute_submission_claim',false,'attempt_id',CAST(:attempt AS bigint),"
+            "'evidence_digest',CAST(:evidence_digest AS text),'evidence_observed_at',"
+            "CAST(:observed_at AS timestamptz),'exchange_order_row_id',"
+            "CAST(:order_id AS bigint),'lifecycle_id',CAST(:lifecycle AS text),"
+            "'predecessor_grant_id',CAST(:grant AS text),'predecessor_handoff_id',"
+            "CAST(:handoff AS text),"
+            "'request_digest',CAST(:request_digest AS text),"
+            "'source_job_id',22)),'UTF8'),'sha256'),'hex')"
+        ), {
+            "attempt": prepared.attempt_id,
+            "evidence_digest": evidence_digest, "observed_at": observed_at,
+            "order_id": prepared.exchange_order_row_id, "lifecycle": lifecycle_id,
+            "grant": grant_id, "handoff": handoff_id,
+            "request_digest": prepared.request_digest,
+        }).scalar_one()
+        payload = {
+            "acceptance_digest": acceptance_digest,
+            "attempt_id": prepared.attempt_id,
+            "evidence_digest": evidence_digest,
+            "evidence_observed_at": observed_at.isoformat(),
+            "evidence_snapshot": evidence,
+            "expected_fencing_version": fencing_version,
+            "lifecycle_id": lifecycle_id,
+        }
+        preconditions = admin.execute(text(
+            "SELECT jsonb_build_object("
+            "'attempt',(a.operation='PLACE' AND a.state='RECOVERY_REQUIRED' AND "
+            "a.reason_code='EXACT_ORDER_NOT_FOUND' AND a.attempt_count=1),"
+            "'chain',(h.source_job_id=22 AND h.supersedes_handoff_id IS NOT NULL AND "
+            "h.status='CONSUMED' AND g.status='CONSUMED' AND EXISTS(SELECT 1 FROM "
+            "okx_demo_canary_consent_handoffs original WHERE "
+            "original.handoff_id=h.supersedes_handoff_id AND "
+            "original.supersedes_handoff_id IS NULL AND original.status='EXPIRED')),"
+            "'lifecycle',(l.cleanup_phase='OPENING_SUBMITTED' AND l.outcome='PENDING' "
+            "AND l.attributed_fill_quantity=0 AND l.fencing_version=:fencing),"
+            "'handoff_expiry',(h.consent_deadline_at<clock_timestamp() AND "
+            "h.bundle_expires_at<clock_timestamp()),"
+            "'grant_expiry',g.expires_at<clock_timestamp(),"
+            "'lifecycle_expiry',l.deadline_at<clock_timestamp(),"
+            "'lease_expiry',lease.expires_at<clock_timestamp(),"
+            "'counts',((SELECT count(*) FROM okx_order_write_attempts)=1 AND "
+            "(SELECT count(*) FROM exchange_orders)=1 AND "
+            "(SELECT count(*) FROM exchange_fills)=0)) "
+            "FROM okx_order_write_attempts a JOIN exchange_orders o ON o.id=a.exchange_order_row_id "
+            "JOIN okx_demo_canary_lifecycles l ON l.opening_exchange_order_row_id=o.id "
+            "JOIN okx_demo_submission_grants g ON g.grant_id=l.submission_grant_id "
+            "JOIN okx_demo_canary_consent_handoffs h ON h.grant_id=g.grant_id "
+            "JOIN okx_order_writer_leases lease ON lease.execution_target_id='OKX_DEMO' "
+            "WHERE a.id=:attempt"
+        ), {"attempt": prepared.attempt_id, "fencing": fencing_version}).scalar_one()
+        assert [key for key, value in preconditions.items() if not value] == []
+
+    with pytest.raises(SQLAlchemyError, match="invalid accepted NOT_FOUND attempt transition"):
+        with postgres_writer_engine.begin() as runtime:
+            runtime.execute(text("SET LOCAL ROLE freqtrade"))
+            runtime.execute(text(
+                "UPDATE okx_order_write_attempts SET "
+                "state='USER_ACCEPTED_NOT_FOUND_NO_FILL',"
+                "order_state='USER_ACCEPTED_NOT_FOUND_NO_FILL' WHERE id=:attempt"
+            ), {"attempt": prepared.attempt_id})
+
+    with pytest.raises(SQLAlchemyError, match="invalid accepted NOT_FOUND exchange order transition"):
+        with postgres_writer_engine.begin() as runtime:
+            runtime.execute(text("SET LOCAL ROLE freqtrade"))
+            runtime.execute(text(
+                "UPDATE exchange_orders SET status='USER_ACCEPTED_NOT_FOUND_NO_FILL' "
+                "WHERE id=:order_id"
+            ), {"order_id": prepared.exchange_order_row_id})
+
+    mismatched_time_payload = dict(payload)
+    mismatched_time_payload["evidence_observed_at"] = (
+        observed_at + timedelta(microseconds=1)
+    ).isoformat()
+    with pytest.raises(SQLAlchemyError, match="terminalization precondition mismatch"):
+        with postgres_writer_engine.begin() as owner:
+            owner.execute(text(
+                "SELECT terminalize_accepted_not_found_no_fill(CAST(:payload AS jsonb))"
+            ), {"payload": json.dumps(mismatched_time_payload)})
+
+    with pytest.raises(SQLAlchemyError, match="terminalization precondition mismatch"):
+        with postgres_writer_engine.begin() as owner:
+            owner.execute(text(
+                "UPDATE okx_order_write_attempts SET safe_response_snapshot='{}'::json "
+                "WHERE id=:attempt"
+            ), {"attempt": prepared.attempt_id})
+            owner.execute(text(
+                "SELECT terminalize_accepted_not_found_no_fill(CAST(:payload AS jsonb))"
+            ), {"payload": json.dumps(payload)})
+
+    future_observed_at = observed_at + timedelta(days=1)
+    future_payload = dict(payload)
+    future_payload["evidence_observed_at"] = future_observed_at.isoformat()
+    with pytest.raises(SQLAlchemyError, match="terminalization precondition mismatch"):
+        with postgres_writer_engine.begin() as owner:
+            owner.execute(text(
+                "UPDATE okx_order_write_attempts SET last_attempt_at=:future "
+                "WHERE id=:attempt"
+            ), {"future": future_observed_at, "attempt": prepared.attempt_id})
+            owner.execute(text(
+                "SELECT terminalize_accepted_not_found_no_fill(CAST(:payload AS jsonb))"
+            ), {"payload": json.dumps(future_payload)})
+
+    with postgres_writer_engine.connect() as admin:
+        assert admin.execute(text(
+            "SELECT count(*) FROM okx_demo_accepted_not_found_terminalizations"
+        )).scalar_one() == 0
+
+    # The production owner action runs only after the canonical runtime is
+    # stopped.  Close pooled test connections too, releasing session locks.
+    postgres_writer_engine.dispose()
+
+    def terminalize(_index: int):
+        with postgres_writer_engine.begin() as owner:
+            return owner.execute(text(
+                "SELECT terminalize_accepted_not_found_no_fill(CAST(:payload AS jsonb))"
+            ), {"payload": json.dumps(payload)}).scalar_one()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        receipts = list(executor.map(terminalize, (1, 2)))
+    assert {int(item["terminalization_id"]) for item in receipts} == {1}
+    assert sorted(bool(item["idempotent"]) for item in receipts) == [False, True]
+
+    with Session(postgres_writer_engine) as admin:
+        attempt = admin.get(OkxOrderWriteAttempt, prepared.attempt_id)
+        lifecycle = admin.get(OkxDemoCanaryLifecycle, lifecycle_id)
+        assert attempt.state == "USER_ACCEPTED_NOT_FOUND_NO_FILL"
+        assert attempt.attempt_count == 1
+        assert attempt.request_digest == prepared.request_digest
+        assert lifecycle.cleanup_phase == "TERMINAL"
+        assert lifecycle.outcome == "FAILED"
+        assert lifecycle.final_reconciliation_run_id is None
+        assert lifecycle.final_evidence_digest == acceptance_digest
+        assert admin.get(ApprovedExecution, approval_id).status == "EXPIRED"
+        assert admin.execute(text(
+            "SELECT status FROM full_chain_runs WHERE id=(SELECT full_chain_run_id "
+            "FROM okx_demo_canary_consent_handoffs WHERE handoff_id=:handoff)"
+        ), {"handoff": handoff_id}).scalar_one() == "BLOCKED"
+        assert admin.query(ExchangeFill).count() == 0
+        assert admin.execute(text(
+            "SELECT request_digest FROM okx_demo_accepted_not_found_terminalizations"
+        )).scalar_one() == prepared.request_digest
+        assert admin.execute(text(
+            "SELECT has_function_privilege('freqtrade',"
+            "'terminalize_accepted_not_found_no_fill(jsonb)','EXECUTE')"
+        )).scalar_one() is False
+        assert admin.execute(text(
+            "SELECT has_table_privilege('freqtrade',"
+            "'okx_demo_accepted_not_found_terminalizations','INSERT')"
+        )).scalar_one() is False
+
+    with Session(postgres_writer_engine) as runtime:
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        successor = OkxDemoCanaryPreparationService(
+            runtime
+        ).request_final_attestation_consent(
+            idempotency_key="issue-627-v32-only-successor",
+            operator_token="synthetic-test-operator-token",
+        )
+        assert successor.operation_status == "REQUESTED"
+
+    successor_runtime_id = "RuntimeV32AcceptedSuccessor"
+    with postgres_writer_engine.connect() as connection, Session(bind=connection) as runtime:
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        store = SqlAlchemyOrderWriterStore(runtime)
+        assert acquire_one_shot_runtime_lock(runtime) is True
+        successor_prepared = process_pending_canary_consent_handoff(
+            read_client=read_type(30), db=runtime,
+            runtime_instance_id=successor_runtime_id,
+            fresh_reconciliation=lambda: {"reconciliation_run_id": run_id},
+            safety_check=lambda: True,
+            atomic_holder_token_digest=store.atomic_process_token_digest,
+            now=datetime.now(timezone.utc),
+        )
+        assert successor_prepared is not None
+        assert successor_prepared.atomic_receipt is not None
+        runtime.commit()
+        assert release_one_shot_runtime_lock(runtime) is True
+        runtime.commit()
+
+    with Session(postgres_writer_engine) as runtime:
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        with pytest.raises(
+            OkxDemoCanaryPreparationBlocked,
+            match="accepted terminalization successor is unavailable",
+        ):
+            OkxDemoCanaryPreparationService(runtime).request_final_attestation_consent(
+                idempotency_key="issue-627-v32-forbidden-third",
+                operator_token="synthetic-test-operator-token",
+            )
+    with Session(postgres_writer_engine) as admin:
+        successor_row = admin.get(OkxDemoCanaryConsentHandoff, successor.handoff_id)
+        assert successor_row.supersedes_handoff_id == handoff_id
+        assert successor_row.terminal_receipt_id == 1
+        assert successor_row.status == "CONSUMED"
+        assert admin.query(OkxOrderWriteAttempt).count() == 2
+        assert admin.query(OkxOrderWriteAttempt).filter_by(
+            state="PREPARED"
+        ).count() == 1
+        assert admin.query(ExchangeFill).count() == 0
+        assert admin.execute(text(
+            "SELECT eligible_atomic_okx_demo_canary_predecessor()"
+        )).scalar_one() is None
+
+
+def test_postgresql_v31_upgrades_to_v32_terminalization_boundary(
+    postgres_writer_engine, monkeypatch,
+) -> None:
+    assert upgrade_database(postgres_writer_engine) == SCHEMA_VERSION
+    now, run_id, predecessor, current, read_type = _prepare_v31_atomic_successor(
+        postgres_writer_engine, monkeypatch, suffix="nonempty-upgrade"
+    )
+    runtime_id = "RuntimeV31NonemptyUpgrade"
+    with postgres_writer_engine.connect() as connection, Session(bind=connection) as runtime:
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        store = SqlAlchemyOrderWriterStore(runtime)
+        assert acquire_one_shot_runtime_lock(runtime) is True
+        finalized = process_pending_canary_consent_handoff(
+            read_client=read_type(30), db=runtime, runtime_instance_id=runtime_id,
+            fresh_reconciliation=lambda: {"reconciliation_run_id": run_id},
+            safety_check=lambda: True,
+            atomic_holder_token_digest=store.atomic_process_token_digest, now=now,
+        )
+        prepared = SimpleNamespace(**dict(finalized.atomic_receipt))
+        assert runtime.execute(text(
+            "SELECT claim_atomic_okx_demo_canary_dispatch("
+            ":attempt,:runtime,:token,:generation,:digest)"
+        ), {
+            "attempt": prepared.attempt_id, "runtime": runtime_id,
+            "token": store.atomic_process_token,
+            "generation": prepared.lease_generation,
+            "digest": prepared.request_digest,
+        }).scalar_one() is not None
+        runtime.commit()
+        assert release_one_shot_runtime_lock(runtime) is True
+        runtime.commit()
+    with postgres_writer_engine.begin() as admin:
+        admin.execute(text(
+            "UPDATE okx_order_writer_leases SET "
+            "acquired_at=clock_timestamp()-interval '3 seconds',"
+            "heartbeat_at=clock_timestamp()-interval '2 seconds',"
+            "expires_at=clock_timestamp()-interval '1 second'"
+        ))
+
+    class UpgradeNotFound:
+        def order(self, inst_id, *, order_id=None, client_order_id=None):
+            raise OkxReadAdapterError(
+                kind="BUSINESS_ERROR", status="FAILED", message="not found",
+                okx_code="51603",
+            )
+
+    with Session(postgres_writer_engine) as runtime:
+        result = OkxDemoOrderWriter(
+            read_client=UpgradeNotFound(),
+            write_transport=SimpleNamespace(post=lambda **_: pytest.fail("POST forbidden")),
+            store=SqlAlchemyOrderWriterStore(runtime),
+        ).reconcile_unresolved(prepared.attempt_id)
+        assert result.status == "RECOVERY_REQUIRED"
+    with postgres_writer_engine.connect() as admin:
+        before = admin.execute(text(
+            "SELECT a.state,a.reason_code,a.attempt_count,a.safe_response_snapshot::jsonb,"
+            "(h.supersedes_handoff_id IS NOT NULL),h.status,g.status,ae.status "
+            "FROM okx_order_write_attempts a JOIN okx_demo_submission_grants g "
+            "ON g.approval_id=a.approval_id JOIN okx_demo_canary_consent_handoffs h "
+            "ON h.grant_id=g.grant_id JOIN approved_executions ae ON ae.id=a.approval_id "
+            "WHERE a.id=:attempt"
+        ), {"attempt": prepared.attempt_id}).one()
+    with postgres_writer_engine.begin() as admin:
+        admin.execute(text(
+            "DROP TRIGGER IF EXISTS okx_order_write_attempts_accepted_not_found_guard "
+            "ON okx_order_write_attempts"
+        ))
+        admin.execute(text(
+            "DROP FUNCTION IF EXISTS guard_accepted_not_found_attempt_transition()"
+        ))
+        admin.execute(text(
+            "CREATE OR REPLACE FUNCTION guard_okx_demo_exchange_order() "
+            "RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$"
+        ))
+        admin.execute(text(
+            "ALTER TABLE okx_demo_canary_lifecycles "
+            "DROP COLUMN accepted_terminalization_id CASCADE"
+        ))
+        admin.execute(text(
+            "ALTER TABLE okx_demo_canary_consent_handoffs "
+            "DROP COLUMN terminal_receipt_id CASCADE"
+        ))
+        admin.execute(text(
+            "DROP TABLE okx_demo_accepted_not_found_terminalizations CASCADE"
+        ))
+        admin.execute(text(
+            "DROP INDEX IF EXISTS okx_demo_canary_one_successor_ever_idx"
+        ))
+        admin.execute(text("DELETE FROM {}".format(VERSION_TABLE)))
+        admin.execute(text(
+            "INSERT INTO {}(version) VALUES(:version)".format(VERSION_TABLE)
+        ), {"version": "20260803_31"})
+
+    assert upgrade_database(postgres_writer_engine) == SCHEMA_VERSION
+    assert schema_problems(postgres_writer_engine) == []
+    with postgres_writer_engine.connect() as admin:
+        after = admin.execute(text(
+            "SELECT a.state,a.reason_code,a.attempt_count,a.safe_response_snapshot::jsonb,"
+            "(h.supersedes_handoff_id IS NOT NULL),h.status,g.status,ae.status "
+            "FROM okx_order_write_attempts a JOIN okx_demo_submission_grants g "
+            "ON g.approval_id=a.approval_id JOIN okx_demo_canary_consent_handoffs h "
+            "ON h.grant_id=g.grant_id JOIN approved_executions ae ON ae.id=a.approval_id "
+            "WHERE a.id=:attempt"
+        ), {"attempt": prepared.attempt_id}).one()
+        assert after == before
+        assert admin.execute(text(
+            "SELECT to_regclass('okx_demo_accepted_not_found_terminalizations') "
+            "IS NOT NULL"
+        )).scalar_one() is True
+        assert admin.execute(text(
+            "SELECT has_function_privilege('freqtrade',"
+            "'terminalize_accepted_not_found_no_fill(jsonb)','EXECUTE')"
+        )).scalar_one() is False
+        assert "USER_ACCEPTED_NOT_FOUND_NO_FILL" in admin.execute(text(
+            "SELECT prosrc FROM pg_proc WHERE oid="
+            "to_regprocedure('guard_okx_demo_exchange_order()')"
+        )).scalar_one()
+        assert admin.execute(text(
+            "SELECT count(*)=1 FROM pg_trigger WHERE tgrelid="
+            "to_regclass('okx_order_write_attempts') AND "
+            "tgname='okx_order_write_attempts_accepted_not_found_guard' "
+            "AND NOT tgisinternal"
+        )).scalar_one() is True
+
+
 def test_postgresql_concurrent_same_timestamp_different_digest_has_one_winner(
     postgres_writer_engine,
 ) -> None:

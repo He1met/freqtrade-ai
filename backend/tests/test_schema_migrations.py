@@ -10,6 +10,7 @@ from app.db.migrations import (
     CANARY_CONSENT_HANDOFF_BASE_VERSION,
     CANARY_CONSENT_FAILURE_AUDIT_BASE_VERSION,
     CANARY_ATOMIC_PREPARE_BASE_VERSION,
+    ACCEPTED_NOT_FOUND_TERMINALIZATION_BASE_VERSION,
     EARLY_TARGET_LINEAGE_VERSION,
     DUAL_SIDE_BASE_VERSION,
     FULL_CHAIN_BASE_VERSION,
@@ -40,6 +41,7 @@ from app.db.migrations import (
     _add_controlled_canary_lifecycle_boundary,
     _add_canary_consent_handoff_boundary,
     _add_atomic_canary_prepare_boundary,
+    _add_accepted_not_found_terminalization_boundary,
 )
 from app.db.session import create_database_engine
 
@@ -101,7 +103,33 @@ def test_schema_version_is_explicit_and_stable() -> None:
     assert CANARY_CONSENT_HANDOFF_BASE_VERSION == "20260802_28"
     assert CANARY_CONSENT_FAILURE_AUDIT_BASE_VERSION == "20260803_29"
     assert CANARY_ATOMIC_PREPARE_BASE_VERSION == "20260803_30"
-    assert SCHEMA_VERSION == "20260803_31"
+    assert ACCEPTED_NOT_FOUND_TERMINALIZATION_BASE_VERSION == "20260803_31"
+    assert SCHEMA_VERSION == "20260803_32"
+
+
+def test_v32_accepted_not_found_sql_is_owner_only_and_single_successor() -> None:
+    import inspect as pyinspect
+
+    source = pyinspect.getsource(_add_accepted_not_found_terminalization_boundary)
+    for fragment in (
+        "terminalize_accepted_not_found_no_fill",
+        "USER_ACCEPTED_NOT_FOUND_NO_FILL_V1",
+        "absolute_submission_claim",
+        "exchange_result_code','51603'",
+        "observed_at IS DISTINCT FROM attempt.last_attempt_at",
+        "attempt.safe_response_snapshot::jsonb IS DISTINCT FROM",
+        "receipt.request_digest=attempt.request_digest",
+        "guard_accepted_not_found_attempt_transition",
+        "pg_advisory_xact_lock(5067747289570038600)",
+        "okx_demo_canary_one_accepted_successor_idx",
+        "terminal_receipt_id IS NOT NULL",
+        "okx_demo_canary_consent_eligibility",
+        "'ACCEPTED_SUCCESSOR'",
+        "'BLOCKED'",
+        "REVOKE ALL ON FUNCTION",
+        "FROM PUBLIC,freqtrade",
+    ):
+        assert fragment in source
 
 
 def test_v31_atomic_prepare_sql_is_single_commit_and_fail_closed() -> None:
