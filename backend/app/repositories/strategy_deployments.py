@@ -371,7 +371,10 @@ class StrategyDeploymentRepository:
                 SignalEvaluation.closed_candle_at.asc(),
                 SignalEvaluation.id.asc(),
             )
-            .with_for_update(skip_locked=True)
+            # Lock only the mutable queue row.  ``strategy_deployments`` is
+            # immutable to the runtime role and is joined solely to prove the
+            # evaluation still belongs to an ACTIVE OKX_DEMO deployment.
+            .with_for_update(of=SignalEvaluation, skip_locked=True)
             .limit(1)
         )
         if candidate is None:
