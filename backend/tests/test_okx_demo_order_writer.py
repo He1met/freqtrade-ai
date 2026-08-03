@@ -1,5 +1,9 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from concurrent.futures import ThreadPoolExecutor
+import hashlib
+import json
+import time
 
 import pytest
 
@@ -198,6 +202,30 @@ class FakeStore:
         self.next_attempt_id = 1
         self.next_order_id = 101
         self.lease_calls = []
+        self.atomic_remaining_ms = 900
+        self.atomic_order_delay_seconds = 0.0
+
+    @property
+    def atomic_process_token_digest(self):
+        return "a" * 64
+
+    @property
+    def atomic_process_token(self):
+        return "b" * 64
+
+    def validate_atomic_dispatch_authority(
+        self, *, attempt_id, runtime_instance_id, lease_generation,
+        request_digest, bundle_digest,
+    ):
+        self.lease_calls.append(
+            ("atomic", attempt_id, runtime_instance_id, lease_generation,
+             request_digest, bundle_digest)
+        )
+        return self.atomic_remaining_ms
+
+    def load_atomic_attempt(self, attempt_id):
+        assert self.current is not None and self.current.attempt_id == attempt_id
+        return self.current
 
     def acquire_lease(
         self,
@@ -238,6 +266,7 @@ class FakeStore:
             return None
         if self.current.state in {
             WriteState.PREPARED,
+            WriteState.DISPATCHED,
             WriteState.ACKNOWLEDGED,
             WriteState.RECOVERY_REQUIRED,
             WriteState.RESIDUAL_CLOSE_REQUIRED,
@@ -397,6 +426,7 @@ class FakeStore:
         return updated
 
     def order_for_attempt(self, attempt):
+        time.sleep(self.atomic_order_delay_seconds)
         return self.unresolved_order
 
 
@@ -470,6 +500,139 @@ def test_limit_place_is_prepared_before_post_and_reconciled() -> None:
         "ACKNOWLEDGE",
         "RECONCILE",
     ]
+
+
+def test_atomic_dispatch_posts_once_and_same_receipt_cannot_replay() -> None:
+    body = {
+        "instId": "BTC-USDT-SWAP",
+        "tdMode": "isolated",
+        "side": "buy",
+        "posSide": "long",
+        "ordType": "limit",
+        "sz": "0.02",
+        "clOrdId": "WriterOrder001",
+        "px": "57000.1",
+    }
+    digest = hashlib.sha256(
+        json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    order = managed_order()
+    attempt = WriteAttemptRecord(
+        attempt_id=7,
+        exchange_order_row_id=order.exchange_order_row_id,
+        operation="PLACE",
+        operation_id=order.client_order_id,
+        client_order_id=order.client_order_id,
+        instrument_id=order.instrument_id,
+        state=WriteState.DISPATCHED,
+        request_digest=digest,
+        safe_request_snapshot=body,
+        attempt_count=1,
+        lease_generation=3,
+    )
+    store = FakeStore(unresolved=attempt, unresolved_order=order)
+    write = FakeWriteTransport([response()])
+    subject = writer(FakeReadClient(orders=[[order_item()]]), write, store)
+    receipt = {
+        "attempt_id": attempt.attempt_id,
+        "exchange_order_row_id": order.exchange_order_row_id,
+        "client_order_id": order.client_order_id,
+        "instrument_id": order.instrument_id,
+        "request_body": body,
+        "request_digest": digest,
+        "lease_generation": 3,
+        "runtime_instance_id": "RuntimeAtomic1",
+        "holder_token_digest": "a" * 64,
+        "bundle_digest": "c" * 64,
+        "dispatch_remaining_ms": 900,
+        "dispatch_claimed_at": NOW.isoformat(),
+    }
+
+    capability = subject.seal_atomic_dispatch(
+        receipt, runtime_instance_id="RuntimeAtomic1"
+    )
+    result = subject.dispatch_atomic_once(capability)
+
+    assert result.status == "RECONCILED"
+    assert len(write.calls) == 1
+    with pytest.raises(OkxDemoWriteBlocked, match="already consumed"):
+        subject.dispatch_atomic_once(capability)
+    assert len(write.calls) == 1
+
+
+def test_atomic_dispatch_capability_is_single_use_under_concurrency() -> None:
+    body = {
+        "instId": "BTC-USDT-SWAP", "tdMode": "isolated", "side": "buy",
+        "posSide": "long", "ordType": "limit", "sz": "0.02",
+        "clOrdId": "WriterOrder001", "px": "57000.1",
+    }
+    digest = hashlib.sha256(
+        json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    order = managed_order()
+    attempt = WriteAttemptRecord(
+        attempt_id=77, exchange_order_row_id=order.exchange_order_row_id,
+        operation="PLACE", operation_id=order.client_order_id,
+        client_order_id=order.client_order_id, instrument_id=order.instrument_id,
+        state=WriteState.DISPATCHED, request_digest=digest,
+        safe_request_snapshot=body, attempt_count=1, lease_generation=3,
+    )
+    store = FakeStore(unresolved=attempt, unresolved_order=order)
+    write = FakeWriteTransport([response()])
+    subject = writer(FakeReadClient(orders=[[order_item()]]), write, store)
+    capability = subject.seal_atomic_dispatch({
+        "attempt_id": 77, "exchange_order_row_id": order.exchange_order_row_id,
+        "client_order_id": order.client_order_id, "instrument_id": order.instrument_id,
+        "request_body": body, "request_digest": digest, "lease_generation": 3,
+        "runtime_instance_id": "RuntimeAtomic1", "bundle_digest": "c" * 64,
+        "holder_token_digest": "a" * 64,
+        "dispatch_remaining_ms": 900, "dispatch_claimed_at": NOW.isoformat(),
+    }, runtime_instance_id="RuntimeAtomic1")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(lambda _: _dispatch_outcome(subject, capability), range(2)))
+
+    assert sorted(outcomes) == ["BLOCKED", "RECONCILED"]
+    assert len(write.calls) == 1
+
+
+def _dispatch_outcome(subject, capability):
+    try:
+        return subject.dispatch_atomic_once(capability).status
+    except OkxDemoWriteBlocked:
+        return "BLOCKED"
+
+
+def test_atomic_dispatch_expired_after_db_revalidation_is_zero_post() -> None:
+    body = {"instId": "BTC-USDT-SWAP"}
+    digest = hashlib.sha256(
+        json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    order = managed_order()
+    attempt = WriteAttemptRecord(
+        attempt_id=78, exchange_order_row_id=order.exchange_order_row_id,
+        operation="PLACE", operation_id=order.client_order_id,
+        client_order_id=order.client_order_id, instrument_id=order.instrument_id,
+        state=WriteState.DISPATCHED, request_digest=digest,
+        safe_request_snapshot=body, attempt_count=1, lease_generation=3,
+    )
+    store = FakeStore(unresolved=attempt, unresolved_order=order)
+    store.atomic_remaining_ms = 150
+    store.atomic_order_delay_seconds = 0.1
+    write = FakeWriteTransport([response()])
+    subject = writer(FakeReadClient(), write, store)
+    capability = subject.seal_atomic_dispatch({
+        "attempt_id": 78, "exchange_order_row_id": order.exchange_order_row_id,
+        "client_order_id": order.client_order_id, "instrument_id": order.instrument_id,
+        "request_body": body, "request_digest": digest, "lease_generation": 3,
+        "runtime_instance_id": "RuntimeAtomic1", "bundle_digest": "c" * 64,
+        "holder_token_digest": "a" * 64,
+        "dispatch_remaining_ms": 900, "dispatch_claimed_at": NOW.isoformat(),
+    }, runtime_instance_id="RuntimeAtomic1")
+
+    with pytest.raises(OkxDemoWriteBlocked, match="expired before POST"):
+        subject.dispatch_atomic_once(capability)
+    assert write.calls == []
 
 
 def test_reconcile_unresolved_place_is_get_only_and_never_posts() -> None:

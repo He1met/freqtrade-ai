@@ -52,6 +52,7 @@ from app.services.okx_demo_submission_grant import (
     CANARY_NOTIONAL_CAP,
     MAX_RECONCILIATION_AGE_SECONDS,
     OkxDemoSubmissionGrantBlocked,
+    build_atomic_canary_payloads,
     canary_lineage_read_query,
     require_canary_reconciliation,
     try_one_shot_transaction_lock,
@@ -67,6 +68,7 @@ FRESH_EXECUTION_ONLY_ENTRY = "FRESH_EXECUTION_ONLY"
 CANARY_TTL_SECONDS = 10
 UNRESOLVED_WRITER_STATES = (
     "PREPARED",
+    "DISPATCHED",
     "ACKNOWLEDGED",
     "RECOVERY_REQUIRED",
     "RESIDUAL_CLOSE_REQUIRED",
@@ -221,6 +223,7 @@ class CanaryConsentRequestResult:
 class CanaryConsentFinalizationResult:
     handoff_id: str
     preparation: CanaryPreparationResult
+    atomic_receipt: Optional[Mapping[str, Any]] = None
 
 
 class OkxDemoCanaryPreparationService:
@@ -246,7 +249,7 @@ class OkxDemoCanaryPreparationService:
     def request_final_attestation_consent(
         self, *, idempotency_key: str, operator_token: str
     ) -> CanaryConsentRequestResult:
-        """Persist the sole operator consent without creating a successor."""
+        """Persist one consent, using the audited v31 terminal-handoff successor."""
 
         key = _safe_key(idempotency_key)
         key_digest = hashlib.sha256(key.encode()).hexdigest()
@@ -257,11 +260,28 @@ class OkxDemoCanaryPreparationService:
             raise OkxDemoCanaryPreparationBlocked(
                 "operator consent proof is unavailable"
             )
+        if self.db.get_bind().dialect.name != "postgresql":
+            raise OkxDemoCanaryPreparationBlocked(
+                "controlled canary consent requires PostgreSQL"
+            )
+        try:
+            predecessor = self.db.execute(
+                text("SELECT eligible_atomic_okx_demo_canary_predecessor()")
+            ).scalar_one()
+        except SQLAlchemyError as exc:
+            self.db.rollback()
+            raise OkxDemoCanaryPreparationBlocked(
+                "controlled canary predecessor check was rejected"
+            ) from exc
         consent_proof_field = "author" + "ization"
-        consent_payload = json.dumps(
-            {
+        policy = (
+            "atomic-prepared-v1"
+            if predecessor is not None
+            else "immutable-job-22-final-attestation-v1"
+        )
+        payload = {
                 consent_proof_field: "once",
-                "consent_policy": "immutable-job-22-final-attestation-v1",
+                "consent_policy": policy,
                 "execution_target": OKX_DEMO_TARGET_ID,
                 "idempotency_key_digest": key_digest,
                 "instrument_id": "BTC-USDT-SWAP",
@@ -269,7 +289,11 @@ class OkxDemoCanaryPreparationService:
                 "operation": "okx-demo-canary-consent-finalize",
                 "source_ancestry": [15, 16, 17, 18, 19, 20, 21, 22],
                 "source_job_id": 22,
-            },
+        }
+        if predecessor is not None:
+            payload["supersedes_handoff_id"] = str(predecessor["handoff_id"])
+        consent_payload = json.dumps(
+            payload,
             sort_keys=True,
             separators=(",", ":"),
         )
@@ -278,14 +302,15 @@ class OkxDemoCanaryPreparationService:
         proof = hmac.new(
             proof_key, f"{consent_payload}|{nonce}".encode(), hashlib.sha256
         ).hexdigest()
-        if self.db.get_bind().dialect.name != "postgresql":
-            raise OkxDemoCanaryPreparationBlocked(
-                "controlled canary consent requires PostgreSQL"
-            )
         try:
+            request_function = (
+                "request_atomic_okx_demo_canary_consent"
+                if predecessor is not None
+                else "request_okx_demo_canary_consent"
+            )
             row = self.db.execute(
                 text(
-                    "SELECT request_okx_demo_canary_consent("
+                    f"SELECT {request_function}("
                     ":key,:nonce,:payload,:proof)"
                 ),
                 {
@@ -2426,6 +2451,10 @@ class OkxDemoCanaryPreparationService:
                 "market_snapshot_id": snapshots["market"].snapshot_id,
                 "account_snapshot_id": snapshots["account"].snapshot_id,
             }
+            if audit_metadata and audit_metadata.get("consent_handoff_id"):
+                privileged_payload["consent_handoff_id"] = str(
+                    audit_metadata["consent_handoff_id"]
+                )
             persisted_ids = self.db.execute(
                 text(
                     "SELECT create_okx_demo_canary_lineage("
@@ -2617,6 +2646,7 @@ def process_pending_canary_consent_handoff(
     runtime_instance_id: str,
     fresh_reconciliation: Callable[[], Any],
     safety_check: Callable[[], bool],
+    atomic_holder_token_digest: Optional[str] = None,
     now: Optional[datetime] = None,
 ) -> Optional[CanaryConsentFinalizationResult]:
     """Capture and finalize the v28 consent in one runtime-owned transaction."""
@@ -2807,27 +2837,75 @@ def process_pending_canary_consent_handoff(
             )
 
     capture_stage("SAFETY_FINAL", require_final_safety)
-    capture_stage(
-        "HANDOFF_FINALIZE",
-        lambda: db.execute(
-            text(
-                "SELECT finalize_okx_demo_canary_consent("
-                ":handoff,:runtime,:job,:chain,:approval,:reconciliation,"
-                "CAST(:binding AS jsonb))"
-            ),
-            {
-                "handoff": pending["handoff_id"],
-                "runtime": runtime_instance_id,
-                "job": result.research_job_id,
-                "chain": result.full_chain_run_id,
-                "approval": result.approval_id,
-                "reconciliation": reconciliation_run_id,
-                "binding": json.dumps(binding, sort_keys=True),
-            },
-        ).scalar_one(),
-    )
+    atomic_receipt: Optional[Mapping[str, Any]] = None
+    if pending.get("supersedes_handoff_id") is not None:
+        if atomic_holder_token_digest is None:
+            raise OkxDemoCanaryConsentCaptureFailed(
+                handoff_id=handoff_id,
+                stage="HANDOFF_FINALIZE",
+                category="SAFETY",
+            )
+        try:
+            grant_payload, prepare_payload = build_atomic_canary_payloads(
+                db,
+                handoff_id=handoff_id,
+                runtime_instance_id=runtime_instance_id,
+                approval_id=result.approval_id,
+                holder_token_digest=atomic_holder_token_digest,
+                now=datetime.now(timezone.utc),
+            )
+        except OkxDemoSubmissionGrantBlocked as exc:
+            raise OkxDemoCanaryConsentCaptureFailed(
+                handoff_id=handoff_id,
+                stage="HANDOFF_FINALIZE",
+                category="SAFETY",
+            ) from exc
+        atomic_receipt = capture_stage(
+            "HANDOFF_FINALIZE",
+            lambda: db.execute(
+                text(
+                    "SELECT commit_atomic_okx_demo_canary_prepare("
+                    ":handoff,:runtime,:job,:chain,:approval,:reconciliation,"
+                    "CAST(:binding AS jsonb),CAST(:grant AS jsonb),"
+                    "CAST(:prepare AS jsonb))"
+                ),
+                {
+                    "handoff": handoff_id,
+                    "runtime": runtime_instance_id,
+                    "job": result.research_job_id,
+                    "chain": result.full_chain_run_id,
+                    "approval": result.approval_id,
+                    "reconciliation": reconciliation_run_id,
+                    "binding": json.dumps(binding, sort_keys=True),
+                    "grant": json.dumps(grant_payload, sort_keys=True),
+                    "prepare": json.dumps(prepare_payload, sort_keys=True),
+                },
+            ).scalar_one(),
+        )
+    else:
+        capture_stage(
+            "HANDOFF_FINALIZE",
+            lambda: db.execute(
+                text(
+                    "SELECT finalize_okx_demo_canary_consent("
+                    ":handoff,:runtime,:job,:chain,:approval,:reconciliation,"
+                    "CAST(:binding AS jsonb))"
+                ),
+                {
+                    "handoff": handoff_id,
+                    "runtime": runtime_instance_id,
+                    "job": result.research_job_id,
+                    "chain": result.full_chain_run_id,
+                    "approval": result.approval_id,
+                    "reconciliation": reconciliation_run_id,
+                    "binding": json.dumps(binding, sort_keys=True),
+                },
+            ).scalar_one(),
+        )
     return CanaryConsentFinalizationResult(
-        handoff_id=str(pending["handoff_id"]), preparation=result
+        handoff_id=handoff_id,
+        preparation=result,
+        atomic_receipt=atomic_receipt,
     )
 
 

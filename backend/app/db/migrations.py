@@ -62,7 +62,8 @@ CANARY_FINAL_EXPIRY_BASE_VERSION = "20260802_26"
 CANARY_LIFECYCLE_BASE_VERSION = "20260802_27"
 CANARY_CONSENT_HANDOFF_BASE_VERSION = "20260802_28"
 CANARY_CONSENT_FAILURE_AUDIT_BASE_VERSION = "20260803_29"
-SCHEMA_VERSION = "20260803_30"
+CANARY_ATOMIC_PREPARE_BASE_VERSION = "20260803_30"
+SCHEMA_VERSION = "20260803_31"
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 ATTESTATION_PROOF_KEY_ENV = "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"
 OPERATOR_TOKEN_ENV = "FREQTRADE_AI_OPERATOR_TOKEN"
@@ -315,6 +316,7 @@ DECLARE
     inserted_decision_id bigint;
     inserted_approval_id bigint;
     is_replay boolean := FALSE;
+    atomic_successor_allowed boolean := FALSE;
 BEGIN
     IF NOT pg_try_advisory_xact_lock(5067747289570038600) THEN
         RAISE EXCEPTION 'controlled canary coordination lock is busy';
@@ -325,6 +327,7 @@ BEGIN
        OR EXISTS (
            SELECT 1 FROM jsonb_object_keys(p_payload) AS supplied(key)
            WHERE supplied.key <> ALL (allowed_keys)
+             AND supplied.key <> 'consent_handoff_id'
        )
        OR p_payload->>'execution_target' IS DISTINCT FROM 'OKX_DEMO'
        OR p_payload->>'provenance'
@@ -710,7 +713,31 @@ BEGIN
         RAISE EXCEPTION 'controlled canary reconciliation is not fresh';
     END IF;
 
-    IF NOT is_replay AND (EXISTS (
+    IF p_payload ? 'consent_handoff_id' THEN
+        SELECT EXISTS(
+          SELECT 1
+          FROM SCHEMA_TOKEN.okx_demo_canary_consent_handoffs successor
+          JOIN SCHEMA_TOKEN.okx_demo_canary_consent_handoffs predecessor
+            ON predecessor.handoff_id=successor.supersedes_handoff_id
+          WHERE successor.handoff_id=p_payload->>'consent_handoff_id'
+            AND successor.status='REQUESTED'
+            AND predecessor.status='EXPIRED'
+            AND predecessor.failure_code='FINALIZED_EVIDENCE_EXPIRED'
+            AND predecessor.grant_id IS NULL
+            AND (SELECT count(*) FROM SCHEMA_TOKEN.trade_intents
+                 WHERE execution_target_id='OKX_DEMO')=1
+            AND (SELECT count(*) FROM SCHEMA_TOKEN.approved_executions
+                 WHERE execution_target_id='OKX_DEMO' AND status='EXPIRED')=1
+            AND NOT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_submission_grants)
+            AND NOT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_order_write_attempts
+                 WHERE execution_target_id='OKX_DEMO')
+            AND NOT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.exchange_orders
+                 WHERE execution_target_id='OKX_DEMO')
+            AND NOT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_canary_lifecycles)
+        ) INTO atomic_successor_allowed;
+    END IF;
+
+    IF NOT is_replay AND NOT atomic_successor_allowed AND (EXISTS (
         SELECT 1 FROM SCHEMA_TOKEN.trade_intents AS prior_intent
         WHERE prior_intent.execution_target_id = 'OKX_DEMO'
     ) OR EXISTS (
@@ -4444,7 +4471,7 @@ def _add_okx_demo_reconciliation(connection: Connection) -> None:
                             IS DISTINCT FROM NEW.exchange_order_id
                    )
                    OR NEW.status NOT IN (
-                       'PREPARED', 'ACKNOWLEDGED', 'REJECTED',
+                       'PREPARED', 'DISPATCHED', 'ACKNOWLEDGED', 'REJECTED',
                        'RECOVERY_REQUIRED', 'RESIDUAL_CLOSE_REQUIRED',
                        'RECONCILED', 'live', 'partially_filled',
                        'filled', 'canceled', 'mmp_canceled',
@@ -5105,7 +5132,7 @@ def _add_okx_demo_runtime_recovery_binding(connection: Connection) -> None:
                                         'clOrdId',NEW.client_order_id,'reduceOnly',TRUE)
                                       AND NOT EXISTS(
                                         SELECT 1 FROM __SCHEMA__.okx_order_write_attempts other
-                                        WHERE other.state IN('PREPARED','ACKNOWLEDGED','RECOVERY_REQUIRED','RESIDUAL_CLOSE_REQUIRED')
+                                        WHERE other.state IN('PREPARED','DISPATCHED','ACKNOWLEDGED','RECOVERY_REQUIRED','RESIDUAL_CLOSE_REQUIRED')
                                           AND other.id<>parent.id)
                                    )
                                  )
@@ -5144,7 +5171,7 @@ def _add_okx_demo_runtime_recovery_binding(connection: Connection) -> None:
                    OR (OLD.exchange_order_id IS NOT NULL
                        AND OLD.exchange_order_id IS DISTINCT FROM NEW.exchange_order_id)
                    OR NEW.status NOT IN (
-                       'PREPARED', 'ACKNOWLEDGED', 'REJECTED',
+                       'PREPARED', 'DISPATCHED', 'ACKNOWLEDGED', 'REJECTED',
                        'RECOVERY_REQUIRED', 'RESIDUAL_CLOSE_REQUIRED',
                        'RECONCILED', 'live', 'partially_filled',
                        'filled', 'canceled', 'mmp_canceled',
@@ -5718,6 +5745,13 @@ def _canary_consent_acl_problems(connection: Connection, schema_name: str) -> li
         "revoke_restarted_okx_demo_canary_grant(text,text)",
         "fail_okx_demo_canary_grant_before_prepare(text)",
         "settle_okx_demo_canary_handoff(text)",
+        "eligible_atomic_okx_demo_canary_predecessor()",
+        "request_atomic_okx_demo_canary_consent(text,text,text,text)",
+        "finalize_atomic_okx_demo_canary_consent(text,text,bigint,bigint,bigint,bigint,jsonb)",
+        "issue_atomic_okx_demo_submission_grant(jsonb)",
+        "prepare_atomic_okx_demo_canary_dispatch(jsonb)",
+        "commit_atomic_okx_demo_canary_prepare(text,text,bigint,bigint,bigint,bigint,jsonb,jsonb,jsonb)",
+        "claim_atomic_okx_demo_canary_dispatch(bigint,text,text,bigint,text)",
     }:
         row = connection.execute(text(
             "SELECT owner.rolname,p.prosecdef,p.proconfig,"
@@ -5726,10 +5760,13 @@ def _canary_consent_acl_problems(connection: Connection, schema_name: str) -> li
             "FROM pg_proc p JOIN pg_roles owner ON owner.oid=p.proowner "
             "WHERE p.oid=to_regprocedure(:signature)"
         ), {"signature": "{}.{}".format(schema_name, signature)}).first()
+        runtime_execute_expected = not signature.startswith((
+            "finalize_atomic_", "issue_atomic_", "prepare_atomic_"
+        ))
         if (
             row is None or row[0] != "freqtrade_ai_attestor" or row[1] is not True
             or "search_path=pg_catalog" not in (row[2] or [])
-            or row[3] is not True or row[4] is True
+            or row[3] is not runtime_execute_expected or row[4] is True
         ):
             problems.append("controlled canary consent function mismatch: " + signature)
     return problems
@@ -7076,7 +7113,7 @@ def _add_controlled_canary_lifecycle_boundary(connection: Connection) -> None:
 	                 OR EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_order_write_attempts a
 	                      JOIN SCHEMA_TOKEN.exchange_orders eo ON eo.id=a.exchange_order_row_id
 	                     WHERE (eo.id=l.opening_exchange_order_row_id OR eo.trade_intent_id=l.cleanup_trade_intent_id)
-	                       AND a.state IN('PREPARED','ACKNOWLEDGED','RECOVERY_REQUIRED','RESIDUAL_CLOSE_REQUIRED'))
+	                       AND a.state IN('PREPARED','DISPATCHED','ACKNOWLEDGED','RECOVERY_REQUIRED','RESIDUAL_CLOSE_REQUIRED'))
               THEN RAISE EXCEPTION 'terminal lifecycle evidence rejected'; END IF;
             END IF;
             UPDATE SCHEMA_TOKEN.okx_demo_recovery_grants SET status='EXPIRED' WHERE lifecycle_id=p_lifecycle AND status='ACTIVE';
@@ -7138,7 +7175,7 @@ def _add_controlled_canary_lifecycle_boundary(connection: Connection) -> None:
                     ON a.recovery_grant_database_id=g.database_id
                  WHERE g.lifecycle_id=l.lifecycle_id
                    AND g.action=p_action
-                   AND a.state IN('PREPARED','ACKNOWLEDGED','RECOVERY_REQUIRED','RESIDUAL_CLOSE_REQUIRED')
+                   AND a.state IN('PREPARED','DISPATCHED','ACKNOWLEDGED','RECOVERY_REQUIRED','RESIDUAL_CLOSE_REQUIRED')
                    AND NOT (p_action='REDUCE_ONLY'
                      AND a.state='RESIDUAL_CLOSE_REQUIRED'
                      AND a.close_sequence<3
@@ -7368,6 +7405,10 @@ def _add_canary_consent_handoff_boundary(connection: Connection) -> None:
              AND (h.status='FINALIZED' OR (
                h.grant_id=NEW.grant_id AND (
                  (NEW.status='ACTIVE' AND h.status='GRANT_ISSUED') OR
+                 (NEW.status='ACTIVE' AND h.status='CONSUMED' AND EXISTS(
+                    SELECT 1 FROM SCHEMA_TOKEN.okx_demo_submission_grants current_grant
+                    WHERE current_grant.grant_id=NEW.grant_id
+                      AND current_grant.status='CONSUMED')) OR
                  (NEW.status='CONSUMED' AND h.status='CONSUMED') OR
                  (NEW.status='EXPIRED' AND h.status='EXPIRED') OR
                  (NEW.status='FAILED' AND h.status IN ('FAILED','REVOKED'))
@@ -7577,7 +7618,9 @@ def _add_canary_consent_handoff_boundary(connection: Connection) -> None:
       SELECT * INTO h FROM SCHEMA_TOKEN.okx_demo_canary_consent_handoffs
         WHERE handoff_id=p_handoff_id FOR UPDATE;
       IF NOT FOUND OR h.status<>'REQUESTED'
-         OR h.consent_deadline_at<=statement_timestamp()+interval '5 seconds'
+         OR h.consent_deadline_at<=statement_timestamp()+(
+              CASE WHEN h.supersedes_handoff_id IS NULL
+                THEN interval '5 seconds' ELSE interval '1 second' END)
          OR h.source_job_id<>22 OR h.source_ancestry::jsonb<>'[15,16,17,18,19,20,21,22]'::jsonb THEN
         RAISE EXCEPTION 'controlled canary consent is not claimable';
       END IF;
@@ -7636,6 +7679,9 @@ def _add_canary_consent_handoff_boundary(connection: Connection) -> None:
                 'session_id',account.attested_session_id)),'UTF8'),'sha256'),'hex'),48)
          OR instrument.attested_session_id IS DISTINCT FROM market.attested_session_id
          OR instrument.attested_session_id IS DISTINCT FROM account.attested_session_id
+         OR (h.supersedes_handoff_id IS NOT NULL AND (
+              instrument.observed_at<h.consented_at OR market.observed_at<h.consented_at
+              OR account.observed_at<h.consented_at))
          OR instrument.expires_at<=statement_timestamp() OR market.expires_at<=statement_timestamp()
          OR account.expires_at<=statement_timestamp()
          OR NOT EXISTS (SELECT 1 FROM SCHEMA_TOKEN.okx_demo_attested_sessions a
@@ -7675,7 +7721,7 @@ def _add_canary_consent_handoff_boundary(connection: Connection) -> None:
         WHERE database_id=(p_binding#>>'{account,database_id}')::bigint;
       v_bundle_digest:=encode(public.digest(convert_to(
         SCHEMA_TOKEN.canonical_jsonb_text(p_binding),'UTF8'),'sha256'),'hex');
-      IF h.status<>'REQUESTED'
+      IF h.status<>'REQUESTED' OR h.supersedes_handoff_id IS NOT NULL
          OR h.consent_deadline_at<=statement_timestamp()+interval '5 seconds'
          OR a.id IS NULL OR j.id IS NULL
          OR j.id=22 OR j.operation<>'okx_demo_canary_consent_execution_audit'
@@ -7864,7 +7910,8 @@ def _add_canary_consent_handoff_boundary(connection: Connection) -> None:
          OR a.status<>'ACTIVE' OR i.status<>'APPROVED' OR a.execution_target_id<>'OKX_DEMO'
          OR i.execution_target_id<>'OKX_DEMO' OR i.instrument_id<>'BTC-USDT-SWAP'
          OR i.reduce_only OR a.order_submission_authorized OR NOT a.claim_required
-         OR h.status<>'FINALIZED' OR h.approval_id<>a.id
+         OR h.status<>'FINALIZED' OR h.supersedes_handoff_id IS NOT NULL
+         OR h.approval_id<>a.id
          OR h.runtime_instance_id IS DISTINCT FROM p_payload->>'runtime_instance_id'
          OR h.finalized_at>=transaction_timestamp()
          OR h.consent_deadline_at<=statement_timestamp()+interval '5 seconds'
@@ -7947,6 +7994,7 @@ def _add_canary_consent_handoff_boundary(connection: Connection) -> None:
     DECLARE h SCHEMA_TOKEN.okx_demo_canary_consent_handoffs%ROWTYPE;
             g SCHEMA_TOKEN.okx_demo_submission_grants%ROWTYPE;
     BEGIN
+      PERFORM SCHEMA_TOKEN.require_active_okx_demo_operator_consent_secret();
       IF NOT pg_try_advisory_xact_lock(5067747289570038600) THEN
         RAISE EXCEPTION 'controlled canary coordination lock is busy';
       END IF;
@@ -8082,6 +8130,684 @@ def _add_canary_consent_handoff_boundary(connection: Connection) -> None:
     ))
 
 
+def _add_atomic_canary_prepare_boundary(connection: Connection) -> None:
+    """Install v31's consent successor and durable dispatch fence."""
+
+    schema_name = connection.execute(text("SELECT current_schema()" )).scalar_one()
+    quoted_schema = connection.dialect.identifier_preparer.quote_schema(schema_name)
+    ddl = r"""
+    ALTER TABLE SCHEMA_TOKEN.okx_demo_canary_consent_handoffs
+      ADD COLUMN IF NOT EXISTS supersedes_handoff_id varchar(32);
+    ALTER TABLE SCHEMA_TOKEN.okx_demo_canary_consent_handoffs
+      DROP CONSTRAINT IF EXISTS okx_demo_canary_consent_supersedes_fkey,
+      DROP CONSTRAINT IF EXISTS okx_demo_canary_consent_supersedes_unique,
+      ADD CONSTRAINT okx_demo_canary_consent_supersedes_fkey
+        FOREIGN KEY(supersedes_handoff_id)
+        REFERENCES SCHEMA_TOKEN.okx_demo_canary_consent_handoffs(handoff_id)
+        ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+      ADD CONSTRAINT okx_demo_canary_consent_supersedes_unique
+        UNIQUE(supersedes_handoff_id);
+
+    ALTER TABLE SCHEMA_TOKEN.okx_order_write_attempts
+      ADD COLUMN IF NOT EXISTS dispatch_not_after timestamptz;
+    ALTER TABLE SCHEMA_TOKEN.okx_order_write_attempts
+      DROP CONSTRAINT IF EXISTS okx_order_write_attempts_state_check,
+      ADD CONSTRAINT okx_order_write_attempts_state_check CHECK(
+        state IN ('PREPARED','DISPATCHED','ACKNOWLEDGED','REJECTED',
+                  'RECOVERY_REQUIRED','RESIDUAL_CLOSE_REQUIRED','RECONCILED'));
+    DROP INDEX IF EXISTS SCHEMA_TOKEN.okx_order_write_attempts_one_unresolved_target_idx;
+    CREATE UNIQUE INDEX okx_order_write_attempts_one_unresolved_target_idx
+      ON SCHEMA_TOKEN.okx_order_write_attempts(execution_target_id)
+      WHERE state IN ('PREPARED','DISPATCHED','ACKNOWLEDGED',
+                      'RECOVERY_REQUIRED','RESIDUAL_CLOSE_REQUIRED');
+
+    CREATE OR REPLACE FUNCTION SCHEMA_TOKEN.pending_okx_demo_canary_consent()
+    RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+    DECLARE h SCHEMA_TOKEN.okx_demo_canary_consent_handoffs%ROWTYPE;
+    BEGIN
+      PERFORM SCHEMA_TOKEN.require_active_okx_demo_operator_consent_secret();
+      SELECT * INTO h FROM SCHEMA_TOKEN.okx_demo_canary_consent_handoffs
+       WHERE status='REQUESTED' ORDER BY consented_at,handoff_id LIMIT 1 FOR UPDATE;
+      IF NOT FOUND THEN RETURN NULL; END IF;
+      IF h.consent_deadline_at<=statement_timestamp()+interval '15 seconds' THEN
+        UPDATE SCHEMA_TOKEN.okx_demo_canary_consent_handoffs SET status='EXPIRED',
+          failure_code='INSUFFICIENT_CAPTURE_BUDGET',updated_at=statement_timestamp()
+          WHERE handoff_id=h.handoff_id;
+        RETURN jsonb_build_object('handoff_id',h.handoff_id,'status','EXPIRED');
+      END IF;
+      RETURN jsonb_build_object('handoff_id',h.handoff_id,
+        'status','REQUESTED','source_job_id',h.source_job_id,
+        'source_ancestry',h.source_ancestry::jsonb,
+        'supersedes_handoff_id',h.supersedes_handoff_id,
+        'idempotency_key_digest',h.idempotency_key_digest,
+        'instrument_id',h.instrument_id,'max_notional',h.max_notional::text,
+        'consent_deadline_at',h.consent_deadline_at);
+    END $$;
+
+    CREATE OR REPLACE FUNCTION SCHEMA_TOKEN.eligible_atomic_okx_demo_canary_predecessor()
+    RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+    DECLARE h SCHEMA_TOKEN.okx_demo_canary_consent_handoffs%ROWTYPE;
+            a SCHEMA_TOKEN.approved_executions%ROWTYPE;
+    BEGIN
+      IF (SELECT count(*) FROM SCHEMA_TOKEN.okx_demo_canary_consent_handoffs
+          WHERE status='EXPIRED' AND failure_code='FINALIZED_EVIDENCE_EXPIRED'
+            AND grant_id IS NULL)<>1 THEN RETURN NULL; END IF;
+      SELECT * INTO h FROM SCHEMA_TOKEN.okx_demo_canary_consent_handoffs
+        WHERE status='EXPIRED' AND failure_code='FINALIZED_EVIDENCE_EXPIRED'
+          AND grant_id IS NULL ORDER BY created_at DESC LIMIT 1;
+      SELECT * INTO a FROM SCHEMA_TOKEN.approved_executions WHERE id=h.approval_id;
+      IF h.handoff_id IS NULL OR h.runtime_instance_id IS NULL
+         OR h.finalized_at IS NULL OR h.approval_id IS NULL
+         OR a.id IS NULL OR a.status<>'EXPIRED'
+         OR EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_canary_consent_handoffs
+              WHERE supersedes_handoff_id=h.handoff_id)
+         OR NOT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.full_chain_runs f
+              WHERE f.id=h.full_chain_run_id AND f.approved_execution_id=a.id
+                AND f.execution_target_id='OKX_DEMO' AND f.status='BLOCKED')
+         OR (SELECT count(*) FROM SCHEMA_TOKEN.trade_intents i
+              WHERE i.execution_target_id='OKX_DEMO'
+                AND i.request_snapshot::jsonb->>'provenance'=
+                    'CONTROLLED_CANARY_NON_PRODUCTION')<>1
+         OR (SELECT count(*) FROM SCHEMA_TOKEN.risk_decisions d
+              JOIN SCHEMA_TOKEN.trade_intents i ON i.id=d.trade_intent_id
+              WHERE i.execution_target_id='OKX_DEMO'
+                AND i.request_snapshot::jsonb->>'provenance'=
+                    'CONTROLLED_CANARY_NON_PRODUCTION')<>1
+         OR (SELECT count(*) FROM SCHEMA_TOKEN.approved_executions x
+              JOIN SCHEMA_TOKEN.trade_intents i ON i.id=x.trade_intent_id
+              WHERE i.execution_target_id='OKX_DEMO'
+                AND i.request_snapshot::jsonb->>'provenance'=
+                    'CONTROLLED_CANARY_NON_PRODUCTION')<>1
+         OR EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_submission_grants)
+         OR EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_order_write_attempts
+              WHERE execution_target_id='OKX_DEMO')
+         OR EXISTS(SELECT 1 FROM SCHEMA_TOKEN.exchange_orders
+              WHERE execution_target_id='OKX_DEMO')
+         OR EXISTS(SELECT 1 FROM SCHEMA_TOKEN.exchange_fills
+              WHERE execution_target_id='OKX_DEMO')
+         OR EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_canary_lifecycles)
+         OR EXISTS(SELECT 1 FROM SCHEMA_TOKEN.risk_budgets
+              WHERE execution_target_id='OKX_DEMO'
+                AND (reserved_notional<>0 OR approved_positions<>0)) THEN
+        RETURN NULL;
+      END IF;
+      RETURN jsonb_build_object('handoff_id',h.handoff_id,
+        'source_job_id',h.source_job_id);
+    END $$;
+
+    CREATE OR REPLACE FUNCTION SCHEMA_TOKEN.request_atomic_okx_demo_canary_consent(
+      p_idempotency_digest text,p_nonce text,p_payload text,p_proof text)
+    RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+    DECLARE source SCHEMA_TOKEN.research_jobs%ROWTYPE;
+            predecessor SCHEMA_TOKEN.okx_demo_canary_consent_handoffs%ROWTYPE;
+            existing SCHEMA_TOKEN.okx_demo_canary_consent_handoffs%ROWTYPE;
+            eligible jsonb; new_id text; v_consent_digest text;
+            payload_digest text; proof_key bytea;
+    BEGIN
+      IF NOT pg_try_advisory_xact_lock(5067747289570038601) THEN
+        RAISE EXCEPTION 'controlled canary consent request lock is busy';
+      END IF;
+      eligible:=SCHEMA_TOKEN.eligible_atomic_okx_demo_canary_predecessor();
+      IF eligible IS NULL THEN
+        RAISE EXCEPTION 'atomic canary predecessor is unavailable';
+      END IF;
+      SELECT * INTO predecessor FROM SCHEMA_TOKEN.okx_demo_canary_consent_handoffs
+        WHERE handoff_id=eligible->>'handoff_id' FOR UPDATE;
+      IF p_idempotency_digest!~'^[0-9a-f]{64}$'
+         OR p_nonce!~'^[0-9a-f]{64}$' OR p_proof!~'^[0-9a-f]{64}$'
+         OR p_payload::jsonb IS DISTINCT FROM jsonb_build_object(
+           'authorization','once','consent_policy','atomic-prepared-v1',
+           'execution_target','OKX_DEMO',
+           'idempotency_key_digest',p_idempotency_digest,
+           'instrument_id','BTC-USDT-SWAP','max_notional','20',
+           'operation','okx-demo-canary-consent-finalize',
+           'source_ancestry','[15,16,17,18,19,20,21,22]'::jsonb,
+           'source_job_id',22,
+           'supersedes_handoff_id',predecessor.handoff_id) THEN
+        RAISE EXCEPTION 'invalid atomic canary consent identity';
+      END IF;
+      SELECT hmac_key INTO proof_key
+        FROM SCHEMA_TOKEN.okx_demo_operator_consent_secrets WHERE secret_id='ACTIVE';
+      IF proof_key IS NULL OR NOT public.hmac(
+           convert_to(p_payload||'|'||p_nonce,'UTF8'),proof_key,'sha256')
+           =decode(p_proof,'hex') THEN
+        RAISE EXCEPTION 'invalid controlled canary operator proof';
+      END IF;
+      payload_digest:=encode(public.digest(convert_to(p_payload,'UTF8'),'sha256'),'hex');
+      v_consent_digest:=encode(public.digest(convert_to(
+        payload_digest||'|'||p_nonce||'|'||p_proof,'UTF8'),'sha256'),'hex');
+      SELECT * INTO existing FROM SCHEMA_TOKEN.okx_demo_canary_consent_handoffs
+        WHERE idempotency_key_digest=p_idempotency_digest
+           OR consent_digest=v_consent_digest OR consent_nonce=p_nonce FOR UPDATE;
+      IF FOUND THEN
+        IF existing.idempotency_key_digest IS DISTINCT FROM p_idempotency_digest THEN
+          RAISE EXCEPTION 'controlled canary consent identity conflict';
+        END IF;
+        RETURN jsonb_build_object('handoff_id',existing.handoff_id,
+          'status',existing.status,'source_job_id',existing.source_job_id,
+          'consent_deadline_at',existing.consent_deadline_at);
+      END IF;
+      IF EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_canary_consent_handoffs
+          WHERE status IN ('REQUESTED','FINALIZED','GRANT_ISSUED')) THEN
+        RAISE EXCEPTION 'active controlled canary consent already exists';
+      END IF;
+      SELECT * INTO source FROM SCHEMA_TOKEN.research_jobs WHERE id=22
+        AND execution_scope_id='LOCAL_DRY_RUN'
+        AND status='SUCCESS' AND stage='CANARY_SNAPSHOTS_READY'
+        AND operation='okx_demo.execution_chain_canary'
+        AND request_payload::jsonb->>'provenance'='CONTROLLED_CANARY_NON_PRODUCTION'
+        AND request_payload::jsonb->>'execution_target'='OKX_DEMO'
+        AND request_payload::jsonb->>'instrument_id'='BTC-USDT-SWAP'
+        AND request_payload::jsonb->>'entry_kind'='FRESH_EXECUTION_ONLY_FINAL_EXPIRY_RECOVERY'
+        AND request_payload::jsonb->>'recovery_of_job_id'='21'
+        AND request_payload::jsonb->'supersedes_job_ids'='[15,16,17,18,19,20,21]'::jsonb;
+      IF NOT FOUND OR predecessor.source_job_id<>source.id THEN
+        RAISE EXCEPTION 'immutable canary source is unavailable';
+      END IF;
+      IF EXISTS(SELECT 1 FROM SCHEMA_TOKEN.research_jobs
+          WHERE id>22 AND operation='okx_demo.execution_chain_canary') THEN
+        RAISE EXCEPTION 'successor canary source already exists';
+      END IF;
+      new_id:=left(encode(public.digest(convert_to(
+        p_idempotency_digest||'|'||v_consent_digest||'|'||predecessor.handoff_id,
+        'UTF8'),'sha256'),'hex'),32);
+      INSERT INTO SCHEMA_TOKEN.okx_demo_canary_consent_handoffs(
+        handoff_id,execution_target_id,source_job_id,supersedes_handoff_id,
+        source_ancestry,source_fingerprint,idempotency_key_digest,consent_nonce,
+        consent_payload_digest,consent_digest,provenance,instrument_id,max_notional,
+        status,snapshot_binding,consented_at,consent_deadline_at,created_at,updated_at)
+      VALUES(new_id,'OKX_DEMO',source.id,predecessor.handoff_id,
+        predecessor.source_ancestry,predecessor.source_fingerprint,
+        p_idempotency_digest,p_nonce,payload_digest,v_consent_digest,
+        'CONTROLLED_CANARY_NON_PRODUCTION','BTC-USDT-SWAP',20,'REQUESTED','{}'::json,
+        statement_timestamp(),statement_timestamp()+interval '60 seconds',
+        statement_timestamp(),statement_timestamp());
+      RETURN jsonb_build_object('handoff_id',new_id,'status','REQUESTED',
+        'source_job_id',source.id,
+        'consent_deadline_at',statement_timestamp()+interval '60 seconds');
+    END $$;
+
+    CREATE OR REPLACE FUNCTION SCHEMA_TOKEN.finalize_atomic_okx_demo_canary_consent(
+      p_handoff_id text,p_runtime_id text,p_audit_job_id bigint,
+      p_full_chain_run_id bigint,p_approval_id bigint,
+      p_reconciliation_run_id bigint,p_binding jsonb)
+    RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+    DECLARE h SCHEMA_TOKEN.okx_demo_canary_consent_handoffs%ROWTYPE;
+            predecessor SCHEMA_TOKEN.okx_demo_canary_consent_handoffs%ROWTYPE;
+            a SCHEMA_TOKEN.approved_executions%ROWTYPE;
+            j SCHEMA_TOKEN.research_jobs%ROWTYPE;
+            instrument SCHEMA_TOKEN.okx_demo_trusted_snapshots%ROWTYPE;
+            market SCHEMA_TOKEN.okx_demo_trusted_snapshots%ROWTYPE;
+            account SCHEMA_TOKEN.okx_demo_trusted_snapshots%ROWTYPE;
+            v_bundle_digest text;
+    BEGIN
+      PERFORM SCHEMA_TOKEN.require_active_okx_demo_operator_consent_secret();
+      PERFORM SCHEMA_TOKEN.claim_okx_demo_canary_consent(
+        p_handoff_id,p_runtime_id,p_reconciliation_run_id,p_binding);
+      SELECT * INTO h FROM SCHEMA_TOKEN.okx_demo_canary_consent_handoffs
+        WHERE handoff_id=p_handoff_id FOR UPDATE;
+      SELECT * INTO predecessor FROM SCHEMA_TOKEN.okx_demo_canary_consent_handoffs
+        WHERE handoff_id=h.supersedes_handoff_id;
+      SELECT * INTO a FROM SCHEMA_TOKEN.approved_executions WHERE id=p_approval_id;
+      SELECT * INTO j FROM SCHEMA_TOKEN.research_jobs WHERE id=p_audit_job_id;
+      SELECT * INTO instrument FROM SCHEMA_TOKEN.okx_demo_trusted_snapshots
+        WHERE database_id=(p_binding#>>'{instrument,database_id}')::bigint;
+      SELECT * INTO market FROM SCHEMA_TOKEN.okx_demo_trusted_snapshots
+        WHERE database_id=(p_binding#>>'{market,database_id}')::bigint;
+      SELECT * INTO account FROM SCHEMA_TOKEN.okx_demo_trusted_snapshots
+        WHERE database_id=(p_binding#>>'{account,database_id}')::bigint;
+      IF h.status<>'REQUESTED' OR h.supersedes_handoff_id IS NULL
+         OR predecessor.status<>'EXPIRED'
+         OR predecessor.failure_code<>'FINALIZED_EVIDENCE_EXPIRED'
+         OR predecessor.grant_id IS NOT NULL
+         OR h.consent_deadline_at<=clock_timestamp()+interval '1 second'
+         OR instrument.expires_at<=clock_timestamp()+interval '1 second'
+         OR market.expires_at<=clock_timestamp()+interval '1 second'
+         OR account.expires_at<=clock_timestamp()+interval '1 second'
+         OR instrument.observed_at<h.consented_at
+         OR market.observed_at<h.consented_at OR account.observed_at<h.consented_at
+         OR a.id IS NULL OR a.status<>'ACTIVE' OR a.execution_target_id<>'OKX_DEMO'
+         OR j.id IS NULL OR j.operation<>'okx_demo_canary_consent_execution_audit'
+         OR a.instrument_snapshot_id IS DISTINCT FROM p_binding#>>'{instrument,snapshot_id}'
+         OR a.market_snapshot_id IS DISTINCT FROM p_binding#>>'{market,snapshot_id}'
+         OR a.account_snapshot_id IS DISTINCT FROM p_binding#>>'{account,snapshot_id}'
+         OR NOT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.full_chain_runs f
+              WHERE f.id=p_full_chain_run_id AND f.research_job_id=j.id
+                AND f.approved_execution_id=a.id AND f.execution_target_id='OKX_DEMO') THEN
+        RAISE EXCEPTION 'atomic canary consent finalization mismatch';
+      END IF;
+      v_bundle_digest:=encode(public.digest(convert_to(
+        SCHEMA_TOKEN.canonical_jsonb_text(p_binding),'UTF8'),'sha256'),'hex');
+      UPDATE SCHEMA_TOKEN.okx_demo_canary_consent_handoffs SET status='FINALIZED',
+        runtime_instance_id=p_runtime_id,reconciliation_run_id=p_reconciliation_run_id,
+        attested_session_id=instrument.attested_session_id,snapshot_binding=p_binding::json,
+        bundle_digest=v_bundle_digest,
+        bundle_observed_at=GREATEST(instrument.observed_at,market.observed_at,account.observed_at),
+        bundle_expires_at=LEAST(instrument.expires_at,market.expires_at,account.expires_at),
+        audit_job_id=j.id,full_chain_run_id=p_full_chain_run_id,approval_id=a.id,
+        finalized_at=clock_timestamp(),updated_at=clock_timestamp()
+        WHERE handoff_id=h.handoff_id;
+      RETURN TRUE;
+    END $$;
+
+    CREATE OR REPLACE FUNCTION SCHEMA_TOKEN.issue_atomic_okx_demo_submission_grant(
+      p_payload jsonb)
+    RETURNS varchar LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+    DECLARE h SCHEMA_TOKEN.okx_demo_canary_consent_handoffs%ROWTYPE;
+            a SCHEMA_TOKEN.approved_executions%ROWTYPE;
+            i SCHEMA_TOKEN.trade_intents%ROWTYPE;
+            d SCHEMA_TOKEN.risk_decisions%ROWTYPE;
+            r SCHEMA_TOKEN.reconciliation_runs%ROWTYPE;
+            s SCHEMA_TOKEN.okx_demo_reconciliation_states%ROWTYPE;
+            instrument SCHEMA_TOKEN.okx_demo_trusted_snapshots%ROWTYPE;
+            market SCHEMA_TOKEN.okx_demo_trusted_snapshots%ROWTYPE;
+            account SCHEMA_TOKEN.okx_demo_trusted_snapshots%ROWTYPE;
+            new_id text; expires timestamptz; computed_notional numeric;
+            computed_request_digest text;
+    BEGIN
+      IF NOT pg_try_advisory_xact_lock(5067747289570038600) THEN
+        RAISE EXCEPTION 'controlled canary coordination lock is busy';
+      END IF;
+      SELECT * INTO h FROM SCHEMA_TOKEN.okx_demo_canary_consent_handoffs
+        WHERE handoff_id=p_payload->>'handoff_id' FOR UPDATE;
+      SELECT * INTO a FROM SCHEMA_TOKEN.approved_executions WHERE id=h.approval_id;
+      SELECT * INTO i FROM SCHEMA_TOKEN.trade_intents WHERE id=a.trade_intent_id;
+      SELECT * INTO d FROM SCHEMA_TOKEN.risk_decisions WHERE id=a.risk_decision_id;
+      SELECT * INTO r FROM SCHEMA_TOKEN.reconciliation_runs WHERE id=h.reconciliation_run_id;
+      SELECT * INTO s FROM SCHEMA_TOKEN.okx_demo_reconciliation_states
+        WHERE execution_target_id='OKX_DEMO';
+      SELECT * INTO instrument FROM SCHEMA_TOKEN.okx_demo_trusted_snapshots
+        WHERE database_id=(h.snapshot_binding::jsonb#>>'{instrument,database_id}')::bigint;
+      SELECT * INTO market FROM SCHEMA_TOKEN.okx_demo_trusted_snapshots
+        WHERE database_id=(h.snapshot_binding::jsonb#>>'{market,database_id}')::bigint;
+      SELECT * INTO account FROM SCHEMA_TOKEN.okx_demo_trusted_snapshots
+        WHERE database_id=(h.snapshot_binding::jsonb#>>'{account,database_id}')::bigint;
+      new_id:=p_payload->>'grant_id'; expires:=(p_payload->>'expires_at')::timestamptz;
+      computed_notional:=i.quantity*(instrument.content_json::jsonb->>'ctVal')::numeric*
+        GREATEST((market.content_json::jsonb->>'reference_price')::numeric,
+          (market.content_json::jsonb#>>'{bbo,ask_price}')::numeric,COALESCE(i.limit_price,0));
+      computed_request_digest:=encode(public.digest(convert_to(
+        SCHEMA_TOKEN.canonical_jsonb_text(jsonb_build_object(
+          'approval_id',a.id,'approved_payload_hash',a.approved_payload_hash,
+          'canary_notional',SCHEMA_TOKEN.canonical_decimal_text(computed_notional),
+          'canary_quantity',SCHEMA_TOKEN.canonical_decimal_text(i.quantity),
+          'canonical_hash',a.canonical_hash,'client_order_id',a.client_order_id,
+          'instrument_id',i.instrument_id,'policy_digest',a.policy_digest,
+          'provenance','CONTROLLED_CANARY_NON_PRODUCTION',
+          'reconciliation_run_id',r.id)),'UTF8'),'sha256'),'hex');
+      IF new_id!~'^[0-9a-f]{32}$' OR h.status<>'FINALIZED'
+         OR h.supersedes_handoff_id IS NULL OR a.id IS NULL OR i.id IS NULL
+         OR a.status<>'ACTIVE' OR i.status<>'APPROVED' OR d.decision<>'APPROVED'
+         OR a.execution_target_id<>'OKX_DEMO' OR i.execution_target_id<>'OKX_DEMO'
+         OR i.instrument_id<>'BTC-USDT-SWAP' OR i.reduce_only
+         OR a.order_submission_authorized OR NOT a.claim_required
+         OR h.runtime_instance_id IS DISTINCT FROM p_payload->>'runtime_instance_id'
+         OR h.consent_deadline_at<=clock_timestamp()+interval '1 second'
+         OR h.bundle_expires_at<=clock_timestamp()+interval '1 second'
+         OR instrument.expires_at<=clock_timestamp()+interval '1 second'
+         OR market.expires_at<=clock_timestamp()+interval '1 second'
+         OR account.expires_at<=clock_timestamp()+interval '1 second'
+         OR r.id IS NULL OR r.status NOT IN ('RECONCILED','RECOVERED')
+         OR r.artifact_status<>'READY' OR r.source_type<>'api_aggregate' OR NOT r.core_data
+         OR r.completed_at<clock_timestamp()-interval '30 seconds'
+         OR r.authoritative_observed_at<clock_timestamp()-interval '30 seconds'
+         OR r.database_ids::jsonb->'order_snapshots'<>'[]'::jsonb
+         OR r.database_ids::jsonb->'position_snapshots'<>'[]'::jsonb
+         OR s.last_reconciliation_run_id<>r.id OR s.opening_frozen
+         OR expires<=clock_timestamp()+interval '1 second' OR expires>a.expires_at
+         OR expires>i.expires_at OR computed_notional>20
+         OR (p_payload->>'canary_notional')::numeric IS DISTINCT FROM computed_notional
+         OR computed_notional IS DISTINCT FROM a.reserved_notional
+         OR p_payload->>'canonical_hash' IS DISTINCT FROM a.canonical_hash
+         OR p_payload->>'policy_digest' IS DISTINCT FROM a.policy_digest
+         OR p_payload->>'approved_payload_hash' IS DISTINCT FROM a.approved_payload_hash
+         OR p_payload->>'client_order_id' IS DISTINCT FROM a.client_order_id
+         OR p_payload->>'instrument_id' IS DISTINCT FROM i.instrument_id
+         OR (p_payload->>'canary_quantity')::numeric IS DISTINCT FROM i.quantity
+         OR p_payload->>'request_digest' IS DISTINCT FROM computed_request_digest THEN
+        RAISE EXCEPTION 'unsafe atomic canary grant';
+      END IF;
+      INSERT INTO SCHEMA_TOKEN.okx_demo_submission_grants(
+        grant_id,handoff_id,execution_target_id,approval_id,reconciliation_run_id,
+        canonical_hash,policy_digest,approved_payload_hash,client_order_id,instrument_id,
+        canary_quantity,canary_notional,request_digest,provenance,status,
+        writer_instance_id,issued_at,expires_at)
+      VALUES(new_id,h.handoff_id,'OKX_DEMO',a.id,r.id,a.canonical_hash,a.policy_digest,
+        a.approved_payload_hash,a.client_order_id,i.instrument_id,i.quantity,computed_notional,
+        computed_request_digest,'CONTROLLED_CANARY_NON_PRODUCTION','ACTIVE',NULL,
+        clock_timestamp(),expires);
+      UPDATE SCHEMA_TOKEN.okx_demo_canary_consent_handoffs SET status='GRANT_ISSUED',
+        grant_id=new_id,updated_at=clock_timestamp() WHERE handoff_id=h.handoff_id;
+      RETURN new_id;
+    END $$;
+
+    CREATE OR REPLACE FUNCTION SCHEMA_TOKEN.prepare_atomic_okx_demo_canary_dispatch(
+      p_payload jsonb)
+    RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+    DECLARE h SCHEMA_TOKEN.okx_demo_canary_consent_handoffs%ROWTYPE;
+            g SCHEMA_TOKEN.okx_demo_submission_grants%ROWTYPE;
+            a SCHEMA_TOKEN.approved_executions%ROWTYPE;
+            i SCHEMA_TOKEN.trade_intents%ROWTYPE;
+            r SCHEMA_TOKEN.reconciliation_runs%ROWTYPE;
+            s SCHEMA_TOKEN.okx_demo_reconciliation_states%ROWTYPE;
+            account SCHEMA_TOKEN.okx_demo_trusted_snapshots%ROWTYPE;
+            lease SCHEMA_TOKEN.okx_order_writer_leases%ROWTYPE;
+            expected_body jsonb; attached jsonb; lifecycle_id text;
+            order_id bigint; attempt_id bigint; identity_digest text;
+            expected_request_digest text; submission_not_after timestamptz;
+            dispatch_not_after timestamptz;
+            baseline_digest text; lifecycle_deadline timestamptz;
+    BEGIN
+      IF NOT pg_try_advisory_xact_lock(5067747289570038600) THEN
+        RAISE EXCEPTION 'controlled canary coordination lock is busy';
+      END IF;
+      SELECT * INTO h FROM SCHEMA_TOKEN.okx_demo_canary_consent_handoffs
+        WHERE handoff_id=p_payload->>'handoff_id' FOR UPDATE;
+      SELECT * INTO g FROM SCHEMA_TOKEN.okx_demo_submission_grants
+        WHERE grant_id=p_payload->>'grant_id' FOR UPDATE;
+      SELECT * INTO a FROM SCHEMA_TOKEN.approved_executions WHERE id=g.approval_id FOR UPDATE;
+      SELECT * INTO i FROM SCHEMA_TOKEN.trade_intents WHERE id=a.trade_intent_id FOR UPDATE;
+      SELECT * INTO r FROM SCHEMA_TOKEN.reconciliation_runs
+        WHERE id=g.reconciliation_run_id;
+      SELECT * INTO s FROM SCHEMA_TOKEN.okx_demo_reconciliation_states
+        WHERE execution_target_id='OKX_DEMO' FOR UPDATE;
+      SELECT * INTO account FROM SCHEMA_TOKEN.okx_demo_trusted_snapshots
+        WHERE database_id=(h.snapshot_binding::jsonb#>>'{account,database_id}')::bigint;
+      submission_not_after:=LEAST(h.bundle_expires_at,h.consent_deadline_at,
+        a.expires_at,i.expires_at,g.expires_at);
+      dispatch_not_after:=LEAST(submission_not_after,
+        clock_timestamp()+interval '1 second');
+      expected_body:=jsonb_build_object('instId',i.instrument_id,'tdMode','isolated',
+        'side',i.side,'posSide',i.position_side,'ordType',i.order_type,
+        'sz',SCHEMA_TOKEN.canonical_decimal_text(i.quantity),'clOrdId',i.client_order_id,
+        'px',SCHEMA_TOKEN.canonical_decimal_text(i.limit_price));
+      IF i.take_profit IS NOT NULL OR i.stop_loss IS NOT NULL THEN
+        attached:='{}'::jsonb;
+        IF i.take_profit IS NOT NULL THEN
+          attached:=attached||jsonb_build_object(
+            'attachAlgoClOrdId',left(i.client_order_id,30)||'TP',
+            'tpTriggerPx',SCHEMA_TOKEN.canonical_decimal_text(i.take_profit),
+            'tpOrdPx','-1','tpTriggerPxType','mark');
+        END IF;
+        IF i.stop_loss IS NOT NULL THEN
+          attached:=attached||jsonb_build_object(
+            'attachAlgoClOrdId',COALESCE(attached->>'attachAlgoClOrdId',
+              left(i.client_order_id,30)||'EX'),
+            'slTriggerPx',SCHEMA_TOKEN.canonical_decimal_text(i.stop_loss),
+            'slOrdPx','-1','slTriggerPxType','mark');
+        END IF;
+        expected_body:=expected_body||jsonb_build_object('attachAlgoOrds',jsonb_build_array(attached));
+      END IF;
+      expected_request_digest:=encode(public.digest(convert_to(
+        SCHEMA_TOKEN.canonical_jsonb_text(expected_body),'UTF8'),'sha256'),'hex');
+      IF h.status<>'GRANT_ISSUED' OR g.status<>'ACTIVE'
+         OR h.grant_id IS DISTINCT FROM g.grant_id OR h.approval_id<>a.id
+         OR h.runtime_instance_id IS DISTINCT FROM p_payload->>'runtime_instance_id'
+         OR p_payload->>'holder_token_digest'!~'^[0-9a-f]{64}$' THEN
+        RAISE EXCEPTION 'unsafe atomic canary prepare identity';
+      END IF;
+      IF p_payload->>'request_digest' IS DISTINCT FROM expected_request_digest
+         OR p_payload->'request_body' IS DISTINCT FROM expected_body THEN
+        RAISE EXCEPTION 'unsafe atomic canary prepare request';
+      END IF;
+      IF account.content_json::jsonb#>>'{leverage_by_position_side,long}'
+              IS DISTINCT FROM SCHEMA_TOKEN.canonical_decimal_text(i.leverage) THEN
+        RAISE EXCEPTION 'unsafe atomic canary prepare leverage';
+      END IF;
+      IF r.id IS NULL OR r.status NOT IN ('RECONCILED','RECOVERED')
+         OR r.artifact_status<>'READY' OR r.source_type<>'api_aggregate' OR NOT r.core_data
+         OR s.last_reconciliation_run_id<>r.id OR s.opening_frozen
+         OR r.database_ids::jsonb->'order_snapshots'<>'[]'::jsonb
+         OR r.database_ids::jsonb->'position_snapshots'<>'[]'::jsonb
+         OR jsonb_typeof(r.database_ids::jsonb->'recovery_batches') IS DISTINCT FROM 'array'
+         OR jsonb_array_length(r.database_ids::jsonb->'recovery_batches')<>1
+         OR NOT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_recovery_batches b
+              WHERE b.database_id=(r.database_ids::jsonb->'recovery_batches'->>0)::bigint
+                AND b.execution_target_id='OKX_DEMO' AND b.authenticated
+                AND b.pagination_complete
+                AND b.complete_streams::jsonb='["ACCOUNT","FILL","ORDER","POSITION"]'::jsonb) THEN
+        RAISE EXCEPTION 'unsafe atomic canary prepare reconciliation';
+      END IF;
+      IF submission_not_after<=clock_timestamp()+interval '1 second' THEN
+        RAISE EXCEPTION 'unsafe atomic canary prepare dispatch budget';
+      END IF;
+      IF EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_order_write_attempts
+              WHERE execution_target_id='OKX_DEMO')
+         OR EXISTS(SELECT 1 FROM SCHEMA_TOKEN.exchange_orders
+              WHERE execution_target_id='OKX_DEMO')
+         OR EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_canary_lifecycles) THEN
+        RAISE EXCEPTION 'unsafe atomic canary prepare occupied';
+      END IF;
+      SELECT * INTO lease FROM SCHEMA_TOKEN.okx_order_writer_leases
+        WHERE execution_target_id='OKX_DEMO' FOR UPDATE;
+      IF NOT FOUND THEN
+        INSERT INTO SCHEMA_TOKEN.okx_order_writer_leases(
+          execution_target_id,holder_token_digest,generation,acquired_at,heartbeat_at,expires_at)
+        VALUES('OKX_DEMO',p_payload->>'holder_token_digest',1,clock_timestamp(),
+          clock_timestamp(),submission_not_after) RETURNING * INTO lease;
+      ELSIF lease.holder_token_digest=p_payload->>'holder_token_digest' THEN
+        UPDATE SCHEMA_TOKEN.okx_order_writer_leases SET heartbeat_at=clock_timestamp(),
+          expires_at=submission_not_after WHERE execution_target_id='OKX_DEMO'
+          RETURNING * INTO lease;
+      ELSIF lease.expires_at<=clock_timestamp() THEN
+        UPDATE SCHEMA_TOKEN.okx_order_writer_leases SET
+          holder_token_digest=p_payload->>'holder_token_digest',generation=generation+1,
+          acquired_at=clock_timestamp(),heartbeat_at=clock_timestamp(),
+          expires_at=submission_not_after WHERE execution_target_id='OKX_DEMO'
+          RETURNING * INTO lease;
+      ELSE
+        RAISE EXCEPTION 'another OKX_DEMO writer holds the database lease';
+      END IF;
+      lifecycle_id:=g.grant_id;
+      baseline_digest:=encode(public.digest(convert_to(concat_ws('|',r.id::text,
+        r.artifact_sha256,r.authoritative_observed_at::text,r.completed_at::text),
+        'UTF8'),'sha256'),'hex');
+      lifecycle_deadline:=LEAST(clock_timestamp()+interval '30 seconds',
+        g.expires_at,a.expires_at,i.expires_at);
+      INSERT INTO SCHEMA_TOKEN.okx_demo_canary_lifecycles(
+        lifecycle_id,execution_target_id,submission_grant_id,opening_approval_id,
+        opening_trade_intent_id,baseline_reconciliation_run_id,
+        baseline_position_quantity,baseline_evidence_digest,
+        attributed_fill_quantity,max_quantity,outcome,cleanup_phase,
+        deadline_at,fencing_version,created_at,updated_at)
+      VALUES(lifecycle_id,'OKX_DEMO',g.grant_id,a.id,i.id,r.id,0,
+        baseline_digest,0,g.canary_quantity,'PENDING','ARMED',lifecycle_deadline,
+        1,clock_timestamp(),clock_timestamp());
+      INSERT INTO SCHEMA_TOKEN.exchange_orders(
+        execution_target_id,trade_intent_id,client_order_id,status,
+        request_snapshot,response_snapshot,created_at,updated_at)
+      VALUES('OKX_DEMO',i.id,i.client_order_id,'PREPARED',expected_body::json,'{}'::json,
+        clock_timestamp(),clock_timestamp()) RETURNING id INTO order_id;
+      INSERT INTO SCHEMA_TOKEN.okx_order_write_attempts(
+        execution_target_id,exchange_order_row_id,approval_id,operation,operation_id,
+        client_order_id,instrument_id,state,request_digest,safe_request_snapshot,
+         safe_response_snapshot,attempt_count,lease_generation,close_sequence,
+        last_attempt_at,dispatch_not_after,created_at,updated_at)
+      VALUES('OKX_DEMO',order_id,a.id,'PLACE',i.client_order_id,i.client_order_id,
+        i.instrument_id,'PREPARED',expected_request_digest,expected_body::json,'{}'::json,
+        1,lease.generation,0,clock_timestamp(),dispatch_not_after,
+        clock_timestamp(),clock_timestamp())
+      RETURNING id INTO attempt_id;
+      identity_digest:=encode(public.digest(convert_to(
+        order_id::text||'|'||i.client_order_id||'|'||i.instrument_id||'|'||expected_request_digest,
+        'UTF8'),'sha256'),'hex');
+      UPDATE SCHEMA_TOKEN.okx_demo_submission_grants SET status='CONSUMED',
+        writer_instance_id=p_payload->>'runtime_instance_id',consumed_at=clock_timestamp()
+        WHERE grant_id=g.grant_id;
+      UPDATE SCHEMA_TOKEN.okx_demo_canary_consent_handoffs SET status='CONSUMED',
+        updated_at=clock_timestamp() WHERE handoff_id=h.handoff_id;
+      PERFORM SCHEMA_TOKEN.transition_okx_demo_canary_lifecycle(
+        lifecycle_id,'BIND_OPENING',order_id,NULL,identity_digest,1);
+      RETURN jsonb_build_object('attempt_id',attempt_id,'exchange_order_row_id',order_id,
+        'lease_generation',lease.generation,'request_digest',expected_request_digest,
+        'client_order_id',i.client_order_id,'instrument_id',i.instrument_id,
+        'request_body',expected_body,'dispatch_not_after',dispatch_not_after,
+        'dispatch_guard_policy','db-clock-monotonic-v2','dispatch_guard_ms',1000,
+        'dispatch_claim_min_remaining_ms',500,'post_start_reserve_ms',100,
+        'submission_not_after',submission_not_after,
+        'bundle_digest',h.bundle_digest);
+    END $$;
+
+    CREATE OR REPLACE FUNCTION SCHEMA_TOKEN.commit_atomic_okx_demo_canary_prepare(
+      p_handoff_id text,p_runtime_id text,p_audit_job_id bigint,
+      p_full_chain_run_id bigint,p_approval_id bigint,
+      p_reconciliation_run_id bigint,p_binding jsonb,
+      p_grant_payload jsonb,p_prepare_payload jsonb)
+    RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+    DECLARE grant_id text; receipt jsonb;
+    BEGIN
+      PERFORM SCHEMA_TOKEN.require_active_okx_demo_operator_consent_secret();
+      IF p_grant_payload->>'handoff_id' IS DISTINCT FROM p_handoff_id
+         OR p_grant_payload->>'runtime_instance_id' IS DISTINCT FROM p_runtime_id
+         OR p_prepare_payload->>'handoff_id' IS DISTINCT FROM p_handoff_id
+         OR p_prepare_payload->>'runtime_instance_id' IS DISTINCT FROM p_runtime_id
+         OR p_prepare_payload->>'grant_id' IS DISTINCT FROM p_grant_payload->>'grant_id' THEN
+        RAISE EXCEPTION 'atomic canary coordinator identity mismatch';
+      END IF;
+      PERFORM SCHEMA_TOKEN.finalize_atomic_okx_demo_canary_consent(
+        p_handoff_id,p_runtime_id,p_audit_job_id,p_full_chain_run_id,
+        p_approval_id,p_reconciliation_run_id,p_binding);
+      grant_id:=SCHEMA_TOKEN.issue_atomic_okx_demo_submission_grant(p_grant_payload);
+      IF grant_id IS DISTINCT FROM p_grant_payload->>'grant_id' THEN
+        RAISE EXCEPTION 'atomic canary grant identity changed';
+      END IF;
+      receipt:=SCHEMA_TOKEN.prepare_atomic_okx_demo_canary_dispatch(p_prepare_payload);
+      RETURN receipt||jsonb_build_object('grant_id',grant_id,
+        'handoff_id',p_handoff_id,'runtime_instance_id',p_runtime_id);
+    END $$;
+
+    CREATE OR REPLACE FUNCTION SCHEMA_TOKEN.claim_atomic_okx_demo_canary_dispatch(
+      p_attempt_id bigint,p_runtime_id text,p_holder_digest text,
+      p_lease_generation bigint,p_request_digest text)
+    RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+    DECLARE attempt SCHEMA_TOKEN.okx_order_write_attempts%ROWTYPE;
+            order_row SCHEMA_TOKEN.exchange_orders%ROWTYPE;
+            lease SCHEMA_TOKEN.okx_order_writer_leases%ROWTYPE;
+            g SCHEMA_TOKEN.okx_demo_submission_grants%ROWTYPE;
+            h SCHEMA_TOKEN.okx_demo_canary_consent_handoffs%ROWTYPE;
+            lifecycle SCHEMA_TOKEN.okx_demo_canary_lifecycles%ROWTYPE;
+            submission_not_after timestamptz; claimed_at timestamptz;
+            dispatch_remaining_ms bigint;
+    BEGIN
+      PERFORM SCHEMA_TOKEN.require_active_okx_demo_operator_consent_secret();
+      IF NOT pg_try_advisory_xact_lock(5067747289570038600) THEN
+        RAISE EXCEPTION 'controlled canary coordination lock is busy';
+      END IF;
+      SELECT * INTO attempt FROM SCHEMA_TOKEN.okx_order_write_attempts
+        WHERE id=p_attempt_id FOR UPDATE;
+      SELECT * INTO order_row FROM SCHEMA_TOKEN.exchange_orders
+        WHERE id=attempt.exchange_order_row_id FOR UPDATE;
+      SELECT * INTO g FROM SCHEMA_TOKEN.okx_demo_submission_grants
+        WHERE approval_id=attempt.approval_id FOR UPDATE;
+      SELECT * INTO h FROM SCHEMA_TOKEN.okx_demo_canary_consent_handoffs
+        WHERE grant_id=g.grant_id FOR UPDATE;
+      SELECT * INTO lifecycle FROM SCHEMA_TOKEN.okx_demo_canary_lifecycles
+        WHERE submission_grant_id=g.grant_id FOR UPDATE;
+      SELECT * INTO lease FROM SCHEMA_TOKEN.okx_order_writer_leases
+        WHERE execution_target_id='OKX_DEMO' FOR UPDATE;
+      submission_not_after:=LEAST(h.bundle_expires_at,h.consent_deadline_at,
+        g.expires_at,lease.expires_at);
+      claimed_at:=clock_timestamp();
+      IF attempt.id IS NULL OR attempt.state<>'PREPARED' OR attempt.operation<>'PLACE'
+         OR attempt.attempt_count<>1 OR attempt.request_digest IS DISTINCT FROM p_request_digest
+         OR order_row.status<>'PREPARED' OR order_row.client_order_id<>attempt.client_order_id
+         OR g.status<>'CONSUMED' OR h.status<>'CONSUMED'
+         OR g.writer_instance_id IS DISTINCT FROM p_runtime_id
+         OR h.runtime_instance_id IS DISTINCT FROM p_runtime_id
+         OR p_holder_digest!~'^[0-9a-f]{64}$'
+         OR lease.holder_token_digest IS DISTINCT FROM encode(public.digest(
+              convert_to(p_holder_digest,'UTF8'),'sha256'),'hex')
+         OR lease.generation<>p_lease_generation
+         OR attempt.lease_generation<>lease.generation
+         OR lifecycle.cleanup_phase<>'OPENING_SUBMITTED'
+         OR lifecycle.opening_exchange_order_row_id<>order_row.id
+         OR attempt.dispatch_not_after IS NULL
+         OR attempt.dispatch_not_after<=claimed_at+interval '500 milliseconds' THEN
+        RETURN NULL;
+      END IF;
+      dispatch_remaining_ms:=floor(extract(epoch FROM
+        (attempt.dispatch_not_after-claimed_at))*1000)::bigint;
+      UPDATE SCHEMA_TOKEN.okx_order_write_attempts SET state='DISPATCHED',
+        last_attempt_at=claimed_at,updated_at=claimed_at
+        WHERE id=attempt.id;
+      UPDATE SCHEMA_TOKEN.exchange_orders SET status='DISPATCHED',
+        updated_at=claimed_at WHERE id=order_row.id;
+      RETURN jsonb_build_object('attempt_id',attempt.id,
+        'exchange_order_row_id',order_row.id,'client_order_id',order_row.client_order_id,
+        'instrument_id',attempt.instrument_id,
+        'request_body',attempt.safe_request_snapshot::jsonb,
+        'request_digest',attempt.request_digest,
+        'runtime_instance_id',p_runtime_id,
+        'holder_token_digest',lease.holder_token_digest,
+        'bundle_digest',h.bundle_digest,
+        'dispatch_claimed_at',claimed_at,
+        'dispatch_remaining_ms',dispatch_remaining_ms,
+        'dispatch_not_after',attempt.dispatch_not_after,
+        'submission_not_after',submission_not_after);
+    END $$;
+
+    CREATE OR REPLACE FUNCTION SCHEMA_TOKEN.validate_atomic_okx_demo_dispatch_authority(
+      p_attempt_id bigint,p_runtime_id text,p_holder_token text,
+      p_lease_generation bigint,p_request_digest text,p_bundle_digest text)
+    RETURNS bigint LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+    DECLARE remaining_ms bigint;
+    BEGIN
+      PERFORM SCHEMA_TOKEN.require_active_okx_demo_operator_consent_secret();
+      IF p_holder_token!~'^[0-9a-f]{64}$' THEN RETURN NULL; END IF;
+      SELECT floor(extract(epoch FROM
+               (a.dispatch_not_after-clock_timestamp()))*1000)::bigint
+        INTO remaining_ms
+        FROM SCHEMA_TOKEN.okx_order_write_attempts a
+        JOIN SCHEMA_TOKEN.okx_order_writer_leases l
+          ON l.execution_target_id=a.execution_target_id
+        JOIN SCHEMA_TOKEN.okx_demo_submission_grants g ON g.approval_id=a.approval_id
+        JOIN SCHEMA_TOKEN.okx_demo_canary_consent_handoffs h ON h.grant_id=g.grant_id
+       WHERE a.id=p_attempt_id AND a.state='DISPATCHED'
+         AND a.request_digest=p_request_digest
+         AND a.lease_generation=p_lease_generation
+         AND l.generation=p_lease_generation
+         AND l.holder_token_digest=encode(public.digest(
+               convert_to(p_holder_token,'UTF8'),'sha256'),'hex')
+         AND l.expires_at>clock_timestamp()
+         AND g.status='CONSUMED' AND g.writer_instance_id=p_runtime_id
+         AND h.status='CONSUMED' AND h.runtime_instance_id=p_runtime_id
+         AND h.bundle_digest=p_bundle_digest
+         AND a.dispatch_not_after>clock_timestamp()+interval '100 milliseconds';
+      RETURN remaining_ms;
+    END $$;
+    """.replace("SCHEMA_TOKEN", quoted_schema)
+    connection.execute(text(ddl))
+    runtime_signatures = {
+        "eligible_atomic_okx_demo_canary_predecessor()",
+        "request_atomic_okx_demo_canary_consent(text,text,text,text)",
+        "commit_atomic_okx_demo_canary_prepare(text,text,bigint,bigint,bigint,bigint,jsonb,jsonb,jsonb)",
+        "claim_atomic_okx_demo_canary_dispatch(bigint,text,text,bigint,text)",
+        "validate_atomic_okx_demo_dispatch_authority(bigint,text,text,bigint,text,text)",
+    }
+    for signature in (
+        "eligible_atomic_okx_demo_canary_predecessor()",
+        "request_atomic_okx_demo_canary_consent(text,text,text,text)",
+        "finalize_atomic_okx_demo_canary_consent(text,text,bigint,bigint,bigint,bigint,jsonb)",
+        "issue_atomic_okx_demo_submission_grant(jsonb)",
+        "prepare_atomic_okx_demo_canary_dispatch(jsonb)",
+        "commit_atomic_okx_demo_canary_prepare(text,text,bigint,bigint,bigint,bigint,jsonb,jsonb,jsonb)",
+        "claim_atomic_okx_demo_canary_dispatch(bigint,text,text,bigint,text)",
+        "validate_atomic_okx_demo_dispatch_authority(bigint,text,text,bigint,text,text)",
+    ):
+        connection.execute(text(
+            "ALTER FUNCTION {0}.{1} OWNER TO freqtrade_ai_attestor; "
+            "REVOKE ALL ON FUNCTION {0}.{1} FROM PUBLIC; "
+            "{2}".format(
+                quoted_schema, signature,
+                (
+                    "GRANT EXECUTE ON FUNCTION {0}.{1} TO freqtrade"
+                    if signature in runtime_signatures
+                    else "REVOKE EXECUTE ON FUNCTION {0}.{1} FROM freqtrade"
+                ).format(quoted_schema, signature),
+            )
+        ))
+
+
 def _finalize_current_canary_boundaries(connection: Connection) -> list[str]:
     """Converge every supported upgrade path on the complete current boundary."""
 
@@ -8143,7 +8869,13 @@ def _finalize_current_canary_boundaries(connection: Connection) -> list[str]:
                 )
             )
     _add_controlled_canary_lifecycle_boundary(connection)
+    if "okx_demo_canary_consent_handoffs" in actual_tables:
+        connection.execute(text(
+            "ALTER TABLE okx_demo_canary_consent_handoffs "
+            "ADD COLUMN IF NOT EXISTS supersedes_handoff_id varchar(32)"
+        ))
     _add_canary_consent_handoff_boundary(connection)
+    _add_atomic_canary_prepare_boundary(connection)
     return schema_problems(connection)
 
 
@@ -8201,6 +8933,7 @@ def upgrade_database(engine: Engine) -> str:
                 CANARY_LIFECYCLE_BASE_VERSION,
                 CANARY_CONSENT_HANDOFF_BASE_VERSION,
                 CANARY_CONSENT_FAILURE_AUDIT_BASE_VERSION,
+                CANARY_ATOMIC_PREPARE_BASE_VERSION,
             }
             if current_version in supported_upgrade_versions:
                 connection.execute(
@@ -8239,6 +8972,7 @@ def upgrade_database(engine: Engine) -> str:
                 CANARY_LIFECYCLE_BASE_VERSION,
                 CANARY_CONSENT_HANDOFF_BASE_VERSION,
                 CANARY_CONSENT_FAILURE_AUDIT_BASE_VERSION,
+                CANARY_ATOMIC_PREPARE_BASE_VERSION,
             }:
                 problems = _finalize_current_canary_boundaries(connection)
                 if problems:

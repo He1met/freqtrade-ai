@@ -22,7 +22,7 @@ from app.models.base import Base
 
 
 NONTERMINAL_PREDICATE = (
-    "state IN ('PREPARED', 'ACKNOWLEDGED', 'RECOVERY_REQUIRED', "
+    "state IN ('PREPARED', 'DISPATCHED', 'ACKNOWLEDGED', 'RECOVERY_REQUIRED', "
     "'RESIDUAL_CLOSE_REQUIRED')"
 )
 CANARY_ACTIVE_CONSENT_PREDICATE = (
@@ -111,6 +111,16 @@ class OkxDemoCanaryConsentHandoff(Base):
             initially="DEFERRED",
         ),
         nullable=False,
+    )
+    supersedes_handoff_id: Mapped[Optional[str]] = mapped_column(
+        String(32),
+        ForeignKey(
+            "okx_demo_canary_consent_handoffs.handoff_id",
+            ondelete="RESTRICT",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        unique=True,
     )
     source_ancestry: Mapped[list] = mapped_column(JSON, nullable=False)
     source_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -373,7 +383,7 @@ class OkxOrderWriteAttempt(Base):
             name="okx_order_write_attempts_operation_check",
         ),
         CheckConstraint(
-            "state IN ('PREPARED', 'ACKNOWLEDGED', 'REJECTED', "
+            "state IN ('PREPARED', 'DISPATCHED', 'ACKNOWLEDGED', 'REJECTED', "
             "'RECOVERY_REQUIRED', 'RESIDUAL_CLOSE_REQUIRED', 'RECONCILED')",
             name="okx_order_write_attempts_state_check",
         ),
@@ -471,6 +481,9 @@ class OkxOrderWriteAttempt(Base):
     last_attempt_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
+    )
+    dispatch_not_after: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True)
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
