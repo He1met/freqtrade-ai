@@ -386,6 +386,8 @@ def _policy() -> dict:
 def test_20260727_02_upgrades_to_risk_chain_atomically(postgres_engine) -> None:
     Base.metadata.create_all(postgres_engine)
     with postgres_engine.begin() as connection:
+        connection.execute(text("DROP TABLE okx_demo_automation_guard_events"))
+        connection.execute(text("DROP TABLE okx_demo_automation_guard_states"))
         connection.execute(
             text(
                 "ALTER TABLE okx_demo_canary_consent_handoffs "
