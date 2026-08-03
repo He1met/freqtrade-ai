@@ -35,6 +35,7 @@ from app.db.migrations import (
     CANARY_FINAL_EXPIRY_BASE_VERSION,
     CANARY_LIFECYCLE_BASE_VERSION,
     CANARY_CONSENT_HANDOFF_BASE_VERSION,
+    CANARY_CONSENT_FAILURE_AUDIT_BASE_VERSION,
     FULL_CHAIN_BASE_VERSION,
     ORDER_WRITER_BASE_VERSION,
     RECONCILIATION_BASE_VERSION,
@@ -59,6 +60,7 @@ from app.db.migrations import (
 )
 from app.models.execution_lineage import (
     ApprovedExecution,
+    ExchangeFill,
     ExchangeOrder,
     OkxDemoTrustedSnapshot,
     ReconciliationRun,
@@ -98,6 +100,7 @@ from app.services.okx_demo_reconciliation import (
 )
 from app.services.okx_demo_canary_preparation import (
     CANARY_OPERATION,
+    OkxDemoCanaryConsentCaptureFailed,
     OkxDemoCanaryPreparationBlocked,
     OkxDemoCanaryPreparationService,
     process_pending_canary_consent_handoff,
@@ -5205,6 +5208,142 @@ def test_postgresql_v29_terminal_consent_allows_one_fresh_request_only(
                 "AND status IN ('REQUESTED','FINALIZED','GRANT_ISSUED')"
             )
         ).scalar_one() == 1
+
+
+def test_postgresql_v30_precommit_failure_is_exact_atomic_and_restart_safe(
+    postgres_writer_engine,
+) -> None:
+    upgrade_database(postgres_writer_engine)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    with Session(postgres_writer_engine) as admin:
+        _seed_final_consent_source(admin, now=now)
+    with Session(postgres_writer_engine) as runtime:
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        first = OkxDemoCanaryPreparationService(
+            runtime
+        ).request_final_attestation_consent(
+            idempotency_key="issue-627-v30-concurrent-terminal",
+            operator_token="synthetic-test-operator-token",
+        )
+
+    def terminalize(_index: int) -> bool:
+        with Session(postgres_writer_engine) as runtime:
+            runtime.execute(text("SET LOCAL ROLE freqtrade"))
+            result = runtime.execute(
+                text(
+                    "SELECT fail_requested_okx_demo_canary_consent("
+                    ":handoff,'HANDOFF_RECHECK','DATABASE')"
+                ),
+                {"handoff": first.handoff_id},
+            ).scalar_one()
+            runtime.commit()
+            return result
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        assert sorted(executor.map(terminalize, (1, 2))) == [False, True]
+
+    with Session(postgres_writer_engine) as runtime:
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        second = OkxDemoCanaryPreparationService(
+            runtime
+        ).request_final_attestation_consent(
+            idempotency_key="issue-627-v30-capture-failure",
+            operator_token="synthetic-test-operator-token",
+        )
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        with pytest.raises(OkxDemoCanaryConsentCaptureFailed) as failure:
+            process_pending_canary_consent_handoff(
+                read_client=SimpleNamespace(),
+                db=runtime,
+                runtime_instance_id="RuntimeIssue627V30",
+                fresh_reconciliation=lambda: (_ for _ in ()).throw(
+                    RuntimeError("sensitive synthetic detail")
+                ),
+                safety_check=lambda: True,
+                now=now,
+            )
+        assert failure.value.handoff_id == second.handoff_id
+        assert failure.value.stage == "FRESH_RECONCILIATION"
+        assert failure.value.category == "UNEXPECTED"
+        assert "sensitive synthetic detail" not in str(failure.value)
+        runtime.rollback()
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        assert runtime.execute(
+            text(
+                "SELECT fail_requested_okx_demo_canary_consent("
+                ":handoff,:stage,:category)"
+            ),
+            {
+                "handoff": failure.value.handoff_id,
+                "stage": failure.value.stage,
+                "category": failure.value.category,
+            },
+        ).scalar_one() is True
+        runtime.commit()
+
+    with Session(postgres_writer_engine) as restarted:
+        restarted.execute(text("SET LOCAL ROLE freqtrade"))
+        assert restarted.execute(
+            text("SELECT pending_okx_demo_canary_consent()")
+        ).scalar_one() is None
+        restarted.commit()
+    with Session(postgres_writer_engine) as admin:
+        statuses = dict(admin.execute(text(
+            "SELECT failure_code,status FROM okx_demo_canary_consent_handoffs"
+        )).all())
+        assert statuses == {
+            "CAPTURE_HANDOFF_RECHECK_DATABASE": "EXPIRED",
+            "CAPTURE_FRESH_RECONCILIATION_UNEXPECTED": "EXPIRED",
+        }
+        assert admin.query(TradeIntent).count() == 0
+        assert admin.query(ApprovedExecution).count() == 0
+        assert admin.query(OkxDemoSubmissionGrant).count() == 0
+        assert admin.query(OkxOrderWriteAttempt).count() == 0
+        assert admin.query(ExchangeOrder).count() == 0
+        assert admin.query(ExchangeFill).count() == 0
+        assert admin.query(OkxDemoCanaryLifecycle).count() == 0
+
+
+def test_postgresql_v29_to_v30_preserves_terminal_history(
+    postgres_writer_engine,
+) -> None:
+    upgrade_database(postgres_writer_engine)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    with Session(postgres_writer_engine) as admin:
+        _seed_final_consent_source(admin, now=now)
+    with Session(postgres_writer_engine) as runtime:
+        runtime.execute(text("SET LOCAL ROLE freqtrade"))
+        requested = OkxDemoCanaryPreparationService(
+            runtime
+        ).request_final_attestation_consent(
+            idempotency_key="issue-627-v30-migration-history",
+            operator_token="synthetic-test-operator-token",
+        )
+    with postgres_writer_engine.begin() as admin:
+        admin.execute(text(
+            "UPDATE okx_demo_canary_consent_handoffs SET status='EXPIRED',"
+            "failure_code='INSUFFICIENT_CAPTURE_BUDGET' "
+            "WHERE handoff_id=:handoff"
+        ), {"handoff": requested.handoff_id})
+        before = admin.execute(text(
+            "SELECT handoff_id,status,failure_code,created_at,updated_at "
+            "FROM okx_demo_canary_consent_handoffs WHERE handoff_id=:handoff"
+        ), {"handoff": requested.handoff_id}).one()
+        admin.execute(text(
+            "DROP FUNCTION fail_requested_okx_demo_canary_consent(text,text,text)"
+        ))
+        admin.execute(text("DELETE FROM {}".format(VERSION_TABLE)))
+        admin.execute(text(
+            "INSERT INTO {}(version) VALUES(:version)".format(VERSION_TABLE)
+        ), {"version": CANARY_CONSENT_FAILURE_AUDIT_BASE_VERSION})
+    assert upgrade_database(postgres_writer_engine) == SCHEMA_VERSION
+    assert schema_problems(postgres_writer_engine) == []
+    with postgres_writer_engine.connect() as admin:
+        after = admin.execute(text(
+            "SELECT handoff_id,status,failure_code,created_at,updated_at "
+            "FROM okx_demo_canary_consent_handoffs WHERE handoff_id=:handoff"
+        ), {"handoff": requested.handoff_id}).one()
+        assert after == before
 
 
 def test_postgresql_v28_migration_lock_closes_successor_trigger_window(

@@ -10,6 +10,9 @@ from app.adapters.okx_demo import runtime_service
 from app.adapters.okx_demo.credentials import OkxDemoCredentialsUnavailable
 from app.services.okx_demo_reconciliation import OkxDemoReconciliationBlocked
 from app.adapters.okx_demo.write_semantics import OkxDemoWriteBlocked
+from app.services.okx_demo_canary_preparation import (
+    OkxDemoCanaryConsentCaptureFailed,
+)
 
 
 NOW = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
@@ -519,6 +522,76 @@ def test_runtime_commits_consent_lineage_before_same_identity_grant(monkeypatch,
     ]
     assert adapter.events == ["startup-reconcile", "observe", "one-shot-consumed"]
     assert db.commits >= 3
+
+
+def test_runtime_terminalizes_pre_commit_consent_failure_without_writer_post(
+    monkeypatch, tmp_path
+):
+    events = []
+
+    class TerminalizingDatabase(FakeDatabaseSession):
+        def execute(self, _statement, parameters):
+            events.append(("terminalized", dict(parameters)))
+            return SimpleNamespace(scalar_one=lambda: True)
+
+    adapter = FakeAdapter()
+    server = FakeServerSession(events)
+    db = TerminalizingDatabase()
+    engine = SimpleNamespace(
+        connect=lambda: SimpleNamespace(close=lambda: None),
+        dispose=lambda: None,
+    )
+    monkeypatch.setattr(runtime_service, "STOP_EVENT", FakeStopEvent())
+    monkeypatch.setattr(runtime_service, "Session", lambda bind: db)
+    monkeypatch.setattr(
+        runtime_service, "acquire_one_shot_runtime_lock", lambda _db: True
+    )
+    monkeypatch.setattr(
+        runtime_service, "release_one_shot_runtime_lock", lambda _db: True
+    )
+    monkeypatch.setattr(
+        runtime_service,
+        "create_okx_demo_server_session",
+        lambda *_args, **_kwargs: server,
+    )
+    monkeypatch.setattr(
+        runtime_service, "_write_readiness", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        runtime_service,
+        "process_pending_canary_consent_handoff",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            OkxDemoCanaryConsentCaptureFailed(
+                handoff_id="a" * 32,
+                stage="ATTESTATION_CAPTURE",
+                category="EXCHANGE_READ",
+            )
+        ),
+    )
+
+    with pytest.raises(
+        runtime_service.OkxDemoRuntimeBlocked,
+        match=r"stage=ATTESTATION_CAPTURE, category=EXCHANGE_READ",
+    ):
+        runtime_service.serve(
+            environment={"DATABASE_URL": "postgresql+psycopg:///isolated"},
+            runtime_path=tmp_path,
+            reconciliation_factory=lambda: adapter,
+            engine_factory=lambda *_args, **_kwargs: engine,
+            now_provider=lambda: NOW,
+        )
+
+    assert events[-1] == (
+        "terminalized",
+        {
+            "handoff": "a" * 32,
+            "stage": "ATTESTATION_CAPTURE",
+            "category": "EXCHANGE_READ",
+        },
+    )
+    assert "one-shot-check" not in adapter.events
+    assert db.rollbacks >= 1
+    assert db.commits >= 2
 
 
 @pytest.mark.parametrize(
