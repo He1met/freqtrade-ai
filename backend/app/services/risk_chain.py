@@ -262,6 +262,14 @@ def _safe_string(
     return value
 
 
+TRUSTED_CANDLE_SEQUENCE_PATHS = frozenset(
+    {
+        "market trusted snapshot.confirmed_candles",
+        "market snapshot.confirmed_candles",
+    }
+)
+
+
 def _reject_unsafe_content(value: Any, path: str = "snapshot") -> None:
     if isinstance(value, Mapping):
         for key, item in value.items():
@@ -269,7 +277,12 @@ def _reject_unsafe_content(value: Any, path: str = "snapshot") -> None:
             _reject_unsafe_content(item, "{}.{}".format(path, key))
         return
     if isinstance(value, (list, tuple)):
-        if len(value) > 100:
+        maximum_items = (
+            300
+            if path in TRUSTED_CANDLE_SEQUENCE_PATHS
+            else 100
+        )
+        if len(value) > maximum_items:
             raise RiskChainBlocked("{} is too large".format(path))
         for index, item in enumerate(value):
             _reject_unsafe_content(item, "{}[{}]".format(path, index))
