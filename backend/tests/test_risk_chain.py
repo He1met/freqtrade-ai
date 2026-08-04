@@ -34,6 +34,7 @@ from app.models import (
 from app.models.execution_lineage import OKX_DEMO_TARGET_ID
 from app.repositories.execution_lineage import ensure_execution_scope_catalog
 from app.services.risk_chain import (
+    RiskChainBlocked,
     RiskChainService,
     _issue_attested_session_capability,
     _normalize_attested_snapshot,
@@ -1113,6 +1114,55 @@ def test_snapshot_recorder_is_not_public_and_capability_is_not_serializable() ->
         pickle.dumps(capability)
     with pytest.raises(TypeError, match="private"):
         type(capability)(object(), capability._identity, "forged-proof")
+
+
+def test_only_trusted_market_candles_may_use_the_exchange_window_limit() -> None:
+    for root in ("market trusted snapshot", "market snapshot"):
+        risk_chain_module._reject_unsafe_content(
+            {"confirmed_candles": [0] * 300},
+            root,
+        )
+
+        with pytest.raises(
+            RiskChainBlocked,
+            match="confirmed_candles is too large",
+        ):
+            risk_chain_module._reject_unsafe_content(
+                {"confirmed_candles": [0] * 301},
+                root,
+            )
+    with pytest.raises(RiskChainBlocked, match="other_rows is too large"):
+        risk_chain_module._reject_unsafe_content(
+            {"other_rows": [0] * 101},
+            "market snapshot",
+        )
+    with pytest.raises(RiskChainBlocked, match="confirmed_candles is too large"):
+        risk_chain_module._reject_unsafe_content(
+            {"confirmed_candles": [0] * 101},
+            "account snapshot",
+        )
+
+
+def test_risk_chain_accepts_persisted_202_candle_market_snapshot(
+    session_factory,
+) -> None:
+    now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
+    lineage = _seed_lineage(session_factory)
+    request = _request(lineage, now)
+    market = request["snapshots"]["market"]
+    market["content"]["confirmed_candles"] = [0] * 202
+    _resign(request, "market")
+    _register_snapshots(session_factory, request, now)
+
+    with session_factory() as db:
+        result = RiskChainService(db).evaluate(
+            idempotency_key="request-202-candles",
+            request=request,
+            policy=_policy(),
+            now=now,
+        )
+
+    assert result.status == "APPROVED"
 
 
 def test_expired_attested_capability_cannot_normalize_or_write() -> None:
