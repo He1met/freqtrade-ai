@@ -478,6 +478,19 @@ def test_postgresql_runtime_claim_locks_only_signal_evaluation(
             assert claimed is not None
             assert claimed.id == evaluation.id
             assert claimed.status == "LEASED"
+            checkpoint = StrategyDeploymentRepository(
+                runtime_db
+            ).checkpoint_leased(
+                claimed.id,
+                lease_token=claimed.lease_token,
+                fencing_sequence=claimed.fencing_sequence,
+                input_digest="a" * 64,
+                result_snapshot={
+                    "checkpoint_schema": "SIGNAL_EVALUATION_V1",
+                },
+                now=NOW + timedelta(seconds=2),
+            )
+            assert checkpoint.input_digest == "a" * 64
             runtime_db.execute(text("RESET ROLE"))
             runtime_db.commit()
     finally:
