@@ -46,6 +46,7 @@ from app.services.strategy_validation_matrix import StrategyValidationMatrixServ
 from app.services.okx_demo_strategy_selection import (
     OkxDemoStrategySelectionBlocked,
     OkxDemoStrategySelectionService,
+    validate_okx_demo_selection_receipt,
 )
 
 
@@ -744,6 +745,136 @@ def test_postgresql_owner_demo_selection_is_auditable_and_idempotent(
             selected_run_id = selected_run.id
             selected_task_id = selected_result.backtest_task_id
             selection_chain_id = selection_chain.id
+            selected_receipt = selected_approval.promotion_evidence["selection"]
+            with pytest.raises(
+                OkxDemoStrategySelectionBlocked,
+                match="policy changed",
+            ):
+                validate_okx_demo_selection_receipt(
+                    db,
+                    {**selected_receipt, "allow_real_funds": 0},
+                    project_root=tmp_path,
+                )
+            with pytest.raises(
+                OkxDemoStrategySelectionBlocked,
+                match="fields are incomplete",
+            ):
+                validate_okx_demo_selection_receipt(
+                    db,
+                    {**selected_receipt, "unexpected_field": True},
+                    project_root=tmp_path,
+                )
+
+            # The execution approval must remain bound to the immutable owner
+            # receipt while the v2 Demo policy is revalidated independently of
+            # production profitability promotion rules.
+            monkeypatch.setattr("app.repositories.full_chain.REPO_ROOT", tmp_path)
+            evaluations = StrategyDeploymentRepository(db)
+            first_evaluation = evaluations.enqueue_evaluation(
+                first.id,
+                closed_candle_at=NOW,
+            )
+            first_claim = evaluations.claim_next(
+                owner="okx-runtime",
+                lease_seconds=60,
+                now=NOW + timedelta(seconds=1),
+            )
+            assert first_claim is not None and first_claim.lease_token
+            chains = FullChainRepository(db)
+            execution_chain = chains.open_for_signal_evaluation(
+                first_evaluation.id,
+                first_claim.lease_token,
+                first_claim.fencing_sequence,
+                now=NOW + timedelta(seconds=2),
+            )
+            chains.prepare_execution_stage(
+                execution_chain.id,
+                "SIGNAL",
+                evaluation_id=first_evaluation.id,
+                lease_token=first_claim.lease_token,
+                fencing_sequence=first_claim.fencing_sequence,
+                idempotency_key="demo-selection-valid",
+                input_snapshot={"evaluation_id": first_evaluation.id},
+                now=NOW + timedelta(seconds=2),
+            )
+            signal = chains.record_execution_signal(
+                execution_chain.id,
+                evaluation_id=first_evaluation.id,
+                lease_token=first_claim.lease_token,
+                fencing_sequence=first_claim.fencing_sequence,
+                instrument_id="BTC-USDT-SWAP",
+                source_type="database",
+                source_database_ids={"market_snapshot_id": 1},
+                signal_snapshot={"decision": "ACTIONABLE"},
+                observed_at=NOW + timedelta(seconds=3),
+                expires_at=NOW + timedelta(seconds=30),
+            )
+            assert signal.full_chain_run_id == execution_chain.id
+            assert evaluations.complete(
+                first_evaluation.id,
+                lease_token=first_claim.lease_token,
+                fencing_sequence=first_claim.fencing_sequence,
+                status="ACTIONABLE",
+                input_digest="e" * 64,
+                result_snapshot={"decision": "ACTIONABLE"},
+                now=NOW + timedelta(seconds=4),
+            ) is not None
+
+            second_evaluation = evaluations.enqueue_evaluation(
+                first.id,
+                closed_candle_at=NOW + timedelta(seconds=1),
+            )
+            second_claim = evaluations.claim_next(
+                owner="okx-runtime",
+                lease_seconds=60,
+                now=NOW + timedelta(seconds=5),
+            )
+            assert second_claim is not None and second_claim.lease_token
+            tampered_chain = chains.open_for_signal_evaluation(
+                second_evaluation.id,
+                second_claim.lease_token,
+                second_claim.fencing_sequence,
+                now=NOW + timedelta(seconds=6),
+            )
+            chains.prepare_execution_stage(
+                tampered_chain.id,
+                "SIGNAL",
+                evaluation_id=second_evaluation.id,
+                lease_token=second_claim.lease_token,
+                fencing_sequence=second_claim.fencing_sequence,
+                idempotency_key="demo-selection-tampered",
+                input_snapshot={"evaluation_id": second_evaluation.id},
+                now=NOW + timedelta(seconds=6),
+            )
+            cloned_approval = db.get(
+                StrategyCandidateApproval,
+                tampered_chain.candidate_approval_id,
+            )
+            assert cloned_approval is not None
+            cloned_approval.promotion_evidence = {
+                **cloned_approval.promotion_evidence,
+                "runtime_forgery": True,
+            }
+            db.commit()
+            with pytest.raises(
+                FullChainBlocked,
+                match="owner selection receipt",
+            ):
+                chains.record_execution_signal(
+                    tampered_chain.id,
+                    evaluation_id=second_evaluation.id,
+                    lease_token=second_claim.lease_token,
+                    fencing_sequence=second_claim.fencing_sequence,
+                    instrument_id="BTC-USDT-SWAP",
+                    source_type="database",
+                    source_database_ids={"market_snapshot_id": 2},
+                    signal_snapshot={"decision": "ACTIONABLE"},
+                    observed_at=NOW + timedelta(seconds=7),
+                    expires_at=NOW + timedelta(seconds=30),
+                )
+            assert db.get(StrategyCandidateApproval, cloned_approval.id).status == "REVOKED"
+            assert db.get(FullChainRun, tampered_chain.id).status == "BLOCKED"
+            assert db.get(StrategyCandidateApproval, selection_approval_id).status == "APPROVED"
 
             db.execute(
                 text(

@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.core.config import get_settings
+from app.core.config import REPO_ROOT, get_settings
 from app.models import (
     ApprovedExecution,
     BacktestResult,
@@ -41,6 +41,12 @@ from app.repositories.strategy_deployments import (
     StrategyDeploymentRepository,
 )
 from app.schemas.dry_run_status import redact_dry_run_status_payload, redact_secret_text
+from app.services.okx_demo_strategy_selection import (
+    OKX_DEMO_SELECTION_POLICY_VERSION,
+    OkxDemoStrategySelectionBlocked,
+    validate_okx_demo_selection_receipt,
+)
+from app.services.risk_chain import canonical_digest
 from app.services.strategy_promotion import (
     StrategyPromotionBlocked,
     promotion_candidate_digest,
@@ -1265,12 +1271,17 @@ class FullChainRepository:
         try:
             if result is None or score is None or version is None:
                 raise StrategyPromotionBlocked("candidate research records are missing")
-            evidence, digest = promotion_candidate_digest(result, score, version)
-            if approval.promotion_policy_version != evidence["policy"]["policy_version"]:
-                raise StrategyPromotionBlocked("promotion policy version changed")
-            if approval.promotion_evidence != evidence or approval.candidate_digest != digest:
-                raise StrategyPromotionBlocked("strategy or market evidence changed after approval")
-        except StrategyPromotionBlocked as exc:
+            if approval.promotion_policy_version == OKX_DEMO_SELECTION_POLICY_VERSION:
+                self._require_current_demo_selection(approval, chain)
+            else:
+                evidence, digest = promotion_candidate_digest(result, score, version)
+                if approval.promotion_policy_version != evidence["policy"]["policy_version"]:
+                    raise StrategyPromotionBlocked("promotion policy version changed")
+                if approval.promotion_evidence != evidence or approval.candidate_digest != digest:
+                    raise StrategyPromotionBlocked(
+                        "strategy or market evidence changed after approval"
+                    )
+        except (StrategyPromotionBlocked, OkxDemoStrategySelectionBlocked) as exc:
             reason = "Automatic promotion invalidation: {}".format(exc)
             approval.status = "REVOKED"
             approval.decided_by = "system:promotion-revalidation"
@@ -1292,6 +1303,113 @@ class FullChainRepository:
             chain.completed_at = now
             self.db.commit()
             raise FullChainBlocked(reason)
+
+    def _require_current_demo_selection(
+        self,
+        approval: StrategyCandidateApproval,
+        chain: FullChainRun,
+    ) -> None:
+        """Bind a runtime clone to its immutable owner-mediated Demo receipt."""
+
+        evaluation = (
+            self.db.get(SignalEvaluation, chain.signal_evaluation_id)
+            if chain.signal_evaluation_id is not None
+            else None
+        )
+        deployment = (
+            self.db.get(StrategyDeployment, evaluation.deployment_id)
+            if evaluation is not None
+            else None
+        )
+        source_approval = (
+            self.db.get(StrategyCandidateApproval, deployment.candidate_approval_id)
+            if deployment is not None
+            else None
+        )
+        source_chain = (
+            self.db.get(FullChainRun, source_approval.full_chain_run_id)
+            if source_approval is not None
+            else None
+        )
+        approval_fields = (
+            "promotion_policy_version",
+            "candidate_digest",
+            "promotion_evidence",
+            "strategy_version_id",
+            "backtest_result_id",
+            "strategy_score_id",
+        )
+        lineage_fields = (
+            "research_job_id",
+            "research_job_attempt_id",
+            "strategy_id",
+            "strategy_version_id",
+            "backtest_run_id",
+            "backtest_task_id",
+            "backtest_result_id",
+            "strategy_score_id",
+        )
+        if (
+            chain.run_kind != "EXECUTION"
+            or chain.research_scope_id != LOCAL_DRY_RUN_SCOPE_ID
+            or chain.execution_target_id != OKX_DEMO_TARGET_ID
+            or evaluation is None
+            or evaluation.execution_target_id != OKX_DEMO_TARGET_ID
+            or deployment is None
+            or deployment.status != "ACTIVE"
+            or deployment.execution_target_id != OKX_DEMO_TARGET_ID
+            or evaluation.instrument_id != deployment.instrument_id
+            or evaluation.timeframe != deployment.timeframe
+            or source_approval is None
+            or source_approval.status != "APPROVED"
+            or source_approval.execution_target_id != OKX_DEMO_TARGET_ID
+            or source_chain is None
+            or source_chain.run_kind != "RESEARCH"
+            or source_chain.execution_target_id != OKX_DEMO_TARGET_ID
+            or source_chain.research_scope_id != LOCAL_DRY_RUN_SCOPE_ID
+            or source_chain.candidate_approval_id != source_approval.id
+            or any(
+                getattr(approval, field) != getattr(source_approval, field)
+                for field in approval_fields
+            )
+            or any(
+                getattr(chain, field) != getattr(source_chain, field)
+                for field in lineage_fields
+            )
+            or deployment.strategy_id != source_chain.strategy_id
+            or deployment.strategy_version_id != source_chain.strategy_version_id
+            or deployment.candidate_digest != source_approval.candidate_digest
+            or deployment.promotion_policy_version
+            != source_approval.promotion_policy_version
+        ):
+            raise OkxDemoStrategySelectionBlocked(
+                "Demo execution is not bound to its owner selection receipt"
+            )
+        evidence = source_approval.promotion_evidence
+        if (
+            not isinstance(evidence, dict)
+            or set(evidence) != {"policy", "selection"}
+            or not isinstance(evidence.get("policy"), dict)
+            or evidence["policy"] != evidence.get("selection")
+        ):
+            raise OkxDemoStrategySelectionBlocked("Demo selection evidence is malformed")
+        selection = evidence["selection"]
+        if source_approval.candidate_digest != canonical_digest(selection):
+            raise OkxDemoStrategySelectionBlocked("Demo selection digest changed")
+        if (
+            selection.get("strategy_id") != chain.strategy_id
+            or selection.get("strategy_version_id") != chain.strategy_version_id
+            or selection.get("backtest_run_id") != chain.backtest_run_id
+            or selection.get("backtest_task_id") != chain.backtest_task_id
+            or selection.get("backtest_result_id") != chain.backtest_result_id
+            or selection.get("strategy_score_id") != chain.strategy_score_id
+        ):
+            raise OkxDemoStrategySelectionBlocked("Demo selection lineage changed")
+        validate_okx_demo_selection_receipt(
+            self.db,
+            selection,
+            project_root=REPO_ROOT,
+        )
 
     def finalize_reconciliation(
         self,
