@@ -1,6 +1,10 @@
 from pathlib import Path
+import sys
 
 import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.run_strategy_candidate_research import (
     MIN_STRATEGY_SCORE,
@@ -9,9 +13,6 @@ from scripts.run_strategy_candidate_research import (
     _project_score,
     _stress_metrics,
 )
-
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_research_bundle_contains_exactly_ten_static_safe_candidates() -> None:
