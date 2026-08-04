@@ -26,6 +26,7 @@ from app.models import (
 )
 from app.repositories.strategy_deployments import StrategyDeploymentRepository
 from app.services.okx_demo_automation_guard import OkxDemoAutomationGuard
+from app.services.okx_demo_selection_policy import OKX_DEMO_SELECTION_POLICY_VERSION
 from app.services.risk_chain import canonical_digest
 
 
@@ -33,7 +34,6 @@ class OkxDemoStrategySelectionBlocked(RuntimeError):
     """The fixed Demo selection evidence is absent, stale, or ambiguous."""
 
 
-OKX_DEMO_SELECTION_POLICY_VERSION = "okx-demo-selection-v2"
 OKX_DEMO_ALLOWED_STRATEGIES = {
     "DeepSeekRegimeCrossoverCandidateB": "DeepSeekRegimeCrossoverCandidateB",
     "Codex Okx Demo Dual RSI Strategy": "CodexOkxDemoDualRsiStrategy",

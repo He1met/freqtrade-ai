@@ -41,12 +41,7 @@ from app.repositories.strategy_deployments import (
     StrategyDeploymentRepository,
 )
 from app.schemas.dry_run_status import redact_dry_run_status_payload, redact_secret_text
-from app.services.okx_demo_strategy_selection import (
-    OKX_DEMO_SELECTION_POLICY_VERSION,
-    OkxDemoStrategySelectionBlocked,
-    validate_okx_demo_selection_receipt,
-)
-from app.services.risk_chain import canonical_digest
+from app.services.okx_demo_selection_policy import OKX_DEMO_SELECTION_POLICY_VERSION
 from app.services.strategy_promotion import (
     StrategyPromotionBlocked,
     promotion_candidate_digest,
@@ -1281,7 +1276,7 @@ class FullChainRepository:
                     raise StrategyPromotionBlocked(
                         "strategy or market evidence changed after approval"
                     )
-        except (StrategyPromotionBlocked, OkxDemoStrategySelectionBlocked) as exc:
+        except StrategyPromotionBlocked as exc:
             reason = "Automatic promotion invalidation: {}".format(exc)
             approval.status = "REVOKED"
             approval.decided_by = "system:promotion-revalidation"
@@ -1310,6 +1305,12 @@ class FullChainRepository:
         chain: FullChainRun,
     ) -> None:
         """Bind a runtime clone to its immutable owner-mediated Demo receipt."""
+
+        from app.services.okx_demo_strategy_selection import (
+            OkxDemoStrategySelectionBlocked,
+            validate_okx_demo_selection_receipt,
+        )
+        from app.services.risk_chain import canonical_digest
 
         evaluation = (
             self.db.get(SignalEvaluation, chain.signal_evaluation_id)
@@ -1382,7 +1383,7 @@ class FullChainRepository:
             or deployment.promotion_policy_version
             != source_approval.promotion_policy_version
         ):
-            raise OkxDemoStrategySelectionBlocked(
+            raise StrategyPromotionBlocked(
                 "Demo execution is not bound to its owner selection receipt"
             )
         evidence = source_approval.promotion_evidence
@@ -1392,10 +1393,10 @@ class FullChainRepository:
             or not isinstance(evidence.get("policy"), dict)
             or evidence["policy"] != evidence.get("selection")
         ):
-            raise OkxDemoStrategySelectionBlocked("Demo selection evidence is malformed")
+            raise StrategyPromotionBlocked("Demo selection evidence is malformed")
         selection = evidence["selection"]
         if source_approval.candidate_digest != canonical_digest(selection):
-            raise OkxDemoStrategySelectionBlocked("Demo selection digest changed")
+            raise StrategyPromotionBlocked("Demo selection digest changed")
         if (
             selection.get("strategy_id") != chain.strategy_id
             or selection.get("strategy_version_id") != chain.strategy_version_id
@@ -1404,12 +1405,15 @@ class FullChainRepository:
             or selection.get("backtest_result_id") != chain.backtest_result_id
             or selection.get("strategy_score_id") != chain.strategy_score_id
         ):
-            raise OkxDemoStrategySelectionBlocked("Demo selection lineage changed")
-        validate_okx_demo_selection_receipt(
-            self.db,
-            selection,
-            project_root=REPO_ROOT,
-        )
+            raise StrategyPromotionBlocked("Demo selection lineage changed")
+        try:
+            validate_okx_demo_selection_receipt(
+                self.db,
+                selection,
+                project_root=REPO_ROOT,
+            )
+        except OkxDemoStrategySelectionBlocked as exc:
+            raise StrategyPromotionBlocked(str(exc)) from exc
 
     def finalize_reconciliation(
         self,

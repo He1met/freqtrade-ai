@@ -2,6 +2,8 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import json
 from pathlib import Path
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -16,6 +18,17 @@ from app.services.okx_demo_canary_preparation import (
 
 
 NOW = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+
+
+def test_runtime_module_imports_in_a_fresh_interpreter() -> None:
+    completed = subprocess.run(
+        [sys.executable, "-c", "import app.adapters.okx_demo.runtime_service"],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
 @pytest.mark.parametrize(
