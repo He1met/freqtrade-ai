@@ -88,7 +88,7 @@ class StrategyDeploymentRepository:
             .where(SignalEvaluation.id == evaluation_id)
         )
         if for_update:
-            statement = statement.with_for_update()
+            statement = statement.with_for_update(of=SignalEvaluation)
         row = self.db.execute(statement).first()
         if row is None:
             raise StrategyDeploymentBlocked("signal evaluation is missing")
