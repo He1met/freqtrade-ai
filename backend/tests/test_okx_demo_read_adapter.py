@@ -176,7 +176,7 @@ def trusted_bundle_engine_snapshots(*, confirmed: bool = True) -> dict[str, OkxR
             "volume_ccy": "1200",
             "confirmed": confirmed,
         }
-        for minute in (1, 2, 3)
+        for minute in (1, 2, 3, 4)
     ]
     return {
         "instruments": trusted_read_snapshot(
@@ -1714,6 +1714,172 @@ def test_attested_client_captures_typed_atomic_signal_bundle(monkeypatch) -> Non
         db.close()
 
 
+def test_signal_bundle_uses_only_the_newest_confirmed_candles(monkeypatch) -> None:
+    account = attested_account()
+    install_attestation(monkeypatch, account)
+    monkeypatch.setattr(read_boundary, "_utc_now", lambda: NOW)
+    client = create_attested_okx_demo_read_adapter(
+        ephemeral_environment(account)
+    )
+    snapshots = trusted_bundle_engine_snapshots()
+    snapshots["candles"].items[0]["confirmed"] = False
+    requested_limits = []
+    install_trusted_bundle_engine(client, snapshots)
+    client._engine.candles = lambda inst_id, *, bar, limit: (
+        requested_limits.append(limit) or snapshots["candles"]
+    )
+    db = trusted_bundle_db()
+    try:
+        bundle = client.capture_trusted_signal_bundle(
+            db,
+            inst_id="BTC-USDT-SWAP",
+            timeframe="1m",
+            candle_limit=3,
+        )
+
+        assert requested_limits == [4]
+        assert bundle.candle_set_digest == canonical_digest(
+            {
+                "instrument_id": "BTC-USDT-SWAP",
+                "timeframe": "1m",
+                "candles": [
+                    {
+                        "timestamp": (
+                            NOW - timedelta(minutes=minute)
+                        ).isoformat().replace("+00:00", "Z"),
+                        "open": str(100 + minute),
+                        "high": str(102 + minute),
+                        "low": str(99 + minute),
+                        "close": str(101 + minute),
+                        "volume": "12",
+                        "volume_ccy": "1200",
+                        "confirmed": True,
+                    }
+                    for minute in (4, 3, 2)
+                ],
+            }
+        )
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            lambda rows: (
+                rows[0].update(confirmed=False),
+                rows[1].update(confirmed=False),
+            ),
+            "only the newest candle",
+        ),
+        (
+            lambda rows: rows[1].update(
+                timestamp=NOW - timedelta(minutes=3)
+            ),
+            "duplicated or out of newest-first order",
+        ),
+        (
+            lambda rows: rows.pop(),
+            "closed-candle response is incomplete",
+        ),
+    ],
+)
+def test_signal_bundle_rejects_an_unsafe_raw_candle_window(
+    monkeypatch,
+    mutation,
+    message,
+) -> None:
+    account = attested_account()
+    install_attestation(monkeypatch, account)
+    monkeypatch.setattr(read_boundary, "_utc_now", lambda: NOW)
+    client = create_attested_okx_demo_read_adapter(
+        ephemeral_environment(account)
+    )
+    snapshots = trusted_bundle_engine_snapshots()
+    mutation(snapshots["candles"].items)
+    install_trusted_bundle_engine(client, snapshots)
+    db = trusted_bundle_db()
+    try:
+        with pytest.raises(OkxReadAdapterError, match=message):
+            client.capture_trusted_signal_bundle(
+                db,
+                inst_id="BTC-USDT-SWAP",
+                timeframe="1m",
+                candle_limit=3,
+            )
+        assert db.scalars(select(OkxDemoTrustedSnapshot)).all() == []
+    finally:
+        db.close()
+
+
+def test_signal_bundle_rejects_gap_after_fresh_unconfirmed_candle(
+    monkeypatch,
+) -> None:
+    account = attested_account()
+    install_attestation(monkeypatch, account)
+    monkeypatch.setattr(read_boundary, "_utc_now", lambda: NOW)
+    client = create_attested_okx_demo_read_adapter(
+        ephemeral_environment(account)
+    )
+    snapshots = trusted_bundle_engine_snapshots()
+    rows = snapshots["candles"].items
+    rows[0]["confirmed"] = False
+    rows.pop(1)
+    oldest = dict(rows[-1])
+    oldest.update(
+        {
+            "timestamp": NOW - timedelta(minutes=5),
+            "open": "105",
+            "high": "107",
+            "low": "104",
+            "close": "106",
+        }
+    )
+    rows.append(oldest)
+    install_trusted_bundle_engine(client, snapshots)
+    db = trusted_bundle_db()
+    try:
+        with pytest.raises(OkxReadAdapterError, match="not continuous"):
+            client.capture_trusted_signal_bundle(
+                db,
+                inst_id="BTC-USDT-SWAP",
+                timeframe="1m",
+                candle_limit=3,
+            )
+        assert db.scalars(select(OkxDemoTrustedSnapshot)).all() == []
+    finally:
+        db.close()
+
+
+def test_signal_bundle_rejects_limit_300_before_network(monkeypatch) -> None:
+    account = attested_account()
+    install_attestation(monkeypatch, account)
+    client = create_attested_okx_demo_read_adapter(
+        ephemeral_environment(account)
+    )
+    called = False
+
+    def candles(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("network must not be called")
+
+    client._engine.candles = candles
+    db = trusted_bundle_db()
+    try:
+        with pytest.raises(OkxReadAdapterError, match="between 2 and 299"):
+            client.capture_trusted_signal_bundle(
+                db,
+                inst_id="BTC-USDT-SWAP",
+                timeframe="1m",
+                candle_limit=300,
+            )
+        assert called is False
+    finally:
+        db.close()
+
+
 def test_attested_client_captures_execution_only_bundle_without_candles(
     monkeypatch,
 ) -> None:
@@ -1818,10 +1984,10 @@ def test_execution_only_attestation_fail_closes_malformed_market_or_account(
     ("mutation", "message"),
     [
         (
-            lambda snapshots: snapshots["candles"].items[0].update(
+            lambda snapshots: snapshots["candles"].items[1].update(
                 confirmed=False
             ),
-            "unconfirmed candle",
+            "only the newest candle",
         ),
         (
             lambda snapshots: snapshots["candles"].items[1].update(
