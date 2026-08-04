@@ -1558,9 +1558,9 @@ def create_attested_okx_demo_read_adapter(
                     self._block_signal_bundle(
                         "timeframe has no explicit OKX closed-candle mapping"
                     )
-                if not 2 <= candle_limit <= 300:
+                if not 2 <= candle_limit <= 299:
                     self._block_signal_bundle(
-                        "signal bundle requires between 2 and 300 candles"
+                        "signal bundle requires between 2 and 299 closed candles"
                     )
                 okx_bar, timeframe_seconds = timeframe_mapping
 
@@ -1568,7 +1568,7 @@ def create_attested_okx_demo_read_adapter(
                 candle_snapshot = self._engine.candles(
                     inst_id,
                     bar=okx_bar,
-                    limit=candle_limit,
+                    limit=candle_limit + 1,
                 )
                 book_snapshot = self._engine.orderbook(inst_id, depth=1)
                 mark_snapshot = self._engine.mark_price(inst_id)
@@ -1588,15 +1588,16 @@ def create_attested_okx_demo_read_adapter(
                         "instrument is not an active OKX Demo SWAP"
                     )
 
-                raw_candles = [
+                received_candles = [
                     Candle.model_validate(item)
                     for item in candle_snapshot.items
                 ]
-                if len(raw_candles) != candle_limit:
+                if len(received_candles) != candle_limit + 1:
                     self._block_signal_bundle(
                         "closed-candle response is incomplete"
                     )
-                raw_timestamps = [item.timestamp for item in raw_candles]
+                expected_delta = timedelta(seconds=timeframe_seconds)
+                raw_timestamps = [item.timestamp for item in received_candles]
                 if any(
                     newer <= older
                     for newer, older in zip(
@@ -1607,12 +1608,38 @@ def create_attested_okx_demo_read_adapter(
                     self._block_signal_bundle(
                         "closed candles are duplicated or out of newest-first order"
                     )
-                candles = list(reversed(raw_candles))
-                if any(not item.confirmed for item in candles):
-                    self._block_signal_bundle(
-                        "signal bundle contains an unconfirmed candle"
+                if any(
+                    newer.timestamp - older.timestamp != expected_delta
+                    for newer, older in zip(
+                        received_candles,
+                        received_candles[1:],
                     )
-                expected_delta = timedelta(seconds=timeframe_seconds)
+                ):
+                    self._block_signal_bundle(
+                        "received candles are not continuous for the timeframe"
+                    )
+                unconfirmed_indexes = [
+                    index
+                    for index, candle in enumerate(received_candles)
+                    if not candle.confirmed
+                ]
+                if unconfirmed_indexes not in ([], [0]):
+                    self._block_signal_bundle(
+                        "only the newest candle may be unconfirmed"
+                    )
+                raw_candles = (
+                    received_candles[1:]
+                    if unconfirmed_indexes == [0]
+                    else received_candles[:candle_limit]
+                )
+                if (
+                    len(raw_candles) != candle_limit
+                    or any(not candle.confirmed for candle in raw_candles)
+                ):
+                    self._block_signal_bundle(
+                        "closed-candle response does not contain the exact confirmed window"
+                    )
+                candles = list(reversed(raw_candles))
                 if any(
                     current.timestamp - previous.timestamp != expected_delta
                     for previous, current in zip(candles, candles[1:])
