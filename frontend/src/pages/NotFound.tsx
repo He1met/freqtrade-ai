@@ -20,7 +20,7 @@ export function NotFound() {
           <span>当前路径</span>
           <CompactText label="当前路径" mono value={pathname} />
         </div>
-        <Link className="primary-link" to="/">
+        <Link className="primary-link" data-action-id="not-found.return-dashboard" to="/">
           返回总览
         </Link>
       </div>

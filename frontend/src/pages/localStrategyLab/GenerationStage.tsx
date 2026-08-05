@@ -156,13 +156,19 @@ export function GenerationStage({
           <button
             aria-busy={isSubmitting}
             className="primary-button"
+            data-action-id="lab.generation.submit"
             disabled={!model.canSubmit}
             type="submit"
           >
             {isSubmitting ? "提交中" : "提交生成"}
           </button>
           {isSubmitting ? (
-            <button className="secondary-button" onClick={onCancel} type="button">
+            <button
+              className="secondary-button"
+              data-action-id="lab.generation.cancel"
+              onClick={onCancel}
+              type="button"
+            >
               取消等待
             </button>
           ) : null}
