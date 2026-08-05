@@ -26,6 +26,7 @@ def test_private_current_runtime_evidence_reports_ready(tmp_path) -> None:
                 "adapter": "ATTESTED",
                 "reconciliation": "RECONCILED",
                 "writer": "UNIQUE",
+                "automation_guard": "RUNNING",
                 "pid": os.getpid(),
             }
         ),
@@ -59,6 +60,7 @@ def test_runtime_readiness_fails_closed_for_stale_or_unsafe_evidence(
                 "adapter": "ATTESTED",
                 "reconciliation": "RECONCILED",
                 "writer": "UNIQUE",
+                "automation_guard": "RUNNING",
                 "pid": os.getpid(),
             }
         ),
@@ -93,6 +95,7 @@ def test_runtime_readiness_accepts_a_complete_reconciliation_cycle_age(
                 "adapter": "ATTESTED",
                 "reconciliation": "RECOVERED",
                 "writer": "UNIQUE",
+                "automation_guard": "RUNNING",
                 "pid": os.getpid(),
             }
         ),
@@ -125,6 +128,7 @@ def test_blocked_openings_keeps_writer_target_but_not_credentials_ready(
                 "adapter": "ATTESTED",
                 "reconciliation": "DRIFTED",
                 "writer": "UNIQUE",
+                "automation_guard": "BLOCKED",
                 "pid": os.getpid(),
             }
         ),
@@ -141,3 +145,31 @@ def test_blocked_openings_keeps_writer_target_but_not_credentials_ready(
     assert result.target_ready is True
     assert result.credentials_ready is False
     assert result.writer_ready is True
+
+
+def test_ready_runtime_requires_running_automation_guard(tmp_path) -> None:
+    ready_path = tmp_path / "okx-runtime.ready.json"
+    lock_path = tmp_path / "okx-demo-order-writer.lock"
+    _write_private(
+        ready_path,
+        json.dumps(
+            {
+                "status": "READY",
+                "execution_target": "OKX_DEMO",
+                "adapter": "ATTESTED",
+                "reconciliation": "RECOVERED",
+                "writer": "UNIQUE",
+                "automation_guard": "COOLDOWN",
+                "pid": os.getpid(),
+            }
+        ),
+    )
+    _write_private(lock_path, str(os.getpid()))
+    with lock_path.open("r+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = read_okx_demo_runtime_readiness(
+            now=datetime.now(timezone.utc),
+            runtime_dir=tmp_path,
+        )
+
+    assert result == blocked_runtime_readiness()
