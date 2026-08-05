@@ -70,17 +70,32 @@ def read_okx_demo_runtime_readiness(
         "adapter",
         "reconciliation",
         "writer",
+        "automation_guard",
         "pid",
     }:
         return blocked_runtime_readiness()
     runtime_status = payload.get("status")
     reconciliation = payload.get("reconciliation")
+    automation_guard = payload.get("automation_guard")
+    known_guard_states = {
+        "RUNNING",
+        "BLOCKED",
+        "COOLDOWN",
+        "MANUAL_RESET_REQUIRED",
+    }
     valid_state = (
         runtime_status == "READY"
         and reconciliation in {"RECONCILED", "RECOVERED"}
+        and automation_guard == "RUNNING"
     ) or (
         runtime_status == "BLOCKED_OPENINGS"
-        and reconciliation in {"DRIFTED", "STALE", "UNKNOWN"}
+        and reconciliation
+        in {"RECONCILED", "RECOVERED", "DRIFTED", "STALE", "UNKNOWN"}
+        and automation_guard in known_guard_states
+    ) or (
+        runtime_status == "RECOVERY_ONLY"
+        and reconciliation == "DRIFTED"
+        and automation_guard in known_guard_states
     )
     process_id = payload.get("pid")
     heartbeat_age = observed_now - modified_at
