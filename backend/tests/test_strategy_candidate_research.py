@@ -8,6 +8,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.run_strategy_candidate_research import (
     MIN_STRATEGY_SCORE,
+    MAX_VALIDATION_DRAWDOWN,
     WINDOWS,
     _discover_candidates,
     _project_score,
@@ -73,3 +74,4 @@ def test_slippage_stress_and_project_score_are_deterministic() -> None:
     assert metrics["win_rate"] == pytest.approx(2 / 3)
     assert score["scoring_version"] == "phase2-quality-v1"
     assert score["total_score"] >= MIN_STRATEGY_SCORE
+    assert MAX_VALIDATION_DRAWDOWN == 0.10

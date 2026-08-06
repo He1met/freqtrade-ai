@@ -1,52 +1,32 @@
-"""Bollinger/RSI mean-reversion candidate for range-bound BTC perpetuals.
-
-15m horizon.  Entries require a close outside the band followed by re-entry,
-with low ADX as a regime guard.  The main risk is fading a genuine breakout.
-"""
+"""Rolling VWAP z-score reversion hypothesis for BTC perpetuals, 15m."""
 
 import talib.abstract as ta
 from pandas import DataFrame
 from freqtrade.strategy import IStrategy
 
 
-class Candidate03BollingerRsiReversion(IStrategy):
+class Candidate03RollingVwapZscore(IStrategy):
     timeframe = "15m"
     can_short = True
-    startup_candle_count = 80
-    stoploss = -0.028
-    minimal_roi = {"0": 0.012, "180": 0.004, "480": 0.0}
+    startup_candle_count = 120
+    stoploss = -0.024
+    minimal_roi = {"0": 0.010, "150": 0.003, "420": 0.0}
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        bands = ta.BBANDS(
-            dataframe, timeperiod=24, nbdevup=2.2, nbdevdn=2.2, matype=0
-        )
-        dataframe["bb_upper"] = bands["upperband"]
-        dataframe["bb_middle"] = bands["middleband"]
-        dataframe["bb_lower"] = bands["lowerband"]
-        dataframe["rsi"] = ta.RSI(dataframe, timeperiod=10)
+        typical = (dataframe["high"] + dataframe["low"] + dataframe["close"]) / 3
+        volume_sum = dataframe["volume"].rolling(48).sum()
+        dataframe["rvwap"] = (typical * dataframe["volume"]).rolling(48).sum() / volume_sum
+        dataframe["spread_std"] = (dataframe["close"] - dataframe["rvwap"]).rolling(48).std()
+        dataframe["zscore"] = (dataframe["close"] - dataframe["rvwap"]) / dataframe["spread_std"]
         dataframe["adx"] = ta.ADX(dataframe, timeperiod=14)
         return dataframe
 
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        dataframe.loc[
-            (dataframe["close"] > dataframe["bb_lower"])
-            & (dataframe["close"].shift(1) <= dataframe["bb_lower"].shift(1))
-            & (dataframe["rsi"] < 42)
-            & (dataframe["adx"] < 28)
-            & (dataframe["volume"] > 0),
-            "enter_long",
-        ] = 1
-        dataframe.loc[
-            (dataframe["close"] < dataframe["bb_upper"])
-            & (dataframe["close"].shift(1) >= dataframe["bb_upper"].shift(1))
-            & (dataframe["rsi"] > 58)
-            & (dataframe["adx"] < 28)
-            & (dataframe["volume"] > 0),
-            "enter_short",
-        ] = 1
+        dataframe.loc[(dataframe["zscore"] > -1.6) & (dataframe["zscore"].shift(1) <= -1.6) & (dataframe["adx"] < 26) & (dataframe["volume"] > 0), "enter_long"] = 1
+        dataframe.loc[(dataframe["zscore"] < 1.6) & (dataframe["zscore"].shift(1) >= 1.6) & (dataframe["adx"] < 26) & (dataframe["volume"] > 0), "enter_short"] = 1
         return dataframe
 
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        dataframe.loc[dataframe["close"] >= dataframe["bb_middle"], "exit_long"] = 1
-        dataframe.loc[dataframe["close"] <= dataframe["bb_middle"], "exit_short"] = 1
+        dataframe.loc[dataframe["zscore"] >= 0, "exit_long"] = 1
+        dataframe.loc[dataframe["zscore"] <= 0, "exit_short"] = 1
         return dataframe

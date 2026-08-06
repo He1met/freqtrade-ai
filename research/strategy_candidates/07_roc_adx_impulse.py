@@ -1,48 +1,30 @@
-"""Rate-of-change impulse candidate with ADX confirmation.
-
-15m horizon.  The strategy joins statistically large 12-candle moves only in
-an established directional regime.  Momentum crashes and clustered entries
-after liquidation impulses are key risks.
-"""
+"""Money-flow impulse continuation hypothesis for BTC perpetuals, 15m."""
 
 import talib.abstract as ta
 from pandas import DataFrame
 from freqtrade.strategy import IStrategy
 
 
-class Candidate07RocAdxImpulse(IStrategy):
+class Candidate07MfiImpulse(IStrategy):
     timeframe = "15m"
     can_short = True
-    startup_candle_count = 120
-    stoploss = -0.038
-    minimal_roi = {"0": 0.022, "300": 0.009, "900": 0.0}
+    startup_candle_count = 140
+    stoploss = -0.032
+    minimal_roi = {"0": 0.019, "300": 0.007, "840": 0.0}
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        dataframe["roc"] = ta.ROC(dataframe, timeperiod=12)
-        dataframe["roc_abs_mean"] = dataframe["roc"].abs().rolling(96).mean().shift(1)
-        dataframe["adx"] = ta.ADX(dataframe, timeperiod=14)
+        dataframe["mfi"] = ta.MFI(dataframe, timeperiod=14)
         dataframe["ema"] = ta.EMA(dataframe, timeperiod=100)
+        dataframe["volume_base"] = dataframe["volume"].rolling(48).median().shift(1)
         return dataframe
 
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        threshold = dataframe["roc_abs_mean"] * 1.6
-        dataframe.loc[
-            (dataframe["roc"] > threshold)
-            & (dataframe["adx"] > 22)
-            & (dataframe["close"] > dataframe["ema"])
-            & (dataframe["volume"] > 0),
-            "enter_long",
-        ] = 1
-        dataframe.loc[
-            (dataframe["roc"] < -threshold)
-            & (dataframe["adx"] > 22)
-            & (dataframe["close"] < dataframe["ema"])
-            & (dataframe["volume"] > 0),
-            "enter_short",
-        ] = 1
+        volume_impulse = dataframe["volume"] > dataframe["volume_base"] * 1.5
+        dataframe.loc[(dataframe["mfi"] > 60) & (dataframe["mfi"].shift(1) <= 60) & (dataframe["close"] > dataframe["ema"]) & volume_impulse, "enter_long"] = 1
+        dataframe.loc[(dataframe["mfi"] < 40) & (dataframe["mfi"].shift(1) >= 40) & (dataframe["close"] < dataframe["ema"]) & volume_impulse, "enter_short"] = 1
         return dataframe
 
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        dataframe.loc[dataframe["roc"] < 0, "exit_long"] = 1
-        dataframe.loc[dataframe["roc"] > 0, "exit_short"] = 1
+        dataframe.loc[dataframe["mfi"] < 50, "exit_long"] = 1
+        dataframe.loc[dataframe["mfi"] > 50, "exit_short"] = 1
         return dataframe

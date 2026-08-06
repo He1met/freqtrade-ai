@@ -26,6 +26,7 @@ SLIPPAGE_PER_SIDE = 0.0002
 STARTING_BALANCE = 1000.0
 MIN_STRATEGY_SCORE = 50.0
 MIN_VALIDATION_TRADES = 30
+MAX_VALIDATION_DRAWDOWN = 0.10
 
 WINDOWS = (
     ("primary_bear", "PRIMARY", "bear", "20230701-20231001"),
@@ -172,6 +173,54 @@ def _run_window(
     return payload, command
 
 
+def _run_lookahead(
+    *,
+    freqtrade: Path,
+    config_path: Path,
+    datadir: Path,
+    strategy_path: Path,
+    userdir: Path,
+    artifact_root: Path,
+    class_names: list[str],
+) -> list[str]:
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    export_path = artifact_root / "lookahead.csv"
+    command = [
+        str(freqtrade),
+        "lookahead-analysis",
+        "--no-color",
+        "--config",
+        str(config_path),
+        "--datadir",
+        str(datadir),
+        "--strategy-path",
+        str(strategy_path),
+        "--userdir",
+        str(userdir),
+        "--timerange",
+        "20230701-20260201",
+        "--fee",
+        str(FEE_PER_SIDE),
+        "--minimum-trade-amount",
+        "10",
+        "--targeted-trade-amount",
+        "20",
+        "--lookahead-analysis-exportfilename",
+        str(export_path),
+        "--strategy-list",
+        *class_names,
+    ]
+    completed = subprocess.run(command, check=False, capture_output=True, text=True)
+    (artifact_root / "lookahead.stdout.txt").write_text(completed.stdout, encoding="utf-8")
+    (artifact_root / "lookahead.stderr.txt").write_text(completed.stderr, encoding="utf-8")
+    if completed.returncode != 0 or not export_path.is_file():
+        raise RuntimeError(
+            f"Freqtrade lookahead-analysis failed with exit {completed.returncode}; "
+            f"see {artifact_root / 'lookahead.stderr.txt'}"
+        )
+    return command
+
+
 def _stress_metrics(strategy: dict[str, Any]) -> dict[str, Any]:
     trades = sorted(strategy.get("trades") or [], key=lambda item: item["close_timestamp"])
     stressed_abs: list[float] = []
@@ -250,15 +299,18 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--freqtrade", type=Path, required=True)
     parser.add_argument("--datadir", type=Path, required=True)
-    parser.add_argument("--output", type=Path, default=Path("reports/research/strategy-candidates-20260804.json"))
+    parser.add_argument("--run-id", default="20260804")
+    parser.add_argument("--output", type=Path)
     args = parser.parse_args()
 
     repo = Path(__file__).resolve().parents[1]
     strategy_path = repo / "research" / "strategy_candidates"
     userdir = repo / "user_data"
-    artifact_root = repo / "reports" / "backtests" / "strategy-candidates-20260804"
+    if not args.run_id.isdigit() or len(args.run_id) != 8:
+        raise RuntimeError("run-id must be an eight-digit YYYYMMDD value")
+    artifact_root = repo / "reports" / "backtests" / f"strategy-candidates-{args.run_id}"
     config_dir = repo / "tmp" / "freqtrade_configs"
-    config_path = config_dir / "strategy-candidates-20260804.json"
+    config_path = config_dir / f"strategy-candidates-{args.run_id}.json"
     datadir = args.datadir.resolve()
     freqtrade = args.freqtrade.resolve()
     if not freqtrade.is_file() or not datadir.is_dir():
@@ -268,6 +320,14 @@ def main() -> int:
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path.write_text(
         json.dumps(_config(strategy_path, userdir, datadir), indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    lookahead_config_path = config_dir / f"strategy-candidates-{args.run_id}-lookahead.json"
+    lookahead_config = _config(strategy_path, userdir, datadir)
+    lookahead_config["entry_pricing"]["price_side"] = "other"
+    lookahead_config["exit_pricing"]["price_side"] = "other"
+    lookahead_config_path.write_text(
+        json.dumps(lookahead_config, indent=2, sort_keys=True),
         encoding="utf-8",
     )
 
@@ -282,6 +342,15 @@ def main() -> int:
         for item in candidates
     }
     lookahead_path = artifact_root / "lookahead.csv"
+    lookahead_command = _run_lookahead(
+        freqtrade=freqtrade,
+        config_path=lookahead_config_path,
+        datadir=datadir,
+        strategy_path=strategy_path,
+        userdir=userdir,
+        artifact_root=artifact_root,
+        class_names=[item.class_name for item in candidates],
+    )
     if lookahead_path.is_file():
         by_strategy: dict[str, dict[str, str]] = {}
         with lookahead_path.open(encoding="utf-8", newline="") as handle:
@@ -296,7 +365,7 @@ def main() -> int:
                 "biased_entry_signals": None if row is None else int(row["biased_entry_signals"]),
                 "biased_exit_signals": None if row is None else int(row["biased_exit_signals"]),
             }
-    commands: list[list[str]] = []
+    commands: list[list[str]] = [lookahead_command]
     window_evidence: list[dict[str, Any]] = []
     for name, kind, expected_regime, timerange in WINDOWS:
         market_return = _market_return(datadir, timerange)
@@ -343,12 +412,16 @@ def main() -> int:
             item["windows"][name].get("status") == "SUCCESS"
             and item["windows"][name]["total_trades"] >= MIN_VALIDATION_TRADES
             and item["windows"][name]["profit_pct"] > 0
+            and item["windows"][name]["max_drawdown_pct"] <= MAX_VALIDATION_DRAWDOWN
             for name in validation_names
         )
         score_passed = item["primary_score"]["total_score"] >= MIN_STRATEGY_SCORE
+        lookahead_passed = item.get("lookahead_analysis", {}).get("status") == "PASSED"
         item["validation_passed"] = validation_passed
         item["score_threshold_passed"] = score_passed
-        item["deployable_candidate"] = bool(item["loadable"] and validation_passed and score_passed)
+        item["deployable_candidate"] = bool(
+            item["loadable"] and lookahead_passed and validation_passed and score_passed
+        )
         if item["deployable_candidate"]:
             qualified.append(candidate.class_name)
 
@@ -378,6 +451,8 @@ def main() -> int:
             "min_strategy_score": MIN_STRATEGY_SCORE,
             "min_trades_per_validation_window": MIN_VALIDATION_TRADES,
             "validation_requires_positive_net_profit": True,
+            "max_drawdown_per_validation_window": MAX_VALIDATION_DRAWDOWN,
+            "lookahead_analysis_required": True,
             "score_source": "primary_bear net of fee and slippage",
         },
         "windows": window_evidence,
@@ -390,7 +465,8 @@ def main() -> int:
             "Funding history is unavailable for these historical windows; Freqtrade reports zero funding fees.",
         ],
     }
-    output = args.output if args.output.is_absolute() else repo / args.output
+    requested_output = args.output or Path(f"reports/research/strategy-candidates-{args.run_id}.json")
+    output = requested_output if requested_output.is_absolute() else repo / requested_output
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
     print(output)

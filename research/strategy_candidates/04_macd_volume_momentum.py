@@ -1,43 +1,33 @@
-"""MACD momentum candidate with volume confirmation.
-
-15m horizon.  It trades fresh MACD crosses only when volume exceeds its
-lagged baseline and price agrees with the 100 EMA.  Risks are late entries and
-volume spikes caused by liquidation rather than durable demand.
-"""
+"""ATR squeeze expansion breakout hypothesis for BTC perpetuals, 15m."""
 
 import talib.abstract as ta
 from pandas import DataFrame
 from freqtrade.strategy import IStrategy
 
 
-class Candidate04MacdVolumeMomentum(IStrategy):
+class Candidate04AtrSqueezeExpansion(IStrategy):
     timeframe = "15m"
     can_short = True
-    startup_candle_count = 120
-    stoploss = -0.032
-    minimal_roi = {"0": 0.016, "300": 0.006, "720": 0.0}
+    startup_candle_count = 150
+    stoploss = -0.034
+    minimal_roi = {"0": 0.022, "300": 0.009, "900": 0.0}
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        macd = ta.MACD(dataframe, fastperiod=12, slowperiod=26, signalperiod=9)
-        dataframe["macd"] = macd["macd"]
-        dataframe["signal"] = macd["macdsignal"]
-        dataframe["ema"] = ta.EMA(dataframe, timeperiod=100)
-        dataframe["volume_mean"] = dataframe["volume"].rolling(32).mean().shift(1)
+        dataframe["atr"] = ta.ATR(dataframe, timeperiod=14)
+        dataframe["atr_pct"] = dataframe["atr"] / dataframe["close"]
+        dataframe["atr_baseline"] = dataframe["atr_pct"].rolling(96).median().shift(1)
+        dataframe["upper"] = dataframe["high"].rolling(24).max().shift(1)
+        dataframe["lower"] = dataframe["low"].rolling(24).min().shift(1)
+        dataframe["ema"] = ta.EMA(dataframe, timeperiod=80)
         return dataframe
 
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        cross_up = (dataframe["macd"] > dataframe["signal"]) & (
-            dataframe["macd"].shift(1) <= dataframe["signal"].shift(1)
-        )
-        cross_down = (dataframe["macd"] < dataframe["signal"]) & (
-            dataframe["macd"].shift(1) >= dataframe["signal"].shift(1)
-        )
-        volume_ok = dataframe["volume"] > dataframe["volume_mean"] * 1.15
-        dataframe.loc[cross_up & (dataframe["close"] > dataframe["ema"]) & volume_ok, "enter_long"] = 1
-        dataframe.loc[cross_down & (dataframe["close"] < dataframe["ema"]) & volume_ok, "enter_short"] = 1
+        expanding = (dataframe["atr_pct"] > dataframe["atr_baseline"]) & (dataframe["atr_pct"].shift(4) <= dataframe["atr_baseline"].shift(4))
+        dataframe.loc[expanding & (dataframe["close"] > dataframe["upper"]) & (dataframe["close"] > dataframe["ema"]) & (dataframe["volume"] > 0), "enter_long"] = 1
+        dataframe.loc[expanding & (dataframe["close"] < dataframe["lower"]) & (dataframe["close"] < dataframe["ema"]) & (dataframe["volume"] > 0), "enter_short"] = 1
         return dataframe
 
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        dataframe.loc[dataframe["macd"] < dataframe["signal"], "exit_long"] = 1
-        dataframe.loc[dataframe["macd"] > dataframe["signal"], "exit_short"] = 1
+        dataframe.loc[dataframe["close"] < dataframe["ema"], "exit_long"] = 1
+        dataframe.loc[dataframe["close"] > dataframe["ema"], "exit_short"] = 1
         return dataframe
