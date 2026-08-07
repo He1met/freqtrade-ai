@@ -32,6 +32,7 @@ def main() -> int:
                 run_id=args.run_id,
                 repository_commit=args.repository_commit,
             )
+            service.attach_persistence_receipt(report_path.resolve(), batch)
         else:
             batch = service.record_failed_batch(
                 run_id=args.run_id,

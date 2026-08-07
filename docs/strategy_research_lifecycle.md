@@ -8,7 +8,9 @@ The hourly candidate flow is deliberately separate from the canonical
 2. Run load/static checks, Freqtrade lookahead analysis, fee and slippage stress,
    and the primary, OOS, bull, range, and bear windows.
 3. Write the JSON report and persist one `strategy_research_batches` row plus
-   ten `strategy_research_candidates` rows.
+   ten `strategy_research_candidates` rows. After the database transaction,
+   atomically add a `persistence_receipt` to the report and synchronize its
+   digest so the file cannot keep claiming `database_used=false`.
 4. Keep rejected candidates with structured reasons. A validated batch with
    zero qualified candidates is successful research, not a generation failure.
 5. Let deployment review read only `status=QUALIFIED`; research never creates or

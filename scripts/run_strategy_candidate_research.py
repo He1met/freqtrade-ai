@@ -503,11 +503,13 @@ def main() -> int:
         from app.services.strategy_research import StrategyResearchPersistenceService
 
         with session_scope() as db:
-            batch = StrategyResearchPersistenceService(db).persist_report(
+            service = StrategyResearchPersistenceService(db)
+            batch = service.persist_report(
                 output.resolve(),
                 run_id=args.run_id,
                 repository_commit=args.repository_commit,
             )
+            service.attach_persistence_receipt(output.resolve(), batch)
             print(
                 json.dumps(
                     {

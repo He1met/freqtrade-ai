@@ -1073,11 +1073,22 @@
     "Slippage is applied as a deterministic two-sided post-backtest stress cost.",
     "Funding history is unavailable for these historical windows; Freqtrade reports zero funding fees."
   ],
+  "persistence_receipt": {
+    "completed_at": "2026-08-07T10:39:11.664002+08:00",
+    "generated_count": 10,
+    "persisted_count": 10,
+    "qualified_count": 0,
+    "rejected_count": 10,
+    "repository_commit": "987d2f1146d09c0032b803dd74fc31be0ccfbb91",
+    "research_batch_id": 1,
+    "run_id": "20260807",
+    "status": "PERSISTED"
+  },
   "qualified_candidates": [],
   "safety": {
     "allow_real_funds": false,
     "candidate_database_persistence_requested": true,
-    "database_used": false,
+    "database_used": true,
     "execution_scope": "LOCAL_BACKTEST_ONLY",
     "real_orders": false,
     "runtime_or_writer_touched": false

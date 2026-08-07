@@ -3,8 +3,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import tempfile
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -226,6 +228,38 @@ class StrategyResearchPersistenceService:
             candidates=candidate_models,
         )
         return self.repository.add_batch(batch)
+
+    def attach_persistence_receipt(
+        self, report_path: Path, batch: StrategyResearchBatch
+    ) -> None:
+        """Make the durable report agree with the committed candidate batch."""
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        safety = dict(report.get("safety") or {})
+        safety["database_used"] = True
+        report["safety"] = safety
+        report["persistence_receipt"] = {
+            "status": "PERSISTED",
+            "research_batch_id": batch.id,
+            "run_id": batch.run_id,
+            "generated_count": batch.generated_count,
+            "persisted_count": batch.persisted_count,
+            "qualified_count": batch.qualified_count,
+            "rejected_count": batch.rejected_count,
+            "repository_commit": batch.repository_commit,
+            "completed_at": batch.completed_at.isoformat() if batch.completed_at else None,
+        }
+        content = json.dumps(report, indent=2, sort_keys=True).encode("utf-8") + b"\n"
+        with tempfile.NamedTemporaryFile(
+            dir=report_path.parent, prefix=f".{report_path.name}.", delete=False
+        ) as handle:
+            handle.write(content)
+            temporary_path = Path(handle.name)
+        try:
+            os.replace(temporary_path, report_path)
+        finally:
+            temporary_path.unlink(missing_ok=True)
+        batch.report_digest = _digest_bytes(content)
+        batch.safety_snapshot = safety
 
     def record_failed_batch(
         self,

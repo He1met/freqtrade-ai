@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 from pathlib import Path
 
@@ -55,6 +56,33 @@ def test_report_persistence_is_idempotent_by_run_and_digest(db):
     assert second.id == first.id
     assert len(StrategyResearchRepository(db).list_batches()) == 1
     assert len(StrategyResearchRepository(db).list_candidates()) == 10
+
+
+def test_persistence_receipt_updates_report_and_digest(db, tmp_path):
+    report = tmp_path / "report.json"
+    report.write_bytes(REPORT.read_bytes())
+    service = StrategyResearchPersistenceService(db)
+    batch = service.persist_report(
+        report, run_id="receipt", repository_commit="a" * 40
+    )
+
+    service.attach_persistence_receipt(report, batch)
+    payload = json.loads(report.read_text())
+
+    assert payload["safety"]["database_used"] is True
+    assert payload["persistence_receipt"] == {
+        "status": "PERSISTED",
+        "research_batch_id": batch.id,
+        "run_id": "receipt",
+        "generated_count": 10,
+        "persisted_count": 10,
+        "qualified_count": 0,
+        "rejected_count": 10,
+        "repository_commit": "a" * 40,
+        "completed_at": batch.completed_at.isoformat(),
+    }
+    assert batch.report_digest == hashlib.sha256(report.read_bytes()).hexdigest()
+    assert batch.safety_snapshot["database_used"] is True
 
 
 def test_same_run_rejects_changed_report(db, tmp_path):
