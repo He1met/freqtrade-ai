@@ -14,6 +14,7 @@ from app.api.runtime import router as runtime_router
 from app.api.strategies import router as strategies_router
 from app.api.strategy_generation import router as strategy_generation_router
 from app.api.strategy_promotion import router as strategy_promotion_router
+from app.api.strategy_research import router as strategy_research_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 
@@ -49,3 +50,4 @@ app.include_router(okx_demo_observability_router)
 app.include_router(strategies_router)
 app.include_router(strategy_generation_router)
 app.include_router(strategy_promotion_router)
+app.include_router(strategy_research_router)

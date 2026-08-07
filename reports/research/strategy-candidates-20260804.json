@@ -1,0 +1,1094 @@
+{
+  "candidates": {
+    "Candidate01EmaAdxTrend": {
+      "deployable_candidate": false,
+      "file": "research/strategy_candidates/01_ema_adx_trend.py",
+      "loadable": true,
+      "lookahead_analysis": {
+        "biased_entry_signals": 0,
+        "biased_exit_signals": 0,
+        "has_bias": false,
+        "status": "PASSED",
+        "total_signals": 20
+      },
+      "primary_score": {
+        "assumptions": "static review and validation signals passed; no failure history",
+        "components": {
+          "profit_score": 41.148905,
+          "quality_score": 100.0,
+          "risk_score": 90.966975,
+          "stability_score": 26.436782
+        },
+        "eliminated": false,
+        "scoring_version": "phase2-quality-v1",
+        "total_score": 66.109378
+      },
+      "score_threshold_passed": true,
+      "sha256": "a512f972b93ca7b0b230830cb3b310ec320d6d86fda2708ff494e8f9c4455289",
+      "static_check": "PASSED",
+      "validation_passed": false,
+      "windows": {
+        "oos": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.02057998,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.01525898,
+          "profit_total_abs": -15.25897512,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 246,
+          "win_rate": 0.42682927
+        },
+        "primary_bear": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.01806605,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.01770219,
+          "profit_total_abs": -17.70218813,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 87,
+          "win_rate": 0.26436782
+        },
+        "wf_bear": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.02771313,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.02317646,
+          "profit_total_abs": -23.17646115,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 117,
+          "win_rate": 0.35897436
+        },
+        "wf_bull": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.03133038,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.02815369,
+          "profit_total_abs": -28.15368945,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 137,
+          "win_rate": 0.37226277
+        },
+        "wf_range": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.0212632,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.01940497,
+          "profit_total_abs": -19.40496927,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 109,
+          "win_rate": 0.39449541
+        }
+      }
+    },
+    "Candidate02DonchianAtrBreakout": {
+      "deployable_candidate": false,
+      "file": "research/strategy_candidates/02_donchian_atr_breakout.py",
+      "loadable": true,
+      "lookahead_analysis": {
+        "biased_entry_signals": 0,
+        "biased_exit_signals": 0,
+        "has_bias": false,
+        "status": "PASSED",
+        "total_signals": 20
+      },
+      "primary_score": {
+        "assumptions": "static review and validation signals passed; no failure history",
+        "components": {
+          "profit_score": 39.204085,
+          "quality_score": 100.0,
+          "risk_score": 88.233455,
+          "stability_score": 21.052632
+        },
+        "eliminated": false,
+        "scoring_version": "phase2-quality-v1",
+        "total_score": 63.937688
+      },
+      "score_threshold_passed": true,
+      "sha256": "b7c429b9e1e16004d5bec811b82f613a42ce65a8867a5777ee60045bc50b4c8c",
+      "static_check": "PASSED",
+      "validation_passed": false,
+      "windows": {
+        "oos": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.0713812,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.06213563,
+          "profit_total_abs": -62.13562629,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 397,
+          "win_rate": 0.32241814
+        },
+        "primary_bear": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.02353309,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.02159183,
+          "profit_total_abs": -21.59183379,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 114,
+          "win_rate": 0.21052632
+        },
+        "wf_bear": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.03463624,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.02411881,
+          "profit_total_abs": -24.1188125,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 178,
+          "win_rate": 0.35955056
+        },
+        "wf_bull": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.03789901,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.02760385,
+          "profit_total_abs": -27.60384707,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 205,
+          "win_rate": 0.31219512
+        },
+        "wf_range": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.01178488,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": 0.01386991,
+          "profit_total_abs": 13.8699143,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 171,
+          "win_rate": 0.42105263
+        }
+      }
+    },
+    "Candidate03BollingerRsiReversion": {
+      "deployable_candidate": false,
+      "file": "research/strategy_candidates/03_bollinger_rsi_reversion.py",
+      "loadable": true,
+      "lookahead_analysis": {
+        "biased_entry_signals": 0,
+        "biased_exit_signals": 0,
+        "has_bias": false,
+        "status": "PASSED",
+        "total_signals": 20
+      },
+      "primary_score": {
+        "assumptions": "static review and validation signals passed; no failure history",
+        "components": {
+          "profit_score": 41.469045,
+          "quality_score": 100.0,
+          "risk_score": 91.276125,
+          "stability_score": 52.517986
+        },
+        "eliminated": false,
+        "scoring_version": "phase2-quality-v1",
+        "total_score": 70.210895
+      },
+      "score_threshold_passed": true,
+      "sha256": "355b9646a23f6582b9a520bbe1186df09372563ad29bf4f311404ced78291afa",
+      "static_check": "PASSED",
+      "validation_passed": false,
+      "windows": {
+        "oos": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.05306343,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.05265523,
+          "profit_total_abs": -52.65523278,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 439,
+          "win_rate": 0.54214123
+        },
+        "primary_bear": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.01744775,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.01706191,
+          "profit_total_abs": -17.06191218,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 139,
+          "win_rate": 0.52517986
+        },
+        "wf_bear": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.04299736,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.04245727,
+          "profit_total_abs": -42.45727425,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 193,
+          "win_rate": 0.49222798
+        },
+        "wf_bull": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.04405567,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.04363043,
+          "profit_total_abs": -43.63043495,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 257,
+          "win_rate": 0.61089494
+        },
+        "wf_range": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.03609987,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.03471315,
+          "profit_total_abs": -34.71314656,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 187,
+          "win_rate": 0.57754011
+        }
+      }
+    },
+    "Candidate04MacdVolumeMomentum": {
+      "deployable_candidate": false,
+      "file": "research/strategy_candidates/04_macd_volume_momentum.py",
+      "loadable": true,
+      "lookahead_analysis": {
+        "biased_entry_signals": 0,
+        "biased_exit_signals": 0,
+        "has_bias": false,
+        "status": "PASSED",
+        "total_signals": 20
+      },
+      "primary_score": {
+        "assumptions": "static review and validation signals passed; no failure history",
+        "components": {
+          "profit_score": 44.47501,
+          "quality_score": 100.0,
+          "risk_score": 92.762685,
+          "stability_score": 20.382166
+        },
+        "eliminated": false,
+        "scoring_version": "phase2-quality-v1",
+        "total_score": 66.81425
+      },
+      "score_threshold_passed": true,
+      "sha256": "14c795509502215068319cc080e868b8d8a7437999fc93d47ab5dea67179e50b",
+      "static_check": "PASSED",
+      "validation_passed": false,
+      "windows": {
+        "oos": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.06679515,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.06520212,
+          "profit_total_abs": -65.20212177,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 512,
+          "win_rate": 0.27148438
+        },
+        "primary_bear": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.01447463,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.01104998,
+          "profit_total_abs": -11.04997738,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 157,
+          "win_rate": 0.20382166
+        },
+        "wf_bear": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.03748165,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.02951642,
+          "profit_total_abs": -29.5164172,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 235,
+          "win_rate": 0.27234043
+        },
+        "wf_bull": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.03693596,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.02595241,
+          "profit_total_abs": -25.95240917,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 256,
+          "win_rate": 0.27734375
+        },
+        "wf_range": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.0458485,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.04503554,
+          "profit_total_abs": -45.03554437,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 254,
+          "win_rate": 0.25984252
+        }
+      }
+    },
+    "Candidate05KeltnerPullback": {
+      "deployable_candidate": false,
+      "file": "research/strategy_candidates/05_keltner_pullback.py",
+      "loadable": true,
+      "lookahead_analysis": {
+        "biased_entry_signals": 0,
+        "biased_exit_signals": 0,
+        "has_bias": false,
+        "status": "PASSED",
+        "total_signals": 20
+      },
+      "primary_score": {
+        "assumptions": "static review and validation signals passed; no failure history",
+        "components": {
+          "profit_score": 46.8523,
+          "quality_score": 95.333333,
+          "risk_score": 95.813455,
+          "stability_score": 46.153846
+        },
+        "eliminated": false,
+        "scoring_version": "phase2-quality-v1",
+        "total_score": 71.108079
+      },
+      "score_threshold_passed": true,
+      "sha256": "39bbaea384b97e950ce2502fb5317da7eaa585ab52f4ea6f5891ea67b6789358",
+      "static_check": "PASSED",
+      "validation_passed": false,
+      "windows": {
+        "oos": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.01965198,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.01424499,
+          "profit_total_abs": -14.24499087,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 83,
+          "win_rate": 0.68674699
+        },
+        "primary_bear": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.00837309,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.0062954,
+          "profit_total_abs": -6.29540307,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 26,
+          "win_rate": 0.46153846
+        },
+        "wf_bear": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.00394817,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": 0.00699977,
+          "profit_total_abs": 6.99977375,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 40,
+          "win_rate": 0.725
+        },
+        "wf_bull": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.00071109,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": 0.01062959,
+          "profit_total_abs": 10.62959047,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 36,
+          "win_rate": 0.72222222
+        },
+        "wf_range": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.00300651,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.0001104,
+          "profit_total_abs": -0.11039695,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 24,
+          "win_rate": 0.66666667
+        }
+      }
+    },
+    "Candidate06StochasticReversal": {
+      "deployable_candidate": false,
+      "file": "research/strategy_candidates/06_stochastic_reversal.py",
+      "loadable": true,
+      "lookahead_analysis": {
+        "biased_entry_signals": 0,
+        "biased_exit_signals": 0,
+        "has_bias": false,
+        "status": "PASSED",
+        "total_signals": 20
+      },
+      "primary_score": {
+        "assumptions": "static review and validation signals passed; no failure history",
+        "components": {
+          "profit_score": 27.711165,
+          "quality_score": 100.0,
+          "risk_score": 77.281205,
+          "stability_score": 38.723404
+        },
+        "eliminated": false,
+        "scoring_version": "phase2-quality-v1",
+        "total_score": 59.82772
+      },
+      "score_threshold_passed": true,
+      "sha256": "aba93f569f02f043715d0caaad65e9fb18471a644f57041decd2b1449fc776d9",
+      "static_check": "PASSED",
+      "validation_passed": false,
+      "windows": {
+        "oos": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.10292305,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.10272506,
+          "profit_total_abs": -102.72505524,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 821,
+          "win_rate": 0.53958587
+        },
+        "primary_bear": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.04543759,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.04457767,
+          "profit_total_abs": -44.57766891,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 235,
+          "win_rate": 0.38723404
+        },
+        "wf_bear": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.07571206,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.07480538,
+          "profit_total_abs": -74.80538032,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 370,
+          "win_rate": 0.5027027
+        },
+        "wf_bull": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.08075935,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.07801174,
+          "profit_total_abs": -78.01173555,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 463,
+          "win_rate": 0.54643629
+        },
+        "wf_range": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.05535527,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.05168529,
+          "profit_total_abs": -51.68528648,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 364,
+          "win_rate": 0.59615385
+        }
+      }
+    },
+    "Candidate07RocAdxImpulse": {
+      "deployable_candidate": false,
+      "file": "research/strategy_candidates/07_roc_adx_impulse.py",
+      "loadable": true,
+      "lookahead_analysis": {
+        "biased_entry_signals": 0,
+        "biased_exit_signals": 0,
+        "has_bias": false,
+        "status": "PASSED",
+        "total_signals": 20
+      },
+      "primary_score": {
+        "assumptions": "static review and validation signals passed; no failure history",
+        "components": {
+          "profit_score": 37.396555,
+          "quality_score": 100.0,
+          "risk_score": 85.538805,
+          "stability_score": 23.529412
+        },
+        "eliminated": false,
+        "scoring_version": "phase2-quality-v1",
+        "total_score": 63.002907
+      },
+      "score_threshold_passed": true,
+      "sha256": "9b75dfbee3d03300ef745868a77fbdd5745346a20dd68af137034017f88eaae8",
+      "static_check": "PASSED",
+      "validation_passed": false,
+      "windows": {
+        "oos": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.08715871,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.08482789,
+          "profit_total_abs": -84.82788527,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 599,
+          "win_rate": 0.29382304
+        },
+        "primary_bear": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.02892239,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.02520689,
+          "profit_total_abs": -25.20688988,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 187,
+          "win_rate": 0.23529412
+        },
+        "wf_bear": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.02537615,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.01411334,
+          "profit_total_abs": -14.11333546,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 278,
+          "win_rate": 0.34172662
+        },
+        "wf_bull": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.0489428,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.04499261,
+          "profit_total_abs": -44.9926131,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 354,
+          "win_rate": 0.29661017
+        },
+        "wf_range": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.03386321,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.02989465,
+          "profit_total_abs": -29.89464798,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 290,
+          "win_rate": 0.32758621
+        }
+      }
+    },
+    "Candidate08IchimokuCloud": {
+      "deployable_candidate": false,
+      "file": "research/strategy_candidates/08_ichimoku_cloud.py",
+      "loadable": true,
+      "lookahead_analysis": {
+        "biased_entry_signals": 0,
+        "biased_exit_signals": 0,
+        "has_bias": false,
+        "status": "PASSED",
+        "total_signals": 20
+      },
+      "primary_score": {
+        "assumptions": "static review and validation signals passed; no failure history",
+        "components": {
+          "profit_score": 37.87287,
+          "quality_score": 100.0,
+          "risk_score": 84.628265,
+          "stability_score": 22.48062
+        },
+        "eliminated": false,
+        "scoring_version": "phase2-quality-v1",
+        "total_score": 62.784664
+      },
+      "score_threshold_passed": true,
+      "sha256": "b3fe6b42d6fefc82f2abfa53cc89742e4ddf92c55c1ef52fdc41fc4b8fea2a3f",
+      "static_check": "PASSED",
+      "validation_passed": false,
+      "windows": {
+        "oos": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.09466483,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.08970499,
+          "profit_total_abs": -89.70498837,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 700,
+          "win_rate": 0.30714286
+        },
+        "primary_bear": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.03074347,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.02425426,
+          "profit_total_abs": -24.25425814,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 258,
+          "win_rate": 0.2248062
+        },
+        "wf_bear": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.03164877,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.02519339,
+          "profit_total_abs": -25.19339445,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 292,
+          "win_rate": 0.32876712
+        },
+        "wf_bull": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.05649182,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.05210235,
+          "profit_total_abs": -52.10234579,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 419,
+          "win_rate": 0.27684964
+        },
+        "wf_range": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.04382561,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.03566541,
+          "profit_total_abs": -35.66540844,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 335,
+          "win_rate": 0.32537313
+        }
+      }
+    },
+    "Candidate09ObvPriceConfirmation": {
+      "deployable_candidate": false,
+      "file": "research/strategy_candidates/09_obv_price_confirmation.py",
+      "loadable": true,
+      "lookahead_analysis": {
+        "biased_entry_signals": 0,
+        "biased_exit_signals": 0,
+        "has_bias": false,
+        "status": "PASSED",
+        "total_signals": 20
+      },
+      "primary_score": {
+        "assumptions": "static review and validation signals passed; no failure history",
+        "components": {
+          "profit_score": 38.699,
+          "quality_score": 100.0,
+          "risk_score": 86.84441,
+          "stability_score": 25.465839
+        },
+        "eliminated": false,
+        "scoring_version": "phase2-quality-v1",
+        "total_score": 64.075628
+      },
+      "score_threshold_passed": true,
+      "sha256": "e340d4ac98760bf8dd9b7eb6dbc720522db8a255d99dba5a306c2db100638ebf",
+      "static_check": "PASSED",
+      "validation_passed": false,
+      "windows": {
+        "oos": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.0614307,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.05864082,
+          "profit_total_abs": -58.6408218,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 494,
+          "win_rate": 0.37044534
+        },
+        "primary_bear": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.02631118,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.022602,
+          "profit_total_abs": -22.60200109,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 161,
+          "win_rate": 0.25465839
+        },
+        "wf_bear": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.02427371,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.01352102,
+          "profit_total_abs": -13.52102478,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 220,
+          "win_rate": 0.37727273
+        },
+        "wf_bull": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.06082979,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.05642054,
+          "profit_total_abs": -56.42053875,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 300,
+          "win_rate": 0.31666667
+        },
+        "wf_range": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.00883138,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": 0.01797465,
+          "profit_total_abs": 17.97465151,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 224,
+          "win_rate": 0.47767857
+        }
+      }
+    },
+    "Candidate10AdxRegimeHybrid": {
+      "deployable_candidate": false,
+      "file": "research/strategy_candidates/10_adx_regime_hybrid.py",
+      "loadable": true,
+      "lookahead_analysis": {
+        "biased_entry_signals": 0,
+        "biased_exit_signals": 0,
+        "has_bias": false,
+        "status": "PASSED",
+        "total_signals": 20
+      },
+      "primary_score": {
+        "assumptions": "static review and validation signals passed; no failure history",
+        "components": {
+          "profit_score": 29.237985,
+          "quality_score": 100.0,
+          "risk_score": 79.237985,
+          "stability_score": 28.174603
+        },
+        "eliminated": false,
+        "scoring_version": "phase2-quality-v1",
+        "total_score": 59.268981
+      },
+      "score_threshold_passed": true,
+      "sha256": "2a86690e9aca012c3c5c5760f4c57f123fb34b7e12af20930f0edbfc4ed52a3a",
+      "static_check": "PASSED",
+      "validation_passed": false,
+      "windows": {
+        "oos": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.07919666,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.07090618,
+          "profit_total_abs": -70.90617964,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 750,
+          "win_rate": 0.41333333
+        },
+        "primary_bear": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.04152403,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.04152403,
+          "profit_total_abs": -41.52403363,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 252,
+          "win_rate": 0.28174603
+        },
+        "wf_bear": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.04501011,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.04194156,
+          "profit_total_abs": -41.94155902,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 309,
+          "win_rate": 0.43042071
+        },
+        "wf_bull": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.06488448,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.06463695,
+          "profit_total_abs": -64.63695178,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 432,
+          "win_rate": 0.41666667
+        },
+        "wf_range": {
+          "fee_per_side": 0.0005,
+          "max_drawdown_pct": 0.03359787,
+          "net_of_fee_and_slippage": true,
+          "profit_pct": -0.02527419,
+          "profit_total_abs": -25.27419226,
+          "slippage_per_side": 0.0002,
+          "status": "SUCCESS",
+          "total_trades": 334,
+          "win_rate": 0.45808383
+        }
+      }
+    }
+  },
+  "commands": [
+    [
+      "/Users/shenjianpeng/freqtrade_venv/bin/freqtrade",
+      "backtesting",
+      "--no-color",
+      "--config",
+      "/Users/shenjianpeng/.codex/worktrees/92f8/Freqtrade Ai/tmp/freqtrade_configs/strategy-candidates-20260804.json",
+      "--datadir",
+      "/Users/shenjianpeng/Developer/Freqtrade Ai/user_data/data/okx",
+      "--strategy-path",
+      "/Users/shenjianpeng/.codex/worktrees/92f8/Freqtrade Ai/research/strategy_candidates",
+      "--userdir",
+      "/Users/shenjianpeng/.codex/worktrees/92f8/Freqtrade Ai/user_data",
+      "--timerange",
+      "20230701-20231001",
+      "--fee",
+      "0.0005",
+      "--cache",
+      "none",
+      "--export",
+      "trades",
+      "--backtest-directory",
+      "/Users/shenjianpeng/.codex/worktrees/92f8/Freqtrade Ai/reports/backtests/strategy-candidates-20260804/primary_bear",
+      "--strategy-list",
+      "Candidate01EmaAdxTrend",
+      "Candidate02DonchianAtrBreakout",
+      "Candidate03BollingerRsiReversion",
+      "Candidate04MacdVolumeMomentum",
+      "Candidate05KeltnerPullback",
+      "Candidate06StochasticReversal",
+      "Candidate07RocAdxImpulse",
+      "Candidate08IchimokuCloud",
+      "Candidate09ObvPriceConfirmation",
+      "Candidate10AdxRegimeHybrid"
+    ],
+    [
+      "/Users/shenjianpeng/freqtrade_venv/bin/freqtrade",
+      "backtesting",
+      "--no-color",
+      "--config",
+      "/Users/shenjianpeng/.codex/worktrees/92f8/Freqtrade Ai/tmp/freqtrade_configs/strategy-candidates-20260804.json",
+      "--datadir",
+      "/Users/shenjianpeng/Developer/Freqtrade Ai/user_data/data/okx",
+      "--strategy-path",
+      "/Users/shenjianpeng/.codex/worktrees/92f8/Freqtrade Ai/research/strategy_candidates",
+      "--userdir",
+      "/Users/shenjianpeng/.codex/worktrees/92f8/Freqtrade Ai/user_data",
+      "--timerange",
+      "20231001-20240301",
+      "--fee",
+      "0.0005",
+      "--cache",
+      "none",
+      "--export",
+      "trades",
+      "--backtest-directory",
+      "/Users/shenjianpeng/.codex/worktrees/92f8/Freqtrade Ai/reports/backtests/strategy-candidates-20260804/wf_bull",
+      "--strategy-list",
+      "Candidate01EmaAdxTrend",
+      "Candidate02DonchianAtrBreakout",
+      "Candidate03BollingerRsiReversion",
+      "Candidate04MacdVolumeMomentum",
+      "Candidate05KeltnerPullback",
+      "Candidate06StochasticReversal",
+      "Candidate07RocAdxImpulse",
+      "Candidate08IchimokuCloud",
+      "Candidate09ObvPriceConfirmation",
+      "Candidate10AdxRegimeHybrid"
+    ],
+    [
+      "/Users/shenjianpeng/freqtrade_venv/bin/freqtrade",
+      "backtesting",
+      "--no-color",
+      "--config",
+      "/Users/shenjianpeng/.codex/worktrees/92f8/Freqtrade Ai/tmp/freqtrade_configs/strategy-candidates-20260804.json",
+      "--datadir",
+      "/Users/shenjianpeng/Developer/Freqtrade Ai/user_data/data/okx",
+      "--strategy-path",
+      "/Users/shenjianpeng/.codex/worktrees/92f8/Freqtrade Ai/research/strategy_candidates",
+      "--userdir",
+      "/Users/shenjianpeng/.codex/worktrees/92f8/Freqtrade Ai/user_data",
+      "--timerange",
+      "20240301-20240629",
+      "--fee",
+      "0.0005",
+      "--cache",
+      "none",
+      "--export",
+      "trades",
+      "--backtest-directory",
+      "/Users/shenjianpeng/.codex/worktrees/92f8/Freqtrade Ai/reports/backtests/strategy-candidates-20260804/wf_range",
+      "--strategy-list",
+      "Candidate01EmaAdxTrend",
+      "Candidate02DonchianAtrBreakout",
+      "Candidate03BollingerRsiReversion",
+      "Candidate04MacdVolumeMomentum",
+      "Candidate05KeltnerPullback",
+      "Candidate06StochasticReversal",
+      "Candidate07RocAdxImpulse",
+      "Candidate08IchimokuCloud",
+      "Candidate09ObvPriceConfirmation",
+      "Candidate10AdxRegimeHybrid"
+    ],
+    [
+      "/Users/shenjianpeng/freqtrade_venv/bin/freqtrade",
+      "backtesting",
+      "--no-color",
+      "--config",
+      "/Users/shenjianpeng/.codex/worktrees/92f8/Freqtrade Ai/tmp/freqtrade_configs/strategy-candidates-20260804.json",
+      "--datadir",
+      "/Users/shenjianpeng/Developer/Freqtrade Ai/user_data/data/okx",
+      "--strategy-path",
+      "/Users/shenjianpeng/.codex/worktrees/92f8/Freqtrade Ai/research/strategy_candidates",
+      "--userdir",
+      "/Users/shenjianpeng/.codex/worktrees/92f8/Freqtrade Ai/user_data",
+      "--timerange",
+      "20250101-20251001",
+      "--fee",
+      "0.0005",
+      "--cache",
+      "none",
+      "--export",
+      "trades",
+      "--backtest-directory",
+      "/Users/shenjianpeng/.codex/worktrees/92f8/Freqtrade Ai/reports/backtests/strategy-candidates-20260804/oos",
+      "--strategy-list",
+      "Candidate01EmaAdxTrend",
+      "Candidate02DonchianAtrBreakout",
+      "Candidate03BollingerRsiReversion",
+      "Candidate04MacdVolumeMomentum",
+      "Candidate05KeltnerPullback",
+      "Candidate06StochasticReversal",
+      "Candidate07RocAdxImpulse",
+      "Candidate08IchimokuCloud",
+      "Candidate09ObvPriceConfirmation",
+      "Candidate10AdxRegimeHybrid"
+    ],
+    [
+      "/Users/shenjianpeng/freqtrade_venv/bin/freqtrade",
+      "backtesting",
+      "--no-color",
+      "--config",
+      "/Users/shenjianpeng/.codex/worktrees/92f8/Freqtrade Ai/tmp/freqtrade_configs/strategy-candidates-20260804.json",
+      "--datadir",
+      "/Users/shenjianpeng/Developer/Freqtrade Ai/user_data/data/okx",
+      "--strategy-path",
+      "/Users/shenjianpeng/.codex/worktrees/92f8/Freqtrade Ai/research/strategy_candidates",
+      "--userdir",
+      "/Users/shenjianpeng/.codex/worktrees/92f8/Freqtrade Ai/user_data",
+      "--timerange",
+      "20251001-20260201",
+      "--fee",
+      "0.0005",
+      "--cache",
+      "none",
+      "--export",
+      "trades",
+      "--backtest-directory",
+      "/Users/shenjianpeng/.codex/worktrees/92f8/Freqtrade Ai/reports/backtests/strategy-candidates-20260804/wf_bear",
+      "--strategy-list",
+      "Candidate01EmaAdxTrend",
+      "Candidate02DonchianAtrBreakout",
+      "Candidate03BollingerRsiReversion",
+      "Candidate04MacdVolumeMomentum",
+      "Candidate05KeltnerPullback",
+      "Candidate06StochasticReversal",
+      "Candidate07RocAdxImpulse",
+      "Candidate08IchimokuCloud",
+      "Candidate09ObvPriceConfirmation",
+      "Candidate10AdxRegimeHybrid"
+    ]
+  ],
+  "environment": {
+    "fee_per_side": 0.0005,
+    "freqtrade_version": "Operating System:\tmacOS-26.5.2-arm64-arm-64bit\nPython Version:\t\tPython 3.11.15\nCCXT Version:\t\t4.5.56\n\nFreqtrade Version:\tfreqtrade 2026.5",
+    "lookahead_analysis_artifact": "/Users/shenjianpeng/.codex/worktrees/92f8/Freqtrade Ai/reports/backtests/strategy-candidates-20260804/lookahead.csv",
+    "market_data_file": "/Users/shenjianpeng/Developer/Freqtrade Ai/user_data/data/okx/futures/BTC_USDT_USDT-15m-futures.feather",
+    "market_data_sha256": "14af7d20d71d0eb711e39ecc8b88e6c829e6d706c7e8c2dd8d9e3228b18bbf66",
+    "pair": "BTC/USDT:USDT",
+    "slippage_per_side": 0.0002,
+    "starting_balance": 1000.0,
+    "timeframe": "15m"
+  },
+  "limitations": [
+    "This standalone evidence is not a persisted StrategyValidationPlan.",
+    "Slippage is applied as a deterministic two-sided post-backtest stress cost.",
+    "Funding history is unavailable for these historical windows; Freqtrade reports zero funding fees."
+  ],
+  "qualified_candidates": [],
+  "safety": {
+    "allow_real_funds": false,
+    "database_used": false,
+    "execution_scope": "LOCAL_BACKTEST_ONLY",
+    "real_orders": false,
+    "runtime_or_writer_touched": false
+  },
+  "schema_version": "freqtrade-ai-strategy-candidate-research-v1",
+  "selection_policy": {
+    "min_strategy_score": 50.0,
+    "min_trades_per_validation_window": 30,
+    "score_source": "primary_bear net of fee and slippage",
+    "validation_requires_positive_net_profit": true
+  },
+  "windows": [
+    {
+      "kind": "PRIMARY",
+      "market_regime": "bear",
+      "market_return": -0.11456756,
+      "name": "primary_bear",
+      "timerange": "20230701-20231001"
+    },
+    {
+      "kind": "WALK_FORWARD",
+      "market_regime": "bull",
+      "market_return": 1.26764771,
+      "name": "wf_bull",
+      "timerange": "20231001-20240301"
+    },
+    {
+      "kind": "WALK_FORWARD",
+      "market_regime": "range",
+      "market_return": -0.01362751,
+      "name": "wf_range",
+      "timerange": "20240301-20240629"
+    },
+    {
+      "kind": "OOS",
+      "market_regime": "bull",
+      "market_return": 0.2171585,
+      "name": "oos",
+      "timerange": "20250101-20251001"
+    },
+    {
+      "kind": "WALK_FORWARD",
+      "market_regime": "bear",
+      "market_return": -0.31033927,
+      "name": "wf_bear",
+      "timerange": "20251001-20260201"
+    }
+  ]
+}

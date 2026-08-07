@@ -82,6 +82,8 @@ RUNTIME_APPLICATION_TABLES = (
     "backtest_tasks",
     "backtest_results",
     "strategy_scores",
+    "strategy_research_batches",
+    "strategy_research_candidates",
     "research_jobs",
     "research_job_attempts",
     "research_worker_control",
@@ -11049,6 +11051,17 @@ def upgrade_database(engine: Engine) -> str:
             _create_version_table(connection)
             current_version = _current_version(connection)
             if current_version == SCHEMA_VERSION:
+                # Research persistence is an additive v36 extension.  Keeping
+                # the version stable lets the already-running v36 canonical
+                # process tolerate the new, isolated tables until this code is
+                # merged, while db-init remains idempotent for older v36 DBs.
+                Base.metadata.tables["strategy_research_batches"].create(
+                    bind=connection, checkfirst=True
+                )
+                Base.metadata.tables["strategy_research_candidates"].create(
+                    bind=connection, checkfirst=True
+                )
+                _grant_runtime_application_acl(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(

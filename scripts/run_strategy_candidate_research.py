@@ -1,0 +1,532 @@
+#!/usr/bin/env python3
+"""Reproduce the offline ten-candidate Freqtrade research matrix.
+
+This script is intentionally execution-only: it reads local OHLCV files and
+writes ignored backtest artifacts plus a tracked JSON summary.  It does not
+open a database, read credentials, start a runtime, or submit exchange orders.
+"""
+
+import argparse
+import ast
+import csv
+from datetime import datetime
+import hashlib
+import json
+import subprocess
+import sys
+import zipfile
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Optional
+
+
+PAIR = "BTC/USDT:USDT"
+TIMEFRAME = "15m"
+FEE_PER_SIDE = 0.0005
+SLIPPAGE_PER_SIDE = 0.0002
+STARTING_BALANCE = 1000.0
+MIN_STRATEGY_SCORE = 50.0
+MIN_VALIDATION_TRADES = 30
+MAX_VALIDATION_DRAWDOWN = 0.10
+
+WINDOWS = (
+    ("primary_bear", "PRIMARY", "bear", "20230701-20231001"),
+    ("wf_bull", "WALK_FORWARD", "bull", "20231001-20240301"),
+    ("wf_range", "WALK_FORWARD", "range", "20240301-20240629"),
+    ("oos", "OOS", None, "20250101-20251001"),
+    ("wf_bear", "WALK_FORWARD", "bear", "20251001-20260201"),
+)
+
+
+def _validate_run_id(run_id: str) -> str:
+    formats = {
+        8: "%Y%m%d",
+        10: "%Y%m%d%H",
+        12: "%Y%m%d%H%M",
+        14: "%Y%m%d%H%M%S",
+    }
+    date_format = formats.get(len(run_id))
+    if date_format is None or not run_id.isdigit():
+        raise RuntimeError("run-id must be YYYYMMDD with optional HH, MM, and SS")
+    try:
+        datetime.strptime(run_id, date_format)
+    except ValueError as exc:
+        raise RuntimeError("run-id is not a valid calendar timestamp") from exc
+    return run_id
+
+
+@dataclass(frozen=True)
+class Candidate:
+    class_name: str
+    path: Path
+    sha256: str
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _discover_candidates(root: Path) -> list[Candidate]:
+    candidates: list[Candidate] = []
+    files = sorted(root.glob("[0-9][0-9]_*.py"))
+    if len(files) != 10:
+        raise RuntimeError(f"expected exactly 10 candidate files, found {len(files)}")
+    for path in files:
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(path))
+        classes = [node.name for node in tree.body if isinstance(node, ast.ClassDef)]
+        strategy_classes = [name for name in classes if name.startswith("Candidate")]
+        if len(strategy_classes) != 1:
+            raise RuntimeError(f"{path} must define exactly one Candidate class")
+        _reject_obvious_lookahead(tree, path)
+        compile(source, str(path), "exec")
+        candidates.append(Candidate(strategy_classes[0], path, _sha256(path)))
+    return candidates
+
+
+def _reject_obvious_lookahead(tree: ast.AST, path: Path) -> None:
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr != "shift" or not node.args:
+            continue
+        value = node.args[0]
+        if isinstance(value, ast.UnaryOp) and isinstance(value.op, ast.USub):
+            raise RuntimeError(f"negative shift is forbidden: {path}:{node.lineno}")
+        if isinstance(value, ast.Constant) and isinstance(value.value, (int, float)) and value.value < 0:
+            raise RuntimeError(f"negative shift is forbidden: {path}:{node.lineno}")
+
+
+def _config(strategy_path: Path, userdir: Path, datadir: Path) -> dict[str, Any]:
+    return {
+        "bot_name": "freqtrade_ai_candidate_research",
+        "dry_run": True,
+        "initial_state": "stopped",
+        "max_open_trades": 1,
+        "stake_currency": "USDT",
+        "stake_amount": 100.0,
+        "dry_run_wallet": STARTING_BALANCE,
+        "tradable_balance_ratio": 0.99,
+        "timeframe": TIMEFRAME,
+        "trading_mode": "futures",
+        "margin_mode": "isolated",
+        "exchange": {
+            "name": "okx",
+            "pair_whitelist": [PAIR],
+            "pair_blacklist": [],
+        },
+        "pairlists": [{"method": "StaticPairList"}],
+        "strategy_path": str(strategy_path),
+        "user_data_dir": str(userdir),
+        "datadir": str(datadir),
+        "entry_pricing": {"price_side": "same", "use_order_book": True, "order_book_top": 1},
+        "exit_pricing": {"price_side": "same", "use_order_book": True, "order_book_top": 1},
+        "unfilledtimeout": {
+            "entry": 10,
+            "exit": 10,
+            "exit_timeout_count": 0,
+            "unit": "minutes",
+        },
+    }
+
+
+def _run_window(
+    *,
+    freqtrade: Path,
+    config_path: Path,
+    datadir: Path,
+    strategy_path: Path,
+    userdir: Path,
+    output_dir: Path,
+    timerange: str,
+    class_names: list[str],
+) -> tuple[dict[str, Any], list[str]]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    command = [
+        str(freqtrade),
+        "backtesting",
+        "--no-color",
+        "--config",
+        str(config_path),
+        "--datadir",
+        str(datadir),
+        "--strategy-path",
+        str(strategy_path),
+        "--userdir",
+        str(userdir),
+        "--timerange",
+        timerange,
+        "--fee",
+        str(FEE_PER_SIDE),
+        "--cache",
+        "none",
+        "--export",
+        "trades",
+        "--backtest-directory",
+        str(output_dir),
+        "--strategy-list",
+        *class_names,
+    ]
+    completed = subprocess.run(command, check=False, capture_output=True, text=True)
+    (output_dir / "stdout.txt").write_text(completed.stdout, encoding="utf-8")
+    (output_dir / "stderr.txt").write_text(completed.stderr, encoding="utf-8")
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"Freqtrade failed for {timerange} with exit {completed.returncode}; "
+            f"see {output_dir / 'stderr.txt'}"
+        )
+    archives = sorted(output_dir.glob("*.zip"), key=lambda item: item.stat().st_mtime)
+    if not archives:
+        raise RuntimeError(f"Freqtrade did not produce a result archive in {output_dir}")
+    archive = archives[-1]
+    with zipfile.ZipFile(archive) as bundle:
+        result_names = [name for name in bundle.namelist() if name.endswith(".json") and not name.endswith("_config.json")]
+        if len(result_names) != 1:
+            raise RuntimeError(f"unexpected result members in {archive}: {result_names}")
+        payload = json.loads(bundle.read(result_names[0]))
+    return payload, command
+
+
+def _run_lookahead(
+    *,
+    freqtrade: Path,
+    config_path: Path,
+    datadir: Path,
+    strategy_path: Path,
+    userdir: Path,
+    artifact_root: Path,
+    class_names: list[str],
+) -> list[str]:
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    export_path = artifact_root / "lookahead.csv"
+    command = [
+        str(freqtrade),
+        "lookahead-analysis",
+        "--no-color",
+        "--config",
+        str(config_path),
+        "--datadir",
+        str(datadir),
+        "--strategy-path",
+        str(strategy_path),
+        "--userdir",
+        str(userdir),
+        "--timerange",
+        "20230701-20260201",
+        "--fee",
+        str(FEE_PER_SIDE),
+        "--minimum-trade-amount",
+        "10",
+        "--targeted-trade-amount",
+        "20",
+        "--lookahead-analysis-exportfilename",
+        str(export_path),
+        "--strategy-list",
+        *class_names,
+    ]
+    completed = subprocess.run(command, check=False, capture_output=True, text=True)
+    (artifact_root / "lookahead.stdout.txt").write_text(completed.stdout, encoding="utf-8")
+    (artifact_root / "lookahead.stderr.txt").write_text(completed.stderr, encoding="utf-8")
+    if completed.returncode != 0 or not export_path.is_file():
+        raise RuntimeError(
+            f"Freqtrade lookahead-analysis failed with exit {completed.returncode}; "
+            f"see {artifact_root / 'lookahead.stderr.txt'}"
+        )
+    return command
+
+
+def _stress_metrics(strategy: dict[str, Any]) -> dict[str, Any]:
+    trades = sorted(strategy.get("trades") or [], key=lambda item: item["close_timestamp"])
+    stressed_abs: list[float] = []
+    stressed_ratios: list[float] = []
+    for trade in trades:
+        stake = float(trade.get("stake_amount") or 0.0)
+        ratio = float(trade.get("profit_ratio") or 0.0) - 2.0 * SLIPPAGE_PER_SIDE
+        stressed_ratios.append(ratio)
+        stressed_abs.append(float(trade.get("profit_abs") or 0.0) - stake * 2.0 * SLIPPAGE_PER_SIDE)
+    cumulative = 0.0
+    peak = 0.0
+    max_drawdown_abs = 0.0
+    for profit_abs in stressed_abs:
+        cumulative += profit_abs
+        peak = max(peak, cumulative)
+        max_drawdown_abs = max(max_drawdown_abs, peak - cumulative)
+    total_profit_abs = sum(stressed_abs)
+    total_trades = len(trades)
+    wins = sum(value > 0 for value in stressed_ratios)
+    win_rate = wins / total_trades if total_trades else 0.0
+    profit_pct = total_profit_abs / STARTING_BALANCE
+    max_drawdown_pct = max_drawdown_abs / (STARTING_BALANCE + peak) if STARTING_BALANCE + peak else 0.0
+    return {
+        "total_trades": total_trades,
+        "profit_pct": round(profit_pct, 8),
+        "profit_total_abs": round(total_profit_abs, 8),
+        "max_drawdown_pct": round(max_drawdown_pct, 8),
+        "win_rate": round(win_rate, 8),
+        "fee_per_side": FEE_PER_SIDE,
+        "slippage_per_side": SLIPPAGE_PER_SIDE,
+        "net_of_fee_and_slippage": True,
+    }
+
+
+def _clamp(value: float) -> float:
+    return max(0.0, min(100.0, value))
+
+
+def _project_score(metrics: dict[str, Any]) -> dict[str, Any]:
+    total_trades = int(metrics["total_trades"])
+    profit = _clamp(float(metrics["profit_pct"]) * 500.0 + 50.0)
+    risk = _clamp(100.0 - float(metrics["max_drawdown_pct"]) * 500.0)
+    stability = _clamp(float(metrics["win_rate"]) * 100.0)
+    trade_activity = _clamp(total_trades / 30.0 * 100.0)
+    quality = trade_activity * 0.35 + 65.0
+    total = profit * 0.35 + risk * 0.25 + stability * 0.15 + quality * 0.25
+    eliminated = total_trades < 3 or float(metrics["max_drawdown_pct"]) >= 0.35
+    return {
+        "scoring_version": "phase2-quality-v1",
+        "total_score": round(0.0 if eliminated else total, 6),
+        "components": {
+            "profit_score": round(profit, 6),
+            "risk_score": round(risk, 6),
+            "stability_score": round(stability, 6),
+            "quality_score": round(quality, 6),
+        },
+        "eliminated": eliminated,
+        "assumptions": "static review and validation signals passed; no failure history",
+    }
+
+
+def _market_return(datadir: Path, timerange: str) -> float:
+    import pandas as pd
+
+    path = datadir / "futures" / "BTC_USDT_USDT-15m-futures.feather"
+    frame = pd.read_feather(path, columns=["date", "close"])
+    start, end = timerange.split("-", maxsplit=1)
+    dates = frame["date"].dt.strftime("%Y%m%d")
+    selected = frame[(dates >= start) & (dates < end)]
+    if len(selected) < 2:
+        raise RuntimeError(f"market data does not cover {timerange}")
+    return float(selected["close"].iloc[-1] / selected["close"].iloc[0] - 1.0)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--freqtrade", type=Path, required=True)
+    parser.add_argument("--datadir", type=Path, required=True)
+    parser.add_argument("--run-id", default="20260804")
+    parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--persist-database",
+        action="store_true",
+        help="persist the completed report as research candidates; never deploys or activates",
+    )
+    parser.add_argument("--repository-commit")
+    args = parser.parse_args()
+
+    repo = Path(__file__).resolve().parents[1]
+    strategy_path = repo / "research" / "strategy_candidates"
+    userdir = repo / "user_data"
+    _validate_run_id(args.run_id)
+    artifact_root = repo / "reports" / "backtests" / f"strategy-candidates-{args.run_id}"
+    config_dir = repo / "tmp" / "freqtrade_configs"
+    config_path = config_dir / f"strategy-candidates-{args.run_id}.json"
+    datadir = args.datadir.resolve()
+    freqtrade = args.freqtrade.resolve()
+    if not freqtrade.is_file() or not datadir.is_dir():
+        raise RuntimeError("Freqtrade binary or OKX data directory is missing")
+
+    candidates = _discover_candidates(strategy_path)
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        json.dumps(_config(strategy_path, userdir, datadir), indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    lookahead_config_path = config_dir / f"strategy-candidates-{args.run_id}-lookahead.json"
+    lookahead_config = _config(strategy_path, userdir, datadir)
+    lookahead_config["entry_pricing"]["price_side"] = "other"
+    lookahead_config["exit_pricing"]["price_side"] = "other"
+    lookahead_config_path.write_text(
+        json.dumps(lookahead_config, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    results: dict[str, dict[str, Any]] = {
+        item.class_name: {
+            "file": str(item.path.relative_to(repo)),
+            "sha256": item.sha256,
+            "static_check": "PASSED",
+            "loadable": True,
+            "windows": {},
+        }
+        for item in candidates
+    }
+    lookahead_path = artifact_root / "lookahead.csv"
+    lookahead_command = _run_lookahead(
+        freqtrade=freqtrade,
+        config_path=lookahead_config_path,
+        datadir=datadir,
+        strategy_path=strategy_path,
+        userdir=userdir,
+        artifact_root=artifact_root,
+        class_names=[item.class_name for item in candidates],
+    )
+    if lookahead_path.is_file():
+        by_strategy: dict[str, dict[str, str]] = {}
+        with lookahead_path.open(encoding="utf-8", newline="") as handle:
+            for row in csv.DictReader(handle):
+                by_strategy[row["strategy"]] = row
+        for candidate in candidates:
+            row = by_strategy.get(candidate.class_name)
+            results[candidate.class_name]["lookahead_analysis"] = {
+                "status": "PASSED" if row and row.get("has_bias") == "False" else "MISSING_OR_FAILED",
+                "has_bias": None if row is None else row.get("has_bias") == "True",
+                "total_signals": None if row is None else int(row["total_signals"]),
+                "biased_entry_signals": None if row is None else int(row["biased_entry_signals"]),
+                "biased_exit_signals": None if row is None else int(row["biased_exit_signals"]),
+            }
+    commands: list[list[str]] = [lookahead_command]
+    window_evidence: list[dict[str, Any]] = []
+    for name, kind, expected_regime, timerange in WINDOWS:
+        market_return = _market_return(datadir, timerange)
+        actual_regime = "bull" if market_return >= 0.05 else "bear" if market_return <= -0.05 else "range"
+        payload, command = _run_window(
+            freqtrade=freqtrade,
+            config_path=config_path,
+            datadir=datadir,
+            strategy_path=strategy_path,
+            userdir=userdir,
+            output_dir=artifact_root / name,
+            timerange=timerange,
+            class_names=[item.class_name for item in candidates],
+        )
+        commands.append(command)
+        if expected_regime is not None and actual_regime != expected_regime:
+            raise RuntimeError(f"{name} expected {expected_regime}, computed {actual_regime}")
+        window_evidence.append(
+            {
+                "name": name,
+                "kind": kind,
+                "timerange": timerange,
+                "market_return": round(market_return, 8),
+                "market_regime": actual_regime,
+            }
+        )
+        strategy_payload = payload.get("strategy") or {}
+        for candidate in candidates:
+            item = strategy_payload.get(candidate.class_name)
+            if not isinstance(item, dict):
+                results[candidate.class_name]["loadable"] = False
+                results[candidate.class_name]["windows"][name] = {"status": "MISSING"}
+                continue
+            metrics = _stress_metrics(item)
+            results[candidate.class_name]["windows"][name] = {"status": "SUCCESS", **metrics}
+
+    qualified: list[str] = []
+    for candidate in candidates:
+        item = results[candidate.class_name]
+        primary = item["windows"]["primary_bear"]
+        item["primary_score"] = _project_score(primary)
+        validation_names = ("wf_bull", "wf_range", "oos", "wf_bear")
+        validation_passed = all(
+            item["windows"][name].get("status") == "SUCCESS"
+            and item["windows"][name]["total_trades"] >= MIN_VALIDATION_TRADES
+            and item["windows"][name]["profit_pct"] > 0
+            and item["windows"][name]["max_drawdown_pct"] <= MAX_VALIDATION_DRAWDOWN
+            for name in validation_names
+        )
+        score_passed = item["primary_score"]["total_score"] >= MIN_STRATEGY_SCORE
+        lookahead_passed = item.get("lookahead_analysis", {}).get("status") == "PASSED"
+        item["validation_passed"] = validation_passed
+        item["score_threshold_passed"] = score_passed
+        item["deployable_candidate"] = bool(
+            item["loadable"] and lookahead_passed and validation_passed and score_passed
+        )
+        if item["deployable_candidate"]:
+            qualified.append(candidate.class_name)
+
+    report = {
+        "schema_version": "freqtrade-ai-strategy-candidate-research-v1",
+        "safety": {
+            "execution_scope": "LOCAL_BACKTEST_ONLY",
+            "allow_real_funds": False,
+            "real_orders": False,
+            "database_used": False,
+            "candidate_database_persistence_requested": args.persist_database,
+            "runtime_or_writer_touched": False,
+        },
+        "environment": {
+            "freqtrade_version": subprocess.run(
+                [str(freqtrade), "--version"], check=True, capture_output=True, text=True
+            ).stdout.strip(),
+            "pair": PAIR,
+            "timeframe": TIMEFRAME,
+            "market_data_file": str(datadir / "futures" / "BTC_USDT_USDT-15m-futures.feather"),
+            "market_data_sha256": _sha256(datadir / "futures" / "BTC_USDT_USDT-15m-futures.feather"),
+            "fee_per_side": FEE_PER_SIDE,
+            "slippage_per_side": SLIPPAGE_PER_SIDE,
+            "starting_balance": STARTING_BALANCE,
+            "lookahead_analysis_artifact": str(lookahead_path),
+        },
+        "selection_policy": {
+            "min_strategy_score": MIN_STRATEGY_SCORE,
+            "min_trades_per_validation_window": MIN_VALIDATION_TRADES,
+            "validation_requires_positive_net_profit": True,
+            "max_drawdown_per_validation_window": MAX_VALIDATION_DRAWDOWN,
+            "lookahead_analysis_required": True,
+            "score_source": "primary_bear net of fee and slippage",
+        },
+        "windows": window_evidence,
+        "candidates": results,
+        "qualified_candidates": qualified,
+        "commands": commands,
+        "limitations": [
+            "This standalone evidence is not a persisted StrategyValidationPlan.",
+            "Slippage is applied as a deterministic two-sided post-backtest stress cost.",
+            "Funding history is unavailable for these historical windows; Freqtrade reports zero funding fees.",
+        ],
+    }
+    requested_output = args.output or Path(f"reports/research/strategy-candidates-{args.run_id}.json")
+    output = requested_output if requested_output.is_absolute() else repo / requested_output
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+    print(output)
+    print(json.dumps({"qualified_candidates": qualified}, indent=2))
+    if args.persist_database:
+        if not args.repository_commit:
+            raise RuntimeError("--repository-commit is required with --persist-database")
+        sys.path.insert(0, str(repo / "backend"))
+        from app.db.session import session_scope
+        from app.services.strategy_research import StrategyResearchPersistenceService
+
+        with session_scope() as db:
+            service = StrategyResearchPersistenceService(db)
+            batch = service.persist_report(
+                output.resolve(),
+                run_id=args.run_id,
+                repository_commit=args.repository_commit,
+            )
+            service.attach_persistence_receipt(output.resolve(), batch)
+            print(
+                json.dumps(
+                    {
+                        "research_batch_id": batch.id,
+                        "generated_count": batch.generated_count,
+                        "persisted_count": batch.persisted_count,
+                        "qualified_count": batch.qualified_count,
+                        "rejected_count": batch.rejected_count,
+                        "allow_real_funds": False,
+                        "real_orders": False,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -17,6 +17,7 @@ from app.repositories.strategy_failure_reasons import StrategyFailureReasonRepos
 from app.repositories.strategy_scores import StrategyScoreRepository
 from app.repositories.strategies import StrategyRepository
 from app.repositories.strategy_generation_runs import StrategyGenerationRunRepository
+from app.repositories.strategy_research import StrategyResearchRepository
 from app.repositories.strategy_deployments import (
     StrategyDeploymentBlocked,
     StrategyDeploymentConflict,
@@ -35,6 +36,7 @@ __all__ = [
     "ResearchJobLinkageBlocked",
     "StrategyFailureReasonRepository",
     "StrategyGenerationRunRepository",
+    "StrategyResearchRepository",
     "StrategyDeploymentBlocked",
     "StrategyDeploymentConflict",
     "StrategyDeploymentRepository",
