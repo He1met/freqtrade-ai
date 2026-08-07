@@ -9,6 +9,7 @@ open a database, read credentials, start a runtime, or submit exchange orders.
 import argparse
 import ast
 import csv
+from datetime import datetime
 import hashlib
 import json
 import subprocess
@@ -35,6 +36,23 @@ WINDOWS = (
     ("oos", "OOS", None, "20250101-20251001"),
     ("wf_bear", "WALK_FORWARD", "bear", "20251001-20260201"),
 )
+
+
+def _validate_run_id(run_id: str) -> str:
+    formats = {
+        8: "%Y%m%d",
+        10: "%Y%m%d%H",
+        12: "%Y%m%d%H%M",
+        14: "%Y%m%d%H%M%S",
+    }
+    date_format = formats.get(len(run_id))
+    if date_format is None or not run_id.isdigit():
+        raise RuntimeError("run-id must be YYYYMMDD with optional HH, MM, and SS")
+    try:
+        datetime.strptime(run_id, date_format)
+    except ValueError as exc:
+        raise RuntimeError("run-id is not a valid calendar timestamp") from exc
+    return run_id
 
 
 @dataclass(frozen=True)
@@ -301,13 +319,18 @@ def main() -> int:
     parser.add_argument("--datadir", type=Path, required=True)
     parser.add_argument("--run-id", default="20260804")
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--persist-database",
+        action="store_true",
+        help="persist the completed report as research candidates; never deploys or activates",
+    )
+    parser.add_argument("--repository-commit")
     args = parser.parse_args()
 
     repo = Path(__file__).resolve().parents[1]
     strategy_path = repo / "research" / "strategy_candidates"
     userdir = repo / "user_data"
-    if not args.run_id.isdigit() or len(args.run_id) != 8:
-        raise RuntimeError("run-id must be an eight-digit YYYYMMDD value")
+    _validate_run_id(args.run_id)
     artifact_root = repo / "reports" / "backtests" / f"strategy-candidates-{args.run_id}"
     config_dir = repo / "tmp" / "freqtrade_configs"
     config_path = config_dir / f"strategy-candidates-{args.run_id}.json"
@@ -432,6 +455,7 @@ def main() -> int:
             "allow_real_funds": False,
             "real_orders": False,
             "database_used": False,
+            "candidate_database_persistence_requested": args.persist_database,
             "runtime_or_writer_touched": False,
         },
         "environment": {
@@ -471,6 +495,34 @@ def main() -> int:
     output.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
     print(output)
     print(json.dumps({"qualified_candidates": qualified}, indent=2))
+    if args.persist_database:
+        if not args.repository_commit:
+            raise RuntimeError("--repository-commit is required with --persist-database")
+        sys.path.insert(0, str(repo / "backend"))
+        from app.db.session import session_scope
+        from app.services.strategy_research import StrategyResearchPersistenceService
+
+        with session_scope() as db:
+            batch = StrategyResearchPersistenceService(db).persist_report(
+                output.resolve(),
+                run_id=args.run_id,
+                repository_commit=args.repository_commit,
+            )
+            print(
+                json.dumps(
+                    {
+                        "research_batch_id": batch.id,
+                        "generated_count": batch.generated_count,
+                        "persisted_count": batch.persisted_count,
+                        "qualified_count": batch.qualified_count,
+                        "rejected_count": batch.rejected_count,
+                        "allow_real_funds": False,
+                        "real_orders": False,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
     return 0
 
 

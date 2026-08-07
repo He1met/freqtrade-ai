@@ -13,6 +13,7 @@ from scripts.run_strategy_candidate_research import (
     _discover_candidates,
     _project_score,
     _stress_metrics,
+    _validate_run_id,
 )
 
 
@@ -75,3 +76,11 @@ def test_slippage_stress_and_project_score_are_deterministic() -> None:
     assert score["scoring_version"] == "phase2-quality-v1"
     assert score["total_score"] >= MIN_STRATEGY_SCORE
     assert MAX_VALIDATION_DRAWDOWN == 0.10
+
+
+def test_hourly_run_ids_are_unique_and_calendar_valid() -> None:
+    assert _validate_run_id("20260807") == "20260807"
+    assert _validate_run_id("2026080710") == "2026080710"
+    assert _validate_run_id("202608071059") == "202608071059"
+    with pytest.raises(RuntimeError, match="valid calendar"):
+        _validate_run_id("2026023010")

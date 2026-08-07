@@ -1,7 +1,12 @@
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { combineDataSources } from "../api/sourceState";
 import type { DataSourceTraceSummary } from "../api/types";
+import {
+  fetchStrategyResearchBatches,
+  type StrategyResearchBatch,
+} from "../api/strategyResearchApi";
 import { useMvpData } from "../api/useMvpData";
 import {
   CompactText,
@@ -61,6 +66,29 @@ function StrategyTechnicalDetails({
 export function Strategies() {
   const { data, sources, isLoading, error } = useMvpData();
   const source = combineDataSources(sources, ["strategies", "strategyVersions"]);
+  const [researchBatches, setResearchBatches] = useState<StrategyResearchBatch[]>([]);
+  const [researchLoading, setResearchLoading] = useState(true);
+  const [researchError, setResearchError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchStrategyResearchBatches(controller.signal)
+      .then((batches) => {
+        setResearchBatches(batches);
+        setResearchError(null);
+      })
+      .catch((reason: unknown) => {
+        if (!controller.signal.aborted) {
+          setResearchError(reason instanceof Error ? reason.message : String(reason));
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setResearchLoading(false);
+      });
+    return () => controller.abort();
+  }, []);
+
+  const latestResearch = researchBatches[0];
 
   return (
     <section className="page strategy-page">
@@ -75,6 +103,70 @@ export function Strategies() {
         isLoading={isLoading}
         source={source}
       />
+      <section className="strategy-research-summary" aria-label="研究候选批次">
+        <div className="strategy-research-summary__heading">
+          <div>
+            <h2>研究候选（不计入正式策略数）</h2>
+            <p>候选生成、验证和拒绝证据独立持久化；只有统一质量门全部通过才进入部署评审。</p>
+          </div>
+          <StatusBadge
+            label={researchLoading ? "读取中" : latestResearch?.status ?? "尚未生成"}
+            status={researchLoading ? "RUNNING" : latestResearch?.status ?? "MISSING"}
+          />
+        </div>
+        {researchError ? (
+          <EmptyState
+            title="研究批次状态未知"
+            description={`候选批次 API 读取失败：${researchError}。这不表示没有生成，也不表示候选已被拒绝。`}
+          />
+        ) : null}
+        {!researchLoading && !researchError && !latestResearch ? (
+          <EmptyState
+            title="尚无持久化研究批次"
+            description="数据库中没有研究批次，表示尚未完成生成与入库；不能解释为 10 条候选已验证不合格。"
+          />
+        ) : null}
+        {latestResearch ? (
+          <>
+            <dl className="strategy-research-counts">
+              <div><dt>本轮生成</dt><dd>{latestResearch.generated_count}</dd></div>
+              <div><dt>持久化入库</dt><dd>{latestResearch.persisted_count}</dd></div>
+              <div><dt>合格</dt><dd>{latestResearch.qualified_count}</dd></div>
+              <div><dt>拒绝</dt><dd>{latestResearch.rejected_count}</dd></div>
+            </dl>
+            <p className="strategy-research-freshness">
+              最近持久化批次：{latestResearch.completed_at ?? latestResearch.created_at}。该时间之后若自动化因所有权门禁停止，必须查运行记忆，不能把旧批次当成本小时已生成。
+            </p>
+            {latestResearch.failure_reason ? (
+              <p className="strategy-inline-problem">
+                失败原因：{latestResearch.failure_reason}
+              </p>
+            ) : null}
+            <details className="strategy-technical-details">
+              <summary>查看批次 {latestResearch.run_id} 的候选与拒绝原因</summary>
+              <ul className="strategy-research-candidates">
+                {latestResearch.candidates.map((candidate) => (
+                  <li key={candidate.id}>
+                    <div>
+                      <strong>{candidate.candidate_name}</strong>
+                      <StatusBadge showRaw status={candidate.status} />
+                    </div>
+                    {candidate.rejection_reasons.length ? (
+                      <ul>
+                        {candidate.rejection_reasons.map((reason, index) => (
+                          <li key={`${reason.code}-${index}`}>{reason.code}：{reason.message}</li>
+                        ))}
+                      </ul>
+                    ) : <p>全部研究质量门通过，等待容量与唯一主任务评审。</p>}
+                  </li>
+                ))}
+              </ul>
+              <CopyableValue label="研究报告路径" value={latestResearch.report_path} />
+              <CopyableValue label="研究报告摘要" value={latestResearch.report_digest} />
+            </details>
+          </>
+        ) : null}
+      </section>
       <div className="table-shell strategy-list-table-shell">
         <table className="strategy-list-table">
           <colgroup>

@@ -164,6 +164,12 @@ from app.schemas.strategy_generation_run import (
     StrategyGenerationRunRead,
     StrategyGenerationRunStatusUpdate,
 )
+from app.schemas.strategy_research import (
+    ResearchBatchStatus,
+    ResearchCandidateStatus,
+    StrategyResearchBatchRead,
+    StrategyResearchCandidateRead,
+)
 from app.schemas.deepseek_backtest_loop import (
     DeepSeekBacktestExecutionRead,
     DeepSeekBacktestLoopRequest,
@@ -203,6 +209,10 @@ __all__ = [
     "ResearchJobStatus",
     "ResearchWorkerControlRead",
     "ResearchWorkerPauseRequest",
+    "ResearchBatchStatus",
+    "ResearchCandidateStatus",
+    "StrategyResearchBatchRead",
+    "StrategyResearchCandidateRead",
     "operation_error_evidence",
     "BacktestProfileDataSource",
     "BacktestProfileSafety",
