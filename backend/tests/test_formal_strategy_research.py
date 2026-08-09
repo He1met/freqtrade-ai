@@ -96,6 +96,27 @@ def test_formal_research_starts_exact_ten_candidate_shared_worker(tmp_path, monk
     assert calls[0][1]["pass_fds"]
 
 
+def test_formal_research_uses_nested_okx_data_when_root_futures_also_exists(
+    tmp_path, monkeypatch
+):
+    coordinator = build_coordinator(tmp_path, monkeypatch)
+    root_market = (
+        coordinator.repo
+        / "user_data/data/futures/BTC_USDT_USDT-15m-futures.feather"
+    )
+    nested_market = (
+        coordinator.repo
+        / "user_data/data/okx/futures/BTC_USDT_USDT-15m-futures.feather"
+    )
+    root_market.unlink()
+    nested_market.parent.mkdir(parents=True)
+    nested_market.write_bytes(b"fixture")
+
+    _, datadir = coordinator._paths()
+
+    assert datadir == coordinator.repo / "user_data/data/okx"
+
+
 def test_formal_research_reports_exact_candidate_count_blocker(tmp_path, monkeypatch):
     coordinator = build_coordinator(tmp_path, monkeypatch)
     next((coordinator.repo / "research/strategy_candidates").glob("*.py")).unlink()
