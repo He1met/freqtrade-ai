@@ -243,6 +243,16 @@ class FakeStopEvent:
         return self.calls > 1
 
 
+class MultiRoundStopEvent:
+    def __init__(self, rounds):
+        self.rounds = rounds
+        self.calls = 0
+
+    def wait(self, _seconds):
+        self.calls += 1
+        return self.calls > self.rounds
+
+
 class FakeAdapter:
     def __init__(self, *, startup_status="RECONCILED", resumable=False):
         self.events = []
@@ -374,6 +384,266 @@ def test_runtime_orders_reconciliation_before_writer_and_keeps_drift_alive(
     assert db.closed is True
     assert db.commits == 4
     assert db.rollbacks == 0
+
+
+def test_transient_reconciliation_failure_freezes_openings_and_continues_next_round(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    events = []
+    readiness = []
+    guard_failures = []
+    recovered_grant_checks = []
+    grant_terminalizations = []
+    grant_settlements = []
+    lock_releases = []
+
+    class TransientThenHealthyAdapter(FakeAdapter):
+        def __init__(self):
+            super().__init__()
+            self.observations = 0
+
+        def observe(self, **_kwargs):
+            self.observations += 1
+            self.events.append(("observe", self.observations))
+            if self.observations == 1:
+                raise OkxDemoReconciliationBlocked(
+                    "pending_orders pagination is temporarily incomplete"
+                )
+            return reconciliation("RECONCILED")
+
+        def run_active_one_shot(self, **_kwargs):
+            self.events.append("one-shot-check")
+            return "NONE"
+
+    class RuntimeDatabase(FakeDatabaseSession):
+        def execute(self, _statement, _parameters=None):
+            return SimpleNamespace(scalar_one=lambda: 41)
+
+    adapter = TransientThenHealthyAdapter()
+    server = FakeServerSession(events)
+    db = RuntimeDatabase()
+    connection = SimpleNamespace(close=lambda: events.append("connection-closed"))
+    engine = SimpleNamespace(
+        connect=lambda: connection,
+        dispose=lambda: events.append("engine-disposed"),
+    )
+    stop = MultiRoundStopEvent(rounds=2)
+    monkeypatch.setattr(runtime_service, "STOP_EVENT", stop)
+    monkeypatch.setattr(runtime_service, "Session", lambda bind: db)
+    monkeypatch.setattr(
+        runtime_service,
+        "create_okx_demo_server_session",
+        lambda *_args, **_kwargs: server,
+    )
+    monkeypatch.setattr(
+        runtime_service,
+        "acquire_one_shot_runtime_lock",
+        lambda _db: True,
+    )
+    monkeypatch.setattr(
+        runtime_service,
+        "release_one_shot_runtime_lock",
+        lambda _db: (lock_releases.append("released") or True),
+    )
+    monkeypatch.setattr(
+        runtime_service,
+        "arm_finalized_canary_consent",
+        lambda _db, *, runtime_instance_id: (
+            recovered_grant_checks.append(runtime_instance_id) or None
+        ),
+    )
+    monkeypatch.setattr(
+        runtime_service,
+        "process_pending_canary_consent_handoff",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        runtime_service,
+        "process_pending_canary_attestation",
+        lambda **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        runtime_service,
+        "settle_canary_consent_handoff",
+        lambda *_args, **_kwargs: grant_settlements.append("settled"),
+    )
+    monkeypatch.setattr(
+        runtime_service,
+        "fail_canary_grant_before_prepare",
+        lambda *_args, **_kwargs: grant_terminalizations.append("failed"),
+    )
+    monkeypatch.setattr(
+        runtime_service.OkxDemoAutomationGuard,
+        "record_health",
+        lambda *_args, **_kwargs: "RUNNING",
+    )
+    monkeypatch.setattr(
+        runtime_service.OkxDemoAutomationGuard,
+        "opening_allowed",
+        lambda *_args, **_kwargs: True,
+    )
+
+    def _record_failure(_db, *, failure_class, reconciliation_run_id=None, **_kwargs):
+        guard_failures.append((failure_class, reconciliation_run_id))
+        return "BLOCKED"
+
+    monkeypatch.setattr(
+        runtime_service.OkxDemoAutomationGuard,
+        "record_failure",
+        _record_failure,
+    )
+    monkeypatch.setattr(
+        runtime_service,
+        "_write_readiness",
+        lambda _path, payload: readiness.append(dict(payload)),
+    )
+
+    runtime_service.serve(
+        environment={"DATABASE_URL": "postgresql+psycopg:///isolated"},
+        runtime_path=tmp_path,
+        reconciliation_factory=lambda: adapter,
+        engine_factory=lambda *_args, **_kwargs: engine,
+        now_provider=lambda: NOW,
+    )
+
+    transient = [
+        item
+        for item in readiness
+        if item["status"] == "BLOCKED_OPENINGS"
+        and item["reconciliation"] == "UNKNOWN"
+    ]
+    assert len(transient) == 1
+    assert transient[0]["automation_guard"] == "BLOCKED"
+    assert guard_failures == [("RECONCILIATION_TRANSIENT", 41)]
+    assert adapter.events == [
+        "startup-reconcile",
+        "one-shot-check",
+        ("observe", 1),
+        "one-shot-check",
+        ("observe", 2),
+        ("cycle", True),
+    ]
+    assert readiness[-1]["status"] == "READY"
+    assert readiness[-1]["reconciliation"] == "RECONCILED"
+    assert server.writer.calls == []
+    assert recovered_grant_checks == ["Runtime00000001", "Runtime00000001"]
+    assert grant_terminalizations == []
+    assert grant_settlements == []
+    assert lock_releases == ["released", "released"]
+    assert stop.calls == 3
+    assert adapter.closed is True
+    assert server.closed is True
+    assert db.closed is True
+    assert "connection-closed" in events
+    assert "engine-disposed" in events
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        OkxDemoReconciliationBlocked("exchange order drift mismatch"),
+        OkxDemoWriteBlocked("writer invariant failed"),
+        runtime_service.OkxReadAdapterError(
+            kind="UNAUTHORIZED",
+            status="BLOCKED",
+            message="authentication failed",
+        ),
+    ],
+    ids=["reconciliation", "writer", "authentication"],
+)
+def test_non_transient_runtime_failures_still_exit_fail_closed(
+    monkeypatch,
+    tmp_path: Path,
+    failure: Exception,
+) -> None:
+    events = []
+    guard_failures = []
+
+    class FailingObservationAdapter(FakeAdapter):
+        def observe(self, **_kwargs):
+            self.events.append("observe-failed")
+            raise failure
+
+    class RuntimeDatabase(FakeDatabaseSession):
+        def execute(self, _statement, _parameters=None):
+            return SimpleNamespace(scalar_one=lambda: 41)
+
+    adapter = FailingObservationAdapter()
+    server = FakeServerSession(events)
+    db = RuntimeDatabase()
+    connection = SimpleNamespace(close=lambda: events.append("connection-closed"))
+    engine = SimpleNamespace(
+        connect=lambda: connection,
+        dispose=lambda: events.append("engine-disposed"),
+    )
+    monkeypatch.setattr(runtime_service, "STOP_EVENT", MultiRoundStopEvent(rounds=2))
+    monkeypatch.setattr(runtime_service, "Session", lambda bind: db)
+    monkeypatch.setattr(
+        runtime_service,
+        "create_okx_demo_server_session",
+        lambda *_args, **_kwargs: server,
+    )
+    monkeypatch.setattr(
+        runtime_service,
+        "acquire_one_shot_runtime_lock",
+        lambda _db: True,
+    )
+    monkeypatch.setattr(
+        runtime_service,
+        "release_one_shot_runtime_lock",
+        lambda _db: True,
+    )
+    monkeypatch.setattr(
+        runtime_service,
+        "process_pending_canary_consent_handoff",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        runtime_service,
+        "process_pending_canary_attestation",
+        lambda **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        runtime_service.OkxDemoAutomationGuard,
+        "record_health",
+        lambda *_args, **_kwargs: "RUNNING",
+    )
+    monkeypatch.setattr(
+        runtime_service.OkxDemoAutomationGuard,
+        "opening_allowed",
+        lambda *_args, **_kwargs: True,
+    )
+
+    def _record_failure(_db, *, failure_class, reconciliation_run_id=None, **_kwargs):
+        guard_failures.append((failure_class, reconciliation_run_id))
+        return "BLOCKED"
+
+    monkeypatch.setattr(
+        runtime_service.OkxDemoAutomationGuard,
+        "record_failure",
+        _record_failure,
+    )
+    monkeypatch.setattr(runtime_service, "_write_readiness", lambda *_args: None)
+
+    with pytest.raises(type(failure)):
+        runtime_service.serve(
+            environment={"DATABASE_URL": "postgresql+psycopg:///isolated"},
+            runtime_path=tmp_path,
+            reconciliation_factory=lambda: adapter,
+            engine_factory=lambda *_args, **_kwargs: engine,
+            now_provider=lambda: NOW,
+        )
+
+    assert len(guard_failures) == 1
+    assert guard_failures[0][1] == 41
+    assert adapter.events == ["startup-reconcile", "one-shot-check", "observe-failed"]
+    assert server.writer.calls == []
+    assert adapter.closed is True
+    assert server.closed is True
+    assert db.closed is True
+    assert "connection-closed" in events
+    assert "engine-disposed" in events
 
 
 def test_runtime_restart_allows_only_exact_controlled_canary_recovery(
