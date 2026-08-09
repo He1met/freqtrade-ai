@@ -7,18 +7,18 @@ export type StrategyResearchRejectionReason = {
 };
 
 export type StrategyResearchQualityContract = {
-  contract_version: "formal-strategy-research-aggressive-v1";
-  risk_profile: "AGGRESSIVE";
-  profile_label: "进攻型：最大回撤 15%";
-  min_strategy_score: 50;
-  min_trades_per_validation_window: 30;
-  validation_requires_positive_net_profit: true;
-  max_drawdown_per_validation_window: 0.15;
-  lookahead_analysis_required: true;
-  fee_per_side: 0.0005;
-  slippage_per_side: 0.0002;
-  required_validation_windows: ["wf_bull", "wf_range", "oos", "wf_bear"];
-  score_source: string;
+  contract_version?: string;
+  risk_profile?: string;
+  profile_label?: string;
+  min_strategy_score?: number;
+  min_trades_per_validation_window?: number;
+  validation_requires_positive_net_profit?: boolean;
+  max_drawdown_per_validation_window?: number;
+  lookahead_analysis_required?: boolean;
+  fee_per_side?: number;
+  slippage_per_side?: number;
+  required_validation_windows?: string[];
+  score_source?: string;
 };
 
 export type StrategyResearchCandidate = {

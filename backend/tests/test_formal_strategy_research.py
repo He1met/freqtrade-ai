@@ -337,7 +337,10 @@ def test_formal_research_recovers_persisted_batch_without_replay(tmp_path, monke
                 qualified_count=0,
                 rejected_count=10,
                 safety_snapshot={"allow_real_funds": False, "real_orders": False},
-                selection_policy={},
+                selection_policy={
+                    "max_drawdown_per_validation_window": 0.10,
+                    "validation_requires_positive_net_profit": True,
+                },
                 window_evidence=[],
                 completed_at=NOW - timedelta(minutes=1),
             )
@@ -351,6 +354,10 @@ def test_formal_research_recovers_persisted_batch_without_replay(tmp_path, monke
     assert result.requested_count == 10
     assert result.generated_count == 10
     assert result.persisted_count == 10
+    assert result.quality_contract == {
+        "max_drawdown_per_validation_window": 0.10,
+        "validation_requires_positive_net_profit": True,
+    }
     assert calls == []
     terminal = json.loads(coordinator.state_path.read_text())
     assert terminal["status"] == "COMPLETED"

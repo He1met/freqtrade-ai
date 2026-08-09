@@ -344,6 +344,10 @@ class FormalStrategyResearchCoordinator:
             "qualified_count": batch.qualified_count,
             "rejected_count": batch.rejected_count,
             "deployment_handoff_status": handoff,
+            # A completed run is historical evidence.  Project the exact
+            # contract persisted with that batch instead of silently applying
+            # today's default contract to older research.
+            "quality_contract": dict(batch.selection_policy or {}),
         }
 
     def status(self, db: Session) -> FormalResearchRunRead:

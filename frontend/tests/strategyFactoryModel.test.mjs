@@ -9,6 +9,7 @@ import {
   hasOfficialAggressiveContract,
   hasOfficialSafetyContract,
   lifecycleSummaryText,
+  researchQualityContractText,
   validatedCandidateCount,
 } from "../src/pages/strategyFactoryModel.ts";
 
@@ -69,6 +70,22 @@ test("manual entry fails closed unless the API exposes the exact aggressive cont
     ...ready,
     quality_contract: { ...aggressiveContract, max_drawdown_per_validation_window: 0.16 },
   }, false), false);
+});
+
+test("quality contract copy preserves historical batch thresholds", () => {
+  const legacy = {
+    quality_contract: {
+      max_drawdown_per_validation_window: 0.10,
+      validation_requires_positive_net_profit: true,
+    },
+  };
+  assert.match(researchQualityContractText(legacy), /历史批次契约/);
+  assert.match(researchQualityContractText(legacy), /最大回撤 10%/);
+  assert.match(researchQualityContractText(legacy), /不得自动部署/);
+  assert.match(
+    researchQualityContractText({ quality_contract: aggressiveContract }),
+    /匹配当前 official contract/,
+  );
 });
 
 test("manual entry rejects unsafe or incomplete execution target evidence", () => {
