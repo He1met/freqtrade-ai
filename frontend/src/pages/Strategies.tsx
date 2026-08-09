@@ -218,6 +218,26 @@ export function Strategies() {
             ))}
           </details>
         ) : null}
+        {workspace.data?.sections.quality.status === "UNKNOWN" ? (
+          <p className="formal-problem">分钟数据质量投影不可用；新鲜度、连续性、重复与时区对齐均保持未知。</p>
+        ) : workspace.data?.latest_quality_receipt ? (
+          <details className="formal-disclosure">
+            <summary>查看分钟数据质量证据</summary>
+            <dl className="formal-summary-list">
+              <div><dt>结论</dt><dd><StatusBadge status={workspace.data.latest_quality_receipt.status} /></dd></div>
+              <div><dt>市场 / 周期</dt><dd>{workspace.data.latest_quality_receipt.exchange} · {workspace.data.latest_quality_receipt.pair} · {workspace.data.latest_quality_receipt.timeframe}</dd></div>
+              <div><dt>检查时间</dt><dd>{displayDateTime(workspace.data.latest_quality_receipt.inspected_at)}</dd></div>
+              <div><dt>覆盖窗口</dt><dd>{displayDateTime(workspace.data.latest_quality_receipt.first_open_at)} → {displayDateTime(workspace.data.latest_quality_receipt.last_open_at)}</dd></div>
+              <div><dt>行数 / 间隔</dt><dd>{workspace.data.latest_quality_receipt.row_count} 行 · {workspace.data.latest_quality_receipt.expected_interval_seconds} 秒</dd></div>
+              <div><dt>数据新鲜度</dt><dd>{workspace.data.latest_quality_receipt.freshness_seconds === null ? "未知" : `${Math.round(workspace.data.latest_quality_receipt.freshness_seconds / 60)} 分钟`}</dd></div>
+              <div><dt>连续性</dt><dd>缺口 {workspace.data.latest_quality_receipt.missing_interval_count} · 错位 {workspace.data.latest_quality_receipt.misaligned_timestamp_count} · 乱序 {workspace.data.latest_quality_receipt.out_of_order_count}</dd></div>
+              <div><dt>重复 / OHLCV</dt><dd>重复 {workspace.data.latest_quality_receipt.duplicate_timestamp_count} · 空值 {workspace.data.latest_quality_receipt.null_ohlcv_count} · 无效 OHLC {workspace.data.latest_quality_receipt.invalid_ohlc_count} · 负成交量 {workspace.data.latest_quality_receipt.negative_volume_count}</dd></div>
+              <div><dt>原因代码</dt><dd>{workspace.data.latest_quality_receipt.reason_codes.length ? workspace.data.latest_quality_receipt.reason_codes.join("、") : "无阻断原因"}</dd></div>
+            </dl>
+          </details>
+        ) : workspace.data?.sections.quality.status === "AVAILABLE" ? (
+          <p className="formal-muted">尚无分钟数据质量 receipt；这不等于数据已通过检查。</p>
+        ) : null}
       </section>
 
       <FallbackNotice
