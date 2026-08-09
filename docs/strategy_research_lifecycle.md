@@ -28,15 +28,20 @@ python scripts/run_strategy_candidate_research.py \
   --repository-commit <exact-candidate-commit>
 ```
 
-If generation or validation fails after ownership has been established, record
-the stage without claiming that ten candidates were rejected:
+If generation or validation fails after ownership has been established, the
+runner automatically writes a failure report. Once candidate discovery has
+completed, it also persists all ten candidates as `VALIDATION_FAILED` with the
+partial evidence collected so far. A pre-generation failure remains a zero
+candidate batch and is never described as ten rejected candidates.
+
+If database persistence was unavailable during the run, ingest the durable
+failure report later without re-running backtests:
 
 ```bash
 python scripts/persist_strategy_candidate_research.py \
+  --failure-report reports/research/strategy-candidates-YYYYMMDDHH.json \
   --run-id YYYYMMDDHH \
-  --repository-commit <exact-candidate-commit> \
-  --stage LOOKAHEAD \
-  --failure-reason "sanitized failure summary"
+  --repository-commit <exact-candidate-commit>
 ```
 
 Read-only handoff endpoints:

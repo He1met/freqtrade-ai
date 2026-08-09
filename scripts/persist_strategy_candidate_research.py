@@ -11,6 +11,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     outcome = parser.add_mutually_exclusive_group(required=True)
     outcome.add_argument("--report", type=Path)
+    outcome.add_argument("--failure-report", type=Path)
     outcome.add_argument("--failure-reason")
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--repository-commit", required=True)
@@ -33,6 +34,28 @@ def main() -> int:
                 repository_commit=args.repository_commit,
             )
             service.attach_persistence_receipt(report_path.resolve(), batch)
+        elif args.failure_report is not None:
+            failure_path = (
+                args.failure_report
+                if args.failure_report.is_absolute()
+                else repo / args.failure_report
+            ).resolve()
+            payload = json.loads(failure_path.read_text(encoding="utf-8"))
+            if (
+                payload.get("schema_version")
+                != "freqtrade-ai-strategy-candidate-research-failure-v1"
+            ):
+                raise RuntimeError("unsupported research failure report schema")
+            batch = service.record_failed_batch(
+                run_id=args.run_id,
+                repository_commit=args.repository_commit,
+                stage=str(payload.get("failed_stage") or args.stage),
+                failure_reason=str(payload.get("failure_reason") or "unspecified failure"),
+                requested_count=int(payload.get("requested_count") or 10),
+                candidate_evidence=payload.get("candidates") or [],
+                report_path=str(failure_path),
+            )
+            service.attach_persistence_receipt(failure_path, batch)
         else:
             batch = service.record_failed_batch(
                 run_id=args.run_id,

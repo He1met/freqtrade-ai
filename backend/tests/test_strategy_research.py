@@ -123,6 +123,30 @@ def test_rejects_non_demo_safe_report(db, tmp_path):
         )
 
 
+@pytest.mark.parametrize(
+    ("section", "field", "value"),
+    [
+        ("selection_policy", "min_strategy_score", 49.99),
+        ("selection_policy", "min_trades_per_validation_window", 29),
+        ("selection_policy", "max_drawdown_per_validation_window", 0.1001),
+        ("selection_policy", "validation_requires_positive_net_profit", False),
+        ("selection_policy", "lookahead_analysis_required", False),
+        ("environment", "fee_per_side", 0.00049),
+        ("environment", "slippage_per_side", 0.00019),
+    ],
+)
+def test_report_cannot_weaken_hard_gate_contract(db, tmp_path, section, field, value):
+    payload = json.loads(REPORT.read_text())
+    payload[section][field] = value
+    weakened = tmp_path / f"weakened-{field}.json"
+    weakened.write_text(json.dumps(payload))
+
+    with pytest.raises(StrategyResearchReportError, match="weakens"):
+        StrategyResearchPersistenceService(db).persist_report(
+            weakened, run_id=f"weakened-{field}", repository_commit="a" * 40
+        )
+
+
 def test_missing_independent_window_is_an_auditable_rejection(db, tmp_path):
     payload = json.loads(REPORT.read_text())
     name = next(iter(payload["candidates"]))
@@ -135,6 +159,20 @@ def test_missing_independent_window_is_an_auditable_rejection(db, tmp_path):
     )
     candidate = next(item for item in batch.candidates if item.candidate_name == name)
     assert any(reason["code"] == "WINDOW_MISSING" for reason in candidate.rejection_reasons)
+
+
+def test_window_cannot_claim_validation_without_cost_stress(db, tmp_path):
+    payload = json.loads(REPORT.read_text())
+    name = next(iter(payload["candidates"]))
+    payload["candidates"][name]["windows"]["oos"]["slippage_per_side"] = 0
+    unstressed = tmp_path / "unstressed.json"
+    unstressed.write_text(json.dumps(payload))
+
+    batch = StrategyResearchPersistenceService(db).persist_report(
+        unstressed, run_id="unstressed", repository_commit="a" * 40
+    )
+    candidate = next(item for item in batch.candidates if item.candidate_name == name)
+    assert any(reason["code"] == "COST_STRESS_MISSING" for reason in candidate.rejection_reasons)
 
 
 def test_failed_batch_preserves_stage_without_candidate_rejection_claims(db):
@@ -152,3 +190,37 @@ def test_failed_batch_preserves_stage_without_candidate_rejection_claims(db):
     assert batch.rejected_count == 0
     assert batch.safety_snapshot["failed_stage"] == "LOOKAHEAD"
     assert "should-not-leak" not in batch.failure_reason
+
+
+def test_failed_validation_persists_every_generated_candidate(db):
+    payload = json.loads(REPORT.read_text())
+    candidates = [
+        {
+            "candidate_name": name,
+            "source_path": evidence["file"],
+            "code_digest": evidence["sha256"],
+            "evidence_snapshot": evidence,
+        }
+        for name, evidence in sorted(payload["candidates"].items())
+    ]
+
+    batch = StrategyResearchPersistenceService(db).record_failed_batch(
+        run_id="failed-window-run",
+        repository_commit="b" * 40,
+        stage="WINDOW_WF_BEAR",
+        failure_reason="backtest process exited 2",
+        candidate_evidence=candidates,
+        report_path="reports/research/failed-window-run.json",
+    )
+
+    assert batch.status == "FAILED"
+    assert batch.generated_count == 10
+    assert batch.persisted_count == 10
+    assert batch.qualified_count == 0
+    assert batch.rejected_count == 0
+    assert len(batch.candidates) == 10
+    assert {candidate.status for candidate in batch.candidates} == {"VALIDATION_FAILED"}
+    assert all(
+        candidate.rejection_reasons[0]["evidence"]["stage"] == "WINDOW_WF_BEAR"
+        for candidate in batch.candidates
+    )

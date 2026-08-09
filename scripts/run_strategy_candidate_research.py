@@ -12,6 +12,7 @@ import csv
 from datetime import datetime
 import hashlib
 import json
+import re
 import subprocess
 import sys
 import zipfile
@@ -37,6 +38,8 @@ WINDOWS = (
     ("wf_bear", "WALK_FORWARD", "bear", "20251001-20260201"),
 )
 
+_FAILURE_CONTEXT: dict[str, Any] = {}
+
 
 def _validate_run_id(run_id: str) -> str:
     formats = {
@@ -60,6 +63,80 @@ class Candidate:
     class_name: str
     path: Path
     sha256: str
+
+
+def _safe_error(reason: str) -> str:
+    return re.sub(
+        r"(?i)\b(api[_-]?key|secret|password|passphrase|token)(\s*[:=]\s*)\S+",
+        r"\1\2[REDACTED]",
+        reason,
+    )[:2000]
+
+
+def _failure_candidate_evidence(
+    repo: Path, candidates: list[Candidate], results: dict[str, dict[str, Any]]
+) -> list[dict[str, Any]]:
+    evidence: list[dict[str, Any]] = []
+    for candidate in candidates:
+        evidence.append(
+            {
+                "candidate_name": candidate.class_name,
+                "source_path": str(candidate.path.relative_to(repo)),
+                "code_digest": candidate.sha256,
+                "evidence_snapshot": results.get(candidate.class_name, {}),
+            }
+        )
+    return evidence
+
+
+def _record_unhandled_failure(error: BaseException) -> None:
+    context = _FAILURE_CONTEXT
+    args = context.get("args")
+    repo = context.get("repo")
+    output = context.get("output")
+    if args is None or repo is None or output is None:
+        return
+    safe_reason = _safe_error(f"{type(error).__name__}: {error}")
+    candidate_evidence = _failure_candidate_evidence(
+        repo, context.get("candidates") or [], context.get("results") or {}
+    )
+    failure_report = {
+        "schema_version": "freqtrade-ai-strategy-candidate-research-failure-v1",
+        "run_id": args.run_id,
+        "status": "FAILED",
+        "failed_stage": context.get("stage", "UNKNOWN"),
+        "failure_reason": safe_reason,
+        "requested_count": 10,
+        "generated_count": len(candidate_evidence),
+        "persisted_count": 0,
+        "candidates": candidate_evidence,
+        "safety": {
+            "execution_scope": "LOCAL_BACKTEST_ONLY",
+            "allow_real_funds": False,
+            "real_orders": False,
+            "runtime_or_writer_touched": False,
+        },
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(failure_report, indent=2, sort_keys=True), encoding="utf-8")
+    if not args.persist_database:
+        return
+    if not args.repository_commit:
+        raise RuntimeError("--repository-commit is required with --persist-database")
+    sys.path.insert(0, str(repo / "backend"))
+    from app.db.session import session_scope
+    from app.services.strategy_research import StrategyResearchPersistenceService
+
+    with session_scope() as db:
+        batch = StrategyResearchPersistenceService(db).record_failed_batch(
+            run_id=args.run_id,
+            repository_commit=args.repository_commit,
+            stage=context.get("stage", "UNKNOWN"),
+            failure_reason=safe_reason,
+            candidate_evidence=candidate_evidence,
+            report_path=str(output),
+        )
+        StrategyResearchPersistenceService(db).attach_persistence_receipt(output, batch)
 
 
 def _sha256(path: Path) -> str:
@@ -330,6 +407,21 @@ def main() -> int:
     repo = Path(__file__).resolve().parents[1]
     strategy_path = repo / "research" / "strategy_candidates"
     userdir = repo / "user_data"
+    requested_output = args.output or Path(
+        f"reports/research/strategy-candidates-{args.run_id}.json"
+    )
+    output = requested_output if requested_output.is_absolute() else repo / requested_output
+    _FAILURE_CONTEXT.update(
+        {
+            "args": args,
+            "repo": repo,
+            "strategy_path": strategy_path,
+            "output": output,
+            "stage": "PREFLIGHT",
+            "results": {},
+            "candidates": [],
+        }
+    )
     _validate_run_id(args.run_id)
     artifact_root = repo / "reports" / "backtests" / f"strategy-candidates-{args.run_id}"
     config_dir = repo / "tmp" / "freqtrade_configs"
@@ -340,6 +432,7 @@ def main() -> int:
         raise RuntimeError("Freqtrade binary or OKX data directory is missing")
 
     candidates = _discover_candidates(strategy_path)
+    _FAILURE_CONTEXT["candidates"] = candidates
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path.write_text(
         json.dumps(_config(strategy_path, userdir, datadir), indent=2, sort_keys=True),
@@ -364,6 +457,7 @@ def main() -> int:
         }
         for item in candidates
     }
+    _FAILURE_CONTEXT.update({"stage": "LOOKAHEAD", "results": results})
     lookahead_path = artifact_root / "lookahead.csv"
     lookahead_command = _run_lookahead(
         freqtrade=freqtrade,
@@ -391,6 +485,7 @@ def main() -> int:
     commands: list[list[str]] = [lookahead_command]
     window_evidence: list[dict[str, Any]] = []
     for name, kind, expected_regime, timerange in WINDOWS:
+        _FAILURE_CONTEXT["stage"] = f"WINDOW_{name.upper()}"
         market_return = _market_return(datadir, timerange)
         actual_regime = "bull" if market_return >= 0.05 else "bear" if market_return <= -0.05 else "range"
         payload, command = _run_window(
@@ -489,13 +584,13 @@ def main() -> int:
             "Funding history is unavailable for these historical windows; Freqtrade reports zero funding fees.",
         ],
     }
-    requested_output = args.output or Path(f"reports/research/strategy-candidates-{args.run_id}.json")
-    output = requested_output if requested_output.is_absolute() else repo / requested_output
+    _FAILURE_CONTEXT["stage"] = "REPORT_WRITE"
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
     print(output)
     print(json.dumps({"qualified_candidates": qualified}, indent=2))
     if args.persist_database:
+        _FAILURE_CONTEXT["stage"] = "DATABASE_PERSISTENCE"
         if not args.repository_commit:
             raise RuntimeError("--repository-commit is required with --persist-database")
         sys.path.insert(0, str(repo / "backend"))
@@ -525,8 +620,19 @@ def main() -> int:
                     sort_keys=True,
                 )
             )
+    _FAILURE_CONTEXT.clear()
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except BaseException as exc:
+        try:
+            _record_unhandled_failure(exc)
+        except BaseException as persistence_exc:
+            print(
+                f"failed to persist research failure evidence: {_safe_error(str(persistence_exc))}",
+                file=sys.stderr,
+            )
+        raise

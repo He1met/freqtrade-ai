@@ -1,3 +1,5 @@
+from argparse import Namespace
+import json
 from pathlib import Path
 import sys
 
@@ -10,8 +12,10 @@ from scripts.run_strategy_candidate_research import (
     MIN_STRATEGY_SCORE,
     MAX_VALIDATION_DRAWDOWN,
     WINDOWS,
+    _FAILURE_CONTEXT,
     _discover_candidates,
     _project_score,
+    _record_unhandled_failure,
     _stress_metrics,
     _validate_run_id,
 )
@@ -84,3 +88,45 @@ def test_hourly_run_ids_are_unique_and_calendar_valid() -> None:
     assert _validate_run_id("202608071059") == "202608071059"
     with pytest.raises(RuntimeError, match="valid calendar"):
         _validate_run_id("2026023010")
+
+
+def test_unhandled_validation_failure_keeps_all_generated_candidates(tmp_path) -> None:
+    output = tmp_path / "failed.json"
+    candidates = _discover_candidates(REPO_ROOT / "research" / "strategy_candidates")
+    results = {
+        candidate.class_name: {
+            "file": str(candidate.path.relative_to(REPO_ROOT)),
+            "sha256": candidate.sha256,
+            "static_check": "PASSED",
+            "loadable": True,
+            "windows": {},
+        }
+        for candidate in candidates
+    }
+    _FAILURE_CONTEXT.update(
+        {
+            "args": Namespace(
+                run_id="2026080912",
+                persist_database=False,
+                repository_commit=None,
+            ),
+            "repo": REPO_ROOT,
+            "strategy_path": REPO_ROOT / "research" / "strategy_candidates",
+            "output": output,
+            "stage": "LOOKAHEAD",
+            "results": results,
+            "candidates": candidates,
+        }
+    )
+    try:
+        _record_unhandled_failure(RuntimeError("token=should-not-leak"))
+    finally:
+        _FAILURE_CONTEXT.clear()
+
+    payload = json.loads(output.read_text())
+    assert payload["status"] == "FAILED"
+    assert payload["failed_stage"] == "LOOKAHEAD"
+    assert payload["generated_count"] == 10
+    assert payload["persisted_count"] == 0
+    assert len(payload["candidates"]) == 10
+    assert "should-not-leak" not in payload["failure_reason"]

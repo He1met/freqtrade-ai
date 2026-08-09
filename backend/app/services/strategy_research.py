@@ -17,6 +17,11 @@ from app.repositories.strategy_research import StrategyResearchRepository
 
 EXPECTED_SCHEMA = "freqtrade-ai-strategy-candidate-research-v1"
 EXPECTED_CANDIDATE_COUNT = 10
+MIN_STRATEGY_SCORE = 50.0
+MIN_VALIDATION_TRADES = 30
+MAX_VALIDATION_DRAWDOWN = 0.10
+MIN_FEE_PER_SIDE = 0.0005
+MIN_SLIPPAGE_PER_SIDE = 0.0002
 
 
 class StrategyResearchReportError(ValueError):
@@ -38,6 +43,31 @@ def _safe_failure(reason: str) -> str:
 
 def _reason(code: str, message: str, **evidence: Any) -> dict[str, Any]:
     return {"code": code, "message": message, "evidence": evidence}
+
+
+def _validate_hard_gate_contract(report: dict[str, Any]) -> None:
+    """Reject reports that weaken the project-owned qualification contract."""
+    policy = report.get("selection_policy") or {}
+    if (
+        not isinstance(policy.get("min_strategy_score"), (int, float))
+        or policy["min_strategy_score"] < MIN_STRATEGY_SCORE
+        or not isinstance(policy.get("min_trades_per_validation_window"), int)
+        or policy["min_trades_per_validation_window"] < MIN_VALIDATION_TRADES
+        or not isinstance(policy.get("max_drawdown_per_validation_window"), (int, float))
+        or policy["max_drawdown_per_validation_window"] > MAX_VALIDATION_DRAWDOWN
+        or policy.get("validation_requires_positive_net_profit") is not True
+        or policy.get("lookahead_analysis_required") is not True
+    ):
+        raise StrategyResearchReportError("research report weakens the required hard gates")
+
+    environment = report.get("environment") or {}
+    if (
+        not isinstance(environment.get("fee_per_side"), (int, float))
+        or environment["fee_per_side"] < MIN_FEE_PER_SIDE
+        or not isinstance(environment.get("slippage_per_side"), (int, float))
+        or environment["slippage_per_side"] < MIN_SLIPPAGE_PER_SIDE
+    ):
+        raise StrategyResearchReportError("research report weakens fee or slippage stress")
 
 
 def _candidate_rejection_reasons(candidate: dict[str, Any], policy: dict[str, Any]) -> list[dict]:
@@ -89,6 +119,22 @@ def _candidate_rejection_reasons(candidate: dict[str, Any], policy: dict[str, An
                 _reason("WINDOW_FAILED", "独立验证窗口未成功。", window=window_name)
             )
             continue
+        if (
+            window.get("net_of_fee_and_slippage") is not True
+            or not isinstance(window.get("fee_per_side"), (int, float))
+            or window["fee_per_side"] < MIN_FEE_PER_SIDE
+            or not isinstance(window.get("slippage_per_side"), (int, float))
+            or window["slippage_per_side"] < MIN_SLIPPAGE_PER_SIDE
+        ):
+            reasons.append(
+                _reason(
+                    "COST_STRESS_MISSING",
+                    "独立验证窗口缺少最低费用或滑点压力。",
+                    window=window_name,
+                    fee_per_side=window.get("fee_per_side"),
+                    slippage_per_side=window.get("slippage_per_side"),
+                )
+            )
         if not isinstance(minimum_trades, int) or window.get("total_trades", 0) < minimum_trades:
             reasons.append(
                 _reason(
@@ -153,6 +199,7 @@ class StrategyResearchPersistenceService:
         safety = report.get("safety") or {}
         if safety.get("allow_real_funds") is not False or safety.get("real_orders") is not False:
             raise StrategyResearchReportError("research report is not OKX_DEMO/offline safe")
+        _validate_hard_gate_contract(report)
         candidates = report.get("candidates")
         if not isinstance(candidates, dict) or len(candidates) != EXPECTED_CANDIDATE_COUNT:
             raise StrategyResearchReportError(
@@ -270,18 +317,75 @@ class StrategyResearchPersistenceService:
         failure_reason: str,
         requested_count: int = EXPECTED_CANDIDATE_COUNT,
         generated_count: int = 0,
+        candidate_evidence: list[dict[str, Any]] | None = None,
+        report_path: str = "",
     ) -> StrategyResearchBatch:
         safe_reason = _safe_failure(failure_reason)
+        evidence_items = candidate_evidence or []
+        candidate_models: list[StrategyResearchCandidate] = []
+        for item in evidence_items:
+            candidate_name = item.get("candidate_name")
+            source_path = item.get("source_path")
+            code_digest = item.get("code_digest")
+            if not isinstance(candidate_name, str) or not candidate_name:
+                raise StrategyResearchReportError("failed candidate is missing its name")
+            if not isinstance(source_path, str) or not source_path:
+                raise StrategyResearchReportError(
+                    f"failed candidate {candidate_name!r} is missing its source path"
+                )
+            if not isinstance(code_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", code_digest):
+                raise StrategyResearchReportError(
+                    f"failed candidate {candidate_name!r} is missing its code digest"
+                )
+            snapshot = item.get("evidence_snapshot") or {}
+            candidate_models.append(
+                StrategyResearchCandidate(
+                    candidate_name=candidate_name,
+                    source_path=source_path,
+                    code_digest=code_digest,
+                    status="VALIDATION_FAILED",
+                    loadable=snapshot.get("loadable") is True,
+                    static_check=str(snapshot.get("static_check") or "INCOMPLETE"),
+                    lookahead_status=str(
+                        (snapshot.get("lookahead_analysis") or {}).get("status") or "INCOMPLETE"
+                    ),
+                    score=(snapshot.get("primary_score") or {}).get("total_score"),
+                    validation_passed=False,
+                    deployable_candidate=False,
+                    rejection_reasons=[
+                        _reason(
+                            "VALIDATION_PIPELINE_FAILED",
+                            "验证流水线未完成，候选保留且不得进入部署评审。",
+                            stage=stage,
+                        )
+                    ],
+                    evidence_snapshot=snapshot,
+                )
+            )
+        if candidate_models:
+            generated_count = len(candidate_models)
         failure_evidence = {
             "stage": stage,
             "failure_reason": safe_reason,
             "requested_count": requested_count,
             "generated_count": generated_count,
+            "candidates": [
+                {
+                    "candidate_name": item.candidate_name,
+                    "source_path": item.source_path,
+                    "code_digest": item.code_digest,
+                    "evidence_snapshot": item.evidence_snapshot,
+                }
+                for item in candidate_models
+            ],
             "allow_real_funds": False,
             "real_orders": False,
         }
-        digest = _digest_bytes(
-            json.dumps(failure_evidence, sort_keys=True).encode("utf-8")
+        failure_path = Path(report_path) if report_path else None
+        digest = (
+            _digest_bytes(failure_path.read_bytes())
+            if failure_path is not None and failure_path.is_file()
+            else _digest_bytes(json.dumps(failure_evidence, sort_keys=True).encode("utf-8"))
         )
         existing = self.repository.get_batch_by_run_id(run_id)
         if existing is not None:
@@ -296,12 +400,12 @@ class StrategyResearchPersistenceService:
                 source_type="codex",
                 repository_commit=repository_commit,
                 report_schema_version="freqtrade-ai-strategy-candidate-research-failure-v1",
-                report_path="",
+                report_path=report_path,
                 report_digest=digest,
                 status="FAILED",
                 requested_count=requested_count,
                 generated_count=generated_count,
-                persisted_count=0,
+                persisted_count=len(candidate_models),
                 qualified_count=0,
                 rejected_count=0,
                 failure_reason=safe_reason,
@@ -315,5 +419,6 @@ class StrategyResearchPersistenceService:
                 selection_policy={},
                 window_evidence=[],
                 completed_at=datetime.now(timezone.utc),
+                candidates=candidate_models,
             )
         )
