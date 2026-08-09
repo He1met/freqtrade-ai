@@ -51,3 +51,39 @@ class StrategyResearchBatchRead(BaseModel):
     completed_at: Optional[datetime]
     created_at: datetime
     candidates: list[StrategyResearchCandidateRead] = Field(default_factory=list)
+
+
+FormalResearchRunStatus = Literal["READY", "RUNNING", "COMPLETED", "BLOCKED", "FAILED"]
+
+
+class FormalResearchRunRead(BaseModel):
+    status: FormalResearchRunStatus
+    reason_code: str
+    reason: str
+    active: bool
+    run_id: Optional[str] = None
+    trigger: Optional[Literal["manual", "automation"]] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    requested_count: int = 10
+    generated_count: int = 0
+    validated_count: int = 0
+    persisted_count: int = 0
+    qualified_count: int = 0
+    rejected_count: int = 0
+    deployment_handoff_status: Literal[
+        "NOT_EVALUATED",
+        "NOT_QUEUED_NO_QUALIFIED",
+        "QUEUED_FOR_EXISTING_AUTOMATION",
+    ] = "NOT_EVALUATED"
+    safety: dict = Field(
+        default_factory=lambda: {
+            "execution_target": "OKX_DEMO",
+            "allow_real_funds": False,
+            "real_orders": False,
+            "credentials_collected": False,
+            "dry_run_trading_authorized": False,
+            "grant_authorized": False,
+            "manual_order_authorized": False,
+        }
+    )

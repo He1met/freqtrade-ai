@@ -5,7 +5,15 @@ from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.repositories.strategy_research import StrategyResearchRepository
-from app.schemas.strategy_research import StrategyResearchBatchRead, StrategyResearchCandidateRead
+from app.schemas.strategy_research import (
+    FormalResearchRunRead,
+    StrategyResearchBatchRead,
+    StrategyResearchCandidateRead,
+)
+from app.services.formal_strategy_research import (
+    FormalStrategyResearchCoordinator,
+    get_formal_strategy_research_coordinator,
+)
 
 
 router = APIRouter(prefix="/api", tags=["strategy-research"])
@@ -31,3 +39,23 @@ def list_strategy_research_candidates(
         StrategyResearchCandidateRead.model_validate(candidate)
         for candidate in StrategyResearchRepository(db).list_candidates(status=status, limit=limit)
     ]
+
+
+@router.get("/strategy-research/formal-run", response_model=FormalResearchRunRead)
+def get_formal_research_run(
+    db: Session = Depends(get_db),
+    coordinator: FormalStrategyResearchCoordinator = Depends(
+        get_formal_strategy_research_coordinator
+    ),
+) -> FormalResearchRunRead:
+    return coordinator.status(db)
+
+
+@router.post("/strategy-research/formal-run", response_model=FormalResearchRunRead)
+def start_formal_research_run(
+    db: Session = Depends(get_db),
+    coordinator: FormalStrategyResearchCoordinator = Depends(
+        get_formal_strategy_research_coordinator
+    ),
+) -> FormalResearchRunRead:
+    return coordinator.start(db, trigger="manual")

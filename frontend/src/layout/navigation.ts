@@ -13,9 +13,9 @@ export const navigationSections: NavigationSection[] = [
     label: "工作台",
     items: [
       { to: "/", label: "总览" },
-      { to: "/strategies", label: "策略" },
+      { to: "/strategies", label: "策略工厂" },
       { to: "/generation-runs", label: "生成批次" },
-      { to: "/local-strategy-lab", label: "Local Strategy Lab" },
+      { to: "/local-strategy-lab", label: "本地实验室（非正式）" },
     ],
   },
   {
