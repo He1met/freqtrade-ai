@@ -21,6 +21,25 @@ from app.schemas.strategy_research import FormalResearchRunRead
 EXPECTED_CANDIDATE_COUNT = 10
 OWNERSHIP_SCHEMA = "freqtrade-ai-formal-research-ownership-v1"
 STATE_SCHEMA = "freqtrade-ai-formal-research-state-v1"
+WORKER_DEADLINE_SECONDS = 60 * 60
+WORKER_HEARTBEAT_INTERVAL_SECONDS = 5
+WORKER_HEARTBEAT_STALE_SECONDS = 20
+WORKER_TERMINATION_GRACE_SECONDS = 10
+NON_REPLAYABLE_TERMINAL_CODES = {
+    "COMPLETED",
+    "RESEARCH_PROCESS_FAILED",
+    "WORKER_DEADLINE_EXCEEDED",
+    "WORKER_INTERRUPTED",
+    "WORKER_INTERNAL_ERROR",
+    "PROCESS_GROUP_CLEANUP_UNCONFIRMED",
+}
+VALID_PHASES = {"STARTING", "RUNNING", "TERMINATING", "FINISHED"}
+VALID_CLEANUP_STATUSES = {
+    "NOT_REQUIRED",
+    "TERM_CONFIRMED",
+    "KILL_CONFIRMED",
+    "UNCONFIRMED",
+}
 
 
 def _utc_now() -> datetime:
@@ -46,6 +65,10 @@ def _parse_datetime(value: object) -> Optional[datetime]:
         return _aware(datetime.fromisoformat(value.replace("Z", "+00:00")))
     except ValueError:
         return None
+
+
+def _state_enum(value: object, allowed: set[str]) -> Optional[str]:
+    return value if isinstance(value, str) and value in allowed else None
 
 
 class FormalStrategyResearchCoordinator:
@@ -150,6 +173,10 @@ class FormalStrategyResearchCoordinator:
             "trigger": state.get("trigger"),
             "started_at": state.get("started_at"),
             "completed_at": completed_at.isoformat(),
+            "heartbeat_at": state.get("heartbeat_at"),
+            "deadline_at": state.get("deadline_at"),
+            "phase": "FINISHED",
+            "cleanup_status": state.get("cleanup_status") or "NOT_REQUIRED",
         }
         counts = self._latest_counts(db, terminal)
         if not counts:
@@ -163,7 +190,11 @@ class FormalStrategyResearchCoordinator:
             run_id=run_id,
             trigger=state.get("trigger"),
             started_at=_parse_datetime(state.get("started_at")),
+            heartbeat_at=_parse_datetime(state.get("heartbeat_at")),
+            deadline_at=_parse_datetime(state.get("deadline_at")),
             completed_at=completed_at,
+            phase="FINISHED",
+            cleanup_status=state.get("cleanup_status") or "NOT_REQUIRED",
             **counts,
         )
 
@@ -261,9 +292,24 @@ class FormalStrategyResearchCoordinator:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
             lock.close()
         if active:
-            status = "RUNNING"
-            code = "ACTIVE_RESEARCH"
-            reason = "已有正式研究正在运行；防重入门禁拒绝重复启动。"
+            now = _aware(self.clock())
+            heartbeat_at = _parse_datetime(state.get("heartbeat_at"))
+            deadline_at = _parse_datetime(state.get("deadline_at"))
+            if deadline_at is not None and deadline_at <= now:
+                status = "BLOCKED"
+                code = "WORKER_DEADLINE_CLEANUP_PENDING"
+                reason = "正式研究已超过执行时限，后台 worker 正在清理子进程；清理确认前禁止重放。"
+            elif (
+                heartbeat_at is not None
+                and now - heartbeat_at > timedelta(seconds=WORKER_HEARTBEAT_STALE_SECONDS)
+            ):
+                status = "BLOCKED"
+                code = "WORKER_HEARTBEAT_STALE"
+                reason = "正式研究锁仍被持有，但 worker 心跳已过期；保持阻塞并等待受控清理。"
+            else:
+                status = "RUNNING"
+                code = "ACTIVE_RESEARCH"
+                reason = "已有正式研究正在运行；防重入门禁拒绝重复启动。"
         elif state.get("status") == "RUNNING":
             status = "BLOCKED"
             code = "RUN_STATE_INCONSISTENT"
@@ -285,7 +331,13 @@ class FormalStrategyResearchCoordinator:
             run_id=state.get("run_id"),
             trigger=state.get("trigger"),
             started_at=_parse_datetime(state.get("started_at")),
+            heartbeat_at=_parse_datetime(state.get("heartbeat_at")),
+            deadline_at=_parse_datetime(state.get("deadline_at")),
             completed_at=_parse_datetime(state.get("completed_at")),
+            phase=_state_enum(state.get("phase"), VALID_PHASES),
+            cleanup_status=_state_enum(
+                state.get("cleanup_status"), VALID_CLEANUP_STATUSES
+            ),
             **self._latest_counts(db, state),
         )
 
@@ -297,6 +349,16 @@ class FormalStrategyResearchCoordinator:
         if lock is None:
             return self._blocked("ACTIVE_RESEARCH", "已有正式研究正在运行；防重入门禁拒绝重复启动。")
         state = self._read_json(self.state_path)
+        if (
+            state.get("cleanup_status") == "UNCONFIRMED"
+            or state.get("reason_code") == "PROCESS_GROUP_CLEANUP_UNCONFIRMED"
+        ):
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            lock.close()
+            return self._blocked(
+                "PROCESS_GROUP_CLEANUP_UNCONFIRMED",
+                "上一轮研究子进程组未能证明已退出；人工核对前禁止启动任何新研究。",
+            )
         if state.get("status") == "RUNNING":
             try:
                 return self._terminalize_orphaned_state(db, state)
@@ -306,6 +368,16 @@ class FormalStrategyResearchCoordinator:
         now = _aware(self.clock())
         slot = now.replace(minute=(now.minute // 15) * 15, second=0, microsecond=0)
         run_id = slot.strftime("%Y%m%d%H%M")
+        if (
+            state.get("run_id") == run_id
+            and state.get("reason_code") in NON_REPLAYABLE_TERMINAL_CODES
+        ):
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            lock.close()
+            return self._blocked(
+                "DUPLICATE_SLOT_STATE",
+                f"15 分钟槽位 {run_id} 已有不可自动重放的终态收据，拒绝再次运行。",
+            )
         if StrategyResearchRepository(db).get_batch_by_run_id(run_id) is not None:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
             lock.close()
@@ -316,6 +388,7 @@ class FormalStrategyResearchCoordinator:
             lock.close()
             return self._blocked("FREQTRADE_BINARY_MISSING", "正式研究 Freqtrade 可执行文件不存在。")
         started_at = now.isoformat()
+        deadline_at = (now + timedelta(seconds=WORKER_DEADLINE_SECONDS)).isoformat()
         self._write_state(
             {
                 "status": "RUNNING",
@@ -324,6 +397,10 @@ class FormalStrategyResearchCoordinator:
                 "run_id": run_id,
                 "trigger": trigger,
                 "started_at": started_at,
+                "heartbeat_at": started_at,
+                "deadline_at": deadline_at,
+                "phase": "STARTING",
+                "cleanup_status": "NOT_REQUIRED",
             }
         )
         worker = self.repo / "scripts/formal_strategy_research_worker.py"
@@ -337,6 +414,11 @@ class FormalStrategyResearchCoordinator:
             "--datadir", str(datadir),
             "--repository-commit", self._repository_commit(),
             "--state-path", str(self.state_path),
+            "--started-at", started_at,
+            "--deadline-at", deadline_at,
+            "--deadline-seconds", str(WORKER_DEADLINE_SECONDS),
+            "--heartbeat-seconds", str(WORKER_HEARTBEAT_INTERVAL_SECONDS),
+            "--termination-grace-seconds", str(WORKER_TERMINATION_GRACE_SECONDS),
         ]
         try:
             self.popen(
@@ -356,6 +438,10 @@ class FormalStrategyResearchCoordinator:
                 "status": "BLOCKED", "reason_code": "WORKER_START_FAILED", "reason": reason,
                 "run_id": run_id, "trigger": trigger, "started_at": started_at,
                 "completed_at": _aware(self.clock()).isoformat(),
+                "heartbeat_at": _aware(self.clock()).isoformat(),
+                "deadline_at": deadline_at,
+                "phase": "FINISHED",
+                "cleanup_status": "NOT_REQUIRED",
             })
             return self._blocked("WORKER_START_FAILED", reason)
         lock.close()
@@ -367,6 +453,10 @@ class FormalStrategyResearchCoordinator:
             run_id=run_id,
             trigger=trigger,
             started_at=now,
+            heartbeat_at=now,
+            deadline_at=_parse_datetime(deadline_at),
+            phase="STARTING",
+            cleanup_status="NOT_REQUIRED",
         )
 
     def _repository_commit(self) -> str:

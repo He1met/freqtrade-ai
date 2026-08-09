@@ -57,6 +57,13 @@ class StrategyResearchBatchRead(BaseModel):
 
 
 FormalResearchRunStatus = Literal["READY", "RUNNING", "COMPLETED", "BLOCKED", "FAILED"]
+FormalResearchRunPhase = Literal["STARTING", "RUNNING", "TERMINATING", "FINISHED"]
+FormalResearchCleanupStatus = Literal[
+    "NOT_REQUIRED",
+    "TERM_CONFIRMED",
+    "KILL_CONFIRMED",
+    "UNCONFIRMED",
+]
 
 
 class FormalResearchRunRead(BaseModel):
@@ -67,7 +74,11 @@ class FormalResearchRunRead(BaseModel):
     run_id: Optional[str] = None
     trigger: Optional[Literal["manual", "automation"]] = None
     started_at: Optional[datetime] = None
+    heartbeat_at: Optional[datetime] = None
+    deadline_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
+    phase: Optional[FormalResearchRunPhase] = None
+    cleanup_status: Optional[FormalResearchCleanupStatus] = None
     requested_count: int = 10
     generated_count: int = 0
     validated_count: int = 0

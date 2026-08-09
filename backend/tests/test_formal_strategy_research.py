@@ -96,7 +96,120 @@ def test_formal_research_starts_exact_ten_candidate_shared_worker(tmp_path, monk
     command = calls[0][0]
     assert "formal_strategy_research_worker.py" in command[1]
     assert command[command.index("--trigger") + 1] == "manual"
+    assert command[command.index("--deadline-seconds") + 1] == "3600"
+    assert command[command.index("--heartbeat-seconds") + 1] == "5"
+    state = json.loads(coordinator.state_path.read_text())
+    assert state["phase"] == "STARTING"
+    assert state["cleanup_status"] == "NOT_REQUIRED"
+    assert state["heartbeat_at"] == NOW.isoformat()
+    assert state["deadline_at"] == (NOW + timedelta(hours=1)).isoformat()
     assert calls[0][1]["pass_fds"]
+
+
+def test_status_marks_held_lock_with_stale_heartbeat_as_blocked(tmp_path, monkeypatch):
+    coordinator = build_coordinator(tmp_path, monkeypatch)
+    coordinator.state_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "freqtrade-ai-formal-research-state-v1",
+                "status": "RUNNING",
+                "run_id": "202608090515",
+                "trigger": "automation",
+                "started_at": (NOW - timedelta(minutes=2)).isoformat(),
+                "heartbeat_at": (NOW - timedelta(seconds=21)).isoformat(),
+                "deadline_at": (NOW + timedelta(minutes=58)).isoformat(),
+                "phase": "RUNNING",
+                "cleanup_status": "NOT_REQUIRED",
+            }
+        )
+    )
+    held_lock = coordinator._try_lock()
+    assert held_lock is not None
+    try:
+        with db_session() as db:
+            result = coordinator.status(db)
+    finally:
+        import fcntl
+
+        fcntl.flock(held_lock.fileno(), fcntl.LOCK_UN)
+        held_lock.close()
+    assert result.status == "BLOCKED"
+    assert result.active is True
+    assert result.reason_code == "WORKER_HEARTBEAT_STALE"
+    assert result.phase == "RUNNING"
+
+
+def test_status_marks_passed_deadline_as_cleanup_pending(tmp_path, monkeypatch):
+    coordinator = build_coordinator(tmp_path, monkeypatch)
+    coordinator.state_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "freqtrade-ai-formal-research-state-v1",
+                "status": "RUNNING",
+                "run_id": "202608090515",
+                "heartbeat_at": NOW.isoformat(),
+                "deadline_at": (NOW - timedelta(seconds=1)).isoformat(),
+                "phase": "TERMINATING",
+                "cleanup_status": "NOT_REQUIRED",
+            }
+        )
+    )
+    held_lock = coordinator._try_lock()
+    assert held_lock is not None
+    try:
+        with db_session() as db:
+            result = coordinator.status(db)
+    finally:
+        import fcntl
+
+        fcntl.flock(held_lock.fileno(), fcntl.LOCK_UN)
+        held_lock.close()
+    assert result.status == "BLOCKED"
+    assert result.active is True
+    assert result.reason_code == "WORKER_DEADLINE_CLEANUP_PENDING"
+
+
+def test_deadline_terminal_state_is_not_replayed_in_same_slot(tmp_path, monkeypatch):
+    coordinator = build_coordinator(tmp_path, monkeypatch)
+    calls = []
+    coordinator.popen = lambda command, **kwargs: calls.append((command, kwargs)) or object()
+    coordinator.state_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "freqtrade-ai-formal-research-state-v1",
+                "status": "FAILED",
+                "reason_code": "WORKER_DEADLINE_EXCEEDED",
+                "run_id": "202608090515",
+                "cleanup_status": "TERM_CONFIRMED",
+                "phase": "FINISHED",
+            }
+        )
+    )
+    with db_session() as db:
+        result = coordinator.start(db, trigger="manual")
+    assert result.status == "BLOCKED"
+    assert result.reason_code == "DUPLICATE_SLOT_STATE"
+    assert calls == []
+
+
+def test_unconfirmed_cleanup_blocks_every_new_slot(tmp_path, monkeypatch):
+    coordinator = build_coordinator(tmp_path, monkeypatch)
+    coordinator.state_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "freqtrade-ai-formal-research-state-v1",
+                "status": "BLOCKED",
+                "reason_code": "PROCESS_GROUP_CLEANUP_UNCONFIRMED",
+                "run_id": "202608090500",
+                "cleanup_status": "UNCONFIRMED",
+                "phase": "FINISHED",
+            }
+        )
+    )
+    with db_session() as db:
+        result = coordinator.start(db, trigger="automation")
+    assert result.status == "BLOCKED"
+    assert result.reason_code == "PROCESS_GROUP_CLEANUP_UNCONFIRMED"
 
 
 def test_formal_research_uses_nested_okx_data_when_root_futures_also_exists(
