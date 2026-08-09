@@ -608,6 +608,27 @@ def _automation_openings_ready(
     )
 
 
+def _write_degraded_runtime_readiness(
+    ready_path: Path,
+    *,
+    automation_guard: str = "BLOCKED",
+) -> None:
+    """Refresh the heartbeat while openings await a complete reconciliation."""
+
+    _write_readiness(
+        ready_path,
+        {
+            "status": "BLOCKED_OPENINGS",
+            "execution_target": "OKX_DEMO",
+            "adapter": "ATTESTED",
+            "reconciliation": "UNKNOWN",
+            "writer": "UNIQUE",
+            "automation_guard": automation_guard,
+            "pid": os.getpid(),
+        },
+    )
+
+
 def serve(
     *,
     environment: Mapping[str, str],
@@ -718,9 +739,8 @@ def serve(
             if not coordination_acquired:
                 db.rollback()
                 writer.set_openings_allowed(False)
-                raise OkxDemoRuntimeBlocked(
-                    "one-shot coordination lock is busy"
-                )
+                _write_degraded_runtime_readiness(ready_path)
+                continue
             coordination_lock_released = False
             try:
                 def consent_safety_check() -> bool:
@@ -764,6 +784,7 @@ def serve(
                         raise OkxDemoRuntimeBlocked(
                             "recovered consent grant failed closed"
                         )
+                    _write_degraded_runtime_readiness(ready_path)
                     continue
                 try:
                     consent_finalized = process_pending_canary_consent_handoff(
@@ -847,6 +868,7 @@ def serve(
                             runtime_instance_id=adapter.runtime_instance_id,
                         )
                         writer.dispatch_atomic_once(capability)
+                        _write_degraded_runtime_readiness(ready_path)
                         continue
                     grant = arm_finalized_canary_consent(
                         db,
@@ -888,6 +910,7 @@ def serve(
                             "consent-bound one-shot handoff did not close"
                         )
                     db.commit()
+                    _write_degraded_runtime_readiness(ready_path)
                     continue
                 # The backend API never owns OKX credentials.  A controlled
                 # canary preparation is a DB-backed request that this sole
@@ -920,6 +943,7 @@ def serve(
                         )
                     db.commit()
                     writer.set_openings_allowed(False)
+                    _write_degraded_runtime_readiness(ready_path)
                     continue
                 writer.set_openings_allowed(not externally_frozen)
                 one_shot_result = adapter.run_active_one_shot(
@@ -935,6 +959,7 @@ def serve(
                     )
                 if one_shot_result == "CONSUMED":
                     db.commit()
+                    _write_degraded_runtime_readiness(ready_path)
                     continue
                 try:
                     observed = _reconcile_transaction(
@@ -972,17 +997,9 @@ def serve(
                         reconciliation_run_id=run_id,
                     )
                     db.commit()
-                    _write_readiness(
+                    _write_degraded_runtime_readiness(
                         ready_path,
-                        {
-                            "status": "BLOCKED_OPENINGS",
-                            "execution_target": "OKX_DEMO",
-                            "adapter": "ATTESTED",
-                            "reconciliation": "UNKNOWN",
-                            "writer": "UNIQUE",
-                            "automation_guard": guard_health,
-                            "pid": os.getpid(),
-                        },
+                        automation_guard=guard_health,
                     )
                     continue
                 guard_health = OkxDemoAutomationGuard.record_health(
@@ -1037,6 +1054,7 @@ def serve(
                 )
                 db.rollback()
                 failure_class = _automation_failure_class(exc)
+                guard_health = "BLOCKED"
                 if failure_class is not None:
                     try:
                         run_id = db.execute(
@@ -1045,7 +1063,7 @@ def serve(
                                 "WHERE execution_target_id='OKX_DEMO'"
                             )
                         ).scalar_one()
-                        OkxDemoAutomationGuard.record_failure(
+                        guard_health = OkxDemoAutomationGuard.record_failure(
                             db,
                             failure_class=failure_class,
                             reconciliation_run_id=run_id,
@@ -1053,6 +1071,19 @@ def serve(
                         db.commit()
                     except Exception:
                         db.rollback()
+                if failure_class == "RECONCILIATION_TRANSIENT":
+                    # A transient freshness/read failure can also surface in
+                    # run_cycle after observe completed.  Preserve the unique
+                    # credential-bearing writer just as the observe boundary
+                    # does: close openings, publish an explicit degraded
+                    # heartbeat, release coordination in finally, and retry a
+                    # fresh GET-only reconciliation on the next loop.
+                    writer.set_openings_allowed(False)
+                    _write_degraded_runtime_readiness(
+                        ready_path,
+                        automation_guard=guard_health,
+                    )
+                    continue
                 raise
             finally:
                 if not coordination_lock_released and release_one_shot_runtime_lock(db):
