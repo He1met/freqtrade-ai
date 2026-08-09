@@ -22,6 +22,9 @@ from app.models.okx_demo_reconciliation import (
 )
 from app.models.order_writer import OkxDemoCanaryLifecycle, OkxOrderWriteAttempt
 from app.models.strategy_deployment import StrategyDeployment
+from app.services.okx_demo_execution_orchestrator import (
+    OkxDemoExecutionOrchestrationBlocked,
+)
 from app.services.okx_demo_reconciliation import OkxDemoReconciliationBlocked
 
 
@@ -1334,6 +1337,10 @@ def test_runtime_signal_failure_is_fail_closed_and_never_places(
                 fencing_sequence=1,
             )
 
+        def get_evaluation(self, evaluation_id):
+            assert evaluation_id == 83
+            return None
+
     class Orchestrator:
         def __init__(self, _db, **_kwargs):
             pass
@@ -1367,3 +1374,134 @@ def test_runtime_signal_failure_is_fail_closed_and_never_places(
     with pytest.raises(RuntimeError):
         adapter.run_cycle(read_client=object(), writer=writer, db=db)
     assert writer.calls == []
+
+
+@pytest.mark.parametrize("terminal_status", ["BLOCKED", "FAILED"])
+def test_runtime_absorbs_only_durably_terminal_evaluation_failure(
+    db,
+    monkeypatch,
+    terminal_status,
+) -> None:
+    _active_runtime_deployment(db)
+
+    class Repository:
+        def __init__(self, _db):
+            pass
+
+        def enqueue_evaluation(self, deployment_id, *, closed_candle_at):
+            pass
+
+        def claim_next(self, **_kwargs):
+            return SimpleNamespace(
+                id=84,
+                lease_token="lease-token",
+                fencing_sequence=1,
+            )
+
+        def get_evaluation(self, evaluation_id):
+            assert evaluation_id == 84
+            return SimpleNamespace(status=terminal_status)
+
+    class Orchestrator:
+        def __init__(self, _db, **_kwargs):
+            pass
+
+        def process(self, *_args, **_kwargs):
+            raise RuntimeError("durably terminal synthetic failure")
+
+    monkeypatch.setattr(
+        "app.adapters.okx_demo.reconciliation_runtime."
+        "StrategyDeploymentRepository",
+        Repository,
+    )
+    monkeypatch.setattr(
+        "app.adapters.okx_demo.reconciliation_runtime."
+        "OkxDemoExecutionOrchestrator",
+        Orchestrator,
+    )
+    adapter = object.__new__(OkxDemoRuntimeReconciliationAdapter)
+    adapter._order_submission_enabled = False
+    adapter._now_provider = lambda: NOW
+    adapter._writer_instance_id = "RuntimeWriter01"
+    adapter._signal_lease_owner = "RuntimeSignal01"
+
+    class Writer:
+        calls = []
+
+        def place(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+
+    writer = Writer()
+    adapter.run_cycle(read_client=object(), writer=writer, db=db)
+
+    assert writer.calls == []
+    assert not db.in_transaction()
+
+
+@pytest.mark.parametrize("observed_status", [None, "PENDING", "LEASED"])
+def test_runtime_propagates_unproven_evaluation_failure(
+    db,
+    monkeypatch,
+    observed_status,
+) -> None:
+    _active_runtime_deployment(db)
+
+    class Repository:
+        def __init__(self, _db):
+            pass
+
+        def enqueue_evaluation(self, deployment_id, *, closed_candle_at):
+            pass
+
+        def claim_next(self, **_kwargs):
+            return SimpleNamespace(
+                id=85,
+                lease_token="lease-token",
+                fencing_sequence=1,
+            )
+
+        def get_evaluation(self, evaluation_id):
+            assert evaluation_id == 85
+            return (
+                None
+                if observed_status is None
+                else SimpleNamespace(status=observed_status)
+            )
+
+    class Orchestrator:
+        def __init__(self, _db, **_kwargs):
+            pass
+
+        def process(self, *_args, **_kwargs):
+            raise OkxDemoExecutionOrchestrationBlocked(
+                "unproven synthetic failure"
+            )
+
+    monkeypatch.setattr(
+        "app.adapters.okx_demo.reconciliation_runtime."
+        "StrategyDeploymentRepository",
+        Repository,
+    )
+    monkeypatch.setattr(
+        "app.adapters.okx_demo.reconciliation_runtime."
+        "OkxDemoExecutionOrchestrator",
+        Orchestrator,
+    )
+    adapter = object.__new__(OkxDemoRuntimeReconciliationAdapter)
+    adapter._order_submission_enabled = False
+    adapter._now_provider = lambda: NOW
+    adapter._writer_instance_id = "RuntimeWriter01"
+    adapter._signal_lease_owner = "RuntimeSignal01"
+
+    class Writer:
+        calls = []
+
+        def place(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+
+    writer = Writer()
+    with pytest.raises(OkxDemoExecutionOrchestrationBlocked):
+        adapter.run_cycle(read_client=object(), writer=writer, db=db)
+
+    assert writer.calls == []
+    assert not db.in_transaction()
