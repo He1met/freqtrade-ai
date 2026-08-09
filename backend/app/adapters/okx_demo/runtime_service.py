@@ -919,14 +919,55 @@ def serve(
                 if one_shot_result == "CONSUMED":
                     db.commit()
                     continue
-                observed = _reconcile_transaction(
-                    db,
-                    lambda: adapter.observe(
-                        read_client=server_session.read,
-                        db=db,
-                    ),
-                    now=now_provider(),
-                )
+                try:
+                    observed = _reconcile_transaction(
+                        db,
+                        lambda: adapter.observe(
+                            read_client=server_session.read,
+                            db=db,
+                        ),
+                        now=now_provider(),
+                    )
+                except OkxDemoReconciliationBlocked as exc:
+                    if (
+                        _automation_failure_class(exc)
+                        != "RECONCILIATION_TRANSIENT"
+                    ):
+                        raise
+                    # A bounded read/reconciliation failure must close the
+                    # opening gate, but it does not invalidate this process's
+                    # unique writer ownership.  Keep the credential-bearing
+                    # runtime alive so the supervisor does not tear down the
+                    # unrelated API, worker, and UI services.  The next loop
+                    # performs a fresh read-only reconciliation; no order
+                    # submission or unknown outcome is replayed here.
+                    db.rollback()
+                    writer.set_openings_allowed(False)
+                    run_id = db.execute(
+                        text(
+                            "SELECT max(id) FROM reconciliation_runs "
+                            "WHERE execution_target_id='OKX_DEMO'"
+                        )
+                    ).scalar_one()
+                    guard_health = OkxDemoAutomationGuard.record_failure(
+                        db,
+                        failure_class="RECONCILIATION_TRANSIENT",
+                        reconciliation_run_id=run_id,
+                    )
+                    db.commit()
+                    _write_readiness(
+                        ready_path,
+                        {
+                            "status": "BLOCKED_OPENINGS",
+                            "execution_target": "OKX_DEMO",
+                            "adapter": "ATTESTED",
+                            "reconciliation": "UNKNOWN",
+                            "writer": "UNIQUE",
+                            "automation_guard": guard_health,
+                            "pid": os.getpid(),
+                        },
+                    )
+                    continue
                 guard_health = OkxDemoAutomationGuard.record_health(
                     db,
                     reconciliation_run_id=observed.reconciliation_run_id,
