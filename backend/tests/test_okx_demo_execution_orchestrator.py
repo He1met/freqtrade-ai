@@ -28,12 +28,14 @@ NOW = datetime(2026, 7, 29, 12, 5, tzinfo=timezone.utc)
 class FakeDatabase:
     def __init__(self) -> None:
         self.rollback_count = 0
+        self.transaction_active = True
 
     def in_transaction(self) -> bool:
-        return True
+        return self.transaction_active
 
     def rollback(self) -> None:
         self.rollback_count += 1
+        self.transaction_active = False
 
 
 class FakeDeployments:
@@ -176,10 +178,13 @@ class FakeEvaluator:
 
 
 class FakeRisk:
-    def __init__(self) -> None:
+    def __init__(self, *, db=None) -> None:
         self.calls = []
+        self.db = db
 
     def evaluate(self, **kwargs):
+        if self.db is not None and self.db.in_transaction():
+            raise RuntimeError("risk received a dirty transaction")
         self.calls.append(kwargs)
         return RiskChainResult(
             status="APPROVED",
@@ -300,13 +305,22 @@ def _signal_for_candle(
     )
 
 
-def _orchestrator(*, signal, deployments=None, chains=None, evaluator=None):
+def _orchestrator(
+    *,
+    signal,
+    deployments=None,
+    chains=None,
+    evaluator=None,
+    db=None,
+    risk=None,
+):
     bundle = _bundle()
+    db = db or FakeDatabase()
     deployments = deployments or FakeDeployments()
     chains = chains or FakeChains()
-    risk = FakeRisk()
+    risk = risk or FakeRisk()
     service = OkxDemoExecutionOrchestrator(
-        FakeDatabase(),
+        db,
         read_client=FakeReadClient(bundle),
         deployment_repository=deployments,
         full_chain_repository=chains,
@@ -392,6 +406,40 @@ def test_actionable_signal_completes_signal_then_risk_and_evaluation():
     assert deployments.completions[0]["result_snapshot"][
         "approved_execution_id"
     ] == 43
+
+
+def test_risk_boundary_does_not_refresh_expired_evaluation_after_rollback():
+    db = FakeDatabase()
+
+    class ExpiringEvaluation:
+        status = "LEASED"
+        result_snapshot = {}
+        input_digest = None
+        closed_candle_at = NOW - timedelta(minutes=5)
+
+        @property
+        def id(self):
+            if db.rollback_count:
+                db.transaction_active = True
+            return 11
+
+    deployments = FakeDeployments(terminal=ExpiringEvaluation())
+    risk = FakeRisk(db=db)
+    service, _, _, _ = _orchestrator(
+        signal=_signal("ACTIONABLE"),
+        deployments=deployments,
+        db=db,
+        risk=risk,
+    )
+
+    result = service.process(
+        11, lease_token="lease", fencing_sequence=4, now=NOW
+    )
+
+    assert result.status == "ACTIONABLE"
+    assert db.rollback_count == 1
+    assert len(risk.calls) == 1
+    assert risk.calls[0]["idempotency_key"] == "signal-evaluation-11"
 
 
 def test_terminal_evaluation_replay_does_not_repeat_signal_or_risk():

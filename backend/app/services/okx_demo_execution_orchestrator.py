@@ -324,7 +324,12 @@ class OkxDemoExecutionOrchestrator:
             if self.db.in_transaction():
                 self.db.rollback()
             risk_result = self.risk.evaluate(
-                idempotency_key=f"signal-evaluation-{evaluation.id}",
+                # ``rollback()`` expires SQLAlchemy ORM instances.  Reading
+                # ``evaluation.id`` here can therefore issue an implicit
+                # SELECT and reopen a transaction before RiskChainService
+                # takes ownership of its transaction boundary.  Keep using
+                # the already-validated scalar function argument instead.
+                idempotency_key=f"signal-evaluation-{evaluation_id}",
                 request=risk_request,
                 policy=self.risk_policy,
                 now=active_now,
