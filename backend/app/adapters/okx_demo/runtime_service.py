@@ -8,6 +8,7 @@ import importlib
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import sys
 import tempfile
@@ -147,6 +148,13 @@ def _runtime_failure_category(stage: str) -> str:
     return "RUNTIME"
 
 
+def _safe_exception_type_name(exc: BaseException) -> str:
+    exception_type = type(exc).__name__
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", exception_type):
+        return "UnexpectedError"
+    return exception_type
+
+
 def _startup_call(stage: str, callback: Callable[[], Any]) -> Any:
     try:
         return callback()
@@ -163,6 +171,14 @@ def _startup_call(stage: str, callback: Callable[[], Any]) -> Any:
             cause_type=exc.cause_type,
         ) from None
     except BaseException as exc:
+        if stage == "writer-capability":
+            print(
+                "OKX_DEMO safe startup diagnostic "
+                "stage=writer-capability exception_type={}".format(
+                    _safe_exception_type_name(exc)
+                ),
+                file=sys.stderr,
+            )
         cause_type = type(exc).__name__
         category = _runtime_failure_category(stage)
         if cause_type not in SAFE_STARTUP_FAILURE_TYPES:
@@ -1011,6 +1027,13 @@ def serve(
                 )
                 db.commit()
             except Exception as exc:
+                print(
+                    "OKX_DEMO safe runtime diagnostic "
+                    "stage=runtime-loop exception_type={}".format(
+                        _safe_exception_type_name(exc)
+                    ),
+                    file=sys.stderr,
+                )
                 db.rollback()
                 failure_class = _automation_failure_class(exc)
                 if failure_class is not None:

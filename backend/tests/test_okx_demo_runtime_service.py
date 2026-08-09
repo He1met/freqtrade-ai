@@ -905,7 +905,7 @@ def test_runtime_terminalizes_pre_commit_consent_failure_without_writer_post(
     [("BEFORE_PREPARED", True), ("PREPARED", False)],
 )
 def test_recovered_grant_writer_exception_uses_owner_terminalization_boundary(
-    monkeypatch, tmp_path, journal_state, terminalized
+    monkeypatch, tmp_path, journal_state, terminalized, capsys
 ):
     events = []
     failure_calls = []
@@ -971,6 +971,12 @@ def test_recovered_grant_writer_exception_uses_owner_terminalization_boundary(
     assert settle_calls == []
     assert db.rollbacks >= 1
     assert db.commits >= 2
+    diagnostic = capsys.readouterr().err
+    assert diagnostic == (
+        "OKX_DEMO safe runtime diagnostic "
+        "stage=runtime-loop exception_type=RuntimeError\n"
+    )
+    assert "synthetic recovered writer failure" not in diagnostic
 
 
 @pytest.mark.parametrize("unsafe_source", ["manifest", "openings-freeze"])
@@ -1212,6 +1218,7 @@ def test_factory_failure_preserves_fine_stage_category_and_allowed_type(
 def test_runtime_writer_startup_failure_preserves_stage_without_secret(
     monkeypatch,
     tmp_path: Path,
+    capsys,
 ):
     class SensitiveWriterFailure(RuntimeError):
         pass
@@ -1253,6 +1260,14 @@ def test_runtime_writer_startup_failure_preserves_stage_without_secret(
     assert "secret" not in rendered
     assert "signature" not in rendered
     assert "password" not in rendered
+    diagnostic = capsys.readouterr().err
+    assert diagnostic == (
+        "OKX_DEMO safe startup diagnostic "
+        "stage=writer-capability exception_type=SensitiveWriterFailure\n"
+    )
+    assert "secret" not in diagnostic
+    assert "signature" not in diagnostic
+    assert "password" not in diagnostic
 
     failure_path = tmp_path / runtime_service.FAILURE_FILENAME
     legacy_temporary = failure_path.with_suffix(".tmp")
