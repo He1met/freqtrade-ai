@@ -386,6 +386,7 @@ def test_incremental_worker_migration_preserves_existing_runtime_rows(postgres_e
             "signal_evaluations",
             "strategy_candidate_approvals",
             "strategy_deployments",
+            "strategy_research_candidate_bridge_events",
             "trade_intents",
         }
     ]
@@ -870,7 +871,12 @@ def test_postgresql_trade_intent_client_order_id_is_unique_per_target(
 def test_frozen_old_research_job_ddl_upgrades_data_and_removes_global_unique(
     postgres_engine,
 ) -> None:
-    Base.metadata.create_all(postgres_engine)
+    pre_bridge_tables = [
+        table
+        for table in Base.metadata.tables.values()
+        if table.name != "strategy_research_candidate_bridge_events"
+    ]
+    Base.metadata.create_all(postgres_engine, tables=pre_bridge_tables)
     with postgres_engine.begin() as connection:
         connection.execute(
             text(
