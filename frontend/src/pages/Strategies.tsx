@@ -118,12 +118,12 @@ export function Strategies() {
         });
     };
     refresh();
-    const timer = window.setInterval(refresh, formalRun?.active ? 3000 : 15000);
+    const timer = window.setInterval(refresh, 3000);
     return () => {
       controller.abort();
       window.clearInterval(timer);
     };
-  }, [formalRun?.active]);
+  }, []);
 
   async function runFormalResearch() {
     setStartingResearch(true);
