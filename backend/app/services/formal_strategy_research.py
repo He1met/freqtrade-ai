@@ -75,7 +75,10 @@ class FormalStrategyResearchCoordinator:
         datadir = (
             configured_data if configured_data.is_absolute() else self.repo / configured_data
         ).resolve()
-        if not (datadir / "futures").is_dir() and (datadir / "okx/futures").is_dir():
+        market_filename = "BTC_USDT_USDT-15m-futures.feather"
+        primary_market = datadir / "futures" / market_filename
+        nested_market = datadir / "okx" / "futures" / market_filename
+        if not primary_market.is_file() and nested_market.is_file():
             datadir = datadir / "okx"
         return resolution.resolved_path, datadir
 
