@@ -99,6 +99,21 @@ test("formal strategy API failure stays unknown instead of becoming an empty lib
   await expect(page.getByText("暂无真实策略")).toHaveCount(0);
 });
 
+test("advanced evidence pages do not turn a shared API failure into empty or zero evidence", async ({ page }) => {
+  await page.route("**/api/strategies", (route) => route.fulfill({ status: 503, body: "catalog unavailable" }));
+
+  await page.goto("/generation-runs");
+  await expect(page.getByText("暂无真实生成批次")).toHaveCount(0);
+
+  await page.goto("/hyperopt-runs");
+  await expect(page.getByText("暂无真实 Hyperopt 批次")).toHaveCount(0);
+  await expect(page.getByLabel("Hyperopt 参数优化摘要")).toHaveCount(0);
+
+  await page.goto("/live-governance");
+  await expect(page.getByText("暂无实盘候选治理记录")).toHaveCount(0);
+  await expect(page.getByLabel("实盘候选治理摘要")).toHaveCount(0);
+});
+
 test("unknown route renders the desktop 404 page", async ({ page }) => {
   const problems = captureBrowserProblems(page, SUPERSEDED_API_REQUESTS);
 

@@ -41,7 +41,7 @@ export function GenerationRuns() {
         isLoading={isLoading}
         source={source}
       />
-      {data.generationRuns.length > 0 ? (
+      {!isLoading && !error && data.generationRuns.length > 0 ? (
         <div className="table-shell generation-runs-table-shell">
           <table>
             <colgroup>
@@ -136,7 +136,7 @@ export function GenerationRuns() {
             </tbody>
           </table>
         </div>
-      ) : (
+      ) : !isLoading && !error ? (
         <EmptyState
           description={
             source === "api"
@@ -145,7 +145,7 @@ export function GenerationRuns() {
           }
           title={source === "api" ? "暂无真实生成批次" : "暂无生成批次"}
         />
-      )}
+      ) : null}
     </section>
   );
 }

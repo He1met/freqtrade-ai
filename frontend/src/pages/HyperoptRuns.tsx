@@ -178,6 +178,7 @@ export function HyperoptRuns() {
         source={source}
       />
 
+      {!isLoading && !error ? <>
       <section className="hyperopt-overview" aria-label="Hyperopt 参数优化摘要">
         <article className="hyperopt-overview-card">
           <span>批次状态</span>
@@ -330,6 +331,7 @@ export function HyperoptRuns() {
           title="暂无真实 Hyperopt 批次"
         />
       ) : null}
+      </> : null}
     </section>
   );
 }
