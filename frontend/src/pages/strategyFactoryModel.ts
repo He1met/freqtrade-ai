@@ -149,6 +149,24 @@ export function hasOfficialAggressiveContract(run: FormalResearchRun | null): bo
     && contract.slippage_per_side === 0.0002;
 }
 
+export function researchQualityContractText(run: FormalResearchRun | null): string {
+  const contract = run?.quality_contract;
+  if (!contract) return "质量契约尚未读取";
+  const drawdown = contract.max_drawdown_per_validation_window;
+  const drawdownText = typeof drawdown === "number"
+    ? `${(drawdown * 100).toFixed(drawdown * 100 % 1 === 0 ? 0 : 2)}%`
+    : "未知";
+  const label = contract.profile_label ?? `历史批次契约：最大回撤 ${drawdownText}`;
+  const evidence = [
+    contract.validation_requires_positive_net_profit === true ? "独立窗口成本后净收益为正" : null,
+    contract.lookahead_analysis_required === true ? "要求 lookahead 检查" : null,
+    typeof contract.fee_per_side === "number" ? `费用 ${(contract.fee_per_side * 100).toFixed(2)}%/侧` : null,
+    typeof contract.slippage_per_side === "number" ? `滑点 ${(contract.slippage_per_side * 100).toFixed(2)}%/侧` : null,
+    `最大回撤门 ${drawdownText}`,
+  ].filter((item): item is string => item !== null);
+  return `${label}；${evidence.join("、")}。契约校验：${hasOfficialAggressiveContract(run) ? "匹配当前 official contract" : "历史或不完整契约，不得自动部署"}。`;
+}
+
 export function hasOfficialSafetyContract(run: FormalResearchRun | null): boolean {
   const safety = run?.safety;
   return safety?.execution_target === "OKX_DEMO"

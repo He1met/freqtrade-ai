@@ -27,9 +27,9 @@ import {
   candidateLifecycleDisplay,
   candidateLifecycleFor,
   canStartFormalResearch,
-  hasOfficialAggressiveContract,
   lifecycleSummaryLabel,
   lifecycleSummaryText,
+  researchQualityContractText,
   validatedCandidateCount,
 } from "./strategyFactoryModel";
 import { displayDateTime, displayStatus, displayValue } from "./uiCopy";
@@ -194,7 +194,7 @@ export function Strategies() {
         <details className="formal-disclosure">
           <summary>查看正式质量契约</summary>
           <p className="formal-muted">
-            {formalRun?.quality_contract.profile_label ?? "质量契约尚未读取"}；要求独立窗口成本后净收益为正、lookahead 检查、费用 0.05%/侧、滑点 0.02%/侧，最大回撤门保持 15%。契约校验：{hasOfficialAggressiveContract(formalRun) ? "匹配" : "未确认"}。
+            {researchQualityContractText(formalRun)}
           </p>
         </details>
         {workspace.loading ? <p className="formal-muted">正在读取研究尝试与分钟数据质量证据…</p>
