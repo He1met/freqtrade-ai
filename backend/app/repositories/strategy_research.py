@@ -72,9 +72,26 @@ class StrategyResearchRepository:
         )
         return list(self.db.scalars(statement).all())
 
+    def get_attempt_event(
+        self, *, attempt_id: str, sequence: int
+    ) -> Optional[StrategyResearchAttemptEvent]:
+        return self.db.scalars(
+            select(StrategyResearchAttemptEvent).where(
+                StrategyResearchAttemptEvent.attempt_id == attempt_id,
+                StrategyResearchAttemptEvent.sequence == sequence,
+            )
+        ).first()
+
     def append_market_data_quality_receipt(
         self, receipt: MarketDataQualityReceipt
     ) -> MarketDataQualityReceipt:
+        existing = self.db.scalars(
+            select(MarketDataQualityReceipt).where(
+                MarketDataQualityReceipt.evidence_digest == receipt.evidence_digest
+            )
+        ).first()
+        if existing is not None:
+            return existing
         self.db.add(receipt)
         self.db.commit()
         self.db.refresh(receipt)

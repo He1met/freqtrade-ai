@@ -2,11 +2,18 @@ from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 
+import pandas as pd
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.core.config import get_settings
-from app.models import Base, StrategyResearchBatch
+from app.models import (
+    Base,
+    MarketDataQualityReceipt,
+    StrategyResearchAttemptEvent,
+    StrategyResearchBatch,
+)
 from app.services.formal_strategy_research import FormalStrategyResearchCoordinator
 
 
@@ -20,7 +27,16 @@ def build_coordinator(tmp_path, monkeypatch, *, ownership=True, allow_dry_run=Fa
         (repo / f"research/strategy_candidates/{index:02d}_candidate.py").write_text("pass\n")
     data = repo / "user_data/data/futures/BTC_USDT_USDT-15m-futures.feather"
     data.parent.mkdir(parents=True)
-    data.write_bytes(b"fixture")
+    pd.DataFrame(
+        {
+            "date": pd.date_range("2026-08-09T04:00:00Z", periods=5, freq="15min"),
+            "open": [100.0] * 5,
+            "high": [102.0] * 5,
+            "low": [99.0] * 5,
+            "close": [101.0] * 5,
+            "volume": [2.0] * 5,
+        }
+    ).to_feather(data)
     freqtrade = repo / ".venv/bin/freqtrade"
     freqtrade.parent.mkdir(parents=True)
     freqtrade.write_text("#!/bin/sh\n")
@@ -66,11 +82,15 @@ def test_formal_research_fails_closed_without_fresh_ownership(tmp_path, monkeypa
     coordinator = build_coordinator(tmp_path, monkeypatch, ownership=False)
     with db_session() as db:
         result = coordinator.start(db, trigger="manual")
+        events = db.query(StrategyResearchAttemptEvent).all()
     assert result.status == "BLOCKED"
     assert result.reason_code == "OWNERSHIP_EVIDENCE_MISSING_OR_STALE"
     assert result.requested_count == 0
     assert result.generated_count == 0
     assert result.persisted_count == 0
+    assert len(events) == 1
+    assert events[0].outcome == "NOT_GENERATED"
+    assert events[0].requested_count == 0
 
 
 def test_formal_research_rejects_unsafe_dry_run_configuration(tmp_path, monkeypatch):
@@ -89,15 +109,23 @@ def test_formal_research_starts_exact_ten_candidate_shared_worker(tmp_path, monk
     coordinator._repository_commit = lambda: "a" * 40
     with db_session() as db:
         result = coordinator.start(db, trigger="manual")
+        events = db.query(StrategyResearchAttemptEvent).all()
+        receipts = db.query(MarketDataQualityReceipt).all()
     assert result.status == "RUNNING"
     assert result.run_id == "202608090515"
     assert result.requested_count == 10
     assert len(calls) == 1
+    assert len(events) == len(receipts) == 1
+    assert events[0].outcome == "RUNNING"
+    assert events[0].market_data_quality_receipt_id == receipts[0].id
+    assert receipts[0].status == "PASSED"
     command = calls[0][0]
     assert "formal_strategy_research_worker.py" in command[1]
     assert command[command.index("--trigger") + 1] == "manual"
     assert command[command.index("--deadline-seconds") + 1] == "3600"
     assert command[command.index("--heartbeat-seconds") + 1] == "5"
+    assert command[command.index("--attempt-id") + 1] == result.attempt_id
+    assert command[command.index("--expected-market-data-sha256") + 1] == receipts[0].file_sha256
     state = json.loads(coordinator.state_path.read_text())
     assert state["phase"] == "STARTING"
     assert state["cleanup_status"] == "NOT_REQUIRED"

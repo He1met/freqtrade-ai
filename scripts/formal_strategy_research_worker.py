@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -48,6 +49,8 @@ def _base_state(args: argparse.Namespace, *, now: datetime) -> dict:
         "started_at": args.started_at,
         "heartbeat_at": now.isoformat(),
         "deadline_at": args.deadline_at,
+        "attempt_id": args.attempt_id,
+        "market_data_quality_receipt_id": args.market_data_quality_receipt_id,
     }
 
 
@@ -105,6 +108,68 @@ def terminate_process_group(
         return "UNCONFIRMED"
 
 
+def record_terminal_event(
+    args: argparse.Namespace, *, outcome: str, reason_code: str, reason: str
+) -> None:
+    """Append terminal evidence through the ordinary research persistence role."""
+
+    repo = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(repo / "backend"))
+    from app.db.session import SessionLocal
+    from app.models.strategy_research import StrategyResearchAttemptEvent
+    from app.repositories.strategy_research import StrategyResearchRepository
+
+    with SessionLocal() as db:
+        repository = StrategyResearchRepository(db)
+        if repository.get_attempt_event(attempt_id=args.attempt_id, sequence=2) is not None:
+            return
+        batch = repository.get_batch_by_run_id(args.run_id)
+        generated = batch.generated_count if batch is not None else 0
+        persisted = batch.persisted_count if batch is not None else 0
+        qualified = batch.qualified_count if batch is not None else 0
+        rejected = batch.rejected_count if batch is not None else 0
+        validated = qualified + rejected
+        if outcome == "COMPLETED" and batch is None:
+            raise RuntimeError("completed research has no persisted batch")
+        identity = {
+            "attempt_id": args.attempt_id,
+            "sequence": 2,
+            "run_id": args.run_id,
+            "batch_id": batch.id if batch is not None else None,
+            "outcome": outcome,
+            "reason_code": reason_code,
+            "quality_receipt_id": args.market_data_quality_receipt_id,
+            "counts": [10, generated, validated, persisted, qualified, rejected],
+        }
+        event_digest = hashlib.sha256(
+            json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        repository.append_attempt_event(
+            StrategyResearchAttemptEvent(
+                attempt_id=args.attempt_id,
+                sequence=2,
+                run_id=args.run_id,
+                batch_id=batch.id if batch is not None else None,
+                market_data_quality_receipt_id=args.market_data_quality_receipt_id,
+                trigger=args.trigger,
+                phase="TERMINAL",
+                outcome=outcome,
+                reason_code=reason_code,
+                redacted_reason=safe(reason),
+                requested_count=10,
+                generated_count=generated,
+                validated_count=validated,
+                persisted_count=persisted,
+                qualified_count=qualified,
+                rejected_count=rejected,
+                evidence_snapshot={
+                    "execution_target": "OKX_DEMO",
+                    "allow_real_funds": False,
+                    "real_orders": False,
+                },
+                event_digest=event_digest,
+            )
+        )
 def execute(
     args: argparse.Namespace,
     *,
@@ -113,8 +178,32 @@ def execute(
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
     killpg: Callable[[int, int], None] = os.killpg,
+    terminal_recorder: Callable[..., None] = record_terminal_event,
 ) -> int:
     repo = Path(__file__).resolve().parents[1]
+    data_file = args.datadir / "futures" / "BTC_USDT_USDT-15m-futures.feather"
+    digest = hashlib.sha256(data_file.read_bytes()).hexdigest()
+    if digest != args.expected_market_data_sha256:
+        now = clock()
+        terminal_recorder(
+            args,
+            outcome="BLOCKED",
+            reason_code="MARKET_DATA_DIGEST_CHANGED",
+            reason="数据文件在质量检查后发生变化；本轮未启动研究子进程。",
+        )
+        write_state(
+            args.state_path,
+            {
+                "status": "BLOCKED",
+                "reason_code": "MARKET_DATA_DIGEST_CHANGED",
+                "reason": "数据文件在质量检查后发生变化；本轮未启动研究子进程。",
+                **_base_state(args, now=now),
+                "completed_at": now.isoformat(),
+                "phase": "FINISHED",
+                "cleanup_status": "NOT_REQUIRED",
+            },
+        )
+        return 2
     command = [
         sys.executable,
         str(repo / "scripts/run_strategy_candidate_research.py"),
@@ -200,6 +289,11 @@ def execute(
                     )
                     completed_at = clock()
                     if cleanup == "UNCONFIRMED":
+                        terminal_recorder(
+                            args, outcome="BLOCKED",
+                            reason_code="PROCESS_GROUP_CLEANUP_UNCONFIRMED",
+                            reason="研究子进程组退出状态无法确认；人工核对前禁止重放。",
+                        )
                         write_state(
                             args.state_path,
                             {
@@ -235,6 +329,9 @@ def execute(
                             "cleanup_status": cleanup,
                         },
                     )
+                    terminal_recorder(
+                        args, outcome="FAILED", reason_code=reason_code, reason=reason
+                    )
                     return 124 if interrupted["signal"] is None else 128 + int(interrupted["signal"])
                 write_state(
                     args.state_path,
@@ -252,6 +349,12 @@ def execute(
             returncode = child.wait()
             completed_at = clock()
             if returncode == 0:
+                terminal_recorder(
+                    args,
+                    outcome="COMPLETED",
+                    reason_code="COMPLETED",
+                    reason="正式路径已完成 10 条候选的生成、验证与全量持久化。",
+                )
                 write_state(
                     args.state_path,
                     {
@@ -266,6 +369,12 @@ def execute(
                 )
                 return 0
             detail = _tail(output)
+            terminal_recorder(
+                args,
+                outcome="FAILED",
+                reason_code="RESEARCH_PROCESS_FAILED",
+                reason=f"正式研究进程失败：{detail}",
+            )
             write_state(
                 args.state_path,
                 {
@@ -329,6 +438,9 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--deadline-seconds", type=float, required=True)
     parser.add_argument("--heartbeat-seconds", type=float, required=True)
     parser.add_argument("--termination-grace-seconds", type=float, required=True)
+    parser.add_argument("--attempt-id", required=True)
+    parser.add_argument("--market-data-quality-receipt-id", type=int, required=True)
+    parser.add_argument("--expected-market-data-sha256", required=True)
     args = parser.parse_args(argv)
     if args.deadline_seconds <= 0 or args.heartbeat_seconds <= 0 or args.termination_grace_seconds <= 0:
         parser.error("deadline, heartbeat, and termination grace must be positive")

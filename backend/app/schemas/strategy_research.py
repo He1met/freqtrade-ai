@@ -71,6 +71,8 @@ class FormalResearchRunRead(BaseModel):
     reason_code: str
     reason: str
     active: bool
+    attempt_id: Optional[str] = None
+    market_data_quality_receipt_id: Optional[int] = None
     run_id: Optional[str] = None
     trigger: Optional[Literal["manual", "automation"]] = None
     started_at: Optional[datetime] = None

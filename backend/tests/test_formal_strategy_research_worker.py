@@ -1,5 +1,6 @@
 from argparse import Namespace
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -28,6 +29,9 @@ class FakeChild:
 
 
 def args_for(tmp_path: Path, **updates) -> Namespace:
+    data_file = tmp_path / "data/futures/BTC_USDT_USDT-15m-futures.feather"
+    data_file.parent.mkdir(parents=True)
+    data_file.write_bytes(b"fixture")
     values = {
         "lock_fd": 3,
         "run_id": "202608090515",
@@ -41,6 +45,9 @@ def args_for(tmp_path: Path, **updates) -> Namespace:
         "deadline_seconds": 3600.0,
         "heartbeat_seconds": 5.0,
         "termination_grace_seconds": 10.0,
+        "attempt_id": "00000000-0000-4000-8000-000000000001",
+        "market_data_quality_receipt_id": 1,
+        "expected_market_data_sha256": hashlib.sha256(b"fixture").hexdigest(),
     }
     values.update(updates)
     return Namespace(**values)
@@ -48,12 +55,14 @@ def args_for(tmp_path: Path, **updates) -> Namespace:
 
 def test_worker_records_success_with_terminal_heartbeat(tmp_path):
     args = args_for(tmp_path)
+    terminal = []
     result = execute(
         args,
         popen=lambda *unused_args, **unused_kwargs: FakeChild(0),
         clock=lambda: NOW,
         monotonic=lambda: 0.0,
         sleep=lambda unused: None,
+        terminal_recorder=lambda *unused_args, **kwargs: terminal.append(kwargs),
     )
     state = json.loads(args.state_path.read_text())
     assert result == 0
@@ -61,6 +70,13 @@ def test_worker_records_success_with_terminal_heartbeat(tmp_path):
     assert state["phase"] == "FINISHED"
     assert state["heartbeat_at"] == NOW.isoformat()
     assert state["cleanup_status"] == "NOT_REQUIRED"
+    assert terminal == [
+        {
+            "outcome": "COMPLETED",
+            "reason_code": "COMPLETED",
+            "reason": "正式路径已完成 10 条候选的生成、验证与全量持久化。",
+        }
+    ]
 
 
 def test_worker_deadline_terminates_only_child_process_group(tmp_path):
@@ -80,6 +96,7 @@ def test_worker_deadline_terminates_only_child_process_group(tmp_path):
         monotonic=lambda: next(moments),
         sleep=lambda unused: None,
         killpg=killpg,
+        terminal_recorder=lambda *unused_args, **unused_kwargs: None,
     )
     state = json.loads(args.state_path.read_text())
     assert result == 124
@@ -104,6 +121,7 @@ def test_worker_blocks_when_process_group_cleanup_cannot_be_proven(tmp_path):
         monotonic=lambda: next(moments),
         sleep=lambda unused: None,
         killpg=denied,
+        terminal_recorder=lambda *unused_args, **unused_kwargs: None,
     )
     state = json.loads(args.state_path.read_text())
     assert result == 2

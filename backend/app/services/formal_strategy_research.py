@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ import re
 import subprocess
 import sys
 from typing import Any, Callable, Optional
+import uuid
 
 from sqlalchemy.orm import Session
 
@@ -16,6 +18,8 @@ from app.adapters.freqtrade.binary import resolve_freqtrade_binary
 from app.core.config import Settings, get_settings
 from app.repositories.strategy_research import StrategyResearchRepository
 from app.schemas.strategy_research import FormalResearchRunRead
+from app.models.strategy_research import StrategyResearchAttemptEvent
+from app.services.market_data_quality import inspect_market_data
 
 
 EXPECTED_CANDIDATE_COUNT = 10
@@ -126,6 +130,64 @@ class FormalStrategyResearchCoordinator:
             reason=reason,
             active=False,
             requested_count=0,
+        )
+
+    def _append_attempt_event(
+        self,
+        db: Session,
+        *,
+        attempt_id: str,
+        sequence: int,
+        trigger: str,
+        phase: str,
+        outcome: str,
+        reason_code: str,
+        reason: str,
+        requested_count: int,
+        run_id: Optional[str] = None,
+        quality_receipt_id: Optional[int] = None,
+    ) -> StrategyResearchAttemptEvent:
+        evidence = {
+            "execution_target": "OKX_DEMO",
+            "allow_real_funds": False,
+            "real_orders": False,
+            "candidate_contract_count": EXPECTED_CANDIDATE_COUNT,
+        }
+        identity = {
+            "attempt_id": attempt_id,
+            "sequence": sequence,
+            "run_id": run_id,
+            "trigger": trigger,
+            "phase": phase,
+            "outcome": outcome,
+            "reason_code": reason_code,
+            "requested_count": requested_count,
+            "market_data_quality_receipt_id": quality_receipt_id,
+            "evidence_snapshot": evidence,
+        }
+        digest = hashlib.sha256(
+            json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        return StrategyResearchRepository(db).append_attempt_event(
+            StrategyResearchAttemptEvent(
+                attempt_id=attempt_id,
+                sequence=sequence,
+                run_id=run_id,
+                market_data_quality_receipt_id=quality_receipt_id,
+                trigger=trigger,
+                phase=phase,
+                outcome=outcome,
+                reason_code=reason_code,
+                redacted_reason=_safe_text(reason),
+                requested_count=requested_count,
+                generated_count=0,
+                validated_count=0,
+                persisted_count=0,
+                qualified_count=0,
+                rejected_count=0,
+                evidence_snapshot=evidence,
+                event_digest=digest,
+            )
         )
 
     def _terminalize_orphaned_state(
@@ -328,6 +390,8 @@ class FormalStrategyResearchCoordinator:
             reason_code=code,
             reason=reason,
             active=active,
+            attempt_id=state.get("attempt_id"),
+            market_data_quality_receipt_id=state.get("market_data_quality_receipt_id"),
             run_id=state.get("run_id"),
             trigger=state.get("trigger"),
             started_at=_parse_datetime(state.get("started_at")),
@@ -342,12 +406,32 @@ class FormalStrategyResearchCoordinator:
         )
 
     def start(self, db: Session, *, trigger: str) -> FormalResearchRunRead:
+        attempt_id = str(uuid.uuid4())
         blocked = self._preflight()
         if blocked is not None:
+            self._append_attempt_event(
+                db,
+                attempt_id=attempt_id,
+                sequence=1,
+                trigger=trigger,
+                phase="PRECHECK",
+                outcome="NOT_GENERATED",
+                reason_code=blocked.reason_code,
+                reason=blocked.reason,
+                requested_count=0,
+            )
+            blocked.attempt_id = attempt_id
             return blocked
         lock = self._try_lock()
         if lock is None:
-            return self._blocked("ACTIVE_RESEARCH", "已有正式研究正在运行；防重入门禁拒绝重复启动。")
+            blocked = self._blocked("ACTIVE_RESEARCH", "已有正式研究正在运行；防重入门禁拒绝重复启动。")
+            self._append_attempt_event(
+                db, attempt_id=attempt_id, sequence=1, trigger=trigger,
+                phase="PRECHECK", outcome="NOT_GENERATED",
+                reason_code=blocked.reason_code, reason=blocked.reason, requested_count=0,
+            )
+            blocked.attempt_id = attempt_id
+            return blocked
         state = self._read_json(self.state_path)
         if (
             state.get("cleanup_status") == "UNCONFIRMED"
@@ -381,12 +465,47 @@ class FormalStrategyResearchCoordinator:
         if StrategyResearchRepository(db).get_batch_by_run_id(run_id) is not None:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
             lock.close()
-            return self._blocked("DUPLICATE_SLOT", f"15 分钟槽位 {run_id} 已有持久化批次，拒绝重复运行。")
+            blocked = self._blocked("DUPLICATE_SLOT", f"15 分钟槽位 {run_id} 已有持久化批次，拒绝重复运行。")
+            self._append_attempt_event(
+                db, attempt_id=attempt_id, sequence=1, trigger=trigger,
+                phase="PRECHECK", outcome="NOT_GENERATED",
+                reason_code=blocked.reason_code, reason=blocked.reason,
+                requested_count=0, run_id=run_id,
+            )
+            blocked.attempt_id = attempt_id
+            return blocked
         freqtrade, datadir = self._paths()
         if freqtrade is None:  # guarded by _preflight; retain a fail-closed type boundary
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
             lock.close()
             return self._blocked("FREQTRADE_BINARY_MISSING", "正式研究 Freqtrade 可执行文件不存在。")
+        data_file = datadir / "futures" / "BTC_USDT_USDT-15m-futures.feather"
+        quality = inspect_market_data(
+            data_file,
+            repository_root=self.repo,
+            exchange="okx",
+            pair="BTC/USDT:USDT",
+            timeframe="15m",
+            expected_interval_seconds=15 * 60,
+            inspected_at=now,
+        )
+        quality = StrategyResearchRepository(db).append_market_data_quality_receipt(quality)
+        if quality.status != "PASSED":
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            lock.close()
+            blocked = self._blocked(
+                "MARKET_DATA_QUALITY_BLOCKED",
+                "正式研究数据质量门未通过：" + ", ".join(quality.reason_codes),
+            )
+            self._append_attempt_event(
+                db, attempt_id=attempt_id, sequence=1, trigger=trigger,
+                phase="PRECHECK", outcome="NOT_GENERATED",
+                reason_code=blocked.reason_code, reason=blocked.reason,
+                requested_count=0, run_id=run_id, quality_receipt_id=quality.id,
+            )
+            blocked.attempt_id = attempt_id
+            blocked.market_data_quality_receipt_id = quality.id
+            return blocked
         started_at = now.isoformat()
         deadline_at = (now + timedelta(seconds=WORKER_DEADLINE_SECONDS)).isoformat()
         self._write_state(
@@ -401,6 +520,8 @@ class FormalStrategyResearchCoordinator:
                 "deadline_at": deadline_at,
                 "phase": "STARTING",
                 "cleanup_status": "NOT_REQUIRED",
+                "attempt_id": attempt_id,
+                "market_data_quality_receipt_id": quality.id,
             }
         )
         worker = self.repo / "scripts/formal_strategy_research_worker.py"
@@ -419,7 +540,16 @@ class FormalStrategyResearchCoordinator:
             "--deadline-seconds", str(WORKER_DEADLINE_SECONDS),
             "--heartbeat-seconds", str(WORKER_HEARTBEAT_INTERVAL_SECONDS),
             "--termination-grace-seconds", str(WORKER_TERMINATION_GRACE_SECONDS),
+            "--attempt-id", attempt_id,
+            "--market-data-quality-receipt-id", str(quality.id),
+            "--expected-market-data-sha256", quality.file_sha256,
         ]
+        self._append_attempt_event(
+            db, attempt_id=attempt_id, sequence=1, trigger=trigger,
+            phase="STARTED", outcome="RUNNING", reason_code="STARTED",
+            reason="正式研究已进入后台执行。", requested_count=10,
+            run_id=run_id, quality_receipt_id=quality.id,
+        )
         try:
             self.popen(
                 command,
@@ -450,6 +580,8 @@ class FormalStrategyResearchCoordinator:
             reason_code="STARTED",
             reason="正式研究已进入后台执行；页面轮询同一持久化状态，不会重复提交。",
             active=True,
+            attempt_id=attempt_id,
+            market_data_quality_receipt_id=quality.id,
             run_id=run_id,
             trigger=trigger,
             started_at=now,
