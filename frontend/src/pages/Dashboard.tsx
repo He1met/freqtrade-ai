@@ -13,7 +13,7 @@ import { useFormalReadModels } from "../api/useFormalReadModels";
 import { useFormalCatalogData } from "../api/useFormalCatalogData";
 import { EmptyState, FormalLoadingState, PageHeader, StatusBadge } from "../components/DisplayPrimitives";
 import { okxDemoAcceptanceIsTruthful } from "./okxDemoDisplay";
-import { deploymentHandoffText, validatedCandidateCount } from "./strategyFactoryModel";
+import { candidateLifecycleDisplay, deploymentHandoffText, validatedCandidateCount } from "./strategyFactoryModel";
 import { displayDateTime, displayStatus } from "./uiCopy";
 
 type Loadable<T> = {
@@ -89,6 +89,19 @@ export function Dashboard() {
           : "正式证据已读取，当前没有 ACTIVE 模拟盘部署";
   const pageStatus = pageLoading ? "RUNNING" : dataHasProblem ? "UNKNOWN" : businessBlocked ? "BLOCKED" : "READY";
   const fills = demo.data?.orders.reduce((total, order) => total + order.fills.length, 0) ?? null;
+  const lifecycleSummary = workspace.data?.sections.bridge?.status === "AVAILABLE"
+    ? workspace.data.lifecycle_summary ?? null
+    : null;
+  const candidateLifecycles = workspace.data?.candidate_lifecycles ?? [];
+  const bridgedCount = lifecycleSummary
+    ? candidateLifecycles.filter((item) => item.bridge_outcome === "BRIDGED").length
+    : null;
+  const approvedCount = workspace.data?.sections.approval?.status === "AVAILABLE"
+    ? candidateLifecycles.filter((item) => item.candidate_approval_status === "APPROVED").length
+    : null;
+  const deployedDemoCount = workspace.data?.sections.deployment?.status === "AVAILABLE"
+    ? candidateLifecycles.filter((item) => item.deployment_status === "ACTIVE").length
+    : null;
   const activities = useMemo(() => {
     const items: Array<{ id: string; title: string; meta: string; status: string }> = [];
     if (latestResearch) {
@@ -237,12 +250,18 @@ export function Dashboard() {
             <StatusBadge label="只读" status="UNKNOWN" />
           </div>
           <dl className="formal-summary-list">
-            <div><dt>部署交接</dt><dd>{workspace.data?.handoff_status === "CANONICAL_LINK_UNAVAILABLE" ? "正式生命周期衔接证据尚不可用" : deploymentHandoffText(latestResearchRun)}</dd></div>
+            <div><dt>Blueprint v2 bridge</dt><dd>{bridgedCount === null ? "未知" : `${bridgedCount} 个候选已有权威 bridge 证据`}</dd></div>
+            <div><dt>批准未部署</dt><dd>{approvedCount === null ? "未知" : `${approvedCount} 个`}</dd></div>
+            <div><dt>Demo ACTIVE 映射</dt><dd>{deployedDemoCount === null ? "未知" : `${deployedDemoCount} 个`}</dd></div>
             <div><dt>ACTIVE 运行策略</dt><dd>{runtimeActivity.loading ? "读取中" : runtimeActivity.error ? "未知" : `${runtimeActivity.data?.active_deployments.length ?? 0} 个`}</dd></div>
             <div><dt>最近信号评估</dt><dd>{runtimeActivity.loading ? "读取中" : runtimeActivity.error ? "未知" : latestSignalStatus ? displayStatus(latestSignalStatus) : "当前无信号"}</dd></div>
             <div><dt>未来 Live</dt><dd>状态未知 · 无切换入口</dd></div>
           </dl>
-          <p className="formal-muted">QUALIFIED 只代表可进入评审，不代表已批准、已部署或正在运行。</p>
+          <p className="formal-muted">
+            {lifecycleSummary === null
+              ? candidateLifecycleDisplay(undefined).detail
+              : "各阶段仅来自显式 lifecycle 投影；不以候选数量或名称推断。"}
+          </p>
         </section>
 
         <section className="formal-panel" aria-labelledby="dashboard-demo-title">

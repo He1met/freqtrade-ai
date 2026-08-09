@@ -56,6 +56,7 @@ from app.models.strategy_research import (
     StrategyResearchAttemptEvent,
     StrategyResearchBatch,
     StrategyResearchCandidate,
+    StrategyResearchCandidateBridgeEvent,
 )
 from app.models.strategy_validation import StrategyValidationPlan, StrategyValidationWindow
 
@@ -110,6 +111,7 @@ __all__ = [
     "StrategyGenerationRun",
     "StrategyResearchBatch",
     "StrategyResearchCandidate",
+    "StrategyResearchCandidateBridgeEvent",
     "StrategyResearchAttemptEvent",
     "StrategyScore",
     "StrategyVersion",

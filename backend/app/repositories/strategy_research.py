@@ -8,6 +8,7 @@ from app.models.strategy_research import (
     StrategyResearchAttemptEvent,
     StrategyResearchBatch,
     StrategyResearchCandidate,
+    StrategyResearchCandidateBridgeEvent,
 )
 
 
@@ -46,6 +47,28 @@ class StrategyResearchRepository:
         if status is not None:
             statement = statement.where(StrategyResearchCandidate.status == status)
         return list(self.db.scalars(statement.limit(limit)).all())
+
+    def list_latest_candidate_bridge_events(
+        self, *, candidate_ids: list[int]
+    ) -> list[StrategyResearchCandidateBridgeEvent]:
+        if not candidate_ids:
+            return []
+        rows = list(
+            self.db.scalars(
+                select(StrategyResearchCandidateBridgeEvent)
+                .where(
+                    StrategyResearchCandidateBridgeEvent.research_candidate_id.in_(candidate_ids)
+                )
+                .order_by(
+                    StrategyResearchCandidateBridgeEvent.created_at.desc(),
+                    StrategyResearchCandidateBridgeEvent.id.desc(),
+                )
+            ).all()
+        )
+        latest: dict[int, StrategyResearchCandidateBridgeEvent] = {}
+        for row in rows:
+            latest.setdefault(row.research_candidate_id, row)
+        return list(latest.values())
 
     def add_batch(self, batch: StrategyResearchBatch) -> StrategyResearchBatch:
         self.db.add(batch)

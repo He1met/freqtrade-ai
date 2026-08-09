@@ -69,7 +69,8 @@ FINAL_ACCEPTANCE_BASE_VERSION = "20260804_33"
 CONTINUOUS_DEMO_BASE_VERSION = "20260804_34"
 CONTINUOUS_DEMO_SELECTION_V2_BASE_VERSION = "20260804_35"
 RESEARCH_PERSISTENCE_BASE_VERSION = "20260804_36"
-SCHEMA_VERSION = "20260809_37"
+CANDIDATE_BRIDGE_BASE_VERSION = "20260809_37"
+SCHEMA_VERSION = "20260809_38"
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 ATTESTATION_PROOF_KEY_ENV = "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"
 OPERATOR_TOKEN_ENV = "FREQTRADE_AI_OPERATOR_TOKEN"
@@ -102,6 +103,7 @@ RUNTIME_APPLICATION_TABLES = (
 RUNTIME_APPEND_ONLY_TABLES = frozenset(
     {"strategy_research_attempt_events", "market_data_quality_receipts"}
 )
+BRIDGE_APPEND_ONLY_TABLES = frozenset({"strategy_research_candidate_bridge_events"})
 
 CANARY_LINEAGE_BOUNDARY_TABLES = frozenset(
     {
@@ -1594,6 +1596,11 @@ def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
             "market_data_quality_receipts",
             "researchreceiptsareappend-only",
         ),
+        "strategy_research_candidate_bridge_events_immutable": (
+            "beforedeleteorupdateon",
+            "strategy_research_candidate_bridge_events",
+            "researchreceiptsareappend-only",
+        ),
     }
     for table_name in (
         "okx_demo_exchange_events",
@@ -1658,6 +1665,33 @@ def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
             ).scalar_one()
             if sequence_owner != "freqtrade_ai_attestor":
                 problems.append(f"append-only sequence owner mismatch: {table_name}")
+    for table_name in BRIDGE_APPEND_ONLY_TABLES:
+        owner = bind.execute(
+            text(
+                "SELECT tableowner FROM pg_tables "
+                "WHERE schemaname=:schema_name AND tablename=:table_name"
+            ),
+            {"schema_name": schema_name, "table_name": table_name},
+        ).scalar_one_or_none()
+        if owner != "freqtrade_ai_attestor":
+            problems.append(f"bridge table owner mismatch: {table_name}")
+        privileges = {
+            privilege: bind.execute(
+                text("SELECT has_table_privilege('freqtrade', :table_name, :privilege)"),
+                {
+                    "table_name": "{}.{}".format(schema_name, table_name),
+                    "privilege": privilege,
+                },
+            ).scalar_one()
+            for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE")
+        }
+        if privileges != {
+            "SELECT": True,
+            "INSERT": False,
+            "UPDATE": False,
+            "DELETE": False,
+        }:
+            problems.append(f"bridge table ACL mismatch: {table_name}")
     function_owner = bind.execute(
         text(
             "SELECT pg_get_userbyid(proowner) FROM pg_proc "
@@ -5492,7 +5526,11 @@ def _grant_runtime_application_acl(connection: Connection) -> None:
 def _add_research_receipt_boundary(connection: Connection) -> None:
     """Make research attempt and market-data receipts append-only in PostgreSQL."""
 
-    for table_name in RUNTIME_APPEND_ONLY_TABLES:
+    for table_name in (
+        "market_data_quality_receipts",
+        "strategy_research_attempt_events",
+        "strategy_research_candidate_bridge_events",
+    ):
         Base.metadata.tables[table_name].create(bind=connection, checkfirst=True)
     connection.execute(
         text(
@@ -5513,6 +5551,12 @@ def _add_research_receipt_boundary(connection: Connection) -> None:
                 ON market_data_quality_receipts;
             CREATE TRIGGER market_data_quality_receipts_immutable
                 BEFORE UPDATE OR DELETE ON market_data_quality_receipts
+                FOR EACH ROW EXECUTE FUNCTION prevent_research_receipt_mutation();
+
+            DROP TRIGGER IF EXISTS strategy_research_candidate_bridge_events_immutable
+                ON strategy_research_candidate_bridge_events;
+            CREATE TRIGGER strategy_research_candidate_bridge_events_immutable
+                BEFORE UPDATE OR DELETE ON strategy_research_candidate_bridge_events
                 FOR EACH ROW EXECUTE FUNCTION prevent_research_receipt_mutation();
             """
         )
@@ -5550,6 +5594,30 @@ def _add_research_receipt_boundary(connection: Connection) -> None:
                     "REVOKE ALL ON SEQUENCE {} FROM PUBLIC, freqtrade; "
                     "GRANT USAGE, SELECT ON SEQUENCE {} TO freqtrade".format(
                         sequence_identity, sequence_identity, sequence_identity
+                    )
+                )
+            )
+    for table_name in BRIDGE_APPEND_ONLY_TABLES:
+        qualified_table = "{}.{}".format(qualified_schema, quote(table_name))
+        connection.execute(
+            text(
+                "ALTER TABLE {} OWNER TO freqtrade_ai_attestor; "
+                "REVOKE ALL ON TABLE {} FROM PUBLIC, freqtrade; "
+                "GRANT SELECT ON TABLE {} TO freqtrade".format(
+                    qualified_table, qualified_table, qualified_table
+                )
+            )
+        )
+        sequence_identity = connection.execute(
+            text("SELECT pg_get_serial_sequence(:table_name, 'id')"),
+            {"table_name": "{}.{}".format(schema_name, table_name)},
+        ).scalar_one_or_none()
+        if sequence_identity:
+            connection.execute(
+                text(
+                    "ALTER SEQUENCE {} OWNER TO freqtrade_ai_attestor; "
+                    "REVOKE ALL ON SEQUENCE {} FROM PUBLIC, freqtrade".format(
+                        sequence_identity, sequence_identity
                     )
                 )
             )
@@ -11190,6 +11258,20 @@ def upgrade_database(engine: Engine) -> str:
                         "Recorded schema version does not match ORM metadata: " + "; ".join(problems)
                     )
                 return current_version
+            if current_version == CANDIDATE_BRIDGE_BASE_VERSION:
+                _add_research_receipt_boundary(connection)
+                _grant_runtime_application_acl(connection)
+                problems = schema_problems(connection)
+                if problems:
+                    raise SchemaMigrationBlocked(
+                        "Candidate bridge upgrade does not match ORM metadata: "
+                        + "; ".join(problems)
+                    )
+                connection.execute(
+                    text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+                    {"version": SCHEMA_VERSION},
+                )
+                return SCHEMA_VERSION
             if current_version == RESEARCH_PERSISTENCE_BASE_VERSION:
                 _add_research_receipt_boundary(connection)
                 _grant_runtime_application_acl(connection)
@@ -11244,6 +11326,7 @@ def upgrade_database(engine: Engine) -> str:
                 CONTINUOUS_DEMO_BASE_VERSION,
                 CONTINUOUS_DEMO_SELECTION_V2_BASE_VERSION,
                 RESEARCH_PERSISTENCE_BASE_VERSION,
+                CANDIDATE_BRIDGE_BASE_VERSION,
             }
             if current_version in supported_upgrade_versions:
                 connection.execute(

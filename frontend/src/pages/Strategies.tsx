@@ -24,9 +24,12 @@ import "../styles/strategies.css";
 import { FallbackNotice } from "./FallbackNotice";
 import { formatSourceTrace, formatTraceRecord, strategyAvailability } from "./strategyDisplay";
 import {
+  candidateLifecycleDisplay,
+  candidateLifecycleFor,
   canStartFormalResearch,
   deploymentHandoffText,
   hasOfficialAggressiveContract,
+  lifecycleSummaryLabel,
   validatedCandidateCount,
 } from "./strategyFactoryModel";
 import { displayDateTime, displayStatus, displayValue } from "./uiCopy";
@@ -198,7 +201,7 @@ export function Strategies() {
               <p className="formal-evidence-summary-line">
                 <span>最近尝试：<strong>{workspace.data.sections.attempts.status === "UNKNOWN" ? "未知" : workspace.data.attempts[0] ? displayStatus(workspace.data.attempts[0].latest_outcome) : "尚未尝试"}</strong></span>
                 <span>分钟数据：<strong>{workspace.data.sections.quality.status === "UNKNOWN" ? "未知" : workspace.data.latest_quality_receipt ? displayStatus(workspace.data.latest_quality_receipt.status) : "尚无 receipt"}</strong></span>
-                <span>生命周期衔接：<strong>{workspace.data.handoff_status === "UNKNOWN" ? "未知" : workspace.data.handoff_status === "CANONICAL_LINK_UNAVAILABLE" ? "无可审计 bridge" : workspace.data.handoff_status === "NOT_QUEUED_NO_QUALIFIED" ? "无合格候选" : "尚未评估"}</strong></span>
+                <span>生命周期衔接：<strong>{workspace.data.sections.bridge?.status === "AVAILABLE" ? lifecycleSummaryLabel(workspace.data.lifecycle_summary) : "未知"}</strong></span>
               </p>
             ) : null}
         {workspace.data?.sections.attempts.status === "AVAILABLE" && workspace.data.attempts[0] ? (
@@ -263,6 +266,16 @@ export function Strategies() {
           <div><span className="formal-kicker">正式候选</span><h2 id="research-candidates-title">合格、拒绝与验证失败</h2></div>
           <span className="formal-section-note">QUALIFIED 不等于已部署</span>
         </div>
+        <div className="formal-bridge-path" aria-label="候选到模拟盘的四步正式生命周期">
+          {["候选质量门", "Blueprint v2 bridge", "canonical 验证与批准", "OKX_DEMO ACTIVE"].map((label, index) => (
+            <div key={label}><span>{index + 1}</span><strong>{label}</strong></div>
+          ))}
+        </div>
+        {workspace.loading ? (
+          <p className="formal-muted">正在读取 candidate → canonical 生命周期证据…</p>
+        ) : workspace.error || workspace.data?.sections.bridge?.status !== "AVAILABLE" ? (
+          <p className="formal-problem">生命周期未知：权威 bridge 投影不可用；不会从 QUALIFIED、策略名称或摘要推断。</p>
+        ) : null}
         {researchError ? (
           <EmptyState title="候选状态未知" description="候选 API 读取失败；未知不能显示为没有候选。" />
         ) : latestResearch?.candidates.length ? (
@@ -272,9 +285,11 @@ export function Strategies() {
               const qualified = candidate.status === "QUALIFIED"
                 && candidate.validation_passed
                 && candidate.deployable_candidate;
+              const lifecycle = candidateLifecycleFor(workspace.data, candidate.id);
+              const lifecycleDisplay = candidateLifecycleDisplay(lifecycle?.lifecycle_status);
               return (
                 <li className="formal-candidate-card" key={candidate.id}>
-                  <header><h3>{candidate.candidate_name}</h3><StatusBadge status={candidate.status} /></header>
+                  <header><h3>{candidate.candidate_name}</h3><div><StatusBadge status={candidate.status} /> <StatusBadge label={lifecycleDisplay.label} status={lifecycleDisplay.status} /></div></header>
                   <p>Score {candidate.score ?? "暂无"} · Lookahead {candidate.lookahead_status} · Static {candidate.static_check}</p>
                   <p className="formal-candidate-reason">
                     {primaryReason
@@ -283,6 +298,9 @@ export function Strategies() {
                         ? "研究质量门已通过；是否进入部署评审以权威交接状态为准。"
                         : "拒绝或验证证据缺失，不能视为质量门已通过。"}
                   </p>
+                  <p className={lifecycleDisplay.status === "UNKNOWN" ? "formal-problem" : "formal-muted"}>
+                    正式生命周期：{lifecycleDisplay.detail}
+                  </p>
                   <details className="formal-disclosure">
                     <summary>查看完整拒绝原因与技术证据</summary>
                     {candidate.rejection_reasons.length ? (
@@ -290,6 +308,10 @@ export function Strategies() {
                     ) : <p className="formal-muted">没有拒绝原因记录。</p>}
                     <CopyableValue label="候选来源路径" value={candidate.source_path} />
                     <CopyableValue label="候选摘要" value={candidate.code_digest} />
+                    <CopyableValue label="Bridge 原因码" value={lifecycle?.reason_code} />
+                    <CopyableValue label="Blueprint 摘要" value={lifecycle?.blueprint_digest} />
+                    <CopyableValue label="Canonical Strategy ID" value={lifecycle?.canonical_strategy_id} />
+                    <CopyableValue label="Canonical Version ID" value={lifecycle?.canonical_strategy_version_id} />
                     <ExpandableText summary="完整结构化证据" value={JSON.stringify(candidate.evidence_snapshot, null, 2)} />
                   </details>
                 </li>

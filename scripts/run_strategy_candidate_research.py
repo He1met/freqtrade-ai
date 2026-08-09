@@ -31,6 +31,9 @@ from app.core.strategy_research_contract import (  # noqa: E402
     MIN_VALIDATION_TRADES,
     official_research_policy,
 )
+from app.services.strategy_blueprint_equivalence import (  # noqa: E402
+    prove_blueprint_code_equivalence,
+)
 
 PAIR = "BTC/USDT:USDT"
 TIMEFRAME = "15m"
@@ -69,6 +72,7 @@ class Candidate:
     class_name: str
     path: Path
     sha256: str
+    canonical_blueprint_evidence: Optional[dict[str, Any]] = None
 
 
 def _safe_error(reason: str) -> str:
@@ -167,7 +171,38 @@ def _discover_candidates(root: Path) -> list[Candidate]:
             raise RuntimeError(f"{path} must define exactly one Candidate class")
         _reject_obvious_lookahead(tree, path)
         compile(source, str(path), "exec")
-        candidates.append(Candidate(strategy_classes[0], path, _sha256(path)))
+        source_bytes = path.read_bytes()
+        code_digest = hashlib.sha256(source_bytes).hexdigest()
+        blueprint_path = path.with_suffix(".blueprint.json")
+        blueprint_evidence = None
+        if blueprint_path.is_file():
+            blueprint_payload = json.loads(blueprint_path.read_text(encoding="utf-8"))
+            if not isinstance(blueprint_payload, dict):
+                raise RuntimeError(f"{blueprint_path} must contain one Blueprint v2 object")
+            equivalence = prove_blueprint_code_equivalence(
+                blueprint_payload=blueprint_payload,
+                source_bytes=source_bytes,
+                expected_source_digest=code_digest,
+                expected_class_name=strategy_classes[0],
+                expected_timeframe=TIMEFRAME,
+            )
+            blueprint_evidence = {
+                "contract_version": "formal-candidate-blueprint-evidence-v1",
+                "blueprint": equivalence.blueprint.model_dump(mode="json"),
+                "blueprint_digest": equivalence.blueprint_digest,
+                "renderer_version": equivalence.renderer_version,
+                "rendered_code_digest": equivalence.rendered_code_digest,
+                "source_code_digest": code_digest,
+                "exact_render_match": True,
+            }
+        candidates.append(
+            Candidate(
+                strategy_classes[0],
+                path,
+                code_digest,
+                canonical_blueprint_evidence=blueprint_evidence,
+            )
+        )
     return candidates
 
 
@@ -460,6 +495,11 @@ def main() -> int:
             "static_check": "PASSED",
             "loadable": True,
             "windows": {},
+            **(
+                {"canonical_blueprint_v2": item.canonical_blueprint_evidence}
+                if item.canonical_blueprint_evidence is not None
+                else {}
+            ),
         }
         for item in candidates
     }

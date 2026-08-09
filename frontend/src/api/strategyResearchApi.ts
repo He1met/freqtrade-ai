@@ -110,16 +110,78 @@ export type StrategyResearchAttemptEvent = {
   created_at: string;
 };
 
+export type CandidateLifecycleStatus =
+  | "NOT_APPLICABLE_REJECTED"
+  | "NOT_APPLICABLE_VALIDATION_FAILED"
+  | "UNBRIDGED_REVALIDATION_REQUIRED"
+  | "BRIDGED_PENDING_CANONICAL_VALIDATION"
+  | "BRIDGED_PENDING_APPROVAL"
+  | "BRIDGED_APPROVAL_REJECTED"
+  | "APPROVED_NOT_DEPLOYED"
+  | "DEPLOYED_ACTIVE_DEMO"
+  | "DEPLOYED_DISABLED"
+  | "UNKNOWN";
+
+export type CandidateLifecycleRead = {
+  candidate_id: number;
+  batch_id: number;
+  candidate_name: string;
+  research_status: StrategyResearchCandidate["status"];
+  lifecycle_status: CandidateLifecycleStatus;
+  reason_code: string;
+  source_code_digest: string;
+  bridge_event_id: number | null;
+  bridge_outcome: "REVALIDATION_REQUIRED" | "BRIDGED" | "FAILED" | null;
+  bridge_contract_version: string | null;
+  blueprint_digest: string | null;
+  canonical_strategy_id: number | null;
+  canonical_strategy_version_id: number | null;
+  canonical_full_chain_run_id: number | null;
+  candidate_approval_id: number | null;
+  candidate_approval_status: "PENDING" | "APPROVED" | "REJECTED" | "EXPIRED" | "REVOKED" | null;
+  deployment_id: number | null;
+  deployment_status: "ACTIVE" | "DISABLED" | null;
+  active_slot: number | null;
+  created_at: string | null;
+};
+
+export type CandidateLifecycleSummary = {
+  status:
+    | "NOT_EVALUATED"
+    | "NOT_QUEUED_NO_QUALIFIED"
+    | "UNBRIDGED_REVALIDATION_REQUIRED"
+    | "BRIDGED_PENDING_CANONICAL_VALIDATION"
+    | "BRIDGED_PENDING_APPROVAL"
+    | "APPROVED_NOT_DEPLOYED"
+    | "DEPLOYED_ACTIVE_DEMO"
+    | "MIXED"
+    | "UNKNOWN";
+  qualified_count: number;
+  unbridged_count: number;
+  pending_canonical_validation_count: number;
+  pending_approval_count: number;
+  approved_not_deployed_count: number;
+  active_demo_count: number;
+  unknown_count: number;
+  reason_code: string;
+};
+
 export type StrategyResearchWorkspace = {
-  schema_version: "formal-strategy-research-workspace-v1";
+  schema_version: "formal-strategy-research-workspace-v1" | "formal-strategy-research-workspace-v2";
   as_of: string;
   source_type: "database";
   core_data: true;
+  execution_target_id?: "OKX_DEMO";
+  allow_real_funds?: false;
+  real_orders?: false;
   evidence_status: "COMPLETE" | "PARTIAL";
   sections: {
     attempts: { status: "AVAILABLE" | "UNKNOWN"; reason_code: string | null };
     quality: { status: "AVAILABLE" | "UNKNOWN"; reason_code: string | null };
     batch: { status: "AVAILABLE" | "UNKNOWN"; reason_code: string | null };
+    bridge?: { status: "AVAILABLE" | "UNKNOWN"; reason_code: string | null };
+    approval?: { status: "AVAILABLE" | "UNKNOWN"; reason_code: string | null };
+    deployment?: { status: "AVAILABLE" | "UNKNOWN"; reason_code: string | null };
   };
   attempts: Array<{
     attempt_id: string;
@@ -152,6 +214,8 @@ export type StrategyResearchWorkspace = {
   };
   latest_batch: StrategyResearchBatch | null;
   handoff_status: FormalResearchRun["deployment_handoff_status"] | "UNKNOWN";
+  candidate_lifecycles?: CandidateLifecycleRead[];
+  lifecycle_summary?: CandidateLifecycleSummary;
 };
 
 export function fetchStrategyResearchBatches(signal?: AbortSignal) {

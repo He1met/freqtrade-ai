@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  candidateLifecycleDisplay,
+  candidateLifecycleFor,
   canStartFormalResearch,
   deploymentHandoffText,
   hasOfficialAggressiveContract,
@@ -75,4 +77,26 @@ test("manual entry rejects unsafe or incomplete execution target evidence", () =
   assert.equal(canStartFormalResearch({ ...ready, safety: { ...demoSafety, execution_target: "LIVE" } }, false), false);
   assert.equal(canStartFormalResearch({ ...ready, safety: { ...demoSafety, allow_real_funds: true } }, false), false);
   assert.equal(canStartFormalResearch({ ...ready, safety: { ...demoSafety, real_orders: true } }, false), false);
+});
+
+test("candidate lifecycle display recognizes only explicit authoritative states", () => {
+  assert.equal(candidateLifecycleDisplay("UNBRIDGED_REVALIDATION_REQUIRED").label, "需补充 Blueprint v2 证据");
+  assert.equal(candidateLifecycleDisplay("BRIDGED_PENDING_CANONICAL_VALIDATION").label, "已桥接，待 canonical 验证");
+  assert.equal(candidateLifecycleDisplay("BRIDGED_PENDING_APPROVAL").label, "已桥接，待批准");
+  assert.equal(candidateLifecycleDisplay("APPROVED_NOT_DEPLOYED").label, "已批准，未部署");
+  assert.equal(candidateLifecycleDisplay("DEPLOYED_ACTIVE_DEMO").label, "Demo 运行中");
+  assert.equal(candidateLifecycleDisplay("made-up-state").status, "UNKNOWN");
+  assert.deepEqual(candidateLifecycleDisplay(undefined).steps, ["UNKNOWN", "UNKNOWN", "UNKNOWN", "UNKNOWN"]);
+});
+
+test("candidate lifecycle lookup fails closed when the bridge section is absent or unknown", () => {
+  const lifecycle = { candidate_id: 41, lifecycle_status: "BRIDGED_PENDING_CANONICAL_VALIDATION" };
+  const base = { candidate_lifecycles: [lifecycle] };
+  assert.equal(candidateLifecycleFor(base, 41), null);
+  assert.equal(candidateLifecycleFor({ ...base, sections: { bridge: { status: "UNKNOWN" } } }, 41), null);
+  assert.equal(
+    candidateLifecycleFor({ ...base, sections: { bridge: { status: "AVAILABLE" } } }, 41),
+    lifecycle,
+  );
+  assert.equal(candidateLifecycleFor({ ...base, sections: { bridge: { status: "AVAILABLE" } } }, 99), null);
 });

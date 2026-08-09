@@ -175,7 +175,7 @@ def test_workspace_reports_canonical_link_unavailable_without_guessing_queue(tmp
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["schema_version"] == "formal-strategy-research-workspace-v1"
+    assert payload["schema_version"] == "formal-strategy-research-workspace-v2"
     assert payload["source_type"] == "database"
     assert payload["core_data"] is True
     assert payload["evidence_status"] == "COMPLETE"
@@ -183,9 +183,16 @@ def test_workspace_reports_canonical_link_unavailable_without_guessing_queue(tmp
         "attempts": {"status": "AVAILABLE", "reason_code": None},
         "quality": {"status": "AVAILABLE", "reason_code": None},
         "batch": {"status": "AVAILABLE", "reason_code": None},
+        "bridge": {"status": "AVAILABLE", "reason_code": None},
+        "approval": {"status": "AVAILABLE", "reason_code": None},
+        "deployment": {"status": "AVAILABLE", "reason_code": None},
     }
     assert payload["latest_batch"]["qualified_count"] == 1
     assert payload["handoff_status"] == "CANONICAL_LINK_UNAVAILABLE"
+    assert payload["lifecycle_summary"]["status"] == "UNBRIDGED_REVALIDATION_REQUIRED"
+    assert payload["candidate_lifecycles"][0]["lifecycle_status"] == (
+        "UNBRIDGED_REVALIDATION_REQUIRED"
+    )
     assert payload["attempts"] == []
 
 

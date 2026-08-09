@@ -181,20 +181,96 @@ class StrategyResearchWorkspaceSectionsRead(BaseModel):
     attempts: StrategyResearchWorkspaceSectionRead
     quality: StrategyResearchWorkspaceSectionRead
     batch: StrategyResearchWorkspaceSectionRead
+    bridge: StrategyResearchWorkspaceSectionRead
+    approval: StrategyResearchWorkspaceSectionRead
+    deployment: StrategyResearchWorkspaceSectionRead
+
+
+CandidateLifecycleStatus = Literal[
+    "NOT_APPLICABLE_REJECTED",
+    "NOT_APPLICABLE_VALIDATION_FAILED",
+    "UNBRIDGED_REVALIDATION_REQUIRED",
+    "BRIDGED_PENDING_CANONICAL_VALIDATION",
+    "BRIDGED_PENDING_APPROVAL",
+    "BRIDGED_APPROVAL_REJECTED",
+    "APPROVED_NOT_DEPLOYED",
+    "DEPLOYED_ACTIVE_DEMO",
+    "DEPLOYED_DISABLED",
+    "UNKNOWN",
+]
+
+
+class StrategyResearchCandidateLifecycleRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_id: int
+    batch_id: int
+    candidate_name: str
+    research_status: ResearchCandidateStatus
+    lifecycle_status: CandidateLifecycleStatus
+    reason_code: str
+    source_code_digest: str
+    bridge_event_id: Optional[int] = None
+    bridge_outcome: Optional[Literal["REVALIDATION_REQUIRED", "BRIDGED", "FAILED"]] = None
+    bridge_contract_version: Optional[str] = None
+    blueprint_digest: Optional[str] = None
+    canonical_strategy_id: Optional[int] = None
+    canonical_strategy_version_id: Optional[int] = None
+    canonical_full_chain_run_id: Optional[int] = None
+    candidate_approval_id: Optional[int] = None
+    candidate_approval_status: Optional[
+        Literal["PENDING", "APPROVED", "REJECTED", "EXPIRED", "REVOKED"]
+    ] = None
+    deployment_id: Optional[int] = None
+    deployment_status: Optional[Literal["ACTIVE", "DISABLED"]] = None
+    active_slot: Optional[int] = None
+    created_at: Optional[datetime] = None
+
+
+class StrategyResearchLifecycleSummaryRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal[
+        "NOT_EVALUATED",
+        "NOT_QUEUED_NO_QUALIFIED",
+        "UNBRIDGED_REVALIDATION_REQUIRED",
+        "BRIDGED_PENDING_CANONICAL_VALIDATION",
+        "BRIDGED_PENDING_APPROVAL",
+        "APPROVED_NOT_DEPLOYED",
+        "DEPLOYED_ACTIVE_DEMO",
+        "MIXED",
+        "UNKNOWN",
+    ]
+    qualified_count: int
+    unbridged_count: int
+    pending_canonical_validation_count: int
+    pending_approval_count: int
+    approved_not_deployed_count: int
+    active_demo_count: int
+    unknown_count: int
+    reason_code: str
 
 
 class StrategyResearchWorkspaceRead(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal["formal-strategy-research-workspace-v1"]
+    schema_version: Literal[
+        "formal-strategy-research-workspace-v1",
+        "formal-strategy-research-workspace-v2",
+    ]
     as_of: datetime
     source_type: Literal["database"]
     core_data: Literal[True]
+    execution_target_id: Literal["OKX_DEMO"] = "OKX_DEMO"
+    allow_real_funds: Literal[False] = False
+    real_orders: Literal[False] = False
     evidence_status: Literal["COMPLETE", "PARTIAL"]
     sections: StrategyResearchWorkspaceSectionsRead
     attempts: list[StrategyResearchAttemptRead]
     latest_quality_receipt: Optional[MarketDataQualityReceiptRead] = None
     latest_batch: Optional[StrategyResearchBatchRead] = None
+    lifecycle_summary: StrategyResearchLifecycleSummaryRead
+    candidate_lifecycles: list[StrategyResearchCandidateLifecycleRead]
     handoff_status: Literal[
         "NOT_EVALUATED",
         "NOT_QUEUED_NO_QUALIFIED",

@@ -1069,3 +1069,72 @@ Codex 研究目标/变更假设
 - [ ] ownership/task/API 可见性不完整时返回 UNKNOWN/NO_OP_FAIL_CLOSED，不创建重复任务、第二 runtime 或第二 writer；
 - [ ] 无新增或修改 automation、数据库、schema、runtime、订单、风控、凭据或真实资金能力；
 - [ ] 本章任何待核对表/API/状态在实现前完成专项只读审计，不以推测补齐。
+
+## 16. Candidate → canonical Blueprint v2 bridge（v0.4）
+
+### 16.1 目的与不可跨越边界
+
+`QUALIFIED` 只证明 formal research 质量门通过，不证明候选可由 canonical runtime 安全解释。当前历史候选包含 ADX、ATR、Donchian、Bollinger 等任意 Python，而 Blueprint v2 只允许受限的 RSI/EMA/SMA 与声明式规则；不得通过 AST、名称、相似 digest 或人工猜测反推 Blueprint。
+
+本阶段建立的 bridge 只允许：
+
+1. 读取已持久化的 QUALIFIED candidate、终态 research attempt 与 PASSED 分钟数据 receipt；
+2. 重新验证完整 Blueprint v2；
+3. 使用显式版本的 renderer 重渲染；
+4. 要求渲染字节、源码字节、research code digest 三者完全相同；
+5. 创建 draft canonical Strategy/Version 与 ResearchJob/FullChain lineage；
+6. 停在 `CANONICAL_VALIDATION_REQUIRED`。
+
+Bridge 不导入或伪造 canonical BacktestResult、StrategyScore、ValidationPlan、Approval、Deployment、Signal、Order 或 Fill。Formal research JSON 不能替代独立 canonical 验证；没有 Blueprint v2 证据的历史 candidate 保留为 `UNBRIDGED_REVALIDATION_REQUIRED`。
+
+### 16.2 确定性证据合同
+
+| 证据 | 必须满足 |
+| --- | --- |
+| Blueprint | `schema_version=2`，`extra=forbid`，class/timeframe 与 candidate/15m 合同一致 |
+| Renderer | 显式 `strategy-renderer-v2.1`；未知版本 fail closed |
+| 源码等价 | `render(blueprint).encode('utf-8') == source_bytes`，不忽略注释、空白或换行差异 |
+| Digest | blueprint canonical JSON、rendered code、source file、candidate code digest 全部记录并重新核对 |
+| Research | batch 终态、candidate QUALIFIED、正式 quality policy、terminal attempt、PASSED market-data receipt |
+| Safety | `LOCAL_DRY_RUN` / `OKX_DEMO` / `allow_real_funds=false` / `real_orders=false` |
+| Canonical | 新 Version 为 `pending`；FullChain 在 BACKTEST 阶段 `BLOCKED`，等待独立验证 |
+
+生成端可以为候选提供同名 `.blueprint.json` sidecar。Runner 只在 sidecar 通过完整 schema 与逐字节等价校验时把 `canonical_blueprint_v2` 写入 candidate evidence；不存在 sidecar 时不补猜、不阻断原有 research，但不能 bridge。
+
+### 16.3 数据、writer 与幂等
+
+新增 additive v38 表 `strategy_research_candidate_bridge_events`：
+
+- append-only，禁止 UPDATE/DELETE；历史不回填；
+- outcome 为 `REVALIDATION_REQUIRED / BRIDGED / FAILED`；
+- `BRIDGED` 时 canonical job/attempt/full-chain/generation/strategy/version IDs 必须全部存在，且 rendered digest 必须等于 source digest；
+- candidate 仅允许一个成功 BRIDGED event；失败或缺证据保留独立事件；
+- 固定 scope/target 与 false safety flags；
+- Web/runtime 只读投影不执行 bridge；显式 CLI/coordinator 才可写，PostgreSQL runtime identity 在 service 层 fail closed；
+- 相同 request digest 重放返回原 event 与 canonical IDs，不创建第二份 lineage；
+- 文件写或事务结果未知时不得自动重放，应按 deterministic digest/IDs 人工核对并追加恢复证据。
+
+Bridge coordinator 是唯一 canonical writer；read-model、页面与监督任务无需互斥，也不得把读权限解释为 bridge 接管权。
+
+### 16.4 正式读模型与页面状态
+
+`GET /api/strategy-research/workspace` v2 按 candidate 返回显式生命周期：
+
+- `NOT_APPLICABLE_REJECTED / NOT_APPLICABLE_VALIDATION_FAILED`；
+- `UNBRIDGED_REVALIDATION_REQUIRED`；
+- `BRIDGED_PENDING_CANONICAL_VALIDATION`；
+- 未来只有权威 Approval/Deployment 实体存在时才可显示 `BRIDGED_PENDING_APPROVAL / APPROVED_NOT_DEPLOYED / DEPLOYED_ACTIVE_DEMO`；
+- bridge/approval/deployment 任一区块查询失败时显示 `UNKNOWN`，不能显示 0、无记录或未部署。
+
+策略工厂在 `1280×720` 桌面基线显示“研究 → Canonical 衔接 → 人工审批 → Demo 部署”四步路径。技术 ID/digest 默认收起；页面不提供 bridge、批准、部署、Live 或下单按钮。
+
+### 16.5 验收标准
+
+- [ ] 历史任意 Python QUALIFIED candidate 缺 Blueprint 时只产生 `REVALIDATION_REQUIRED`，canonical 写入为 0；
+- [ ] 任意空白、注释、class、timeframe、renderer version 或 SHA 差异均 fail closed；
+- [ ] exact Blueprint bridge 只创建 draft/pending StrategyVersion 和 BLOCKED canonical validation lineage；
+- [ ] 同请求重放返回相同 event/job/chain/version IDs；并发由 candidate lock、唯一索引与 job idempotency 约束收敛；
+- [ ] bridge 后 Approval、Deployment、Signal、Intent、Execution、Order、Fill 均为 0；
+- [ ] v37→v38 与 fresh schema 均可验证，bridge event 不可修改/删除；
+- [ ] workspace v2 与桌面 UI 不从 QUALIFIED、名称或 digest 推断批准/部署；
+- [ ] 不修改研究阈值、OKX_DEMO 风控、运行时 writer、订单幂等、凭据或真实资金边界。

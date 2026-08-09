@@ -14,6 +14,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
@@ -270,6 +271,134 @@ class StrategyResearchAttemptEvent(Base):
     persisted_count: Mapped[int] = mapped_column(Integer, nullable=False)
     qualified_count: Mapped[int] = mapped_column(Integer, nullable=False)
     rejected_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    evidence_snapshot: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    event_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class StrategyResearchCandidateBridgeEvent(Base):
+    """Immutable evidence for one candidate-to-canonical bridge decision."""
+
+    __tablename__ = "strategy_research_candidate_bridge_events"
+    __table_args__ = (
+        CheckConstraint(
+            "outcome IN ('REVALIDATION_REQUIRED', 'BRIDGED', 'FAILED')",
+            name="strategy_research_candidate_bridge_events_outcome_check",
+        ),
+        CheckConstraint(
+            "execution_scope_id = 'LOCAL_DRY_RUN'",
+            name="strategy_research_candidate_bridge_events_scope_check",
+        ),
+        CheckConstraint(
+            "execution_target_id = 'OKX_DEMO'",
+            name="strategy_research_candidate_bridge_events_target_check",
+        ),
+        CheckConstraint(
+            "allow_real_funds = FALSE AND real_orders = FALSE",
+            name="strategy_research_candidate_bridge_events_safety_check",
+        ),
+        CheckConstraint(
+            "length(request_digest) = 64 AND length(source_code_digest) = 64 "
+            "AND length(evidence_digest) = 64 AND length(event_digest) = 64 "
+            "AND (blueprint_digest IS NULL OR length(blueprint_digest) = 64) "
+            "AND (rendered_code_digest IS NULL OR length(rendered_code_digest) = 64)",
+            name="strategy_research_candidate_bridge_events_digest_check",
+        ),
+        CheckConstraint(
+            "outcome <> 'BRIDGED' OR (blueprint_digest IS NOT NULL "
+            "AND rendered_code_digest = source_code_digest "
+            "AND canonical_research_job_id IS NOT NULL "
+            "AND canonical_research_job_attempt_id IS NOT NULL "
+            "AND canonical_full_chain_run_id IS NOT NULL "
+            "AND strategy_generation_run_id IS NOT NULL "
+            "AND strategy_id IS NOT NULL AND strategy_version_id IS NOT NULL)",
+            name="strategy_research_candidate_bridge_events_bridged_check",
+        ),
+        CheckConstraint(
+            "outcome = 'BRIDGED' OR (canonical_research_job_id IS NULL "
+            "AND canonical_research_job_attempt_id IS NULL "
+            "AND canonical_full_chain_run_id IS NULL "
+            "AND strategy_generation_run_id IS NULL "
+            "AND strategy_id IS NULL AND strategy_version_id IS NULL)",
+            name="strategy_research_candidate_bridge_events_unbridged_check",
+        ),
+        UniqueConstraint(
+            "bridge_attempt_id",
+            "sequence",
+            name="strategy_research_candidate_bridge_events_identity_unique",
+        ),
+        UniqueConstraint(
+            "event_digest",
+            name="strategy_research_candidate_bridge_events_digest_unique",
+        ),
+        Index(
+            "strategy_research_candidate_bridge_events_candidate_created_idx",
+            "research_candidate_id",
+            "created_at",
+            "id",
+        ),
+        Index(
+            "strategy_research_candidate_bridge_events_one_bridge_idx",
+            "research_candidate_id",
+            unique=True,
+            postgresql_where=text("outcome = 'BRIDGED'"),
+            sqlite_where=text("outcome = 'BRIDGED'"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True
+    )
+    bridge_attempt_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    research_candidate_id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey("strategy_research_candidates.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    market_data_quality_receipt_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey("market_data_quality_receipts.id", ondelete="RESTRICT"),
+    )
+    outcome: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason_code: Mapped[str] = mapped_column(String(80), nullable=False)
+    redacted_reason: Mapped[str] = mapped_column(Text, nullable=False)
+    bridge_contract_version: Mapped[str] = mapped_column(String(80), nullable=False)
+    execution_scope_id: Mapped[str] = mapped_column(String(64), nullable=False, default="LOCAL_DRY_RUN")
+    execution_target_id: Mapped[str] = mapped_column(String(64), nullable=False, default="OKX_DEMO")
+    allow_real_funds: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    real_orders: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    source_code_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    blueprint_digest: Mapped[Optional[str]] = mapped_column(String(64))
+    rendered_code_digest: Mapped[Optional[str]] = mapped_column(String(64))
+    request_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    evidence_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    canonical_research_job_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey("research_jobs.id", ondelete="RESTRICT"),
+    )
+    canonical_research_job_attempt_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey("research_job_attempts.id", ondelete="RESTRICT"),
+    )
+    canonical_full_chain_run_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey("full_chain_runs.id", ondelete="RESTRICT"),
+    )
+    strategy_generation_run_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey("strategy_generation_runs.id", ondelete="RESTRICT"),
+    )
+    strategy_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey("strategies.id", ondelete="RESTRICT"),
+    )
+    strategy_version_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey("strategy_versions.id", ondelete="RESTRICT"),
+    )
     evidence_snapshot: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     event_digest: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
