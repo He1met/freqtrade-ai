@@ -485,7 +485,7 @@ export function LiveGovernance() {
         </div>
       </aside>
 
-      {!isLoading ? (
+      {!isLoading && !error ? (
         <section className="live-overview-grid" aria-label="实盘候选治理摘要">
           <article className="live-overview-card">
             <span>候选</span>
@@ -510,7 +510,7 @@ export function LiveGovernance() {
         </section>
       ) : null}
 
-      {!isLoading && overview.blockers.length > 0 ? (
+      {!isLoading && !error && overview.blockers.length > 0 ? (
         <section className="live-blocker-strip" aria-labelledby="live-blocker-title">
           <h2 id="live-blocker-title">当前阻断</h2>
           <ul>
@@ -525,14 +525,14 @@ export function LiveGovernance() {
         </section>
       ) : null}
 
-      {!isLoading && !hasRecords ? (
+      {!isLoading && !error && !hasRecords ? (
         <EmptyState
           description="当前没有可审计的候选、审批、部署治理或监控记录。空结果不代表实盘就绪。"
           title="暂无实盘候选治理记录"
         />
       ) : null}
 
-      {!isLoading && governance.profiles.length > 0 ? (
+      {!isLoading && !error && governance.profiles.length > 0 ? (
         <section className="live-section" aria-labelledby="live-candidates-title">
           <div className="live-section-heading">
             <div>
@@ -545,7 +545,7 @@ export function LiveGovernance() {
         </section>
       ) : null}
 
-      {!isLoading && governance.approvals.length > 0 ? (
+      {!isLoading && !error && governance.approvals.length > 0 ? (
         <section className="live-section" aria-labelledby="live-approvals-title">
           <div className="live-section-heading">
             <div>
@@ -558,7 +558,7 @@ export function LiveGovernance() {
         </section>
       ) : null}
 
-      {!isLoading && governance.deployments.length > 0 ? (
+      {!isLoading && !error && governance.deployments.length > 0 ? (
         <section className="live-section" aria-labelledby="live-deployments-title">
           <div className="live-section-heading">
             <div>
@@ -571,7 +571,7 @@ export function LiveGovernance() {
         </section>
       ) : null}
 
-      {!isLoading && governance.monitoringSnapshots.length > 0 ? (
+      {!isLoading && !error && governance.monitoringSnapshots.length > 0 ? (
         <section className="live-section" aria-labelledby="live-monitoring-title">
           <div className="live-section-heading">
             <div>
@@ -584,7 +584,7 @@ export function LiveGovernance() {
         </section>
       ) : null}
 
-      <section className="live-source-panel" aria-label="治理来源与安全边界">
+      {!isLoading && !error ? <section className="live-source-panel" aria-label="治理来源与安全边界">
         <StatusBadge
           label={overview.readOnlyVerified ? "只读证据" : "只读状态未确认"}
           status={overview.readOnlyVerified ? "ready" : "blocked"}
@@ -609,7 +609,7 @@ export function LiveGovernance() {
           </div>
         </dl>
         <CompactText label="完整安全边界" value={governance.safetyBoundary} />
-      </section>
+      </section> : null}
     </section>
   );
 }

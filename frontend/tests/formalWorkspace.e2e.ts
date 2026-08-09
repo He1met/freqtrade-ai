@@ -35,7 +35,30 @@ test("desktop formal pages trust only the explicit candidate lifecycle projectio
       deployment: { status: "AVAILABLE", reason_code: null },
     },
     attempts: [],
-    latest_quality_receipt: null,
+    latest_quality_receipt: {
+      id: 9,
+      contract_version: "market-data-quality-v1",
+      exchange: "okx",
+      pair: "BTC/USDT:USDT",
+      timeframe: "15m",
+      file_format: "feather",
+      inspected_at: "2026-08-09T11:55:00Z",
+      row_count: 12000,
+      first_open_at: "2025-01-01T00:00:00Z",
+      last_open_at: "2026-08-09T11:45:00Z",
+      expected_interval_seconds: 900,
+      missing_interval_count: 0,
+      duplicate_timestamp_count: 0,
+      out_of_order_count: 0,
+      misaligned_timestamp_count: 0,
+      null_ohlcv_count: 0,
+      invalid_ohlc_count: 0,
+      negative_volume_count: 0,
+      freshness_seconds: 600,
+      status: "PASSED",
+      reason_codes: [],
+      created_at: "2026-08-09T11:55:00Z",
+    },
     latest_batch: null,
     handoff_status: "CANONICAL_LINK_UNAVAILABLE",
     candidate_lifecycles: [{
@@ -72,28 +95,30 @@ test("desktop formal pages trust only the explicit candidate lifecycle projectio
       reason_code: "CANONICAL_VALIDATION_REQUIRED",
     },
   };
+  let workspacePayload: Record<string, unknown> = workspace;
   await page.route("**/api/strategy-research/workspace?*", (route) => route.fulfill({
     contentType: "application/json",
-    body: JSON.stringify(workspace),
+    body: JSON.stringify(workspacePayload),
   }));
 
   await page.goto("/");
   await expect(page.getByText("1 个候选已有权威 bridge 证据")).toBeVisible();
   await expect(page.getByText("0 个", { exact: true }).first()).toBeVisible();
 
-  await page.unroute("**/api/strategy-research/workspace?*");
-  await page.route("**/api/strategy-research/workspace?*", (route) => route.fulfill({
-    contentType: "application/json",
-    body: JSON.stringify({
-      ...workspace,
-      schema_version: "formal-strategy-research-workspace-v1",
-      sections: { ...workspace.sections, bridge: undefined },
-      candidate_lifecycles: undefined,
-      lifecycle_summary: undefined,
-    }),
-  }));
-
   await page.goto("/strategies");
+  await expect(page.getByText("分钟数据：").locator("..").getByText("通过", { exact: true })).toBeVisible();
+  await page.getByText("查看分钟数据质量证据").click();
+  await expect(page.getByText("缺口 0 · 错位 0 · 乱序 0")).toBeVisible();
+
+  workspacePayload = {
+    ...workspace,
+    schema_version: "formal-strategy-research-workspace-v1",
+    sections: { ...workspace.sections, bridge: undefined },
+    candidate_lifecycles: undefined,
+    lifecycle_summary: undefined,
+  };
+
+  await page.reload();
   await expect(page.getByText(/生命周期未知：权威 bridge 投影不可用/)).toBeVisible();
   await expect(page.getByText(/不会从 QUALIFIED、策略名称或摘要推断/)).toBeVisible();
 });

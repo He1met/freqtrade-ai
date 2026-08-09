@@ -1,5 +1,12 @@
 .operator-dashboard-page {
   gap: 18px;
+  min-width: 0;
+}
+
+.operator-dashboard-page > *,
+.operator-section,
+.operator-detail-group {
+  min-width: 0;
 }
 
 .operator-dashboard-page .display-page-header {
@@ -250,10 +257,17 @@
   width: 100%;
 }
 
+.operator-diagnostic-table-shell,
+.operator-artifact-table-shell {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
 .operator-diagnostic-table-shell th,
 .operator-diagnostic-table-shell td,
 .operator-artifact-table-shell th,
 .operator-artifact-table-shell td {
+  overflow-wrap: anywhere;
   padding: 11px 10px;
   vertical-align: top;
 }
@@ -295,6 +309,11 @@
   gap: 12px;
   grid-template-columns: minmax(230px, 1.4fr) minmax(140px, 0.8fr) 70px minmax(130px, 0.8fr);
   padding: 10px 12px;
+}
+
+.operator-env-row > * {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .operator-event-list {
