@@ -1,6 +1,7 @@
 from argparse import Namespace
 from datetime import datetime, timedelta, timezone
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -8,7 +9,18 @@ import signal
 import subprocess
 import sys
 
-from scripts.formal_strategy_research_worker import execute, terminate_process_group
+
+WORKER_PATH = (
+    Path(__file__).resolve().parents[2] / "scripts/formal_strategy_research_worker.py"
+)
+WORKER_SPEC = importlib.util.spec_from_file_location(
+    "formal_strategy_research_worker", WORKER_PATH
+)
+assert WORKER_SPEC is not None and WORKER_SPEC.loader is not None
+WORKER_MODULE = importlib.util.module_from_spec(WORKER_SPEC)
+WORKER_SPEC.loader.exec_module(WORKER_MODULE)
+execute = WORKER_MODULE.execute
+terminate_process_group = WORKER_MODULE.terminate_process_group
 
 
 NOW = datetime(2026, 8, 9, 5, 22, tzinfo=timezone.utc)
