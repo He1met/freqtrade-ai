@@ -14,7 +14,7 @@ import { useFormalCatalogData } from "../api/useFormalCatalogData";
 import { EmptyState, FormalLoadingState, PageHeader, StatusBadge } from "../components/DisplayPrimitives";
 import { okxDemoAcceptanceIsTruthful } from "./okxDemoDisplay";
 import { deploymentHandoffText, validatedCandidateCount } from "./strategyFactoryModel";
-import { displayDateTime } from "./uiCopy";
+import { displayDateTime, displayStatus } from "./uiCopy";
 
 type Loadable<T> = {
   data: T | null;
@@ -70,14 +70,22 @@ export function Dashboard() {
     : null;
   const dataHasProblem = Boolean(catalog.strategies.error || catalog.ranking.error || researchRun.error || workspace.error || runtimeActivity.error || demo.error);
   const pageLoading = catalog.strategies.loading || catalog.ranking.loading || researchRun.loading || workspace.loading || runtimeActivity.loading || demo.loading;
+  const latestSignalStatus = runtimeActivity.data?.recent_signal_evaluations[0]?.status ?? null;
+  const businessBlocked = Boolean(
+    (demo.data && !okxDemoAcceptanceIsTruthful(demo.data))
+    || latestSignalStatus === "BLOCKED"
+    || latestSignalStatus === "FAILED",
+  );
   const pageConclusion = pageLoading
     ? "正在核对正式研究与模拟盘证据"
     : dataHasProblem
       ? "部分状态无法确认，未把缺失数据计为 0"
-      : runtimeActivity.data?.active_deployments.length
-        ? "模拟盘有运行中策略，继续核对最近信号与执行证据"
-        : "正式证据已读取，当前没有 ACTIVE 模拟盘部署";
-  const pageStatus = pageLoading ? "RUNNING" : dataHasProblem ? "UNKNOWN" : "READY";
+      : businessBlocked
+        ? "模拟盘证据未满足严格验收，先核对运行与对账阻断"
+        : runtimeActivity.data?.active_deployments.length
+          ? "模拟盘有运行中策略，继续核对最近信号与执行证据"
+          : "正式证据已读取，当前没有 ACTIVE 模拟盘部署";
+  const pageStatus = pageLoading ? "RUNNING" : dataHasProblem ? "UNKNOWN" : businessBlocked ? "BLOCKED" : "READY";
   const fills = demo.data?.orders.reduce((total, order) => total + order.fills.length, 0) ?? null;
   const activities = useMemo(() => {
     const items: Array<{ id: string; title: string; meta: string; status: string }> = [];
@@ -111,20 +119,27 @@ export function Dashboard() {
   return (
     <section className="page dashboard-page formal-page">
       <PageHeader
-        actions={<span className="formal-target-chip">OKX_DEMO · Demo-only</span>}
+        actions={(
+          <>
+            <span className="formal-target-chip">OKX_DEMO · Demo-only</span>
+            <span className="formal-context-chip">Live：状态未知 · 无切换入口</span>
+          </>
+        )}
         description="先看结论、研究进度与模拟盘证据；技术详情按需展开。"
         eyebrow="正式工作台"
-        status={<StatusBadge label={pageLoading ? "读取中" : dataHasProblem ? "部分未知" : "已读取"} status={pageStatus} />}
+        status={<StatusBadge label={pageLoading ? "读取中" : dataHasProblem ? "部分未知" : businessBlocked ? "需关注" : "已读取"} status={pageStatus} />}
         title="总览"
       />
 
-      <section className="formal-conclusion" data-state={dataHasProblem ? "attention" : "neutral"}>
+      <section className="formal-conclusion" data-state={dataHasProblem || businessBlocked ? "attention" : "neutral"}>
         <div>
           <span className="formal-kicker">当前结论</span>
           <h2>{pageConclusion}</h2>
           <p>
             {dataHasProblem
               ? "可用区块继续展示真实数据；读取失败的区块保持未知，不推断系统空闲或运行正常。"
+              : businessBlocked
+                ? "只读证据已返回，但至少一项信号、订单、账户或对账条件未通过；页面不会把有记录等同于可验收。"
               : "页面不会把目录 active、QUALIFIED 或订单记录替代为 ACTIVE 部署与 signal evaluation。"}
           </p>
         </div>
@@ -213,7 +228,7 @@ export function Dashboard() {
           <dl className="formal-summary-list">
             <div><dt>部署交接</dt><dd>{workspace.data?.handoff_status === "CANONICAL_LINK_UNAVAILABLE" ? "正式生命周期衔接证据尚不可用" : deploymentHandoffText(latestResearchRun)}</dd></div>
             <div><dt>ACTIVE 运行策略</dt><dd>{runtimeActivity.loading ? "读取中" : runtimeActivity.error ? "未知" : `${runtimeActivity.data?.active_deployments.length ?? 0} 个`}</dd></div>
-            <div><dt>最近信号评估</dt><dd>{runtimeActivity.loading ? "读取中" : runtimeActivity.error ? "未知" : runtimeActivity.data?.recent_signal_evaluations[0]?.status ?? "当前无信号"}</dd></div>
+            <div><dt>最近信号评估</dt><dd>{runtimeActivity.loading ? "读取中" : runtimeActivity.error ? "未知" : latestSignalStatus ? displayStatus(latestSignalStatus) : "当前无信号"}</dd></div>
           </dl>
           <p className="formal-muted">QUALIFIED 只代表可进入评审，不代表已批准、已部署或正在运行。</p>
         </section>

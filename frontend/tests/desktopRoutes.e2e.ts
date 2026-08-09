@@ -48,8 +48,23 @@ test("strategy detail route renders against the isolated database", async ({ pag
 
   await page.goto(`/strategies/${strategies[0].id}`);
   await expectPageReady(page);
+  await expect(page.getByRole("link", { name: "返回策略工厂" })).toHaveAttribute("href", "/strategies");
 
   expect(problems).toEqual([]);
+});
+
+test("missing strategy remains explicit and links back to the formal factory", async ({ page }) => {
+  await page.goto("/strategies/__missing_strategy__");
+  await expect(page.getByRole("heading", { level: 1, name: "策略详情" })).toBeVisible();
+  await expect(page.getByText("未找到策略")).toBeVisible();
+  await expect(page.getByRole("link", { name: "返回策略工厂" })).toHaveAttribute("href", "/strategies");
+});
+
+test("formal strategy API failure stays unknown instead of becoming an empty library", async ({ page }) => {
+  await page.route("**/api/strategies", (route) => route.fulfill({ status: 503, body: "catalog unavailable" }));
+  await page.goto("/strategies");
+  await expect(page.getByText("正式策略库状态未知")).toBeVisible();
+  await expect(page.getByText("暂无真实策略")).toHaveCount(0);
 });
 
 test("unknown route renders the desktop 404 page", async ({ page }) => {

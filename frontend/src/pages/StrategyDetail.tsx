@@ -102,6 +102,7 @@ export function StrategyDetail() {
     return (
       <section className="page strategy-page">
         <PageHeader
+          actions={<Link className="formal-text-link" to="/strategies">返回策略工厂</Link>}
           title="策略详情"
           description="查看策略概要、当前版本和可追溯技术证据。"
           status={<StatusBadge label={displayLoadState(isLoading, source)} status={isLoading ? "RUNNING" : source} />}
@@ -168,7 +169,10 @@ export function StrategyDetail() {
             <>
               <strong>v{strategy.currentVersion.versionNumber}</strong>
               <StatusBadge showRaw status={strategy.currentVersion.validationStatus} />
-              <CopyableValue label="策略文件路径" value={strategy.currentVersion.filePath} />
+              <details className="formal-disclosure">
+                <summary>查看策略文件路径</summary>
+                <CopyableValue label="策略文件路径" value={strategy.currentVersion.filePath} />
+              </details>
             </>
           ) : (
             <>
@@ -190,7 +194,10 @@ export function StrategyDetail() {
           <span>策略说明</span>
           <p>{displayValue(strategy.description)}</p>
         </div>
-        <CopyableValue label="策略 ID" value={strategy.id} />
+        <details className="formal-disclosure">
+          <summary>查看策略 ID</summary>
+          <CopyableValue label="策略 ID" value={strategy.id} />
+        </details>
       </section>
 
       {problemCount > 0 ? (

@@ -59,7 +59,7 @@ export function AppLayout() {
   const currentLabel = navigationLabelForPath(pathname);
   const [mobileOpen, setMobileOpen] = useState(false);
   const mainRef = useRef<HTMLElement>(null);
-  const developmentRoute = pathname.startsWith("/local-strategy-lab") || pathname.startsWith("/operator-dashboard");
+  const developmentRoute = pathname.startsWith("/operator-dashboard");
   const historicalRoute = ["/generation-runs", "/backtest-runs", "/backtest-tasks", "/hyperopt-runs", "/ranking", "/live-governance"]
     .some((prefix) => pathname.startsWith(prefix));
 
@@ -131,12 +131,12 @@ export function AppLayout() {
         {developmentRoute ? (
           <aside className="formal-context-banner" data-kind="development">
             <div><strong>开发实验</strong><span>本页结果不进入正式候选生命周期，也不计入正式工作台数字。</span></div>
-            <Link to="/strategies">返回策略工厂</Link>
+            <Link to="/okx-demo">返回模拟盘</Link>
           </aside>
         ) : historicalRoute ? (
           <aside className="formal-context-banner" data-kind="historical">
             <div><strong>高级与历史证据</strong><span>本页保留兼容查询，不推进正式候选、部署或订单生命周期。</span></div>
-            <Link to={pathname.startsWith("/operator") ? "/okx-demo" : "/strategies"}>返回正式入口</Link>
+            <Link to="/strategies">返回策略工厂</Link>
           </aside>
         ) : null}
         <Outlet />

@@ -242,7 +242,7 @@ export function OkxDemo() {
         eyebrow="正式工作台"
         title="模拟盘"
         description="只读查看 OKX_DEMO 运行、订单与成交证据；页面不会启动交易。"
-        status={<span className="formal-target-chip">OKX_DEMO · Demo-only · real_orders=false</span>}
+        status={<span className="formal-target-chip">OKX_DEMO · Demo-only · allow_real_funds=false · real_orders=false</span>}
       />
 
       {searchParams.get("from") === "freq-ui" ? (
@@ -407,6 +407,15 @@ export function OkxDemo() {
         </div>
         {selectedOrder ? <OrderDetail data={data} order={selectedOrder} /> : null}
       </section>
+
+      {fillCount === 0 ? (
+        <section className="formal-panel" aria-labelledby="demo-fill-empty-title">
+          <div className="okx-empty">
+            <strong id="demo-fill-empty-title">当前没有成交记录</strong>
+            <p>查询成功且最近证据窗口内没有权威成交数据库记录；订单提交、接受或历史订单均不等于成交。</p>
+          </div>
+        </section>
+      ) : null}
 
       <section className="okx-secondary-grid">
         <article>
