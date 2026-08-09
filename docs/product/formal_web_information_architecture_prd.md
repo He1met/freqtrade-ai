@@ -1,7 +1,7 @@
 # Freqtrade AI 正式网页信息架构简化 PRD
 
-- 文档状态：`DRAFT / 待用户确认`
-- 版本：`v0.3`
+- 文档状态：`v0.3 已确认 / v0.4 调度设计补充待审阅`
+- 版本：`v0.4`
 - 日期：`2026-08-09`
 - 适用范围：Freqtrade AI 正式 Web 界面、正式候选研究展示、OKX_DEMO 只读运行展示
 - 实施门禁：用户明确确认本 PRD 前，只允许文档和只读审查；不得开始页面实现
@@ -729,8 +729,9 @@ ID、路径、digest、artifact、source trace、ENV presence、schema、完整 
 6. 是否同意第 14 节只作为未来受控上线的设计基线，本轮页面最多展示只读准备状态，绝不实现 Live 控制面？
 7. 是否同意先执行阶段 0.5 的三个真实页面视觉原型/截图评审，确认后再扩展完整功能？
 8. 是否同意采纳第 8.5 节审计结论：下一阶段先设计最小只读 deployment/signal 投影，并专项核对正式研究候选到 canonical strategy 的可审计 receipt；在这些事实可证明前，页面显示未知而不是推断？
+9. 是否同意第 15 节的任务职责、共享 coordinator、数据独立性和错峰原则作为未来 automation 变更基线？具体时刻仍须在每次实施前只读复核并单独确认。
 
-用户确认前，实施状态保持：`NOT_STARTED`。
+状态说明：用户已确认 v0.3 并授权阶段 0.5；本次 v0.4 补充按最新要求仅更新文档，页面原型实施暂不继续。恢复阶段 0.5 或调整 automation 均等待后续明确指令；本章不构成调度变更授权。
 
 ## 14. 从 OKX_DEMO 迁移到真实盘的受控上线流程（未来设计基线）
 
@@ -875,3 +876,192 @@ ID、路径、digest、artifact、source trace、ENV presence、schema、完整 
 - [ ] 停止、熔断、回滚和禁止自动恢复的情形有明确只读状态；
 - [ ] `Live 已获人工批准` 不被渲染为“已启动/已运行/可下单”；
 - [ ] 未知 API/表/字段/ACL/幂等细节保持“待核对”，本任务零 schema 和零订单链路变更。
+
+## 15. Codex 策略生成与定时任务运行设计（建议基线）
+
+### 15.1 本章定位、边界与非永久事实声明
+
+Codex 可以参与策略构思、代码生成、研究执行和证据整理，但“Codex 生成了一个 `.py` 文件”不等于该策略已经成为正式候选。任何 Codex 生成或修改的策略，只有完成正式研究 coordinator 的生成、验证、全量持久化和质量门，形成 `strategy_research_batches` / `strategy_research_candidates` 记录后，才进入正式候选生命周期；只有 `status=QUALIFIED` 才能被既有部署评审读取。Local Strategy Lab、聊天输出、本地文件、单次回测或定时任务成功提示均不能替代该生命周期。
+
+本章定义未来创建、修改和验收 Codex 定时任务时应遵守的产品与数据契约，不授权本次执行任何调度变更。本次工作不得：
+
+- 创建、启用、暂停、重排、修改或删除 Codex 定时任务；
+- 触发手动研究、定时研究、部署评审、运行监督或历史整理；
+- 修改数据库、schema、API、运行时、writer、订单、ACL、凭据或 OKX_DEMO 风控；
+- 把本章建议时刻、当前状态、任务名称或运行节奏当作永久配置；
+- 因任务超时、任务列表不可见或状态未知而接管、补跑、重放或创建第二个 writer。
+
+本章出现的“当前”仅指 `2026-08-09` 对本机 automation metadata 和仓库代码的只读核对快照。任何后续实施、页面展示或故障判断都必须重新读取当时的任务定义、状态、可见性和运行证据；无法完整读取时统一为 `UNKNOWN / NO_OP_FAIL_CLOSED`。
+
+### 15.2 Codex 生成策略进入正式生命周期的唯一推荐路径
+
+```text
+Codex 研究目标/变更假设
+  → 生成或修改候选源码（仍是研究输入，不是正式候选）
+  → FormalStrategyResearchCoordinator.start(trigger=manual|automation)
+  → 所有权、OKX_DEMO、市场数据、候选集合、锁与槽位 preflight
+  → 固定 10 条生成/加载/静态检查/lookahead/独立窗口/费用与滑点验证
+  → 全量持久化 batch + candidates + report digest
+  → QUALIFIED / REJECTED / VALIDATION_FAILED
+  → 仅 QUALIFIED 由既有部署评审读取
+  → canonical strategy/version/backtest/score/approval/deployment（跨链 receipt 仍按 8.5 节待核对）
+  → OKX_DEMO 信号/意图/风控/订单/成交/对账
+```
+
+路径规则：
+
+1. Codex 只负责提出或生成研究输入，不能直接把状态写成 `QUALIFIED`、`APPROVED`、`ACTIVE` 或“已部署”；
+2. 研究策略源码、repository commit、数据窗口、质量契约和报告 digest 必须绑定同一批次，后续修改源码会形成新证据，不覆盖旧批次；
+3. 候选必须全量入库，包括拒绝和验证流水线失败记录；不得只保存表现最好的一条；
+4. 研究任务不得直接调用订单、grant、writer 或 Live 能力；部署评审不得降低研究门槛；
+5. 若 formal research candidate 到 canonical strategy/version 的 receipt 仍不可证明，页面和任务报告只能写“待部署评审/衔接待核对”，不能写“已部署”；
+6. 任意源、锁、所有权、数据新鲜度、运行状态或写入结果未知时停止在当前阶段，保留证据并 fail closed。
+
+### 15.3 当前自动化只读快照（非永久配置）
+
+以下表只记录本次审阅时读取到的 automation metadata，用于解释错峰建议。它不是运行健康证明，也不保证下一次仍存在、启用或按相同节奏执行。
+
+| 任务名称（当前快照） | 当前 metadata 状态 | 当前 metadata 频率 | 当前环境/模型 | 在本章中的归类 | 每次实施前必须核对 |
+| --- | --- | --- | --- | --- | --- |
+| 每15分钟策略进化研究 | `ACTIVE` | 每小时 `:00/:15/:30/:45`，second 0 | local / `gpt-5.6-sol` / medium | 正式研究生成、验证与候选入库 | 任务 ID、prompt、项目/目录、所有权、coordinator、最近 run/batch、可见性和是否仍 ACTIVE |
+| 监督 OKX_DEMO 多策略持续运行 | `ACTIVE` | 每小时 `:05/:20/:35/:50`，second 0 | local / `gpt-5.6-sol` / medium | OKX_DEMO 运行监督 | 是否只读、唯一 runtime/writer 所有权、read-only endpoints、最近 reconciliation、不可见来源 |
+| 每小时合格策略自动部署 | `ACTIVE` | 每小时 `:10`，second 0 | local / `gpt-5.6-sol` / medium | 合格候选部署评审/自动部署 | 是否只读 `QUALIFIED`、容量/CI/所有权、唯一 deployment writer、最近 no-op/部署 receipt |
+| 每两天整理全部 Codex 任务与定时任务 | `ACTIVE` | 每两天 10:00，second 0 | local / `gpt-5.6-terra` / low | 任务历史整理 | 完整任务可见性、活跃/等待用户任务、归档范围、不可恢复影响和通知策略 |
+| Freqtrade AI 每三小时自动开发 | `PAUSED` | metadata 中为指定小时的 minute 0 / second 0 | local / `gpt-5.6-sol` / high | 不属于本章核心运行链 | 是否仍暂停；不得与正式研究、runtime 或 writer 混为一条任务 |
+| 分钟行情/数据入库与质量检查 | `待核对` | 本次 automation metadata 未发现独立定义 | 表/API/writer 待核对 | 建议新增的独立数据任务职责，不是本次创建项 | 先审计现有数据获取者、文件/DB owner、重复下载、时区、延迟和 runtime 依赖 |
+
+当前快照显示多数任务在 `second=0` 启动，且每两天 10:00 的历史整理与 10:00 的研究槽位存在同秒触发可能；暂停的自动开发若未来恢复，也可能与 minute 0 的任务竞争。该结论只用于提出建议，不能据此自动调整任务。
+
+### 15.4 定时任务清单、输入输出与写入边界
+
+| 任务 ID / 职责 | 推荐触发语义 | 输入 | 输出 | 数据表 / API / Artifact | 唯一写入者与权限 | 可并行 / 必须互斥 | 失败或超时的 fail-closed 行为 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `TASK-DATA-01` 分钟行情入库与质量检查 | 每分钟处理上一根已闭合 candle；入库和质量检查作为一个有 receipt 的数据周期，独立于策略研究 | 精确 execution target、instrument、timeframe、交易所时间、上一根闭合 candle、source response/digest、上次 watermark | 不可变行情记录或受控数据文件、ingest receipt、quality result、freshness/continuity/duplicate/timezone/latency 指标、watermark | 当前正式研究读取 Freqtrade market data catalog/file；runtime 有 trusted market snapshot 模型；专用分钟入库表、写 API、质量 receipt 实体均`待核对`，不得猜测 | 未来专用 market-data ingestor 为唯一数据 writer；Codex 任务只调用受控入口并读取 receipt；不得写 strategy/order 表 | 可与只读监督并行；与同 target/instrument/timeframe 的下一次 ingest 互斥；研究只读取最后一个已提交且质量通过的不可变 snapshot，不能读取写入中的文件 | 源超时、缺 candle、重复冲突、时区不一致、延迟超阈值、部分写入或 receipt 未确认=`DATA_QUALITY_BLOCKED/UNKNOWN`；保留原证据，不推进 watermark，不触发或放行依赖该数据的研究，不自动重复写入未知周期 |
+| `TASK-RESEARCH-01` Codex 策略研究生成、验证与候选入库 | 当前建议保留 15 分钟业务节奏，但实际频率/时刻每次核对；手动和定时共用 coordinator | 研究目标、候选源码集合、repository commit、固定质量契约、已通过的数据质量 receipt/market data、当前所有权证据、OKX_DEMO 安全 manifest | formal run state、10 条候选报告、`strategy_research_batches`、`strategy_research_candidates`、六计数、拒绝/失败原因、deployment handoff 状态 | `GET/POST /api/strategy-research/formal-run`；`GET /api/strategy-research-batches`、`/strategy-research-candidates`；正式 worker 和报告 artifact | `FormalStrategyResearchCoordinator` + 持锁 worker 是唯一入口/写入路径；定时任务不得直写候选表或绕过 service | 手动与定时研究全局互斥；同一 15 分钟 slot 互斥；可与监督的只读查询并行；部署评审只能读取已提交终态批次 | preflight 失败记录 `BLOCKED` 且 `generated=0`；已有锁=`ACTIVE_RESEARCH`；同 slot 已持久化=`DUPLICATE_SLOT`；HTTP/任务超时=结果未知，先 GET/DB 核对，禁止自动重跑；已有候选后验证失败则全量保留为 `VALIDATION_FAILED`/FAILED batch，不制造 qualified |
+| `TASK-DEPLOY-01` 合格候选部署评审与受控自动部署 | 当前快照为每小时；推荐与研究错峰，只消费已提交 `QUALIFIED` 和完整 canonical promotion evidence | `status=QUALIFIED` 候选、官方质量契约、canonical strategy/version/backtest/score/approval receipt、CI、容量、target、风险策略、唯一所有权和 deployment slots | 明确的 `DEPLOYED / NOT_QUEUED_NO_QUALIFIED / BLOCKED / NO_OP_FAIL_CLOSED` receipt；若部署成功则可追溯 approval/deployment IDs | 读取 research candidates；canonical 链涉及 `full_chain_runs/stages`、`strategy_candidate_approvals`、`strategy_deployments` 等；正式部署读/写 API 路径和 research→canonical receipt 仍按 8.5 节`待核对` | 仅既有 canonical deployment automation/主任务可写 approval/deployment；网页和普通 Codex 研究任务无写权限 | 可并行读取旧的终态批次；同 candidate/version/target/slot 的评审与部署互斥；不得与另一个 deployment writer 并行；监督只读可并行 | 无 qualified 是正常 no-op；receipt/CI/容量/所有权/target 任一未知即不部署；超时不重放，先按 candidate/version/idempotency key 查 receipt；不能因追求活动而降低门槛或制造 ACTIVE |
+| `TASK-SUPERVISE-01` OKX_DEMO 运行监督 | 当前快照为每 15 分钟且较研究错后 5 分钟；建议保留错峰思想，实际频率每次核对 | 完整任务可见性、唯一 runtime/writer ownership、`/runtime/read-only`、execution target、observability、exchange state、订单/成交/仓位、latest reconciliation、automation guard | 只读健康结论、状态变化、异常/未知原因、evidence IDs、必要通知；不以任务本身制造订单 | `/runtime/read-only`、`/runtime/execution-target`、`GET /api/okx-demo/observability`、reconciliation/exchange-state 等现有只读接口；guard/reconciliation/order/fill/position 只读实体 | 监督任务只写自己的任务报告/通知；canonical runtime/writer 仍是唯一交易链写入者；不得因监督失败启动第二 runtime/writer | 可与数据 ingest、研究和部署的只读阶段并行；涉及任何恢复/写动作时必须退出一般监督范围并取得单独授权；同一 runtime ownership 检查不可被多个任务解释为接管权 | `unavailableHosts/unavailableSources`、timeout、pending、错误或所有权不完整均为 UNKNOWN；返回 `NO_OP_FAIL_CLOSED`，不启动/停止/重启、不 grant、不下单、不重放未知历史订单；重复无变化只做简短报告 |
+| `TASK-HISTORY-01` Codex 任务历史整理 | 低频、低优先级、避开研究/监督/部署窗口；当前快照为每两天 | 完整线程/任务/automation 列表、状态、最后活动、待用户输入、分支/PR/CI 摘要、不可见来源 | 归档建议或经权限允许的可恢复整理结果、保留/跳过原因、数量与审计摘要 | Codex task/automation metadata；不读取或写入交易数据库；具体 task API 以运行时工具为准 | 专用任务整理自动化是唯一整理者；不能修改其他任务的 runtime/writer ownership；归档属于外部状态写入，必须按任务契约显式授权 | 不能与被整理任务的 active turn/等待关键 CI/等待用户批准阶段竞争；可在系统低峰读取快照；同一 task archive 操作幂等 | 任务可见性不完整、状态 unknown/active、存在未提交改动、等待用户或证据不足时跳过；不得误归档、删除分支/worktree 或丢弃历史；失败只记录待核对，不循环重试 |
+
+### 15.5 并行与互斥矩阵
+
+| 发起任务 \ 同时存在任务 | 数据入库 | 策略研究 | 部署评审 | Demo 监督 | 历史整理 |
+| --- | --- | --- | --- | --- | --- |
+| 数据入库 | 同 target/instrument/timeframe 互斥；不同明确分区可并行 | 可并行，但研究只读上一个已提交质量通过版本 | 可并行，部署不得读取写入中的 market artifact | 可并行只读；监督不得改 watermark | 可并行，历史任务不接触数据 store |
+| 策略研究 | 只读稳定 snapshot | 手动/定时/重复 slot 全部互斥 | 可并行处理更早的终态候选；同一未提交批次禁止 | 可并行只读；资源不足时研究应让位于 runtime 安全 | 历史整理不得归档 active research task |
+| 部署评审 | 无数据写入权限 | 只读终态 qualified | 同 target/candidate/version/slot 唯一 writer 互斥 | 只读监督可并行；任何恢复动作另行授权 | 历史整理不得归档 active deployment task |
+| Demo 监督 | 只读 | 只读 | 只读 | 可有多个观察者但只有一个 canonical ownership 结论；不得出现第二 writer | 历史整理不得把 active/unknown 监督任务当完成 |
+| 历史整理 | 不接触 | 仅在已终态且可见时整理 | 同左 | 同左 | 单一整理任务；归档/取消动作幂等 |
+
+资源优先级建议：`OKX_DEMO 安全与对账 > 分钟数据完整性 > 部署/研究写入 > 历史整理`。优先级只决定冲突时谁应等待或 no-op，不扩大任何任务权限。
+
+### 15.6 建议错峰调度表（不在本次执行）
+
+以下时间使用项目统一时区（建议显式 `Asia/Shanghai`，同时在数据内部存 UTC）；秒数用于减少 Codex 任务索引和本机资源在同一秒争用。实施前必须结合当时任务耗时分布、scheduler 支持能力和 runtime 负载重新评审。
+
+| 任务 | 当前只读快照节奏 | 建议节奏 | 建议原因与冲突处理 |
+| --- | --- | --- | --- |
+| 分钟行情/质量 | 未发现独立 automation，待核对 | 每分钟 `second=08`，处理上一根闭合 candle；超过 60 秒时下一 tick 只核对同一 idempotency key 并 fail closed | 先让整点 candle 完成，再入库；为 quarter-hour 研究留出质量检查时间；同一分区单锁防止重叠 |
+| 策略研究 | `:00/:15/:30/:45 second=0` | 保留每 15 分钟业务节奏，建议改为 `:00/:15/:30/:45 second=35` | 等待当前分钟数据 receipt；避开所有 second 0 任务；研究未结束时下个 slot 由共享锁拒绝，不排队补跑 |
+| Demo 监督 | `:05/:20/:35/:50 second=0` | 保留每 15 分钟且相对研究错后 5 分钟，建议 `:05/:20/:35/:50 second=20` | 每个监督点先等本分钟数据任务完成；与研究、部署错开；监督超时不触发恢复 |
+| 部署评审 | 每小时 `:10 second=0` | 每小时 `:12 second=20` | 避开 second 0 和当前整点研究；只读最近已提交 qualified，不等待或接管仍运行的研究 |
+| 历史整理 | 每两天 10:00 `second=0` | 每两天 10:42 `second=20`，或另选经负载证据确认的低峰 | 消除与 10:00 研究的同秒冲突；远离部署和监督分钟；若仍有 active task 则跳过而不是强制整理 |
+| 暂停的自动开发 | 当前 `PAUSED`，原 metadata 为若干小时 minute 0 | 保持不属于核心调度；若未来另行恢复，先选择独立 minute/second 并重新做所有权审查 | 防止“自动开发”误触正式研究/runtime/writer；恢复需要独立确认，不由本章授权 |
+
+调度不得依赖“任务通常几分钟就结束”的假设。每项写任务必须同时有逻辑 idempotency key、数据库/文件唯一约束和可证明的 lock/lease；错峰只是降低争用，不是并发安全机制。
+
+### 15.7 Codex 新建或修改定时任务的必填字段
+
+任何未来 automation 变更必须先在 PRD/Issue/变更记录中填写下表；缺一项即不得创建或更新任务。任务 prompt 不得包含凭据值、真实账户敏感信息或授权绕过语句。
+
+| 必填字段 | 要求 |
+| --- | --- |
+| 任务 ID / 名称 / owner | 稳定 ID、面向用户的名称、业务 owner、唯一 writer owner；说明是否替代已有任务，禁止语义重复任务 |
+| 目标与非目标 | 一句话可验收目标；明确不能触发的研究、部署、runtime、订单、Live、凭据和外部写入 |
+| 频率与时区 | interval、建议 minute/second、时区、首个生效窗口、错峰理由、最长运行时间和 overlap 策略；不得只写“定期” |
+| 执行环境 | local/worktree、项目/仓库、canonical root、分支策略、依赖环境；正式 runtime/writer 只能由已确认 canonical 环境拥有 |
+| 模型与推理 | model、reasoning effort、为什么匹配任务风险；模型变化视为任务变更并重新验收 |
+| 输入与 source of truth | 精确 API/表/artifact、target、时间窗口、freshness、schema/version、不可见源处理；不从 UI 文案反推事实 |
+| 输出与写入范围 | 写 API/表/文件/任务状态/通知的 allowlist、字段范围、唯一写入者、审计 ID；只读任务明确写“无业务写入” |
+| 权限范围 | 最小权限、禁止项、是否需要 operator approval；不得把任务 prompt 当作 grant、凭据或真实资金授权 |
+| 幂等、锁与互斥 | idempotency key 组成、slot/window、lock/lease/fencing、重复触发结果、手动入口关系、与其他任务的并发矩阵 |
+| 超时、失败与重试 | timeout 后的 UNKNOWN 核对路径、可重试/不可重试分类、最大次数和退避；订单/部署/研究未知写入默认不自动重放 |
+| 归档与保留 | automation run/thread、日志、DB receipt、artifact、截图的保留期和归档条件；active/unknown/待用户任务不得归档 |
+| 通知策略 | 哪些状态通知、去重/节流、失败和安全事件优先级、无变化 no-op 摘要；通知不泄露 secret |
+| 变更与回滚 | before/after、change ID、批准人、启停窗口、恢复旧任务定义的方法；回滚不删除历史 run/receipt |
+| 验收证据 | 至少包含 task definition 快照、一次安全 no-op/受控测试、锁/重复触发测试、失败/timeout、输出 ID、数据/页面对账和 secret scan |
+
+### 15.8 手动运行与定时运行共享 coordinator
+
+当前代码已经提供应保留的核心模式（是否仍然有效须在实施时复核）：
+
+- 页面 `POST /api/strategy-research/formal-run` 调用 `FormalStrategyResearchCoordinator.start(db, trigger="manual")`；
+- 定时脚本 `scripts/trigger_formal_strategy_research.py` 调用同一个 `start(..., trigger="automation")`；
+- coordinator 先核对 OKX_DEMO 安全 manifest、30 分钟内唯一所有权证据、Freqtrade binary、正式市场数据和固定 10 条候选集合；
+- manual 和 automation 共用同一个 file lock、state artifact 和 15 分钟 slot `run_id`；
+- `strategy_research_batches.run_id UNIQUE` 与 report/candidate unique constraints 提供持久化防重边界；
+- worker 继承同一 lock FD，在后台完成研究并写回同一状态，不由页面另起一条生成路径。
+
+必须持续满足的交互语义：
+
+| 场景 | coordinator / 页面 / automation 行为 |
+| --- | --- |
+| 手动点击时定时研究已持锁 | 返回 `ACTIVE_RESEARCH`，按钮保持禁用/运行中；不排队第二轮 |
+| 定时 tick 时手动研究已持锁 | 定时任务记录 no-op/blocked receipt；不得重试或创建新 worker |
+| 同一 15 分钟 slot 已有 batch | 返回 `DUPLICATE_SLOT`；读取已有 batch，不重新生成/入库 |
+| state 写 RUNNING 但锁不存在 | `RUN_STATE_INCONSISTENT`；人工核对，不猜测完成、不自动修复 |
+| POST 或 automation 超时 | 结果未知；先 GET formal-run，再按 run_id 查 batch；在确认没有写入前仍不得重复提交 |
+| preflight 阻断 | `generated/persisted/qualified/rejected=0`，原因属于未生成门禁，不记成候选拒绝 |
+| worker 在已有候选后失败 | 保留 failed batch/`VALIDATION_FAILED` 候选和原因；禁止只保留成功子集 |
+
+未来若改变 slot 粒度、锁实现、worker 环境或 candidate count，必须先更新本章、兼容/迁移策略和重复触发测试；不得在 automation prompt 中实现另一套防重逻辑。
+
+### 15.9 分钟级数据入库与质量检查契约
+
+分钟数据任务必须是策略研究的独立上游能力：它有自己的 owner、writer、watermark、幂等键、质量 receipt 和告警；研究任务只能消费已完成的结果，不能在研究脚本里顺带下载、修补或覆盖分钟数据。当前专用表/API 尚未核对，本章不指定 schema 名称，也不授权新增。
+
+每个数据周期至少需要以下只读可展示字段；字段落点全部待数据专项审计：
+
+| 维度 | 最低字段/证据 | 质量判定 |
+| --- | --- | --- |
+| 身份 | target、exchange、instrument、product type、timeframe、source endpoint/version | 与任务 allowlist 完全一致；不能用 Demo/Live 模糊名称 |
+| 时间 | candle open/close UTC、exchange timestamp、received_at、ingested_at、quality_checked_at、display timezone | 全部 timezone-aware；页面可用本地时区展示但保留 UTC；未来时间或顺序逆转即阻断 |
+| 新鲜度 | latest closed candle、expected close、age、freshness threshold/version | 超阈值显示“数据过期”，不把旧数据当当前行情 |
+| 连续性 | expected/observed candle count、first/last timestamp、missing intervals | 任一必需 interval 缺失时列出范围；不静默 forward-fill 后标通过 |
+| 重复 | natural key（建议 target+instrument+timeframe+open time）、source digest、duplicate/conflict count | 完全相同重复可幂等 no-op；同 key 不同内容为冲突并阻断 |
+| 延迟 | exchange→received、received→ingested、ingested→quality checked 的 p50/p95/max 或单周期值 | 阈值版本化；延迟异常与 API 失败分开显示 |
+| 内容 | OHLCV 合法性、非负 volume、high/low 边界、closed/final 标识、行数、文件/批次 digest | 未闭合 candle 不进入研究；数值/摘要不一致时隔离该周期 |
+| 审计 | ingest run ID、idempotency key、writer、source digest、row count、watermark before/after、status/reason | 成功、失败、重复、冲突和超时都有 receipt；不能只留日志文本 |
+
+正式页面建议语义：
+
+- 总览显示“行情新鲜 / 延迟 / 缺口 / 未知”的短结论、最新闭合时间和检查时间；
+- 策略工厂显示本轮研究绑定的数据 receipt/digest 和窗口，不提供“忽略数据质量继续”按钮；
+- 模拟盘继续显示 runtime/trusted snapshot 与 reconciliation 的新鲜度，不能用研究数据质量替代交易所权威状态；
+- API 失败、从未运行、数据过期、存在缺口、重复 no-op 和内容冲突必须是不同状态；
+- 研究在数据任务失败后显示 `DATA_QUALITY_BLOCKED` 或等价待核对状态，不能自行下载数据后绕过上游 receipt。
+
+### 15.10 页面与按钮边界
+
+本章不新增页面按钮。现有唯一正式研究写入口仍是 `UI-S-01 / DATA-S-01` 的“手动运行一轮研究（10 条）”，它与定时研究共享 coordinator。总览、策略工厂和模拟盘未来若展示任务计划、下一次运行、数据新鲜度、最近 supervision 或 deployment receipt，必须先在第 7、8 节增加新的 `UI-TASK-*` / `DATA-TASK-*` 条目，写明：
+
+- 数据是否来自 automation metadata、coordinator state、数据库 receipt 或 runtime API；
+- 计划时间与最近实际运行时间，不能把“已调度”显示为“已完成”；
+- loading、unknown、paused、blocked、no-op、timeout 和 stale 的页面状态；
+- 页面只读或会触发哪一个共享 coordinator；
+- task ID、run ID、batch ID、change ID 和 freshness 如何审计；
+- 是否涉及外部状态写入、需要何种权限和单独确认。
+
+正式页面不得提供“立即部署”“补跑订单”“接管 runtime”“跳过数据质量”“恢复 Live”或任意跨越现有门禁的任务按钮。
+
+### 15.11 验收标准
+
+- [ ] Codex 生成/修改的策略只有经过 formal coordinator、10 条验证与全量持久化后才显示为正式候选；
+- [ ] 分钟数据、研究、部署、监督和历史整理五项任务均记录输入、输出、数据/API、唯一 writer、并发和 fail-closed 行为；
+- [ ] 手动与定时研究调用同一 coordinator、lock、state、slot 和数据库唯一约束，重复触发测试通过；
+- [ ] 分钟行情任务独立于研究，能区分 freshness、continuity、duplicate、timezone、latency 和 unknown；
+- [ ] 当前任务名称、状态和频率均标为日期快照，页面或文档不把它们当永久事实；
+- [ ] 建议调度避免当前已知同秒冲突，并明确错峰不能替代 lock/idempotency；
+- [ ] 新建/修改 automation 前填写目标、频率、环境、模型/推理、权限、幂等/锁、归档、通知、回滚和验收证据；
+- [ ] ownership/task/API 可见性不完整时返回 UNKNOWN/NO_OP_FAIL_CLOSED，不创建重复任务、第二 runtime 或第二 writer；
+- [ ] 无新增或修改 automation、数据库、schema、runtime、订单、风控、凭据或真实资金能力；
+- [ ] 本章任何待核对表/API/状态在实现前完成专项只读审计，不以推测补齐。
