@@ -8,6 +8,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 from app.models import Base
+from app.core.strategy_research_contract import official_research_policy
 from app.repositories.strategy_research import StrategyResearchRepository
 from app.services.strategy_research import (
     StrategyResearchPersistenceService,
@@ -15,12 +16,21 @@ from app.services.strategy_research import (
 )
 
 
-REPORT = (
+HISTORICAL_REPORT = (
     Path(__file__).resolve().parents[2]
     / "reports"
     / "research"
     / "strategy-candidates-20260806.json"
 )
+
+
+@pytest.fixture()
+def report(tmp_path):
+    payload = json.loads(HISTORICAL_REPORT.read_text())
+    payload["selection_policy"] = official_research_policy()
+    path = tmp_path / "official-aggressive-report.json"
+    path.write_text(json.dumps(payload))
+    return path
 
 
 @pytest.fixture()
@@ -32,9 +42,9 @@ def db():
         yield session
 
 
-def test_persists_all_rejected_candidates_without_formal_strategies(db):
+def test_persists_all_rejected_candidates_without_formal_strategies(db, report):
     batch = StrategyResearchPersistenceService(db).persist_report(
-        REPORT, run_id="20260806", repository_commit="a" * 40
+        report, run_id="20260806", repository_commit="a" * 40
     )
 
     assert batch.status == "VALIDATED"
@@ -48,19 +58,17 @@ def test_persists_all_rejected_candidates_without_formal_strategies(db):
     assert db.execute(text("SELECT count(*) FROM strategies")).scalar() == 0
 
 
-def test_report_persistence_is_idempotent_by_run_and_digest(db):
+def test_report_persistence_is_idempotent_by_run_and_digest(db, report):
     service = StrategyResearchPersistenceService(db)
-    first = service.persist_report(REPORT, run_id="20260806", repository_commit="a" * 40)
-    second = service.persist_report(REPORT, run_id="20260806", repository_commit="a" * 40)
+    first = service.persist_report(report, run_id="20260806", repository_commit="a" * 40)
+    second = service.persist_report(report, run_id="20260806", repository_commit="a" * 40)
 
     assert second.id == first.id
     assert len(StrategyResearchRepository(db).list_batches()) == 1
     assert len(StrategyResearchRepository(db).list_candidates()) == 10
 
 
-def test_persistence_receipt_updates_report_and_digest(db, tmp_path):
-    report = tmp_path / "report.json"
-    report.write_bytes(REPORT.read_bytes())
+def test_persistence_receipt_updates_report_and_digest(db, report):
     service = StrategyResearchPersistenceService(db)
     batch = service.persist_report(
         report, run_id="receipt", repository_commit="a" * 40
@@ -85,11 +93,11 @@ def test_persistence_receipt_updates_report_and_digest(db, tmp_path):
     assert batch.safety_snapshot["database_used"] is True
 
 
-def test_same_run_rejects_changed_report(db, tmp_path):
+def test_same_run_rejects_changed_report(db, tmp_path, report):
     service = StrategyResearchPersistenceService(db)
-    service.persist_report(REPORT, run_id="20260806", repository_commit="a" * 40)
+    service.persist_report(report, run_id="20260806", repository_commit="a" * 40)
     changed = tmp_path / "changed.json"
-    payload = json.loads(REPORT.read_text())
+    payload = json.loads(report.read_text())
     payload["limitations"].append("changed")
     changed.write_text(json.dumps(payload))
 
@@ -97,8 +105,8 @@ def test_same_run_rejects_changed_report(db, tmp_path):
         service.persist_report(changed, run_id="20260806", repository_commit="a" * 40)
 
 
-def test_claimed_qualification_cannot_bypass_hard_gates(db, tmp_path):
-    payload = json.loads(REPORT.read_text())
+def test_claimed_qualification_cannot_bypass_hard_gates(db, tmp_path, report):
+    payload = json.loads(report.read_text())
     name = next(iter(payload["candidates"]))
     payload["qualified_candidates"] = [name]
     payload["candidates"][name]["deployable_candidate"] = True
@@ -111,8 +119,8 @@ def test_claimed_qualification_cannot_bypass_hard_gates(db, tmp_path):
         )
 
 
-def test_rejects_non_demo_safe_report(db, tmp_path):
-    payload = copy.deepcopy(json.loads(REPORT.read_text()))
+def test_rejects_non_demo_safe_report(db, tmp_path, report):
+    payload = copy.deepcopy(json.loads(report.read_text()))
     payload["safety"]["allow_real_funds"] = True
     unsafe = tmp_path / "unsafe.json"
     unsafe.write_text(json.dumps(payload))
@@ -128,27 +136,31 @@ def test_rejects_non_demo_safe_report(db, tmp_path):
     [
         ("selection_policy", "min_strategy_score", 49.99),
         ("selection_policy", "min_trades_per_validation_window", 29),
-        ("selection_policy", "max_drawdown_per_validation_window", 0.1001),
+        ("selection_policy", "max_drawdown_per_validation_window", 0.1499),
+        ("selection_policy", "max_drawdown_per_validation_window", 0.1501),
+        ("selection_policy", "contract_version", "self-selected-contract"),
         ("selection_policy", "validation_requires_positive_net_profit", False),
         ("selection_policy", "lookahead_analysis_required", False),
         ("environment", "fee_per_side", 0.00049),
         ("environment", "slippage_per_side", 0.00019),
     ],
 )
-def test_report_cannot_weaken_hard_gate_contract(db, tmp_path, section, field, value):
-    payload = json.loads(REPORT.read_text())
+def test_report_cannot_weaken_hard_gate_contract(
+    db, tmp_path, report, section, field, value
+):
+    payload = json.loads(report.read_text())
     payload[section][field] = value
     weakened = tmp_path / f"weakened-{field}.json"
     weakened.write_text(json.dumps(payload))
 
-    with pytest.raises(StrategyResearchReportError, match="weakens"):
+    with pytest.raises(StrategyResearchReportError, match="quality contract|weakens"):
         StrategyResearchPersistenceService(db).persist_report(
             weakened, run_id=f"weakened-{field}", repository_commit="a" * 40
         )
 
 
-def test_missing_independent_window_is_an_auditable_rejection(db, tmp_path):
-    payload = json.loads(REPORT.read_text())
+def test_missing_independent_window_is_an_auditable_rejection(db, tmp_path, report):
+    payload = json.loads(report.read_text())
     name = next(iter(payload["candidates"]))
     del payload["candidates"][name]["windows"]["oos"]
     incomplete = tmp_path / "incomplete.json"
@@ -161,8 +173,8 @@ def test_missing_independent_window_is_an_auditable_rejection(db, tmp_path):
     assert any(reason["code"] == "WINDOW_MISSING" for reason in candidate.rejection_reasons)
 
 
-def test_window_cannot_claim_validation_without_cost_stress(db, tmp_path):
-    payload = json.loads(REPORT.read_text())
+def test_window_cannot_claim_validation_without_cost_stress(db, tmp_path, report):
+    payload = json.loads(report.read_text())
     name = next(iter(payload["candidates"]))
     payload["candidates"][name]["windows"]["oos"]["slippage_per_side"] = 0
     unstressed = tmp_path / "unstressed.json"
@@ -192,8 +204,8 @@ def test_failed_batch_preserves_stage_without_candidate_rejection_claims(db):
     assert "should-not-leak" not in batch.failure_reason
 
 
-def test_failed_validation_persists_every_generated_candidate(db):
-    payload = json.loads(REPORT.read_text())
+def test_failed_validation_persists_every_generated_candidate(db, report):
+    payload = json.loads(report.read_text())
     candidates = [
         {
             "candidate_name": name,

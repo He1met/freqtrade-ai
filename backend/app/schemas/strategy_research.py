@@ -3,6 +3,8 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.core.strategy_research_contract import official_research_policy
+
 
 ResearchBatchStatus = Literal["GENERATED", "VALIDATED", "FAILED"]
 ResearchCandidateStatus = Literal["QUALIFIED", "REJECTED", "VALIDATION_FAILED"]
@@ -25,6 +27,7 @@ class StrategyResearchCandidateRead(BaseModel):
     deployable_candidate: bool
     rejection_reasons: list[dict] = Field(default_factory=list)
     evidence_snapshot: dict = Field(default_factory=dict)
+    quality_contract: dict = Field(default_factory=dict)
     created_at: datetime
 
 
@@ -76,6 +79,7 @@ class FormalResearchRunRead(BaseModel):
         "NOT_QUEUED_NO_QUALIFIED",
         "QUEUED_FOR_EXISTING_AUTOMATION",
     ] = "NOT_EVALUATED"
+    quality_contract: dict = Field(default_factory=official_research_policy)
     safety: dict = Field(
         default_factory=lambda: {
             "execution_target": "OKX_DEMO",

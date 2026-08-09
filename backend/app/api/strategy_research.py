@@ -3,6 +3,7 @@ from typing import Literal, Optional
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
+from app.core.strategy_research_contract import matches_official_research_policy
 from app.db.session import get_db
 from app.repositories.strategy_research import StrategyResearchRepository
 from app.schemas.strategy_research import (
@@ -35,9 +36,18 @@ def list_strategy_research_candidates(
     limit: int = Query(default=500, ge=1, le=1000),
     db: Session = Depends(get_db),
 ) -> list[StrategyResearchCandidateRead]:
+    candidates = StrategyResearchRepository(db).list_candidates(status=status, limit=limit)
+    if status == "QUALIFIED":
+        candidates = [
+            candidate
+            for candidate in candidates
+            if matches_official_research_policy(candidate.batch.selection_policy)
+        ]
     return [
-        StrategyResearchCandidateRead.model_validate(candidate)
-        for candidate in StrategyResearchRepository(db).list_candidates(status=status, limit=limit)
+        StrategyResearchCandidateRead.model_validate(candidate).model_copy(
+            update={"quality_contract": candidate.batch.selection_policy}
+        )
+        for candidate in candidates
     ]
 
 
