@@ -711,16 +711,30 @@ class OkxDemoRuntimeReconciliationAdapter:
             raise OkxDemoReconciliationBlocked(
                 "claimed signal evaluation lacks a lease token"
             )
-        OkxDemoExecutionOrchestrator(
-            db,
-            read_client=read_client,
-            deployment_repository=repository,
-        ).process(
-            claimed.id,
-            lease_token=claimed.lease_token,
-            fencing_sequence=claimed.fencing_sequence,
-            now=now,
-        )
+        try:
+            OkxDemoExecutionOrchestrator(
+                db,
+                read_client=read_client,
+                deployment_repository=repository,
+            ).process(
+                claimed.id,
+                lease_token=claimed.lease_token,
+                fencing_sequence=claimed.fencing_sequence,
+                now=now,
+            )
+        except Exception:
+            # The orchestrator handles both expected blocks and unexpected
+            # exceptions by attempting durable fail-closed terminalization.
+            # Re-read that receipt after a clean rollback and absorb the
+            # per-evaluation failure only when the DB proves it is terminal.
+            # Missing/leased/unknown outcomes continue to stop the sole
+            # runtime and can never fall through to place().
+            db.rollback()
+            terminal = repository.get_evaluation(claimed.id)
+            if terminal is None or terminal.status not in {"BLOCKED", "FAILED"}:
+                db.rollback()
+                raise
+            db.rollback()
         return True
 
     def _submission_authorization(
