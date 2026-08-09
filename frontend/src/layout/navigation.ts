@@ -6,33 +6,39 @@ export type NavigationItem = {
 export type NavigationSection = {
   label: string;
   items: NavigationItem[];
+  collapsible?: boolean;
+  description?: string;
 };
 
 export const navigationSections: NavigationSection[] = [
   {
-    label: "工作台",
+    label: "正式工作台",
     items: [
       { to: "/", label: "总览" },
       { to: "/strategies", label: "策略工厂" },
-      { to: "/generation-runs", label: "生成批次" },
-      { to: "/local-strategy-lab", label: "本地实验室（非正式）" },
+      { to: "/okx-demo", label: "模拟盘" },
     ],
   },
   {
-    label: "研究与验证",
+    label: "开发实验",
+    collapsible: true,
+    description: "非正式候选",
     items: [
+      { to: "/local-strategy-lab", label: "Local Strategy Lab" },
+      { to: "/operator-dashboard", label: "技术运行证据" },
+    ],
+  },
+  {
+    label: "高级与历史",
+    collapsible: true,
+    description: "兼容旧入口",
+    items: [
+      { to: "/generation-runs", label: "生成批次" },
       { to: "/backtest-runs", label: "回测批次" },
       { to: "/backtest-tasks", label: "回测任务" },
       { to: "/hyperopt-runs", label: "Hyperopt 参数优化" },
       { to: "/ranking", label: "策略排行榜" },
-    ],
-  },
-  {
-    label: "治理与运行",
-    items: [
-      { to: "/live-governance", label: "实盘候选治理" },
-      { to: "/operator-dashboard", label: "运维面板" },
-      { to: "/okx-demo", label: "OKX Demo 执行" },
+      { to: "/live-governance", label: "候选治理证据" },
     ],
   },
 ];

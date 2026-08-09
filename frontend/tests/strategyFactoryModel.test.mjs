@@ -27,10 +27,12 @@ function batch(statuses, qualifiedCount = 0) {
   };
 }
 
-test("factory counts only completed validation and queues only complete qualified evidence", () => {
+test("factory counts only completed validation and never infers handoff from candidate counts", () => {
   assert.equal(validatedCandidateCount(batch(["QUALIFIED", "REJECTED", "VALIDATION_FAILED"])), 2);
-  assert.match(deploymentHandoffText(batch(["QUALIFIED", "REJECTED"], 1)), /自动部署评审队列/);
-  assert.match(deploymentHandoffText(batch(["QUALIFIED", "VALIDATION_FAILED"], 1)), /未进入/);
+  assert.match(deploymentHandoffText(null), /未知/);
+  assert.match(deploymentHandoffText({ deployment_handoff_status: "NOT_EVALUATED" }), /未知/);
+  assert.match(deploymentHandoffText({ deployment_handoff_status: "QUEUED_FOR_EXISTING_AUTOMATION" }), /已交接/);
+  assert.match(deploymentHandoffText({ deployment_handoff_status: "NOT_QUEUED_NO_QUALIFIED" }), /未交接/);
 });
 
 test("manual entry is enabled only for an inactive READY formal run", () => {

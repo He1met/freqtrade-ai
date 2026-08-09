@@ -16,10 +16,14 @@ export function validatedCandidateCount(batch: StrategyResearchBatch): number {
   return batch.candidates.filter((candidate) => candidate.status !== "VALIDATION_FAILED").length;
 }
 
-export function deploymentHandoffText(batch: StrategyResearchBatch): string {
-  return batch.qualified_count > 0 && validatedCandidateCount(batch) === batch.persisted_count
-    ? "已由 QUALIFIED 持久化状态进入既有自动部署评审队列"
-    : "未进入（本批次没有具备完整生命周期证据的 QUALIFIED 候选）";
+export function deploymentHandoffText(run: FormalResearchRun | null): string {
+  if (run?.deployment_handoff_status === "QUEUED_FOR_EXISTING_AUTOMATION") {
+    return "协调器已交接给既有自动部署评审";
+  }
+  if (run?.deployment_handoff_status === "NOT_QUEUED_NO_QUALIFIED") {
+    return "未交接：本批次没有 QUALIFIED 候选";
+  }
+  return "未知：尚无权威部署交接状态";
 }
 
 export function canStartFormalResearch(run: FormalResearchRun | null, submitting: boolean): boolean {

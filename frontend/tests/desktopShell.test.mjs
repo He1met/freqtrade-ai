@@ -12,7 +12,7 @@ import { dashboardViewState } from "../src/pages/dashboardState.ts";
 test("desktop navigation groups every route once while preserving detail route matching", () => {
   assert.deepEqual(
     navigationSections.map((section) => section.label),
-    ["工作台", "研究与验证", "治理与运行"],
+    ["正式工作台", "开发实验", "高级与历史"],
   );
   assert.equal(new Set(navigationItems.map((item) => item.to)).size, navigationItems.length);
   assert.equal(navigationLabelForPath("/strategies/42"), "策略工厂");

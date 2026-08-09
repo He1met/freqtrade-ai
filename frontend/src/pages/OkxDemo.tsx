@@ -5,7 +5,12 @@ import {
   type OkxDemoObservability,
   type OkxDemoOrder,
 } from "../api/okxDemoApi";
-import { CompactText, CopyableValue, StatusBadge } from "../components/DisplayPrimitives";
+import {
+  CompactText,
+  CopyableValue,
+  PageHeader,
+  StatusBadge,
+} from "../components/DisplayPrimitives";
 import "../styles/okx-demo.css";
 import { okxDemoAcceptanceIsTruthful, orderCanDisplayComplete } from "./okxDemoDisplay";
 import { displayDateTime, displayValue } from "./uiCopy";
@@ -175,79 +180,119 @@ export function OkxDemo() {
 
   if (error) {
     return (
-      <div className="page okx-demo-page">
-        <header className="page-header"><h1>OKX Demo 执行</h1></header>
-        <section className="okx-load-state" role="alert">
-          <strong>数据加载失败</strong>
-          <p>{error}</p>
-          <p>没有读取到数据库证据，页面不会显示运行成功。</p>
+      <div className="page formal-page okx-demo-page">
+        <PageHeader
+          eyebrow="正式工作台"
+          title="模拟盘"
+          description="查看 OKX_DEMO 的运行健康、意图、订单、成交与对账证据。"
+          status={<span className="formal-target-chip">OKX_DEMO · Demo-only</span>}
+        />
+        <section className="formal-conclusion" data-state="blocked" role="alert">
+          <div>
+            <span className="formal-kicker">数据不可用</span>
+            <h2>暂时无法确认模拟盘状态</h2>
+            <p>{error}。没有读取到真实数据库证据，页面不会把未知状态显示为成功。</p>
+          </div>
+          <StatusBadge status="UNKNOWN" label="未知" />
         </section>
       </div>
     );
   }
   if (!data) {
     return (
-      <div className="page okx-demo-page">
-        <header className="page-header"><h1>OKX Demo 执行</h1></header>
-        <section className="okx-load-state" aria-live="polite">正在读取数据库证据…</section>
+      <div className="page formal-page okx-demo-page" aria-live="polite">
+        <PageHeader eyebrow="正式工作台" title="模拟盘" />
+        <section className="formal-conclusion formal-skeleton"><h2>正在读取模拟盘证据</h2></section>
+        <section className="formal-metric-grid">
+          {Array.from({ length: 4 }, (_, index) => (
+            <article className="formal-metric formal-skeleton" key={index}><strong>—</strong></article>
+          ))}
+        </section>
+        <section className="formal-panel formal-compact-skeleton formal-skeleton">加载中</section>
       </div>
     );
   }
 
   const acceptable = okxDemoAcceptanceIsTruthful(data);
+  const fillCount = data.orders.reduce((total, order) => total + order.fills.length, 0);
+  const riskDecisionCount = data.orders.filter((order) => order.riskDecision).length;
+  const readyCount = data.readiness.filter((check) => check.status === "READY").length;
+  const readinessState = data.readiness.length > 0 && readyCount === data.readiness.length
+    ? "READY"
+    : "BLOCKED";
   return (
-    <div className="page okx-demo-page">
-      <header className="okx-target-bar">
-        <div>
-          <span className="okx-kicker">当前唯一交易目标</span>
-          <h1>{data.target.label}</h1>
-          <p>OKX 永续合约 · isolated · 仅模拟资金</p>
-        </div>
-        <div className="okx-target-safety">
-          <span>SIMULATED</span>
-          <strong>不允许真实资金</strong>
-        </div>
-      </header>
+    <div className="page formal-page okx-demo-page">
+      <PageHeader
+        eyebrow="正式工作台"
+        title="模拟盘"
+        description="只读查看 OKX_DEMO 运行、订单与成交证据；页面不会启动交易。"
+        status={<span className="formal-target-chip">OKX_DEMO · Demo-only</span>}
+      />
 
-      <section className="okx-readiness" aria-labelledby="okx-readiness-title">
-        <div className="okx-section-heading">
-          <div>
-            <span className="okx-kicker">启动门禁</span>
-            <h2 id="okx-readiness-title">运行准备度</h2>
-          </div>
-          <span>更新于 {displayDateTime(data.generatedAt)}</span>
+      <section className="formal-conclusion" data-state={acceptable ? "ready" : "attention"}>
+        <div>
+          <span className="formal-kicker">当前结论</span>
+          <h2>{acceptable ? "模拟盘证据完整，可继续观察" : "模拟盘证据尚未满足严格验收"}</h2>
+          <p>{data.acceptanceReason}</p>
         </div>
+        <StatusBadge status={acceptable ? "ACCEPTABLE" : "NOT_ACCEPTABLE"} />
+      </section>
+
+      <section className="formal-metric-grid" aria-label="模拟盘关键指标">
+        <article className="formal-metric" data-state="unknown">
+          <span>运行中策略</span><strong>—</strong><small>当前只读接口未提供部署实例，保持未知</small>
+        </article>
+        <article className="formal-metric" data-state="unknown">
+          <span>最近信号</span><strong>—</strong><small>当前聚合接口未提供信号评估记录</small>
+        </article>
+        <article className="formal-metric">
+          <span>订单记录</span><strong>{data.orders.length}</strong><small>最近聚合窗口内的数据库订单</small>
+        </article>
+        <article className="formal-metric">
+          <span>成交记录</span><strong>{fillCount}</strong><small>订单附带的真实成交数据库记录</small>
+        </article>
+      </section>
+
+      <section className="formal-panel" aria-labelledby="demo-flow-title">
+        <div className="formal-section-heading">
+          <div><span className="formal-kicker">执行链路</span><h2 id="demo-flow-title">最近证据覆盖</h2></div>
+          <span className="formal-section-note">更新于 {displayDateTime(data.generatedAt)}</span>
+        </div>
+        <div className="formal-demo-flow">
+          <div><span>信号</span><strong>未知</strong></div>
+          <div><span>交易意图</span><strong>{data.intents.length} 条</strong></div>
+          <div><span>风控决定</span><strong>{riskDecisionCount} 条</strong></div>
+          <div><span>订单</span><strong>{data.orders.length} 条</strong></div>
+          <div><span>成交</span><strong>{fillCount} 条</strong></div>
+          <div><span>对账</span><strong>{data.latestReconciliation?.status ?? "暂无"}</strong></div>
+        </div>
+        <p className="formal-muted">订单提交不等于成交；缺少信号或部署读取 DTO 时保持“未知”，不从订单反推运行成功。</p>
+      </section>
+
+      <details className="formal-panel okx-readiness-disclosure">
+        <summary>
+          <span><strong>运行准备度</strong><small>{readyCount}/{data.readiness.length} 项就绪</small></span>
+          <StatusBadge status={readinessState} />
+        </summary>
         <div className="okx-readiness-grid">
           {data.readiness.map((check) => (
             <article key={check.key}>
-              <header>
-                <strong>{check.label}</strong>
-                <StatusBadge status={check.status} showRaw />
-              </header>
+              <header><strong>{check.label}</strong><StatusBadge status={check.status} /></header>
               <p>{check.summary}</p>
               {check.action ? <small>{check.action}</small> : null}
             </article>
           ))}
         </div>
-      </section>
-
-      <section className="okx-acceptance">
-        <div>
-          <span className="okx-kicker">严格验收判定</span>
-          <strong>{acceptable ? "当前证据可验收" : "当前证据不可验收"}</strong>
-          <p>{data.acceptanceReason}</p>
-        </div>
-        <StatusBadge status={acceptable ? "ACCEPTABLE" : "NOT_ACCEPTABLE"} showRaw />
-      </section>
+      </details>
 
       <section className="okx-workspace" aria-label="订单主从工作区">
         <div className="okx-master">
-          <div className="okx-section-heading">
+          <div className="formal-section-heading">
             <div>
-              <span className="okx-kicker">数据库记录</span>
-              <h2>订单</h2>
+              <span className="formal-kicker">最近活动</span>
+              <h2>订单与完成判定</h2>
             </div>
-            <span>{data.orders.length} 条</span>
+            <span className="formal-section-note">{data.orders.length} 条</span>
           </div>
           {data.orders.length ? (
             <div className="okx-order-table-wrap">
@@ -290,7 +335,7 @@ export function OkxDemo() {
           ) : (
             <div className="okx-empty">
               <strong>暂无订单数据库记录</strong>
-              <p>空结果不代表运行成功，也不能进入验收。</p>
+              <p>等待模拟盘产生并持久化订单证据；空结果不代表运行成功，也不能进入验收。</p>
             </div>
           )}
         </div>
@@ -299,7 +344,7 @@ export function OkxDemo() {
 
       <section className="okx-secondary-grid">
         <article>
-          <div className="okx-section-heading">
+          <div className="formal-section-heading compact">
             <h2>仓位</h2><span>{data.positions.length} 条</span>
           </div>
           {data.positions.length ? (
@@ -315,7 +360,7 @@ export function OkxDemo() {
           ) : <p className="okx-muted">暂无仓位数据库记录。</p>}
         </article>
         <article>
-          <div className="okx-section-heading"><h2>账户</h2><StatusBadge status={data.account.status} showRaw /></div>
+          <div className="formal-section-heading compact"><h2>账户</h2><StatusBadge status={data.account.status} /></div>
           <p>{data.account.reason}</p>
           {data.account.databaseId ? (
             <dl className="okx-detail-grid">
@@ -329,8 +374,8 @@ export function OkxDemo() {
           ) : null}
         </article>
         <article>
-          <div className="okx-section-heading"><h2>最近对账</h2>
-            <StatusBadge status={data.latestReconciliation?.status ?? "UNKNOWN"} showRaw />
+          <div className="formal-section-heading compact"><h2>最近对账</h2>
+            <StatusBadge status={data.latestReconciliation?.status ?? "UNKNOWN"} />
           </div>
           {data.latestReconciliation ? (
             <>
@@ -341,6 +386,18 @@ export function OkxDemo() {
           ) : <p className="okx-muted">没有对账数据库记录，不能验收。</p>}
         </article>
       </section>
+
+      <details className="formal-panel okx-live-readiness">
+        <summary>
+          <span><strong>未来 Live 受控上线证据</strong><small>只读规划状态，不提供真实资金操作</small></span>
+          <StatusBadge status="UNKNOWN" label="Live 未配置" />
+        </summary>
+        <div className="okx-live-grid">
+          <p>Demo 与 Live 必须使用严格隔离的 execution target、凭据、数据与审计域，不能在本页直接切换。</p>
+          <p>持续表现、独立验证、运行健康、对账、风险限额、账户权限、人工审批和回滚演练等证据尚未由当前接口提供。</p>
+          <p>本阶段没有、也不会新增“一键实盘”按钮；任何 Live 能力都需要独立审批与后续数据设计。</p>
+        </div>
+      </details>
     </div>
   );
 }
