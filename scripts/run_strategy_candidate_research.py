@@ -20,15 +20,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "backend"))
+
+from app.core.strategy_research_contract import (  # noqa: E402
+    MAX_VALIDATION_DRAWDOWN,
+    MIN_FEE_PER_SIDE as FEE_PER_SIDE,
+    MIN_SLIPPAGE_PER_SIDE as SLIPPAGE_PER_SIDE,
+    MIN_STRATEGY_SCORE,
+    MIN_VALIDATION_TRADES,
+    official_research_policy,
+)
 
 PAIR = "BTC/USDT:USDT"
 TIMEFRAME = "15m"
-FEE_PER_SIDE = 0.0005
-SLIPPAGE_PER_SIDE = 0.0002
 STARTING_BALANCE = 1000.0
-MIN_STRATEGY_SCORE = 50.0
-MIN_VALIDATION_TRADES = 30
-MAX_VALIDATION_DRAWDOWN = 0.10
 
 WINDOWS = (
     ("primary_bear", "PRIMARY", "bear", "20230701-20231001"),
@@ -566,14 +572,7 @@ def main() -> int:
             "starting_balance": STARTING_BALANCE,
             "lookahead_analysis_artifact": str(lookahead_path),
         },
-        "selection_policy": {
-            "min_strategy_score": MIN_STRATEGY_SCORE,
-            "min_trades_per_validation_window": MIN_VALIDATION_TRADES,
-            "validation_requires_positive_net_profit": True,
-            "max_drawdown_per_validation_window": MAX_VALIDATION_DRAWDOWN,
-            "lookahead_analysis_required": True,
-            "score_source": "primary_bear net of fee and slippage",
-        },
+        "selection_policy": official_research_policy(),
         "windows": window_evidence,
         "candidates": results,
         "qualified_candidates": qualified,

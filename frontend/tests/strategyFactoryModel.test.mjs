@@ -4,8 +4,20 @@ import test from "node:test";
 import {
   canStartFormalResearch,
   deploymentHandoffText,
+  hasOfficialAggressiveContract,
   validatedCandidateCount,
 } from "../src/pages/strategyFactoryModel.ts";
+
+const aggressiveContract = {
+  contract_version: "formal-strategy-research-aggressive-v1",
+  risk_profile: "AGGRESSIVE",
+  profile_label: "进攻型：最大回撤 15%",
+  max_drawdown_per_validation_window: 0.15,
+  validation_requires_positive_net_profit: true,
+  lookahead_analysis_required: true,
+  fee_per_side: 0.0005,
+  slippage_per_side: 0.0002,
+};
 
 function batch(statuses, qualifiedCount = 0) {
   return {
@@ -22,8 +34,23 @@ test("factory counts only completed validation and queues only complete qualifie
 });
 
 test("manual entry is enabled only for an inactive READY formal run", () => {
-  assert.equal(canStartFormalResearch({ status: "READY", active: false }, false), true);
-  assert.equal(canStartFormalResearch({ status: "RUNNING", active: true }, false), false);
-  assert.equal(canStartFormalResearch({ status: "BLOCKED", active: false }, false), false);
-  assert.equal(canStartFormalResearch({ status: "READY", active: false }, true), false);
+  const ready = { status: "READY", active: false, quality_contract: aggressiveContract };
+  assert.equal(canStartFormalResearch(ready, false), true);
+  assert.equal(canStartFormalResearch({ ...ready, status: "RUNNING", active: true }, false), false);
+  assert.equal(canStartFormalResearch({ ...ready, status: "BLOCKED" }, false), false);
+  assert.equal(canStartFormalResearch(ready, true), false);
+});
+
+test("manual entry fails closed unless the API exposes the exact aggressive contract", () => {
+  const ready = { status: "READY", active: false, quality_contract: aggressiveContract };
+  assert.equal(hasOfficialAggressiveContract(ready), true);
+  assert.equal(canStartFormalResearch({ ...ready, quality_contract: undefined }, false), false);
+  assert.equal(canStartFormalResearch({
+    ...ready,
+    quality_contract: { ...aggressiveContract, max_drawdown_per_validation_window: 0.10 },
+  }, false), false);
+  assert.equal(canStartFormalResearch({
+    ...ready,
+    quality_contract: { ...aggressiveContract, max_drawdown_per_validation_window: 0.16 },
+  }, false), false);
 });

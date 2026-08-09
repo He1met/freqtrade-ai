@@ -403,6 +403,22 @@
 .strategy-factory-safety { margin: .45rem 0 0; }
 .strategy-factory-run-button { min-height: 42px; white-space: nowrap; }
 .strategy-factory-safety { font-size: .9rem; opacity: .78; }
+.strategy-factory-profile {
+  display: grid;
+  gap: .35rem;
+  margin-top: .8rem;
+  border: 1px solid #d4a84d;
+  border-left: 5px solid #b66b13;
+  border-radius: 8px;
+  background: #fff8e8;
+  padding: .85rem 1rem;
+}
+.strategy-factory-profile strong { color: #7a4300; font-size: 1.05rem; }
+.strategy-factory-profile span { color: #5c4a2c; line-height: 1.5; }
+.strategy-factory-profile[data-contract-valid="false"] {
+  border-color: #c95f5f;
+  background: #fff2f2;
+}
 
 .strategy-research-counts div {
   background: var(--surface-subtle, rgba(127, 127, 127, .08));

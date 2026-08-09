@@ -30,8 +30,13 @@ class StrategyResearchRepository:
     def list_candidates(
         self, *, status: Optional[str] = None, limit: int = 500
     ) -> list[StrategyResearchCandidate]:
-        statement = select(StrategyResearchCandidate).order_by(
-            StrategyResearchCandidate.created_at.desc(), StrategyResearchCandidate.id.desc()
+        statement = (
+            select(StrategyResearchCandidate)
+            .options(selectinload(StrategyResearchCandidate.batch))
+            .order_by(
+                StrategyResearchCandidate.created_at.desc(),
+                StrategyResearchCandidate.id.desc(),
+            )
         )
         if status is not None:
             statement = statement.where(StrategyResearchCandidate.status == status)

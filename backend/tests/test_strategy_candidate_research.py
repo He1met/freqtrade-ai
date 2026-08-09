@@ -79,7 +79,7 @@ def test_slippage_stress_and_project_score_are_deterministic() -> None:
     assert metrics["win_rate"] == pytest.approx(2 / 3)
     assert score["scoring_version"] == "phase2-quality-v1"
     assert score["total_score"] >= MIN_STRATEGY_SCORE
-    assert MAX_VALIDATION_DRAWDOWN == 0.10
+    assert MAX_VALIDATION_DRAWDOWN == 0.15
 
 
 def test_hourly_run_ids_are_unique_and_calendar_valid() -> None:

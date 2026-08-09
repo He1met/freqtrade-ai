@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -6,6 +7,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.db.session import get_db
+from app.core.strategy_research_contract import official_research_policy
 from app.main import app
 from app.models import Base
 from app.schemas.strategy_research import FormalResearchRunRead
@@ -19,6 +21,32 @@ REPORT = (
     / "research"
     / "strategy-candidates-20260806.json"
 )
+
+
+def write_official_report(tmp_path, *, qualified=False):
+    payload = json.loads(REPORT.read_text())
+    payload["selection_policy"] = official_research_policy()
+    if qualified:
+        name = next(iter(payload["candidates"]))
+        candidate = payload["candidates"][name]
+        for window_name in ("wf_bull", "wf_range", "oos", "wf_bear"):
+            candidate["windows"][window_name].update(
+                {
+                    "status": "SUCCESS",
+                    "total_trades": 30,
+                    "profit_pct": 0.001,
+                    "max_drawdown_pct": 0.15,
+                    "net_of_fee_and_slippage": True,
+                    "fee_per_side": 0.0005,
+                    "slippage_per_side": 0.0002,
+                }
+            )
+        candidate["validation_passed"] = True
+        candidate["deployable_candidate"] = True
+        payload["qualified_candidates"] = [name]
+    path = tmp_path / "official-api-report.json"
+    path.write_text(json.dumps(payload))
+    return path
 
 
 def test_research_endpoints_are_empty_but_explicit_before_first_batch():
@@ -43,7 +71,7 @@ def test_research_endpoints_are_empty_but_explicit_before_first_batch():
         app.dependency_overrides.clear()
 
 
-def test_research_api_exposes_complete_candidate_evidence():
+def test_research_api_exposes_complete_candidate_evidence(tmp_path):
     engine = create_engine(
         "sqlite+pysqlite:///:memory:",
         connect_args={"check_same_thread": False},
@@ -53,7 +81,9 @@ def test_research_api_exposes_complete_candidate_evidence():
     factory = sessionmaker(bind=engine)
     with factory() as db:
         StrategyResearchPersistenceService(db).persist_report(
-            REPORT, run_id="api-evidence", repository_commit="c" * 40
+            write_official_report(tmp_path),
+            run_id="api-evidence",
+            repository_commit="c" * 40,
         )
 
     def override_db():
@@ -72,6 +102,50 @@ def test_research_api_exposes_complete_candidate_evidence():
     assert len(payload[0]["candidates"]) == 10
     assert all(item["evidence_snapshot"]["windows"] for item in payload[0]["candidates"])
     assert all(item["rejection_reasons"] for item in payload[0]["candidates"])
+    assert payload[0]["selection_policy"]["profile_label"] == "进攻型：最大回撤 15%"
+
+
+def test_qualified_candidate_api_requires_exact_official_contract(tmp_path):
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine)
+    with factory() as db:
+        batch = StrategyResearchPersistenceService(db).persist_report(
+            write_official_report(tmp_path, qualified=True),
+            run_id="api-qualified",
+            repository_commit="d" * 40,
+        )
+        batch_id = batch.id
+
+    def override_db():
+        with factory() as db:
+            yield db
+
+    app.dependency_overrides[get_db] = override_db
+    try:
+        client = TestClient(app)
+        qualified = client.get(
+            "/api/strategy-research-candidates?status=QUALIFIED"
+        ).json()
+        assert len(qualified) == 1
+        assert qualified[0]["quality_contract"]["max_drawdown_per_validation_window"] == 0.15
+
+        with factory() as db:
+            batch = db.get(type(batch), batch_id)
+            batch.selection_policy = {
+                **batch.selection_policy,
+                "max_drawdown_per_validation_window": 0.10,
+            }
+            db.commit()
+        assert client.get(
+            "/api/strategy-research-candidates?status=QUALIFIED"
+        ).json() == []
+    finally:
+        app.dependency_overrides.clear()
 
 
 def test_formal_research_api_uses_credential_free_shared_coordinator():
@@ -126,3 +200,5 @@ def test_formal_research_api_uses_credential_free_shared_coordinator():
         "grant_authorized": False,
         "manual_order_authorized": False,
     }
+    assert ready.json()["quality_contract"]["profile_label"] == "进攻型：最大回撤 15%"
+    assert ready.json()["quality_contract"]["max_drawdown_per_validation_window"] == 0.15

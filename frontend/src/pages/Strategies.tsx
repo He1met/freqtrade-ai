@@ -25,6 +25,7 @@ import { formatSourceTrace, formatTraceRecord, strategyAvailability } from "./st
 import {
   canStartFormalResearch,
   deploymentHandoffText,
+  hasOfficialAggressiveContract,
   validatedCandidateCount,
 } from "./strategyFactoryModel";
 import { EMPTY_TEXT, displayLoadState, displayValue } from "./uiCopy";
@@ -186,6 +187,15 @@ export function Strategies() {
         <p className="strategy-factory-safety">
           本页不收集 operator token、Provider token 或任何凭据；不授权实盘、Dry-run 交易、grant 或手动下单。固定 OKX_DEMO、allow_real_funds=false、real_orders=false。
         </p>
+        <div
+          className="strategy-factory-profile"
+          data-contract-valid={hasOfficialAggressiveContract(formalRun)}
+        >
+          <strong>{formalRun?.quality_contract.profile_label ?? "质量契约未知"}</strong>
+          <span>
+            每个独立 OOS/bull/range/bear 窗口必须成本后净收益为正；强制 lookahead、费用 0.05%/侧与滑点 0.02%/侧验证。报告不能自行降低或放宽 15% 阈值。
+          </span>
+        </div>
         {researchError ? (
           <EmptyState
             title="研究批次状态未知"
@@ -221,7 +231,7 @@ export function Strategies() {
             ) : null}
             {researchBatches.map((batch) => (
               <details className="strategy-technical-details" key={batch.id}>
-              <summary>批次 {batch.run_id} · requested {batch.requested_count} · generated {batch.generated_count} · persisted {batch.persisted_count}</summary>
+              <summary>批次 {batch.run_id} · {batch.selection_policy?.profile_label ?? "历史质量契约"} · requested {batch.requested_count} · generated {batch.generated_count} · persisted {batch.persisted_count}</summary>
               {batch.failure_reason ? <p className="strategy-inline-problem">失败原因：{batch.failure_reason}</p> : null}
               <ul className="strategy-research-candidates">
                 {batch.candidates.map((candidate) => (

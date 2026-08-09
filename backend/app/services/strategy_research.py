@@ -11,19 +11,17 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.core.strategy_research_contract import (
+    MIN_FEE_PER_SIDE,
+    MIN_SLIPPAGE_PER_SIDE,
+    matches_official_research_policy,
+)
 from app.models.strategy_research import StrategyResearchBatch, StrategyResearchCandidate
 from app.repositories.strategy_research import StrategyResearchRepository
 
 
 EXPECTED_SCHEMA = "freqtrade-ai-strategy-candidate-research-v1"
 EXPECTED_CANDIDATE_COUNT = 10
-MIN_STRATEGY_SCORE = 50.0
-MIN_VALIDATION_TRADES = 30
-MAX_VALIDATION_DRAWDOWN = 0.10
-MIN_FEE_PER_SIDE = 0.0005
-MIN_SLIPPAGE_PER_SIDE = 0.0002
-
-
 class StrategyResearchReportError(ValueError):
     pass
 
@@ -48,17 +46,10 @@ def _reason(code: str, message: str, **evidence: Any) -> dict[str, Any]:
 def _validate_hard_gate_contract(report: dict[str, Any]) -> None:
     """Reject reports that weaken the project-owned qualification contract."""
     policy = report.get("selection_policy") or {}
-    if (
-        not isinstance(policy.get("min_strategy_score"), (int, float))
-        or policy["min_strategy_score"] < MIN_STRATEGY_SCORE
-        or not isinstance(policy.get("min_trades_per_validation_window"), int)
-        or policy["min_trades_per_validation_window"] < MIN_VALIDATION_TRADES
-        or not isinstance(policy.get("max_drawdown_per_validation_window"), (int, float))
-        or policy["max_drawdown_per_validation_window"] > MAX_VALIDATION_DRAWDOWN
-        or policy.get("validation_requires_positive_net_profit") is not True
-        or policy.get("lookahead_analysis_required") is not True
-    ):
-        raise StrategyResearchReportError("research report weakens the required hard gates")
+    if not matches_official_research_policy(policy):
+        raise StrategyResearchReportError(
+            "research report does not use the exact project-owned quality contract"
+        )
 
     environment = report.get("environment") or {}
     if (
