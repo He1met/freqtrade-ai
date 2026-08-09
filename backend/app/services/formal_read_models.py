@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.models.full_chain import StrategyCandidateApproval
@@ -19,6 +20,8 @@ from app.schemas.strategy_research import (
     StrategyResearchAttemptRead,
     StrategyResearchBatchRead,
     StrategyResearchWorkspaceRead,
+    StrategyResearchWorkspaceSectionRead,
+    StrategyResearchWorkspaceSectionsRead,
 )
 
 
@@ -34,7 +37,17 @@ class StrategyResearchWorkspaceService:
 
     def build(self, *, attempt_limit: int = 10) -> StrategyResearchWorkspaceRead:
         repository = StrategyResearchRepository(self.db)
-        chains = repository.list_recent_attempt_event_chains(attempt_limit=attempt_limit)
+        section_statuses: dict[str, StrategyResearchWorkspaceSectionRead] = {}
+        try:
+            chains = repository.list_recent_attempt_event_chains(attempt_limit=attempt_limit)
+            section_statuses["attempts"] = StrategyResearchWorkspaceSectionRead(status="AVAILABLE")
+        except SQLAlchemyError:
+            self.db.rollback()
+            chains = []
+            section_statuses["attempts"] = StrategyResearchWorkspaceSectionRead(
+                status="UNKNOWN",
+                reason_code="ATTEMPT_RECEIPTS_UNAVAILABLE",
+            )
         attempts = [
             StrategyResearchAttemptRead(
                 attempt_id=events[0].attempt_id,
@@ -44,10 +57,30 @@ class StrategyResearchWorkspaceService:
             for events in chains
             if events
         ]
-        batches = repository.list_batches(limit=1)
+        try:
+            batches = repository.list_batches(limit=1)
+            section_statuses["batch"] = StrategyResearchWorkspaceSectionRead(status="AVAILABLE")
+        except SQLAlchemyError:
+            self.db.rollback()
+            batches = []
+            section_statuses["batch"] = StrategyResearchWorkspaceSectionRead(
+                status="UNKNOWN",
+                reason_code="RESEARCH_BATCHES_UNAVAILABLE",
+            )
         latest_batch = batches[0] if batches else None
-        latest_quality = repository.latest_quality_receipt()
-        if latest_batch is None:
+        try:
+            latest_quality = repository.latest_quality_receipt()
+            section_statuses["quality"] = StrategyResearchWorkspaceSectionRead(status="AVAILABLE")
+        except SQLAlchemyError:
+            self.db.rollback()
+            latest_quality = None
+            section_statuses["quality"] = StrategyResearchWorkspaceSectionRead(
+                status="UNKNOWN",
+                reason_code="MARKET_DATA_QUALITY_RECEIPTS_UNAVAILABLE",
+            )
+        if section_statuses["batch"].status == "UNKNOWN":
+            handoff = "UNKNOWN"
+        elif latest_batch is None:
             handoff = "NOT_EVALUATED"
         elif latest_batch.qualified_count == 0:
             handoff = "NOT_QUEUED_NO_QUALIFIED"
@@ -59,6 +92,12 @@ class StrategyResearchWorkspaceService:
             as_of=_utc_now(),
             source_type="database",
             core_data=True,
+            evidence_status=(
+                "COMPLETE"
+                if all(section.status == "AVAILABLE" for section in section_statuses.values())
+                else "PARTIAL"
+            ),
+            sections=StrategyResearchWorkspaceSectionsRead(**section_statuses),
             attempts=attempts,
             latest_quality_receipt=(
                 MarketDataQualityReceiptRead.model_validate(latest_quality)

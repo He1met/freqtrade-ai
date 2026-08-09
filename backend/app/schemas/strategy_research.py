@@ -66,7 +66,21 @@ FormalResearchCleanupStatus = Literal[
 ]
 
 
+class FormalResearchSafetyRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    execution_target: Literal["OKX_DEMO"] = "OKX_DEMO"
+    allow_real_funds: Literal[False] = False
+    real_orders: Literal[False] = False
+    credentials_collected: Literal[False] = False
+    dry_run_trading_authorized: Literal[False] = False
+    grant_authorized: Literal[False] = False
+    manual_order_authorized: Literal[False] = False
+
+
 class FormalResearchRunRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     status: FormalResearchRunStatus
     reason_code: str
     reason: str
@@ -93,17 +107,7 @@ class FormalResearchRunRead(BaseModel):
         "CANONICAL_LINK_UNAVAILABLE",
     ] = "NOT_EVALUATED"
     quality_contract: dict = Field(default_factory=official_research_policy)
-    safety: dict = Field(
-        default_factory=lambda: {
-            "execution_target": "OKX_DEMO",
-            "allow_real_funds": False,
-            "real_orders": False,
-            "credentials_collected": False,
-            "dry_run_trading_authorized": False,
-            "grant_authorized": False,
-            "manual_order_authorized": False,
-        }
-    )
+    safety: FormalResearchSafetyRead = Field(default_factory=FormalResearchSafetyRead)
 
 
 class StrategyResearchAttemptEventRead(BaseModel):
@@ -164,6 +168,21 @@ class MarketDataQualityReceiptRead(BaseModel):
     created_at: datetime
 
 
+class StrategyResearchWorkspaceSectionRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["AVAILABLE", "UNKNOWN"]
+    reason_code: Optional[str] = None
+
+
+class StrategyResearchWorkspaceSectionsRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    attempts: StrategyResearchWorkspaceSectionRead
+    quality: StrategyResearchWorkspaceSectionRead
+    batch: StrategyResearchWorkspaceSectionRead
+
+
 class StrategyResearchWorkspaceRead(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -171,6 +190,8 @@ class StrategyResearchWorkspaceRead(BaseModel):
     as_of: datetime
     source_type: Literal["database"]
     core_data: Literal[True]
+    evidence_status: Literal["COMPLETE", "PARTIAL"]
+    sections: StrategyResearchWorkspaceSectionsRead
     attempts: list[StrategyResearchAttemptRead]
     latest_quality_receipt: Optional[MarketDataQualityReceiptRead] = None
     latest_batch: Optional[StrategyResearchBatchRead] = None
@@ -178,4 +199,5 @@ class StrategyResearchWorkspaceRead(BaseModel):
         "NOT_EVALUATED",
         "NOT_QUEUED_NO_QUALIFIED",
         "CANONICAL_LINK_UNAVAILABLE",
+        "UNKNOWN",
     ]

@@ -12,6 +12,17 @@ export function hasOfficialAggressiveContract(run: FormalResearchRun | null): bo
     && contract.slippage_per_side === 0.0002;
 }
 
+export function hasOfficialSafetyContract(run: FormalResearchRun | null): boolean {
+  const safety = run?.safety;
+  return safety?.execution_target === "OKX_DEMO"
+    && safety.allow_real_funds === false
+    && safety.real_orders === false
+    && safety.credentials_collected === false
+    && safety.dry_run_trading_authorized === false
+    && safety.grant_authorized === false
+    && safety.manual_order_authorized === false;
+}
+
 export function validatedCandidateCount(batch: StrategyResearchBatch): number {
   return batch.candidates.filter((candidate) => candidate.status !== "VALIDATION_FAILED").length;
 }
@@ -28,5 +39,5 @@ export function deploymentHandoffText(run: FormalResearchRun | null): string {
 
 export function canStartFormalResearch(run: FormalResearchRun | null, submitting: boolean): boolean {
   return !submitting && run?.status === "READY" && !run.active
-    && hasOfficialAggressiveContract(run);
+    && hasOfficialAggressiveContract(run) && hasOfficialSafetyContract(run);
 }

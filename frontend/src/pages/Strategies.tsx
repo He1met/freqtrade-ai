@@ -167,11 +167,11 @@ export function Strategies() {
         title="策略工厂"
       />
 
-      <nav className="formal-tabs" aria-label="策略工厂分区">
-        <a className="formal-tab-link" href="#latest-research">最新研究</a>
-        <a className="formal-tab-link" href="#research-candidates">候选</a>
-        <a className="formal-tab-link" href="#strategy-library">策略库</a>
-        <a className="formal-tab-link" href="#strategy-ranking">排行榜</a>
+      <nav className="formal-tabs" aria-label="策略工厂页内导航">
+        <a aria-controls="latest-research" className="formal-tab-link" href="#latest-research">最新研究</a>
+        <a aria-controls="research-candidates" className="formal-tab-link" href="#research-candidates">候选</a>
+        <a aria-controls="strategy-library" className="formal-tab-link" href="#strategy-library">策略库</a>
+        <a aria-controls="strategy-ranking" className="formal-tab-link" href="#strategy-ranking">排行榜</a>
       </nav>
 
       <section className="formal-panel" id="latest-research" aria-labelledby="latest-research-title">
@@ -195,13 +195,13 @@ export function Strategies() {
         {workspace.loading ? <p className="formal-muted">正在读取研究尝试与分钟数据质量证据…</p>
           : workspace.error ? <p className="formal-problem">研究生命周期投影读取失败，attempt 与质量状态未知。</p>
             : workspace.data ? (
-              <dl className="formal-summary-list">
-                <div><dt>最近尝试</dt><dd>{workspace.data.attempts[0]?.latest_outcome ?? "尚未尝试"}</dd></div>
-                <div><dt>分钟数据质量</dt><dd>{workspace.data.latest_quality_receipt?.status ?? "尚无 receipt"}</dd></div>
-                <div><dt>正式生命周期衔接</dt><dd>{workspace.data.handoff_status === "CANONICAL_LINK_UNAVAILABLE" ? "不可用：尚无可审计 bridge" : workspace.data.handoff_status === "NOT_QUEUED_NO_QUALIFIED" ? "未排队：无合格候选" : "尚未评估"}</dd></div>
-              </dl>
+              <p className="formal-evidence-summary-line">
+                <span>最近尝试：<strong>{workspace.data.sections.attempts.status === "UNKNOWN" ? "未知" : workspace.data.attempts[0] ? displayStatus(workspace.data.attempts[0].latest_outcome) : "尚未尝试"}</strong></span>
+                <span>分钟数据：<strong>{workspace.data.sections.quality.status === "UNKNOWN" ? "未知" : workspace.data.latest_quality_receipt ? displayStatus(workspace.data.latest_quality_receipt.status) : "尚无 receipt"}</strong></span>
+                <span>生命周期衔接：<strong>{workspace.data.handoff_status === "UNKNOWN" ? "未知" : workspace.data.handoff_status === "CANONICAL_LINK_UNAVAILABLE" ? "无可审计 bridge" : workspace.data.handoff_status === "NOT_QUEUED_NO_QUALIFIED" ? "无合格候选" : "尚未评估"}</strong></span>
+              </p>
             ) : null}
-        {workspace.data?.attempts[0] ? (
+        {workspace.data?.sections.attempts.status === "AVAILABLE" && workspace.data.attempts[0] ? (
           <details className="formal-disclosure">
             <summary>查看最近研究尝试完整事件</summary>
             {workspace.data.attempts[0].events.map((event) => (
@@ -230,7 +230,7 @@ export function Strategies() {
         {researchLoading ? (
           <FormalLoadingState className="formal-lifecycle" label="正在读取研究批次" />
         ) : researchError ? (
-          <><EmptyState title="研究批次状态未知" description="候选批次 API 读取失败；这不表示没有生成，也不表示候选已被拒绝。" /><button className="formal-primary-button" onClick={() => { setResearchLoading(true); setResearchError(null); setResearchRevision((value) => value + 1); refreshReadModels(); }} type="button">重新读取研究证据</button></>
+          <><EmptyState title="研究批次状态未知" description="候选批次 API 读取失败；这不表示没有生成，也不表示候选已被拒绝。" /><button className="secondary-button" onClick={() => { setResearchLoading(true); setResearchError(null); setResearchRevision((value) => value + 1); refreshReadModels(); }} type="button">重新读取研究证据</button></>
         ) : latestResearch ? (
           <>
             <div className="formal-lifecycle">
@@ -323,7 +323,7 @@ export function Strategies() {
           <span className="formal-section-note">目录 active 不等于部署 ACTIVE</span>
         </div>
         {catalog.strategies.loading ? <FormalLoadingState label="正在读取正式策略库" /> : catalog.strategies.error ? (
-          <><EmptyState title="正式策略库状态未知" description="策略目录或版本 API 读取失败；未知不能显示为暂无策略。" /><button className="formal-primary-button" onClick={catalog.refresh} type="button">重新读取策略库</button></>
+          <><EmptyState title="正式策略库状态未知" description="策略目录或版本 API 读取失败；未知不能显示为暂无策略。" /><button className="secondary-button" onClick={catalog.refresh} type="button">重新读取策略库</button></>
         ) : source !== "api" ? (
           <EmptyState title="正式策略库来源不可验收" description="fixture 或未知来源不计入正式策略数字。" />
         ) : null}
@@ -370,7 +370,7 @@ export function Strategies() {
           <Link className="formal-text-link" to="/ranking">查看完整证据</Link>
         </div>
         {catalog.ranking.loading ? <FormalLoadingState label="正在读取排行榜" /> : catalog.ranking.error ? (
-          <><EmptyState title="排行榜状态未知" description="排名 API 读取失败；未知不能显示为空榜。" /><button className="formal-primary-button" onClick={catalog.refresh} type="button">重新读取排行榜</button></>
+          <><EmptyState title="排行榜状态未知" description="排名 API 读取失败；未知不能显示为空榜。" /><button className="secondary-button" onClick={catalog.refresh} type="button">重新读取排行榜</button></>
         ) : source !== "api" ? (
           <EmptyState title="排行榜来源不可验收" description="fixture 或未知来源不计入正式排名。" />
         ) : data.ranking.length ? (

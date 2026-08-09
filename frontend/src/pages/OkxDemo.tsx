@@ -66,7 +66,7 @@ function OrderDetail({
           <span className="okx-kicker">订单详情</span>
           <h2>{order.instrumentId ?? "合约未知"}</h2>
         </div>
-        <StatusBadge status={complete ? "COMPLETE" : "INCOMPLETE"} showRaw />
+        <StatusBadge status={complete ? "COMPLETE" : "INCOMPLETE"} />
       </header>
       <p className={complete ? "okx-conclusion okx-conclusion-ready" : "okx-conclusion"}>
         {order.completionReason}
@@ -216,7 +216,7 @@ export function OkxDemo() {
                 <div><dt>最近信号</dt><dd>{runtimeActivity.data?.recent_signal_evaluations[0] ? displayStatus(runtimeActivity.data.recent_signal_evaluations[0].status) : "当前无信号"}</dd></div>
               </dl>}
         </section>
-        <button className="formal-primary-button" onClick={() => { setError(null); setData(null); setRevision((value) => value + 1); refresh(); }} type="button">重新读取只读证据</button>
+        <button className="secondary-button" onClick={() => { setError(null); setData(null); setRevision((value) => value + 1); refresh(); }} type="button">重新读取只读证据</button>
       </div>
     );
   }
@@ -239,6 +239,7 @@ export function OkxDemo() {
   return (
     <div className="page formal-page okx-demo-page">
       <PageHeader
+        actions={<span className="formal-context-chip">最近对账：{displayDateTime(data.latestReconciliation?.completedAt)}</span>}
         eyebrow="正式工作台"
         title="模拟盘"
         description="只读查看 OKX_DEMO 运行、订单与成交证据；页面不会启动交易。"
@@ -390,8 +391,8 @@ export function OkxDemo() {
                       </td>
                       <td>{order.side ?? "—"} / {order.orderType ?? "—"}</td>
                       <td>{displayDecimal(order.quantity)}</td>
-                      <td><StatusBadge status={order.authoritativeStatus ?? order.status} showRaw /></td>
-                      <td><StatusBadge status={orderCanDisplayComplete(order, data) ? "COMPLETE" : "INCOMPLETE"} showRaw /></td>
+                      <td><StatusBadge status={order.authoritativeStatus ?? order.status} /></td>
+                      <td><StatusBadge status={orderCanDisplayComplete(order, data) ? "COMPLETE" : "INCOMPLETE"} /></td>
                       <td><CompactText label="交易所订单 ID" value={order.exchangeOrderId ?? "未提供"} /></td>
                     </tr>
                   ))}

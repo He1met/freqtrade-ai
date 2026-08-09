@@ -5,6 +5,7 @@ import {
   canStartFormalResearch,
   deploymentHandoffText,
   hasOfficialAggressiveContract,
+  hasOfficialSafetyContract,
   validatedCandidateCount,
 } from "../src/pages/strategyFactoryModel.ts";
 
@@ -17,6 +18,16 @@ const aggressiveContract = {
   lookahead_analysis_required: true,
   fee_per_side: 0.0005,
   slippage_per_side: 0.0002,
+};
+
+const demoSafety = {
+  execution_target: "OKX_DEMO",
+  allow_real_funds: false,
+  real_orders: false,
+  credentials_collected: false,
+  dry_run_trading_authorized: false,
+  grant_authorized: false,
+  manual_order_authorized: false,
 };
 
 function batch(statuses, qualifiedCount = 0) {
@@ -36,7 +47,7 @@ test("factory counts only completed validation and never infers handoff from can
 });
 
 test("manual entry is enabled only for an inactive READY formal run", () => {
-  const ready = { status: "READY", active: false, quality_contract: aggressiveContract };
+  const ready = { status: "READY", active: false, quality_contract: aggressiveContract, safety: demoSafety };
   assert.equal(canStartFormalResearch(ready, false), true);
   assert.equal(canStartFormalResearch({ ...ready, status: "RUNNING", active: true }, false), false);
   assert.equal(canStartFormalResearch({ ...ready, status: "BLOCKED" }, false), false);
@@ -44,7 +55,7 @@ test("manual entry is enabled only for an inactive READY formal run", () => {
 });
 
 test("manual entry fails closed unless the API exposes the exact aggressive contract", () => {
-  const ready = { status: "READY", active: false, quality_contract: aggressiveContract };
+  const ready = { status: "READY", active: false, quality_contract: aggressiveContract, safety: demoSafety };
   assert.equal(hasOfficialAggressiveContract(ready), true);
   assert.equal(canStartFormalResearch({ ...ready, quality_contract: undefined }, false), false);
   assert.equal(canStartFormalResearch({
@@ -55,4 +66,13 @@ test("manual entry fails closed unless the API exposes the exact aggressive cont
     ...ready,
     quality_contract: { ...aggressiveContract, max_drawdown_per_validation_window: 0.16 },
   }, false), false);
+});
+
+test("manual entry rejects unsafe or incomplete execution target evidence", () => {
+  const ready = { status: "READY", active: false, quality_contract: aggressiveContract, safety: demoSafety };
+  assert.equal(hasOfficialSafetyContract(ready), true);
+  assert.equal(canStartFormalResearch({ ...ready, safety: undefined }, false), false);
+  assert.equal(canStartFormalResearch({ ...ready, safety: { ...demoSafety, execution_target: "LIVE" } }, false), false);
+  assert.equal(canStartFormalResearch({ ...ready, safety: { ...demoSafety, allow_real_funds: true } }, false), false);
+  assert.equal(canStartFormalResearch({ ...ready, safety: { ...demoSafety, real_orders: true } }, false), false);
 });

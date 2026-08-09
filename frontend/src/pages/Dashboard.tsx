@@ -64,11 +64,13 @@ export function Dashboard() {
   }, []);
 
   const latestResearch = workspace.data?.latest_batch ?? null;
+  const workspaceBatchError = workspace.error
+    ?? (workspace.data?.sections.batch.status === "UNKNOWN" ? workspace.data.sections.batch.reason_code ?? "研究批次来源不可用" : null);
   const formalResearchRun = researchRun.data;
   const latestResearchRun = formalResearchRun?.run_id === latestResearch?.run_id
     ? formalResearchRun
     : null;
-  const dataHasProblem = Boolean(catalog.strategies.error || catalog.ranking.error || researchRun.error || workspace.error || runtimeActivity.error || demo.error);
+  const dataHasProblem = Boolean(catalog.strategies.error || catalog.ranking.error || researchRun.error || workspace.error || workspace.data?.evidence_status === "PARTIAL" || runtimeActivity.error || demo.error);
   const pageLoading = catalog.strategies.loading || catalog.ranking.loading || researchRun.loading || workspace.loading || runtimeActivity.loading || demo.loading;
   const latestSignalStatus = runtimeActivity.data?.recent_signal_evaluations[0]?.status ?? null;
   const businessBlocked = Boolean(
@@ -122,7 +124,7 @@ export function Dashboard() {
         actions={(
           <>
             <span className="formal-target-chip">OKX_DEMO · Demo-only</span>
-            <span className="formal-context-chip">Live：状态未知 · 无切换入口</span>
+            <span className="formal-context-chip">数据更新：{displayDateTime(runtimeActivity.data?.as_of ?? demo.data?.generatedAt ?? workspace.data?.as_of)}</span>
           </>
         )}
         description="先看结论、研究进度与模拟盘证据；技术详情按需展开。"
@@ -162,13 +164,13 @@ export function Dashboard() {
           </article>
           <article className={workspace.loading ? "formal-metric formal-skeleton" : "formal-metric"}>
             <span>本批次候选</span>
-            <strong>{metricValue(workspace.loading, workspace.error, latestResearch?.persisted_count ?? null)}</strong>
-            <small>{workspace.error ? "研究投影读取失败" : latestResearch ? "已持久化候选" : "尚无持久化批次"}</small>
+            <strong>{metricValue(workspace.loading, workspaceBatchError, latestResearch?.persisted_count ?? null)}</strong>
+            <small>{workspaceBatchError ? "研究批次读取失败" : latestResearch ? "已持久化候选" : "尚无持久化批次"}</small>
           </article>
           <article className={workspace.loading ? "formal-metric formal-skeleton" : "formal-metric"}>
             <span>合格候选</span>
-            <strong>{metricValue(workspace.loading, workspace.error, latestResearch?.qualified_count ?? null)}</strong>
-            <small>{workspace.error ? "研究投影读取失败" : latestResearch?.qualified_count ? "正式衔接证据待建立" : latestResearch ? "本批次无合格" : "尚无批次"}</small>
+            <strong>{metricValue(workspace.loading, workspaceBatchError, latestResearch?.qualified_count ?? null)}</strong>
+            <small>{workspaceBatchError ? "研究批次读取失败" : latestResearch?.qualified_count ? "正式衔接证据待建立" : latestResearch ? "本批次无合格" : "尚无批次"}</small>
           </article>
           <article className={runtimeActivity.loading ? "formal-metric formal-skeleton" : "formal-metric"} data-state={runtimeActivity.error ? "unknown" : undefined}>
             <span>运行中策略</span>
@@ -188,7 +190,7 @@ export function Dashboard() {
         </div>
         {workspace.loading ? (
           <FormalLoadingState className="formal-lifecycle" label="正在读取研究进度" />
-        ) : workspace.error ? (
+        ) : workspaceBatchError ? (
           <EmptyState title="研究状态未知" description="正式研究 API 读取失败，不代表尚未生成或全部被拒绝。" />
         ) : latestResearch ? (
           <>
@@ -213,6 +215,15 @@ export function Dashboard() {
                 {displayDateTime(latestResearch.completed_at ?? latestResearch.created_at)}
               </time>
             </div>
+            <details className="formal-disclosure">
+              <summary>查看批次详情</summary>
+              <dl className="formal-summary-list">
+                <div><dt>Run ID</dt><dd>{latestResearch.run_id}</dd></div>
+                <div><dt>原始状态</dt><dd>{latestResearch.status}</dd></div>
+                <div><dt>当前阶段</dt><dd>{formalResearchRun?.reason_code ?? "批次已持久化，coordinator 阶段未知"}</dd></div>
+                <div><dt>失败 / 阻断原因</dt><dd>{latestResearch.failure_reason ?? formalResearchRun?.reason ?? "无已记录失败原因"}</dd></div>
+              </dl>
+            </details>
           </>
         ) : (
           <EmptyState title="尚无持久化研究批次" description="这表示尚未完成生成与入库，不代表 10 条候选被拒绝。" />
@@ -229,6 +240,7 @@ export function Dashboard() {
             <div><dt>部署交接</dt><dd>{workspace.data?.handoff_status === "CANONICAL_LINK_UNAVAILABLE" ? "正式生命周期衔接证据尚不可用" : deploymentHandoffText(latestResearchRun)}</dd></div>
             <div><dt>ACTIVE 运行策略</dt><dd>{runtimeActivity.loading ? "读取中" : runtimeActivity.error ? "未知" : `${runtimeActivity.data?.active_deployments.length ?? 0} 个`}</dd></div>
             <div><dt>最近信号评估</dt><dd>{runtimeActivity.loading ? "读取中" : runtimeActivity.error ? "未知" : latestSignalStatus ? displayStatus(latestSignalStatus) : "当前无信号"}</dd></div>
+            <div><dt>未来 Live</dt><dd>状态未知 · 无切换入口</dd></div>
           </dl>
           <p className="formal-muted">QUALIFIED 只代表可进入评审，不代表已批准、已部署或正在运行。</p>
         </section>

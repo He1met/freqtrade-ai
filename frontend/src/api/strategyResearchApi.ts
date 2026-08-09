@@ -115,6 +115,12 @@ export type StrategyResearchWorkspace = {
   as_of: string;
   source_type: "database";
   core_data: true;
+  evidence_status: "COMPLETE" | "PARTIAL";
+  sections: {
+    attempts: { status: "AVAILABLE" | "UNKNOWN"; reason_code: string | null };
+    quality: { status: "AVAILABLE" | "UNKNOWN"; reason_code: string | null };
+    batch: { status: "AVAILABLE" | "UNKNOWN"; reason_code: string | null };
+  };
   attempts: Array<{
     attempt_id: string;
     latest_outcome: StrategyResearchAttemptEvent["outcome"];
@@ -145,7 +151,7 @@ export type StrategyResearchWorkspace = {
     created_at: string;
   };
   latest_batch: StrategyResearchBatch | null;
-  handoff_status: FormalResearchRun["deployment_handoff_status"];
+  handoff_status: FormalResearchRun["deployment_handoff_status"] | "UNKNOWN";
 };
 
 export function fetchStrategyResearchBatches(signal?: AbortSignal) {

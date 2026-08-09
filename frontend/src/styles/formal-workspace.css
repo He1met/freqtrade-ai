@@ -69,6 +69,21 @@
   white-space: nowrap;
 }
 
+.formal-evidence-summary-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  margin: 8px 0 0;
+  border-top: 1px solid var(--formal-border);
+  color: var(--formal-muted);
+  padding-top: 8px;
+  font-size: 12px;
+}
+
+.formal-evidence-summary-line strong {
+  color: var(--formal-ink);
+}
+
 .formal-target-chip::before {
   width: 7px;
   height: 7px;

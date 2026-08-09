@@ -178,9 +178,63 @@ def test_workspace_reports_canonical_link_unavailable_without_guessing_queue(tmp
     assert payload["schema_version"] == "formal-strategy-research-workspace-v1"
     assert payload["source_type"] == "database"
     assert payload["core_data"] is True
+    assert payload["evidence_status"] == "COMPLETE"
+    assert payload["sections"] == {
+        "attempts": {"status": "AVAILABLE", "reason_code": None},
+        "quality": {"status": "AVAILABLE", "reason_code": None},
+        "batch": {"status": "AVAILABLE", "reason_code": None},
+    }
     assert payload["latest_batch"]["qualified_count"] == 1
     assert payload["handoff_status"] == "CANONICAL_LINK_UNAVAILABLE"
     assert payload["attempts"] == []
+
+
+def test_workspace_preserves_batch_when_new_receipt_tables_are_unavailable(tmp_path):
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine)
+    with factory() as db:
+        StrategyResearchPersistenceService(db).persist_report(
+            write_official_report(tmp_path),
+            run_id="workspace-partial-schema",
+            repository_commit="f" * 40,
+        )
+    Base.metadata.tables["strategy_research_attempt_events"].drop(engine)
+    Base.metadata.tables["market_data_quality_receipts"].drop(engine)
+
+    def override_db():
+        with factory() as db:
+            yield db
+
+    app.dependency_overrides[get_db] = override_db
+    try:
+        response = TestClient(app).get("/api/strategy-research/workspace?attempt_limit=1")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["evidence_status"] == "PARTIAL"
+    assert payload["sections"]["attempts"] == {
+        "status": "UNKNOWN",
+        "reason_code": "ATTEMPT_RECEIPTS_UNAVAILABLE",
+    }
+    assert payload["sections"]["quality"] == {
+        "status": "UNKNOWN",
+        "reason_code": "MARKET_DATA_QUALITY_RECEIPTS_UNAVAILABLE",
+    }
+    assert payload["sections"]["batch"] == {
+        "status": "AVAILABLE",
+        "reason_code": None,
+    }
+    assert payload["latest_batch"]["run_id"] == "workspace-partial-schema"
+    assert payload["attempts"] == []
+    assert payload["latest_quality_receipt"] is None
+    assert payload["handoff_status"] == "NOT_QUEUED_NO_QUALIFIED"
 
 
 def test_formal_research_api_uses_credential_free_shared_coordinator():

@@ -139,7 +139,7 @@ export function StrategyDetail() {
         description="概要与当前版本优先；来源、谱系和 Diff 可按需审计。"
         status={
           <>
-            <StatusBadge showRaw status={strategy.status} />
+            <StatusBadge status={strategy.status} />
             <StatusBadge label={displayLoadState(isLoading, source)} status={isLoading ? "RUNNING" : source} />
           </>
         }
@@ -160,7 +160,7 @@ export function StrategyDetail() {
         </article>
         <article className={availability.isProblem ? "strategy-overview-card strategy-overview-problem" : "strategy-overview-card"}>
           <span>当前是否可用</span>
-          <StatusBadge showRaw status={availability.status} />
+          <StatusBadge status={availability.status} />
           <p>{availability.reason ?? "当前版本未发现阻塞或校验失败。"}</p>
         </article>
         <article className="strategy-overview-card">
@@ -168,7 +168,7 @@ export function StrategyDetail() {
           {strategy.currentVersion ? (
             <>
               <strong>v{strategy.currentVersion.versionNumber}</strong>
-              <StatusBadge showRaw status={strategy.currentVersion.validationStatus} />
+              <StatusBadge status={strategy.currentVersion.validationStatus} />
               <details className="formal-disclosure">
                 <summary>查看策略文件路径</summary>
                 <CopyableValue label="策略文件路径" value={strategy.currentVersion.filePath} />
