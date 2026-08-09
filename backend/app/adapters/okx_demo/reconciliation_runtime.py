@@ -306,13 +306,13 @@ class OkxDemoRuntimeReconciliationAdapter:
             and not OkxDemoAutomationGuard.opening_allowed(db)
         ):
             return
+        approved = _next_unconsumed_approved_execution(db, now=now)
+        if approved is None:
+            return
         if not _fresh_reconciliation_allows_opening(db, now=now):
             raise OkxDemoReconciliationBlocked(
                 "fresh reconciled runtime state is required before new submission"
             )
-        approved = _next_unconsumed_approved_execution(db, now=now)
-        if approved is None:
-            return
         writer.place(
             approved,
             submission_grant=self._submission_authorization(approved),

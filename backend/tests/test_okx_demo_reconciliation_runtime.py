@@ -775,6 +775,88 @@ def test_runtime_submission_disabled_never_calls_writer(
     assert writer.calls == []
 
 
+def test_runtime_without_approval_does_not_require_submission_freshness(
+    db,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setattr(
+        "app.adapters.okx_demo.reconciliation_runtime.get_settings",
+        lambda: SimpleNamespace(
+            execution_target_manifest=SimpleNamespace(
+                active_target=SimpleNamespace(order_submission_enabled=True)
+            )
+        ),
+    )
+    adapter = OkxDemoRuntimeReconciliationAdapter(
+        evidence_root=tmp_path / "managed" / "reconciliation",
+        allowed_evidence_root=tmp_path / "managed",
+        account_fingerprint_sha256="a" * 64,
+        order_submission_enabled=True,
+        now_provider=lambda: NOW,
+    )
+    monkeypatch.setattr(
+        "app.adapters.okx_demo.reconciliation_runtime."
+        "_next_unconsumed_approved_execution",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.adapters.okx_demo.reconciliation_runtime."
+        "_fresh_reconciliation_allows_opening",
+        lambda *_args, **_kwargs: pytest.fail(
+            "freshness is a submission gate, not a no-action health failure"
+        ),
+    )
+
+    class Writer:
+        def place(self, *_args, **_kwargs):
+            pytest.fail("no approval must never reach the writer")
+
+    adapter.run_cycle(read_client=object(), writer=Writer(), db=db)
+
+
+def test_runtime_stale_approval_still_fails_closed_before_writer(
+    db,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setattr(
+        "app.adapters.okx_demo.reconciliation_runtime.get_settings",
+        lambda: SimpleNamespace(
+            execution_target_manifest=SimpleNamespace(
+                active_target=SimpleNamespace(order_submission_enabled=True)
+            )
+        ),
+    )
+    adapter = OkxDemoRuntimeReconciliationAdapter(
+        evidence_root=tmp_path / "managed" / "reconciliation",
+        allowed_evidence_root=tmp_path / "managed",
+        account_fingerprint_sha256="a" * 64,
+        order_submission_enabled=True,
+        now_provider=lambda: NOW,
+    )
+    monkeypatch.setattr(
+        "app.adapters.okx_demo.reconciliation_runtime."
+        "_next_unconsumed_approved_execution",
+        lambda *_args, **_kwargs: _runtime_approved_execution(),
+    )
+    monkeypatch.setattr(
+        "app.adapters.okx_demo.reconciliation_runtime."
+        "_fresh_reconciliation_allows_opening",
+        lambda *_args, **_kwargs: False,
+    )
+
+    class Writer:
+        def place(self, *_args, **_kwargs):
+            pytest.fail("stale reconciliation must block the writer")
+
+    with pytest.raises(
+        OkxDemoReconciliationBlocked,
+        match="fresh reconciled runtime state",
+    ):
+        adapter.run_cycle(read_client=object(), writer=Writer(), db=db)
+
+
 def test_runtime_submits_at_most_one_fresh_approval_with_ephemeral_demo_grant(
     db,
     monkeypatch,
