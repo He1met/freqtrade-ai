@@ -148,6 +148,41 @@ def test_qualified_candidate_api_requires_exact_official_contract(tmp_path):
         app.dependency_overrides.clear()
 
 
+def test_workspace_reports_canonical_link_unavailable_without_guessing_queue(tmp_path):
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine)
+    with factory() as db:
+        StrategyResearchPersistenceService(db).persist_report(
+            write_official_report(tmp_path, qualified=True),
+            run_id="workspace-qualified",
+            repository_commit="e" * 40,
+        )
+
+    def override_db():
+        with factory() as db:
+            yield db
+
+    app.dependency_overrides[get_db] = override_db
+    try:
+        response = TestClient(app).get("/api/strategy-research/workspace?attempt_limit=1")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["schema_version"] == "formal-strategy-research-workspace-v1"
+    assert payload["source_type"] == "database"
+    assert payload["core_data"] is True
+    assert payload["latest_batch"]["qualified_count"] == 1
+    assert payload["handoff_status"] == "CANONICAL_LINK_UNAVAILABLE"
+    assert payload["attempts"] == []
+
+
 def test_formal_research_api_uses_credential_free_shared_coordinator():
     engine = create_engine(
         "sqlite+pysqlite:///:memory:",

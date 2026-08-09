@@ -1,4 +1,4 @@
-import { type CSSProperties, type ReactNode, useId, useState } from "react";
+import { type CSSProperties, type ReactNode, useEffect, useId, useState } from "react";
 
 import {
   EMPTY_TEXT,
@@ -80,6 +80,26 @@ export function StatusBadge({
         <code className="display-status-raw">{rawStatus}</code>
       ) : null}
     </span>
+  );
+}
+
+export function FormalLoadingState({
+  label,
+  className,
+}: {
+  label: string;
+  className?: string;
+}) {
+  const [showSkeleton, setShowSkeleton] = useState(false);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setShowSkeleton(true), 400);
+    return () => window.clearTimeout(timer);
+  }, []);
+  return (
+    <div aria-busy="true" className={classNames("formal-loading-state", className)} role="status">
+      <span className="sr-only">{label}</span>
+      {showSkeleton ? <div aria-hidden="true" className="formal-compact-skeleton formal-skeleton" /> : null}
+    </div>
   );
 }
 

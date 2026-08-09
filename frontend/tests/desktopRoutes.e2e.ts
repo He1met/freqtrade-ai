@@ -14,7 +14,7 @@ const routes = [
   { path: "/backtest-runs", heading: "回测批次" },
   { path: "/backtest-tasks", heading: "回测任务" },
   { path: "/hyperopt-runs", heading: "Hyperopt 参数优化" },
-  { path: "/live-governance", heading: "实盘候选治理" },
+  { path: "/live-governance", heading: "候选治理证据（只读 / 未来能力）" },
   { path: "/operator-dashboard", heading: "Operator Dashboard" },
   { path: "/okx-demo", heading: "模拟盘" },
   { path: "/ranking", heading: "策略排行榜" },
@@ -34,8 +34,9 @@ for (const route of routes) {
 
 test("legacy FreqUI bookmark redirects to the only active OKX Demo target", async ({ page }) => {
   await page.goto("/freq-ui");
-  await expect(page).toHaveURL(/\/okx-demo$/);
+  await expect(page).toHaveURL(/\/okx-demo\?from=freq-ui$/);
   await expect(page.getByRole("heading", { level: 1, name: "模拟盘" })).toBeVisible();
+  await expect(page.getByText("旧 FreqUI 兼容入口")).toBeVisible();
 });
 
 test("strategy detail route renders against the isolated database", async ({ page, request }) => {

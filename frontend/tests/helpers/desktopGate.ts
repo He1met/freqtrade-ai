@@ -11,7 +11,7 @@ export type BrowserProblemOptions = {
 };
 
 export const SUPERSEDED_API_REQUESTS: BrowserProblemOptions = {
-  allowedAbortedUrlPatterns: [/\/api\/(?:strategies|strategy-versions|strategy-generation-runs|strategy-research-batches|strategy-research\/formal-run|backtest-runs|backtest-tasks|backtest-results|hyperopt-runs|dry-run\/management|live-candidates\/governance|runtime\/read-only|runtime\/operator-status|okx-demo\/observability|governance-events|ranking|strategy-failure-reasons|strategy-version-lineage)(?:\?|$)/],
+  allowedAbortedUrlPatterns: [/\/api\/(?:strategies|strategy-versions|strategy-generation-runs|strategy-research-batches|strategy-research\/(?:formal-run|workspace)|backtest-runs|backtest-tasks|backtest-results|hyperopt-runs|dry-run\/management|live-candidates\/governance|runtime\/read-only|runtime\/operator-status|okx-demo\/(?:observability|runtime-activity)|governance-events|ranking|strategy-failure-reasons|strategy-version-lineage)(?:\?|$)/],
 };
 
 export function captureBrowserProblems(

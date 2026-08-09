@@ -8,6 +8,7 @@ from app.db.session import get_db
 from app.repositories.strategy_research import StrategyResearchRepository
 from app.schemas.strategy_research import (
     FormalResearchRunRead,
+    StrategyResearchWorkspaceRead,
     StrategyResearchBatchRead,
     StrategyResearchCandidateRead,
 )
@@ -15,6 +16,7 @@ from app.services.formal_strategy_research import (
     FormalStrategyResearchCoordinator,
     get_formal_strategy_research_coordinator,
 )
+from app.services.formal_read_models import StrategyResearchWorkspaceService
 
 
 router = APIRouter(prefix="/api", tags=["strategy-research"])
@@ -59,6 +61,16 @@ def get_formal_research_run(
     ),
 ) -> FormalResearchRunRead:
     return coordinator.status(db)
+
+
+@router.get(
+    "/strategy-research/workspace", response_model=StrategyResearchWorkspaceRead
+)
+def read_strategy_research_workspace(
+    attempt_limit: int = Query(default=10, ge=1, le=50),
+    db: Session = Depends(get_db),
+) -> StrategyResearchWorkspaceRead:
+    return StrategyResearchWorkspaceService(db).build(attempt_limit=attempt_limit)
 
 
 @router.post("/strategy-research/formal-run", response_model=FormalResearchRunRead)

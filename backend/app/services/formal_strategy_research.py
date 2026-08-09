@@ -332,8 +332,8 @@ class FormalStrategyResearchCoordinator:
             candidate.status in {"QUALIFIED", "REJECTED"} for candidate in batch.candidates
         )
         handoff = (
-            "QUEUED_FOR_EXISTING_AUTOMATION"
-            if batch.qualified_count > 0 and validated == batch.generated_count == batch.persisted_count
+            "CANONICAL_LINK_UNAVAILABLE"
+            if batch.qualified_count > 0
             else "NOT_QUEUED_NO_QUALIFIED"
         )
         return {

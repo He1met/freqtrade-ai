@@ -123,26 +123,26 @@ ID、路径、digest、artifact、source trace、ENV presence、schema、完整 
 
 ### 4.3 字号与数字层级
 
-| 层级 | 桌面建议 | 窄屏建议 | 用途 |
-| --- | --- | --- | --- |
-| 页面标题 H1 | 28–32px / 1.2 | 24–28px / 1.25 | 每页唯一标题 |
-| 区块标题 H2 | 20–22px / 1.35 | 18–20px / 1.35 | 主要区块 |
-| 小标题 H3 | 16–18px / 1.4 | 16px / 1.4 | 卡片/详情标题 |
-| 正文 | 14–16px / 1.5–1.65 | 14–16px / 1.5–1.65 | 结论与说明 |
-| 辅助标签 | 12–13px / 1.4 | 12–13px / 1.4 | 时间、来源、次要字段 |
-| 核心数字 | 24–32px / 1.15 | 22–28px / 1.2 | 策略、候选、运行中等关键计数 |
-| 表格 | 13–14px / 1.4 | 13–14px / 1.4 | 高密度数据 |
+| 层级 | 桌面建议 | 用途 |
+| --- | --- | --- |
+| 页面标题 H1 | 28–32px / 1.2 | 每页唯一标题 |
+| 区块标题 H2 | 20–22px / 1.35 | 主要区块 |
+| 小标题 H3 | 16–18px / 1.4 | 卡片/详情标题 |
+| 正文 | 14–16px / 1.5–1.65 | 结论与说明 |
+| 辅助标签 | 12–13px / 1.4 | 时间、来源、次要字段 |
+| 核心数字 | 24–32px / 1.15 | 策略、候选、运行中等关键计数 |
+| 表格 | 13–14px / 1.4 | 高密度数据 |
 
 正文使用系统无衬线字体；ID、digest、代码和路径使用等宽字体。数字使用 tabular numerals，百分比、小数位和单位在同一列保持一致。正文不得低于 14px，辅助标签不得低于 12px。
 
 ### 4.4 留白、栅格与卡片密度
 
 - 采用 4px 基础间距；常用间距为 8、12、16、24、32、48px；
-- 页面内容最大宽度建议 1440px，桌面 12 栏、平板 8 栏、窄屏 4 栏；
-- 页面左右安全边距：桌面 24–32px，平板 20–24px，窄屏 16px；
+- 本轮产品范围为电脑端；以 1280×720 为统一实现、测试和截图验收基线；
+- 页面内容最大宽度建议 1440px，桌面采用 12 栏；页面左右安全边距 24–32px；
 - 一级区块垂直间距 32–48px，卡片间距 16–24px；
-- 卡片内边距桌面 20–24px、窄屏 16px；同类摘要卡等高；
-- 首屏摘要卡桌面最多四列，平板两列，窄屏单列或 2×2 紧凑计数；
+- 卡片内边距 20–24px；同类摘要卡等高；
+- 首屏摘要卡最多四列；
 - 默认卡片只展示一个结论、2–4 个关键值和一个下一步；超过范围进入 details、抽屉或独立详情页；
 - 技术证据卡使用更低视觉权重的中性边框，不与业务结论卡竞争。
 
@@ -172,14 +172,13 @@ ID、路径、digest、artifact、source trace、ENV presence、schema、完整 
 - 写操作提交后按钮进入明确 loading，禁止重复点击；超时显示“结果未知，先核对状态”，不自动重试；
 - details 的摘要必须说明展开后能看到什么，不能只写“更多”。
 
-### 4.7 数据表、窄屏与加载规则
+### 4.7 数据表与加载规则
 
 - 表头名称简短稳定；状态、名称/对象、关键结果、时间、操作按阅读顺序排列；
 - 行高不低于 48px，长文本最多两行截断并可展开；数字右对齐，文本左对齐；
 - 状态列使用短标签，原因在相邻摘要或详情中；固定表头仅在不遮挡内容时使用；
 - 表格必须提供清晰的空、加载、失败状态；数据刷新不使列宽剧烈跳动；
-- 窄屏优先转为“摘要行 + 展开详情”或卡片列表；如必须横向滚动，首列保持对象名称且显示滚动提示；
-- 390px 宽度下不得出现页面级水平溢出、按钮截断或必须缩放才能阅读；
+- 1280×720 桌面基线下表格不得造成页面级水平溢出；高密度证据可在区块内横向滚动，首列保持对象名称并显示滚动提示；
 - 骨架屏形状应对应最终布局，最多覆盖预计首屏；加载中不显示 0、成功色或陈旧结论；
 - 超过 400ms 才显示骨架，短请求避免闪烁；超过既有请求超时后切换到明确失败/未知状态；
 - 保留上次成功数据时必须标注“可能已过期”和最后更新时间，不能继续显示为当前正常。
@@ -213,7 +212,7 @@ ID、路径、digest、artifact、source trace、ENV presence、schema、完整 
 └ 空状态或分页/历史批次入口
 ```
 
-视觉验收：主按钮是全页唯一高强调操作；质量契约首屏压缩为不超过两行；六计数顺序固定且在窄屏不混行；拒绝原因默认一行摘要，技术证据默认关闭；`QUALIFIED` 与已部署在视觉和文案上严格不同。
+视觉验收：主按钮是全页唯一高强调操作；质量契约首屏压缩为不超过两行；六计数顺序固定且在 1280×720 桌面基线中不混行；拒绝原因默认一行摘要，技术证据默认关闭；`QUALIFIED` 与已部署在视觉和文案上严格不同。
 
 #### 模拟盘 `/okx-demo`
 
@@ -369,6 +368,7 @@ ID、路径、digest、artifact、source trace、ENV presence、schema、完整 
 | UI-D-02 | 总览 / 模拟盘摘要 | 查看模拟盘 | 路由 `/okx-demo` | 无业务写入 | 只读导航 | 新增 |
 | UI-D-03 | 总览 / 最新研究 | 展开批次详情 | 展示已加载批次计数、拒绝摘要、时间、原始状态 | 加载禁用；失败显示未知；无批次显示说明 | 只读，不触发刷新/研究 | 新增 |
 | UI-D-04 | 总览 / Execution Target | 无按钮；只读状态卡 | 展示当前仅为 `Demo-only`，以及未来 Live 准备状态的只读投影 | Live 来源不可用时显示“Live 未配置/状态未知”，绝不推断已批准 | 不提供切换、配置凭据、批准或启动按钮；“已获人工批准”不等于已启动 | 新增状态规范，是否实现待用户确认 |
+| UI-D-05 | 总览 / 当前运行与最近信号 | 查看模拟盘 | `GET /api/okx-demo/runtime-activity` 读取 ACTIVE 部署与最近 signal evaluation；路由到 `/okx-demo` 查看详情 | 部署、信号各自独立为加载/失败/无数据/有数据；失败显示“未知”，空数据分别显示“尚未部署”“当前无信号” | 固定 `OKX_DEMO`、只读；目录 `Strategy.status` 不得代替部署事实，订单不得代替信号事实 | 新增正式投影 |
 | UI-S-01 | 策略工厂 / 正式研究控制 | 手动运行一轮研究（10 条）（唯一主按钮） | `POST /api/strategy-research/formal-run`；后端按既有协调器启动 | 加载“正在提交”；成功进入运行中并轮询；`BLOCKED/FAILED` 显示原因；超时显示“提交结果未知，先查状态”，不得重试 | 不收集凭据；不授权 Dry-run、grant、下单；需既有唯一所有权/锁门禁 | 保留，文案简化 |
 | UI-S-02 | 策略工厂 / 最新批次 | 查看完整批次 | 展开已由 `GET /api/strategy-research-batches` 读取的批次与候选 | API 失败=未知；无批次=尚未生成 | 只读 | 合并现有 details |
 | UI-S-03 | 策略工厂 / 候选列表 | 查看拒绝原因 | 展开候选 `rejection_reasons` 与摘要证据 | 无拒绝原因且 QUALIFIED 显示“通过研究质量门”；未知不显示通过 | 只读，原始 JSON 放二级详情 | 新增/重排 |
@@ -376,6 +376,7 @@ ID、路径、digest、artifact、source trace、ENV presence、schema、完整 
 | UI-S-05 | 策略工厂 / 正式策略库 | 策略名称链接 | 路由 `/strategies/:strategyId` | ID 无效进入不存在状态 | 只读 | 保留 |
 | UI-S-06 | 策略工厂 / 分区导航 | 最新研究 / 候选 / 策略库 / 排行榜 | 页面内锚点或页签；排行榜使用现有只读 API | 各分区独立状态 | 不用页签隐藏错误红点 | 新增，合并旧页入口 |
 | UI-S-07 | 策略工厂 / 批次详情 | 复制报告路径/摘要/ID | 浏览器剪贴板，仅复制当前字段 | 空值禁用；失败显示复制失败 | 可能含本地路径，不自动外发 | 保留在详情 |
+| UI-S-08 | 策略工厂 / 研究生命周期摘要 | 无按钮；只读投影 | `GET /api/strategy-research/workspace` 返回完整 attempt 事件链、最近数据质量 receipt、最近批次与权威交接结论 | 读取失败=未知；无 attempt=尚未尝试；`NOT_GENERATED` 必须显示 0/0/0/0/0/0 与短原因；历史批次无 receipt 显示 legacy/未知 | UI 不从候选数、名称或 digest 推断已入 canonical/已部署；`QUALIFIED` 但无 bridge 显示“正式衔接不可用” | 新增正式投影 |
 | UI-SD-01 | 策略详情 / 页头 | 返回策略工厂 | 路由 `/strategies` | 即时 | 只读 | 新增 |
 | UI-SD-02 | 策略详情 / 来源与版本 | 查看来源追踪 / 查看 Diff / 复制 ID 或路径 | 展开已加载字段/写剪贴板 | 缺失明确显示 | 不复制凭据；默认收起代码与路径 | 合并保留 |
 | UI-GR-01 | 生成批次 / 行详情 | 查看完整错误 / 复制批次 ID | 只读已加载数据、剪贴板 | 无错误显示“未记录错误” | 开发证据 | 保留在深入证据页 |
@@ -386,6 +387,7 @@ ID、路径、digest、artifact、source trace、ENV presence、schema、完整 
 | UI-O-01 | 模拟盘 / 订单表 | 选择订单行 | 仅设置前端 selectedId，展示当前 `GET /api/okx-demo/observability` 结果内详情 | 无订单显示原因导向的空状态 | 只读，不发送订单请求 | 保留 |
 | UI-O-02 | 模拟盘 / 订单详情 | 复制 ID / 展开生命周期 | 剪贴板/本地展开 | 字段缺失标未知 | 订单 ID 不是授权；不提供重放 | 合并保留 |
 | UI-O-03 | 模拟盘 / 上线准备证据 | 查看 Live 准备证据（只读详情） | 仅展开未来经批准 API 返回的检查项、人工批准摘要、过期时间和审计引用；当前 API 未定义 | 无数据=`Live 未配置`；部分检查=`Live 准备中`；完整且有效的人工作业凭据=`Live 已获人工批准`；读取失败=`未知` | 无“切换到 Live”“启动”“下单”按钮；不读取/显示密钥；证据详情不能充当授权 | 新增状态规范，API 待核对 |
+| UI-O-04 | 模拟盘 / 运行策略与最近信号 | 选择部署或查看信号证据 | `GET /api/okx-demo/runtime-activity?signal_limit=N`；前端仅选择已加载行/展开 allowlist 证据 | API 失败=未知；无 ACTIVE 行=尚未部署；无 evaluation=当前无信号证据；`NO_ACTION/BLOCKED/FAILED` 分别说明自然无动作、风控/质量阻断、评估失败 | 只读；不暴露 lease/token/raw snapshot/digest，不提供启动、停用、重放、grant 或下单按钮 | 新增正式投影 |
 | UI-OP-01 | 技术运行证据 / 各详情组 | 展开 Runtime/Artifacts/ENV/治理/安全详情 | 只读共享 loader / runtime endpoints | 不可用显示原因 | ENV 只显示 presence，绝不显示值 | 移入开发实验 |
 | UI-OP-02 | 技术运行证据 / 字段 | 复制路径/Schema/来源 | 剪贴板 | 空值禁用 | 本地证据不自动外发 | 保留 |
 | UI-LG-01 | 候选治理证据 / 卡片 | 展开候选/审批/部署/监控详情 | 只读 loader 数据 | 无后端路由时标“历史/未知”，不能显示成功 | 未来能力，不授权真实部署 | 改名并移入高级 |
@@ -416,10 +418,12 @@ ID、路径、digest、artifact、source trace、ENV presence、schema、完整 
 | 映射 ID / 对应 UI | 分类 | 读取 API | 写入 API | 表/实体与字段范围 | 前置、唯一写入者、审计/幂等 | 失败/超时页面反馈 |
 | --- | --- | --- | --- | --- | --- | --- |
 | DATA-D-01 / UI-D-01~03 | R | `GET /api/strategies`、`/strategy-versions`、`/strategy-research-batches`、`/strategy-research/formal-run`、`/ranking`、`/okx-demo/observability`；`strategy_deployments` / `signal_evaluations` 当前无正式读 API，运行中策略和最近信号不得从其他状态猜测 | 无 | `strategies(id,status,current_version_id)`；`strategy_versions(id,validation_status)`；研究批次/候选计数与状态；score；OKX observability allowlist；运行中事实应来自 `strategy_deployments.status=ACTIVE`，信号事实应来自 `signal_evaluations` | 聚合必须保留 source/freshness；任何一个关键源失败，不用 0 替代；`strategies.status=active` 不等于已部署运行 | 现有 API 缺口下对应计数显示“未知/暂不可用”；不得拿策略目录状态代替运行状态 |
+| DATA-D-02 / UI-D-05、UI-O-04 | R | `GET /api/okx-demo/runtime-activity?signal_limit=20` | 无 | `strategy_deployments` allowlist：`id,status,active_slot,instrument_id,timeframe,strategy_id,strategy_version_id,candidate_approval_id,created_at,disabled_at`；关联 Strategy/Version/Approval 的显示摘要；`signal_evaluations` allowlist：`id,deployment_id,instrument_id,timeframe,closed_candle_at,status,completed_at,error_code,signal_snapshot_id`；响应含 `schema_version,as_of,execution_target=OKX_DEMO,allow_real_funds=false,real_orders=false` 和窗口完整性 | 查询强制 `execution_target_id=OKX_DEMO`；只读 service/repository，不 commit/flush；lease owner/token、原始 snapshot、错误原文、凭据、订单 capability 一律不返回 | DB/API 失败整区未知，不返回伪空数组；空数组仅表示成功查询范围内确无记录；窗口截断显示“仅最近 N 条” |
 | DATA-LIVE-RO-01 / UI-D-04、UI-O-03 | R（未来 Live 准备只读投影） | API 路径待核对；本任务不得新增或假定 endpoint | 无 | Demo 与 Live 的 execution target、账户 fingerprint、检查项、批准摘要、批准范围/过期时间、变更/回滚演练审计引用；实体名、表名、字段名和 schema 全部待核对 | 必须由未来独立 Live 控制面/审计域提供；Web UI 不是批准者或写入者；Demo 批准、grant、凭据和订单 ID 不得复用 | 缺数据=`Live 未配置`；部分/过期/不一致=`Live 准备中或已阻断`；API 失败=`未知`；不得显示可切换 |
 | DATA-S-01 / UI-S-01 | RW-R | `GET /api/strategy-research/formal-run` | `POST /api/strategy-research/formal-run` | coordinator 状态文件/锁；成功流程写 `strategy_research_batches` 与 `strategy_research_candidates`。具体中间进程字段不由 UI 写 | 前置：coordinator `READY`、无 active run、锁与所有权满足；正式 runner 为唯一写入者；`run_id`、`report_digest`、`batch_id+candidate_name/code_digest` 唯一；POST 的重复/并发语义以 coordinator 现状为准，不在本任务改变 | `BLOCKED` 展示 reason；HTTP 超时=结果未知，禁用自动重试，继续 GET 状态核对 |
 | DATA-S-02 / UI-S-02~04 | R | `GET /api/strategy-research-batches?limit=20`、必要时 `GET /api/strategy-research-candidates?status=...` | 无 | batches：`id,run_id,status,requested/generated/persisted/qualified/rejected,failure_reason,selection_policy,report_path,digest,commit,completed_at,created_at`；candidates：`id,batch_id,name,status,loadable,static_check,lookahead_status,score,validation_passed,deployable_candidate,rejection_reasons,evidence_snapshot` | `QUALIFIED` 查询仍受官方质量契约过滤；UI 不重算/改写状态 | API 失败=未知；无 rows=尚无持久化批次；不得显示“全部拒绝” |
 | DATA-S-03 / UI-S-05~07 | R | `GET /api/strategies`、`/strategy-versions`、`/ranking` | 无 | `strategies`、`strategy_versions`、`strategy_scores` 的展示字段；`strategy_research_candidates` 只有 `batch_id/source_path/code_digest`，没有指向正式策略、版本、批准或部署的 FK | 只读；剪贴板不写数据库；正式候选到正式策略的跨链关联必须由可审计 receipt/FK/API 证明，不能按名称或 digest 猜测 | 单一 API 失败仅影响对应分区；未建立可证明关联时显示“正式入库衔接待核对” |
+| DATA-S-04 / UI-S-08 | R | `GET /api/strategy-research/workspace?attempt_limit=10` | 无 | 读取 `strategy_research_attempt_events` 的完整 attempt 事件链、`market_data_quality_receipts` 最近记录、`strategy_research_batches/candidates` 最近批次；响应仅返回 allowlist evidence 和 reason code，包含 `schema_version,as_of`；交接状态限定 `NOT_EVALUATED/NOT_QUEUED_NO_QUALIFIED/CANONICAL_LINK_UNAVAILABLE` | GET 纯读；以 distinct attempt 限制后再取完整 sequence，禁止按事件条数截断一次尝试；没有可审计 candidate→canonical bridge 时不得返回 queued/deployed；历史 batch 不回填、不猜测 receipt | 任一 section 查询失败必须保留该 section 为 UNKNOWN；无记录与失败分开；门禁前失败显示 `NOT_GENERATED` 且计数全 0，不计入 rejected |
 | DATA-SD-01 / UI-SD-* | R | 当前共享 loader：`GET /api/strategies`、`/strategy-versions`；部署/运行关联当前无正式读 API | 无 | strategy/version 全字段的展示子集；运行事实实体已确认为 `strategy_deployments`，并通过 `strategy_id/strategy_version_id/candidate_approval_id` 关联正式批准链；页面投影缺失 | 不加载 generated_code 全文到首屏；路径/ID 收起；`Strategy.status` 只表达目录生命周期 | 不存在=404 式空状态；部署投影不可用时显示未知，不显示未部署 |
 | DATA-GR-01 / UI-GR-01 | R | `GET /api/strategy-generation-runs` | 无 | `strategy_generation_runs`：`id,status,provider,model,prompt hash/summary,params snapshot,requested/generated/accepted/failed,error,timestamps` | 来源必须标 real/non-core/unknown | 失败保留记录；无数据不代表 provider 正常 |
 | DATA-B-01 / UI-BR/BT | R | `GET /api/backtest-runs`、`/backtest-tasks`、`/backtest-results` | 无 | `backtest_runs(id,execution_scope_id,strategy_version_id,profile,status,counts,timestamps)`；tasks 的 pair/timeframe/status/path/error；results 的 IDs/path/metrics/profit/drawdown/win_rate/trades/timerange | Result 必须可关联 run+task；读页面不启动回测 | task succeeded 但无 Result=不可验收；API 失败=未知 |
@@ -432,7 +436,7 @@ ID、路径、digest、artifact、source trace、ENV presence、schema、完整 
 | DATA-L-03 / UI-L-07 | RW-R（结果入库） | backtest/ranking GET APIs | `POST /api/backtest-tasks/{task_id}/artifact-ingest` | 写/更新 `backtest_results`、`strategy_scores`；task-result 一对一，score `(strategy_version_id,scoring_version)` 唯一 | Artifact 必须可验证且关联 task；幂等细节按现有 ingest service，待实现前测试核对 | 冲突/重复/失败显示明确原因；成功必须出现 Result/Score ID |
 | DATA-L-04 / UI-L-08 | RW-R（受控 Provider） | operator readiness + evidence GET | `POST /api/strategy-generation-runs/deepseek-single` | 与 generation 实体/文件写入相关；精确写字段同现有 service | 真实 Provider 仅一次授权，key 不进入 UI/DB/log | 超时未知，禁止自动重试 |
 | DATA-L-05 / UI-L-09 | RW-R（开发 Dry-run） | `GET /api/dry-run/management` 等 | `POST /api/dry-run/readiness`、`/control/start`、`/control/stop` | 主要写本地 manifest/status artifact；是否涉及 DB 表当前未确认，标“待核对” | 只允许本地受控 Dry-run；不等于正式 OKX_DEMO 部署 | 失败/超时 fail-closed；显示 manifest/snapshot 证据 |
-| DATA-DP-01 / 部署摘要（无按钮） | RW-D 的只读投影 | 候选 `QUALIFIED` 查询；`strategy_deployments` 当前无正式读 endpoint，需在确认后优先设计 additive 只读投影 | UI 无 | `strategy_deployments(id,execution_target_id,candidate_approval_id,strategy_id,strategy_version_id,candidate_digest,instrument_id,timeframe,status,active_slot,evidence_snapshot,disabled_*,timestamps)`；只读投影还应包含可核对的 approval/strategy/version 摘要 | 仅既有自动化/唯一主任务写；容量、CI、所有权门不变；页面不得产生、批准、停用部署 | 未知≠未部署；无 qualified 显示“不排队”；无读 API 时显示“部署状态暂不可用” |
+| DATA-DP-01 / 部署摘要（无按钮） | RW-D 的只读投影 | `GET /api/okx-demo/runtime-activity`；候选 `QUALIFIED` 查询仅用于研究结果，不用于推断部署 | UI 无 | `strategy_deployments(id,execution_target_id,candidate_approval_id,strategy_id,strategy_version_id,candidate_digest,instrument_id,timeframe,status,active_slot,evidence_snapshot,disabled_*,timestamps)`；只读投影包含可核对的 approval/strategy/version 摘要 | 仅既有自动化/唯一主任务写；容量、CI、所有权门不变；页面不得产生、批准、停用部署 | 未知≠未部署；无 ACTIVE rows 才显示“尚未部署”；qualified 但无 canonical bridge 显示“正式衔接不可用” |
 
 ### 8.3 数据真实性规则
 
@@ -604,9 +608,9 @@ ID、路径、digest、artifact、source trace、ENV presence、schema、完整 
 
 1. 使用现有真实只读 API 和组件状态；不得用 mock/fixture 制造成功截图；
 2. 主写按钮保持既有门禁，视觉核验不得点击“手动运行一轮研究（10 条）”；
-3. 至少核验 1440×900、1024×768、390×844 三种视口；
+3. 统一在 1280×720 桌面视口核验；移动端、平板和窄屏响应式不属于当前范围；既有多视口测试仅保留为历史回归证据，不作为交付门禁；
 4. 覆盖浅色、深色（若现有产品支持）、加载、空、失败/未知和有真实数据状态；
-5. 在真实页面中检查键盘焦点、窄屏溢出、表格/详情展开、状态对比度和骨架稳定性；
+5. 在真实页面中检查键盘焦点、桌面页面溢出、表格/详情展开、状态对比度和骨架稳定性；
 6. 提交总览、策略工厂、模拟盘的首屏及必要展开态截图，并附对应 `UI-*` / `DATA-*` ID；
 7. 用户明确确认视觉原型后，才进入阶段 1 的完整实现和其余页面扩展。
 
@@ -687,13 +691,13 @@ ID、路径、digest、artifact、source trace、ENV presence、schema、完整 
 ### 12.6 视觉与交互质量
 
 - [ ] 三个正式入口符合第 4.8 节文字线框，首屏主结论和下一步无需寻找；
-- [ ] 桌面 1440×900、平板 1024×768、窄屏 390×844 均无页面级水平溢出、遮挡或截断；
+- [ ] 1280×720 桌面验收视口无页面级水平溢出、遮挡或截断；移动端、平板和窄屏响应式不纳入本轮验收；
 - [ ] 字号、间距、栅格、卡片密度、按钮和图标符合第 4.3–4.7 节，不出现随意例外；
 - [ ] 同一视图最多一个高强调主按钮，危险/真实资金操作不存在；
 - [ ] 状态颜色语义一致，同时有短标签和文字/图标，关闭颜色感知也能判断；
 - [ ] 正文与背景达到 4.5:1、非文本边界和大字号达到 3:1；键盘焦点清晰；
 - [ ] 技术证据、完整拒绝信息、路径、ID、digest 和 JSON 默认收起，业务结论不被淹没；
-- [ ] 表格数字对齐、单位一致、行高不低于 48px，长内容可展开，窄屏有明确降级方案；
+- [ ] 表格数字对齐、单位一致、行高不低于 48px，长内容可展开，高密度技术证据在桌面区块内可控滚动；
 - [ ] 骨架与最终布局一致，加载不先显示 0/成功，刷新不产生明显布局跳动；
 - [ ] 深浅主题使用同一语义 token，`prefers-reduced-motion` 下无非必要动效；
 - [ ] 视觉原型截图经过用户明确确认后才进入阶段 1。

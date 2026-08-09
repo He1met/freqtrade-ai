@@ -37,7 +37,6 @@ export const navigationSections: NavigationSection[] = [
       { to: "/backtest-runs", label: "回测批次" },
       { to: "/backtest-tasks", label: "回测任务" },
       { to: "/hyperopt-runs", label: "Hyperopt 参数优化" },
-      { to: "/ranking", label: "策略排行榜" },
       { to: "/live-governance", label: "候选治理证据" },
     ],
   },

@@ -17,8 +17,8 @@ export function validatedCandidateCount(batch: StrategyResearchBatch): number {
 }
 
 export function deploymentHandoffText(run: FormalResearchRun | null): string {
-  if (run?.deployment_handoff_status === "QUEUED_FOR_EXISTING_AUTOMATION") {
-    return "协调器已交接给既有自动部署评审";
+  if (run?.deployment_handoff_status === "CANONICAL_LINK_UNAVAILABLE") {
+    return "已有 QUALIFIED 候选，但正式生命周期衔接证据尚不可用";
   }
   if (run?.deployment_handoff_status === "NOT_QUEUED_NO_QUALIFIED") {
     return "未交接：本批次没有 QUALIFIED 候选";

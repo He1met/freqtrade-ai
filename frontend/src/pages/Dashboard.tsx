@@ -5,15 +5,13 @@ import {
   fetchOkxDemoObservability,
   type OkxDemoObservability,
 } from "../api/okxDemoApi";
-import { combineDataSources } from "../api/sourceState";
 import {
   fetchFormalResearchRun,
-  fetchStrategyResearchBatches,
   type FormalResearchRun,
-  type StrategyResearchBatch,
 } from "../api/strategyResearchApi";
-import { useMvpData } from "../api/useMvpData";
-import { EmptyState, PageHeader, StatusBadge } from "../components/DisplayPrimitives";
+import { useFormalReadModels } from "../api/useFormalReadModels";
+import { useFormalCatalogData } from "../api/useFormalCatalogData";
+import { EmptyState, FormalLoadingState, PageHeader, StatusBadge } from "../components/DisplayPrimitives";
 import { okxDemoAcceptanceIsTruthful } from "./okxDemoDisplay";
 import { deploymentHandoffText, validatedCandidateCount } from "./strategyFactoryModel";
 import { displayDateTime } from "./uiCopy";
@@ -33,24 +31,18 @@ function metricValue(loading: boolean, error: string | null, value: number | nul
 }
 
 export function Dashboard() {
-  const { data, sources, isLoading, error } = useMvpData();
-  const coreSource = combineDataSources(sources, ["strategies", "strategyVersions", "ranking"]);
-  const [research, setResearch] = useState<Loadable<{
-    batches: StrategyResearchBatch[];
-    run: FormalResearchRun;
-  }>>(initialLoadable);
+  const catalog = useFormalCatalogData();
+  const { workspace, runtimeActivity } = useFormalReadModels();
+  const [researchRun, setResearchRun] = useState<Loadable<FormalResearchRun>>(initialLoadable);
   const [demo, setDemo] = useState<Loadable<OkxDemoObservability>>(initialLoadable);
 
   useEffect(() => {
     const controller = new AbortController();
-    Promise.all([
-      fetchStrategyResearchBatches(controller.signal),
-      fetchFormalResearchRun(controller.signal),
-    ])
-      .then(([batches, run]) => setResearch({ data: { batches, run }, error: null, loading: false }))
+    fetchFormalResearchRun(controller.signal)
+      .then((run) => setResearchRun({ data: run, error: null, loading: false }))
       .catch((reason: unknown) => {
         if (!controller.signal.aborted) {
-          setResearch({
+          setResearchRun({
             data: null,
             error: reason instanceof Error ? reason.message : String(reason),
             loading: false,
@@ -71,18 +63,20 @@ export function Dashboard() {
     return () => controller.abort();
   }, []);
 
-  const latestResearch = research.data?.batches[0] ?? null;
-  const formalResearchRun = research.data?.run ?? null;
+  const latestResearch = workspace.data?.latest_batch ?? null;
+  const formalResearchRun = researchRun.data;
   const latestResearchRun = formalResearchRun?.run_id === latestResearch?.run_id
     ? formalResearchRun
     : null;
-  const dataHasProblem = Boolean(error || research.error || demo.error);
-  const pageLoading = isLoading || research.loading || demo.loading;
+  const dataHasProblem = Boolean(catalog.strategies.error || catalog.ranking.error || researchRun.error || workspace.error || runtimeActivity.error || demo.error);
+  const pageLoading = catalog.strategies.loading || catalog.ranking.loading || researchRun.loading || workspace.loading || runtimeActivity.loading || demo.loading;
   const pageConclusion = pageLoading
     ? "正在核对正式研究与模拟盘证据"
     : dataHasProblem
       ? "部分状态无法确认，未把缺失数据计为 0"
-      : "核心数据已读取，运行中策略与最近信号仍待只读接口";
+      : runtimeActivity.data?.active_deployments.length
+        ? "模拟盘有运行中策略，继续核对最近信号与执行证据"
+        : "正式证据已读取，当前没有 ACTIVE 模拟盘部署";
   const pageStatus = pageLoading ? "RUNNING" : dataHasProblem ? "UNKNOWN" : "READY";
   const fills = demo.data?.orders.reduce((total, order) => total + order.fills.length, 0) ?? null;
   const activities = useMemo(() => {
@@ -95,6 +89,14 @@ export function Dashboard() {
         status: latestResearch.status,
       });
     }
+    for (const evaluation of runtimeActivity.data?.recent_signal_evaluations.slice(0, 2) ?? []) {
+      items.push({
+        id: `signal-${evaluation.evaluation_id}`,
+        title: `${evaluation.instrument_id} · ${evaluation.timeframe} 信号评估`,
+        meta: `${displayDateTime(evaluation.closed_candle_at)} · Evaluation #${evaluation.evaluation_id}`,
+        status: evaluation.status,
+      });
+    }
     for (const order of demo.data?.orders.slice(0, 4) ?? []) {
       items.push({
         id: `order-${order.databaseId}`,
@@ -104,7 +106,7 @@ export function Dashboard() {
       });
     }
     return items.slice(0, 5);
-  }, [demo.data, latestResearch]);
+  }, [demo.data, latestResearch, runtimeActivity.data]);
 
   return (
     <section className="page dashboard-page formal-page">
@@ -138,25 +140,25 @@ export function Dashboard() {
           <span className="formal-section-note">真实来源不可用时显示“—”</span>
         </div>
         <div className="formal-metric-grid">
-          <article className={isLoading ? "formal-metric formal-skeleton" : "formal-metric"}>
+          <article className={catalog.strategies.loading ? "formal-metric formal-skeleton" : "formal-metric"}>
             <span>正式策略</span>
-            <strong>{metricValue(isLoading, error, error ? null : data.strategies.length)}</strong>
-            <small>{error ? "策略 API 读取失败" : coreSource === "api" ? "正式策略目录" : "来源未确认"}</small>
+            <strong>{metricValue(catalog.strategies.loading, catalog.strategies.error, catalog.strategies.data?.length ?? null)}</strong>
+            <small>{catalog.strategies.error ? "策略 API 读取失败" : "正式策略目录"}</small>
           </article>
-          <article className={research.loading ? "formal-metric formal-skeleton" : "formal-metric"}>
+          <article className={workspace.loading ? "formal-metric formal-skeleton" : "formal-metric"}>
             <span>本批次候选</span>
-            <strong>{metricValue(research.loading, research.error, latestResearch?.persisted_count ?? null)}</strong>
-            <small>{research.error ? "研究 API 读取失败" : latestResearch ? "已持久化候选" : "尚无持久化批次"}</small>
+            <strong>{metricValue(workspace.loading, workspace.error, latestResearch?.persisted_count ?? null)}</strong>
+            <small>{workspace.error ? "研究投影读取失败" : latestResearch ? "已持久化候选" : "尚无持久化批次"}</small>
           </article>
-          <article className={research.loading ? "formal-metric formal-skeleton" : "formal-metric"}>
+          <article className={workspace.loading ? "formal-metric formal-skeleton" : "formal-metric"}>
             <span>合格候选</span>
-            <strong>{metricValue(research.loading, research.error, latestResearch?.qualified_count ?? null)}</strong>
-            <small>{latestResearch?.qualified_count ? "待既有部署评审" : latestResearch ? "本批次无合格" : "尚无批次"}</small>
+            <strong>{metricValue(workspace.loading, workspace.error, latestResearch?.qualified_count ?? null)}</strong>
+            <small>{workspace.error ? "研究投影读取失败" : latestResearch?.qualified_count ? "正式衔接证据待建立" : latestResearch ? "本批次无合格" : "尚无批次"}</small>
           </article>
-          <article className="formal-metric" data-state="unknown">
+          <article className={runtimeActivity.loading ? "formal-metric formal-skeleton" : "formal-metric"} data-state={runtimeActivity.error ? "unknown" : undefined}>
             <span>运行中策略</span>
-            <strong>—</strong>
-            <small>ACTIVE deployment 只读接口待补</small>
+            <strong>{metricValue(runtimeActivity.loading, runtimeActivity.error, runtimeActivity.data?.active_deployments.length ?? null)}</strong>
+            <small>{runtimeActivity.error ? "部署投影读取失败" : runtimeActivity.data?.active_deployments.length ? "OKX_DEMO ACTIVE deployment" : "尚未部署"}</small>
           </article>
         </div>
       </section>
@@ -169,9 +171,9 @@ export function Dashboard() {
           </div>
           <Link className="formal-text-link" to="/strategies">查看全部</Link>
         </div>
-        {research.loading ? (
-          <div className="formal-lifecycle formal-skeleton" aria-label="正在读取研究进度" />
-        ) : research.error ? (
+        {workspace.loading ? (
+          <FormalLoadingState className="formal-lifecycle" label="正在读取研究进度" />
+        ) : workspace.error ? (
           <EmptyState title="研究状态未知" description="正式研究 API 读取失败，不代表尚未生成或全部被拒绝。" />
         ) : latestResearch ? (
           <>
@@ -209,8 +211,9 @@ export function Dashboard() {
             <StatusBadge label="只读" status="UNKNOWN" />
           </div>
           <dl className="formal-summary-list">
-            <div><dt>部署交接</dt><dd>{deploymentHandoffText(latestResearchRun)}</dd></div>
-            <div><dt>ACTIVE 运行策略</dt><dd>暂不可用</dd></div>
+            <div><dt>部署交接</dt><dd>{workspace.data?.handoff_status === "CANONICAL_LINK_UNAVAILABLE" ? "正式生命周期衔接证据尚不可用" : deploymentHandoffText(latestResearchRun)}</dd></div>
+            <div><dt>ACTIVE 运行策略</dt><dd>{runtimeActivity.loading ? "读取中" : runtimeActivity.error ? "未知" : `${runtimeActivity.data?.active_deployments.length ?? 0} 个`}</dd></div>
+            <div><dt>最近信号评估</dt><dd>{runtimeActivity.loading ? "读取中" : runtimeActivity.error ? "未知" : runtimeActivity.data?.recent_signal_evaluations[0]?.status ?? "当前无信号"}</dd></div>
           </dl>
           <p className="formal-muted">QUALIFIED 只代表可进入评审，不代表已批准、已部署或正在运行。</p>
         </section>
@@ -220,7 +223,7 @@ export function Dashboard() {
             <div><span className="formal-kicker">模拟盘</span><h2 id="dashboard-demo-title">最近执行证据</h2></div>
             <Link className="formal-text-link" to="/okx-demo">查看模拟盘</Link>
           </div>
-          {demo.loading ? <div className="formal-compact-skeleton formal-skeleton" /> : demo.error ? (
+          {demo.loading ? <FormalLoadingState label="正在读取模拟盘摘要" /> : demo.error ? (
             <p className="formal-problem">模拟盘证据读取失败，当前状态未知。</p>
           ) : demo.data ? (
             <dl className="formal-summary-list">
@@ -234,7 +237,7 @@ export function Dashboard() {
 
       <section className="formal-panel" aria-labelledby="dashboard-activity-title">
         <div className="formal-section-heading compact">
-          <div><span className="formal-kicker">最近活动</span><h2 id="dashboard-activity-title">研究与订单证据</h2></div>
+          <div><span className="formal-kicker">最近活动</span><h2 id="dashboard-activity-title">研究、信号与订单证据</h2></div>
           <span className="formal-section-note">最多 5 条</span>
         </div>
         {activities.length ? (
@@ -247,7 +250,7 @@ export function Dashboard() {
             ))}
           </ol>
         ) : pageLoading ? (
-          <div className="formal-compact-skeleton formal-skeleton" />
+          <FormalLoadingState label="正在读取最近活动" />
         ) : (
           <EmptyState title="暂无可确认的最近活动" description="无记录与读取失败已分开处理；页面不会制造研究或订单数据。" />
         )}

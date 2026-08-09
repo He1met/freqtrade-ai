@@ -131,6 +131,15 @@ export type OkxDemoObservability = {
   generatedAt: string;
   sourceType: "api_aggregate";
   coreData: true;
+  scope: {
+    asOf: string;
+    requestedLimit: number;
+    intentTotalCount: number;
+    intentReturnedCount: number;
+    orderTotalCount: number;
+    orderReturnedCount: number;
+    truncated: boolean;
+  };
   target: {
     targetId: "OKX_DEMO";
     label: "OKX_DEMO / 模拟盘";
@@ -282,6 +291,27 @@ export function normalizeOkxDemoObservability(value: unknown): OkxDemoObservabil
     generatedAt: requiredText(payload.generated_at, "生成时间"),
     sourceType: "api_aggregate",
     coreData: true,
+    scope: (() => {
+      const scope = record(payload.scope);
+      const requestedLimit = Number(scope.requested_limit);
+      const intentTotalCount = Number(scope.intent_total_count);
+      const intentReturnedCount = Number(scope.intent_returned_count);
+      const orderTotalCount = Number(scope.order_total_count);
+      const orderReturnedCount = Number(scope.order_returned_count);
+      if (![requestedLimit, intentTotalCount, intentReturnedCount, orderTotalCount, orderReturnedCount].every(Number.isInteger)
+        || requestedLimit <= 0 || scope.truncated !== (intentTotalCount > requestedLimit || orderTotalCount > requestedLimit)) {
+        throw new Error("OKX Demo API 窗口范围不可信");
+      }
+      return {
+        asOf: requiredText(scope.as_of, "投影时间"),
+        requestedLimit,
+        intentTotalCount,
+        intentReturnedCount,
+        orderTotalCount,
+        orderReturnedCount,
+        truncated: scope.truncated as boolean,
+      };
+    })(),
     target: {
       targetId: "OKX_DEMO",
       label: "OKX_DEMO / 模拟盘",

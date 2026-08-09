@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
-import { combineDataSources } from "../api/sourceState";
 import type { DataSourceTraceSummary } from "../api/types";
 import {
   fetchFormalResearchRun,
@@ -10,12 +9,14 @@ import {
   type FormalResearchRun,
   type StrategyResearchBatch,
 } from "../api/strategyResearchApi";
-import { useMvpData } from "../api/useMvpData";
+import { useFormalCatalogData } from "../api/useFormalCatalogData";
+import { useFormalReadModels } from "../api/useFormalReadModels";
 import {
   CompactText,
   CopyableValue,
   EmptyState,
   ExpandableText,
+  FormalLoadingState,
   PageHeader,
   StatusBadge,
 } from "../components/DisplayPrimitives";
@@ -28,7 +29,7 @@ import {
   hasOfficialAggressiveContract,
   validatedCandidateCount,
 } from "./strategyFactoryModel";
-import { displayDateTime, displayValue } from "./uiCopy";
+import { displayDateTime, displayStatus, displayValue } from "./uiCopy";
 
 function StrategyTechnicalDetails({
   id,
@@ -57,14 +58,22 @@ function StrategyTechnicalDetails({
 }
 
 export function Strategies() {
-  const { data, sources, isLoading, error } = useMvpData();
-  const source = combineDataSources(sources, ["strategies", "strategyVersions"]);
+  const { workspace, refresh: refreshReadModels } = useFormalReadModels();
+  const catalog = useFormalCatalogData();
+  const data = {
+    strategies: catalog.strategies.data ?? [],
+    ranking: catalog.ranking.data ?? [],
+  };
+  const isLoading = catalog.strategies.loading || catalog.ranking.loading;
+  const error = catalog.strategies.error ?? catalog.ranking.error;
+  const source = error ? "failed" : "api";
   const [researchBatches, setResearchBatches] = useState<StrategyResearchBatch[]>([]);
   const [researchLoading, setResearchLoading] = useState(true);
   const [researchError, setResearchError] = useState<string | null>(null);
   const [formalRun, setFormalRun] = useState<FormalResearchRun | null>(null);
   const [formalRunError, setFormalRunError] = useState<string | null>(null);
   const [startingResearch, setStartingResearch] = useState(false);
+  const [researchRevision, setResearchRevision] = useState(0);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -82,7 +91,7 @@ export function Strategies() {
         if (!controller.signal.aborted) setResearchLoading(false);
       });
     return () => controller.abort();
-  }, []);
+  }, [researchRevision]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -116,7 +125,6 @@ export function Strategies() {
     try {
       const run = await startFormalResearchRun();
       setFormalRun(run);
-      if (run.status === "BLOCKED") setFormalRunError(`${run.reason_code}：${run.reason}`);
     } catch (reason) {
       setFormalRunError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -137,7 +145,7 @@ export function Strategies() {
       ? "状态未知"
       : formalRun?.status === "READY"
         ? "可以运行"
-        : formalRun?.status ?? latestResearch?.status ?? "尚未开始";
+        : displayStatus(formalRun?.status ?? latestResearch?.status ?? "NOT_RUN");
 
   return (
     <section className="page strategy-page formal-page">
@@ -170,7 +178,7 @@ export function Strategies() {
         <div className="formal-control-row">
           <div>
             <span className="formal-kicker">正式研究门禁</span>
-            <h2 id="latest-research-title">{formalRun?.reason_code ?? (formalRunError ? "状态未知" : "正在读取")}</h2>
+            <h2 id="latest-research-title">{formalRun ? displayStatus(formalRun.status) : (formalRunError ? "状态未知" : "正在读取")}</h2>
             <p>{formalRunError ?? formalRun?.reason ?? "正在读取正式研究 coordinator 状态。"}</p>
           </div>
           <StatusBadge label={currentResearchLabel} status={currentResearchStatus} />
@@ -184,6 +192,27 @@ export function Strategies() {
             {formalRun?.quality_contract.profile_label ?? "质量契约尚未读取"}；要求独立窗口成本后净收益为正、lookahead 检查、费用 0.05%/侧、滑点 0.02%/侧，最大回撤门保持 15%。契约校验：{hasOfficialAggressiveContract(formalRun) ? "匹配" : "未确认"}。
           </p>
         </details>
+        {workspace.loading ? <p className="formal-muted">正在读取研究尝试与分钟数据质量证据…</p>
+          : workspace.error ? <p className="formal-problem">研究生命周期投影读取失败，attempt 与质量状态未知。</p>
+            : workspace.data ? (
+              <dl className="formal-summary-list">
+                <div><dt>最近尝试</dt><dd>{workspace.data.attempts[0]?.latest_outcome ?? "尚未尝试"}</dd></div>
+                <div><dt>分钟数据质量</dt><dd>{workspace.data.latest_quality_receipt?.status ?? "尚无 receipt"}</dd></div>
+                <div><dt>正式生命周期衔接</dt><dd>{workspace.data.handoff_status === "CANONICAL_LINK_UNAVAILABLE" ? "不可用：尚无可审计 bridge" : workspace.data.handoff_status === "NOT_QUEUED_NO_QUALIFIED" ? "未排队：无合格候选" : "尚未评估"}</dd></div>
+              </dl>
+            ) : null}
+        {workspace.data?.attempts[0] ? (
+          <details className="formal-disclosure">
+            <summary>查看最近研究尝试完整事件</summary>
+            {workspace.data.attempts[0].events.map((event) => (
+              <article className="strategy-history-batch" key={event.id}>
+                <div><strong>{event.phase} · {event.reason_code}</strong><StatusBadge status={event.outcome} /></div>
+                <p>{event.redacted_reason}</p>
+                <p>请求 {event.requested_count} · 生成 {event.generated_count} · 验证 {event.validated_count} · 入库 {event.persisted_count} · 合格 {event.qualified_count} · 拒绝 {event.rejected_count}</p>
+              </article>
+            ))}
+          </details>
+        ) : null}
       </section>
 
       <FallbackNotice
@@ -195,13 +224,13 @@ export function Strategies() {
 
       <section className="formal-panel" aria-labelledby="research-progress-title">
         <div className="formal-section-heading">
-          <div><span className="formal-kicker">最新批次</span><h2 id="research-progress-title">生成、验证与全量入库</h2></div>
+          <div><span className="formal-kicker">最新批次</span><h2 id="research-progress-title">生成、验证与入库</h2></div>
           <span className="formal-section-note">{latestResearch ? displayDateTime(latestResearch.completed_at ?? latestResearch.created_at) : "尚无批次"}</span>
         </div>
         {researchLoading ? (
-          <div className="formal-lifecycle formal-skeleton" aria-label="正在读取研究批次" />
+          <FormalLoadingState className="formal-lifecycle" label="正在读取研究批次" />
         ) : researchError ? (
-          <EmptyState title="研究批次状态未知" description="候选批次 API 读取失败；这不表示没有生成，也不表示候选已被拒绝。" />
+          <><EmptyState title="研究批次状态未知" description="候选批次 API 读取失败；这不表示没有生成，也不表示候选已被拒绝。" /><button className="formal-primary-button" onClick={() => { setResearchLoading(true); setResearchError(null); setResearchRevision((value) => value + 1); refreshReadModels(); }} type="button">重新读取研究证据</button></>
         ) : latestResearch ? (
           <>
             <div className="formal-lifecycle">
@@ -234,7 +263,9 @@ export function Strategies() {
           <div><span className="formal-kicker">正式候选</span><h2 id="research-candidates-title">合格、拒绝与验证失败</h2></div>
           <span className="formal-section-note">QUALIFIED 不等于已部署</span>
         </div>
-        {latestResearch?.candidates.length ? (
+        {researchError ? (
+          <EmptyState title="候选状态未知" description="候选 API 读取失败；未知不能显示为没有候选。" />
+        ) : latestResearch?.candidates.length ? (
           <ul className="formal-candidate-list">
             {latestResearch.candidates.map((candidate) => {
               const primaryReason = candidate.rejection_reasons[0];
@@ -253,7 +284,11 @@ export function Strategies() {
                         : "拒绝或验证证据缺失，不能视为质量门已通过。"}
                   </p>
                   <details className="formal-disclosure">
-                    <summary>查看技术证据</summary>
+                    <summary>查看完整拒绝原因与技术证据</summary>
+                    {candidate.rejection_reasons.length ? (
+                      <ol>{candidate.rejection_reasons.map((reason, index) => <li key={`${reason.code}-${index}`}>{reason.code}：{reason.message}</li>)}</ol>
+                    ) : <p className="formal-muted">没有拒绝原因记录。</p>}
+                    <CopyableValue label="候选来源路径" value={candidate.source_path} />
                     <CopyableValue label="候选摘要" value={candidate.code_digest} />
                     <ExpandableText summary="完整结构化证据" value={JSON.stringify(candidate.evidence_snapshot, null, 2)} />
                   </details>
@@ -262,7 +297,7 @@ export function Strategies() {
             })}
           </ul>
         ) : researchLoading ? (
-          <div className="formal-compact-skeleton formal-skeleton" />
+          <FormalLoadingState label="正在读取候选" />
         ) : (
           <EmptyState title="当前没有候选行" description="无候选可能表示尚未生成或在生成前失败；请结合最新批次状态判断。" />
         )}
@@ -273,6 +308,7 @@ export function Strategies() {
               <article className="strategy-history-batch" key={batch.id}>
                 <div><strong>{batch.run_id}</strong><StatusBadge status={batch.status} /></div>
                 <p>请求 {batch.requested_count} · 生成 {batch.generated_count} · 入库 {batch.persisted_count} · 合格 {batch.qualified_count}</p>
+                <CopyableValue label="研究 Run ID" value={batch.run_id} />
                 <CopyableValue label="研究报告路径" value={batch.report_path} />
                 <CopyableValue label="研究报告摘要" value={batch.report_digest} />
               </article>
@@ -286,8 +322,12 @@ export function Strategies() {
           <div><span className="formal-kicker">正式策略库</span><h2 id="strategy-library-title">目录状态与当前版本</h2></div>
           <span className="formal-section-note">目录 active 不等于部署 ACTIVE</span>
         </div>
-        {isLoading ? <div className="formal-compact-skeleton formal-skeleton" /> : null}
-        {!isLoading && data.strategies.length ? (
+        {catalog.strategies.loading ? <FormalLoadingState label="正在读取正式策略库" /> : catalog.strategies.error ? (
+          <><EmptyState title="正式策略库状态未知" description="策略目录或版本 API 读取失败；未知不能显示为暂无策略。" /><button className="formal-primary-button" onClick={catalog.refresh} type="button">重新读取策略库</button></>
+        ) : source !== "api" ? (
+          <EmptyState title="正式策略库来源不可验收" description="fixture 或未知来源不计入正式策略数字。" />
+        ) : null}
+        {!catalog.strategies.loading && !catalog.strategies.error && data.strategies.length ? (
           <div className="table-shell strategy-list-table-shell">
             <table className="strategy-list-table">
               <colgroup>
@@ -321,7 +361,7 @@ export function Strategies() {
             </table>
           </div>
         ) : null}
-        {!isLoading && data.strategies.length === 0 ? <EmptyState title="暂无真实策略" description="当前没有可展示的真实核心策略记录；空结果不代表策略生成成功。" /> : null}
+        {!catalog.strategies.loading && !catalog.strategies.error && data.strategies.length === 0 ? <EmptyState title="暂无真实策略" description="当前没有可展示的真实核心策略记录；空结果不代表策略生成成功。" /> : null}
       </section>
 
       <section className="formal-panel" id="strategy-ranking" aria-labelledby="strategy-ranking-title">
@@ -329,7 +369,11 @@ export function Strategies() {
           <div><span className="formal-kicker">排行榜</span><h2 id="strategy-ranking-title">真实评分策略</h2></div>
           <Link className="formal-text-link" to="/ranking">查看完整证据</Link>
         </div>
-        {data.ranking.length ? (
+        {catalog.ranking.loading ? <FormalLoadingState label="正在读取排行榜" /> : catalog.ranking.error ? (
+          <><EmptyState title="排行榜状态未知" description="排名 API 读取失败；未知不能显示为空榜。" /><button className="formal-primary-button" onClick={catalog.refresh} type="button">重新读取排行榜</button></>
+        ) : source !== "api" ? (
+          <EmptyState title="排行榜来源不可验收" description="fixture 或未知来源不计入正式排名。" />
+        ) : data.ranking.length ? (
           <ol className="formal-ranking-list">
             {data.ranking.slice(0, 5).map((entry) => (
               <li key={entry.scoreId}>

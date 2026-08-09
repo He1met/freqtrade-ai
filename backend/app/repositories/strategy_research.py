@@ -1,6 +1,6 @@
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.strategy_research import (
@@ -72,6 +72,53 @@ class StrategyResearchRepository:
         )
         return list(self.db.scalars(statement).all())
 
+    def list_recent_attempt_event_chains(
+        self, *, attempt_limit: int = 10
+    ) -> list[list[StrategyResearchAttemptEvent]]:
+        """Return complete event chains for the most recent distinct attempts."""
+
+        recent = (
+            select(
+                StrategyResearchAttemptEvent.attempt_id.label("attempt_id"),
+                func.max(StrategyResearchAttemptEvent.created_at).label("latest_at"),
+                func.max(StrategyResearchAttemptEvent.id).label("latest_id"),
+            )
+            .group_by(StrategyResearchAttemptEvent.attempt_id)
+            .order_by(
+                func.max(StrategyResearchAttemptEvent.created_at).desc(),
+                func.max(StrategyResearchAttemptEvent.id).desc(),
+            )
+            .limit(attempt_limit)
+            .subquery()
+        )
+        attempt_ids = list(
+            self.db.scalars(
+                select(recent.c.attempt_id).order_by(
+                    recent.c.latest_at.desc(), recent.c.latest_id.desc()
+                )
+            ).all()
+        )
+        if not attempt_ids:
+            return []
+        events = list(
+            self.db.scalars(
+                select(StrategyResearchAttemptEvent)
+                .where(StrategyResearchAttemptEvent.attempt_id.in_(attempt_ids))
+                .order_by(
+                    StrategyResearchAttemptEvent.created_at.desc(),
+                    StrategyResearchAttemptEvent.id.desc(),
+                    StrategyResearchAttemptEvent.sequence.asc(),
+                )
+            ).all()
+        )
+        grouped = {attempt_id: [] for attempt_id in attempt_ids}
+        for event in events:
+            grouped[event.attempt_id].append(event)
+        return [
+            sorted(grouped[attempt_id], key=lambda event: (event.sequence, event.id))
+            for attempt_id in attempt_ids
+        ]
+
     def get_attempt_event(
         self, *, attempt_id: str, sequence: int
     ) -> Optional[StrategyResearchAttemptEvent]:
@@ -107,6 +154,17 @@ class StrategyResearchRepository:
                 MarketDataQualityReceipt.pair == pair,
                 MarketDataQualityReceipt.timeframe == timeframe,
             )
+            .order_by(
+                MarketDataQualityReceipt.inspected_at.desc(),
+                MarketDataQualityReceipt.id.desc(),
+            )
+            .limit(1)
+        )
+        return self.db.scalars(statement).first()
+
+    def latest_quality_receipt(self) -> Optional[MarketDataQualityReceipt]:
+        statement = (
+            select(MarketDataQualityReceipt)
             .order_by(
                 MarketDataQualityReceipt.inspected_at.desc(),
                 MarketDataQualityReceipt.id.desc(),

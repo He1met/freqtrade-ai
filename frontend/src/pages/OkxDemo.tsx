@@ -1,19 +1,22 @@
 import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 
 import {
   fetchOkxDemoObservability,
   type OkxDemoObservability,
   type OkxDemoOrder,
 } from "../api/okxDemoApi";
+import { useFormalReadModels } from "../api/useFormalReadModels";
 import {
   CompactText,
   CopyableValue,
+  FormalLoadingState,
   PageHeader,
   StatusBadge,
 } from "../components/DisplayPrimitives";
 import "../styles/okx-demo.css";
 import { okxDemoAcceptanceIsTruthful, orderCanDisplayComplete } from "./okxDemoDisplay";
-import { displayDateTime, displayValue } from "./uiCopy";
+import { displayDateTime, displayStatus, displayValue } from "./uiCopy";
 
 function displayDecimal(
   value: string | null | undefined,
@@ -57,7 +60,7 @@ function OrderDetail({
   );
   const complete = orderCanDisplayComplete(order, data);
   return (
-    <aside className="okx-detail" aria-label="订单详情">
+    <aside className="okx-detail" aria-label="订单详情" id="okx-order-detail">
       <header>
         <div>
           <span className="okx-kicker">订单详情</span>
@@ -70,38 +73,28 @@ function OrderDetail({
       </p>
 
       <section>
-        <h3>订单</h3>
+        <h3>订单结论</h3>
         <dl className="okx-detail-grid">
-          <DetailValue label="数据库 ID" value={order.databaseId} />
-          <DetailValue label="完整链 DB ID" value={order.fullChainDatabaseId} />
           <DetailValue label="状态" value={order.status} />
           <DetailValue label="权威状态" value={order.authoritativeStatus} />
           <DetailValue label="方向" value={order.side} />
           <DetailValue label="类型" value={order.orderType} />
           <DetailValue label="数量" value={displayDecimal(order.quantity)} />
           <DetailValue label="已成交" value={displayDecimal(order.filledQuantity)} />
-          <DetailValue label="权威快照 DB ID" value={order.authoritativeSnapshotDatabaseId} />
-          <DetailValue label="权威事件 DB ID" value={order.authoritativeEventDatabaseId} />
           <DetailValue label="更新时间" value={displayDateTime(order.updatedAt)} />
         </dl>
-        <CopyableValue label="交易所订单 ID" value={order.exchangeOrderId ?? "未提供"} />
-        <CopyableValue label="客户端订单 ID" value={order.clientOrderId} />
       </section>
 
       <section>
-        <h3>TradeIntent 与风控</h3>
+        <h3>风控结论</h3>
         <dl className="okx-detail-grid">
-          <DetailValue label="TradeIntent DB ID" value={intent?.databaseId} />
-          <DetailValue label="策略版本 ID" value={intent?.strategyVersionId} />
           <DetailValue label="意图状态" value={intent?.status} />
           <DetailValue label="风控决定" value={order.riskDecision?.decision} />
-          <DetailValue label="风控 DB ID" value={order.riskDecision?.databaseId} />
           <DetailValue label="策略版本" value={order.riskDecision?.policyVersion} />
         </dl>
         {order.riskDecision?.reason ? (
           <p className="okx-action-reason">{order.riskDecision.reason}</p>
         ) : null}
-        <CopyableValue label="TradeIntent ID" value={intent?.intentId ?? "未提供"} />
       </section>
 
       <section>
@@ -121,9 +114,24 @@ function OrderDetail({
         )}
       </section>
 
-      <section>
-        <h3>证据链</h3>
-        <div className="okx-lineage">
+      <details className="formal-disclosure okx-technical-evidence">
+        <summary>查看技术证据与完整链路</summary>
+        <section>
+          <h3>标识与数据库证据</h3>
+          <dl className="okx-detail-grid">
+            <DetailValue label="订单数据库 ID" value={order.databaseId} />
+            <DetailValue label="完整链 DB ID" value={order.fullChainDatabaseId} />
+            <DetailValue label="权威快照 DB ID" value={order.authoritativeSnapshotDatabaseId} />
+            <DetailValue label="权威事件 DB ID" value={order.authoritativeEventDatabaseId} />
+            <DetailValue label="TradeIntent DB ID" value={intent?.databaseId} />
+            <DetailValue label="策略版本 ID" value={intent?.strategyVersionId} />
+            <DetailValue label="风控 DB ID" value={order.riskDecision?.databaseId} />
+          </dl>
+          <CopyableValue label="交易所订单 ID" value={order.exchangeOrderId ?? "未提供"} />
+          <CopyableValue label="客户端订单 ID" value={order.clientOrderId} />
+          <CopyableValue label="TradeIntent ID" value={intent?.intentId ?? "未提供"} />
+          <h3>证据链</h3>
+          <div className="okx-lineage">
           <span>Chain #{lineage?.fullChainDatabaseId ?? "—"}</span>
           <span aria-hidden="true">→</span>
           <span>Strategy #{lineage?.strategyVersionDatabaseId ?? "—"}</span>
@@ -147,16 +155,20 @@ function OrderDetail({
           <span>Snapshot #{lineage?.authoritativeOrderSnapshotDatabaseId ?? "—"}</span>
           <span aria-hidden="true">→</span>
           <span>Reconcile #{lineage?.reconciliationDatabaseId ?? "—"}</span>
-        </div>
-      </section>
+          </div>
+        </section>
+      </details>
     </aside>
   );
 }
 
 export function OkxDemo() {
+  const [searchParams] = useSearchParams();
+  const { runtimeActivity, refresh } = useFormalReadModels();
   const [data, setData] = useState<OkxDemoObservability | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [revision, setRevision] = useState(0);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -171,7 +183,7 @@ export function OkxDemo() {
         }
       });
     return () => controller.abort();
-  }, []);
+  }, [revision]);
 
   const selectedOrder = useMemo(
     () => data?.orders.find((order) => order.databaseId === selectedId) ?? data?.orders[0] ?? null,
@@ -195,20 +207,24 @@ export function OkxDemo() {
           </div>
           <StatusBadge status="UNKNOWN" label="未知" />
         </section>
+        <section className="formal-panel">
+          <div className="formal-section-heading compact"><h2>运行策略与信号（独立只读来源）</h2><StatusBadge status={runtimeActivity.error ? "UNKNOWN" : "READY"} /></div>
+          {runtimeActivity.loading ? <FormalLoadingState label="正在读取运行投影" />
+            : runtimeActivity.error ? <p className="formal-problem">运行投影同样不可用，状态未知。</p>
+              : <dl className="formal-summary-list">
+                <div><dt>ACTIVE 运行策略</dt><dd>{runtimeActivity.data?.active_deployments.length ?? 0}</dd></div>
+                <div><dt>最近信号</dt><dd>{runtimeActivity.data?.recent_signal_evaluations[0] ? displayStatus(runtimeActivity.data.recent_signal_evaluations[0].status) : "当前无信号"}</dd></div>
+              </dl>}
+        </section>
+        <button className="formal-primary-button" onClick={() => { setError(null); setData(null); setRevision((value) => value + 1); refresh(); }} type="button">重新读取只读证据</button>
       </div>
     );
   }
   if (!data) {
     return (
-      <div className="page formal-page okx-demo-page" aria-live="polite">
+      <div className="page formal-page okx-demo-page">
         <PageHeader eyebrow="正式工作台" title="模拟盘" />
-        <section className="formal-conclusion formal-skeleton"><h2>正在读取模拟盘证据</h2></section>
-        <section className="formal-metric-grid">
-          {Array.from({ length: 4 }, (_, index) => (
-            <article className="formal-metric formal-skeleton" key={index}><strong>—</strong></article>
-          ))}
-        </section>
-        <section className="formal-panel formal-compact-skeleton formal-skeleton">加载中</section>
+        <FormalLoadingState className="formal-conclusion" label="正在读取模拟盘证据" />
       </div>
     );
   }
@@ -226,8 +242,14 @@ export function OkxDemo() {
         eyebrow="正式工作台"
         title="模拟盘"
         description="只读查看 OKX_DEMO 运行、订单与成交证据；页面不会启动交易。"
-        status={<span className="formal-target-chip">OKX_DEMO · Demo-only</span>}
+        status={<span className="formal-target-chip">OKX_DEMO · Demo-only · real_orders=false</span>}
       />
+
+      {searchParams.get("from") === "freq-ui" ? (
+        <aside className="formal-context-banner" data-kind="compatibility">
+          <div><strong>旧 FreqUI 兼容入口</strong><span>该入口已归并到正式模拟盘页面；这里仅展示 Freqtrade AI 的只读证据。</span></div>
+        </aside>
+      ) : null}
 
       <section className="formal-conclusion" data-state={acceptable ? "ready" : "attention"}>
         <div>
@@ -239,11 +261,15 @@ export function OkxDemo() {
       </section>
 
       <section className="formal-metric-grid" aria-label="模拟盘关键指标">
-        <article className="formal-metric" data-state="unknown">
-          <span>运行中策略</span><strong>—</strong><small>当前只读接口未提供部署实例，保持未知</small>
+        <article className={runtimeActivity.loading ? "formal-metric formal-skeleton" : "formal-metric"} data-state={runtimeActivity.error ? "unknown" : undefined}>
+          <span>运行中策略</span>
+          <strong>{runtimeActivity.loading ? "…" : runtimeActivity.error ? "—" : runtimeActivity.data?.active_deployments.length ?? 0}</strong>
+          <small>{runtimeActivity.error ? "部署投影读取失败，保持未知" : runtimeActivity.data?.active_deployments.length ? "OKX_DEMO ACTIVE deployment" : "尚未部署运行策略"}</small>
         </article>
-        <article className="formal-metric" data-state="unknown">
-          <span>最近信号</span><strong>—</strong><small>当前聚合接口未提供信号评估记录</small>
+        <article className={runtimeActivity.loading ? "formal-metric formal-skeleton" : "formal-metric"} data-state={runtimeActivity.error ? "unknown" : undefined}>
+          <span>最近信号</span>
+          <strong>{runtimeActivity.loading ? "…" : runtimeActivity.error ? "—" : runtimeActivity.data?.recent_signal_evaluations[0] ? displayStatus(runtimeActivity.data.recent_signal_evaluations[0].status) : "无"}</strong>
+          <small>{runtimeActivity.error ? "信号投影读取失败，保持未知" : runtimeActivity.data?.recent_signal_evaluations.length ? displayDateTime(runtimeActivity.data.recent_signal_evaluations[0].closed_candle_at) : "当前没有 signal evaluation"}</small>
         </article>
         <article className="formal-metric">
           <span>订单记录</span><strong>{data.orders.length}</strong><small>最近聚合窗口内的数据库订单</small>
@@ -259,7 +285,7 @@ export function OkxDemo() {
           <span className="formal-section-note">更新于 {displayDateTime(data.generatedAt)}</span>
         </div>
         <div className="formal-demo-flow">
-          <div><span>信号</span><strong>未知</strong></div>
+          <div><span>信号</span><strong>{runtimeActivity.loading ? "读取中" : runtimeActivity.error ? "未知" : `${runtimeActivity.data?.recent_signal_evaluations.length ?? 0} 条`}</strong></div>
           <div><span>交易意图</span><strong>{data.intents.length} 条</strong></div>
           <div><span>风控决定</span><strong>{riskDecisionCount} 条</strong></div>
           <div><span>订单</span><strong>{data.orders.length} 条</strong></div>
@@ -267,6 +293,38 @@ export function OkxDemo() {
           <div><span>对账</span><strong>{data.latestReconciliation?.status ?? "暂无"}</strong></div>
         </div>
         <p className="formal-muted">订单提交不等于成交；缺少信号或部署读取 DTO 时保持“未知”，不从订单反推运行成功。</p>
+      </section>
+
+      <section className="formal-panel" aria-labelledby="demo-runtime-title">
+        <div className="formal-section-heading">
+          <div><span className="formal-kicker">运行读模型</span><h2 id="demo-runtime-title">ACTIVE 策略与最近信号</h2></div>
+          <span className="formal-section-note">{runtimeActivity.data ? `更新于 ${displayDateTime(runtimeActivity.data.as_of)}` : "独立只读来源"}</span>
+        </div>
+        {runtimeActivity.loading ? <FormalLoadingState label="正在读取运行投影" />
+          : runtimeActivity.error ? <p className="formal-problem">运行投影读取失败：{runtimeActivity.error}。订单证据仍可独立展示。</p>
+            : runtimeActivity.data?.active_deployments.length ? (
+              <div className="formal-demo-flow">
+                {runtimeActivity.data.active_deployments.map((deployment) => (
+                  <div key={deployment.deployment_id}>
+                    <span>槽位 {deployment.active_slot} · {deployment.instrument_id}</span>
+                    <strong>{deployment.strategy_name} · v{deployment.strategy_version_number}</strong>
+                    <small>{deployment.timeframe} · Approval #{deployment.candidate_approval_id}</small>
+                  </div>
+                ))}
+              </div>
+            ) : <div className="okx-empty"><strong>尚未部署运行策略</strong><p>查询成功且没有 OKX_DEMO ACTIVE deployment；这不是 API 读取失败。</p></div>}
+        {!runtimeActivity.loading && !runtimeActivity.error && runtimeActivity.data ? (
+          runtimeActivity.data.recent_signal_evaluations.length ? (
+            <ol className="formal-activity-list">
+              {runtimeActivity.data.recent_signal_evaluations.slice(0, 5).map((evaluation) => (
+                <li key={evaluation.evaluation_id}>
+                  <StatusBadge status={evaluation.status} />
+                  <div><strong>{evaluation.instrument_id} · {evaluation.timeframe}</strong><span>{displayDateTime(evaluation.closed_candle_at)}{evaluation.error_code ? ` · ${evaluation.error_code}` : ""}</span></div>
+                </li>
+              ))}
+            </ol>
+          ) : <div className="okx-empty"><strong>当前无信号评估记录</strong><p>可能尚无 ACTIVE 部署或尚未到闭合 candle；不会从订单反推信号。</p></div>
+        ) : null}
       </section>
 
       <details className="formal-panel okx-readiness-disclosure">
@@ -295,7 +353,13 @@ export function OkxDemo() {
             <span className="formal-section-note">{data.orders.length} 条</span>
           </div>
           {data.orders.length ? (
-            <div className="okx-order-table-wrap">
+            <div
+              aria-label="订单表，可横向滚动查看全部列"
+              className="okx-order-table-wrap"
+              role="region"
+              tabIndex={0}
+            >
+              <p className="okx-scroll-hint">横向滚动查看全部订单字段</p>
               <table className="okx-order-table">
                 <thead>
                   <tr>
@@ -312,16 +376,18 @@ export function OkxDemo() {
                     <tr
                       aria-selected={selectedOrder?.databaseId === order.databaseId}
                       key={order.databaseId}
-                      onClick={() => setSelectedId(order.databaseId)}
-                      tabIndex={0}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter" || event.key === " ") {
-                          event.preventDefault();
-                          setSelectedId(order.databaseId);
-                        }
-                      }}
                     >
-                      <td><strong>{order.instrumentId ?? "未提供"}</strong><small>DB #{order.databaseId}</small></td>
+                      <td>
+                        <button
+                          aria-controls="okx-order-detail"
+                          aria-pressed={selectedOrder?.databaseId === order.databaseId}
+                          className="okx-order-select"
+                          onClick={() => setSelectedId(order.databaseId)}
+                          type="button"
+                        >
+                          <strong>{order.instrumentId ?? "未提供"}</strong><small>DB #{order.databaseId}</small>
+                        </button>
+                      </td>
                       <td>{order.side ?? "—"} / {order.orderType ?? "—"}</td>
                       <td>{displayDecimal(order.quantity)}</td>
                       <td><StatusBadge status={order.authoritativeStatus ?? order.status} showRaw /></td>

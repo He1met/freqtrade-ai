@@ -43,6 +43,7 @@ export function okxDemoAcceptanceIsTruthful(data: OkxDemoObservability): boolean
   return (
     data.sourceType === "api_aggregate"
     && data.coreData
+    && !data.scope.truncated
     && data.orders.length > 0
     && data.orders.every((order) => orderCanDisplayComplete(order, data))
     && accountReady

@@ -31,7 +31,7 @@ test("factory counts only completed validation and never infers handoff from can
   assert.equal(validatedCandidateCount(batch(["QUALIFIED", "REJECTED", "VALIDATION_FAILED"])), 2);
   assert.match(deploymentHandoffText(null), /未知/);
   assert.match(deploymentHandoffText({ deployment_handoff_status: "NOT_EVALUATED" }), /未知/);
-  assert.match(deploymentHandoffText({ deployment_handoff_status: "QUEUED_FOR_EXISTING_AUTOMATION" }), /已交接/);
+  assert.match(deploymentHandoffText({ deployment_handoff_status: "CANONICAL_LINK_UNAVAILABLE" }), /衔接证据尚不可用/);
   assert.match(deploymentHandoffText({ deployment_handoff_status: "NOT_QUEUED_NO_QUALIFIED" }), /未交接/);
 });
 

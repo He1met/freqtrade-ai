@@ -76,7 +76,7 @@ export type FormalResearchRun = {
   deployment_handoff_status:
     | "NOT_EVALUATED"
     | "NOT_QUEUED_NO_QUALIFIED"
-    | "QUEUED_FOR_EXISTING_AUTOMATION";
+    | "CANONICAL_LINK_UNAVAILABLE";
   quality_contract: StrategyResearchQualityContract;
   safety: {
     execution_target: "OKX_DEMO";
@@ -89,12 +89,75 @@ export type FormalResearchRun = {
   };
 };
 
+export type StrategyResearchAttemptEvent = {
+  id: number;
+  attempt_id: string;
+  sequence: number;
+  run_id: string | null;
+  batch_id: number | null;
+  market_data_quality_receipt_id: number | null;
+  trigger: "manual" | "automation";
+  phase: "PRECHECK" | "STARTED" | "TERMINAL" | "RECOVERY";
+  outcome: "NOT_GENERATED" | "RUNNING" | "COMPLETED" | "FAILED" | "BLOCKED";
+  reason_code: string;
+  redacted_reason: string;
+  requested_count: number;
+  generated_count: number;
+  validated_count: number;
+  persisted_count: number;
+  qualified_count: number;
+  rejected_count: number;
+  created_at: string;
+};
+
+export type StrategyResearchWorkspace = {
+  schema_version: "formal-strategy-research-workspace-v1";
+  as_of: string;
+  source_type: "database";
+  core_data: true;
+  attempts: Array<{
+    attempt_id: string;
+    latest_outcome: StrategyResearchAttemptEvent["outcome"];
+    events: StrategyResearchAttemptEvent[];
+  }>;
+  latest_quality_receipt: null | {
+    id: number;
+    contract_version: string;
+    exchange: string;
+    pair: string;
+    timeframe: string;
+    file_format: string;
+    inspected_at: string;
+    row_count: number;
+    first_open_at: string | null;
+    last_open_at: string | null;
+    expected_interval_seconds: number;
+    missing_interval_count: number;
+    duplicate_timestamp_count: number;
+    out_of_order_count: number;
+    misaligned_timestamp_count: number;
+    null_ohlcv_count: number;
+    invalid_ohlc_count: number;
+    negative_volume_count: number;
+    freshness_seconds: number | null;
+    status: "PASSED" | "BLOCKED" | "FAILED";
+    reason_codes: string[];
+    created_at: string;
+  };
+  latest_batch: StrategyResearchBatch | null;
+  handoff_status: FormalResearchRun["deployment_handoff_status"];
+};
+
 export function fetchStrategyResearchBatches(signal?: AbortSignal) {
   return fetchJson<StrategyResearchBatch[]>("/strategy-research-batches?limit=20", signal);
 }
 
 export function fetchFormalResearchRun(signal?: AbortSignal) {
   return fetchJson<FormalResearchRun>("/strategy-research/formal-run", signal);
+}
+
+export function fetchStrategyResearchWorkspace(signal?: AbortSignal) {
+  return fetchJson<StrategyResearchWorkspace>("/strategy-research/workspace?attempt_limit=10", signal);
 }
 
 export function startFormalResearchRun(signal?: AbortSignal) {

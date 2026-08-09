@@ -90,7 +90,7 @@ class FormalResearchRunRead(BaseModel):
     deployment_handoff_status: Literal[
         "NOT_EVALUATED",
         "NOT_QUEUED_NO_QUALIFIED",
-        "QUEUED_FOR_EXISTING_AUTOMATION",
+        "CANONICAL_LINK_UNAVAILABLE",
     ] = "NOT_EVALUATED"
     quality_contract: dict = Field(default_factory=official_research_policy)
     safety: dict = Field(
@@ -104,3 +104,78 @@ class FormalResearchRunRead(BaseModel):
             "manual_order_authorized": False,
         }
     )
+
+
+class StrategyResearchAttemptEventRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True, extra="forbid")
+
+    id: int
+    attempt_id: str
+    sequence: int
+    run_id: Optional[str] = None
+    batch_id: Optional[int] = None
+    market_data_quality_receipt_id: Optional[int] = None
+    trigger: Literal["manual", "automation"]
+    phase: Literal["PRECHECK", "STARTED", "TERMINAL", "RECOVERY"]
+    outcome: Literal["NOT_GENERATED", "RUNNING", "COMPLETED", "FAILED", "BLOCKED"]
+    reason_code: str
+    redacted_reason: str
+    requested_count: int
+    generated_count: int
+    validated_count: int
+    persisted_count: int
+    qualified_count: int
+    rejected_count: int
+    created_at: datetime
+
+
+class StrategyResearchAttemptRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    attempt_id: str
+    latest_outcome: Literal["NOT_GENERATED", "RUNNING", "COMPLETED", "FAILED", "BLOCKED"]
+    events: list[StrategyResearchAttemptEventRead]
+
+
+class MarketDataQualityReceiptRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True, extra="forbid")
+
+    id: int
+    contract_version: str
+    exchange: str
+    pair: str
+    timeframe: str
+    file_format: str
+    inspected_at: datetime
+    row_count: int
+    first_open_at: Optional[datetime] = None
+    last_open_at: Optional[datetime] = None
+    expected_interval_seconds: int
+    missing_interval_count: int
+    duplicate_timestamp_count: int
+    out_of_order_count: int
+    misaligned_timestamp_count: int
+    null_ohlcv_count: int
+    invalid_ohlc_count: int
+    negative_volume_count: int
+    freshness_seconds: Optional[int] = None
+    status: Literal["PASSED", "BLOCKED", "FAILED"]
+    reason_codes: list[str]
+    created_at: datetime
+
+
+class StrategyResearchWorkspaceRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["formal-strategy-research-workspace-v1"]
+    as_of: datetime
+    source_type: Literal["database"]
+    core_data: Literal[True]
+    attempts: list[StrategyResearchAttemptRead]
+    latest_quality_receipt: Optional[MarketDataQualityReceiptRead] = None
+    latest_batch: Optional[StrategyResearchBatchRead] = None
+    handoff_status: Literal[
+        "NOT_EVALUATED",
+        "NOT_QUEUED_NO_QUALIFIED",
+        "CANONICAL_LINK_UNAVAILABLE",
+    ]
