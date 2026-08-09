@@ -386,9 +386,11 @@ def test_runtime_orders_reconciliation_before_writer_and_keeps_drift_alive(
     assert db.rollbacks == 0
 
 
+@pytest.mark.parametrize("failure_point", ["lock", "observe", "cycle"])
 def test_transient_reconciliation_failure_freezes_openings_and_continues_next_round(
     monkeypatch,
     tmp_path: Path,
+    failure_point: str,
 ) -> None:
     events = []
     readiness = []
@@ -397,6 +399,7 @@ def test_transient_reconciliation_failure_freezes_openings_and_continues_next_ro
     grant_terminalizations = []
     grant_settlements = []
     lock_releases = []
+    lock_attempts = []
 
     class TransientThenHealthyAdapter(FakeAdapter):
         def __init__(self):
@@ -406,11 +409,18 @@ def test_transient_reconciliation_failure_freezes_openings_and_continues_next_ro
         def observe(self, **_kwargs):
             self.observations += 1
             self.events.append(("observe", self.observations))
-            if self.observations == 1:
+            if failure_point == "observe" and self.observations == 1:
                 raise OkxDemoReconciliationBlocked(
                     "pending_orders pagination is temporarily incomplete"
                 )
             return reconciliation("RECONCILED")
+
+        def run_cycle(self, **kwargs):
+            super().run_cycle(**kwargs)
+            if failure_point == "cycle" and self.observations == 1:
+                raise OkxDemoReconciliationBlocked(
+                    "fresh reconciled runtime state is required before new submission"
+                )
 
         def run_active_one_shot(self, **_kwargs):
             self.events.append("one-shot-check")
@@ -436,10 +446,15 @@ def test_transient_reconciliation_failure_freezes_openings_and_continues_next_ro
         "create_okx_demo_server_session",
         lambda *_args, **_kwargs: server,
     )
+
+    def _acquire_lock(_db):
+        lock_attempts.append("attempt")
+        return failure_point != "lock" or len(lock_attempts) > 1
+
     monkeypatch.setattr(
         runtime_service,
         "acquire_one_shot_runtime_lock",
-        lambda _db: True,
+        _acquire_lock,
     )
     monkeypatch.setattr(
         runtime_service,
@@ -515,22 +530,44 @@ def test_transient_reconciliation_failure_freezes_openings_and_continues_next_ro
     ]
     assert len(transient) == 1
     assert transient[0]["automation_guard"] == "BLOCKED"
-    assert guard_failures == [("RECONCILIATION_TRANSIENT", 41)]
-    assert adapter.events == [
-        "startup-reconcile",
-        "one-shot-check",
-        ("observe", 1),
-        "one-shot-check",
-        ("observe", 2),
-        ("cycle", True),
-    ]
+    assert guard_failures == (
+        []
+        if failure_point == "lock"
+        else [("RECONCILIATION_TRANSIENT", 41)]
+    )
+    expected_events = ["startup-reconcile"]
+    if failure_point != "lock":
+        expected_events.extend(
+            [
+                "one-shot-check",
+                ("observe", 1),
+            ]
+        )
+        if failure_point == "cycle":
+            expected_events.append(("cycle", True))
+    expected_events.extend(
+        [
+            "one-shot-check",
+            ("observe", 1 if failure_point == "lock" else 2),
+            ("cycle", True),
+        ]
+    )
+    assert adapter.events == expected_events
     assert readiness[-1]["status"] == "READY"
     assert readiness[-1]["reconciliation"] == "RECONCILED"
     assert server.writer.calls == []
-    assert recovered_grant_checks == ["Runtime00000001", "Runtime00000001"]
+    assert recovered_grant_checks == (
+        ["Runtime00000001"]
+        if failure_point == "lock"
+        else ["Runtime00000001", "Runtime00000001"]
+    )
     assert grant_terminalizations == []
     assert grant_settlements == []
-    assert lock_releases == ["released", "released"]
+    assert lock_releases == (
+        ["released"]
+        if failure_point == "lock"
+        else ["released", "released"]
+    )
     assert stop.calls == 3
     assert adapter.closed is True
     assert server.closed is True
@@ -763,6 +800,11 @@ def test_runtime_releases_coordination_window_after_canary_attestation(
     # the next polling turn then exits without a long reconciliation cycle.
     assert db.commits == 4
     assert db.rollbacks == 0
+    assert [item["status"] for item in readiness] == [
+        "BLOCKED_OPENINGS",
+        "BLOCKED_OPENINGS",
+    ]
+    assert readiness[-1]["reconciliation"] == "UNKNOWN"
 
 
 def test_runtime_commits_consent_lineage_before_same_identity_grant(monkeypatch, tmp_path):
