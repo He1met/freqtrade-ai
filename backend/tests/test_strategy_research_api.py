@@ -8,6 +8,8 @@ from sqlalchemy.pool import StaticPool
 from app.db.session import get_db
 from app.main import app
 from app.models import Base
+from app.schemas.strategy_research import FormalResearchRunRead
+from app.services.formal_strategy_research import get_formal_strategy_research_coordinator
 from app.services.strategy_research import StrategyResearchPersistenceService
 
 
@@ -70,3 +72,57 @@ def test_research_api_exposes_complete_candidate_evidence():
     assert len(payload[0]["candidates"]) == 10
     assert all(item["evidence_snapshot"]["windows"] for item in payload[0]["candidates"])
     assert all(item["rejection_reasons"] for item in payload[0]["candidates"])
+
+
+def test_formal_research_api_uses_credential_free_shared_coordinator():
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine)
+
+    class FakeCoordinator:
+        def status(self, db):
+            return FormalResearchRunRead(
+                status="READY", reason_code="READY", reason="ready", active=False
+            )
+
+        def start(self, db, *, trigger):
+            assert trigger == "manual"
+            return FormalResearchRunRead(
+                status="RUNNING",
+                reason_code="STARTED",
+                reason="started",
+                active=True,
+                run_id="202608090515",
+                trigger="manual",
+            )
+
+    def override_db():
+        with factory() as db:
+            yield db
+
+    app.dependency_overrides[get_db] = override_db
+    app.dependency_overrides[get_formal_strategy_research_coordinator] = FakeCoordinator
+    try:
+        client = TestClient(app)
+        ready = client.get("/api/strategy-research/formal-run")
+        started = client.post("/api/strategy-research/formal-run", json={})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert ready.status_code == 200
+    assert ready.json()["status"] == "READY"
+    assert started.status_code == 200
+    assert started.json()["run_id"] == "202608090515"
+    assert started.json()["safety"] == {
+        "execution_target": "OKX_DEMO",
+        "allow_real_funds": False,
+        "real_orders": False,
+        "credentials_collected": False,
+        "dry_run_trading_authorized": False,
+        "grant_authorized": False,
+        "manual_order_authorized": False,
+    }

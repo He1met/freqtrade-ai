@@ -4,7 +4,10 @@ import { Link } from "react-router-dom";
 import { combineDataSources } from "../api/sourceState";
 import type { DataSourceTraceSummary } from "../api/types";
 import {
+  fetchFormalResearchRun,
   fetchStrategyResearchBatches,
+  startFormalResearchRun,
+  type FormalResearchRun,
   type StrategyResearchBatch,
 } from "../api/strategyResearchApi";
 import { useMvpData } from "../api/useMvpData";
@@ -19,6 +22,11 @@ import {
 import "../styles/strategies.css";
 import { FallbackNotice } from "./FallbackNotice";
 import { formatSourceTrace, formatTraceRecord, strategyAvailability } from "./strategyDisplay";
+import {
+  canStartFormalResearch,
+  deploymentHandoffText,
+  validatedCandidateCount,
+} from "./strategyFactoryModel";
 import { EMPTY_TEXT, displayLoadState, displayValue } from "./uiCopy";
 
 function StrategyTechnicalDetails({
@@ -69,6 +77,9 @@ export function Strategies() {
   const [researchBatches, setResearchBatches] = useState<StrategyResearchBatch[]>([]);
   const [researchLoading, setResearchLoading] = useState(true);
   const [researchError, setResearchError] = useState<string | null>(null);
+  const [formalRun, setFormalRun] = useState<FormalResearchRun | null>(null);
+  const [formalRunError, setFormalRunError] = useState<string | null>(null);
+  const [startingResearch, setStartingResearch] = useState(false);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -88,13 +99,53 @@ export function Strategies() {
     return () => controller.abort();
   }, []);
 
+  useEffect(() => {
+    const controller = new AbortController();
+    const refresh = () => {
+      fetchFormalResearchRun(controller.signal)
+        .then((run) => {
+          setFormalRun(run);
+          setFormalRunError(null);
+          if (run.status === "COMPLETED" || run.status === "FAILED") {
+            return fetchStrategyResearchBatches(controller.signal).then(setResearchBatches);
+          }
+          return undefined;
+        })
+        .catch((reason: unknown) => {
+          if (!controller.signal.aborted) {
+            setFormalRunError(reason instanceof Error ? reason.message : String(reason));
+          }
+        });
+    };
+    refresh();
+    const timer = window.setInterval(refresh, formalRun?.active ? 3000 : 15000);
+    return () => {
+      controller.abort();
+      window.clearInterval(timer);
+    };
+  }, [formalRun?.active]);
+
+  async function runFormalResearch() {
+    setStartingResearch(true);
+    setFormalRunError(null);
+    try {
+      const run = await startFormalResearchRun();
+      setFormalRun(run);
+      if (run.status === "BLOCKED") setFormalRunError(`${run.reason_code}：${run.reason}`);
+    } catch (reason) {
+      setFormalRunError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setStartingResearch(false);
+    }
+  }
+
   const latestResearch = researchBatches[0];
 
   return (
     <section className="page strategy-page">
       <PageHeader
-        title="策略"
-        description="优先查看策略状态、当前版本和 Timeframe；路径与来源追踪按需展开。"
+        title="策略工厂"
+        description="正式候选研究、完整验证、全量持久化与自动部署评审交接；Local Strategy Lab 不属于此生命周期。"
         status={<StatusBadge label={displayLoadState(isLoading, source)} status={isLoading ? "RUNNING" : source} />}
       />
       <FallbackNotice
@@ -106,14 +157,35 @@ export function Strategies() {
       <section className="strategy-research-summary" aria-label="研究候选批次">
         <div className="strategy-research-summary__heading">
           <div>
-            <h2>研究候选（不计入正式策略数）</h2>
-            <p>候选生成、验证和拒绝证据独立持久化；只有统一质量门全部通过才进入部署评审。</p>
+            <h2>正式研究控制</h2>
+            <p>手动运行与每 15 分钟定时器共用同一正式入口；固定请求 10 条，并执行完整验证、全量入库和既有自动部署评审交接。</p>
           </div>
           <StatusBadge
             label={researchLoading ? "读取中" : latestResearch?.status ?? "尚未生成"}
             status={researchLoading ? "RUNNING" : latestResearch?.status ?? "MISSING"}
           />
         </div>
+        <div className="strategy-factory-control">
+          <div>
+            <StatusBadge
+              label={formalRun?.reason_code ?? (formalRunError ? "STATUS_UNKNOWN" : "读取门禁")}
+              status={formalRun?.status ?? (formalRunError ? "UNKNOWN" : "RUNNING")}
+              showRaw
+            />
+            <p>{formalRunError ?? formalRun?.reason ?? "正在读取正式研究门禁。"}</p>
+          </div>
+          <button
+            className="strategy-factory-run-button"
+            disabled={!canStartFormalResearch(formalRun, startingResearch)}
+            onClick={() => void runFormalResearch()}
+            type="button"
+          >
+            {startingResearch ? "正在提交…" : "手动运行一轮研究（10 条）"}
+          </button>
+        </div>
+        <p className="strategy-factory-safety">
+          本页不收集 operator token、Provider token 或任何凭据；不授权实盘、Dry-run 交易、grant 或手动下单。固定 OKX_DEMO、allow_real_funds=false、real_orders=false。
+        </p>
         {researchError ? (
           <EmptyState
             title="研究批次状态未知"
@@ -129,11 +201,16 @@ export function Strategies() {
         {latestResearch ? (
           <>
             <dl className="strategy-research-counts">
+              <div><dt>请求</dt><dd>{latestResearch.requested_count}</dd></div>
               <div><dt>本轮生成</dt><dd>{latestResearch.generated_count}</dd></div>
+              <div><dt>完成验证</dt><dd>{validatedCandidateCount(latestResearch)}</dd></div>
               <div><dt>持久化入库</dt><dd>{latestResearch.persisted_count}</dd></div>
               <div><dt>合格</dt><dd>{latestResearch.qualified_count}</dd></div>
               <div><dt>拒绝</dt><dd>{latestResearch.rejected_count}</dd></div>
             </dl>
+            <p className="strategy-research-freshness">
+              自动部署任务：{deploymentHandoffText(latestResearch)}。
+            </p>
             <p className="strategy-research-freshness">
               最近持久化批次：{latestResearch.completed_at ?? latestResearch.created_at}。该时间之后若自动化因所有权门禁停止，必须查运行记忆，不能把旧批次当成本小时已生成。
             </p>
@@ -142,15 +219,24 @@ export function Strategies() {
                 失败原因：{latestResearch.failure_reason}
               </p>
             ) : null}
-            <details className="strategy-technical-details">
-              <summary>查看批次 {latestResearch.run_id} 的候选与拒绝原因</summary>
+            {researchBatches.map((batch) => (
+              <details className="strategy-technical-details" key={batch.id}>
+              <summary>批次 {batch.run_id} · requested {batch.requested_count} · generated {batch.generated_count} · persisted {batch.persisted_count}</summary>
+              {batch.failure_reason ? <p className="strategy-inline-problem">失败原因：{batch.failure_reason}</p> : null}
               <ul className="strategy-research-candidates">
-                {latestResearch.candidates.map((candidate) => (
+                {batch.candidates.map((candidate) => (
                   <li key={candidate.id}>
                     <div>
                       <strong>{candidate.candidate_name}</strong>
                       <StatusBadge showRaw status={candidate.status} />
                     </div>
+                    <p>
+                      loadable={String(candidate.loadable)} · static={candidate.static_check} · lookahead={candidate.lookahead_status} · validation={String(candidate.validation_passed)} · score={candidate.score ?? "MISSING"}
+                    </p>
+                    <ExpandableText
+                      summary="查看结构化候选证据"
+                      value={JSON.stringify(candidate.evidence_snapshot, null, 2)}
+                    />
                     {candidate.rejection_reasons.length ? (
                       <ul>
                         {candidate.rejection_reasons.map((reason, index) => (
@@ -161,9 +247,10 @@ export function Strategies() {
                   </li>
                 ))}
               </ul>
-              <CopyableValue label="研究报告路径" value={latestResearch.report_path} />
-              <CopyableValue label="研究报告摘要" value={latestResearch.report_digest} />
+              <CopyableValue label="研究报告路径" value={batch.report_path} />
+              <CopyableValue label="研究报告摘要" value={batch.report_digest} />
             </details>
+            ))}
           </>
         ) : null}
       </section>

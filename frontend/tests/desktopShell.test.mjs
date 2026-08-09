@@ -15,7 +15,7 @@ test("desktop navigation groups every route once while preserving detail route m
     ["工作台", "研究与验证", "治理与运行"],
   );
   assert.equal(new Set(navigationItems.map((item) => item.to)).size, navigationItems.length);
-  assert.equal(navigationLabelForPath("/strategies/42"), "策略");
+  assert.equal(navigationLabelForPath("/strategies/42"), "策略工厂");
   assert.equal(navigationLabelForPath("/missing"), "页面未找到");
   assert.equal(isNavigationItemActive("/generation-runs-old", { to: "/generation-runs", label: "生成批次" }), false);
 });
