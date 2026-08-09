@@ -14,7 +14,7 @@ import { useFormalCatalogData } from "../api/useFormalCatalogData";
 import { EmptyState, FormalLoadingState, PageHeader, StatusBadge } from "../components/DisplayPrimitives";
 import { okxDemoAcceptanceIsTruthful } from "./okxDemoDisplay";
 import { dashboardActivityState } from "./dashboardState";
-import { candidateLifecycleDisplay, deploymentHandoffText, validatedCandidateCount } from "./strategyFactoryModel";
+import { candidateLifecycleDisplay, lifecycleSummaryText, validatedCandidateCount } from "./strategyFactoryModel";
 import { displayDateTime, displayStatus } from "./uiCopy";
 
 type Loadable<T> = {
@@ -68,9 +68,6 @@ export function Dashboard() {
   const workspaceBatchError = workspace.error
     ?? (workspace.data?.sections.batch.status === "UNKNOWN" ? workspace.data.sections.batch.reason_code ?? "研究批次来源不可用" : null);
   const formalResearchRun = researchRun.data;
-  const latestResearchRun = formalResearchRun?.run_id === latestResearch?.run_id
-    ? formalResearchRun
-    : null;
   const dataHasProblem = Boolean(catalog.strategies.error || catalog.ranking.error || researchRun.error || workspace.error || workspace.data?.evidence_status === "PARTIAL" || runtimeActivity.error || demo.error);
   const pageLoading = catalog.strategies.loading || catalog.ranking.loading || researchRun.loading || workspace.loading || runtimeActivity.loading || demo.loading;
   const latestSignalStatus = runtimeActivity.data?.recent_signal_evaluations[0]?.status ?? null;
@@ -97,11 +94,15 @@ export function Dashboard() {
   const bridgedCount = lifecycleSummary
     ? candidateLifecycles.filter((item) => item.bridge_outcome === "BRIDGED").length
     : null;
-  const approvedCount = workspace.data?.sections.approval?.status === "AVAILABLE"
-    ? candidateLifecycles.filter((item) => item.candidate_approval_status === "APPROVED").length
+  const approvedNotDeployedCount = workspace.data?.sections.approval?.status === "AVAILABLE"
+    && workspace.data?.sections.deployment?.status === "AVAILABLE"
+    ? lifecycleSummary?.approved_not_deployed_count ?? null
     : null;
   const deployedDemoCount = workspace.data?.sections.deployment?.status === "AVAILABLE"
-    ? candidateLifecycles.filter((item) => item.deployment_status === "ACTIVE").length
+    ? lifecycleSummary?.active_demo_count ?? null
+    : null;
+  const latestBatchLifecycleSummary = workspace.data?.latest_batch?.id === latestResearch?.id
+    ? lifecycleSummary
     : null;
   const activityError = workspaceBatchError ?? runtimeActivity.error ?? demo.error;
   const activities = useMemo(() => {
@@ -230,7 +231,7 @@ export function Dashboard() {
               ))}
             </div>
             <div className="formal-panel-footer">
-              <span>{deploymentHandoffText(latestResearchRun)}</span>
+              <span>{lifecycleSummaryText(latestBatchLifecycleSummary, workspace.data?.sections.bridge?.status === "AVAILABLE")}</span>
               <time dateTime={latestResearch.completed_at ?? latestResearch.created_at}>
                 {displayDateTime(latestResearch.completed_at ?? latestResearch.created_at)}
               </time>
@@ -258,7 +259,7 @@ export function Dashboard() {
           </div>
           <dl className="formal-summary-list">
             <div><dt>Blueprint v2 bridge</dt><dd>{bridgedCount === null ? "未知" : `${bridgedCount} 个候选已有权威 bridge 证据`}</dd></div>
-            <div><dt>批准未部署</dt><dd>{approvedCount === null ? "未知" : `${approvedCount} 个`}</dd></div>
+            <div><dt>批准未部署</dt><dd>{approvedNotDeployedCount === null ? "未知" : `${approvedNotDeployedCount} 个`}</dd></div>
             <div><dt>Demo ACTIVE 映射</dt><dd>{deployedDemoCount === null ? "未知" : `${deployedDemoCount} 个`}</dd></div>
             <div><dt>ACTIVE 运行策略</dt><dd>{runtimeActivity.loading ? "读取中" : runtimeActivity.error ? "未知" : `${runtimeActivity.data?.active_deployments.length ?? 0} 个`}</dd></div>
             <div><dt>最近信号评估</dt><dd>{runtimeActivity.loading ? "读取中" : runtimeActivity.error ? "未知" : latestSignalStatus ? displayStatus(latestSignalStatus) : "当前无信号"}</dd></div>

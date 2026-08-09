@@ -197,7 +197,7 @@ export function OkxDemo() {
           eyebrow="正式工作台"
           title="模拟盘"
           description="查看 OKX_DEMO 的运行健康、意图、订单、成交与对账证据。"
-          status={<span className="formal-target-chip">OKX_DEMO · Demo-only</span>}
+          status={<span className="formal-target-chip">OKX_DEMO · Demo-only · allow_real_funds=false · real_orders=false</span>}
         />
         <section className="formal-conclusion" data-state="blocked" role="alert">
           <div>
@@ -208,7 +208,7 @@ export function OkxDemo() {
           <StatusBadge status="UNKNOWN" label="未知" />
         </section>
         <section className="formal-panel">
-          <div className="formal-section-heading compact"><h2>运行策略与信号（独立只读来源）</h2><StatusBadge status={runtimeActivity.error ? "UNKNOWN" : "READY"} /></div>
+          <div className="formal-section-heading compact"><h2>运行策略与信号（独立只读来源）</h2><StatusBadge label={runtimeActivity.loading ? "读取中" : runtimeActivity.error ? "未知" : "已读取"} status={runtimeActivity.loading ? "RUNNING" : runtimeActivity.error ? "UNKNOWN" : "READY"} /></div>
           {runtimeActivity.loading ? <FormalLoadingState label="正在读取运行投影" />
             : runtimeActivity.error ? <p className="formal-problem">运行投影同样不可用，状态未知。</p>
               : <dl className="formal-summary-list">
@@ -223,7 +223,7 @@ export function OkxDemo() {
   if (!data) {
     return (
       <div className="page formal-page okx-demo-page">
-        <PageHeader eyebrow="正式工作台" title="模拟盘" />
+        <PageHeader eyebrow="正式工作台" title="模拟盘" status={<span className="formal-target-chip">OKX_DEMO · Demo-only · allow_real_funds=false · real_orders=false</span>} />
         <FormalLoadingState className="formal-conclusion" label="正在读取模拟盘证据" />
       </div>
     );
@@ -231,7 +231,7 @@ export function OkxDemo() {
 
   const acceptable = okxDemoAcceptanceIsTruthful(data);
   const fillCount = data.orders.reduce((total, order) => total + order.fills.length, 0);
-  const riskDecisionCount = data.orders.filter((order) => order.riskDecision).length;
+  const orderLinkedRiskDecisionCount = data.orders.filter((order) => order.riskDecision).length;
   const readyCount = data.readiness.filter((check) => check.status === "READY").length;
   const readinessState = data.readiness.length > 0 && readyCount === data.readiness.length
     ? "READY"
@@ -273,7 +273,7 @@ export function OkxDemo() {
           <small>{runtimeActivity.error ? "信号投影读取失败，保持未知" : runtimeActivity.data?.recent_signal_evaluations.length ? displayDateTime(runtimeActivity.data.recent_signal_evaluations[0].closed_candle_at) : "当前没有 signal evaluation"}</small>
         </article>
         <article className="formal-metric">
-          <span>订单记录</span><strong>{data.orders.length}</strong><small>最近聚合窗口内的数据库订单</small>
+          <span>订单记录</span><strong>{data.scope.orderReturnedCount} / {data.scope.orderTotalCount}</strong><small>{data.scope.truncated ? "证据窗口已截断，不能代表全部订单" : "已返回 / 总数；当前窗口未截断"}</small>
         </article>
         <article className="formal-metric">
           <span>成交记录</span><strong>{fillCount}</strong><small>订单附带的真实成交数据库记录</small>
@@ -288,12 +288,14 @@ export function OkxDemo() {
         <div className="formal-demo-flow">
           <div><span>信号</span><strong>{runtimeActivity.loading ? "读取中" : runtimeActivity.error ? "未知" : `${runtimeActivity.data?.recent_signal_evaluations.length ?? 0} 条`}</strong></div>
           <div><span>交易意图</span><strong>{data.intents.length} 条</strong></div>
-          <div><span>风控决定</span><strong>{riskDecisionCount} 条</strong></div>
+          <div><span>订单关联风控证据</span><strong>{orderLinkedRiskDecisionCount} 条</strong></div>
           <div><span>订单</span><strong>{data.orders.length} 条</strong></div>
           <div><span>成交</span><strong>{fillCount} 条</strong></div>
           <div><span>对账</span><strong>{data.latestReconciliation?.status ?? "暂无"}</strong></div>
         </div>
-        <p className="formal-muted">订单提交不等于成交；缺少信号或部署读取 DTO 时保持“未知”，不从订单反推运行成功。</p>
+        <p className={data.scope.truncated ? "formal-problem" : "formal-muted"}>
+          证据范围：交易意图 {data.scope.intentReturnedCount}/{data.scope.intentTotalCount}，订单 {data.scope.orderReturnedCount}/{data.scope.orderTotalCount}；{data.scope.truncated ? "窗口已截断，整体状态保持不可验收。" : "窗口未截断。"} 订单关联风控证据不代表全部风控决定。
+        </p>
       </section>
 
       <section className="formal-panel" aria-labelledby="demo-runtime-title">

@@ -117,6 +117,26 @@ export function lifecycleSummaryLabel(
   }[summary.status];
 }
 
+export function lifecycleSummaryText(
+  summary: CandidateLifecycleSummary | null | undefined,
+  projectionAvailable: boolean,
+): string {
+  if (!projectionAvailable || !summary) {
+    return "生命周期未知：权威 candidate → canonical 投影不可用";
+  }
+  return {
+    NOT_EVALUATED: "尚未评估 candidate → canonical 生命周期",
+    NOT_QUEUED_NO_QUALIFIED: "未衔接：本批次没有 QUALIFIED 候选",
+    UNBRIDGED_REVALIDATION_REQUIRED: `待补证：${summary.unbridged_count} 个候选需要 Blueprint v2 等价复验`,
+    BRIDGED_PENDING_CANONICAL_VALIDATION: `已 bridge：${summary.pending_canonical_validation_count} 个候选等待 canonical 验证`,
+    BRIDGED_PENDING_APPROVAL: `待审批：${summary.pending_approval_count} 个候选已有 bridge 证据`,
+    APPROVED_NOT_DEPLOYED: `已批准未部署：${summary.approved_not_deployed_count} 个候选`,
+    DEPLOYED_ACTIVE_DEMO: `Demo 运行中：${summary.active_demo_count} 个候选具有完整映射`,
+    MIXED: "候选处于多个正式生命周期阶段，请查看逐项证据",
+    UNKNOWN: "生命周期未知：投影未能给出可信结论",
+  }[summary.status];
+}
+
 export function hasOfficialAggressiveContract(run: FormalResearchRun | null): boolean {
   const contract = run?.quality_contract;
   return contract?.contract_version === "formal-strategy-research-aggressive-v1"

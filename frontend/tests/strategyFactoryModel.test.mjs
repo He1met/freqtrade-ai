@@ -8,6 +8,7 @@ import {
   deploymentHandoffText,
   hasOfficialAggressiveContract,
   hasOfficialSafetyContract,
+  lifecycleSummaryText,
   validatedCandidateCount,
 } from "../src/pages/strategyFactoryModel.ts";
 
@@ -99,4 +100,21 @@ test("candidate lifecycle lookup fails closed when the bridge section is absent 
     lifecycle,
   );
   assert.equal(candidateLifecycleFor({ ...base, sections: { bridge: { status: "AVAILABLE" } } }, 99), null);
+});
+
+test("batch handoff copy comes only from the authoritative lifecycle summary", () => {
+  const summary = {
+    status: "APPROVED_NOT_DEPLOYED",
+    qualified_count: 2,
+    unbridged_count: 0,
+    pending_canonical_validation_count: 0,
+    pending_approval_count: 0,
+    approved_not_deployed_count: 2,
+    active_demo_count: 0,
+    unknown_count: 0,
+    reason_code: "APPROVED_NOT_DEPLOYED",
+  };
+  assert.match(lifecycleSummaryText(summary, true), /已批准未部署：2/);
+  assert.match(lifecycleSummaryText(summary, false), /生命周期未知/);
+  assert.match(lifecycleSummaryText(null, true), /生命周期未知/);
 });

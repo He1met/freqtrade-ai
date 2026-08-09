@@ -27,9 +27,9 @@ import {
   candidateLifecycleDisplay,
   candidateLifecycleFor,
   canStartFormalResearch,
-  deploymentHandoffText,
   hasOfficialAggressiveContract,
   lifecycleSummaryLabel,
+  lifecycleSummaryText,
   validatedCandidateCount,
 } from "./strategyFactoryModel";
 import { displayDateTime, displayStatus, displayValue } from "./uiCopy";
@@ -136,7 +136,9 @@ export function Strategies() {
   }
 
   const latestResearch = researchBatches[0] ?? null;
-  const latestResearchRun = formalRun?.run_id === latestResearch?.run_id ? formalRun : null;
+  const latestLifecycleSummary = workspace.data && workspace.data.latest_batch?.id === latestResearch?.id
+    ? workspace.data.lifecycle_summary
+    : null;
   const currentResearchStatus = researchLoading
     ? "RUNNING"
     : researchError || formalRunError
@@ -251,7 +253,7 @@ export function Strategies() {
               ))}
             </div>
             <div className="formal-panel-footer">
-              <span>{deploymentHandoffText(latestResearchRun)}</span>
+              <span>{lifecycleSummaryText(latestLifecycleSummary, workspace.data?.sections.bridge?.status === "AVAILABLE")}</span>
               <StatusBadge status={latestResearch.status} />
             </div>
             {latestResearch.failure_reason ? <p className="formal-problem">失败原因：{latestResearch.failure_reason}</p> : null}

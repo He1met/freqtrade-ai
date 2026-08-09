@@ -72,26 +72,23 @@ test("desktop formal pages trust only the explicit candidate lifecycle projectio
       reason_code: "CANONICAL_VALIDATION_REQUIRED",
     },
   };
+  let workspacePayload: Record<string, unknown> = workspace;
   await page.route("**/api/strategy-research/workspace?*", (route) => route.fulfill({
     contentType: "application/json",
-    body: JSON.stringify(workspace),
+    body: JSON.stringify(workspacePayload),
   }));
 
   await page.goto("/");
   await expect(page.getByText("1 个候选已有权威 bridge 证据")).toBeVisible();
   await expect(page.getByText("0 个", { exact: true }).first()).toBeVisible();
 
-  await page.unroute("**/api/strategy-research/workspace?*");
-  await page.route("**/api/strategy-research/workspace?*", (route) => route.fulfill({
-    contentType: "application/json",
-    body: JSON.stringify({
-      ...workspace,
-      schema_version: "formal-strategy-research-workspace-v1",
-      sections: { ...workspace.sections, bridge: undefined },
-      candidate_lifecycles: undefined,
-      lifecycle_summary: undefined,
-    }),
-  }));
+  workspacePayload = {
+    ...workspace,
+    schema_version: "formal-strategy-research-workspace-v1",
+    sections: { ...workspace.sections, bridge: undefined },
+    candidate_lifecycles: undefined,
+    lifecycle_summary: undefined,
+  };
 
   await page.goto("/strategies");
   await expect(page.getByText(/生命周期未知：权威 bridge 投影不可用/)).toBeVisible();
