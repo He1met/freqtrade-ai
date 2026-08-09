@@ -1,4 +1,5 @@
 import copy
+from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -7,7 +8,7 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
-from app.models import Base
+from app.models import Base, MarketDataQualityReceipt, StrategyResearchAttemptEvent
 from app.core.strategy_research_contract import official_research_policy
 from app.repositories.strategy_research import StrategyResearchRepository
 from app.services.strategy_research import (
@@ -236,3 +237,62 @@ def test_failed_validation_persists_every_generated_candidate(db, report):
         candidate.rejection_reasons[0]["evidence"]["stage"] == "WINDOW_WF_BEAR"
         for candidate in batch.candidates
     )
+
+
+def test_append_only_repositories_preserve_attempt_and_quality_receipts(db):
+    now = datetime(2026, 8, 9, 5, 22, tzinfo=timezone.utc)
+    repository = StrategyResearchRepository(db)
+    quality = repository.append_market_data_quality_receipt(
+        MarketDataQualityReceipt(
+            contract_version="market-data-quality-v1",
+            exchange="okx",
+            pair="BTC/USDT:USDT",
+            timeframe="15m",
+            relative_path="futures/BTC_USDT_USDT-15m-futures.feather",
+            file_format="feather",
+            file_size=123,
+            file_sha256="a" * 64,
+            inspected_at=now,
+            row_count=100,
+            first_open_at=now,
+            last_open_at=now,
+            expected_interval_seconds=900,
+            missing_interval_count=0,
+            duplicate_timestamp_count=0,
+            out_of_order_count=0,
+            misaligned_timestamp_count=0,
+            null_ohlcv_count=0,
+            invalid_ohlc_count=0,
+            negative_volume_count=0,
+            freshness_seconds=0,
+            status="PASSED",
+            reason_codes=[],
+            evidence_digest="b" * 64,
+        )
+    )
+    event = repository.append_attempt_event(
+        StrategyResearchAttemptEvent(
+            attempt_id="00000000-0000-4000-8000-000000000001",
+            sequence=1,
+            run_id=None,
+            market_data_quality_receipt_id=quality.id,
+            trigger="manual",
+            phase="PRECHECK",
+            outcome="NOT_GENERATED",
+            reason_code="MARKET_DATA_QUALITY_BLOCKED",
+            redacted_reason="数据质量门未通过。",
+            requested_count=0,
+            generated_count=0,
+            validated_count=0,
+            persisted_count=0,
+            qualified_count=0,
+            rejected_count=0,
+            evidence_snapshot={"execution_target": "OKX_DEMO"},
+            event_digest="c" * 64,
+        )
+    )
+
+    assert repository.latest_market_data_quality_receipt(
+        exchange="okx", pair="BTC/USDT:USDT", timeframe="15m"
+    ).id == quality.id
+    assert [item.id for item in repository.list_attempt_events()] == [event.id]

@@ -3,7 +3,12 @@ from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from app.models.strategy_research import StrategyResearchBatch, StrategyResearchCandidate
+from app.models.strategy_research import (
+    MarketDataQualityReceipt,
+    StrategyResearchAttemptEvent,
+    StrategyResearchBatch,
+    StrategyResearchCandidate,
+)
 
 
 class StrategyResearchRepository:
@@ -47,3 +52,48 @@ class StrategyResearchRepository:
         self.db.commit()
         self.db.refresh(batch)
         return self.get_batch_by_run_id(batch.run_id) or batch
+
+    def append_attempt_event(
+        self, event: StrategyResearchAttemptEvent
+    ) -> StrategyResearchAttemptEvent:
+        self.db.add(event)
+        self.db.commit()
+        self.db.refresh(event)
+        return event
+
+    def list_attempt_events(self, limit: int = 100) -> list[StrategyResearchAttemptEvent]:
+        statement = (
+            select(StrategyResearchAttemptEvent)
+            .order_by(
+                StrategyResearchAttemptEvent.created_at.desc(),
+                StrategyResearchAttemptEvent.id.desc(),
+            )
+            .limit(limit)
+        )
+        return list(self.db.scalars(statement).all())
+
+    def append_market_data_quality_receipt(
+        self, receipt: MarketDataQualityReceipt
+    ) -> MarketDataQualityReceipt:
+        self.db.add(receipt)
+        self.db.commit()
+        self.db.refresh(receipt)
+        return receipt
+
+    def latest_market_data_quality_receipt(
+        self, *, exchange: str, pair: str, timeframe: str
+    ) -> Optional[MarketDataQualityReceipt]:
+        statement = (
+            select(MarketDataQualityReceipt)
+            .where(
+                MarketDataQualityReceipt.exchange == exchange,
+                MarketDataQualityReceipt.pair == pair,
+                MarketDataQualityReceipt.timeframe == timeframe,
+            )
+            .order_by(
+                MarketDataQualityReceipt.inspected_at.desc(),
+                MarketDataQualityReceipt.id.desc(),
+            )
+            .limit(1)
+        )
+        return self.db.scalars(statement).first()
