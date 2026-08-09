@@ -276,7 +276,9 @@ export function Strategies() {
         ) : workspace.error || workspace.data?.sections.bridge?.status !== "AVAILABLE" ? (
           <p className="formal-problem">生命周期未知：权威 bridge 投影不可用；不会从 QUALIFIED、策略名称或摘要推断。</p>
         ) : null}
-        {researchError ? (
+        {researchLoading ? (
+          <FormalLoadingState label="正在读取候选" />
+        ) : researchError ? (
           <EmptyState title="候选状态未知" description="候选 API 读取失败；未知不能显示为没有候选。" />
         ) : latestResearch?.candidates.length ? (
           <ul className="formal-candidate-list">
@@ -318,12 +320,10 @@ export function Strategies() {
               );
             })}
           </ul>
-        ) : researchLoading ? (
-          <FormalLoadingState label="正在读取候选" />
         ) : (
           <EmptyState title="当前没有候选行" description="无候选可能表示尚未生成或在生成前失败；请结合最新批次状态判断。" />
         )}
-        {researchBatches.length ? (
+        {!researchLoading && !researchError && researchBatches.length ? (
           <details className="formal-disclosure">
             <summary>查看历史批次与报告证据</summary>
             {researchBatches.map((batch) => (

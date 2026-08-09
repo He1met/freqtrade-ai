@@ -156,7 +156,7 @@ export function StrategyDetail() {
           {runtimeActivity.loading ? <strong>读取中</strong>
             : runtimeActivity.error ? <StatusBadge label="未知" status="UNKNOWN" />
               : activeDeployment ? <><StatusBadge status="ACTIVE" /><strong>槽位 {activeDeployment.active_slot}</strong><small>{activeDeployment.instrument_id} · {activeDeployment.timeframe}</small></>
-                : <StatusBadge label="未部署" status="NOT_RUN" />}
+                : <><StatusBadge label="未关联 ACTIVE" status="NOT_RUN" /><p>只读投影中没有关联的 OKX_DEMO ACTIVE 部署；不代表从未部署。</p></>}
         </article>
         <article className={availability.isProblem ? "strategy-overview-card strategy-overview-problem" : "strategy-overview-card"}>
           <span>当前是否可用</span>

@@ -3,9 +3,11 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import hashlib
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine, event, func, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.adapters.freqtrade.strategy_file_manager import StrategyFileManager
@@ -357,3 +359,73 @@ def test_exact_blueprint_bridges_once_and_stops_at_canonical_validation(
     assert _count(db, FullChainRun) == 1
     assert _count(db, FullChainStageRun) == 2
     _assert_no_execution_side_effects(db)
+
+
+@pytest.mark.parametrize(
+    ("failed_section", "reason_code"),
+    [
+        ("bridge", "CANDIDATE_BRIDGE_EVENTS_UNAVAILABLE"),
+        ("approval", "CANDIDATE_APPROVALS_UNAVAILABLE"),
+        ("deployment", "CANDIDATE_DEPLOYMENTS_UNAVAILABLE"),
+    ],
+)
+def test_workspace_marks_only_failed_lifecycle_query_unknown(
+    db: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failed_section: str,
+    reason_code: str,
+) -> None:
+    payload = _blueprint_payload()
+    candidate = _persist_qualified_candidate(db, tmp_path, blueprint_payload=payload)
+    bridged = _bridge_service(db, tmp_path).bridge(
+        candidate.id,
+        blueprint_payload=payload,
+        requested_by="test-reviewer",
+        now=NOW,
+    )
+    original_scalars = db.scalars
+
+    if failed_section == "bridge":
+        monkeypatch.setattr(
+            "app.repositories.strategy_research.StrategyResearchRepository."
+            "list_latest_candidate_bridge_events",
+            lambda _repository, *, candidate_ids: (_ for _ in ()).throw(
+                SQLAlchemyError("bridge receipts unavailable")
+            ),
+        )
+    else:
+        def _scalars(statement, *args, **kwargs):
+            sql = str(statement)
+            if "strategy_candidate_approvals" in sql:
+                if failed_section == "approval":
+                    raise SQLAlchemyError("approval receipts unavailable")
+                return SimpleNamespace(
+                    all=lambda: [
+                        SimpleNamespace(
+                            id=987,
+                            full_chain_run_id=bridged.canonical_full_chain_run_id,
+                            status="APPROVED",
+                        )
+                    ]
+                )
+            if "strategy_deployments" in sql and failed_section == "deployment":
+                raise SQLAlchemyError("deployment receipts unavailable")
+            return original_scalars(statement, *args, **kwargs)
+
+        monkeypatch.setattr(db, "scalars", _scalars)
+
+    workspace = StrategyResearchWorkspaceService(db).build(attempt_limit=10)
+
+    assert workspace.evidence_status == "PARTIAL"
+    assert getattr(workspace.sections, failed_section).status == "UNKNOWN"
+    assert getattr(workspace.sections, failed_section).reason_code == reason_code
+    for preserved in {"attempts", "quality", "batch", "bridge", "approval", "deployment"} - {
+        failed_section
+    }:
+        assert getattr(workspace.sections, preserved).status == "AVAILABLE"
+    assert workspace.candidate_lifecycles[0].lifecycle_status == "UNKNOWN"
+    assert workspace.candidate_lifecycles[0].reason_code == reason_code
+    assert workspace.execution_target_id == "OKX_DEMO"
+    assert workspace.allow_real_funds is False
+    assert workspace.real_orders is False

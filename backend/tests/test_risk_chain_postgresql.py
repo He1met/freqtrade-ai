@@ -384,7 +384,12 @@ def _policy() -> dict:
 
 
 def test_20260727_02_upgrades_to_risk_chain_atomically(postgres_engine) -> None:
-    Base.metadata.create_all(postgres_engine)
+    pre_bridge_tables = [
+        table
+        for table in Base.metadata.tables.values()
+        if table.name != "strategy_research_candidate_bridge_events"
+    ]
+    Base.metadata.create_all(postgres_engine, tables=pre_bridge_tables)
     with postgres_engine.begin() as connection:
         connection.execute(text("DROP TABLE okx_demo_automation_guard_events"))
         connection.execute(text("DROP TABLE okx_demo_automation_guard_states"))

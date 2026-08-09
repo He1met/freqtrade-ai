@@ -1228,7 +1228,7 @@ td.log-cell {
 
 .local-strategy-lab {
   display: grid;
-  gap: 14px;
+  gap: 10px;
 }
 
 .local-strategy-lab .page-header {

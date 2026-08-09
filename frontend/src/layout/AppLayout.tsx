@@ -59,7 +59,10 @@ export function AppLayout() {
   const currentLabel = navigationLabelForPath(pathname);
   const [mobileOpen, setMobileOpen] = useState(false);
   const mainRef = useRef<HTMLElement>(null);
-  const developmentRoute = pathname.startsWith("/operator-dashboard");
+  const developmentRoute = pathname.startsWith("/operator-dashboard") || pathname.startsWith("/local-strategy-lab");
+  const developmentReturn = pathname.startsWith("/local-strategy-lab")
+    ? { label: "返回策略工厂", to: "/strategies" }
+    : { label: "返回模拟盘", to: "/okx-demo" };
   const historicalRoute = ["/generation-runs", "/backtest-runs", "/backtest-tasks", "/hyperopt-runs", "/ranking", "/live-governance"]
     .some((prefix) => pathname.startsWith(prefix));
 
@@ -129,9 +132,13 @@ export function AppLayout() {
       </aside>
       <main className="main-panel" id="main-content" ref={mainRef} tabIndex={-1}>
         {developmentRoute ? (
-          <aside className="formal-context-banner" data-kind="development">
+          <aside
+            className="formal-context-banner"
+            data-context={pathname.startsWith("/local-strategy-lab") ? "local-lab" : "operator"}
+            data-kind="development"
+          >
             <div><strong>开发实验</strong><span>本页结果不进入正式候选生命周期，也不计入正式工作台数字。</span></div>
-            <Link to="/okx-demo">返回模拟盘</Link>
+            <Link to={developmentReturn.to}>{developmentReturn.label}</Link>
           </aside>
         ) : historicalRoute ? (
           <aside className="formal-context-banner" data-kind="historical">

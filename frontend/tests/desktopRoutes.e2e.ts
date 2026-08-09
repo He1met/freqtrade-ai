@@ -60,6 +60,38 @@ test("missing strategy remains explicit and links back to the formal factory", a
   await expect(page.getByRole("link", { name: "返回策略工厂" })).toHaveAttribute("href", "/strategies");
 });
 
+test("strategy detail distinguishes an unlinked ACTIVE deployment from an unknown projection", async ({ page, request }) => {
+  const response = await request.get("/api/strategies");
+  expect(response.ok()).toBe(true);
+  const strategies = await response.json() as Array<{ id: number | string }>;
+  const strategyId = strategies[0].id;
+  const emptyRuntimeProjection = {
+    schema_version: "okx-demo-runtime-activity-v1",
+    as_of: "2026-08-09T12:00:00Z",
+    source_type: "database",
+    core_data: true,
+    execution_target: "OKX_DEMO",
+    allow_real_funds: false,
+    real_orders: false,
+    active_deployments: [],
+    recent_signal_evaluations: [],
+    signal_window: { returned_count: 0, limit: 20, has_more: false },
+  };
+  await page.route("**/api/okx-demo/runtime-activity?*", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify(emptyRuntimeProjection),
+  }));
+  await page.goto(`/strategies/${strategyId}`);
+  await expect(page.getByText("未关联 ACTIVE")).toBeVisible();
+  await expect(page.getByText(/不代表从未部署/)).toBeVisible();
+
+  await page.unroute("**/api/okx-demo/runtime-activity?*");
+  await page.route("**/api/okx-demo/runtime-activity?*", (route) => route.fulfill({ status: 503, body: "projection unavailable" }));
+  await page.reload();
+  await expect(page.getByText("未知", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("未关联 ACTIVE")).toHaveCount(0);
+});
+
 test("formal strategy API failure stays unknown instead of becoming an empty library", async ({ page }) => {
   await page.route("**/api/strategies", (route) => route.fulfill({ status: 503, body: "catalog unavailable" }));
   await page.goto("/strategies");

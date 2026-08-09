@@ -13,6 +13,7 @@ import { useFormalReadModels } from "../api/useFormalReadModels";
 import { useFormalCatalogData } from "../api/useFormalCatalogData";
 import { EmptyState, FormalLoadingState, PageHeader, StatusBadge } from "../components/DisplayPrimitives";
 import { okxDemoAcceptanceIsTruthful } from "./okxDemoDisplay";
+import { dashboardActivityState } from "./dashboardState";
 import { candidateLifecycleDisplay, deploymentHandoffText, validatedCandidateCount } from "./strategyFactoryModel";
 import { displayDateTime, displayStatus } from "./uiCopy";
 
@@ -102,6 +103,7 @@ export function Dashboard() {
   const deployedDemoCount = workspace.data?.sections.deployment?.status === "AVAILABLE"
     ? candidateLifecycles.filter((item) => item.deployment_status === "ACTIVE").length
     : null;
+  const activityError = workspaceBatchError ?? runtimeActivity.error ?? demo.error;
   const activities = useMemo(() => {
     const items: Array<{ id: string; title: string; meta: string; status: string }> = [];
     if (latestResearch) {
@@ -130,6 +132,11 @@ export function Dashboard() {
     }
     return items.slice(0, 5);
   }, [demo.data, latestResearch, runtimeActivity.data]);
+  const activityState = dashboardActivityState({
+    error: activityError,
+    isLoading: pageLoading,
+    visibleRecordCount: activities.length,
+  });
 
   return (
     <section className="page dashboard-page formal-page">
@@ -286,17 +293,22 @@ export function Dashboard() {
           <div><span className="formal-kicker">最近活动</span><h2 id="dashboard-activity-title">研究、信号与订单证据</h2></div>
           <span className="formal-section-note">最多 5 条</span>
         </div>
-        {activities.length ? (
-          <ol className="formal-activity-list">
-            {activities.map((activity) => (
-              <li key={activity.id}>
-                <StatusBadge status={activity.status} />
-                <div><strong>{activity.title}</strong><span>{activity.meta}</span></div>
-              </li>
-            ))}
-          </ol>
-        ) : pageLoading ? (
+        {activityState === "loading" ? (
           <FormalLoadingState label="正在读取最近活动" />
+        ) : activityState === "ready" || activityState === "partial" ? (
+          <>
+            <ol className="formal-activity-list">
+              {activities.map((activity) => (
+                <li key={activity.id}>
+                  <StatusBadge status={activity.status} />
+                  <div><strong>{activity.title}</strong><span>{activity.meta}</span></div>
+                </li>
+              ))}
+            </ol>
+            {activityState === "partial" ? <p className="formal-problem">部分活动来源仍在读取或读取失败；仅展示已确认记录，其余状态未知。</p> : null}
+          </>
+        ) : activityState === "failed" ? (
+          <EmptyState title="最近活动状态未知" description="研究批次、运行投影或模拟盘证据读取失败；不能解释为没有活动。" />
         ) : (
           <EmptyState title="暂无可确认的最近活动" description="无记录与读取失败已分开处理；页面不会制造研究或订单数据。" />
         )}

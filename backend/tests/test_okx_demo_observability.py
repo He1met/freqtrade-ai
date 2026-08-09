@@ -4,6 +4,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from sqlalchemy import event
 from sqlalchemy.orm import Session
 
 from app.db.session import create_database_engine, create_session_factory, get_db
@@ -86,6 +87,44 @@ def test_runtime_activity_empty_projection_is_demo_only_and_explicit(tmp_path: P
         "limit": 3,
         "has_more": False,
     }
+    forbidden_keys = {"generated_code", "lease_token", "secret"}
+    assert forbidden_keys.isdisjoint(payload)
+    assert all(key not in response.text for key in forbidden_keys)
+
+
+def test_runtime_activity_get_performs_selects_without_commit_flush_or_write(
+    tmp_path: Path,
+) -> None:
+    client, session_factory = _client(tmp_path)
+    engine = session_factory.kw["bind"]
+    db = session_factory()
+    statements: list[str] = []
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def _capture_sql(_connection, _cursor, statement, _parameters, _context, _many):
+        statements.append(statement.strip())
+
+    def _forbid_write(*_args, **_kwargs):
+        raise AssertionError("GET projection attempted an ORM write boundary")
+
+    db.commit = _forbid_write
+    db.flush = _forbid_write
+    db.add = _forbid_write
+    db.delete = _forbid_write
+
+    def override_get_db():
+        yield db
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        response = client.get("/api/okx-demo/runtime-activity?signal_limit=3")
+    finally:
+        app.dependency_overrides.clear()
+        db.close()
+
+    assert response.status_code == 200
+    assert statements
+    assert all(statement.lstrip().upper().startswith("SELECT") for statement in statements)
 
 
 def test_allowlisted_projection_omits_raw_snapshots_and_requires_reconciliation(

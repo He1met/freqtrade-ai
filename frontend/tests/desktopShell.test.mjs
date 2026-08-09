@@ -7,7 +7,7 @@ import {
   navigationLabelForPath,
   navigationSections,
 } from "../src/layout/navigation.ts";
-import { dashboardViewState } from "../src/pages/dashboardState.ts";
+import { dashboardActivityState, dashboardViewState } from "../src/pages/dashboardState.ts";
 
 test("desktop navigation groups every route once while preserving detail route matching", () => {
   assert.deepEqual(
@@ -37,4 +37,12 @@ test("dashboard never promotes initial zero values to a ready state", () => {
     dashboardViewState({ error: null, isLoading: false, source: "api", visibleRecordCount: 2 }),
     "ready",
   );
+});
+
+test("dashboard activities keep loading failure empty partial and data states distinct", () => {
+  assert.equal(dashboardActivityState({ error: null, isLoading: true, visibleRecordCount: 0 }), "loading");
+  assert.equal(dashboardActivityState({ error: "runtime unavailable", isLoading: false, visibleRecordCount: 0 }), "failed");
+  assert.equal(dashboardActivityState({ error: null, isLoading: false, visibleRecordCount: 0 }), "empty");
+  assert.equal(dashboardActivityState({ error: "one source unavailable", isLoading: false, visibleRecordCount: 2 }), "partial");
+  assert.equal(dashboardActivityState({ error: null, isLoading: false, visibleRecordCount: 2 }), "ready");
 });

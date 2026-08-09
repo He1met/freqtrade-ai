@@ -1,5 +1,4 @@
 import { type FormEvent, useEffect, useRef, useState } from "react";
-import { Link } from "react-router-dom";
 
 import { StrategyGenerationApiError, createStrategyGenerationRun } from "../api/client";
 import { combineDataSources } from "../api/sourceState";
@@ -269,8 +268,6 @@ export function LocalStrategyLab() {
   return (
     <section className="page local-strategy-lab">
       <PageHeader
-        actions={<Link className="formal-text-link" to="/strategies">返回策略工厂</Link>}
-        description="开发实验，不进入正式候选生命周期；仅完整 API/DB 持久证据可显示成功。"
         status={
           <StatusBadge
             label={submissionDisplay.label}
