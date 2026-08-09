@@ -2,6 +2,8 @@ import pytest
 
 from app.core.exceptions import ConfigurationError
 from app.db.migrations import (
+    RUNTIME_APPEND_ONLY_TABLES,
+    BRIDGE_APPEND_ONLY_TABLES,
     ATTESTATION_ACL_BASE_VERSION,
     ATTESTED_SESSION_BASE_VERSION,
     CANARY_LINEAGE_WRITE_BASE_VERSION,
@@ -15,6 +17,8 @@ from app.db.migrations import (
     FINAL_ACCEPTANCE_BASE_VERSION,
     CONTINUOUS_DEMO_BASE_VERSION,
     CONTINUOUS_DEMO_SELECTION_V2_BASE_VERSION,
+    RESEARCH_PERSISTENCE_BASE_VERSION,
+    CANDIDATE_BRIDGE_BASE_VERSION,
     EARLY_TARGET_LINEAGE_VERSION,
     DUAL_SIDE_BASE_VERSION,
     FULL_CHAIN_BASE_VERSION,
@@ -49,6 +53,7 @@ from app.db.migrations import (
     _add_bounded_second_accepted_not_found_boundary,
     _add_final_accepted_not_found_boundary,
     _add_continuous_demo_automation_boundary,
+    _add_research_receipt_boundary,
 )
 from app.db.session import create_database_engine
 
@@ -115,7 +120,29 @@ def test_schema_version_is_explicit_and_stable() -> None:
     assert FINAL_ACCEPTANCE_BASE_VERSION == "20260804_33"
     assert CONTINUOUS_DEMO_BASE_VERSION == "20260804_34"
     assert CONTINUOUS_DEMO_SELECTION_V2_BASE_VERSION == "20260804_35"
-    assert SCHEMA_VERSION == "20260804_36"
+    assert RESEARCH_PERSISTENCE_BASE_VERSION == "20260804_36"
+    assert CANDIDATE_BRIDGE_BASE_VERSION == "20260809_37"
+    assert SCHEMA_VERSION == "20260809_38"
+
+
+def test_v37_research_receipts_are_append_only_runtime_tables() -> None:
+    import inspect as pyinspect
+
+    source = pyinspect.getsource(_add_research_receipt_boundary)
+    assert RUNTIME_APPEND_ONLY_TABLES == frozenset(
+        {"strategy_research_attempt_events", "market_data_quality_receipts"}
+    )
+    assert BRIDGE_APPEND_ONLY_TABLES == frozenset(
+        {"strategy_research_candidate_bridge_events"}
+    )
+    for fragment in (
+        "prevent_research_receipt_mutation",
+        "research receipts are append-only",
+        "BEFORE UPDATE OR DELETE ON strategy_research_attempt_events",
+        "BEFORE UPDATE OR DELETE ON market_data_quality_receipts",
+        "BEFORE UPDATE OR DELETE ON strategy_research_candidate_bridge_events",
+    ):
+        assert fragment in source
 
 
 def test_v36_continuous_demo_boundary_is_fixed_and_owner_controlled() -> None:

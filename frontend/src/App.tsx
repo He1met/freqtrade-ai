@@ -31,7 +31,7 @@ export function App() {
         <Route path="operator-dashboard" element={<OperatorDashboard />} />
         <Route path="okx-demo" element={<OkxDemo />} />
         <Route path="ranking" element={<Ranking />} />
-        <Route path="freq-ui" element={<Navigate replace to="/okx-demo" />} />
+        <Route path="freq-ui" element={<Navigate replace to="/okx-demo?from=freq-ui" />} />
         <Route path="*" element={<NotFound />} />
       </Route>
     </Routes>

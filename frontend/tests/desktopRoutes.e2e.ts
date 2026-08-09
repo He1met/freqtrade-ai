@@ -8,15 +8,15 @@ import {
 
 const routes = [
   { path: "/", heading: "总览" },
-  { path: "/strategies", heading: "策略" },
+  { path: "/strategies", heading: "策略工厂" },
   { path: "/generation-runs", heading: "生成批次" },
   { path: "/local-strategy-lab", heading: "本地策略实验室（Local Strategy Lab）" },
   { path: "/backtest-runs", heading: "回测批次" },
   { path: "/backtest-tasks", heading: "回测任务" },
   { path: "/hyperopt-runs", heading: "Hyperopt 参数优化" },
-  { path: "/live-governance", heading: "实盘候选治理" },
+  { path: "/live-governance", heading: "候选治理证据（只读 / 未来能力）" },
   { path: "/operator-dashboard", heading: "Operator Dashboard" },
-  { path: "/okx-demo", heading: "OKX_DEMO / 模拟盘" },
+  { path: "/okx-demo", heading: "模拟盘" },
   { path: "/ranking", heading: "策略排行榜" },
 ] as const;
 
@@ -34,8 +34,9 @@ for (const route of routes) {
 
 test("legacy FreqUI bookmark redirects to the only active OKX Demo target", async ({ page }) => {
   await page.goto("/freq-ui");
-  await expect(page).toHaveURL(/\/okx-demo$/);
-  await expect(page.getByRole("heading", { level: 1, name: "OKX_DEMO / 模拟盘" })).toBeVisible();
+  await expect(page).toHaveURL(/\/okx-demo\?from=freq-ui$/);
+  await expect(page.getByRole("heading", { level: 1, name: "模拟盘" })).toBeVisible();
+  await expect(page.getByText("旧 FreqUI 兼容入口")).toBeVisible();
 });
 
 test("strategy detail route renders against the isolated database", async ({ page, request }) => {
@@ -47,8 +48,55 @@ test("strategy detail route renders against the isolated database", async ({ pag
 
   await page.goto(`/strategies/${strategies[0].id}`);
   await expectPageReady(page);
+  await expect(page.getByRole("link", { name: "返回策略工厂" })).toHaveAttribute("href", "/strategies");
 
   expect(problems).toEqual([]);
+});
+
+test("missing strategy remains explicit and links back to the formal factory", async ({ page }) => {
+  await page.goto("/strategies/__missing_strategy__");
+  await expect(page.getByRole("heading", { level: 1, name: "策略详情" })).toBeVisible();
+  await expect(page.getByText("未找到策略")).toBeVisible();
+  await expect(page.getByRole("link", { name: "返回策略工厂" })).toHaveAttribute("href", "/strategies");
+});
+
+test("strategy detail distinguishes an unlinked ACTIVE deployment from an unknown projection", async ({ page, request }) => {
+  const response = await request.get("/api/strategies");
+  expect(response.ok()).toBe(true);
+  const strategies = await response.json() as Array<{ id: number | string }>;
+  const strategyId = strategies[0].id;
+  const emptyRuntimeProjection = {
+    schema_version: "okx-demo-runtime-activity-v1",
+    as_of: "2026-08-09T12:00:00Z",
+    source_type: "database",
+    core_data: true,
+    execution_target: "OKX_DEMO",
+    allow_real_funds: false,
+    real_orders: false,
+    active_deployments: [],
+    recent_signal_evaluations: [],
+    signal_window: { returned_count: 0, limit: 20, has_more: false },
+  };
+  await page.route("**/api/okx-demo/runtime-activity?*", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify(emptyRuntimeProjection),
+  }));
+  await page.goto(`/strategies/${strategyId}`);
+  await expect(page.getByText("未关联 ACTIVE")).toBeVisible();
+  await expect(page.getByText(/不代表从未部署/)).toBeVisible();
+
+  await page.unroute("**/api/okx-demo/runtime-activity?*");
+  await page.route("**/api/okx-demo/runtime-activity?*", (route) => route.fulfill({ status: 503, body: "projection unavailable" }));
+  await page.reload();
+  await expect(page.getByText("未知", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("未关联 ACTIVE")).toHaveCount(0);
+});
+
+test("formal strategy API failure stays unknown instead of becoming an empty library", async ({ page }) => {
+  await page.route("**/api/strategies", (route) => route.fulfill({ status: 503, body: "catalog unavailable" }));
+  await page.goto("/strategies");
+  await expect(page.getByText("正式策略库状态未知")).toBeVisible();
+  await expect(page.getByText("暂无真实策略")).toHaveCount(0);
 });
 
 test("unknown route renders the desktop 404 page", async ({ page }) => {

@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from typing import Callable, Optional, Type, TypeVar
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.execution_target import ONLY_EXCHANGE_EXECUTION_TARGET_ID
@@ -27,6 +27,7 @@ from app.schemas.okx_demo_observability import (
     OkxDemoObservabilityResponse,
     OkxDemoOrderSummary,
     OkxDemoPositionSummary,
+    OkxDemoProjectionScope,
     OkxDemoReadinessCheck,
     OkxDemoReconciliationSummary,
     OkxDemoRiskDecisionSummary,
@@ -129,6 +130,17 @@ class OkxDemoObservabilityService:
 
     def build(self, limit: int = 100) -> OkxDemoObservabilityResponse:
         target_id = ONLY_EXCHANGE_EXECUTION_TARGET_ID
+        as_of = datetime.now(timezone.utc)
+        intent_total_count = int(self.db.scalar(
+            select(func.count()).select_from(TradeIntent).where(
+                TradeIntent.execution_target_id == target_id
+            )
+        ) or 0)
+        order_total_count = int(self.db.scalar(
+            select(func.count()).select_from(ExchangeOrder).where(
+                ExchangeOrder.execution_target_id == target_id
+            )
+        ) or 0)
         intents = list(
             self.db.scalars(
                 select(TradeIntent)
@@ -145,6 +157,19 @@ class OkxDemoObservabilityService:
                 .limit(limit)
             ).all()
         )
+        intent_by_id = {intent.id: intent for intent in intents}
+        missing_intent_ids = {
+            order.trade_intent_id for order in local_orders
+            if order.trade_intent_id not in intent_by_id
+        }
+        if missing_intent_ids:
+            referenced_intents = self.db.scalars(
+                select(TradeIntent).where(
+                    TradeIntent.execution_target_id == target_id,
+                    TradeIntent.id.in_(missing_intent_ids),
+                )
+            ).all()
+            intents.extend(referenced_intents)
         state = self.db.scalars(
             select(OkxDemoReconciliationState).where(
                 OkxDemoReconciliationState.execution_target_id == target_id
@@ -255,6 +280,8 @@ class OkxDemoObservabilityService:
         account = self._account(latest_account, state=state, run=run)
         acceptable = (
             bool(order_summaries)
+            and intent_total_count <= limit
+            and order_total_count <= limit
             and all(order.completion_state == "COMPLETE" for order in order_summaries)
             and account.status == "READY"
             and len(readiness) == 6
@@ -273,9 +300,18 @@ class OkxDemoObservabilityService:
         ]
 
         return OkxDemoObservabilityResponse(
-            generated_at=datetime.now(timezone.utc),
+            generated_at=as_of,
             source_type="api_aggregate",
             core_data=True,
+            scope=OkxDemoProjectionScope(
+                as_of=as_of,
+                requested_limit=limit,
+                intent_total_count=intent_total_count,
+                intent_returned_count=len(intents),
+                order_total_count=order_total_count,
+                order_returned_count=len(local_orders),
+                truncated=intent_total_count > limit or order_total_count > limit,
+            ),
             target=OkxDemoTargetSummary(
                 target_id="OKX_DEMO",
                 label="OKX_DEMO / 模拟盘",
@@ -299,7 +335,7 @@ class OkxDemoObservabilityService:
             acceptance_reason=(
                 "DeepSeek、策略、回测、评分、批准、信号、订单、成交、账户和权威对账证据全部就绪。"
                 if acceptable
-                else "完整持久链、订单证据、账户快照或运行门禁仍不完整；空结果、历史记录、部分记录和 UNKNOWN 均不能验收。"
+                else "完整持久链、订单证据、账户快照或运行门禁仍不完整；空结果、历史记录、截断窗口、部分记录和 UNKNOWN 均不能验收。"
             ),
         )
 

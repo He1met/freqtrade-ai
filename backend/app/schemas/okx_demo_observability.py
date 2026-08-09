@@ -183,10 +183,23 @@ class OkxDemoLineageSummary(BaseModel):
     model_config = {"extra": "forbid"}
 
 
+class OkxDemoProjectionScope(BaseModel):
+    as_of: datetime
+    requested_limit: int = Field(gt=0)
+    intent_total_count: int = Field(ge=0)
+    intent_returned_count: int = Field(ge=0)
+    order_total_count: int = Field(ge=0)
+    order_returned_count: int = Field(ge=0)
+    truncated: bool
+
+    model_config = {"extra": "forbid"}
+
+
 class OkxDemoObservabilityResponse(BaseModel):
     generated_at: datetime
     source_type: Literal["api_aggregate"]
     core_data: Literal[True]
+    scope: OkxDemoProjectionScope
     target: OkxDemoTargetSummary
     readiness: list[OkxDemoReadinessCheck]
     intents: list[OkxDemoTradeIntentSummary]

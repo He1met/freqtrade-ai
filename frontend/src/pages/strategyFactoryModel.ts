@@ -1,4 +1,121 @@
-import type { FormalResearchRun, StrategyResearchBatch } from "../api/strategyResearchApi";
+import type {
+  CandidateLifecycleRead,
+  CandidateLifecycleSummary,
+  CandidateLifecycleStatus,
+  FormalResearchRun,
+  StrategyResearchBatch,
+  StrategyResearchWorkspace,
+} from "../api/strategyResearchApi";
+
+const lifecycleStatuses = new Set<CandidateLifecycleStatus>([
+  "NOT_APPLICABLE_REJECTED",
+  "NOT_APPLICABLE_VALIDATION_FAILED",
+  "UNBRIDGED_REVALIDATION_REQUIRED",
+  "BRIDGED_PENDING_CANONICAL_VALIDATION",
+  "BRIDGED_PENDING_APPROVAL",
+  "BRIDGED_APPROVAL_REJECTED",
+  "APPROVED_NOT_DEPLOYED",
+  "DEPLOYED_ACTIVE_DEMO",
+  "DEPLOYED_DISABLED",
+  "UNKNOWN",
+]);
+
+export type LifecycleStepState = "COMPLETE" | "CURRENT" | "BLOCKED" | "UNKNOWN" | "NOT_APPLICABLE";
+
+export type LifecycleDisplay = {
+  label: string;
+  detail: string;
+  status: CandidateLifecycleStatus;
+  steps: [LifecycleStepState, LifecycleStepState, LifecycleStepState, LifecycleStepState];
+};
+
+export function strictCandidateLifecycleStatus(value: unknown): CandidateLifecycleStatus {
+  return typeof value === "string" && lifecycleStatuses.has(value as CandidateLifecycleStatus)
+    ? value as CandidateLifecycleStatus
+    : "UNKNOWN";
+}
+
+export function candidateLifecycleDisplay(value: unknown): LifecycleDisplay {
+  const status = strictCandidateLifecycleStatus(value);
+  const displays: Record<CandidateLifecycleStatus, Omit<LifecycleDisplay, "status">> = {
+    NOT_APPLICABLE_REJECTED: {
+      label: "质量门拒绝",
+      detail: "候选未通过质量门，不进入 canonical bridge。",
+      steps: ["BLOCKED", "NOT_APPLICABLE", "NOT_APPLICABLE", "NOT_APPLICABLE"],
+    },
+    NOT_APPLICABLE_VALIDATION_FAILED: {
+      label: "验证失败",
+      detail: "候选验证未完成，不进入 canonical bridge。",
+      steps: ["BLOCKED", "NOT_APPLICABLE", "NOT_APPLICABLE", "NOT_APPLICABLE"],
+    },
+    UNBRIDGED_REVALIDATION_REQUIRED: {
+      label: "需补充 Blueprint v2 证据",
+      detail: "尚未建立确定性等价 bridge；不能提升为 canonical 策略。",
+      steps: ["COMPLETE", "BLOCKED", "NOT_APPLICABLE", "NOT_APPLICABLE"],
+    },
+    BRIDGED_PENDING_CANONICAL_VALIDATION: {
+      label: "已桥接，待 canonical 验证",
+      detail: "仅确认 Blueprint v2 等价与 canonical 身份；尚未进入批准或部署。",
+      steps: ["COMPLETE", "COMPLETE", "CURRENT", "NOT_APPLICABLE"],
+    },
+    BRIDGED_PENDING_APPROVAL: {
+      label: "已桥接，待批准",
+      detail: "canonical 验证已完成，尚无明确批准证据。",
+      steps: ["COMPLETE", "COMPLETE", "CURRENT", "NOT_APPLICABLE"],
+    },
+    BRIDGED_APPROVAL_REJECTED: {
+      label: "批准未通过",
+      detail: "Bridge 证据保留，但批准已拒绝、过期或撤销；不得部署。",
+      steps: ["COMPLETE", "COMPLETE", "BLOCKED", "NOT_APPLICABLE"],
+    },
+    APPROVED_NOT_DEPLOYED: {
+      label: "已批准，未部署",
+      detail: "已有明确批准证据，尚无 OKX_DEMO ACTIVE 部署。",
+      steps: ["COMPLETE", "COMPLETE", "COMPLETE", "CURRENT"],
+    },
+    DEPLOYED_ACTIVE_DEMO: {
+      label: "Demo 运行中",
+      detail: "权威投影确认 OKX_DEMO ACTIVE 部署。",
+      steps: ["COMPLETE", "COMPLETE", "COMPLETE", "COMPLETE"],
+    },
+    DEPLOYED_DISABLED: {
+      label: "Demo 部署已停用",
+      detail: "权威投影确认部署记录存在但当前不是 ACTIVE。",
+      steps: ["COMPLETE", "COMPLETE", "COMPLETE", "BLOCKED"],
+    },
+    UNKNOWN: {
+      label: "生命周期未知",
+      detail: "权威 bridge 投影缺失或不可用；页面不从候选状态推断。",
+      steps: ["UNKNOWN", "UNKNOWN", "UNKNOWN", "UNKNOWN"],
+    },
+  };
+  return { status, ...displays[status] };
+}
+
+export function candidateLifecycleFor(
+  workspace: StrategyResearchWorkspace | null | undefined,
+  candidateId: number,
+): CandidateLifecycleRead | null {
+  if (workspace?.sections?.bridge?.status !== "AVAILABLE") return null;
+  return workspace.candidate_lifecycles?.find((item) => item.candidate_id === candidateId) ?? null;
+}
+
+export function lifecycleSummaryLabel(
+  summary: CandidateLifecycleSummary | null | undefined,
+): string {
+  if (!summary) return "未知";
+  return {
+    NOT_EVALUATED: "尚未评估",
+    NOT_QUEUED_NO_QUALIFIED: "无合格候选",
+    UNBRIDGED_REVALIDATION_REQUIRED: "需补充 Blueprint v2 证据",
+    BRIDGED_PENDING_CANONICAL_VALIDATION: "已桥接，待 canonical 验证",
+    BRIDGED_PENDING_APPROVAL: "已桥接，待人工审批",
+    APPROVED_NOT_DEPLOYED: "已批准，未部署",
+    DEPLOYED_ACTIVE_DEMO: "Demo 运行中",
+    MIXED: "候选处于多个阶段",
+    UNKNOWN: "未知",
+  }[summary.status];
+}
 
 export function hasOfficialAggressiveContract(run: FormalResearchRun | null): boolean {
   const contract = run?.quality_contract;
@@ -12,17 +129,32 @@ export function hasOfficialAggressiveContract(run: FormalResearchRun | null): bo
     && contract.slippage_per_side === 0.0002;
 }
 
+export function hasOfficialSafetyContract(run: FormalResearchRun | null): boolean {
+  const safety = run?.safety;
+  return safety?.execution_target === "OKX_DEMO"
+    && safety.allow_real_funds === false
+    && safety.real_orders === false
+    && safety.credentials_collected === false
+    && safety.dry_run_trading_authorized === false
+    && safety.grant_authorized === false
+    && safety.manual_order_authorized === false;
+}
+
 export function validatedCandidateCount(batch: StrategyResearchBatch): number {
   return batch.candidates.filter((candidate) => candidate.status !== "VALIDATION_FAILED").length;
 }
 
-export function deploymentHandoffText(batch: StrategyResearchBatch): string {
-  return batch.qualified_count > 0 && validatedCandidateCount(batch) === batch.persisted_count
-    ? "已由 QUALIFIED 持久化状态进入既有自动部署评审队列"
-    : "未进入（本批次没有具备完整生命周期证据的 QUALIFIED 候选）";
+export function deploymentHandoffText(run: FormalResearchRun | null): string {
+  if (run?.deployment_handoff_status === "CANONICAL_LINK_UNAVAILABLE") {
+    return "已有 QUALIFIED 候选，但正式生命周期衔接证据尚不可用";
+  }
+  if (run?.deployment_handoff_status === "NOT_QUEUED_NO_QUALIFIED") {
+    return "未交接：本批次没有 QUALIFIED 候选";
+  }
+  return "未知：尚无权威部署交接状态";
 }
 
 export function canStartFormalResearch(run: FormalResearchRun | null, submitting: boolean): boolean {
   return !submitting && run?.status === "READY" && !run.active
-    && hasOfficialAggressiveContract(run);
+    && hasOfficialAggressiveContract(run) && hasOfficialSafetyContract(run);
 }

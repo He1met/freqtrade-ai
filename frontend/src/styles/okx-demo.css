@@ -1,156 +1,104 @@
 .okx-demo-page {
-  max-width: 1440px;
-  display: grid;
-  gap: 22px;
+  max-width: 1320px;
 }
 
-.okx-target-bar {
+.okx-readiness-disclosure,
+.okx-live-readiness {
+  padding: 0;
+  overflow: hidden;
+}
+
+.okx-readiness-disclosure > summary,
+.okx-live-readiness > summary {
   display: flex;
-  min-height: 148px;
+  min-height: 64px;
   align-items: center;
   justify-content: space-between;
-  gap: 24px;
-  border: 1px solid #194d39;
-  border-radius: 18px;
-  padding: 26px 30px;
-  background:
-    radial-gradient(circle at 78% 0%, rgba(242, 193, 78, 0.2), transparent 38%),
-    linear-gradient(135deg, #10241b, #1d3f2f);
-  color: #f6fbf5;
-  box-shadow: 0 18px 44px rgba(16, 36, 27, 0.15);
-}
-
-.okx-target-bar h1 {
-  margin: 5px 0;
-  font-size: 32px;
-}
-
-.okx-target-bar p {
-  margin: 0;
-  color: #c9ddd0;
-}
-
-.okx-kicker {
-  color: #779083;
-  font-size: 11px;
-  font-weight: 850;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-}
-
-.okx-target-bar .okx-kicker {
-  color: #b6cabe;
-}
-
-.okx-target-safety {
-  display: grid;
-  min-width: 190px;
-  gap: 6px;
-  border: 1px solid rgba(242, 193, 78, 0.42);
-  border-radius: 13px;
-  padding: 14px 18px;
-  background: rgba(8, 22, 15, 0.42);
-}
-
-.okx-target-safety span {
-  color: #f2c14e;
-  font-size: 12px;
-  font-weight: 900;
-  letter-spacing: 0.16em;
-}
-
-.okx-section-heading {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
   gap: 16px;
+  cursor: pointer;
+  padding: 14px 18px;
+  list-style: none;
 }
 
-.okx-section-heading h2 {
-  margin: 3px 0 0;
-  font-size: 20px;
+.okx-readiness-disclosure > summary::-webkit-details-marker,
+.okx-live-readiness > summary::-webkit-details-marker {
+  display: none;
 }
 
-.okx-section-heading > span {
-  color: #64736a;
-  font-size: 12px;
-}
-
-.okx-readiness {
+.okx-readiness-disclosure > summary > span:first-child,
+.okx-live-readiness > summary > span:first-child {
   display: grid;
-  gap: 13px;
+  gap: 4px;
+}
+
+.okx-readiness-disclosure > summary strong,
+.okx-live-readiness > summary strong {
+  color: var(--formal-ink);
+  font-size: 15px;
+}
+
+.okx-readiness-disclosure > summary small,
+.okx-live-readiness > summary small {
+  color: var(--formal-muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.okx-readiness-disclosure[open] > summary,
+.okx-live-readiness[open] > summary {
+  border-bottom: 1px solid var(--formal-border);
 }
 
 .okx-readiness-grid {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
+  padding: 14px 18px 18px;
 }
 
 .okx-readiness-grid article {
   min-width: 0;
-  border: 1px solid #d5ddd6;
-  border-radius: 12px;
+  border: 1px solid var(--formal-border);
+  border-radius: 9px;
+  background: var(--formal-surface-soft);
   padding: 13px;
-  background: #fff;
 }
 
 .okx-readiness-grid header {
-  display: grid;
-  gap: 9px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
 }
 
 .okx-readiness-grid p {
-  min-height: 48px;
-  margin: 11px 0 7px;
+  margin: 10px 0 5px;
   color: #435148;
-  font-size: 13px;
-  line-height: 1.45;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .okx-readiness-grid small {
-  display: block;
-  color: #8a5b14;
-  line-height: 1.4;
-}
-
-.okx-acceptance {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18px;
-  border-left: 4px solid #d79b26;
-  border-radius: 10px;
-  padding: 16px 18px;
-  background: #fff7e7;
-}
-
-.okx-acceptance strong {
-  display: block;
-  margin-top: 3px;
-  font-size: 17px;
-}
-
-.okx-acceptance p {
-  margin: 4px 0 0;
-  color: #675229;
+  color: #805516;
+  font-size: 11px;
+  line-height: 1.45;
 }
 
 .okx-workspace {
   display: grid;
+  min-width: 0;
   grid-template-columns: minmax(0, 1.55fr) minmax(340px, 0.85fr);
-  gap: 14px;
   align-items: start;
+  gap: 14px;
 }
 
 .okx-master,
 .okx-detail,
 .okx-secondary-grid > article {
   min-width: 0;
-  border: 1px solid #d6ded7;
-  border-radius: 14px;
-  background: #fff;
-  box-shadow: 0 8px 24px rgba(32, 51, 40, 0.06);
+  border: 1px solid var(--formal-border);
+  border-radius: 12px;
+  background: var(--formal-surface);
 }
 
 .okx-master {
@@ -158,29 +106,65 @@
 }
 
 .okx-order-table-wrap {
-  margin-top: 14px;
+  max-width: 100%;
+  margin-top: 10px;
   overflow-x: auto;
+}
+
+.okx-scroll-hint {
+  display: none;
+  margin: 0 0 8px;
+  color: var(--formal-muted);
+  font-size: 11px;
+}
+
+.okx-technical-evidence {
+  margin-top: 16px;
+}
+
+.okx-technical-evidence > section {
+  margin-top: 0;
+  padding: 14px 0 0;
+}
+
+.okx-order-select {
+  display: grid;
+  min-height: 44px;
+  width: 100%;
+  gap: 3px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: 0;
+  text-align: left;
+}
+
+.okx-order-select:focus-visible {
+  outline: 3px solid rgba(31, 111, 74, 0.28);
+  outline-offset: 2px;
 }
 
 .okx-order-table {
   width: 100%;
-  min-width: 840px;
+  min-width: 820px;
   border-collapse: collapse;
   font-size: 13px;
 }
 
 .okx-order-table th {
-  padding: 10px 9px;
-  border-bottom: 1px solid #d9e1da;
+  border-bottom: 1px solid var(--formal-border);
   color: #65736a;
+  padding: 10px 9px;
   font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
   text-align: left;
-  text-transform: uppercase;
 }
 
 .okx-order-table td {
-  padding: 12px 9px;
   border-bottom: 1px solid #edf0ed;
+  padding: 12px 9px;
   vertical-align: middle;
 }
 
@@ -191,7 +175,12 @@
 .okx-order-table tbody tr:hover,
 .okx-order-table tbody tr[aria-selected="true"] {
   background: #f1f6f2;
-  box-shadow: inset 3px 0 #296348;
+  box-shadow: inset 3px 0 var(--formal-brand);
+}
+
+.okx-order-table tbody tr:focus-visible {
+  outline: 3px solid rgba(31, 111, 74, 0.2);
+  outline-offset: -3px;
 }
 
 .okx-order-table td small {
@@ -215,17 +204,20 @@
 
 .okx-detail h2 {
   margin: 3px 0 0;
+  color: var(--formal-ink);
+  font-size: 20px;
 }
 
 .okx-detail section {
-  padding-top: 16px;
   border-top: 1px solid #e2e7e3;
   margin-top: 16px;
+  padding-top: 16px;
 }
 
 .okx-detail h3 {
   margin: 0 0 11px;
-  font-size: 15px;
+  color: var(--formal-ink);
+  font-size: 14px;
 }
 
 .okx-detail-grid {
@@ -246,18 +238,26 @@
   font-weight: 650;
 }
 
+.okx-kicker {
+  color: #65756b;
+  font-size: 11px;
+  font-weight: 850;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
 .okx-conclusion,
 .okx-action-reason {
   border-radius: 8px;
-  padding: 10px 12px;
-  background: #fff1d6;
+  background: #fff4df;
   color: #745018;
-  font-size: 13px;
-  line-height: 1.45;
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .okx-conclusion-ready {
-  background: #e2f2ea;
+  background: #e7f2eb;
   color: #19623b;
 }
 
@@ -270,8 +270,8 @@
   display: grid;
   gap: 3px;
   border-radius: 8px;
+  background: var(--formal-surface-soft);
   padding: 10px;
-  background: #f4f7f4;
 }
 
 .okx-fill-list span {
@@ -291,8 +291,8 @@
 .okx-lineage span:nth-child(odd) {
   border: 1px solid #c8d8cc;
   border-radius: 999px;
-  padding: 5px 8px;
   background: #eff5f0;
+  padding: 5px 8px;
 }
 
 .okx-secondary-grid {
@@ -305,6 +305,10 @@
   padding: 17px;
 }
 
+.okx-secondary-grid h2 {
+  margin: 0;
+}
+
 .okx-position-list {
   display: grid;
   gap: 8px;
@@ -313,8 +317,8 @@
 
 .okx-position-list > div {
   border-radius: 8px;
+  background: var(--formal-surface-soft);
   padding: 10px;
-  background: #f4f7f4;
 }
 
 .okx-position-list dd {
@@ -325,26 +329,59 @@
 .okx-position-list small,
 .okx-muted {
   color: #6d7a72;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
-.okx-empty,
-.okx-load-state {
+.okx-empty {
   margin-top: 14px;
   border: 1px dashed #c9d2cb;
   border-radius: 10px;
+  background: #f7f9f7;
   padding: 24px;
   text-align: center;
-  background: #f7f9f7;
 }
 
-.okx-empty p,
-.okx-load-state p {
+.okx-empty p {
   margin-bottom: 0;
   color: #66736b;
 }
 
-@media (max-width: 1320px) {
-  .okx-readiness-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
+.okx-live-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  padding: 16px 18px 18px;
+}
+
+.okx-live-grid p {
+  margin: 0;
+  border-left: 3px solid #a9b6ad;
+  color: var(--formal-muted);
+  padding-left: 12px;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+@media (max-width: 1120px) {
+  .okx-workspace { grid-template-columns: 1fr; }
+  .okx-detail { position: static; }
+  .okx-secondary-grid { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 760px) {
+  .okx-readiness-grid,
+  .okx-live-grid { grid-template-columns: 1fr; }
+  .okx-readiness-disclosure > summary,
+  .okx-live-readiness > summary { align-items: flex-start; }
+  .okx-workspace { display: block; }
+  .okx-scroll-hint { display: block; }
+  .okx-detail { margin-top: 12px; }
+}
+
+@media (max-width: 520px) {
+  .okx-detail-grid { grid-template-columns: 1fr; }
+  .okx-master,
+  .okx-detail,
+  .okx-secondary-grid > article { padding: 14px; }
 }

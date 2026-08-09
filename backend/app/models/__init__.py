@@ -51,7 +51,13 @@ from app.models.strategy_failure_reason import StrategyFailureReason
 from app.models.strategy_score import StrategyScore
 from app.models.strategy_deployment import SignalEvaluation, StrategyDeployment
 from app.models.strategy_generation_run import StrategyGenerationRun
-from app.models.strategy_research import StrategyResearchBatch, StrategyResearchCandidate
+from app.models.strategy_research import (
+    MarketDataQualityReceipt,
+    StrategyResearchAttemptEvent,
+    StrategyResearchBatch,
+    StrategyResearchCandidate,
+    StrategyResearchCandidateBridgeEvent,
+)
 from app.models.strategy_validation import StrategyValidationPlan, StrategyValidationWindow
 
 __all__ = [
@@ -73,6 +79,7 @@ __all__ = [
     "OkxDemoTrustedSnapshot",
     "LocalTestBatch",
     "LocalTestDbEvent",
+    "MarketDataQualityReceipt",
     "OkxOrderWriteAttempt",
     "OkxDemoCanaryConsentHandoff",
     "OkxDemoCanaryLifecycle",
@@ -104,6 +111,8 @@ __all__ = [
     "StrategyGenerationRun",
     "StrategyResearchBatch",
     "StrategyResearchCandidate",
+    "StrategyResearchCandidateBridgeEvent",
+    "StrategyResearchAttemptEvent",
     "StrategyScore",
     "StrategyVersion",
     "StrategyValidationPlan",

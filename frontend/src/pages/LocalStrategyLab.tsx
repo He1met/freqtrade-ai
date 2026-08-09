@@ -268,7 +268,6 @@ export function LocalStrategyLab() {
   return (
     <section className="page local-strategy-lab">
       <PageHeader
-        description="输入策略约束并提交本地生成请求；只有完整 API/DB 持久证据才会显示为成功。"
         status={
           <StatusBadge
             label={submissionDisplay.label}

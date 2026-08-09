@@ -1,8 +1,9 @@
-import { useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 
-import { combineDataSources } from "../api/sourceState";
 import type { DataSourceTraceSummary } from "../api/types";
 import { useMvpData } from "../api/useMvpData";
+import { useFormalReadModels } from "../api/useFormalReadModels";
+import { useFormalCatalogData } from "../api/useFormalCatalogData";
 import {
   CompactText,
   CopyableValue,
@@ -63,15 +64,22 @@ function SourceTraceCard({
 }
 
 export function StrategyDetail() {
+  const { runtimeActivity } = useFormalReadModels();
   const { strategyId } = useParams();
-  const { data, sources, isLoading, error } = useMvpData();
-  const source = combineDataSources(sources, ["strategies", "failureReasons", "versionLineage"]);
-  const strategy = data.strategies.find((item) => item.id === strategyId);
+  const catalog = useFormalCatalogData();
+  const mvp = useMvpData();
+  const source = catalog.strategies.error ? "failed" : "api";
+  const isLoading = catalog.strategies.loading;
+  const error = catalog.strategies.error;
+  const strategy = catalog.strategies.data?.find((item) => item.id === strategyId);
   const currentVersionId = strategy?.currentVersion?.id;
+  const activeDeployment = runtimeActivity.data?.active_deployments.find(
+    (deployment) => String(deployment.strategy_id) === strategy?.id,
+  ) ?? null;
   const currentVersionTrace =
-    data.strategyVersions.find((version) => version.id === currentVersionId)?.dataSource ??
+    catalog.strategyVersions.data?.find((version) => version.id === currentVersionId)?.dataSource ??
     strategy?.currentVersion?.dataSource;
-  const versionLineage = data.versionLineage
+  const versionLineage = mvp.data.versionLineage
     .filter((entry) => entry.strategyId === strategy?.id)
     .sort((left, right) => left.versionNumber - right.versionNumber);
   const currentLineage = versionLineage.find((entry) => entry.id === currentVersionId);
@@ -82,7 +90,7 @@ export function StrategyDetail() {
     : "缺失";
   const currentDiffEntries = Object.entries(currentLineage?.diffSnapshot ?? {});
   const validationErrors = strategy?.currentVersion?.validationErrors ?? [];
-  const failureReasons = data.failureReasons.filter((reason) => {
+  const failureReasons = mvp.data.failureReasons.filter((reason) => {
     if (reason.strategyId !== strategy?.id) {
       return false;
     }
@@ -94,6 +102,7 @@ export function StrategyDetail() {
     return (
       <section className="page strategy-page">
         <PageHeader
+          actions={<Link className="formal-text-link" to="/strategies">返回策略工厂</Link>}
           title="策略详情"
           description="查看策略概要、当前版本和可追溯技术证据。"
           status={<StatusBadge label={displayLoadState(isLoading, source)} status={isLoading ? "RUNNING" : source} />}
@@ -124,12 +133,13 @@ export function StrategyDetail() {
   return (
     <section className="page strategy-page">
       <PageHeader
+        actions={<Link className="formal-text-link" to="/strategies">返回策略工厂</Link>}
         eyebrow="策略详情"
         title={strategy.name}
         description="概要与当前版本优先；来源、谱系和 Diff 可按需审计。"
         status={
           <>
-            <StatusBadge showRaw status={strategy.status} />
+            <StatusBadge status={strategy.status} />
             <StatusBadge label={displayLoadState(isLoading, source)} status={isLoading ? "RUNNING" : source} />
           </>
         }
@@ -141,9 +151,16 @@ export function StrategyDetail() {
         source={source}
       />
       <section className="strategy-detail-overview" aria-label="策略与当前版本概要">
+        <article className="strategy-overview-card">
+          <span>OKX_DEMO 部署</span>
+          {runtimeActivity.loading ? <strong>读取中</strong>
+            : runtimeActivity.error ? <StatusBadge label="未知" status="UNKNOWN" />
+              : activeDeployment ? <><StatusBadge status="ACTIVE" /><strong>槽位 {activeDeployment.active_slot}</strong><small>{activeDeployment.instrument_id} · {activeDeployment.timeframe}</small></>
+                : <><StatusBadge label="未关联 ACTIVE" status="NOT_RUN" /><p>只读投影中没有关联的 OKX_DEMO ACTIVE 部署；不代表从未部署。</p></>}
+        </article>
         <article className={availability.isProblem ? "strategy-overview-card strategy-overview-problem" : "strategy-overview-card"}>
           <span>当前是否可用</span>
-          <StatusBadge showRaw status={availability.status} />
+          <StatusBadge status={availability.status} />
           <p>{availability.reason ?? "当前版本未发现阻塞或校验失败。"}</p>
         </article>
         <article className="strategy-overview-card">
@@ -151,8 +168,11 @@ export function StrategyDetail() {
           {strategy.currentVersion ? (
             <>
               <strong>v{strategy.currentVersion.versionNumber}</strong>
-              <StatusBadge showRaw status={strategy.currentVersion.validationStatus} />
-              <CopyableValue label="策略文件路径" value={strategy.currentVersion.filePath} />
+              <StatusBadge status={strategy.currentVersion.validationStatus} />
+              <details className="formal-disclosure">
+                <summary>查看策略文件路径</summary>
+                <CopyableValue label="策略文件路径" value={strategy.currentVersion.filePath} />
+              </details>
             </>
           ) : (
             <>
@@ -174,7 +194,10 @@ export function StrategyDetail() {
           <span>策略说明</span>
           <p>{displayValue(strategy.description)}</p>
         </div>
-        <CopyableValue label="策略 ID" value={strategy.id} />
+        <details className="formal-disclosure">
+          <summary>查看策略 ID</summary>
+          <CopyableValue label="策略 ID" value={strategy.id} />
+        </details>
       </section>
 
       {problemCount > 0 ? (

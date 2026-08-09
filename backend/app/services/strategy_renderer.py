@@ -1,5 +1,7 @@
 from app.schemas.strategy_blueprint import SignalRule, StrategyBlueprint
 
+STRATEGY_RENDERER_VERSION = "strategy-renderer-v2.1"
+
 
 class StrategyCodeRenderer:
     def render(self, blueprint: StrategyBlueprint) -> str:

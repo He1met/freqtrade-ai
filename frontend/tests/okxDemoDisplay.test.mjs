@@ -10,6 +10,15 @@ import { normalizeOkxDemoObservability } from "../src/api/okxDemoApi.ts";
 function rawPayload() {
   return {
     generated_at: "2026-07-27T08:00:00Z",
+    scope: {
+      as_of: "2026-07-27T08:00:00Z",
+      requested_limit: 100,
+      intent_total_count: 1,
+      intent_returned_count: 1,
+      order_total_count: 1,
+      order_returned_count: 1,
+      truncated: false,
+    },
     source_type: "api_aggregate",
     core_data: true,
     target: {

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ import re
 import subprocess
 import sys
 from typing import Any, Callable, Optional
+import uuid
 
 from sqlalchemy.orm import Session
 
@@ -16,11 +18,32 @@ from app.adapters.freqtrade.binary import resolve_freqtrade_binary
 from app.core.config import Settings, get_settings
 from app.repositories.strategy_research import StrategyResearchRepository
 from app.schemas.strategy_research import FormalResearchRunRead
+from app.models.strategy_research import StrategyResearchAttemptEvent
+from app.services.market_data_quality import inspect_market_data
 
 
 EXPECTED_CANDIDATE_COUNT = 10
 OWNERSHIP_SCHEMA = "freqtrade-ai-formal-research-ownership-v1"
 STATE_SCHEMA = "freqtrade-ai-formal-research-state-v1"
+WORKER_DEADLINE_SECONDS = 60 * 60
+WORKER_HEARTBEAT_INTERVAL_SECONDS = 5
+WORKER_HEARTBEAT_STALE_SECONDS = 20
+WORKER_TERMINATION_GRACE_SECONDS = 10
+NON_REPLAYABLE_TERMINAL_CODES = {
+    "COMPLETED",
+    "RESEARCH_PROCESS_FAILED",
+    "WORKER_DEADLINE_EXCEEDED",
+    "WORKER_INTERRUPTED",
+    "WORKER_INTERNAL_ERROR",
+    "PROCESS_GROUP_CLEANUP_UNCONFIRMED",
+}
+VALID_PHASES = {"STARTING", "RUNNING", "TERMINATING", "FINISHED"}
+VALID_CLEANUP_STATUSES = {
+    "NOT_REQUIRED",
+    "TERM_CONFIRMED",
+    "KILL_CONFIRMED",
+    "UNCONFIRMED",
+}
 
 
 def _utc_now() -> datetime:
@@ -46,6 +69,10 @@ def _parse_datetime(value: object) -> Optional[datetime]:
         return _aware(datetime.fromisoformat(value.replace("Z", "+00:00")))
     except ValueError:
         return None
+
+
+def _state_enum(value: object, allowed: set[str]) -> Optional[str]:
+    return value if isinstance(value, str) and value in allowed else None
 
 
 class FormalStrategyResearchCoordinator:
@@ -98,7 +125,139 @@ class FormalStrategyResearchCoordinator:
 
     def _blocked(self, code: str, reason: str) -> FormalResearchRunRead:
         return FormalResearchRunRead(
-            status="BLOCKED", reason_code=code, reason=reason, active=False
+            status="BLOCKED",
+            reason_code=code,
+            reason=reason,
+            active=False,
+            requested_count=0,
+        )
+
+    def _append_attempt_event(
+        self,
+        db: Session,
+        *,
+        attempt_id: str,
+        sequence: int,
+        trigger: str,
+        phase: str,
+        outcome: str,
+        reason_code: str,
+        reason: str,
+        requested_count: int,
+        run_id: Optional[str] = None,
+        quality_receipt_id: Optional[int] = None,
+    ) -> StrategyResearchAttemptEvent:
+        evidence = {
+            "execution_target": "OKX_DEMO",
+            "allow_real_funds": False,
+            "real_orders": False,
+            "candidate_contract_count": EXPECTED_CANDIDATE_COUNT,
+        }
+        identity = {
+            "attempt_id": attempt_id,
+            "sequence": sequence,
+            "run_id": run_id,
+            "trigger": trigger,
+            "phase": phase,
+            "outcome": outcome,
+            "reason_code": reason_code,
+            "requested_count": requested_count,
+            "market_data_quality_receipt_id": quality_receipt_id,
+            "evidence_snapshot": evidence,
+        }
+        digest = hashlib.sha256(
+            json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        return StrategyResearchRepository(db).append_attempt_event(
+            StrategyResearchAttemptEvent(
+                attempt_id=attempt_id,
+                sequence=sequence,
+                run_id=run_id,
+                market_data_quality_receipt_id=quality_receipt_id,
+                trigger=trigger,
+                phase=phase,
+                outcome=outcome,
+                reason_code=reason_code,
+                redacted_reason=_safe_text(reason),
+                requested_count=requested_count,
+                generated_count=0,
+                validated_count=0,
+                persisted_count=0,
+                qualified_count=0,
+                rejected_count=0,
+                evidence_snapshot=evidence,
+                event_digest=digest,
+            )
+        )
+
+    def _terminalize_orphaned_state(
+        self, db: Session, state: dict[str, Any]
+    ) -> FormalResearchRunRead:
+        """Reconcile one unlocked RUNNING state without replaying its work."""
+
+        run_id = state.get("run_id")
+        batch = (
+            StrategyResearchRepository(db).get_batch_by_run_id(run_id)
+            if isinstance(run_id, str) and run_id
+            else None
+        )
+        completed_at = batch.completed_at if batch is not None else _aware(self.clock())
+        if batch is not None and batch.status == "VALIDATED":
+            status = "COMPLETED"
+            code = "RECOVERED_PERSISTED_BATCH"
+            reason = (
+                "旧运行锁已释放，但对应研究批次已完整持久化；"
+                "已按数据库证据恢复终态，本次不重复启动。"
+            )
+        elif batch is not None and batch.status == "FAILED":
+            status = "FAILED"
+            code = "RECOVERED_FAILED_BATCH"
+            reason = (
+                "旧运行锁已释放，对应失败批次已持久化；"
+                "已按数据库证据恢复终态，本次不重复启动。"
+            )
+        elif batch is not None:
+            status = "BLOCKED"
+            code = "RUN_DATABASE_BATCH_NON_TERMINAL"
+            reason = "旧运行锁已释放，但数据库批次不是终态；拒绝猜测或自动重放。"
+        else:
+            status = "BLOCKED"
+            code = "ORPHANED_RUN_STATE"
+            reason = (
+                "旧运行状态为 RUNNING，但唯一研究锁已释放且没有对应持久化批次；"
+                "已终态化为阻塞，本次不自动重放。"
+            )
+        terminal = {
+            "status": status,
+            "reason_code": code,
+            "reason": reason,
+            "run_id": run_id,
+            "trigger": state.get("trigger"),
+            "started_at": state.get("started_at"),
+            "completed_at": completed_at.isoformat(),
+            "heartbeat_at": state.get("heartbeat_at"),
+            "deadline_at": state.get("deadline_at"),
+            "phase": "FINISHED",
+            "cleanup_status": state.get("cleanup_status") or "NOT_REQUIRED",
+        }
+        counts = self._latest_counts(db, terminal)
+        if not counts:
+            counts = {"requested_count": 0}
+        self._write_state(terminal)
+        return FormalResearchRunRead(
+            status=status,
+            reason_code=code,
+            reason=reason,
+            active=False,
+            run_id=run_id,
+            trigger=state.get("trigger"),
+            started_at=_parse_datetime(state.get("started_at")),
+            heartbeat_at=_parse_datetime(state.get("heartbeat_at")),
+            deadline_at=_parse_datetime(state.get("deadline_at")),
+            completed_at=completed_at,
+            phase="FINISHED",
+            cleanup_status=state.get("cleanup_status") or "NOT_REQUIRED",
+            **counts,
         )
 
     def _preflight(self) -> Optional[FormalResearchRunRead]:
@@ -173,8 +332,8 @@ class FormalStrategyResearchCoordinator:
             candidate.status in {"QUALIFIED", "REJECTED"} for candidate in batch.candidates
         )
         handoff = (
-            "QUEUED_FOR_EXISTING_AUTOMATION"
-            if batch.qualified_count > 0 and validated == batch.generated_count == batch.persisted_count
+            "CANONICAL_LINK_UNAVAILABLE"
+            if batch.qualified_count > 0
             else "NOT_QUEUED_NO_QUALIFIED"
         )
         return {
@@ -195,9 +354,24 @@ class FormalStrategyResearchCoordinator:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
             lock.close()
         if active:
-            status = "RUNNING"
-            code = "ACTIVE_RESEARCH"
-            reason = "已有正式研究正在运行；防重入门禁拒绝重复启动。"
+            now = _aware(self.clock())
+            heartbeat_at = _parse_datetime(state.get("heartbeat_at"))
+            deadline_at = _parse_datetime(state.get("deadline_at"))
+            if deadline_at is not None and deadline_at <= now:
+                status = "BLOCKED"
+                code = "WORKER_DEADLINE_CLEANUP_PENDING"
+                reason = "正式研究已超过执行时限，后台 worker 正在清理子进程；清理确认前禁止重放。"
+            elif (
+                heartbeat_at is not None
+                and now - heartbeat_at > timedelta(seconds=WORKER_HEARTBEAT_STALE_SECONDS)
+            ):
+                status = "BLOCKED"
+                code = "WORKER_HEARTBEAT_STALE"
+                reason = "正式研究锁仍被持有，但 worker 心跳已过期；保持阻塞并等待受控清理。"
+            else:
+                status = "RUNNING"
+                code = "ACTIVE_RESEARCH"
+                reason = "已有正式研究正在运行；防重入门禁拒绝重复启动。"
         elif state.get("status") == "RUNNING":
             status = "BLOCKED"
             code = "RUN_STATE_INCONSISTENT"
@@ -216,41 +390,124 @@ class FormalStrategyResearchCoordinator:
             reason_code=code,
             reason=reason,
             active=active,
+            attempt_id=state.get("attempt_id"),
+            market_data_quality_receipt_id=state.get("market_data_quality_receipt_id"),
             run_id=state.get("run_id"),
             trigger=state.get("trigger"),
             started_at=_parse_datetime(state.get("started_at")),
+            heartbeat_at=_parse_datetime(state.get("heartbeat_at")),
+            deadline_at=_parse_datetime(state.get("deadline_at")),
             completed_at=_parse_datetime(state.get("completed_at")),
+            phase=_state_enum(state.get("phase"), VALID_PHASES),
+            cleanup_status=_state_enum(
+                state.get("cleanup_status"), VALID_CLEANUP_STATUSES
+            ),
             **self._latest_counts(db, state),
         )
 
     def start(self, db: Session, *, trigger: str) -> FormalResearchRunRead:
+        attempt_id = str(uuid.uuid4())
         blocked = self._preflight()
         if blocked is not None:
+            self._append_attempt_event(
+                db,
+                attempt_id=attempt_id,
+                sequence=1,
+                trigger=trigger,
+                phase="PRECHECK",
+                outcome="NOT_GENERATED",
+                reason_code=blocked.reason_code,
+                reason=blocked.reason,
+                requested_count=0,
+            )
+            blocked.attempt_id = attempt_id
             return blocked
         lock = self._try_lock()
         if lock is None:
-            return self._blocked("ACTIVE_RESEARCH", "已有正式研究正在运行；防重入门禁拒绝重复启动。")
+            blocked = self._blocked("ACTIVE_RESEARCH", "已有正式研究正在运行；防重入门禁拒绝重复启动。")
+            self._append_attempt_event(
+                db, attempt_id=attempt_id, sequence=1, trigger=trigger,
+                phase="PRECHECK", outcome="NOT_GENERATED",
+                reason_code=blocked.reason_code, reason=blocked.reason, requested_count=0,
+            )
+            blocked.attempt_id = attempt_id
+            return blocked
         state = self._read_json(self.state_path)
-        if state.get("status") == "RUNNING":
+        if (
+            state.get("cleanup_status") == "UNCONFIRMED"
+            or state.get("reason_code") == "PROCESS_GROUP_CLEANUP_UNCONFIRMED"
+        ):
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
             lock.close()
             return self._blocked(
-                "RUN_STATE_INCONSISTENT",
-                "状态记录为 RUNNING，但唯一研究锁未被持有；拒绝猜测或自动重放。",
+                "PROCESS_GROUP_CLEANUP_UNCONFIRMED",
+                "上一轮研究子进程组未能证明已退出；人工核对前禁止启动任何新研究。",
             )
+        if state.get("status") == "RUNNING":
+            try:
+                return self._terminalize_orphaned_state(db, state)
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                lock.close()
         now = _aware(self.clock())
         slot = now.replace(minute=(now.minute // 15) * 15, second=0, microsecond=0)
         run_id = slot.strftime("%Y%m%d%H%M")
+        if (
+            state.get("run_id") == run_id
+            and state.get("reason_code") in NON_REPLAYABLE_TERMINAL_CODES
+        ):
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            lock.close()
+            return self._blocked(
+                "DUPLICATE_SLOT_STATE",
+                f"15 分钟槽位 {run_id} 已有不可自动重放的终态收据，拒绝再次运行。",
+            )
         if StrategyResearchRepository(db).get_batch_by_run_id(run_id) is not None:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
             lock.close()
-            return self._blocked("DUPLICATE_SLOT", f"15 分钟槽位 {run_id} 已有持久化批次，拒绝重复运行。")
+            blocked = self._blocked("DUPLICATE_SLOT", f"15 分钟槽位 {run_id} 已有持久化批次，拒绝重复运行。")
+            self._append_attempt_event(
+                db, attempt_id=attempt_id, sequence=1, trigger=trigger,
+                phase="PRECHECK", outcome="NOT_GENERATED",
+                reason_code=blocked.reason_code, reason=blocked.reason,
+                requested_count=0, run_id=run_id,
+            )
+            blocked.attempt_id = attempt_id
+            return blocked
         freqtrade, datadir = self._paths()
         if freqtrade is None:  # guarded by _preflight; retain a fail-closed type boundary
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
             lock.close()
             return self._blocked("FREQTRADE_BINARY_MISSING", "正式研究 Freqtrade 可执行文件不存在。")
+        data_file = datadir / "futures" / "BTC_USDT_USDT-15m-futures.feather"
+        quality = inspect_market_data(
+            data_file,
+            repository_root=self.repo,
+            exchange="okx",
+            pair="BTC/USDT:USDT",
+            timeframe="15m",
+            expected_interval_seconds=15 * 60,
+            inspected_at=now,
+        )
+        quality = StrategyResearchRepository(db).append_market_data_quality_receipt(quality)
+        if quality.status != "PASSED":
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            lock.close()
+            blocked = self._blocked(
+                "MARKET_DATA_QUALITY_BLOCKED",
+                "正式研究数据质量门未通过：" + ", ".join(quality.reason_codes),
+            )
+            self._append_attempt_event(
+                db, attempt_id=attempt_id, sequence=1, trigger=trigger,
+                phase="PRECHECK", outcome="NOT_GENERATED",
+                reason_code=blocked.reason_code, reason=blocked.reason,
+                requested_count=0, run_id=run_id, quality_receipt_id=quality.id,
+            )
+            blocked.attempt_id = attempt_id
+            blocked.market_data_quality_receipt_id = quality.id
+            return blocked
         started_at = now.isoformat()
+        deadline_at = (now + timedelta(seconds=WORKER_DEADLINE_SECONDS)).isoformat()
         self._write_state(
             {
                 "status": "RUNNING",
@@ -259,6 +516,12 @@ class FormalStrategyResearchCoordinator:
                 "run_id": run_id,
                 "trigger": trigger,
                 "started_at": started_at,
+                "heartbeat_at": started_at,
+                "deadline_at": deadline_at,
+                "phase": "STARTING",
+                "cleanup_status": "NOT_REQUIRED",
+                "attempt_id": attempt_id,
+                "market_data_quality_receipt_id": quality.id,
             }
         )
         worker = self.repo / "scripts/formal_strategy_research_worker.py"
@@ -272,7 +535,21 @@ class FormalStrategyResearchCoordinator:
             "--datadir", str(datadir),
             "--repository-commit", self._repository_commit(),
             "--state-path", str(self.state_path),
+            "--started-at", started_at,
+            "--deadline-at", deadline_at,
+            "--deadline-seconds", str(WORKER_DEADLINE_SECONDS),
+            "--heartbeat-seconds", str(WORKER_HEARTBEAT_INTERVAL_SECONDS),
+            "--termination-grace-seconds", str(WORKER_TERMINATION_GRACE_SECONDS),
+            "--attempt-id", attempt_id,
+            "--market-data-quality-receipt-id", str(quality.id),
+            "--expected-market-data-sha256", quality.file_sha256,
         ]
+        self._append_attempt_event(
+            db, attempt_id=attempt_id, sequence=1, trigger=trigger,
+            phase="STARTED", outcome="RUNNING", reason_code="STARTED",
+            reason="正式研究已进入后台执行。", requested_count=10,
+            run_id=run_id, quality_receipt_id=quality.id,
+        )
         try:
             self.popen(
                 command,
@@ -291,6 +568,10 @@ class FormalStrategyResearchCoordinator:
                 "status": "BLOCKED", "reason_code": "WORKER_START_FAILED", "reason": reason,
                 "run_id": run_id, "trigger": trigger, "started_at": started_at,
                 "completed_at": _aware(self.clock()).isoformat(),
+                "heartbeat_at": _aware(self.clock()).isoformat(),
+                "deadline_at": deadline_at,
+                "phase": "FINISHED",
+                "cleanup_status": "NOT_REQUIRED",
             })
             return self._blocked("WORKER_START_FAILED", reason)
         lock.close()
@@ -299,9 +580,15 @@ class FormalStrategyResearchCoordinator:
             reason_code="STARTED",
             reason="正式研究已进入后台执行；页面轮询同一持久化状态，不会重复提交。",
             active=True,
+            attempt_id=attempt_id,
+            market_data_quality_receipt_id=quality.id,
             run_id=run_id,
             trigger=trigger,
             started_at=now,
+            heartbeat_at=now,
+            deadline_at=_parse_datetime(deadline_at),
+            phase="STARTING",
+            cleanup_status="NOT_REQUIRED",
         )
 
     def _repository_commit(self) -> str:

@@ -464,7 +464,7 @@ export function LiveGovernance() {
         description="只读核对候选资格、人工审批、阻断原因和治理证据。"
         eyebrow="治理与安全"
         status={<StatusBadge label={displayLoadState(isLoading, source)} status={isLoading ? "running" : source} />}
-        title="实盘候选治理"
+        title="候选治理证据（只读 / 未来能力）"
       />
       <FallbackNotice
         context="Live Governance 实盘候选、审批、部署治理、回滚计划和监控快照。"
