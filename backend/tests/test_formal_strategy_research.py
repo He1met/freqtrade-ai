@@ -6,7 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.core.config import get_settings
-from app.models import Base
+from app.models import Base, StrategyResearchBatch
 from app.services.formal_strategy_research import FormalStrategyResearchCoordinator
 
 
@@ -68,6 +68,9 @@ def test_formal_research_fails_closed_without_fresh_ownership(tmp_path, monkeypa
         result = coordinator.start(db, trigger="manual")
     assert result.status == "BLOCKED"
     assert result.reason_code == "OWNERSHIP_EVIDENCE_MISSING_OR_STALE"
+    assert result.requested_count == 0
+    assert result.generated_count == 0
+    assert result.persisted_count == 0
 
 
 def test_formal_research_rejects_unsafe_dry_run_configuration(tmp_path, monkeypatch):
@@ -128,6 +131,9 @@ def test_formal_research_reports_exact_candidate_count_blocker(tmp_path, monkeyp
 
 def test_formal_research_does_not_replay_inconsistent_running_state(tmp_path, monkeypatch):
     coordinator = build_coordinator(tmp_path, monkeypatch)
+    calls = []
+    coordinator.popen = lambda command, **kwargs: calls.append((command, kwargs)) or object()
+    coordinator._repository_commit = lambda: "a" * 40
     coordinator.state_path.write_text(
         json.dumps(
             {
@@ -139,6 +145,71 @@ def test_formal_research_does_not_replay_inconsistent_running_state(tmp_path, mo
         )
     )
     with db_session() as db:
+        observed = coordinator.status(db)
+        assert observed.reason_code == "RUN_STATE_INCONSISTENT"
+        assert json.loads(coordinator.state_path.read_text())["status"] == "RUNNING"
+
         result = coordinator.start(db, trigger="manual")
-    assert result.status == "BLOCKED"
-    assert result.reason_code == "RUN_STATE_INCONSISTENT"
+        assert result.status == "BLOCKED"
+        assert result.reason_code == "ORPHANED_RUN_STATE"
+        assert result.requested_count == 0
+        assert calls == []
+        terminal = json.loads(coordinator.state_path.read_text())
+        assert terminal["status"] == "BLOCKED"
+        assert terminal["reason_code"] == "ORPHANED_RUN_STATE"
+
+        restarted = coordinator.start(db, trigger="manual")
+
+    assert restarted.status == "RUNNING"
+    assert restarted.run_id == "202608090515"
+    assert len(calls) == 1
+
+
+def test_formal_research_recovers_persisted_batch_without_replay(tmp_path, monkeypatch):
+    coordinator = build_coordinator(tmp_path, monkeypatch)
+    calls = []
+    coordinator.popen = lambda command, **kwargs: calls.append((command, kwargs)) or object()
+    coordinator.state_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "freqtrade-ai-formal-research-state-v1",
+                "status": "RUNNING",
+                "run_id": "202608090515",
+                "trigger": "automation",
+                "started_at": (NOW - timedelta(minutes=4)).isoformat(),
+            }
+        )
+    )
+    with db_session() as db:
+        db.add(
+            StrategyResearchBatch(
+                run_id="202608090515",
+                source_type="codex",
+                repository_commit="a" * 40,
+                report_schema_version="freqtrade-ai-strategy-candidate-research-v1",
+                report_path="reports/research/test.json",
+                report_digest="b" * 64,
+                status="VALIDATED",
+                requested_count=10,
+                generated_count=10,
+                persisted_count=10,
+                qualified_count=0,
+                rejected_count=10,
+                safety_snapshot={"allow_real_funds": False, "real_orders": False},
+                selection_policy={},
+                window_evidence=[],
+                completed_at=NOW - timedelta(minutes=1),
+            )
+        )
+        db.commit()
+
+        result = coordinator.start(db, trigger="manual")
+
+    assert result.status == "COMPLETED"
+    assert result.reason_code == "RECOVERED_PERSISTED_BATCH"
+    assert result.requested_count == 10
+    assert result.generated_count == 10
+    assert result.persisted_count == 10
+    assert calls == []
+    terminal = json.loads(coordinator.state_path.read_text())
+    assert terminal["status"] == "COMPLETED"

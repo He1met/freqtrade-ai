@@ -98,7 +98,73 @@ class FormalStrategyResearchCoordinator:
 
     def _blocked(self, code: str, reason: str) -> FormalResearchRunRead:
         return FormalResearchRunRead(
-            status="BLOCKED", reason_code=code, reason=reason, active=False
+            status="BLOCKED",
+            reason_code=code,
+            reason=reason,
+            active=False,
+            requested_count=0,
+        )
+
+    def _terminalize_orphaned_state(
+        self, db: Session, state: dict[str, Any]
+    ) -> FormalResearchRunRead:
+        """Reconcile one unlocked RUNNING state without replaying its work."""
+
+        run_id = state.get("run_id")
+        batch = (
+            StrategyResearchRepository(db).get_batch_by_run_id(run_id)
+            if isinstance(run_id, str) and run_id
+            else None
+        )
+        completed_at = batch.completed_at if batch is not None else _aware(self.clock())
+        if batch is not None and batch.status == "VALIDATED":
+            status = "COMPLETED"
+            code = "RECOVERED_PERSISTED_BATCH"
+            reason = (
+                "旧运行锁已释放，但对应研究批次已完整持久化；"
+                "已按数据库证据恢复终态，本次不重复启动。"
+            )
+        elif batch is not None and batch.status == "FAILED":
+            status = "FAILED"
+            code = "RECOVERED_FAILED_BATCH"
+            reason = (
+                "旧运行锁已释放，对应失败批次已持久化；"
+                "已按数据库证据恢复终态，本次不重复启动。"
+            )
+        elif batch is not None:
+            status = "BLOCKED"
+            code = "RUN_DATABASE_BATCH_NON_TERMINAL"
+            reason = "旧运行锁已释放，但数据库批次不是终态；拒绝猜测或自动重放。"
+        else:
+            status = "BLOCKED"
+            code = "ORPHANED_RUN_STATE"
+            reason = (
+                "旧运行状态为 RUNNING，但唯一研究锁已释放且没有对应持久化批次；"
+                "已终态化为阻塞，本次不自动重放。"
+            )
+        terminal = {
+            "status": status,
+            "reason_code": code,
+            "reason": reason,
+            "run_id": run_id,
+            "trigger": state.get("trigger"),
+            "started_at": state.get("started_at"),
+            "completed_at": completed_at.isoformat(),
+        }
+        counts = self._latest_counts(db, terminal)
+        if not counts:
+            counts = {"requested_count": 0}
+        self._write_state(terminal)
+        return FormalResearchRunRead(
+            status=status,
+            reason_code=code,
+            reason=reason,
+            active=False,
+            run_id=run_id,
+            trigger=state.get("trigger"),
+            started_at=_parse_datetime(state.get("started_at")),
+            completed_at=completed_at,
+            **counts,
         )
 
     def _preflight(self) -> Optional[FormalResearchRunRead]:
@@ -232,12 +298,11 @@ class FormalStrategyResearchCoordinator:
             return self._blocked("ACTIVE_RESEARCH", "已有正式研究正在运行；防重入门禁拒绝重复启动。")
         state = self._read_json(self.state_path)
         if state.get("status") == "RUNNING":
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-            lock.close()
-            return self._blocked(
-                "RUN_STATE_INCONSISTENT",
-                "状态记录为 RUNNING，但唯一研究锁未被持有；拒绝猜测或自动重放。",
-            )
+            try:
+                return self._terminalize_orphaned_state(db, state)
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                lock.close()
         now = _aware(self.clock())
         slot = now.replace(minute=(now.minute // 15) * 15, second=0, microsecond=0)
         run_id = slot.strftime("%Y%m%d%H%M")
