@@ -33,6 +33,7 @@ they are not a current source of work status.
 
 ## Primary Runtime Docs
 
+- [正式网页信息架构简化 PRD（待确认）](product/formal_web_information_architecture_prd.md)
 - [ADR-0010: OKX Demo SWAP compatibility and single order writer](adr/0010-okx-demo-order-writer-compatibility.md)
 - [OKX Demo Keychain credential boundary](okx_demo_credentials.md)
 - [OKX Demo canary（直连入口已封禁）](okx_demo_canary.md)
