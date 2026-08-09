@@ -1291,6 +1291,23 @@ def test_runtime_writer_startup_failure_preserves_stage_without_secret(
     assert "secret" not in failure_path.read_text(encoding="utf-8")
 
 
+def test_writer_risk_chain_failure_keeps_safe_typed_diagnostic() -> None:
+    failure = runtime_service.OkxDemoRuntimeStartupBlocked(
+        stage="writer-capability",
+        category="WRITER",
+        cause_type="RiskChainBlocked",
+    )
+
+    assert failure.stage == "writer-capability"
+    assert failure.category == "WRITER"
+    assert failure.cause_type == "RiskChainBlocked"
+    assert str(failure) == (
+        "OKX_DEMO runtime startup blocked "
+        "[stage=writer-capability, category=WRITER, "
+        "cause_type=RiskChainBlocked]"
+    )
+
+
 def test_invalid_reconciliation_rolls_back_persisted_evidence():
     db = FakeDatabaseSession()
     invalid = reconciliation()

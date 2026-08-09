@@ -1403,6 +1403,64 @@ def test_bound_attested_session_renews_across_multiple_ttl_windows(
         ) == 1
 
 
+def test_initial_attested_session_bind_renews_near_expiry(
+    postgres_engine,
+    monkeypatch,
+) -> None:
+    upgrade_database(postgres_engine)
+    now = datetime.now(timezone.utc)
+    current = [now]
+    expected_fingerprint = "e" * 64
+    monkeypatch.setattr(read_boundary, "_utc_now", lambda: current[0])
+    monkeypatch.setattr(read_boundary, "run_preflight", lambda environment: None)
+    monkeypatch.setattr(
+        read_boundary,
+        "require_pinned_account_fingerprint",
+        lambda environment: expected_fingerprint,
+    )
+    monkeypatch.setattr(
+        read_boundary,
+        "_build_demo_authorization_headers",
+        lambda *args, **kwargs: {
+            "OK-ACCESS-KEY": "temporary-key",
+            "OK-ACCESS-SIGN": "signature",
+            "OK-ACCESS-TIMESTAMP": "2026-07-27T00:00:00.000Z",
+            "OK-ACCESS-PASSPHRASE": "temporary-passphrase",
+        },
+    )
+    client = read_boundary.create_attested_okx_demo_read_adapter(
+        {
+            "FREQTRADE_AI_EXECUTION_TARGET": "OKX_DEMO",
+            "FREQTRADE_AI_ALLOW_REAL_FUNDS": "false",
+            "FREQTRADE_AI_OKX_DEMO_REST_URL": "https://openapi.okx.com",
+            "OKX_DEMO_API_KEY": "temporary-key",
+            "OKX_DEMO_API_SECRET": "temporary-secret",
+            "OKX_DEMO_API_PASSPHRASE": "temporary-passphrase",
+            "OKX_DEMO_ACCOUNT_FINGERPRINT": expected_fingerprint,
+            "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY": "74" * 32,
+        }
+    )
+    handle = _create_attested_writer_credential_bridge(client)
+
+    # Reconciliation may finish inside the renewal lead window. The initial
+    # writer bind must rotate first instead of persisting a stale capability.
+    current[0] = now + timedelta(seconds=55)
+    with postgres_engine.connect() as connection:
+        db = Session(bind=connection)
+        handle.bind_database(db)
+        db.close()
+
+    with Session(postgres_engine) as db:
+        sessions = db.scalars(select(OkxDemoAttestedSession)).all()
+        assert len(sessions) == 1
+        assert sessions[0].created_at == current[0]
+        assert sessions[0].expires_at == current[0] + timedelta(seconds=60)
+        assert sessions[0].revoked_at is None
+
+    current[0] = now + timedelta(seconds=56)
+    client.close()
+
+
 def test_approved_execution_snapshot_foreign_keys_restrict_registry_delete(
     postgres_engine,
 ) -> None:

@@ -1369,6 +1369,11 @@ def create_attested_okx_demo_read_adapter(
                 if self._revoke_session_factory is None:
                     from sqlalchemy.orm import sessionmaker
 
+                    # Startup reconciliation can consume most of the short
+                    # attestation window before the sole writer is bound.
+                    # Reuse the normal renewal boundary before the first
+                    # durable bind so an expired capability is never written.
+                    self._renew_if_needed(_utc_now())
                     revoke_session_factory = sessionmaker(
                         bind=db.get_bind(),
                         expire_on_commit=False,

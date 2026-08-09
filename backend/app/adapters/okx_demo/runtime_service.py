@@ -99,6 +99,7 @@ SAFE_STARTUP_FAILURE_TYPES = frozenset(
         "OkxDemoWriteBlocked",
         "OperationalError",
         "ProgrammingError",
+        "RiskChainBlocked",
         "UnexpectedError",
     }
 )
