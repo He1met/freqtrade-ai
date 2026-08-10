@@ -76,7 +76,8 @@ MULTI_ASSET_CAPACITY_BASE_VERSION = "20260810_39"
 AUTOMATION_GUARD_REBIND_BASE_VERSION = "20260810_40"
 DEPLOYMENT_POLICY_REBIND_BASE_VERSION = "20260810_41"
 NATURAL_SIGNAL_EVALUATOR_RECEIPT_BASE_VERSION = "20260810_42"
-SCHEMA_VERSION = "20260811_43"
+NATURAL_SIGNAL_RISK_BUDGET_BASE_VERSION = "20260811_43"
+SCHEMA_VERSION = "20260811_44"
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 ATTESTATION_PROOF_KEY_ENV = "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"
 OPERATOR_TOKEN_ENV = "FREQTRADE_AI_OPERATOR_TOKEN"
@@ -11264,6 +11265,7 @@ def _add_natural_signal_risk_chain_boundary(
     restrict_legacy_strategy_names: bool = False,
     refresh_supporting_boundaries: bool = True,
     rebind_automation_guard: bool = True,
+    initialize_missing_budget: bool = True,
 ) -> None:
     """Install the one runtime-callable, owner-mediated natural-risk write path."""
 
@@ -11279,6 +11281,12 @@ def _add_natural_signal_risk_chain_boundary(
     allowed_instruments_json = json.dumps(
         list(allowed_instruments), separators=(",", ":")
     )
+    initialize_budget_sql = """
+      INSERT INTO SCHEMA_TOKEN.risk_budgets(
+        execution_target_id,reserved_notional,approved_positions,updated_at)
+      VALUES('OKX_DEMO',0,0,clock_timestamp())
+      ON CONFLICT (execution_target_id) DO NOTHING;
+    """ if initialize_missing_budget else ""
     if refresh_supporting_boundaries:
         connection.execute(text(
             "ALTER TABLE {0}.strategy_deployments ADD COLUMN IF NOT EXISTS "
@@ -12000,6 +12008,7 @@ def _add_natural_signal_risk_chain_boundary(
           'order_submission_authorized',false,'idempotent_replay',true);
       END IF;
 
+      INITIALIZE_BUDGET_TOKEN
       SELECT execution_target_id,reserved_notional,approved_positions
         INTO budget.execution_target_id,budget.reserved_notional,budget.approved_positions
         FROM SCHEMA_TOKEN.risk_budgets
@@ -12073,7 +12082,9 @@ def _add_natural_signal_risk_chain_boundary(
         'client_order_id',p_payload->>'client_order_id',
         'order_submission_authorized',false,'idempotent_replay',false);
     END $$;
-    """.replace("SCHEMA_TOKEN", quoted_schema).replace(
+    """.replace("INITIALIZE_BUDGET_TOKEN", initialize_budget_sql).replace(
+        "SCHEMA_TOKEN", quoted_schema
+    ).replace(
         "ALLOWED_INSTRUMENTS_TOKEN", allowed_instruments_json
     )
     connection.execute(text(ddl))
@@ -12112,7 +12123,11 @@ def _add_natural_signal_risk_chain_boundary(
     ))
     connection.execute(text(
         "REVOKE INSERT,UPDATE,DELETE,TRUNCATE ON TABLE {0}.risk_budgets "
-        "FROM PUBLIC,freqtrade; GRANT SELECT ON TABLE {0}.risk_budgets TO freqtrade"
+        "FROM PUBLIC,freqtrade; "
+        "REVOKE INSERT ON TABLE {0}.risk_budgets FROM freqtrade_ai_attestor; "
+        "GRANT INSERT (execution_target_id,reserved_notional,approved_positions,updated_at) "
+        "ON {0}.risk_budgets TO freqtrade_ai_attestor; "
+        "GRANT SELECT ON TABLE {0}.risk_budgets TO freqtrade"
         .format(quoted_schema)
     ))
     signature = f"{quoted_schema}.persist_okx_demo_natural_risk_chain(jsonb)"
@@ -12323,6 +12338,7 @@ def _natural_signal_risk_chain_boundary_problems(
         "max_drawdown_contract", "okx_demo_continuous_opening_allowed",
         "natural signal writer fence is invalid", "allow_real_funds",
         "FullChainRepository._stable_digest uses Python's str(datetime)",
+        "ON CONFLICT (execution_target_id) DO NOTHING",
         '["BTC-USDT-SWAP","ETH-USDT-SWAP","SOL-USDT-SWAP"]',
     )
     if (owner != "freqtrade_ai_attestor" or security_definer is not True
@@ -12350,9 +12366,13 @@ def _natural_signal_risk_chain_boundary_problems(
         return ["natural signal deployment Demo-only contract is missing"]
     budget_acl = connection.execute(text(
         "SELECT has_table_privilege('freqtrade',:table,'SELECT'),"
-        "has_table_privilege('freqtrade',:table,'INSERT,UPDATE,DELETE,TRUNCATE')"
+        "has_table_privilege('freqtrade',:table,'INSERT,UPDATE,DELETE,TRUNCATE'),"
+        "has_column_privilege('freqtrade_ai_attestor',:table,'execution_target_id','INSERT') "
+        "AND has_column_privilege('freqtrade_ai_attestor',:table,'reserved_notional','INSERT') "
+        "AND has_column_privilege('freqtrade_ai_attestor',:table,'approved_positions','INSERT') "
+        "AND has_column_privilege('freqtrade_ai_attestor',:table,'updated_at','INSERT')"
     ), {"table": f"{schema_name}.risk_budgets"}).one()
-    return [] if budget_acl == (True, False) else [
+    return [] if budget_acl == (True, False, True) else [
         "natural signal risk budget ACL mismatch"
     ]
 
@@ -12460,6 +12480,23 @@ def upgrade_database(engine: Engine) -> str:
                         "Recorded schema version does not match ORM metadata: " + "; ".join(problems)
                     )
                 return current_version
+            if current_version == NATURAL_SIGNAL_RISK_BUDGET_BASE_VERSION:
+                _add_natural_signal_risk_chain_boundary(
+                    connection,
+                    refresh_supporting_boundaries=False,
+                    rebind_automation_guard=False,
+                )
+                problems = schema_problems(connection)
+                if problems:
+                    raise SchemaMigrationBlocked(
+                        "Natural signal risk budget upgrade does not match "
+                        "ORM metadata: " + "; ".join(problems)
+                    )
+                connection.execute(
+                    text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+                    {"version": SCHEMA_VERSION},
+                )
+                return SCHEMA_VERSION
             if current_version == NATURAL_SIGNAL_EVALUATOR_RECEIPT_BASE_VERSION:
                 _add_natural_signal_risk_chain_boundary(
                     connection,
