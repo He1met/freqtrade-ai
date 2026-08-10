@@ -100,7 +100,7 @@ def test_worker_records_success_with_terminal_heartbeat(tmp_path):
         {
             "outcome": "COMPLETED",
             "reason_code": "COMPLETED",
-            "reason": "正式路径已完成 10 条候选的生成、验证与全量持久化。",
+            "reason": "正式路径已完成 60 条候选的生成、验证与全量持久化。",
         }
     ]
 

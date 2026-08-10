@@ -279,7 +279,7 @@ export function Strategies() {
             {latestResearch.failure_reason ? <p className="formal-problem">失败原因：{latestResearch.failure_reason}</p> : null}
           </>
         ) : (
-          <EmptyState title="尚无持久化研究批次" description="数据库中没有正式批次，表示尚未完成生成与入库；不能解释为 10 条候选已验证不合格。" />
+          <EmptyState title="尚无持久化研究批次" description="数据库中没有正式批次，表示尚未完成生成与入库；不能解释为 60 条候选已验证不合格。" />
         )}
       </section>
 

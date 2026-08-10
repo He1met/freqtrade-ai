@@ -19,6 +19,7 @@ from typing import Callable, Optional
 
 
 STATE_SCHEMA = "freqtrade-ai-formal-research-state-v1"
+EXPECTED_CANDIDATE_COUNT = 60
 
 
 def utc_now() -> datetime:
@@ -139,7 +140,14 @@ def record_terminal_event(
             "outcome": outcome,
             "reason_code": reason_code,
             "quality_receipt_id": args.market_data_quality_receipt_id,
-            "counts": [60, generated, validated, persisted, qualified, rejected],
+            "counts": [
+                EXPECTED_CANDIDATE_COUNT,
+                generated,
+                validated,
+                persisted,
+                qualified,
+                rejected,
+            ],
         }
         event_digest = hashlib.sha256(
             json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
@@ -364,18 +372,22 @@ def execute(
             returncode = child.wait()
             completed_at = clock()
             if returncode == 0:
+                completion_reason = (
+                    f"正式路径已完成 {EXPECTED_CANDIDATE_COUNT} 条候选的"
+                    "生成、验证与全量持久化。"
+                )
                 terminal_recorder(
                     args,
                     outcome="COMPLETED",
                     reason_code="COMPLETED",
-                    reason="正式路径已完成 10 条候选的生成、验证与全量持久化。",
+                    reason=completion_reason,
                 )
                 write_state(
                     args.state_path,
                     {
                         "status": "COMPLETED",
                         "reason_code": "COMPLETED",
-                        "reason": "正式路径已完成 10 条候选的生成、验证与全量持久化。",
+                        "reason": completion_reason,
                         **_base_state(args, now=completed_at),
                         "completed_at": completed_at.isoformat(),
                         "phase": "FINISHED",
