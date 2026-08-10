@@ -1,3 +1,4 @@
+import copy
 import json
 from pathlib import Path
 
@@ -44,6 +45,31 @@ def write_official_report(tmp_path, *, qualified=False):
         candidate["validation_passed"] = True
         candidate["deployable_candidate"] = True
         payload["qualified_candidates"] = [name]
+    pairs = ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT"]
+    payload["environment"]["pairs"] = pairs
+    payload["environment"]["timeframes"] = ["5m", "15m"]
+    payload["environment"]["market_data"] = [
+        {
+            "pair": pair,
+            "timeframe": timeframe,
+            "path": f"futures/{pair.split('/')[0]}-{timeframe}.feather",
+            "sha256": "a" * 64,
+        }
+        for pair in pairs
+        for timeframe in ("5m", "15m")
+    ]
+    for index, evidence in enumerate(payload["candidates"].values()):
+        timeframe = "5m" if index < 5 else "15m"
+        evidence["declared_timeframe"] = timeframe
+        evidence["deployment_target"] = {"pair": pairs[0], "timeframe": timeframe}
+        evidence["targets"] = {
+            f"{pair}|{timeframe}": {
+                **copy.deepcopy(evidence),
+                "pair": pair,
+                "timeframe": timeframe,
+            }
+            for pair in pairs
+        }
     path = tmp_path / "official-api-report.json"
     path.write_text(json.dumps(payload))
     return path

@@ -173,7 +173,11 @@ def _persist_qualified_candidate(
         validation_passed=True,
         deployable_candidate=True,
         rejection_reasons=[],
-        evidence_snapshot={"independent_oos": True, "lookahead": "PASSED"},
+        evidence_snapshot={
+            "independent_oos": True,
+            "lookahead": "PASSED",
+            "deployment_target": {"pair": "BTC/USDT:USDT", "timeframe": "15m"},
+        },
     )
     db.add(candidate)
     db.flush()
@@ -195,7 +199,17 @@ def _persist_qualified_candidate(
             persisted_count=1,
             qualified_count=1,
             rejected_count=0,
-            evidence_snapshot={"execution_target": "OKX_DEMO"},
+            evidence_snapshot={
+                "execution_target": "OKX_DEMO",
+                "market_data_bindings": [
+                    {
+                        "pair": "BTC/USDT:USDT",
+                        "timeframe": "15m",
+                        "receipt_id": quality.id,
+                        "sha256": quality.file_sha256,
+                    }
+                ],
+            },
             event_digest="4" * 64,
         )
     )

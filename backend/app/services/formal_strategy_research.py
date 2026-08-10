@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.adapters.freqtrade.binary import resolve_freqtrade_binary
 from app.core.config import Settings, get_settings
+from app.core.strategy_research_matrix import RESEARCH_TARGETS
 from app.repositories.strategy_research import StrategyResearchRepository
 from app.schemas.strategy_research import FormalResearchRunRead
 from app.models.strategy_research import StrategyResearchAttemptEvent
@@ -296,12 +297,18 @@ class FormalStrategyResearchCoordinator:
                 "缺少当前 30 分钟内、指向唯一正式研究所有者的完整所有权证据。",
             )
         freqtrade, datadir = self._paths()
-        data_file = datadir / "futures" / "BTC_USDT_USDT-15m-futures.feather"
+        missing_targets = [
+            target.key for target in RESEARCH_TARGETS
+            if not target.market_path(datadir).is_file()
+        ]
         candidates = sorted((self.repo / "research/strategy_candidates").glob("[0-9][0-9]_*.py"))
         if freqtrade is None or not freqtrade.is_file():
             return self._blocked("FREQTRADE_BINARY_MISSING", "正式研究 Freqtrade 可执行文件不存在。")
-        if not data_file.is_file():
-            return self._blocked("MARKET_DATA_MISSING", "BTC/USDT:USDT 15m 正式研究数据不存在。")
+        if missing_targets:
+            return self._blocked(
+                "MARKET_DATA_MATRIX_MISSING",
+                "正式研究数据矩阵不完整：" + ", ".join(missing_targets),
+            )
         if len(candidates) != EXPECTED_CANDIDATE_COUNT:
             return self._blocked(
                 "CANDIDATE_SET_INCOMPLETE",
@@ -483,23 +490,30 @@ class FormalStrategyResearchCoordinator:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
             lock.close()
             return self._blocked("FREQTRADE_BINARY_MISSING", "正式研究 Freqtrade 可执行文件不存在。")
-        data_file = datadir / "futures" / "BTC_USDT_USDT-15m-futures.feather"
-        quality = inspect_market_data(
-            data_file,
-            repository_root=self.repo,
-            exchange="okx",
-            pair="BTC/USDT:USDT",
-            timeframe="15m",
-            expected_interval_seconds=15 * 60,
-            inspected_at=now,
-        )
-        quality = StrategyResearchRepository(db).append_market_data_quality_receipt(quality)
-        if quality.status != "PASSED":
+        qualities = []
+        repository = StrategyResearchRepository(db)
+        for target in RESEARCH_TARGETS:
+            quality = inspect_market_data(
+                target.market_path(datadir),
+                repository_root=self.repo,
+                exchange="okx",
+                pair=target.pair,
+                timeframe=target.timeframe,
+                expected_interval_seconds=(5 if target.timeframe == "5m" else 15) * 60,
+                inspected_at=now,
+            )
+            qualities.append(repository.append_market_data_quality_receipt(quality))
+        blocked_qualities = [quality for quality in qualities if quality.status != "PASSED"]
+        quality = qualities[0]
+        if blocked_qualities:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
             lock.close()
             blocked = self._blocked(
                 "MARKET_DATA_QUALITY_BLOCKED",
-                "正式研究数据质量门未通过：" + ", ".join(quality.reason_codes),
+                "正式研究数据质量门未通过：" + "; ".join(
+                    f"{item.pair} {item.timeframe}: {','.join(item.reason_codes)}"
+                    for item in blocked_qualities
+                ),
             )
             self._append_attempt_event(
                 db, attempt_id=attempt_id, sequence=1, trigger=trigger,
@@ -526,6 +540,7 @@ class FormalStrategyResearchCoordinator:
                 "cleanup_status": "NOT_REQUIRED",
                 "attempt_id": attempt_id,
                 "market_data_quality_receipt_id": quality.id,
+                "market_data_quality_receipt_ids": [item.id for item in qualities],
             }
         )
         worker = self.repo / "scripts/formal_strategy_research_worker.py"
@@ -546,7 +561,19 @@ class FormalStrategyResearchCoordinator:
             "--termination-grace-seconds", str(WORKER_TERMINATION_GRACE_SECONDS),
             "--attempt-id", attempt_id,
             "--market-data-quality-receipt-id", str(quality.id),
-            "--expected-market-data-sha256", quality.file_sha256,
+            "--expected-market-data-manifest", json.dumps(
+                [
+                    {
+                        "pair": target.pair,
+                        "timeframe": target.timeframe,
+                        "relative_path": str(target.market_path(datadir).relative_to(datadir)),
+                        "sha256": receipt.file_sha256,
+                        "receipt_id": receipt.id,
+                    }
+                    for target, receipt in zip(RESEARCH_TARGETS, qualities)
+                ],
+                sort_keys=True,
+            ),
         ]
         self._append_attempt_event(
             db, attempt_id=attempt_id, sequence=1, trigger=trigger,

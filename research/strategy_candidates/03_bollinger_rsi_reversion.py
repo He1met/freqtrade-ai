@@ -6,7 +6,7 @@ from freqtrade.strategy import IStrategy
 
 
 class Candidate03RollingVwapZscore(IStrategy):
-    timeframe = "15m"
+    timeframe = "5m"
     can_short = True
     startup_candle_count = 120
     stoploss = -0.024

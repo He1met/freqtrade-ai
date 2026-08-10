@@ -31,12 +31,15 @@ from app.core.strategy_research_contract import (  # noqa: E402
     MIN_VALIDATION_TRADES,
     official_research_policy,
 )
+from app.core.strategy_research_matrix import (  # noqa: E402
+    ALLOWED_RESEARCH_PAIRS,
+    ALLOWED_RESEARCH_TIMEFRAMES,
+    ResearchTarget,
+)
 from app.services.strategy_blueprint_equivalence import (  # noqa: E402
     prove_blueprint_code_equivalence,
 )
 
-PAIR = "BTC/USDT:USDT"
-TIMEFRAME = "15m"
 STARTING_BALANCE = 1000.0
 
 WINDOWS = (
@@ -72,6 +75,7 @@ class Candidate:
     class_name: str
     path: Path
     sha256: str
+    timeframe: str
     canonical_blueprint_evidence: Optional[dict[str, Any]] = None
 
 
@@ -170,6 +174,24 @@ def _discover_candidates(root: Path) -> list[Candidate]:
         if len(strategy_classes) != 1:
             raise RuntimeError(f"{path} must define exactly one Candidate class")
         _reject_obvious_lookahead(tree, path)
+        strategy_node = next(
+            node for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == strategy_classes[0]
+        )
+        timeframe = None
+        for node in strategy_node.body:
+            if (
+                isinstance(node, ast.Assign)
+                and any(isinstance(target, ast.Name) and target.id == "timeframe" for target in node.targets)
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)
+            ):
+                timeframe = node.value.value
+                break
+        if timeframe not in ALLOWED_RESEARCH_TIMEFRAMES:
+            raise RuntimeError(
+                f"{path} must declare timeframe in {ALLOWED_RESEARCH_TIMEFRAMES}"
+            )
         compile(source, str(path), "exec")
         source_bytes = path.read_bytes()
         code_digest = hashlib.sha256(source_bytes).hexdigest()
@@ -184,7 +206,7 @@ def _discover_candidates(root: Path) -> list[Candidate]:
                 source_bytes=source_bytes,
                 expected_source_digest=code_digest,
                 expected_class_name=strategy_classes[0],
-                expected_timeframe=TIMEFRAME,
+                expected_timeframe=timeframe,
             )
             blueprint_evidence = {
                 "contract_version": "formal-candidate-blueprint-evidence-v1",
@@ -200,6 +222,7 @@ def _discover_candidates(root: Path) -> list[Candidate]:
                 strategy_classes[0],
                 path,
                 code_digest,
+                timeframe,
                 canonical_blueprint_evidence=blueprint_evidence,
             )
         )
@@ -219,7 +242,14 @@ def _reject_obvious_lookahead(tree: ast.AST, path: Path) -> None:
             raise RuntimeError(f"negative shift is forbidden: {path}:{node.lineno}")
 
 
-def _config(strategy_path: Path, userdir: Path, datadir: Path) -> dict[str, Any]:
+def _config(
+    strategy_path: Path,
+    userdir: Path,
+    datadir: Path,
+    *,
+    pair: str,
+    timeframe: str,
+) -> dict[str, Any]:
     return {
         "bot_name": "freqtrade_ai_candidate_research",
         "dry_run": True,
@@ -229,12 +259,12 @@ def _config(strategy_path: Path, userdir: Path, datadir: Path) -> dict[str, Any]
         "stake_amount": 100.0,
         "dry_run_wallet": STARTING_BALANCE,
         "tradable_balance_ratio": 0.99,
-        "timeframe": TIMEFRAME,
+        "timeframe": timeframe,
         "trading_mode": "futures",
         "margin_mode": "isolated",
         "exchange": {
             "name": "okx",
-            "pair_whitelist": [PAIR],
+            "pair_whitelist": [pair],
             "pair_blacklist": [],
         },
         "pairlists": [{"method": "StaticPairList"}],
@@ -262,6 +292,7 @@ def _run_window(
     output_dir: Path,
     timerange: str,
     class_names: list[str],
+    timeframe: str,
 ) -> tuple[dict[str, Any], list[str]]:
     output_dir.mkdir(parents=True, exist_ok=True)
     command = [
@@ -278,6 +309,8 @@ def _run_window(
         str(userdir),
         "--timerange",
         timerange,
+        "--timeframe",
+        timeframe,
         "--fee",
         str(FEE_PER_SIDE),
         "--cache",
@@ -318,6 +351,7 @@ def _run_lookahead(
     userdir: Path,
     artifact_root: Path,
     class_names: list[str],
+    timeframe: str,
 ) -> list[str]:
     artifact_root.mkdir(parents=True, exist_ok=True)
     export_path = artifact_root / "lookahead.csv"
@@ -335,6 +369,8 @@ def _run_lookahead(
         str(userdir),
         "--timerange",
         "20230701-20260201",
+        "--timeframe",
+        timeframe,
         "--fee",
         str(FEE_PER_SIDE),
         "--minimum-trade-amount",
@@ -418,10 +454,10 @@ def _project_score(metrics: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _market_return(datadir: Path, timerange: str) -> float:
+def _market_return(datadir: Path, target: ResearchTarget, timerange: str) -> float:
     import pandas as pd
 
-    path = datadir / "futures" / "BTC_USDT_USDT-15m-futures.feather"
+    path = target.market_path(datadir)
     frame = pd.read_feather(path, columns=["date", "close"])
     start, end = timerange.split("-", maxsplit=1)
     dates = frame["date"].dt.strftime("%Y%m%d")
@@ -475,26 +511,14 @@ def main() -> int:
     candidates = _discover_candidates(strategy_path)
     _FAILURE_CONTEXT["candidates"] = candidates
     config_dir.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(
-        json.dumps(_config(strategy_path, userdir, datadir), indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
-    lookahead_config_path = config_dir / f"strategy-candidates-{args.run_id}-lookahead.json"
-    lookahead_config = _config(strategy_path, userdir, datadir)
-    lookahead_config["entry_pricing"]["price_side"] = "other"
-    lookahead_config["exit_pricing"]["price_side"] = "other"
-    lookahead_config_path.write_text(
-        json.dumps(lookahead_config, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
-
     results: dict[str, dict[str, Any]] = {
         item.class_name: {
             "file": str(item.path.relative_to(repo)),
             "sha256": item.sha256,
+            "declared_timeframe": item.timeframe,
             "static_check": "PASSED",
             "loadable": True,
-            "windows": {},
+            "targets": {},
             **(
                 {"canonical_blueprint_v2": item.canonical_blueprint_evidence}
                 if item.canonical_blueprint_evidence is not None
@@ -503,90 +527,170 @@ def main() -> int:
         }
         for item in candidates
     }
-    _FAILURE_CONTEXT.update({"stage": "LOOKAHEAD", "results": results})
-    lookahead_path = artifact_root / "lookahead.csv"
-    lookahead_command = _run_lookahead(
-        freqtrade=freqtrade,
-        config_path=lookahead_config_path,
-        datadir=datadir,
-        strategy_path=strategy_path,
-        userdir=userdir,
-        artifact_root=artifact_root,
-        class_names=[item.class_name for item in candidates],
-    )
-    if lookahead_path.is_file():
-        by_strategy: dict[str, dict[str, str]] = {}
-        with lookahead_path.open(encoding="utf-8", newline="") as handle:
-            for row in csv.DictReader(handle):
-                by_strategy[row["strategy"]] = row
-        for candidate in candidates:
-            row = by_strategy.get(candidate.class_name)
-            results[candidate.class_name]["lookahead_analysis"] = {
-                "status": "PASSED" if row and row.get("has_bias") == "False" else "MISSING_OR_FAILED",
-                "has_bias": None if row is None else row.get("has_bias") == "True",
-                "total_signals": None if row is None else int(row["total_signals"]),
-                "biased_entry_signals": None if row is None else int(row["biased_entry_signals"]),
-                "biased_exit_signals": None if row is None else int(row["biased_exit_signals"]),
-            }
-    commands: list[list[str]] = [lookahead_command]
+    _FAILURE_CONTEXT.update({"stage": "MATRIX", "results": results})
+    commands: list[list[str]] = []
     window_evidence: list[dict[str, Any]] = []
-    for name, kind, expected_regime, timerange in WINDOWS:
-        _FAILURE_CONTEXT["stage"] = f"WINDOW_{name.upper()}"
-        market_return = _market_return(datadir, timerange)
-        actual_regime = "bull" if market_return >= 0.05 else "bear" if market_return <= -0.05 else "range"
-        payload, command = _run_window(
-            freqtrade=freqtrade,
-            config_path=config_path,
-            datadir=datadir,
-            strategy_path=strategy_path,
-            userdir=userdir,
-            output_dir=artifact_root / name,
-            timerange=timerange,
-            class_names=[item.class_name for item in candidates],
-        )
-        commands.append(command)
-        if expected_regime is not None and actual_regime != expected_regime:
-            raise RuntimeError(f"{name} expected {expected_regime}, computed {actual_regime}")
-        window_evidence.append(
-            {
-                "name": name,
-                "kind": kind,
-                "timerange": timerange,
-                "market_return": round(market_return, 8),
-                "market_regime": actual_regime,
-            }
-        )
-        strategy_payload = payload.get("strategy") or {}
-        for candidate in candidates:
-            item = strategy_payload.get(candidate.class_name)
-            if not isinstance(item, dict):
-                results[candidate.class_name]["loadable"] = False
-                results[candidate.class_name]["windows"][name] = {"status": "MISSING"}
-                continue
-            metrics = _stress_metrics(item)
-            results[candidate.class_name]["windows"][name] = {"status": "SUCCESS", **metrics}
+    market_data_evidence: list[dict[str, Any]] = []
+    for timeframe in ALLOWED_RESEARCH_TIMEFRAMES:
+        timeframe_candidates = [item for item in candidates if item.timeframe == timeframe]
+        if not timeframe_candidates:
+            raise RuntimeError(f"candidate set has no {timeframe} strategies")
+        for pair in ALLOWED_RESEARCH_PAIRS:
+            target = ResearchTarget(pair=pair, timeframe=timeframe)
+            target_slug = pair.split("/", 1)[0].lower() + "-" + timeframe
+            target_root = artifact_root / target_slug
+            config_path = config_dir / f"strategy-candidates-{args.run_id}-{target_slug}.json"
+            config = _config(
+                strategy_path, userdir, datadir, pair=pair, timeframe=timeframe
+            )
+            config_path.write_text(
+                json.dumps(config, indent=2, sort_keys=True), encoding="utf-8"
+            )
+            lookahead_config_path = config_dir / (
+                f"strategy-candidates-{args.run_id}-{target_slug}-lookahead.json"
+            )
+            lookahead_config = json.loads(json.dumps(config))
+            lookahead_config["entry_pricing"]["price_side"] = "other"
+            lookahead_config["exit_pricing"]["price_side"] = "other"
+            lookahead_config_path.write_text(
+                json.dumps(lookahead_config, indent=2, sort_keys=True), encoding="utf-8"
+            )
+            market_path = target.market_path(datadir)
+            if not market_path.is_file():
+                raise RuntimeError(f"required research data is missing: {market_path}")
+            market_data_evidence.append(
+                {
+                    "pair": pair,
+                    "timeframe": timeframe,
+                    "path": str(market_path),
+                    "sha256": _sha256(market_path),
+                }
+            )
+            _FAILURE_CONTEXT["stage"] = f"LOOKAHEAD_{target_slug.upper()}"
+            lookahead_command = _run_lookahead(
+                freqtrade=freqtrade,
+                config_path=lookahead_config_path,
+                datadir=datadir,
+                strategy_path=strategy_path,
+                userdir=userdir,
+                artifact_root=target_root,
+                class_names=[item.class_name for item in timeframe_candidates],
+                timeframe=timeframe,
+            )
+            commands.append(lookahead_command)
+            lookahead_path = target_root / "lookahead.csv"
+            by_strategy: dict[str, dict[str, str]] = {}
+            with lookahead_path.open(encoding="utf-8", newline="") as handle:
+                for row in csv.DictReader(handle):
+                    by_strategy[row["strategy"]] = row
+            for candidate in timeframe_candidates:
+                row = by_strategy.get(candidate.class_name)
+                results[candidate.class_name]["targets"][target.key] = {
+                    "pair": pair,
+                    "timeframe": timeframe,
+                    "lookahead_analysis": {
+                        "status": "PASSED" if row and row.get("has_bias") == "False" else "MISSING_OR_FAILED",
+                        "has_bias": None if row is None else row.get("has_bias") == "True",
+                        "total_signals": None if row is None else int(row["total_signals"]),
+                        "biased_entry_signals": None if row is None else int(row["biased_entry_signals"]),
+                        "biased_exit_signals": None if row is None else int(row["biased_exit_signals"]),
+                    },
+                    "windows": {},
+                }
+            for name, kind, expected_regime, timerange in WINDOWS:
+                _FAILURE_CONTEXT["stage"] = f"WINDOW_{target_slug.upper()}_{name.upper()}"
+                market_return = _market_return(datadir, target, timerange)
+                actual_regime = (
+                    "bull" if market_return >= 0.05
+                    else "bear" if market_return <= -0.05 else "range"
+                )
+                payload, command = _run_window(
+                    freqtrade=freqtrade,
+                    config_path=config_path,
+                    datadir=datadir,
+                    strategy_path=strategy_path,
+                    userdir=userdir,
+                    output_dir=target_root / name,
+                    timerange=timerange,
+                    class_names=[item.class_name for item in timeframe_candidates],
+                    timeframe=timeframe,
+                )
+                commands.append(command)
+                if expected_regime is not None and actual_regime != expected_regime:
+                    raise RuntimeError(
+                        f"{target.key} {name} expected {expected_regime}, computed {actual_regime}"
+                    )
+                window_evidence.append(
+                    {
+                        "target": target.key,
+                        "name": name,
+                        "kind": kind,
+                        "timerange": timerange,
+                        "market_return": round(market_return, 8),
+                        "market_regime": actual_regime,
+                    }
+                )
+                strategy_payload = payload.get("strategy") or {}
+                for candidate in timeframe_candidates:
+                    item = strategy_payload.get(candidate.class_name)
+                    target_result = results[candidate.class_name]["targets"][target.key]
+                    if not isinstance(item, dict):
+                        results[candidate.class_name]["loadable"] = False
+                        target_result["windows"][name] = {"status": "MISSING"}
+                        continue
+                    target_result["windows"][name] = {
+                        "status": "SUCCESS", **_stress_metrics(item)
+                    }
 
     qualified: list[str] = []
+    validation_names = ("wf_bull", "wf_range", "oos", "wf_bear")
     for candidate in candidates:
         item = results[candidate.class_name]
-        primary = item["windows"]["primary_bear"]
-        item["primary_score"] = _project_score(primary)
-        validation_names = ("wf_bull", "wf_range", "oos", "wf_bear")
-        validation_passed = all(
-            item["windows"][name].get("status") == "SUCCESS"
-            and item["windows"][name]["total_trades"] >= MIN_VALIDATION_TRADES
-            and item["windows"][name]["profit_pct"] > 0
-            and item["windows"][name]["max_drawdown_pct"] <= MAX_VALIDATION_DRAWDOWN
-            for name in validation_names
+        qualified_targets: list[dict[str, Any]] = []
+        for target_result in item["targets"].values():
+            primary = target_result["windows"]["primary_bear"]
+            target_result["primary_score"] = _project_score(primary)
+            target_result["validation_passed"] = all(
+                target_result["windows"][name].get("status") == "SUCCESS"
+                and target_result["windows"][name]["total_trades"] >= MIN_VALIDATION_TRADES
+                and target_result["windows"][name]["profit_pct"] > 0
+                and target_result["windows"][name]["max_drawdown_pct"] <= MAX_VALIDATION_DRAWDOWN
+                for name in validation_names
+            )
+            target_result["score_threshold_passed"] = (
+                target_result["primary_score"]["total_score"] >= MIN_STRATEGY_SCORE
+            )
+            target_result["deployable_candidate"] = bool(
+                item["loadable"]
+                and target_result["lookahead_analysis"]["status"] == "PASSED"
+                and target_result["validation_passed"]
+                and target_result["score_threshold_passed"]
+            )
+            if target_result["deployable_candidate"]:
+                qualified_targets.append(target_result)
+        selected = max(
+            qualified_targets,
+            key=lambda value: value["primary_score"]["total_score"],
+            default=max(
+                item["targets"].values(),
+                key=lambda value: value["primary_score"]["total_score"],
+            ),
         )
-        score_passed = item["primary_score"]["total_score"] >= MIN_STRATEGY_SCORE
-        lookahead_passed = item.get("lookahead_analysis", {}).get("status") == "PASSED"
-        item["validation_passed"] = validation_passed
-        item["score_threshold_passed"] = score_passed
-        item["deployable_candidate"] = bool(
-            item["loadable"] and lookahead_passed and validation_passed and score_passed
-        )
-        if item["deployable_candidate"]:
+        item["deployment_target"] = {
+            "pair": selected["pair"],
+            "timeframe": selected["timeframe"],
+        }
+        item["lookahead_analysis"] = selected["lookahead_analysis"]
+        item["windows"] = selected["windows"]
+        item["primary_score"] = selected["primary_score"]
+        item["validation_passed"] = selected["validation_passed"]
+        item["score_threshold_passed"] = selected["score_threshold_passed"]
+        item["deployable_candidate"] = bool(qualified_targets)
+        item["qualified_targets"] = [
+            {"pair": value["pair"], "timeframe": value["timeframe"]}
+            for value in qualified_targets
+        ]
+        if qualified_targets:
             qualified.append(candidate.class_name)
 
     report = {
@@ -603,14 +707,12 @@ def main() -> int:
             "freqtrade_version": subprocess.run(
                 [str(freqtrade), "--version"], check=True, capture_output=True, text=True
             ).stdout.strip(),
-            "pair": PAIR,
-            "timeframe": TIMEFRAME,
-            "market_data_file": str(datadir / "futures" / "BTC_USDT_USDT-15m-futures.feather"),
-            "market_data_sha256": _sha256(datadir / "futures" / "BTC_USDT_USDT-15m-futures.feather"),
+            "pairs": list(ALLOWED_RESEARCH_PAIRS),
+            "timeframes": list(ALLOWED_RESEARCH_TIMEFRAMES),
+            "market_data": market_data_evidence,
             "fee_per_side": FEE_PER_SIDE,
             "slippage_per_side": SLIPPAGE_PER_SIDE,
             "starting_balance": STARTING_BALANCE,
-            "lookahead_analysis_artifact": str(lookahead_path),
         },
         "selection_policy": official_research_policy(),
         "windows": window_evidence,
@@ -621,6 +723,7 @@ def main() -> int:
             "This standalone evidence is not a persisted StrategyValidationPlan.",
             "Slippage is applied as a deterministic two-sided post-backtest stress cost.",
             "Funding history is unavailable for these historical windows; Freqtrade reports zero funding fees.",
+            "ETH/SOL deployment remains blocked until the canonical owner applies and verifies the separate risk-chain allowlist migration.",
         ],
     }
     _FAILURE_CONTEXT["stage"] = "REPORT_WRITE"

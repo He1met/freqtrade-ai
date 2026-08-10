@@ -28,6 +28,8 @@ def test_research_bundle_contains_exactly_ten_static_safe_candidates() -> None:
     assert len({candidate.class_name for candidate in candidates}) == 10
     assert len({candidate.sha256 for candidate in candidates}) == 10
     assert all(len(candidate.sha256) == 64 for candidate in candidates)
+    assert [candidate.timeframe for candidate in candidates].count("5m") == 5
+    assert [candidate.timeframe for candidate in candidates].count("15m") == 5
 
 
 def test_research_windows_are_non_overlapping_and_cover_required_regimes() -> None:
