@@ -11262,38 +11262,42 @@ def _add_natural_signal_risk_chain_boundary(
     ),
     max_active_strategies: int = 9,
     restrict_legacy_strategy_names: bool = False,
+    refresh_supporting_boundaries: bool = True,
+    rebind_automation_guard: bool = True,
 ) -> None:
     """Install the one runtime-callable, owner-mediated natural-risk write path."""
 
-    _add_v40_research_unit_boundary(connection)
-    _add_continuous_demo_automation_boundary(
-        connection,
-        max_active_strategies=max_active_strategies,
-        restrict_legacy_strategy_names=restrict_legacy_strategy_names,
-    )
+    if refresh_supporting_boundaries:
+        _add_v40_research_unit_boundary(connection)
+        _add_continuous_demo_automation_boundary(
+            connection,
+            max_active_strategies=max_active_strategies,
+            restrict_legacy_strategy_names=restrict_legacy_strategy_names,
+        )
     schema_name = connection.execute(text("SELECT current_schema()" )).scalar_one()
     quoted_schema = '"{}"'.format(schema_name.replace('"', '""'))
     allowed_instruments_json = json.dumps(
         list(allowed_instruments), separators=(",", ":")
     )
-    connection.execute(text(
-        "ALTER TABLE {0}.strategy_deployments ADD COLUMN IF NOT EXISTS "
-        "real_orders BOOLEAN NOT NULL DEFAULT false; "
-        "ALTER TABLE {0}.strategy_deployments DROP CONSTRAINT IF EXISTS "
-        "strategy_deployments_demo_only_check; "
-        "ALTER TABLE {0}.strategy_deployments ADD CONSTRAINT "
-        "strategy_deployments_demo_only_check CHECK (real_orders=false)"
-        .format(quoted_schema)
-    ))
-    connection.execute(text(
-        "ALTER TABLE {0}.strategy_deployments DROP CONSTRAINT IF EXISTS "
-        "strategy_deployments_active_slot_check; "
-        "ALTER TABLE {0}.strategy_deployments ADD CONSTRAINT "
-        "strategy_deployments_active_slot_check CHECK ("
-        "(status='ACTIVE' AND active_slot BETWEEN 1 AND {1}) OR "
-        "(status='DISABLED' AND active_slot IS NULL))"
-        .format(quoted_schema, max_active_strategies)
-    ))
+    if refresh_supporting_boundaries:
+        connection.execute(text(
+            "ALTER TABLE {0}.strategy_deployments ADD COLUMN IF NOT EXISTS "
+            "real_orders BOOLEAN NOT NULL DEFAULT false; "
+            "ALTER TABLE {0}.strategy_deployments DROP CONSTRAINT IF EXISTS "
+            "strategy_deployments_demo_only_check; "
+            "ALTER TABLE {0}.strategy_deployments ADD CONSTRAINT "
+            "strategy_deployments_demo_only_check CHECK (real_orders=false)"
+            .format(quoted_schema)
+        ))
+        connection.execute(text(
+            "ALTER TABLE {0}.strategy_deployments DROP CONSTRAINT IF EXISTS "
+            "strategy_deployments_active_slot_check; "
+            "ALTER TABLE {0}.strategy_deployments ADD CONSTRAINT "
+            "strategy_deployments_active_slot_check CHECK ("
+            "(status='ACTIVE' AND active_slot BETWEEN 1 AND {1}) OR "
+            "(status='DISABLED' AND active_slot IS NULL))"
+            .format(quoted_schema, max_active_strategies)
+        ))
     ddl = """
     CREATE OR REPLACE FUNCTION SCHEMA_TOKEN.persist_okx_demo_natural_risk_chain(
       p_payload jsonb)
@@ -12118,7 +12122,8 @@ def _add_natural_signal_risk_chain_boundary(
         "GRANT EXECUTE ON FUNCTION {0} TO freqtrade".format(signature)
     ))
     if (
-        allowed_instruments
+        rebind_automation_guard
+        and allowed_instruments
         == ("BTC-USDT-SWAP", "ETH-USDT-SWAP", "SOL-USDT-SWAP")
         and max_active_strategies == 9
     ):
@@ -12456,7 +12461,11 @@ def upgrade_database(engine: Engine) -> str:
                     )
                 return current_version
             if current_version == NATURAL_SIGNAL_EVALUATOR_RECEIPT_BASE_VERSION:
-                _add_natural_signal_risk_chain_boundary(connection)
+                _add_natural_signal_risk_chain_boundary(
+                    connection,
+                    refresh_supporting_boundaries=False,
+                    rebind_automation_guard=False,
+                )
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
