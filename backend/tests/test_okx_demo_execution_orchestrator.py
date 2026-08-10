@@ -345,20 +345,25 @@ def _orchestrator(
             code_hash="f" * 64,
         ),
         snapshot_loader=lambda _: _snapshots(bundle),
-        clock=clock,
+        clock=clock or (lambda: NOW),
     )
     return service, deployments, chains, risk
 
 
 def test_actionable_refreshes_verifier_clock_after_slow_snapshot_capture():
     captured_before_snapshot = NOW - timedelta(seconds=45)
-    clock_values = iter((captured_before_snapshot, NOW, NOW))
+    clock_values = iter((NOW, NOW))
     service, deployments, chains, risk = _orchestrator(
         signal=_signal("ACTIONABLE"),
         clock=lambda: next(clock_values),
     )
 
-    result = service.process(11, lease_token="lease", fencing_sequence=4)
+    result = service.process(
+        11,
+        lease_token="lease",
+        fencing_sequence=4,
+        now=captured_before_snapshot,
+    )
 
     assert result.status == "ACTIONABLE"
     assert risk.calls[0]["now"] == NOW
