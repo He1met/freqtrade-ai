@@ -67,6 +67,7 @@ def _blueprint(*, timeframe: str = "5m") -> dict:
 def seed_resumed_candidate(
     factory,
     *,
+    pair: str = "BTC/USDT:USDT",
     request_timeframe: str = "5m",
     task_timeframe: str = "5m",
     blueprint_timeframe: str = "5m",
@@ -113,7 +114,7 @@ def seed_resumed_candidate(
         db.flush()
         task = BacktestTask(
             backtest_run_id=backtest_run.id,
-            pair="BTC/USDT:USDT",
+            pair=pair,
             timeframe=task_timeframe,
             status="succeeded",
             result_path="reports/backtests/continuation.json",
@@ -146,13 +147,13 @@ def seed_resumed_candidate(
             prompt_summary="Generate and validate one candidate.",
             allow_real_call=True,
             backtest_profile={
-                "pair": "BTC/USDT:USDT",
+                "pair": pair,
                 "timeframe": request_timeframe,
             },
         )
         job_id = ResearchJobQueueService(db).enqueue_deepseek_backtest(
             request,
-            idempotency_key="deployment-continuation",
+            idempotency_key=f"deployment-continuation-{pair}",
         ).id
         jobs = ResearchJobRepository(db)
         job = jobs.claim_next(owner="continuation-seed", lease_seconds=3600, now=NOW)
@@ -294,6 +295,36 @@ def test_approved_candidate_is_published_and_job_completes_without_research(
         assert job.evidence_snapshot["strategy_deployment_id"] == deployment.id
         assert job.evidence_snapshot["research_repeated"] is False
         assert deployment.instrument_id == "BTC-USDT-SWAP"
+        assert deployment.timeframe == "5m"
+
+
+@pytest.mark.parametrize(
+    ("pair", "instrument"),
+    [
+        ("ETH/USDT:USDT", "ETH-USDT-SWAP"),
+        ("SOL/USDT:USDT", "SOL-USDT-SWAP"),
+    ],
+)
+def test_multi_asset_candidate_preserves_pair_to_instrument_binding(
+    session_factory, pair, instrument
+) -> None:
+    job_id, approval_id = seed_resumed_candidate(session_factory, pair=pair)
+    worker = DeepSeekBacktestWorker(
+        session_factory=session_factory,
+        continuation_factory=continuation_factory,
+        owner="multi-asset-continuation-worker",
+        lease_seconds=3600,
+    )
+
+    assert worker.run_once() == job_id
+    with session_factory() as db:
+        deployment = db.scalar(
+            select(StrategyDeployment).where(
+                StrategyDeployment.candidate_approval_id == approval_id
+            )
+        )
+        assert deployment is not None
+        assert deployment.instrument_id == instrument
         assert deployment.timeframe == "5m"
 
 

@@ -16,6 +16,10 @@ from app.core.strategy_research_contract import (
     MIN_SLIPPAGE_PER_SIDE,
     matches_official_research_policy,
 )
+from app.core.strategy_research_matrix import (
+    ALLOWED_RESEARCH_PAIRS,
+    ALLOWED_RESEARCH_TIMEFRAMES,
+)
 from app.models.strategy_research import StrategyResearchBatch, StrategyResearchCandidate
 from app.repositories.strategy_research import StrategyResearchRepository
 
@@ -59,6 +63,34 @@ def _validate_hard_gate_contract(report: dict[str, Any]) -> None:
         or environment["slippage_per_side"] < MIN_SLIPPAGE_PER_SIDE
     ):
         raise StrategyResearchReportError("research report weakens fee or slippage stress")
+    if (
+        environment.get("pairs") != list(ALLOWED_RESEARCH_PAIRS)
+        or environment.get("timeframes") != list(ALLOWED_RESEARCH_TIMEFRAMES)
+    ):
+        raise StrategyResearchReportError("research report does not cover the official target matrix")
+    market_data = environment.get("market_data")
+    expected_targets = {
+        (pair, timeframe)
+        for pair in ALLOWED_RESEARCH_PAIRS
+        for timeframe in ALLOWED_RESEARCH_TIMEFRAMES
+    }
+    if (
+        not isinstance(market_data, list)
+        or len(market_data) != len(expected_targets)
+        or {
+            (item.get("pair"), item.get("timeframe"))
+            for item in market_data if isinstance(item, dict)
+        } != expected_targets
+        or any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("path"), str)
+            or not item["path"]
+            or not isinstance(item.get("sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", item["sha256"])
+            for item in market_data
+        )
+    ):
+        raise StrategyResearchReportError("research report market-data evidence is incomplete")
 
 
 def _candidate_rejection_reasons(candidate: dict[str, Any], policy: dict[str, Any]) -> list[dict]:
@@ -164,6 +196,84 @@ def _candidate_rejection_reasons(candidate: dict[str, Any], policy: dict[str, An
     return reasons
 
 
+def _validate_candidate_target_matrix(
+    candidate_name: str,
+    candidate: dict[str, Any],
+    policy: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    declared = candidate.get("declared_timeframe")
+    if declared not in ALLOWED_RESEARCH_TIMEFRAMES:
+        raise StrategyResearchReportError(
+            f"candidate {candidate_name!r} has an unsupported declared timeframe"
+        )
+    targets = candidate.get("targets")
+    expected_keys = {f"{pair}|{declared}" for pair in ALLOWED_RESEARCH_PAIRS}
+    if not isinstance(targets, dict) or set(targets) != expected_keys:
+        raise StrategyResearchReportError(
+            f"candidate {candidate_name!r} does not cover every required pair"
+        )
+    decisions: list[dict[str, Any]] = []
+    qualified: list[dict[str, Any]] = []
+    for key in sorted(targets):
+        target = targets[key]
+        if (
+            not isinstance(target, dict)
+            or target.get("timeframe") != declared
+            or key != f"{target.get('pair')}|{target.get('timeframe')}"
+        ):
+            raise StrategyResearchReportError(
+                f"candidate {candidate_name!r} has inconsistent target evidence"
+            )
+        reasons = _candidate_rejection_reasons(
+            {
+                **target,
+                "loadable": candidate.get("loadable"),
+                "static_check": candidate.get("static_check"),
+            },
+            policy,
+        )
+        decision = {
+            "pair": target["pair"],
+            "timeframe": target["timeframe"],
+            "status": "QUALIFIED" if not reasons else "REJECTED",
+            "rejection_reasons": reasons,
+        }
+        decisions.append(decision)
+        if not reasons:
+            qualified.append(decision)
+    selected = candidate.get("deployment_target")
+    selected_identity = (
+        selected.get("pair"), selected.get("timeframe")
+    ) if isinstance(selected, dict) else (None, None)
+    if not isinstance(selected, dict) or selected_identity not in {
+        (item["pair"], item["timeframe"]) for item in decisions
+    }:
+        raise StrategyResearchReportError(
+            f"candidate {candidate_name!r} has no valid deployment target"
+        )
+    if qualified and selected_identity not in {
+        (item["pair"], item["timeframe"]) for item in qualified
+    }:
+        raise StrategyResearchReportError(
+            f"candidate {candidate_name!r} selects a target that failed hard gates"
+        )
+    selected_evidence = targets[f"{selected['pair']}|{selected['timeframe']}"]
+    if any(
+        candidate.get(field) != selected_evidence.get(field)
+        for field in (
+            "lookahead_analysis",
+            "windows",
+            "primary_score",
+            "validation_passed",
+            "score_threshold_passed",
+        )
+    ):
+        raise StrategyResearchReportError(
+            f"candidate {candidate_name!r} selected-target projection is inconsistent"
+        )
+    return decisions, qualified
+
+
 class StrategyResearchPersistenceService:
     def __init__(self, db: Session) -> None:
         self.repository = StrategyResearchRepository(db)
@@ -210,7 +320,24 @@ class StrategyResearchPersistenceService:
                 raise StrategyResearchReportError(
                     f"candidate {candidate_name!r} is missing its code digest"
                 )
-            reasons = _candidate_rejection_reasons(evidence, policy)
+            target_decisions, qualified_targets = _validate_candidate_target_matrix(
+                candidate_name, evidence, policy
+            )
+            evidence = {**evidence, "target_decisions": target_decisions}
+            reasons = []
+            if not qualified_targets:
+                for decision in target_decisions:
+                    for reason in decision["rejection_reasons"]:
+                        reasons.append(
+                            {
+                                **reason,
+                                "evidence": {
+                                    **(reason.get("evidence") or {}),
+                                    "pair": decision["pair"],
+                                    "timeframe": decision["timeframe"],
+                                },
+                            }
+                        )
             claims_qualified = (
                 candidate_name in qualified
                 or evidence.get("deployable_candidate") is True

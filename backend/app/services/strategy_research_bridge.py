@@ -103,6 +103,9 @@ class StrategyResearchBridgeService:
         persisted_blueprint_evidence = (candidate.evidence_snapshot or {}).get(
             "canonical_blueprint_v2"
         )
+        deployment_target = (candidate.evidence_snapshot or {}).get("deployment_target")
+        if not isinstance(deployment_target, dict):
+            raise StrategyResearchBridgeBlocked("candidate deployment target is missing")
         if blueprint_payload is None and isinstance(persisted_blueprint_evidence, dict):
             persisted_blueprint = persisted_blueprint_evidence.get("blueprint")
             if (
@@ -187,7 +190,7 @@ class StrategyResearchBridgeService:
                 source_bytes=source_path.read_bytes(),
                 expected_source_digest=candidate.code_digest,
                 expected_class_name=candidate.candidate_name,
-                expected_timeframe="15m",
+                expected_timeframe=str(deployment_target.get("timeframe") or ""),
             )
         except (OSError, StrategyBlueprintEquivalenceBlocked, ValueError) as exc:
             return self._blocked_event(
@@ -429,9 +432,8 @@ class StrategyResearchBridgeService:
             .order_by(StrategyResearchAttemptEvent.created_at.desc(), StrategyResearchAttemptEvent.id.desc())
         )
         quality = (
-            self.db.get(MarketDataQualityReceipt, terminal.market_data_quality_receipt_id)
-            if terminal is not None and terminal.market_data_quality_receipt_id is not None
-            else None
+            self._bound_market_data_quality(candidate, terminal)
+            if terminal is not None else None
         )
         evidence = {
             "research_batch_id": batch.id,
@@ -447,6 +449,34 @@ class StrategyResearchBridgeService:
             "candidate_validation": candidate.evidence_snapshot,
         }
         return evidence, quality
+
+    def _bound_market_data_quality(
+        self,
+        candidate: StrategyResearchCandidate,
+        terminal: StrategyResearchAttemptEvent,
+    ) -> MarketDataQualityReceipt | None:
+        target = (candidate.evidence_snapshot or {}).get("deployment_target")
+        bindings = (terminal.evidence_snapshot or {}).get("market_data_bindings")
+        if not isinstance(target, dict) or not isinstance(bindings, list):
+            return None
+        matches = [
+            item for item in bindings
+            if isinstance(item, dict)
+            and item.get("pair") == target.get("pair")
+            and item.get("timeframe") == target.get("timeframe")
+            and isinstance(item.get("receipt_id"), int)
+        ]
+        if len(matches) != 1:
+            return None
+        quality = self.db.get(MarketDataQualityReceipt, matches[0]["receipt_id"])
+        if (
+            quality is None
+            or quality.pair != target.get("pair")
+            or quality.timeframe != target.get("timeframe")
+            or quality.file_sha256 != matches[0].get("sha256")
+        ):
+            return None
+        return quality
 
     def _blocked_event(
         self,

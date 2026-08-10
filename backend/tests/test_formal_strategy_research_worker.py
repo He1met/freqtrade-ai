@@ -41,9 +41,23 @@ class FakeChild:
 
 
 def args_for(tmp_path: Path, **updates) -> Namespace:
-    data_file = tmp_path / "data/futures/BTC_USDT_USDT-15m-futures.feather"
-    data_file.parent.mkdir(parents=True)
-    data_file.write_bytes(b"fixture")
+    data_root = tmp_path / "data/futures"
+    data_root.mkdir(parents=True)
+    manifest = []
+    for asset in ("BTC", "ETH", "SOL"):
+        for timeframe in ("5m", "15m"):
+            relative_path = f"futures/{asset}_USDT_USDT-{timeframe}-futures.feather"
+            data_file = tmp_path / "data" / relative_path
+            data_file.write_bytes(b"fixture")
+            manifest.append(
+                {
+                    "pair": f"{asset}/USDT:USDT",
+                    "timeframe": timeframe,
+                    "relative_path": relative_path,
+                    "sha256": hashlib.sha256(b"fixture").hexdigest(),
+                    "receipt_id": len(manifest) + 1,
+                }
+            )
     values = {
         "lock_fd": 3,
         "run_id": "202608090515",
@@ -59,7 +73,7 @@ def args_for(tmp_path: Path, **updates) -> Namespace:
         "termination_grace_seconds": 10.0,
         "attempt_id": "00000000-0000-4000-8000-000000000001",
         "market_data_quality_receipt_id": 1,
-        "expected_market_data_sha256": hashlib.sha256(b"fixture").hexdigest(),
+        "expected_market_data_manifest": json.dumps(manifest),
     }
     values.update(updates)
     return Namespace(**values)
@@ -89,6 +103,25 @@ def test_worker_records_success_with_terminal_heartbeat(tmp_path):
             "reason": "正式路径已完成 10 条候选的生成、验证与全量持久化。",
         }
     ]
+
+
+def test_worker_blocks_if_any_matrix_artifact_changes_after_quality_gate(tmp_path):
+    args = args_for(tmp_path)
+    (args.datadir / "futures/SOL_USDT_USDT-5m-futures.feather").write_bytes(b"changed")
+    terminal = []
+
+    result = execute(
+        args,
+        popen=lambda *unused_args, **unused_kwargs: (_ for _ in ()).throw(
+            AssertionError("research child must not start")
+        ),
+        clock=lambda: NOW,
+        terminal_recorder=lambda *unused_args, **kwargs: terminal.append(kwargs),
+    )
+
+    assert result == 2
+    assert json.loads(args.state_path.read_text())["reason_code"] == "MARKET_DATA_DIGEST_CHANGED"
+    assert terminal[0]["outcome"] == "BLOCKED"
 
 
 def test_worker_deadline_terminates_only_child_process_group(tmp_path):

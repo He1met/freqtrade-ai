@@ -3,6 +3,11 @@ from __future__ import annotations
 from math import isclose
 from typing import Any
 
+from app.core.strategy_research_matrix import (
+    ALLOWED_RESEARCH_PAIRS,
+    ALLOWED_RESEARCH_TIMEFRAMES,
+)
+
 
 RESEARCH_CONTRACT_VERSION = "formal-strategy-research-aggressive-v1"
 RESEARCH_RISK_PROFILE = "AGGRESSIVE"
@@ -29,6 +34,9 @@ def official_research_policy() -> dict[str, Any]:
         "slippage_per_side": MIN_SLIPPAGE_PER_SIDE,
         "required_validation_windows": ["wf_bull", "wf_range", "oos", "wf_bear"],
         "score_source": "primary_bear net of fee and slippage",
+        "research_pairs": list(ALLOWED_RESEARCH_PAIRS),
+        "research_timeframes": list(ALLOWED_RESEARCH_TIMEFRAMES),
+        "target_qualification_rule": "at_least_one_fully_qualified_target",
     }
 
 

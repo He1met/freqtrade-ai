@@ -29,6 +29,31 @@ HISTORICAL_REPORT = (
 def report(tmp_path):
     payload = json.loads(HISTORICAL_REPORT.read_text())
     payload["selection_policy"] = official_research_policy()
+    pairs = ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT"]
+    payload["environment"]["pairs"] = pairs
+    payload["environment"]["timeframes"] = ["5m", "15m"]
+    payload["environment"]["market_data"] = [
+        {
+            "pair": pair,
+            "timeframe": timeframe,
+            "path": f"futures/{pair.split('/')[0]}-{timeframe}.feather",
+            "sha256": "a" * 64,
+        }
+        for pair in pairs
+        for timeframe in ("5m", "15m")
+    ]
+    for index, evidence in enumerate(payload["candidates"].values()):
+        timeframe = "5m" if index < 5 else "15m"
+        evidence["declared_timeframe"] = timeframe
+        evidence["deployment_target"] = {"pair": pairs[0], "timeframe": timeframe}
+        evidence["targets"] = {
+            f"{pair}|{timeframe}": {
+                **copy.deepcopy(evidence),
+                "pair": pair,
+                "timeframe": timeframe,
+            }
+            for pair in pairs
+        }
     path = tmp_path / "official-aggressive-report.json"
     path.write_text(json.dumps(payload))
     return path
@@ -163,7 +188,11 @@ def test_report_cannot_weaken_hard_gate_contract(
 def test_missing_independent_window_is_an_auditable_rejection(db, tmp_path, report):
     payload = json.loads(report.read_text())
     name = next(iter(payload["candidates"]))
-    del payload["candidates"][name]["windows"]["oos"]
+    for target in payload["candidates"][name]["targets"].values():
+        del target["windows"]["oos"]
+    payload["candidates"][name]["windows"] = copy.deepcopy(
+        payload["candidates"][name]["targets"]["BTC/USDT:USDT|5m"]["windows"]
+    )
     incomplete = tmp_path / "incomplete.json"
     incomplete.write_text(json.dumps(payload))
 
@@ -177,7 +206,11 @@ def test_missing_independent_window_is_an_auditable_rejection(db, tmp_path, repo
 def test_window_cannot_claim_validation_without_cost_stress(db, tmp_path, report):
     payload = json.loads(report.read_text())
     name = next(iter(payload["candidates"]))
-    payload["candidates"][name]["windows"]["oos"]["slippage_per_side"] = 0
+    for target in payload["candidates"][name]["targets"].values():
+        target["windows"]["oos"]["slippage_per_side"] = 0
+    payload["candidates"][name]["windows"] = copy.deepcopy(
+        payload["candidates"][name]["targets"]["BTC/USDT:USDT|5m"]["windows"]
+    )
     unstressed = tmp_path / "unstressed.json"
     unstressed.write_text(json.dumps(payload))
 

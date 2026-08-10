@@ -6,7 +6,7 @@ from freqtrade.strategy import IStrategy
 
 
 class Candidate04AtrSqueezeExpansion(IStrategy):
-    timeframe = "15m"
+    timeframe = "5m"
     can_short = True
     startup_candle_count = 150
     stoploss = -0.034

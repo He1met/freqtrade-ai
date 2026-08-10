@@ -166,6 +166,9 @@ def record_terminal_event(
                     "execution_target": "OKX_DEMO",
                     "allow_real_funds": False,
                     "real_orders": False,
+                    "market_data_bindings": json.loads(
+                        args.expected_market_data_manifest
+                    ),
                 },
                 event_digest=event_digest,
             )
@@ -181,22 +184,34 @@ def execute(
     terminal_recorder: Callable[..., None] = record_terminal_event,
 ) -> int:
     repo = Path(__file__).resolve().parents[1]
-    data_file = args.datadir / "futures" / "BTC_USDT_USDT-15m-futures.feather"
-    digest = hashlib.sha256(data_file.read_bytes()).hexdigest()
-    if digest != args.expected_market_data_sha256:
+    manifest = json.loads(args.expected_market_data_manifest)
+    if not isinstance(manifest, list) or len(manifest) != 6:
+        raise RuntimeError("formal research requires exactly six market-data bindings")
+    changed = []
+    for item in manifest:
+        if not isinstance(item, dict) or not isinstance(item.get("relative_path"), str):
+            raise RuntimeError("market-data manifest is malformed")
+        data_file = (args.datadir / item["relative_path"]).resolve()
+        if args.datadir.resolve() not in data_file.parents or not data_file.is_file():
+            changed.append(str(item.get("relative_path")))
+            continue
+        digest = hashlib.sha256(data_file.read_bytes()).hexdigest()
+        if digest != item.get("sha256"):
+            changed.append(str(item.get("relative_path")))
+    if changed:
         now = clock()
         terminal_recorder(
             args,
             outcome="BLOCKED",
             reason_code="MARKET_DATA_DIGEST_CHANGED",
-            reason="数据文件在质量检查后发生变化；本轮未启动研究子进程。",
+            reason="数据矩阵在质量检查后发生变化；本轮未启动研究子进程。",
         )
         write_state(
             args.state_path,
             {
                 "status": "BLOCKED",
                 "reason_code": "MARKET_DATA_DIGEST_CHANGED",
-                "reason": "数据文件在质量检查后发生变化；本轮未启动研究子进程。",
+                "reason": "数据矩阵在质量检查后发生变化；本轮未启动研究子进程。",
                 **_base_state(args, now=now),
                 "completed_at": now.isoformat(),
                 "phase": "FINISHED",
@@ -440,7 +455,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--termination-grace-seconds", type=float, required=True)
     parser.add_argument("--attempt-id", required=True)
     parser.add_argument("--market-data-quality-receipt-id", type=int, required=True)
-    parser.add_argument("--expected-market-data-sha256", required=True)
+    parser.add_argument("--expected-market-data-manifest", required=True)
     args = parser.parse_args(argv)
     if args.deadline_seconds <= 0 or args.heartbeat_seconds <= 0 or args.termination_grace_seconds <= 0:
         parser.error("deadline, heartbeat, and termination grace must be positive")

@@ -41,11 +41,16 @@ def _stable_digest(payload: dict) -> str:
 
 
 def _instrument_from_pair(pair: object) -> str:
-    if pair != "BTC/USDT:USDT":
+    instruments = {
+        "BTC/USDT:USDT": "BTC-USDT-SWAP",
+        "ETH/USDT:USDT": "ETH-USDT-SWAP",
+        "SOL/USDT:USDT": "SOL-USDT-SWAP",
+    }
+    if pair not in instruments:
         raise StrategyDeploymentContinuationBlocked(
-            "persisted backtest pair is not the locked OKX Demo instrument"
+            "persisted backtest pair is not in the locked OKX Demo research allowlist"
         )
-    return "BTC-USDT-SWAP"
+    return instruments[pair]
 
 
 class StrategyDeploymentContinuation:

@@ -3,18 +3,32 @@
 The hourly candidate flow is deliberately separate from the canonical
 `strategies` catalog and from `StrategyDeployment`:
 
-1. Generate exactly ten differentiated `BTC/USDT:USDT` 15m candidates in the
-   single owned research worktree.
-2. Run load/static checks, Freqtrade lookahead analysis, fee and slippage stress,
-   and the primary, OOS, bull, range, and bear windows.
+1. Generate exactly ten differentiated candidates in the single owned research
+   worktree: five declare `5m` and five declare `15m`.
+2. Evaluate every candidate on its declared timeframe for each of
+   `BTC/USDT:USDT`, `ETH/USDT:USDT`, and `SOL/USDT:USDT`. Each target runs
+   load/static checks, Freqtrade lookahead analysis, fee and slippage stress,
+   and the primary, independent OOS, bull, range, and bear windows. The six
+   market-data artifacts are quality-checked and digest-bound before the worker
+   starts.
 3. Write the JSON report and persist one `strategy_research_batches` row plus
-   ten `strategy_research_candidates` rows. After the database transaction,
+   ten `strategy_research_candidates` rows. Each row preserves all three target
+   decisions, including structured rejection reasons, and one deterministic
+   deployment target. After the database transaction,
    atomically add a `persistence_receipt` to the report and synchronize its
    digest so the file cannot keep claiming `database_used=false`.
 4. Keep rejected candidates with structured reasons. A validated batch with
    zero qualified candidates is successful research, not a generation failure.
-5. Let deployment review read only `status=QUALIFIED`; research never creates or
-   activates a `StrategyDeployment`.
+5. Mark a candidate `QUALIFIED` only when at least one pair on its declared
+   timeframe passes every hard gate. Let canonical bridge/deployment review read
+   only `status=QUALIFIED`; rejected or validation-failed candidates cannot enter
+   that continuation.
+6. The continuation binds `BTC`, `ETH`, and `SOL` pairs to their exact OKX swap
+   instrument IDs. It still preserves the existing active-slot limit, unique
+   writer, total exposure, order-frequency, circuit-breaker, idempotency, and
+   reconciliation gates. ETH/SOL execution remains fail-closed until the unique
+   canonical owner applies and verifies the corresponding risk-policy/DB
+   allowlist migration; this research branch does not run that migration.
 
 The supported complete command is:
 
