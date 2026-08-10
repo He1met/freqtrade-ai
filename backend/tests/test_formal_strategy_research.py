@@ -16,6 +16,8 @@ from app.models import (
     StrategyResearchBatch,
 )
 from app.services.formal_strategy_research import FormalStrategyResearchCoordinator
+from app.schemas.strategy_blueprint import StrategyBlueprint
+from app.services.strategy_renderer import StrategyCodeRenderer
 
 
 NOW = datetime(2026, 8, 9, 5, 22, tzinfo=timezone.utc)
@@ -23,9 +25,23 @@ NOW = datetime(2026, 8, 9, 5, 22, tzinfo=timezone.utc)
 
 def build_coordinator(tmp_path, monkeypatch, *, ownership=True, allow_dry_run=False):
     repo = tmp_path / "repo"
-    (repo / "research/strategy_candidates").mkdir(parents=True)
-    for index in range(10):
-        (repo / f"research/strategy_candidates/{index:02d}_candidate.py").write_text("pass\n")
+    for timeframe in ("5m", "15m"):
+        candidate_root = repo / "research/strategy_candidates" / timeframe
+        candidate_root.mkdir(parents=True)
+        for index in range(1, 11):
+            blueprint = StrategyBlueprint(
+                name=f"Candidate {index} {timeframe}",
+                slug=f"candidate-{index}-{timeframe}",
+                class_name=f"Candidate{index}{timeframe.upper()}",
+                timeframe=timeframe,
+                indicators=[{"name": "rsi", "kind": "rsi", "period": 14}],
+                entry_rules=[{"indicator": "rsi", "operator": "<", "value": 35.0}],
+            )
+            stem = candidate_root / f"{index:02d}_candidate"
+            stem.with_suffix(".py").write_text(StrategyCodeRenderer().render(blueprint))
+            stem.with_suffix(".blueprint.json").write_text(
+                json.dumps(blueprint.model_dump(mode="json"))
+            )
     for asset in ("BTC", "ETH", "SOL"):
         for timeframe, frequency in (("5m", "5min"), ("15m", "15min")):
             data = repo / (
@@ -301,11 +317,22 @@ def test_formal_research_uses_nested_okx_data_when_root_futures_also_exists(
 
 def test_formal_research_reports_exact_candidate_count_blocker(tmp_path, monkeypatch):
     coordinator = build_coordinator(tmp_path, monkeypatch)
-    next((coordinator.repo / "research/strategy_candidates").glob("*.py")).unlink()
+    next((coordinator.repo / "research/strategy_candidates/5m").glob("*.py")).unlink()
     with db_session() as db:
         result = coordinator.start(db, trigger="manual")
     assert result.reason_code == "CANDIDATE_SET_INCOMPLETE"
-    assert "当前为 9 条" in result.reason
+    assert "5m=9、15m=10" in result.reason
+
+
+def test_formal_research_rejects_non_equivalent_candidate_blueprint(tmp_path, monkeypatch):
+    coordinator = build_coordinator(tmp_path, monkeypatch)
+    candidate = next(
+        (coordinator.repo / "research/strategy_candidates/15m").glob("*.py")
+    )
+    candidate.write_text(candidate.read_text() + "\n# drift\n")
+    with db_session() as db:
+        result = coordinator.start(db, trigger="manual")
+    assert result.reason_code == "CANDIDATE_BLUEPRINT_INVALID"
 
 
 def test_formal_research_does_not_replay_inconsistent_running_state(tmp_path, monkeypatch):

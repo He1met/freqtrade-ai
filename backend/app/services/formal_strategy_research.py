@@ -16,14 +16,25 @@ from sqlalchemy.orm import Session
 
 from app.adapters.freqtrade.binary import resolve_freqtrade_binary
 from app.core.config import Settings, get_settings
-from app.core.strategy_research_matrix import RESEARCH_TARGETS
+from app.core.strategy_research_matrix import (
+    ALLOWED_RESEARCH_TIMEFRAMES,
+    RESEARCH_TARGETS,
+)
 from app.repositories.strategy_research import StrategyResearchRepository
 from app.schemas.strategy_research import FormalResearchRunRead
 from app.models.strategy_research import StrategyResearchAttemptEvent
 from app.services.market_data_quality import inspect_market_data
+from app.services.strategy_blueprint_equivalence import (
+    StrategyBlueprintEquivalenceBlocked,
+    prove_blueprint_code_equivalence,
+)
 
 
-EXPECTED_SOURCE_CANDIDATE_COUNT = 10
+EXPECTED_SOURCE_CANDIDATE_COUNT_PER_TIMEFRAME = 10
+EXPECTED_SOURCE_CANDIDATE_COUNT = (
+    EXPECTED_SOURCE_CANDIDATE_COUNT_PER_TIMEFRAME
+    * len(ALLOWED_RESEARCH_TIMEFRAMES)
+)
 EXPECTED_CANDIDATE_COUNT = 60
 OWNERSHIP_SCHEMA = "freqtrade-ai-formal-research-ownership-v1"
 STATE_SCHEMA = "freqtrade-ai-formal-research-state-v1"
@@ -302,7 +313,19 @@ class FormalStrategyResearchCoordinator:
             target.key for target in RESEARCH_TARGETS
             if not target.market_path(datadir).is_file()
         ]
-        candidates = sorted((self.repo / "research/strategy_candidates").glob("[0-9][0-9]_*.py"))
+        candidate_root = self.repo / "research/strategy_candidates"
+        candidates_by_timeframe = {
+            timeframe: sorted(
+                (candidate_root / timeframe).glob("[0-9][0-9]_*.py")
+            )
+            for timeframe in ALLOWED_RESEARCH_TIMEFRAMES
+        }
+        candidates = [
+            candidate
+            for timeframe in ALLOWED_RESEARCH_TIMEFRAMES
+            for candidate in candidates_by_timeframe[timeframe]
+        ]
+        legacy_candidates = sorted(candidate_root.glob("[0-9][0-9]_*.py"))
         if freqtrade is None or not freqtrade.is_file():
             return self._blocked("FREQTRADE_BINARY_MISSING", "正式研究 Freqtrade 可执行文件不存在。")
         if missing_targets:
@@ -310,12 +333,51 @@ class FormalStrategyResearchCoordinator:
                 "MARKET_DATA_MATRIX_MISSING",
                 "正式研究数据矩阵不完整：" + ", ".join(missing_targets),
             )
-        if len(candidates) != EXPECTED_SOURCE_CANDIDATE_COUNT:
+        counts = {
+            timeframe: len(candidates_by_timeframe[timeframe])
+            for timeframe in ALLOWED_RESEARCH_TIMEFRAMES
+        }
+        if (
+            len(candidates) != EXPECTED_SOURCE_CANDIDATE_COUNT
+            or legacy_candidates
+            or any(
+                count != EXPECTED_SOURCE_CANDIDATE_COUNT_PER_TIMEFRAME
+                for count in counts.values()
+            )
+        ):
             return self._blocked(
                 "CANDIDATE_SET_INCOMPLETE",
-                "正式研究必须由 10 个结构化蓝图生成六个研究单元各 10 条；"
-                f"当前为 {len(candidates)} 条蓝图。",
+                "正式研究必须由 5m/15m 各 10 个 timeframe-bound 蓝图生成"
+                "六个研究单元各 10 条；"
+                f"当前为 5m={counts.get('5m', 0)}、15m={counts.get('15m', 0)}，"
+                f"旧顶层源码={len(legacy_candidates)}。",
             )
+        for candidate in candidates:
+            blueprint_path = candidate.with_suffix(".blueprint.json")
+            try:
+                blueprint_payload = json.loads(blueprint_path.read_text(encoding="utf-8"))
+                if not isinstance(blueprint_payload, dict):
+                    raise ValueError("blueprint payload must be an object")
+                source_bytes = candidate.read_bytes()
+                source_digest = hashlib.sha256(source_bytes).hexdigest()
+                prove_blueprint_code_equivalence(
+                    blueprint_payload=blueprint_payload,
+                    source_bytes=source_bytes,
+                    expected_source_digest=source_digest,
+                    expected_class_name=str(blueprint_payload.get("class_name") or ""),
+                    expected_timeframe=candidate.parent.name,
+                )
+            except (
+                OSError,
+                json.JSONDecodeError,
+                StrategyBlueprintEquivalenceBlocked,
+                ValueError,
+            ):
+                return self._blocked(
+                    "CANDIDATE_BLUEPRINT_INVALID",
+                    "正式研究候选缺少 timeframe-bound Blueprint 或源码不能由其逐字复现："
+                    + str(candidate.relative_to(self.repo)),
+                )
         return None
 
     def _try_lock(self):
