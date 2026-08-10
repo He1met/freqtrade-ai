@@ -1,6 +1,12 @@
 # Roadmap
 
-## 当前运行入口
+> **Historical / superseded for current planning.** 本文保留 Phase 规划与验收背景，
+> 不再维护当前任务状态。当前计划只看 [GitHub open issues](https://github.com/He1met/freqtrade-ai/issues)
+> 的 roadmap 标签；current 文档入口见 [index.md](index.md)，正式研究数量见
+> [60-candidate 契约](formal_research_contract.md)。不得用下文的“当前”段落判断 runtime、
+> receipt 修复、部署或订单链路已完成。
+
+## 历史运行入口（superseded）
 
 当前运行、验证和文档入口见 [index.md](index.md)。Phase 1 到 Phase 9 已完成阶段性
 验收；当前工作是 Phase 9 之后的 refactor/runtime 收紧队列，重点是让页面默认使用

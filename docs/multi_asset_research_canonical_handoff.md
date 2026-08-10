@@ -1,5 +1,10 @@
 # BTC/ETH/SOL dual-timeframe canonical handoff
 
+> **Historical merge handoff.** 本文保留引入多资产/双 timeframe 时的 owner 交接边界；
+> 当前候选矩阵与状态语义见
+> [60-candidate 正式研究契约](formal_research_contract.md)。本文不证明 migration、
+> deployment、runtime 或 evaluator receipt 当前已完成。
+
 This branch is intentionally limited to isolated-worktree implementation and
 offline tests. It does not inspect or mutate the canonical runtime/database and
 does not start research, bridge, deployment, or order execution.

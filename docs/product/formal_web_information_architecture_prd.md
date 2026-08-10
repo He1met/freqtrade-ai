@@ -1,5 +1,11 @@
 # Freqtrade AI 正式网页信息架构简化 PRD
 
+> **部分 superseded。** 本文继续作为历史产品/页面证据模型；其中“固定 10 条”、
+> `10/10/10/10` 及“手动运行一轮研究（10 条）”文案已不再是 current 研究定义。
+> 当前矩阵、计数、状态与交接只以
+> [60-candidate 正式研究契约](../formal_research_contract.md)为准。本文的实施状态也不替代
+> [GitHub open issues](https://github.com/He1met/freqtrade-ai/issues)或新鲜 runtime/receipt 证据。
+
 - 文档状态：`v0.4 已确认 / 阶段 0.5–1 实施中`
 - 版本：`v0.4`
 - 日期：`2026-08-09`

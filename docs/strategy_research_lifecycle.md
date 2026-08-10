@@ -1,5 +1,10 @@
 # Strategy research lifecycle
 
+> **Superseded candidate-count snapshot.** 本文保留早期 ten-source 流程说明作为历史背景；
+> 当前正式矩阵、计数、状态和 `QUALIFIED`-only 交接只以
+> [60-candidate 正式研究契约](formal_research_contract.md)为准。下文的 ten-candidate/ten-row
+> 表述不得用于 current UI、运行判定或研究启动。
+
 The hourly candidate flow is deliberately separate from the canonical
 `strategies` catalog and from `StrategyDeployment`:
 

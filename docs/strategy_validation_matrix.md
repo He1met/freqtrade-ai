@@ -1,5 +1,9 @@
 # 独立 OOS / Walk-forward 验证矩阵
 
+> 本文定义正式策略版本的独立验证实现边界，不定义正式研究候选数量。
+> 当前候选矩阵与研究状态只以
+> [60-candidate 正式研究契约](formal_research_contract.md)为准。
+
 `StrategyValidationMatrixService` 是研究结果进入候选晋级前的 fail-closed
 边界。它不把一个 `BacktestResult` 的 trades 切片解释成 OOS 或
 walk-forward。

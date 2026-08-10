@@ -1,125 +1,74 @@
-# Freqtrade AI Current Run Docs
+# Freqtrade AI 文档导航
 
-Last updated: 2026-07-22
+这是仓库唯一的 current 文档导航入口。任何会变化的进度结论以开放 GitHub issues、
+当前 checkout 和新鲜 runtime/receipt 证据为准；README、roadmap、已合并 PR、历史报告和
+页面快照都不能单独证明当前完成或可运行。
 
-This is the current documentation entry point for local real-run validation,
-runtime evidence, refactor work, and safety boundaries.
+## Runtime truth
 
-## Current Objective
+- [本地 runtime / worker](phase9_db_backed_worker.md)：受管服务、`status`、`verify` 与恢复边界。
+- [ExecutionTarget](execution_target.md)：执行目标隔离和 Demo-only 约束。
+- [OKX Demo E2E](okx_demo_e2e.md)：端到端验收与 fail-closed 判定。
+- [OKX Demo risk chain](okx_demo_risk_chain.md)：自然信号、风控和 owner-mediated 写入边界。
+- [OKX Demo read adapter](okx_demo_read_adapter.md)：只读交易所事实与数据来源。
+- [OKX Demo soak](okx_demo_soak.md)：持续观察和对账证据要求。
 
-The final Phase 9 refactor/runtime implementation item is Issue `#369`, a
-single-process DB-backed local worker with durable idempotency, lease,
-heartbeat, expiry, pause, cancel, and restart-safe evidence. The goal is not to
-add a new trading capability or scheduler. The goal is to move the existing
-DeepSeek-to-backtest chain out of a long HTTP request while keeping browser,
-API, database, and artifact evidence reconcilable:
+运行状态必须现场执行仓库支持的 verification 命令后判断。`VERIFIED` 仅说明该次核对的
+基线一致；它不替代尚未完成 issue 的验收，也不授权研究、部署、重启或下单。
 
-- core pages prefer real database / backend API evidence;
-- `fixture`, `fallback`, `mock`, and `unknown` data stay visibly non-core;
-- empty states explain why no real data exists and what to do next;
-- core actions show `success`, `failed`, or `BLOCKED` evidence;
-- QA can reconcile browser, API, and database state.
+## Current plan
 
-## Current Issue Queue
+Current plan 不在静态 roadmap 中维护：
 
-| Issue | Purpose | Status on 2026-07-22 |
-| --- | --- | --- |
-| [#369](https://github.com/He1met/freqtrade-ai/issues/369) | Single-process DB-backed worker, lease, and failure recovery | Delivered by this change; live status remains in Project #3 |
-| [#362](https://github.com/He1met/freqtrade-ai/issues/362) | Phase 9 runtime/refactor Epic closeout | Tracked separately after #369 acceptance |
+- [开放 issues](https://github.com/He1met/freqtrade-ai/issues)
+- [`roadmap/current`](https://github.com/He1met/freqtrade-ai/issues?q=is%3Aissue+is%3Aopen+label%3Aroadmap%2Fcurrent)
+- [`roadmap/next`](https://github.com/He1met/freqtrade-ai/issues?q=is%3Aissue+is%3Aopen+label%3Aroadmap%2Fnext)
+- [`roadmap/long-term`](https://github.com/He1met/freqtrade-ai/issues?q=is%3Aissue+is%3Aopen+label%3Aroadmap%2Flong-term)
 
-All other child dependencies for `#369` are complete. The historical queue
-snapshots remain available through the phase acceptance and planning documents;
-they are not a current source of work status.
+若 issue、PR 和 runtime 证据不一致，保持未知或阻断，并在 issue 中收敛事实；不得修改静态
+文档来制造完成状态。
 
-## Primary Runtime Docs
+## Research contract
 
-- [正式网页信息架构简化 PRD（待确认）](product/formal_web_information_architecture_prd.md)
-- [ADR-0010: OKX Demo SWAP compatibility and single order writer](adr/0010-okx-demo-order-writer-compatibility.md)
-- [OKX Demo Keychain credential boundary](okx_demo_credentials.md)
-- [OKX Demo canary（直连入口已封禁）](okx_demo_canary.md)
-- [OKX Demo E2E acceptance](okx_demo_e2e.md)
-- [execution_target.md](execution_target.md)
-- [execution_target_lineage.md](execution_target_lineage.md)
-- [okx_demo_read_adapter.md](okx_demo_read_adapter.md)
-- [okx_demo_risk_chain.md](okx_demo_risk_chain.md)
-- [okx_demo_soak.md](okx_demo_soak.md)
-- [phase9_operational_readiness_plan.md](phase9_operational_readiness_plan.md)
-- [phase9_acceptance.md](phase9_acceptance.md)
-- [phase9_deepseek_single_e2e.md](phase9_deepseek_single_e2e.md)
-- [phase9_deepseek_backtest_loop.md](phase9_deepseek_backtest_loop.md)
-- [phase9_db_backed_worker.md](phase9_db_backed_worker.md)
-- [phase9_page_data_source_audit.md](phase9_page_data_source_audit.md)
-- [phase9_bug_issue_flow.md](phase9_bug_issue_flow.md)
-- [phase9_security_boundary_review.md](phase9_security_boundary_review.md)
-- [phase8_acceptance.md](phase8_acceptance.md)
-- [phase8_e2e_reconciliation.md](phase8_e2e_reconciliation.md)
-- [phase8_local_strategy_lab_plan.md](phase8_local_strategy_lab_plan.md)
+- [60-candidate 正式研究契约](formal_research_contract.md)：当前唯一候选数量、矩阵、状态、
+  质量门和交接定义。
+- [Strategy research lifecycle](strategy_research_lifecycle.md)：历史流程说明；涉及候选数量时
+  以上述契约为准。
+- [独立 OOS / Walk-forward 验证矩阵](strategy_validation_matrix.md)：正式策略版本的独立验证边界。
+- [多资产 canonical handoff](multi_asset_research_canonical_handoff.md)：历史合并交接与 owner 边界。
+- [正式网页信息架构 PRD](product/formal_web_information_architecture_prd.md)：产品/页面证据模型；
+  其中旧的固定 10 条文案已 superseded。
 
-## Validation Entry Points
+## Runbooks and governance
 
-Use the narrowest command that proves the affected surface. For refactor PRs,
-also include `git diff --check` and `python3 scripts/scan_secrets.py`.
+- [Feature intake](feature_intake.md) 与 [Acceptance checklist](acceptance_checklist.md)
+- [凭据边界](okx_demo_credentials.md)
+- [Runtime 安全边界](phase9_security_boundary_review.md)
+- [ExecutionTarget lineage](execution_target_lineage.md)
+- [受控 canary](okx_demo_canary.md)
+- [ADR-0010：OKX Demo single writer](adr/0010-okx-demo-order-writer-compatibility.md)
 
-| Surface | Command |
-| --- | --- |
-| Backend | `(cd backend && . .venv/bin/activate && pytest)` |
-| DB-backed worker, at most one job | `(cd backend && .venv/bin/python -m app.workers.deepseek_backtest_worker --once)` |
-| Python syntax | `python3 -m compileall backend/app backend/tests scripts` |
-| Frontend | `(cd frontend && npm run build)` |
-| Phase 8 local QA | `python3 scripts/smoke_phase8.py --offline --tmp-dir /tmp/freqtrade-ai-phase8-smoke` |
-| Phase 9 single E2E, safe default | `python3 scripts/phase9_deepseek_single_e2e.py --json` |
-| Phase 9 single E2E, real call | `python3 scripts/phase9_deepseek_single_e2e.py --allow-real-call --json` |
-| OKX Demo E2E, network-free CI | `python3 scripts/okx_demo_e2e.py --mode offline-ci` |
-| OKX Demo E2E, controlled real (blocked until normal pipeline integration) | `python3 scripts/okx_demo_e2e.py --mode controlled-real` |
-| Secret scan | `python3 scripts/scan_secrets.py` |
-| Whitespace | `git diff --check` |
+这些文档不授权 `OKX_LIVE`、真实资金、真实订单、credentials 读取/记录、扩大 DB/ACL、
+runtime 接管或绕过唯一 writer。
 
-Real DeepSeek calls require local operator approval and a local ENV key. Never
-write the key to code, config, database, logs, UI, screenshots, reports, Issue,
-or PR text.
+## Historical evidence
 
-## Safety Boundary
+- [历史 roadmap](roadmap.md)：Phase 规划与背景，已 superseded 为 current plan 来源。
+- `phase*_acceptance.md`、`phase*_plan.md`：阶段验收和设计快照。
+- `reports/`：带时间、commit、环境和 receipt 的运行/研究证据；报告事实只在其声明的证据范围内成立。
+- `docs/adr/`：架构决策记录，不因 current 入口收口而删除或重写。
 
-Allowed local work:
+仓库当前尚无统一的 reports manifest。预留 canonical 路径为 `reports/index.md`；在该文件由
+独立任务实际建立并合并前，本导航不提供虚假的可点击入口，也不把目录内容描述为完整清单。
 
-- local DeepSeek API validation with explicit authorization;
-- one local DB-backed research worker for the explicitly queued job;
-- local database read/write and local test DB reset/seed;
-- local strategy file writes in approved directories;
-- local backtest and local controlled dry-run readiness checks;
-- browser/API/database reconciliation.
+## 静态文档验收
 
-Forbidden work:
+文档修改至少执行：
 
-- live trading, real orders, production deployment, automatic live deployment;
-- switching dry-run to live;
-- start/stop/deploy live controls;
-- modifying Freqtrade source;
-- committing or reporting real secrets;
-- adding hourly or recurring scheduling, Redis, Celery, Kafka, RabbitMQ,
-  production queues, distributed workers, or worker pools.
+```bash
+python3 scripts/scan_secrets.py
+git diff --check
+```
 
-## Historical Phase Archive
-
-These docs are retained as historical evidence and should not be deleted during
-current-run cleanup:
-
-- Phase 1: [phase1_acceptance.md](phase1_acceptance.md)
-- Phase 2: [phase2_acceptance.md](phase2_acceptance.md),
-  [phase2_architecture_review.md](phase2_architecture_review.md),
-  [phase2_real_freqtrade_backtest_spike.md](phase2_real_freqtrade_backtest_spike.md)
-- Phase 3: [phase3_acceptance.md](phase3_acceptance.md),
-  [phase3_plan.md](phase3_plan.md)
-- Phase 4: [phase4_acceptance.md](phase4_acceptance.md),
-  [phase4_hyperopt_design.md](phase4_hyperopt_design.md),
-  [post_phase4_cleanup.md](post_phase4_cleanup.md)
-- Phase 5: [phase5_acceptance.md](phase5_acceptance.md),
-  [phase5_plan.md](phase5_plan.md),
-  [phase5_pr127_split_decision.md](phase5_pr127_split_decision.md)
-- Phase 6: [phase6_acceptance.md](phase6_acceptance.md),
-  [phase6_live_candidate_plan.md](phase6_live_candidate_plan.md)
-- Phase 7: [phase7_acceptance.md](phase7_acceptance.md),
-  [phase7_engineering_plan.md](phase7_engineering_plan.md),
-  [phase7_ci.md](phase7_ci.md),
-  [phase7_secret_scanning.md](phase7_secret_scanning.md),
-  [phase7_worker_queue_design.md](phase7_worker_queue_design.md)
+还应检查所有相对 Markdown 链接实际存在；外部 GitHub 链接只作为 current plan 的动态入口，
+不把查询结果复制为静态状态表。
