@@ -83,6 +83,7 @@ class OkxDemoExecutionOrchestrator:
         snapshot_loader: Optional[
             Callable[[TrustedSignalBundle], Mapping[str, Mapping[str, Any]]]
         ] = None,
+        clock: Optional[Callable[[], datetime]] = None,
     ) -> None:
         self.db = db
         self.read_client = read_client
@@ -101,6 +102,7 @@ class OkxDemoExecutionOrchestrator:
         self.risk_policy = configured_policy
         self._strategy_loader = strategy_loader or self._load_strategy
         self._snapshot_loader = snapshot_loader or self._load_snapshots
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
 
     def process(
         self,
@@ -110,7 +112,7 @@ class OkxDemoExecutionOrchestrator:
         fencing_sequence: int,
         now: Optional[datetime] = None,
     ) -> OkxDemoExecutionOrchestrationResult:
-        active_now = _aware(now or datetime.now(timezone.utc))
+        active_now = _aware(now or self._clock())
         replay = self._terminal_replay(evaluation_id)
         if replay is not None:
             return replay
@@ -157,6 +159,13 @@ class OkxDemoExecutionOrchestrator:
                     raise OkxDemoExecutionOrchestrationBlocked(
                         "trusted signal bundle is stale or deployment-inconsistent"
                     )
+                # Capturing authoritative OKX snapshots can take materially longer
+                # than the bundle's short TTL.  A timestamp taken before that I/O
+                # makes a newly observed snapshot look as though it came from the
+                # future.  Refresh only the verifier clock; bundle timestamps and
+                # expiry remain immutable and are still checked fail-closed.
+                if now is None:
+                    active_now = _aware(self._clock())
                 self._require_fresh_bundle(bundle, active_now)
                 snapshots = self._snapshot_loader(bundle)
                 signal_request = self._signal_request(
@@ -288,6 +297,12 @@ class OkxDemoExecutionOrchestrator:
                 now=active_now,
             )
             prepared_stage = None
+            # Re-check immediately before the owner-mediated risk boundary.
+            # Slow signal persistence must not turn an expired bundle into an
+            # approved risk chain.
+            if now is None:
+                active_now = _aware(self._clock())
+            self._require_fresh_bundle(bundle, active_now)
             self.deployments.renew_checkpoint_execution_authority(
                 evaluation.id,
                 lease_token=lease_token,
