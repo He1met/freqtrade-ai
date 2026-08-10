@@ -9,12 +9,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.run_strategy_candidate_research import (
+    Candidate,
     MIN_STRATEGY_SCORE,
     MAX_VALIDATION_DRAWDOWN,
     WINDOWS,
     _FAILURE_CONTEXT,
     _discover_candidates,
     _diversity_input,
+    _diversity_evidence_for_target,
     _pearson,
     _project_score,
     _record_unhandled_failure,
@@ -42,6 +44,45 @@ def test_oos_diversity_inputs_are_cost_stressed_and_zero_variance_blocks():
     assert sum(evidence["daily_pnl"].values()) < -0.01
     assert _pearson([0.0] * 30, [1.0] * 30) is None
     assert _pearson(list(map(float, range(30))), list(map(float, range(30)))) == pytest.approx(1.0)
+
+
+def test_cross_unit_correlation_uses_all_timeframes_without_cross_target_signal_lookup():
+    candidates_5m = [
+        Candidate(f"Five{index}", Path(f"five-{index}.py"), str(index) * 64, "5m", index)
+        for index in (1, 2)
+    ]
+    candidates_15m = [
+        Candidate(f"Fifteen{index}", Path(f"fifteen-{index}.py"), str(index + 2) * 64, "15m", index)
+        for index in (1, 2)
+    ]
+    all_candidates = candidates_5m + candidates_15m
+    target_5m = "BTC/USDT:USDT|5m"
+    target_15m = "BTC/USDT:USDT|15m"
+    days = {f"2025-01-{index:02d}": float(index) for index in range(1, 31)}
+    results = {}
+    for candidate in all_candidates:
+        target = target_5m if candidate.timeframe == "5m" else target_15m
+        results[candidate.class_name] = {
+            "targets": {
+                target: {
+                    "_diversity_input": {
+                        "entry_timestamps": list(range(30)),
+                        "daily_pnl": days,
+                    }
+                }
+            }
+        }
+
+    evidence = _diversity_evidence_for_target(
+        candidates_5m,
+        results,
+        target_5m,
+        all_candidates=all_candidates,
+    )
+
+    assert set(evidence) == {"Five1", "Five2"}
+    comparisons = evidence["Five1"]["correlation_evidence"]["comparisons"]
+    assert any(label.startswith(f"{target_15m}|") for label, *_rest in comparisons)
 
 
 def test_research_bundle_contains_exactly_ten_blueprint_candidates_per_timeframe() -> None:

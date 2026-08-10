@@ -587,7 +587,7 @@ def _diversity_evidence_for_target(
         candidate.class_name: results[candidate.class_name]["targets"][target_key].get(
             "_diversity_input", {}
         )
-        for candidate in (all_candidates or candidates)
+        for candidate in candidates
     }
     cross_unit_inputs = {
         f"{other_target_key}|{candidate.class_name}": (
@@ -595,7 +595,7 @@ def _diversity_evidence_for_target(
                 "_diversity_input", {}
             )
         )
-        for candidate in candidates
+        for candidate in (all_candidates or candidates)
         for other_target_key in results[candidate.class_name]["targets"]
     }
     evidence: dict[str, dict[str, Any]] = {}
