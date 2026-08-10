@@ -1964,7 +1964,7 @@ def test_postgresql_concurrent_idempotent_retry_reads_one_chain(
         assert len(db.scalars(select(TradeIntent)).all()) == 1
 
 
-def test_postgresql_v39_natural_signal_reaches_writer_claim(postgres_engine) -> None:
+def test_postgresql_v40_natural_signal_reaches_writer_claim(postgres_engine) -> None:
     """Exercise the real owner function with one fully bound natural fixture."""
 
     upgrade_database(postgres_engine)
@@ -1972,7 +1972,11 @@ def test_postgresql_v39_natural_signal_reaches_writer_claim(postgres_engine) -> 
     lineage = _seed(factory)
     now = datetime.now(timezone.utc).replace(microsecond=0)
     policy = {
-        "allowed_instruments": ["BTC-USDT-SWAP"],
+        "allowed_instruments": [
+            "BTC-USDT-SWAP",
+            "ETH-USDT-SWAP",
+            "SOL-USDT-SWAP",
+        ],
         "allowed_sides": ["buy", "sell"],
         "allowed_order_types": ["limit"],
         "max_leverage": "2",

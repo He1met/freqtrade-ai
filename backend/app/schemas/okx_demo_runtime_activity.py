@@ -9,7 +9,7 @@ class OkxDemoActiveDeploymentRead(BaseModel):
 
     deployment_id: int = Field(gt=0)
     status: Literal["ACTIVE"]
-    active_slot: int = Field(ge=1, le=3)
+    active_slot: int = Field(ge=1, le=9)
     instrument_id: str
     timeframe: str
     strategy_id: int = Field(gt=0)

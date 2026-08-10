@@ -20,6 +20,7 @@ from app.db.migrations import (
     RESEARCH_PERSISTENCE_BASE_VERSION,
     CANDIDATE_BRIDGE_BASE_VERSION,
     NATURAL_SIGNAL_RISK_CHAIN_BASE_VERSION,
+    MULTI_ASSET_CAPACITY_BASE_VERSION,
     EARLY_TARGET_LINEAGE_VERSION,
     DUAL_SIDE_BASE_VERSION,
     FULL_CHAIN_BASE_VERSION,
@@ -125,7 +126,8 @@ def test_schema_version_is_explicit_and_stable() -> None:
     assert RESEARCH_PERSISTENCE_BASE_VERSION == "20260804_36"
     assert CANDIDATE_BRIDGE_BASE_VERSION == "20260809_37"
     assert NATURAL_SIGNAL_RISK_CHAIN_BASE_VERSION == "20260809_38"
-    assert SCHEMA_VERSION == "20260810_39"
+    assert MULTI_ASSET_CAPACITY_BASE_VERSION == "20260810_39"
+    assert SCHEMA_VERSION == "20260810_40"
 
 
 def test_v39_natural_signal_risk_boundary_is_narrow_and_demo_only() -> None:
@@ -182,7 +184,7 @@ def test_v36_continuous_demo_boundary_is_fixed_and_owner_controlled() -> None:
 
     source = pyinspect.getsource(_add_continuous_demo_automation_boundary)
     for fragment in (
-        "active_slot BETWEEN 1 AND 3",
+        "active_slot BETWEEN 1 AND MAX_ACTIVE_TOKEN",
         "CONTINUOUS_DEMO_V1",
         "okx-demo-selection-v2",
         "Codex Okx Demo Dual RSI Strategy",

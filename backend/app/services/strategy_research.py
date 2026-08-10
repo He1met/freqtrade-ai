@@ -20,12 +20,19 @@ from app.core.strategy_research_matrix import (
     ALLOWED_RESEARCH_PAIRS,
     ALLOWED_RESEARCH_TIMEFRAMES,
 )
+from app.core.strategy_research_diversity import (
+    MAX_ABS_PNL_CORRELATION,
+    MAX_SIGNAL_SIMILARITY,
+    RESEARCH_CANDIDATE_COUNT,
+    validate_research_diversity_contract,
+)
 from app.models.strategy_research import StrategyResearchBatch, StrategyResearchCandidate
 from app.repositories.strategy_research import StrategyResearchRepository
 
 
 EXPECTED_SCHEMA = "freqtrade-ai-strategy-candidate-research-v1"
 EXPECTED_CANDIDATE_COUNT = 10
+V40_EXPECTED_SCHEMA = "freqtrade-ai-strategy-candidate-research-v2"
 class StrategyResearchReportError(ValueError):
     pass
 
@@ -95,6 +102,20 @@ def _validate_hard_gate_contract(report: dict[str, Any]) -> None:
 
 def _candidate_rejection_reasons(candidate: dict[str, Any], policy: dict[str, Any]) -> list[dict]:
     reasons: list[dict] = []
+    blueprint_evidence = candidate.get("canonical_blueprint_v2")
+    if candidate.get("unit_slot") is not None and (
+        not isinstance(blueprint_evidence, dict)
+        or blueprint_evidence.get("exact_render_match") is not True
+        or not isinstance(blueprint_evidence.get("blueprint_digest"), str)
+        or not isinstance(blueprint_evidence.get("rendered_code_digest"), str)
+        or blueprint_evidence.get("rendered_code_digest") != candidate.get("sha256")
+    ):
+        reasons.append(
+            _reason(
+                "CANONICAL_BLUEPRINT_V2_MISSING",
+                "候选缺少可精确重现已研究源码的 Blueprint v2 证据。",
+            )
+        )
     if not candidate.get("loadable"):
         reasons.append(_reason("NOT_LOADABLE", "策略无法由 Freqtrade 加载。"))
     if candidate.get("static_check") != "PASSED":
@@ -295,17 +316,22 @@ class StrategyResearchPersistenceService:
             report = json.loads(content)
         except json.JSONDecodeError as exc:
             raise StrategyResearchReportError("research report is not valid JSON") from exc
-        if report.get("schema_version") != EXPECTED_SCHEMA:
+        report_schema = report.get("schema_version")
+        if report_schema not in {EXPECTED_SCHEMA, V40_EXPECTED_SCHEMA}:
             raise StrategyResearchReportError("unsupported research report schema")
+        is_v40 = report_schema == V40_EXPECTED_SCHEMA
         safety = report.get("safety") or {}
         if safety.get("allow_real_funds") is not False or safety.get("real_orders") is not False:
             raise StrategyResearchReportError("research report is not OKX_DEMO/offline safe")
         _validate_hard_gate_contract(report)
         candidates = report.get("candidates")
-        if not isinstance(candidates, dict) or len(candidates) != EXPECTED_CANDIDATE_COUNT:
+        expected_count = RESEARCH_CANDIDATE_COUNT if is_v40 else EXPECTED_CANDIDATE_COUNT
+        if not isinstance(candidates, dict) or len(candidates) != expected_count:
             raise StrategyResearchReportError(
-                f"research report must contain exactly {EXPECTED_CANDIDATE_COUNT} candidates"
+                f"research report must contain exactly {expected_count} candidates"
             )
+        if is_v40:
+            validate_research_diversity_contract(candidates.values())
         policy = report.get("selection_policy") or {}
         qualified = set(report.get("qualified_candidates") or [])
         candidate_models: list[StrategyResearchCandidate] = []
@@ -320,9 +346,52 @@ class StrategyResearchPersistenceService:
                 raise StrategyResearchReportError(
                     f"candidate {candidate_name!r} is missing its code digest"
                 )
-            target_decisions, qualified_targets = _validate_candidate_target_matrix(
-                candidate_name, evidence, policy
-            )
+            if is_v40:
+                direct_reasons = _candidate_rejection_reasons(evidence, policy)
+                similarity = evidence.get("similarity_evidence") or {}
+                correlation = evidence.get("correlation_evidence") or {}
+                if similarity.get("status") != "PASSED":
+                    direct_reasons.append(_reason(
+                        "SIGNAL_SIMILARITY_EVIDENCE_BLOCKED",
+                        "信号相似度证据不足，候选不得部署。",
+                    ))
+                elif similarity.get("max_signal_similarity", 1) > MAX_SIGNAL_SIMILARITY:
+                    direct_reasons.append(_reason(
+                        "SIGNAL_SIMILARITY_EXCEEDED",
+                        "候选与同研究单元策略的信号过度相似。",
+                        maximum=MAX_SIGNAL_SIMILARITY,
+                        observed=similarity.get("max_signal_similarity"),
+                    ))
+                if correlation.get("status") != "PASSED":
+                    direct_reasons.append(_reason(
+                        "PNL_CORRELATION_EVIDENCE_BLOCKED",
+                        "OOS 收益相关性证据不足，候选不得部署。",
+                    ))
+                elif correlation.get("max_abs_pnl_correlation", 1) > MAX_ABS_PNL_CORRELATION:
+                    direct_reasons.append(_reason(
+                        "PNL_CORRELATION_EXCEEDED",
+                        "候选与同研究单元策略的 OOS 收益过度相关。",
+                        maximum=MAX_ABS_PNL_CORRELATION,
+                        observed=correlation.get("max_abs_pnl_correlation"),
+                    ))
+                evidence = {
+                    **evidence,
+                    "deployment_target": {
+                        "pair": evidence["pair"],
+                        "timeframe": evidence["timeframe"],
+                    },
+                }
+                target_decisions = [{
+                    "pair": evidence["pair"],
+                    "timeframe": evidence["timeframe"],
+                    "status": "QUALIFIED" if not direct_reasons else "REJECTED",
+                    "rejection_reasons": direct_reasons,
+                }]
+                qualified_targets = [] if direct_reasons else target_decisions
+            else:
+                target_decisions, qualified_targets = _validate_candidate_target_matrix(
+                    candidate_name, evidence, policy
+                )
             evidence = {**evidence, "target_decisions": target_decisions}
             reasons = []
             if not qualified_targets:
@@ -359,6 +428,26 @@ class StrategyResearchPersistenceService:
                     candidate_name=candidate_name,
                     source_path=source_path,
                     code_digest=code_digest,
+                    pair=evidence.get("pair") if is_v40 else None,
+                    timeframe=evidence.get("timeframe") if is_v40 else None,
+                    unit_slot=evidence.get("unit_slot") if is_v40 else None,
+                    strategy_family=evidence.get("strategy_family") if is_v40 else None,
+                    regime_hypothesis=evidence.get("regime_hypothesis") if is_v40 else None,
+                    expected_holding_period=(
+                        evidence.get("expected_holding_period") if is_v40 else None
+                    ),
+                    expected_trade_frequency=(
+                        evidence.get("expected_trade_frequency") if is_v40 else None
+                    ),
+                    structure_fingerprint=(
+                        evidence.get("structure_fingerprint") if is_v40 else None
+                    ),
+                    similarity_evidence=(
+                        evidence.get("similarity_evidence") if is_v40 else {}
+                    ),
+                    correlation_evidence=(
+                        evidence.get("correlation_evidence") if is_v40 else {}
+                    ),
                     status="QUALIFIED" if actually_qualified else "REJECTED",
                     loadable=evidence.get("loadable") is True,
                     static_check=str(evidence.get("static_check") or "MISSING"),
@@ -377,11 +466,11 @@ class StrategyResearchPersistenceService:
             run_id=run_id,
             source_type="codex",
             repository_commit=repository_commit,
-            report_schema_version=EXPECTED_SCHEMA,
+            report_schema_version=report_schema,
             report_path=str(report_path),
             report_digest=digest,
             status="VALIDATED",
-            requested_count=EXPECTED_CANDIDATE_COUNT,
+            requested_count=expected_count,
             generated_count=len(candidate_models),
             persisted_count=len(candidate_models),
             qualified_count=qualified_count,
@@ -433,7 +522,7 @@ class StrategyResearchPersistenceService:
         repository_commit: str,
         stage: str,
         failure_reason: str,
-        requested_count: int = EXPECTED_CANDIDATE_COUNT,
+        requested_count: int = RESEARCH_CANDIDATE_COUNT,
         generated_count: int = 0,
         candidate_evidence: list[dict[str, Any]] | None = None,
         report_path: str = "",
@@ -461,6 +550,11 @@ class StrategyResearchPersistenceService:
                     candidate_name=candidate_name,
                     source_path=source_path,
                     code_digest=code_digest,
+                    pair=item.get("pair"),
+                    timeframe=item.get("timeframe"),
+                    unit_slot=item.get("unit_slot"),
+                    strategy_family=item.get("strategy_family"),
+                    structure_fingerprint=item.get("structure_fingerprint"),
                     status="VALIDATION_FAILED",
                     loadable=snapshot.get("loadable") is True,
                     static_check=str(snapshot.get("static_check") or "INCOMPLETE"),
@@ -517,7 +611,7 @@ class StrategyResearchPersistenceService:
                 run_id=run_id,
                 source_type="codex",
                 repository_commit=repository_commit,
-                report_schema_version="freqtrade-ai-strategy-candidate-research-failure-v1",
+                report_schema_version="freqtrade-ai-strategy-candidate-research-failure-v2",
                 report_path=report_path,
                 report_digest=digest,
                 status="FAILED",

@@ -10,6 +10,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.models import Base, MarketDataQualityReceipt, StrategyResearchAttemptEvent
 from app.core.strategy_research_contract import official_research_policy
+from app.core.strategy_research_diversity import REQUIRED_STRATEGY_FAMILIES
 from app.repositories.strategy_research import StrategyResearchRepository
 from app.services.strategy_research import (
     StrategyResearchPersistenceService,
@@ -82,6 +83,67 @@ def test_persists_all_rejected_candidates_without_formal_strategies(db, report):
     assert {candidate.status for candidate in batch.candidates} == {"REJECTED"}
     assert all(candidate.rejection_reasons for candidate in batch.candidates)
     assert db.execute(text("SELECT count(*) FROM strategies")).scalar() == 0
+
+
+def test_v40_persists_exact_sixty_terminal_unit_candidates(db, report, tmp_path):
+    payload = json.loads(report.read_text())
+    sources = list(payload["candidates"].items())
+    families = sorted(REQUIRED_STRATEGY_FAMILIES)
+    units = {}
+    for pair in payload["environment"]["pairs"]:
+        for timeframe in payload["environment"]["timeframes"]:
+            for slot in range(1, 11):
+                source_name, source = sources[(slot - 1) % len(sources)]
+                target = copy.deepcopy(
+                    next(iter(source["targets"].values()))
+                )
+                identity = f"{pair}|{timeframe}|{slot}"
+                units[f"{source_name}__{identity}"] = {
+                    **target,
+                    "file": source["file"],
+                    "sha256": hashlib.sha256(f"source|{slot}".encode()).hexdigest(),
+                    "pair": pair,
+                    "timeframe": timeframe,
+                    "unit_slot": slot,
+                    "strategy_family": families[(slot - 1) % len(families)],
+                    "regime_hypothesis": "explicit OOS market-state hypothesis",
+                    "expected_holding_period": "3-48 candles",
+                    "expected_trade_frequency": "evidence-derived",
+                    "structure_fingerprint": hashlib.sha256(
+                        f"structure|{slot}".encode()
+                    ).hexdigest(),
+                    "similarity_evidence": {
+                        "status": "BLOCKED",
+                        "evidence_digest": hashlib.sha256(
+                            f"signal|{identity}".encode()
+                        ).hexdigest(),
+                    },
+                    "correlation_evidence": {
+                        "status": "BLOCKED",
+                        "evidence_digest": hashlib.sha256(
+                            f"pnl|{identity}".encode()
+                        ).hexdigest(),
+                    },
+                    "deployable_candidate": False,
+                }
+    payload["schema_version"] = "freqtrade-ai-strategy-candidate-research-v2"
+    payload["candidates"] = units
+    payload["qualified_candidates"] = []
+    path = tmp_path / "v40-sixty.json"
+    path.write_text(json.dumps(payload))
+
+    batch = StrategyResearchPersistenceService(db).persist_report(
+        path, run_id="v40-sixty", repository_commit="b" * 40
+    )
+
+    assert (batch.requested_count, batch.generated_count, batch.persisted_count) == (60, 60, 60)
+    assert batch.qualified_count == 0
+    assert batch.rejected_count == 60
+    assert len({(row.pair, row.timeframe, row.unit_slot) for row in batch.candidates}) == 60
+    assert all(
+        any(reason["code"] == "SIGNAL_SIMILARITY_EVIDENCE_BLOCKED" for reason in row.rejection_reasons)
+        for row in batch.candidates
+    )
 
 
 def test_report_persistence_is_idempotent_by_run_and_digest(db, report):

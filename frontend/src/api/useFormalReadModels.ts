@@ -22,6 +22,11 @@ export function useFormalReadModels() {
   const refresh = useCallback(() => setRevision((value) => value + 1), []);
 
   useEffect(() => {
+    const timer = window.setInterval(refresh, 30_000);
+    return () => window.clearInterval(timer);
+  }, [refresh]);
+
+  useEffect(() => {
     const controller = new AbortController();
     setWorkspace((current) => ({ ...current, error: null, loading: true }));
     setRuntimeActivity((current) => ({ ...current, error: null, loading: true }));

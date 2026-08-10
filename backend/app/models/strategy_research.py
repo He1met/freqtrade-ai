@@ -85,7 +85,24 @@ class StrategyResearchCandidate(Base):
             "batch_id", "candidate_name", name="strategy_research_candidates_batch_name_unique"
         ),
         UniqueConstraint(
-            "batch_id", "code_digest", name="strategy_research_candidates_batch_digest_unique"
+            "batch_id", "code_digest", "pair", "timeframe",
+            name="strategy_research_candidates_batch_digest_unique"
+        ),
+        UniqueConstraint(
+            "batch_id", "pair", "timeframe", "unit_slot",
+            name="strategy_research_candidates_batch_unit_unique",
+        ),
+        CheckConstraint(
+            "pair IS NULL OR pair IN ('BTC/USDT:USDT','ETH/USDT:USDT','SOL/USDT:USDT')",
+            name="strategy_research_candidates_pair_check",
+        ),
+        CheckConstraint(
+            "timeframe IS NULL OR timeframe IN ('5m','15m')",
+            name="strategy_research_candidates_timeframe_check",
+        ),
+        CheckConstraint(
+            "unit_slot IS NULL OR unit_slot BETWEEN 1 AND 10",
+            name="strategy_research_candidates_unit_slot_check",
         ),
     )
 
@@ -100,6 +117,16 @@ class StrategyResearchCandidate(Base):
     candidate_name: Mapped[str] = mapped_column(String(180), nullable=False)
     source_path: Mapped[str] = mapped_column(Text, nullable=False)
     code_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    pair: Mapped[Optional[str]] = mapped_column(String(40))
+    timeframe: Mapped[Optional[str]] = mapped_column(String(12))
+    unit_slot: Mapped[Optional[int]] = mapped_column(Integer)
+    strategy_family: Mapped[Optional[str]] = mapped_column(String(80))
+    regime_hypothesis: Mapped[Optional[str]] = mapped_column(Text)
+    expected_holding_period: Mapped[Optional[str]] = mapped_column(String(120))
+    expected_trade_frequency: Mapped[Optional[str]] = mapped_column(String(120))
+    structure_fingerprint: Mapped[Optional[str]] = mapped_column(String(64))
+    similarity_evidence: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    correlation_evidence: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     loadable: Mapped[bool] = mapped_column(Boolean, nullable=False)
     static_check: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -174,6 +201,10 @@ class MarketDataQualityReceipt(Base):
     file_format: Mapped[str] = mapped_column(String(20), nullable=False)
     file_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
     file_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_type: Mapped[Optional[str]] = mapped_column(String(40))
+    source_receipt_path: Mapped[Optional[str]] = mapped_column(Text)
+    source_receipt_digest: Mapped[Optional[str]] = mapped_column(String(64))
+    source_response_chain_digest: Mapped[Optional[str]] = mapped_column(String(64))
     inspected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     row_count: Mapped[int] = mapped_column(Integer, nullable=False)
     first_open_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))

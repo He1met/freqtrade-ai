@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import json
 import os
 import re
 from typing import Iterable, Optional, Union
@@ -71,7 +72,8 @@ CONTINUOUS_DEMO_SELECTION_V2_BASE_VERSION = "20260804_35"
 RESEARCH_PERSISTENCE_BASE_VERSION = "20260804_36"
 CANDIDATE_BRIDGE_BASE_VERSION = "20260809_37"
 NATURAL_SIGNAL_RISK_CHAIN_BASE_VERSION = "20260809_38"
-SCHEMA_VERSION = "20260810_39"
+MULTI_ASSET_CAPACITY_BASE_VERSION = "20260810_39"
+SCHEMA_VERSION = "20260810_40"
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 ATTESTATION_PROOF_KEY_ENV = "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"
 OPERATOR_TOKEN_ENV = "FREQTRADE_AI_OPERATOR_TOKEN"
@@ -10624,8 +10626,13 @@ def _add_atomic_canary_prepare_boundary(connection: Connection) -> None:
         ))
 
 
-def _add_continuous_demo_automation_boundary(connection: Connection) -> None:
-    """Install the fixed three-strategy Demo guard without generic permissions."""
+def _add_continuous_demo_automation_boundary(
+    connection: Connection,
+    *,
+    max_active_strategies: int = 9,
+    restrict_legacy_strategy_names: bool = False,
+) -> None:
+    """Install the qualified-only Demo guard without generic permissions."""
 
     schema_name = connection.execute(text("SELECT current_schema()" )).scalar_one()
     quoted_schema = connection.dialect.identifier_preparer.quote_schema(schema_name)
@@ -10643,8 +10650,8 @@ def _add_continuous_demo_automation_boundary(connection: Connection) -> None:
     BEGIN
       SELECT count(*) INTO active_count FROM SCHEMA_TOKEN.strategy_deployments
        WHERE status='ACTIVE';
-      IF active_count>3 THEN
-        RAISE EXCEPTION 'more than three ACTIVE OKX_DEMO deployments exist';
+      IF active_count>MAX_ACTIVE_TOKEN THEN
+        RAISE EXCEPTION 'too many ACTIVE OKX_DEMO deployments exist';
       END IF;
       WITH ranked AS (
         SELECT id,row_number() OVER(ORDER BY id)::integer slot
@@ -10659,7 +10666,7 @@ def _add_continuous_demo_automation_boundary(connection: Connection) -> None:
     ALTER TABLE SCHEMA_TOKEN.strategy_deployments
       DROP CONSTRAINT IF EXISTS strategy_deployments_active_slot_check,
       ADD CONSTRAINT strategy_deployments_active_slot_check CHECK(
-        (status='ACTIVE' AND active_slot BETWEEN 1 AND 3)
+        (status='ACTIVE' AND active_slot BETWEEN 1 AND MAX_ACTIVE_TOKEN)
         OR (status='DISABLED' AND active_slot IS NULL));
     CREATE UNIQUE INDEX strategy_deployments_active_slot_idx
       ON SCHEMA_TOKEN.strategy_deployments(execution_target_id,active_slot)
@@ -11031,7 +11038,7 @@ def _add_continuous_demo_automation_boundary(connection: Connection) -> None:
               FROM SCHEMA_TOKEN.okx_demo_reconciliation_states
               WHERE execution_target_id='OKX_DEMO') IS NOT FALSE
          OR (SELECT count(*) FROM SCHEMA_TOKEN.strategy_deployments
-              WHERE status='ACTIVE') NOT BETWEEN 1 AND 3
+              WHERE status='ACTIVE') NOT BETWEEN 1 AND MAX_ACTIVE_TOKEN
          OR EXISTS(
               SELECT 1 FROM SCHEMA_TOKEN.strategy_deployments deployment
               JOIN SCHEMA_TOKEN.strategy_candidate_approvals selection
@@ -11042,8 +11049,7 @@ def _add_continuous_demo_automation_boundary(connection: Connection) -> None:
                 selection.status<>'APPROVED'
                 OR selection.promotion_policy_version<>'okx-demo-selection-v2'
                 OR deployment.risk_policy_digest IS DISTINCT FROM p_policy_digest
-                OR strategy.name NOT IN ('DeepSeekRegimeCrossoverCandidateB',
-                                         'Codex Okx Demo Dual RSI Strategy')
+                STRATEGY_NAME_GUARD_TOKEN
                 OR COALESCE((selection.promotion_evidence::jsonb#>>
                     '{selection,production_promotion_claim}')::boolean,true)
                 OR COALESCE((selection.promotion_evidence::jsonb#>>
@@ -11078,7 +11084,7 @@ def _add_continuous_demo_automation_boundary(connection: Connection) -> None:
         execution_target_id,event_key,event_kind,failure_class,policy_digest,
         reconciliation_run_id,evidence_snapshot,observed_at)
       VALUES('OKX_DEMO',event_digest,'AUTHORIZATION_ENABLED',NULL,p_policy_digest,
-        p_reconciliation_run_id,jsonb_build_object('max_active_strategies',3,
+        p_reconciliation_run_id,jsonb_build_object('max_active_strategies',MAX_ACTIVE_TOKEN,
           'max_positions',3,'max_order_notional',1000,'max_total_exposure',3000,
           'max_leverage',2,'deployment_set_digest',deployment_digest,
           'allow_real_funds',false)::json,clock_timestamp());
@@ -11126,7 +11132,17 @@ def _add_continuous_demo_automation_boundary(connection: Connection) -> None:
           'allow_real_funds',false)::json,now_value);
       RETURN true;
     END $$;
-    """.replace("SCHEMA_TOKEN", quoted_schema)
+    """.replace("SCHEMA_TOKEN", quoted_schema).replace(
+        "MAX_ACTIVE_TOKEN", str(max_active_strategies)
+    ).replace(
+        "STRATEGY_NAME_GUARD_TOKEN",
+        (
+            "OR strategy.name NOT IN ('DeepSeekRegimeCrossoverCandidateB',"
+            "'Codex Okx Demo Dual RSI Strategy')"
+            if restrict_legacy_strategy_names
+            else ""
+        ),
+    )
     connection.execute(text(ddl))
     owner_only = {
         "enable_okx_demo_continuous_automation(text,bigint)",
@@ -11172,11 +11188,91 @@ def _add_continuous_demo_automation_boundary(connection: Connection) -> None:
     ))
 
 
-def _add_natural_signal_risk_chain_boundary(connection: Connection) -> None:
-    """Install the one runtime-callable, owner-mediated natural-risk write path."""
+def _add_v40_research_unit_boundary(connection: Connection) -> None:
+    """Add nullable legacy-compatible columns for exact 6x10 research units."""
 
     schema_name = connection.execute(text("SELECT current_schema()" )).scalar_one()
+    quoted_schema = connection.dialect.identifier_preparer.quote_schema(schema_name)
+    connection.execute(text(
+        "ALTER TABLE {0}.strategy_research_candidates "
+        "ADD COLUMN IF NOT EXISTS pair varchar(40), "
+        "ADD COLUMN IF NOT EXISTS timeframe varchar(12), "
+        "ADD COLUMN IF NOT EXISTS unit_slot integer, "
+        "ADD COLUMN IF NOT EXISTS strategy_family varchar(80), "
+        "ADD COLUMN IF NOT EXISTS regime_hypothesis text, "
+        "ADD COLUMN IF NOT EXISTS expected_holding_period varchar(120), "
+        "ADD COLUMN IF NOT EXISTS expected_trade_frequency varchar(120), "
+        "ADD COLUMN IF NOT EXISTS structure_fingerprint varchar(64), "
+        "ADD COLUMN IF NOT EXISTS similarity_evidence jsonb NOT NULL DEFAULT '{{}}'::jsonb, "
+        "ADD COLUMN IF NOT EXISTS correlation_evidence jsonb NOT NULL DEFAULT '{{}}'::jsonb"
+        .format(quoted_schema)
+    ))
+    connection.execute(text(
+        "ALTER TABLE {0}.market_data_quality_receipts "
+        "ADD COLUMN IF NOT EXISTS source_type varchar(40), "
+        "ADD COLUMN IF NOT EXISTS source_receipt_path text, "
+        "ADD COLUMN IF NOT EXISTS source_receipt_digest varchar(64), "
+        "ADD COLUMN IF NOT EXISTS source_response_chain_digest varchar(64)"
+        .format(quoted_schema)
+    ))
+    for name, expression in (
+        (
+            "strategy_research_candidates_pair_check",
+            "pair IS NULL OR pair IN ('BTC/USDT:USDT','ETH/USDT:USDT','SOL/USDT:USDT')",
+        ),
+        (
+            "strategy_research_candidates_timeframe_check",
+            "timeframe IS NULL OR timeframe IN ('5m','15m')",
+        ),
+        (
+            "strategy_research_candidates_unit_slot_check",
+            "unit_slot IS NULL OR unit_slot BETWEEN 1 AND 10",
+        ),
+    ):
+        connection.execute(text(
+            "ALTER TABLE {0}.strategy_research_candidates DROP CONSTRAINT IF EXISTS {1}; "
+            "ALTER TABLE {0}.strategy_research_candidates ADD CONSTRAINT {1} CHECK ({2})"
+            .format(quoted_schema, name, expression)
+        ))
+    connection.execute(text(
+        "ALTER TABLE {0}.strategy_research_candidates DROP CONSTRAINT IF EXISTS "
+        "strategy_research_candidates_batch_digest_unique; "
+        "ALTER TABLE {0}.strategy_research_candidates ADD CONSTRAINT "
+        "strategy_research_candidates_batch_digest_unique "
+        "UNIQUE(batch_id,code_digest,pair,timeframe); "
+        "ALTER TABLE {0}.strategy_research_candidates DROP CONSTRAINT IF EXISTS "
+        "strategy_research_candidates_batch_unit_unique; "
+        "ALTER TABLE {0}.strategy_research_candidates ADD CONSTRAINT "
+        "strategy_research_candidates_batch_unit_unique "
+        "UNIQUE(batch_id,pair,timeframe,unit_slot)"
+        .format(quoted_schema)
+    ))
+
+
+def _add_natural_signal_risk_chain_boundary(
+    connection: Connection,
+    *,
+    allowed_instruments: tuple[str, ...] = (
+        "BTC-USDT-SWAP",
+        "ETH-USDT-SWAP",
+        "SOL-USDT-SWAP",
+    ),
+    max_active_strategies: int = 9,
+    restrict_legacy_strategy_names: bool = False,
+) -> None:
+    """Install the one runtime-callable, owner-mediated natural-risk write path."""
+
+    _add_v40_research_unit_boundary(connection)
+    _add_continuous_demo_automation_boundary(
+        connection,
+        max_active_strategies=max_active_strategies,
+        restrict_legacy_strategy_names=restrict_legacy_strategy_names,
+    )
+    schema_name = connection.execute(text("SELECT current_schema()" )).scalar_one()
     quoted_schema = '"{}"'.format(schema_name.replace('"', '""'))
+    allowed_instruments_json = json.dumps(
+        list(allowed_instruments), separators=(",", ":")
+    )
     connection.execute(text(
         "ALTER TABLE {0}.strategy_deployments ADD COLUMN IF NOT EXISTS "
         "real_orders BOOLEAN NOT NULL DEFAULT false; "
@@ -11185,6 +11281,15 @@ def _add_natural_signal_risk_chain_boundary(connection: Connection) -> None:
         "ALTER TABLE {0}.strategy_deployments ADD CONSTRAINT "
         "strategy_deployments_demo_only_check CHECK (real_orders=false)"
         .format(quoted_schema)
+    ))
+    connection.execute(text(
+        "ALTER TABLE {0}.strategy_deployments DROP CONSTRAINT IF EXISTS "
+        "strategy_deployments_active_slot_check; "
+        "ALTER TABLE {0}.strategy_deployments ADD CONSTRAINT "
+        "strategy_deployments_active_slot_check CHECK ("
+        "(status='ACTIVE' AND active_slot BETWEEN 1 AND {1}) OR "
+        "(status='DISABLED' AND active_slot IS NULL))"
+        .format(quoted_schema, max_active_strategies)
     ))
     ddl = """
     CREATE OR REPLACE FUNCTION SCHEMA_TOKEN.persist_okx_demo_natural_risk_chain(
@@ -11239,7 +11344,7 @@ def _add_natural_signal_risk_chain_boundary(connection: Connection) -> None:
          OR jsonb_typeof(p_payload->'request_snapshot')<>'object'
          OR jsonb_typeof(p_payload->'policy')<>'object'
          OR p_payload->'policy'->'allowed_instruments' IS DISTINCT FROM
-              '["BTC-USDT-SWAP"]'::jsonb
+              'ALLOWED_INSTRUMENTS_TOKEN'::jsonb
          OR p_payload->'policy'->'allowed_sides' IS DISTINCT FROM
               '["buy","sell"]'::jsonb
          OR p_payload->'policy'->'allowed_order_types' IS DISTINCT FROM
@@ -11958,7 +12063,9 @@ def _add_natural_signal_risk_chain_boundary(connection: Connection) -> None:
         'client_order_id',p_payload->>'client_order_id',
         'order_submission_authorized',false,'idempotent_replay',false);
     END $$;
-    """.replace("SCHEMA_TOKEN", quoted_schema)
+    """.replace("SCHEMA_TOKEN", quoted_schema).replace(
+        "ALLOWED_INSTRUMENTS_TOKEN", allowed_instruments_json
+    )
     connection.execute(text(ddl))
     connection.execute(text(
         "GRANT SELECT (id,signal_evaluation_id,research_scope_id,"
@@ -12026,6 +12133,7 @@ def _natural_signal_risk_chain_boundary_problems(
         "CONTINUOUS_DEMO_V1", "okx-demo-selection-v2",
         "max_drawdown_contract", "okx_demo_continuous_opening_allowed",
         "natural signal writer fence is invalid", "allow_real_funds",
+        '["BTC-USDT-SWAP","ETH-USDT-SWAP","SOL-USDT-SWAP"]',
     )
     if (owner != "freqtrade_ai_attestor" or security_definer is not True
         or "search_path=pg_catalog" not in (config or [])
@@ -12162,6 +12270,19 @@ def upgrade_database(engine: Engine) -> str:
                         "Recorded schema version does not match ORM metadata: " + "; ".join(problems)
                     )
                 return current_version
+            if current_version == MULTI_ASSET_CAPACITY_BASE_VERSION:
+                _add_natural_signal_risk_chain_boundary(connection)
+                problems = schema_problems(connection)
+                if problems:
+                    raise SchemaMigrationBlocked(
+                        "Multi-asset capacity upgrade does not match ORM metadata: "
+                        + "; ".join(problems)
+                    )
+                connection.execute(
+                    text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+                    {"version": SCHEMA_VERSION},
+                )
+                return SCHEMA_VERSION
             if current_version == NATURAL_SIGNAL_RISK_CHAIN_BASE_VERSION:
                 _add_natural_signal_risk_chain_boundary(connection)
                 problems = schema_problems(connection)
@@ -12247,6 +12368,7 @@ def upgrade_database(engine: Engine) -> str:
                 RESEARCH_PERSISTENCE_BASE_VERSION,
                 CANDIDATE_BRIDGE_BASE_VERSION,
                 NATURAL_SIGNAL_RISK_CHAIN_BASE_VERSION,
+                MULTI_ASSET_CAPACITY_BASE_VERSION,
             }
             if current_version in supported_upgrade_versions:
                 connection.execute(
@@ -12797,8 +12919,8 @@ def upgrade_database(engine: Engine) -> str:
     return SCHEMA_VERSION
 
 
-def rollback_natural_signal_risk_chain(engine: Engine) -> str:
-    """Explicit admin-only v39 rollback; protected lineage data is untouched."""
+def rollback_multi_asset_capacity(engine: Engine) -> str:
+    """Explicit admin-only v40 rollback to the BTC-only v39 boundary."""
 
     if engine.dialect.name != "postgresql":
         raise ConfigurationError("PostgreSQL DATABASE_URL is required for migrations.")
@@ -12806,8 +12928,55 @@ def rollback_natural_signal_risk_chain(engine: Engine) -> str:
         _require_attestation_admin(connection)
         if _current_version(connection) != SCHEMA_VERSION:
             raise SchemaMigrationBlocked(
-                "Natural signal risk-chain rollback requires schema version "
+                "Multi-asset capacity rollback requires schema version "
                 + SCHEMA_VERSION
+            )
+        active_count = connection.execute(text(
+            "SELECT count(*) FROM strategy_deployments WHERE status='ACTIVE'"
+        )).scalar_one()
+        if active_count > 3:
+            raise SchemaMigrationBlocked(
+                "Multi-asset capacity rollback requires at most three ACTIVE deployments"
+            )
+        _add_natural_signal_risk_chain_boundary(
+            connection,
+            allowed_instruments=("BTC-USDT-SWAP",),
+            max_active_strategies=3,
+            restrict_legacy_strategy_names=True,
+        )
+        schema_name = connection.execute(text("SELECT current_schema()" )).scalar_one()
+        quoted_schema = connection.dialect.identifier_preparer.quote_schema(schema_name)
+        connection.execute(text(
+            "ALTER TABLE {0}.strategy_deployments DROP CONSTRAINT IF EXISTS "
+            "strategy_deployments_active_slot_check; "
+            "ALTER TABLE {0}.strategy_deployments ADD CONSTRAINT "
+            "strategy_deployments_active_slot_check CHECK ("
+            "(status='ACTIVE' AND active_slot BETWEEN 1 AND 3) OR "
+            "(status='DISABLED' AND active_slot IS NULL))"
+            .format(quoted_schema)
+        ))
+        connection.execute(
+            text(f"DELETE FROM {VERSION_TABLE} WHERE version=:version"),
+            {"version": SCHEMA_VERSION},
+        )
+        connection.execute(text(
+            f"INSERT INTO {VERSION_TABLE}(version) VALUES(:version) "
+            "ON CONFLICT(version) DO NOTHING"
+        ), {"version": MULTI_ASSET_CAPACITY_BASE_VERSION})
+    return MULTI_ASSET_CAPACITY_BASE_VERSION
+
+
+def rollback_natural_signal_risk_chain(engine: Engine) -> str:
+    """Explicit admin-only v39 rollback; protected lineage data is untouched."""
+
+    if engine.dialect.name != "postgresql":
+        raise ConfigurationError("PostgreSQL DATABASE_URL is required for migrations.")
+    with engine.begin() as connection:
+        _require_attestation_admin(connection)
+        if _current_version(connection) != MULTI_ASSET_CAPACITY_BASE_VERSION:
+            raise SchemaMigrationBlocked(
+                "Natural signal risk-chain rollback requires schema version "
+                + MULTI_ASSET_CAPACITY_BASE_VERSION
             )
         schema_name = connection.execute(text("SELECT current_schema()" )).scalar_one()
         quoted_schema = connection.dialect.identifier_preparer.quote_schema(schema_name)
@@ -12826,7 +12995,7 @@ def rollback_natural_signal_risk_chain(engine: Engine) -> str:
         ))
         connection.execute(
             text(f"DELETE FROM {VERSION_TABLE} WHERE version=:version"),
-            {"version": SCHEMA_VERSION},
+            {"version": MULTI_ASSET_CAPACITY_BASE_VERSION},
         )
         connection.execute(text(
             f"INSERT INTO {VERSION_TABLE}(version) VALUES(:version) "

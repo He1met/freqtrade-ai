@@ -139,7 +139,7 @@ def record_terminal_event(
             "outcome": outcome,
             "reason_code": reason_code,
             "quality_receipt_id": args.market_data_quality_receipt_id,
-            "counts": [10, generated, validated, persisted, qualified, rejected],
+            "counts": [60, generated, validated, persisted, qualified, rejected],
         }
         event_digest = hashlib.sha256(
             json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
@@ -156,7 +156,7 @@ def record_terminal_event(
                 outcome=outcome,
                 reason_code=reason_code,
                 redacted_reason=safe(reason),
-                requested_count=10,
+                requested_count=60,
                 generated_count=generated,
                 validated_count=validated,
                 persisted_count=persisted,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reproduce the offline ten-candidate Freqtrade research matrix.
+"""Reproduce the offline 6x10-candidate Freqtrade research matrix.
 
 This script is intentionally execution-only: it reads local OHLCV files and
 writes ignored backtest artifacts plus a tracked JSON summary.  It does not
@@ -9,9 +9,10 @@ open a database, read credentials, start a runtime, or submit exchange orders.
 import argparse
 import ast
 import csv
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
+import math
 import re
 import subprocess
 import sys
@@ -35,12 +36,68 @@ from app.core.strategy_research_matrix import (  # noqa: E402
     ALLOWED_RESEARCH_PAIRS,
     ALLOWED_RESEARCH_TIMEFRAMES,
     ResearchTarget,
+    RESEARCH_TARGETS,
+)
+from app.core.strategy_research_diversity import (  # noqa: E402
+    MAX_ABS_PNL_CORRELATION,
+    MAX_SIGNAL_SIMILARITY,
 )
 from app.services.strategy_blueprint_equivalence import (  # noqa: E402
     prove_blueprint_code_equivalence,
 )
 
 STARTING_BALANCE = 1000.0
+OOS_START_DATE = date(2025, 1, 1)
+OOS_END_DATE = date(2025, 10, 1)
+
+FAMILY_BY_SLOT = (
+    "PULLBACK_TREND_CONTINUATION",
+    "VOLATILITY_BREAKOUT",
+    "MEAN_REVERSION",
+    "MOMENTUM_VOLUME_CONFIRMATION",
+    "PULLBACK_TREND_CONTINUATION",
+    "MEAN_REVERSION",
+    "MOMENTUM_VOLUME_CONFIRMATION",
+    "TREND_BREAKOUT_FOLLOWING",
+    "MOMENTUM_VOLUME_CONFIRMATION",
+    "RANGE_LIQUIDITY_FILTER",
+)
+REGIME_HYPOTHESIS_BY_SLOT = (
+    "Directional trend with an orderly pullback and renewed DMI strength.",
+    "Volatility expansion through a prior Donchian range with ATR risk scaling.",
+    "Range-bound price with exhausted RSI and Bollinger displacement.",
+    "Directional MACD impulse confirmed by expanding traded volume.",
+    "Established EMA trend resuming after a Keltner pullback.",
+    "Range or reversal regime with stochastic/Williams exhaustion.",
+    "Momentum impulse confirmed by MFI participation and trend direction.",
+    "Persistent directional regime confirmed by Ichimoku structure.",
+    "Liquid participation regime where price direction is confirmed by OBV/ADOSC.",
+    "ADX-labelled trend/range transition with explicit regime filtering.",
+)
+EXPECTED_HOLDING_BY_SLOT = (
+    "12-96 closed candles",
+    "6-72 closed candles",
+    "3-36 closed candles",
+    "6-48 closed candles",
+    "12-120 closed candles",
+    "3-24 closed candles",
+    "6-48 closed candles",
+    "18-144 closed candles",
+    "6-60 closed candles",
+    "8-96 closed candles",
+)
+EXPECTED_FREQUENCY_BY_SLOT = (
+    "low-to-medium; pullback completion only",
+    "low; range breakout only",
+    "medium; bounded exhaustion events",
+    "medium; momentum plus volume confirmation",
+    "low-to-medium; trend continuation only",
+    "medium; oscillator reversal events",
+    "medium; impulse plus participation confirmation",
+    "low; persistent trend structure only",
+    "medium; liquidity-confirmed direction changes",
+    "low-to-medium; exclusive regime transitions",
+)
 
 WINDOWS = (
     ("primary_bear", "PRIMARY", "bear", "20230701-20231001"),
@@ -91,15 +148,28 @@ def _failure_candidate_evidence(
     repo: Path, candidates: list[Candidate], results: dict[str, dict[str, Any]]
 ) -> list[dict[str, Any]]:
     evidence: list[dict[str, Any]] = []
-    for candidate in candidates:
-        evidence.append(
-            {
-                "candidate_name": candidate.class_name,
-                "source_path": str(candidate.path.relative_to(repo)),
-                "code_digest": candidate.sha256,
-                "evidence_snapshot": results.get(candidate.class_name, {}),
-            }
-        )
+    for slot, candidate in enumerate(candidates, start=1):
+        result = results.get(candidate.class_name, {})
+        targets = result.get("targets") if isinstance(result, dict) else {}
+        for target in RESEARCH_TARGETS:
+            pair_slug = re.sub(r"[^A-Za-z0-9]+", "_", target.pair).strip("_")
+            evidence.append(
+                {
+                    "candidate_name": (
+                        f"{candidate.class_name}__{pair_slug}_{target.timeframe}"
+                    ),
+                    "source_path": str(candidate.path.relative_to(repo)),
+                    "code_digest": candidate.sha256,
+                    "pair": target.pair,
+                    "timeframe": target.timeframe,
+                    "unit_slot": slot,
+                    "strategy_family": FAMILY_BY_SLOT[slot - 1],
+                    "structure_fingerprint": candidate.sha256,
+                    "evidence_snapshot": (
+                        targets.get(target.key, {}) if isinstance(targets, dict) else {}
+                    ),
+                }
+            )
     return evidence
 
 
@@ -120,7 +190,7 @@ def _record_unhandled_failure(error: BaseException) -> None:
         "status": "FAILED",
         "failed_stage": context.get("stage", "UNKNOWN"),
         "failure_reason": safe_reason,
-        "requested_count": 10,
+        "requested_count": 60,
         "generated_count": len(candidate_evidence),
         "persisted_count": 0,
         "candidates": candidate_evidence,
@@ -427,6 +497,148 @@ def _stress_metrics(strategy: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _diversity_input(strategy: dict[str, Any]) -> dict[str, Any]:
+    entries: set[int] = set()
+    daily_pnl: dict[str, float] = {}
+    current_day = OOS_START_DATE
+    while current_day < OOS_END_DATE:
+        daily_pnl[current_day.isoformat()] = 0.0
+        current_day += timedelta(days=1)
+    for trade in strategy.get("trades") or []:
+        opened = trade.get("open_timestamp")
+        closed = trade.get("close_timestamp")
+        if isinstance(opened, (int, float)):
+            entries.add(int(opened))
+        if isinstance(closed, (int, float)):
+            day = datetime.fromtimestamp(float(closed) / 1000, tz=timezone.utc).date().isoformat()
+            if day in daily_pnl:
+                stressed = (
+                    float(trade.get("profit_ratio") or 0.0)
+                    - 2.0 * SLIPPAGE_PER_SIDE
+                )
+                daily_pnl[day] += stressed
+    return {"entry_timestamps": sorted(entries), "daily_pnl": daily_pnl}
+
+
+def _pearson(left: list[float], right: list[float]) -> Optional[float]:
+    if len(left) != len(right) or len(left) < 30:
+        return None
+    left_mean = sum(left) / len(left)
+    right_mean = sum(right) / len(right)
+    left_delta = [value - left_mean for value in left]
+    right_delta = [value - right_mean for value in right]
+    left_norm = math.sqrt(sum(value * value for value in left_delta))
+    right_norm = math.sqrt(sum(value * value for value in right_delta))
+    if left_norm == 0 or right_norm == 0:
+        return None
+    return sum(a * b for a, b in zip(left_delta, right_delta)) / (left_norm * right_norm)
+
+
+def _diversity_evidence_for_target(
+    candidates: list[Candidate], results: dict[str, dict[str, Any]], target_key: str
+) -> dict[str, dict[str, Any]]:
+    inputs = {
+        candidate.class_name: results[candidate.class_name]["targets"][target_key].get(
+            "_diversity_input", {}
+        )
+        for candidate in candidates
+    }
+    cross_unit_inputs = {
+        f"{other_target_key}|{candidate.class_name}": (
+            results[candidate.class_name]["targets"][other_target_key].get(
+                "_diversity_input", {}
+            )
+        )
+        for candidate in candidates
+        for other_target_key in results[candidate.class_name]["targets"]
+    }
+    evidence: dict[str, dict[str, Any]] = {}
+    for candidate in candidates:
+        name = candidate.class_name
+        current = inputs[name]
+        current_entries = set(current.get("entry_timestamps") or [])
+        signal_comparisons = []
+        pnl_comparisons = []
+        for other in candidates:
+            if other.class_name == name:
+                continue
+            other_input = inputs[other.class_name]
+            other_entries = set(other_input.get("entry_timestamps") or [])
+            union = current_entries | other_entries
+            if (
+                union
+                and len(current_entries) >= MIN_VALIDATION_TRADES
+                and len(other_entries) >= MIN_VALIDATION_TRADES
+            ):
+                signal_comparisons.append(
+                    (other.class_name, len(current_entries & other_entries) / len(union))
+                )
+        current_daily = current.get("daily_pnl") or {}
+        for other_label, other_input in cross_unit_inputs.items():
+            if other_label == f"{target_key}|{name}":
+                continue
+            other_daily = other_input.get("daily_pnl") or {}
+            common_days = sorted(set(current_daily) & set(other_daily))
+            current_series = [float(current_daily[day]) for day in common_days]
+            other_series = [float(other_daily[day]) for day in common_days]
+            correlation = _pearson(current_series, other_series)
+            if correlation is not None and math.isfinite(correlation):
+                pnl_comparisons.append(
+                    (other_label, abs(correlation), len(common_days))
+                )
+        signal_payload = {
+            "contract_version": "entry-signal-jaccard-v1",
+            "target": target_key,
+            "candidate": name,
+            "input_digest": hashlib.sha256(
+                json.dumps(sorted(current_entries), separators=(",", ":")).encode()
+            ).hexdigest(),
+            "comparisons": sorted(signal_comparisons),
+        }
+        pnl_payload = {
+            "contract_version": "cross-unit-daily-oos-pnl-pearson-v1",
+            "target": target_key,
+            "candidate": name,
+            "common_day_count": (
+                min(value[2] for value in pnl_comparisons)
+                if pnl_comparisons else 0
+            ),
+            "input_digest": hashlib.sha256(
+                json.dumps(
+                    current_daily, sort_keys=True, separators=(",", ":")
+                ).encode()
+            ).hexdigest(),
+            "comparisons": sorted(pnl_comparisons),
+        }
+        evidence[name] = {
+            "similarity_evidence": {
+                "status": "PASSED" if signal_comparisons else "BLOCKED",
+                "reason_code": None if signal_comparisons else "SIGNAL_VECTOR_INSUFFICIENT",
+                "max_signal_similarity": (
+                    max(value for _, value in signal_comparisons)
+                    if signal_comparisons else None
+                ),
+                "evidence_digest": hashlib.sha256(
+                    json.dumps(signal_payload, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest(),
+                **signal_payload,
+            },
+            "correlation_evidence": {
+                "status": "PASSED" if pnl_comparisons else "BLOCKED",
+                "reason_code": None if pnl_comparisons else "OOS_PNL_SERIES_INSUFFICIENT",
+                "max_abs_pnl_correlation": (
+                    max(value for _, value, _ in pnl_comparisons)
+                    if pnl_comparisons else None
+                ),
+                "evidence_digest": hashlib.sha256(
+                    json.dumps(pnl_payload, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest(),
+                **pnl_payload,
+            },
+        }
+    return evidence
+
+
 def _clamp(value: float) -> float:
     return max(0.0, min(100.0, value))
 
@@ -532,9 +744,10 @@ def main() -> int:
     window_evidence: list[dict[str, Any]] = []
     market_data_evidence: list[dict[str, Any]] = []
     for timeframe in ALLOWED_RESEARCH_TIMEFRAMES:
-        timeframe_candidates = [item for item in candidates if item.timeframe == timeframe]
-        if not timeframe_candidates:
-            raise RuntimeError(f"candidate set has no {timeframe} strategies")
+        # Freqtrade's explicit --timeframe override binds each structural
+        # blueprint to both official research timeframes.  This yields ten
+        # independently evaluated candidates in every pair/timeframe unit.
+        timeframe_candidates = candidates
         for pair in ALLOWED_RESEARCH_PAIRS:
             target = ResearchTarget(pair=pair, timeframe=timeframe)
             target_slug = pair.split("/", 1)[0].lower() + "-" + timeframe
@@ -641,8 +854,9 @@ def main() -> int:
                     target_result["windows"][name] = {
                         "status": "SUCCESS", **_stress_metrics(item)
                     }
+                    if name == "oos":
+                        target_result["_diversity_input"] = _diversity_input(item)
 
-    qualified: list[str] = []
     validation_names = ("wf_bull", "wf_range", "oos", "wf_bear")
     for candidate in candidates:
         item = results[candidate.class_name]
@@ -665,6 +879,7 @@ def main() -> int:
                 and target_result["lookahead_analysis"]["status"] == "PASSED"
                 and target_result["validation_passed"]
                 and target_result["score_threshold_passed"]
+                and candidate.canonical_blueprint_evidence is not None
             )
             if target_result["deployable_candidate"]:
                 qualified_targets.append(target_result)
@@ -690,11 +905,60 @@ def main() -> int:
             {"pair": value["pair"], "timeframe": value["timeframe"]}
             for value in qualified_targets
         ]
-        if qualified_targets:
-            qualified.append(candidate.class_name)
+
+    diversity_by_target = {
+        target.key: _diversity_evidence_for_target(candidates, results, target.key)
+        for timeframe in ALLOWED_RESEARCH_TIMEFRAMES
+        for pair in ALLOWED_RESEARCH_PAIRS
+        for target in (ResearchTarget(pair=pair, timeframe=timeframe),)
+    }
+    unit_results: dict[str, dict[str, Any]] = {}
+    qualified_units: list[str] = []
+    for slot, candidate in enumerate(candidates, start=1):
+        base = results[candidate.class_name]
+        for target_key, target_result in sorted(base["targets"].items()):
+            pair_slug = re.sub(r"[^A-Za-z0-9]+", "_", target_result["pair"]).strip("_")
+            unit_name = f"{candidate.class_name}__{pair_slug}_{target_result['timeframe']}"
+            diversity = diversity_by_target[target_key][candidate.class_name]
+            target_result = {
+                key: value for key, value in target_result.items()
+                if key != "_diversity_input"
+            }
+            unit = {
+                "file": str(candidate.path.relative_to(repo)),
+                "sha256": candidate.sha256,
+                "source_class_name": candidate.class_name,
+                "pair": target_result["pair"],
+                "timeframe": target_result["timeframe"],
+                "unit_slot": slot,
+                "strategy_family": FAMILY_BY_SLOT[slot - 1],
+                "regime_hypothesis": REGIME_HYPOTHESIS_BY_SLOT[slot - 1],
+                "expected_holding_period": EXPECTED_HOLDING_BY_SLOT[slot - 1],
+                "expected_trade_frequency": EXPECTED_FREQUENCY_BY_SLOT[slot - 1],
+                "structure_fingerprint": candidate.sha256,
+                "similarity_evidence": diversity["similarity_evidence"],
+                "correlation_evidence": diversity["correlation_evidence"],
+                "static_check": base["static_check"],
+                "loadable": base["loadable"],
+                **target_result,
+                "deployable_candidate": bool(
+                    target_result.get("deployable_candidate")
+                    and diversity["similarity_evidence"]["status"] == "PASSED"
+                    and diversity["correlation_evidence"]["status"] == "PASSED"
+                    and diversity["similarity_evidence"]["max_signal_similarity"]
+                    <= MAX_SIGNAL_SIMILARITY
+                    and diversity["correlation_evidence"]["max_abs_pnl_correlation"]
+                    <= MAX_ABS_PNL_CORRELATION
+                ),
+            }
+            if candidate.canonical_blueprint_evidence is not None:
+                unit["canonical_blueprint_v2"] = candidate.canonical_blueprint_evidence
+            unit_results[unit_name] = unit
+            if unit["deployable_candidate"]:
+                qualified_units.append(unit_name)
 
     report = {
-        "schema_version": "freqtrade-ai-strategy-candidate-research-v1",
+        "schema_version": "freqtrade-ai-strategy-candidate-research-v2",
         "safety": {
             "execution_scope": "LOCAL_BACKTEST_ONLY",
             "allow_real_funds": False,
@@ -716,8 +980,8 @@ def main() -> int:
         },
         "selection_policy": official_research_policy(),
         "windows": window_evidence,
-        "candidates": results,
-        "qualified_candidates": qualified,
+        "candidates": unit_results,
+        "qualified_candidates": qualified_units,
         "commands": commands,
         "limitations": [
             "This standalone evidence is not a persisted StrategyValidationPlan.",
@@ -730,7 +994,7 @@ def main() -> int:
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
     print(output)
-    print(json.dumps({"qualified_candidates": qualified}, indent=2))
+    print(json.dumps({"qualified_candidates": qualified_units}, indent=2))
     if args.persist_database:
         _FAILURE_CONTEXT["stage"] = "DATABASE_PERSISTENCE"
         if not args.repository_commit:

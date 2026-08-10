@@ -23,7 +23,8 @@ from app.models.strategy_research import StrategyResearchAttemptEvent
 from app.services.market_data_quality import inspect_market_data
 
 
-EXPECTED_CANDIDATE_COUNT = 10
+EXPECTED_SOURCE_CANDIDATE_COUNT = 10
+EXPECTED_CANDIDATE_COUNT = 60
 OWNERSHIP_SCHEMA = "freqtrade-ai-formal-research-ownership-v1"
 STATE_SCHEMA = "freqtrade-ai-formal-research-state-v1"
 WORKER_DEADLINE_SECONDS = 60 * 60
@@ -309,10 +310,11 @@ class FormalStrategyResearchCoordinator:
                 "MARKET_DATA_MATRIX_MISSING",
                 "正式研究数据矩阵不完整：" + ", ".join(missing_targets),
             )
-        if len(candidates) != EXPECTED_CANDIDATE_COUNT:
+        if len(candidates) != EXPECTED_SOURCE_CANDIDATE_COUNT:
             return self._blocked(
                 "CANDIDATE_SET_INCOMPLETE",
-                f"正式研究候选集合必须恰好为 10 条，当前为 {len(candidates)} 条。",
+                "正式研究必须由 10 个结构化蓝图生成六个研究单元各 10 条；"
+                f"当前为 {len(candidates)} 条蓝图。",
             )
         return None
 
@@ -336,7 +338,8 @@ class FormalStrategyResearchCoordinator:
         if batch is None:
             return {}
         validated = sum(
-            candidate.status in {"QUALIFIED", "REJECTED"} for candidate in batch.candidates
+            candidate.status in {"QUALIFIED", "REJECTED", "VALIDATION_FAILED"}
+            for candidate in batch.candidates
         )
         handoff = (
             "CANONICAL_LINK_UNAVAILABLE"
@@ -501,6 +504,7 @@ class FormalStrategyResearchCoordinator:
                 timeframe=target.timeframe,
                 expected_interval_seconds=(5 if target.timeframe == "5m" else 15) * 60,
                 inspected_at=now,
+                require_source_receipt=True,
             )
             qualities.append(repository.append_market_data_quality_receipt(quality))
         blocked_qualities = [quality for quality in qualities if quality.status != "PASSED"]
@@ -578,7 +582,7 @@ class FormalStrategyResearchCoordinator:
         self._append_attempt_event(
             db, attempt_id=attempt_id, sequence=1, trigger=trigger,
             phase="STARTED", outcome="RUNNING", reason_code="STARTED",
-            reason="正式研究已进入后台执行。", requested_count=10,
+            reason="正式研究已进入后台执行。", requested_count=EXPECTED_CANDIDATE_COUNT,
             run_id=run_id, quality_receipt_id=quality.id,
         )
         try:

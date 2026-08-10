@@ -46,6 +46,7 @@ from app.services.strategy_validation_matrix import StrategyValidationMatrixServ
 from app.services.okx_demo_strategy_selection import (
     OkxDemoStrategySelectionBlocked,
     OkxDemoStrategySelectionService,
+    _instrument_from_research_pair,
     validate_okx_demo_selection_receipt,
 )
 
@@ -306,77 +307,43 @@ def test_publish_is_idempotent_and_persists_exact_candidate_binding(
         assert persisted.status == "ACTIVE"
 
 
-def test_publish_assigns_three_slots_and_blocks_a_fourth_active_deployment(
+def test_publish_assigns_nine_slots_and_blocks_a_tenth_active_deployment(
     session_factory,
 ) -> None:
     with session_factory() as db:
-        first_approval = seed_approved_candidate(db, suffix="One")
-        first = publish(db, first_approval.id)
         jobs = ResearchJobRepository(db)
-        first_chain = db.get(FullChainRun, first_approval.full_chain_run_id)
-        assert first_chain is not None
-        active_job = jobs.get(first_chain.research_job_id)
-        assert active_job is not None and active_job.lease_token
-        jobs.complete(
-            active_job.id,
-            active_job.lease_token,
-            status="SUCCESS",
-            stage="DEPLOYED",
-            links={},
-            evidence_snapshot={"status": "SUCCESS"},
-            error_message=None,
-            provider_completed=False,
-            now=NOW,
-        )
+        deployments = []
+        for index in range(1, 10):
+            approval = seed_approved_candidate(db, suffix=f"Slot{index}")
+            deployments.append(publish(db, approval.id))
+            chain = db.get(FullChainRun, approval.full_chain_run_id)
+            assert chain is not None
+            job = jobs.get(chain.research_job_id)
+            assert job is not None and job.lease_token
+            jobs.complete(
+                job.id,
+                job.lease_token,
+                status="SUCCESS",
+                stage="DEPLOYED",
+                links={},
+                evidence_snapshot={"status": "SUCCESS"},
+                error_message=None,
+                provider_completed=False,
+                now=NOW,
+            )
 
-        second_approval = seed_approved_candidate(db, suffix="Two")
-        second = publish(db, second_approval.id)
-        second_chain = db.get(FullChainRun, second_approval.full_chain_run_id)
-        assert second_chain is not None
-        second_job = jobs.get(second_chain.research_job_id)
-        assert second_job is not None and second_job.lease_token
-        jobs.complete(
-            second_job.id,
-            second_job.lease_token,
-            status="SUCCESS",
-            stage="DEPLOYED",
-            links={},
-            evidence_snapshot={"status": "SUCCESS"},
-            error_message=None,
-            provider_completed=False,
-            now=NOW,
-        )
-        third_approval = seed_approved_candidate(db, suffix="Three")
-        third = publish(db, third_approval.id)
-        third_chain = db.get(FullChainRun, third_approval.full_chain_run_id)
-        assert third_chain is not None
-        third_job = jobs.get(third_chain.research_job_id)
-        assert third_job is not None and third_job.lease_token
-        jobs.complete(
-            third_job.id,
-            third_job.lease_token,
-            status="SUCCESS",
-            stage="DEPLOYED",
-            links={},
-            evidence_snapshot={"status": "SUCCESS"},
-            error_message=None,
-            provider_completed=False,
-            now=NOW,
-        )
-        fourth_approval = seed_approved_candidate(db, suffix="Four")
-        with pytest.raises(StrategyDeploymentConflict, match="three ACTIVE"):
-            publish(db, fourth_approval.id)
+        tenth_approval = seed_approved_candidate(db, suffix="Slot10")
+        with pytest.raises(StrategyDeploymentConflict, match="nine ACTIVE"):
+            publish(db, tenth_approval.id)
 
         persisted = db.query(StrategyDeployment).order_by(StrategyDeployment.id).all()
         assert [deployment.id for deployment in persisted] == [
-            first.id,
-            second.id,
-            third.id,
+            deployment.id for deployment in deployments
         ]
-        assert [deployment.active_slot for deployment in persisted] == [1, 2, 3]
+        assert [deployment.active_slot for deployment in persisted] == list(range(1, 10))
 
 
-def test_postgresql_concurrent_publish_has_exactly_three_active_slots(
+def test_postgresql_concurrent_publish_has_exactly_nine_active_slots(
     monkeypatch,
 ) -> None:
     database_url = os.environ.get("POSTGRES_WORKER_URL")
@@ -395,9 +362,9 @@ def test_postgresql_concurrent_publish_has_exactly_three_active_slots(
         upgrade_database(engine)
         factory = create_session_factory(engine)
         approval_ids = []
-        for suffix in ("PgOne", "PgTwo", "PgThree", "PgFour"):
+        for index in range(1, 11):
             with factory() as db:
-                approval = seed_approved_candidate(db, suffix=suffix)
+                approval = seed_approved_candidate(db, suffix=f"PgSlot{index}")
                 approval_ids.append(approval.id)
                 chain = db.get(FullChainRun, approval.full_chain_run_id)
                 assert chain is not None
@@ -424,17 +391,15 @@ def test_postgresql_concurrent_publish_has_exactly_three_active_slots(
                 except StrategyDeploymentConflict:
                     return "BLOCKED", None
 
-        with ThreadPoolExecutor(max_workers=4) as executor:
+        with ThreadPoolExecutor(max_workers=10) as executor:
             outcomes = list(executor.map(publish_one, approval_ids))
-        assert sorted(outcomes) == [
-            ("ACTIVE", 1),
-            ("ACTIVE", 2),
-            ("ACTIVE", 3),
+        assert sorted(outcomes, key=lambda item: (item[0], item[1] or 0)) == [
+            *(("ACTIVE", slot) for slot in range(1, 10)),
             ("BLOCKED", None),
         ]
         with factory() as db:
             persisted = db.query(StrategyDeployment).filter_by(status="ACTIVE").all()
-            assert sorted(item.active_slot for item in persisted) == [1, 2, 3]
+            assert sorted(item.active_slot for item in persisted) == list(range(1, 10))
     finally:
         with engine.begin() as connection:
             connection.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
@@ -1373,3 +1338,22 @@ def test_publish_requires_current_approved_candidate(session_factory) -> None:
         )
         with pytest.raises(StrategyDeploymentBlocked, match="expired"):
             publish(db, expired.id)
+
+
+@pytest.mark.parametrize(
+    ("pair", "instrument_id"),
+    [
+        ("BTC/USDT:USDT", "BTC-USDT-SWAP"),
+        ("ETH/USDT:USDT", "ETH-USDT-SWAP"),
+        ("SOL/USDT:USDT", "SOL-USDT-SWAP"),
+    ],
+)
+def test_demo_selection_maps_only_locked_research_pairs(
+    pair: str, instrument_id: str
+) -> None:
+    assert _instrument_from_research_pair(pair) == instrument_id
+
+
+def test_demo_selection_rejects_pair_outside_locked_allowlist() -> None:
+    with pytest.raises(OkxDemoStrategySelectionBlocked, match="outside"):
+        _instrument_from_research_pair("XRP/USDT:USDT")

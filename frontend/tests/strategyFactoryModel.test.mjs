@@ -102,7 +102,7 @@ test("candidate lifecycle display recognizes only explicit authoritative states"
   assert.equal(candidateLifecycleDisplay("BRIDGED_PENDING_CANONICAL_VALIDATION").label, "已桥接，待 canonical 验证");
   assert.equal(candidateLifecycleDisplay("BRIDGED_PENDING_APPROVAL").label, "已桥接，待批准");
   assert.equal(candidateLifecycleDisplay("APPROVED_NOT_DEPLOYED").label, "已批准，未部署");
-  assert.equal(candidateLifecycleDisplay("DEPLOYED_ACTIVE_DEMO").label, "Demo 运行中");
+  assert.equal(candidateLifecycleDisplay("DEPLOYED_ACTIVE_DEMO").label, "Demo ACTIVE 部署记录");
   assert.equal(candidateLifecycleDisplay("made-up-state").status, "UNKNOWN");
   assert.deepEqual(candidateLifecycleDisplay(undefined).steps, ["UNKNOWN", "UNKNOWN", "UNKNOWN", "UNKNOWN"]);
 });

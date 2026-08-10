@@ -171,6 +171,11 @@ export function OkxDemo() {
   const [revision, setRevision] = useState(0);
 
   useEffect(() => {
+    const timer = window.setInterval(() => setRevision((value) => value + 1), 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
     const controller = new AbortController();
     fetchOkxDemoObservability(controller.signal)
       .then((result) => {
@@ -212,7 +217,7 @@ export function OkxDemo() {
           {runtimeActivity.loading ? <FormalLoadingState label="正在读取运行投影" />
             : runtimeActivity.error ? <p className="formal-problem">运行投影同样不可用，状态未知。</p>
               : <dl className="formal-summary-list">
-                <div><dt>ACTIVE 运行策略</dt><dd>{runtimeActivity.data?.active_deployments.length ?? 0}</dd></div>
+                <div><dt>ACTIVE 部署记录</dt><dd>{runtimeActivity.data?.active_deployments.length ?? 0}</dd></div>
                 <div><dt>最近信号</dt><dd>{runtimeActivity.data?.recent_signal_evaluations[0] ? displayStatus(runtimeActivity.data.recent_signal_evaluations[0].status) : "当前无信号"}</dd></div>
               </dl>}
         </section>
@@ -260,12 +265,13 @@ export function OkxDemo() {
         </div>
         <StatusBadge status={acceptable ? "ACCEPTABLE" : "NOT_ACCEPTABLE"} />
       </section>
+      <button className="secondary-button" onClick={() => { setError(null); setRevision((value) => value + 1); refresh(); }} type="button">重新读取只读证据</button>
 
       <section className="formal-metric-grid" aria-label="模拟盘关键指标">
         <article className={runtimeActivity.loading ? "formal-metric formal-skeleton" : "formal-metric"} data-state={runtimeActivity.error ? "unknown" : undefined}>
-          <span>运行中策略</span>
+          <span>ACTIVE 部署记录</span>
           <strong>{runtimeActivity.loading ? "…" : runtimeActivity.error ? "—" : runtimeActivity.data?.active_deployments.length ?? 0}</strong>
-          <small>{runtimeActivity.error ? "部署投影读取失败，保持未知" : runtimeActivity.data?.active_deployments.length ? "OKX_DEMO ACTIVE deployment" : "尚未部署运行策略"}</small>
+          <small>{runtimeActivity.error ? "部署投影读取失败，保持未知" : runtimeActivity.data?.active_deployments.length ? "仅证明 OKX_DEMO ACTIVE deployment；运行健康见 readiness" : "尚无 ACTIVE 部署记录"}</small>
         </article>
         <article className={runtimeActivity.loading ? "formal-metric formal-skeleton" : "formal-metric"} data-state={runtimeActivity.error ? "unknown" : undefined}>
           <span>最近信号</span>
@@ -300,7 +306,7 @@ export function OkxDemo() {
 
       <section className="formal-panel" aria-labelledby="demo-runtime-title">
         <div className="formal-section-heading">
-          <div><span className="formal-kicker">运行读模型</span><h2 id="demo-runtime-title">ACTIVE 策略与最近信号</h2></div>
+          <div><span className="formal-kicker">运行读模型</span><h2 id="demo-runtime-title">ACTIVE 部署记录与最近信号</h2></div>
           <span className="formal-section-note">{runtimeActivity.data ? `更新于 ${displayDateTime(runtimeActivity.data.as_of)}` : "独立只读来源"}</span>
         </div>
         {runtimeActivity.loading ? <FormalLoadingState label="正在读取运行投影" />
@@ -315,7 +321,7 @@ export function OkxDemo() {
                   </div>
                 ))}
               </div>
-            ) : <div className="okx-empty"><strong>尚未部署运行策略</strong><p>查询成功且没有 OKX_DEMO ACTIVE deployment；这不是 API 读取失败。</p></div>}
+            ) : <div className="okx-empty"><strong>尚无 ACTIVE 部署记录</strong><p>查询成功且没有 OKX_DEMO ACTIVE deployment；这不是 API 读取失败。</p></div>}
         {!runtimeActivity.loading && !runtimeActivity.error && runtimeActivity.data ? (
           runtimeActivity.data.recent_signal_evaluations.length ? (
             <ol className="formal-activity-list">

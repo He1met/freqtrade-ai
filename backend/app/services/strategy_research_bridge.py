@@ -11,6 +11,7 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.core.strategy_research_contract import matches_official_research_policy
+from app.core.strategy_research_diversity import RESEARCH_CANDIDATE_COUNT
 from app.models import (
     FullChainRun,
     FullChainStageRun,
@@ -139,6 +140,7 @@ class StrategyResearchBridgeService:
         evidence_snapshot, quality = self._validated_research_evidence(candidate)
         if (
             evidence_snapshot["official_policy_matches"] is not True
+            or evidence_snapshot["batch_completeness_matches"] is not True
             or evidence_snapshot["terminal_attempt_event_id"] is None
             or quality is None
             or quality.status != "PASSED"
@@ -185,11 +187,18 @@ class StrategyResearchBridgeService:
                 reason="Candidate source is missing, unsafe, or outside the project root.",
             )
         try:
+            source_class_name = (candidate.evidence_snapshot or {}).get(
+                "source_class_name"
+            )
             equivalence = prove_blueprint_code_equivalence(
                 blueprint_payload=blueprint_payload,
                 source_bytes=source_path.read_bytes(),
                 expected_source_digest=candidate.code_digest,
-                expected_class_name=candidate.candidate_name,
+                expected_class_name=(
+                    source_class_name
+                    if isinstance(source_class_name, str) and source_class_name
+                    else candidate.candidate_name
+                ),
                 expected_timeframe=str(deployment_target.get("timeframe") or ""),
             )
         except (OSError, StrategyBlueprintEquivalenceBlocked, ValueError) as exc:
@@ -423,6 +432,22 @@ class StrategyResearchBridgeService:
     ) -> tuple[dict[str, Any], MarketDataQualityReceipt | None]:
         batch = candidate.batch
         policy_ok = matches_official_research_policy(batch.selection_policy)
+        is_v40 = batch.report_schema_version == "freqtrade-ai-strategy-candidate-research-v2"
+        batch_complete = (
+            batch.requested_count == RESEARCH_CANDIDATE_COUNT
+            and batch.generated_count == RESEARCH_CANDIDATE_COUNT
+            and batch.persisted_count == RESEARCH_CANDIDATE_COUNT
+            and len(batch.candidates) == RESEARCH_CANDIDATE_COUNT
+            and all(
+                row.status in {"QUALIFIED", "REJECTED", "VALIDATION_FAILED"}
+                and row.pair is not None
+                and row.timeframe is not None
+                and row.unit_slot is not None
+                and row.strategy_family is not None
+                and row.structure_fingerprint is not None
+                for row in batch.candidates
+            )
+        ) if is_v40 else True
         terminal = self.db.scalar(
             select(StrategyResearchAttemptEvent)
             .where(
@@ -443,6 +468,7 @@ class StrategyResearchBridgeService:
             "research_candidate_id": candidate.id,
             "source_code_digest": candidate.code_digest,
             "official_policy_matches": policy_ok,
+            "batch_completeness_matches": batch_complete,
             "terminal_attempt_event_id": terminal.id if terminal is not None else None,
             "market_data_quality_receipt_id": quality.id if quality is not None else None,
             "market_data_quality_status": quality.status if quality is not None else "UNKNOWN",

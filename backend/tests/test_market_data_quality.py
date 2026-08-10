@@ -1,4 +1,6 @@
 from datetime import datetime, timezone
+import hashlib
+import json
 
 import pandas as pd
 import pytest
@@ -43,6 +45,59 @@ def test_complete_aligned_feather_passes(tmp_path):
     assert receipt.row_count == 5
     assert receipt.relative_path == "data/candles.feather"
     assert len(receipt.file_sha256) == len(receipt.evidence_digest) == 64
+
+
+def test_millisecond_precision_feather_is_normalized_before_alignment_check(tmp_path):
+    rows = good_rows()
+    frame = pd.DataFrame(rows)
+    frame["date"] = frame["date"].astype("datetime64[ms, UTC]")
+    path = tmp_path / "data" / "candles.feather"
+    path.parent.mkdir(exist_ok=True)
+    frame.to_feather(path)
+
+    receipt = inspect(path, tmp_path)
+
+    assert receipt.status == "PASSED"
+    assert receipt.misaligned_timestamp_count == 0
+
+
+def test_required_public_source_receipt_is_digest_bound(tmp_path):
+    path = write_frame(tmp_path, good_rows())
+    missing = inspect_market_data(
+        path,
+        repository_root=tmp_path,
+        exchange="okx",
+        pair="BTC/USDT:USDT",
+        timeframe="15m",
+        expected_interval_seconds=900,
+        inspected_at=NOW,
+        require_source_receipt=True,
+    )
+    assert "SOURCE_RECEIPT_MISSING" in missing.reason_codes
+
+    file_digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    source_path = path.with_suffix(path.suffix + ".source.json")
+    source_path.write_text(json.dumps({
+        "schema_version": "okx-public-candle-file-source-v1",
+        "source_type": "DERIVED_FROM_OKX_PUBLIC_REST",
+        "credentials_used": False,
+        "account_endpoint_used": False,
+        "orders_submitted": False,
+        "data_file_sha256": file_digest,
+        "response_chain_sha256": "a" * 64,
+    }))
+    passed = inspect_market_data(
+        path,
+        repository_root=tmp_path,
+        exchange="okx",
+        pair="BTC/USDT:USDT",
+        timeframe="15m",
+        expected_interval_seconds=900,
+        inspected_at=NOW,
+        require_source_receipt=True,
+    )
+    assert passed.status == "PASSED"
+    assert passed.source_receipt_digest == hashlib.sha256(source_path.read_bytes()).hexdigest()
 
 
 @pytest.mark.parametrize(
