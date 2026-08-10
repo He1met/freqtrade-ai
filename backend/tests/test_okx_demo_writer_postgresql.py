@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 from threading import Barrier
 import time
 from types import SimpleNamespace
@@ -5837,6 +5838,10 @@ def test_postgresql_v28_missing_consent_key_requires_explicit_terminalization(
 def test_postgresql_v28_terminal_history_real_atomic_dump_restore_and_reharden(
     postgres_writer_engine, monkeypatch, tmp_path
 ) -> None:
+    pg_dump_binary = shutil.which("pg_dump")
+    psql_binary = shutil.which("psql")
+    assert pg_dump_binary is not None, "pg_dump must be available for restore coverage"
+    assert psql_binary is not None, "psql must be available for restore coverage"
     _now, handoff_id, grant_id, _approval_id = _finalize_and_arm_v28_handoff(
         postgres_writer_engine,
         monkeypatch,
@@ -5878,7 +5883,7 @@ def test_postgresql_v28_terminal_history_real_atomic_dump_restore_and_reharden(
     backup_path, manifest_path = postgres_backup.create_backup(
         database_url=source_url,
         output_dir=tmp_path,
-        pg_dump_binary="/opt/homebrew/bin/pg_dump",
+        pg_dump_binary=pg_dump_binary,
     )
 
     destination_name = "test_okx_restore_{}".format(uuid4().hex)
@@ -5929,7 +5934,7 @@ def test_postgresql_v28_terminal_history_real_atomic_dump_restore_and_reharden(
                     database_url=destination_url,
                     backup_path=backup_path,
                     manifest_path=manifest_path,
-                    psql_binary="/opt/homebrew/bin/psql",
+                    psql_binary=psql_binary,
                 )
             with destination_engine.begin() as destination:
                 destination.execute(text("DELETE FROM {}".format(secret_table)))
@@ -5947,7 +5952,7 @@ def test_postgresql_v28_terminal_history_real_atomic_dump_restore_and_reharden(
                 database_url=destination_url,
                 backup_path=backup_path,
                 manifest_path=manifest_path,
-                psql_binary="/opt/homebrew/bin/psql",
+                psql_binary=psql_binary,
             )
         with destination_engine.begin() as destination:
             assert destination.execute(text(
@@ -5965,7 +5970,7 @@ def test_postgresql_v28_terminal_history_real_atomic_dump_restore_and_reharden(
                 database_url=destination_url,
                 backup_path=backup_path,
                 manifest_path=manifest_path,
-                psql_binary="/opt/homebrew/bin/psql",
+                psql_binary=psql_binary,
             )
         with destination_engine.begin() as destination:
             assert destination.execute(text(
@@ -5994,7 +5999,7 @@ def test_postgresql_v28_terminal_history_real_atomic_dump_restore_and_reharden(
                 database_url=destination_url,
                 backup_path=delayed_backup_path,
                 manifest_path=delayed_manifest_path,
-                psql_binary="/opt/homebrew/bin/psql",
+                psql_binary=psql_binary,
             )
             lock_observed = False
             deadline = time.monotonic() + 5
