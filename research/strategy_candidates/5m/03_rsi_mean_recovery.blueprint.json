@@ -1,0 +1,108 @@
+{
+  "can_short": true,
+  "class_name": "Candidate03RsiMeanRecovery5M",
+  "description": "Deterministic MEAN_REVERSION research structure for 5m closed candles.",
+  "entry_rules": [
+    {
+      "compare_indicator": "mean",
+      "indicator": "close_raw",
+      "lookback": 1,
+      "operator": "<",
+      "regime": null,
+      "value": null
+    },
+    {
+      "compare_indicator": null,
+      "indicator": "rsi",
+      "lookback": 1,
+      "operator": "<",
+      "regime": null,
+      "value": 30.0
+    },
+    {
+      "compare_indicator": null,
+      "indicator": "rsi",
+      "lookback": 2,
+      "operator": "rising",
+      "regime": null,
+      "value": null
+    }
+  ],
+  "exit_rules": [
+    {
+      "compare_indicator": "mean",
+      "indicator": "close_raw",
+      "lookback": 1,
+      "operator": ">=",
+      "regime": null,
+      "value": null
+    }
+  ],
+  "indicators": [
+    {
+      "kind": "raw",
+      "name": "close_raw",
+      "period": 1
+    },
+    {
+      "kind": "sma",
+      "name": "mean",
+      "period": 48
+    },
+    {
+      "kind": "rsi",
+      "name": "rsi",
+      "period": 14
+    }
+  ],
+  "minimal_roi": {
+    "0": 0.03
+  },
+  "name": "RSI Mean Recovery 5m",
+  "regime_rules": [],
+  "schema_version": "2",
+  "short_entry_rules": [
+    {
+      "compare_indicator": "mean",
+      "indicator": "close_raw",
+      "lookback": 1,
+      "operator": ">",
+      "regime": null,
+      "value": null
+    },
+    {
+      "compare_indicator": null,
+      "indicator": "rsi",
+      "lookback": 1,
+      "operator": ">",
+      "regime": null,
+      "value": 70.0
+    },
+    {
+      "compare_indicator": null,
+      "indicator": "rsi",
+      "lookback": 2,
+      "operator": "falling",
+      "regime": null,
+      "value": null
+    }
+  ],
+  "short_exit_rules": [
+    {
+      "compare_indicator": "mean",
+      "indicator": "close_raw",
+      "lookback": 1,
+      "operator": "<=",
+      "regime": null,
+      "value": null
+    }
+  ],
+  "slug": "candidate-03-rsi-mean-recovery-5m",
+  "stoploss": -0.1,
+  "tags": [
+    "formal-research",
+    "blueprint-native",
+    "mean_reversion"
+  ],
+  "timeframe": "5m"
+}

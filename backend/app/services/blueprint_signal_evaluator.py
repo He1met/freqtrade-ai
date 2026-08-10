@@ -21,8 +21,8 @@ from app.schemas.strategy_signal import (
 from app.services.strategy_renderer import StrategyCodeRenderer
 
 
-EVALUATOR_VERSION = "blueprint-signal-v2"
-INDICATOR_ENGINE_VERSION = "decimal-talib-golden-v1"
+EVALUATOR_VERSION = "blueprint-signal-v2.1"
+INDICATOR_ENGINE_VERSION = "decimal-talib-golden-v2"
 STARTUP_CANDLE_COUNT = 50
 RULE_BOUNDARY_RELATIVE_TOLERANCE = Decimal("1e-12")
 TIMEFRAME_PATTERN = re.compile(r"^([1-9][0-9]*)([mhdw])$")
@@ -68,15 +68,33 @@ class BlueprintSignalEvaluator:
             evaluated_at=evaluated_at,
             required_count=self._required_candle_count(blueprint),
         )
-        closes = [candle.close for candle in candles]
+        source_values = {
+            "open": [candle.open for candle in candles],
+            "high": [candle.high for candle in candles],
+            "low": [candle.low for candle in candles],
+            "close": [candle.close for candle in candles],
+            "volume": [candle.volume for candle in candles],
+        }
         series_by_name: dict[str, IndicatorSeries] = {}
         for indicator in blueprint.indicators:
-            calculator = {
-                "rsi": _rsi,
-                "ema": _ema,
-                "sma": _sma,
-            }[indicator.kind]
-            series_by_name[indicator.name] = calculator(closes, indicator.period)
+            values = source_values[indicator.source]
+            if indicator.kind == "raw":
+                series = list(values)
+            elif indicator.kind == "atr":
+                series = _atr(
+                    source_values["high"],
+                    source_values["low"],
+                    source_values["close"],
+                    indicator.period,
+                )
+            else:
+                calculator = {
+                    "rsi": _rsi,
+                    "ema": _ema,
+                    "sma": _sma,
+                }[indicator.kind]
+                series = calculator(values, indicator.period)
+            series_by_name[indicator.name] = series
 
         latest_values: dict[str, Decimal] = {}
         for name, series in series_by_name.items():
@@ -332,6 +350,35 @@ def _rsi_value(average_gain: Decimal, average_loss: Decimal) -> Decimal:
     return Decimal("100") - Decimal("100") / (
         Decimal("1") + relative_strength
     )
+
+
+def _atr(
+    highs: list[Decimal],
+    lows: list[Decimal],
+    closes: list[Decimal],
+    period: int,
+) -> IndicatorSeries:
+    output: IndicatorSeries = [None] * len(closes)
+    if len(closes) <= period:
+        return output
+    true_ranges = [
+        max(
+            highs[index] - lows[index],
+            abs(highs[index] - closes[index - 1]),
+            abs(lows[index] - closes[index - 1]),
+        )
+        for index in range(1, len(closes))
+    ]
+    with localcontext() as context:
+        context.prec = 34
+        previous = sum(true_ranges[:period], Decimal("0")) / Decimal(period)
+        output[period] = previous
+        for range_index in range(period, len(true_ranges)):
+            previous = (
+                previous * Decimal(period - 1) + true_ranges[range_index]
+            ) / Decimal(period)
+            output[range_index + 1] = previous
+    return output
 
 
 def _evaluate_regime(

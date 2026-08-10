@@ -1,0 +1,92 @@
+{
+  "can_short": true,
+  "class_name": "Candidate08EmaPersistenceCross5M",
+  "description": "Deterministic TREND_BREAKOUT_FOLLOWING research structure for 5m closed candles.",
+  "entry_rules": [
+    {
+      "compare_indicator": "ema_slow",
+      "indicator": "ema_fast",
+      "lookback": 1,
+      "operator": "crosses_above",
+      "regime": null,
+      "value": null
+    },
+    {
+      "compare_indicator": null,
+      "indicator": "rsi",
+      "lookback": 1,
+      "operator": ">",
+      "regime": null,
+      "value": 55.0
+    }
+  ],
+  "exit_rules": [
+    {
+      "compare_indicator": "ema_slow",
+      "indicator": "ema_fast",
+      "lookback": 1,
+      "operator": "<",
+      "regime": null,
+      "value": null
+    }
+  ],
+  "indicators": [
+    {
+      "kind": "ema",
+      "name": "ema_fast",
+      "period": 18
+    },
+    {
+      "kind": "ema",
+      "name": "ema_slow",
+      "period": 72
+    },
+    {
+      "kind": "rsi",
+      "name": "rsi",
+      "period": 14
+    }
+  ],
+  "minimal_roi": {
+    "0": 0.03
+  },
+  "name": "EMA Persistence Cross 5m",
+  "regime_rules": [],
+  "schema_version": "2",
+  "short_entry_rules": [
+    {
+      "compare_indicator": "ema_slow",
+      "indicator": "ema_fast",
+      "lookback": 1,
+      "operator": "crosses_below",
+      "regime": null,
+      "value": null
+    },
+    {
+      "compare_indicator": null,
+      "indicator": "rsi",
+      "lookback": 1,
+      "operator": "<",
+      "regime": null,
+      "value": 45.0
+    }
+  ],
+  "short_exit_rules": [
+    {
+      "compare_indicator": "ema_slow",
+      "indicator": "ema_fast",
+      "lookback": 1,
+      "operator": ">",
+      "regime": null,
+      "value": null
+    }
+  ],
+  "slug": "candidate-08-ema-persistence-cross-5m",
+  "stoploss": -0.1,
+  "tags": [
+    "formal-research",
+    "blueprint-native",
+    "trend_breakout_following"
+  ],
+  "timeframe": "5m"
+}

@@ -1,0 +1,120 @@
+{
+  "can_short": true,
+  "class_name": "Candidate10RangeLiquidityCross15M",
+  "description": "Deterministic RANGE_LIQUIDITY_FILTER research structure for 15m closed candles.",
+  "entry_rules": [
+    {
+      "compare_indicator": "volume_mean",
+      "indicator": "volume_raw",
+      "lookback": 1,
+      "operator": ">",
+      "regime": null,
+      "value": null
+    },
+    {
+      "compare_indicator": "range_mean",
+      "indicator": "close_raw",
+      "lookback": 1,
+      "operator": "crosses_above",
+      "regime": null,
+      "value": null
+    },
+    {
+      "compare_indicator": null,
+      "indicator": "rsi",
+      "lookback": 1,
+      "operator": "<",
+      "regime": null,
+      "value": 60.0
+    }
+  ],
+  "exit_rules": [
+    {
+      "compare_indicator": null,
+      "indicator": "rsi",
+      "lookback": 1,
+      "operator": ">",
+      "regime": null,
+      "value": 65.0
+    }
+  ],
+  "indicators": [
+    {
+      "kind": "raw",
+      "name": "close_raw",
+      "period": 1
+    },
+    {
+      "kind": "raw",
+      "name": "volume_raw",
+      "period": 1,
+      "source": "volume"
+    },
+    {
+      "kind": "sma",
+      "name": "volume_mean",
+      "period": 72,
+      "source": "volume"
+    },
+    {
+      "kind": "sma",
+      "name": "range_mean",
+      "period": 32
+    },
+    {
+      "kind": "rsi",
+      "name": "rsi",
+      "period": 14
+    }
+  ],
+  "minimal_roi": {
+    "0": 0.03
+  },
+  "name": "Range Liquidity Cross 15m",
+  "regime_rules": [],
+  "schema_version": "2",
+  "short_entry_rules": [
+    {
+      "compare_indicator": "volume_mean",
+      "indicator": "volume_raw",
+      "lookback": 1,
+      "operator": ">",
+      "regime": null,
+      "value": null
+    },
+    {
+      "compare_indicator": "range_mean",
+      "indicator": "close_raw",
+      "lookback": 1,
+      "operator": "crosses_below",
+      "regime": null,
+      "value": null
+    },
+    {
+      "compare_indicator": null,
+      "indicator": "rsi",
+      "lookback": 1,
+      "operator": ">",
+      "regime": null,
+      "value": 40.0
+    }
+  ],
+  "short_exit_rules": [
+    {
+      "compare_indicator": null,
+      "indicator": "rsi",
+      "lookback": 1,
+      "operator": "<",
+      "regime": null,
+      "value": 35.0
+    }
+  ],
+  "slug": "candidate-10-range-liquidity-cross-15m",
+  "stoploss": -0.1,
+  "tags": [
+    "formal-research",
+    "blueprint-native",
+    "range_liquidity_filter"
+  ],
+  "timeframe": "15m"
+}

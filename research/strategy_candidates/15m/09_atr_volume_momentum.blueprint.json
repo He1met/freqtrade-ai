@@ -1,0 +1,141 @@
+{
+  "can_short": true,
+  "class_name": "Candidate09AtrVolumeMomentum15M",
+  "description": "Deterministic MOMENTUM_VOLUME_CONFIRMATION research structure for 15m closed candles.",
+  "entry_rules": [
+    {
+      "compare_indicator": "volume_mean",
+      "indicator": "volume_raw",
+      "lookback": 1,
+      "operator": ">",
+      "regime": null,
+      "value": null
+    },
+    {
+      "compare_indicator": null,
+      "indicator": "atr",
+      "lookback": 3,
+      "operator": "rising",
+      "regime": null,
+      "value": null
+    },
+    {
+      "compare_indicator": "ema_slow",
+      "indicator": "ema_fast",
+      "lookback": 1,
+      "operator": ">",
+      "regime": null,
+      "value": null
+    },
+    {
+      "compare_indicator": "ema_fast",
+      "indicator": "close_raw",
+      "lookback": 1,
+      "operator": ">",
+      "regime": null,
+      "value": null
+    }
+  ],
+  "exit_rules": [
+    {
+      "compare_indicator": "ema_slow",
+      "indicator": "ema_fast",
+      "lookback": 1,
+      "operator": "<",
+      "regime": null,
+      "value": null
+    }
+  ],
+  "indicators": [
+    {
+      "kind": "raw",
+      "name": "close_raw",
+      "period": 1
+    },
+    {
+      "kind": "raw",
+      "name": "volume_raw",
+      "period": 1,
+      "source": "volume"
+    },
+    {
+      "kind": "sma",
+      "name": "volume_mean",
+      "period": 48,
+      "source": "volume"
+    },
+    {
+      "kind": "atr",
+      "name": "atr",
+      "period": 14
+    },
+    {
+      "kind": "ema",
+      "name": "ema_fast",
+      "period": 34
+    },
+    {
+      "kind": "ema",
+      "name": "ema_slow",
+      "period": 100
+    }
+  ],
+  "minimal_roi": {
+    "0": 0.03
+  },
+  "name": "ATR Volume Momentum 15m",
+  "regime_rules": [],
+  "schema_version": "2",
+  "short_entry_rules": [
+    {
+      "compare_indicator": "volume_mean",
+      "indicator": "volume_raw",
+      "lookback": 1,
+      "operator": ">",
+      "regime": null,
+      "value": null
+    },
+    {
+      "compare_indicator": null,
+      "indicator": "atr",
+      "lookback": 3,
+      "operator": "rising",
+      "regime": null,
+      "value": null
+    },
+    {
+      "compare_indicator": "ema_slow",
+      "indicator": "ema_fast",
+      "lookback": 1,
+      "operator": "<",
+      "regime": null,
+      "value": null
+    },
+    {
+      "compare_indicator": "ema_fast",
+      "indicator": "close_raw",
+      "lookback": 1,
+      "operator": "<",
+      "regime": null,
+      "value": null
+    }
+  ],
+  "short_exit_rules": [
+    {
+      "compare_indicator": "ema_slow",
+      "indicator": "ema_fast",
+      "lookback": 1,
+      "operator": ">",
+      "regime": null,
+      "value": null
+    }
+  ],
+  "slug": "candidate-09-atr-volume-momentum-15m",
+  "stoploss": -0.1,
+  "tags": [
+    "formal-research",
+    "blueprint-native",
+    "momentum_volume_confirmation"
+  ],
+  "timeframe": "15m"
+}

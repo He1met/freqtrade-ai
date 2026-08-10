@@ -1,0 +1,92 @@
+{
+  "can_short": true,
+  "class_name": "Candidate06FastRsiExhaustion5M",
+  "description": "Deterministic MEAN_REVERSION research structure for 5m closed candles.",
+  "entry_rules": [
+    {
+      "compare_indicator": "mean",
+      "indicator": "close_raw",
+      "lookback": 1,
+      "operator": "<",
+      "regime": null,
+      "value": null
+    },
+    {
+      "compare_indicator": null,
+      "indicator": "rsi_fast",
+      "lookback": 1,
+      "operator": "<",
+      "regime": null,
+      "value": 22.0
+    }
+  ],
+  "exit_rules": [
+    {
+      "compare_indicator": null,
+      "indicator": "rsi_fast",
+      "lookback": 1,
+      "operator": ">",
+      "regime": null,
+      "value": 50.0
+    }
+  ],
+  "indicators": [
+    {
+      "kind": "raw",
+      "name": "close_raw",
+      "period": 1
+    },
+    {
+      "kind": "sma",
+      "name": "mean",
+      "period": 96
+    },
+    {
+      "kind": "rsi",
+      "name": "rsi_fast",
+      "period": 7
+    }
+  ],
+  "minimal_roi": {
+    "0": 0.03
+  },
+  "name": "Fast RSI Exhaustion 5m",
+  "regime_rules": [],
+  "schema_version": "2",
+  "short_entry_rules": [
+    {
+      "compare_indicator": "mean",
+      "indicator": "close_raw",
+      "lookback": 1,
+      "operator": ">",
+      "regime": null,
+      "value": null
+    },
+    {
+      "compare_indicator": null,
+      "indicator": "rsi_fast",
+      "lookback": 1,
+      "operator": ">",
+      "regime": null,
+      "value": 78.0
+    }
+  ],
+  "short_exit_rules": [
+    {
+      "compare_indicator": null,
+      "indicator": "rsi_fast",
+      "lookback": 1,
+      "operator": "<",
+      "regime": null,
+      "value": 50.0
+    }
+  ],
+  "slug": "candidate-06-fast-rsi-exhaustion-5m",
+  "stoploss": -0.1,
+  "tags": [
+    "formal-research",
+    "blueprint-native",
+    "mean_reversion"
+  ],
+  "timeframe": "5m"
+}

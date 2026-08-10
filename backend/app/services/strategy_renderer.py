@@ -1,6 +1,6 @@
 from app.schemas.strategy_blueprint import SignalRule, StrategyBlueprint
 
-STRATEGY_RENDERER_VERSION = "strategy-renderer-v2.1"
+STRATEGY_RENDERER_VERSION = "strategy-renderer-v2.2"
 
 
 class StrategyCodeRenderer:
@@ -70,17 +70,35 @@ class StrategyCodeRenderer:
     def _render_indicators(self, blueprint: StrategyBlueprint) -> list[str]:
         lines: list[str] = []
         for indicator in blueprint.indicators:
-            if indicator.kind == "rsi":
+            if indicator.kind == "raw":
+                lines.append(
+                    f"        dataframe[{indicator.name!r}] = dataframe[{indicator.source!r}]"
+                )
+            elif indicator.kind == "rsi":
                 lines.append(
                     f"        dataframe[{indicator.name!r}] = ta.RSI(dataframe, timeperiod={indicator.period})"
                 )
             elif indicator.kind == "ema":
+                input_expression = (
+                    "dataframe"
+                    if indicator.source == "close"
+                    else f"dataframe[{indicator.source!r}]"
+                )
                 lines.append(
-                    f"        dataframe[{indicator.name!r}] = ta.EMA(dataframe, timeperiod={indicator.period})"
+                    f"        dataframe[{indicator.name!r}] = ta.EMA({input_expression}, timeperiod={indicator.period})"
                 )
             elif indicator.kind == "sma":
+                input_expression = (
+                    "dataframe"
+                    if indicator.source == "close"
+                    else f"dataframe[{indicator.source!r}]"
+                )
                 lines.append(
-                    f"        dataframe[{indicator.name!r}] = ta.SMA(dataframe, timeperiod={indicator.period})"
+                    f"        dataframe[{indicator.name!r}] = ta.SMA({input_expression}, timeperiod={indicator.period})"
+                )
+            elif indicator.kind == "atr":
+                lines.append(
+                    f"        dataframe[{indicator.name!r}] = ta.ATR(dataframe, timeperiod={indicator.period})"
                 )
         return lines
 
