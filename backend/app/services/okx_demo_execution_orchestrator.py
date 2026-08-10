@@ -164,8 +164,7 @@ class OkxDemoExecutionOrchestrator:
                 # makes a newly observed snapshot look as though it came from the
                 # future.  Refresh only the verifier clock; bundle timestamps and
                 # expiry remain immutable and are still checked fail-closed.
-                if now is None:
-                    active_now = _aware(self._clock())
+                active_now = _aware(self._clock())
                 self._require_fresh_bundle(bundle, active_now)
                 snapshots = self._snapshot_loader(bundle)
                 signal_request = self._signal_request(
@@ -300,8 +299,7 @@ class OkxDemoExecutionOrchestrator:
             # Re-check immediately before the owner-mediated risk boundary.
             # Slow signal persistence must not turn an expired bundle into an
             # approved risk chain.
-            if now is None:
-                active_now = _aware(self._clock())
+            active_now = _aware(self._clock())
             self._require_fresh_bundle(bundle, active_now)
             self.deployments.renew_checkpoint_execution_authority(
                 evaluation.id,
