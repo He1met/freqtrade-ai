@@ -75,7 +75,8 @@ NATURAL_SIGNAL_RISK_CHAIN_BASE_VERSION = "20260809_38"
 MULTI_ASSET_CAPACITY_BASE_VERSION = "20260810_39"
 AUTOMATION_GUARD_REBIND_BASE_VERSION = "20260810_40"
 DEPLOYMENT_POLICY_REBIND_BASE_VERSION = "20260810_41"
-SCHEMA_VERSION = "20260810_42"
+NATURAL_SIGNAL_EVALUATOR_RECEIPT_BASE_VERSION = "20260810_42"
+SCHEMA_VERSION = "20260811_43"
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 ATTESTATION_PROOF_KEY_ENV = "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"
 OPERATOR_TOKEN_ENV = "FREQTRADE_AI_OPERATOR_TOKEN"
@@ -11841,12 +11842,15 @@ def _add_natural_signal_risk_chain_boundary(
                 'source_type',signal_row.source_type,
                 'source_database_ids',signal_row.source_database_ids::jsonb,
                 'signal_snapshot',signal_row.signal_snapshot::jsonb,
+                -- FullChainRepository._stable_digest uses Python's str(datetime),
+                -- whose date/time separator is one space.  Keep this reconstruction
+                -- byte-identical instead of borrowing the evaluator's ISO-T format.
                 'observed_at',to_char(signal_row.observed_at AT TIME ZONE 'UTC',
-                  'YYYY-MM-DD"T"HH24:MI:SS')||CASE WHEN extract(microseconds FROM
+                  'YYYY-MM-DD HH24:MI:SS')||CASE WHEN extract(microseconds FROM
                   signal_row.observed_at)::integer%1000000=0 THEN '' ELSE '.'||
                   to_char(signal_row.observed_at AT TIME ZONE 'UTC','US') END||'+00:00',
                 'expires_at',to_char(signal_row.expires_at AT TIME ZONE 'UTC',
-                  'YYYY-MM-DD"T"HH24:MI:SS')||CASE WHEN extract(microseconds FROM
+                  'YYYY-MM-DD HH24:MI:SS')||CASE WHEN extract(microseconds FROM
                   signal_row.expires_at)::integer%1000000=0 THEN '' ELSE '.'||
                   to_char(signal_row.expires_at AT TIME ZONE 'UTC','US') END||'+00:00')),
               'UTF8'),'sha256'),'hex')
@@ -12313,6 +12317,7 @@ def _natural_signal_risk_chain_boundary_problems(
         "CONTINUOUS_DEMO_V1", "okx-demo-selection-v2",
         "max_drawdown_contract", "okx_demo_continuous_opening_allowed",
         "natural signal writer fence is invalid", "allow_real_funds",
+        "FullChainRepository._stable_digest uses Python's str(datetime)",
         '["BTC-USDT-SWAP","ETH-USDT-SWAP","SOL-USDT-SWAP"]',
     )
     if (owner != "freqtrade_ai_attestor" or security_definer is not True
@@ -12450,6 +12455,19 @@ def upgrade_database(engine: Engine) -> str:
                         "Recorded schema version does not match ORM metadata: " + "; ".join(problems)
                     )
                 return current_version
+            if current_version == NATURAL_SIGNAL_EVALUATOR_RECEIPT_BASE_VERSION:
+                _add_natural_signal_risk_chain_boundary(connection)
+                problems = schema_problems(connection)
+                if problems:
+                    raise SchemaMigrationBlocked(
+                        "Natural signal evaluator receipt upgrade does not match "
+                        "ORM metadata: " + "; ".join(problems)
+                    )
+                connection.execute(
+                    text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+                    {"version": SCHEMA_VERSION},
+                )
+                return SCHEMA_VERSION
             if current_version == DEPLOYMENT_POLICY_REBIND_BASE_VERSION:
                 problems = schema_problems(connection)
                 if problems:

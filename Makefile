@@ -1,7 +1,8 @@
-.PHONY: help bootstrap doctor up status down logs verify operator-token-init operator-token-status okx-demo-pin-account okx-demo-preflight okx-demo-compatibility okx-demo-canary okx-demo-e2e-offline okx-demo-e2e-controlled autostart-install autostart-status autostart-logs autostart-restart autostart-uninstall db-backup db-init db-verify db-attestation-harden test
+.PHONY: help bootstrap doctor up status down logs verify operator-token-init operator-token-status okx-demo-pin-account okx-demo-preflight okx-demo-compatibility okx-demo-canary okx-demo-e2e-offline okx-demo-e2e-controlled evaluator-receipt-preflight autostart-install autostart-status autostart-logs autostart-restart autostart-uninstall db-backup db-init db-verify db-attestation-harden test
 .PHONY: help bootstrap doctor up status down logs verify operator-token-init operator-token-status okx-demo-pin-account okx-demo-preflight okx-demo-canary okx-demo-e2e-offline okx-demo-e2e-controlled autostart-install autostart-status autostart-logs autostart-restart autostart-uninstall db-backup db-init db-verify db-attestation-harden db-reconciliation-compact-plan db-reconciliation-compact-apply db-reconciliation-compact-verify test
 
 DATABASE_URL ?= postgresql+psycopg://freqtrade:change_me@localhost:5432/freqtrade_ai
+CANONICAL_REPO ?= $(CURDIR)
 
 help:
 	@backend/.venv/bin/python scripts/local_runtime.py doctor --json >/dev/null || true
@@ -12,6 +13,7 @@ help:
 	@printf '%s\n' 'OKX Demo compatibility: make okx-demo-compatibility (offline-first; uses the shared FREQTRADE_BINARY resolver)'
 	@printf '%s\n' 'OKX Demo direct canary: permanently BLOCKED; canonical runtime one-shot grant owns any controlled canary'
 	@printf '%s\n' 'OKX Demo E2E: make okx-demo-e2e-offline (controlled mode stays blocked until #449/#450 integration)'
+	@printf '%s\n' 'Evaluator receipt: POSTGRES_WORKER_URL=... make evaluator-receipt-preflight (real PostgreSQL; zero order submission)'
 	@printf '%s\n' 'macOS autostart: make autostart-install | autostart-status | autostart-logs | autostart-restart | autostart-uninstall'
 	@printf '%s\n' 'The managed runtime uses only local PostgreSQL database freqtrade_ai.'
 	@printf '%s\n' 'One-time peer-admin attestation ACL: make db-attestation-harden'
@@ -61,6 +63,17 @@ okx-demo-e2e-offline:
 
 okx-demo-e2e-controlled:
 	backend/.venv/bin/python scripts/okx_demo_e2e.py --mode controlled-real $(E2E_FLAGS)
+
+evaluator-receipt-preflight:
+	@test -n "$(POSTGRES_WORKER_URL)" || (printf '%s\n' 'POSTGRES_WORKER_URL is required' >&2; exit 2)
+	@"$(CANONICAL_REPO)/backend/.venv/bin/python" "$(CANONICAL_REPO)/scripts/local_runtime.py" verify
+	@cd backend && PYTHONPATH=. POSTGRES_WORKER_URL="$(POSTGRES_WORKER_URL)" \
+		"$(CANONICAL_REPO)/backend/.venv/bin/python" -m pytest -q \
+		tests/test_risk_chain_postgresql.py::test_postgresql_v43_natural_signal_evaluator_receipt_reaches_writer_claim \
+		tests/test_risk_chain_postgresql.py::test_postgresql_v43_reinstalls_repository_datetime_digest_contract \
+		tests/test_okx_demo_execution_orchestrator.py::test_actionable_signal_completes_signal_then_risk_and_evaluation \
+		tests/test_okx_demo_execution_orchestrator.py::test_signal_checkpoint_survives_expiry_and_new_fence_without_recapture \
+		tests/test_strategy_deployment_repository.py::test_leased_signal_checkpoint_survives_expiry_and_is_immutable
 
 autostart-install:
 	backend/.venv/bin/python scripts/macos_launch_agent.py install
