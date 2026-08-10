@@ -313,6 +313,7 @@ def _orchestrator(
     evaluator=None,
     db=None,
     risk=None,
+    clock=None,
 ):
     bundle = _bundle()
     db = db or FakeDatabase()
@@ -344,8 +345,24 @@ def _orchestrator(
             code_hash="f" * 64,
         ),
         snapshot_loader=lambda _: _snapshots(bundle),
+        clock=clock,
     )
     return service, deployments, chains, risk
+
+
+def test_actionable_refreshes_verifier_clock_after_slow_snapshot_capture():
+    captured_before_snapshot = NOW - timedelta(seconds=45)
+    clock_values = iter((captured_before_snapshot, NOW, NOW))
+    service, deployments, chains, risk = _orchestrator(
+        signal=_signal("ACTIONABLE"),
+        clock=lambda: next(clock_values),
+    )
+
+    result = service.process(11, lease_token="lease", fencing_sequence=4)
+
+    assert result.status == "ACTIONABLE"
+    assert risk.calls[0]["now"] == NOW
+    assert deployments.completions[0]["now"] == NOW
 
 
 def test_no_action_completes_evaluation_without_opening_execution_chain():
