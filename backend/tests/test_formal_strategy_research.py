@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -42,22 +43,42 @@ def build_coordinator(tmp_path, monkeypatch, *, ownership=True, allow_dry_run=Fa
             stem.with_suffix(".blueprint.json").write_text(
                 json.dumps(blueprint.model_dump(mode="json"))
             )
+    source_matrix = []
+    downloaded_at = NOW.isoformat()
     for asset in ("BTC", "ETH", "SOL"):
-        for timeframe, frequency in (("5m", "5min"), ("15m", "15min")):
+        frames = {
+            "5m": pd.DataFrame(
+                {
+                    "date": pd.date_range(
+                        "2026-08-09T04:00:00Z", periods=13, freq="5min"
+                    ),
+                    "open": [100.0] * 13,
+                    "high": [102.0] * 13,
+                    "low": [99.0] * 13,
+                    "close": [101.0] * 13,
+                    "volume": [2.0] * 13,
+                }
+            )
+        }
+        indexed = frames["5m"].iloc[:12].set_index("date")
+        frames["15m"] = indexed.resample("15min").agg(
+            {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+        ).reset_index()
+        source = {
+            "pair": f"{asset}/USDT:USDT",
+            "instrument_id": f"{asset}-USDT-SWAP",
+            "first_open_at": frames["5m"]["date"].iloc[0].isoformat(),
+            "last_open_at": frames["5m"]["date"].iloc[-1].isoformat(),
+            "row_count": len(frames["5m"]),
+            "fifteen_minute_row_count": len(frames["15m"]),
+        }
+        for timeframe in ("5m", "15m"):
             data = repo / (
                 f"user_data/data/futures/{asset}_USDT_USDT-{timeframe}-futures.feather"
             )
             data.parent.mkdir(parents=True, exist_ok=True)
-            pd.DataFrame(
-                {
-                    "date": pd.date_range("2026-08-09T04:00:00Z", periods=5, freq=frequency),
-                    "open": [100.0] * 5,
-                    "high": [102.0] * 5,
-                    "low": [99.0] * 5,
-                    "close": [101.0] * 5,
-                    "volume": [2.0] * 5,
-                }
-            ).to_feather(data)
+            frames[timeframe].to_feather(data)
+            digest = hashlib.sha256(data.read_bytes()).hexdigest()
             data.with_suffix(data.suffix + ".source.json").write_text(json.dumps({
                 "schema_version": "okx-public-candle-file-source-v1",
                 "source_type": (
@@ -67,9 +88,25 @@ def build_coordinator(tmp_path, monkeypatch, *, ownership=True, allow_dry_run=Fa
                 "credentials_used": False,
                 "account_endpoint_used": False,
                 "orders_submitted": False,
-                "data_file_sha256": hashlib.sha256(data.read_bytes()).hexdigest(),
+                "data_file_sha256": digest,
                 "response_chain_sha256": "a" * 64,
+                "downloaded_at": downloaded_at,
             }))
+            prefix = "five_minute" if timeframe == "5m" else "fifteen_minute"
+            source[f"{prefix}_path"] = str(data.relative_to(repo))
+            source[f"{prefix}_sha256"] = digest
+        source_matrix.append(source)
+    aggregate = repo / "reports/research/okx-public-candle-source-20260809.json"
+    aggregate.parent.mkdir(parents=True)
+    aggregate.write_text(json.dumps({
+        "schema_version": "okx-public-candle-source-receipt-v1",
+        "downloaded_at": downloaded_at,
+        "execution_scope": "PUBLIC_MARKET_DATA_ONLY",
+        "credentials_used": False,
+        "account_endpoint_used": False,
+        "orders_submitted": False,
+        "sources": source_matrix,
+    }))
     freqtrade = repo / ".venv/bin/freqtrade"
     freqtrade.parent.mkdir(parents=True)
     freqtrade.write_text("#!/bin/sh\n")
@@ -186,6 +223,35 @@ def test_formal_research_starts_exact_sixty_candidate_shared_worker(tmp_path, mo
     assert state["heartbeat_at"] == NOW.isoformat()
     assert state["deadline_at"] == (NOW + timedelta(hours=1)).isoformat()
     assert calls[0][1]["pass_fds"]
+
+
+@pytest.mark.parametrize("field", ["five_minute_sha256", "last_open_at"])
+def test_formal_research_binds_actual_file_to_aggregate_source_receipt(
+    tmp_path, monkeypatch, field
+):
+    coordinator = build_coordinator(tmp_path, monkeypatch)
+    receipt_path = next(
+        (coordinator.repo / "reports/research").glob(
+            "okx-public-candle-source-*.json"
+        )
+    )
+    receipt = json.loads(receipt_path.read_text())
+    receipt["sources"][0][field] = (
+        "0" * 64 if field.endswith("sha256") else "2026-08-09T03:55:00+00:00"
+    )
+    receipt_path.write_text(json.dumps(receipt))
+
+    with db_session() as db:
+        result = coordinator.start(db, trigger="manual")
+        events = db.query(StrategyResearchAttemptEvent).all()
+        qualities = db.query(MarketDataQualityReceipt).all()
+
+    assert result.status == "BLOCKED"
+    assert result.reason_code == "MARKET_DATA_SOURCE_RECEIPT_BLOCKED"
+    assert result.requested_count == 0
+    assert len(qualities) == 6
+    assert all(quality.status == "PASSED" for quality in qualities)
+    assert events[0].outcome == "NOT_GENERATED"
 
 
 def test_status_marks_held_lock_with_stale_heartbeat_as_blocked(tmp_path, monkeypatch):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import math
@@ -16,6 +17,15 @@ REQUIRED_COLUMNS = ("date", "open", "high", "low", "close", "volume")
 DEFAULT_MAX_FRESHNESS_SECONDS = 7 * 24 * 60 * 60
 
 
+@dataclass(frozen=True)
+class SourceMatrixVerification:
+    status: str
+    reason_codes: tuple[str, ...]
+    receipt_path: str | None = None
+    receipt_digest: str | None = None
+    downloaded_at: datetime | None = None
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -26,6 +36,142 @@ def _sha256(path: Path) -> str:
 
 def _aware(value: datetime) -> datetime:
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+def _parse_datetime(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return _aware(datetime.fromisoformat(value.replace("Z", "+00:00")))
+    except ValueError:
+        return None
+
+
+def verify_public_source_matrix(
+    *,
+    repository_root: Path,
+    qualities: list[MarketDataQualityReceipt],
+    inspected_at: datetime,
+) -> SourceMatrixVerification:
+    """Bind current candle contents and last opens to one public OKX receipt.
+
+    Per-file sidecars prove each file's response-chain lineage.  This matrix
+    check additionally requires all sidecars to name one download timestamp
+    and binds that timestamp to the aggregate receipt, its digest, all six
+    current file digests, row counts, and actual last-open timestamps.
+    """
+
+    inspected_at = _aware(inspected_at)
+    reasons: set[str] = set()
+    sidecar_downloads: set[datetime] = set()
+    for quality in qualities:
+        if not quality.source_receipt_path:
+            reasons.add("SOURCE_MATRIX_SIDECAR_MISSING")
+            continue
+        sidecar_path = repository_root / quality.source_receipt_path
+        try:
+            sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            reasons.add("SOURCE_MATRIX_SIDECAR_INVALID")
+            continue
+        downloaded_at = _parse_datetime(sidecar.get("downloaded_at"))
+        if downloaded_at is None:
+            reasons.add("SOURCE_MATRIX_DOWNLOADED_AT_INVALID")
+        else:
+            sidecar_downloads.add(downloaded_at)
+    if len(sidecar_downloads) != 1:
+        reasons.add("SOURCE_MATRIX_DOWNLOAD_MISMATCH")
+        return SourceMatrixVerification("BLOCKED", tuple(sorted(reasons)))
+    downloaded_at = next(iter(sidecar_downloads))
+    if downloaded_at > inspected_at:
+        reasons.add("SOURCE_MATRIX_RECEIPT_FROM_FUTURE")
+
+    matches: list[tuple[Path, dict[str, object]]] = []
+    for path in (repository_root / "reports" / "research").glob(
+        "okx-public-candle-source-*.json"
+    ):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            continue
+        if _parse_datetime(payload.get("downloaded_at")) == downloaded_at:
+            matches.append((path, payload))
+    if len(matches) != 1:
+        reasons.add(
+            "SOURCE_MATRIX_RECEIPT_MISSING"
+            if not matches
+            else "SOURCE_MATRIX_RECEIPT_AMBIGUOUS"
+        )
+        return SourceMatrixVerification(
+            "BLOCKED", tuple(sorted(reasons)), downloaded_at=downloaded_at
+        )
+
+    receipt_path, payload = matches[0]
+    relative_receipt_path = str(
+        receipt_path.resolve().relative_to(repository_root.resolve())
+    )
+    receipt_digest = _sha256(receipt_path)
+    if (
+        payload.get("schema_version") != "okx-public-candle-source-receipt-v1"
+        or payload.get("execution_scope") != "PUBLIC_MARKET_DATA_ONLY"
+        or payload.get("credentials_used") is not False
+        or payload.get("account_endpoint_used") is not False
+        or payload.get("orders_submitted") is not False
+    ):
+        reasons.add("SOURCE_MATRIX_RECEIPT_INVALID")
+    sources = payload.get("sources")
+    if not isinstance(sources, list):
+        sources = []
+        reasons.add("SOURCE_MATRIX_RECEIPT_INVALID")
+    by_pair = {
+        item.get("pair"): item
+        for item in sources
+        if isinstance(item, dict) and isinstance(item.get("pair"), str)
+    }
+    expected_pairs = {quality.pair for quality in qualities}
+    if set(by_pair) != expected_pairs or len(sources) != len(expected_pairs):
+        reasons.add("SOURCE_MATRIX_TARGET_SET_MISMATCH")
+
+    for quality in qualities:
+        source = by_pair.get(quality.pair)
+        if not isinstance(source, dict):
+            reasons.add("SOURCE_MATRIX_TARGET_MISSING")
+            continue
+        prefix = "five_minute" if quality.timeframe == "5m" else "fifteen_minute"
+        if (
+            source.get(f"{prefix}_path") != quality.relative_path
+            or source.get(f"{prefix}_sha256") != quality.file_sha256
+            or source.get(
+                "row_count" if quality.timeframe == "5m" else "fifteen_minute_row_count"
+            )
+            != quality.row_count
+        ):
+            reasons.add("SOURCE_MATRIX_FILE_MISMATCH")
+        source_first = _parse_datetime(source.get("first_open_at"))
+        source_last = _parse_datetime(source.get("last_open_at"))
+        if source_first != quality.first_open_at or source_last is None:
+            reasons.add("SOURCE_MATRIX_TIME_RANGE_MISMATCH")
+            continue
+        expected_last = source_last
+        if quality.timeframe == "15m":
+            bucket = source_last.replace(
+                minute=(source_last.minute // 15) * 15, second=0, microsecond=0
+            )
+            expected_last = (
+                bucket
+                if source_last >= bucket + timedelta(minutes=10)
+                else bucket - timedelta(minutes=15)
+            )
+        if quality.last_open_at != expected_last or source_last > downloaded_at:
+            reasons.add("SOURCE_MATRIX_TIME_RANGE_MISMATCH")
+
+    return SourceMatrixVerification(
+        "PASSED" if not reasons else "BLOCKED",
+        tuple(sorted(reasons)),
+        receipt_path=relative_receipt_path,
+        receipt_digest=receipt_digest,
+        downloaded_at=downloaded_at,
+    )
 
 
 def inspect_market_data(
