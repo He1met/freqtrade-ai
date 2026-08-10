@@ -21,6 +21,7 @@ from app.db.migrations import (
     CANDIDATE_BRIDGE_BASE_VERSION,
     NATURAL_SIGNAL_RISK_CHAIN_BASE_VERSION,
     MULTI_ASSET_CAPACITY_BASE_VERSION,
+    AUTOMATION_GUARD_REBIND_BASE_VERSION,
     EARLY_TARGET_LINEAGE_VERSION,
     DUAL_SIDE_BASE_VERSION,
     FULL_CHAIN_BASE_VERSION,
@@ -42,6 +43,7 @@ from app.db.migrations import (
     SINGLE_ACTIVE_DEPLOYMENT_BASE_VERSION,
     STRATEGY_VALIDATION_BASE_VERSION,
     SCHEMA_VERSION,
+    _demo_automation_policy_digest,
     SOAK_BASE_VERSION,
     TARGET_LINEAGE_BASE_VERSION,
     TRUSTED_SNAPSHOT_BASE_VERSION,
@@ -127,7 +129,23 @@ def test_schema_version_is_explicit_and_stable() -> None:
     assert CANDIDATE_BRIDGE_BASE_VERSION == "20260809_37"
     assert NATURAL_SIGNAL_RISK_CHAIN_BASE_VERSION == "20260809_38"
     assert MULTI_ASSET_CAPACITY_BASE_VERSION == "20260810_39"
-    assert SCHEMA_VERSION == "20260810_40"
+    assert AUTOMATION_GUARD_REBIND_BASE_VERSION == "20260810_40"
+    assert SCHEMA_VERSION == "20260810_41"
+
+
+def test_v41_guard_policy_digests_match_the_exact_v39_and_v40_contracts() -> None:
+    assert _demo_automation_policy_digest(
+        allowed_instruments=("BTC-USDT-SWAP",),
+        max_active_strategies=3,
+    ) == "63fa1f4c0270b0630daf30862231de4ee46e43e85bf9911809682c6095e4ec5b"
+    assert _demo_automation_policy_digest(
+        allowed_instruments=(
+            "BTC-USDT-SWAP",
+            "ETH-USDT-SWAP",
+            "SOL-USDT-SWAP",
+        ),
+        max_active_strategies=9,
+    ) == "7318d7559b79afb72faf379c216bedb7989964352f95fa126add98e5d17405e2"
 
 
 def test_v39_natural_signal_risk_boundary_is_narrow_and_demo_only() -> None:

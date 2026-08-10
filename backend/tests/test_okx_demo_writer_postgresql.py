@@ -33,6 +33,7 @@ from app.adapters.okx_demo.reconciliation_runtime import (
     OkxDemoRuntimeReconciliationAdapter,
 )
 from app.db.migrations import (
+    AUTOMATION_GUARD_REBIND_BASE_VERSION,
     CANARY_LINEAGE_WRITE_BASE_VERSION,
     CANARY_FINAL_EXPIRY_BASE_VERSION,
     CANARY_LIFECYCLE_BASE_VERSION,
@@ -53,12 +54,14 @@ from app.db.migrations import (
     _add_bounded_second_accepted_not_found_boundary,
     _add_final_accepted_not_found_boundary,
     _add_order_writer,
+    _demo_automation_policy_digest,
     _add_canary_consent_handoff_boundary,
     schema_problems,
     harden_operator_consent_access_boundary,
     harden_attestation_access_boundary,
     revoke_operator_consents_for_key_hardening,
     revoke_attested_sessions_for_key_hardening,
+    rollback_automation_guard_rebind,
     upgrade_database,
     verify_connection_schema,
     verify_schema,
@@ -8512,3 +8515,113 @@ def test_postgresql_continuous_guard_acl_tamper_fails_readiness(
         "continuous Demo guard function ACL mismatch" in problem
         for problem in readiness.problems
     )
+
+
+def test_postgresql_v41_rebinds_v40_guard_and_requires_fresh_health(
+    postgres_writer_engine,
+) -> None:
+    old_digest = _demo_automation_policy_digest(
+        allowed_instruments=("BTC-USDT-SWAP",),
+        max_active_strategies=3,
+    )
+    new_digest = _demo_automation_policy_digest(
+        allowed_instruments=(
+            "BTC-USDT-SWAP",
+            "ETH-USDT-SWAP",
+            "SOL-USDT-SWAP",
+        ),
+        max_active_strategies=9,
+    )
+    approval_id, run_id = _seed_continuous_demo_guard(
+        postgres_writer_engine,
+        policy_digest=old_digest,
+    )
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE approved_executions SET expires_at=clock_timestamp()-interval '1 second' "
+                "WHERE id=:approval"
+            ),
+            {"approval": approval_id},
+        )
+        connection.execute(text(f"DELETE FROM {VERSION_TABLE}"))
+        connection.execute(
+            text(f"INSERT INTO {VERSION_TABLE}(version) VALUES(:version)"),
+            {"version": AUTOMATION_GUARD_REBIND_BASE_VERSION},
+        )
+
+    assert upgrade_database(postgres_writer_engine) == SCHEMA_VERSION
+    with postgres_writer_engine.begin() as connection:
+        guard = connection.execute(
+            text(
+                "SELECT policy_digest,operational_state,health_check_required,"
+                "critical_failure_count,cooldown_until<=clock_timestamp(),fencing_version "
+                "FROM okx_demo_automation_guard_states WHERE execution_target_id='OKX_DEMO'"
+            )
+        ).one()
+        event = connection.execute(
+            text(
+                "SELECT event_kind,policy_digest,evidence_snapshot "
+                "FROM okx_demo_automation_guard_events ORDER BY id DESC LIMIT 1"
+            )
+        ).one()
+        assert connection.execute(
+            text("SELECT okx_demo_continuous_opening_allowed(:digest)"),
+            {"digest": new_digest},
+        ).scalar_one() is False
+        health = connection.execute(
+            text("SELECT record_okx_demo_automation_health(:run,:digest)"),
+            {"run": run_id, "digest": new_digest},
+        ).scalar_one()
+    assert tuple(guard) == (new_digest, "COOLDOWN", True, 0, True, 2)
+    assert event[0] == "AUTHORIZATION_ENABLED"
+    assert event[1] == new_digest
+    assert event[2]["fresh_health_check_required"] is True
+    assert event[2]["allow_real_funds"] is False
+    assert health == "RUNNING"
+
+    assert rollback_automation_guard_rebind(postgres_writer_engine) == (
+        AUTOMATION_GUARD_REBIND_BASE_VERSION
+    )
+    with postgres_writer_engine.connect() as connection:
+        rolled_back = connection.execute(
+            text(
+                "SELECT policy_digest,operational_state,health_check_required "
+                "FROM okx_demo_automation_guard_states WHERE execution_target_id='OKX_DEMO'"
+            )
+        ).one()
+    assert tuple(rolled_back) == (old_digest, "COOLDOWN", True)
+
+
+def test_postgresql_v41_rebind_fails_closed_with_unexpired_approval(
+    postgres_writer_engine,
+) -> None:
+    old_digest = _demo_automation_policy_digest(
+        allowed_instruments=("BTC-USDT-SWAP",),
+        max_active_strategies=3,
+    )
+    _seed_continuous_demo_guard(
+        postgres_writer_engine,
+        policy_digest=old_digest,
+    )
+    with postgres_writer_engine.begin() as connection:
+        connection.execute(text(f"DELETE FROM {VERSION_TABLE}"))
+        connection.execute(
+            text(f"INSERT INTO {VERSION_TABLE}(version) VALUES(:version)"),
+            {"version": AUTOMATION_GUARD_REBIND_BASE_VERSION},
+        )
+
+    with pytest.raises(SchemaMigrationBlocked, match="no unexpired approval"):
+        upgrade_database(postgres_writer_engine)
+    with postgres_writer_engine.connect() as connection:
+        version = connection.execute(
+            text(f"SELECT version FROM {VERSION_TABLE}")
+        ).scalar_one()
+        guard = connection.execute(
+            text(
+                "SELECT policy_digest,operational_state,fencing_version "
+                "FROM okx_demo_automation_guard_states WHERE execution_target_id='OKX_DEMO'"
+            )
+        ).one()
+    assert version == AUTOMATION_GUARD_REBIND_BASE_VERSION
+    assert tuple(guard) == (old_digest, "RUNNING", 1)
