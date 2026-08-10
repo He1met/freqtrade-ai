@@ -36,6 +36,7 @@ from app.services.strategy_generation import (
     StrategyGenerationService,
     build_deepseek_single_provider_from_env,
 )
+from app.services.research_job_queue import DEEPSEEK_BACKTEST_OPERATION
 
 ServiceFactory = Callable[[Session], DeepSeekBacktestLoopService]
 
@@ -136,6 +137,7 @@ class DeepSeekBacktestWorker:
             job = repository.claim_next(
                 owner=self.owner,
                 lease_seconds=self.lease_seconds,
+                operations={DEEPSEEK_BACKTEST_OPERATION},
             )
             if job is None:
                 return None

@@ -75,7 +75,9 @@ NATURAL_SIGNAL_RISK_CHAIN_BASE_VERSION = "20260809_38"
 MULTI_ASSET_CAPACITY_BASE_VERSION = "20260810_39"
 AUTOMATION_GUARD_REBIND_BASE_VERSION = "20260810_40"
 DEPLOYMENT_POLICY_REBIND_BASE_VERSION = "20260810_41"
-SCHEMA_VERSION = "20260810_42"
+NATURAL_SIGNAL_EVALUATOR_RECEIPT_BASE_VERSION = "20260810_42"
+NATURAL_SIGNAL_RISK_BUDGET_BASE_VERSION = "20260811_43"
+SCHEMA_VERSION = "20260811_44"
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 ATTESTATION_PROOF_KEY_ENV = "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"
 OPERATOR_TOKEN_ENV = "FREQTRADE_AI_OPERATOR_TOKEN"
@@ -11261,38 +11263,49 @@ def _add_natural_signal_risk_chain_boundary(
     ),
     max_active_strategies: int = 9,
     restrict_legacy_strategy_names: bool = False,
+    refresh_supporting_boundaries: bool = True,
+    rebind_automation_guard: bool = True,
+    initialize_missing_budget: bool = True,
 ) -> None:
     """Install the one runtime-callable, owner-mediated natural-risk write path."""
 
-    _add_v40_research_unit_boundary(connection)
-    _add_continuous_demo_automation_boundary(
-        connection,
-        max_active_strategies=max_active_strategies,
-        restrict_legacy_strategy_names=restrict_legacy_strategy_names,
-    )
+    if refresh_supporting_boundaries:
+        _add_v40_research_unit_boundary(connection)
+        _add_continuous_demo_automation_boundary(
+            connection,
+            max_active_strategies=max_active_strategies,
+            restrict_legacy_strategy_names=restrict_legacy_strategy_names,
+        )
     schema_name = connection.execute(text("SELECT current_schema()" )).scalar_one()
     quoted_schema = '"{}"'.format(schema_name.replace('"', '""'))
     allowed_instruments_json = json.dumps(
         list(allowed_instruments), separators=(",", ":")
     )
-    connection.execute(text(
-        "ALTER TABLE {0}.strategy_deployments ADD COLUMN IF NOT EXISTS "
-        "real_orders BOOLEAN NOT NULL DEFAULT false; "
-        "ALTER TABLE {0}.strategy_deployments DROP CONSTRAINT IF EXISTS "
-        "strategy_deployments_demo_only_check; "
-        "ALTER TABLE {0}.strategy_deployments ADD CONSTRAINT "
-        "strategy_deployments_demo_only_check CHECK (real_orders=false)"
-        .format(quoted_schema)
-    ))
-    connection.execute(text(
-        "ALTER TABLE {0}.strategy_deployments DROP CONSTRAINT IF EXISTS "
-        "strategy_deployments_active_slot_check; "
-        "ALTER TABLE {0}.strategy_deployments ADD CONSTRAINT "
-        "strategy_deployments_active_slot_check CHECK ("
-        "(status='ACTIVE' AND active_slot BETWEEN 1 AND {1}) OR "
-        "(status='DISABLED' AND active_slot IS NULL))"
-        .format(quoted_schema, max_active_strategies)
-    ))
+    initialize_budget_sql = """
+      INSERT INTO SCHEMA_TOKEN.risk_budgets(
+        execution_target_id,reserved_notional,approved_positions,updated_at)
+      VALUES('OKX_DEMO',0,0,clock_timestamp())
+      ON CONFLICT (execution_target_id) DO NOTHING;
+    """ if initialize_missing_budget else ""
+    if refresh_supporting_boundaries:
+        connection.execute(text(
+            "ALTER TABLE {0}.strategy_deployments ADD COLUMN IF NOT EXISTS "
+            "real_orders BOOLEAN NOT NULL DEFAULT false; "
+            "ALTER TABLE {0}.strategy_deployments DROP CONSTRAINT IF EXISTS "
+            "strategy_deployments_demo_only_check; "
+            "ALTER TABLE {0}.strategy_deployments ADD CONSTRAINT "
+            "strategy_deployments_demo_only_check CHECK (real_orders=false)"
+            .format(quoted_schema)
+        ))
+        connection.execute(text(
+            "ALTER TABLE {0}.strategy_deployments DROP CONSTRAINT IF EXISTS "
+            "strategy_deployments_active_slot_check; "
+            "ALTER TABLE {0}.strategy_deployments ADD CONSTRAINT "
+            "strategy_deployments_active_slot_check CHECK ("
+            "(status='ACTIVE' AND active_slot BETWEEN 1 AND {1}) OR "
+            "(status='DISABLED' AND active_slot IS NULL))"
+            .format(quoted_schema, max_active_strategies)
+        ))
     ddl = """
     CREATE OR REPLACE FUNCTION SCHEMA_TOKEN.persist_okx_demo_natural_risk_chain(
       p_payload jsonb)
@@ -11841,12 +11854,15 @@ def _add_natural_signal_risk_chain_boundary(
                 'source_type',signal_row.source_type,
                 'source_database_ids',signal_row.source_database_ids::jsonb,
                 'signal_snapshot',signal_row.signal_snapshot::jsonb,
+                -- FullChainRepository._stable_digest uses Python's str(datetime),
+                -- whose date/time separator is one space.  Keep this reconstruction
+                -- byte-identical instead of borrowing the evaluator's ISO-T format.
                 'observed_at',to_char(signal_row.observed_at AT TIME ZONE 'UTC',
-                  'YYYY-MM-DD"T"HH24:MI:SS')||CASE WHEN extract(microseconds FROM
+                  'YYYY-MM-DD HH24:MI:SS')||CASE WHEN extract(microseconds FROM
                   signal_row.observed_at)::integer%1000000=0 THEN '' ELSE '.'||
                   to_char(signal_row.observed_at AT TIME ZONE 'UTC','US') END||'+00:00',
                 'expires_at',to_char(signal_row.expires_at AT TIME ZONE 'UTC',
-                  'YYYY-MM-DD"T"HH24:MI:SS')||CASE WHEN extract(microseconds FROM
+                  'YYYY-MM-DD HH24:MI:SS')||CASE WHEN extract(microseconds FROM
                   signal_row.expires_at)::integer%1000000=0 THEN '' ELSE '.'||
                   to_char(signal_row.expires_at AT TIME ZONE 'UTC','US') END||'+00:00')),
               'UTF8'),'sha256'),'hex')
@@ -11992,6 +12008,7 @@ def _add_natural_signal_risk_chain_boundary(
           'order_submission_authorized',false,'idempotent_replay',true);
       END IF;
 
+      INITIALIZE_BUDGET_TOKEN
       SELECT execution_target_id,reserved_notional,approved_positions
         INTO budget.execution_target_id,budget.reserved_notional,budget.approved_positions
         FROM SCHEMA_TOKEN.risk_budgets
@@ -12065,7 +12082,9 @@ def _add_natural_signal_risk_chain_boundary(
         'client_order_id',p_payload->>'client_order_id',
         'order_submission_authorized',false,'idempotent_replay',false);
     END $$;
-    """.replace("SCHEMA_TOKEN", quoted_schema).replace(
+    """.replace("INITIALIZE_BUDGET_TOKEN", initialize_budget_sql).replace(
+        "SCHEMA_TOKEN", quoted_schema
+    ).replace(
         "ALLOWED_INSTRUMENTS_TOKEN", allowed_instruments_json
     )
     connection.execute(text(ddl))
@@ -12104,7 +12123,11 @@ def _add_natural_signal_risk_chain_boundary(
     ))
     connection.execute(text(
         "REVOKE INSERT,UPDATE,DELETE,TRUNCATE ON TABLE {0}.risk_budgets "
-        "FROM PUBLIC,freqtrade; GRANT SELECT ON TABLE {0}.risk_budgets TO freqtrade"
+        "FROM PUBLIC,freqtrade; "
+        "REVOKE INSERT ON TABLE {0}.risk_budgets FROM freqtrade_ai_attestor; "
+        "GRANT INSERT (execution_target_id,reserved_notional,approved_positions,updated_at) "
+        "ON {0}.risk_budgets TO freqtrade_ai_attestor; "
+        "GRANT SELECT ON TABLE {0}.risk_budgets TO freqtrade"
         .format(quoted_schema)
     ))
     signature = f"{quoted_schema}.persist_okx_demo_natural_risk_chain(jsonb)"
@@ -12114,7 +12137,8 @@ def _add_natural_signal_risk_chain_boundary(
         "GRANT EXECUTE ON FUNCTION {0} TO freqtrade".format(signature)
     ))
     if (
-        allowed_instruments
+        rebind_automation_guard
+        and allowed_instruments
         == ("BTC-USDT-SWAP", "ETH-USDT-SWAP", "SOL-USDT-SWAP")
         and max_active_strategies == 9
     ):
@@ -12313,6 +12337,8 @@ def _natural_signal_risk_chain_boundary_problems(
         "CONTINUOUS_DEMO_V1", "okx-demo-selection-v2",
         "max_drawdown_contract", "okx_demo_continuous_opening_allowed",
         "natural signal writer fence is invalid", "allow_real_funds",
+        "FullChainRepository._stable_digest uses Python's str(datetime)",
+        "ON CONFLICT (execution_target_id) DO NOTHING",
         '["BTC-USDT-SWAP","ETH-USDT-SWAP","SOL-USDT-SWAP"]',
     )
     if (owner != "freqtrade_ai_attestor" or security_definer is not True
@@ -12340,9 +12366,13 @@ def _natural_signal_risk_chain_boundary_problems(
         return ["natural signal deployment Demo-only contract is missing"]
     budget_acl = connection.execute(text(
         "SELECT has_table_privilege('freqtrade',:table,'SELECT'),"
-        "has_table_privilege('freqtrade',:table,'INSERT,UPDATE,DELETE,TRUNCATE')"
+        "has_table_privilege('freqtrade',:table,'INSERT,UPDATE,DELETE,TRUNCATE'),"
+        "has_column_privilege('freqtrade_ai_attestor',:table,'execution_target_id','INSERT') "
+        "AND has_column_privilege('freqtrade_ai_attestor',:table,'reserved_notional','INSERT') "
+        "AND has_column_privilege('freqtrade_ai_attestor',:table,'approved_positions','INSERT') "
+        "AND has_column_privilege('freqtrade_ai_attestor',:table,'updated_at','INSERT')"
     ), {"table": f"{schema_name}.risk_budgets"}).one()
-    return [] if budget_acl == (True, False) else [
+    return [] if budget_acl == (True, False, True) else [
         "natural signal risk budget ACL mismatch"
     ]
 
@@ -12450,6 +12480,40 @@ def upgrade_database(engine: Engine) -> str:
                         "Recorded schema version does not match ORM metadata: " + "; ".join(problems)
                     )
                 return current_version
+            if current_version == NATURAL_SIGNAL_RISK_BUDGET_BASE_VERSION:
+                _add_natural_signal_risk_chain_boundary(
+                    connection,
+                    refresh_supporting_boundaries=False,
+                    rebind_automation_guard=False,
+                )
+                problems = schema_problems(connection)
+                if problems:
+                    raise SchemaMigrationBlocked(
+                        "Natural signal risk budget upgrade does not match "
+                        "ORM metadata: " + "; ".join(problems)
+                    )
+                connection.execute(
+                    text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+                    {"version": SCHEMA_VERSION},
+                )
+                return SCHEMA_VERSION
+            if current_version == NATURAL_SIGNAL_EVALUATOR_RECEIPT_BASE_VERSION:
+                _add_natural_signal_risk_chain_boundary(
+                    connection,
+                    refresh_supporting_boundaries=False,
+                    rebind_automation_guard=False,
+                )
+                problems = schema_problems(connection)
+                if problems:
+                    raise SchemaMigrationBlocked(
+                        "Natural signal evaluator receipt upgrade does not match "
+                        "ORM metadata: " + "; ".join(problems)
+                    )
+                connection.execute(
+                    text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+                    {"version": SCHEMA_VERSION},
+                )
+                return SCHEMA_VERSION
             if current_version == DEPLOYMENT_POLICY_REBIND_BASE_VERSION:
                 problems = schema_problems(connection)
                 if problems:
