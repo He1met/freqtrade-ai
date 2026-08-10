@@ -25,6 +25,9 @@ export type StrategyResearchCandidate = {
   id: number;
   batch_id: number;
   candidate_name: string;
+  pair?: string | null;
+  timeframe?: string | null;
+  unit_slot?: number | null;
   status: "QUALIFIED" | "REJECTED" | "VALIDATION_FAILED";
   source_path: string;
   code_digest: string;
@@ -37,6 +40,7 @@ export type StrategyResearchCandidate = {
   rejection_reasons: StrategyResearchRejectionReason[];
   evidence_snapshot: Record<string, unknown>;
   quality_contract: StrategyResearchQualityContract;
+  created_at?: string;
 };
 
 export type StrategyResearchBatch = {
