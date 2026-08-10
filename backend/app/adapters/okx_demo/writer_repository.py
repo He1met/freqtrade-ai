@@ -259,8 +259,11 @@ class SqlAlchemyOrderWriterStore:
                 )
                 self.db.add(lease)
             elif lease.holder_token_digest == digest:
-                lease.heartbeat_at = now
-                lease.expires_at = lease_expires_at
+                lease.heartbeat_at = max(_aware_utc(lease.heartbeat_at), now)
+                lease.expires_at = max(
+                    _aware_utc(lease.expires_at),
+                    lease_expires_at,
+                )
             elif _aware_utc(lease.expires_at) <= now:
                 lease.holder_token_digest = digest
                 lease.generation += 1
@@ -616,8 +619,11 @@ class SqlAlchemyOrderWriterStore:
                 )
                 self.db.add(lease)
             elif lease.holder_token_digest == digest:
-                lease.heartbeat_at = now
-                lease.expires_at = expires_at
+                lease.heartbeat_at = max(_aware_utc(lease.heartbeat_at), now)
+                lease.expires_at = max(
+                    _aware_utc(lease.expires_at),
+                    expires_at,
+                )
             elif _aware_utc(lease.expires_at) <= now:
                 lease.holder_token_digest = digest
                 lease.generation += 1
@@ -722,8 +728,11 @@ class SqlAlchemyOrderWriterStore:
                 self.db.add(lease)
                 self.db.flush()
             elif lease.holder_token_digest == digest:
-                lease.heartbeat_at = now
-                lease.expires_at = expires_at
+                lease.heartbeat_at = max(_aware_utc(lease.heartbeat_at), now)
+                lease.expires_at = max(
+                    _aware_utc(lease.expires_at),
+                    expires_at,
+                )
             elif _aware_utc(lease.expires_at) <= now:
                 lease.holder_token_digest = digest
                 lease.generation += 1
