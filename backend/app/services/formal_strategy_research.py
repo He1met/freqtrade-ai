@@ -23,7 +23,10 @@ from app.core.strategy_research_matrix import (
 from app.repositories.strategy_research import StrategyResearchRepository
 from app.schemas.strategy_research import FormalResearchRunRead
 from app.models.strategy_research import StrategyResearchAttemptEvent
-from app.services.market_data_quality import inspect_market_data
+from app.services.market_data_quality import (
+    inspect_market_data,
+    verify_public_source_matrix,
+)
 from app.services.strategy_blueprint_equivalence import (
     StrategyBlueprintEquivalenceBlocked,
     prove_blueprint_code_equivalence,
@@ -555,7 +558,7 @@ class FormalStrategyResearchCoordinator:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
             lock.close()
             return self._blocked("FREQTRADE_BINARY_MISSING", "正式研究 Freqtrade 可执行文件不存在。")
-        qualities = []
+        inspected_qualities = []
         repository = StrategyResearchRepository(db)
         for target in RESEARCH_TARGETS:
             quality = inspect_market_data(
@@ -568,7 +571,16 @@ class FormalStrategyResearchCoordinator:
                 inspected_at=now,
                 require_source_receipt=True,
             )
-            qualities.append(repository.append_market_data_quality_receipt(quality))
+            inspected_qualities.append(quality)
+        source_matrix = verify_public_source_matrix(
+            repository_root=self.repo,
+            qualities=inspected_qualities,
+            inspected_at=now,
+        )
+        qualities = [
+            repository.append_market_data_quality_receipt(quality)
+            for quality in inspected_qualities
+        ]
         blocked_qualities = [quality for quality in qualities if quality.status != "PASSED"]
         quality = qualities[0]
         if blocked_qualities:
@@ -580,6 +592,23 @@ class FormalStrategyResearchCoordinator:
                     f"{item.pair} {item.timeframe}: {','.join(item.reason_codes)}"
                     for item in blocked_qualities
                 ),
+            )
+            self._append_attempt_event(
+                db, attempt_id=attempt_id, sequence=1, trigger=trigger,
+                phase="PRECHECK", outcome="NOT_GENERATED",
+                reason_code=blocked.reason_code, reason=blocked.reason,
+                requested_count=0, run_id=run_id, quality_receipt_id=quality.id,
+            )
+            blocked.attempt_id = attempt_id
+            blocked.market_data_quality_receipt_id = quality.id
+            return blocked
+        if source_matrix.status != "PASSED":
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            lock.close()
+            blocked = self._blocked(
+                "MARKET_DATA_SOURCE_RECEIPT_BLOCKED",
+                "正式研究数据源矩阵收据未通过："
+                + ",".join(source_matrix.reason_codes),
             )
             self._append_attempt_event(
                 db, attempt_id=attempt_id, sequence=1, trigger=trigger,

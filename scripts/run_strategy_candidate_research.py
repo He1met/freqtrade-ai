@@ -107,7 +107,30 @@ WINDOWS = (
     ("wf_bear", "WALK_FORWARD", "bear", "20251001-20260201"),
 )
 
+TARGET_WINDOW_TIMERANGE_OVERRIDES = {
+    "SOL/USDT:USDT": {
+        # SOL rose during BTC/ETH's 2023-07 primary bear window.  The shorter
+        # closed interval is independently bearish for both official
+        # timeframes and ends before the shared bull window begins.
+        "primary_bear": "20230801-20231001",
+        # SOL also trended upward through the shared 2024 range interval.
+        # This closed interval is range-bound (absolute return < 5%) on both
+        # the official 5m and derived 15m sources.
+        "wf_range": "20240301-20240501",
+    },
+}
+
 _FAILURE_CONTEXT: dict[str, Any] = {}
+
+
+def windows_for_target(
+    target: ResearchTarget,
+) -> tuple[tuple[str, str, Optional[str], str], ...]:
+    overrides = TARGET_WINDOW_TIMERANGE_OVERRIDES.get(target.pair, {})
+    return tuple(
+        (name, kind, expected_regime, overrides.get(name, timerange))
+        for name, kind, expected_regime, timerange in WINDOWS
+    )
 
 
 def _validate_run_id(run_id: str) -> str:
@@ -836,7 +859,7 @@ def main() -> int:
                     },
                     "windows": {},
                 }
-            for name, kind, expected_regime, timerange in WINDOWS:
+            for name, kind, expected_regime, timerange in windows_for_target(target):
                 _FAILURE_CONTEXT["stage"] = f"WINDOW_{target_slug.upper()}_{name.upper()}"
                 market_return = _market_return(datadir, target, timerange)
                 actual_regime = (

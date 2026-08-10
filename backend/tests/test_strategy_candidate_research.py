@@ -20,7 +20,9 @@ from scripts.run_strategy_candidate_research import (
     _record_unhandled_failure,
     _stress_metrics,
     _validate_run_id,
+    windows_for_target,
 )
+from app.core.strategy_research_matrix import ResearchTarget
 
 
 def test_oos_diversity_inputs_are_cost_stressed_and_zero_variance_blocks():
@@ -77,6 +79,20 @@ def test_research_windows_are_non_overlapping_and_cover_required_regimes() -> No
         "range",
     }
     assert sum(kind == "OOS" for _name, kind, _regime, _timerange in WINDOWS) == 1
+
+
+def test_sol_uses_non_overlapping_true_bear_and_range_window_overrides() -> None:
+    windows = windows_for_target(
+        ResearchTarget(pair="SOL/USDT:USDT", timeframe="5m")
+    )
+    by_name = {name: timerange for name, _kind, _regime, timerange in windows}
+
+    assert by_name["primary_bear"] == "20230801-20231001"
+    assert by_name["wf_range"] == "20240301-20240501"
+    intervals = [timerange.split("-", maxsplit=1) for *_rest, timerange in windows]
+    for index, left in enumerate(intervals):
+        for right in intervals[index + 1 :]:
+            assert left[1] <= right[0] or right[1] <= left[0]
 
 
 def test_slippage_stress_and_project_score_are_deterministic() -> None:
