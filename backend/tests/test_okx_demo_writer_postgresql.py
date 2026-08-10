@@ -14,7 +14,7 @@ from typing import Optional
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, func, inspect, select, text
+from sqlalchemy import create_engine, event, func, inspect, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -28,6 +28,7 @@ from app.adapters.okx_demo.writer_models import (
     normalize_order_command,
 )
 from app.adapters.okx_demo.writer_repository import SqlAlchemyOrderWriterStore
+from app.adapters.okx_demo.runtime_writer_lease import RuntimeWriterLeaseKeeper
 from app.adapters.okx_demo.writer_state import WriteEvent
 from app.adapters.okx_demo.reconciliation_runtime import (
     OkxDemoRuntimeReconciliationAdapter,
@@ -86,6 +87,7 @@ from app.models.order_writer import (
     OkxDemoCanaryLifecycle,
     OkxDemoSubmissionGrant,
     OkxOrderWriteAttempt,
+    OkxOrderWriterLease,
 )
 from app.models.okx_demo_reconciliation import (
     OkxDemoExchangeEvent,
@@ -4224,6 +4226,216 @@ def test_postgresql_concurrent_lease_has_one_winner(
         )
 
     assert sorted(results) == ["ACQUIRED", "BLOCKED"]
+
+
+def _runtime_role_engine(engine):
+    runtime_engine = engine.execution_options()
+
+    @event.listens_for(runtime_engine, "begin")
+    def _set_runtime_role(connection):
+        connection.exec_driver_sql("SET LOCAL ROLE freqtrade")
+
+    return runtime_engine
+
+
+def test_postgresql_runtime_lease_keeper_renews_fences_and_expires(
+    postgres_writer_engine,
+) -> None:
+    upgrade_database(postgres_writer_engine)
+    runtime_engine = _runtime_role_engine(postgres_writer_engine)
+    failures = []
+    first = RuntimeWriterLeaseKeeper(
+        runtime_engine,
+        holder_token="1" * 64,
+        on_failure=lambda: failures.append("first"),
+        heartbeat_seconds=0.05,
+        lease_seconds=1,
+    )
+    contender = RuntimeWriterLeaseKeeper(
+        runtime_engine,
+        holder_token="2" * 64,
+        on_failure=lambda: failures.append("contender"),
+        heartbeat_seconds=0.05,
+        lease_seconds=1,
+    )
+    digest_replay = None
+    try:
+        first.start()
+        with postgres_writer_engine.connect() as connection:
+            initial = connection.execute(
+                text(
+                    "SELECT holder_token_digest,generation,heartbeat_at,expires_at,"
+                    "clock_timestamp() "
+                    "FROM okx_order_writer_leases WHERE execution_target_id='OKX_DEMO'"
+                )
+            ).one()
+        heartbeat_deadline = time.monotonic() + 2
+        while True:
+            first.require_healthy()
+            with postgres_writer_engine.connect() as connection:
+                renewed = connection.execute(
+                    text(
+                        "SELECT generation,heartbeat_at,expires_at,clock_timestamp() "
+                        "FROM okx_order_writer_leases "
+                        "WHERE execution_target_id='OKX_DEMO'"
+                    )
+                ).one()
+            if renewed.heartbeat_at > initial.heartbeat_at:
+                break
+            if time.monotonic() >= heartbeat_deadline:
+                pytest.fail("runtime writer heartbeat did not advance")
+            time.sleep(0.02)
+        assert renewed.generation == initial.generation == 1
+        assert renewed.heartbeat_at > initial.heartbeat_at
+        assert renewed.expires_at > renewed.clock_timestamp
+        assert renewed.clock_timestamp - renewed.heartbeat_at < timedelta(seconds=30)
+        with pytest.raises(OkxDemoWriteBlocked, match="another OKX_DEMO writer"):
+            contender.start()
+        digest_replay = RuntimeWriterLeaseKeeper(
+            runtime_engine,
+            holder_token=initial.holder_token_digest,
+            on_failure=lambda: failures.append("digest-replay"),
+            heartbeat_seconds=0.05,
+            lease_seconds=1,
+        )
+        with pytest.raises(OkxDemoWriteBlocked, match="another OKX_DEMO writer"):
+            digest_replay.start()
+        with postgres_writer_engine.connect() as connection:
+            fenced = connection.execute(
+                text(
+                    "SELECT holder_token_digest,generation FROM okx_order_writer_leases "
+                    "WHERE execution_target_id='OKX_DEMO'"
+                )
+            ).one()
+        assert tuple(fenced) == (
+            hashlib.sha256(("1" * 64).encode()).hexdigest(),
+            1,
+        )
+
+        first.close()
+        with postgres_writer_engine.connect() as connection:
+            released = connection.execute(
+                text(
+                    "SELECT generation,expires_at,clock_timestamp() "
+                    "FROM okx_order_writer_leases WHERE execution_target_id='OKX_DEMO'"
+                )
+            ).one()
+        assert released.generation == 1
+        assert released.expires_at <= released.clock_timestamp
+
+        contender.start()
+        with postgres_writer_engine.connect() as connection:
+            taken_over = connection.execute(
+                text(
+                    "SELECT holder_token_digest,generation FROM okx_order_writer_leases "
+                    "WHERE execution_target_id='OKX_DEMO'"
+                )
+            ).one()
+        assert tuple(taken_over) == (
+            hashlib.sha256(("2" * 64).encode()).hexdigest(),
+            2,
+        )
+        assert failures == []
+    finally:
+        if contender.generation is not None:
+            contender.close()
+        if digest_replay is not None and digest_replay.generation is not None:
+            digest_replay.close()
+        if first.generation is not None:
+            first.close()
+
+
+def test_postgresql_runtime_keeper_shares_order_writer_fence_token(
+    postgres_writer_engine,
+) -> None:
+    upgrade_database(postgres_writer_engine)
+    test_now = datetime.now(timezone.utc)
+    with Session(postgres_writer_engine) as admin:
+        approval_id, _order_id = _seed_approved_order(
+            admin,
+            seed_now=test_now,
+        )
+        approval = admin.get(ApprovedExecution, approval_id)
+        identity = {
+            "approval_id": approval_id,
+            "canonical_hash": approval.canonical_hash,
+            "policy_digest": approval.policy_digest,
+            "approved_payload_hash": approval.approved_payload_hash,
+        }
+    runtime_engine = _runtime_role_engine(postgres_writer_engine)
+    keeper = None
+    try:
+        with Session(runtime_engine) as runtime:
+            store = SqlAlchemyOrderWriterStore(
+                runtime,
+                now_provider=lambda: test_now,
+            )
+            keeper = RuntimeWriterLeaseKeeper(
+                runtime_engine,
+                holder_token=store.atomic_process_token,
+                on_failure=lambda: None,
+                heartbeat_seconds=0.1,
+                lease_seconds=2,
+            )
+            keeper.start()
+            generation = keeper.generation
+            with postgres_writer_engine.connect() as connection:
+                baseline = connection.execute(
+                    text(
+                        "SELECT heartbeat_at,expires_at FROM okx_order_writer_leases "
+                        "WHERE execution_target_id='OKX_DEMO'"
+                    )
+                ).one()
+            store.acquire_lease(
+                writer_instance_id="RuntimeLeaseSharedToken01",
+                **identity,
+                now=test_now,
+                expires_at=test_now + timedelta(milliseconds=500),
+            )
+            lease = runtime.get(
+                OkxOrderWriterLease,
+                "OKX_DEMO",
+                populate_existing=True,
+            )
+            assert lease.holder_token_digest == store.atomic_process_token_digest
+            assert lease.generation == generation
+            assert lease.heartbeat_at >= baseline.heartbeat_at
+            assert lease.expires_at >= baseline.expires_at
+        keeper.require_healthy()
+    finally:
+        if keeper is not None and keeper.generation is not None:
+            keeper.close()
+
+
+def test_postgresql_runtime_keeper_db_failure_revokes_health(
+    postgres_writer_engine,
+    monkeypatch,
+) -> None:
+    upgrade_database(postgres_writer_engine)
+    runtime_engine = _runtime_role_engine(postgres_writer_engine)
+    failures = []
+    keeper = RuntimeWriterLeaseKeeper(
+        runtime_engine,
+        holder_token="3" * 64,
+        on_failure=lambda: failures.append("revoked"),
+        heartbeat_seconds=0.05,
+        lease_seconds=1,
+    )
+    try:
+        keeper.start()
+
+        def fail_heartbeat(*, expected_generation):
+            assert expected_generation == keeper.generation
+            raise SQLAlchemyError("database unavailable")
+
+        monkeypatch.setattr(keeper, "_maintain", fail_heartbeat)
+        time.sleep(0.12)
+        assert failures == ["revoked"]
+        with pytest.raises(OkxDemoWriteBlocked, match="heartbeat failed"):
+            keeper.require_healthy()
+    finally:
+        if keeper.generation is not None:
+            keeper.close()
 
 
 def test_postgresql_one_shot_advisory_lock_fences_api_transaction(

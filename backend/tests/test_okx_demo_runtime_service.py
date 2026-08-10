@@ -20,6 +20,27 @@ from app.services.okx_demo_canary_preparation import (
 NOW = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
 
 
+class FakeRuntimeLease:
+    def __init__(self, _engine, *, holder_token, on_failure):
+        self.holder_token = holder_token
+        self.on_failure = on_failure
+        self.started = False
+        self.closed = False
+
+    def start(self):
+        self.started = True
+
+    def require_healthy(self):
+        assert self.started and not self.closed
+
+    def publish(self, callback):
+        self.require_healthy()
+        callback()
+
+    def close(self):
+        self.closed = True
+
+
 def test_runtime_module_imports_in_a_fresh_interpreter() -> None:
     completed = subprocess.run(
         [sys.executable, "-c", "import app.adapters.okx_demo.runtime_service"],
@@ -60,6 +81,11 @@ def _no_recoverable_consent(monkeypatch):
         runtime_service,
         "arm_finalized_canary_consent",
         lambda _db, *, runtime_instance_id: None,
+    )
+    monkeypatch.setattr(
+        runtime_service,
+        "RuntimeWriterLeaseKeeper",
+        FakeRuntimeLease,
     )
 
 
@@ -182,6 +208,14 @@ def test_runtime_main_records_known_block_reason_without_traceback(
 class FakeWriter:
     def __init__(self):
         self.calls = []
+
+    @property
+    def atomic_holder_token_digest(self):
+        return "a" * 64
+
+    @property
+    def atomic_holder_token(self):
+        return "1" * 64
 
     def place(self, approved, **kwargs):
         self.calls.append(("place", approved, kwargs))
@@ -332,6 +366,20 @@ def test_runtime_orders_reconciliation_before_writer_and_keeps_drift_alive(
         connect=lambda: connection,
         dispose=lambda: events.append("engine-disposed"),
     )
+
+    class RecordingRuntimeLease(FakeRuntimeLease):
+        def start(self):
+            events.append("lease-started")
+            super().start()
+
+        def publish(self, callback):
+            events.append("lease-published")
+            super().publish(callback)
+
+        def close(self):
+            events.append("lease-closed")
+            super().close()
+
     monkeypatch.setattr(runtime_service, "STOP_EVENT", FakeStopEvent())
     monkeypatch.setattr(runtime_service, "Session", lambda bind: db)
     monkeypatch.setattr(
@@ -362,6 +410,7 @@ def test_runtime_orders_reconciliation_before_writer_and_keeps_drift_alive(
         runtime_path=tmp_path,
         reconciliation_factory=lambda: adapter,
         engine_factory=lambda *_args, **_kwargs: engine,
+        runtime_lease_factory=RecordingRuntimeLease,
         now_provider=lambda: NOW,
     )
 
@@ -375,6 +424,13 @@ def test_runtime_orders_reconciliation_before_writer_and_keeps_drift_alive(
     ]
     assert events[0][0] == "session-created"
     assert events[1] == "writer-created"
+    assert events[2:5] == [
+        "lease-started",
+        "lease-published",
+        "lease-published",
+    ]
+    assert events.index("lease-closed") < events.index("connection-closed")
+    assert events.index("lease-closed") < events.index("engine-disposed")
     assert [item["status"] for item in readiness] == [
         "BLOCKED_OPENINGS",
         "BLOCKED_OPENINGS",
@@ -384,6 +440,91 @@ def test_runtime_orders_reconciliation_before_writer_and_keeps_drift_alive(
     assert db.closed is True
     assert db.commits == 4
     assert db.rollbacks == 0
+
+
+def test_runtime_lease_start_failure_never_publishes_ready(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    class FailingRuntimeLease(FakeRuntimeLease):
+        def start(self):
+            raise OkxDemoWriteBlocked("database lease contender")
+
+    events = []
+    server = FakeServerSession(events)
+    db = FakeDatabaseSession()
+    connection = SimpleNamespace(close=lambda: None)
+    engine = SimpleNamespace(connect=lambda: connection, dispose=lambda: None)
+    readiness = []
+    monkeypatch.setattr(runtime_service, "Session", lambda bind: db)
+    monkeypatch.setattr(
+        runtime_service,
+        "create_okx_demo_server_session",
+        lambda *_args, **_kwargs: server,
+    )
+    monkeypatch.setattr(
+        runtime_service,
+        "_write_readiness",
+        lambda _path, payload: readiness.append(dict(payload)),
+    )
+
+    with pytest.raises(runtime_service.OkxDemoRuntimeStartupBlocked) as captured:
+        runtime_service.serve(
+            environment={"DATABASE_URL": "postgresql+psycopg:///freqtrade_ai"},
+            runtime_path=tmp_path,
+            reconciliation_factory=FakeAdapter,
+            engine_factory=lambda *_args, **_kwargs: engine,
+            runtime_lease_factory=FailingRuntimeLease,
+            now_provider=lambda: NOW,
+        )
+
+    assert captured.value.stage == "writer-capability"
+    assert captured.value.category == "WRITER"
+    assert readiness == []
+    assert not (tmp_path / runtime_service.READY_FILENAME).exists()
+    assert server.closed is True
+    assert db.closed is True
+
+
+def test_runtime_lease_heartbeat_failure_revokes_ready_before_exit(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    class FailingHeartbeatLease(FakeRuntimeLease):
+        def require_healthy(self):
+            self.on_failure()
+            raise OkxDemoWriteBlocked("database lease heartbeat failed")
+
+        def publish(self, callback):
+            assert self.started and not self.closed
+            callback()
+
+    events = []
+    server = FakeServerSession(events)
+    db = FakeDatabaseSession()
+    connection = SimpleNamespace(close=lambda: None)
+    engine = SimpleNamespace(connect=lambda: connection, dispose=lambda: None)
+    monkeypatch.setattr(runtime_service, "STOP_EVENT", MultiRoundStopEvent(1))
+    monkeypatch.setattr(runtime_service, "Session", lambda bind: db)
+    monkeypatch.setattr(
+        runtime_service,
+        "create_okx_demo_server_session",
+        lambda *_args, **_kwargs: server,
+    )
+
+    with pytest.raises(OkxDemoWriteBlocked, match="heartbeat failed"):
+        runtime_service.serve(
+            environment={"DATABASE_URL": "postgresql+psycopg:///freqtrade_ai"},
+            runtime_path=tmp_path,
+            reconciliation_factory=FakeAdapter,
+            engine_factory=lambda *_args, **_kwargs: engine,
+            runtime_lease_factory=FailingHeartbeatLease,
+            now_provider=lambda: NOW,
+        )
+
+    assert not (tmp_path / runtime_service.READY_FILENAME).exists()
+    assert server.closed is True
+    assert db.closed is True
 
 
 @pytest.mark.parametrize("failure_point", ["lock", "observe", "cycle"])

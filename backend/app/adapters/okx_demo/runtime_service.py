@@ -37,6 +37,7 @@ from app.adapters.okx_demo.writer_models import (
     OrderSubmissionAuthorization,
     approved_execution_view,
 )
+from app.adapters.okx_demo.runtime_writer_lease import RuntimeWriterLeaseKeeper
 from app.services.okx_demo_reconciliation import OkxDemoReconciliationBlocked
 from app.services.okx_demo_automation_guard import OkxDemoAutomationGuard
 from app.services.okx_demo_submission_grant import (
@@ -635,6 +636,7 @@ def serve(
     runtime_path: Path,
     reconciliation_factory: Optional[ReconciliationFactory] = None,
     engine_factory: Callable[..., Any] = create_engine,
+    runtime_lease_factory: Optional[Callable[..., Any]] = None,
     now_provider: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> None:
     """Own the only credential-bearing adapter/reconciler/writer lifecycle."""
@@ -650,6 +652,7 @@ def serve(
     engine = None
     connection = None
     db = None
+    runtime_lease = None
     try:
         factory = reconciliation_factory or _startup_call(
             "reconciliation-adapter-load",
@@ -702,6 +705,33 @@ def serve(
                 server_session.create_order_writer(db)
             ),
         )
+        lease_factory = runtime_lease_factory or RuntimeWriterLeaseKeeper
+
+        def revoke_writer_readiness() -> None:
+            writer.set_openings_allowed(False)
+            ready_path.unlink(missing_ok=True)
+
+        runtime_lease = _startup_call(
+            "writer-capability",
+            lambda: lease_factory(
+                engine,
+                holder_token=writer.atomic_holder_token,
+                on_failure=revoke_writer_readiness,
+            ),
+        )
+        _startup_call("writer-capability", runtime_lease.start)
+
+        def publish_readiness(payload: Mapping[str, Any]) -> None:
+            runtime_lease.publish(lambda: _write_readiness(ready_path, payload))
+
+        def publish_degraded(*, automation_guard: str = "BLOCKED") -> None:
+            runtime_lease.publish(
+                lambda: _write_degraded_runtime_readiness(
+                    ready_path,
+                    automation_guard=automation_guard,
+                )
+            )
+
         startup_guard = OkxDemoAutomationGuard.record_health(
             db,
             reconciliation_run_id=startup.reconciliation_run_id,
@@ -715,8 +745,7 @@ def serve(
         # The capability remains available for the separately grant-bound
         # one-shot path; MANIFEST dispatch is still DB-blocked by the guard.
         writer.set_openings_allowed(not recovery_only)
-        _write_readiness(
-            ready_path,
+        publish_readiness(
             {
                 "status": (
                     "RECOVERY_ONLY"
@@ -732,6 +761,7 @@ def serve(
             },
         )
         while not STOP_EVENT.wait(POLL_SECONDS):
+            runtime_lease.require_healthy()
             externally_frozen = (
                 runtime_path / OPENINGS_FREEZE_FILENAME
             ).is_file()
@@ -739,7 +769,7 @@ def serve(
             if not coordination_acquired:
                 db.rollback()
                 writer.set_openings_allowed(False)
-                _write_degraded_runtime_readiness(ready_path)
+                publish_degraded()
                 continue
             coordination_lock_released = False
             try:
@@ -784,7 +814,7 @@ def serve(
                         raise OkxDemoRuntimeBlocked(
                             "recovered consent grant failed closed"
                         )
-                    _write_degraded_runtime_readiness(ready_path)
+                    publish_degraded()
                     continue
                 try:
                     consent_finalized = process_pending_canary_consent_handoff(
@@ -868,7 +898,7 @@ def serve(
                             runtime_instance_id=adapter.runtime_instance_id,
                         )
                         writer.dispatch_atomic_once(capability)
-                        _write_degraded_runtime_readiness(ready_path)
+                        publish_degraded()
                         continue
                     grant = arm_finalized_canary_consent(
                         db,
@@ -910,7 +940,7 @@ def serve(
                             "consent-bound one-shot handoff did not close"
                         )
                     db.commit()
-                    _write_degraded_runtime_readiness(ready_path)
+                    publish_degraded()
                     continue
                 # The backend API never owns OKX credentials.  A controlled
                 # canary preparation is a DB-backed request that this sole
@@ -943,7 +973,7 @@ def serve(
                         )
                     db.commit()
                     writer.set_openings_allowed(False)
-                    _write_degraded_runtime_readiness(ready_path)
+                    publish_degraded()
                     continue
                 writer.set_openings_allowed(not externally_frozen)
                 one_shot_result = adapter.run_active_one_shot(
@@ -959,7 +989,7 @@ def serve(
                     )
                 if one_shot_result == "CONSUMED":
                     db.commit()
-                    _write_degraded_runtime_readiness(ready_path)
+                    publish_degraded()
                     continue
                 try:
                     observed = _reconcile_transaction(
@@ -997,8 +1027,7 @@ def serve(
                         reconciliation_run_id=run_id,
                     )
                     db.commit()
-                    _write_degraded_runtime_readiness(
-                        ready_path,
+                    publish_degraded(
                         automation_guard=guard_health,
                     )
                     continue
@@ -1020,8 +1049,7 @@ def serve(
                     externally_frozen=externally_frozen,
                 )
                 writer.set_openings_allowed(openings_ready)
-                _write_readiness(
-                    ready_path,
+                publish_readiness(
                     {
                         "status": (
                             "READY"
@@ -1079,8 +1107,7 @@ def serve(
                     # heartbeat, release coordination in finally, and retry a
                     # fresh GET-only reconciliation on the next loop.
                     writer.set_openings_allowed(False)
-                    _write_degraded_runtime_readiness(
-                        ready_path,
+                    publish_degraded(
                         automation_guard=guard_health,
                     )
                     continue
@@ -1094,6 +1121,8 @@ def serve(
         cleanup_actions = [
             lambda: ready_path.unlink(missing_ok=True),
         ]
+        if runtime_lease is not None:
+            cleanup_actions.append(runtime_lease.close)
         if adapter is not None:
             cleanup_actions.append(adapter.close)
         if server_session is not None:

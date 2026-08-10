@@ -1053,6 +1053,35 @@ def test_database_lease_blocks_contender_and_allows_expired_takeover(db) -> None
     assert lease.generation == 2
 
 
+def test_same_holder_lease_heartbeat_and_expiry_are_monotonic(db) -> None:
+    session, approval_id = db
+    store = SqlAlchemyOrderWriterStore(session, now_provider=lambda: NOW)
+    acquire(
+        store,
+        session,
+        approval_id,
+        writer_instance_id="WriterInstance01",
+        now=NOW + timedelta(seconds=5),
+        expires_at=NOW + timedelta(seconds=20),
+    )
+    acquire(
+        store,
+        session,
+        approval_id,
+        writer_instance_id="WriterInstance01",
+        now=NOW + timedelta(seconds=1),
+        expires_at=NOW + timedelta(seconds=2),
+    )
+
+    lease = session.get(OkxOrderWriterLease, "OKX_DEMO")
+    assert lease.heartbeat_at.replace(tzinfo=timezone.utc) == (
+        NOW + timedelta(seconds=5)
+    )
+    assert lease.expires_at.replace(tzinfo=timezone.utc) == (
+        NOW + timedelta(seconds=20)
+    )
+
+
 def test_stale_lease_holder_cannot_transition_after_fenced_takeover(db) -> None:
     session, approval_id = db
     first = SqlAlchemyOrderWriterStore(session, now_provider=lambda: NOW)
