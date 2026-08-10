@@ -24,6 +24,55 @@ def test_renderer_outputs_freqtrade_strategy_class() -> None:
     compile(code, "generated_strategy.py", "exec")
 
 
+def test_renderer_preserves_legacy_close_bytes_and_supports_closed_ohlcv_vocabulary() -> None:
+    blueprint = StrategyBlueprint(
+        name="Volume ATR Demo",
+        slug="volume-atr-demo",
+        class_name="VolumeAtrDemoStrategy",
+        indicators=[
+            {"name": "close_raw", "kind": "raw", "period": 1},
+            {"name": "volume_raw", "kind": "raw", "period": 1, "source": "volume"},
+            {"name": "volume_sma", "kind": "sma", "period": 24, "source": "volume"},
+            {"name": "atr", "kind": "atr", "period": 14},
+            {"name": "ema", "kind": "ema", "period": 20},
+        ],
+        entry_rules=[
+            {"indicator": "volume_raw", "operator": ">", "compare_indicator": "volume_sma"},
+            {"indicator": "atr", "operator": "rising", "lookback": 3},
+            {"indicator": "close_raw", "operator": ">", "compare_indicator": "ema"},
+        ],
+    )
+
+    code = StrategyCodeRenderer().render(blueprint)
+
+    assert "dataframe['close_raw'] = dataframe['close']" in code
+    assert "dataframe['volume_raw'] = dataframe['volume']" in code
+    assert "ta.SMA(dataframe['volume'], timeperiod=24)" in code
+    assert "ta.ATR(dataframe, timeperiod=14)" in code
+    assert "ta.EMA(dataframe, timeperiod=20)" in code
+    assert "source" not in blueprint.model_dump(mode="json")["indicators"][0]
+    assert blueprint.model_dump(mode="json")["indicators"][1]["source"] == "volume"
+    compile(code, "generated_strategy.py", "exec")
+
+
+@pytest.mark.parametrize(
+    ("indicator", "message"),
+    [
+        ({"name": "raw", "kind": "raw", "period": 2}, "raw indicators require period=1"),
+        ({"name": "atr", "kind": "atr", "period": 14, "source": "volume"}, "atr indicators require source=close"),
+    ],
+)
+def test_blueprint_rejects_invalid_ohlcv_indicator_shapes(indicator, message) -> None:
+    with pytest.raises(ValueError, match=message):
+        StrategyBlueprint(
+            name="Invalid OHLCV",
+            slug="invalid-ohlcv",
+            class_name="InvalidOhlcvStrategy",
+            indicators=[indicator],
+            entry_rules=[{"indicator": indicator["name"], "operator": ">", "value": 1.0}],
+        )
+
+
 def test_blueprint_rejects_invalid_class_name() -> None:
     try:
         StrategyBlueprint(

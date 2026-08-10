@@ -63,16 +63,16 @@ FAMILY_BY_SLOT = (
     "RANGE_LIQUIDITY_FILTER",
 )
 REGIME_HYPOTHESIS_BY_SLOT = (
-    "Directional trend with an orderly pullback and renewed DMI strength.",
-    "Volatility expansion through a prior Donchian range with ATR risk scaling.",
-    "Range-bound price with exhausted RSI and Bollinger displacement.",
-    "Directional MACD impulse confirmed by expanding traded volume.",
-    "Established EMA trend resuming after a Keltner pullback.",
-    "Range or reversal regime with stochastic/Williams exhaustion.",
-    "Momentum impulse confirmed by MFI participation and trend direction.",
-    "Persistent directional regime confirmed by Ichimoku structure.",
-    "Liquid participation regime where price direction is confirmed by OBV/ADOSC.",
-    "ADX-labelled trend/range transition with explicit regime filtering.",
+    "Directional trend resuming when price reclaims the medium EMA with RSI confirmation.",
+    "Rising ATR regime where price and the fast EMA break through the slow trend baseline.",
+    "Range-bound exhaustion recovering toward a 48-candle mean after an RSI extreme.",
+    "Directional RSI impulse confirmed by above-average closed-candle volume.",
+    "Established 100-candle EMA regime resuming after a fast-EMA pullback.",
+    "Short-horizon RSI exhaustion displaced from a slow 96-candle range mean.",
+    "Fast RSI acceleration confirmed by participation and an 80-candle trend filter.",
+    "Persistent directional regime beginning at an 18/72 EMA cross with RSI confirmation.",
+    "ATR expansion and above-average volume confirming aligned 34/100 EMA momentum.",
+    "Liquid range rotation crossing a 32-candle mean without an RSI trend extreme.",
 )
 EXPECTED_HOLDING_BY_SLOT = (
     "12-96 closed candles",
@@ -133,6 +133,7 @@ class Candidate:
     path: Path
     sha256: str
     timeframe: str
+    unit_slot: int
     canonical_blueprint_evidence: Optional[dict[str, Any]] = None
 
 
@@ -148,10 +149,12 @@ def _failure_candidate_evidence(
     repo: Path, candidates: list[Candidate], results: dict[str, dict[str, Any]]
 ) -> list[dict[str, Any]]:
     evidence: list[dict[str, Any]] = []
-    for slot, candidate in enumerate(candidates, start=1):
+    for candidate in candidates:
         result = results.get(candidate.class_name, {})
         targets = result.get("targets") if isinstance(result, dict) else {}
         for target in RESEARCH_TARGETS:
+            if target.timeframe != candidate.timeframe:
+                continue
             pair_slug = re.sub(r"[^A-Za-z0-9]+", "_", target.pair).strip("_")
             evidence.append(
                 {
@@ -162,8 +165,8 @@ def _failure_candidate_evidence(
                     "code_digest": candidate.sha256,
                     "pair": target.pair,
                     "timeframe": target.timeframe,
-                    "unit_slot": slot,
-                    "strategy_family": FAMILY_BY_SLOT[slot - 1],
+                    "unit_slot": candidate.unit_slot,
+                    "strategy_family": FAMILY_BY_SLOT[candidate.unit_slot - 1],
                     "structure_fingerprint": candidate.sha256,
                     "evidence_snapshot": (
                         targets.get(target.key, {}) if isinstance(targets, dict) else {}
@@ -233,10 +236,23 @@ def _sha256(path: Path) -> str:
 
 def _discover_candidates(root: Path) -> list[Candidate]:
     candidates: list[Candidate] = []
-    files = sorted(root.glob("[0-9][0-9]_*.py"))
-    if len(files) != 10:
-        raise RuntimeError(f"expected exactly 10 candidate files, found {len(files)}")
+    files = sorted(root.glob("*/[0-9][0-9]_*.py"))
+    if len(files) != 20:
+        raise RuntimeError(f"expected exactly 20 timeframe-bound candidate files, found {len(files)}")
+    counts_by_timeframe = {
+        timeframe: sum(path.parent.name == timeframe for path in files)
+        for timeframe in ALLOWED_RESEARCH_TIMEFRAMES
+    }
+    if any(count != 10 for count in counts_by_timeframe.values()):
+        raise RuntimeError(
+            f"expected exactly 10 candidates per timeframe, found {counts_by_timeframe}"
+        )
     for path in files:
+        if path.parent.name not in ALLOWED_RESEARCH_TIMEFRAMES:
+            raise RuntimeError(f"candidate directory must be an official timeframe: {path}")
+        unit_slot = int(path.name[:2])
+        if unit_slot not in range(1, 11):
+            raise RuntimeError(f"candidate filename must use a slot from 01 through 10: {path}")
         source = path.read_text(encoding="utf-8")
         tree = ast.parse(source, filename=str(path))
         classes = [node.name for node in tree.body if isinstance(node, ast.ClassDef)]
@@ -262,6 +278,8 @@ def _discover_candidates(root: Path) -> list[Candidate]:
             raise RuntimeError(
                 f"{path} must declare timeframe in {ALLOWED_RESEARCH_TIMEFRAMES}"
             )
+        if timeframe != path.parent.name:
+            raise RuntimeError(f"{path} timeframe must match its parent directory")
         compile(source, str(path), "exec")
         source_bytes = path.read_bytes()
         code_digest = hashlib.sha256(source_bytes).hexdigest()
@@ -293,6 +311,7 @@ def _discover_candidates(root: Path) -> list[Candidate]:
                 path,
                 code_digest,
                 timeframe,
+                unit_slot,
                 canonical_blueprint_evidence=blueprint_evidence,
             )
         )
@@ -535,13 +554,17 @@ def _pearson(left: list[float], right: list[float]) -> Optional[float]:
 
 
 def _diversity_evidence_for_target(
-    candidates: list[Candidate], results: dict[str, dict[str, Any]], target_key: str
+    candidates: list[Candidate],
+    results: dict[str, dict[str, Any]],
+    target_key: str,
+    *,
+    all_candidates: Optional[list[Candidate]] = None,
 ) -> dict[str, dict[str, Any]]:
     inputs = {
         candidate.class_name: results[candidate.class_name]["targets"][target_key].get(
             "_diversity_input", {}
         )
-        for candidate in candidates
+        for candidate in (all_candidates or candidates)
     }
     cross_unit_inputs = {
         f"{other_target_key}|{candidate.class_name}": (
@@ -747,14 +770,17 @@ def main() -> int:
         # Freqtrade's explicit --timeframe override binds each structural
         # blueprint to both official research timeframes.  This yields ten
         # independently evaluated candidates in every pair/timeframe unit.
-        timeframe_candidates = candidates
+        timeframe_candidates = [
+            candidate for candidate in candidates if candidate.timeframe == timeframe
+        ]
+        timeframe_strategy_path = strategy_path / timeframe
         for pair in ALLOWED_RESEARCH_PAIRS:
             target = ResearchTarget(pair=pair, timeframe=timeframe)
             target_slug = pair.split("/", 1)[0].lower() + "-" + timeframe
             target_root = artifact_root / target_slug
             config_path = config_dir / f"strategy-candidates-{args.run_id}-{target_slug}.json"
             config = _config(
-                strategy_path, userdir, datadir, pair=pair, timeframe=timeframe
+                timeframe_strategy_path, userdir, datadir, pair=pair, timeframe=timeframe
             )
             config_path.write_text(
                 json.dumps(config, indent=2, sort_keys=True), encoding="utf-8"
@@ -784,7 +810,7 @@ def main() -> int:
                 freqtrade=freqtrade,
                 config_path=lookahead_config_path,
                 datadir=datadir,
-                strategy_path=strategy_path,
+                strategy_path=timeframe_strategy_path,
                 userdir=userdir,
                 artifact_root=target_root,
                 class_names=[item.class_name for item in timeframe_candidates],
@@ -821,7 +847,7 @@ def main() -> int:
                     freqtrade=freqtrade,
                     config_path=config_path,
                     datadir=datadir,
-                    strategy_path=strategy_path,
+                    strategy_path=timeframe_strategy_path,
                     userdir=userdir,
                     output_dir=target_root / name,
                     timerange=timerange,
@@ -907,14 +933,19 @@ def main() -> int:
         ]
 
     diversity_by_target = {
-        target.key: _diversity_evidence_for_target(candidates, results, target.key)
+        target.key: _diversity_evidence_for_target(
+            [candidate for candidate in candidates if candidate.timeframe == timeframe],
+            results,
+            target.key,
+            all_candidates=candidates,
+        )
         for timeframe in ALLOWED_RESEARCH_TIMEFRAMES
         for pair in ALLOWED_RESEARCH_PAIRS
         for target in (ResearchTarget(pair=pair, timeframe=timeframe),)
     }
     unit_results: dict[str, dict[str, Any]] = {}
     qualified_units: list[str] = []
-    for slot, candidate in enumerate(candidates, start=1):
+    for candidate in candidates:
         base = results[candidate.class_name]
         for target_key, target_result in sorted(base["targets"].items()):
             pair_slug = re.sub(r"[^A-Za-z0-9]+", "_", target_result["pair"]).strip("_")
@@ -930,11 +961,11 @@ def main() -> int:
                 "source_class_name": candidate.class_name,
                 "pair": target_result["pair"],
                 "timeframe": target_result["timeframe"],
-                "unit_slot": slot,
-                "strategy_family": FAMILY_BY_SLOT[slot - 1],
-                "regime_hypothesis": REGIME_HYPOTHESIS_BY_SLOT[slot - 1],
-                "expected_holding_period": EXPECTED_HOLDING_BY_SLOT[slot - 1],
-                "expected_trade_frequency": EXPECTED_FREQUENCY_BY_SLOT[slot - 1],
+                "unit_slot": candidate.unit_slot,
+                "strategy_family": FAMILY_BY_SLOT[candidate.unit_slot - 1],
+                "regime_hypothesis": REGIME_HYPOTHESIS_BY_SLOT[candidate.unit_slot - 1],
+                "expected_holding_period": EXPECTED_HOLDING_BY_SLOT[candidate.unit_slot - 1],
+                "expected_trade_frequency": EXPECTED_FREQUENCY_BY_SLOT[candidate.unit_slot - 1],
                 "structure_fingerprint": candidate.sha256,
                 "similarity_evidence": diversity["similarity_evidence"],
                 "correlation_evidence": diversity["correlation_evidence"],
@@ -987,7 +1018,7 @@ def main() -> int:
             "This standalone evidence is not a persisted StrategyValidationPlan.",
             "Slippage is applied as a deterministic two-sided post-backtest stress cost.",
             "Funding history is unavailable for these historical windows; Freqtrade reports zero funding fees.",
-            "ETH/SOL deployment remains blocked until the canonical owner applies and verifies the separate risk-chain allowlist migration.",
+            "Instrument eligibility never bypasses QUALIFIED status, the global risk budget, or the nine-slot cap.",
         ],
     }
     _FAILURE_CONTEXT["stage"] = "REPORT_WRITE"

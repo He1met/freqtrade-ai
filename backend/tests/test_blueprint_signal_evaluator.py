@@ -121,6 +121,32 @@ def test_evaluates_rsi_ema_sma_and_and_rules_on_latest_closed_candle() -> None:
     assert [row["matched"] for row in result.rule_evidence] == [True, True, True]
 
 
+def test_evaluates_raw_volume_sma_and_atr_from_closed_ohlcv() -> None:
+    strategy = blueprint(
+        indicators=[
+            {"name": "close_raw", "kind": "raw", "period": 1},
+            {"name": "volume_raw", "kind": "raw", "period": 1, "source": "volume"},
+            {"name": "volume_sma", "kind": "sma", "period": 3, "source": "volume"},
+            {"name": "atr", "kind": "atr", "period": 3},
+        ],
+        entry_rules=[
+            {"indicator": "volume_raw", "operator": ">", "compare_indicator": "volume_sma"},
+            {"indicator": "atr", "operator": ">", "value": 0.1},
+            {"indicator": "close_raw", "operator": ">", "value": 49.0},
+        ],
+    )
+
+    result = BlueprintSignalEvaluator().evaluate(
+        request(strategy, candles(range(1, 51)))
+    )
+
+    assert result.decision == "ACTIONABLE"
+    assert result.indicator_values["close_raw"] == "50"
+    assert result.indicator_values["volume_raw"] == "149"
+    assert result.indicator_values["volume_sma"] == "148"
+    assert result.indicator_values["atr"] == "1.1"
+
+
 def test_and_rule_requires_every_condition() -> None:
     strategy = blueprint(
         entry_rules=[
@@ -333,13 +359,14 @@ def test_strategy_version_code_must_match_deterministic_renderer_and_hash() -> N
 
 def test_indicator_engine_matches_fixed_talib_golden_vector() -> None:
     # Generated once with the sole configured Freqtrade 2026.5 environment:
-    # talib 0.6.8, RSI/EMA/SMA(timeperiod=14). These constants deliberately
+    # talib 0.6.8, RSI/EMA/SMA/ATR(timeperiod=14). These constants deliberately
     # remain in the backend suite so ambient dependency upgrades cannot silently
     # redefine the evaluator.
     talib_expected = {
         "rsi_14": Decimal("44.306144809270585"),
         "ema_14": Decimal("107.08699627029503"),
         "sma_14": Decimal("107.07500000000003"),
+        "atr_14": Decimal("2.561678815131764"),
     }
     strategy = StrategyBlueprint.model_validate(
         {
@@ -352,6 +379,7 @@ def test_indicator_engine_matches_fixed_talib_golden_vector() -> None:
                 {"name": "rsi_14", "kind": "rsi", "period": 14},
                 {"name": "ema_14", "kind": "ema", "period": 14},
                 {"name": "sma_14", "kind": "sma", "period": 14},
+                {"name": "atr_14", "kind": "atr", "period": 14},
             ],
             "entry_rules": [
                 {"indicator": "rsi_14", "operator": ">", "value": 40},
@@ -367,7 +395,7 @@ def test_indicator_engine_matches_fixed_talib_golden_vector() -> None:
         request(strategy, candles(prices))
     )
 
-    assert result.indicator_engine_version == "decimal-talib-golden-v1"
+    assert result.indicator_engine_version == "decimal-talib-golden-v2"
     for name, expected in talib_expected.items():
         observed = Decimal(result.indicator_values[name])
         assert abs(observed - expected) <= Decimal("1e-12")

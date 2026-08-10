@@ -42,15 +42,24 @@ def test_oos_diversity_inputs_are_cost_stressed_and_zero_variance_blocks():
     assert _pearson(list(map(float, range(30))), list(map(float, range(30)))) == pytest.approx(1.0)
 
 
-def test_research_bundle_contains_exactly_ten_static_safe_candidates() -> None:
+def test_research_bundle_contains_exactly_ten_blueprint_candidates_per_timeframe() -> None:
     candidates = _discover_candidates(REPO_ROOT / "research" / "strategy_candidates")
 
-    assert len(candidates) == 10
-    assert len({candidate.class_name for candidate in candidates}) == 10
-    assert len({candidate.sha256 for candidate in candidates}) == 10
+    assert len(candidates) == 20
+    assert len({candidate.class_name for candidate in candidates}) == 20
+    assert len({candidate.sha256 for candidate in candidates}) == 20
     assert all(len(candidate.sha256) == 64 for candidate in candidates)
-    assert [candidate.timeframe for candidate in candidates].count("5m") == 5
-    assert [candidate.timeframe for candidate in candidates].count("15m") == 5
+    assert [candidate.timeframe for candidate in candidates].count("5m") == 10
+    assert [candidate.timeframe for candidate in candidates].count("15m") == 10
+    assert all(candidate.canonical_blueprint_evidence is not None for candidate in candidates)
+    assert {
+        (candidate.timeframe, candidate.unit_slot)
+        for candidate in candidates
+    } == {
+        (timeframe, slot)
+        for timeframe in ("5m", "15m")
+        for slot in range(1, 11)
+    }
 
 
 def test_research_windows_are_non_overlapping_and_cover_required_regimes() -> None:

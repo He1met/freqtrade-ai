@@ -1,0 +1,113 @@
+{
+  "can_short": true,
+  "class_name": "Candidate01PullbackReclaim15M",
+  "description": "Deterministic PULLBACK_TREND_CONTINUATION research structure for 15m closed candles.",
+  "entry_rules": [
+    {
+      "compare_indicator": "ema_mid",
+      "indicator": "close_raw",
+      "lookback": 1,
+      "operator": "crosses_above",
+      "regime": null,
+      "value": null
+    },
+    {
+      "compare_indicator": "ema_slow",
+      "indicator": "ema_mid",
+      "lookback": 1,
+      "operator": ">",
+      "regime": null,
+      "value": null
+    },
+    {
+      "compare_indicator": null,
+      "indicator": "rsi",
+      "lookback": 1,
+      "operator": ">",
+      "regime": null,
+      "value": 52.0
+    }
+  ],
+  "exit_rules": [
+    {
+      "compare_indicator": "ema_slow",
+      "indicator": "ema_mid",
+      "lookback": 1,
+      "operator": "<",
+      "regime": null,
+      "value": null
+    }
+  ],
+  "indicators": [
+    {
+      "kind": "raw",
+      "name": "close_raw",
+      "period": 1
+    },
+    {
+      "kind": "ema",
+      "name": "ema_mid",
+      "period": 32
+    },
+    {
+      "kind": "ema",
+      "name": "ema_slow",
+      "period": 96
+    },
+    {
+      "kind": "rsi",
+      "name": "rsi",
+      "period": 14
+    }
+  ],
+  "minimal_roi": {
+    "0": 0.03
+  },
+  "name": "Pullback Reclaim 15m",
+  "regime_rules": [],
+  "schema_version": "2",
+  "short_entry_rules": [
+    {
+      "compare_indicator": "ema_mid",
+      "indicator": "close_raw",
+      "lookback": 1,
+      "operator": "crosses_below",
+      "regime": null,
+      "value": null
+    },
+    {
+      "compare_indicator": "ema_slow",
+      "indicator": "ema_mid",
+      "lookback": 1,
+      "operator": "<",
+      "regime": null,
+      "value": null
+    },
+    {
+      "compare_indicator": null,
+      "indicator": "rsi",
+      "lookback": 1,
+      "operator": "<",
+      "regime": null,
+      "value": 48.0
+    }
+  ],
+  "short_exit_rules": [
+    {
+      "compare_indicator": "ema_slow",
+      "indicator": "ema_mid",
+      "lookback": 1,
+      "operator": ">",
+      "regime": null,
+      "value": null
+    }
+  ],
+  "slug": "candidate-01-pullback-reclaim-15m",
+  "stoploss": -0.1,
+  "tags": [
+    "formal-research",
+    "blueprint-native",
+    "pullback_trend_continuation"
+  ],
+  "timeframe": "15m"
+}

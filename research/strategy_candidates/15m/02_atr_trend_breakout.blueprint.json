@@ -1,0 +1,113 @@
+{
+  "can_short": true,
+  "class_name": "Candidate02AtrTrendBreakout15M",
+  "description": "Deterministic VOLATILITY_BREAKOUT research structure for 15m closed candles.",
+  "entry_rules": [
+    {
+      "compare_indicator": null,
+      "indicator": "atr",
+      "lookback": 4,
+      "operator": "rising",
+      "regime": null,
+      "value": null
+    },
+    {
+      "compare_indicator": "ema_slow",
+      "indicator": "close_raw",
+      "lookback": 1,
+      "operator": "crosses_above",
+      "regime": null,
+      "value": null
+    },
+    {
+      "compare_indicator": "ema_slow",
+      "indicator": "ema_fast",
+      "lookback": 1,
+      "operator": ">",
+      "regime": null,
+      "value": null
+    }
+  ],
+  "exit_rules": [
+    {
+      "compare_indicator": "ema_slow",
+      "indicator": "ema_fast",
+      "lookback": 1,
+      "operator": "<",
+      "regime": null,
+      "value": null
+    }
+  ],
+  "indicators": [
+    {
+      "kind": "raw",
+      "name": "close_raw",
+      "period": 1
+    },
+    {
+      "kind": "atr",
+      "name": "atr",
+      "period": 14
+    },
+    {
+      "kind": "ema",
+      "name": "ema_fast",
+      "period": 24
+    },
+    {
+      "kind": "ema",
+      "name": "ema_slow",
+      "period": 72
+    }
+  ],
+  "minimal_roi": {
+    "0": 0.03
+  },
+  "name": "ATR Trend Breakout 15m",
+  "regime_rules": [],
+  "schema_version": "2",
+  "short_entry_rules": [
+    {
+      "compare_indicator": null,
+      "indicator": "atr",
+      "lookback": 4,
+      "operator": "rising",
+      "regime": null,
+      "value": null
+    },
+    {
+      "compare_indicator": "ema_slow",
+      "indicator": "close_raw",
+      "lookback": 1,
+      "operator": "crosses_below",
+      "regime": null,
+      "value": null
+    },
+    {
+      "compare_indicator": "ema_slow",
+      "indicator": "ema_fast",
+      "lookback": 1,
+      "operator": "<",
+      "regime": null,
+      "value": null
+    }
+  ],
+  "short_exit_rules": [
+    {
+      "compare_indicator": "ema_slow",
+      "indicator": "ema_fast",
+      "lookback": 1,
+      "operator": ">",
+      "regime": null,
+      "value": null
+    }
+  ],
+  "slug": "candidate-02-atr-trend-breakout-15m",
+  "stoploss": -0.1,
+  "tags": [
+    "formal-research",
+    "blueprint-native",
+    "volatility_breakout"
+  ],
+  "timeframe": "15m"
+}

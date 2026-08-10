@@ -1,0 +1,136 @@
+{
+  "can_short": true,
+  "class_name": "Candidate07ParticipationMomentum5M",
+  "description": "Deterministic MOMENTUM_VOLUME_CONFIRMATION research structure for 5m closed candles.",
+  "entry_rules": [
+    {
+      "compare_indicator": "volume_mean",
+      "indicator": "volume_raw",
+      "lookback": 1,
+      "operator": ">",
+      "regime": null,
+      "value": null
+    },
+    {
+      "compare_indicator": null,
+      "indicator": "rsi_fast",
+      "lookback": 3,
+      "operator": "rising",
+      "regime": null,
+      "value": null
+    },
+    {
+      "compare_indicator": null,
+      "indicator": "rsi_fast",
+      "lookback": 1,
+      "operator": ">",
+      "regime": null,
+      "value": 55.0
+    },
+    {
+      "compare_indicator": "ema",
+      "indicator": "close_raw",
+      "lookback": 1,
+      "operator": ">",
+      "regime": null,
+      "value": null
+    }
+  ],
+  "exit_rules": [
+    {
+      "compare_indicator": null,
+      "indicator": "rsi_fast",
+      "lookback": 1,
+      "operator": "<",
+      "regime": null,
+      "value": 50.0
+    }
+  ],
+  "indicators": [
+    {
+      "kind": "raw",
+      "name": "close_raw",
+      "period": 1
+    },
+    {
+      "kind": "raw",
+      "name": "volume_raw",
+      "period": 1,
+      "source": "volume"
+    },
+    {
+      "kind": "sma",
+      "name": "volume_mean",
+      "period": 24,
+      "source": "volume"
+    },
+    {
+      "kind": "ema",
+      "name": "ema",
+      "period": 80
+    },
+    {
+      "kind": "rsi",
+      "name": "rsi_fast",
+      "period": 10
+    }
+  ],
+  "minimal_roi": {
+    "0": 0.03
+  },
+  "name": "Participation Momentum 5m",
+  "regime_rules": [],
+  "schema_version": "2",
+  "short_entry_rules": [
+    {
+      "compare_indicator": "volume_mean",
+      "indicator": "volume_raw",
+      "lookback": 1,
+      "operator": ">",
+      "regime": null,
+      "value": null
+    },
+    {
+      "compare_indicator": null,
+      "indicator": "rsi_fast",
+      "lookback": 3,
+      "operator": "falling",
+      "regime": null,
+      "value": null
+    },
+    {
+      "compare_indicator": null,
+      "indicator": "rsi_fast",
+      "lookback": 1,
+      "operator": "<",
+      "regime": null,
+      "value": 45.0
+    },
+    {
+      "compare_indicator": "ema",
+      "indicator": "close_raw",
+      "lookback": 1,
+      "operator": "<",
+      "regime": null,
+      "value": null
+    }
+  ],
+  "short_exit_rules": [
+    {
+      "compare_indicator": null,
+      "indicator": "rsi_fast",
+      "lookback": 1,
+      "operator": ">",
+      "regime": null,
+      "value": 50.0
+    }
+  ],
+  "slug": "candidate-07-participation-momentum-5m",
+  "stoploss": -0.1,
+  "tags": [
+    "formal-research",
+    "blueprint-native",
+    "momentum_volume_confirmation"
+  ],
+  "timeframe": "5m"
+}

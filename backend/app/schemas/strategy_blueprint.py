@@ -1,18 +1,21 @@
 import math
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import (
     BaseModel,
     Field,
+    SerializerFunctionWrapHandler,
     StrictFloat,
     StrictInt,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
 
 BLUEPRINT_SCHEMA_VERSION = "2"
-IndicatorKind = Literal["rsi", "ema", "sma"]
+IndicatorKind = Literal["raw", "rsi", "ema", "sma", "atr"]
+IndicatorSource = Literal["open", "high", "low", "close", "volume"]
 SignalOperator = Literal[
     "<",
     "<=",
@@ -34,9 +37,33 @@ _TREND_OPERATORS = {"rising", "falling"}
 class IndicatorBlueprint(BaseModel):
     name: str = Field(min_length=1, max_length=80, pattern=r"^[a-z][a-z0-9_]*$")
     kind: IndicatorKind
-    period: int = Field(gt=1, le=500)
+    period: int = Field(ge=1, le=500)
+    source: IndicatorSource = "close"
 
     model_config = {"extra": "forbid"}
+
+    @model_validator(mode="after")
+    def validate_indicator_shape(self) -> "IndicatorBlueprint":
+        if self.kind == "raw" and self.period != 1:
+            raise ValueError("raw indicators require period=1")
+        if self.kind != "raw" and self.period <= 1:
+            raise ValueError("calculated indicators require period>1")
+        if self.kind in {"rsi", "atr"} and self.source != "close":
+            raise ValueError(f"{self.kind} indicators require source=close")
+        return self
+
+    @model_serializer(mode="wrap")
+    def serialize_indicator(
+        self,
+        handler: SerializerFunctionWrapHandler,
+    ) -> dict[str, Any]:
+        data = handler(self)
+        # Preserve byte-for-byte canonical Blueprint v2 payloads for the
+        # historical close-based RSI/EMA/SMA vocabulary.  Non-default sources
+        # remain explicit and therefore digest-bound.
+        if self.source == "close":
+            data.pop("source", None)
+        return data
 
 
 class SignalRule(BaseModel):
@@ -193,6 +220,8 @@ class StrategyBlueprint(BaseModel):
                 raise ValueError(f"rsi rule value must be between 0 and 100: {rule.indicator}")
             if indicator.kind in {"ema", "sma"} and rule.value <= 0:
                 raise ValueError(f"moving average rule value must be positive: {rule.indicator}")
+            if indicator.kind in {"raw", "atr"} and rule.value <= 0:
+                raise ValueError(f"price/volume rule value must be positive: {rule.indicator}")
         signal_rules = [
             rule
             for rules in rule_groups.values()

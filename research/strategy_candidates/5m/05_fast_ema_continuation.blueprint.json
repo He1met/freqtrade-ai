@@ -1,0 +1,113 @@
+{
+  "can_short": true,
+  "class_name": "Candidate05FastEmaContinuation5M",
+  "description": "Deterministic PULLBACK_TREND_CONTINUATION research structure for 5m closed candles.",
+  "entry_rules": [
+    {
+      "compare_indicator": "ema_fast",
+      "indicator": "close_raw",
+      "lookback": 1,
+      "operator": "crosses_above",
+      "regime": null,
+      "value": null
+    },
+    {
+      "compare_indicator": "ema_regime",
+      "indicator": "ema_fast",
+      "lookback": 1,
+      "operator": ">",
+      "regime": null,
+      "value": null
+    },
+    {
+      "compare_indicator": null,
+      "indicator": "rsi",
+      "lookback": 1,
+      "operator": ">",
+      "regime": null,
+      "value": 50.0
+    }
+  ],
+  "exit_rules": [
+    {
+      "compare_indicator": "ema_regime",
+      "indicator": "close_raw",
+      "lookback": 1,
+      "operator": "<",
+      "regime": null,
+      "value": null
+    }
+  ],
+  "indicators": [
+    {
+      "kind": "raw",
+      "name": "close_raw",
+      "period": 1
+    },
+    {
+      "kind": "ema",
+      "name": "ema_fast",
+      "period": 20
+    },
+    {
+      "kind": "ema",
+      "name": "ema_regime",
+      "period": 100
+    },
+    {
+      "kind": "rsi",
+      "name": "rsi",
+      "period": 14
+    }
+  ],
+  "minimal_roi": {
+    "0": 0.03
+  },
+  "name": "Fast EMA Continuation 5m",
+  "regime_rules": [],
+  "schema_version": "2",
+  "short_entry_rules": [
+    {
+      "compare_indicator": "ema_fast",
+      "indicator": "close_raw",
+      "lookback": 1,
+      "operator": "crosses_below",
+      "regime": null,
+      "value": null
+    },
+    {
+      "compare_indicator": "ema_regime",
+      "indicator": "ema_fast",
+      "lookback": 1,
+      "operator": "<",
+      "regime": null,
+      "value": null
+    },
+    {
+      "compare_indicator": null,
+      "indicator": "rsi",
+      "lookback": 1,
+      "operator": "<",
+      "regime": null,
+      "value": 50.0
+    }
+  ],
+  "short_exit_rules": [
+    {
+      "compare_indicator": "ema_regime",
+      "indicator": "close_raw",
+      "lookback": 1,
+      "operator": ">",
+      "regime": null,
+      "value": null
+    }
+  ],
+  "slug": "candidate-05-fast-ema-continuation-5m",
+  "stoploss": -0.1,
+  "tags": [
+    "formal-research",
+    "blueprint-native",
+    "pullback_trend_continuation"
+  ],
+  "timeframe": "5m"
+}

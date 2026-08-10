@@ -1,0 +1,120 @@
+{
+  "can_short": true,
+  "class_name": "Candidate04VolumeRsiImpulse15M",
+  "description": "Deterministic MOMENTUM_VOLUME_CONFIRMATION research structure for 15m closed candles.",
+  "entry_rules": [
+    {
+      "compare_indicator": "volume_mean",
+      "indicator": "volume_raw",
+      "lookback": 1,
+      "operator": ">",
+      "regime": null,
+      "value": null
+    },
+    {
+      "compare_indicator": null,
+      "indicator": "rsi",
+      "lookback": 1,
+      "operator": ">",
+      "regime": null,
+      "value": 58.0
+    },
+    {
+      "compare_indicator": "ema",
+      "indicator": "close_raw",
+      "lookback": 1,
+      "operator": ">",
+      "regime": null,
+      "value": null
+    }
+  ],
+  "exit_rules": [
+    {
+      "compare_indicator": null,
+      "indicator": "rsi",
+      "lookback": 1,
+      "operator": "<",
+      "regime": null,
+      "value": 50.0
+    }
+  ],
+  "indicators": [
+    {
+      "kind": "raw",
+      "name": "close_raw",
+      "period": 1
+    },
+    {
+      "kind": "raw",
+      "name": "volume_raw",
+      "period": 1,
+      "source": "volume"
+    },
+    {
+      "kind": "sma",
+      "name": "volume_mean",
+      "period": 36,
+      "source": "volume"
+    },
+    {
+      "kind": "ema",
+      "name": "ema",
+      "period": 50
+    },
+    {
+      "kind": "rsi",
+      "name": "rsi",
+      "period": 14
+    }
+  ],
+  "minimal_roi": {
+    "0": 0.03
+  },
+  "name": "Volume RSI Impulse 15m",
+  "regime_rules": [],
+  "schema_version": "2",
+  "short_entry_rules": [
+    {
+      "compare_indicator": "volume_mean",
+      "indicator": "volume_raw",
+      "lookback": 1,
+      "operator": ">",
+      "regime": null,
+      "value": null
+    },
+    {
+      "compare_indicator": null,
+      "indicator": "rsi",
+      "lookback": 1,
+      "operator": "<",
+      "regime": null,
+      "value": 42.0
+    },
+    {
+      "compare_indicator": "ema",
+      "indicator": "close_raw",
+      "lookback": 1,
+      "operator": "<",
+      "regime": null,
+      "value": null
+    }
+  ],
+  "short_exit_rules": [
+    {
+      "compare_indicator": null,
+      "indicator": "rsi",
+      "lookback": 1,
+      "operator": ">",
+      "regime": null,
+      "value": 50.0
+    }
+  ],
+  "slug": "candidate-04-volume-rsi-impulse-15m",
+  "stoploss": -0.1,
+  "tags": [
+    "formal-research",
+    "blueprint-native",
+    "momentum_volume_confirmation"
+  ],
+  "timeframe": "15m"
+}

@@ -81,10 +81,14 @@ class BlueprintSignalEvaluationRequest(BaseModel):
 
 class BlueprintSignalEvaluation(BaseModel):
     schema_version: Literal["1"] = "1"
-    evaluator_version: Literal["blueprint-signal-v2"] = "blueprint-signal-v2"
+    evaluator_version: Literal[
+        "blueprint-signal-v2",
+        "blueprint-signal-v2.1",
+    ] = "blueprint-signal-v2.1"
     indicator_engine_version: Literal[
-        "decimal-talib-golden-v1"
-    ] = "decimal-talib-golden-v1"
+        "decimal-talib-golden-v1",
+        "decimal-talib-golden-v2",
+    ] = "decimal-talib-golden-v2"
     execution_target: Literal["OKX_DEMO"] = "OKX_DEMO"
     instrument_id: str
     strategy_version_id: int = Field(gt=0)
