@@ -425,6 +425,13 @@ def test_actionable_signal_completes_signal_then_risk_and_evaluation():
     assert request["position_side"] == "long"
     assert request["quantity"] == "0.01"
     assert request["full_chain_run_id"] == 21
+    risk_prepare = next(
+        call for call in chains.calls
+        if call[0] == "prepare" and call[1] == "RISK"
+    )
+    assert risk_prepare[2]["idempotency_key"] == (
+        "risk-evaluation:11:" + "d" * 64
+    )
     assert deployments.completions[0]["result_snapshot"][
         "approved_execution_id"
     ] == 43
