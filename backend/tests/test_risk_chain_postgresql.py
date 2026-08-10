@@ -1974,7 +1974,9 @@ def test_postgresql_v43_natural_signal_evaluator_receipt_reaches_writer_claim(
     upgrade_database(postgres_engine)
     factory = create_session_factory(postgres_engine)
     lineage = _seed(factory)
-    now = datetime.now(timezone.utc).replace(microsecond=482565)
+    now = (datetime.now(timezone.utc) - timedelta(seconds=1)).replace(
+        microsecond=482565
+    )
     policy = {
         "allowed_instruments": [
             "BTC-USDT-SWAP",
@@ -2459,6 +2461,17 @@ def test_postgresql_v43_reinstalls_repository_datetime_digest_contract(
             ),
             {"version": NATURAL_SIGNAL_EVALUATOR_RECEIPT_BASE_VERSION},
         )
+        connection.execute(
+            text(
+                "INSERT INTO okx_demo_automation_guard_states("
+                "execution_target_id,authorization_mode,operational_state,"
+                "policy_digest,deployment_set_digest,critical_failure_count,"
+                "health_check_required,fencing_version) VALUES("
+                "'OKX_DEMO','CONTINUOUS_DEMO_V1','RUNNING',:digest,:digest,"
+                "0,false,1)"
+            ),
+            {"digest": "0" * 64},
+        )
 
     assert upgrade_database(postgres_engine) == SCHEMA_VERSION
     with postgres_engine.connect() as connection:
@@ -2468,5 +2481,13 @@ def test_postgresql_v43_reinstalls_repository_datetime_digest_contract(
                 "'persist_okx_demo_natural_risk_chain(jsonb)'::regprocedure)"
             )
         ).scalar_one()
+        guard = connection.execute(
+            text(
+                "SELECT operational_state,policy_digest,deployment_set_digest,"
+                "fencing_version FROM okx_demo_automation_guard_states "
+                "WHERE execution_target_id='OKX_DEMO'"
+            )
+        ).one()
     assert "FullChainRepository._stable_digest uses Python's str(datetime)" in repaired
     assert repaired.count("'YYYY-MM-DD HH24:MI:SS'") >= 2
+    assert tuple(guard) == ("RUNNING", "0" * 64, "0" * 64, 1)
