@@ -22,6 +22,7 @@ from app.db.migrations import (
     NATURAL_SIGNAL_RISK_CHAIN_BASE_VERSION,
     MULTI_ASSET_CAPACITY_BASE_VERSION,
     AUTOMATION_GUARD_REBIND_BASE_VERSION,
+    DEPLOYMENT_POLICY_REBIND_BASE_VERSION,
     EARLY_TARGET_LINEAGE_VERSION,
     DUAL_SIDE_BASE_VERSION,
     FULL_CHAIN_BASE_VERSION,
@@ -44,6 +45,7 @@ from app.db.migrations import (
     STRATEGY_VALIDATION_BASE_VERSION,
     SCHEMA_VERSION,
     _demo_automation_policy_digest,
+    _rebind_demo_automation_guard_policy,
     SOAK_BASE_VERSION,
     TARGET_LINEAGE_BASE_VERSION,
     TRUSTED_SNAPSHOT_BASE_VERSION,
@@ -130,7 +132,8 @@ def test_schema_version_is_explicit_and_stable() -> None:
     assert NATURAL_SIGNAL_RISK_CHAIN_BASE_VERSION == "20260809_38"
     assert MULTI_ASSET_CAPACITY_BASE_VERSION == "20260810_39"
     assert AUTOMATION_GUARD_REBIND_BASE_VERSION == "20260810_40"
-    assert SCHEMA_VERSION == "20260810_41"
+    assert DEPLOYMENT_POLICY_REBIND_BASE_VERSION == "20260810_41"
+    assert SCHEMA_VERSION == "20260810_42"
 
 
 def test_v41_guard_policy_digests_match_the_exact_v39_and_v40_contracts() -> None:
@@ -146,6 +149,23 @@ def test_v41_guard_policy_digests_match_the_exact_v39_and_v40_contracts() -> Non
         ),
         max_active_strategies=9,
     ) == "7318d7559b79afb72faf379c216bedb7989964352f95fa126add98e5d17405e2"
+
+
+def test_v42_rebind_is_fenced_audited_and_updates_only_exact_active_source_rows() -> None:
+    import inspect as pyinspect
+
+    source = pyinspect.getsource(_rebind_demo_automation_guard_policy)
+    for fragment in (
+        "no pending write, no unexpired approval",
+        "risk_policy_digest=:source",
+        "SET risk_policy_digest=:target",
+        "status='ACTIVE'",
+        "operational_state='COOLDOWN'",
+        "fresh_health_check_required",
+        "rebound_active_deployments",
+        "allow_real_funds",
+    ):
+        assert fragment in source
 
 
 def test_v39_natural_signal_risk_boundary_is_narrow_and_demo_only() -> None:

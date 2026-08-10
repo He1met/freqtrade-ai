@@ -74,7 +74,8 @@ CANDIDATE_BRIDGE_BASE_VERSION = "20260809_37"
 NATURAL_SIGNAL_RISK_CHAIN_BASE_VERSION = "20260809_38"
 MULTI_ASSET_CAPACITY_BASE_VERSION = "20260810_39"
 AUTOMATION_GUARD_REBIND_BASE_VERSION = "20260810_40"
-SCHEMA_VERSION = "20260810_41"
+DEPLOYMENT_POLICY_REBIND_BASE_VERSION = "20260810_41"
+SCHEMA_VERSION = "20260810_42"
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 ATTESTATION_PROOF_KEY_ENV = "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"
 OPERATOR_TOKEN_ENV = "FREQTRADE_AI_OPERATOR_TOKEN"
@@ -12123,6 +12124,7 @@ def _add_natural_signal_risk_chain_boundary(
             source_max_active=3,
             target_instruments=allowed_instruments,
             target_max_active=max_active_strategies,
+            allow_source_migration_cooldown=True,
         )
 
 
@@ -12163,6 +12165,7 @@ def _rebind_demo_automation_guard_policy(
     source_max_active: int,
     target_instruments: tuple[str, ...],
     target_max_active: int,
+    allow_source_migration_cooldown: bool = False,
 ) -> None:
     """Atomically fence and rebind a healthy standing Demo authorization."""
 
@@ -12195,16 +12198,26 @@ def _rebind_demo_automation_guard_policy(
         "deployment.execution_target_id='OKX_DEMO' AND deployment.status='ACTIVE'"
         .format(quoted_schema)
     )).scalar_one()
-    healthy = (
-        guard[0] == "CONTINUOUS_DEMO_V1"
-        and guard[1] == "RUNNING"
-        and guard[2] == source_digest
-        and guard[3] == deployment_digest
-        and guard[4] == 0
+    running_state = (
+        guard[1] == "RUNNING"
         and guard[5] is None
         and guard[6] is None
         and guard[7] is False
+    )
+    migration_cooldown = (
+        allow_source_migration_cooldown
+        and guard[1] == "COOLDOWN"
+        and guard[5] is None
+        and guard[6] is not None
+        and guard[7] is True
+    )
+    healthy = (
+        guard[0] == "CONTINUOUS_DEMO_V1"
+        and guard[2] == source_digest
+        and guard[3] == deployment_digest
+        and guard[4] == 0
         and guard[8] is None
+        and (running_state or migration_cooldown)
     )
     unsafe_pending = connection.execute(text(
         "SELECT EXISTS(SELECT 1 FROM {0}.okx_order_write_attempts WHERE "
@@ -12215,11 +12228,15 @@ def _rebind_demo_automation_guard_policy(
         "AND expires_at>clock_timestamp()) OR EXISTS(SELECT 1 FROM "
         "{0}.strategy_deployments WHERE status='ACTIVE' AND (real_orders "
         "OR instrument_id<>ALL(CAST(:instruments AS text[])) "
-        "OR (risk_policy_digest IS NOT NULL AND risk_policy_digest<>:target))) "
+        "OR (risk_policy_digest IS NOT NULL AND risk_policy_digest NOT IN "
+        "(:source,:target)) OR (risk_policy_digest=:source AND "
+        "instrument_id<>ALL(CAST(:source_instruments AS text[]))))) "
         "OR (SELECT count(*) FROM {0}.strategy_deployments WHERE status='ACTIVE')>:maximum"
         .format(quoted_schema)
     ), {
         "instruments": list(target_instruments),
+        "source_instruments": list(source_instruments),
+        "source": source_digest,
         "target": target_digest,
         "maximum": target_max_active,
     }).scalar_one()
@@ -12229,6 +12246,22 @@ def _rebind_demo_automation_guard_policy(
             "matching deployment set, no pending write, no unexpired approval, "
             "and Demo-only target-compatible deployments"
         )
+    rebound_deployments = connection.execute(text(
+        "UPDATE {0}.strategy_deployments SET risk_policy_digest=:target,"
+        "updated_at=clock_timestamp() WHERE execution_target_id='OKX_DEMO' "
+        "AND status='ACTIVE' AND risk_policy_digest=:source"
+        .format(quoted_schema)
+    ), {"source": source_digest, "target": target_digest}).rowcount
+    target_deployment_digest = connection.execute(text(
+        "SELECT encode(public.digest(convert_to(COALESCE(string_agg("
+        "deployment.id::text||':'||deployment.active_slot::text||':'||"
+        "deployment.candidate_approval_id::text||':'||deployment.candidate_digest||':'||"
+        "deployment.deployment_policy_digest||':'||COALESCE(deployment.risk_policy_digest,''),"
+        "'|' ORDER BY deployment.active_slot),''),'UTF8'),'sha256'),'hex') "
+        "FROM {0}.strategy_deployments deployment WHERE "
+        "deployment.execution_target_id='OKX_DEMO' AND deployment.status='ACTIVE'"
+        .format(quoted_schema)
+    )).scalar_one()
     connection.execute(text(
         "UPDATE {0}.okx_demo_automation_guard_states SET policy_digest=:target,"
         "deployment_set_digest=:deployments,operational_state='COOLDOWN',"
@@ -12239,7 +12272,7 @@ def _rebind_demo_automation_guard_policy(
         .format(quoted_schema)
     ), {
         "target": target_digest,
-        "deployments": deployment_digest,
+        "deployments": target_deployment_digest,
     })
     connection.execute(text(
         "INSERT INTO {0}.okx_demo_automation_guard_events("
@@ -12250,6 +12283,7 @@ def _rebind_demo_automation_guard_policy(
         "'AUTHORIZATION_ENABLED',NULL,:target,last_healthy_reconciliation_run_id,"
         "jsonb_build_object('migration','automation-guard-policy-rebind-v1',"
         "'source_policy_digest',:source,'target_policy_digest',:target,"
+        "'rebound_active_deployments',CAST(:rebound AS integer),"
         "'fresh_health_check_required',true,'allow_real_funds',false),"
         "clock_timestamp() FROM {0}.okx_demo_automation_guard_states "
         "WHERE execution_target_id='OKX_DEMO'"
@@ -12257,6 +12291,7 @@ def _rebind_demo_automation_guard_policy(
     ), {
         "source": source_digest,
         "target": target_digest,
+        "rebound": rebound_deployments,
     })
 def _natural_signal_risk_chain_boundary_problems(
     connection: Connection, schema_name: str
@@ -12415,6 +12450,18 @@ def upgrade_database(engine: Engine) -> str:
                         "Recorded schema version does not match ORM metadata: " + "; ".join(problems)
                     )
                 return current_version
+            if current_version == DEPLOYMENT_POLICY_REBIND_BASE_VERSION:
+                problems = schema_problems(connection)
+                if problems:
+                    raise SchemaMigrationBlocked(
+                        "Deployment policy rebind upgrade does not match ORM metadata: "
+                        + "; ".join(problems)
+                    )
+                connection.execute(
+                    text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+                    {"version": SCHEMA_VERSION},
+                )
+                return SCHEMA_VERSION
             if current_version == AUTOMATION_GUARD_REBIND_BASE_VERSION:
                 _add_natural_signal_risk_chain_boundary(connection)
                 problems = schema_problems(connection)
@@ -13077,8 +13124,8 @@ def upgrade_database(engine: Engine) -> str:
     return SCHEMA_VERSION
 
 
-def rollback_automation_guard_rebind(engine: Engine) -> str:
-    """Explicit admin-only v41 rollback to the fail-closed v40 digest state."""
+def rollback_deployment_policy_rebind(engine: Engine) -> str:
+    """Explicit admin-only v42 rollback to the compatible v41 schema marker."""
 
     if engine.dialect.name != "postgresql":
         raise ConfigurationError("PostgreSQL DATABASE_URL is required for migrations.")
@@ -13086,8 +13133,31 @@ def rollback_automation_guard_rebind(engine: Engine) -> str:
         _require_attestation_admin(connection)
         if _current_version(connection) != SCHEMA_VERSION:
             raise SchemaMigrationBlocked(
-                "Automation guard rebind rollback requires schema version "
+                "Deployment policy rebind rollback requires schema version "
                 + SCHEMA_VERSION
+            )
+        connection.execute(
+            text(f"DELETE FROM {VERSION_TABLE} WHERE version=:version"),
+            {"version": SCHEMA_VERSION},
+        )
+        connection.execute(text(
+            f"INSERT INTO {VERSION_TABLE}(version) VALUES(:version) "
+            "ON CONFLICT(version) DO NOTHING"
+        ), {"version": DEPLOYMENT_POLICY_REBIND_BASE_VERSION})
+    return DEPLOYMENT_POLICY_REBIND_BASE_VERSION
+
+
+def rollback_automation_guard_rebind(engine: Engine) -> str:
+    """Explicit admin-only v41 rollback to the fail-closed v40 digest state."""
+
+    if engine.dialect.name != "postgresql":
+        raise ConfigurationError("PostgreSQL DATABASE_URL is required for migrations.")
+    with engine.begin() as connection:
+        _require_attestation_admin(connection)
+        if _current_version(connection) != DEPLOYMENT_POLICY_REBIND_BASE_VERSION:
+            raise SchemaMigrationBlocked(
+                "Automation guard rebind rollback requires schema version "
+                + DEPLOYMENT_POLICY_REBIND_BASE_VERSION
             )
         _rebind_demo_automation_guard_policy(
             connection,
@@ -13099,10 +13169,11 @@ def rollback_automation_guard_rebind(engine: Engine) -> str:
             source_max_active=9,
             target_instruments=("BTC-USDT-SWAP",),
             target_max_active=3,
+            allow_source_migration_cooldown=True,
         )
         connection.execute(
             text(f"DELETE FROM {VERSION_TABLE} WHERE version=:version"),
-            {"version": SCHEMA_VERSION},
+            {"version": DEPLOYMENT_POLICY_REBIND_BASE_VERSION},
         )
         connection.execute(text(
             f"INSERT INTO {VERSION_TABLE}(version) VALUES(:version) "

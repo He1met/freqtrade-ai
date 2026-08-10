@@ -34,6 +34,7 @@ from app.adapters.okx_demo.reconciliation_runtime import (
 )
 from app.db.migrations import (
     AUTOMATION_GUARD_REBIND_BASE_VERSION,
+    DEPLOYMENT_POLICY_REBIND_BASE_VERSION,
     CANARY_LINEAGE_WRITE_BASE_VERSION,
     CANARY_FINAL_EXPIRY_BASE_VERSION,
     CANARY_LIFECYCLE_BASE_VERSION,
@@ -62,6 +63,7 @@ from app.db.migrations import (
     revoke_operator_consents_for_key_hardening,
     revoke_attested_sessions_for_key_hardening,
     rollback_automation_guard_rebind,
+    rollback_deployment_policy_rebind,
     upgrade_database,
     verify_connection_schema,
     verify_schema,
@@ -8517,7 +8519,7 @@ def test_postgresql_continuous_guard_acl_tamper_fails_readiness(
     )
 
 
-def test_postgresql_v41_rebinds_v40_guard_and_requires_fresh_health(
+def test_postgresql_v42_rebinds_v40_guard_and_requires_fresh_health(
     postgres_writer_engine,
 ) -> None:
     old_digest = _demo_automation_policy_digest(
@@ -8578,8 +8580,12 @@ def test_postgresql_v41_rebinds_v40_guard_and_requires_fresh_health(
     assert event[1] == new_digest
     assert event[2]["fresh_health_check_required"] is True
     assert event[2]["allow_real_funds"] is False
+    assert event[2]["rebound_active_deployments"] == 0
     assert health == "RUNNING"
 
+    assert rollback_deployment_policy_rebind(postgres_writer_engine) == (
+        DEPLOYMENT_POLICY_REBIND_BASE_VERSION
+    )
     assert rollback_automation_guard_rebind(postgres_writer_engine) == (
         AUTOMATION_GUARD_REBIND_BASE_VERSION
     )
@@ -8593,7 +8599,7 @@ def test_postgresql_v41_rebinds_v40_guard_and_requires_fresh_health(
     assert tuple(rolled_back) == (old_digest, "COOLDOWN", True)
 
 
-def test_postgresql_v41_rebind_fails_closed_with_unexpired_approval(
+def test_postgresql_v42_rebind_fails_closed_with_unexpired_approval(
     postgres_writer_engine,
 ) -> None:
     old_digest = _demo_automation_policy_digest(
