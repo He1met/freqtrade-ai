@@ -70,7 +70,8 @@ CONTINUOUS_DEMO_BASE_VERSION = "20260804_34"
 CONTINUOUS_DEMO_SELECTION_V2_BASE_VERSION = "20260804_35"
 RESEARCH_PERSISTENCE_BASE_VERSION = "20260804_36"
 CANDIDATE_BRIDGE_BASE_VERSION = "20260809_37"
-SCHEMA_VERSION = "20260809_38"
+NATURAL_SIGNAL_RISK_CHAIN_BASE_VERSION = "20260809_38"
+SCHEMA_VERSION = "20260810_39"
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 ATTESTATION_PROOF_KEY_ENV = "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"
 OPERATOR_TOKEN_ENV = "FREQTRADE_AI_OPERATOR_TOKEN"
@@ -97,7 +98,6 @@ RUNTIME_APPLICATION_TABLES = (
     "strategy_candidate_approvals",
     "full_chain_signal_snapshots",
     "signal_evaluations",
-    "risk_budgets",
 )
 
 RUNTIME_APPEND_ONLY_TABLES = frozenset(
@@ -2788,6 +2788,7 @@ def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
         problems.extend(_canary_consent_acl_problems(bind, schema_name))
         problems.extend(_accepted_not_found_boundary_problems(bind, schema_name))
         problems.extend(_continuous_demo_automation_boundary_problems(bind, schema_name))
+        problems.extend(_natural_signal_risk_chain_boundary_problems(bind, schema_name))
         problems.extend(_expired_approval_attestor_acl_problems(bind, schema_name))
         problems.extend(_strategy_validation_acl_problems(bind, schema_name))
     return problems
@@ -5532,6 +5533,22 @@ def _add_research_receipt_boundary(connection: Connection) -> None:
         "strategy_research_candidate_bridge_events",
     ):
         Base.metadata.tables[table_name].create(bind=connection, checkfirst=True)
+    schema_name = connection.execute(text("SELECT current_schema()" )).scalar_one()
+    if "full_chain_runs" in inspect(connection).get_table_names(schema=schema_name):
+        bridge_foreign_keys = {
+            tuple(item["constrained_columns"])
+            for item in inspect(connection).get_foreign_keys(
+                "strategy_research_candidate_bridge_events", schema=schema_name
+            )
+        }
+        if ("canonical_full_chain_run_id",) not in bridge_foreign_keys:
+            connection.execute(text(
+                "ALTER TABLE strategy_research_candidate_bridge_events "
+                "ADD CONSTRAINT strategy_research_candidate_bridge_events_"
+                "canonical_full_chain_run_id_fkey FOREIGN KEY "
+                "(canonical_full_chain_run_id) REFERENCES full_chain_runs(id) "
+                "ON DELETE RESTRICT"
+            ))
     connection.execute(
         text(
             """
@@ -5561,7 +5578,6 @@ def _add_research_receipt_boundary(connection: Connection) -> None:
             """
         )
     )
-    schema_name = connection.execute(text("SELECT current_schema()" )).scalar_one()
     quote = connection.dialect.identifier_preparer.quote
     qualified_schema = quote(schema_name)
     connection.execute(
@@ -11156,6 +11172,893 @@ def _add_continuous_demo_automation_boundary(connection: Connection) -> None:
     ))
 
 
+def _add_natural_signal_risk_chain_boundary(connection: Connection) -> None:
+    """Install the one runtime-callable, owner-mediated natural-risk write path."""
+
+    schema_name = connection.execute(text("SELECT current_schema()" )).scalar_one()
+    quoted_schema = '"{}"'.format(schema_name.replace('"', '""'))
+    connection.execute(text(
+        "ALTER TABLE {0}.strategy_deployments ADD COLUMN IF NOT EXISTS "
+        "real_orders BOOLEAN NOT NULL DEFAULT false; "
+        "ALTER TABLE {0}.strategy_deployments DROP CONSTRAINT IF EXISTS "
+        "strategy_deployments_demo_only_check; "
+        "ALTER TABLE {0}.strategy_deployments ADD CONSTRAINT "
+        "strategy_deployments_demo_only_check CHECK (real_orders=false)"
+        .format(quoted_schema)
+    ))
+    ddl = """
+    CREATE OR REPLACE FUNCTION SCHEMA_TOKEN.persist_okx_demo_natural_risk_chain(
+      p_payload jsonb)
+    RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+    DECLARE
+      now_value timestamptz:=clock_timestamp();
+      chain SCHEMA_TOKEN.full_chain_runs%ROWTYPE;
+      signal_row SCHEMA_TOKEN.full_chain_signal_snapshots%ROWTYPE;
+      instrument_row SCHEMA_TOKEN.okx_demo_trusted_snapshots%ROWTYPE;
+      market_row SCHEMA_TOKEN.okx_demo_trusted_snapshots%ROWTYPE;
+      account_row SCHEMA_TOKEN.okx_demo_trusted_snapshots%ROWTYPE;
+      deployment SCHEMA_TOKEN.strategy_deployments%ROWTYPE;
+      guard SCHEMA_TOKEN.okx_demo_automation_guard_states%ROWTYPE;
+      budget SCHEMA_TOKEN.risk_budgets%ROWTYPE;
+      existing SCHEMA_TOKEN.trade_intents%ROWTYPE;
+      intent_database_id bigint; decision_database_id bigint;
+      approved_database_id bigint:=NULL;
+      final_status text:=p_payload->>'proposed_status';
+      notional numeric; projected numeric; projected_positions integer;
+      maximum_total numeric; maximum_order numeric; maximum_leverage numeric;
+      maximum_deviation numeric; minimum_score double precision;
+      reference_price numeric; order_price numeric; leverage_value numeric;
+      account_exposure numeric; account_positions integer;
+      quantity_value numeric; calculated_notional numeric;
+      contract_value numeric; lot_size numeric; minimum_size numeric;
+      tick_size numeric; snapshot_reference_price numeric;
+      strategy_blueprint jsonb; stop_fraction numeric; roi_fraction numeric;
+      expected_limit numeric; expected_stop numeric; expected_take numeric;
+      instrument_content jsonb; market_content jsonb; account_content jsonb;
+      expires_value timestamptz;
+      snapshot_count integer; writer_count integer; writer_generation bigint;
+      reconciliation_run_id bigint;
+      computed_canonical_hash text; computed_policy_digest text;
+      computed_approved_hash text; computed_intent_id text;
+      reasons jsonb:=COALESCE(p_payload->'reasons','[]'::jsonb);
+    BEGIN
+      IF jsonb_typeof(p_payload)<>'object'
+         OR p_payload->>'execution_target'<>'OKX_DEMO'
+         OR p_payload->>'authorization_schema_version'<>'RISK_V1'
+         OR p_payload->>'allow_real_funds'<>'false'
+         OR p_payload->>'real_orders'<>'false'
+         OR p_payload->>'simulated_trading'<>'true'
+         OR final_status NOT IN ('APPROVED','REJECTED')
+         OR jsonb_typeof(reasons)<>'array'
+         OR p_payload->>'idempotency_key_digest'!~'^[0-9a-f]{64}$'
+         OR p_payload->>'intent_id'!~'^[0-9a-f]{64}$'
+         OR p_payload->>'canonical_hash'!~'^[0-9a-f]{64}$'
+         OR p_payload->>'policy_digest'!~'^[0-9a-f]{64}$'
+         OR p_payload->>'approved_payload_hash'!~'^[0-9a-f]{64}$'
+         OR p_payload->>'client_order_id'!~'^FAI[0-9a-f]{29}$'
+         OR jsonb_typeof(p_payload->'request_snapshot')<>'object'
+         OR jsonb_typeof(p_payload->'policy')<>'object'
+         OR p_payload->'policy'->'allowed_instruments' IS DISTINCT FROM
+              '["BTC-USDT-SWAP"]'::jsonb
+         OR p_payload->'policy'->'allowed_sides' IS DISTINCT FROM
+              '["buy","sell"]'::jsonb
+         OR p_payload->'policy'->'allowed_order_types' IS DISTINCT FROM
+              '["limit"]'::jsonb
+         OR (p_payload->'policy'->>'max_leverage')::numeric<>2
+         OR (p_payload->'policy'->>'max_order_notional')::numeric<>1000
+         OR (p_payload->'policy'->>'max_total_exposure')::numeric<>3000
+         OR (p_payload->'policy'->>'max_positions')::integer<>3
+         OR (p_payload->'policy'->>'max_price_deviation_pct')::numeric<>0.01
+         OR (p_payload->'policy'->>'min_strategy_score')::numeric<>50
+         OR p_payload->'policy'->>'scoring_version'<>'phase2-quality-v1' THEN
+        RAISE EXCEPTION 'invalid natural risk payload';
+      END IF;
+
+      computed_canonical_hash:=encode(public.digest(convert_to(
+        SCHEMA_TOKEN.canonical_jsonb_text(
+          p_payload->'request_snapshot'->'canonical_input'),
+        'UTF8'),'sha256'),'hex');
+      computed_policy_digest:=encode(public.digest(convert_to(
+        SCHEMA_TOKEN.canonical_jsonb_text(p_payload->'policy'),
+        'UTF8'),'sha256'),'hex');
+      computed_intent_id:=encode(public.digest(convert_to(
+        SCHEMA_TOKEN.canonical_jsonb_text(jsonb_build_object(
+          'execution_target','OKX_DEMO','input_digest',computed_canonical_hash,
+          'policy_digest',computed_policy_digest,'idempotency_digest',
+          p_payload->>'idempotency_key_digest')),
+        'UTF8'),'sha256'),'hex');
+      computed_approved_hash:=encode(public.digest(convert_to(
+        SCHEMA_TOKEN.canonical_jsonb_text(jsonb_build_object(
+          'authorization_schema_version','RISK_V1',
+          'canonical_hash',computed_canonical_hash,
+          'policy_digest',computed_policy_digest,
+          'lineage',p_payload->'trusted_lineage',
+          'snapshots',p_payload->'request_snapshot'->'snapshot_evidence',
+          'order',jsonb_build_object(
+            'instrument_id',p_payload->>'instrument_id','side',p_payload->>'side',
+            'position_side',p_payload->>'position_side',
+            'order_type',p_payload->>'order_type','quantity',p_payload->>'quantity',
+            'limit_price',p_payload->'limit_price',
+            'reference_price',p_payload->>'reference_price',
+            'leverage',p_payload->>'leverage','margin_mode',p_payload->>'margin_mode',
+            'stop_loss',p_payload->>'stop_loss','take_profit',p_payload->>'take_profit',
+            'reduce_only',p_payload->'reduce_only','notional',p_payload->>'notional'))),
+        'UTF8'),'sha256'),'hex');
+      IF p_payload->>'canonical_hash' IS DISTINCT FROM computed_canonical_hash
+         OR p_payload->>'policy_digest' IS DISTINCT FROM computed_policy_digest
+         OR p_payload->>'intent_id' IS DISTINCT FROM computed_intent_id
+         OR p_payload->>'client_order_id' IS DISTINCT FROM
+              'FAI'||left(computed_intent_id,29)
+         OR p_payload->>'approved_payload_hash' IS DISTINCT FROM
+              computed_approved_hash
+         OR p_payload->'request_snapshot'->'canonical_input' IS DISTINCT FROM
+              jsonb_build_object(
+                'execution_target','OKX_DEMO',
+                'full_chain_run_id',p_payload->'full_chain_run_id',
+                'candidate_approval_id',p_payload->'candidate_approval_id',
+                'signal_snapshot_id',p_payload->'signal_snapshot_id',
+                'signal_digest',p_payload->'signal_digest',
+                'lineage',jsonb_build_object(
+                  'strategy_id',p_payload->'strategy_id',
+                  'strategy_version_id',p_payload->'strategy_version_id',
+                  'backtest_run_id',p_payload->'backtest_run_id',
+                  'backtest_task_id',p_payload->'backtest_task_id',
+                  'backtest_result_id',p_payload->'backtest_result_id',
+                  'strategy_score_id',p_payload->'strategy_score_id'),
+                'snapshot_ids',jsonb_build_object(
+                  'instrument',p_payload->'instrument_snapshot_id',
+                  'market',p_payload->'market_snapshot_id',
+                  'account',p_payload->'account_snapshot_id'),
+                'instrument_id',p_payload->'instrument_id','side',p_payload->'side',
+                'position_side',p_payload->'position_side',
+                'order_type',p_payload->'order_type','quantity',p_payload->'quantity',
+                'limit_price',p_payload->'limit_price',
+                'reference_price',p_payload->'reference_price',
+                'leverage',p_payload->'leverage','margin_mode',p_payload->'margin_mode',
+                'stop_loss',p_payload->'stop_loss','take_profit',p_payload->'take_profit',
+                'reduce_only',p_payload->'reduce_only') THEN
+        RAISE EXCEPTION 'natural signal risk identity is invalid';
+      END IF;
+
+      PERFORM pg_advisory_xact_lock(543000039);
+
+      SELECT id,signal_evaluation_id,research_scope_id,execution_target_id,
+             run_kind,status,current_stage,strategy_id,strategy_version_id,
+             backtest_run_id,backtest_task_id,backtest_result_id,
+             strategy_score_id,candidate_approval_id,signal_snapshot_id
+        INTO chain.id,chain.signal_evaluation_id,chain.research_scope_id,
+             chain.execution_target_id,chain.run_kind,chain.status,
+             chain.current_stage,chain.strategy_id,chain.strategy_version_id,
+             chain.backtest_run_id,chain.backtest_task_id,
+             chain.backtest_result_id,chain.strategy_score_id,
+             chain.candidate_approval_id,chain.signal_snapshot_id
+        FROM SCHEMA_TOKEN.full_chain_runs
+       WHERE id=(p_payload->>'full_chain_run_id')::bigint FOR UPDATE;
+      SELECT id,full_chain_run_id,candidate_approval_id,execution_target_id,
+             source_type,core_data,signal_digest,instrument_id,source_database_ids,
+             signal_snapshot,observed_at,expires_at
+        INTO signal_row.id,signal_row.full_chain_run_id,
+             signal_row.candidate_approval_id,signal_row.execution_target_id,
+             signal_row.source_type,signal_row.core_data,signal_row.signal_digest,
+             signal_row.instrument_id,signal_row.source_database_ids,
+             signal_row.signal_snapshot,signal_row.observed_at,signal_row.expires_at
+        FROM SCHEMA_TOKEN.full_chain_signal_snapshots
+       WHERE id=(p_payload->>'signal_snapshot_id')::bigint;
+      SELECT * INTO deployment FROM SCHEMA_TOKEN.strategy_deployments
+       WHERE id=(p_payload->>'deployment_id')::bigint;
+      SELECT * INTO guard FROM SCHEMA_TOKEN.okx_demo_automation_guard_states
+       WHERE execution_target_id='OKX_DEMO' FOR UPDATE;
+
+      IF chain.id IS NULL OR chain.execution_target_id<>'OKX_DEMO'
+         OR chain.research_scope_id<>'LOCAL_DRY_RUN'
+         OR chain.run_kind<>'EXECUTION' OR chain.status<>'EXECUTING'
+         OR chain.current_stage<>'RISK'
+         OR chain.signal_evaluation_id IS DISTINCT FROM
+              (p_payload->>'signal_evaluation_id')::bigint
+         OR chain.candidate_approval_id IS DISTINCT FROM
+              (p_payload->>'candidate_approval_id')::bigint
+         OR chain.signal_snapshot_id IS DISTINCT FROM signal_row.id
+         OR chain.strategy_id IS DISTINCT FROM (p_payload->>'strategy_id')::bigint
+         OR chain.strategy_version_id IS DISTINCT FROM
+              (p_payload->>'strategy_version_id')::bigint
+         OR chain.backtest_run_id IS DISTINCT FROM
+              (p_payload->>'backtest_run_id')::bigint
+         OR chain.backtest_task_id IS DISTINCT FROM
+              (p_payload->>'backtest_task_id')::bigint
+         OR chain.backtest_result_id IS DISTINCT FROM
+              (p_payload->>'backtest_result_id')::bigint
+         OR chain.strategy_score_id IS DISTINCT FROM
+              (p_payload->>'strategy_score_id')::bigint
+         OR (p_payload->'trusted_lineage'->>'strategy_id')::bigint
+              IS DISTINCT FROM chain.strategy_id
+         OR (p_payload->'trusted_lineage'->>'strategy_version_id')::bigint
+              IS DISTINCT FROM chain.strategy_version_id
+         OR (p_payload->'trusted_lineage'->>'backtest_run_id')::bigint
+              IS DISTINCT FROM chain.backtest_run_id
+         OR (p_payload->'trusted_lineage'->>'backtest_task_id')::bigint
+              IS DISTINCT FROM chain.backtest_task_id
+         OR (p_payload->'trusted_lineage'->>'backtest_result_id')::bigint
+              IS DISTINCT FROM chain.backtest_result_id
+         OR (p_payload->'trusted_lineage'->>'strategy_score_id')::bigint
+              IS DISTINCT FROM chain.strategy_score_id
+         OR NOT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.signal_evaluations evaluation
+              WHERE evaluation.id=chain.signal_evaluation_id
+                AND evaluation.deployment_id=(p_payload->>'deployment_id')::bigint
+                AND evaluation.execution_target_id='OKX_DEMO'
+                AND evaluation.status='LEASED'
+                AND evaluation.lease_token=p_payload->>'evaluation_lease_token'
+                AND evaluation.fencing_sequence=
+                    (p_payload->>'evaluation_fencing_sequence')::integer
+                AND evaluation.lease_expires_at>now_value
+                AND evaluation.instrument_id=signal_row.instrument_id)
+         OR signal_row.id IS NULL OR signal_row.execution_target_id<>'OKX_DEMO'
+         OR signal_row.full_chain_run_id<>chain.id
+         OR signal_row.candidate_approval_id<>chain.candidate_approval_id
+         OR signal_row.signal_digest<>p_payload->>'signal_digest'
+         OR signal_row.instrument_id<>p_payload->>'instrument_id'
+         OR signal_row.core_data IS NOT TRUE
+         OR signal_row.source_type NOT IN ('database','api_aggregate')
+         OR signal_row.observed_at>now_value OR signal_row.expires_at<=now_value
+         OR NOT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.full_chain_stage_runs stage
+              WHERE stage.full_chain_run_id=chain.id AND stage.stage='SIGNAL'
+                AND stage.status='SUCCESS'
+                AND stage.database_ids::jsonb=jsonb_build_object(
+                    'signal_snapshot_id',signal_row.id))
+         OR NOT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.full_chain_stage_runs stage
+              WHERE stage.full_chain_run_id=chain.id AND stage.stage='RISK'
+                AND stage.status='PREPARED'
+                AND stage.idempotency_key_digest=encode(public.digest(convert_to(
+                    'risk-evaluation:'||chain.signal_evaluation_id::text||':'||
+                    signal_row.signal_digest,'UTF8'),'sha256'),'hex')
+                AND stage.input_snapshot::jsonb->>'evaluation_id'=
+                    chain.signal_evaluation_id::text
+                AND stage.input_snapshot::jsonb->>'signal_snapshot_id'=signal_row.id::text
+                AND stage.input_snapshot::jsonb->>'signal_digest'=signal_row.signal_digest
+                AND stage.input_snapshot::jsonb->>'risk_canonical_hash'=
+                    p_payload->>'canonical_hash'
+                AND stage.input_snapshot::jsonb->>'risk_idempotency_digest'=
+                    p_payload->>'idempotency_key_digest'
+                AND stage.input_snapshot::jsonb->>'risk_intent_id'=p_payload->>'intent_id'
+                AND stage.input_snapshot::jsonb->>'risk_client_order_id'=
+                    p_payload->>'client_order_id'
+                AND stage.input_snapshot::jsonb->>'policy_digest'=
+                    p_payload->>'policy_digest')
+         OR p_payload->>'idempotency_key_digest'<>encode(public.digest(convert_to(
+              'signal-evaluation-'||chain.signal_evaluation_id::text,
+              'UTF8'),'sha256'),'hex') THEN
+        RAISE EXCEPTION 'natural signal lineage is not active';
+      END IF;
+
+      IF deployment.id IS NULL OR deployment.execution_target_id<>'OKX_DEMO'
+         OR deployment.status<>'ACTIVE'
+         OR deployment.real_orders IS NOT FALSE
+         OR deployment.strategy_id<>chain.strategy_id
+         OR deployment.strategy_version_id<>chain.strategy_version_id
+         OR deployment.instrument_id<>signal_row.instrument_id
+         OR deployment.promotion_policy_version<>'okx-demo-selection-v2'
+         OR deployment.risk_policy_digest IS DISTINCT FROM p_payload->>'policy_digest'
+         OR deployment.evidence_snapshot::jsonb->>'execution_target_id'<>'OKX_DEMO'
+         OR deployment.evidence_snapshot::jsonb->>'allow_real_funds'<>'false'
+         OR jsonb_typeof(p_payload->'trusted_lineage')<>'object'
+         OR (SELECT array_agg(key ORDER BY key) FROM jsonb_object_keys(
+              p_payload->'trusted_lineage') key) IS DISTINCT FROM ARRAY[
+              'backtest_result_id','backtest_run_id','backtest_task_id','minimum_score',
+              'run_status','score','scoring_version','strategy_id','strategy_score_id',
+              'strategy_version_id','task_status','version_validation_status']::text[]
+         OR NOT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.strategy_candidate_approvals approval
+              JOIN SCHEMA_TOKEN.strategy_candidate_approvals source_approval
+                ON source_approval.id=deployment.candidate_approval_id
+              JOIN SCHEMA_TOKEN.full_chain_runs source_chain
+                ON source_chain.id=source_approval.full_chain_run_id
+              WHERE approval.id=chain.candidate_approval_id
+                AND approval.status='APPROVED' AND approval.expires_at>now_value
+                AND approval.full_chain_run_id=chain.id
+                AND approval.strategy_version_id=chain.strategy_version_id
+                AND approval.backtest_result_id=chain.backtest_result_id
+                AND approval.strategy_score_id=chain.strategy_score_id
+                AND approval.promotion_policy_version='okx-demo-selection-v2'
+                AND approval.candidate_digest=source_approval.candidate_digest
+                AND approval.promotion_evidence::jsonb=source_approval.promotion_evidence::jsonb
+                AND source_approval.status='APPROVED'
+                AND source_approval.execution_target_id='OKX_DEMO'
+                AND source_approval.candidate_digest=deployment.candidate_digest
+                AND source_approval.promotion_policy_version=deployment.promotion_policy_version
+                AND source_chain.run_kind='RESEARCH'
+                AND source_chain.execution_target_id='OKX_DEMO'
+                AND source_chain.research_scope_id='LOCAL_DRY_RUN'
+                AND source_chain.candidate_approval_id=source_approval.id
+                AND source_chain.strategy_id=chain.strategy_id
+                AND source_chain.strategy_version_id=chain.strategy_version_id
+                AND source_chain.backtest_run_id=chain.backtest_run_id
+                AND source_chain.backtest_task_id=chain.backtest_task_id
+                AND source_chain.backtest_result_id=chain.backtest_result_id
+                AND source_chain.strategy_score_id=chain.strategy_score_id
+                AND source_approval.promotion_evidence::jsonb#>>'{policy,execution_target_id}'='OKX_DEMO'
+                AND source_approval.promotion_evidence::jsonb#>>'{policy,allow_real_funds}'='false'
+                AND source_approval.promotion_evidence::jsonb#>>'{policy,production_promotion_claim}'='false'
+                AND source_approval.promotion_evidence::jsonb#>>'{policy,validated_backtest_required}'='true'
+                AND (source_approval.promotion_evidence::jsonb#>>'{policy,minimum_score}')::numeric=50)
+         OR NOT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.strategy_versions version
+              JOIN SCHEMA_TOKEN.strategies strategy ON strategy.id=version.strategy_id
+              JOIN SCHEMA_TOKEN.backtest_runs run
+                ON run.id=chain.backtest_run_id AND run.strategy_version_id=version.id
+              JOIN SCHEMA_TOKEN.backtest_tasks task
+                ON task.id=chain.backtest_task_id AND task.backtest_run_id=run.id
+              JOIN SCHEMA_TOKEN.backtest_results result
+                ON result.id=chain.backtest_result_id
+               AND result.backtest_run_id=run.id AND result.backtest_task_id=task.id
+              JOIN SCHEMA_TOKEN.strategy_scores score
+                ON score.id=chain.strategy_score_id
+               AND score.strategy_id=strategy.id
+               AND score.strategy_version_id=version.id
+               AND score.backtest_result_id=result.id
+              WHERE version.id=chain.strategy_version_id
+                AND strategy.current_version_id=version.id
+                AND version.validation_status='passed'
+                AND run.execution_scope_id='LOCAL_DRY_RUN'
+                AND run.status='succeeded' AND task.status='succeeded'
+                AND result.max_drawdown_pct IS NOT NULL
+                AND abs(result.max_drawdown_pct)<=0.15
+                AND score.total_score>=(p_payload->'policy'->>'min_strategy_score')::float
+                AND score.scoring_version=p_payload->'policy'->>'scoring_version'
+                AND (p_payload->'trusted_lineage'->>'score')::float=score.total_score
+                AND (p_payload->'trusted_lineage'->>'minimum_score')::numeric=50
+                AND p_payload->'trusted_lineage'->>'version_validation_status'='passed'
+                AND p_payload->'trusted_lineage'->>'run_status'='succeeded'
+                AND p_payload->'trusted_lineage'->>'task_status'='succeeded'
+                AND p_payload->'trusted_lineage'->>'scoring_version'=
+                    score.scoring_version) THEN
+        RAISE EXCEPTION 'natural signal deployment or quality contract is invalid';
+      END IF;
+
+      IF guard.execution_target_id IS NULL
+         OR guard.authorization_mode<>'CONTINUOUS_DEMO_V1'
+         OR guard.operational_state<>'RUNNING'
+         OR guard.policy_digest IS DISTINCT FROM p_payload->>'policy_digest'
+         OR NOT SCHEMA_TOKEN.okx_demo_continuous_opening_allowed(
+              p_payload->>'policy_digest') THEN
+        RAISE EXCEPTION 'natural signal global guard is closed';
+      END IF;
+      SELECT count(*),max(generation) INTO writer_count,writer_generation
+        FROM SCHEMA_TOKEN.okx_order_writer_leases
+       WHERE execution_target_id='OKX_DEMO' AND expires_at>now_value
+         AND heartbeat_at>=now_value-interval '30 seconds';
+      IF writer_count<>1 OR writer_generation IS NULL THEN
+        RAISE EXCEPTION 'natural signal writer fence is invalid';
+      END IF;
+      PERFORM 1 FROM SCHEMA_TOKEN.okx_order_writer_leases
+       WHERE execution_target_id='OKX_DEMO' AND generation=writer_generation
+       FOR SHARE;
+
+      SELECT state.last_reconciliation_run_id INTO reconciliation_run_id
+        FROM SCHEMA_TOKEN.okx_demo_reconciliation_states state
+        JOIN SCHEMA_TOKEN.reconciliation_runs run
+          ON run.id=state.last_reconciliation_run_id
+       WHERE state.execution_target_id='OKX_DEMO'
+         AND state.status IN ('RECONCILED','RECOVERED')
+         AND state.opening_frozen=false
+         AND run.execution_target_id='OKX_DEMO'
+         AND run.status IN ('RECONCILED','RECOVERED')
+         AND run.artifact_status='READY'
+         AND run.source_type='api_aggregate' AND run.core_data=true
+         AND run.authoritative_observed_at BETWEEN now_value-interval '90 seconds'
+                                               AND now_value+interval '5 seconds'
+         AND run.completed_at BETWEEN now_value-interval '90 seconds'
+                                  AND now_value+interval '5 seconds'
+         AND run.database_ids::jsonb->'reconciliation_run'=jsonb_build_array(run.id)
+         AND jsonb_typeof(run.database_ids::jsonb->'recovery_batches')='array'
+         AND jsonb_array_length(run.database_ids::jsonb->'recovery_batches')=1
+         AND EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_recovery_batches batch
+              WHERE batch.database_id=(run.database_ids::jsonb->'recovery_batches'->>0)::bigint
+                AND batch.execution_target_id='OKX_DEMO'
+                AND batch.authenticated=true AND batch.pagination_complete=true
+                AND batch.complete_streams::jsonb=
+                    '["ACCOUNT","FILL","ORDER","POSITION"]'::jsonb
+                AND batch.completed_at BETWEEN now_value-interval '90 seconds'
+                                           AND now_value+interval '5 seconds'
+                AND batch.observed_at BETWEEN now_value-interval '90 seconds'
+                                          AND now_value+interval '5 seconds');
+      IF reconciliation_run_id IS NULL
+         OR guard.last_healthy_reconciliation_run_id IS DISTINCT FROM
+              reconciliation_run_id THEN
+        RAISE EXCEPTION 'natural signal reconciliation is stale';
+      END IF;
+
+      SELECT count(*) INTO snapshot_count
+        FROM SCHEMA_TOKEN.okx_demo_trusted_snapshots snapshot
+        JOIN SCHEMA_TOKEN.okx_demo_attested_sessions session
+          ON session.session_id=snapshot.attested_session_id
+       WHERE snapshot.snapshot_id IN (
+          p_payload->>'instrument_snapshot_id',p_payload->>'market_snapshot_id',
+          p_payload->>'account_snapshot_id')
+         AND snapshot.execution_target_id='OKX_DEMO'
+         AND snapshot.source_type='api_aggregate' AND snapshot.core_data=true
+         AND snapshot.expires_at>now_value AND snapshot.observed_at<=now_value
+         AND snapshot.content_json->>'execution_target'='OKX_DEMO'
+         AND snapshot.content_json->>'source'='okx_demo_rest'
+         AND snapshot.content_json->>'stale'='false'
+         AND snapshot.content_json->>'resource' IN ('instrument','market','account')
+         AND session.execution_target_id='OKX_DEMO'
+         AND session.revoked_at IS NULL AND session.expires_at>now_value
+         AND snapshot.attestation_fingerprint_sha256=session.pinned_fingerprint_sha256;
+      IF snapshot_count<>3 OR (SELECT count(DISTINCT snapshot.content_json->>'resource')
+          FROM SCHEMA_TOKEN.okx_demo_trusted_snapshots snapshot
+         WHERE snapshot.snapshot_id IN (p_payload->>'instrument_snapshot_id',
+               p_payload->>'market_snapshot_id',p_payload->>'account_snapshot_id'))<>3 THEN
+        RAISE EXCEPTION 'natural signal attestation is invalid';
+      END IF;
+
+      SELECT * INTO instrument_row FROM SCHEMA_TOKEN.okx_demo_trusted_snapshots
+       WHERE snapshot_id=p_payload->>'instrument_snapshot_id' AND kind='instrument';
+      SELECT * INTO market_row FROM SCHEMA_TOKEN.okx_demo_trusted_snapshots
+       WHERE snapshot_id=p_payload->>'market_snapshot_id' AND kind='market';
+      SELECT * INTO account_row FROM SCHEMA_TOKEN.okx_demo_trusted_snapshots
+       WHERE snapshot_id=p_payload->>'account_snapshot_id' AND kind='account';
+      instrument_content:=instrument_row.content_json::jsonb;
+      market_content:=market_row.content_json::jsonb;
+      account_content:=account_row.content_json::jsonb;
+      IF instrument_row.database_id IS NULL OR market_row.database_id IS NULL
+         OR account_row.database_id IS NULL
+         OR instrument_row.attested_session_id<>market_row.attested_session_id
+         OR instrument_row.attested_session_id<>account_row.attested_session_id
+         OR instrument_row.attested_session_expires_at<=now_value
+         OR market_row.attested_session_expires_at<=now_value
+         OR account_row.attested_session_expires_at<=now_value
+         OR p_payload->'request_snapshot'#>>'{snapshot_evidence,instrument,snapshot_id}'
+              IS DISTINCT FROM instrument_row.snapshot_id
+         OR p_payload->'request_snapshot'#>>'{snapshot_evidence,market,snapshot_id}'
+              IS DISTINCT FROM market_row.snapshot_id
+         OR p_payload->'request_snapshot'#>>'{snapshot_evidence,account,snapshot_id}'
+              IS DISTINCT FROM account_row.snapshot_id
+         OR p_payload->'request_snapshot'#>>'{snapshot_evidence,instrument,digest}'
+              IS DISTINCT FROM instrument_row.digest
+         OR p_payload->'request_snapshot'#>>'{snapshot_evidence,market,digest}'
+              IS DISTINCT FROM market_row.digest
+         OR p_payload->'request_snapshot'#>>'{snapshot_evidence,account,digest}'
+              IS DISTINCT FROM account_row.digest
+         OR p_payload->'request_snapshot'#>>'{snapshot_evidence,instrument,database_id}'
+              IS DISTINCT FROM instrument_row.database_id::text
+         OR p_payload->'request_snapshot'#>>'{snapshot_evidence,market,database_id}'
+              IS DISTINCT FROM market_row.database_id::text
+         OR p_payload->'request_snapshot'#>>'{snapshot_evidence,account,database_id}'
+              IS DISTINCT FROM account_row.database_id::text
+         OR (p_payload->'request_snapshot'#>>'{snapshot_evidence,instrument,expires_at}')::timestamptz
+              IS DISTINCT FROM instrument_row.expires_at
+         OR (p_payload->'request_snapshot'#>>'{snapshot_evidence,market,expires_at}')::timestamptz
+              IS DISTINCT FROM market_row.expires_at
+         OR (p_payload->'request_snapshot'#>>'{snapshot_evidence,account,expires_at}')::timestamptz
+              IS DISTINCT FROM account_row.expires_at THEN
+        RAISE EXCEPTION 'natural signal snapshot binding is invalid';
+      END IF;
+      IF instrument_row.digest IS DISTINCT FROM encode(public.digest(convert_to(
+            SCHEMA_TOKEN.canonical_jsonb_text(instrument_content),'UTF8'),'sha256'),'hex')
+         OR market_row.digest IS DISTINCT FROM encode(public.digest(convert_to(
+            SCHEMA_TOKEN.canonical_jsonb_text(market_content),'UTF8'),'sha256'),'hex')
+         OR account_row.digest IS DISTINCT FROM encode(public.digest(convert_to(
+            SCHEMA_TOKEN.canonical_jsonb_text(account_content),'UTF8'),'sha256'),'hex')
+         OR instrument_row.snapshot_id IS DISTINCT FROM instrument_row.kind||':'||left(
+            encode(public.digest(convert_to(SCHEMA_TOKEN.canonical_jsonb_text(
+              jsonb_build_object('digest',instrument_row.digest,
+                'fingerprint',instrument_row.attestation_fingerprint_sha256,
+                'kind',instrument_row.kind,'observed_at',
+                to_char(instrument_row.observed_at AT TIME ZONE 'UTC',
+                  'YYYY-MM-DD"T"HH24:MI:SS')||CASE WHEN extract(microseconds FROM
+                  instrument_row.observed_at)::integer%1000000=0 THEN '' ELSE '.'||
+                  to_char(instrument_row.observed_at AT TIME ZONE 'UTC','US') END||'+00:00',
+                'session_id',instrument_row.attested_session_id)),
+              'UTF8'),'sha256'),'hex'),48)
+         OR market_row.snapshot_id IS DISTINCT FROM market_row.kind||':'||left(
+            encode(public.digest(convert_to(SCHEMA_TOKEN.canonical_jsonb_text(
+              jsonb_build_object('digest',market_row.digest,
+                'fingerprint',market_row.attestation_fingerprint_sha256,
+                'kind',market_row.kind,'observed_at',
+                to_char(market_row.observed_at AT TIME ZONE 'UTC',
+                  'YYYY-MM-DD"T"HH24:MI:SS')||CASE WHEN extract(microseconds FROM
+                  market_row.observed_at)::integer%1000000=0 THEN '' ELSE '.'||
+                  to_char(market_row.observed_at AT TIME ZONE 'UTC','US') END||'+00:00',
+                'session_id',market_row.attested_session_id)),
+              'UTF8'),'sha256'),'hex'),48)
+         OR account_row.snapshot_id IS DISTINCT FROM account_row.kind||':'||left(
+            encode(public.digest(convert_to(SCHEMA_TOKEN.canonical_jsonb_text(
+              jsonb_build_object('digest',account_row.digest,
+                'fingerprint',account_row.attestation_fingerprint_sha256,
+                'kind',account_row.kind,'observed_at',
+                to_char(account_row.observed_at AT TIME ZONE 'UTC',
+                  'YYYY-MM-DD"T"HH24:MI:SS')||CASE WHEN extract(microseconds FROM
+                  account_row.observed_at)::integer%1000000=0 THEN '' ELSE '.'||
+                  to_char(account_row.observed_at AT TIME ZONE 'UTC','US') END||'+00:00',
+                'session_id',account_row.attested_session_id)),
+              'UTF8'),'sha256'),'hex'),48)
+         OR (instrument_content->>'expires_at')::timestamptz IS DISTINCT FROM
+              instrument_row.expires_at
+         OR (market_content->>'expires_at')::timestamptz IS DISTINCT FROM
+              market_row.expires_at
+         OR (account_content->>'expires_at')::timestamptz IS DISTINCT FROM
+              account_row.expires_at
+         OR instrument_row.observed_at NOT BETWEEN now_value-interval '90 seconds'
+                                                 AND now_value
+         OR market_row.observed_at NOT BETWEEN now_value-interval '90 seconds'
+                                             AND now_value
+         OR account_row.observed_at NOT BETWEEN now_value-interval '90 seconds'
+                                              AND now_value
+         OR (market_content->>'as_of')::timestamptz NOT BETWEEN
+              now_value-interval '90 seconds' AND now_value+interval '5 seconds'
+         OR (account_content->>'as_of')::timestamptz NOT BETWEEN
+              now_value-interval '90 seconds' AND now_value+interval '5 seconds'
+         OR account_content->'authenticated' IS DISTINCT FROM 'true'::jsonb
+         OR account_content->>'pinned_account_fingerprint' IS DISTINCT FROM
+              account_row.attestation_fingerprint_sha256
+         OR instrument_content->>'instrument_type' IS DISTINCT FROM 'SWAP'
+         OR (instrument_content->>'contract_shape'='linear' AND
+              instrument_content->>'ctValCcy' IS DISTINCT FROM
+              split_part(instrument_content->>'instId','-',1))
+         OR (instrument_content->>'contract_shape'='inverse' AND
+              instrument_content->>'ctValCcy' NOT IN (
+                split_part(instrument_content->>'instId','-',2),'USD')) THEN
+        RAISE EXCEPTION 'natural signal snapshot semantics are invalid';
+      END IF;
+      IF signal_row.source_database_ids::jsonb IS DISTINCT FROM jsonb_build_object(
+            'instrument_snapshot',instrument_row.database_id,
+            'market_snapshot',market_row.database_id,
+            'account_snapshot',account_row.database_id)
+         OR signal_row.signal_snapshot::jsonb->>'decision' IS DISTINCT FROM 'ACTIONABLE'
+         OR jsonb_typeof(signal_row.signal_snapshot::jsonb->'enter_long')
+              IS DISTINCT FROM 'boolean'
+         OR jsonb_typeof(signal_row.signal_snapshot::jsonb->'enter_short')
+              IS DISTINCT FROM 'boolean'
+         OR (signal_row.signal_snapshot::jsonb->>'enter_long')::boolean =
+              (signal_row.signal_snapshot::jsonb->>'enter_short')::boolean
+         OR ((signal_row.signal_snapshot::jsonb->>'enter_long')::boolean IS TRUE
+              AND (p_payload->>'side'<>'buy'
+                   OR p_payload->>'position_side'<>'long'))
+         OR ((signal_row.signal_snapshot::jsonb->>'enter_short')::boolean IS TRUE
+              AND (p_payload->>'side'<>'sell'
+                   OR p_payload->>'position_side'<>'short'))
+         OR signal_row.signal_snapshot::jsonb->>'instrument_id' IS DISTINCT FROM
+              signal_row.instrument_id
+         OR (signal_row.signal_snapshot::jsonb->>'strategy_version_id')::bigint
+              IS DISTINCT FROM chain.strategy_version_id
+         OR signal_row.signal_snapshot::jsonb->>'candidate_digest' IS DISTINCT FROM
+              (SELECT candidate_digest FROM SCHEMA_TOKEN.strategy_candidate_approvals
+                WHERE id=chain.candidate_approval_id)
+         OR signal_row.signal_snapshot::jsonb->>'market_snapshot_id' IS DISTINCT FROM
+              market_row.snapshot_id
+         OR signal_row.signal_snapshot::jsonb->>'market_digest' IS DISTINCT FROM
+              market_row.digest
+         OR signal_row.signal_digest IS DISTINCT FROM encode(public.digest(convert_to(
+              SCHEMA_TOKEN.canonical_jsonb_text(jsonb_build_object(
+                'candidate_digest',(SELECT candidate_digest FROM
+                  SCHEMA_TOKEN.strategy_candidate_approvals
+                   WHERE id=chain.candidate_approval_id),
+                'instrument_id',signal_row.instrument_id,
+                'source_type',signal_row.source_type,
+                'source_database_ids',signal_row.source_database_ids::jsonb,
+                'signal_snapshot',signal_row.signal_snapshot::jsonb,
+                'observed_at',to_char(signal_row.observed_at AT TIME ZONE 'UTC',
+                  'YYYY-MM-DD"T"HH24:MI:SS')||CASE WHEN extract(microseconds FROM
+                  signal_row.observed_at)::integer%1000000=0 THEN '' ELSE '.'||
+                  to_char(signal_row.observed_at AT TIME ZONE 'UTC','US') END||'+00:00',
+                'expires_at',to_char(signal_row.expires_at AT TIME ZONE 'UTC',
+                  'YYYY-MM-DD"T"HH24:MI:SS')||CASE WHEN extract(microseconds FROM
+                  signal_row.expires_at)::integer%1000000=0 THEN '' ELSE '.'||
+                  to_char(signal_row.expires_at AT TIME ZONE 'UTC','US') END||'+00:00')),
+              'UTF8'),'sha256'),'hex')
+         OR NOT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.signal_evaluations evaluation
+              WHERE evaluation.id=chain.signal_evaluation_id
+                AND evaluation.result_snapshot::jsonb->>'checkpoint_schema'=
+                    'SIGNAL_EVALUATION_V1'
+                AND evaluation.result_snapshot::jsonb->'signal'=
+                    signal_row.signal_snapshot::jsonb
+                AND evaluation.result_snapshot::jsonb#>>'{bundle,instrument,database_id}'=
+                    instrument_row.database_id::text
+                AND evaluation.result_snapshot::jsonb#>>'{bundle,market,database_id}'=
+                    market_row.database_id::text
+                AND evaluation.result_snapshot::jsonb#>>'{bundle,account,database_id}'=
+                    account_row.database_id::text
+                AND evaluation.result_snapshot::jsonb#>>'{bundle,instrument,snapshot_id}'=
+                    instrument_row.snapshot_id
+                AND evaluation.result_snapshot::jsonb#>>'{bundle,market,snapshot_id}'=
+                    market_row.snapshot_id
+                AND evaluation.result_snapshot::jsonb#>>'{bundle,account,snapshot_id}'=
+                    account_row.snapshot_id) THEN
+        RAISE EXCEPTION 'natural signal evaluator receipt is invalid';
+      END IF;
+      account_exposure:=
+        (account_content#>>'{exposure_by_position_side,long}')::numeric+
+        (account_content#>>'{exposure_by_position_side,short}')::numeric;
+      account_positions:=
+        (account_content#>>'{open_positions_by_position_side,long}')::integer+
+        (account_content#>>'{open_positions_by_position_side,short}')::integer;
+      IF account_exposure IS NULL OR account_exposure<0
+         OR account_positions IS NULL OR account_positions<0 THEN
+        RAISE EXCEPTION 'natural signal account exposure is invalid';
+      END IF;
+
+      notional:=(p_payload->>'notional')::numeric;
+      maximum_total:=(p_payload->'policy'->>'max_total_exposure')::numeric;
+      maximum_order:=(p_payload->'policy'->>'max_order_notional')::numeric;
+      maximum_leverage:=(p_payload->'policy'->>'max_leverage')::numeric;
+      maximum_deviation:=(p_payload->'policy'->>'max_price_deviation_pct')::numeric;
+      minimum_score:=(p_payload->'policy'->>'min_strategy_score')::float;
+      reference_price:=(p_payload->>'reference_price')::numeric;
+      order_price:=COALESCE((p_payload->>'limit_price')::numeric,reference_price);
+      quantity_value:=(p_payload->>'quantity')::numeric;
+      leverage_value:=(p_payload->>'leverage')::numeric;
+      expires_value:=(p_payload->>'expires_at')::timestamptz;
+      snapshot_reference_price:=(market_content->>'reference_price')::numeric;
+      contract_value:=(instrument_content->>'ctVal')::numeric;
+      lot_size:=(instrument_content->>'lotSz')::numeric;
+      minimum_size:=(instrument_content->>'minSz')::numeric;
+      tick_size:=(instrument_content->>'tickSz')::numeric;
+      SELECT version.blueprint::jsonb INTO strategy_blueprint
+        FROM SCHEMA_TOKEN.strategy_versions version
+       WHERE version.id=chain.strategy_version_id;
+      stop_fraction:=abs((strategy_blueprint->>'stoploss')::numeric);
+      SELECT max(value::numeric) INTO roi_fraction
+        FROM jsonb_each_text(strategy_blueprint->'minimal_roi');
+      expected_limit:=CASE
+        WHEN (signal_row.signal_snapshot::jsonb->>'enter_long')::boolean
+          THEN floor(reference_price/tick_size)*tick_size
+        ELSE ceil(reference_price/tick_size)*tick_size END;
+      expected_stop:=CASE
+        WHEN (signal_row.signal_snapshot::jsonb->>'enter_long')::boolean
+          THEN floor(expected_limit*(1-stop_fraction)/tick_size)*tick_size
+        ELSE ceil(expected_limit*(1+stop_fraction)/tick_size)*tick_size END;
+      expected_take:=CASE
+        WHEN (signal_row.signal_snapshot::jsonb->>'enter_long')::boolean
+          THEN ceil(expected_limit*(1+roi_fraction)/tick_size)*tick_size
+        ELSE floor(expected_limit*(1-roi_fraction)/tick_size)*tick_size END;
+      calculated_notional:=CASE WHEN instrument_content->>'contract_shape'='linear'
+        THEN quantity_value*contract_value*order_price
+        WHEN instrument_content->>'contract_shape'='inverse'
+        THEN quantity_value*contract_value ELSE NULL END;
+      IF notional<=0 OR maximum_total<=0 OR maximum_order<=0
+         OR maximum_leverage<=0 OR maximum_deviation<0 OR minimum_score<0
+         OR reference_price<=0 OR reference_price<>snapshot_reference_price
+         OR order_price<=0 OR leverage_value<=0 OR quantity_value<=0
+         OR contract_value<=0 OR lot_size<=0 OR minimum_size<=0 OR tick_size<=0
+         OR stop_fraction IS NULL OR stop_fraction<=0
+         OR roi_fraction IS NULL OR roi_fraction<=0
+         OR quantity_value IS DISTINCT FROM minimum_size
+         OR order_price IS DISTINCT FROM expected_limit
+         OR (p_payload->>'stop_loss')::numeric IS DISTINCT FROM expected_stop
+         OR (p_payload->>'take_profit')::numeric IS DISTINCT FROM expected_take
+         OR quantity_value<minimum_size OR mod(quantity_value,lot_size)<>0
+         OR mod(order_price,tick_size)<>0
+         OR calculated_notional IS NULL OR calculated_notional<>notional
+         OR expires_value<=now_value OR expires_value>signal_row.expires_at
+         OR expires_value>instrument_row.expires_at
+         OR expires_value>market_row.expires_at OR expires_value>account_row.expires_at
+         OR instrument_content->>'instId'<>p_payload->>'instrument_id'
+         OR market_content->>'instrument_id'<>p_payload->>'instrument_id'
+         OR account_content->>'account_mode'<>'long_short_mode'
+         OR account_content->>'margin_mode'<>'isolated'
+         OR (account_content->>'current_exposure')::numeric<>account_exposure
+         OR (account_content->>'open_positions')::integer<>account_positions
+         OR leverage_value<>(account_content#>>ARRAY['leverage_by_position_side',
+              p_payload->>'position_side'])::numeric
+         OR p_payload->>'margin_mode'<>'isolated'
+         OR p_payload->>'side' NOT IN ('buy','sell')
+         OR p_payload->>'position_side' NOT IN ('long','short')
+         OR p_payload->>'order_type' NOT IN ('limit','market')
+         OR ((p_payload->>'position_side'='long') IS DISTINCT FROM
+              ((p_payload->>'side'='buy')<>(p_payload->>'reduce_only')::boolean))
+         OR (p_payload->>'side'='buy' AND NOT (
+              (p_payload->>'stop_loss')::numeric<reference_price AND
+              reference_price<(p_payload->>'take_profit')::numeric))
+         OR (p_payload->>'side'='sell' AND NOT (
+              (p_payload->>'take_profit')::numeric<reference_price AND
+              reference_price<(p_payload->>'stop_loss')::numeric))
+         OR NOT (p_payload->'policy'->'allowed_instruments' ?
+              (p_payload->>'instrument_id'))
+         OR NOT (p_payload->'policy'->'allowed_sides' ? (p_payload->>'side'))
+         OR NOT (p_payload->'policy'->'allowed_order_types' ?
+              (p_payload->>'order_type')) THEN
+        RAISE EXCEPTION 'natural signal risk contract is invalid';
+      END IF;
+      IF final_status='APPROVED' AND (notional>maximum_order
+         OR leverage_value>maximum_leverage
+         OR abs(order_price-reference_price)/reference_price>maximum_deviation) THEN
+        final_status:='REJECTED'; reasons:=reasons||'["database risk limit exceeded"]'::jsonb;
+      END IF;
+
+      SELECT * INTO existing FROM SCHEMA_TOKEN.trade_intents
+       WHERE execution_target_id='OKX_DEMO'
+         AND idempotency_key_digest=p_payload->>'idempotency_key_digest'
+       FOR UPDATE;
+      IF existing.id IS NOT NULL THEN
+        IF existing.canonical_hash IS DISTINCT FROM p_payload->>'canonical_hash'
+           OR existing.policy_digest IS DISTINCT FROM p_payload->>'policy_digest'
+           OR existing.intent_id IS DISTINCT FROM p_payload->>'intent_id'
+           OR existing.client_order_id IS DISTINCT FROM p_payload->>'client_order_id' THEN
+          RAISE EXCEPTION 'natural risk idempotency conflict';
+        END IF;
+        SELECT id INTO decision_database_id FROM SCHEMA_TOKEN.risk_decisions
+         WHERE trade_intent_id=existing.id;
+        SELECT id INTO approved_database_id FROM SCHEMA_TOKEN.approved_executions
+         WHERE trade_intent_id=existing.id AND status='ACTIVE'
+           AND expires_at>now_value;
+        RETURN jsonb_build_object('status',existing.status,
+          'trade_intent_id',existing.id,'risk_decision_id',decision_database_id,
+          'approved_execution_id',approved_database_id,
+          'intent_id',existing.intent_id,'client_order_id',existing.client_order_id,
+          'order_submission_authorized',false,'idempotent_replay',true);
+      END IF;
+
+      SELECT execution_target_id,reserved_notional,approved_positions
+        INTO budget.execution_target_id,budget.reserved_notional,budget.approved_positions
+        FROM SCHEMA_TOKEN.risk_budgets
+       WHERE execution_target_id='OKX_DEMO' FOR UPDATE;
+      IF budget.execution_target_id IS NULL THEN
+        RAISE EXCEPTION 'natural signal risk budget is missing';
+      END IF;
+      projected:=GREATEST(budget.reserved_notional,account_exposure)+notional;
+      projected_positions:=GREATEST(budget.approved_positions,account_positions)+1;
+      IF final_status='APPROVED' AND (projected>maximum_total
+         OR projected_positions>(p_payload->'policy'->>'max_positions')::integer) THEN
+        final_status:='REJECTED'; reasons:=reasons||'["database global budget exceeded"]'::jsonb;
+      END IF;
+
+      INSERT INTO SCHEMA_TOKEN.trade_intents(
+        execution_target_id,authorization_schema_version,intent_id,canonical_hash,
+        policy_digest,approved_payload_hash,idempotency_key_digest,client_order_id,
+        strategy_id,strategy_version_id,backtest_run_id,backtest_result_id,
+        strategy_score_id,instrument_id,side,position_side,order_type,quantity,
+        limit_price,reference_price,leverage,margin_mode,stop_loss,take_profit,
+        reduce_only,status,request_snapshot,expires_at)
+      VALUES('OKX_DEMO','RISK_V1',p_payload->>'intent_id',
+        p_payload->>'canonical_hash',p_payload->>'policy_digest',
+        CASE WHEN final_status='APPROVED' THEN p_payload->>'approved_payload_hash' END,
+        p_payload->>'idempotency_key_digest',p_payload->>'client_order_id',
+        chain.strategy_id,chain.strategy_version_id,chain.backtest_run_id,
+        chain.backtest_result_id,chain.strategy_score_id,p_payload->>'instrument_id',
+        p_payload->>'side',p_payload->>'position_side',p_payload->>'order_type',
+        (p_payload->>'quantity')::numeric,(p_payload->>'limit_price')::numeric,
+        reference_price,leverage_value,p_payload->>'margin_mode',
+        (p_payload->>'stop_loss')::numeric,(p_payload->>'take_profit')::numeric,
+        (p_payload->>'reduce_only')::boolean,final_status,
+        p_payload->'request_snapshot',expires_value)
+      RETURNING id INTO intent_database_id;
+      INSERT INTO SCHEMA_TOKEN.risk_decisions(
+        execution_target_id,trade_intent_id,authorization_schema_version,
+        policy_digest,decision,policy_version,evidence_snapshot)
+      VALUES('OKX_DEMO',intent_database_id,'RISK_V1',p_payload->>'policy_digest',
+        final_status,'risk-chain-v2',jsonb_build_object('reasons',reasons,
+          'input_digest',p_payload->>'canonical_hash',
+          'policy_digest',p_payload->>'policy_digest','llm_authority',false,
+          'lineage',p_payload->'trusted_lineage',
+          'notional',notional::text,
+          'natural_signal',true,'reconciliation_run_id',reconciliation_run_id,
+          'max_drawdown_contract',0.15))
+      RETURNING id INTO decision_database_id;
+      IF final_status='APPROVED' THEN
+        UPDATE SCHEMA_TOKEN.risk_budgets SET reserved_notional=projected,
+          approved_positions=projected_positions
+         WHERE execution_target_id='OKX_DEMO';
+        INSERT INTO SCHEMA_TOKEN.approved_executions(
+          execution_target_id,trade_intent_id,risk_decision_id,intent_id,
+          client_order_id,authorization_schema_version,canonical_hash,policy_digest,
+          approved_payload_hash,instrument_snapshot_id,market_snapshot_id,
+          account_snapshot_id,decision,intent_status,reserved_notional,
+          order_submission_authorized,claim_required,status,expires_at,evidence_snapshot)
+        VALUES('OKX_DEMO',intent_database_id,decision_database_id,
+          p_payload->>'intent_id',p_payload->>'client_order_id','RISK_V1',
+          p_payload->>'canonical_hash',p_payload->>'policy_digest',
+          p_payload->>'approved_payload_hash',p_payload->>'instrument_snapshot_id',
+          p_payload->>'market_snapshot_id',p_payload->>'account_snapshot_id',
+          'APPROVED','APPROVED',notional,false,true,'ACTIVE',expires_value,
+          jsonb_build_object('offline_execution_permission',true,
+            'claim_revalidation_required',true,'natural_signal',true,
+            'notional',notional::text)) RETURNING id INTO approved_database_id;
+      END IF;
+      RETURN jsonb_build_object('status',final_status,
+        'trade_intent_id',intent_database_id,'risk_decision_id',decision_database_id,
+        'approved_execution_id',approved_database_id,
+        'intent_id',p_payload->>'intent_id',
+        'client_order_id',p_payload->>'client_order_id',
+        'order_submission_authorized',false,'idempotent_replay',false);
+    END $$;
+    """.replace("SCHEMA_TOKEN", quoted_schema)
+    connection.execute(text(ddl))
+    connection.execute(text(
+        "GRANT SELECT (id,signal_evaluation_id,research_scope_id,"
+        "execution_target_id,run_kind,status,current_stage,strategy_id,"
+        "strategy_version_id,backtest_run_id,backtest_task_id,backtest_result_id,"
+        "strategy_score_id,candidate_approval_id,signal_snapshot_id) ON "
+        "{0}.full_chain_runs TO freqtrade_ai_attestor; "
+        "GRANT SELECT (id,full_chain_run_id,candidate_approval_id,"
+        "execution_target_id,source_type,core_data,signal_digest,instrument_id,"
+        "source_database_ids,signal_snapshot,observed_at,expires_at) ON "
+        "{0}.full_chain_signal_snapshots "
+        "TO freqtrade_ai_attestor; "
+        "GRANT SELECT (full_chain_run_id,stage,status,idempotency_key_digest,"
+        "input_snapshot,database_ids) ON "
+        "{0}.full_chain_stage_runs TO freqtrade_ai_attestor; "
+        "GRANT SELECT (id,current_version_id) ON {0}.strategies "
+        "TO freqtrade_ai_attestor; "
+        "GRANT SELECT (id,strategy_id,validation_status,blueprint) ON "
+        "{0}.strategy_versions "
+        "TO freqtrade_ai_attestor; "
+        "GRANT SELECT (id,strategy_version_id,execution_scope_id,status) ON "
+        "{0}.backtest_runs TO freqtrade_ai_attestor; "
+        "GRANT SELECT (id,backtest_run_id,status) ON {0}.backtest_tasks "
+        "TO freqtrade_ai_attestor; "
+        "GRANT SELECT (id,backtest_run_id,backtest_task_id,max_drawdown_pct) ON "
+        "{0}.backtest_results TO freqtrade_ai_attestor; "
+        "GRANT SELECT (id,strategy_id,strategy_version_id,backtest_result_id,"
+        "total_score,scoring_version) ON {0}.strategy_scores "
+        "TO freqtrade_ai_attestor; "
+        "GRANT SELECT (database_id,execution_target_id,authenticated,"
+        "pagination_complete,complete_streams,completed_at,observed_at) ON "
+        "{0}.okx_demo_recovery_batches TO freqtrade_ai_attestor"
+        .format(quoted_schema)
+    ))
+    connection.execute(text(
+        "REVOKE INSERT,UPDATE,DELETE,TRUNCATE ON TABLE {0}.risk_budgets "
+        "FROM PUBLIC,freqtrade; GRANT SELECT ON TABLE {0}.risk_budgets TO freqtrade"
+        .format(quoted_schema)
+    ))
+    signature = f"{quoted_schema}.persist_okx_demo_natural_risk_chain(jsonb)"
+    connection.execute(text(
+        "ALTER FUNCTION {0} OWNER TO freqtrade_ai_attestor; "
+        "REVOKE ALL ON FUNCTION {0} FROM PUBLIC,freqtrade; "
+        "GRANT EXECUTE ON FUNCTION {0} TO freqtrade".format(signature)
+    ))
+
+
+def _natural_signal_risk_chain_boundary_problems(
+    connection: Connection, schema_name: str
+) -> list[str]:
+    signature = f"{schema_name}.persist_okx_demo_natural_risk_chain(jsonb)"
+    row = connection.execute(text(
+        "SELECT owner.rolname,p.prosecdef,p.proconfig,"
+        "has_function_privilege('freqtrade',p.oid,'EXECUTE'),"
+        "EXISTS(SELECT 1 FROM aclexplode(COALESCE(p.proacl,"
+        "acldefault('f',p.proowner))) acl WHERE acl.grantee=0 "
+        "AND acl.privilege_type='EXECUTE'),p.prosrc "
+        "FROM pg_proc p JOIN pg_roles owner ON owner.oid=p.proowner "
+        "WHERE p.oid=to_regprocedure(:signature)"
+    ), {"signature": signature}).first()
+    if row is None:
+        return ["natural signal risk function is missing"]
+    owner, security_definer, config, runtime_execute, public_execute, source = row
+    required = (
+        "CONTINUOUS_DEMO_V1", "okx-demo-selection-v2",
+        "max_drawdown_contract", "okx_demo_continuous_opening_allowed",
+        "natural signal writer fence is invalid", "allow_real_funds",
+    )
+    if (owner != "freqtrade_ai_attestor" or security_definer is not True
+        or "search_path=pg_catalog" not in (config or [])
+        or runtime_execute is not True or public_execute is True
+        or any(fragment not in source for fragment in required)
+        or "create_okx_demo_canary_lineage" in source):
+        return ["natural signal risk function boundary mismatch"]
+    overloads = connection.execute(text(
+        "SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace "
+        "WHERE n.nspname=:schema AND p.proname='persist_okx_demo_natural_risk_chain'"
+    ), {"schema": schema_name}).scalar_one()
+    if overloads != 1:
+        return ["natural signal risk function overload mismatch"]
+    real_orders_contract = connection.execute(text(
+        "SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE "
+        "table_schema=:schema AND table_name='strategy_deployments' "
+        "AND column_name='real_orders' AND is_nullable='NO'),"
+        "EXISTS(SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid "
+        "JOIN pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname=:schema "
+        "AND t.relname='strategy_deployments' "
+        "AND c.conname='strategy_deployments_demo_only_check' AND c.convalidated)"
+    ), {"schema": schema_name}).one()
+    if tuple(real_orders_contract) != (True, True):
+        return ["natural signal deployment Demo-only contract is missing"]
+    budget_acl = connection.execute(text(
+        "SELECT has_table_privilege('freqtrade',:table,'SELECT'),"
+        "has_table_privilege('freqtrade',:table,'INSERT,UPDATE,DELETE,TRUNCATE')"
+    ), {"table": f"{schema_name}.risk_budgets"}).one()
+    return [] if budget_acl == (True, False) else [
+        "natural signal risk budget ACL mismatch"
+    ]
+
+
 def _finalize_current_canary_boundaries(connection: Connection) -> list[str]:
     """Converge every supported upgrade path on the complete current boundary."""
 
@@ -11234,6 +12137,7 @@ def _finalize_current_canary_boundaries(connection: Connection) -> list[str]:
     _add_continuous_demo_automation_boundary(connection)
     _add_research_receipt_boundary(connection)
     _grant_runtime_application_acl(connection)
+    _add_natural_signal_risk_chain_boundary(connection)
     return schema_problems(connection)
 
 
@@ -11258,9 +12162,23 @@ def upgrade_database(engine: Engine) -> str:
                         "Recorded schema version does not match ORM metadata: " + "; ".join(problems)
                     )
                 return current_version
+            if current_version == NATURAL_SIGNAL_RISK_CHAIN_BASE_VERSION:
+                _add_natural_signal_risk_chain_boundary(connection)
+                problems = schema_problems(connection)
+                if problems:
+                    raise SchemaMigrationBlocked(
+                        "Natural signal risk-chain upgrade does not match ORM metadata: "
+                        + "; ".join(problems)
+                    )
+                connection.execute(
+                    text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+                    {"version": SCHEMA_VERSION},
+                )
+                return SCHEMA_VERSION
             if current_version == CANDIDATE_BRIDGE_BASE_VERSION:
                 _add_research_receipt_boundary(connection)
                 _grant_runtime_application_acl(connection)
+                _add_natural_signal_risk_chain_boundary(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -11275,6 +12193,7 @@ def upgrade_database(engine: Engine) -> str:
             if current_version == RESEARCH_PERSISTENCE_BASE_VERSION:
                 _add_research_receipt_boundary(connection)
                 _grant_runtime_application_acl(connection)
+                _add_natural_signal_risk_chain_boundary(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -11327,6 +12246,7 @@ def upgrade_database(engine: Engine) -> str:
                 CONTINUOUS_DEMO_SELECTION_V2_BASE_VERSION,
                 RESEARCH_PERSISTENCE_BASE_VERSION,
                 CANDIDATE_BRIDGE_BASE_VERSION,
+                NATURAL_SIGNAL_RISK_CHAIN_BASE_VERSION,
             }
             if current_version in supported_upgrade_versions:
                 connection.execute(
@@ -11875,6 +12795,44 @@ def upgrade_database(engine: Engine) -> str:
             f"Database migration failed for {database_identity(engine)}: {exc.__class__.__name__}"
         ) from exc
     return SCHEMA_VERSION
+
+
+def rollback_natural_signal_risk_chain(engine: Engine) -> str:
+    """Explicit admin-only v39 rollback; protected lineage data is untouched."""
+
+    if engine.dialect.name != "postgresql":
+        raise ConfigurationError("PostgreSQL DATABASE_URL is required for migrations.")
+    with engine.begin() as connection:
+        _require_attestation_admin(connection)
+        if _current_version(connection) != SCHEMA_VERSION:
+            raise SchemaMigrationBlocked(
+                "Natural signal risk-chain rollback requires schema version "
+                + SCHEMA_VERSION
+            )
+        schema_name = connection.execute(text("SELECT current_schema()" )).scalar_one()
+        quoted_schema = connection.dialect.identifier_preparer.quote_schema(schema_name)
+        signature = f"{quoted_schema}.persist_okx_demo_natural_risk_chain(jsonb)"
+        connection.execute(text(
+            "REVOKE ALL ON FUNCTION {0} FROM PUBLIC,freqtrade; "
+            "DROP FUNCTION {0}; "
+            "GRANT INSERT,UPDATE ON TABLE {1}.risk_budgets TO freqtrade"
+            .format(signature, quoted_schema)
+        ))
+        connection.execute(text(
+            "ALTER TABLE {0}.strategy_deployments DROP CONSTRAINT IF EXISTS "
+            "strategy_deployments_demo_only_check; "
+            "ALTER TABLE {0}.strategy_deployments DROP COLUMN IF EXISTS real_orders"
+            .format(quoted_schema)
+        ))
+        connection.execute(
+            text(f"DELETE FROM {VERSION_TABLE} WHERE version=:version"),
+            {"version": SCHEMA_VERSION},
+        )
+        connection.execute(text(
+            f"INSERT INTO {VERSION_TABLE}(version) VALUES(:version) "
+            "ON CONFLICT(version) DO NOTHING"
+        ), {"version": NATURAL_SIGNAL_RISK_CHAIN_BASE_VERSION})
+    return NATURAL_SIGNAL_RISK_CHAIN_BASE_VERSION
 
 
 def _verify_connection_schema(

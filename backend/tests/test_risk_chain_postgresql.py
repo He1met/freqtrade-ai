@@ -1,6 +1,8 @@
+import hashlib
 import os
 import json
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from threading import Barrier, Lock, Thread
 from uuid import uuid4
 
@@ -41,7 +43,9 @@ from app.models import (
     FullChainSignalSnapshot,
     FullChainStageRun,
     OkxDemoAttestedSession,
+    OkxOrderWriterLease,
     OkxDemoTrustedSnapshot,
+    ReconciliationRun,
     RiskBudget,
     RiskDecision,
     ResearchJob,
@@ -52,6 +56,12 @@ from app.models import (
     StrategyVersion,
     TradeIntent,
 )
+from app.models.okx_demo_reconciliation import (
+    OkxDemoReconciliationState,
+    OkxDemoRecoveryBatch,
+)
+from app.models.strategy_deployment import SignalEvaluation, StrategyDeployment
+from app.adapters.okx_demo.writer_repository import SqlAlchemyOrderWriterStore
 from app.models.execution_lineage import OKX_DEMO_TARGET_ID
 from app.repositories.execution_lineage import ensure_execution_scope_catalog
 from app.services.risk_chain import (
@@ -312,7 +322,17 @@ def _request(
         "candidate_approval_id": lineage["_candidate_approval_id"],
         "signal_snapshot_id": lineage["_signal_snapshot_id"],
         "signal_digest": lineage["_signal_digest"],
-        "lineage": lineage,
+        "lineage": {
+            name: lineage[name]
+            for name in (
+                "strategy_id",
+                "strategy_version_id",
+                "backtest_run_id",
+                "backtest_task_id",
+                "backtest_result_id",
+                "strategy_score_id",
+            )
+        },
         "snapshots": {
             name: envelope(name, content)
             for name, content in (
@@ -1942,3 +1962,461 @@ def test_postgresql_concurrent_idempotent_retry_reads_one_chain(
         assert budget.approved_positions == 1
         assert len(db.scalars(select(ApprovedExecution)).all()) == 1
         assert len(db.scalars(select(TradeIntent)).all()) == 1
+
+
+def test_postgresql_v39_natural_signal_reaches_writer_claim(postgres_engine) -> None:
+    """Exercise the real owner function with one fully bound natural fixture."""
+
+    upgrade_database(postgres_engine)
+    factory = create_session_factory(postgres_engine)
+    lineage = _seed(factory)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    policy = {
+        "allowed_instruments": ["BTC-USDT-SWAP"],
+        "allowed_sides": ["buy", "sell"],
+        "allowed_order_types": ["limit"],
+        "max_leverage": "2",
+        "max_order_notional": "1000",
+        "max_total_exposure": "3000",
+        "max_positions": 3,
+        "max_price_deviation_pct": "0.01",
+        "min_strategy_score": "50",
+        "scoring_version": "phase2-quality-v1",
+    }
+    policy_digest = canonical_digest(policy)
+    selection_evidence = {
+        "policy": {
+            "execution_target_id": "OKX_DEMO",
+            "allow_real_funds": False,
+            "production_promotion_claim": False,
+            "validated_backtest_required": True,
+            "minimum_score": 50,
+        }
+    }
+    lease_token = "a" * 64
+
+    with factory.begin() as db:
+        source_chain = db.get(FullChainRun, lineage["_full_chain_run_id"])
+        source_approval = db.get(
+            StrategyCandidateApproval, lineage["_candidate_approval_id"]
+        )
+        old_signal = db.get(
+            FullChainSignalSnapshot, lineage["_signal_snapshot_id"]
+        )
+        source_chain.signal_snapshot_id = None
+        for stage in db.scalars(
+            select(FullChainStageRun).where(
+                FullChainStageRun.full_chain_run_id == source_chain.id
+            )
+        ).all():
+            db.delete(stage)
+        db.delete(old_signal)
+        source_chain.run_kind = "RESEARCH"
+        source_chain.status = "APPROVED"
+        source_chain.current_stage = "CANDIDATE_APPROVAL"
+        source_approval.promotion_policy_version = "okx-demo-selection-v2"
+        source_approval.promotion_evidence = selection_evidence
+        source_approval.expires_at = now + timedelta(minutes=10)
+        score = db.get(StrategyScore, lineage["strategy_score_id"])
+        score.scoring_version = "phase2-quality-v1"
+        score.total_score = 80
+        result = db.get(BacktestResult, lineage["backtest_result_id"])
+        result.max_drawdown_pct = Decimal("0.10")
+        version = db.get(StrategyVersion, lineage["strategy_version_id"])
+        version.blueprint = {
+            "stoploss": -0.04,
+            "minimal_roi": {"0": 0.08},
+        }
+        db.flush()
+
+        deployment = StrategyDeployment(
+            execution_target_id="OKX_DEMO",
+            candidate_approval_id=source_approval.id,
+            strategy_id=lineage["strategy_id"],
+            strategy_version_id=lineage["strategy_version_id"],
+            candidate_digest=source_approval.candidate_digest,
+            promotion_policy_version="okx-demo-selection-v2",
+            deployment_policy_digest="b" * 64,
+            risk_policy_digest=policy_digest,
+            instrument_id="BTC-USDT-SWAP",
+            timeframe="15m",
+            status="ACTIVE",
+            active_slot=1,
+            evidence_snapshot={
+                "execution_target_id": "OKX_DEMO",
+                "allow_real_funds": False,
+            },
+        )
+        db.add(deployment)
+        db.flush()
+        evaluation = SignalEvaluation(
+            deployment_id=deployment.id,
+            execution_target_id="OKX_DEMO",
+            instrument_id="BTC-USDT-SWAP",
+            timeframe="15m",
+            closed_candle_at=now - timedelta(minutes=15),
+            status="LEASED",
+            lease_owner="runtime-test",
+            lease_token=lease_token,
+            lease_expires_at=now + timedelta(minutes=5),
+            heartbeat_at=now,
+            fencing_sequence=1,
+        )
+        db.add(evaluation)
+        db.flush()
+        execution_chain = FullChainRun(
+            research_job_id=source_chain.research_job_id,
+            research_job_attempt_id=source_chain.research_job_attempt_id,
+            run_kind="EXECUTION",
+            signal_evaluation_id=evaluation.id,
+            research_scope_id="LOCAL_DRY_RUN",
+            execution_target_id="OKX_DEMO",
+            status="EXECUTING",
+            current_stage="RISK",
+            strategy_id=lineage["strategy_id"],
+            strategy_version_id=lineage["strategy_version_id"],
+            backtest_run_id=lineage["backtest_run_id"],
+            backtest_task_id=lineage["backtest_task_id"],
+            backtest_result_id=lineage["backtest_result_id"],
+            strategy_score_id=lineage["strategy_score_id"],
+        )
+        db.add(execution_chain)
+        db.flush()
+        execution_approval = StrategyCandidateApproval(
+            full_chain_run_id=execution_chain.id,
+            execution_target_id="OKX_DEMO",
+            strategy_version_id=lineage["strategy_version_id"],
+            backtest_result_id=lineage["backtest_result_id"],
+            strategy_score_id=lineage["strategy_score_id"],
+            candidate_digest=source_approval.candidate_digest,
+            promotion_policy_version="okx-demo-selection-v2",
+            promotion_evidence=selection_evidence,
+            status="APPROVED",
+            requested_by="system:test",
+            decided_by="system:test",
+            decision_reason="Natural signal v39 integration fixture.",
+            requested_at=now,
+            decided_at=now,
+            expires_at=now + timedelta(minutes=10),
+        )
+        db.add(execution_approval)
+        db.flush()
+        execution_chain.candidate_approval_id = execution_approval.id
+        deployment_id = deployment.id
+        evaluation_id = evaluation.id
+        execution_chain_id = execution_chain.id
+        execution_approval_id = execution_approval.id
+        lineage.update(
+            _full_chain_run_id=execution_chain_id,
+            _candidate_approval_id=execution_approval_id,
+            _signal_snapshot_id=1,
+            _signal_digest="d" * 64,
+        )
+
+    request = _request(lineage, now, factory)
+    request["quantity"] = "0.001"
+    with factory.begin() as db:
+        snapshot_rows = {
+            kind: db.scalars(
+                select(OkxDemoTrustedSnapshot).where(
+                    OkxDemoTrustedSnapshot.snapshot_id == request["snapshot_ids"][kind]
+                )
+            ).one()
+            for kind in ("instrument", "market", "account")
+        }
+        source_database_ids = {
+            "instrument_snapshot": snapshot_rows["instrument"].database_id,
+            "market_snapshot": snapshot_rows["market"].database_id,
+            "account_snapshot": snapshot_rows["account"].database_id,
+        }
+        signal_snapshot = {
+            "decision": "ACTIONABLE",
+            "instrument_id": "BTC-USDT-SWAP",
+            "strategy_version_id": lineage["strategy_version_id"],
+            "candidate_digest": db.get(
+                StrategyCandidateApproval, execution_approval_id
+            ).candidate_digest,
+            "market_snapshot_id": snapshot_rows["market"].snapshot_id,
+            "market_digest": snapshot_rows["market"].digest,
+            "enter_long": True,
+            "enter_short": False,
+        }
+        signal_digest = canonical_digest(
+            {
+                "candidate_digest": signal_snapshot["candidate_digest"],
+                "instrument_id": "BTC-USDT-SWAP",
+                "source_type": "api_aggregate",
+                "source_database_ids": source_database_ids,
+                "signal_snapshot": signal_snapshot,
+                "observed_at": now,
+                "expires_at": now + timedelta(minutes=5),
+            }
+        )
+        signal = FullChainSignalSnapshot(
+            full_chain_run_id=execution_chain_id,
+            candidate_approval_id=execution_approval_id,
+            execution_target_id="OKX_DEMO",
+            instrument_id="BTC-USDT-SWAP",
+            signal_digest=signal_digest,
+            source_type="api_aggregate",
+            core_data=True,
+            source_database_ids=source_database_ids,
+            signal_snapshot=signal_snapshot,
+            observed_at=now,
+            expires_at=now + timedelta(minutes=5),
+        )
+        db.add(signal)
+        db.flush()
+        signal_id = signal.id
+        chain = db.get(FullChainRun, execution_chain_id)
+        chain.signal_snapshot_id = signal_id
+        evaluation = db.get(SignalEvaluation, evaluation_id)
+        evaluation.result_snapshot = {
+            "checkpoint_schema": "SIGNAL_EVALUATION_V1",
+            "evaluation_id": evaluation_id,
+            "deployment_id": deployment_id,
+            "closed_candle_at": evaluation.closed_candle_at.isoformat(),
+            "bundle": {
+                kind: {
+                    "database_id": snapshot_rows[kind].database_id,
+                    "snapshot_id": snapshot_rows[kind].snapshot_id,
+                    "digest": snapshot_rows[kind].digest,
+                }
+                for kind in ("instrument", "market", "account")
+            },
+            "signal": signal_snapshot,
+        }
+    request.update(
+        full_chain_run_id=execution_chain_id,
+        candidate_approval_id=execution_approval_id,
+        signal_snapshot_id=signal_id,
+        signal_digest=signal_digest,
+    )
+    authorization_input = RiskChainService._authorization_input(request)
+    authorization_digest = canonical_digest(authorization_input)
+    key = "signal-evaluation-{}".format(evaluation_id)
+    key_digest = hashlib.sha256(key.encode()).hexdigest()
+    intent_id = canonical_digest(
+        {
+            "execution_target": "OKX_DEMO",
+            "input_digest": authorization_digest,
+            "policy_digest": policy_digest,
+            "idempotency_digest": key_digest,
+        }
+    )
+    with factory.begin() as db:
+        db.add_all(
+            [
+                FullChainStageRun(
+                    full_chain_run_id=execution_chain_id,
+                    stage="SIGNAL",
+                    status="SUCCESS",
+                    idempotency_key_digest="1" * 64,
+                    input_digest="2" * 64,
+                    input_snapshot={"evaluation_id": evaluation_id},
+                    output_snapshot={"status": "ACTIONABLE"},
+                    database_ids={"signal_snapshot_id": signal_id},
+                    prepared_at=now,
+                    completed_at=now,
+                ),
+                FullChainStageRun(
+                    full_chain_run_id=execution_chain_id,
+                    stage="RISK",
+                    status="PREPARED",
+                    idempotency_key_digest=hashlib.sha256(
+                        "risk-evaluation:{}:{}".format(
+                            evaluation_id, signal_digest
+                        ).encode()
+                    ).hexdigest(),
+                    input_digest="3" * 64,
+                    input_snapshot={
+                        "evaluation_id": evaluation_id,
+                        "signal_snapshot_id": signal_id,
+                        "signal_digest": signal_digest,
+                        "risk_input_digest": canonical_digest(request),
+                        "risk_canonical_hash": authorization_digest,
+                        "risk_idempotency_digest": key_digest,
+                        "risk_intent_id": intent_id,
+                        "risk_client_order_id": "FAI" + intent_id[:29],
+                        "policy_digest": policy_digest,
+                    },
+                    output_snapshot={},
+                    database_ids={},
+                    prepared_at=now,
+                ),
+            ]
+        )
+        batch = OkxDemoRecoveryBatch(
+            execution_target_id="OKX_DEMO",
+            recovery_batch_id="e" * 64,
+            authenticated=True,
+            pagination_complete=True,
+            complete_streams=["ACCOUNT", "FILL", "ORDER", "POSITION"],
+            high_watermarks={name: 0 for name in ("ACCOUNT", "FILL", "ORDER", "POSITION")},
+            overlap_started_at=now - timedelta(seconds=1),
+            observed_at=now,
+            completed_at=now,
+            event_count=0,
+            evidence_digest="f" * 64,
+        )
+        db.add(batch)
+        db.flush()
+        reconciliation = ReconciliationRun(
+            execution_target_id="OKX_DEMO",
+            status="RECOVERED",
+            summary_snapshot={},
+            database_ids={},
+            artifact_status="READY",
+            authoritative_observed_at=now,
+            source_type="api_aggregate",
+            core_data=True,
+            started_at=now,
+            completed_at=now,
+        )
+        db.add(reconciliation)
+        db.flush()
+        reconciliation.database_ids = {
+            "reconciliation_run": [reconciliation.id],
+            "recovery_batches": [batch.database_id],
+        }
+        state = db.scalars(
+            select(OkxDemoReconciliationState).where(
+                OkxDemoReconciliationState.execution_target_id == "OKX_DEMO"
+            )
+        ).one_or_none()
+        if state is None:
+            state = OkxDemoReconciliationState(
+                execution_target_id="OKX_DEMO",
+            )
+            db.add(state)
+        state.status = "RECOVERED"
+        state.opening_frozen = False
+        state.block_reason = None
+        state.last_event_observed_at = now
+        state.last_reconciliation_run_id = reconciliation.id
+        db.add(
+            OkxOrderWriterLease(
+                execution_target_id="OKX_DEMO",
+                holder_token_digest="9" * 64,
+                generation=1,
+                acquired_at=now,
+                heartbeat_at=now,
+                expires_at=now + timedelta(minutes=5),
+            )
+        )
+        budget = db.get(RiskBudget, "OKX_DEMO")
+        if budget is None:
+            budget = RiskBudget(
+                execution_target_id="OKX_DEMO",
+            )
+            db.add(budget)
+        budget.reserved_notional = 0
+        budget.approved_positions = 0
+        db.flush()
+        deployment_digest = db.execute(
+            text(
+                "SELECT encode(public.digest(convert_to(string_agg("
+                "id::text||':'||active_slot::text||':'||candidate_approval_id::text||':'||"
+                "candidate_digest||':'||deployment_policy_digest||':'||"
+                "COALESCE(risk_policy_digest,''),'|' ORDER BY id),'UTF8'),'sha256'),'hex') "
+                "FROM strategy_deployments WHERE status='ACTIVE'"
+            )
+        ).scalar_one()
+        db.execute(
+            text(
+                "INSERT INTO okx_demo_automation_guard_states("
+                "execution_target_id,authorization_mode,operational_state,policy_digest,"
+                "deployment_set_digest,critical_failure_count,health_check_required,"
+                "last_healthy_reconciliation_run_id,fencing_version) VALUES("
+                "'OKX_DEMO','CONTINUOUS_DEMO_V1','RUNNING',:policy,:deployments,0,false,:run,1)"
+            ),
+            {
+                "policy": policy_digest,
+                "deployments": deployment_digest,
+                "run": reconciliation.id,
+            },
+        )
+
+    with factory() as db:
+        db.execute(text("SET ROLE freqtrade"))
+        db.commit()
+        result = RiskChainService(db).evaluate(
+            idempotency_key=key,
+            request=request,
+            policy=policy,
+            natural_signal_context={
+                "deployment_id": deployment_id,
+                "lease_token": lease_token,
+                "fencing_sequence": 1,
+            },
+            now=now,
+        )
+        db.execute(text("RESET ROLE"))
+        db.commit()
+    assert result.status == "APPROVED"
+    assert result.approved_execution_id is not None
+
+    with factory() as db:
+        db.execute(text("SET ROLE freqtrade"))
+        db.commit()
+        replay = RiskChainService(db).evaluate(
+            idempotency_key=key,
+            request=request,
+            policy=policy,
+            natural_signal_context={
+                "deployment_id": deployment_id,
+                "lease_token": lease_token,
+                "fencing_sequence": 1,
+            },
+            now=now,
+        )
+        db.execute(text("RESET ROLE"))
+        db.commit()
+    assert replay == result
+
+    with factory() as db:
+        db.execute(text("SET ROLE freqtrade"))
+        db.commit()
+        with pytest.raises(DBAPIError):
+            RiskChainService(db).evaluate(
+                idempotency_key=key + "-alternate",
+                request=request,
+                policy=policy,
+                natural_signal_context={
+                    "deployment_id": deployment_id,
+                    "lease_token": lease_token,
+                    "fencing_sequence": 1,
+                },
+                now=now,
+            )
+        db.rollback()
+
+    with factory.begin() as db:
+        chain = db.get(FullChainRun, execution_chain_id)
+        checkpoint = db.scalars(
+            select(FullChainStageRun).where(
+                FullChainStageRun.full_chain_run_id == chain.id,
+                FullChainStageRun.stage == "RISK",
+            )
+        ).one()
+        chain.trade_intent_id = result.trade_intent_id
+        chain.risk_decision_id = result.risk_decision_id
+        chain.approved_execution_id = result.approved_execution_id
+        chain.current_stage = "EXECUTION"
+        checkpoint.status = "SUCCESS"
+        checkpoint.database_ids = {
+            "trade_intent_id": result.trade_intent_id,
+            "risk_decision_id": result.risk_decision_id,
+            "approved_execution_id": result.approved_execution_id,
+        }
+        checkpoint.completed_at = now
+
+    with factory() as db:
+        db.execute(text("SET ROLE freqtrade"))
+        db.commit()
+        claimed = SqlAlchemyOrderWriterStore(
+            db, now_provider=lambda: now
+        ).load_approved_execution(result.approved_execution_id)
+        db.execute(text("RESET ROLE"))
+        db.commit()
+    assert claimed.approval_id == result.approved_execution_id

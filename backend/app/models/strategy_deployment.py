@@ -3,6 +3,7 @@ from typing import Optional
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -28,6 +29,10 @@ class StrategyDeployment(Base):
         CheckConstraint(
             "execution_target_id = 'OKX_DEMO'",
             name="strategy_deployments_target_check",
+        ),
+        CheckConstraint(
+            "real_orders = FALSE",
+            name="strategy_deployments_demo_only_check",
         ),
         CheckConstraint(
             "status IN ('ACTIVE', 'DISABLED')",
@@ -94,6 +99,9 @@ class StrategyDeployment(Base):
     promotion_policy_version: Mapped[str] = mapped_column(String(80), nullable=False)
     deployment_policy_digest: Mapped[str] = mapped_column(String(64), nullable=False)
     risk_policy_digest: Mapped[Optional[str]] = mapped_column(String(64))
+    real_orders: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
     instrument_id: Mapped[str] = mapped_column(String(80), nullable=False)
     timeframe: Mapped[str] = mapped_column(String(16), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="ACTIVE")
