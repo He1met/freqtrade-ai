@@ -4269,15 +4269,22 @@ def test_postgresql_runtime_lease_keeper_renews_fences_and_expires(
                     "FROM okx_order_writer_leases WHERE execution_target_id='OKX_DEMO'"
                 )
             ).one()
-        time.sleep(0.12)
-        first.require_healthy()
-        with postgres_writer_engine.connect() as connection:
-            renewed = connection.execute(
-                text(
-                    "SELECT generation,heartbeat_at,expires_at,clock_timestamp() "
-                    "FROM okx_order_writer_leases WHERE execution_target_id='OKX_DEMO'"
-                )
-            ).one()
+        heartbeat_deadline = time.monotonic() + 2
+        while True:
+            first.require_healthy()
+            with postgres_writer_engine.connect() as connection:
+                renewed = connection.execute(
+                    text(
+                        "SELECT generation,heartbeat_at,expires_at,clock_timestamp() "
+                        "FROM okx_order_writer_leases "
+                        "WHERE execution_target_id='OKX_DEMO'"
+                    )
+                ).one()
+            if renewed.heartbeat_at > initial.heartbeat_at:
+                break
+            if time.monotonic() >= heartbeat_deadline:
+                pytest.fail("runtime writer heartbeat did not advance")
+            time.sleep(0.02)
         assert renewed.generation == initial.generation == 1
         assert renewed.heartbeat_at > initial.heartbeat_at
         assert renewed.expires_at > renewed.clock_timestamp
