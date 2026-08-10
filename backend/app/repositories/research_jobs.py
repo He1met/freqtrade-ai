@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Collection, Optional
 from uuid import uuid4
 
 from sqlalchemy import and_, func, or_, select, update
@@ -28,6 +28,7 @@ TERMINAL_JOB_STATUSES = {
 RECOVERY_JOB_STAGES = {
     "CANDIDATE_APPROVED",
     "GENERATION_RETRY",
+    "VALIDATION_RETRY",
     "PERSISTED_RESULT_RECOVERY",
     "SIGNAL_RECOVERY",
 }
@@ -174,6 +175,7 @@ class ResearchJobRepository:
         owner: str,
         lease_seconds: int,
         now: Optional[datetime] = None,
+        operations: Optional[Collection[str]] = None,
     ) -> Optional[ResearchJob]:
         self._require_executable_scope()
         current_time = now or datetime.now(timezone.utc)
@@ -211,6 +213,11 @@ class ResearchJobRepository:
                 .order_by(ResearchJob.created_at.asc(), ResearchJob.id.asc())
                 .limit(1)
             )
+            if operations is not None:
+                operation_set = tuple(sorted(set(operations)))
+                if not operation_set:
+                    raise ValueError("operations must not be empty when provided")
+                statement = statement.where(ResearchJob.operation.in_(operation_set))
             if self.db.bind is not None and self.db.bind.dialect.name == "postgresql":
                 statement = statement.with_for_update(skip_locked=True)
             job = self.db.scalars(statement).first()
@@ -351,6 +358,7 @@ class ResearchJobRepository:
         self._require_executable_scope()
         if recovery_stage not in {
             "GENERATION_RETRY",
+            "VALIDATION_RETRY",
             "PERSISTED_RESULT_RECOVERY",
             "SIGNAL_RECOVERY",
         }:
@@ -370,7 +378,7 @@ class ResearchJobRepository:
                 ResearchJob.backtest_result_id.is_(None),
                 ResearchJob.strategy_score_id.is_(None),
             )
-            if recovery_stage == "GENERATION_RETRY"
+            if recovery_stage in {"GENERATION_RETRY", "VALIDATION_RETRY"}
             else (
                 ResearchJob.provider_attempted_at.is_not(None),
                 ResearchJob.provider_completed_at.is_not(None),
