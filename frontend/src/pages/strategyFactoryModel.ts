@@ -74,7 +74,7 @@ export function candidateLifecycleDisplay(value: unknown): LifecycleDisplay {
       steps: ["COMPLETE", "COMPLETE", "COMPLETE", "CURRENT"],
     },
     DEPLOYED_ACTIVE_DEMO: {
-      label: "Demo 运行中",
+      label: "Demo ACTIVE 部署记录",
       detail: "权威投影确认 OKX_DEMO ACTIVE 部署。",
       steps: ["COMPLETE", "COMPLETE", "COMPLETE", "COMPLETE"],
     },
@@ -111,7 +111,7 @@ export function lifecycleSummaryLabel(
     BRIDGED_PENDING_CANONICAL_VALIDATION: "已桥接，待 canonical 验证",
     BRIDGED_PENDING_APPROVAL: "已桥接，待人工审批",
     APPROVED_NOT_DEPLOYED: "已批准，未部署",
-    DEPLOYED_ACTIVE_DEMO: "Demo 运行中",
+    DEPLOYED_ACTIVE_DEMO: "Demo ACTIVE 部署记录",
     MIXED: "候选处于多个阶段",
     UNKNOWN: "未知",
   }[summary.status];
@@ -131,7 +131,7 @@ export function lifecycleSummaryText(
     BRIDGED_PENDING_CANONICAL_VALIDATION: `已 bridge：${summary.pending_canonical_validation_count} 个候选等待 canonical 验证`,
     BRIDGED_PENDING_APPROVAL: `待审批：${summary.pending_approval_count} 个候选已有 bridge 证据`,
     APPROVED_NOT_DEPLOYED: `已批准未部署：${summary.approved_not_deployed_count} 个候选`,
-    DEPLOYED_ACTIVE_DEMO: `Demo 运行中：${summary.active_demo_count} 个候选具有完整映射`,
+    DEPLOYED_ACTIVE_DEMO: `Demo ACTIVE 部署记录：${summary.active_demo_count} 个候选具有完整映射`,
     MIXED: "候选处于多个正式生命周期阶段，请查看逐项证据",
     UNKNOWN: "生命周期未知：投影未能给出可信结论",
   }[summary.status];

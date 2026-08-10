@@ -205,12 +205,12 @@ class StrategyDeploymentRepository:
             ).all()
         )
         active_slot = next(
-            (slot for slot in range(1, 4) if slot not in active_slots),
+            (slot for slot in range(1, 10) if slot not in active_slots),
             None,
         )
         if active_slot is None:
             raise StrategyDeploymentConflict(
-                "OKX_DEMO already has three ACTIVE strategy deployments"
+                "OKX_DEMO already has nine ACTIVE strategy deployments"
             )
 
         deployment = StrategyDeployment(
@@ -265,9 +265,9 @@ class StrategyDeploymentRepository:
                         StrategyDeployment.status == "ACTIVE",
                     )
                 )
-                if int(active_count or 0) >= 3:
+                if int(active_count or 0) >= 9:
                     raise StrategyDeploymentConflict(
-                        "OKX_DEMO already has three ACTIVE strategy deployments"
+                        "OKX_DEMO already has nine ACTIVE strategy deployments"
                     )
                 raise
             replay_binding = (

@@ -13,8 +13,14 @@ class OkxDemoRiskPolicy(BaseModel):
     """Locked numerical limits for the first automated OKX Demo policy."""
 
     schema_version: Literal["1"] = "1"
-    allowed_instruments: tuple[Literal["BTC-USDT-SWAP"]] = (
+    allowed_instruments: tuple[
+        Literal["BTC-USDT-SWAP"],
+        Literal["ETH-USDT-SWAP"],
+        Literal["SOL-USDT-SWAP"],
+    ] = (
         "BTC-USDT-SWAP",
+        "ETH-USDT-SWAP",
+        "SOL-USDT-SWAP",
     )
     allowed_sides: tuple[Literal["buy"], Literal["sell"]] = ("buy", "sell")
     allowed_order_types: tuple[Literal["limit"]] = ("limit",)
@@ -24,7 +30,7 @@ class OkxDemoRiskPolicy(BaseModel):
     max_positions: Literal[3] = 3
     max_price_deviation_pct: Literal[0.01] = 0.01
     min_strategy_score: Literal[50] = 50
-    max_active_strategies: Literal[3] = 3
+    max_active_strategies: Literal[9] = 9
     max_orders_per_5_minutes: Literal[6] = 6
     max_orders_per_hour: Literal[24] = 24
     critical_failure_threshold: Literal[3] = 3

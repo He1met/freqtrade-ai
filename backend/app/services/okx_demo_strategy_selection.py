@@ -30,6 +30,22 @@ from app.services.okx_demo_selection_policy import OKX_DEMO_SELECTION_POLICY_VER
 from app.services.risk_chain import canonical_digest
 
 
+_RESEARCH_PAIR_TO_INSTRUMENT = {
+    "BTC/USDT:USDT": "BTC-USDT-SWAP",
+    "ETH/USDT:USDT": "ETH-USDT-SWAP",
+    "SOL/USDT:USDT": "SOL-USDT-SWAP",
+}
+
+
+def _instrument_from_research_pair(pair: str) -> str:
+    try:
+        return _RESEARCH_PAIR_TO_INSTRUMENT[pair]
+    except KeyError as exc:
+        raise OkxDemoStrategySelectionBlocked(
+            "validated backtest pair is outside the locked OKX Demo allowlist"
+        ) from exc
+
+
 class OkxDemoStrategySelectionBlocked(RuntimeError):
     """The fixed Demo selection evidence is absent, stale, or ambiguous."""
 
@@ -193,7 +209,7 @@ def validate_okx_demo_selection_receipt(
         or run.status != "succeeded"
         or task.backtest_run_id != run.id
         or task.status != "succeeded"
-        or task.pair != "BTC/USDT:USDT"
+        or task.pair not in _RESEARCH_PAIR_TO_INSTRUMENT
         or version.blueprint.get("timeframe") != task.timeframe
         or str(run.config_snapshot.get("strategy_version_id")) != str(version.id)
         or Path(str(run.config_snapshot.get("strategy_file_path", ""))).resolve()
@@ -327,7 +343,7 @@ class OkxDemoStrategySelectionService:
             or run.status != "succeeded"
             or task.backtest_run_id != run.id
             or task.status != "succeeded"
-            or task.pair != "BTC/USDT:USDT"
+            or task.pair not in _RESEARCH_PAIR_TO_INSTRUMENT
             or version.blueprint.get("timeframe") != task.timeframe
             or str(run.config_snapshot.get("strategy_version_id")) != str(version.id)
             or Path(str(run.config_snapshot.get("strategy_file_path", ""))).resolve()
@@ -497,7 +513,7 @@ class OkxDemoStrategySelectionService:
         )
         deployment = StrategyDeploymentRepository(self.db).publish(
             candidate_approval_id=approval.id,
-            instrument_id="BTC-USDT-SWAP",
+            instrument_id=_instrument_from_research_pair(task.pair),
             timeframe=task.timeframe,
             deployment_policy_digest=deployment_policy,
             risk_policy_digest=OkxDemoAutomationGuard.policy_digest(),

@@ -38,6 +38,7 @@ def inspect_market_data(
     expected_interval_seconds: int,
     inspected_at: datetime,
     max_freshness_seconds: int = DEFAULT_MAX_FRESHNESS_SECONDS,
+    require_source_receipt: bool = False,
 ) -> MarketDataQualityReceipt:
     """Inspect one exact candle file and return an unsaved immutable receipt."""
 
@@ -52,6 +53,36 @@ def inspect_market_data(
     missing = duplicate = out_of_order = misaligned = 0
     null_ohlcv = invalid_ohlc = negative_volume = 0
     freshness_seconds = None
+    source_type = source_receipt_path = source_receipt_digest = None
+    source_response_chain_digest = None
+    source_path = path.with_suffix(path.suffix + ".source.json")
+    if source_path.is_file():
+        try:
+            source_payload = json.loads(source_path.read_text(encoding="utf-8"))
+            source_receipt_digest = _sha256(source_path)
+            source_receipt_path = str(
+                source_path.resolve().relative_to(repository_root.resolve())
+            )
+            source_type = source_payload.get("source_type")
+            source_response_chain_digest = source_payload.get(
+                "response_chain_sha256"
+            )
+            if (
+                source_payload.get("schema_version")
+                != "okx-public-candle-file-source-v1"
+                or source_payload.get("credentials_used") is not False
+                or source_payload.get("account_endpoint_used") is not False
+                or source_payload.get("orders_submitted") is not False
+                or source_payload.get("data_file_sha256") != digest_before
+                or source_type not in {"OKX_PUBLIC_REST", "DERIVED_FROM_OKX_PUBLIC_REST"}
+                or not isinstance(source_response_chain_digest, str)
+                or len(source_response_chain_digest) != 64
+            ):
+                reasons.add("SOURCE_RECEIPT_INVALID_OR_MISMATCHED")
+        except (OSError, ValueError, TypeError):
+            reasons.add("SOURCE_RECEIPT_INVALID_OR_MISMATCHED")
+    elif require_source_receipt:
+        reasons.add("SOURCE_RECEIPT_MISSING")
     try:
         suffix = path.suffix.lower()
         if suffix == ".feather":
@@ -76,7 +107,10 @@ def inspect_market_data(
             if not valid_timestamps.empty:
                 first_open_at = valid_timestamps.min().to_pydatetime()
                 last_open_at = valid_timestamps.max().to_pydatetime()
-                nanoseconds = valid_timestamps.astype("int64")
+                # Feather commonly preserves UTC timestamps at millisecond
+                # precision.  ``astype("int64")`` then returns milliseconds,
+                # so normalize explicitly before applying nanosecond intervals.
+                nanoseconds = valid_timestamps.array.as_unit("ns").asi8
                 interval_ns = expected_interval_seconds * 1_000_000_000
                 misaligned = int((nanoseconds % interval_ns != 0).sum())
                 diffs = valid_timestamps.diff().dt.total_seconds().dropna()
@@ -142,6 +176,10 @@ def inspect_market_data(
         "file_format": path.suffix.lower().lstrip("."),
         "file_size": file_size,
         "file_sha256": digest_after,
+        "source_type": source_type,
+        "source_receipt_path": source_receipt_path,
+        "source_receipt_digest": source_receipt_digest,
+        "source_response_chain_digest": source_response_chain_digest,
         "inspected_at": inspected_at.isoformat(),
         "row_count": row_count,
         "first_open_at": first_open_at.isoformat() if first_open_at else None,

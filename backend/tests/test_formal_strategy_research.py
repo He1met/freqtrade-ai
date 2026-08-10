@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 from pathlib import Path
 
@@ -41,6 +42,18 @@ def build_coordinator(tmp_path, monkeypatch, *, ownership=True, allow_dry_run=Fa
                     "volume": [2.0] * 5,
                 }
             ).to_feather(data)
+            data.with_suffix(data.suffix + ".source.json").write_text(json.dumps({
+                "schema_version": "okx-public-candle-file-source-v1",
+                "source_type": (
+                    "OKX_PUBLIC_REST" if timeframe == "5m"
+                    else "DERIVED_FROM_OKX_PUBLIC_REST"
+                ),
+                "credentials_used": False,
+                "account_endpoint_used": False,
+                "orders_submitted": False,
+                "data_file_sha256": hashlib.sha256(data.read_bytes()).hexdigest(),
+                "response_chain_sha256": "a" * 64,
+            }))
     freqtrade = repo / ".venv/bin/freqtrade"
     freqtrade.parent.mkdir(parents=True)
     freqtrade.write_text("#!/bin/sh\n")
@@ -124,7 +137,7 @@ def test_formal_research_fails_closed_when_target_matrix_is_incomplete(
     assert events[0].outcome == "NOT_GENERATED"
 
 
-def test_formal_research_starts_exact_ten_candidate_shared_worker(tmp_path, monkeypatch):
+def test_formal_research_starts_exact_sixty_candidate_shared_worker(tmp_path, monkeypatch):
     calls = []
     coordinator = build_coordinator(tmp_path, monkeypatch)
     coordinator.popen = lambda command, **kwargs: calls.append((command, kwargs)) or object()
@@ -135,7 +148,7 @@ def test_formal_research_starts_exact_ten_candidate_shared_worker(tmp_path, monk
         receipts = db.query(MarketDataQualityReceipt).all()
     assert result.status == "RUNNING"
     assert result.run_id == "202608090515"
-    assert result.requested_count == 10
+    assert result.requested_count == 60
     assert len(calls) == 1
     assert len(events) == 1
     assert len(receipts) == 6

@@ -30,7 +30,11 @@ def test_app_yaml_pins_okx_demo_automation_without_live_or_real_funds() -> None:
     assert policy.require_reconciliation is True
     assert policy.allow_live_trading is False
     assert policy.allow_real_funds is False
-    assert policy.demo_risk_policy.allowed_instruments == ("BTC-USDT-SWAP",)
+    assert policy.demo_risk_policy.allowed_instruments == (
+        "BTC-USDT-SWAP",
+        "ETH-USDT-SWAP",
+        "SOL-USDT-SWAP",
+    )
     assert policy.demo_risk_policy.allowed_sides == ("buy", "sell")
     assert policy.demo_risk_policy.allowed_order_types == ("limit",)
     assert policy.demo_risk_policy.max_leverage == 2
@@ -39,7 +43,7 @@ def test_app_yaml_pins_okx_demo_automation_without_live_or_real_funds() -> None:
     assert policy.demo_risk_policy.max_positions == 3
     assert policy.demo_risk_policy.max_price_deviation_pct == 0.01
     assert policy.demo_risk_policy.min_strategy_score == 50
-    assert policy.demo_risk_policy.max_active_strategies == 3
+    assert policy.demo_risk_policy.max_active_strategies == 9
     assert policy.demo_risk_policy.max_orders_per_5_minutes == 6
     assert policy.demo_risk_policy.max_orders_per_hour == 24
     assert policy.demo_risk_policy.critical_failure_threshold == 3

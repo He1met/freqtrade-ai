@@ -14,11 +14,32 @@ from scripts.run_strategy_candidate_research import (
     WINDOWS,
     _FAILURE_CONTEXT,
     _discover_candidates,
+    _diversity_input,
+    _pearson,
     _project_score,
     _record_unhandled_failure,
     _stress_metrics,
     _validate_run_id,
 )
+
+
+def test_oos_diversity_inputs_are_cost_stressed_and_zero_variance_blocks():
+    evidence = _diversity_input({"trades": [
+        {
+            "open_timestamp": 1_735_689_600_000,
+            "close_timestamp": 1_735_693_200_000,
+            "profit_ratio": 0.01,
+        },
+        {
+            "open_timestamp": 1_735_776_000_000,
+            "close_timestamp": 1_735_779_600_000,
+            "profit_ratio": -0.02,
+        },
+    ]})
+    assert evidence["entry_timestamps"] == [1_735_689_600_000, 1_735_776_000_000]
+    assert sum(evidence["daily_pnl"].values()) < -0.01
+    assert _pearson([0.0] * 30, [1.0] * 30) is None
+    assert _pearson(list(map(float, range(30))), list(map(float, range(30)))) == pytest.approx(1.0)
 
 
 def test_research_bundle_contains_exactly_ten_static_safe_candidates() -> None:
@@ -128,7 +149,7 @@ def test_unhandled_validation_failure_keeps_all_generated_candidates(tmp_path) -
     payload = json.loads(output.read_text())
     assert payload["status"] == "FAILED"
     assert payload["failed_stage"] == "LOOKAHEAD"
-    assert payload["generated_count"] == 10
+    assert payload["generated_count"] == 60
     assert payload["persisted_count"] == 0
-    assert len(payload["candidates"]) == 10
+    assert len(payload["candidates"]) == 60
     assert "should-not-leak" not in payload["failure_reason"]

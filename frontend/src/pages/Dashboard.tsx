@@ -83,7 +83,7 @@ export function Dashboard() {
       : businessBlocked
         ? "模拟盘证据未满足严格验收，先核对运行与对账阻断"
         : runtimeActivity.data?.active_deployments.length
-          ? "模拟盘有运行中策略，继续核对最近信号与执行证据"
+          ? "模拟盘有 ACTIVE 部署记录，继续核对 heartbeat、最近信号与执行证据"
           : "正式证据已读取，当前没有 ACTIVE 模拟盘部署";
   const pageStatus = pageLoading ? "RUNNING" : dataHasProblem ? "UNKNOWN" : businessBlocked ? "BLOCKED" : "READY";
   const fills = demo.data?.orders.reduce((total, order) => total + order.fills.length, 0) ?? null;
@@ -194,7 +194,7 @@ export function Dashboard() {
             <small>{workspaceBatchError ? "研究批次读取失败" : latestResearch?.qualified_count ? "正式衔接证据待建立" : latestResearch ? "本批次无合格" : "尚无批次"}</small>
           </article>
           <article className={runtimeActivity.loading ? "formal-metric formal-skeleton" : "formal-metric"} data-state={runtimeActivity.error ? "unknown" : undefined}>
-            <span>运行中策略</span>
+            <span>ACTIVE 部署记录</span>
             <strong>{metricValue(runtimeActivity.loading, runtimeActivity.error, runtimeActivity.data?.active_deployments.length ?? null)}</strong>
             <small>{runtimeActivity.error ? "部署投影读取失败" : runtimeActivity.data?.active_deployments.length ? "OKX_DEMO ACTIVE deployment" : "尚未部署"}</small>
           </article>
@@ -261,7 +261,7 @@ export function Dashboard() {
             <div><dt>Blueprint v2 bridge</dt><dd>{bridgedCount === null ? "未知" : `${bridgedCount} 个候选已有权威 bridge 证据`}</dd></div>
             <div><dt>批准未部署</dt><dd>{approvedNotDeployedCount === null ? "未知" : `${approvedNotDeployedCount} 个`}</dd></div>
             <div><dt>Demo ACTIVE 映射</dt><dd>{deployedDemoCount === null ? "未知" : `${deployedDemoCount} 个`}</dd></div>
-            <div><dt>ACTIVE 运行策略</dt><dd>{runtimeActivity.loading ? "读取中" : runtimeActivity.error ? "未知" : `${runtimeActivity.data?.active_deployments.length ?? 0} 个`}</dd></div>
+            <div><dt>ACTIVE 部署记录</dt><dd>{runtimeActivity.loading ? "读取中" : runtimeActivity.error ? "未知" : `${runtimeActivity.data?.active_deployments.length ?? 0} 个`}</dd></div>
             <div><dt>最近信号评估</dt><dd>{runtimeActivity.loading ? "读取中" : runtimeActivity.error ? "未知" : latestSignalStatus ? displayStatus(latestSignalStatus) : "当前无信号"}</dd></div>
             <div><dt>未来 Live</dt><dd>状态未知 · 无切换入口</dd></div>
           </dl>

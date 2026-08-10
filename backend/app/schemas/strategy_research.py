@@ -18,6 +18,16 @@ class StrategyResearchCandidateRead(BaseModel):
     candidate_name: str
     source_path: str
     code_digest: str
+    pair: Optional[str] = None
+    timeframe: Optional[str] = None
+    unit_slot: Optional[int] = None
+    strategy_family: Optional[str] = None
+    regime_hypothesis: Optional[str] = None
+    expected_holding_period: Optional[str] = None
+    expected_trade_frequency: Optional[str] = None
+    structure_fingerprint: Optional[str] = None
+    similarity_evidence: dict = Field(default_factory=dict)
+    correlation_evidence: dict = Field(default_factory=dict)
     status: ResearchCandidateStatus
     loadable: bool
     static_check: str
@@ -95,7 +105,7 @@ class FormalResearchRunRead(BaseModel):
     completed_at: Optional[datetime] = None
     phase: Optional[FormalResearchRunPhase] = None
     cleanup_status: Optional[FormalResearchCleanupStatus] = None
-    requested_count: int = 10
+    requested_count: int = 60
     generated_count: int = 0
     validated_count: int = 0
     persisted_count: int = 0
@@ -150,6 +160,10 @@ class MarketDataQualityReceiptRead(BaseModel):
     pair: str
     timeframe: str
     file_format: str
+    source_type: Optional[str] = None
+    source_receipt_path: Optional[str] = None
+    source_receipt_digest: Optional[str] = None
+    source_response_chain_digest: Optional[str] = None
     inspected_at: datetime
     row_count: int
     first_open_at: Optional[datetime] = None

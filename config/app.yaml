@@ -70,6 +70,8 @@ demo_automation:
     schema_version: "1"
     allowed_instruments:
       - BTC-USDT-SWAP
+      - ETH-USDT-SWAP
+      - SOL-USDT-SWAP
     allowed_sides:
       - buy
       - sell
@@ -81,7 +83,7 @@ demo_automation:
     max_positions: 3
     max_price_deviation_pct: 0.01
     min_strategy_score: 50
-    max_active_strategies: 3
+    max_active_strategies: 9
     max_orders_per_5_minutes: 6
     max_orders_per_hour: 24
     critical_failure_threshold: 3
