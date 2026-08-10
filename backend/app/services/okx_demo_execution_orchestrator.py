@@ -127,6 +127,10 @@ class OkxDemoExecutionOrchestrator:
                 fencing_sequence=fencing_sequence,
                 now=active_now,
             )
+            # Keep identifiers as plain scalars across repository commits/rollbacks.
+            # SQLAlchemy expires ORM instances at those boundaries and re-reading an
+            # attribute would implicitly open a transaction before RiskChainService.
+            deployment_id = deployment.id
             material = self._strategy_loader(deployment.strategy_version_id)
             checkpoint = evaluation.result_snapshot or {}
             if evaluation.input_digest is not None or checkpoint:
@@ -302,6 +306,20 @@ class OkxDemoExecutionOrchestrator:
                 material=material,
             )
             risk_input_digest = _digest(risk_request)
+            risk_canonical_hash = _digest(
+                RiskChainService._authorization_input(risk_request)
+            )
+            risk_idempotency_digest = hashlib.sha256(
+                f"signal-evaluation-{evaluation_id}".encode("utf-8")
+            ).hexdigest()
+            risk_intent_id = _digest(
+                {
+                    "execution_target": "OKX_DEMO",
+                    "input_digest": risk_canonical_hash,
+                    "policy_digest": _digest(self.risk_policy),
+                    "idempotency_digest": risk_idempotency_digest,
+                }
+            )
             self.chains.prepare_execution_stage(
                 chain.id,
                 "RISK",
@@ -314,6 +332,10 @@ class OkxDemoExecutionOrchestrator:
                     "signal_snapshot_id": signal_row.id,
                     "signal_digest": signal_row.signal_digest,
                     "risk_input_digest": risk_input_digest,
+                    "risk_canonical_hash": risk_canonical_hash,
+                    "risk_idempotency_digest": risk_idempotency_digest,
+                    "risk_intent_id": risk_intent_id,
+                    "risk_client_order_id": "FAI" + risk_intent_id[:29],
                     "policy_digest": _digest(self.risk_policy),
                 },
                 now=active_now,
@@ -332,6 +354,11 @@ class OkxDemoExecutionOrchestrator:
                 idempotency_key=f"signal-evaluation-{evaluation_id}",
                 request=risk_request,
                 policy=self.risk_policy,
+                natural_signal_context={
+                    "deployment_id": deployment_id,
+                    "lease_token": lease_token,
+                    "fencing_sequence": fencing_sequence,
+                },
                 now=active_now,
             )
             if (

@@ -614,6 +614,7 @@ class RiskChainService:
         idempotency_key: str,
         request: Mapping[str, Any],
         policy: Mapping[str, Any],
+        natural_signal_context: Optional[Mapping[str, Any]] = None,
         now: Optional[datetime] = None,
     ) -> RiskChainResult:
         if self.db.in_transaction():
@@ -641,6 +642,37 @@ class RiskChainService:
 
         with self.db.begin():
             self._lock_idempotency(key_digest)
+            owner_mediated = (
+                self.db.get_bind().dialect.name == "postgresql"
+                and self.db.execute(text("SELECT current_user")).scalar_one()
+                == "freqtrade"
+            )
+            if owner_mediated:
+                try:
+                    trusted = self._validate(request_input, policy, active_now)
+                except RiskChainBlocked:
+                    # Structural or attestation failures are terminalized by the
+                    # leased evaluation orchestrator.  Never use the owner
+                    # function to persist caller-controlled incomplete rows.
+                    raise
+                status, reasons = self._evaluate_policy(trusted, policy)
+                if trusted.expires_at <= active_now:
+                    status, reasons = "EXPIRED", ["snapshot evidence expired"]
+                if status == "EXPIRED":
+                    raise RiskChainBlocked("snapshot evidence expired")
+                return self._persist_owner_mediated_natural_signal(
+                    context=natural_signal_context,
+                    request_input=request_input,
+                    policy=policy,
+                    trusted=trusted,
+                    status=status,
+                    reasons=reasons,
+                    intent_id=intent_id,
+                    client_order_id=client_order_id,
+                    input_digest=input_digest,
+                    policy_digest=policy_digest,
+                    key_digest=key_digest,
+                )
             existing = self.db.scalars(
                 select(TradeIntent).where(
                     TradeIntent.execution_target_id == OKX_DEMO_TARGET_ID,
@@ -739,6 +771,103 @@ class RiskChainService:
                 policy_digest=policy_digest,
                 trusted=trusted,
             )
+
+    def _persist_owner_mediated_natural_signal(
+        self,
+        *,
+        context: Optional[Mapping[str, Any]],
+        request_input: Mapping[str, Any],
+        policy: Mapping[str, Any],
+        trusted: TrustedRiskInput,
+        status: str,
+        reasons: list[str],
+        intent_id: str,
+        client_order_id: str,
+        input_digest: str,
+        policy_digest: str,
+        key_digest: str,
+    ) -> RiskChainResult:
+        if not isinstance(context, Mapping):
+            raise RiskChainBlocked("natural signal execution context is missing")
+        chain = self.db.get(FullChainRun, request_input["full_chain_run_id"])
+        if chain is None or chain.signal_evaluation_id is None:
+            raise RiskChainBlocked("natural signal execution chain is missing")
+        approved_hash = self._approved_payload_hash(
+            intent=TradeIntent(canonical_hash=input_digest),
+            trusted=trusted,
+            policy_digest=policy_digest,
+        )
+        payload = {
+            "execution_target": "OKX_DEMO",
+            "authorization_schema_version": "RISK_V1",
+            "allow_real_funds": False,
+            "real_orders": False,
+            "simulated_trading": True,
+            "proposed_status": status,
+            "reasons": reasons,
+            "idempotency_key_digest": key_digest,
+            "intent_id": intent_id,
+            "canonical_hash": input_digest,
+            "policy_digest": policy_digest,
+            "approved_payload_hash": approved_hash,
+            "client_order_id": client_order_id,
+            "full_chain_run_id": chain.id,
+            "signal_evaluation_id": chain.signal_evaluation_id,
+            "deployment_id": context.get("deployment_id"),
+            "evaluation_lease_token": context.get("lease_token"),
+            "evaluation_fencing_sequence": context.get("fencing_sequence"),
+            "candidate_approval_id": request_input["candidate_approval_id"],
+            "signal_snapshot_id": request_input["signal_snapshot_id"],
+            "signal_digest": request_input["signal_digest"],
+            "trusted_lineage": trusted.lineage,
+            **trusted.lineage,
+            "instrument_snapshot_id": trusted.snapshot_evidence["instrument"]["snapshot_id"],
+            "market_snapshot_id": trusted.snapshot_evidence["market"]["snapshot_id"],
+            "account_snapshot_id": trusted.snapshot_evidence["account"]["snapshot_id"],
+            "instrument_id": trusted.instrument_id,
+            "side": trusted.side,
+            "position_side": trusted.position_side,
+            "order_type": trusted.order_type,
+            "quantity": format(trusted.quantity, "f"),
+            "limit_price": (
+                None if trusted.limit_price is None else format(trusted.limit_price, "f")
+            ),
+            "reference_price": format(trusted.reference_price, "f"),
+            "leverage": format(trusted.leverage, "f"),
+            "margin_mode": trusted.margin_mode,
+            "stop_loss": format(trusted.stop_loss, "f"),
+            "take_profit": format(trusted.take_profit, "f"),
+            "reduce_only": trusted.reduce_only,
+            "notional": format(trusted.notional, "f"),
+            "expires_at": trusted.expires_at.isoformat(),
+            "request_snapshot": {
+                "canonical_input": request_input,
+                "snapshot_evidence": trusted.snapshot_evidence,
+            },
+            "policy": dict(policy),
+        }
+        result = self.db.execute(
+            text(
+                "SELECT persist_okx_demo_natural_risk_chain("
+                "CAST(:payload AS jsonb))"
+            ),
+            {"payload": _canonical(payload)},
+        ).scalar_one()
+        if not isinstance(result, Mapping):
+            raise RiskChainBlocked("natural signal risk receipt is invalid")
+        return RiskChainResult(
+            status=str(result["status"]),
+            trade_intent_id=int(result["trade_intent_id"]),
+            risk_decision_id=int(result["risk_decision_id"]),
+            approved_execution_id=(
+                None
+                if result.get("approved_execution_id") is None
+                else int(result["approved_execution_id"])
+            ),
+            intent_id=str(result["intent_id"]),
+            client_order_id=str(result["client_order_id"]),
+            order_submission_authorized=False,
+        )
 
     def claim_active_approval(
         self,

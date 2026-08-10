@@ -19,6 +19,7 @@ from app.db.migrations import (
     CONTINUOUS_DEMO_SELECTION_V2_BASE_VERSION,
     RESEARCH_PERSISTENCE_BASE_VERSION,
     CANDIDATE_BRIDGE_BASE_VERSION,
+    NATURAL_SIGNAL_RISK_CHAIN_BASE_VERSION,
     EARLY_TARGET_LINEAGE_VERSION,
     DUAL_SIDE_BASE_VERSION,
     FULL_CHAIN_BASE_VERSION,
@@ -54,6 +55,7 @@ from app.db.migrations import (
     _add_final_accepted_not_found_boundary,
     _add_continuous_demo_automation_boundary,
     _add_research_receipt_boundary,
+    _add_natural_signal_risk_chain_boundary,
 )
 from app.db.session import create_database_engine
 
@@ -122,7 +124,37 @@ def test_schema_version_is_explicit_and_stable() -> None:
     assert CONTINUOUS_DEMO_SELECTION_V2_BASE_VERSION == "20260804_35"
     assert RESEARCH_PERSISTENCE_BASE_VERSION == "20260804_36"
     assert CANDIDATE_BRIDGE_BASE_VERSION == "20260809_37"
-    assert SCHEMA_VERSION == "20260809_38"
+    assert NATURAL_SIGNAL_RISK_CHAIN_BASE_VERSION == "20260809_38"
+    assert SCHEMA_VERSION == "20260810_39"
+
+
+def test_v39_natural_signal_risk_boundary_is_narrow_and_demo_only() -> None:
+    import inspect as pyinspect
+
+    source = pyinspect.getsource(_add_natural_signal_risk_chain_boundary)
+    for fragment in (
+        "persist_okx_demo_natural_risk_chain",
+        "SECURITY DEFINER SET search_path=pg_catalog",
+        "CONTINUOUS_DEMO_V1",
+        "okx-demo-selection-v2",
+        "abs(result.max_drawdown_pct)<=0.15",
+        "natural signal writer fence is invalid",
+        "okx_demo_continuous_opening_allowed",
+        "signal_snapshot::jsonb->'enter_long'",
+        "p_payload->>'position_side'<>'long'",
+        "p_payload->>'position_side'<>'short'",
+        "quantity_value IS DISTINCT FROM minimum_size",
+        "order_price IS DISTINCT FROM expected_limit",
+        "stop_loss')::numeric IS DISTINCT FROM expected_stop",
+        "take_profit')::numeric IS DISTINCT FROM expected_take",
+        "allow_real_funds",
+        "real_orders",
+        "REVOKE ALL ON FUNCTION",
+        "GRANT EXECUTE ON FUNCTION",
+        "REVOKE INSERT,UPDATE,DELETE,TRUNCATE ON TABLE {0}.risk_budgets",
+    ):
+        assert fragment in source
+    assert "create_okx_demo_canary_lineage" not in source
 
 
 def test_v37_research_receipts_are_append_only_runtime_tables() -> None:
