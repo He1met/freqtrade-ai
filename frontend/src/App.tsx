@@ -12,6 +12,7 @@ import { NotFound } from "./pages/NotFound";
 import { OperatorDashboard } from "./pages/OperatorDashboard";
 import { OkxDemo } from "./pages/OkxDemo";
 import { Ranking } from "./pages/Ranking";
+import { ResearchQueue } from "./pages/ResearchQueue";
 import { Strategies } from "./pages/Strategies";
 import { StrategyDetail } from "./pages/StrategyDetail";
 
@@ -22,6 +23,7 @@ export function App() {
         <Route index element={<Dashboard />} />
         <Route path="strategies" element={<Strategies />} />
         <Route path="strategies/:strategyId" element={<StrategyDetail />} />
+        <Route path="research-queue" element={<ResearchQueue />} />
         <Route path="generation-runs" element={<GenerationRuns />} />
         <Route path="local-strategy-lab" element={<LocalStrategyLab />} />
         <Route path="backtest-runs" element={<BacktestRuns />} />
