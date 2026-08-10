@@ -339,7 +339,9 @@ class OkxDemoExecutionOrchestrator:
                 evaluation_id=evaluation.id,
                 lease_token=lease_token,
                 fencing_sequence=fencing_sequence,
-                idempotency_key=f"risk-evaluation:{evaluation.id}:{signal.signal_digest}",
+                idempotency_key=(
+                    f"risk-evaluation:{evaluation.id}:{signal_row.signal_digest}"
+                ),
                 input_snapshot={
                     "evaluation_id": evaluation.id,
                     "signal_snapshot_id": signal_row.id,
