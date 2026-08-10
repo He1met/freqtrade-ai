@@ -774,6 +774,36 @@ def test_snapshot_content_tampering_is_durable_blocked(session_factory) -> None:
         assert db.scalar(select(RiskBudget)) is None
 
 
+def test_market_snapshot_future_binding_is_blocked_without_permission(
+    session_factory,
+) -> None:
+    now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
+    request = _request(_seed_lineage(session_factory), now)
+    request["snapshots"]["market"]["content"]["as_of"] = (
+        now + timedelta(seconds=1)
+    ).isoformat()
+    _resign(request, "market")
+    _register_snapshots(session_factory, request, now)
+
+    with session_factory() as db:
+        result = RiskChainService(db).evaluate(
+            idempotency_key="future-market-binding",
+            request=request,
+            policy=_policy(),
+            now=now,
+        )
+
+    with session_factory() as db:
+        decision = db.get(RiskDecision, result.risk_decision_id)
+        assert result.status == "BLOCKED"
+        assert result.approved_execution_id is None
+        assert decision.evidence_snapshot["reasons"] == [
+            "market snapshot binding is invalid"
+        ]
+        assert db.scalar(select(RiskBudget)) is None
+        assert db.scalar(select(ExchangeOrder)) is None
+
+
 def test_caller_cannot_self_sign_snapshot_content(session_factory) -> None:
     now = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
     request = _request(_seed_lineage(session_factory), now)

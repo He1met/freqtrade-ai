@@ -1,4 +1,4 @@
-.PHONY: help bootstrap doctor up status down logs verify operator-token-init operator-token-status okx-demo-pin-account okx-demo-preflight okx-demo-compatibility okx-demo-canary okx-demo-e2e-offline okx-demo-e2e-controlled evaluator-receipt-preflight natural-risk-budget-preflight autostart-install autostart-status autostart-logs autostart-restart autostart-uninstall db-backup db-init db-verify db-attestation-harden test
+.PHONY: help bootstrap doctor up status down logs verify operator-token-init operator-token-status okx-demo-pin-account okx-demo-preflight okx-demo-compatibility okx-demo-canary okx-demo-e2e-offline okx-demo-e2e-controlled natural-chain-preflight evaluator-receipt-preflight natural-risk-budget-preflight autostart-install autostart-status autostart-logs autostart-restart autostart-uninstall db-backup db-init db-verify db-attestation-harden test
 .PHONY: help bootstrap doctor up status down logs verify operator-token-init operator-token-status okx-demo-pin-account okx-demo-preflight okx-demo-canary okx-demo-e2e-offline okx-demo-e2e-controlled autostart-install autostart-status autostart-logs autostart-restart autostart-uninstall db-backup db-init db-verify db-attestation-harden db-reconciliation-compact-plan db-reconciliation-compact-apply db-reconciliation-compact-verify test
 
 DATABASE_URL ?= postgresql+psycopg://freqtrade:change_me@localhost:5432/freqtrade_ai
@@ -13,6 +13,7 @@ help:
 	@printf '%s\n' 'OKX Demo compatibility: make okx-demo-compatibility (offline-first; uses the shared FREQTRADE_BINARY resolver)'
 	@printf '%s\n' 'OKX Demo direct canary: permanently BLOCKED; canonical runtime one-shot grant owns any controlled canary'
 	@printf '%s\n' 'OKX Demo E2E: make okx-demo-e2e-offline (controlled mode stays blocked until #449/#450 integration)'
+	@printf '%s\n' 'Natural chain: make natural-chain-preflight (disposable real PostgreSQL; zero exchange/order access)'
 	@printf '%s\n' 'Evaluator receipt: POSTGRES_WORKER_URL=... make evaluator-receipt-preflight (real PostgreSQL; zero order submission)'
 	@printf '%s\n' 'Natural risk budget: POSTGRES_WORKER_URL=... make natural-risk-budget-preflight (real PostgreSQL; zero order submission)'
 	@printf '%s\n' 'macOS autostart: make autostart-install | autostart-status | autostart-logs | autostart-restart | autostart-uninstall'
@@ -64,6 +65,9 @@ okx-demo-e2e-offline:
 
 okx-demo-e2e-controlled:
 	backend/.venv/bin/python scripts/okx_demo_e2e.py --mode controlled-real $(E2E_FLAGS)
+
+natural-chain-preflight:
+	backend/.venv/bin/python scripts/okx_demo_natural_chain_preflight.py
 
 evaluator-receipt-preflight:
 	@test -n "$(POSTGRES_WORKER_URL)" || (printf '%s\n' 'POSTGRES_WORKER_URL is required' >&2; exit 2)
