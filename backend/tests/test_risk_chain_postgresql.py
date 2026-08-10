@@ -23,9 +23,12 @@ from app.db.migrations import (
     RISK_CHAIN_BASE_VERSION,
     RISK_CHAIN_HARDENING_BASE_VERSION,
     SCHEMA_VERSION,
+    NATURAL_SIGNAL_EVALUATOR_RECEIPT_BASE_VERSION,
+    NATURAL_SIGNAL_RISK_BUDGET_BASE_VERSION,
     SchemaMigrationBlocked,
     TRUSTED_SNAPSHOT_BASE_VERSION,
     VERSION_TABLE,
+    _add_natural_signal_risk_chain_boundary,
     _add_trusted_snapshot_boundary,
     harden_attestation_access_boundary,
     schema_problems,
@@ -64,6 +67,7 @@ from app.models.strategy_deployment import SignalEvaluation, StrategyDeployment
 from app.adapters.okx_demo.writer_repository import SqlAlchemyOrderWriterStore
 from app.models.execution_lineage import OKX_DEMO_TARGET_ID
 from app.repositories.execution_lineage import ensure_execution_scope_catalog
+from app.repositories.full_chain import _stable_digest as full_chain_digest
 from app.services.risk_chain import (
     RiskChainService,
     _issue_attested_session_capability,
@@ -1964,13 +1968,17 @@ def test_postgresql_concurrent_idempotent_retry_reads_one_chain(
         assert len(db.scalars(select(TradeIntent)).all()) == 1
 
 
-def test_postgresql_v40_natural_signal_reaches_writer_claim(postgres_engine) -> None:
-    """Exercise the real owner function with one fully bound natural fixture."""
+def test_postgresql_v44_owner_initializes_missing_natural_budget_once(
+    postgres_engine,
+) -> None:
+    """Exercise the repository signal digest through the real owner function."""
 
     upgrade_database(postgres_engine)
     factory = create_session_factory(postgres_engine)
     lineage = _seed(factory)
-    now = datetime.now(timezone.utc).replace(microsecond=0)
+    now = (datetime.now(timezone.utc) - timedelta(seconds=1)).replace(
+        microsecond=482565
+    )
     policy = {
         "allowed_instruments": [
             "BTC-USDT-SWAP",
@@ -2145,7 +2153,7 @@ def test_postgresql_v40_natural_signal_reaches_writer_claim(postgres_engine) -> 
             "enter_long": True,
             "enter_short": False,
         }
-        signal_digest = canonical_digest(
+        signal_digest = full_chain_digest(
             {
                 "candidate_digest": signal_snapshot["candidate_digest"],
                 "instrument_id": "BTC-USDT-SWAP",
@@ -2308,15 +2316,6 @@ def test_postgresql_v40_natural_signal_reaches_writer_claim(postgres_engine) -> 
                 expires_at=now + timedelta(minutes=5),
             )
         )
-        budget = db.get(RiskBudget, "OKX_DEMO")
-        if budget is None:
-            budget = RiskBudget(
-                execution_target_id="OKX_DEMO",
-            )
-            db.add(budget)
-        budget.reserved_notional = 0
-        budget.approved_positions = 0
-        db.flush()
         deployment_digest = db.execute(
             text(
                 "SELECT encode(public.digest(convert_to(string_agg("
@@ -2341,6 +2340,51 @@ def test_postgresql_v40_natural_signal_reaches_writer_claim(postgres_engine) -> 
             },
         )
 
+    with postgres_engine.begin() as connection:
+        assert connection.execute(text("SELECT count(*) FROM risk_budgets")).scalar_one() == 0
+        before = connection.execute(text(
+            "SELECT (SELECT count(*) FROM trade_intents),"
+            "(SELECT count(*) FROM risk_decisions),"
+            "(SELECT count(*) FROM approved_executions)"
+        )).one()
+        connection.execute(text("RESET ROLE"))
+        _add_natural_signal_risk_chain_boundary(
+            connection,
+            refresh_supporting_boundaries=False,
+            rebind_automation_guard=False,
+            initialize_missing_budget=False,
+        )
+    with factory() as db:
+        db.execute(text("SET ROLE freqtrade"))
+        db.commit()
+        with pytest.raises(DBAPIError, match="natural signal risk budget is missing"):
+            RiskChainService(db).evaluate(
+                idempotency_key=key,
+                request=request,
+                policy=policy,
+                natural_signal_context={
+                    "deployment_id": deployment_id,
+                    "lease_token": lease_token,
+                    "fencing_sequence": 1,
+                },
+                now=now,
+            )
+        db.rollback()
+    with postgres_engine.begin() as connection:
+        assert connection.execute(text("SELECT count(*) FROM risk_budgets")).scalar_one() == 0
+        after = connection.execute(text(
+            "SELECT (SELECT count(*) FROM trade_intents),"
+            "(SELECT count(*) FROM risk_decisions),"
+            "(SELECT count(*) FROM approved_executions)"
+        )).one()
+        assert after == before
+        connection.execute(text("RESET ROLE"))
+        _add_natural_signal_risk_chain_boundary(
+            connection,
+            refresh_supporting_boundaries=False,
+            rebind_automation_guard=False,
+        )
+
     with factory() as db:
         db.execute(text("SET ROLE freqtrade"))
         db.commit()
@@ -2359,6 +2403,12 @@ def test_postgresql_v40_natural_signal_reaches_writer_claim(postgres_engine) -> 
         db.commit()
     assert result.status == "APPROVED"
     assert result.approved_execution_id is not None
+    with factory() as db:
+        budget = db.get(RiskBudget, "OKX_DEMO")
+        assert budget is not None
+        assert budget.reserved_notional > 0
+        assert budget.approved_positions == 1
+        assert db.execute(text("SELECT count(*) FROM risk_budgets")).scalar_one() == 1
 
     with factory() as db:
         db.execute(text("SET ROLE freqtrade"))
@@ -2377,23 +2427,8 @@ def test_postgresql_v40_natural_signal_reaches_writer_claim(postgres_engine) -> 
         db.execute(text("RESET ROLE"))
         db.commit()
     assert replay == result
-
     with factory() as db:
-        db.execute(text("SET ROLE freqtrade"))
-        db.commit()
-        with pytest.raises(DBAPIError):
-            RiskChainService(db).evaluate(
-                idempotency_key=key + "-alternate",
-                request=request,
-                policy=policy,
-                natural_signal_context={
-                    "deployment_id": deployment_id,
-                    "lease_token": lease_token,
-                    "fencing_sequence": 1,
-                },
-                now=now,
-            )
-        db.rollback()
+        assert db.execute(text("SELECT count(*) FROM risk_budgets")).scalar_one() == 1
 
     with factory.begin() as db:
         chain = db.get(FullChainRun, execution_chain_id)
@@ -2424,3 +2459,172 @@ def test_postgresql_v40_natural_signal_reaches_writer_claim(postgres_engine) -> 
         db.execute(text("RESET ROLE"))
         db.commit()
     assert claimed.approval_id == result.approved_execution_id
+
+    with factory.begin() as db:
+        db.execute(text("RESET ROLE"))
+        chain = db.get(FullChainRun, execution_chain_id)
+        chain.trade_intent_id = None
+        chain.risk_decision_id = None
+        chain.approved_execution_id = None
+        chain.current_stage = "RISK"
+        db.flush()
+        db.execute(
+            text("DELETE FROM trade_intents WHERE id=:intent_id"),
+            {"intent_id": result.trade_intent_id},
+        )
+        checkpoint = db.scalars(
+            select(FullChainStageRun).where(
+                FullChainStageRun.full_chain_run_id == chain.id,
+                FullChainStageRun.stage == "RISK",
+            )
+        ).one()
+        checkpoint.status = "PREPARED"
+        checkpoint.database_ids = {}
+        checkpoint.completed_at = None
+        budget = db.get(RiskBudget, "OKX_DEMO")
+        budget.reserved_notional = Decimal("3000")
+        budget.approved_positions = 3
+    with factory() as db:
+        db.execute(text("SET ROLE freqtrade"))
+        db.commit()
+        exhausted = RiskChainService(db).evaluate(
+            idempotency_key=key,
+            request=request,
+            policy=policy,
+            natural_signal_context={
+                "deployment_id": deployment_id,
+                "lease_token": lease_token,
+                "fencing_sequence": 1,
+            },
+            now=now,
+        )
+        db.execute(text("RESET ROLE"))
+        db.commit()
+    assert exhausted.status == "REJECTED"
+    assert exhausted.approved_execution_id is None
+    with factory() as db:
+        budget = db.get(RiskBudget, "OKX_DEMO")
+        assert budget.reserved_notional == Decimal("3000")
+        assert budget.approved_positions == 3
+        assert db.execute(text("SELECT count(*) FROM risk_budgets")).scalar_one() == 1
+
+    with factory() as db:
+        db.execute(text("SET ROLE freqtrade"))
+        db.commit()
+        with pytest.raises(DBAPIError):
+            RiskChainService(db).evaluate(
+                idempotency_key=key + "-alternate",
+                request=request,
+                policy=policy,
+                natural_signal_context={
+                    "deployment_id": deployment_id,
+                    "lease_token": lease_token,
+                    "fencing_sequence": 1,
+                },
+                now=now,
+            )
+        db.rollback()
+
+
+def test_postgresql_v44_reinstalls_repository_datetime_digest_contract(
+    postgres_engine,
+) -> None:
+    upgrade_database(postgres_engine)
+    with postgres_engine.begin() as connection:
+        definition = connection.execute(
+            text(
+                "SELECT pg_get_functiondef("
+                "'persist_okx_demo_natural_risk_chain(jsonb)'::regprocedure)"
+            )
+        ).scalar_one()
+        legacy_definition = definition.replace(
+            "'YYYY-MM-DD HH24:MI:SS'",
+            "'YYYY-MM-DD\"T\"HH24:MI:SS'",
+            2,
+        )
+        assert legacy_definition != definition
+        connection.execute(text(legacy_definition))
+        connection.execute(
+            text("DELETE FROM freqtrade_ai_schema_migrations WHERE version=:version"),
+            {"version": SCHEMA_VERSION},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO freqtrade_ai_schema_migrations(version) "
+                "VALUES(:version)"
+            ),
+            {"version": NATURAL_SIGNAL_EVALUATOR_RECEIPT_BASE_VERSION},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO okx_demo_automation_guard_states("
+                "execution_target_id,authorization_mode,operational_state,"
+                "policy_digest,deployment_set_digest,critical_failure_count,"
+                "health_check_required,fencing_version) VALUES("
+                "'OKX_DEMO','CONTINUOUS_DEMO_V1','RUNNING',:digest,:digest,"
+                "0,false,1)"
+            ),
+            {"digest": "0" * 64},
+        )
+
+    assert upgrade_database(postgres_engine) == SCHEMA_VERSION
+    with postgres_engine.connect() as connection:
+        repaired = connection.execute(
+            text(
+                "SELECT pg_get_functiondef("
+                "'persist_okx_demo_natural_risk_chain(jsonb)'::regprocedure)"
+            )
+        ).scalar_one()
+        guard = connection.execute(
+            text(
+                "SELECT operational_state,policy_digest,deployment_set_digest,"
+                "fencing_version FROM okx_demo_automation_guard_states "
+                "WHERE execution_target_id='OKX_DEMO'"
+            )
+        ).one()
+    assert "FullChainRepository._stable_digest uses Python's str(datetime)" in repaired
+    assert repaired.count("'YYYY-MM-DD HH24:MI:SS'") >= 2
+    assert tuple(guard) == ("RUNNING", "0" * 64, "0" * 64, 1)
+
+
+def test_postgresql_v43_upgrades_budget_initializer_and_acl_idempotently(
+    postgres_engine,
+) -> None:
+    upgrade_database(postgres_engine)
+    with postgres_engine.begin() as connection:
+        connection.execute(text("RESET ROLE"))
+        _add_natural_signal_risk_chain_boundary(
+            connection,
+            refresh_supporting_boundaries=False,
+            rebind_automation_guard=False,
+            initialize_missing_budget=False,
+        )
+        connection.execute(text(
+            "REVOKE INSERT ON risk_budgets FROM freqtrade_ai_attestor"
+        ))
+        connection.execute(
+            text("DELETE FROM freqtrade_ai_schema_migrations WHERE version=:version"),
+            {"version": SCHEMA_VERSION},
+        )
+        connection.execute(
+            text("INSERT INTO freqtrade_ai_schema_migrations(version) VALUES(:version)"),
+            {"version": NATURAL_SIGNAL_RISK_BUDGET_BASE_VERSION},
+        )
+
+    assert upgrade_database(postgres_engine) == SCHEMA_VERSION
+    assert upgrade_database(postgres_engine) == SCHEMA_VERSION
+    assert verify_schema(postgres_engine).ready is True
+    with postgres_engine.connect() as connection:
+        source = connection.execute(text(
+            "SELECT prosrc FROM pg_proc WHERE oid="
+            "'persist_okx_demo_natural_risk_chain(jsonb)'::regprocedure"
+        )).scalar_one()
+        acl = connection.execute(text(
+            "SELECT has_table_privilege('freqtrade','risk_budgets','INSERT,UPDATE,DELETE'),"
+            "has_column_privilege('freqtrade_ai_attestor','risk_budgets',"
+            "'execution_target_id','INSERT'),"
+            "has_column_privilege('freqtrade_ai_attestor','risk_budgets',"
+            "'updated_at','INSERT')"
+        )).one()
+    assert "ON CONFLICT (execution_target_id) DO NOTHING" in source
+    assert tuple(acl) == (False, True, True)
