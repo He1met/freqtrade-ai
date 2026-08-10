@@ -23,6 +23,7 @@ from app.db.migrations import (
     RISK_CHAIN_BASE_VERSION,
     RISK_CHAIN_HARDENING_BASE_VERSION,
     SCHEMA_VERSION,
+    NATURAL_SIGNAL_EVALUATOR_RECEIPT_BASE_VERSION,
     SchemaMigrationBlocked,
     TRUSTED_SNAPSHOT_BASE_VERSION,
     VERSION_TABLE,
@@ -64,6 +65,7 @@ from app.models.strategy_deployment import SignalEvaluation, StrategyDeployment
 from app.adapters.okx_demo.writer_repository import SqlAlchemyOrderWriterStore
 from app.models.execution_lineage import OKX_DEMO_TARGET_ID
 from app.repositories.execution_lineage import ensure_execution_scope_catalog
+from app.repositories.full_chain import _stable_digest as full_chain_digest
 from app.services.risk_chain import (
     RiskChainService,
     _issue_attested_session_capability,
@@ -1964,13 +1966,15 @@ def test_postgresql_concurrent_idempotent_retry_reads_one_chain(
         assert len(db.scalars(select(TradeIntent)).all()) == 1
 
 
-def test_postgresql_v40_natural_signal_reaches_writer_claim(postgres_engine) -> None:
-    """Exercise the real owner function with one fully bound natural fixture."""
+def test_postgresql_v43_natural_signal_evaluator_receipt_reaches_writer_claim(
+    postgres_engine,
+) -> None:
+    """Exercise the repository signal digest through the real owner function."""
 
     upgrade_database(postgres_engine)
     factory = create_session_factory(postgres_engine)
     lineage = _seed(factory)
-    now = datetime.now(timezone.utc).replace(microsecond=0)
+    now = datetime.now(timezone.utc).replace(microsecond=482565)
     policy = {
         "allowed_instruments": [
             "BTC-USDT-SWAP",
@@ -2145,7 +2149,7 @@ def test_postgresql_v40_natural_signal_reaches_writer_claim(postgres_engine) -> 
             "enter_long": True,
             "enter_short": False,
         }
-        signal_digest = canonical_digest(
+        signal_digest = full_chain_digest(
             {
                 "candidate_digest": signal_snapshot["candidate_digest"],
                 "instrument_id": "BTC-USDT-SWAP",
@@ -2424,3 +2428,45 @@ def test_postgresql_v40_natural_signal_reaches_writer_claim(postgres_engine) -> 
         db.execute(text("RESET ROLE"))
         db.commit()
     assert claimed.approval_id == result.approved_execution_id
+
+
+def test_postgresql_v43_reinstalls_repository_datetime_digest_contract(
+    postgres_engine,
+) -> None:
+    upgrade_database(postgres_engine)
+    with postgres_engine.begin() as connection:
+        definition = connection.execute(
+            text(
+                "SELECT pg_get_functiondef("
+                "'persist_okx_demo_natural_risk_chain(jsonb)'::regprocedure)"
+            )
+        ).scalar_one()
+        legacy_definition = definition.replace(
+            "'YYYY-MM-DD HH24:MI:SS'",
+            "'YYYY-MM-DD\"T\"HH24:MI:SS'",
+            2,
+        )
+        assert legacy_definition != definition
+        connection.execute(text(legacy_definition))
+        connection.execute(
+            text("DELETE FROM freqtrade_ai_schema_migrations WHERE version=:version"),
+            {"version": SCHEMA_VERSION},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO freqtrade_ai_schema_migrations(version) "
+                "VALUES(:version)"
+            ),
+            {"version": NATURAL_SIGNAL_EVALUATOR_RECEIPT_BASE_VERSION},
+        )
+
+    assert upgrade_database(postgres_engine) == SCHEMA_VERSION
+    with postgres_engine.connect() as connection:
+        repaired = connection.execute(
+            text(
+                "SELECT pg_get_functiondef("
+                "'persist_okx_demo_natural_risk_chain(jsonb)'::regprocedure)"
+            )
+        ).scalar_one()
+    assert "FullChainRepository._stable_digest uses Python's str(datetime)" in repaired
+    assert repaired.count("'YYYY-MM-DD HH24:MI:SS'") >= 2
