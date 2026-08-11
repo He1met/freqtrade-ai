@@ -1328,7 +1328,7 @@ def test_runtime_enqueues_same_closed_candle_once_and_no_action_does_not_place(
     assert writer.calls == []
 
 
-def test_runtime_actionable_evaluation_defers_approval_to_next_cycle(
+def test_runtime_actionable_evaluation_dispatches_exact_approval_in_same_cycle(
     db,
     monkeypatch,
 ) -> None:
@@ -1359,7 +1359,10 @@ def test_runtime_actionable_evaluation_defers_approval_to_next_cycle(
             pass
 
         def process(self, *_args, **_kwargs):
-            return SimpleNamespace(status="ACTIONABLE")
+            return SimpleNamespace(
+                status="ACTIONABLE",
+                approved_execution_id=41,
+            )
 
     monkeypatch.setattr(
         "app.adapters.okx_demo.reconciliation_runtime."
@@ -1371,10 +1374,20 @@ def test_runtime_actionable_evaluation_defers_approval_to_next_cycle(
         "OkxDemoExecutionOrchestrator",
         Orchestrator,
     )
+    selections = []
+
+    def select_approval(*_args, **kwargs):
+        selections.append(kwargs)
+        return (
+            _runtime_approved_execution()
+            if kwargs["approved_execution_id"] == 41
+            else None
+        )
+
     monkeypatch.setattr(
         "app.adapters.okx_demo.reconciliation_runtime."
         "_next_unconsumed_approved_execution",
-        lambda *_args, **_kwargs: _runtime_approved_execution(),
+        select_approval,
     )
     adapter = object.__new__(OkxDemoRuntimeReconciliationAdapter)
     adapter._order_submission_enabled = True
@@ -1390,9 +1403,104 @@ def test_runtime_actionable_evaluation_defers_approval_to_next_cycle(
 
     writer = Writer()
     adapter.run_cycle(read_client=object(), writer=writer, db=db)
-    assert writer.calls == []
+    assert len(writer.calls) == 1
+    assert selections == [{"now": NOW, "approved_execution_id": 41}]
     adapter.run_cycle(read_client=object(), writer=writer, db=db)
     assert len(writer.calls) == 1
+    assert selections[-1] == {"now": NOW, "approved_execution_id": None}
+
+
+def test_runtime_actionable_without_exact_approval_binding_fails_closed(
+    db,
+    monkeypatch,
+) -> None:
+    _active_runtime_deployment(db)
+
+    monkeypatch.setattr(
+        OkxDemoRuntimeReconciliationAdapter,
+        "_process_one_signal_evaluation",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            status="ACTIONABLE",
+            approved_execution_id=None,
+        ),
+    )
+    adapter = object.__new__(OkxDemoRuntimeReconciliationAdapter)
+    adapter._order_submission_enabled = True
+    adapter._now_provider = lambda: NOW
+    writer = SimpleNamespace(place=lambda *_args, **_kwargs: pytest.fail(
+        "unbound ACTIONABLE result must never reach the writer"
+    ))
+
+    with pytest.raises(
+        OkxDemoReconciliationBlocked,
+        match="lacks an approved execution binding",
+    ):
+        adapter.run_cycle(read_client=object(), writer=writer, db=db)
+
+
+def test_runtime_actionable_blocked_opening_is_explicit_and_never_places(
+    db,
+    monkeypatch,
+) -> None:
+    _active_runtime_deployment(db)
+    monkeypatch.setattr(
+        OkxDemoRuntimeReconciliationAdapter,
+        "_process_one_signal_evaluation",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            status="ACTIONABLE",
+            approved_execution_id=41,
+        ),
+    )
+    monkeypatch.setattr(
+        "app.adapters.okx_demo.reconciliation_runtime."
+        "OkxDemoAutomationGuard.opening_allowed",
+        lambda *_args, **_kwargs: False,
+    )
+    adapter = object.__new__(OkxDemoRuntimeReconciliationAdapter)
+    adapter._order_submission_enabled = False
+    adapter._now_provider = lambda: NOW
+    writer = SimpleNamespace(place=lambda *_args, **_kwargs: pytest.fail(
+        "guard-blocked ACTIONABLE result must never reach the writer"
+    ))
+
+    with pytest.raises(
+        OkxDemoReconciliationBlocked,
+        match="blocked by the Demo opening guard",
+    ):
+        adapter.run_cycle(read_client=object(), writer=writer, db=db)
+
+
+def test_runtime_actionable_exact_approval_unavailable_fails_closed(
+    db,
+    monkeypatch,
+) -> None:
+    _active_runtime_deployment(db)
+    _allow_fresh_runtime_opening(db)
+    monkeypatch.setattr(
+        OkxDemoRuntimeReconciliationAdapter,
+        "_process_one_signal_evaluation",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            status="ACTIONABLE",
+            approved_execution_id=41,
+        ),
+    )
+    monkeypatch.setattr(
+        "app.adapters.okx_demo.reconciliation_runtime."
+        "_next_unconsumed_approved_execution",
+        lambda *_args, **_kwargs: None,
+    )
+    adapter = object.__new__(OkxDemoRuntimeReconciliationAdapter)
+    adapter._order_submission_enabled = True
+    adapter._now_provider = lambda: NOW
+    writer = SimpleNamespace(place=lambda *_args, **_kwargs: pytest.fail(
+        "an unavailable exact approval must never reach the writer"
+    ))
+
+    with pytest.raises(
+        OkxDemoReconciliationBlocked,
+        match="not claimable for execution",
+    ):
+        adapter.run_cycle(read_client=object(), writer=writer, db=db)
 
 
 @pytest.mark.parametrize("failure_point", ["lease", "service"])

@@ -82,6 +82,18 @@ CONTRACT_CHECKS = (
         "Demo-only execution, completed risk checkpoint, current reconciliation, and automation guard digests",
     ),
     ContractCheck(
+        "ACTIONABLE_CLAIM_EXECUTION_HANDOFF",
+        (
+            "tests/test_okx_demo_reconciliation_runtime.py::test_runtime_actionable_evaluation_dispatches_exact_approval_in_same_cycle",
+            "tests/test_okx_demo_reconciliation_runtime.py::test_runtime_actionable_without_exact_approval_binding_fails_closed",
+            "tests/test_okx_demo_reconciliation_runtime.py::test_runtime_actionable_blocked_opening_is_explicit_and_never_places",
+            "tests/test_okx_demo_reconciliation_runtime.py::test_runtime_actionable_exact_approval_unavailable_fails_closed",
+            "tests/test_okx_demo_writer_postgresql.py::test_postgresql_runtime_dispatches_fresh_actionable_in_same_cycle_without_exchange",
+            "tests/test_okx_demo_writer_postgresql.py::test_postgresql_runtime_role_completes_real_writer_happy_lifecycle",
+        ),
+        "same-cycle exact approval handoff, runtime-role claim, Demo authorization, guarded writer preparation, and zero exchange access",
+    ),
+    ContractCheck(
         "WRITER_LEASE_FENCING",
         (
             "tests/test_okx_demo_writer_postgresql.py::test_postgresql_concurrent_lease_has_one_winner",

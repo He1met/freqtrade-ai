@@ -51,6 +51,7 @@ from app.models.order_writer import (
 from app.models.strategy_deployment import SignalEvaluation, StrategyDeployment
 from app.repositories.strategy_deployments import StrategyDeploymentRepository
 from app.services.okx_demo_execution_orchestrator import (
+    OkxDemoExecutionOrchestrationResult,
     OkxDemoExecutionOrchestrator,
 )
 from app.services.okx_demo_automation_guard import OkxDemoAutomationGuard
@@ -295,19 +296,47 @@ class OkxDemoRuntimeReconciliationAdapter:
                 )
         if grants:
             return
-        if self._process_one_signal_evaluation(
+        evaluation_result = self._process_one_signal_evaluation(
             read_client=read_client,
             db=db,
-        ):
-            return
-        now = _aware(self._now_provider())
+        )
         if (
-            not getattr(self, "_order_submission_enabled", False)
-            and not OkxDemoAutomationGuard.opening_allowed(db)
+            evaluation_result is not None
+            and evaluation_result.status != "ACTIONABLE"
         ):
             return
-        approved = _next_unconsumed_approved_execution(db, now=now)
+        if (
+            evaluation_result is not None
+            and evaluation_result.approved_execution_id is None
+        ):
+            raise OkxDemoReconciliationBlocked(
+                "ACTIONABLE evaluation lacks an approved execution binding"
+            )
+        now = _aware(self._now_provider())
+        opening_authorized = (
+            getattr(self, "_order_submission_enabled", False)
+            or OkxDemoAutomationGuard.opening_allowed(db)
+        )
+        if not opening_authorized:
+            if evaluation_result is not None:
+                raise OkxDemoReconciliationBlocked(
+                    "fresh ACTIONABLE approval is blocked by the Demo opening guard"
+                )
+            return
+        approved = _next_unconsumed_approved_execution(
+            db,
+            now=now,
+            approved_execution_id=(
+                evaluation_result.approved_execution_id
+                if evaluation_result is not None
+                else None
+            ),
+        )
         if approved is None:
+            if evaluation_result is not None:
+                raise OkxDemoReconciliationBlocked(
+                    "fresh ACTIONABLE approval is not claimable for execution"
+                )
             return
         if not _fresh_reconciliation_allows_opening(db, now=now):
             raise OkxDemoReconciliationBlocked(
@@ -679,7 +708,7 @@ class OkxDemoRuntimeReconciliationAdapter:
         *,
         read_client: Any,
         db: Session,
-    ) -> bool:
+    ) -> Optional[OkxDemoExecutionOrchestrationResult]:
         now = _aware(self._now_provider())
         repository = StrategyDeploymentRepository(db)
         deployments = list(
@@ -706,13 +735,13 @@ class OkxDemoRuntimeReconciliationAdapter:
             now=now,
         )
         if claimed is None:
-            return False
+            return None
         if not claimed.lease_token:
             raise OkxDemoReconciliationBlocked(
                 "claimed signal evaluation lacks a lease token"
             )
         try:
-            OkxDemoExecutionOrchestrator(
+            result = OkxDemoExecutionOrchestrator(
                 db,
                 read_client=read_client,
                 deployment_repository=repository,
@@ -735,7 +764,11 @@ class OkxDemoRuntimeReconciliationAdapter:
                 db.rollback()
                 raise
             db.rollback()
-        return True
+            return OkxDemoExecutionOrchestrationResult(
+                evaluation_id=claimed.id,
+                status=terminal.status,
+            )
+        return result
 
     def _submission_authorization(
         self,
@@ -1386,6 +1419,7 @@ def _next_unconsumed_approved_execution(
     db: Session,
     *,
     now: datetime,
+    approved_execution_id: Optional[int] = None,
 ) -> Optional[ClaimedApprovedExecution]:
     consumed = (
         select(OkxOrderWriteAttempt.id)
@@ -1404,7 +1438,7 @@ def _next_unconsumed_approved_execution(
         )
         .exists()
     )
-    row = db.execute(
+    statement = (
         select(
             ApprovedExecution,
             TradeIntent,
@@ -1453,7 +1487,12 @@ def _next_unconsumed_approved_execution(
         )
         .order_by(ApprovedExecution.created_at, ApprovedExecution.id)
         .limit(1)
-    ).first()
+    )
+    if approved_execution_id is not None:
+        statement = statement.where(
+            ApprovedExecution.id == approved_execution_id
+        )
+    row = db.execute(statement).first()
     if row is None:
         return None
     approved, intent, decision, chain, evaluation = row
