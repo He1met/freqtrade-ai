@@ -78,8 +78,10 @@ CONTRACT_CHECKS = (
             "tests/test_okx_demo_writer_postgresql.py::test_postgresql_writer_blocks_incomplete_full_chain_risk_checkpoint",
             "tests/test_okx_demo_writer_postgresql.py::test_postgresql_continuous_guard_blocks_deployment_set_digest_drift",
             "tests/test_okx_demo_writer_postgresql.py::test_postgresql_continuous_guard_acl_tamper_fails_readiness",
+            "tests/test_okx_demo_order_writer.py::test_set_leverage_recovery_selects_exact_side_from_dual_side_snapshot",
+            "tests/test_okx_demo_writer_postgresql.py::test_postgresql_runtime_get_only_recovers_dual_side_leverage_attempt",
         ),
-        "Demo-only execution, completed risk checkpoint, current reconciliation, and automation guard digests",
+        "Demo-only execution, completed risk checkpoint, current reconciliation, GET-only writer recovery, and automation guard digests",
     ),
     ContractCheck(
         "ACTIONABLE_CLAIM_EXECUTION_HANDOFF",

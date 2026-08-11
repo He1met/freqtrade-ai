@@ -7,6 +7,7 @@ import time
 
 import pytest
 
+from app.adapters.okx_demo import OkxDemoReadAdapter, OkxReadHttpResponse
 from app.adapters.okx_demo.models import OkxReadSnapshot, SnapshotMetadata
 from app.adapters.okx_demo.order_writer import (
     ManagedOrder,
@@ -809,6 +810,150 @@ def test_set_leverage_timeout_queries_and_never_reposts() -> None:
     assert [call[0] for call in write.calls].count(
         "/api/v5/account/set-leverage"
     ) == 1
+
+
+def test_set_leverage_recovery_selects_exact_side_from_dual_side_snapshot() -> None:
+    order = managed_order()
+    attempt = WriteAttemptRecord(
+        attempt_id=8,
+        exchange_order_row_id=101,
+        operation="SET_LEVERAGE",
+        operation_id="WriterOrder001LEV",
+        client_order_id="WriterOrder001",
+        instrument_id="BTC-USDT-SWAP",
+        state=WriteState.RECOVERY_REQUIRED,
+        request_digest="b" * 64,
+        safe_request_snapshot={
+            "instId": "BTC-USDT-SWAP",
+            "lever": "2",
+            "mgnMode": "isolated",
+            "posSide": "long",
+        },
+        attempt_count=1,
+    )
+    store = FakeStore(attempt, order)
+
+    class RecordedCredentials:
+        def authorization_headers(self, **_kwargs):
+            return {
+                "OK-ACCESS-KEY": "recorded",
+                "OK-ACCESS-SIGN": "recorded",
+                "OK-ACCESS-TIMESTAMP": "recorded",
+                "OK-ACCESS-PASSPHRASE": "recorded",
+            }
+
+    read = OkxDemoReadAdapter(
+        execution_target="OKX_DEMO",
+        recorded_responses=[
+            OkxReadHttpResponse(
+                status_code=200,
+                payload={
+                    "code": "0",
+                    "msg": "",
+                    "data": [
+                        {
+                            "instId": "BTC-USDT-SWAP",
+                            "mgnMode": "isolated",
+                            "posSide": "long",
+                            "lever": "2",
+                        },
+                        {
+                            "instId": "BTC-USDT-SWAP",
+                            "mgnMode": "isolated",
+                            "posSide": "short",
+                            "lever": "3",
+                        },
+                    ],
+                },
+                received_at=NOW,
+            )
+        ],
+        credential_provider=RecordedCredentials(),
+        now_provider=lambda: NOW,
+    )
+    write = FakeWriteTransport()
+
+    result = writer(read, write, store).reconcile_unresolved(attempt.attempt_id)
+
+    assert result.status == "RECONCILED"
+    assert write.calls == []
+    assert [event[0] for event in store.events] == ["RECONCILE"]
+    assert len(read._transport.calls) == 1
+    call = read._transport.calls[0]
+    assert call["path"] == "/api/v5/account/leverage-info"
+    assert call["query"] == {
+        "instId": "BTC-USDT-SWAP",
+        "mgnMode": "isolated",
+    }
+    assert call["headers"]["x-simulated-trading"] == "1"
+
+
+@pytest.mark.parametrize(
+    "leverages",
+    [
+        [
+            {
+                "inst_id": "BTC-USDT-SWAP",
+                "margin_mode": "isolated",
+                "position_side": "long",
+                "leverage": Decimal("2"),
+            },
+            {
+                "inst_id": "BTC-USDT-SWAP",
+                "margin_mode": "isolated",
+                "position_side": "long",
+                "leverage": Decimal("2"),
+            },
+        ],
+        [
+            {
+                "inst_id": "BTC-USDT-SWAP",
+                "margin_mode": "isolated",
+                "position_side": "short",
+                "leverage": Decimal("2"),
+            },
+        ],
+        [
+            {
+                "inst_id": "BTC-USDT-SWAP",
+                "margin_mode": "isolated",
+                "position_side": "long",
+                "leverage": Decimal("3"),
+            },
+        ],
+    ],
+    ids=("ambiguous-target", "missing-target", "leverage-mismatch"),
+)
+def test_set_leverage_recovery_rejects_ambiguous_or_nonmatching_side(
+    leverages,
+) -> None:
+    attempt = WriteAttemptRecord(
+        attempt_id=8,
+        exchange_order_row_id=101,
+        operation="SET_LEVERAGE",
+        operation_id="WriterOrder001LEV",
+        client_order_id="WriterOrder001",
+        instrument_id="BTC-USDT-SWAP",
+        state=WriteState.RECOVERY_REQUIRED,
+        request_digest="b" * 64,
+        safe_request_snapshot={
+            "instId": "BTC-USDT-SWAP",
+            "lever": "2",
+            "mgnMode": "isolated",
+            "posSide": "long",
+        },
+        attempt_count=1,
+    )
+    store = FakeStore(attempt, managed_order())
+    write = FakeWriteTransport()
+
+    result = writer(
+        FakeReadClient(leverages=[leverages]), write, store
+    ).reconcile_unresolved(attempt.attempt_id)
+
+    assert result.status == "RECOVERY_REQUIRED"
+    assert write.calls == []
+    assert store.current.state == WriteState.RECOVERY_REQUIRED
 
 
 def test_prepared_crash_recovery_queries_and_does_not_post() -> None:

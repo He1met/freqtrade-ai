@@ -1045,19 +1045,21 @@ class OkxDemoOrderWriter:
         leverage: Decimal,
     ) -> bool:
         snapshot = self._read.leverage(instrument_id)
-        if len(snapshot.items) != 1:
+        matches = [
+            item
+            for item in snapshot.items
+            if item.get("inst_id") == instrument_id
+            and item.get("margin_mode") == margin_mode
+            and item.get("position_side") == position_side
+        ]
+        if len(matches) != 1:
             return False
-        item = snapshot.items[0]
+        item = matches[0]
         try:
             observed = Decimal(str(item["leverage"]))
         except (KeyError, TypeError, ValueError):
             return False
-        return (
-            item.get("inst_id") == instrument_id
-            and item.get("margin_mode") == margin_mode
-            and item.get("position_side") == position_side
-            and observed == leverage
-        )
+        return observed == leverage
 
     def _require_exact_close_position(
         self,

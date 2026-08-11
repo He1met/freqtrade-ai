@@ -4172,6 +4172,111 @@ def test_postgresql_partial_unique_rejects_second_unresolved_attempt(
             session.commit()
 
 
+def test_postgresql_runtime_get_only_recovers_dual_side_leverage_attempt(
+    postgres_writer_engine,
+) -> None:
+    upgrade_database(postgres_writer_engine)
+    test_now = datetime.now(timezone.utc)
+    post_calls = []
+
+    class DualSideLeverageRead:
+        def leverage(self, inst_id):
+            assert inst_id == "BTC-USDT-SWAP"
+            return OkxReadSnapshot(
+                metadata=SnapshotMetadata(
+                    resource="leverage",
+                    fetched_at=test_now,
+                    expires_at=test_now + timedelta(seconds=30),
+                    stale=False,
+                    authenticated=True,
+                ),
+                items=[
+                    {
+                        "inst_id": inst_id,
+                        "margin_mode": "isolated",
+                        "position_side": "long",
+                        "leverage": Decimal("3"),
+                    },
+                    {
+                        "inst_id": inst_id,
+                        "margin_mode": "isolated",
+                        "position_side": "short",
+                        "leverage": Decimal("2"),
+                    },
+                ],
+            )
+
+    class NoPostTransport:
+        def post(self, **kwargs):
+            post_calls.append(kwargs)
+            raise AssertionError("SET_LEVERAGE recovery must remain GET-only")
+
+    with Session(postgres_writer_engine) as session:
+        approval_id, order_id = _seed_approved_order(
+            session,
+            seed_now=test_now,
+        )
+        approval = session.get(ApprovedExecution, approval_id)
+        store = SqlAlchemyOrderWriterStore(
+            session,
+            now_provider=lambda: test_now,
+        )
+        session.execute(text("SET LOCAL ROLE freqtrade"))
+        store.acquire_lease(
+            writer_instance_id="PgLeverageRecoveryWriter",
+            approval_id=approval_id,
+            canonical_hash=approval.canonical_hash,
+            policy_digest=approval.policy_digest,
+            approved_payload_hash=approval.approved_payload_hash,
+            now=test_now,
+            expires_at=test_now + timedelta(minutes=1),
+        )
+        lease = session.get(OkxOrderWriterLease, "OKX_DEMO")
+        attempt = OkxOrderWriteAttempt(
+            execution_target_id="OKX_DEMO",
+            exchange_order_row_id=order_id,
+            approval_id=approval_id,
+            operation="SET_LEVERAGE",
+            operation_id="PgWriterOrder001LEV",
+            client_order_id="PgWriterOrder001",
+            instrument_id="BTC-USDT-SWAP",
+            state="RECOVERY_REQUIRED",
+            request_digest="a" * 64,
+            safe_request_snapshot={
+                "instId": "BTC-USDT-SWAP",
+                "lever": "3",
+                "mgnMode": "isolated",
+                "posSide": "long",
+            },
+            safe_response_snapshot={},
+            attempt_count=1,
+            lease_generation=lease.generation,
+            close_sequence=0,
+            reason_code="LEVERAGE_RECONCILIATION_FAILED",
+            last_attempt_at=test_now,
+        )
+        session.add(attempt)
+        session.commit()
+        attempt_id = attempt.id
+
+        session.execute(text("SET LOCAL ROLE freqtrade"))
+        result = OkxDemoOrderWriter(
+            read_client=DualSideLeverageRead(),
+            write_transport=NoPostTransport(),
+            store=store,
+            now_provider=lambda: test_now,
+        ).reconcile_unresolved(attempt_id)
+
+        assert result.status == "RECONCILED"
+
+    with Session(postgres_writer_engine) as admin:
+        persisted = admin.get(OkxOrderWriteAttempt, attempt_id)
+        assert persisted.state == "RECONCILED"
+        assert persisted.order_state == "leverage_confirmed"
+        assert persisted.attempt_count == 1
+        assert post_calls == []
+
+
 def test_postgresql_partial_predicate_tamper_is_detected(
     postgres_writer_engine,
 ) -> None:
