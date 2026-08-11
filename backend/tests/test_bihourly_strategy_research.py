@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+import hashlib
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import shutil
 
@@ -10,6 +11,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from app.models import Base, ResearchJob
+from app.core.strategy_research_matrix import RESEARCH_TARGETS
 from app.repositories.execution_lineage import ensure_execution_scope_catalog
 from app.schemas.deepseek_backtest_loop import DeepSeekBacktestLoopRequest
 from app.services.bihourly_strategy_research import (
@@ -89,6 +91,111 @@ def _runtime_snapshot(*, blocked_openings: bool = False) -> dict:
             for name in ("backend", "worker", "frontend", "okx_runtime")
         ],
     }
+
+
+def _install_market_receipts(
+    root: Path,
+    *,
+    now: datetime,
+) -> Path:
+    datadir = root / "market"
+    for target in RESEARCH_TARGETS:
+        path = target.market_path(datadir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(f"{target.key}\n".encode())
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        sidecar = {
+            "schema_version": "okx-public-candle-file-source-v1",
+            "source_type": (
+                "OKX_PUBLIC_REST"
+                if target.timeframe == "5m"
+                else "DERIVED_FROM_OKX_PUBLIC_REST"
+            ),
+            "timeframe": target.timeframe,
+            "credentials_used": False,
+            "account_endpoint_used": False,
+            "orders_submitted": False,
+            "downloaded_at": now.isoformat(),
+            "data_file_sha256": digest,
+        }
+        if target.timeframe == "15m":
+            five = next(
+                item
+                for item in RESEARCH_TARGETS
+                if item.pair == target.pair and item.timeframe == "5m"
+            )
+            sidecar["parent_five_minute_sha256"] = hashlib.sha256(
+                five.market_path(datadir).read_bytes()
+            ).hexdigest()
+        path.with_suffix(path.suffix + ".source.json").write_text(
+            json.dumps(sidecar), encoding="utf-8"
+        )
+    return datadir
+
+
+def test_market_freshness_uses_closed_candle_time_without_relaxing_gate(
+    database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _root(tmp_path)
+    now = datetime(2026, 8, 11, 17, 36, 29, tzinfo=timezone.utc)
+    five_open = now.replace(minute=30, second=0, microsecond=0)
+    fifteen_open = now.replace(minute=15, second=0, microsecond=0)
+    datadir = _install_market_receipts(
+        root,
+        now=now,
+    )
+    service = BihourlyStrategyResearchService(
+        database, canonical_root=root, datadir=datadir
+    )
+    monkeypatch.setattr(
+        "app.services.bihourly_strategy_research._data_bounds",
+        lambda path: (
+            datetime(2023, 7, 1, tzinfo=timezone.utc),
+            fifteen_open if "-15m-" in path.name else five_open,
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.bihourly_strategy_research._matching_market_data_files",
+        lambda datadir, pair, timeframe: [
+            next(
+                target.market_path(datadir)
+                for target in RESEARCH_TARGETS
+                if target.pair == pair and target.timeframe == timeframe
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        "app.services.bihourly_strategy_research._market_data_files_digest",
+        lambda _paths: "a" * 64,
+    )
+
+    evidence = service._validate_market_data(now=now)
+    assert {item["last_close_at"] for item in evidence.values()} == {
+        "2026-08-11T17:30:00+00:00",
+        "2026-08-11T17:35:00+00:00",
+    }
+
+    stale_open = datetime(2026, 8, 11, 17, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        "app.services.bihourly_strategy_research._data_bounds",
+        lambda path: (
+            datetime(2023, 7, 1, tzinfo=timezone.utc),
+            stale_open if "-15m-" in path.name else five_open,
+        ),
+    )
+    with pytest.raises(BihourlyStrategyResearchBlocked, match="MARKET_DATA_NOT_FRESH"):
+        service._validate_market_data(now=now)
+
+    not_closed_open = datetime(2026, 8, 11, 17, 30, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        "app.services.bihourly_strategy_research._data_bounds",
+        lambda path: (
+            datetime(2023, 7, 1, tzinfo=timezone.utc),
+            not_closed_open if "-15m-" in path.name else five_open,
+        ),
+    )
+    with pytest.raises(BihourlyStrategyResearchBlocked, match="MARKET_DATA_NOT_FRESH"):
+        service._validate_market_data(now=now)
 
 
 def test_manual_and_automation_share_fail_closed_generation_trigger(
