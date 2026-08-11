@@ -52,7 +52,9 @@ CONTRACT_CHECKS = (
     ContractCheck(
         "SNAPSHOT_SIGNAL_BINDING",
         (
+            "tests/test_okx_demo_read_adapter.py::test_signal_bundle_attests_local_as_of_when_exchange_clock_is_ahead",
             "tests/test_risk_chain.py::test_market_snapshot_future_binding_is_blocked_without_permission",
+            "tests/test_risk_chain_postgresql.py::test_postgresql_accepts_local_market_observation_with_ahead_exchange_events",
             "tests/test_risk_chain_postgresql.py::test_security_definer_rejects_wrong_pinned_account",
             "tests/test_risk_chain_postgresql.py::test_revoked_or_expired_attested_session_blocks_authorization",
         ),

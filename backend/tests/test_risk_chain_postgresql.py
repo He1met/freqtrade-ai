@@ -1153,6 +1153,68 @@ def test_database_rejects_direct_authorization_tampering(
         assert db.get(TradeIntent, result.trade_intent_id).status == "APPROVED"
 
 
+def test_postgresql_accepts_local_market_observation_with_ahead_exchange_events(
+    postgres_engine,
+) -> None:
+    upgrade_database(postgres_engine)
+    factory = create_session_factory(postgres_engine)
+    lineage = _seed(factory)
+    now = datetime.now(timezone.utc)
+    request = _request(lineage, now)
+    market = request["snapshots"]["market"]["content"]
+    exchange_time = now + timedelta(seconds=1)
+    market["bbo"] = {
+        "bid_price": "49999.9",
+        "bid_size": "1",
+        "ask_price": "50000.1",
+        "ask_size": "1",
+        "timestamp": exchange_time.isoformat(),
+    }
+    market["mark"] = {
+        "price": "50000",
+        "timestamp": exchange_time.isoformat(),
+    }
+
+    snapshots = request.pop("snapshots")
+    capability = _issue_attested_session_capability(
+        attestation_hmac_key=b"t" * 32,
+        pinned_fingerprint_sha256="e" * 64,
+        created_at=now,
+        expires_at=now + timedelta(minutes=10),
+    )
+    snapshot_ids = {}
+    with factory.begin() as db:
+        for kind, envelope in snapshots.items():
+            content = envelope["content"]
+            expires_at = datetime.fromisoformat(content["expires_at"])
+            normalized = _normalize_attested_snapshot(
+                capability,
+                kind=kind,
+                content=content,
+                observed_at=now,
+                expires_at=expires_at,
+            )
+            row = _write_attested_snapshot(
+                db,
+                capability,
+                normalized,
+                now=now,
+            )
+            snapshot_ids[kind] = row.snapshot_id
+    request["snapshot_ids"] = snapshot_ids
+
+    with factory() as db:
+        result = RiskChainService(db).evaluate(
+            idempotency_key="local-market-observation-ahead-exchange-events",
+            request=request,
+            policy=_policy(),
+            now=now,
+        )
+
+    assert result.status == "APPROVED"
+    assert result.approved_execution_id is not None
+
+
 @pytest.mark.parametrize(
     "statement",
     [

@@ -1714,6 +1714,48 @@ def test_attested_client_captures_typed_atomic_signal_bundle(monkeypatch) -> Non
         db.close()
 
 
+def test_signal_bundle_attests_local_as_of_when_exchange_clock_is_ahead(
+    monkeypatch,
+) -> None:
+    account = attested_account()
+    install_attestation(monkeypatch, account)
+    monkeypatch.setattr(read_boundary, "_utc_now", lambda: NOW)
+    client = create_attested_okx_demo_read_adapter(
+        ephemeral_environment(account)
+    )
+    snapshots = trusted_bundle_engine_snapshots()
+    exchange_time = NOW + timedelta(seconds=1)
+    snapshots["orderbook"].items[0]["timestamp"] = exchange_time
+    snapshots["mark_price"].items[0]["timestamp"] = exchange_time
+    install_trusted_bundle_engine(client, snapshots)
+    db = trusted_bundle_db()
+    try:
+        client.capture_trusted_signal_bundle(
+            db,
+            inst_id="BTC-USDT-SWAP",
+            timeframe="1m",
+            candle_limit=3,
+        )
+
+        market = db.scalar(
+            select(OkxDemoTrustedSnapshot).where(
+                OkxDemoTrustedSnapshot.kind == "market"
+            )
+        )
+        assert market is not None
+        assert market.content_json["as_of"] == NOW.isoformat().replace(
+            "+00:00", "Z"
+        )
+        assert market.content_json["bbo"]["timestamp"] == (
+            exchange_time.isoformat().replace("+00:00", "Z")
+        )
+        assert market.content_json["mark"]["timestamp"] == (
+            exchange_time.isoformat().replace("+00:00", "Z")
+        )
+    finally:
+        db.close()
+
+
 def test_signal_bundle_uses_only_the_newest_confirmed_candles(monkeypatch) -> None:
     account = attested_account()
     install_attestation(monkeypatch, account)
@@ -1890,6 +1932,9 @@ def test_attested_client_captures_execution_only_bundle_without_candles(
         ephemeral_environment(account)
     )
     snapshots = trusted_bundle_engine_snapshots()
+    exchange_time = NOW + timedelta(seconds=1)
+    snapshots["orderbook"].items[0]["timestamp"] = exchange_time
+    snapshots["mark_price"].items[0]["timestamp"] = exchange_time
     install_trusted_bundle_engine(client, snapshots)
 
     def candles_must_not_be_called(*_args, **_kwargs):
@@ -1913,6 +1958,15 @@ def test_attested_client_captures_execution_only_bundle_without_candles(
         }
         assert set(rows) == {"instrument", "market", "account"}
         assert rows["market"].content_json["execution_only"] is True
+        assert datetime.fromisoformat(
+            rows["market"].content_json["as_of"].replace("Z", "+00:00")
+        ) == NOW
+        assert rows["market"].content_json["bbo"]["timestamp"] == (
+            exchange_time.isoformat().replace("+00:00", "Z")
+        )
+        assert rows["market"].content_json["mark"]["timestamp"] == (
+            exchange_time.isoformat().replace("+00:00", "Z")
+        )
         assert "confirmed_candles" not in rows["market"].content_json
         assert rows["account"].content_json["authenticated"] is True
         assert rows["account"].content_json["pinned_account_fingerprint"]

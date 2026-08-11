@@ -1822,11 +1822,6 @@ def create_attested_okx_demo_read_adapter(
                     self._block_signal_bundle(
                         "signal bundle expired before atomic persistence"
                     )
-                market_as_of = max(
-                    candles[-1].timestamp,
-                    order_book.timestamp,
-                    mark_price.timestamp,
-                )
                 account_as_of = max(
                     config_snapshot.metadata.fetched_at,
                     positions_snapshot.metadata.fetched_at,
@@ -1849,7 +1844,10 @@ def create_attested_okx_demo_read_adapter(
                     timeframe=timeframe,
                     okx_bar=okx_bar,
                     reference_price=mark_price.price,
-                    as_of=market_as_of,
+                    # ``as_of`` is the locally attested observation time used
+                    # by the risk verifier.  Exchange event times remain in
+                    # the candle, BBO, and mark evidence for ordering/audit.
+                    as_of=observed_at,
                     first_candle_at=candles[0].timestamp,
                     last_candle_at=candles[-1].timestamp,
                     candle_count=len(candles),
@@ -2168,15 +2166,19 @@ def create_attested_okx_demo_read_adapter(
                     *(snapshot.metadata.expires_at for snapshot in fetched_snapshots),
                     self._attested_session.expires_at,
                 )
-                market_as_of = max(order_book.timestamp, mark_price.timestamp)
+                exchange_market_as_of = max(
+                    order_book.timestamp,
+                    mark_price.timestamp,
+                )
                 account_as_of = max(
                     config_snapshot.metadata.fetched_at,
                     positions_snapshot.metadata.fetched_at,
                     leverage_snapshot.metadata.fetched_at,
                 )
                 if (
-                    market_as_of > observed_at + timedelta(seconds=FUTURE_SKEW_SECONDS)
-                    or observed_at - market_as_of > timedelta(seconds=30)
+                    exchange_market_as_of
+                    > observed_at + timedelta(seconds=FUTURE_SKEW_SECONDS)
+                    or observed_at - exchange_market_as_of > timedelta(seconds=30)
                 ):
                     raise OkxReadAdapterError(
                         kind="STALE_DATA",
@@ -2210,7 +2212,9 @@ def create_attested_okx_demo_read_adapter(
                     "execution_only": True,
                     "instrument_id": inst_id,
                     "reference_price": str(mark_price.price),
-                    "as_of": market_as_of.isoformat(),
+                    # Keep the verifier-facing timestamp on the attested local
+                    # clock; the raw exchange event times remain in BBO/mark.
+                    "as_of": observed_at.isoformat(),
                     "bbo": TrustedBbo(
                         bid_price=best_bid.price,
                         bid_size=best_bid.size,
