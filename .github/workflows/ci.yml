@@ -104,7 +104,10 @@ jobs:
 
       - name: Run backend pytest and artifact reconciliation coverage
         working-directory: backend
-        run: pytest
+        # The complete real-PostgreSQL worker file ran in the immediately
+        # preceding gate. Exclude only that duplicate here; all tests still run
+        # once, while the remaining backend suite keeps its PostgreSQL env.
+        run: pytest --ignore=tests/test_research_job_postgresql.py
 
       - name: Compile Python modules
         run: python -m compileall backend/app backend/tests scripts
