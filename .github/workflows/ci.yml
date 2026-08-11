@@ -15,7 +15,6 @@ env:
   FREQTRADE_AI_CI_OFFLINE: "1"
   POSTGRES_MIGRATION_URL: postgresql+psycopg://postgres@127.0.0.1:5432/freqtrade_ai_ci_test
   POSTGRES_PHASE8_URL: postgresql+psycopg://postgres@127.0.0.1:5432/freqtrade_ai_phase8_test
-  POSTGRES_WORKER_URL: postgresql+psycopg://postgres@127.0.0.1:5432/freqtrade_ai_worker_test
 
 jobs:
   validate:
@@ -67,7 +66,6 @@ jobs:
               for database_name in (
                   "freqtrade_ai_ci_test",
                   "freqtrade_ai_phase8_test",
-                  "freqtrade_ai_worker_test",
               ):
                   connection.execute(f'CREATE DATABASE "{database_name}"')
           PY
@@ -100,10 +98,17 @@ jobs:
 
       - name: Run backend pytest and artifact reconciliation coverage
         working-directory: backend
-        # The complete real-PostgreSQL worker file runs in its own isolated job.
-        # Exclude only that duplicate here; all tests still run once, while the
-        # remaining backend suite keeps its PostgreSQL env.
-        run: pytest --ignore=tests/test_research_job_postgresql.py
+        # The complete real-PostgreSQL contract files run, in their original
+        # pytest order, in an isolated job. Exclude only those duplicates here;
+        # every test still runs once without sharing schema/role mutations with
+        # the general backend suite.
+        run: |
+          pytest \
+            --ignore=tests/test_full_chain_repository.py \
+            --ignore=tests/test_okx_demo_writer_postgresql.py \
+            --ignore=tests/test_research_job_postgresql.py \
+            --ignore=tests/test_risk_chain_postgresql.py \
+            --ignore=tests/test_strategy_deployment_repository.py
 
       - name: Compile Python modules
         run: python -m compileall backend/app backend/tests scripts
@@ -160,9 +165,7 @@ jobs:
 
       - name: Re-verify migration database after integration gates
         working-directory: backend
-        run: |
-          python -m app.db.migrate verify --database-url "$POSTGRES_MIGRATION_URL"
-          python -m app.db.migrate verify --database-url "$POSTGRES_WORKER_URL"
+        run: python -m app.db.migrate verify --database-url "$POSTGRES_MIGRATION_URL"
 
       - name: Check whitespace
         run: |
@@ -179,10 +182,12 @@ jobs:
             --offline \
             --tmp-dir "$RUNNER_TEMP/freqtrade-ai-phase6-smoke"
 
-  research-worker-postgresql:
-    name: Isolated PostgreSQL research worker gate
+  postgresql-contracts:
+    name: Isolated PostgreSQL backend contracts
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 15
+    env:
+      POSTGRES_WORKER_URL: postgresql+psycopg://postgres@127.0.0.1:5432/freqtrade_ai_worker_test
     services:
       postgres:
         image: postgres:16
@@ -226,9 +231,15 @@ jobs:
               connection.execute("CREATE DATABASE freqtrade_ai_worker_test")
           PY
 
-      - name: Verify PostgreSQL worker migration and atomic lease gate
+      - name: Verify PostgreSQL ACL, writer, worker, risk, and deployment contracts
         working-directory: backend
-        run: pytest -q tests/test_research_job_postgresql.py
+        run: |
+          pytest -q \
+            tests/test_full_chain_repository.py \
+            tests/test_okx_demo_writer_postgresql.py \
+            tests/test_research_job_postgresql.py \
+            tests/test_risk_chain_postgresql.py \
+            tests/test_strategy_deployment_repository.py
 
   natural-chain-preflight:
     name: Isolated natural-chain zero-order preflight
