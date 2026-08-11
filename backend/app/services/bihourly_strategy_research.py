@@ -40,7 +40,7 @@ OWNERSHIP_RELATIVE_PATH = Path(
     ".freqtrade-ai/research/formal-strategy-research-ownership.json"
 )
 LOCK_RELATIVE_PATH = Path(".freqtrade-ai/research/bihourly-strategy-research.lock")
-MARKET_DATA_MAX_AGE = timedelta(minutes=20)
+MARKET_DATA_MAX_CLOSE_AGE = timedelta(minutes=20)
 SOURCE_RECEIPT_MAX_AGE = timedelta(hours=2)
 REQUIRED_HISTORY_START = datetime(2023, 7, 1, tzinfo=timezone.utc)
 
@@ -186,10 +186,12 @@ class BihourlyStrategyResearchService:
                     "MARKET_DATA_SOURCE_RECEIPT_INVALID_OR_STALE"
                 )
             first_open_at, last_open_at = _data_bounds(path)
+            last_close_at = last_open_at + _timeframe_duration(target.timeframe)
             if (
                 first_open_at > REQUIRED_HISTORY_START
                 or last_open_at > now
-                or now - last_open_at > MARKET_DATA_MAX_AGE
+                or last_close_at > now + timedelta(minutes=1)
+                or now - last_close_at > MARKET_DATA_MAX_CLOSE_AGE
             ):
                 raise BihourlyStrategyResearchBlocked("MARKET_DATA_NOT_FRESH")
             lineage = _matching_market_data_files(
@@ -209,6 +211,7 @@ class BihourlyStrategyResearchService:
                 "file_sha256": digest,
                 "validation_lineage_digest": lineage_digest,
                 "last_open_at": last_open_at.isoformat(),
+                "last_close_at": last_close_at.isoformat(),
                 "first_open_at": first_open_at.isoformat(),
                 "source_receipt_path": str(sidecar_path),
                 "source_receipt_sha256": _sha256(sidecar_path),
@@ -501,6 +504,16 @@ def _data_bounds(path: Path) -> tuple[datetime, datetime]:
         _as_utc(pd.Timestamp(dates.iloc[0]).to_pydatetime()),
         _as_utc(pd.Timestamp(dates.iloc[-1]).to_pydatetime()),
     )
+
+
+def _timeframe_duration(timeframe: str) -> timedelta:
+    durations = {"5m": timedelta(minutes=5), "15m": timedelta(minutes=15)}
+    try:
+        return durations[timeframe]
+    except KeyError as exc:
+        raise BihourlyStrategyResearchBlocked(
+            "MARKET_DATA_TIMEFRAME_UNSUPPORTED"
+        ) from exc
 
 
 def _sha256(path: Path) -> str:
