@@ -77,7 +77,8 @@ AUTOMATION_GUARD_REBIND_BASE_VERSION = "20260810_40"
 DEPLOYMENT_POLICY_REBIND_BASE_VERSION = "20260810_41"
 NATURAL_SIGNAL_EVALUATOR_RECEIPT_BASE_VERSION = "20260810_42"
 NATURAL_SIGNAL_RISK_BUDGET_BASE_VERSION = "20260811_43"
-SCHEMA_VERSION = "20260811_44"
+STALE_NATURAL_APPROVAL_RELEASE_BASE_VERSION = "20260811_44"
+SCHEMA_VERSION = "20260811_45"
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 ATTESTATION_PROOF_KEY_ENV = "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"
 OPERATOR_TOKEN_ENV = "FREQTRADE_AI_OPERATOR_TOKEN"
@@ -4333,6 +4334,7 @@ def _grant_expired_approval_attestor_acl(connection: Connection) -> None:
             "trade_intent_id",
             "risk_decision_id",
             "exchange_order_id",
+            "exchange_fill_id",
             "terminal_reason",
             "completed_at",
         },
@@ -4381,7 +4383,7 @@ def _grant_expired_approval_attestor_acl(connection: Connection) -> None:
                           strategy_score_id, candidate_approval_id,
                           signal_snapshot_id, trade_intent_id,
                           risk_decision_id, approved_execution_id,
-                          exchange_order_id),
+                          exchange_order_id, exchange_fill_id),
                   UPDATE (status, terminal_reason, completed_at)
                 ON __SCHEMA__.full_chain_runs TO freqtrade_ai_attestor;
             GRANT SELECT (execution_target_id, reserved_notional,
@@ -6540,6 +6542,7 @@ def _expired_approval_attestor_acl_problems(
                 "risk_decision_id",
                 "approved_execution_id",
                 "exchange_order_id",
+                "exchange_fill_id",
             },
             "UPDATE": {"status", "terminal_reason", "completed_at"},
         },
@@ -6636,6 +6639,44 @@ def _expired_approval_attestor_acl_problems(
         or boundary[4] is True
     ):
         problems.append("expired approval function boundary mismatch")
+    sweep_boundary = connection.execute(
+        text(
+            "SELECT owner.rolname, function.prosecdef, function.proconfig, "
+            "has_function_privilege('freqtrade', function.oid, 'EXECUTE'), "
+            "EXISTS (SELECT 1 FROM aclexplode(COALESCE(function.proacl, "
+            "acldefault('f', function.proowner))) AS acl "
+            "WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'), "
+            "function.prosrc "
+            "FROM pg_proc AS function "
+            "JOIN pg_namespace AS namespace ON namespace.oid = function.pronamespace "
+            "JOIN pg_roles AS owner ON owner.oid = function.proowner "
+            "WHERE namespace.nspname = :schema_name "
+            "AND function.proname = "
+            "'release_unclaimed_expired_natural_approvals'"
+        ),
+        {"schema_name": schema_name},
+    ).first()
+    sweep_fragments = (
+        "interval '5 seconds'",
+        "natural_signal",
+        "okx_order_write_attempts",
+        "okx_demo_submission_grants",
+        "okx_demo_canary_lifecycles",
+        "okx_demo_automation_guard_events",
+        "stage.stage='EXECUTION'",
+        "approved_positions>=1",
+        "stale natural approval budget is inconsistent",
+    )
+    if (
+        sweep_boundary is None
+        or sweep_boundary[0] != "freqtrade_ai_attestor"
+        or sweep_boundary[1] is not True
+        or "search_path=pg_catalog" not in (sweep_boundary[2] or [])
+        or sweep_boundary[3] is True
+        or sweep_boundary[4] is True
+        or any(fragment not in sweep_boundary[5] for fragment in sweep_fragments)
+    ):
+        problems.append("stale natural approval sweep boundary mismatch")
     return problems
 
 
@@ -11306,6 +11347,84 @@ def _add_natural_signal_risk_chain_boundary(
             "(status='DISABLED' AND active_slot IS NULL))"
             .format(quoted_schema, max_active_strategies)
         ))
+    connection.execute(text("""
+      CREATE OR REPLACE FUNCTION SCHEMA_TOKEN.release_unclaimed_expired_natural_approvals()
+      RETURNS integer LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+      DECLARE
+        approval record;
+        released integer:=0;
+        release_reason text:='unclaimed natural approval expired without execution';
+        now_value timestamptz:=clock_timestamp();
+      BEGIN
+        PERFORM pg_advisory_xact_lock(hashtext('OKX_DEMO-risk-budget'));
+        FOR approval IN
+          SELECT a.id,a.trade_intent_id,a.risk_decision_id,a.reserved_notional
+            FROM SCHEMA_TOKEN.approved_executions a
+            JOIN SCHEMA_TOKEN.trade_intents i ON i.id=a.trade_intent_id
+            JOIN SCHEMA_TOKEN.risk_decisions d ON d.id=a.risk_decision_id
+           WHERE a.execution_target_id='OKX_DEMO' AND a.status='ACTIVE'
+             AND a.order_submission_authorized=false AND a.claim_required=true
+             AND a.expires_at<=now_value-interval '5 seconds'
+             AND i.expires_at<=now_value-interval '5 seconds'
+             AND i.execution_target_id='OKX_DEMO' AND i.status='APPROVED'
+             AND d.execution_target_id='OKX_DEMO' AND d.decision='APPROVED'
+             AND a.evidence_snapshot::jsonb->'natural_signal'='true'::jsonb
+             AND d.evidence_snapshot::jsonb->'natural_signal'='true'::jsonb
+             AND EXISTS(SELECT 1 FROM SCHEMA_TOKEN.full_chain_runs chain
+                  WHERE chain.approved_execution_id=a.id
+                    AND chain.execution_target_id='OKX_DEMO'
+                    AND chain.status='EXECUTING' AND chain.current_stage='EXECUTION'
+                    AND chain.exchange_order_id IS NULL AND chain.exchange_fill_id IS NULL)
+             AND NOT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.full_chain_stage_runs stage
+                  JOIN SCHEMA_TOKEN.full_chain_runs chain
+                    ON chain.id=stage.full_chain_run_id
+                  WHERE chain.approved_execution_id=a.id AND stage.stage='EXECUTION')
+             AND NOT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.exchange_orders orders
+                  WHERE orders.trade_intent_id=a.trade_intent_id)
+             AND NOT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_order_write_attempts attempt
+                  WHERE attempt.approval_id=a.id)
+             AND NOT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_submission_grants grant_row
+                  WHERE grant_row.approval_id=a.id)
+             AND NOT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_canary_lifecycles lifecycle
+                  WHERE lifecycle.opening_approval_id=a.id
+                     OR lifecycle.cleanup_approval_id=a.id)
+             AND NOT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_canary_consent_handoffs handoff
+                  WHERE handoff.approval_id=a.id)
+             AND NOT EXISTS(SELECT 1 FROM SCHEMA_TOKEN.okx_demo_automation_guard_events action
+                  WHERE action.approved_execution_id=a.id)
+           ORDER BY a.id FOR UPDATE OF a
+        LOOP
+          UPDATE SCHEMA_TOKEN.approved_executions SET status='EXPIRED',
+            evidence_snapshot=jsonb_set(evidence_snapshot::jsonb,
+              '{invalidation_reason}',to_jsonb(release_reason),true)::json
+            WHERE id=approval.id AND status='ACTIVE';
+          IF NOT FOUND THEN CONTINUE; END IF;
+          UPDATE SCHEMA_TOKEN.risk_decisions SET
+            evidence_snapshot=jsonb_set(evidence_snapshot::jsonb,'{reasons}',
+              jsonb_build_array(release_reason),true)::json
+            WHERE id=approval.risk_decision_id AND decision='APPROVED';
+          UPDATE SCHEMA_TOKEN.full_chain_runs SET status='BLOCKED',
+            terminal_reason=release_reason,completed_at=now_value
+            WHERE approved_execution_id=approval.id
+              AND execution_target_id='OKX_DEMO' AND status='EXECUTING';
+          UPDATE SCHEMA_TOKEN.risk_budgets SET
+            reserved_notional=reserved_notional-approval.reserved_notional,
+            approved_positions=approved_positions-1
+            WHERE execution_target_id='OKX_DEMO'
+              AND reserved_notional>=approval.reserved_notional
+              AND approved_positions>=1;
+          IF NOT FOUND THEN
+            RAISE EXCEPTION 'stale natural approval budget is inconsistent';
+          END IF;
+          released:=released+1;
+        END LOOP;
+        RETURN released;
+      END $$;
+      ALTER FUNCTION SCHEMA_TOKEN.release_unclaimed_expired_natural_approvals()
+        OWNER TO freqtrade_ai_attestor;
+      REVOKE ALL ON FUNCTION SCHEMA_TOKEN.release_unclaimed_expired_natural_approvals()
+        FROM PUBLIC,freqtrade;
+    """.replace("SCHEMA_TOKEN", quoted_schema)))
     ddl = """
     CREATE OR REPLACE FUNCTION SCHEMA_TOKEN.persist_okx_demo_natural_risk_chain(
       p_payload jsonb)
@@ -11985,6 +12104,7 @@ def _add_natural_signal_risk_chain_boundary(
         final_status:='REJECTED'; reasons:=reasons||'["database risk limit exceeded"]'::jsonb;
       END IF;
 
+      PERFORM SCHEMA_TOKEN.release_unclaimed_expired_natural_approvals();
       SELECT * INTO existing FROM SCHEMA_TOKEN.trade_intents
        WHERE execution_target_id='OKX_DEMO'
          AND idempotency_key_digest=p_payload->>'idempotency_key_digest'
@@ -12136,6 +12256,7 @@ def _add_natural_signal_risk_chain_boundary(
         "REVOKE ALL ON FUNCTION {0} FROM PUBLIC,freqtrade; "
         "GRANT EXECUTE ON FUNCTION {0} TO freqtrade".format(signature)
     ))
+    _grant_expired_approval_attestor_acl(connection)
     if (
         rebind_automation_guard
         and allowed_instruments
@@ -12480,6 +12601,23 @@ def upgrade_database(engine: Engine) -> str:
                         "Recorded schema version does not match ORM metadata: " + "; ".join(problems)
                     )
                 return current_version
+            if current_version == STALE_NATURAL_APPROVAL_RELEASE_BASE_VERSION:
+                _add_natural_signal_risk_chain_boundary(
+                    connection,
+                    refresh_supporting_boundaries=False,
+                    rebind_automation_guard=False,
+                )
+                problems = schema_problems(connection)
+                if problems:
+                    raise SchemaMigrationBlocked(
+                        "Stale natural approval release upgrade does not match "
+                        "ORM metadata: " + "; ".join(problems)
+                    )
+                connection.execute(
+                    text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+                    {"version": SCHEMA_VERSION},
+                )
+                return SCHEMA_VERSION
             if current_version == NATURAL_SIGNAL_RISK_BUDGET_BASE_VERSION:
                 _add_natural_signal_risk_chain_boundary(
                     connection,

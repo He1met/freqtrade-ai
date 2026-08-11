@@ -45,6 +45,8 @@ CONTRACT_CHECKS = (
             "tests/test_risk_chain_postgresql.py::test_database_rejects_direct_authorization_tampering",
             "tests/test_risk_chain_postgresql.py::test_runtime_role_cannot_directly_insert_attestation_rows",
             "tests/test_risk_chain_postgresql.py::test_postgresql_v43_upgrades_budget_initializer_and_acl_idempotently",
+            "tests/test_risk_chain_postgresql.py::test_postgresql_v44_upgrades_private_stale_release_idempotently",
+            "tests/test_risk_chain_postgresql.py::test_runtime_cannot_call_or_bypass_private_stale_approval_sweep",
             "tests/test_okx_demo_writer_postgresql.py::test_postgresql_v39_natural_risk_function_is_execute_only_and_fail_closed",
         ),
         "real migrations, role ACLs, private SECURITY DEFINER entrypoint, and runtime DML denial",
@@ -93,10 +95,15 @@ CONTRACT_CHECKS = (
         (
             "tests/test_risk_chain_postgresql.py::test_postgresql_budget_lock_allows_only_one_concurrent_permission",
             "tests/test_risk_chain_postgresql.py::test_postgresql_concurrent_idempotent_retry_reads_one_chain",
+            "tests/test_risk_chain_postgresql.py::test_owner_sweep_releases_only_unclaimed_expired_natural_approval",
+            "tests/test_risk_chain_postgresql.py::test_owner_sweep_preserves_unproven_or_started_execution",
+            "tests/test_risk_chain_postgresql.py::test_owner_sweep_is_concurrent_and_idempotent",
+            "tests/test_risk_chain_postgresql.py::test_owner_sweep_fails_closed_on_budget_mismatch",
+            "tests/test_risk_chain_postgresql.py::test_natural_risk_boundary_invokes_private_stale_approval_sweep",
             "tests/test_risk_chain.py::test_approved_chain_is_deterministic_idempotent_and_never_submits",
             "tests/test_okx_demo_execution_orchestrator.py::test_actionable_completion_failure_blocks_already_risked_chain",
         ),
-        "atomic budget reservation, risk decision, deterministic replay, fail-closed completion, and zero orders",
+        "atomic budget reservation and stale release, risk decision, deterministic replay, fail-closed completion, and zero orders",
     ),
 )
 

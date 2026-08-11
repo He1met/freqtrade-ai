@@ -25,6 +25,7 @@ from app.db.migrations import (
     SCHEMA_VERSION,
     NATURAL_SIGNAL_EVALUATOR_RECEIPT_BASE_VERSION,
     NATURAL_SIGNAL_RISK_BUDGET_BASE_VERSION,
+    STALE_NATURAL_APPROVAL_RELEASE_BASE_VERSION,
     SchemaMigrationBlocked,
     TRUSTED_SNAPSHOT_BASE_VERSION,
     VERSION_TABLE,
@@ -42,6 +43,7 @@ from app.models import (
     BacktestRun,
     BacktestTask,
     Base,
+    ExchangeOrder,
     FullChainRun,
     FullChainSignalSnapshot,
     FullChainStageRun,
@@ -107,10 +109,13 @@ def postgres_engine():
         admin.dispose()
 
 
-def _seed(factory) -> dict[str, int]:
+def _seed(factory, *, suffix: str = "") -> dict[str, int]:
     with factory.begin() as db:
         ensure_execution_scope_catalog(db)
-        strategy = Strategy(name="PG risk chain", slug="pg-risk-chain")
+        strategy = Strategy(
+            name="PG risk chain" + (" " + suffix if suffix else ""),
+            slug="pg-risk-chain" + ("-" + suffix if suffix else ""),
+        )
         db.add(strategy)
         db.flush()
         version = StrategyVersion(
@@ -118,7 +123,9 @@ def _seed(factory) -> dict[str, int]:
             version_number=1,
             blueprint={},
             generated_code="class PGRiskChain: pass",
-            file_path="/tmp/pg-risk-chain.py",
+            file_path="/tmp/pg-risk-chain{}.py".format(
+                "-" + suffix if suffix else ""
+            ),
             validation_status="passed",
         )
         db.add(version)
@@ -404,6 +411,106 @@ def _policy() -> dict:
         "max_price_deviation_pct": "0.02",
         "min_strategy_score": "70",
         "scoring_version": "risk-chain-pg-v1",
+    }
+
+
+def _seed_unclaimed_natural_approval(
+    factory,
+    *,
+    expired: bool = True,
+    with_exchange_order: bool = False,
+    with_execution_checkpoint: bool = False,
+) -> dict[str, object]:
+    lineage = _seed(factory)
+    now = datetime.now(timezone.utc)
+    with factory() as db:
+        result = RiskChainService(db).evaluate(
+            idempotency_key="stale-natural-{}".format(uuid4().hex),
+            request=_request(lineage, now, factory),
+            policy=_policy(),
+            now=now,
+        )
+    assert result.status == "APPROVED"
+    assert result.approved_execution_id is not None
+
+    with factory.begin() as db:
+        approval = db.get(ApprovedExecution, result.approved_execution_id)
+        assert approval is not None
+        intent = db.get(TradeIntent, approval.trade_intent_id)
+        decision = db.get(RiskDecision, approval.risk_decision_id)
+        chain = db.get(FullChainRun, lineage["_full_chain_run_id"])
+        assert intent is not None and decision is not None and chain is not None
+        if expired:
+            stale_at = now - timedelta(seconds=10)
+            # Isolated owner-only fixture setup: move the immutable intent clock
+            # only while no ACTIVE approval exists, then restore the exact state
+            # that natural wall-clock expiry produces.
+            db.execute(
+                text("UPDATE approved_executions SET status='EXPIRED' WHERE id=:id"),
+                {"id": approval.id},
+            )
+            db.execute(
+                text("UPDATE trade_intents SET expires_at=:stale_at WHERE id=:id"),
+                {"stale_at": stale_at, "id": intent.id},
+            )
+            db.execute(
+                text(
+                    "UPDATE approved_executions SET expires_at=:stale_at,status='ACTIVE' "
+                    "WHERE id=:id"
+                ),
+                {"stale_at": stale_at, "id": approval.id},
+            )
+            db.expire_all()
+            approval = db.get(ApprovedExecution, result.approved_execution_id)
+            intent = db.get(TradeIntent, approval.trade_intent_id)
+            decision = db.get(RiskDecision, approval.risk_decision_id)
+            chain = db.get(FullChainRun, lineage["_full_chain_run_id"])
+            assert intent is not None and decision is not None and chain is not None
+        approval.evidence_snapshot = {
+            **approval.evidence_snapshot,
+            "natural_signal": True,
+        }
+        decision.evidence_snapshot = {
+            **decision.evidence_snapshot,
+            "natural_signal": True,
+        }
+        chain.trade_intent_id = intent.id
+        chain.risk_decision_id = decision.id
+        chain.approved_execution_id = approval.id
+        chain.status = "EXECUTING"
+        chain.current_stage = "EXECUTION"
+        if with_exchange_order:
+            order = ExchangeOrder(
+                execution_target_id=OKX_DEMO_TARGET_ID,
+                trade_intent_id=intent.id,
+                client_order_id=intent.client_order_id,
+                exchange_order_id=None,
+                status="PREPARED",
+                request_snapshot={},
+                response_snapshot={},
+            )
+            db.add(order)
+            db.flush()
+            chain.exchange_order_id = order.id
+        if with_execution_checkpoint:
+            db.add(
+                FullChainStageRun(
+                    full_chain_run_id=chain.id,
+                    stage="EXECUTION",
+                    status="PREPARED",
+                    idempotency_key_digest=uuid4().hex * 2,
+                    input_digest=uuid4().hex * 2,
+                    input_snapshot={},
+                    output_snapshot={},
+                    database_ids={"approved_execution_id": approval.id},
+                    prepared_at=now,
+                )
+            )
+        reserved_notional = approval.reserved_notional
+    return {
+        "approval_id": result.approved_execution_id,
+        "chain_id": lineage["_full_chain_run_id"],
+        "reserved_notional": reserved_notional,
     }
 
 
@@ -1936,6 +2043,187 @@ def test_legacy_authorization_row_cannot_become_active_approval(
             )
 
 
+def test_owner_sweep_releases_only_unclaimed_expired_natural_approval(
+    postgres_engine,
+) -> None:
+    upgrade_database(postgres_engine)
+    factory = create_session_factory(postgres_engine)
+    seeded = _seed_unclaimed_natural_approval(factory)
+
+    with postgres_engine.begin() as connection:
+        first = connection.execute(
+            text("SELECT release_unclaimed_expired_natural_approvals()")
+        ).scalar_one()
+        second = connection.execute(
+            text("SELECT release_unclaimed_expired_natural_approvals()")
+        ).scalar_one()
+
+    assert first == 1
+    assert second == 0
+    with factory() as db:
+        approval = db.get(ApprovedExecution, seeded["approval_id"])
+        chain = db.get(FullChainRun, seeded["chain_id"])
+        budget = db.get(RiskBudget, OKX_DEMO_TARGET_ID)
+        assert approval is not None and approval.status == "EXPIRED"
+        assert chain is not None and chain.status == "BLOCKED"
+        assert chain.current_stage == "EXECUTION"
+        assert chain.terminal_reason == (
+            "unclaimed natural approval expired without execution"
+        )
+        assert budget is not None
+        assert budget.approved_positions == 0
+        assert budget.reserved_notional == Decimal("0")
+
+    # The recovered slot is usable by the unchanged strict risk policy.
+    second_lineage = _seed(factory, suffix=uuid4().hex)
+    now = datetime.now(timezone.utc)
+    with factory() as db:
+        recovered = RiskChainService(db).evaluate(
+            idempotency_key="recovered-stale-natural-budget",
+            request=_request(second_lineage, now, factory),
+            policy=_policy(),
+            now=now,
+        )
+    assert recovered.status == "APPROVED"
+
+
+@pytest.mark.parametrize(
+    "seed_options",
+    [
+        {"expired": False},
+        {"with_exchange_order": True},
+        {"with_execution_checkpoint": True},
+    ],
+    ids=["not-expired", "exchange-order", "execution-checkpoint"],
+)
+def test_owner_sweep_preserves_unproven_or_started_execution(
+    postgres_engine,
+    seed_options,
+) -> None:
+    upgrade_database(postgres_engine)
+    factory = create_session_factory(postgres_engine)
+    seeded = _seed_unclaimed_natural_approval(factory, **seed_options)
+
+    with postgres_engine.begin() as connection:
+        released = connection.execute(
+            text("SELECT release_unclaimed_expired_natural_approvals()")
+        ).scalar_one()
+
+    assert released == 0
+    with factory() as db:
+        approval = db.get(ApprovedExecution, seeded["approval_id"])
+        budget = db.get(RiskBudget, OKX_DEMO_TARGET_ID)
+        assert approval is not None and approval.status == "ACTIVE"
+        assert budget is not None and budget.approved_positions == 1
+        assert budget.reserved_notional == seeded["reserved_notional"]
+
+
+def test_owner_sweep_is_concurrent_and_idempotent(postgres_engine) -> None:
+    upgrade_database(postgres_engine)
+    factory = create_session_factory(postgres_engine)
+    _seed_unclaimed_natural_approval(factory)
+    barrier = Barrier(2)
+    results: list[int] = []
+    failures: list[Exception] = []
+    mutex = Lock()
+
+    def worker() -> None:
+        try:
+            barrier.wait(timeout=5)
+            with postgres_engine.begin() as connection:
+                released = connection.execute(
+                    text("SELECT release_unclaimed_expired_natural_approvals()")
+                ).scalar_one()
+            with mutex:
+                results.append(released)
+        except Exception as exc:  # pragma: no cover - assertion reports details
+            with mutex:
+                failures.append(exc)
+
+    threads = [Thread(target=worker), Thread(target=worker)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert failures == []
+    assert sorted(results) == [0, 1]
+    with factory() as db:
+        budget = db.get(RiskBudget, OKX_DEMO_TARGET_ID)
+        assert budget is not None
+        assert budget.approved_positions == 0
+        assert budget.reserved_notional == Decimal("0")
+
+
+def test_owner_sweep_fails_closed_on_budget_mismatch(postgres_engine) -> None:
+    upgrade_database(postgres_engine)
+    factory = create_session_factory(postgres_engine)
+    seeded = _seed_unclaimed_natural_approval(factory)
+    with factory.begin() as db:
+        budget = db.get(RiskBudget, OKX_DEMO_TARGET_ID)
+        assert budget is not None
+        budget.reserved_notional = Decimal("0")
+        budget.approved_positions = 0
+
+    with pytest.raises(DBAPIError, match="stale natural approval budget is inconsistent"):
+        with postgres_engine.begin() as connection:
+            connection.execute(
+                text("SELECT release_unclaimed_expired_natural_approvals()")
+            )
+
+    with factory() as db:
+        approval = db.get(ApprovedExecution, seeded["approval_id"])
+        chain = db.get(FullChainRun, seeded["chain_id"])
+        assert approval is not None and approval.status == "ACTIVE"
+        assert chain is not None and chain.status == "EXECUTING"
+
+
+def test_runtime_cannot_call_or_bypass_private_stale_approval_sweep(
+    postgres_engine,
+) -> None:
+    upgrade_database(postgres_engine)
+    factory = create_session_factory(postgres_engine)
+    seeded = _seed_unclaimed_natural_approval(factory)
+
+    with pytest.raises(DBAPIError):
+        with postgres_engine.begin() as connection:
+            connection.execute(text("SET LOCAL ROLE freqtrade"))
+            connection.execute(
+                text("SELECT release_unclaimed_expired_natural_approvals()")
+            )
+    with pytest.raises(DBAPIError):
+        with postgres_engine.begin() as connection:
+            connection.execute(text("SET LOCAL ROLE freqtrade"))
+            connection.execute(
+                text(
+                    "UPDATE approved_executions SET status='EXPIRED' "
+                    "WHERE id=:approval_id"
+                ),
+                {"approval_id": seeded["approval_id"]},
+            )
+
+    with factory() as db:
+        approval = db.get(ApprovedExecution, seeded["approval_id"])
+        budget = db.get(RiskBudget, OKX_DEMO_TARGET_ID)
+        assert approval is not None and approval.status == "ACTIVE"
+        assert budget is not None and budget.approved_positions == 1
+
+
+def test_natural_risk_boundary_invokes_private_stale_approval_sweep(
+    postgres_engine,
+) -> None:
+    upgrade_database(postgres_engine)
+    with postgres_engine.connect() as connection:
+        definition = connection.execute(
+            text(
+                "SELECT pg_get_functiondef("
+                "'persist_okx_demo_natural_risk_chain(jsonb)'::regprocedure)"
+            )
+        ).scalar_one()
+    assert "PERFORM" in definition
+    assert "release_unclaimed_expired_natural_approvals()" in definition
+
+
 def test_postgresql_budget_lock_allows_only_one_concurrent_permission(
     postgres_engine,
 ) -> None:
@@ -2690,3 +2978,47 @@ def test_postgresql_v43_upgrades_budget_initializer_and_acl_idempotently(
         )).one()
     assert "ON CONFLICT (execution_target_id) DO NOTHING" in source
     assert tuple(acl) == (False, True, True)
+
+
+def test_postgresql_v44_upgrades_private_stale_release_idempotently(
+    postgres_engine,
+) -> None:
+    upgrade_database(postgres_engine)
+    with postgres_engine.begin() as connection:
+        connection.execute(text("RESET ROLE"))
+        connection.execute(
+            text(
+                "ALTER FUNCTION release_unclaimed_expired_natural_approvals() "
+                "OWNER TO postgres; "
+                "REVOKE SELECT (exchange_fill_id) ON full_chain_runs "
+                "FROM freqtrade_ai_attestor"
+            )
+        )
+        connection.execute(
+            text("DELETE FROM freqtrade_ai_schema_migrations WHERE version=:version"),
+            {"version": SCHEMA_VERSION},
+        )
+        connection.execute(
+            text("INSERT INTO freqtrade_ai_schema_migrations(version) VALUES(:version)"),
+            {"version": STALE_NATURAL_APPROVAL_RELEASE_BASE_VERSION},
+        )
+
+    assert upgrade_database(postgres_engine) == SCHEMA_VERSION
+    assert upgrade_database(postgres_engine) == SCHEMA_VERSION
+    assert verify_schema(postgres_engine).ready is True
+    with postgres_engine.connect() as connection:
+        owner, runtime_execute, fill_select = connection.execute(
+            text(
+                "SELECT owner.rolname,"
+                "has_function_privilege('freqtrade',function.oid,'EXECUTE'),"
+                "has_column_privilege('freqtrade_ai_attestor','full_chain_runs',"
+                "'exchange_fill_id','SELECT') "
+                "FROM pg_proc function JOIN pg_roles owner "
+                "ON owner.oid=function.proowner "
+                "WHERE function.oid="
+                "'release_unclaimed_expired_natural_approvals()'::regprocedure"
+            )
+        ).one()
+    assert owner == "freqtrade_ai_attestor"
+    assert runtime_execute is False
+    assert fill_select is True
