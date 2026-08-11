@@ -7,10 +7,20 @@ from app.core.strategy_research_contract import matches_official_research_policy
 from app.db.session import get_db
 from app.repositories.strategy_research import StrategyResearchRepository
 from app.schemas.strategy_research import (
+    BihourlyStrategyResearchTriggerRead,
     FormalResearchRunRead,
     StrategyResearchWorkspaceRead,
     StrategyResearchBatchRead,
     StrategyResearchCandidateRead,
+)
+from app.services.bihourly_strategy_research_trigger import (
+    OwnerMediatedBihourlyStrategyResearchTrigger,
+    get_owner_mediated_bihourly_strategy_research_trigger,
+)
+from app.services.operator_authorization import (
+    OperatorRequestHeaders,
+    operator_request_coordinator,
+    operator_request_headers,
 )
 from app.services.formal_strategy_research import (
     FormalStrategyResearchCoordinator,
@@ -30,6 +40,37 @@ def read_candidate_validation_queue(
     db: Session = Depends(get_db),
 ) -> dict:
     return CandidateValidationQueueReadService(db).read()
+
+
+def _get_bihourly_trigger(
+) -> OwnerMediatedBihourlyStrategyResearchTrigger:
+    return get_owner_mediated_bihourly_strategy_research_trigger()
+
+
+@router.post(
+    "/strategy-research/bihourly-generation",
+    response_model=BihourlyStrategyResearchTriggerRead,
+)
+def trigger_bihourly_strategy_research(
+    trigger: OwnerMediatedBihourlyStrategyResearchTrigger = Depends(
+        _get_bihourly_trigger
+    ),
+    operator_headers: OperatorRequestHeaders = Depends(operator_request_headers),
+) -> BihourlyStrategyResearchTriggerRead:
+    def execute() -> BihourlyStrategyResearchTriggerRead:
+        result = trigger.run(trigger="manual")
+        return BihourlyStrategyResearchTriggerRead.model_validate(
+            result.model_dump()
+        )
+
+    return operator_request_coordinator.execute(
+        operator_headers,
+        operation="strategy_research.bihourly_generation",
+        provider_call=False,
+        request_payload={"trigger": "manual", "requested_count": 60},
+        handler=execute,
+        cache_result=lambda result: result.status != "FAILED",
+    )
 
 
 @router.get("/strategy-research-batches", response_model=list[StrategyResearchBatchRead])

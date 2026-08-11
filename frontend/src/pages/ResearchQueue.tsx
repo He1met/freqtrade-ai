@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 
-import { fetchCandidateResearchQueue, type CandidateResearchQueueItem, type CandidateResearchQueueRead, type CandidateResearchQueueStatus } from "../api/candidateResearchQueueApi";
+import { fetchCandidateResearchQueue, triggerBihourlyResearchGeneration, type BihourlyResearchTriggerResult, type CandidateResearchQueueItem, type CandidateResearchQueueRead, type CandidateResearchQueueStatus } from "../api/candidateResearchQueueApi";
 import { fetchStrategyResearchWorkspace, type StrategyResearchWorkspace } from "../api/strategyResearchApi";
 import { CompactText, EmptyState, ExpandableText, FormalLoadingState, PageHeader, StatusBadge } from "../components/DisplayPrimitives";
 import "../styles/research-queue.css";
@@ -57,6 +57,10 @@ export function ResearchQueue() {
   const [queueError, setQueueError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [revision, setRevision] = useState(0);
+  const [triggering, setTriggering] = useState(false);
+  const [triggerResult, setTriggerResult] = useState<BihourlyResearchTriggerResult | null>(null);
+  const [triggerError, setTriggerError] = useState<string | null>(null);
+  const [operatorToken, setOperatorToken] = useState("");
   const [filters, setFilters] = useState<QueueFilters>(EMPTY_FILTERS);
   const [sort, setSort] = useState<ResearchQueueSort>("queue");
 
@@ -81,14 +85,37 @@ export function ResearchQueue() {
   const timeframes = [...new Set([...projection.waiting, ...projection.completed].map((item) => item.timeframe).filter((value): value is string => Boolean(value)))].sort();
   const setFilter = <K extends keyof QueueFilters>(key: K, value: QueueFilters[K]) => setFilters((current) => ({ ...current, [key]: value }));
 
+  const triggerGeneration = async () => {
+    if (!operatorToken.trim()) {
+      setTriggerError("需要本地 operator token；凭据仅保留在当前页面内存中。");
+      return;
+    }
+    if (!window.confirm("只刷新公开行情并持久化本批 60 条候选；不会在本次请求中启动回测、部署、信号或订单。继续吗？")) return;
+    const controller = new AbortController();
+    setTriggering(true);
+    setTriggerResult(null);
+    setTriggerError(null);
+    try {
+      const result = await triggerBihourlyResearchGeneration(operatorToken, controller.signal);
+      setTriggerResult(result);
+      setRevision((value) => value + 1);
+    } catch (error) {
+      setTriggerError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setTriggering(false);
+    }
+  };
+
   return <section className="page research-queue-page">
-    <PageHeader title="策略研究队列" description="候选先持久化，再由 lease 保护的串行队列逐条回测。本页只读，不启动、取消、重试或部署任务。" actions={<button className="secondary-button" onClick={() => setRevision((value) => value + 1)} type="button">刷新只读数据</button>} status={<StatusBadge label={loading ? "读取中" : projection.available ? "队列数据已连接" : "等待后端队列"} status={loading ? "RUNNING" : projection.available ? "AVAILABLE" : "UNKNOWN"} tone={loading ? "info" : projection.available ? "success" : "warning"} />} />
+    <PageHeader title="策略研究队列" description="候选先持久化，再由 lease 保护的独立串行消费者逐条回测；生成入口不会在同一请求中启动回测或部署。" actions={<><label className="research-queue-operator-token"><span>本地 operator token</span><input autoComplete="off" onChange={(event) => setOperatorToken(event.target.value)} placeholder="仅当前页面内存" type="password" value={operatorToken} /></label><button className="primary-button" disabled={triggering || !operatorToken.trim()} onClick={triggerGeneration} type="button">{triggering ? "正在安全生成…" : "刷新行情并生成本批"}</button><button className="secondary-button" onClick={() => setRevision((value) => value + 1)} type="button">刷新只读数据</button></>} status={<StatusBadge label={triggering ? "生成门禁检查中" : loading ? "读取中" : projection.available ? "队列数据已连接" : "等待后端队列"} status={triggering || loading ? "RUNNING" : projection.available ? "AVAILABLE" : "UNKNOWN"} tone={triggering || loading ? "info" : projection.available ? "success" : "warning"} />} />
+    {triggerResult ? <aside className={`research-queue-trigger-result is-${triggerResult.status.toLowerCase()}`} role="status"><strong>{triggerResult.status}</strong><span>批次 {triggerResult.run_id} · 持久化 {triggerResult.persisted_count} 条 · {triggerResult.reason_code}</span><small>runtime {triggerResult.runtime_status} / opening guard {triggerResult.opening_guard}；本次未启动回测、部署、信号或订单。</small></aside> : null}
+    {triggerError ? <aside className="research-queue-trigger-result is-failed" role="alert"><strong>触发失败</strong><span>{triggerError}</span><small>未推断或伪造任何队列进度，请以重新读取的后端状态为准。</small></aside> : null}
     {loading ? <FormalLoadingState label="正在读取策略研究队列" /> : <>
       {!projection.available ? <aside className="research-queue-fallback" role="status"><strong>队列实时数据暂不可用</strong><p>等待后端提供 <code>formal-candidate-validation-queue-read-v1</code>。旧批次只能显示历史终态，不能推断当前回测项、lease、位置或百分比。</p><ExpandableText summary="查看接口状态" value={projection.fallbackReason} /></aside> : null}
       <section className="research-queue-focus" aria-labelledby="research-queue-focus-title">
         <div className="research-queue-section-heading"><div><span>现在正在做什么 · 串行最多 1 条</span><h2 id="research-queue-focus-title">当前正在回测</h2></div><StatusBadge label={projection.active ? "已由 lease 领取" : projection.available ? "当前空闲" : "数据暂不可用"} status={projection.active?.status ?? "UNKNOWN"} tone={projection.active ? "info" : "neutral"} /></div>
         {projection.active ? <CandidateCard current item={projection.active} /> : <EmptyState title={projection.available ? "当前没有候选被领取" : "当前回测项数据暂不可用"} description={projection.available ? "队列可能为空、等待 worker，或本批次已经完成。" : "不能从旧批次状态推断某条策略正在回测。"} />}
-        <div className="research-queue-safe-actions"><button disabled type="button">取消不可用</button><button disabled type="button">重试不可用</button><span>只读页面；操作需由后端 owner/lease 契约授权。</span></div>
+        <div className="research-queue-safe-actions"><button disabled type="button">取消不可用</button><button disabled type="button">重试不可用</button><span>候选执行状态只读；生成由后端 runtime/data/ownership 门禁授权。</span></div>
       </section>
 
       <section aria-label="本批次辅助汇总" className="research-queue-summary">{[["本批目标", projection.batch?.expected_count ?? 60], ["生成状态", researchGenerationStatusLabel(projection.available ? projection.batch?.generation_status ?? null : null)], ["等待中", projection.available ? projection.batch?.waiting_count ?? 0 : "暂不可用"], ["已完成", projection.batch?.completed_count ?? projection.completed.length], ["剩余", projection.available ? projection.batch?.remaining_count ?? 0 : "暂不可用"], ["队列健康", projection.health?.status ?? "UNKNOWN"]].map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</section>

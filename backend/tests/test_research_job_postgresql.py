@@ -47,6 +47,9 @@ from app.services.strategy_candidate_validation_queue import (
 from app.services.bihourly_strategy_research import (
     BihourlyStrategyResearchService,
 )
+from app.services.bihourly_strategy_research_trigger import (
+    BihourlyStrategyResearchTrigger,
+)
 from sqlalchemy import func, inspect, select, text
 from sqlalchemy.exc import DataError, IntegrityError
 
@@ -648,13 +651,38 @@ def test_postgresql_formal_candidate_consumer_is_serial_and_runtime_enqueue_is_r
             "_validate_market_data",
             lambda **_kwargs: market,
         )
-        result = service.run_generation_only(
-            run_id="postgres-formal-serial",
-            repository_commit="d" * 40,
-            owner_task_id="postgres-formal-owner",
+        result = BihourlyStrategyResearchTrigger(
+            db,
+            canonical_root=canonical_root,
+            datadir=tmp_path / "market",
+            receipt_path=tmp_path / "source-receipt.json",
+            runtime_snapshot=lambda: {
+                "status": "BLOCKED_OPENINGS",
+                "execution_target": {"active": "OKX_DEMO", "status": "READY"},
+                "trading": {"live": False, "dry_run": False, "real_orders": False},
+                "database": {"kind": "postgresql", "schema": "verified"},
+                "okx_runtime": {
+                    "execution_target": "OKX_DEMO",
+                    "adapter": "ATTESTED",
+                    "writer": "UNIQUE",
+                    "reconciliation": "RECOVERED",
+                    "automation_guard": "BLOCKED",
+                },
+                "services": [
+                    {"service": name, "running": True}
+                    for name in ("backend", "worker", "frontend", "okx_runtime")
+                ],
+            },
+            repository_state=lambda: ("main", "d" * 40),
             refresh=lambda: None,
+            generation_service=service,
+        ).run(
+            trigger="automation",
+            run_id="postgres-formal-serial",
+            owner_task_id="postgres-formal-owner",
             now=datetime.now(timezone.utc),
         )
+        assert result.status == "GENERATED"
         assert result.persisted_count == 60
         assert db.scalar(
             select(func.count()).select_from(ResearchJob).where(

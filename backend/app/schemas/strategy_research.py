@@ -10,6 +10,29 @@ ResearchBatchStatus = Literal["GENERATED", "VALIDATED", "FAILED"]
 ResearchCandidateStatus = Literal["QUALIFIED", "REJECTED", "VALIDATION_FAILED"]
 
 
+class BihourlyStrategyResearchTriggerRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["bihourly-strategy-research-trigger-v1"]
+    status: Literal["GENERATED", "NO_OP", "FAILED"]
+    reason_code: str
+    trigger: Literal["manual", "automation"]
+    run_id: str
+    persisted_count: int = Field(ge=0, le=60)
+    runtime_status: str
+    opening_guard: Literal["RUNNING", "BLOCKED"]
+    generation_only: Literal[True] = True
+    serial_consumer_separate: Literal[True] = True
+    backtest_started: Literal[False] = False
+    deployment_started: Literal[False] = False
+    signal_or_order_started: Literal[False] = False
+    real_orders: Literal[False] = False
+    allow_real_funds: Literal[False] = False
+    exchange_access: Literal["PUBLIC_MARKET_DATA_ONLY"] = (
+        "PUBLIC_MARKET_DATA_ONLY"
+    )
+
+
 class StrategyResearchCandidateRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
