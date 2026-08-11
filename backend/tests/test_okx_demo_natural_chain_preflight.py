@@ -24,6 +24,7 @@ def test_contract_matrix_has_every_required_safety_class_once() -> None:
         "SNAPSHOT_SIGNAL_BINDING",
         "RECEIPT_LINEAGE_DEPLOYMENT_POLICY",
         "DEMO_READINESS_RECONCILIATION_GUARD",
+        "ACTIONABLE_CLAIM_EXECUTION_HANDOFF",
         "WRITER_LEASE_FENCING",
         "RISK_BUDGET_DECISION_IDEMPOTENCY",
     ]

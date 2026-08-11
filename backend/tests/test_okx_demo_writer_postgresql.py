@@ -32,6 +32,7 @@ from app.adapters.okx_demo.runtime_writer_lease import RuntimeWriterLeaseKeeper
 from app.adapters.okx_demo.writer_state import WriteEvent
 from app.adapters.okx_demo.reconciliation_runtime import (
     OkxDemoRuntimeReconciliationAdapter,
+    _approved_execution_by_id,
 )
 from app.db.migrations import (
     AUTOMATION_GUARD_REBIND_BASE_VERSION,
@@ -107,6 +108,9 @@ from app.services.risk_chain import (
     canonical_digest,
 )
 from app.services.okx_demo_automation_guard import OkxDemoAutomationGuard
+from app.services.okx_demo_execution_orchestrator import (
+    OkxDemoExecutionOrchestrationResult,
+)
 from app.services.okx_demo_reconciliation import (
     OkxDemoReconciliationBlocked,
     OkxDemoReconciliationService,
@@ -7861,6 +7865,75 @@ def test_postgresql_runtime_role_completes_real_writer_happy_lifecycle(
                 ),
                 {"approval_id": approval_id},
             )
+
+
+def test_postgresql_runtime_dispatches_fresh_actionable_in_same_cycle_without_exchange(
+    postgres_writer_engine,
+    monkeypatch,
+) -> None:
+    """Prove the runtime bridge reaches the writer claim before short evidence expiry."""
+
+    monkeypatch.setattr(OkxDemoAutomationGuard, "policy_digest", lambda: "3" * 64)
+    test_now = datetime.now(timezone.utc)
+    approval_id, _ = _seed_continuous_demo_guard(postgres_writer_engine)
+    result = OkxDemoExecutionOrchestrationResult(
+        evaluation_id=82,
+        status="ACTIONABLE",
+        approved_execution_id=approval_id,
+    )
+    selections = []
+
+    def select_exact(db, *, now, approved_execution_id=None):
+        selections.append((now, approved_execution_id))
+        if approved_execution_id != approval_id:
+            return None
+        return _approved_execution_by_id(db, approval_id=approval_id)
+
+    monkeypatch.setattr(
+        OkxDemoRuntimeReconciliationAdapter,
+        "_process_one_signal_evaluation",
+        lambda *_args, **_kwargs: result,
+    )
+    monkeypatch.setattr(
+        "app.adapters.okx_demo.reconciliation_runtime."
+        "_next_unconsumed_approved_execution",
+        select_exact,
+    )
+    adapter = object.__new__(OkxDemoRuntimeReconciliationAdapter)
+    adapter._order_submission_enabled = True
+    adapter._now_provider = lambda: test_now
+    adapter._writer_instance_id = "PgNaturalRuntime01"
+    claims = []
+
+    with Session(postgres_writer_engine) as session:
+        session.execute(text("SET LOCAL ROLE freqtrade"))
+
+        class ClaimBoundaryWriter:
+            def place(self, approved, *, submission_grant):
+                claimed = SqlAlchemyOrderWriterStore(
+                    session,
+                    now_provider=lambda: test_now,
+                ).load_approved_execution(approved.approval_id)
+                claims.append((claimed, submission_grant))
+
+        adapter.run_cycle(
+            read_client=object(),
+            writer=ClaimBoundaryWriter(),
+            db=session,
+        )
+        assert session.scalar(select(func.count(ExchangeOrder.id))) == 0
+        session.rollback()
+
+    assert selections == [(test_now, approval_id)]
+    assert len(claims) == 1
+    claimed, authorization = claims[0]
+    assert claimed.approval_id == approval_id
+    assert authorization.approval_id == approval_id
+    assert authorization.authorization_mode == "MANIFEST"
+    assert authorization.execution_target_id == "OKX_DEMO"
+    assert authorization.allow_real_funds is False
+    assert authorization.simulated_trading is True
+    assert authorization.order_submission_enabled is True
 
 
 def test_postgresql_runtime_role_releases_expired_approval_budget(
