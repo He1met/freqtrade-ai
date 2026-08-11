@@ -98,15 +98,11 @@ jobs:
               )
           PY
 
-      - name: Verify PostgreSQL worker migration and atomic lease gate
-        working-directory: backend
-        run: pytest -q tests/test_research_job_postgresql.py
-
       - name: Run backend pytest and artifact reconciliation coverage
         working-directory: backend
-        # The complete real-PostgreSQL worker file ran in the immediately
-        # preceding gate. Exclude only that duplicate here; all tests still run
-        # once, while the remaining backend suite keeps its PostgreSQL env.
+        # The complete real-PostgreSQL worker file runs in its own isolated job.
+        # Exclude only that duplicate here; all tests still run once, while the
+        # remaining backend suite keeps its PostgreSQL env.
         run: pytest --ignore=tests/test_research_job_postgresql.py
 
       - name: Compile Python modules
@@ -182,6 +178,57 @@ jobs:
           python scripts/smoke_phase6.py \
             --offline \
             --tmp-dir "$RUNNER_TEMP/freqtrade-ai-phase6-smoke"
+
+  research-worker-postgresql:
+    name: Isolated PostgreSQL research worker gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r backend/requirements.txt
+
+      - name: Create isolated PostgreSQL worker database
+        run: |
+          python - <<'PY'
+          import psycopg
+
+          with psycopg.connect("postgresql://postgres@127.0.0.1:5432/postgres", autocommit=True) as connection:
+              connection.execute(
+                  "CREATE ROLE freqtrade LOGIN NOSUPERUSER NOCREATEROLE "
+                  "NOCREATEDB NOINHERIT NOREPLICATION NOBYPASSRLS"
+              )
+              connection.execute("CREATE DATABASE freqtrade_ai_worker_test")
+          PY
+
+      - name: Verify PostgreSQL worker migration and atomic lease gate
+        working-directory: backend
+        run: pytest -q tests/test_research_job_postgresql.py
 
   natural-chain-preflight:
     name: Isolated natural-chain zero-order preflight
