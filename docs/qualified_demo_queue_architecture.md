@@ -6,19 +6,22 @@ This contract separates candidate generation, validation, qualified Demo
 continuation, and natural runtime acceptance. Generation never implies that a
 backtest ran. Queueing never implies that a strategy was deployed.
 
-The current Draft PR implements the two operation-scoped queue entrypoints,
-leases, idempotency, stale retry contract, and Demo-only qualification gate. It
-does not yet implement the dedicated validation consumer, the read-only API, or
-the frontend workspace. Those remain blocked from merge/deployment until the
-evaluator receipt repair is terminal and canonical state is freshly verified.
+The current implementation keeps the bi-hourly producer generation-only and
+uses the existing long-running research worker as the independent serial
+consumer. The producer refreshes the exact six public OKX data files, obtains a
+short ownership lease, and persists exactly 60 pending candidates. It never
+starts a backtest. The consumer claims one row through the global database lease,
+runs its isolated validation, persists evidence/reasons, and only then advances a
+QUALIFIED candidate through the independently fenced Demo deployment continuation.
 
 ```text
-generated Blueprint
-  -> GENERATED_QUEUED
-  -> leased validation steps
-  -> QUALIFIED | REJECTED | VALIDATION_FAILED
-  -> QUALIFIED_PENDING_CANONICAL_VALIDATION (QUALIFIED only)
-  -> canonical validation/approval/deployment
+public 5m refresh -> deterministic 15m derivation -> atomic six-file promotion
+  -> short formal-research ownership lease
+  -> 3 pairs x 2 timeframes x 10 candidates persisted as GENERATED_QUEUED
+  -> independent long-running worker claims exactly one global lease
+  -> persisted Blueprint primary/OOS/walk-forward validation
+  -> VALIDATED -> QUALIFIED_PENDING_DEPLOYMENT | REJECTED | FAILED
+  -> independently fenced OKX_DEMO approval/deployment (QUALIFIED only)
   -> natural closed-candle evaluation
   -> NO_ACTION | ACTIONABLE | BLOCKED | FAILED
 ```
@@ -31,9 +34,10 @@ or manufacture a signal or order.
 - Generation, queue claiming, backtesting, terminal projection, and qualified
   continuation are separate stages. Durable identities and indexed queue state
   replace repeated full-batch scans and prevent completed backtests from rerunning.
-- A validation consumer claims exactly one executable job per lease. Crash or
-  timeout produces a durable `STALE` state; only explicit fenced recovery may
-  retry the same idempotent job.
+- The already supervised research worker claims exactly one executable job per
+  global lease. It polls the indexed queue head, not the whole candidate set.
+  Crash or timeout produces durable `STALE`; deterministic persisted-result and
+  deployment recovery resume the same job without repeating completed research.
 - Expensive Freqtrade validation remains serial. Fast source/Blueprint/data/schema
   prechecks and API contract tests run before it, so deterministic failures do not
   consume a backtest slot.
@@ -75,10 +79,10 @@ Validation steps are an ordered server enum:
 9. `SCORING`
 10. `TERMINAL`
 
-A consumer may use strictly bounded concurrency in the future, but every job
-still requires a distinct lease/fence and deterministic capacity configuration.
-No throughput setting may alter the 15% drawdown contract, OOS/window gates,
-fees/slippage, evidence requirements, or Demo-only flags.
+The formal candidate consumer is deliberately serial. Parallel batch backtests
+are outside this contract. No throughput setting may alter the 15% drawdown
+contract, OOS/window gates, fees/slippage, evidence requirements, or Demo-only
+flags.
 
 Each terminal record exposes structured `reason_codes` plus evidence references
 for market-data receipt, source digest, Blueprint digest, lookahead artifact,
@@ -87,39 +91,28 @@ credentials, generated code, lease tokens, or trading-table data.
 
 ## Read-only API projection
 
-The planned endpoint is:
+The endpoint is:
 
-`GET /api/formal-strategy-research/queue-workspace`
+`GET /api/strategy-research/candidate-validation-queue`
 
 It is a read-only projection assembled from one database snapshot. It has no
 claim, retry, cancel, deployment, signal, or order side effects.
 
 ```json
 {
-  "schema_version": "formal-research-queue-workspace-v1",
+  "schema_version": "formal-candidate-validation-queue-read-v1",
   "availability": "AVAILABLE",
-  "reason_code": "OK",
-  "observed_at": "2026-08-11T00:00:00Z",
-  "current": null,
-  "waiting": [],
-  "completed": [],
-  "legacy": [],
-  "counts": {
-    "running": 0,
-    "waiting": 0,
-    "completed": 0
-  }
+  "as_of": "2026-08-11T00:00:00Z",
+  "serial_execution": true,
+  "active_candidate": null,
+  "waiting_candidates": [],
+  "completed_candidates": []
 }
 ```
 
-`availability` is `AVAILABLE`, `UNAVAILABLE`, or `UNKNOWN`:
-
-- `AVAILABLE`: every required query succeeded and at most one current lease is
-  internally consistent.
-- `UNAVAILABLE`: the schema or capability is deliberately not installed.
-- `UNKNOWN`: any required query, relationship, lease, or evidence lookup is
-  incomplete or contradictory. Arrays and counts must not be presented as an
-  authoritative empty queue.
+The API executes no claim, retry, validation, deployment, signal, or order
+action. `health.status=UNKNOWN` whenever the active job and singleton worker
+control disagree, rather than fabricating an idle queue.
 
 `current`, `waiting[]`, and `completed[]` use the same item contract:
 
@@ -127,7 +120,7 @@ claim, retry, cancel, deployment, signal, or order side effects.
 |---|---|
 | `job_id`, `attempt_number` | Stable database identity |
 | `candidate_key`, `pair`, `timeframe` | Digest-bound candidate identity |
-| `status`, `stage`, `reason_codes` | Persisted server state only |
+| `status`, `stage`, `reason_codes` | Real pending/claimed/running/validated/rejected/failed/qualified-pending/deploying/deployed state only |
 | `queue_position` | Server-derived integer for waiting rows; otherwise null |
 | `lease_state` | `NONE`, `ACTIVE`, `EXPIRED`, or `UNKNOWN`; never includes token |
 | `started_at`, `heartbeat_at`, `completed_at` | Database timestamps |

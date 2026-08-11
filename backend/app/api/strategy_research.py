@@ -17,9 +17,19 @@ from app.services.formal_strategy_research import (
     get_formal_strategy_research_coordinator,
 )
 from app.services.formal_read_models import StrategyResearchWorkspaceService
+from app.services.candidate_validation_queue_read import (
+    CandidateValidationQueueReadService,
+)
 
 
 router = APIRouter(prefix="/api", tags=["strategy-research"])
+
+
+@router.get("/strategy-research/candidate-validation-queue")
+def read_candidate_validation_queue(
+    db: Session = Depends(get_db),
+) -> dict:
+    return CandidateValidationQueueReadService(db).read()
 
 
 @router.get("/strategy-research-batches", response_model=list[StrategyResearchBatchRead])

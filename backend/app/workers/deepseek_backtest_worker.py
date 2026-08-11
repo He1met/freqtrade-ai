@@ -37,6 +37,9 @@ from app.services.strategy_generation import (
     build_deepseek_single_provider_from_env,
 )
 from app.services.research_job_queue import DEEPSEEK_BACKTEST_OPERATION
+from app.services.strategy_candidate_validation_queue import (
+    CANDIDATE_VALIDATION_OPERATION,
+)
 
 ServiceFactory = Callable[[Session], DeepSeekBacktestLoopService]
 
@@ -137,7 +140,10 @@ class DeepSeekBacktestWorker:
             job = repository.claim_next(
                 owner=self.owner,
                 lease_seconds=self.lease_seconds,
-                operations={DEEPSEEK_BACKTEST_OPERATION},
+                operations={
+                    DEEPSEEK_BACKTEST_OPERATION,
+                    CANDIDATE_VALIDATION_OPERATION,
+                },
             )
             if job is None:
                 return None
@@ -188,7 +194,7 @@ class DeepSeekBacktestWorker:
             if job.stage == "PERSISTED_RESULT_RECOVERY":
                 try:
                     payload = DeepSeekBacktestLoopRequest.model_validate(
-                        job.request_payload
+                        self._validation_payload(job)
                     )
                     links = chain.prepare_promotion(
                         job_id,
@@ -252,7 +258,8 @@ class DeepSeekBacktestWorker:
                         provider_completed=True,
                     )
                 return
-            payload = DeepSeekBacktestLoopRequest.model_validate(job.request_payload)
+            request_payload = self._validation_payload(job)
+            payload = DeepSeekBacktestLoopRequest.model_validate(request_payload)
             try:
                 chain.begin(job_id, lease_token)
             except ResearchFullChainBlocked as exc:
@@ -394,6 +401,20 @@ class DeepSeekBacktestWorker:
                 evidence_snapshot=response.evidence.model_dump(mode="json"),
                 provider_completed=payload.allow_real_call,
             )
+
+    @staticmethod
+    def _validation_payload(job: object) -> dict:
+        request_payload = getattr(job, "request_payload", None)
+        operation = getattr(job, "operation", None)
+        if (
+            operation == CANDIDATE_VALIDATION_OPERATION
+            and isinstance(request_payload, dict)
+            and isinstance(request_payload.get("validation_request"), dict)
+        ):
+            return request_payload["validation_request"]
+        if not isinstance(request_payload, dict):
+            raise ValueError("research job request payload is invalid")
+        return request_payload
 
     def _execute_approved_candidate_continuation(
         self,

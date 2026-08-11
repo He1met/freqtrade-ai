@@ -146,7 +146,16 @@ class StrategyDeploymentContinuation:
                 "candidate approval checkpoint is missing or incomplete"
             )
 
-        profile = job.request_payload.get("backtest_profile")
+        request_payload = job.request_payload
+        profile = (
+            request_payload.get("validation_request", {}).get("backtest_profile")
+            if job.operation == "strategy_research.candidate_validation_queue_v1"
+            and isinstance(request_payload, dict)
+            and isinstance(request_payload.get("validation_request"), dict)
+            else request_payload.get("backtest_profile")
+            if isinstance(request_payload, dict)
+            else None
+        )
         if not isinstance(profile, dict):
             raise StrategyDeploymentContinuationBlocked(
                 "research job has no persisted backtest profile"

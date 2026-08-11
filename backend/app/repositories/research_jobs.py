@@ -401,6 +401,26 @@ class ResearchJobRepository:
                 ResearchJob.strategy_score_id.is_not(None),
             )
         )
+        if recovery_stage == "PERSISTED_RESULT_RECOVERY":
+            recovery_guards = (
+                or_(
+                    ResearchJob.provider_attempted_at.is_not(None),
+                    and_(
+                        ResearchJob.job_type == "formal_candidate_validation",
+                        ResearchJob.operation
+                        == "strategy_research.candidate_validation_queue_v1",
+                        ResearchJob.provider_attempted_at.is_(None),
+                    ),
+                ),
+                ResearchJob.provider_completed_at.is_not(None),
+                ResearchJob.strategy_generation_run_id.is_not(None),
+                ResearchJob.strategy_id.is_not(None),
+                ResearchJob.strategy_version_id.is_not(None),
+                ResearchJob.backtest_run_id.is_not(None),
+                ResearchJob.backtest_task_id.is_not(None),
+                ResearchJob.backtest_result_id.is_not(None),
+                ResearchJob.strategy_score_id.is_not(None),
+            )
         result = self.db.execute(
             update(ResearchJob)
             .where(

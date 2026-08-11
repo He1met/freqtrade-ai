@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
@@ -37,6 +37,8 @@ class GeneratedCandidate:
     pair: str
     timeframe: str
     blueprint_evidence: dict[str, Any]
+    validation_request: dict[str, Any] | None = None
+    market_data_evidence: dict[str, Any] | None = None
 
 
 class StrategyCandidateValidationQueueService:
@@ -54,6 +56,7 @@ class StrategyCandidateValidationQueueService:
         candidates: Iterable[GeneratedCandidate],
         ownership_evidence: dict[str, Any] | None,
         now: datetime | None = None,
+        ownership_guard: Callable[[], bool] | None = None,
     ) -> tuple[ResearchJob, ...]:
         current = now or datetime.now(timezone.utc)
         try:
@@ -96,6 +99,8 @@ class StrategyCandidateValidationQueueService:
                 "pair": candidate.pair,
                 "timeframe": candidate.timeframe,
                 "blueprint_evidence": candidate.blueprint_evidence,
+                "validation_request": candidate.validation_request,
+                "market_data_evidence": candidate.market_data_evidence,
                 "quality_contract": official_research_policy(),
                 "execution_scope_id": "LOCAL_DRY_RUN",
                 "execution_target_id": "OKX_DEMO",
@@ -148,6 +153,11 @@ class StrategyCandidateValidationQueueService:
             )
             self.db.add(job)
             queued.append(job)
+        if ownership_guard is not None and ownership_guard() is not True:
+            self.db.rollback()
+            raise StrategyCandidateValidationQueueBlocked(
+                "RESEARCH_OWNERSHIP_LOST_BEFORE_QUEUE_COMMIT"
+            )
         self.db.commit()
         for job in queued:
             self.db.refresh(job)
@@ -197,6 +207,28 @@ class StrategyCandidateValidationQueueService:
             raise StrategyCandidateValidationQueueBlocked(
                 "GENERATED_CANDIDATE_EVIDENCE_INVALID"
             )
+        if candidate.validation_request is not None:
+            from app.schemas.deepseek_backtest_loop import DeepSeekBacktestLoopRequest
+
+            try:
+                request = DeepSeekBacktestLoopRequest.model_validate(
+                    candidate.validation_request
+                )
+            except ValueError as exc:
+                raise StrategyCandidateValidationQueueBlocked(
+                    "GENERATED_CANDIDATE_VALIDATION_REQUEST_INVALID"
+                ) from exc
+            profile = request.backtest_profile
+            if (
+                request.allow_real_call is not False
+                or request.persisted_blueprint != blueprint.get("blueprint")
+                or profile.get("pair") != candidate.pair
+                or profile.get("timeframe") != candidate.timeframe
+                or len(request.validation_windows) != 4
+            ):
+                raise StrategyCandidateValidationQueueBlocked(
+                    "GENERATED_CANDIDATE_VALIDATION_REQUEST_INVALID"
+                )
 
 
 def _digest(value: Any) -> str:
