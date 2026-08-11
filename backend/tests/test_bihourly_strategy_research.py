@@ -316,6 +316,16 @@ def test_generation_persists_exactly_sixty_pending_without_starting_backtests(
         ).validation_windows) == 4
         for job in jobs
     )
+    profiles = [
+        DeepSeekBacktestLoopRequest.model_validate(
+            job.request_payload["validation_request"]
+        ).backtest_profile
+        for job in jobs
+    ]
+    assert all("path" not in profile["strategy"] for profile in profiles)
+    assert {profile["data_source"]["datadir"] for profile in profiles} == {
+        "user_data/data"
+    }
 
     replay = service.run_generation_only(
         run_id="2026081108",

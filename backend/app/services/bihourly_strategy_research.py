@@ -448,7 +448,6 @@ def _validation_request(
             "timerange": primary,
             "strategy": {
                 "name": source.class_name,
-                "path": str(source.path.parent),
             },
             "stake": {
                 "currency": "USDT",
@@ -459,7 +458,7 @@ def _validation_request(
             "data_source": {
                 "kind": "local",
                 "exchange": "okx",
-                "datadir": "user_data/data/okx",
+                "datadir": "user_data/data",
                 "data_format": "feather",
                 "trading_mode": "futures",
                 "margin_mode": "isolated",
