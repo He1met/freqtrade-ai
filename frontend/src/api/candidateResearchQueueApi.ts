@@ -4,8 +4,9 @@ import { fetchJson } from "./http";
  * Legacy batch data must never be used to infer active work, lease state or progress.
  */
 export type CandidateResearchQueueStatus =
-  | "ENQUEUED" | "WAITING_FOR_LEASE" | "BACKTESTING" | "VALIDATING"
-  | "QUALIFIED" | "REJECTED" | "FAILED" | "NO_ACTION";
+  | "PENDING" | "CLAIMED" | "RUNNING" | "VALIDATED"
+  | "REJECTED" | "FAILED" | "QUALIFIED_PENDING_DEPLOYMENT"
+  | "DEPLOYING" | "DEPLOYED";
 
 export type CandidateResearchQueueEvidence = {
   label: string;

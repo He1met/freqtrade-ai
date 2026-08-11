@@ -841,12 +841,34 @@ class FullChainRepository:
                 .with_for_update()
                 .execution_options(populate_existing=True)
             )
+            supported_job = job is not None and (
+                (
+                    job.job_type == "deepseek_backtest"
+                    and job.operation
+                    == "strategy_generation.deepseek_backtest_loop"
+                )
+                or (
+                    job.job_type == "formal_candidate_validation"
+                    and job.operation
+                    == "strategy_research.candidate_validation_queue_v1"
+                    and isinstance(job.request_payload, dict)
+                    and isinstance(
+                        job.request_payload.get("validation_request"), dict
+                    )
+                    and job.request_payload["validation_request"].get(
+                        "allow_real_call"
+                    )
+                    is False
+                    and job.request_payload.get("execution_target_id")
+                    == "OKX_DEMO"
+                    and job.request_payload.get("allow_real_funds") is False
+                    and job.request_payload.get("real_orders") is False
+                )
+            )
             if (
                 job is None
                 or job.execution_scope_id != LOCAL_DRY_RUN_SCOPE_ID
-                or job.job_type != "deepseek_backtest"
-                or job.operation
-                != "strategy_generation.deepseek_backtest_loop"
+                or not supported_job
                 or job.status != "RUNNING"
                 or job.cancel_requested
                 or job.lease_token != lease_token
@@ -1559,11 +1581,25 @@ class FullChainRepository:
         allow_cancel_requested: bool = False,
     ) -> tuple[ResearchJob, ResearchJobAttempt]:
         job = self.db.get(ResearchJob, job_id)
+        supported_job = job is not None and (
+            (
+                job.job_type == "deepseek_backtest"
+                and job.operation == "strategy_generation.deepseek_backtest_loop"
+            )
+            or (
+                job.job_type == "formal_candidate_validation"
+                and job.operation
+                == "strategy_research.candidate_validation_queue_v1"
+                and isinstance(job.request_payload, dict)
+                and job.request_payload.get("execution_target_id") == "OKX_DEMO"
+                and job.request_payload.get("allow_real_funds") is False
+                and job.request_payload.get("real_orders") is False
+            )
+        )
         if (
             job is None
             or job.execution_scope_id != LOCAL_DRY_RUN_SCOPE_ID
-            or job.job_type != "deepseek_backtest"
-            or job.operation != "strategy_generation.deepseek_backtest_loop"
+            or not supported_job
             or job.status != "RUNNING"
             or (job.cancel_requested and not allow_cancel_requested)
             or job.lease_token != lease_token

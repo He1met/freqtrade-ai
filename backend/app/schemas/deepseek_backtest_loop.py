@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -37,6 +37,28 @@ class DeepSeekBacktestLoopRequest(BaseModel):
         default_factory=list
     )
     timeout_seconds: Optional[int] = Field(default=None, gt=0, le=3600)
+    persisted_blueprint: Optional[dict[str, Any]] = None
+    formal_provenance: Optional[dict[str, Any]] = None
+
+    @model_validator(mode="after")
+    def validate_persisted_blueprint_boundary(self) -> "DeepSeekBacktestLoopRequest":
+        if self.persisted_blueprint is None and self.formal_provenance is None:
+            return self
+        if (
+            self.persisted_blueprint is None
+            or self.formal_provenance is None
+            or self.allow_real_call is not False
+            or self.formal_provenance.get("contract_version")
+            != "formal-candidate-validation-provenance-v1"
+            or self.formal_provenance.get("execution_target_id") != "OKX_DEMO"
+            or self.formal_provenance.get("allow_real_funds") is not False
+            or self.formal_provenance.get("real_orders") is not False
+            or self.formal_provenance.get("provider_call_attempted") is not False
+        ):
+            raise ValueError(
+                "persisted Blueprint validation requires exact Demo-only provenance"
+            )
+        return self
 
 
 class DeepSeekBacktestExecutionRead(BaseModel):

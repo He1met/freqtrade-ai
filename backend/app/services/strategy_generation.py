@@ -566,6 +566,32 @@ class FakeStrategyBlueprintProvider:
         }
 
 
+class PersistedStrategyBlueprintProvider:
+    """Render one already persisted Blueprint without any provider access."""
+
+    provider_name = "formal_research"
+    model_name = "persisted-blueprint-v1"
+
+    def __init__(self, blueprint: StrategyBlueprint) -> None:
+        self.blueprint = blueprint
+
+    def generate(self, prompt_summary: str, requested_count: int) -> list[StrategyBlueprint]:
+        if requested_count != 1:
+            raise ValueError("persisted Blueprint provider accepts exactly one candidate")
+        return [self.blueprint]
+
+    def metadata_snapshot(self) -> dict[str, Any]:
+        return {
+            "mode": "persisted_blueprint",
+            "provider": self.provider_name,
+            "model": self.model_name,
+            "real_provider": False,
+            "provider_kind": "deterministic",
+            "provider_call_attempted": False,
+            "credential_values_recorded": False,
+        }
+
+
 def build_strategy_blueprint_provider_from_env(
     http_client: Optional[LLMHTTPClient] = None,
 ) -> StrategyBlueprintProvider:

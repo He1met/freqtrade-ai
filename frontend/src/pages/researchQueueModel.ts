@@ -17,25 +17,24 @@ export type ResearchQueueProjection = {
 };
 
 export type ResearchQueueSort = "queue" | "generated-newest" | "generated-oldest" | "name";
-export const TERMINAL_STATUSES: CandidateResearchQueueStatus[] = ["QUALIFIED", "REJECTED", "FAILED", "NO_ACTION"];
+export const TERMINAL_STATUSES: CandidateResearchQueueStatus[] = ["VALIDATED", "REJECTED", "FAILED", "DEPLOYED"];
 
 const LABELS: Record<CandidateResearchQueueStatus, string> = {
-  ENQUEUED: "已入队", WAITING_FOR_LEASE: "等待领取", BACKTESTING: "回测中",
-  VALIDATING: "验证中", QUALIFIED: "合格", REJECTED: "已拒绝", FAILED: "失败", NO_ACTION: "无动作",
+  PENDING: "待回测", CLAIMED: "已领取", RUNNING: "回测验证中", VALIDATED: "已验证",
+  REJECTED: "已拒绝", FAILED: "失败", QUALIFIED_PENDING_DEPLOYMENT: "合格待部署",
+  DEPLOYING: "Demo 部署中", DEPLOYED: "已部署",
 };
 
 export function researchQueueStatusLabel(status: CandidateResearchQueueStatus) { return LABELS[status] ?? "状态未知"; }
 export function researchQueueStatusTone(status: CandidateResearchQueueStatus): "success" | "danger" | "warning" | "info" | "neutral" {
-  if (status === "QUALIFIED") return "success";
+  if (["VALIDATED", "QUALIFIED_PENDING_DEPLOYMENT", "DEPLOYED"].includes(status)) return "success";
   if (status === "FAILED") return "danger";
   if (status === "REJECTED") return "warning";
-  if (status === "NO_ACTION") return "neutral";
   return "info";
 }
 export function researchQueueActionAdvice(status: CandidateResearchQueueStatus): string | null {
   if (status === "FAILED") return "检查失败阶段与证据完整性；仅在 owner/lease 契约允许时重试。";
   if (status === "REJECTED") return "质量门已给出终态；不要直接重试或降低门槛。";
-  if (status === "NO_ACTION") return "这是合法无动作终态，无需按错误处理。";
   return null;
 }
 
@@ -54,7 +53,7 @@ export function safeEvidenceHref(href: string | null): string | null {
 }
 
 function legacyStatus(status: string): CandidateResearchQueueStatus {
-  return status === "QUALIFIED" ? "QUALIFIED" : status === "REJECTED" ? "REJECTED" : "FAILED";
+  return status === "QUALIFIED" ? "VALIDATED" : status === "REJECTED" ? "REJECTED" : "FAILED";
 }
 
 export function projectResearchQueue(queue: CandidateResearchQueueRead | null, workspace: StrategyResearchWorkspace | null, queueError: string | null): ResearchQueueProjection {

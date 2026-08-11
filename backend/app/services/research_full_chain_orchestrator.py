@@ -159,8 +159,19 @@ class ResearchFullChainOrchestrator:
                 # The external outcome is ambiguous. It must remain isolated as
                 # STALE and may never be replayed automatically.
                 continue
+            formal_deterministic = (
+                job.job_type == "formal_candidate_validation"
+                and job.operation
+                == "strategy_research.candidate_validation_queue_v1"
+                and isinstance(job.request_payload, dict)
+                and isinstance(job.request_payload.get("validation_request"), dict)
+                and job.request_payload["validation_request"].get(
+                    "allow_real_call"
+                )
+                is False
+            )
             if (
-                job.provider_attempted_at is not None
+                (job.provider_attempted_at is not None or formal_deterministic)
                 and job.provider_completed_at is not None
                 and len(links) == len(LINK_KEYS)
                 and chain is not None
@@ -320,7 +331,7 @@ class ResearchFullChainOrchestrator:
             input_snapshot={
                 "research_job_id": job.id,
                 "request_digest": job.request_hash,
-                "provider": "deepseek",
+                "provider": self._provider_for_job(job),
                 "execution_scope_id": "LOCAL_DRY_RUN",
                 "execution_target_id": "OKX_DEMO",
             },
@@ -473,7 +484,7 @@ class ResearchFullChainOrchestrator:
             input_snapshot={
                 "research_job_id": job.id,
                 "request_digest": job.request_hash,
-                "provider": "deepseek",
+                "provider": self._provider_for_job(job),
                 "execution_scope_id": "LOCAL_DRY_RUN",
                 "execution_target_id": "OKX_DEMO",
             },
@@ -635,12 +646,51 @@ class ResearchFullChainOrchestrator:
         return generation, strategy, version, run, task, result, score
 
     @staticmethod
+    def _provider_for_job(job: ResearchJob) -> str:
+        return (
+            "formal_research"
+            if job.operation == "strategy_research.candidate_validation_queue_v1"
+            else "deepseek"
+        )
+
+    @staticmethod
     def _require_real_provider(
         job: ResearchJob,
         generation: StrategyGenerationRun,
     ) -> None:
         params = generation.params_snapshot
         payload = job.request_payload
+        formal_request = (
+            payload.get("validation_request")
+            if isinstance(payload, dict)
+            else None
+        )
+        formal_provenance = (
+            formal_request.get("formal_provenance")
+            if isinstance(formal_request, dict)
+            else None
+        )
+        if (
+            job.job_type == "formal_candidate_validation"
+            and job.operation
+            == "strategy_research.candidate_validation_queue_v1"
+            and isinstance(formal_request, dict)
+            and formal_request.get("allow_real_call") is False
+            and isinstance(formal_provenance, dict)
+            and formal_provenance.get("contract_version")
+            == "formal-candidate-validation-provenance-v1"
+            and formal_provenance.get("execution_target_id") == "OKX_DEMO"
+            and formal_provenance.get("allow_real_funds") is False
+            and formal_provenance.get("real_orders") is False
+            and formal_provenance.get("provider_call_attempted") is False
+            and isinstance(params, dict)
+            and generation.provider == "formal_research"
+            and params.get("mode") == "persisted_blueprint"
+            and params.get("provider_call_attempted") is False
+            and params.get("credential_values_recorded") is False
+            and params.get("operation_status") == "SUCCESS"
+        ):
+            return
         if (
             os.environ.get("FREQTRADE_AI_CI_OFFLINE") == "1"
             or not isinstance(payload, dict)

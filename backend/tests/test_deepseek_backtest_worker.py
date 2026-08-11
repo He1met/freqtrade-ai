@@ -38,6 +38,7 @@ from app.schemas import (
     operation_error_evidence,
 )
 from app.schemas.deepseek_backtest_loop import DeepSeekBacktestLoopResponse
+from app.schemas.strategy_blueprint import StrategyBlueprint
 from app.services.deepseek_backtest_loop import DeepSeekBacktestLoopService
 from app.services.research_full_chain_orchestrator import (
     ResearchFullChainBlocked,
@@ -48,6 +49,12 @@ from app.services.strategy_generation import (
     LLMProviderConfig,
     OpenAICompatibleStrategyBlueprintProvider,
     StrategyGenerationService,
+)
+from app.services.strategy_renderer import StrategyCodeRenderer
+from app.services.strategy_blueprint_equivalence import prove_blueprint_code_equivalence
+from app.services.strategy_candidate_validation_queue import (
+    GeneratedCandidate,
+    StrategyCandidateValidationQueueService,
 )
 from app.workers.deepseek_backtest_worker import DeepSeekBacktestWorker
 
@@ -778,9 +785,11 @@ def test_worker_exception_is_stale_and_closes_chain_without_claiming_provider_co
         assert attempt.completed_at is not None
 
 
+@pytest.mark.parametrize("formal_mode", [False, True])
 def test_worker_runs_controlled_service_chain_and_reconciles_all_database_ids(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    formal_mode: bool,
 ) -> None:
     monkeypatch.delenv("FREQTRADE_AI_CI_OFFLINE", raising=False)
     factory = session_factory(tmp_path)
@@ -894,16 +903,87 @@ def test_worker_runs_controlled_service_chain_and_reconciles_all_database_ids(
         )
 
     with factory() as db:
-        job_id = ResearchJobQueueService(db).enqueue_deepseek_backtest(
-            DeepSeekBacktestLoopRequest(
-                prompt_summary="Generate one controlled strategy and run the local worker chain.",
-                allow_real_call=True,
-                backtest_profile=local_profile(datadir),
-                validation_windows=validation_windows(datadir),
-                timeout_seconds=60,
+        request_payload = DeepSeekBacktestLoopRequest(
+            prompt_summary="Generate one controlled strategy and run the local worker chain.",
+            allow_real_call=not formal_mode,
+            backtest_profile=local_profile(datadir),
+            validation_windows=validation_windows(datadir),
+            timeout_seconds=60,
+            **(
+                {
+                    "persisted_blueprint": StrategyBlueprint.model_validate(
+                        MockLLMResponse().json()["blueprints"][0]
+                    ).model_dump(mode="json"),
+                    "formal_provenance": {
+                        "contract_version": "formal-candidate-validation-provenance-v1",
+                        "execution_target_id": "OKX_DEMO",
+                        "allow_real_funds": False,
+                        "real_orders": False,
+                        "provider_call_attempted": False,
+                        "credential_values_recorded": False,
+                    },
+                }
+                if formal_mode
+                else {}
             ),
-            idempotency_key="worker-full-chain",
-        ).id
+        )
+        if formal_mode:
+            blueprint = StrategyBlueprint.model_validate(
+                request_payload.persisted_blueprint
+            )
+            source_path = tmp_path / "research/strategy_candidates/15m/01_worker.py"
+            source_path.parent.mkdir(parents=True)
+            source_path.write_text(
+                StrategyCodeRenderer().render(blueprint), encoding="utf-8"
+            )
+            digest = hashlib.sha256(source_path.read_bytes()).hexdigest()
+            equivalence = prove_blueprint_code_equivalence(
+                blueprint_payload=blueprint.model_dump(mode="json"),
+                source_bytes=source_path.read_bytes(),
+                expected_source_digest=digest,
+                expected_class_name=blueprint.class_name,
+                expected_timeframe=blueprint.timeframe,
+            )
+            ownership = {
+                "schema_version": "freqtrade-ai-formal-research-ownership-v1",
+                "scope": "FORMAL_STRATEGY_RESEARCH",
+                "canonical_root": str(tmp_path.resolve()),
+                "owner_task_id": "formal-worker-integration",
+                "confirmed_at": datetime.now(timezone.utc).isoformat(),
+                "expires_at": (
+                    datetime.now(timezone.utc) + timedelta(minutes=20)
+                ).isoformat(),
+            }
+            job_id = StrategyCandidateValidationQueueService(
+                db, canonical_root=tmp_path
+            ).enqueue_generated(
+                run_id="formal-worker-full-chain",
+                repository_commit="f" * 40,
+                candidates=[
+                    GeneratedCandidate(
+                        candidate_key="formal-worker-btc-15m-01",
+                        source_path=str(source_path.relative_to(tmp_path)),
+                        source_code_digest=digest,
+                        pair="BTC/USDT:USDT",
+                        timeframe="15m",
+                        blueprint_evidence={
+                            "exact_render_match": True,
+                            "source_code_digest": digest,
+                            "rendered_code_digest": digest,
+                            "blueprint_digest": equivalence.blueprint_digest,
+                            "renderer_version": equivalence.renderer_version,
+                            "blueprint": blueprint.model_dump(mode="json"),
+                        },
+                        validation_request=request_payload.model_dump(mode="json"),
+                    )
+                ],
+                ownership_evidence=ownership,
+            )[0].id
+        else:
+            job_id = ResearchJobQueueService(db).enqueue_deepseek_backtest(
+                request_payload,
+                idempotency_key="worker-full-chain",
+            ).id
 
     worker = DeepSeekBacktestWorker(
         session_factory=factory,
@@ -961,6 +1041,13 @@ def test_worker_runs_controlled_service_chain_and_reconciles_all_database_ids(
         ) is not None
 
     assert worker.run_once() == job_id
+    with factory() as db:
+        approval_ready = ResearchJobRepository(db).get(job_id)
+        assert approval_ready is not None
+        assert (approval_ready.status, approval_ready.stage) == (
+            "PENDING",
+            "CANDIDATE_APPROVED",
+        ), (approval_ready.error_message, approval_ready.evidence_snapshot)
     original_complete = ResearchJobRepository.complete
 
     def crash_after_deployment_publish(self, *args, **kwargs):
@@ -996,15 +1083,16 @@ def test_worker_runs_controlled_service_chain_and_reconciles_all_database_ids(
 
     assert worker.run_once() == job_id
     assert worker.run_once() is None
-    assert len(http_client.requests) == 1
-    assert http_client.requests[0]["url"] == "https://api.deepseek.com/chat/completions"
+    assert len(http_client.requests) == (0 if formal_mode else 1)
+    if not formal_mode:
+        assert http_client.requests[0]["url"] == "https://api.deepseek.com/chat/completions"
 
     with factory() as db:
         job = ResearchJobRepository(db).get(job_id)
         assert job is not None
         assert job.status == "SUCCESS", (job.error_message, job.evidence_snapshot)
         assert job.stage == "DEPLOYED"
-        assert job.provider_attempted_at is not None
+        assert (job.provider_attempted_at is not None) is (not formal_mode)
         assert job.provider_completed_at is not None
         assert job.evidence_snapshot["acceptance_ready"] is True
         assert all(
@@ -1020,6 +1108,11 @@ def test_worker_runs_controlled_service_chain_and_reconciles_all_database_ids(
             )
         )
         assert db.query(StrategyGenerationRun).count() == 1
+        generation = db.query(StrategyGenerationRun).one()
+        assert generation.provider == ("formal_research" if formal_mode else "deepseek")
+        if formal_mode:
+            assert generation.params_snapshot["provider_call_attempted"] is False
+            assert generation.params_snapshot["credential_values_recorded"] is False
         assert db.query(Strategy).count() == 1
         assert db.query(StrategyVersion).count() == 1
         assert db.query(BacktestRun).count() == 5

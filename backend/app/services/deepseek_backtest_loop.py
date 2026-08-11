@@ -37,6 +37,8 @@ from app.schemas.deepseek_backtest_loop import (
 from app.services.backtest_artifact_ingest import BacktestArtifactIngestService
 from app.services.local_backtest_trigger import LocalBacktestTriggerService
 from app.services.strategy_generation import StrategyGenerationExecutionError, StrategyGenerationService
+from app.services.strategy_generation import PersistedStrategyBlueprintProvider
+from app.schemas.strategy_blueprint import StrategyBlueprint
 from app.services.strategy_validation_matrix import (
     StrategyValidationBlocked,
     StrategyValidationMatrixService,
@@ -78,10 +80,24 @@ class DeepSeekBacktestLoopService:
         self.backtests = BacktestRepository(db)
 
     def run(self, payload: DeepSeekBacktestLoopRequest) -> DeepSeekBacktestLoopResponse:
-        if self.generation_service.provider.provider_name != "deepseek":
+        if payload.persisted_blueprint is not None:
+            blueprint = StrategyBlueprint.model_validate(payload.persisted_blueprint)
+            formal_generation = StrategyGenerationService(
+                self.db,
+                provider=PersistedStrategyBlueprintProvider(blueprint),
+                file_manager=self.generation_service.file_manager,
+            )
+            generation_result = formal_generation.run_once_with_result(
+                payload.prompt_summary,
+                requested_count=1,
+                execution_metadata={
+                    **(payload.formal_provenance or {}),
+                    "operation_status": "STARTED",
+                },
+            )
+        elif self.generation_service.provider.provider_name != "deepseek":
             raise RuntimeError("DeepSeek backtest loop provider boundary is misconfigured")
-
-        if not payload.allow_real_call:
+        elif not payload.allow_real_call:
             reason = "Real DeepSeek call requires explicit single-run authorization."
             run_id = self.generation_service.record_blocked_once(
                 payload.prompt_summary,
@@ -99,7 +115,7 @@ class DeepSeekBacktestLoopService:
                 ),
             )
 
-        if not self.generation_service.has_provider_credential():
+        elif not self.generation_service.has_provider_credential():
             reason = "Missing configured DeepSeek API key environment variable."
             run_id = self.generation_service.record_blocked_once(
                 payload.prompt_summary,
@@ -117,39 +133,40 @@ class DeepSeekBacktestLoopService:
                 ),
             )
 
-        try:
-            generation_result = self.generation_service.run_once_with_result(
-                payload.prompt_summary,
-                requested_count=1,
-                execution_metadata={
-                    "real_call_authorized": True,
-                    "real_call_attempted": True,
-                    "credential_env_present": True,
-                    "credential_values_recorded": False,
-                    "loop_mode": "deepseek_backtest_minimal_loop",
-                },
-            )
-        except StrategyGenerationExecutionError as exc:
-            run = self._require_generation_run(exc.run_id)
-            status = "blocked" if "missing LLM API key environment variable" in str(exc) else "failed"
-            evidence = (
-                self._blocked_evidence(
-                    str(exc),
-                    ids={"strategy_generation_run_id": run.id},
-                    next_action="Set the configured DeepSeek key in ENV and retry once.",
+        else:
+            try:
+                generation_result = self.generation_service.run_once_with_result(
+                    payload.prompt_summary,
+                    requested_count=1,
+                    execution_metadata={
+                        "real_call_authorized": True,
+                        "real_call_attempted": True,
+                        "credential_env_present": True,
+                        "credential_values_recorded": False,
+                        "loop_mode": "deepseek_backtest_minimal_loop",
+                    },
                 )
-                if status == "blocked"
-                else self._failed_evidence(
-                    str(exc),
-                    ids={"strategy_generation_run_id": run.id},
-                    next_action="Inspect the persisted generation run diagnostics and retry only after correcting the provider failure.",
+            except StrategyGenerationExecutionError as exc:
+                run = self._require_generation_run(exc.run_id)
+                status = "blocked" if "missing LLM API key environment variable" in str(exc) else "failed"
+                evidence = (
+                    self._blocked_evidence(
+                        str(exc),
+                        ids={"strategy_generation_run_id": run.id},
+                        next_action="Set the configured DeepSeek key in ENV and retry once.",
+                    )
+                    if status == "blocked"
+                    else self._failed_evidence(
+                        str(exc),
+                        ids={"strategy_generation_run_id": run.id},
+                        next_action="Inspect the persisted generation run diagnostics and retry only after correcting the provider failure.",
+                    )
                 )
-            )
-            return DeepSeekBacktestLoopResponse(
-                overall_status=status,
-                generation_run=StrategyGenerationRunRead.model_validate(run),
-                evidence=evidence,
-            )
+                return DeepSeekBacktestLoopResponse(
+                    overall_status=status,
+                    generation_run=StrategyGenerationRunRead.model_validate(run),
+                    evidence=evidence,
+                )
 
         generation = self._generation_response(generation_result.run_id, generation_result.version_ids)
         version = self.strategies.get_version(generation_result.version_ids[0])

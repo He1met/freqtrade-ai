@@ -1,6 +1,8 @@
 import os
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
+import shutil
 from threading import Barrier, Lock, Thread
 
 import pytest
@@ -37,7 +39,15 @@ from app.repositories import (
 )
 from app.schemas import BacktestRunCreate, StrategyCreate, StrategyVersionCreate
 from app.schemas.strategy_generation_run import StrategyGenerationRunCreate
-from sqlalchemy import inspect, text
+from app.services.strategy_candidate_validation_queue import (
+    GeneratedCandidate,
+    StrategyCandidateValidationQueueBlocked,
+    StrategyCandidateValidationQueueService,
+)
+from app.services.bihourly_strategy_research import (
+    BihourlyStrategyResearchService,
+)
+from sqlalchemy import func, inspect, select, text
 from sqlalchemy.exc import DataError, IntegrityError
 
 POSTGRES_WORKER_URL = os.environ.get("POSTGRES_WORKER_URL")
@@ -597,6 +607,116 @@ def test_postgresql_two_workers_claim_only_one_global_job(postgres_engine) -> No
         running = next(job for job in jobs if job.status == "RUNNING")
         assert running.attempt_count == 1
         assert running.lease_token is not None
+
+
+def test_postgresql_formal_candidate_consumer_is_serial_and_runtime_enqueue_is_rejected(
+    postgres_engine,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    assert upgrade_database(postgres_engine) == SCHEMA_VERSION
+    session_factory = create_session_factory(postgres_engine)
+    operation = "strategy_research.candidate_validation_queue_v1"
+    canonical_root = tmp_path / "canonical"
+    shutil.copytree(
+        Path(__file__).resolve().parents[2] / "research/strategy_candidates",
+        canonical_root / "research/strategy_candidates",
+    )
+    market = {
+        f"{pair}|{timeframe}": {
+            "pair": pair,
+            "timeframe": timeframe,
+            "path": f"/isolated/{pair}-{timeframe}.feather",
+            "file_sha256": "a" * 64,
+            "validation_lineage_digest": "b" * 64,
+            "first_open_at": "2023-07-01T00:00:00+00:00",
+            "last_open_at": datetime.now(timezone.utc).isoformat(),
+            "source_receipt_path": f"/isolated/{pair}-{timeframe}.source.json",
+            "source_receipt_sha256": "c" * 64,
+        }
+        for pair in ("BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT")
+        for timeframe in ("5m", "15m")
+    }
+    with session_factory() as db:
+        service = BihourlyStrategyResearchService(
+            db,
+            canonical_root=canonical_root,
+            datadir=tmp_path / "market",
+        )
+        monkeypatch.setattr(
+            service,
+            "_validate_market_data",
+            lambda **_kwargs: market,
+        )
+        result = service.run_generation_only(
+            run_id="postgres-formal-serial",
+            repository_commit="d" * 40,
+            owner_task_id="postgres-formal-owner",
+            refresh=lambda: None,
+            now=datetime.now(timezone.utc),
+        )
+        assert result.persisted_count == 60
+        assert db.scalar(
+            select(func.count()).select_from(ResearchJob).where(
+                ResearchJob.operation == operation
+            )
+        ) == 60
+
+    barrier = Barrier(2)
+    result_lock = Lock()
+    claimed_ids: list[int | None] = []
+
+    def claim(owner: str) -> None:
+        barrier.wait(timeout=5)
+        with session_factory() as db:
+            claimed = ResearchJobRepository(db).claim_next(
+                owner=owner,
+                lease_seconds=60,
+                operations={operation},
+            )
+            with result_lock:
+                claimed_ids.append(None if claimed is None else claimed.id)
+
+    threads = [Thread(target=claim, args=(f"formal-worker-{index}",)) for index in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+    assert all(not thread.is_alive() for thread in threads)
+    assert len([job_id for job_id in claimed_ids if job_id is not None]) == 1
+    assert claimed_ids.count(None) == 1
+    with session_factory() as db:
+        db.execute(text("SET ROLE freqtrade"))
+        with pytest.raises(
+            StrategyCandidateValidationQueueBlocked,
+            match="RUNTIME_ROLE_CANNOT_ENQUEUE_VALIDATION",
+        ):
+            StrategyCandidateValidationQueueService(
+                db, canonical_root=tmp_path
+            ).enqueue_generated(
+                run_id="postgres-runtime-role-rejected",
+                repository_commit="a" * 40,
+                candidates=[
+                    GeneratedCandidate(
+                        candidate_key="must-not-be-written",
+                        source_path="missing.py",
+                        source_code_digest="b" * 64,
+                        pair="BTC/USDT:USDT",
+                        timeframe="5m",
+                        blueprint_evidence={},
+                    )
+                ],
+                ownership_evidence={
+                    "schema_version": "freqtrade-ai-formal-research-ownership-v1",
+                    "scope": "FORMAL_STRATEGY_RESEARCH",
+                    "canonical_root": str(tmp_path.resolve()),
+                    "owner_task_id": "postgres-owner",
+                    "confirmed_at": datetime.now(timezone.utc).isoformat(),
+                    "expires_at": (
+                        datetime.now(timezone.utc) + timedelta(minutes=20)
+                    ).isoformat(),
+                },
+            )
 
 
 def test_postgresql_terminal_cas_rejects_expired_and_concurrent_lease(
