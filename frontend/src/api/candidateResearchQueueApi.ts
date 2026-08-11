@@ -1,4 +1,4 @@
-import { fetchJson } from "./http";
+import { fetchJson, postJson } from "./http";
 
 /** Minimum read-only contract for the lease-protected serial candidate queue.
  * Legacy batch data must never be used to infer active work, lease state or progress.
@@ -72,5 +72,36 @@ export function fetchCandidateResearchQueue(signal?: AbortSignal) {
   return fetchJson<CandidateResearchQueueRead>(
     "/strategy-research/candidate-validation-queue",
     signal,
+  );
+}
+
+export type BihourlyResearchTriggerResult = {
+  schema_version: "bihourly-strategy-research-trigger-v1";
+  status: "GENERATED" | "NO_OP" | "FAILED";
+  reason_code: string;
+  trigger: "manual" | "automation";
+  run_id: string;
+  persisted_count: number;
+  runtime_status: string;
+  opening_guard: "RUNNING" | "BLOCKED";
+  generation_only: true;
+  serial_consumer_separate: true;
+  backtest_started: false;
+  deployment_started: false;
+  signal_or_order_started: false;
+  real_orders: false;
+  allow_real_funds: false;
+  exchange_access: "PUBLIC_MARKET_DATA_ONLY";
+};
+
+export function triggerBihourlyResearchGeneration(operatorToken: string, signal?: AbortSignal) {
+  return postJson<BihourlyResearchTriggerResult>(
+    "/strategy-research/bihourly-generation",
+    {},
+    {
+      idempotencyKey: `bihourly-manual-${crypto.randomUUID()}`,
+      operatorToken,
+      signal,
+    },
   );
 }

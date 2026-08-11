@@ -10,10 +10,14 @@ from sqlalchemy.pool import StaticPool
 from app.db.session import create_session_factory, get_db
 from app.core.strategy_research_contract import official_research_policy
 from app.main import app
+from app.api.strategy_research import _get_bihourly_trigger
 from app.models import Base, Strategy, StrategyVersion
 from app.schemas.strategy_research import FormalResearchRunRead
 from app.services.formal_strategy_research import get_formal_strategy_research_coordinator
 from app.services.strategy_research import StrategyResearchPersistenceService
+from app.services.bihourly_strategy_research_trigger import (
+    BihourlyStrategyResearchTriggerResult,
+)
 
 
 REPORT = (
@@ -409,3 +413,54 @@ def test_formal_research_api_uses_credential_free_shared_coordinator():
     }
     assert ready.json()["quality_contract"]["profile_label"] == "进攻型：最大回撤 15%"
     assert ready.json()["quality_contract"]["max_drawdown_per_validation_window"] == 0.15
+
+
+def test_manual_bihourly_generation_api_uses_shared_zero_order_trigger(monkeypatch):
+    class FakeTrigger:
+        def run(self, *, trigger):
+            assert trigger == "manual"
+            return BihourlyStrategyResearchTriggerResult(
+                schema_version="bihourly-strategy-research-trigger-v1",
+                status="NO_OP",
+                reason_code="MARKET_DATA_NOT_FRESH",
+                trigger="manual",
+                run_id="2026081110",
+                persisted_count=0,
+                runtime_status="BLOCKED_OPENINGS",
+                opening_guard="BLOCKED",
+            )
+
+    operator_token = "local-research-operator-token-123456789"
+    monkeypatch.setenv("FREQTRADE_AI_OPERATOR_TOKEN", operator_token)
+    app.dependency_overrides[_get_bihourly_trigger] = FakeTrigger
+    try:
+        response = TestClient(app).post(
+            "/api/strategy-research/bihourly-generation",
+            json={},
+            headers={
+                "X-Operator-Token": operator_token,
+                "Idempotency-Key": "manual-research-2026081110",
+            },
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "schema_version": "bihourly-strategy-research-trigger-v1",
+        "status": "NO_OP",
+        "reason_code": "MARKET_DATA_NOT_FRESH",
+        "trigger": "manual",
+        "run_id": "2026081110",
+        "persisted_count": 0,
+        "runtime_status": "BLOCKED_OPENINGS",
+        "opening_guard": "BLOCKED",
+        "generation_only": True,
+        "serial_consumer_separate": True,
+        "backtest_started": False,
+        "deployment_started": False,
+        "signal_or_order_started": False,
+        "real_orders": False,
+        "allow_real_funds": False,
+        "exchange_access": "PUBLIC_MARKET_DATA_ONLY",
+    }

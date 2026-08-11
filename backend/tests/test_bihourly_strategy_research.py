@@ -16,6 +16,10 @@ from app.services.bihourly_strategy_research import (
     BihourlyStrategyResearchBlocked,
     BihourlyStrategyResearchService,
 )
+from app.services.bihourly_strategy_research_trigger import (
+    BihourlyStrategyResearchTrigger,
+    _canonical_peer_owner_url,
+)
 from app.services.candidate_validation_queue_read import (
     CandidateValidationQueueReadService,
 )
@@ -65,6 +69,103 @@ def _market() -> dict[str, dict]:
                 "source_receipt_sha256": "c" * 64,
             }
     return result
+
+
+def _runtime_snapshot(*, blocked_openings: bool = False) -> dict:
+    return {
+        "status": "BLOCKED_OPENINGS" if blocked_openings else "VERIFIED",
+        "execution_target": {"active": "OKX_DEMO", "status": "READY"},
+        "trading": {"live": False, "dry_run": False, "real_orders": False},
+        "database": {"kind": "postgresql", "schema": "verified"},
+        "okx_runtime": {
+            "execution_target": "OKX_DEMO",
+            "adapter": "ATTESTED",
+            "writer": "UNIQUE",
+            "reconciliation": "RECOVERED",
+            "automation_guard": "BLOCKED" if blocked_openings else "RUNNING",
+        },
+        "services": [
+            {"service": name, "running": True}
+            for name in ("backend", "worker", "frontend", "okx_runtime")
+        ],
+    }
+
+
+def test_manual_and_automation_share_fail_closed_generation_trigger(
+    database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _root(tmp_path)
+    generation = BihourlyStrategyResearchService(
+        database, canonical_root=root, datadir=tmp_path / "market"
+    )
+    monkeypatch.setattr(generation, "_validate_market_data", lambda **_kwargs: _market())
+    refresh_calls: list[str] = []
+    trigger = BihourlyStrategyResearchTrigger(
+        database,
+        canonical_root=root,
+        datadir=tmp_path / "market",
+        receipt_path=tmp_path / "receipt.json",
+        runtime_snapshot=lambda: _runtime_snapshot(blocked_openings=True),
+        repository_state=lambda: ("main", "d" * 40),
+        refresh=lambda: refresh_calls.append("refresh"),
+        generation_service=generation,
+    )
+
+    manual = trigger.run(
+        trigger="manual", run_id="2026081108", owner_task_id="shared-owner", now=NOW
+    )
+    scheduled = trigger.run(
+        trigger="automation",
+        run_id="2026081108",
+        owner_task_id="shared-owner",
+        now=NOW + timedelta(minutes=1),
+    )
+
+    assert manual.status == "GENERATED"
+    assert manual.persisted_count == 60
+    assert manual.runtime_status == "BLOCKED_OPENINGS"
+    assert manual.opening_guard == "BLOCKED"
+    assert manual.backtest_started is False
+    assert scheduled.status == "NO_OP"
+    assert scheduled.reason_code == "RESEARCH_BATCH_ALREADY_PERSISTED"
+    assert refresh_calls == ["refresh"]
+
+
+def test_trigger_no_ops_before_refresh_when_runtime_contract_is_unsafe(
+    database, tmp_path: Path
+) -> None:
+    root = _root(tmp_path)
+    unsafe = _runtime_snapshot()
+    unsafe["trading"]["real_orders"] = True
+    calls: list[str] = []
+    result = BihourlyStrategyResearchTrigger(
+        database,
+        canonical_root=root,
+        datadir=tmp_path / "market",
+        receipt_path=tmp_path / "receipt.json",
+        runtime_snapshot=lambda: unsafe,
+        repository_state=lambda: ("main", "d" * 40),
+        refresh=lambda: calls.append("unexpected"),
+    ).run(trigger="manual", now=NOW)
+
+    assert result.status == "NO_OP"
+    assert result.reason_code == "RUNTIME_TRADING_SAFETY_INVALID"
+    assert calls == []
+    assert database.scalar(select(ResearchJob).limit(1)) is None
+
+
+def test_owner_mediated_url_is_local_peer_only_and_drops_runtime_credentials() -> None:
+    peer = _canonical_peer_owner_url(
+        "postgresql+psycopg://freqtrade:secret@localhost:5432/freqtrade_ai"
+    )
+    assert peer.username is None
+    assert peer.password is None
+    assert peer.database == "freqtrade_ai"
+    assert peer.query == {"host": "/tmp", "port": "5432"}
+    with pytest.raises(RuntimeError):
+        _canonical_peer_owner_url(
+            "postgresql+psycopg://freqtrade:secret@example.com/freqtrade_ai"
+        )
 
 
 def test_generation_persists_exactly_sixty_pending_without_starting_backtests(
