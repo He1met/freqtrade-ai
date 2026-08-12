@@ -239,6 +239,7 @@ jobs:
             tests/test_okx_demo_writer_postgresql.py \
             tests/test_research_job_postgresql.py \
             tests/test_risk_chain_postgresql.py \
+            tests/test_strategy_platform_postgresql.py \
             tests/test_strategy_deployment_repository.py
 
   natural-chain-preflight:

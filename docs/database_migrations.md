@@ -28,6 +28,13 @@ check constraint；任一不匹配都会 fail closed。
 迁移在 PostgreSQL transaction 内运行：失败不会写入 version，也不会留下部分 schema。
 命令和 readiness 输出只显示脱敏 database identity，绝不显示 URL 密码或其他密钥。
 
+## 前向演进规则
+
+策略平台 V1.3 及后续阶段采用可验证的前向演进、兼容性和审计，不要求 down
+migration、反向迁移或恢复旧模型。每次升级必须保留既有数据与历史语义、提供可重复的
+升级验证和迁移证据；forward-only 不授权删除或覆盖既有数据，也不允许降低 Demo-only、
+唯一 writer、最小权限、secret 隔离、幂等和状态机边界。
+
 ## psql / pg_dump 边界
 
 `postgresql+psycopg://` 是 SQLAlchemy 专用 URL。`psql` 和 `pg_dump` 使用 `postgresql://`

@@ -78,7 +78,8 @@ DEPLOYMENT_POLICY_REBIND_BASE_VERSION = "20260810_41"
 NATURAL_SIGNAL_EVALUATOR_RECEIPT_BASE_VERSION = "20260810_42"
 NATURAL_SIGNAL_RISK_BUDGET_BASE_VERSION = "20260811_43"
 STALE_NATURAL_APPROVAL_RELEASE_BASE_VERSION = "20260811_44"
-SCHEMA_VERSION = "20260811_45"
+STRATEGY_PLATFORM_V1_BASE_VERSION = "20260811_45"
+SCHEMA_VERSION = "20260813_46"
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 ATTESTATION_PROOF_KEY_ENV = "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"
 OPERATOR_TOKEN_ENV = "FREQTRADE_AI_OPERATOR_TOKEN"
@@ -111,6 +112,53 @@ RUNTIME_APPEND_ONLY_TABLES = frozenset(
     {"strategy_research_attempt_events", "market_data_quality_receipts"}
 )
 BRIDGE_APPEND_ONLY_TABLES = frozenset({"strategy_research_candidate_bridge_events"})
+
+STRATEGY_PLATFORM_V1_TABLES = (
+    "configuration_types",
+    "configuration_versions",
+    "configuration_dependencies",
+    "configuration_activations",
+    "configuration_audit_events",
+    "configuration_bundle_snapshots",
+    "execution_target_definitions",
+    "execution_target_definition_versions",
+    "strategy_targets",
+    "validation_window_config_sets",
+    "validation_window_purposes",
+    "market_regime_definitions",
+    "validation_window_configs",
+    "validation_window_expectations",
+    "metric_definitions",
+    "metric_definition_versions",
+    "quality_gate_profiles",
+    "quality_gate_profile_versions",
+    "quality_gate_rules",
+    "validation_window_scores",
+    "validation_window_score_components",
+    "quality_rule_evaluations",
+    "strategy_evaluation_summaries",
+)
+STRATEGY_PLATFORM_V1_PREREQUISITE_TABLES = (
+    "configuration_types",
+    "configuration_versions",
+    "configuration_dependencies",
+    "configuration_activations",
+    "configuration_audit_events",
+    "configuration_bundle_snapshots",
+    "execution_target_definitions",
+    "execution_target_definition_versions",
+    "strategy_targets",
+    "validation_window_config_sets",
+    "validation_window_purposes",
+    "market_regime_definitions",
+    "validation_window_configs",
+    "validation_window_expectations",
+    "metric_definitions",
+    "metric_definition_versions",
+    "quality_gate_profiles",
+    "quality_gate_profile_versions",
+    "quality_gate_rules",
+)
 
 CANARY_LINEAGE_BOUNDARY_TABLES = frozenset(
     {
@@ -5541,7 +5589,7 @@ def _add_research_receipt_boundary(connection: Connection) -> None:
         "strategy_research_candidate_bridge_events",
     ):
         Base.metadata.tables[table_name].create(bind=connection, checkfirst=True)
-    schema_name = connection.execute(text("SELECT current_schema()" )).scalar_one()
+    schema_name = connection.execute(text("SELECT current_schema()")).scalar_one()
     if "full_chain_runs" in inspect(connection).get_table_names(schema=schema_name):
         bridge_foreign_keys = {
             tuple(item["constrained_columns"])
@@ -7149,6 +7197,607 @@ def _add_strategy_validation_matrix(connection: Connection) -> None:
                    OR (OLD.execution_id IS NOT NULL
                        AND OLD.execution_id IS DISTINCT FROM NEW.execution_id) THEN
                     RAISE EXCEPTION 'strategy validation window identity is immutable';
+                END IF;
+                RETURN NEW;
+            END
+            $$;
+            DROP TRIGGER IF EXISTS strategy_validation_windows_immutable
+                ON {quoted_schema}.strategy_validation_windows;
+            CREATE TRIGGER strategy_validation_windows_immutable
+                BEFORE UPDATE OR DELETE ON {quoted_schema}.strategy_validation_windows
+                FOR EACH ROW EXECUTE FUNCTION
+                {quoted_schema}.guard_strategy_validation_window();
+            """
+        )
+    )
+
+
+def _add_strategy_platform_v1_prerequisites(connection: Connection) -> None:
+    """Create parents required by the expanded validation tables on old upgrades."""
+
+    for table_name in STRATEGY_PLATFORM_V1_PREREQUISITE_TABLES:
+        Base.metadata.tables[table_name].create(bind=connection, checkfirst=True)
+
+
+def _add_strategy_platform_v1_foundation(connection: Connection) -> None:
+    """Install the forward-only V1.3 catalog, validation, and config foundation.
+
+    This migration is deliberately schema-only.  It never invents targets, rewrites
+    historical validation evidence, activates configuration, or grants a runtime
+    principal new access.
+    """
+
+    schema_name = connection.execute(text("SELECT current_schema()" )).scalar_one()
+    actual_tables = set(inspect(connection).get_table_names(schema=schema_name))
+    required_existing = {
+        "market_data_quality_receipts",
+        "research_jobs",
+        "strategies",
+        "strategy_deployments",
+        "strategy_validation_plans",
+        "strategy_validation_windows",
+        "strategy_versions",
+    }
+    missing_existing = sorted(required_existing - actual_tables)
+    if missing_existing:
+        raise SchemaMigrationBlocked(
+            "Strategy Platform V1.3 foundation dependencies are incomplete: "
+            + ", ".join(missing_existing)
+        )
+
+    for table_name in STRATEGY_PLATFORM_V1_TABLES:
+        Base.metadata.tables[table_name].create(bind=connection, checkfirst=True)
+
+    connection.execute(
+        text(
+            "ALTER TABLE research_jobs "
+            "ADD COLUMN IF NOT EXISTS configuration_bundle_snapshot_id BIGINT "
+            "REFERENCES configuration_bundle_snapshots(id) ON DELETE RESTRICT; "
+            "ALTER TABLE strategy_deployments "
+            "ADD COLUMN IF NOT EXISTS configuration_bundle_snapshot_id BIGINT "
+            "REFERENCES configuration_bundle_snapshots(id) ON DELETE RESTRICT"
+        )
+    )
+    connection.execute(
+        text(
+            "ALTER TABLE strategy_validation_plans "
+            "ADD COLUMN IF NOT EXISTS strategy_target_id BIGINT "
+            "REFERENCES strategy_targets(id) ON DELETE RESTRICT, "
+            "ADD COLUMN IF NOT EXISTS quality_gate_profile_version_id BIGINT "
+            "REFERENCES quality_gate_profile_versions(configuration_version_id) "
+            "ON DELETE RESTRICT, "
+            "ADD COLUMN IF NOT EXISTS validation_window_config_set_id BIGINT "
+            "REFERENCES validation_window_config_sets(id) ON DELETE RESTRICT, "
+            "ADD COLUMN IF NOT EXISTS configuration_bundle_snapshot_id BIGINT "
+            "REFERENCES configuration_bundle_snapshots(id) ON DELETE RESTRICT, "
+            "ADD COLUMN IF NOT EXISTS cycle_number INTEGER, "
+            "ADD COLUMN IF NOT EXISTS trigger_source_key VARCHAR(120), "
+            "ADD COLUMN IF NOT EXISTS trigger_metadata JSON NOT NULL DEFAULT '{}'::json, "
+            "ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ, "
+            "ADD COLUMN IF NOT EXISTS policy_snapshot_digest VARCHAR(64), "
+            "ADD COLUMN IF NOT EXISTS market_data_snapshot_digest VARCHAR(64), "
+            "DROP CONSTRAINT IF EXISTS strategy_validation_plans_status_check, "
+            "DROP CONSTRAINT IF EXISTS strategy_validation_plans_cycle_number_check, "
+            "DROP CONSTRAINT IF EXISTS strategy_validation_plans_snapshot_digest_check, "
+            "DROP CONSTRAINT IF EXISTS strategy_validation_plans_target_cycle_unique, "
+            "ADD CONSTRAINT strategy_validation_plans_status_check CHECK ("
+            "status IN ('DECLARED','QUEUED','RUNNING','PASSED','QUALIFIED',"
+            "'REJECTED','FAILED','BLOCKED')), "
+            "ADD CONSTRAINT strategy_validation_plans_cycle_number_check CHECK ("
+            "cycle_number IS NULL OR cycle_number > 0), "
+            "ADD CONSTRAINT strategy_validation_plans_snapshot_digest_check CHECK ("
+            "(policy_snapshot_digest IS NULL OR length(policy_snapshot_digest)=64) "
+            "AND (market_data_snapshot_digest IS NULL "
+            "OR length(market_data_snapshot_digest)=64)), "
+            "ADD CONSTRAINT strategy_validation_plans_target_cycle_unique "
+            "UNIQUE (strategy_target_id, cycle_number)"
+        )
+    )
+    connection.execute(
+        text(
+            "ALTER TABLE strategy_validation_windows "
+            "ADD COLUMN IF NOT EXISTS window_config_id BIGINT "
+            "REFERENCES validation_window_configs(id) ON DELETE RESTRICT, "
+            "ADD COLUMN IF NOT EXISTS window_key_snapshot VARCHAR(120), "
+            "ADD COLUMN IF NOT EXISTS name_zh_snapshot VARCHAR(160), "
+            "ADD COLUMN IF NOT EXISTS description_zh_snapshot TEXT, "
+            "ADD COLUMN IF NOT EXISTS attempt_number INTEGER NOT NULL DEFAULT 1, "
+            "ADD COLUMN IF NOT EXISTS net_profit_after_cost DOUBLE PRECISION, "
+            "ADD COLUMN IF NOT EXISTS max_drawdown DOUBLE PRECISION, "
+            "ADD COLUMN IF NOT EXISTS volatility DOUBLE PRECISION, "
+            "ADD COLUMN IF NOT EXISTS total_trades INTEGER, "
+            "ADD COLUMN IF NOT EXISTS failure_code VARCHAR(160), "
+            "ADD COLUMN IF NOT EXISTS failure_message TEXT, "
+            "ALTER COLUMN window_kind DROP NOT NULL, "
+            "DROP CONSTRAINT IF EXISTS strategy_validation_windows_kind_check, "
+            "DROP CONSTRAINT IF EXISTS strategy_validation_windows_status_check, "
+            "DROP CONSTRAINT IF EXISTS strategy_validation_windows_plan_ordinal_unique, "
+            "DROP CONSTRAINT IF EXISTS strategy_validation_windows_attempt_number_check, "
+            "DROP CONSTRAINT IF EXISTS strategy_validation_windows_total_trades_check, "
+            "DROP CONSTRAINT IF EXISTS "
+            "strategy_validation_windows_plan_config_attempt_unique, "
+            "ADD CONSTRAINT strategy_validation_windows_status_check CHECK ("
+            "status IN ('DECLARED','READY','RUNNING','PASSED','REJECTED',"
+            "'FAILED','BLOCKED')), "
+            "ADD CONSTRAINT strategy_validation_windows_attempt_number_check CHECK ("
+            "attempt_number > 0), "
+            "ADD CONSTRAINT strategy_validation_windows_total_trades_check CHECK ("
+            "total_trades IS NULL OR total_trades >= 0), "
+            "ADD CONSTRAINT strategy_validation_windows_plan_config_attempt_unique "
+            "UNIQUE (validation_plan_id, window_config_id, attempt_number)"
+        )
+    )
+
+    quoted_schema = connection.dialect.identifier_preparer.quote_schema(schema_name)
+    connection.execute(
+        text(
+            f"""
+            CREATE OR REPLACE FUNCTION {quoted_schema}.guard_configuration_version()
+            RETURNS trigger LANGUAGE plpgsql AS $$
+            DECLARE
+                payload jsonb;
+            BEGIN
+                IF TG_OP = 'DELETE' THEN
+                    IF OLD.lifecycle_status <> 'DRAFT' THEN
+                        RAISE EXCEPTION 'validated configuration versions are immutable';
+                    END IF;
+                    RETURN OLD;
+                END IF;
+
+                IF TG_OP = 'INSERT' AND NEW.lifecycle_status <> 'DRAFT' THEN
+                    RAISE EXCEPTION 'configuration versions must start as DRAFT';
+                END IF;
+
+                payload := NEW.payload_json::jsonb;
+                IF jsonb_path_exists(
+                       payload, '$.**.allow_real_funds ? (@ == true)'
+                   )
+                   OR jsonb_path_exists(
+                       payload, '$.**.demo_only ? (@ == false)'
+                   )
+                   OR jsonb_path_exists(
+                       payload, '$.**.single_writer_required ? (@ == false)'
+                   ) THEN
+                    RAISE EXCEPTION 'configuration cannot weaken Demo-only writer safety';
+                END IF;
+                IF jsonb_path_exists(payload, '$.**.api_key')
+                   OR jsonb_path_exists(payload, '$.**.api_secret')
+                   OR jsonb_path_exists(payload, '$.**.secret_value')
+                   OR jsonb_path_exists(payload, '$.**.passphrase')
+                   OR jsonb_path_exists(payload, '$.**.private_key') THEN
+                    RAISE EXCEPTION 'configuration payload cannot contain secret values';
+                END IF;
+                IF jsonb_path_exists(payload, '$.**.python_code')
+                   OR jsonb_path_exists(payload, '$.**.callable_source')
+                   OR jsonb_path_exists(payload, '$.**.executable_code') THEN
+                    RAISE EXCEPTION 'configuration payload cannot contain executable code';
+                END IF;
+
+                IF TG_OP = 'UPDATE' THEN
+                    IF OLD.id IS DISTINCT FROM NEW.id
+                       OR OLD.type_key IS DISTINCT FROM NEW.type_key
+                       OR OLD.version_number IS DISTINCT FROM NEW.version_number
+                       OR OLD.created_by IS DISTINCT FROM NEW.created_by
+                       OR OLD.created_at IS DISTINCT FROM NEW.created_at THEN
+                        RAISE EXCEPTION 'configuration version identity is immutable';
+                    END IF;
+                    IF OLD.lifecycle_status IN ('VALIDATED', 'RETIRED') AND (
+                       OLD.payload_json::jsonb IS DISTINCT FROM NEW.payload_json::jsonb
+                       OR OLD.schema_version IS DISTINCT FROM NEW.schema_version
+                       OR OLD.config_digest IS DISTINCT FROM NEW.config_digest
+                       OR OLD.change_summary IS DISTINCT FROM NEW.change_summary
+                       OR OLD.validated_at IS DISTINCT FROM NEW.validated_at) THEN
+                        RAISE EXCEPTION 'validated configuration payload is immutable';
+                    END IF;
+                    IF NOT (
+                       OLD.lifecycle_status = NEW.lifecycle_status
+                       OR OLD.lifecycle_status = 'DRAFT'
+                          AND NEW.lifecycle_status IN ('VALIDATED', 'RETIRED')
+                       OR OLD.lifecycle_status = 'VALIDATED'
+                          AND NEW.lifecycle_status = 'RETIRED') THEN
+                        RAISE EXCEPTION 'illegal configuration lifecycle transition';
+                    END IF;
+                    IF OLD.lifecycle_status = 'DRAFT'
+                       AND NEW.lifecycle_status = 'VALIDATED'
+                       AND EXISTS (
+                           SELECT 1
+                             FROM {quoted_schema}.configuration_dependencies dependency
+                             JOIN {quoted_schema}.configuration_versions required_version
+                               ON required_version.id = dependency.depends_on_version_id
+                            WHERE dependency.configuration_version_id = NEW.id
+                              AND required_version.lifecycle_status <> 'VALIDATED'
+                       ) THEN
+                        RAISE EXCEPTION 'configuration dependencies must be VALIDATED';
+                    END IF;
+                END IF;
+                RETURN NEW;
+            END
+            $$;
+            DROP TRIGGER IF EXISTS configuration_versions_guard
+                ON {quoted_schema}.configuration_versions;
+            CREATE TRIGGER configuration_versions_guard
+                BEFORE INSERT OR UPDATE OR DELETE
+                ON {quoted_schema}.configuration_versions
+                FOR EACH ROW EXECUTE FUNCTION
+                {quoted_schema}.guard_configuration_version();
+
+            CREATE OR REPLACE FUNCTION {quoted_schema}.guard_configuration_activation()
+            RETURNS trigger LANGUAGE plpgsql AS $$
+            DECLARE
+                version_status text;
+                version_type text;
+            BEGIN
+                SELECT lifecycle_status, type_key
+                  INTO version_status, version_type
+                  FROM {quoted_schema}.configuration_versions
+                 WHERE id = NEW.version_id;
+                IF version_status IS DISTINCT FROM 'VALIDATED'
+                   OR version_type IS DISTINCT FROM NEW.config_type THEN
+                    RAISE EXCEPTION 'activation requires matching VALIDATED version';
+                END IF;
+                RETURN NEW;
+            END
+            $$;
+            DROP TRIGGER IF EXISTS configuration_activations_validated
+                ON {quoted_schema}.configuration_activations;
+            CREATE TRIGGER configuration_activations_validated
+                BEFORE INSERT OR UPDATE
+                ON {quoted_schema}.configuration_activations
+                FOR EACH ROW EXECUTE FUNCTION
+                {quoted_schema}.guard_configuration_activation();
+
+            CREATE OR REPLACE FUNCTION {quoted_schema}.guard_configuration_bundle_snapshot()
+            RETURNS trigger LANGUAGE plpgsql AS $$
+            DECLARE
+                resolved record;
+                resolved_status text;
+                resolved_digest text;
+            BEGIN
+                IF jsonb_typeof(NEW.resolved_versions_json::jsonb) <> 'object'
+                   OR NEW.resolved_versions_json::jsonb = '{{}}'::jsonb
+                   OR jsonb_typeof(NEW.resolved_digests_json::jsonb) <> 'object' THEN
+                    RAISE EXCEPTION 'bundle requires resolved version and digest maps';
+                END IF;
+                FOR resolved IN
+                    SELECT key, value
+                      FROM jsonb_each_text(NEW.resolved_versions_json::jsonb)
+                LOOP
+                    SELECT lifecycle_status, config_digest
+                      INTO resolved_status, resolved_digest
+                      FROM {quoted_schema}.configuration_versions
+                     WHERE id = resolved.value::bigint;
+                    IF resolved_status IS DISTINCT FROM 'VALIDATED'
+                       OR resolved_digest IS DISTINCT FROM
+                          NEW.resolved_digests_json::jsonb ->> resolved.key THEN
+                        RAISE EXCEPTION 'bundle resolved version/digest mismatch';
+                    END IF;
+                END LOOP;
+                FOR resolved IN
+                    SELECT key, value
+                      FROM jsonb_each_text(NEW.resolved_digests_json::jsonb)
+                LOOP
+                    IF NOT NEW.resolved_versions_json::jsonb ? resolved.key THEN
+                        RAISE EXCEPTION 'bundle resolved version/digest mismatch';
+                    END IF;
+                END LOOP;
+                SELECT lifecycle_status INTO resolved_status
+                  FROM {quoted_schema}.configuration_versions
+                 WHERE id = NEW.aggregate_profile_version_id;
+                IF resolved_status IS DISTINCT FROM 'VALIDATED' THEN
+                    RAISE EXCEPTION 'bundle aggregate profile must be VALIDATED';
+                END IF;
+                IF NOT (
+                    NEW.capability_snapshot::jsonb @> '{{"demo_only": true}}'::jsonb
+                    AND NEW.capability_snapshot::jsonb @>
+                        '{{"allow_real_funds": false}}'::jsonb
+                    AND NEW.capability_snapshot::jsonb @>
+                        '{{"single_writer_required": true}}'::jsonb
+                ) THEN
+                    RAISE EXCEPTION 'bundle safety capability snapshot is incomplete';
+                END IF;
+                RETURN NEW;
+            END
+            $$;
+            DROP TRIGGER IF EXISTS configuration_bundle_snapshots_validated
+                ON {quoted_schema}.configuration_bundle_snapshots;
+            CREATE TRIGGER configuration_bundle_snapshots_validated
+                BEFORE INSERT ON {quoted_schema}.configuration_bundle_snapshots
+                FOR EACH ROW EXECUTE FUNCTION
+                {quoted_schema}.guard_configuration_bundle_snapshot();
+
+            CREATE OR REPLACE FUNCTION {quoted_schema}.guard_configuration_dependency()
+            RETURNS trigger LANGUAGE plpgsql AS $$
+            DECLARE
+                creates_cycle boolean;
+                version_status text;
+            BEGIN
+                IF TG_OP = 'DELETE' THEN
+                    SELECT lifecycle_status INTO version_status
+                      FROM {quoted_schema}.configuration_versions
+                     WHERE id = OLD.configuration_version_id;
+                    IF version_status IS DISTINCT FROM 'DRAFT' THEN
+                        RAISE EXCEPTION 'validated configuration dependencies are immutable';
+                    END IF;
+                    RETURN OLD;
+                END IF;
+                IF TG_OP = 'UPDATE'
+                   AND OLD.configuration_version_id IS DISTINCT FROM
+                       NEW.configuration_version_id THEN
+                    SELECT lifecycle_status INTO version_status
+                      FROM {quoted_schema}.configuration_versions
+                     WHERE id = OLD.configuration_version_id;
+                    IF version_status IS DISTINCT FROM 'DRAFT' THEN
+                        RAISE EXCEPTION 'validated configuration dependencies are immutable';
+                    END IF;
+                END IF;
+                SELECT lifecycle_status INTO version_status
+                  FROM {quoted_schema}.configuration_versions
+                 WHERE id = NEW.configuration_version_id;
+                IF version_status IS DISTINCT FROM 'DRAFT' THEN
+                    RAISE EXCEPTION 'validated configuration dependencies are immutable';
+                END IF;
+                WITH RECURSIVE reachable(version_id) AS (
+                    SELECT NEW.depends_on_version_id
+                    UNION
+                    SELECT dependency.depends_on_version_id
+                      FROM {quoted_schema}.configuration_dependencies dependency
+                      JOIN reachable
+                        ON dependency.configuration_version_id = reachable.version_id
+                     WHERE TG_OP = 'INSERT' OR dependency.id <> OLD.id
+                )
+                SELECT EXISTS (
+                    SELECT 1 FROM reachable
+                     WHERE version_id = NEW.configuration_version_id
+                ) INTO creates_cycle;
+                IF creates_cycle THEN
+                    RAISE EXCEPTION 'configuration dependency cycle is forbidden';
+                END IF;
+                RETURN NEW;
+            END
+            $$;
+            DROP TRIGGER IF EXISTS configuration_dependencies_acyclic
+                ON {quoted_schema}.configuration_dependencies;
+            CREATE TRIGGER configuration_dependencies_acyclic
+                BEFORE INSERT OR UPDATE OR DELETE
+                ON {quoted_schema}.configuration_dependencies
+                FOR EACH ROW EXECUTE FUNCTION
+                {quoted_schema}.guard_configuration_dependency();
+
+            CREATE OR REPLACE FUNCTION {quoted_schema}.prevent_strategy_platform_mutation()
+            RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+                RAISE EXCEPTION '% rows are immutable', TG_TABLE_NAME;
+            END
+            $$;
+            """
+        )
+    )
+    for table_name in (
+        "configuration_audit_events",
+        "configuration_bundle_snapshots",
+        "validation_window_scores",
+        "validation_window_score_components",
+        "quality_rule_evaluations",
+        "strategy_evaluation_summaries",
+    ):
+        connection.execute(
+            text(
+                f"DROP TRIGGER IF EXISTS {table_name}_immutable "
+                f"ON {quoted_schema}.{table_name}; "
+                f"CREATE TRIGGER {table_name}_immutable "
+                f"BEFORE UPDATE OR DELETE ON {quoted_schema}.{table_name} "
+                f"FOR EACH ROW EXECUTE FUNCTION "
+                f"{quoted_schema}.prevent_strategy_platform_mutation()"
+            )
+        )
+
+    connection.execute(
+        text(
+            f"""
+            CREATE OR REPLACE FUNCTION {quoted_schema}.guard_configuration_child()
+            RETURNS trigger LANGUAGE plpgsql AS $$
+            DECLARE
+                old_version_id bigint;
+                new_version_id bigint;
+                version_status text;
+            BEGIN
+                IF TG_TABLE_NAME IN (
+                    'execution_target_definition_versions',
+                    'metric_definition_versions',
+                    'quality_gate_profile_versions'
+                ) THEN
+                    old_version_id := CASE WHEN TG_OP = 'INSERT' THEN NULL
+                                           ELSE OLD.configuration_version_id END;
+                    new_version_id := CASE WHEN TG_OP = 'DELETE' THEN NULL
+                                           ELSE NEW.configuration_version_id END;
+                ELSIF TG_TABLE_NAME = 'validation_window_config_sets' THEN
+                    old_version_id := CASE WHEN TG_OP = 'INSERT' THEN NULL ELSE OLD.id END;
+                    new_version_id := CASE WHEN TG_OP = 'DELETE' THEN NULL ELSE NEW.id END;
+                ELSIF TG_TABLE_NAME IN (
+                    'validation_window_purposes',
+                    'market_regime_definitions',
+                    'validation_window_configs'
+                ) THEN
+                    old_version_id := CASE WHEN TG_OP = 'INSERT' THEN NULL
+                                           ELSE OLD.config_set_id END;
+                    new_version_id := CASE WHEN TG_OP = 'DELETE' THEN NULL
+                                           ELSE NEW.config_set_id END;
+                ELSIF TG_TABLE_NAME = 'validation_window_expectations' THEN
+                    IF TG_OP <> 'INSERT' THEN
+                        SELECT config_set_id INTO old_version_id
+                          FROM {quoted_schema}.validation_window_configs
+                         WHERE id = OLD.window_config_id;
+                    END IF;
+                    IF TG_OP <> 'DELETE' THEN
+                        SELECT config_set_id INTO new_version_id
+                          FROM {quoted_schema}.validation_window_configs
+                         WHERE id = NEW.window_config_id;
+                    END IF;
+                ELSIF TG_TABLE_NAME = 'quality_gate_rules' THEN
+                    old_version_id := CASE WHEN TG_OP = 'INSERT' THEN NULL
+                                           ELSE OLD.profile_version_id END;
+                    new_version_id := CASE WHEN TG_OP = 'DELETE' THEN NULL
+                                           ELSE NEW.profile_version_id END;
+                ELSE
+                    RAISE EXCEPTION 'unsupported configuration child table';
+                END IF;
+
+                IF TG_OP = 'UPDATE' AND old_version_id IS DISTINCT FROM new_version_id THEN
+                    RAISE EXCEPTION 'configuration child version identity is immutable';
+                END IF;
+                SELECT lifecycle_status INTO version_status
+                  FROM {quoted_schema}.configuration_versions
+                 WHERE id = COALESCE(new_version_id, old_version_id);
+                IF version_status IS DISTINCT FROM 'DRAFT' THEN
+                    RAISE EXCEPTION 'validated configuration children are immutable';
+                END IF;
+                RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+            END
+            $$;
+            """
+        )
+    )
+    for table_name in (
+        "execution_target_definition_versions",
+        "metric_definition_versions",
+        "quality_gate_profile_versions",
+        "validation_window_config_sets",
+        "validation_window_purposes",
+        "market_regime_definitions",
+        "validation_window_configs",
+        "validation_window_expectations",
+        "quality_gate_rules",
+    ):
+        connection.execute(
+            text(
+                f"DROP TRIGGER IF EXISTS {table_name}_draft_only "
+                f"ON {quoted_schema}.{table_name}; "
+                f"CREATE TRIGGER {table_name}_draft_only "
+                f"BEFORE INSERT OR UPDATE OR DELETE ON {quoted_schema}.{table_name} "
+                f"FOR EACH ROW EXECUTE FUNCTION "
+                f"{quoted_schema}.guard_configuration_child()"
+            )
+        )
+
+    connection.execute(
+        text(
+            f"""
+            CREATE OR REPLACE FUNCTION {quoted_schema}.guard_strategy_validation_plan()
+            RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+                IF TG_OP = 'DELETE' THEN
+                    RAISE EXCEPTION 'strategy validation plans are immutable';
+                END IF;
+                IF OLD.strategy_version_id IS DISTINCT FROM NEW.strategy_version_id
+                   OR OLD.promotion_backtest_result_id IS DISTINCT FROM NEW.promotion_backtest_result_id
+                   OR OLD.provider_name IS DISTINCT FROM NEW.provider_name
+                   OR OLD.strategy_code_digest IS DISTINCT FROM NEW.strategy_code_digest
+                   OR OLD.plan_digest IS DISTINCT FROM NEW.plan_digest
+                   OR OLD.plan_snapshot::jsonb IS DISTINCT FROM NEW.plan_snapshot::jsonb
+                   OR OLD.created_at IS DISTINCT FROM NEW.created_at
+                   OR (OLD.strategy_target_id IS NOT NULL
+                       AND OLD.strategy_target_id IS DISTINCT FROM NEW.strategy_target_id)
+                   OR (OLD.quality_gate_profile_version_id IS NOT NULL
+                       AND OLD.quality_gate_profile_version_id IS DISTINCT FROM
+                           NEW.quality_gate_profile_version_id)
+                   OR (OLD.validation_window_config_set_id IS NOT NULL
+                       AND OLD.validation_window_config_set_id IS DISTINCT FROM
+                           NEW.validation_window_config_set_id)
+                   OR (OLD.configuration_bundle_snapshot_id IS NOT NULL
+                       AND OLD.configuration_bundle_snapshot_id IS DISTINCT FROM
+                           NEW.configuration_bundle_snapshot_id)
+                   OR (OLD.cycle_number IS NOT NULL
+                       AND OLD.cycle_number IS DISTINCT FROM NEW.cycle_number)
+                   OR (OLD.trigger_source_key IS NOT NULL
+                       AND OLD.trigger_source_key IS DISTINCT FROM NEW.trigger_source_key)
+                   OR (OLD.trigger_metadata::jsonb <> '{{}}'::jsonb
+                       AND OLD.trigger_metadata::jsonb IS DISTINCT FROM
+                           NEW.trigger_metadata::jsonb)
+                   OR (OLD.started_at IS NOT NULL
+                       AND OLD.started_at IS DISTINCT FROM NEW.started_at)
+                   OR (OLD.policy_snapshot_digest IS NOT NULL
+                       AND OLD.policy_snapshot_digest IS DISTINCT FROM
+                           NEW.policy_snapshot_digest)
+                   OR (OLD.market_data_snapshot_digest IS NOT NULL
+                       AND OLD.market_data_snapshot_digest IS DISTINCT FROM
+                           NEW.market_data_snapshot_digest) THEN
+                    RAISE EXCEPTION 'strategy validation plan identity is immutable';
+                END IF;
+                IF OLD.status IS DISTINCT FROM NEW.status AND NOT (
+                   OLD.status = 'DECLARED' AND NEW.status IN ('QUEUED','RUNNING','BLOCKED')
+                   OR OLD.status = 'QUEUED' AND NEW.status IN ('RUNNING','FAILED','BLOCKED')
+                   OR OLD.status = 'RUNNING' AND NEW.status IN (
+                       'PASSED','QUALIFIED','REJECTED','FAILED','BLOCKED'
+                   )
+                   OR OLD.status = 'PASSED' AND NEW.status = 'BLOCKED'
+                ) THEN
+                    RAISE EXCEPTION 'illegal strategy validation plan transition';
+                END IF;
+                IF OLD.status IN ('QUALIFIED','REJECTED','FAILED','BLOCKED')
+                   AND OLD.status = NEW.status
+                   AND OLD IS DISTINCT FROM NEW THEN
+                    RAISE EXCEPTION 'terminal strategy validation plan is immutable';
+                END IF;
+                RETURN NEW;
+            END
+            $$;
+            DROP TRIGGER IF EXISTS strategy_validation_plans_immutable
+                ON {quoted_schema}.strategy_validation_plans;
+            CREATE TRIGGER strategy_validation_plans_immutable
+                BEFORE UPDATE OR DELETE ON {quoted_schema}.strategy_validation_plans
+                FOR EACH ROW EXECUTE FUNCTION
+                {quoted_schema}.guard_strategy_validation_plan();
+
+            CREATE OR REPLACE FUNCTION {quoted_schema}.guard_strategy_validation_window()
+            RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+                IF TG_OP = 'DELETE' THEN
+                    RAISE EXCEPTION 'strategy validation windows are immutable';
+                END IF;
+                IF OLD.validation_plan_id IS DISTINCT FROM NEW.validation_plan_id
+                   OR OLD.ordinal IS DISTINCT FROM NEW.ordinal
+                   OR (OLD.window_kind IS NOT NULL
+                       AND OLD.window_kind IS DISTINCT FROM NEW.window_kind)
+                   OR OLD.required_market_state IS DISTINCT FROM NEW.required_market_state
+                   OR OLD.timerange IS DISTINCT FROM NEW.timerange
+                   OR OLD.profile_snapshot::jsonb IS DISTINCT FROM NEW.profile_snapshot::jsonb
+                   OR OLD.expected_market_data_digest IS DISTINCT FROM
+                       NEW.expected_market_data_digest
+                   OR OLD.created_at IS DISTINCT FROM NEW.created_at
+                   OR (OLD.window_config_id IS NOT NULL
+                       AND OLD.window_config_id IS DISTINCT FROM NEW.window_config_id)
+                   OR (OLD.window_key_snapshot IS NOT NULL
+                       AND OLD.window_key_snapshot IS DISTINCT FROM NEW.window_key_snapshot)
+                   OR (OLD.name_zh_snapshot IS NOT NULL
+                       AND OLD.name_zh_snapshot IS DISTINCT FROM NEW.name_zh_snapshot)
+                   OR (OLD.description_zh_snapshot IS NOT NULL
+                       AND OLD.description_zh_snapshot IS DISTINCT FROM
+                           NEW.description_zh_snapshot)
+                   OR OLD.attempt_number IS DISTINCT FROM NEW.attempt_number
+                   OR (OLD.backtest_run_id IS NOT NULL
+                       AND OLD.backtest_run_id IS DISTINCT FROM NEW.backtest_run_id)
+                   OR (OLD.backtest_task_id IS NOT NULL
+                       AND OLD.backtest_task_id IS DISTINCT FROM NEW.backtest_task_id)
+                   OR (OLD.backtest_result_id IS NOT NULL
+                       AND OLD.backtest_result_id IS DISTINCT FROM NEW.backtest_result_id)
+                   OR (OLD.execution_id IS NOT NULL
+                       AND OLD.execution_id IS DISTINCT FROM NEW.execution_id) THEN
+                    RAISE EXCEPTION 'strategy validation window identity is immutable';
+                END IF;
+                IF OLD.status IS DISTINCT FROM NEW.status AND NOT (
+                   OLD.status = 'DECLARED' AND NEW.status IN ('READY','RUNNING','BLOCKED')
+                   OR OLD.status = 'READY' AND NEW.status IN (
+                       'RUNNING','PASSED','REJECTED','FAILED','BLOCKED'
+                   )
+                   OR OLD.status = 'RUNNING' AND NEW.status IN (
+                       'PASSED','REJECTED','FAILED','BLOCKED'
+                   )) THEN
+                    RAISE EXCEPTION 'illegal strategy validation window transition';
+                END IF;
+                IF OLD.status IN ('PASSED','REJECTED','FAILED','BLOCKED')
+                   AND OLD.status = NEW.status
+                   AND OLD IS DISTINCT FROM NEW THEN
+                    RAISE EXCEPTION 'terminal strategy validation window is immutable';
                 END IF;
                 RETURN NEW;
             END
@@ -12577,6 +13226,7 @@ def _finalize_current_canary_boundaries(connection: Connection) -> list[str]:
     _add_research_receipt_boundary(connection)
     _grant_runtime_application_acl(connection)
     _add_natural_signal_risk_chain_boundary(connection)
+    _add_strategy_platform_v1_foundation(connection)
     return schema_problems(connection)
 
 
@@ -12601,12 +13251,26 @@ def upgrade_database(engine: Engine) -> str:
                         "Recorded schema version does not match ORM metadata: " + "; ".join(problems)
                     )
                 return current_version
+            if current_version == STRATEGY_PLATFORM_V1_BASE_VERSION:
+                _add_strategy_platform_v1_foundation(connection)
+                problems = schema_problems(connection)
+                if problems:
+                    raise SchemaMigrationBlocked(
+                        "Strategy Platform V1.3 foundation upgrade does not match "
+                        "ORM metadata: " + "; ".join(problems)
+                    )
+                connection.execute(
+                    text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+                    {"version": SCHEMA_VERSION},
+                )
+                return SCHEMA_VERSION
             if current_version == STALE_NATURAL_APPROVAL_RELEASE_BASE_VERSION:
                 _add_natural_signal_risk_chain_boundary(
                     connection,
                     refresh_supporting_boundaries=False,
                     rebind_automation_guard=False,
                 )
+                _add_strategy_platform_v1_foundation(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -12624,6 +13288,7 @@ def upgrade_database(engine: Engine) -> str:
                     refresh_supporting_boundaries=False,
                     rebind_automation_guard=False,
                 )
+                _add_strategy_platform_v1_foundation(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -12641,6 +13306,7 @@ def upgrade_database(engine: Engine) -> str:
                     refresh_supporting_boundaries=False,
                     rebind_automation_guard=False,
                 )
+                _add_strategy_platform_v1_foundation(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -12653,6 +13319,7 @@ def upgrade_database(engine: Engine) -> str:
                 )
                 return SCHEMA_VERSION
             if current_version == DEPLOYMENT_POLICY_REBIND_BASE_VERSION:
+                _add_strategy_platform_v1_foundation(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -12666,6 +13333,7 @@ def upgrade_database(engine: Engine) -> str:
                 return SCHEMA_VERSION
             if current_version == AUTOMATION_GUARD_REBIND_BASE_VERSION:
                 _add_natural_signal_risk_chain_boundary(connection)
+                _add_strategy_platform_v1_foundation(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -12679,6 +13347,7 @@ def upgrade_database(engine: Engine) -> str:
                 return SCHEMA_VERSION
             if current_version == MULTI_ASSET_CAPACITY_BASE_VERSION:
                 _add_natural_signal_risk_chain_boundary(connection)
+                _add_strategy_platform_v1_foundation(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -12692,6 +13361,7 @@ def upgrade_database(engine: Engine) -> str:
                 return SCHEMA_VERSION
             if current_version == NATURAL_SIGNAL_RISK_CHAIN_BASE_VERSION:
                 _add_natural_signal_risk_chain_boundary(connection)
+                _add_strategy_platform_v1_foundation(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -12707,6 +13377,7 @@ def upgrade_database(engine: Engine) -> str:
                 _add_research_receipt_boundary(connection)
                 _grant_runtime_application_acl(connection)
                 _add_natural_signal_risk_chain_boundary(connection)
+                _add_strategy_platform_v1_foundation(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -12722,6 +13393,7 @@ def upgrade_database(engine: Engine) -> str:
                 _add_research_receipt_boundary(connection)
                 _grant_runtime_application_acl(connection)
                 _add_natural_signal_risk_chain_boundary(connection)
+                _add_strategy_platform_v1_foundation(connection)
                 problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
@@ -12801,6 +13473,7 @@ def upgrade_database(engine: Engine) -> str:
                     )
                 ):
                     _grant_expired_approval_attestor_acl(connection)
+                _add_strategy_platform_v1_prerequisites(connection)
                 _add_strategy_validation_matrix(connection)
                 schema_name = connection.execute(
                     text("SELECT current_schema()")
