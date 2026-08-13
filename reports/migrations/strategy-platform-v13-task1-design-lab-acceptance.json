@@ -1,0 +1,140 @@
+{
+  "schema_version": "strategy-platform-v13-task1-design-lab-acceptance-v1",
+  "generated_at": "2026-08-13T15:38:38+08:00",
+  "database_migration_subgate": "ACCEPTED",
+  "overall_task1_status": "NOT_ACCEPTED_STATIC_RUNTIME_CUTOVER_PENDING",
+  "architecture_boundary": {
+    "legacy_database": "freqtrade_ai",
+    "legacy_database_target_mode": "READ_ONLY_HISTORICAL_SOURCE",
+    "legacy_database_observed_mode": "WRITABLE_CAPABILITIES_REMAIN_CUTOVER_PENDING",
+    "legacy_database_read_only_enforced": false,
+    "v13_owner_database": "freqtrade_ai_design_lab",
+    "shared_in_place_migration_performed": false,
+    "credential_attestation": "OUT_OF_SCOPE",
+    "runtime_execution_evidence": "UNKNOWN",
+    "okx_live_accessed": false,
+    "orders_or_signals_created": false
+  },
+  "sanitized_source_snapshot": {
+    "isolation": "SERIALIZABLE_READ_ONLY_DEFERRABLE_EXPORTED_SNAPSHOT",
+    "snapshot_id": "00000003-000479AD-1",
+    "started_at": "2026-08-13T14:33:23.138204+08:00",
+    "completed_at": "2026-08-13T14:34:36.233571+08:00",
+    "wal_lsn": "1E/FF68CC58",
+    "database_size_bytes": 2092416023,
+    "schema_version": "20260811_45",
+    "excluded_table_data": [
+      "public.okx_demo_attestation_secrets",
+      "public.okx_demo_operator_consent_secrets"
+    ],
+    "dump_sha256": "1d6aa361460bb1b1a826bf55e2d11cb802e72187279884869ed2c0bbfc74f25d",
+    "dump_size_bytes": 404458871,
+    "restored_secret_row_counts": {
+      "okx_demo_attestation_secrets": 0,
+      "okx_demo_operator_consent_secrets": 0
+    }
+  },
+  "market_evidence": {
+    "schema_version": "strategy-platform-v13-migration-market-evidence-v1",
+    "artifact_file_sha256": "4d83e33a8fcecaa8e5a27c919b4e633127c98cefa38c33fc9e4f8668e7eefb76",
+    "artifact_digest": "16d283c86a8e724c7f5a44c019e4e3643847d9f139ed8d03af6a32c45af1c5f8",
+    "legacy_aggregate_status": "BLOCKED",
+    "corrected_matrix_status": "PASSED",
+    "full_scan_file_count": 6,
+    "freshness": "UNKNOWN",
+    "quality_decision": "NOT_STRATEGY_QUALIFICATION",
+    "artifact_generation_delay_seconds": 55027
+  },
+  "migration": {
+    "run_id": 1,
+    "request_id": "v13-task1-design-lab-final-v7-20260813",
+    "source_schema_version": "20260811_45",
+    "target_schema_version": "20260813_47",
+    "schema_applied_at": "2026-08-13T14:45:17.164+08:00",
+    "started_at": "2026-08-13T14:45:42.115758+08:00",
+    "completed_at": "2026-08-13T14:47:54.686481+08:00",
+    "status": "SUCCEEDED",
+    "source_snapshot_digest": "3b72823769d091c1e4bbf545aebc8e7bea6649f2205cffb08a8d56018accaf76",
+    "target_snapshot_digest": "b5996ac2943691d2f7453a319b67912e27d71838c28ac3e0ff91ea33bc2a4cf7",
+    "report_digest": "9130e87794aeb1f0c40627a9845a4520301a716eebf4312c8300ffcd2fdf372c",
+    "evidence_manifest_digest": "4c0c1635d86c2859a0f68326e04c67a7ff524c491b577b69e52ed74d23c642c6",
+    "destructive_write_count": 0,
+    "overwritten_row_count": 0,
+    "deleted_row_count": 0,
+    "before_table_count": 30,
+    "before_row_count": 42549,
+    "after_table_count": 97,
+    "after_row_count": 44225,
+    "mapping_count": 88286,
+    "all_fk_orphan_counts_zero": true,
+    "all_constraints_validated": true,
+    "all_v13_triggers_enabled": true
+  },
+  "real_data_counts": {
+    "strategies": 31,
+    "strategy_versions": 491,
+    "strategy_targets": 493,
+    "validation_plans": 428,
+    "validation_windows": 1712,
+    "legacy_window_passed_evidence": 273,
+    "legacy_window_blocked_evidence": 1439,
+    "strategy_scores_preserved": 430,
+    "window_scores_created": 0,
+    "blocked_evaluation_summaries": 428,
+    "qualified_evaluation_summaries": 0,
+    "qualified_research_candidates": 0,
+    "v13_market_receipts": 6,
+    "legacy_market_receipts_preserved": 18,
+    "unmapped": 0,
+    "conflicts": 0
+  },
+  "idempotency_replay": {
+    "repeat_noop": true,
+    "migration_run_count_after_replay": 1,
+    "mapping_count_after_replay": 88286,
+    "source_snapshot_digest_unchanged": true,
+    "target_snapshot_digest_unchanged": true,
+    "report_digest_unchanged": true,
+    "first_command_report_sha256": "6a05d9e15fa7ecd3d2c2aa1586e935fb26883748c976bb84a18db57b26f2b10d",
+    "repeat_command_report_sha256": "61b0fe48d7eef3a0d98ca389378749562794eb47266ea635ff76a61e7860a73a",
+    "artifacts_mode": "0600",
+    "first_report_overwritten": false
+  },
+  "acl": {
+    "status": "PASSED_MINIMUM_READ_ONLY",
+    "v13_direct_select_objects": 54,
+    "runtime_v13_dml_grants": 0,
+    "runtime_sequence_grants": 0,
+    "runtime_schema_create": false,
+    "legacy_capability_tables_revoked": 59,
+    "legacy_capability_sequences_revoked": 48,
+    "legacy_security_definer_functions_revoked": 37,
+    "unknown_third_party_grantees": 0
+  },
+  "backup_restore": {
+    "backup_sha256": "16ddd105df1c6f33cbfcda9e834967e271ca7197f6e426b7e147b4567afbd24d",
+    "backup_size_bytes": 409280061,
+    "backup_created_at": "2026-08-13T15:03:02+08:00",
+    "restored_table_count": 131,
+    "restored_source_digest_matches": true,
+    "restored_target_digest_matches": true,
+    "restored_secret_row_counts_zero": true,
+    "restored_unvalidated_constraint_count": 0,
+    "restored_disabled_trigger_count": 0,
+    "v13_owner_schema_verifier": "PASSED_ZERO_PROBLEMS"
+  },
+  "read_only_sql_artifacts": {
+    "reconciliation_sha256": "67bf6d025744381d9bca5ccdf5c7071b41afeb93d2620ad908e3904a7ff56129",
+    "evidence_sha256": "4262880c5cc64cc3ed638cb4f1c9e7177cdc47408ffea860e01fca1328c6e77f"
+  },
+  "tests": {
+    "backend_passed": 1650,
+    "backend_skipped": 214,
+    "backend_failed": 0
+  },
+  "remaining_gates": [
+    "The canonical supervisor must load and attest the maintenance generation before old-service retirement",
+    "The formal runtime must bind the V1.3 owner database and remove hidden configurable-business fallbacks",
+    "The section 9.1 static and AST production-path contract must pass before overall Task 1 acceptance"
+  ]
+}

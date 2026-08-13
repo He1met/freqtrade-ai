@@ -367,11 +367,10 @@ def test_resolver_materializes_idempotent_immutable_snapshot(db: Session) -> Non
 
     assert resolution.persisted is False
     assert resolution.snapshot_id is None
-    assert resolution.resolved_versions_json.keys() == {
-        "research-profile",
-        "research-targets",
-        "validation-windows",
-    }
+    assert {
+        key.rsplit(":", 1)[0]
+        for key in resolution.resolved_versions_json
+    } == {"research-profile", "research-targets", "validation-windows"}
     assert len(resolution.bundle_digest) == 64
     assert resolution.capability_snapshot["demo_only"] is True
     assert resolution.capability_snapshot["allow_real_funds"] is False

@@ -29,6 +29,31 @@
 15. **外部模型通过 API 入库**。Codex 或其他模型不能直连数据库；提交和服务端生成共用同一持久化、去重和排队服务。
 16. **严格按数据库 → API → 前端三个任务执行**。先迁移全部现有真实策略和关联数据并完成数据库验收，再实现接口，最后实现页面；前一任务未通过不得开始下一任务。
 
+### 1.1 受控数据库切换决定（2026-08-13）
+
+经用户明确确认，V1.3 不在旧共享库 `freqtrade_ai` 上原位升级，也不再以旧
+runtime/schema 兼容为交付条件：
+
+- `freqtrade_ai` 在受控停旧完成后永久降级为只读历史迁移源；在该切换真正生效前，
+  仍存续的写能力必须标记为 `CUTOVER_PENDING`。无论切换是否完成，V1.3 工具均不得
+  对其执行 DDL、DML、ACL 或 schema marker 写入。
+- 物理隔离的 `freqtrade_ai_design_lab` 是本阶段唯一 V1.3 owner DB；它必须从旧库
+  的一致性快照导入全部需要保留的真实历史，再完成 v47 schema、双次幂等迁移、
+  reconciliation、最小 ACL 和备份验收。
+- owner DB 不继承旧凭据材料。一致性 dump 在导出层排除
+  `okx_demo_attestation_secrets` 与 `okx_demo_operator_consent_secrets` 的 TABLE DATA，
+  不读取其行内容；旧源保持不变，新库保留空 schema 并以 count=0 验收。旧 attestation
+  与 runtime 记录只作历史审计，不作为新系统 capability，runtime ACL 必须撤销旧
+  OKX capability 表、sequence 与 SECURITY DEFINER 函数的访问。
+- 旧服务在确认 launchd label、PID、持久化控制状态和唯一 writer 所有权后，通过
+  maintenance generation fence 受控停止；旧 supervisor 不得自行恢复它们。
+- 新系统只允许指向 V1.3 owner DB。credential/IP/OKX attestation 仍为
+  `OUT_OF_SCOPE/UNKNOWN`，因此 execution 必须 fail-closed；这不阻止纯数据层验收。
+- 该决定不授权删除、覆盖或伪造旧历史，不授权读取凭据、访问 `OKX_LIVE`、创建
+  信号/订单或放宽 `OKX_DEMO-only / allow_real_funds=false / unique writer`。
+
+以下“当前基线”描述旧库的迁移源事实，不再表示 V1.3 的运行目标或兼容承诺。
+
 ## 2. 当前基线与复用边界
 
 设计时只读确认的当前基线：
@@ -205,7 +230,7 @@ flowchart LR
 - `resolved_versions_json/resolved_digests_json/bundle_digest`；
 - `capability_snapshot/created_at`。
 
-`research_jobs`、validation plan、market data update job、optimization run、deployment 和 runtime instance 分别新增 nullable `configuration_bundle_snapshot_id`，完成历史回填后新记录改为必填。worker 只从该 bundle 读取配置；任务创建后即使 active 版本变化，也不能改变已排队、运行中或已完成任务。配置版本升级需要创建新版本；旧 adapter 暂时不可用时历史数据仍可读，但重跑必须明确 `BLOCKED_ADAPTER_UNAVAILABLE`，不能自动替换实现。
+`research_jobs`、validation plan、market data update job、optimization run、deployment 和 runtime instance 分别新增 nullable `configuration_bundle_snapshot_id`。历史记录仅在存在可重算的版本证据时回填；缺失证据或受既有不可变审计 trigger 保护的历史记录必须保留 `NULL/UNKNOWN`，并在 append-only migration mapping 中明确记录，禁止用迁移时合成的 generic profile 冒充当时配置。所有 V1.3 新记录通过数据库 trigger 强制必填。worker 只从该 bundle 读取配置；任务创建后即使 active 版本变化，也不能改变已排队、运行中或已完成任务。配置版本升级需要创建新版本；旧 adapter 暂时不可用时历史数据仍可读，但重跑必须明确 `BLOCKED_ADAPTER_UNAVAILABLE`，不能自动替换实现。
 
 #### `strategy_targets`
 
@@ -902,7 +927,7 @@ Hyperopt 参数优化 | AI 结构优化 | 优化历史
 8. 将当前研究目标、候选数量、策略家族、评分、多样性、调度、行情更新、worker 资源、Demo 选择与容量、风控、provider/model、Hyperopt、runtime 和 UI 展示默认值逐项迁入各自首个 active 配置版本，并创建完整的 `research_profile_version` 总装配引用。
 9. 为旧 ID 建立可审计映射报告。相同 `code_hash/blueprint` 不直接删除或合并；只有身份和关联证据完全一致时才归入同一策略身份，否则保留原记录并继续核对。
 10. 解析真实 backtest result 和验证 evidence，回填窗口代码、实际指标、窗口评分和综合结论；证据不存在的字段保持 `UNKNOWN`，不能生成补位分数。
-11. 完成 design lab 多轮迁移后，再用同一 migration 对当前数据库执行正式迁移并生成迁移后对账报告。
+11. 完成 `freqtrade_ai_design_lab` 真副本多轮迁移后，将该物理隔离库直接确认为唯一 V1.3 owner DB 并生成迁移后对账、最小 ACL 与可恢复备份；旧 `freqtrade_ai` 不执行同一 migration，也不再作为新系统运行库，并在 maintenance-fenced 停旧完成后永久降级为只读历史源。切换前存续的写能力必须显式标记为 `CUTOVER_PENDING`。
 
 数据库验收标准：
 

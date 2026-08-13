@@ -292,6 +292,20 @@ class ExecutionTargetDefinition(Base):
 class ExecutionTargetDefinitionVersion(Base):
     __tablename__ = "execution_target_definition_versions"
     __table_args__ = (
+        ForeignKeyConstraint(
+            ("exchange_adapter_key",),
+            ("adapter_definitions.adapter_key",),
+            ondelete="RESTRICT",
+            use_alter=True,
+            name="exec_target_versions_exchange_adapter_fkey",
+        ),
+        ForeignKeyConstraint(
+            ("runtime_adapter_key",),
+            ("adapter_definitions.adapter_key",),
+            ondelete="RESTRICT",
+            use_alter=True,
+            name="exec_target_versions_runtime_adapter_fkey",
+        ),
         CheckConstraint(
             "demo_only = TRUE AND allow_real_funds = FALSE "
             "AND single_writer_required = TRUE",
@@ -393,6 +407,15 @@ class StrategyTarget(Base):
 
 class ValidationWindowConfigSet(Base):
     __tablename__ = "validation_window_config_sets"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ("default_classifier_adapter_key",),
+            ("adapter_definitions.adapter_key",),
+            ondelete="RESTRICT",
+            use_alter=True,
+            name="validation_window_sets_classifier_adapter_fkey",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(
         BigInteger().with_variant(Integer, "sqlite"),
@@ -481,6 +504,13 @@ class MarketRegimeDefinition(Base):
 class ValidationWindowConfig(Base):
     __tablename__ = "validation_window_configs"
     __table_args__ = (
+        ForeignKeyConstraint(
+            ("classifier_adapter_key",),
+            ("adapter_definitions.adapter_key",),
+            ondelete="RESTRICT",
+            use_alter=True,
+            name="validation_windows_classifier_adapter_fkey",
+        ),
         ForeignKeyConstraint(
             ("config_set_id", "purpose_key"),
             (
@@ -659,6 +689,13 @@ class QualityGateProfileVersion(Base):
 class QualityGateRule(Base):
     __tablename__ = "quality_gate_rules"
     __table_args__ = (
+        ForeignKeyConstraint(
+            ("evaluation_adapter_key",),
+            ("adapter_definitions.adapter_key",),
+            ondelete="RESTRICT",
+            use_alter=True,
+            name="quality_gate_rules_evaluation_adapter_fkey",
+        ),
         CheckConstraint(
             "severity IN ('BLOCKING', 'WARNING')",
             name="quality_gate_rules_severity_check",

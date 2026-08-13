@@ -63,7 +63,7 @@ class StrategyDeployment(Base):
             sqlite_where=text("status = 'ACTIVE'"),
         ),
         CheckConstraint(
-            "(status = 'ACTIVE' AND active_slot BETWEEN 1 AND 9) OR "
+            "(status = 'ACTIVE' AND active_slot > 0) OR "
             "(status = 'DISABLED' AND active_slot IS NULL)",
             name="strategy_deployments_active_slot_check",
         ),
@@ -94,6 +94,10 @@ class StrategyDeployment(Base):
         BigInteger().with_variant(Integer, "sqlite"),
         ForeignKey("strategy_versions.id", ondelete="RESTRICT"),
         nullable=False,
+    )
+    strategy_target_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey("strategy_targets.id", ondelete="RESTRICT"),
     )
     configuration_bundle_snapshot_id: Mapped[Optional[int]] = mapped_column(
         BigInteger().with_variant(Integer, "sqlite"),

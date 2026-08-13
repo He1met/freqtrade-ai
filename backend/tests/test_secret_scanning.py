@@ -65,6 +65,28 @@ exchange:
     assert report.findings == ()
 
 
+def test_secret_scan_allows_boolean_absence_flags_without_allowing_values(
+    tmp_path,
+) -> None:
+    write_file(
+        tmp_path / "config" / "evidence.py",
+        """
+contains_secret_material: False
+secret_material_present = False
+api_secret: local-credential-value
+""".strip(),
+    )
+
+    report = scan_repo_for_secrets(
+        tmp_path,
+        scan_paths=["config"],
+        tracked_only=False,
+    )
+
+    assert report.status == "BLOCKED"
+    assert [finding.key for finding in report.findings] == ["api_secret"]
+
+
 def test_secret_scan_allows_documented_safe_examples(tmp_path) -> None:
     write_file(
         tmp_path / "docs" / "security.md",

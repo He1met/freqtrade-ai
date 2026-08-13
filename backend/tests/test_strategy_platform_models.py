@@ -32,7 +32,7 @@ def _sqlite_session() -> Session:
 
 def test_v13_foundation_metadata_is_forward_only_and_complete() -> None:
     assert STRATEGY_PLATFORM_V1_BASE_VERSION == "20260811_45"
-    assert SCHEMA_VERSION == "20260813_46"
+    assert SCHEMA_VERSION == "20260813_47"
     assert set(STRATEGY_PLATFORM_V1_TABLES).issubset(Base.metadata.tables)
 
     plan_columns = Base.metadata.tables["strategy_validation_plans"].c

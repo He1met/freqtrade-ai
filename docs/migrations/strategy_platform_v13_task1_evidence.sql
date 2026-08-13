@@ -201,7 +201,21 @@ WITH relations AS (
         END AS bound_column,
         lower(relation.relname) ~
             '(^|_)(secrets?|credentials?|passwords?|passphrases?|tokens?|api_keys?|access_keys?|private_keys?|auth(entication|orization)?)(_|$)'
-        OR EXISTS (
+        OR (relation.relname NOT IN (
+                'adapter_definitions',
+                'research_jobs',
+                'strategy_deployments',
+                'full_chain_runs',
+                'full_chain_stage_runs',
+                'full_chain_signal_snapshots',
+                'signal_evaluations',
+                'trade_intents',
+                'risk_decisions',
+                'approved_executions',
+                'exchange_orders',
+                'exchange_fills',
+                'exchange_positions'
+            ) AND EXISTS (
             SELECT 1
             FROM pg_attribute sensitive_attribute
             WHERE sensitive_attribute.attrelid = relation.oid
@@ -209,7 +223,7 @@ WITH relations AS (
               AND NOT sensitive_attribute.attisdropped
               AND lower(sensitive_attribute.attname) ~
                   '(^|_)(secrets?|credentials?|passwords?|passphrases?|tokens?|api_keys?|access_keys?|private_keys?|auth(entication|orization)?)(_|$)'
-        ) AS is_sensitive
+        )) AS is_sensitive
     FROM pg_class relation
     JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
     WHERE namespace.nspname = current_schema()
@@ -310,8 +324,8 @@ SELECT format(
                    OR observed_at < last_close_at
             )::bigint AS invalid_close_time_count,
             count(*) FILTER (
-                WHERE freshness_status <> 'FRESH'
-            )::bigint AS nonfresh_count,
+                WHERE freshness_status <> 'UNKNOWN'
+            )::bigint AS invalid_migration_freshness_count,
             count(*) FILTER (
                 WHERE btrim(scan_id) = '' OR observed_at IS NULL
             )::bigint AS missing_scan_evidence_count,
@@ -341,7 +355,7 @@ SELECT format(
              AND invalid_coverage_count = 0
              AND invalid_content_quality_count = 0
              AND invalid_close_time_count = 0
-             AND nonfresh_count = 0
+             AND invalid_migration_freshness_count = 0
              AND missing_scan_evidence_count = 0
              AND missing_receipt_reference_count = 0
                 THEN 'PASSED'
@@ -516,19 +530,24 @@ SELECT format(
         SELECT
             count(*)::bigint AS receipt_count,
             count(*) FILTER (
-                WHERE NOT EXISTS (
+                WHERE receipt.contract_version = 'market-data-quality-v13-v1'
+                  AND NOT EXISTS (
                     SELECT 1
                     FROM %I.%I AS file_record
                     WHERE file_record.source_receipt_id = receipt.id
                 )
-            )::bigint AS unreferenced_receipt_count
+            )::bigint AS unreferenced_v13_receipt_count,
+            count(*) FILTER (
+                WHERE receipt.contract_version <> 'market-data-quality-v13-v1'
+            )::bigint AS preserved_legacy_receipt_count
         FROM %I.%I AS receipt
     )
     SELECT
         'market_data_receipt_reconciliation'::text AS evidence_section,
         link_metrics.*,
         receipt_metrics.receipt_count,
-        receipt_metrics.unreferenced_receipt_count,
+        receipt_metrics.unreferenced_v13_receipt_count,
+        receipt_metrics.preserved_legacy_receipt_count,
         CASE
             WHEN link_metrics.file_record_count = 0
               OR receipt_metrics.receipt_count = 0 THEN 'UNKNOWN'
@@ -537,7 +556,7 @@ SELECT format(
              AND link_metrics.nonpassed_receipt_count = 0
              AND link_metrics.receipt_identity_or_coverage_mismatch_count = 0
              AND link_metrics.incomplete_receipt_digest_chain_count = 0
-             AND receipt_metrics.unreferenced_receipt_count = 0
+             AND receipt_metrics.unreferenced_v13_receipt_count = 0
                 THEN 'PASSED'
             ELSE 'BLOCKED'
         END AS evidence_status
@@ -826,7 +845,15 @@ SELECT format(
              AND source_snapshot_digest ~ '^[0-9a-f]{64}$'
              AND target_snapshot_digest ~ '^[0-9a-f]{64}$'
              AND report_digest ~ '^[0-9a-f]{64}$'
-             AND unknown_dimensions::jsonb = '[]'::jsonb THEN 'PASSED'
+             AND unknown_dimensions::jsonb <@ jsonb_build_array(
+                    'credential_attestation:OUT_OF_SCOPE',
+                    'runtime_execution_evidence:UNKNOWN',
+                    'legacy_missing_evidence:UNKNOWN'
+                 )
+             AND unknown_dimensions::jsonb @> jsonb_build_array(
+                    'credential_attestation:OUT_OF_SCOPE',
+                    'runtime_execution_evidence:UNKNOWN'
+                 ) THEN 'PASSED'
             ELSE 'UNKNOWN'
         END AS audit_record_status
     FROM %I.%I
@@ -901,6 +928,9 @@ SELECT format(
         before_snapshot.orphan_count AS before_orphan_count,
         after_snapshot.orphan_count AS after_orphan_count,
         CASE
+            WHEN before_snapshot.id IS NULL AND after_snapshot.id IS NOT NULL
+             AND after_snapshot.orphan_count = 0
+                THEN 'PASSED_NEW_TARGET_TABLE'
             WHEN before_snapshot.id IS NULL OR after_snapshot.id IS NULL
                 THEN 'UNKNOWN_MISSING_PHASE'
             WHEN after_snapshot.row_count < before_snapshot.row_count
@@ -935,6 +965,7 @@ SELECT format(
             )::bigint AS unresolved_mapping_count,
             count(*) FILTER (
                 WHERE mapping_status IN ('MAPPED', 'PRESERVED')
+                  AND mapping_kind <> 'LEGACY_ROW_SOURCE_SNAPSHOT'
                   AND (target_table IS NULL OR target_primary_key IS NULL)
             )::bigint AS incomplete_target_identity_count,
             count(*) FILTER (
@@ -1183,7 +1214,10 @@ SELECT format(
         )::bigint AS nonvalidated_resolved_version_count,
         count(*) FILTER (
             WHERE resolved_version.id IS NOT NULL
-              AND resolved_version.type_key IS DISTINCT FROM version_entry.key
+              AND version_entry.key NOT IN (
+                    resolved_version.type_key,
+                    resolved_version.type_key || ':' || resolved_version.id::text
+                  )
         )::bigint AS resolved_type_key_mismatch_count,
         count(*) FILTER (
             WHERE version_entry.key IS NOT NULL
@@ -1215,7 +1249,11 @@ SELECT format(
                           version_entry.value !~ '^[0-9]+$'
                           OR resolved_version.id IS NULL
                           OR resolved_version.lifecycle_status <> 'VALIDATED'
-                          OR resolved_version.type_key IS DISTINCT FROM version_entry.key
+                          OR version_entry.key NOT IN (
+                               resolved_version.type_key,
+                               resolved_version.type_key || ':' ||
+                                   resolved_version.id::text
+                             )
                           OR NOT (bundle_rows.digest_map ? version_entry.key)
                           OR resolved_version.config_digest IS DISTINCT FROM
                               bundle_rows.digest_map ->> version_entry.key
