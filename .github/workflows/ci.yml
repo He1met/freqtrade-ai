@@ -108,6 +108,7 @@ jobs:
             --ignore=tests/test_okx_demo_writer_postgresql.py \
             --ignore=tests/test_research_job_postgresql.py \
             --ignore=tests/test_risk_chain_postgresql.py \
+            --ignore=tests/test_strategy_platform_read_postgresql.py \
             --ignore=tests/test_strategy_deployment_repository.py
 
       - name: Compile Python modules
@@ -239,6 +240,7 @@ jobs:
             tests/test_okx_demo_writer_postgresql.py \
             tests/test_research_job_postgresql.py \
             tests/test_risk_chain_postgresql.py \
+            tests/test_strategy_platform_read_postgresql.py \
             tests/test_strategy_platform_postgresql.py \
             tests/test_strategy_deployment_repository.py
 
