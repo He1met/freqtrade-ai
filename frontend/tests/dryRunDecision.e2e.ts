@@ -42,6 +42,21 @@ test("shows one Dry-run decision, one blocker and at most one primary action at 
       current_version_id: 201, data_source: source("strategy_id", 301),
     }]),
   }));
+  await page.route("**/api/backtest-runs", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify([{
+      id: 501, strategy_version_id: 201, strategy_name: "E2E", status: "succeeded",
+      profile_name: "local-e2e", requested_task_count: 1, completed_task_count: 1,
+      config_snapshot: { profile: {
+        pair: "BTC/USDT", timeframe: "5m",
+        data_source: { kind: "local", exchange: "okx", datadir: "user_data/data" },
+      } },
+      data_source: {
+        ...source("backtest_run_id", 501),
+        database_ids: { backtest_run_id: 501, strategy_version_id: 201 },
+      },
+    }]),
+  }));
   await page.route("**/api/backtest-results", (route) => route.fulfill({
     contentType: "application/json",
     body: JSON.stringify([{
@@ -113,6 +128,21 @@ test("reconciles READY to RUNNING and RUNNING to STOPPED using persistent manage
     body: JSON.stringify([{
       id: 301, name: "E2E", status: "validated", source: "deepseek", current_version_id: 201,
       data_source: source("strategy_id", 301),
+    }]),
+  }));
+  await page.route("**/api/backtest-runs", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify([{
+      id: 501, strategy_version_id: 201, strategy_name: "E2E", status: "succeeded",
+      profile_name: "local-e2e", requested_task_count: 1, completed_task_count: 1,
+      config_snapshot: { profile: {
+        pair: "BTC/USDT", timeframe: "5m",
+        data_source: { kind: "local", exchange: "okx", datadir: "user_data/data" },
+      } },
+      data_source: {
+        ...source("backtest_run_id", 501),
+        database_ids: { backtest_run_id: 501, strategy_version_id: 201 },
+      },
     }]),
   }));
   await page.route("**/api/backtest-results", (route) => route.fulfill({
@@ -317,29 +347,80 @@ test("candidate changes and disappearance clear readiness and manual approval", 
       },
     ]),
   }));
+  await page.route("**/api/backtest-runs", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify([
+      {
+        id: 501, strategy_version_id: 201, strategy_name: "E2EA", status: "succeeded",
+        profile_name: "local-e2e", requested_task_count: 1, completed_task_count: 1,
+        config_snapshot: { profile: {
+          pair: "BTC/USDT", timeframe: "5m",
+          data_source: { kind: "local", exchange: "okx", datadir: "user_data/data" },
+        } },
+        data_source: {
+          ...source("backtest_run_id", 501),
+          database_ids: { backtest_run_id: 501, strategy_version_id: 201 },
+        },
+      },
+      {
+        id: 502, strategy_version_id: 202, strategy_name: "E2EB", status: "succeeded",
+        profile_name: "local-e2e", requested_task_count: 1, completed_task_count: 1,
+        config_snapshot: { profile: {
+          pair: "ETH/USDT", timeframe: "15m",
+          data_source: { kind: "local", exchange: "okx", datadir: "user_data/data" },
+        } },
+        data_source: {
+          ...source("backtest_run_id", 502),
+          database_ids: { backtest_run_id: 502, strategy_version_id: 202 },
+        },
+      },
+    ]),
+  }));
   await page.route("**/api/backtest-results", (route) => route.fulfill({
     contentType: "application/json",
-    body: JSON.stringify([{
-      id: 401, backtest_run_id: 501, backtest_task_id: 601, result_path: "/tmp/result.json",
-      data_source: source("backtest_result_id", 401),
-    }]),
+    body: JSON.stringify([
+      {
+        id: 401, backtest_run_id: 501, backtest_task_id: 601, result_path: "/tmp/result-a.json",
+        data_source: source("backtest_result_id", 401),
+      },
+      {
+        id: 402, backtest_run_id: 502, backtest_task_id: 602, result_path: "/tmp/result-b.json",
+        data_source: source("backtest_result_id", 402),
+      },
+    ]),
   }));
   await page.route("**/api/ranking", (route) => route.fulfill({
     contentType: "application/json",
-    body: JSON.stringify([{
-      rank: 1, score_id: 701, strategy_id: 301, strategy_version_id: 201,
-      backtest_result_id: 401, strategy_name: "E2EA", version_number: 1,
-      file_path: "user_data/strategies/generated/E2EA.py", total_score: 80,
-      data_source: {
-        ...source("strategy_score_id", 701),
-        source_type: "api_aggregate",
-        database_ids: {
-          strategy_score_id: 701,
-          strategy_version_id: 201,
-          backtest_result_id: 401,
+    body: JSON.stringify([
+      {
+        rank: 1, score_id: 701, strategy_id: 301, strategy_version_id: 201,
+        backtest_result_id: 401, strategy_name: "E2EA", version_number: 1,
+        file_path: "user_data/strategies/generated/E2EA.py", total_score: 80,
+        data_source: {
+          ...source("strategy_score_id", 701),
+          source_type: "api_aggregate",
+          database_ids: {
+            strategy_score_id: 701,
+            strategy_version_id: 201,
+            backtest_result_id: 401,
+          },
         },
       },
-    }]),
+      {
+        rank: 2, score_id: 702, strategy_id: 302, strategy_version_id: 202,
+        backtest_result_id: 402, strategy_name: "E2EB", version_number: 1,
+        file_path: "user_data/strategies/generated/E2EB.py", total_score: 79,
+        data_source: {
+          ...source("strategy_score_id", 702),
+          source_type: "api_aggregate",
+          database_ids: {
+            strategy_score_id: 702,
+            strategy_version_id: 202,
+            backtest_result_id: 402,
+          },
+        },
+      },
+    ]),
   }));
   let readinessMode: "immediate" | "delayed-success" | "delayed-error" | "mismatched-success" = "immediate";
   let releaseReadiness: (() => void) | null = null;

@@ -111,6 +111,7 @@ test("keeps one explicit candidate chain and proves POST actions with matching G
             timeframe: "5m",
             timerange: "20240101-20240201",
             strategy: { name: "Candidate201", path: "user_data/strategies/generated/Candidate201.py" },
+            data_source: { kind: "local", exchange: "okx", datadir: "user_data/data" },
           },
         },
         data_source: source({ backtest_run_id: 501, strategy_version_id: 201 }),
@@ -130,6 +131,7 @@ test("keeps one explicit candidate chain and proves POST actions with matching G
               timeframe: "5m",
               timerange: "20240201-20240301",
               strategy: { name: "Candidate201", path: "user_data/strategies/generated/Candidate201.py" },
+              data_source: { kind: "local", exchange: "okx", datadir: "user_data/data" },
             },
             blocked_reasons: ["<b>missing local candles</b>", "token=do-not-show"],
           },
@@ -271,6 +273,8 @@ test("keeps one explicit candidate chain and proves POST actions with matching G
   await expect(workbench.getByRole("button", { name: "触发此候选的回测" })).toBeDisabled();
 
   await candidateSelect.selectOption("201");
+  await workbench.getByLabel("pair").fill("BTC/USDT");
+  await workbench.getByLabel("timeframe").fill("5m");
   await workbench.getByLabel("timerange").fill("20240101-20240201");
   const trigger = workbench.getByRole("button", { name: "触发此候选的回测" });
   await expect(trigger).toBeEnabled();
