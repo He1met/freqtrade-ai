@@ -1102,10 +1102,12 @@ def test_postgresql_v27_to_v28_preserves_exact_jobs_15_through_22(
         connection.execute(text(
             "INSERT INTO research_jobs(id,execution_scope_id,job_type,operation,"
             "idempotency_key_digest,request_hash,request_payload,status,stage,"
-            "attempt_count,max_attempts,cancel_requested,evidence_snapshot,created_at) "
+            "attempt_count,max_attempts,cancel_requested,evidence_snapshot,created_at,"
+            "configuration_bundle_snapshot_id) "
             "SELECT 23,execution_scope_id,job_type,operation,:digest,request_hash,"
             "'{}'::jsonb,'PENDING',stage,attempt_count,max_attempts,FALSE,"
-            "evidence_snapshot,created_at FROM research_jobs WHERE id=22"
+            "evidence_snapshot,created_at,configuration_bundle_snapshot_id "
+            "FROM research_jobs WHERE id=22"
         ), {"digest": "5" * 64})
     with pytest.raises(
         SchemaMigrationBlocked,
@@ -5114,10 +5116,12 @@ def test_postgresql_v28_consent_exact_finalize_and_restart_revoke(
             runtime.execute(text(
                 "INSERT INTO research_jobs(id,execution_scope_id,job_type,operation,"
                 "idempotency_key_digest,request_hash,request_payload,status,stage,"
-                "attempt_count,max_attempts,evidence_snapshot,started_at,completed_at,created_at) "
+                "attempt_count,max_attempts,evidence_snapshot,started_at,completed_at,created_at,"
+                "configuration_bundle_snapshot_id) "
                 "SELECT 23,execution_scope_id,job_type,operation,"
                 ":digest,request_hash,request_payload,status,stage,attempt_count,max_attempts,"
-                "evidence_snapshot,started_at,completed_at,created_at FROM research_jobs WHERE id=22"
+                "evidence_snapshot,started_at,completed_at,created_at,"
+                "configuration_bundle_snapshot_id FROM research_jobs WHERE id=22"
             ), {"digest": "9" * 64})
         runtime.rollback()
         for successor_status, entry_kind in (
@@ -5132,10 +5136,12 @@ def test_postgresql_v28_consent_exact_finalize_and_restart_revoke(
                 runtime.execute(text(
                     "INSERT INTO research_jobs(id,execution_scope_id,job_type,operation,"
                     "idempotency_key_digest,request_hash,request_payload,status,stage,"
-                    "attempt_count,max_attempts,evidence_snapshot,created_at) "
+                    "attempt_count,max_attempts,evidence_snapshot,created_at,"
+                    "configuration_bundle_snapshot_id) "
                     "SELECT 23,execution_scope_id,job_type,operation,:digest,request_hash,"
                     "CAST(:payload AS jsonb),:status,stage,attempt_count,max_attempts,"
-                    "evidence_snapshot,created_at FROM research_jobs WHERE id=22"
+                    "evidence_snapshot,created_at,configuration_bundle_snapshot_id "
+                    "FROM research_jobs WHERE id=22"
                 ), {
                     "digest": hashlib.sha256(
                         "{}:{}".format(successor_status, entry_kind).encode()
@@ -5148,10 +5154,12 @@ def test_postgresql_v28_consent_exact_finalize_and_restart_revoke(
         runtime.execute(text(
             "INSERT INTO research_jobs(id,execution_scope_id,job_type,operation,"
             "idempotency_key_digest,request_hash,request_payload,status,stage,"
-            "attempt_count,max_attempts,cancel_requested,evidence_snapshot,created_at) "
+            "attempt_count,max_attempts,cancel_requested,evidence_snapshot,created_at,"
+            "configuration_bundle_snapshot_id) "
             "SELECT 23,execution_scope_id,job_type,'unrelated.operation',:digest,"
             "request_hash,'{}'::jsonb,status,stage,attempt_count,max_attempts,FALSE,"
-            "evidence_snapshot,created_at FROM research_jobs WHERE id=22"
+            "evidence_snapshot,created_at,configuration_bundle_snapshot_id "
+            "FROM research_jobs WHERE id=22"
         ), {"digest": "7" * 64})
         runtime.commit()
         runtime.execute(text("SET LOCAL ROLE freqtrade"))
@@ -5170,10 +5178,12 @@ def test_postgresql_v28_consent_exact_finalize_and_restart_revoke(
                 contender.execute(text(
                     "INSERT INTO research_jobs(id,execution_scope_id,job_type,operation,"
                     "idempotency_key_digest,request_hash,request_payload,status,stage,"
-                    "attempt_count,max_attempts,evidence_snapshot,created_at) "
+                    "attempt_count,max_attempts,evidence_snapshot,created_at,"
+                    "configuration_bundle_snapshot_id) "
                     "SELECT :job_id,execution_scope_id,job_type,operation,:digest,"
                     "request_hash,'{}'::jsonb,'PENDING',stage,attempt_count,max_attempts,"
-                    "evidence_snapshot,created_at FROM research_jobs WHERE id=22"
+                    "evidence_snapshot,created_at,configuration_bundle_snapshot_id "
+                    "FROM research_jobs WHERE id=22"
                 ), {
                     "job_id": job_id,
                     "digest": hashlib.sha256(str(job_id).encode()).hexdigest(),
@@ -5758,10 +5768,12 @@ def test_postgresql_v28_migration_lock_closes_successor_trigger_window(
                 contender.execute(text(
                     "INSERT INTO research_jobs(id,execution_scope_id,job_type,operation,"
                     "idempotency_key_digest,request_hash,request_payload,status,stage,"
-                    "attempt_count,max_attempts,cancel_requested,evidence_snapshot,created_at) "
+                    "attempt_count,max_attempts,cancel_requested,evidence_snapshot,created_at,"
+                    "configuration_bundle_snapshot_id) "
                     "SELECT 23,execution_scope_id,job_type,operation,:digest,request_hash,"
                     "'{}'::jsonb,'PENDING',stage,attempt_count,max_attempts,FALSE,"
-                    "evidence_snapshot,created_at FROM research_jobs WHERE id=22"
+                    "evidence_snapshot,created_at,configuration_bundle_snapshot_id "
+                    "FROM research_jobs WHERE id=22"
                 ), {"digest": "4" * 64})
                 transaction.commit()
                 return "INSERTED"

@@ -10,6 +10,7 @@ from app.db.migrations import (
     SCHEMA_VERSION,
     STRATEGY_PLATFORM_V1_BASE_VERSION,
     STRATEGY_PLATFORM_V1_TABLES,
+    SchemaMigrationBlocked,
     VERSION_TABLE,
     upgrade_database,
     verify_schema,
@@ -108,7 +109,7 @@ def _simulate_v45_schema(connection) -> None:
     )
 
 
-def test_v45_upgrade_preserves_existing_rows_and_is_idempotent(postgres_engine) -> None:
+def test_v45_upgrade_is_blocked_outside_controlled_design_lab(postgres_engine) -> None:
     assert upgrade_database(postgres_engine) == SCHEMA_VERSION
     with postgres_engine.begin() as connection:
         connection.execute(
@@ -122,10 +123,15 @@ def test_v45_upgrade_preserves_existing_rows_and_is_idempotent(postgres_engine) 
         ).scalar_one()
         _simulate_v45_schema(connection)
 
-    assert upgrade_database(postgres_engine) == SCHEMA_VERSION
-    assert upgrade_database(postgres_engine) == SCHEMA_VERSION
-    assert verify_schema(postgres_engine).ready is True
+    with pytest.raises(
+        SchemaMigrationBlocked,
+        match="BLOCKED_STRATEGY_PLATFORM_V13_CONTROLLED_UPGRADE_REQUIRED",
+    ):
+        upgrade_database(postgres_engine)
     with postgres_engine.connect() as connection:
+        assert connection.execute(
+            text(f"SELECT version FROM {VERSION_TABLE}")
+        ).scalar_one() == STRATEGY_PLATFORM_V1_BASE_VERSION
         row = connection.execute(
             text(
                 "SELECT id,name,description,status,source "
