@@ -1998,6 +1998,19 @@ def cleanup_orphaned_managed_processes(state_dir: Path) -> None:
     )
     for service in SERVICE_STOP_ORDER:
         for pid in orphaned[service]:
+            identity = managed_process_identity(pid, service)
+            if identity != MANAGED_PROCESS_MATCH:
+                state = process_state(pid)
+                if state in TERMINAL_PROCESS_STATES:
+                    continue
+                if identity == MANAGED_PROCESS_INACCESSIBLE:
+                    raise RuntimeBlocked(
+                        "managed orphan process ownership could not be "
+                        "re-established safely"
+                    )
+                raise RuntimeBlocked(
+                    "managed orphan process identity changed before signaling"
+                )
             try:
                 os.killpg(pid, signal.SIGTERM)
             except ProcessLookupError:

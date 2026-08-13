@@ -2656,6 +2656,42 @@ def test_orphan_discovery_fails_closed_on_inaccessible_ownership(
         runtime.orphaned_managed_process_map(tmp_path, ("backend",))
 
 
+def test_orphan_cleanup_revalidates_identity_before_sigterm(
+    monkeypatch,
+    tmp_path,
+):
+    runtime = load_runtime_module()
+    monkeypatch.setattr(
+        runtime,
+        "orphaned_managed_process_map",
+        lambda _state_dir, services: {
+            service: ([321] if service == "backend" else [])
+            for service in services
+        },
+    )
+    monkeypatch.setattr(
+        runtime,
+        "managed_process_identity",
+        lambda *_args: runtime.MANAGED_PROCESS_NO_MATCH,
+    )
+    monkeypatch.setattr(
+        runtime,
+        "process_state",
+        lambda _pid: runtime.PROCESS_STATE_RUNNING,
+    )
+    signals = []
+    monkeypatch.setattr(
+        runtime.os,
+        "killpg",
+        lambda pid, signum: signals.append((pid, signum)),
+    )
+
+    with pytest.raises(runtime.RuntimeBlocked, match="changed before signaling"):
+        runtime.cleanup_orphaned_managed_processes(tmp_path)
+
+    assert signals == []
+
+
 def test_orphan_cleanup_blocks_when_sigkill_does_not_terminate_process(
     monkeypatch,
     tmp_path,
@@ -2673,6 +2709,11 @@ def test_orphan_cleanup_blocks_when_sigkill_does_not_terminate_process(
         runtime,
         "process_state",
         lambda _pid: runtime.PROCESS_STATE_RUNNING,
+    )
+    monkeypatch.setattr(
+        runtime,
+        "managed_process_identity",
+        lambda *_args: runtime.MANAGED_PROCESS_MATCH,
     )
     monkeypatch.setattr(runtime, "is_managed_process", lambda *_args: True)
     moments = iter((0.0, 11.0, 20.0, 26.0))
