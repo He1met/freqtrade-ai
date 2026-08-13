@@ -137,7 +137,7 @@ def test_validate_task1_evidence_manifest_accepts_six_historical_files() -> None
     assert validated["corrected_matrix"]["status"] == "PASSED"
     assert validated["freshness_basis"] == _FRESHNESS_BASIS
     assert validated["artifact_generation_delay_seconds"] == 55027
-    assert validated["installed_adapter_manifest"]["adapter_count"] == 14
+    assert validated["installed_adapter_manifest"]["adapter_count"] == 16
     assert len(validated["installed_adapter_manifest"]["digest"]) == 64
 
 

@@ -203,6 +203,165 @@ INSTALLED_ADAPTER_MANIFEST: tuple[InstalledAdapter, ...] = (
         source_sha256="1cd8e5d6b3bb0c4aa015def61801afc9335477db383d9f6cc0f3fa6a04913816",
     ),
     InstalledAdapter(
+        adapter_key="diversity-threshold-v2",
+        adapter_kind="DIVERSITY_EVALUATOR",
+        implementation_version="profile-bound-diversity-v2",
+        input_schema_version="profile-bound-diversity-input-v2",
+        output_schema_version="profile-bound-diversity-output-v2",
+        input_schema=_object_schema(
+            required=(
+                "candidate_count",
+                "target_count",
+                "observed_family_version_ids",
+                "metrics",
+            ),
+            properties={
+                "candidate_count": {"type": "integer", "minimum": 1},
+                "target_count": {"type": "integer", "minimum": 1},
+                "observed_family_version_ids": {
+                    "type": "array",
+                    "items": {"type": "integer", "minimum": 1},
+                    "minItems": 1,
+                },
+                "metrics": {
+                    "type": "object",
+                    "required": [
+                        "max_signal_similarity",
+                        "max_abs_pnl_correlation",
+                    ],
+                    "properties": {
+                        "max_signal_similarity": {"type": "number"},
+                        "max_abs_pnl_correlation": {"type": "number"},
+                    },
+                    "additionalProperties": False,
+                },
+            },
+        ),
+        output_schema=_object_schema(
+            required=(
+                "status",
+                "validated_candidate_count",
+                "validated_target_count",
+                "reasons",
+            ),
+            properties={
+                "status": {"type": "string", "enum": ["PASSED", "BLOCKED"]},
+                "validated_candidate_count": {"type": "integer", "minimum": 1},
+                "validated_target_count": {"type": "integer", "minimum": 1},
+                "reasons": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+        ),
+        capabilities={
+            "profile_bound": True,
+            "candidate_count_default": False,
+            "target_count_default": False,
+            "threshold_default": False,
+        },
+        source_ref=(
+            "backend/app/services/profile_bound_adapters.py"
+            "#evaluate_profile_bound_diversity"
+        ),
+        source_sha256="626f33dbd5b647ca92a54ff7c0770911ea6d96e58fcc1b1170c59d9113a018cf",
+    ),
+    InstalledAdapter(
+        adapter_key="profile-bound-score-v2",
+        adapter_kind="SCORER",
+        implementation_version="profile-bound-score-v2",
+        input_schema_version="profile-bound-score-input-v2",
+        output_schema_version="profile-bound-score-output-v2",
+        input_schema=_object_schema(
+            required=(
+                "profit_score",
+                "risk_score",
+                "stability_score",
+                "required_windows_score",
+                "static_quality_score",
+                "net_profit",
+                "max_drawdown",
+                "total_trades",
+                "win_rate",
+                "quality_error_count",
+                "quality_warning_count",
+                "all_metrics_missing",
+                "validation_error",
+            ),
+            properties={
+                "profit_score": {"type": "number"},
+                "risk_score": {"type": "number"},
+                "stability_score": {"type": "number"},
+                "required_windows_score": {"type": "number"},
+                "static_quality_score": {"type": "number"},
+                "net_profit": {"type": "number"},
+                "max_drawdown": {"type": "number"},
+                "total_trades": {"type": "integer", "minimum": 0},
+                "win_rate": {"type": "number"},
+                "quality_error_count": {"type": "integer", "minimum": 0},
+                "quality_warning_count": {"type": "integer", "minimum": 0},
+                "all_metrics_missing": {"type": "boolean"},
+                "validation_error": {"type": "boolean"},
+            },
+        ),
+        output_schema=_object_schema(
+            required=(
+                "total_score",
+                "components",
+                "quality_components",
+                "eliminated_by",
+                "warnings",
+            ),
+            properties={
+                "total_score": {"type": "number", "minimum": 0, "maximum": 100},
+                "components": _object_schema(
+                    required=(
+                        "profit_score",
+                        "risk_score",
+                        "stability_score",
+                        "quality_score",
+                    ),
+                    properties={
+                        "profit_score": {"type": "number"},
+                        "risk_score": {"type": "number"},
+                        "stability_score": {"type": "number"},
+                        "quality_score": {"type": "number"},
+                    },
+                ),
+                "quality_components": _object_schema(
+                    required=(
+                        "required_windows",
+                        "trade_activity",
+                        "static_quality",
+                        "metric_completeness",
+                        "quality_signals",
+                    ),
+                    properties={
+                        "required_windows": {"type": "number"},
+                        "trade_activity": {"type": "number"},
+                        "static_quality": {"type": "number"},
+                        "metric_completeness": {"type": "number"},
+                        "quality_signals": {"type": "number"},
+                    },
+                ),
+                "eliminated_by": {"type": "array", "items": {"type": "string"}},
+                "warnings": {"type": "array", "items": {"type": "string"}},
+            },
+        ),
+        capabilities={
+            "profile_bound": True,
+            "normalization_default": False,
+            "quality_weight_default": False,
+            "threshold_default": False,
+            "bounded_score": True,
+        },
+        source_ref=(
+            "backend/app/services/profile_bound_adapters.py"
+            "#score_profile_bound_candidate"
+        ),
+        source_sha256="626f33dbd5b647ca92a54ff7c0770911ea6d96e58fcc1b1170c59d9113a018cf",
+    ),
+    InstalledAdapter(
         adapter_key="okx-public-candles-v1",
         adapter_kind="MARKET_DATA_DOWNLOADER",
         implementation_version="okx-public-candle-source-receipt-v1",

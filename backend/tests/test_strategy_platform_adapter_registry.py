@@ -27,7 +27,7 @@ def test_installed_manifest_sources_schemas_and_symbols_are_current() -> None:
     assert tuple(item.adapter_key for item in validated) == tuple(
         sorted(item.adapter_key for item in INSTALLED_ADAPTER_MANIFEST)
     )
-    assert len(validated) == 14
+    assert len(validated) == 16
     assert len(installed_adapter_manifest_digest()) == 64
     assert [row["adapter_key"] for row in canonical_manifest_payload()] == sorted(
         item.adapter_key for item in INSTALLED_ADAPTER_MANIFEST
