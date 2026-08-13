@@ -770,7 +770,7 @@
     },
     {
       "path": "backend/app/models/strategy_deployment.py",
-      "line": 106,
+      "line": 110,
       "symbol": "<module>.StrategyDeployment.assign:real_orders",
       "fingerprint": "sha256:032a179d74f09434eded00fab68c025ef5eafaaf5adc86192a6ebfccc64a9e80",
       "category": "SAFETY_INVARIANT",
@@ -781,7 +781,7 @@
     },
     {
       "path": "backend/app/models/strategy_deployment.py",
-      "line": 109,
+      "line": 113,
       "symbol": "<module>.StrategyDeployment.assign:instrument_id",
       "fingerprint": "sha256:c93299006d739fed81f08d2ab54916a37d7173a003f34e408a5215da70f15f59",
       "category": "RESEARCH_TARGET",
@@ -792,7 +792,7 @@
     },
     {
       "path": "backend/app/models/strategy_deployment.py",
-      "line": 110,
+      "line": 114,
       "symbol": "<module>.StrategyDeployment.assign:timeframe",
       "fingerprint": "sha256:9256e0fc72585251d329c431f61738add80e4075b36a173fddc80419e25d38a7",
       "category": "TIMEFRAME_DEFINITION",
@@ -803,7 +803,7 @@
     },
     {
       "path": "backend/app/models/strategy_deployment.py",
-      "line": 197,
+      "line": 201,
       "symbol": "<module>.SignalEvaluation.assign:instrument_id",
       "fingerprint": "sha256:1ad36a18e6dde69060456bb5c482ba67bfec14d9ab8e78c5dfc60fa5b7872735",
       "category": "RESEARCH_TARGET",
@@ -814,7 +814,7 @@
     },
     {
       "path": "backend/app/models/strategy_deployment.py",
-      "line": 198,
+      "line": 202,
       "symbol": "<module>.SignalEvaluation.assign:timeframe",
       "fingerprint": "sha256:5628c89ec1d6b1213c1d9e8281dc0595db6ab2d2e7eafab7c1b7166a08a21d53",
       "category": "TIMEFRAME_DEFINITION",
@@ -902,7 +902,7 @@
     },
     {
       "path": "backend/app/models/strategy_research.py",
-      "line": 199,
+      "line": 219,
       "symbol": "<module>.MarketDataQualityReceipt.assign:timeframe",
       "fingerprint": "sha256:bfeac4a9ce4d4fd9fd6fa6385f2cb9e32f519f82f086c2503c06bd6a06cc4773",
       "category": "TIMEFRAME_DEFINITION",
@@ -913,7 +913,7 @@
     },
     {
       "path": "backend/app/models/strategy_research.py",
-      "line": 212,
+      "line": 232,
       "symbol": "<module>.MarketDataQualityReceipt.assign:expected_interval_seconds",
       "fingerprint": "sha256:2c7dd960a0d18128d3f225f8ea4be7fb46401338d04a475fb68a94577ad2e68b",
       "category": "TIMEFRAME_DEFINITION",
@@ -924,7 +924,40 @@
     },
     {
       "path": "backend/app/models/strategy_research.py",
-      "line": 290,
+      "line": 241,
+      "symbol": "<module>.MarketDataQualityReceipt.assign:quality_scope",
+      "fingerprint": "sha256:64bd113d6c9374a1feccfaa30d15f221292635d15fd9e9aebc93535e29df9db1",
+      "category": "QUALITY_GATE",
+      "disposition": "BLOCKED",
+      "reason": "Persisted quality scope is business semantics and requires the authoritative frozen quality profile before runtime use.",
+      "owner": "issue-704-old-rule-removal",
+      "dependency": "Task1 frozen configuration bundle/resolver contract"
+    },
+    {
+      "path": "backend/app/models/strategy_research.py",
+      "line": 242,
+      "symbol": "<module>.MarketDataQualityReceipt.assign:quality_decision",
+      "fingerprint": "sha256:2221c73b8730f1a2fe2322e0fa36f65f55f157b2ab1294110255dc029e355499",
+      "category": "QUALITY_GATE",
+      "disposition": "BLOCKED",
+      "reason": "Persisted quality decision is business semantics and requires the authoritative frozen quality profile before runtime use.",
+      "owner": "issue-704-old-rule-removal",
+      "dependency": "Task1 frozen configuration bundle/resolver contract"
+    },
+    {
+      "path": "backend/app/models/strategy_research.py",
+      "line": 247,
+      "symbol": "<module>.MarketDataQualityReceipt.assign:freshness_basis",
+      "fingerprint": "sha256:a9eb31371638214916f30086ff8298a7836a5e439377f814058ac39969c2548e",
+      "category": "EVIDENCE_FRESHNESS_PROFILE",
+      "disposition": "BLOCKED",
+      "reason": "Freshness basis is business semantics and requires an authoritative frozen freshness profile before runtime use.",
+      "owner": "issue-704-old-rule-removal",
+      "dependency": "Task1 frozen configuration bundle/resolver contract"
+    },
+    {
+      "path": "backend/app/models/strategy_research.py",
+      "line": 317,
       "symbol": "<module>.StrategyResearchAttemptEvent.assign:market_data_quality_receipt_id",
       "fingerprint": "sha256:ff53eb32a760c25dec002a709157f427610e0a7b64f8aa7af45082bf6d8582ba",
       "category": "QUALITY_GATE",
@@ -935,7 +968,7 @@
     },
     {
       "path": "backend/app/models/strategy_research.py",
-      "line": 299,
+      "line": 326,
       "symbol": "<module>.StrategyResearchAttemptEvent.assign:requested_count",
       "fingerprint": "sha256:75730975d55493dc9dd4a6a840a1287162516083e5b8c1ce21515d7c0ae24bb1",
       "category": "GENERATION_PROFILE",
@@ -946,7 +979,7 @@
     },
     {
       "path": "backend/app/models/strategy_research.py",
-      "line": 392,
+      "line": 419,
       "symbol": "<module>.StrategyResearchCandidateBridgeEvent.assign:market_data_quality_receipt_id",
       "fingerprint": "sha256:2275d6ca9f5cb6b84761edef08cf98837cc4aff1aecd17b9b7edfbb15d953ee0",
       "category": "QUALITY_GATE",
@@ -957,7 +990,7 @@
     },
     {
       "path": "backend/app/models/strategy_research.py",
-      "line": 402,
+      "line": 429,
       "symbol": "<module>.StrategyResearchCandidateBridgeEvent.assign:allow_real_funds",
       "fingerprint": "sha256:9be5a8aa98781724cc4f79294f5aeb93a38e7651f74e2522bdcea1b4f3c6fc49",
       "category": "SAFETY_INVARIANT",
@@ -968,7 +1001,7 @@
     },
     {
       "path": "backend/app/models/strategy_research.py",
-      "line": 403,
+      "line": 430,
       "symbol": "<module>.StrategyResearchCandidateBridgeEvent.assign:real_orders",
       "fingerprint": "sha256:265cf7c7f4bf81d4ea8b1bea635a1848a31601cefc1880a8c6d008907b526dc7",
       "category": "SAFETY_INVARIANT",
