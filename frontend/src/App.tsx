@@ -3,6 +3,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { AppLayout } from "./layout/AppLayout";
 import { BacktestRuns } from "./pages/BacktestRuns";
 import { BacktestTasks } from "./pages/BacktestTasks";
+import { ConfigurationCenter } from "./pages/ConfigurationCenter";
 import { Dashboard } from "./pages/Dashboard";
 import { GenerationRuns } from "./pages/GenerationRuns";
 import { HyperoptRuns } from "./pages/HyperoptRuns";
@@ -23,6 +24,7 @@ export function App() {
         <Route index element={<Dashboard />} />
         <Route path="strategies" element={<Strategies />} />
         <Route path="strategies/:strategyId" element={<StrategyDetail />} />
+        <Route path="configuration" element={<ConfigurationCenter />} />
         <Route path="research-queue" element={<ResearchQueue />} />
         <Route path="generation-runs" element={<GenerationRuns />} />
         <Route path="local-strategy-lab" element={<LocalStrategyLab />} />

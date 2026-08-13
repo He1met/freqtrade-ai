@@ -1,4 +1,4 @@
-import { fetchOwnerJson, postOwnerReadJson } from "./http";
+import { fetchOwnerJson, postJson, postOwnerReadJson } from "./http";
 
 export type ConfigurationTypeRead = {
   type_key: string;
@@ -59,6 +59,63 @@ export type ConfigurationBundleSnapshotRead = ConfigurationBundleResolutionRead 
   persisted: true;
   snapshot_id: number;
   created_at: string;
+};
+
+export type ConfigurationDependencyRead = {
+  configuration_version_id: number;
+  configuration_type: string;
+  depends_on_version_id: number;
+  depends_on_type: string;
+  relation_key: string;
+};
+
+export type ConfigurationVersionListRead = {
+  config_type: string;
+  scope_type: string;
+  scope_key: string;
+  active_version_id: number | null;
+  items: ConfigurationVersionRead[];
+};
+
+export type ConfigurationVersionDetailRead = {
+  version: ConfigurationVersionRead;
+  dependencies: ConfigurationDependencyRead[];
+};
+
+export type ConfigurationWriteResult = {
+  schema_version: string;
+  request_id: string;
+  idempotent_replay: boolean;
+  operation: string;
+  scope_type: string;
+  scope_key: string;
+  version: ConfigurationVersionRead;
+  dependencies: ConfigurationDependencyRead[];
+  previous_active_version_id: number | null;
+  active_version_id: number | null;
+  validation_bundle: ConfigurationBundleResolutionRead | null;
+};
+
+export type ConfigurationAuditEventRead = {
+  id: number;
+  configuration_version_id: number;
+  event_type: string;
+  actor: string;
+  request_id: string;
+  scope_type: string | null;
+  scope_key: string | null;
+  reason: string | null;
+  event_snapshot: Record<string, unknown>;
+  created_at: string;
+};
+
+export type ConfigurationVersionDiffRead = {
+  config_type: string;
+  scope_type: string;
+  scope_key: string;
+  from_version_id: number;
+  to_version_id: number;
+  items: Array<{ path: string; before: unknown; after: unknown }>;
 };
 
 export type StrategyTargetProjectionRead = {
@@ -171,6 +228,121 @@ export function fetchActiveConfiguration(
     `/v1/configurations/${encodeURIComponent(configType)}/active?${query.toString()}`,
     operatorToken,
     signal,
+  );
+}
+
+export function fetchConfigurationVersions(
+  configType: string,
+  scope: { scope_type: string; scope_key: string },
+  operatorToken: string,
+  signal?: AbortSignal,
+) {
+  const query = new URLSearchParams(scope);
+  return fetchOwnerJson<ConfigurationVersionListRead>(
+    `/v1/configurations/${encodeURIComponent(configType)}/versions?${query.toString()}`,
+    operatorToken,
+    signal,
+  );
+}
+
+export function fetchConfigurationVersionDetail(
+  configType: string,
+  versionId: number,
+  operatorToken: string,
+  signal?: AbortSignal,
+) {
+  return fetchOwnerJson<ConfigurationVersionDetailRead>(
+    `/v1/configurations/${encodeURIComponent(configType)}/versions/${versionId}`,
+    operatorToken,
+    signal,
+  );
+}
+
+export function fetchConfigurationAuditEvents(
+  configType: string,
+  scope: { scope_type: string; scope_key: string },
+  operatorToken: string,
+  signal?: AbortSignal,
+) {
+  const query = new URLSearchParams(scope);
+  return fetchOwnerJson<{
+    config_type: string;
+    scope_type: string;
+    scope_key: string;
+    items: ConfigurationAuditEventRead[];
+  }>(
+    `/v1/configurations/${encodeURIComponent(configType)}/audit-events?${query.toString()}`,
+    operatorToken,
+    signal,
+  );
+}
+
+export function fetchConfigurationBundleHistory(
+  scope: { scope_type: string; scope_key: string },
+  operatorToken: string,
+  signal?: AbortSignal,
+) {
+  const query = new URLSearchParams(scope);
+  return fetchOwnerJson<{
+    scope_type: string;
+    scope_key: string;
+    items: ConfigurationBundleSnapshotRead[];
+  }>(`/v1/configuration-bundles?${query.toString()}`, operatorToken, signal);
+}
+
+export function fetchConfigurationVersionDiff(
+  configType: string,
+  versionId: number,
+  againstVersionId: number,
+  scope: { scope_type: string; scope_key: string },
+  operatorToken: string,
+  signal?: AbortSignal,
+) {
+  const query = new URLSearchParams({
+    ...scope,
+    against_version_id: String(againstVersionId),
+  });
+  return fetchOwnerJson<ConfigurationVersionDiffRead>(
+    `/v1/configurations/${encodeURIComponent(configType)}/versions/${versionId}/diff?${query.toString()}`,
+    operatorToken,
+    signal,
+  );
+}
+
+export function createConfigurationDraft(
+  configType: string,
+  request: {
+    scope_type: string;
+    scope_key: string;
+    change_summary: string;
+    source_version_id?: number;
+    payload_json: Record<string, unknown>;
+    dependencies: Array<{ depends_on_version_id: number; relation_key: string }>;
+  },
+  operatorToken: string,
+  idempotencyKey: string,
+  signal?: AbortSignal,
+) {
+  return postJson<ConfigurationWriteResult>(
+    `/v1/configurations/${encodeURIComponent(configType)}/versions`,
+    request,
+    { operatorToken, idempotencyKey, signal },
+  );
+}
+
+export function applyConfigurationVersionAction(
+  action: "validate" | "activate" | "retire",
+  configType: string,
+  versionId: number,
+  request: { scope_type: string; scope_key: string; reason?: string },
+  operatorToken: string,
+  idempotencyKey: string,
+  signal?: AbortSignal,
+) {
+  return postJson<ConfigurationWriteResult>(
+    `/v1/configurations/${encodeURIComponent(configType)}/versions/${versionId}/${action}`,
+    request,
+    { operatorToken, idempotencyKey, signal },
   );
 }
 
