@@ -1,6 +1,8 @@
 import importlib.util
 import json
+import os
 from pathlib import Path
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -21,6 +23,16 @@ def load_module(path: Path, name: str):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def fake_supervisor_identity(control, repo_root, *, pid=None):
+    return {
+        "supervisor_pid": os.getpid() if pid is None else pid,
+        "supervisor_start_token": "1" * 64,
+        "supervisor_command_sha256": "2" * 64,
+        "supervisor_cwd": str(repo_root),
+        "supervisor_launchd_label": control.LAUNCHD_LABEL,
+    }
 
 
 def test_supervisor_verify_does_not_restart_healthy_runtime(monkeypatch):
@@ -81,6 +93,243 @@ def test_supervisor_respects_fail_closed_down(monkeypatch):
 
     assert supervisor.verify_or_recover() is False
     assert calls == ["verify", "down"]
+
+
+def test_supervisor_suspended_fence_writes_receipt_before_runtime_actions(
+    monkeypatch,
+    tmp_path,
+):
+    supervisor = load_module(
+        SUPERVISOR_PATH,
+        "local_supervisor_maintenance_suspended",
+    )
+    control = load_module(
+        REPO_ROOT / "scripts" / "local_supervisor_control.py",
+        "local_supervisor_control_suspend_fixture",
+    )
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(mode=0o755)
+    state_dir = repo_root / "runtime"
+    suspended = control.suspend_supervisor_control(
+        state_dir,
+        request_id="task1-v47-cutover-supervisor",
+        operator_identity="task1",
+        reason="strategy-platform-v13-cutover",
+        target_schema_version="20260813_47",
+        trusted_root=repo_root,
+    )
+    generation = suspended["control"]["cutover_generation"]
+    monkeypatch.setattr(supervisor, "REPO_ROOT", repo_root)
+    monkeypatch.setattr(supervisor, "SUPERVISOR_RUNTIME_DIR", state_dir)
+    monkeypatch.setattr(
+        supervisor,
+        "observe_supervisor_control",
+        lambda path, **_kwargs: control.observe_supervisor_control(
+            path,
+            trusted_root=repo_root,
+        ),
+    )
+    monkeypatch.setattr(
+        control,
+        "_probe_canonical_supervisor",
+        lambda *_args, **_kwargs: fake_supervisor_identity(control, repo_root),
+    )
+    runtime_calls = []
+    monkeypatch.setattr(
+        supervisor,
+        "run_runtime",
+        lambda command: runtime_calls.append(command),
+    )
+
+    assert supervisor.supervise_once() is False
+    assert runtime_calls == []
+    receipt_path = state_dir / "supervisor-control.observed.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["supervisor_pid"] == supervisor.os.getpid()
+    assert receipt["observed_generation"] == generation
+    assert receipt["observed_mode"] == "MIGRATION_SUSPENDED"
+    assert receipt["observed_request_id"] == (
+        "task1-v47-cutover-supervisor"
+    )
+    assert receipt_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_supervisor_malformed_fence_fails_closed_before_credentials_or_runtime(
+    monkeypatch,
+    tmp_path,
+):
+    supervisor = load_module(
+        SUPERVISOR_PATH,
+        "local_supervisor_maintenance_malformed",
+    )
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(mode=0o755)
+    state_dir = repo_root / "runtime"
+    state_dir.mkdir(mode=0o700)
+    state_path = state_dir / "supervisor-control.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "supervisor-control-future",
+                "mode": "ACTIVE",
+            }
+        ),
+        encoding="utf-8",
+    )
+    state_path.chmod(0o600)
+    monkeypatch.setattr(supervisor, "REPO_ROOT", repo_root)
+    monkeypatch.setattr(supervisor, "SUPERVISOR_RUNTIME_DIR", state_dir)
+    runtime_calls = []
+    monkeypatch.setattr(
+        supervisor,
+        "run_runtime",
+        lambda command: runtime_calls.append(command),
+    )
+
+    assert supervisor.supervise_once() is False
+    assert runtime_calls == []
+    assert not (state_dir / "supervisor-control.observed.json").exists()
+
+
+def test_supervisor_shutdown_does_not_down_while_migration_is_suspended(
+    monkeypatch,
+    tmp_path,
+):
+    supervisor = load_module(
+        SUPERVISOR_PATH,
+        "local_supervisor_maintenance_shutdown",
+    )
+    control = load_module(
+        REPO_ROOT / "scripts" / "local_supervisor_control.py",
+        "local_supervisor_control_shutdown_fixture",
+    )
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(mode=0o755)
+    state_dir = repo_root / "runtime"
+    control.suspend_supervisor_control(
+        state_dir,
+        request_id="task1-v47-cutover-shutdown",
+        operator_identity="task1",
+        reason="strategy-platform-v13-cutover",
+        target_schema_version="20260813_47",
+        trusted_root=repo_root,
+    )
+    monkeypatch.setattr(supervisor, "REPO_ROOT", repo_root)
+    monkeypatch.setattr(supervisor, "SUPERVISOR_RUNTIME_DIR", state_dir)
+    monkeypatch.setattr(
+        supervisor,
+        "observe_supervisor_control",
+        lambda path, **_kwargs: control.observe_supervisor_control(
+            path,
+            trusted_root=repo_root,
+        ),
+    )
+    monkeypatch.setattr(
+        control,
+        "_probe_canonical_supervisor",
+        lambda *_args, **_kwargs: fake_supervisor_identity(control, repo_root),
+    )
+    supervisor.STOP_EVENT.set()
+    runtime_calls = []
+    monkeypatch.setattr(
+        supervisor,
+        "run_runtime",
+        lambda command: runtime_calls.append(command),
+    )
+    monkeypatch.setattr(supervisor.signal, "signal", lambda *_args: None)
+
+    assert supervisor.main([]) == 0
+    assert runtime_calls == []
+
+
+def test_suspended_receipt_is_written_only_after_inflight_iteration_drains(
+    monkeypatch,
+    tmp_path,
+):
+    supervisor = load_module(
+        SUPERVISOR_PATH,
+        "local_supervisor_maintenance_drain_barrier",
+    )
+    control = load_module(
+        REPO_ROOT / "scripts" / "local_supervisor_control.py",
+        "local_supervisor_control_drain_fixture",
+    )
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(mode=0o755)
+    state_dir = repo_root / "runtime"
+    monkeypatch.setattr(supervisor, "REPO_ROOT", repo_root)
+    monkeypatch.setattr(supervisor, "SUPERVISOR_RUNTIME_DIR", state_dir)
+    monkeypatch.setattr(
+        supervisor,
+        "observe_supervisor_control",
+        lambda path, **_kwargs: control.observe_supervisor_control(
+            path,
+            trusted_root=repo_root,
+        ),
+    )
+    monkeypatch.setattr(
+        control,
+        "_probe_canonical_supervisor",
+        lambda *_args, **_kwargs: fake_supervisor_identity(control, repo_root),
+    )
+    supervisor.LAST_CREDENTIAL_GENERATION = "credential-generation-1"
+    capability_entered = threading.Event()
+    release_capability = threading.Event()
+    runtime_calls = []
+
+    def fake_run(command):
+        runtime_calls.append(command)
+        if command == "supervisor-capability":
+            capability_entered.set()
+            assert release_capability.wait(2)
+            return {
+                "status": "READY",
+                "return_code": 0,
+                "_generation": "credential-generation-1",
+            }
+        if command == "verify":
+            return {"status": "VERIFIED", "return_code": 0}
+        return {"status": "READY", "return_code": 0}
+
+    monkeypatch.setattr(supervisor, "run_runtime", fake_run)
+    result = []
+    worker = threading.Thread(target=lambda: result.append(supervisor.supervise_once()))
+    worker.start()
+    assert capability_entered.wait(2)
+
+    suspended = control.suspend_supervisor_control(
+        state_dir,
+        request_id="task1-drain-barrier",
+        operator_identity="task1",
+        reason="retire-legacy-runtime",
+        target_schema_version="20260813_47",
+        trusted_root=repo_root,
+    )
+    assert suspended["observed_matches_control"] is False
+    assert not (state_dir / control.CONTROL_OBSERVATION_FILE).exists()
+
+    release_capability.set()
+    worker.join(2)
+    assert not worker.is_alive()
+    assert result == [True]
+    assert runtime_calls == [
+        "supervisor-capability",
+        "supervisor-thaw-openings",
+        "verify",
+    ]
+
+    runtime_calls.clear()
+    assert supervisor.supervise_once() is False
+    assert runtime_calls == []
+    receipt = json.loads(
+        (state_dir / control.CONTROL_OBSERVATION_FILE).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert receipt["observed_generation"] == suspended["control"][
+        "cutover_generation"
+    ]
+    assert receipt["observed_mode"] == "MIGRATION_SUSPENDED"
 
 
 def test_launch_agent_plist_has_one_keepalive_supervisor(monkeypatch, tmp_path):
@@ -569,6 +818,45 @@ def test_same_generation_attestation_failure_becomes_terminal(
     assert '"event": "runtime_recovery_suppressed"' in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("secret_stage", ("initial-verify", "up", "final-verify"))
+def test_recovery_never_logs_raw_runtime_reasons(
+    monkeypatch,
+    capsys,
+    secret_stage,
+):
+    supervisor = load_module(
+        SUPERVISOR_PATH,
+        "local_supervisor_reason_redaction_{}".format(secret_stage),
+    )
+    secret = "credential-secret-sentinel"
+    calls = []
+    verify_calls = {"count": 0}
+
+    def run_runtime(command):
+        calls.append(command)
+        if command == "verify":
+            verify_calls["count"] += 1
+            if secret_stage == "final-verify" and verify_calls["count"] == 2:
+                return {"status": "BLOCKED", "reason": secret, "return_code": 2}
+            return {
+                "status": "BLOCKED" if verify_calls["count"] == 1 else "VERIFIED",
+                "reason": secret if secret_stage == "initial-verify" else None,
+                "return_code": 2 if verify_calls["count"] == 1 else 0,
+            }
+        if command == "down":
+            return {"services": [], "return_code": 0}
+        if command == "up" and secret_stage == "up":
+            return {"status": "BLOCKED", "reason": secret, "return_code": 2}
+        return {"status": "READY", "return_code": 0}
+
+    monkeypatch.setattr(supervisor, "run_runtime", run_runtime)
+
+    assert supervisor.verify_or_recover("generation-safe") is (
+        secret_stage not in {"up", "final-verify"}
+    )
+    assert secret not in capsys.readouterr().out
+
+
 def test_new_generation_clears_terminal_attestation_latch(monkeypatch):
     supervisor = load_module(
         SUPERVISOR_PATH,
@@ -626,6 +914,89 @@ def test_unavailable_capability_does_not_bypass_terminal_latch(
     emitted = capsys.readouterr().out
     assert '"credential_generation_status": "UNAVAILABLE"' in emitted
     assert '"event": "runtime_recovery_suppressed"' in emitted
+
+
+def test_unavailable_capability_exact_attestation_latches_until_generation_recovers(
+    monkeypatch,
+    capsys,
+):
+    supervisor = load_module(
+        SUPERVISOR_PATH,
+        "local_supervisor_unavailable_capability_terminal_episode",
+    )
+    calls = []
+    capabilities = iter(
+        (
+            {"status": "BLOCKED", "return_code": 2},
+            {"status": "BLOCKED", "return_code": 2},
+            {
+                "status": "READY",
+                "_generation": "generation-recovered",
+                "return_code": 0,
+            },
+        )
+    )
+    verification = iter(
+        (
+            {"status": "BLOCKED", "return_code": 2},
+            {"status": "VERIFIED", "return_code": 0},
+        )
+    )
+    starts = iter(
+        (
+            {
+                "status": "BLOCKED",
+                "return_code": 2,
+                "okx_runtime_failure_stage": "read-attestation",
+                "okx_runtime_failure_category": "ATTESTATION",
+                "okx_runtime_failure_type": "OkxDemoCredentialsUnavailable",
+            },
+            {"status": "RUNNING", "return_code": 0},
+        )
+    )
+
+    def run_runtime(command):
+        calls.append(command)
+        if command == "supervisor-capability":
+            return next(capabilities)
+        if command == "supervisor-freeze-openings":
+            return {"status": "BLOCKED_OPENINGS", "return_code": 0}
+        if command == "verify":
+            return next(verification)
+        if command == "down":
+            return {"services": [], "return_code": 0}
+        if command == "up":
+            return next(starts)
+        pytest.fail("unexpected runtime command: {}".format(command))
+
+    monkeypatch.setattr(supervisor, "run_runtime", run_runtime)
+
+    assert supervisor.supervise_once() is False
+    assert calls == [
+        "supervisor-capability",
+        "supervisor-freeze-openings",
+        "verify",
+        "down",
+        "up",
+    ]
+    assert (
+        supervisor.LAST_TERMINAL_CREDENTIAL_GENERATION
+        is supervisor.CAPABILITY_UNAVAILABLE_TERMINAL
+    )
+    first_emitted = capsys.readouterr().out
+    assert '"credential_generation_status": "UNAVAILABLE"' in first_emitted
+    assert '"terminal_for_credential_generation": true' in first_emitted
+
+    calls.clear()
+    assert supervisor.supervise_once() is False
+    assert calls == ["supervisor-capability"]
+    assert '"event": "runtime_recovery_suppressed"' in capsys.readouterr().out
+
+    calls.clear()
+    assert supervisor.supervise_once() is True
+    assert calls == ["supervisor-capability", "down", "up", "verify"]
+    assert supervisor.LAST_CREDENTIAL_GENERATION == "generation-recovered"
+    assert supervisor.LAST_TERMINAL_CREDENTIAL_GENERATION is None
 
 
 def test_near_miss_attestation_diagnostic_is_not_terminal(monkeypatch):

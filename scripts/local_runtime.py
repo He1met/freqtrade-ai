@@ -15,6 +15,7 @@ import argparse
 from contextlib import contextmanager
 import errno
 import fcntl
+import hashlib
 import json
 import os
 import pwd
@@ -32,6 +33,27 @@ from urllib.error import URLError
 from urllib.parse import urlsplit
 from urllib.request import urlopen
 from uuid import uuid4
+
+try:
+    from scripts.local_supervisor_control import (
+        SupervisorControlBlocked,
+        active_supervisor_automation_fence,
+        legacy_runtime_stop_fence,
+        reload_supervisor_owner,
+        resume_supervisor_control,
+        supervisor_control_status,
+        suspend_supervisor_control,
+    )
+except ModuleNotFoundError:  # Direct ``python scripts/local_runtime.py``.
+    from local_supervisor_control import (  # type: ignore[no-redef]
+        SupervisorControlBlocked,
+        active_supervisor_automation_fence,
+        legacy_runtime_stop_fence,
+        reload_supervisor_owner,
+        resume_supervisor_control,
+        supervisor_control_status,
+        suspend_supervisor_control,
+    )
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -149,6 +171,17 @@ SERVICE_PROCESS_MARKERS = {
     "frontend": "vite",
     "okx_runtime": "app.adapters.okx_demo.runtime_service",
 }
+SERVICE_EXACT_ARGUMENTS = {
+    "backend": ("-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000"),
+    "worker": ("-m", "app.workers.deepseek_backtest_worker"),
+    "frontend": ("--host", "127.0.0.1", "--port", "5173"),
+    "okx_runtime": (
+        "-m",
+        "app.adapters.okx_demo.runtime_service",
+        "--runtime-dir",
+        str(DEFAULT_RUNTIME_DIR),
+    ),
+}
 SERVICE_WORKING_DIRECTORIES = {
     "backend": REPO_ROOT / "backend",
     "worker": REPO_ROOT / "backend",
@@ -157,11 +190,13 @@ SERVICE_WORKING_DIRECTORIES = {
 }
 SERVICE_START_ORDER = ("backend", "worker", "frontend", "okx_runtime")
 SERVICE_STOP_ORDER = tuple(reversed(SERVICE_START_ORDER))
+LEGACY_SERVICE_PORTS = (BACKEND_PORT, FRONTEND_PORT)
 OKX_RUNTIME_READY_FILE = "okx-runtime.ready.json"
 OKX_RUNTIME_FAILURE_FILE = "okx-runtime.failure.json"
 OKX_WRITER_LOCK_FILE = "okx-demo-order-writer.lock"
 CONTROL_LOCK_FILE = "runtime-control.lock"
 OPENINGS_FREEZE_FILE = "okx-runtime.freeze-openings"
+LEGACY_GROUP_EVIDENCE_PREFIX = "legacy-stop-group."
 PROCESS_STATE_RUNNING = "RUNNING"
 PROCESS_STATE_ZOMBIE = "ZOMBIE"
 PROCESS_STATE_EXITED = "EXITED"
@@ -174,6 +209,22 @@ TERMINAL_PROCESS_STATES = frozenset(
 )
 PROCESS_STATE_PROBE_TIMEOUT_SECONDS = 5
 FINAL_PROCESS_TERMINATION_TIMEOUT_SECONDS = 5
+SAFE_PROCESS_PROBE_ENV = {
+    "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+    "LC_ALL": "C",
+}
+SUPERVISOR_MAINTENANCE_COMMANDS = frozenset(
+    {
+        "supervisor-maintenance-suspend",
+        "supervisor-maintenance-status",
+        "supervisor-maintenance-resume",
+        "supervisor-maintenance-stop-legacy",
+        "supervisor-maintenance-reload-owner",
+    }
+)
+FENCE_FIRST_RUNTIME_COMMANDS = frozenset(
+    {"up", "supervisor-thaw-openings"}
+)
 SECRET_LINE = re.compile(
     r"(?i)(api[_-]?key|token|secret|password|passphrase|authorization|"
     r"ok-access-(?:key|sign|passphrase))([\"']?\s*[:=]\s*[\"']?)([^\s,;\"']+)"
@@ -245,6 +296,19 @@ def runtime_dir(raw_path: Optional[str]) -> Path:
     return resolved
 
 
+def maintenance_runtime_dir(raw_path: Optional[str]) -> Path:
+    """Bind every public maintenance command to the canonical owner state."""
+
+    candidate = Path(raw_path).expanduser() if raw_path else DEFAULT_RUNTIME_DIR
+    lexical = Path(os.path.abspath(os.fspath(candidate)))
+    canonical = Path(os.path.abspath(os.fspath(DEFAULT_RUNTIME_DIR)))
+    if lexical != canonical:
+        raise RuntimeBlocked(
+            "maintenance runtime directory must be the canonical owner state"
+        )
+    return lexical
+
+
 def redact_database_url(value: str) -> str:
     try:
         parsed = urlsplit(value)
@@ -309,11 +373,12 @@ def process_state(pid: int) -> str:
 
     try:
         completed = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "state="],
+            ["/bin/ps", "-p", str(pid), "-o", "state="],
             check=False,
             text=True,
             capture_output=True,
             timeout=PROCESS_STATE_PROBE_TIMEOUT_SECONDS,
+            env=SAFE_PROCESS_PROBE_ENV,
         )
     except (OSError, subprocess.TimeoutExpired):
         return PROCESS_STATE_INACCESSIBLE
@@ -350,15 +415,52 @@ def process_state(pid: int) -> str:
     return PROCESS_STATE_INACCESSIBLE
 
 
+def process_group_state(pid: int) -> str:
+    """Prove that a managed session has no live members before retirement."""
+
+    try:
+        completed = subprocess.run(
+            ["/bin/ps", "-axo", "pid=,pgid=,state="],
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=PROCESS_STATE_PROBE_TIMEOUT_SECONDS,
+            env=SAFE_PROCESS_PROBE_ENV,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return PROCESS_STATE_INACCESSIBLE
+    if completed.returncode != 0:
+        return PROCESS_STATE_INACCESSIBLE
+    seen = False
+    for line in completed.stdout.splitlines():
+        fields = line.split()
+        if len(fields) < 2 or not fields[0].isdigit() or not fields[1].isdigit():
+            continue
+        if int(fields[1]) != pid:
+            continue
+        seen = True
+        if len(fields) != 3:
+            return PROCESS_STATE_INACCESSIBLE
+        marker = fields[2][:1].upper()
+        if marker not in {"Z", "X"}:
+            return PROCESS_STATE_RUNNING
+    return PROCESS_STATE_EXITED if seen else PROCESS_STATE_EXITED
+
+
 def process_running(pid: int) -> bool:
     return process_state(pid) == PROCESS_STATE_RUNNING
 
 
 def read_pid(path: Path) -> Optional[int]:
     try:
-        return int(read_private_state(path).strip())
-    except (OSError, ValueError):
+        raw = read_private_state(path).strip()
+    except FileNotFoundError:
         return None
+    except OSError:
+        raise RuntimeBlocked("PID evidence could not be inspected safely") from None
+    if not raw.isdigit() or int(raw) <= 0:
+        raise RuntimeBlocked("PID evidence is malformed")
+    return int(raw)
 
 
 def read_private_state(path: Path) -> str:
@@ -404,6 +506,44 @@ def write_private_state(path: Path, value: str) -> None:
         raise
 
 
+def legacy_group_evidence_path(state_dir: Path, service: str, pid: int) -> Path:
+    return state_dir / "{}{}.{}.pid".format(
+        LEGACY_GROUP_EVIDENCE_PREFIX,
+        service,
+        pid,
+    )
+
+
+def legacy_group_evidence(state_dir: Path) -> Dict[str, list[int]]:
+    evidence = {service: [] for service in SERVICE_START_ORDER}
+    try:
+        entries = list(state_dir.iterdir())
+    except FileNotFoundError:
+        return evidence
+    except OSError:
+        raise RuntimeBlocked("legacy process-group evidence is unavailable") from None
+    pattern = re.compile(
+        r"^{}({})\.([1-9][0-9]*)\.pid$".format(
+            re.escape(LEGACY_GROUP_EVIDENCE_PREFIX),
+            "|".join(re.escape(service) for service in SERVICE_START_ORDER),
+        )
+    )
+    for path in entries:
+        if not path.name.startswith(LEGACY_GROUP_EVIDENCE_PREFIX):
+            continue
+        match = pattern.fullmatch(path.name)
+        if match is None:
+            raise RuntimeBlocked("legacy process-group evidence is malformed")
+        service = match.group(1)
+        pid = int(match.group(2))
+        if read_pid(path) != pid:
+            raise RuntimeBlocked("legacy process-group evidence is inconsistent")
+        evidence[service].append(pid)
+    for pids in evidence.values():
+        pids.sort()
+    return evidence
+
+
 @contextmanager
 def runtime_control_lock(state_dir: Path):
     """Serialize up/down/verify without creating another supervisor."""
@@ -435,6 +575,133 @@ def runtime_control_lock(state_dir: Path):
         handle.close()
 
 
+def suspend_supervisor_for_migration(
+    state_dir: Path,
+    *,
+    request_id: str,
+    operator_identity: str,
+    reason: str,
+    target_schema_version: str,
+) -> Dict[str, Any]:
+    """Atomically fence supervisor automation without reading runtime inputs."""
+
+    state_dir = maintenance_runtime_dir(str(state_dir))
+    try:
+        return suspend_supervisor_control(
+            state_dir,
+            request_id=request_id,
+            operator_identity=operator_identity,
+            reason=reason,
+            target_schema_version=target_schema_version,
+            trusted_root=REPO_ROOT,
+        )
+    except SupervisorControlBlocked as exc:
+        raise RuntimeBlocked(str(exc)) from None
+
+
+def resume_supervisor_after_migration(
+    state_dir: Path,
+    *,
+    cutover_generation: str,
+    request_id: str,
+) -> Dict[str, Any]:
+    """CAS-resume the exact suspended cutover generation and request."""
+
+    state_dir = maintenance_runtime_dir(str(state_dir))
+    try:
+        return resume_supervisor_control(
+            state_dir,
+            cutover_generation=cutover_generation,
+            request_id=request_id,
+            trusted_root=REPO_ROOT,
+        )
+    except SupervisorControlBlocked as exc:
+        raise RuntimeBlocked(str(exc)) from None
+
+
+def read_supervisor_maintenance_status(state_dir: Path) -> Dict[str, Any]:
+    """Read only non-secret control and durable observation metadata."""
+
+    state_dir = maintenance_runtime_dir(str(state_dir))
+    try:
+        return supervisor_control_status(state_dir, trusted_root=REPO_ROOT)
+    except SupervisorControlBlocked as exc:
+        raise RuntimeBlocked(str(exc)) from None
+
+
+def stop_legacy_runtime_for_migration(
+    state_dir: Path,
+    *,
+    cutover_generation: str,
+    request_id: str,
+) -> Dict[str, Any]:
+    """Stop only exact marker+cwd legacy children under an observed fence."""
+
+    state_dir = maintenance_runtime_dir(str(state_dir))
+    try:
+        with legacy_runtime_stop_fence(
+            state_dir,
+            cutover_generation=cutover_generation,
+            request_id=request_id,
+            trusted_root=REPO_ROOT,
+        ) as authorization:
+            with runtime_control_lock(state_dir):
+                child_snapshot = authorization["_legacy_child_snapshot"]
+                stopped = stop_legacy_snapshot_processes(
+                    state_dir,
+                    child_snapshot["children"],
+                )
+                prove_legacy_snapshot_retirement(
+                    state_dir,
+                    child_snapshot["children"],
+                )
+                retirement = authorization["_commit_retirement"]()
+                authorization["retirement_committed"] = True
+                authorization["retirement_receipt"] = retirement
+        return {
+            "status": "LEGACY_RUNTIME_STOPPED",
+            "mode": authorization["mode"],
+            "cutover_generation": authorization["cutover_generation"],
+            "request_id": authorization["request_id"],
+            "services": stopped["services"],
+            "automatic_recovery": "FENCED",
+            "retirement_committed": authorization[
+                "retirement_committed"
+            ],
+            "legacy_retirement_path": authorization[
+                "legacy_retirement_path"
+            ],
+        }
+    except SupervisorControlBlocked as exc:
+        raise RuntimeBlocked(str(exc)) from None
+
+
+def reload_supervisor_for_migration(
+    state_dir: Path,
+    *,
+    cutover_generation: str,
+    request_id: str,
+) -> Dict[str, Any]:
+    """Reload only the launchd supervisor owner; do not touch child services."""
+
+    state_dir = maintenance_runtime_dir(str(state_dir))
+
+    def capture_children() -> Sequence[Mapping[str, Any]]:
+        with runtime_control_lock(state_dir):
+            return capture_legacy_child_process_snapshot(state_dir)
+
+    try:
+        return reload_supervisor_owner(
+            state_dir,
+            cutover_generation=cutover_generation,
+            request_id=request_id,
+            capture_legacy_children=capture_children,
+            trusted_root=REPO_ROOT,
+        )
+    except SupervisorControlBlocked as exc:
+        raise RuntimeBlocked(str(exc)) from None
+
+
 def process_status(state_dir: Path, service: str) -> Dict[str, Any]:
     pid_path = state_dir / PID_FILES[service]
     pid = read_pid(pid_path)
@@ -452,12 +719,20 @@ def managed_process_identity(pid: int, service: str) -> str:
     """Refuse to signal a reused/stale PID that is not our local process."""
 
     try:
+        if os.getpgid(pid) != pid:
+            return MANAGED_PROCESS_NO_MATCH
+    except ProcessLookupError:
+        return MANAGED_PROCESS_NO_MATCH
+    except (PermissionError, OSError):
+        return MANAGED_PROCESS_INACCESSIBLE
+    try:
         completed = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "command="],
+            ["/bin/ps", "-ww", "-p", str(pid), "-o", "command="],
             check=False,
             text=True,
             capture_output=True,
             timeout=PROCESS_STATE_PROBE_TIMEOUT_SECONDS,
+            env=SAFE_PROCESS_PROBE_ENV,
         )
     except (OSError, subprocess.TimeoutExpired):
         return MANAGED_PROCESS_INACCESSIBLE
@@ -471,13 +746,17 @@ def managed_process_identity(pid: int, service: str) -> str:
     expected = SERVICE_PROCESS_MARKERS[service]
     if expected not in command:
         return MANAGED_PROCESS_NO_MATCH
+    argument_suffix = " " + " ".join(SERVICE_EXACT_ARGUMENTS[service])
+    if not command.endswith(argument_suffix):
+        return MANAGED_PROCESS_NO_MATCH
     try:
         cwd_result = subprocess.run(
-            ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+            ["/usr/sbin/lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
             check=False,
             text=True,
             capture_output=True,
             timeout=PROCESS_STATE_PROBE_TIMEOUT_SECONDS,
+            env=SAFE_PROCESS_PROBE_ENV,
         )
     except (OSError, subprocess.TimeoutExpired):
         return MANAGED_PROCESS_INACCESSIBLE
@@ -488,11 +767,149 @@ def managed_process_identity(pid: int, service: str) -> str:
             else MANAGED_PROCESS_INACCESSIBLE
         )
     expected_cwd = SERVICE_WORKING_DIRECTORIES[service]
+    cwd_paths = [
+        line[1:]
+        for line in cwd_result.stdout.splitlines()
+        if line.startswith("n")
+    ]
     return (
         MANAGED_PROCESS_MATCH
-        if "n{}".format(expected_cwd) in cwd_result.stdout
+        if cwd_paths == [str(expected_cwd)]
         else MANAGED_PROCESS_NO_MATCH
     )
+
+
+def _managed_process_ps_value(pid: int, field: str) -> Tuple[str, Optional[str]]:
+    try:
+        completed = subprocess.run(
+            ["/bin/ps", "-ww", "-p", str(pid), "-o", field + "="],
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=PROCESS_STATE_PROBE_TIMEOUT_SECONDS,
+            env=SAFE_PROCESS_PROBE_ENV,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return MANAGED_PROCESS_INACCESSIBLE, None
+    value = completed.stdout.strip()
+    if completed.returncode == 0 and value:
+        return MANAGED_PROCESS_MATCH, value
+    return (
+        (MANAGED_PROCESS_NO_MATCH, None)
+        if process_state(pid) in TERMINAL_PROCESS_STATES
+        else (MANAGED_PROCESS_INACCESSIBLE, None)
+    )
+
+
+def _managed_process_cwd(pid: int) -> Tuple[str, Optional[str]]:
+    try:
+        completed = subprocess.run(
+            ["/usr/sbin/lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=PROCESS_STATE_PROBE_TIMEOUT_SECONDS,
+            env=SAFE_PROCESS_PROBE_ENV,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return MANAGED_PROCESS_INACCESSIBLE, None
+    paths = [
+        line[1:]
+        for line in completed.stdout.splitlines()
+        if line.startswith("n")
+    ]
+    if completed.returncode == 0 and len(paths) == 1 and paths[0].startswith("/"):
+        return MANAGED_PROCESS_MATCH, paths[0]
+    return (
+        (MANAGED_PROCESS_NO_MATCH, None)
+        if process_state(pid) in TERMINAL_PROCESS_STATES
+        else (MANAGED_PROCESS_INACCESSIBLE, None)
+    )
+
+
+def managed_process_snapshot(
+    pid: int,
+    service: str,
+) -> Tuple[str, Optional[Dict[str, Any]]]:
+    """Double-probe one exact process identity without persisting its argv."""
+
+    if service not in SERVICE_START_ORDER or pid <= 0:
+        return MANAGED_PROCESS_NO_MATCH, None
+    state = process_state(pid)
+    if state in TERMINAL_PROCESS_STATES:
+        return MANAGED_PROCESS_NO_MATCH, None
+    if state != PROCESS_STATE_RUNNING:
+        return MANAGED_PROCESS_INACCESSIBLE, None
+    try:
+        first_pgid = os.getpgid(pid)
+    except ProcessLookupError:
+        return MANAGED_PROCESS_NO_MATCH, None
+    except (PermissionError, OSError):
+        return MANAGED_PROCESS_INACCESSIBLE, None
+    if first_pgid != pid:
+        return MANAGED_PROCESS_NO_MATCH, None
+
+    first_values = []
+    for field in ("lstart", "command"):
+        status, value = _managed_process_ps_value(pid, field)
+        if status != MANAGED_PROCESS_MATCH or value is None:
+            return status, None
+        first_values.append(value)
+    cwd_status, first_cwd = _managed_process_cwd(pid)
+    if cwd_status != MANAGED_PROCESS_MATCH or first_cwd is None:
+        return cwd_status, None
+    started, command = first_values
+    expected_marker = SERVICE_PROCESS_MARKERS[service]
+    expected_suffix = " " + " ".join(SERVICE_EXACT_ARGUMENTS[service])
+    if (
+        expected_marker not in command
+        or not command.endswith(expected_suffix)
+        or first_cwd != str(SERVICE_WORKING_DIRECTORIES[service])
+    ):
+        return MANAGED_PROCESS_NO_MATCH, None
+
+    second_state = process_state(pid)
+    try:
+        second_pgid = os.getpgid(pid)
+    except ProcessLookupError:
+        return MANAGED_PROCESS_NO_MATCH, None
+    except (PermissionError, OSError):
+        return MANAGED_PROCESS_INACCESSIBLE, None
+    second_values = []
+    for field in ("lstart", "command"):
+        status, value = _managed_process_ps_value(pid, field)
+        if status != MANAGED_PROCESS_MATCH or value is None:
+            return status, None
+        second_values.append(value)
+    cwd_status, second_cwd = _managed_process_cwd(pid)
+    if cwd_status != MANAGED_PROCESS_MATCH or second_cwd is None:
+        return cwd_status, None
+    if (
+        second_state != PROCESS_STATE_RUNNING
+        or second_pgid != first_pgid
+        or second_values != first_values
+        or second_cwd != first_cwd
+    ):
+        return MANAGED_PROCESS_INACCESSIBLE, None
+
+    command_sha256 = hashlib.sha256(command.encode("utf-8")).hexdigest()
+    start_token = hashlib.sha256(
+        "{}\0{}\0{}\0{}\0{}".format(
+            pid,
+            first_pgid,
+            started,
+            command_sha256,
+            first_cwd,
+        ).encode("utf-8")
+    ).hexdigest()
+    return MANAGED_PROCESS_MATCH, {
+        "service": service,
+        "pid": pid,
+        "pgid": first_pgid,
+        "start_token": start_token,
+        "command_sha256": command_sha256,
+        "cwd": first_cwd,
+    }
 
 
 def is_managed_process(pid: int, service: str) -> bool:
@@ -1595,8 +2012,20 @@ def _writer_lock_holder(state_dir: Path) -> Optional[int]:
             | getattr(os, "O_CLOEXEC", 0)
             | getattr(os, "O_NOFOLLOW", 0),
         )
-    except OSError:
+    except FileNotFoundError:
         return None
+    except OSError:
+        raise RuntimeBlocked(
+            "writer lock evidence could not be inspected safely"
+        ) from None
+    metadata = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+    ):
+        os.close(descriptor)
+        raise RuntimeBlocked("writer lock evidence is not an owner-private file")
     handle = os.fdopen(descriptor, "r+")
     try:
         try:
@@ -1605,8 +2034,10 @@ def _writer_lock_holder(state_dir: Path) -> Optional[int]:
             try:
                 handle.seek(0)
                 return int(handle.read().strip())
-            except ValueError:
-                return None
+            except (OSError, ValueError):
+                raise RuntimeBlocked(
+                    "held writer lock evidence contains an invalid owner"
+                ) from None
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         return None
     finally:
@@ -1871,6 +2302,11 @@ def cleanup_stale_runtime_state(state_dir: Path) -> None:
         if pid is not None:
             state = process_state(pid)
             if state in TERMINAL_PROCESS_STATES:
+                if process_group_state(pid) not in TERMINAL_PROCESS_STATES:
+                    raise RuntimeBlocked(
+                        "{} process leader is terminal but its group is not; "
+                        "refusing a competing start".format(service)
+                    )
                 pid_path.unlink(missing_ok=True)
         elif pid is None:
             try:
@@ -1944,32 +2380,30 @@ def orphaned_managed_process_map(
         service: read_pid(state_dir / PID_FILES[service])
         for service in services
     }
-    try:
-        completed = subprocess.run(
-            ["ps", "-axo", "pid=,command="],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        raise RuntimeBlocked("managed process discovery is unavailable") from None
-    if completed.returncode != 0:
-        raise RuntimeBlocked("managed process discovery is unavailable")
     candidates: Dict[str, list[int]] = {
         service: [] for service in services
     }
-    for line in completed.stdout.splitlines():
-        fields = line.strip().split(maxsplit=1)
-        if len(fields) != 2:
-            continue
+    for service in services:
         try:
-            pid = int(fields[0])
-        except ValueError:
-            continue
-        for service in services:
-            if SERVICE_PROCESS_MARKERS[service] not in fields[1]:
-                continue
+            exact_suffix = re.escape(
+                " " + " ".join(SERVICE_EXACT_ARGUMENTS[service])
+            ) + "$"
+            completed = subprocess.run(
+                ["/usr/bin/pgrep", "-f", exact_suffix],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=SAFE_PROCESS_PROBE_ENV,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            raise RuntimeBlocked("managed process discovery is unavailable") from None
+        if completed.returncode not in {0, 1}:
+            raise RuntimeBlocked("managed process discovery is unavailable")
+        for raw_pid in completed.stdout.splitlines():
+            if not raw_pid.strip().isdigit():
+                raise RuntimeBlocked("managed process discovery is ambiguous")
+            pid = int(raw_pid.strip())
             if pid in {os.getpid(), tracked[service]}:
                 continue
             identity = managed_process_identity(pid, service)
@@ -1989,6 +2423,437 @@ def orphaned_managed_processes(
     return orphaned_managed_process_map(state_dir, (service,))[service]
 
 
+def _legacy_service_candidate_pids(
+    state_dir: Path,
+    services: Sequence[str],
+) -> Tuple[Dict[str, Optional[int]], Dict[str, list[int]]]:
+    tracked = {
+        service: read_pid(state_dir / PID_FILES[service])
+        for service in services
+    }
+    candidates: Dict[str, list[int]] = {}
+    for service in services:
+        try:
+            exact_suffix = re.escape(
+                " " + " ".join(SERVICE_EXACT_ARGUMENTS[service])
+            ) + "$"
+            completed = subprocess.run(
+                ["/usr/bin/pgrep", "-f", exact_suffix],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=PROCESS_STATE_PROBE_TIMEOUT_SECONDS,
+                env=SAFE_PROCESS_PROBE_ENV,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            raise RuntimeBlocked(
+                "legacy child candidate discovery is unavailable"
+            ) from None
+        if completed.returncode not in {0, 1}:
+            raise RuntimeBlocked(
+                "legacy child candidate discovery is unavailable"
+            )
+        service_pids = set()
+        if tracked[service] is not None:
+            service_pids.add(int(tracked[service]))
+        for raw_pid in completed.stdout.splitlines():
+            if not raw_pid.strip().isdigit() or int(raw_pid.strip()) <= 0:
+                raise RuntimeBlocked(
+                    "legacy child candidate discovery is ambiguous"
+                )
+            pid = int(raw_pid.strip())
+            if pid != os.getpid():
+                service_pids.add(pid)
+        candidates[service] = sorted(service_pids)
+    return tracked, candidates
+
+
+def _legacy_child_process_snapshot_once(
+    state_dir: Path,
+    *,
+    allowed_terminal_groups: frozenset[Tuple[str, int]] = frozenset(),
+) -> list[Dict[str, Any]]:
+    tracked, candidates = _legacy_service_candidate_pids(
+        state_dir,
+        SERVICE_START_ORDER,
+    )
+    snapshot = []
+    seen_pids = set()
+    for service in SERVICE_START_ORDER:
+        for pid in candidates[service]:
+            status, identity = managed_process_snapshot(pid, service)
+            if status == MANAGED_PROCESS_MATCH and identity is not None:
+                if pid in seen_pids:
+                    raise RuntimeBlocked(
+                        "legacy child candidate has ambiguous service ownership"
+                    )
+                seen_pids.add(pid)
+                snapshot.append(identity)
+                continue
+            state = process_state(pid)
+            if pid == tracked[service]:
+                group_state = process_group_state(pid)
+                if (
+                    state in TERMINAL_PROCESS_STATES
+                    and group_state in TERMINAL_PROCESS_STATES
+                ):
+                    continue
+                if (
+                    state in TERMINAL_PROCESS_STATES
+                    and group_state == PROCESS_STATE_RUNNING
+                ):
+                    if (service, pid) in allowed_terminal_groups:
+                        continue
+                    raise RuntimeBlocked(
+                        "legacy child snapshot cannot establish a terminal leader's live group identity"
+                    )
+                raise RuntimeBlocked(
+                    "tracked legacy child identity could not be snapshotted safely"
+                )
+            if status == MANAGED_PROCESS_INACCESSIBLE:
+                raise RuntimeBlocked(
+                    "legacy child candidate identity is inaccessible"
+                )
+            if state == PROCESS_STATE_RUNNING:
+                raise RuntimeBlocked(
+                    "legacy child candidate ownership is ambiguous"
+                )
+    snapshot.sort(key=lambda child: (str(child["service"]), int(child["pid"])))
+    return snapshot
+
+
+def capture_legacy_child_process_snapshot(
+    state_dir: Path,
+) -> Sequence[Mapping[str, Any]]:
+    """Capture a stable child generation while the legacy owner is paused."""
+
+    first = _legacy_child_process_snapshot_once(state_dir)
+    second = _legacy_child_process_snapshot_once(state_dir)
+    if first != second:
+        raise RuntimeBlocked(
+            "legacy child candidate set changed during generation snapshot"
+        )
+    return second
+
+
+def _legacy_snapshot_children_by_key(
+    children: Sequence[Mapping[str, Any]],
+) -> Dict[Tuple[str, int], Dict[str, Any]]:
+    indexed: Dict[Tuple[str, int], Dict[str, Any]] = {}
+    seen_pids = set()
+    for raw_child in children:
+        child = dict(raw_child)
+        service = child.get("service")
+        pid = child.get("pid")
+        if (
+            service not in SERVICE_START_ORDER
+            or type(pid) is not int
+            or pid <= 0
+            or child.get("pgid") != pid
+            or (service, pid) in indexed
+            or pid in seen_pids
+        ):
+            raise RuntimeBlocked("legacy child snapshot is invalid")
+        indexed[(str(service), pid)] = child
+        seen_pids.add(pid)
+    return indexed
+
+
+def _matching_live_snapshot_identity(child: Mapping[str, Any]) -> bool:
+    status, current = managed_process_snapshot(
+        int(child["pid"]),
+        str(child["service"]),
+    )
+    return status == MANAGED_PROCESS_MATCH and current == dict(child)
+
+
+def _preflight_legacy_snapshot_stop(
+    state_dir: Path,
+    children: Sequence[Mapping[str, Any]],
+) -> list[Dict[str, Any]]:
+    expected = _legacy_snapshot_children_by_key(children)
+    allowed_terminal_groups = frozenset(expected)
+    first = _legacy_child_process_snapshot_once(
+        state_dir,
+        allowed_terminal_groups=allowed_terminal_groups,
+    )
+    second = _legacy_child_process_snapshot_once(
+        state_dir,
+        allowed_terminal_groups=allowed_terminal_groups,
+    )
+    if first != second:
+        raise RuntimeBlocked(
+            "legacy child candidate set changed before stop; zero signals sent"
+        )
+    for current in second:
+        key = (str(current["service"]), int(current["pid"]))
+        if key not in expected or expected[key] != current:
+            raise RuntimeBlocked(
+                "unexpected legacy child candidate blocks stop; zero signals sent"
+            )
+
+    for service in SERVICE_START_ORDER:
+        tracked_pid = read_pid(state_dir / PID_FILES[service])
+        if tracked_pid is not None and (service, tracked_pid) not in expected:
+            if (
+                process_state(tracked_pid) not in TERMINAL_PROCESS_STATES
+                or process_group_state(tracked_pid)
+                not in TERMINAL_PROCESS_STATES
+            ):
+                raise RuntimeBlocked(
+                    "unexpected tracked legacy child blocks stop; zero signals sent"
+                )
+    recorded = legacy_group_evidence(state_dir)
+    for service, pids in recorded.items():
+        if any((service, pid) not in expected for pid in pids):
+            raise RuntimeBlocked(
+                "unexpected legacy process-group evidence blocks stop; zero signals sent"
+            )
+
+    plan = []
+    for key, child in expected.items():
+        pid = int(child["pid"])
+        state = process_state(pid)
+        group_state = process_group_state(pid)
+        if group_state == PROCESS_STATE_INACCESSIBLE:
+            raise RuntimeBlocked(
+                "legacy child process group is inaccessible; zero signals sent"
+            )
+        if group_state in TERMINAL_PROCESS_STATES:
+            continue
+        if state == PROCESS_STATE_RUNNING:
+            if not _matching_live_snapshot_identity(child):
+                raise RuntimeBlocked(
+                    "legacy child identity changed before stop; zero signals sent"
+                )
+        elif state not in TERMINAL_PROCESS_STATES:
+            raise RuntimeBlocked(
+                "legacy child state is inaccessible; zero signals sent"
+            )
+        plan.append(dict(child))
+    order = {service: index for index, service in enumerate(SERVICE_STOP_ORDER)}
+    plan.sort(key=lambda child: (order[str(child["service"])], int(child["pid"])))
+    return plan
+
+
+def _snapshot_group_signalable(child: Mapping[str, Any]) -> bool:
+    pid = int(child["pid"])
+    state = process_state(pid)
+    group_state = process_group_state(pid)
+    if group_state == PROCESS_STATE_INACCESSIBLE:
+        raise RuntimeBlocked("legacy child process group became inaccessible")
+    if group_state in TERMINAL_PROCESS_STATES:
+        return False
+    if state == PROCESS_STATE_RUNNING:
+        if not _matching_live_snapshot_identity(child):
+            raise RuntimeBlocked(
+                "legacy child identity changed immediately before signaling"
+            )
+        return True
+    if state in TERMINAL_PROCESS_STATES:
+        # A durable live-leader snapshot binds this still-live orphaned PGID.
+        return True
+    raise RuntimeBlocked("legacy child state became inaccessible before signaling")
+
+
+def _wait_for_snapshot_groups(
+    children: Sequence[Mapping[str, Any]],
+    timeout_seconds: float,
+) -> list[Dict[str, Any]]:
+    deadline = time.monotonic() + timeout_seconds
+    remaining = [dict(child) for child in children]
+    while remaining and time.monotonic() < deadline:
+        next_remaining = []
+        for child in remaining:
+            state = process_group_state(int(child["pid"]))
+            if state == PROCESS_STATE_INACCESSIBLE:
+                raise RuntimeBlocked(
+                    "legacy child process-group termination is inaccessible"
+                )
+            if state not in TERMINAL_PROCESS_STATES:
+                next_remaining.append(child)
+        remaining = next_remaining
+        if remaining:
+            time.sleep(0.1)
+    return remaining
+
+
+def stop_legacy_snapshot_processes(
+    state_dir: Path,
+    children: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """Signal only identities durably captured for this cutover generation."""
+
+    expected = _legacy_snapshot_children_by_key(children)
+    plan = _preflight_legacy_snapshot_stop(state_dir, children)
+    # Revalidate the complete plan once more before the first signal. This
+    # closes PID reuse between discovery and the transaction's signal phase.
+    signalable = [child for child in plan if _snapshot_group_signalable(child)]
+    for child in signalable:
+        try:
+            os.killpg(int(child["pgid"]), signal.SIGTERM)
+        except ProcessLookupError:
+            if process_group_state(int(child["pid"])) not in TERMINAL_PROCESS_STATES:
+                raise RuntimeBlocked(
+                    "legacy child process group disappeared ambiguously"
+                ) from None
+        except PermissionError:
+            raise RuntimeBlocked(
+                "legacy child process group could not be signaled safely"
+            ) from None
+
+    remaining = _wait_for_snapshot_groups(signalable, 10)
+    killable = [
+        child for child in remaining if _snapshot_group_signalable(child)
+    ]
+    for child in killable:
+        try:
+            os.killpg(int(child["pgid"]), signal.SIGKILL)
+        except ProcessLookupError:
+            if process_group_state(int(child["pid"])) not in TERMINAL_PROCESS_STATES:
+                raise RuntimeBlocked(
+                    "legacy child process group could not be resolved safely"
+                ) from None
+        except PermissionError:
+            raise RuntimeBlocked(
+                "legacy child process group could not be terminated safely"
+            ) from None
+    remaining = _wait_for_snapshot_groups(
+        killable,
+        FINAL_PROCESS_TERMINATION_TIMEOUT_SECONDS,
+    )
+    if remaining:
+        raise RuntimeBlocked(
+            "legacy child process group did not reach a terminal state"
+        )
+
+    for (service, pid), _child in expected.items():
+        if process_group_state(pid) not in TERMINAL_PROCESS_STATES:
+            raise RuntimeBlocked(
+                "legacy child process group still has live members"
+            )
+        pid_path = state_dir / PID_FILES[service]
+        if read_pid(pid_path) == pid:
+            pid_path.unlink(missing_ok=True)
+        evidence_path = legacy_group_evidence_path(state_dir, service, pid)
+        if evidence_path.exists() and read_pid(evidence_path) == pid:
+            evidence_path.unlink(missing_ok=True)
+    for service in SERVICE_START_ORDER:
+        pid_path = state_dir / PID_FILES[service]
+        pid = read_pid(pid_path)
+        if (
+            pid is not None
+            and process_state(pid) in TERMINAL_PROCESS_STATES
+            and process_group_state(pid) in TERMINAL_PROCESS_STATES
+        ):
+            pid_path.unlink(missing_ok=True)
+    (state_dir / OKX_RUNTIME_READY_FILE).unlink(missing_ok=True)
+
+    services = []
+    for service in SERVICE_STOP_ORDER:
+        service_children = [
+            child
+            for child in expected.values()
+            if child["service"] == service
+        ]
+        if not service_children:
+            services.append({"service": service, "status": "not-snapshotted"})
+        else:
+            services.extend(
+                {
+                    "service": service,
+                    "status": "stopped",
+                    "pid": int(child["pid"]),
+                }
+                for child in sorted(
+                    service_children,
+                    key=lambda item: int(item["pid"]),
+                )
+            )
+    return {"services": services}
+
+
+def prove_legacy_snapshot_retirement(
+    state_dir: Path,
+    children: Sequence[Mapping[str, Any]],
+) -> None:
+    expected = _legacy_snapshot_children_by_key(children)
+    for _proof_round in range(2):
+        for _key, child in expected.items():
+            state = process_group_state(int(child["pid"]))
+            if state not in TERMINAL_PROCESS_STATES:
+                raise RuntimeBlocked(
+                    "legacy child snapshot terminal proof is incomplete"
+                )
+        if _legacy_child_process_snapshot_once(state_dir):
+            raise RuntimeBlocked(
+                "unexpected legacy child candidate blocks retirement receipt"
+            )
+        for service in SERVICE_START_ORDER:
+            if read_pid(state_dir / PID_FILES[service]) is not None:
+                raise RuntimeBlocked(
+                    "legacy tracked PID evidence remains before retirement"
+                )
+        if any(legacy_group_evidence(state_dir).values()):
+            raise RuntimeBlocked(
+                "legacy process-group evidence remains before retirement"
+            )
+        if any(legacy_service_port_owners().values()):
+            raise RuntimeBlocked(
+                "legacy service port ownership is not stably empty before retirement"
+            )
+        if _writer_lock_holder(state_dir) is not None:
+            raise RuntimeBlocked(
+                "legacy writer lock remains held before retirement"
+            )
+
+
+def legacy_service_port_owners() -> Dict[int, list[int]]:
+    """Return bounded local listener metadata; never connect to a service."""
+
+    owners: Dict[int, list[int]] = {}
+    for port in LEGACY_SERVICE_PORTS:
+        try:
+            completed = subprocess.run(
+                [
+                    "/usr/sbin/lsof",
+                    "-nP",
+                    "-iTCP:{}".format(port),
+                    "-sTCP:LISTEN",
+                    "-Fp",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=PROCESS_STATE_PROBE_TIMEOUT_SECONDS,
+                env=SAFE_PROCESS_PROBE_ENV,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            raise RuntimeBlocked(
+                "legacy service port ownership is unavailable"
+            ) from None
+        if completed.returncode not in {0, 1}:
+            raise RuntimeBlocked(
+                "legacy service port ownership is unavailable"
+            )
+        port_owners = []
+        for line in completed.stdout.splitlines():
+            if not line:
+                continue
+            if not line.startswith("p") or not line[1:].isdigit():
+                raise RuntimeBlocked(
+                    "legacy service port ownership is ambiguous"
+                )
+            pid = int(line[1:])
+            if pid <= 0:
+                raise RuntimeBlocked(
+                    "legacy service port ownership is ambiguous"
+                )
+            port_owners.append(pid)
+        owners[port] = sorted(set(port_owners))
+    return owners
+
+
 def cleanup_orphaned_managed_processes(state_dir: Path) -> None:
     """Terminate only exact marker+cwd children missing from canonical PID files."""
 
@@ -1996,12 +2861,23 @@ def cleanup_orphaned_managed_processes(state_dir: Path) -> None:
         state_dir,
         SERVICE_STOP_ORDER,
     )
+    recorded = legacy_group_evidence(state_dir)
+    for service in SERVICE_STOP_ORDER:
+        orphaned[service] = sorted(
+            set(orphaned[service]) | set(recorded[service])
+        )
     for service in SERVICE_STOP_ORDER:
         for pid in orphaned[service]:
+            evidence_path = legacy_group_evidence_path(state_dir, service, pid)
             identity = managed_process_identity(pid, service)
             if identity != MANAGED_PROCESS_MATCH:
                 state = process_state(pid)
                 if state in TERMINAL_PROCESS_STATES:
+                    if process_group_state(pid) not in TERMINAL_PROCESS_STATES:
+                        raise RuntimeBlocked(
+                            "managed orphan process group still has live members"
+                        )
+                    evidence_path.unlink(missing_ok=True)
                     continue
                 if identity == MANAGED_PROCESS_INACCESSIBLE:
                     raise RuntimeBlocked(
@@ -2011,10 +2887,17 @@ def cleanup_orphaned_managed_processes(state_dir: Path) -> None:
                 raise RuntimeBlocked(
                     "managed orphan process identity changed before signaling"
                 )
+            if pid not in recorded[service]:
+                write_private_state(evidence_path, "{}\n".format(pid))
             try:
                 os.killpg(pid, signal.SIGTERM)
             except ProcessLookupError:
                 if process_state(pid) in TERMINAL_PROCESS_STATES:
+                    if process_group_state(pid) not in TERMINAL_PROCESS_STATES:
+                        raise RuntimeBlocked(
+                            "managed orphan process group still has live members"
+                        )
+                    evidence_path.unlink(missing_ok=True)
                     continue
                 raise RuntimeBlocked(
                     "managed orphan process group could not be resolved safely"
@@ -2032,6 +2915,11 @@ def cleanup_orphaned_managed_processes(state_dir: Path) -> None:
                 time.sleep(0.1)
                 state = process_state(pid)
             if state in TERMINAL_PROCESS_STATES:
+                if process_group_state(pid) not in TERMINAL_PROCESS_STATES:
+                    raise RuntimeBlocked(
+                        "managed orphan process group still has live members"
+                    )
+                evidence_path.unlink(missing_ok=True)
                 continue
             if state == PROCESS_STATE_INACCESSIBLE:
                 raise RuntimeBlocked(
@@ -2040,6 +2928,11 @@ def cleanup_orphaned_managed_processes(state_dir: Path) -> None:
             if not is_managed_process(pid, service):
                 state = process_state(pid)
                 if state in TERMINAL_PROCESS_STATES:
+                    if process_group_state(pid) not in TERMINAL_PROCESS_STATES:
+                        raise RuntimeBlocked(
+                            "managed orphan process group still has live members"
+                        )
+                    evidence_path.unlink(missing_ok=True)
                     continue
                 raise RuntimeBlocked(
                     "managed orphan process identity changed before termination"
@@ -2069,6 +2962,11 @@ def cleanup_orphaned_managed_processes(state_dir: Path) -> None:
                 raise RuntimeBlocked(
                     "managed orphan process group did not reach a terminal state"
                 )
+            if process_group_state(pid) not in TERMINAL_PROCESS_STATES:
+                raise RuntimeBlocked(
+                    "managed orphan process group still has live members"
+                )
+            evidence_path.unlink(missing_ok=True)
 
 
 def stop_service(state_dir: Path, service: str) -> Dict[str, Any]:
@@ -2078,6 +2976,14 @@ def stop_service(state_dir: Path, service: str) -> Dict[str, Any]:
         return {"service": service, "status": "not-managed"}
     state = process_state(pid)
     if state in TERMINAL_PROCESS_STATES:
+        group_state = process_group_state(pid)
+        if group_state not in TERMINAL_PROCESS_STATES:
+            return {
+                "service": service,
+                "status": "BLOCKED",
+                "pid": pid,
+                "reason": "managed process leader is terminal but its group still has live members",
+            }
         pid_path.unlink(missing_ok=True)
         return {"service": service, "status": "stale-pid-removed", "pid": pid}
     if state == PROCESS_STATE_INACCESSIBLE:
@@ -2090,6 +2996,13 @@ def stop_service(state_dir: Path, service: str) -> Dict[str, Any]:
     if not is_managed_process(pid, service):
         state = process_state(pid)
         if state in TERMINAL_PROCESS_STATES:
+            if process_group_state(pid) not in TERMINAL_PROCESS_STATES:
+                return {
+                    "service": service,
+                    "status": "BLOCKED",
+                    "pid": pid,
+                    "reason": "managed process leader is terminal but its group still has live members",
+                }
             pid_path.unlink(missing_ok=True)
             return {
                 "service": service,
@@ -2129,6 +3042,13 @@ def stop_service(state_dir: Path, service: str) -> Dict[str, Any]:
         if not is_managed_process(pid, service):
             state = process_state(pid)
             if state in TERMINAL_PROCESS_STATES:
+                if process_group_state(pid) not in TERMINAL_PROCESS_STATES:
+                    return {
+                        "service": service,
+                        "status": "BLOCKED",
+                        "pid": pid,
+                        "reason": "managed process leader terminated but its group still has live members",
+                    }
                 pid_path.unlink(missing_ok=True)
                 return {
                     "service": service,
@@ -2171,6 +3091,13 @@ def stop_service(state_dir: Path, service: str) -> Dict[str, Any]:
             "pid": pid,
             "reason": "managed process group did not reach a terminal state",
         }
+    if process_group_state(pid) not in TERMINAL_PROCESS_STATES:
+        return {
+            "service": service,
+            "status": "BLOCKED",
+            "pid": pid,
+            "reason": "managed process leader terminated but its group still has live members",
+        }
     pid_path.unlink(missing_ok=True)
     return {"service": service, "status": "stopped", "pid": pid}
 
@@ -2193,10 +3120,24 @@ def require_complete_startup_cleanup(
         for item in stopped.get("services", [])
         if item.get("status") == "BLOCKED"
     ]
+    stopped_pids = {
+        str(item.get("service")): int(item["pid"])
+        for item in stopped.get("services", [])
+        if isinstance(item, Mapping)
+        and isinstance(item.get("service"), str)
+        and type(item.get("pid")) is int
+        and int(item["pid"]) > 0
+    }
     statuses = {
         service: process_status(state_dir, service)
         for service in SERVICE_START_ORDER
     }
+    nonterminal_groups = [
+        service
+        for service, pid in stopped_pids.items()
+        if process_group_state(pid)
+        not in TERMINAL_PROCESS_STATES
+    ]
     remaining = [
         service for service, status in statuses.items() if status["running"]
     ]
@@ -2212,22 +3153,31 @@ def require_complete_startup_cleanup(
     orphaned = {
         service: pids for service, pids in orphaned.items() if pids
     }
+    recorded_groups = {
+        service: pids
+        for service, pids in legacy_group_evidence(state_dir).items()
+        if pids
+    }
     lock_holder = _writer_lock_holder(state_dir)
     if (
         blocked
         or remaining
         or inaccessible
+        or nonterminal_groups
         or orphaned
+        or recorded_groups
         or lock_holder is not None
     ):
         raise RuntimeBlocked(
             "runtime startup failed and cleanup is incomplete; "
-            "blocked={}, remaining={}, inaccessible={}, orphaned={}, "
+            "blocked={}, remaining={}, inaccessible={}, nonterminal_groups={}, orphaned={}, recorded_groups={}, "
             "writer_lock_held={}".format(
                 blocked,
                 remaining,
                 inaccessible,
+                nonterminal_groups,
                 sorted(orphaned),
+                sorted(recorded_groups),
                 lock_holder is not None,
             )
         )
@@ -2535,6 +3485,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
             "supervisor-capability",
             "supervisor-freeze-openings",
             "supervisor-thaw-openings",
+            "supervisor-maintenance-suspend",
+            "supervisor-maintenance-status",
+            "supervisor-maintenance-resume",
+            "supervisor-maintenance-stop-legacy",
+            "supervisor-maintenance-reload-owner",
         ),
     )
     parser.add_argument("--runtime-dir")
@@ -2545,21 +3500,42 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--instrument",
         default=OKX_DEMO_CANARY_DEFAULT_INSTRUMENT,
     )
+    parser.add_argument("--request-id")
+    parser.add_argument("--operator-identity")
+    parser.add_argument("--reason")
+    parser.add_argument("--target-schema-version")
+    parser.add_argument("--cutover-generation")
     return parser.parse_args(argv)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     try:
-        load_runtime_environment()
-        state_dir = runtime_dir(args.runtime_dir)
+        if (
+            args.command not in SUPERVISOR_MAINTENANCE_COMMANDS
+            and args.command not in FENCE_FIRST_RUNTIME_COMMANDS
+        ):
+            load_runtime_environment()
+        state_dir = (
+            maintenance_runtime_dir(args.runtime_dir)
+            if args.command in SUPERVISOR_MAINTENANCE_COMMANDS
+            else runtime_dir(args.runtime_dir)
+        )
         if args.command == "doctor":
             payload = doctor(state_dir)
         elif args.command == "bootstrap":
             payload = bootstrap()
         elif args.command == "up":
-            with runtime_control_lock(state_dir):
-                payload = start(state_dir)
+            try:
+                with active_supervisor_automation_fence(
+                    DEFAULT_RUNTIME_DIR,
+                    trusted_root=REPO_ROOT,
+                ):
+                    load_runtime_environment()
+                    with runtime_control_lock(state_dir):
+                        payload = start(state_dir)
+            except SupervisorControlBlocked as exc:
+                raise RuntimeBlocked(str(exc)) from None
         elif args.command == "status":
             payload = current_status(state_dir)
         elif args.command == "down":
@@ -2600,8 +3576,80 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             with runtime_control_lock(state_dir):
                 payload = freeze_okx_openings(state_dir)
         elif args.command == "supervisor-thaw-openings":
-            with runtime_control_lock(state_dir):
-                payload = thaw_okx_openings(state_dir)
+            try:
+                with active_supervisor_automation_fence(
+                    DEFAULT_RUNTIME_DIR,
+                    trusted_root=REPO_ROOT,
+                ):
+                    with runtime_control_lock(state_dir):
+                        payload = thaw_okx_openings(state_dir)
+            except SupervisorControlBlocked as exc:
+                raise RuntimeBlocked(str(exc)) from None
+        elif args.command == "supervisor-maintenance-suspend":
+            if not all(
+                isinstance(value, str) and value
+                for value in (
+                    args.request_id,
+                    args.operator_identity,
+                    args.reason,
+                    args.target_schema_version,
+                )
+            ):
+                raise RuntimeBlocked(
+                    "supervisor maintenance suspend requires request, operator, "
+                    "reason, and target schema metadata"
+                )
+            payload = suspend_supervisor_for_migration(
+                state_dir,
+                request_id=args.request_id,
+                operator_identity=args.operator_identity,
+                reason=args.reason,
+                target_schema_version=args.target_schema_version,
+            )
+        elif args.command == "supervisor-maintenance-status":
+            payload = read_supervisor_maintenance_status(state_dir)
+        elif args.command == "supervisor-maintenance-resume":
+            if not all(
+                isinstance(value, str) and value
+                for value in (args.cutover_generation, args.request_id)
+            ):
+                raise RuntimeBlocked(
+                    "supervisor maintenance resume requires the exact cutover "
+                    "generation and request"
+                )
+            payload = resume_supervisor_after_migration(
+                state_dir,
+                cutover_generation=args.cutover_generation,
+                request_id=args.request_id,
+            )
+        elif args.command == "supervisor-maintenance-stop-legacy":
+            if not all(
+                isinstance(value, str) and value
+                for value in (args.cutover_generation, args.request_id)
+            ):
+                raise RuntimeBlocked(
+                    "legacy runtime stop requires the exact cutover generation "
+                    "and request"
+                )
+            payload = stop_legacy_runtime_for_migration(
+                state_dir,
+                cutover_generation=args.cutover_generation,
+                request_id=args.request_id,
+            )
+        elif args.command == "supervisor-maintenance-reload-owner":
+            if not all(
+                isinstance(value, str) and value
+                for value in (args.cutover_generation, args.request_id)
+            ):
+                raise RuntimeBlocked(
+                    "supervisor owner reload requires the exact cutover "
+                    "generation and request"
+                )
+            payload = reload_supervisor_for_migration(
+                state_dir,
+                cutover_generation=args.cutover_generation,
+                request_id=args.request_id,
+            )
         else:
             with runtime_control_lock(state_dir):
                 status = current_status(state_dir)

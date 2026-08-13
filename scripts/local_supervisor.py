@@ -19,9 +19,23 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 
+try:
+    from scripts.local_supervisor_control import (
+        CONTROL_MODE_MIGRATION_SUSPENDED,
+        SupervisorControlBlocked,
+        observe_supervisor_control,
+    )
+except ModuleNotFoundError:  # Direct ``python scripts/local_supervisor.py``.
+    from local_supervisor_control import (  # type: ignore[no-redef]
+        CONTROL_MODE_MIGRATION_SUSPENDED,
+        SupervisorControlBlocked,
+        observe_supervisor_control,
+    )
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_SCRIPT = REPO_ROOT / "scripts" / "local_runtime.py"
+SUPERVISOR_RUNTIME_DIR = REPO_ROOT / ".freqtrade-ai" / "runtime"
 DEFAULT_INTERVAL_SECONDS = 30
 COMMAND_TIMEOUT_SECONDS = 900
 CREDENTIAL_RETRY_COOLDOWN_SECONDS = 300
@@ -78,7 +92,8 @@ STOP_EVENT = threading.Event()
 LAST_CREDENTIAL_GENERATION: Optional[str] = None
 LAST_FAILED_CREDENTIAL_GENERATION: Optional[str] = None
 LAST_FAILED_CREDENTIAL_RETRY_AT = 0.0
-LAST_TERMINAL_CREDENTIAL_GENERATION: Optional[str] = None
+CAPABILITY_UNAVAILABLE_TERMINAL = object()
+LAST_TERMINAL_CREDENTIAL_GENERATION: Optional[object] = None
 
 
 def timestamp() -> str:
@@ -181,11 +196,11 @@ def is_terminal_credential_attestation_failure(
 
 
 def record_terminal_credential_failure(
-    generation: str,
+    generation: Optional[str],
     stage: str,
     payload: Dict[str, Any],
 ) -> bool:
-    """Latch one credential generation without exposing credential details."""
+    """Latch one generation or unavailable-capability episode safely."""
 
     global LAST_FAILED_CREDENTIAL_GENERATION
     global LAST_FAILED_CREDENTIAL_RETRY_AT
@@ -193,11 +208,21 @@ def record_terminal_credential_failure(
 
     LAST_FAILED_CREDENTIAL_GENERATION = generation
     LAST_FAILED_CREDENTIAL_RETRY_AT = 0.0
-    LAST_TERMINAL_CREDENTIAL_GENERATION = generation
+    LAST_TERMINAL_CREDENTIAL_GENERATION = (
+        generation
+        if generation is not None
+        else CAPABILITY_UNAVAILABLE_TERMINAL
+    )
+    generation_status = (
+        {"credential_generation_status": "UNAVAILABLE"}
+        if generation is None
+        else {}
+    )
     emit(
         "runtime_recovery_blocked",
         stage=stage,
         terminal_for_credential_generation=True,
+        **generation_status,
         **safe_runtime_failure_details(payload),
     )
     return False
@@ -211,7 +236,7 @@ def verify_or_recover(generation: Optional[str] = None) -> bool:
     emit(
         "runtime_recovery_started",
         verify_status=verification.get("status"),
-        verify_reason=verification.get("reason"),
+        **safe_runtime_failure_details(verification),
     )
     stopped = run_runtime("down")
     if any(service.get("status") == "BLOCKED" for service in stopped.get("services", [])):
@@ -220,10 +245,7 @@ def verify_or_recover(generation: Optional[str] = None) -> bool:
 
     started = run_runtime("up")
     if started["return_code"] != 0:
-        if (
-            generation is not None
-            and is_terminal_credential_attestation_failure(started)
-        ):
+        if is_terminal_credential_attestation_failure(started):
             return record_terminal_credential_failure(
                 generation,
                 "up",
@@ -233,7 +255,7 @@ def verify_or_recover(generation: Optional[str] = None) -> bool:
             "runtime_recovery_blocked",
             stage="up",
             status=started.get("status"),
-            reason=started.get("reason"),
+            **safe_runtime_failure_details(started),
         )
         return False
 
@@ -242,7 +264,7 @@ def verify_or_recover(generation: Optional[str] = None) -> bool:
     emit(
         "runtime_recovered" if recovered else "runtime_recovery_failed",
         status=final_verification.get("status"),
-        reason=final_verification.get("reason"),
+        **safe_runtime_failure_details(final_verification),
     )
     return recovered
 
@@ -326,10 +348,39 @@ def controlled_credential_restart(generation: str) -> bool:
     return True
 
 
+def supervisor_automation_allowed(*, stage: str) -> bool:
+    """Observe the local cutover fence before any automatic runtime action."""
+
+    try:
+        observation = observe_supervisor_control(
+            SUPERVISOR_RUNTIME_DIR,
+            trusted_root=REPO_ROOT,
+        )
+    except SupervisorControlBlocked:
+        emit(
+            "supervisor_maintenance_fail_closed",
+            stage=stage,
+            status="BLOCKED",
+        )
+        return False
+    if observation.get("mode") == CONTROL_MODE_MIGRATION_SUSPENDED:
+        emit(
+            "supervisor_migration_suspended",
+            stage=stage,
+            status="MIGRATION_SUSPENDED",
+            cutover_generation=observation.get("cutover_generation"),
+            observed_receipt="DURABLE",
+        )
+        return False
+    return True
+
+
 def supervise_once() -> bool:
     global LAST_FAILED_CREDENTIAL_GENERATION
     global LAST_FAILED_CREDENTIAL_RETRY_AT
     global LAST_TERMINAL_CREDENTIAL_GENERATION
+    if not supervisor_automation_allowed(stage="supervise"):
+        return False
     generation = credential_generation()
     if generation is None:
         emit("credential_capability_unavailable")
@@ -407,6 +458,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         except Exception as exc:
             emit("supervisor_error", error_type=exc.__class__.__name__)
         STOP_EVENT.wait(interval)
+    if not supervisor_automation_allowed(stage="shutdown"):
+        emit(
+            "supervisor_stopped",
+            runtime_down="SUPPRESSED_BY_MAINTENANCE_FENCE",
+        )
+        return 0
     stopped = run_runtime("down")
     emit(
         "supervisor_stopped",
