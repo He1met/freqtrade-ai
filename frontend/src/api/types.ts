@@ -179,9 +179,9 @@ export type StrategyGenerationApiResult = {
 export type DryRunReadinessPayload = {
   strategyVersionId: string;
   strategyName?: string | null;
-  pair?: string;
-  timeframe?: string;
-  exchange?: string;
+  pair: string;
+  timeframe: string;
+  exchange: string;
 };
 
 export type DryRunReadinessCheck = {
@@ -718,7 +718,7 @@ export type RankingEntry = {
   versionNumber: number;
   filePath: string;
   scoringVersion: string | null;
-  totalScore: number;
+  totalScore: number | null;
   rawTotalScore: number | null;
   profitScore: number | null;
   riskScore: number | null;
@@ -732,9 +732,9 @@ export type RankingEntry = {
 
 export type RankingScoreBreakdownItem = {
   name: string;
-  score: number;
-  weight: number;
-  contribution: number;
+  score: number | null;
+  weight: number | null;
+  contribution: number | null;
 };
 
 export type RankingSignalSummary = {

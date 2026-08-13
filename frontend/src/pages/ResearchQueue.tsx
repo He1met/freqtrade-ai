@@ -90,7 +90,7 @@ export function ResearchQueue() {
       setTriggerError("需要本地 operator token；凭据仅保留在当前页面内存中。");
       return;
     }
-    if (!window.confirm("只刷新公开行情并持久化本批 60 条候选；不会在本次请求中启动回测、部署、信号或订单。继续吗？")) return;
+    if (!window.confirm("只刷新公开行情并按后端当前配置持久化本批候选；不会在本次请求中启动回测、部署、信号或订单。继续吗？")) return;
     const controller = new AbortController();
     setTriggering(true);
     setTriggerResult(null);
@@ -118,11 +118,11 @@ export function ResearchQueue() {
         <div className="research-queue-safe-actions"><button disabled type="button">取消不可用</button><button disabled type="button">重试不可用</button><span>候选执行状态只读；生成由后端 runtime/data/ownership 门禁授权。</span></div>
       </section>
 
-      <section aria-label="本批次辅助汇总" className="research-queue-summary">{[["本批目标", projection.batch?.expected_count ?? 60], ["生成状态", researchGenerationStatusLabel(projection.available ? projection.batch?.generation_status ?? null : null)], ["等待中", projection.available ? projection.batch?.waiting_count ?? 0 : "暂不可用"], ["已完成", projection.batch?.completed_count ?? projection.completed.length], ["剩余", projection.available ? projection.batch?.remaining_count ?? 0 : "暂不可用"], ["队列健康", projection.health?.status ?? "UNKNOWN"]].map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</section>
+      <section aria-label="本批次辅助汇总" className="research-queue-summary">{[["本批目标", projection.batch?.expected_count ?? "UNKNOWN"], ["生成状态", researchGenerationStatusLabel(projection.available ? projection.batch?.generation_status ?? null : null)], ["等待中", projection.available ? projection.batch?.waiting_count ?? 0 : "暂不可用"], ["已完成", projection.batch?.completed_count ?? projection.completed.length], ["剩余", projection.available ? projection.batch?.remaining_count ?? 0 : "暂不可用"], ["队列健康", projection.health?.status ?? "UNKNOWN"]].map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</section>
 
       <div className="research-queue-controls" role="search">
         <label><span>搜索</span><input onChange={(event) => setFilter("query", event.target.value)} placeholder="名称或候选标识" type="search" value={filters.query} /></label>
-        <label><span>状态</span><select onChange={(event) => setFilter("status", event.target.value as CandidateResearchQueueStatus | "ALL")} value={filters.status}><option value="ALL">全部（默认不隐藏失败/等待）</option>{["PENDING", "CLAIMED", "RUNNING", "VALIDATED", "REJECTED", "FAILED", "QUALIFIED_PENDING_DEPLOYMENT", "DEPLOYING", "DEPLOYED"].map((value) => <option key={value} value={value}>{researchQueueStatusLabel(value as CandidateResearchQueueStatus)}</option>)}</select></label>
+        <label><span>状态</span><select onChange={(event) => setFilter("status", event.target.value as CandidateResearchQueueStatus | "ALL")} value={filters.status}><option value="ALL">全部（默认不隐藏失败/等待）</option>{["PENDING", "CLAIMED", "RUNNING", "VALIDATED", "REJECTED", "FAILED", "QUALIFIED_PENDING_DEPLOYMENT", "DEPLOYING", "DEPLOYED", "UNKNOWN"].map((value) => <option key={value} value={value}>{researchQueueStatusLabel(value as CandidateResearchQueueStatus)}</option>)}</select></label>
         <label><span>品种</span><select onChange={(event) => setFilter("pair", event.target.value)} value={filters.pair}><option value="">全部品种</option>{pairs.map((pair) => <option key={pair}>{pair}</option>)}</select></label>
         <label><span>周期</span><select onChange={(event) => setFilter("timeframe", event.target.value)} value={filters.timeframe}><option value="">全部周期</option>{timeframes.map((timeframe) => <option key={timeframe}>{timeframe}</option>)}</select></label>
         <label><span>批次</span><select onChange={(event) => setFilter("batch", event.target.value)} value={filters.batch}><option value="">全部批次</option>{batchId ? <option value={batchId}>{batchId}</option> : null}</select></label>

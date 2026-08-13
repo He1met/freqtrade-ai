@@ -247,7 +247,7 @@ export function Dashboard() {
             </details>
           </>
         ) : (
-          <EmptyState title="尚无持久化研究批次" description="这表示尚未完成生成与入库，不代表 60 条候选被拒绝。" />
+          <EmptyState title="尚无持久化研究批次" description="这表示尚未完成生成与入库，不代表已有候选被拒绝。" />
         )}
       </section>
 

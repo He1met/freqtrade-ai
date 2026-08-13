@@ -174,7 +174,7 @@ export function Ranking() {
                         value={entry.scoreBreakdown
                           .map(
                             (item) =>
-                              `${rankingScoreLabel(item)}：得分 ${displayNumber(item.score, { maximumFractionDigits: 2 })}，权重 ${displayNumber(item.weight * 100, { maximumFractionDigits: 1 })}%，贡献 ${displayNumber(item.contribution, { maximumFractionDigits: 2 })}`,
+                              `${rankingScoreLabel(item)}：得分 ${displayNumber(item.score, { maximumFractionDigits: 2 })}，权重 ${displayNumber(item.weight === null ? null : item.weight * 100, { maximumFractionDigits: 1 })}%，贡献 ${displayNumber(item.contribution, { maximumFractionDigits: 2 })}`,
                           )
                           .join("\n")}
                       />

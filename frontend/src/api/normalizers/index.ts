@@ -68,6 +68,10 @@ import {
   normalizeReportsEnvValues,
   normalizeValueRendered,
 } from "../operatorPresenceContract";
+import {
+  normalizePersistedScoreBreakdown,
+  optionalFiniteScore,
+} from "../scoreEvidence.ts";
 
 // The frontend keeps a controlled fallback path while backend endpoints are
 // still being stabilized. The flag returned by loadMvpData makes that fallback
@@ -786,29 +790,7 @@ export function normalizeRankingSignal(raw: unknown): RankingSignalSummary {
 }
 
 export function normalizeScoreBreakdown(raw: unknown): RankingScoreBreakdownItem[] {
-  return Array.isArray(raw)
-    ? raw.map((item) => {
-        const value = asRecord(item);
-        return {
-          name: typeof value.name === "string" ? value.name : "score",
-          score: asNumber(value.score),
-          weight: asNumber(value.weight),
-          contribution: asNumber(value.contribution),
-        };
-      })
-    : [];
-}
-
-function buildFallbackScoreBreakdown(raw: RawRankingEntry): RankingScoreBreakdownItem[] {
-  return [
-    { name: "profit_score", score: raw.profitScore ?? raw.profit_score ?? 0, weight: 0.35 },
-    { name: "risk_score", score: raw.riskScore ?? raw.risk_score ?? 0, weight: 0.25 },
-    { name: "stability_score", score: raw.stabilityScore ?? raw.stability_score ?? 0, weight: 0.15 },
-    { name: "quality_score", score: raw.qualityScore ?? raw.quality_score ?? 0, weight: 0.25 },
-  ].map((item) => ({
-    ...item,
-    contribution: Number((item.score * item.weight).toFixed(6)),
-  }));
+  return normalizePersistedScoreBreakdown(raw);
 }
 
 export function normalizeElimination(raw: unknown): RankingEliminationSummary {
@@ -838,7 +820,7 @@ export function normalizeRankingEntry(raw: RawRankingEntry, index: number): Rank
     versionNumber: raw.versionNumber ?? raw.version_number ?? 0,
     filePath: raw.filePath ?? raw.file_path ?? "",
     scoringVersion: raw.scoringVersion ?? raw.scoring_version ?? null,
-    totalScore: raw.totalScore ?? raw.total_score ?? 0,
+    totalScore: optionalFiniteScore(raw.totalScore ?? raw.total_score),
     rawTotalScore:
       raw.rawTotalScore ??
       raw.raw_total_score ??
@@ -847,7 +829,7 @@ export function normalizeRankingEntry(raw: RawRankingEntry, index: number): Rank
     riskScore: raw.riskScore ?? raw.risk_score ?? null,
     stabilityScore: raw.stabilityScore ?? raw.stability_score ?? null,
     qualityScore: raw.qualityScore ?? raw.quality_score ?? null,
-    scoreBreakdown: breakdown.length > 0 ? breakdown : buildFallbackScoreBreakdown(raw),
+    scoreBreakdown: breakdown,
     elimination: normalizeElimination(raw.elimination ?? metricsSnapshot.elimination),
     warnings: Array.isArray(warningSignals) ? warningSignals.map(normalizeRankingSignal) : [],
     dataSource: normalizeDataSourceTrace(

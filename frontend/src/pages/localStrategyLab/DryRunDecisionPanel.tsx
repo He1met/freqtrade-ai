@@ -31,6 +31,7 @@ import {
   candidateIdentityMatches,
   deriveDryRunCandidate,
   deriveDryRunDecision,
+  deriveDryRunRequestTarget,
   inactiveActionLabel,
   readinessReason,
   readinessTerminalStatus,
@@ -101,15 +102,21 @@ export function DryRunDecisionPanel({
   });
   const candidate = deriveDryRunCandidate(data, selection);
   const candidateId = candidate?.strategyVersionId ?? null;
-  const candidateIdentity = useRef({ strategyVersionId: candidateId, epoch: 0 });
-  if (candidateIdentity.current.strategyVersionId !== candidateId) {
+  const requestTarget = deriveDryRunRequestTarget(data, selection);
+  const candidateRequestIdentity = candidate
+    ? [candidate.strategyVersionId, requestTarget?.pair, requestTarget?.timeframe, requestTarget?.exchange]
+      .map((value) => value ?? "MISSING")
+      .join("|")
+    : null;
+  const candidateIdentity = useRef({ strategyVersionId: candidateRequestIdentity, epoch: 0 });
+  if (candidateIdentity.current.strategyVersionId !== candidateRequestIdentity) {
     candidateIdentity.current = {
-      strategyVersionId: candidateId,
+      strategyVersionId: candidateRequestIdentity,
       epoch: candidateIdentity.current.epoch + 1,
     };
   }
-  const readiness = reconcileCandidateScopedValue(readinessState, candidateId).value;
-  const manualApproval = reconcileCandidateScopedValue(approvalState, candidateId).value === true;
+  const readiness = reconcileCandidateScopedValue(readinessState, candidateRequestIdentity).value;
+  const manualApproval = reconcileCandidateScopedValue(approvalState, candidateRequestIdentity).value === true;
   const runtime = data.operatorDashboard.runtimeContract.dryRunReadiness;
   const manifest = data.dryRun.manifest;
   const snapshot = data.dryRun.snapshot;
@@ -125,8 +132,15 @@ export function DryRunDecisionPanel({
   const environmentScope = candidate
     ? data.strategyVersions.find((version) => version.id === candidate.strategyVersionId)?.dataSource?.environment.scope ?? "unknown"
     : "unknown";
-  const actionDisabledReason = model.action === "start"
-    ? !operatorToken
+  const targetBlockedReason = requestTarget
+    ? null
+    : "缺少当前候选链上持久 BacktestProfile 的显式 pair、timeframe 或 exchange；不会使用默认目标。";
+  const actionDisabledReason = model.action === "check"
+    ? targetBlockedReason
+    : model.action === "start"
+    ? targetBlockedReason
+      ? targetBlockedReason
+      : !operatorToken
       ? "请输入本地 operator token 后才能启动。"
       : !manualApproval
         ? "勾选本次人工批准后才能启动。"
@@ -136,13 +150,13 @@ export function DryRunDecisionPanel({
       : null;
 
   useEffect(() => {
-    setReadinessState((current) => reconcileCandidateScopedValue(current, candidateId));
-    setApprovalState((current) => reconcileCandidateScopedValue(current, candidateId));
+    setReadinessState((current) => reconcileCandidateScopedValue(current, candidateRequestIdentity));
+    setApprovalState((current) => reconcileCandidateScopedValue(current, candidateRequestIdentity));
     setTransient((current) =>
       current.kind === "checking" || current.kind === "failed"
         ? { kind: "idle" }
         : current);
-  }, [candidateId]);
+  }, [candidateRequestIdentity]);
 
   useEffect(() => {
     if (!pendingReconciliation) return;
@@ -187,11 +201,12 @@ export function DryRunDecisionPanel({
   ]);
 
   async function check() {
-    if (!candidate) return;
+    if (!candidate || !requestTarget || !candidateRequestIdentity) return;
     const checkedCandidateId = candidate.strategyVersionId;
+    const checkedCandidateRequestIdentity = candidateRequestIdentity;
     const checkedCandidateIdentity = { ...candidateIdentity.current };
-    setReadinessState({ strategyVersionId: checkedCandidateId, value: null });
-    setApprovalState({ strategyVersionId: checkedCandidateId, value: null });
+    setReadinessState({ strategyVersionId: checkedCandidateRequestIdentity, value: null });
+    setApprovalState({ strategyVersionId: checkedCandidateRequestIdentity, value: null });
     setTransient({ kind: "checking" });
     const lifecycleId = createActionLifecycleId("dry-run");
     recordAction(createActionEvidence({
@@ -201,12 +216,13 @@ export function DryRunDecisionPanel({
     }));
     try {
       const result = await checkDryRunReadiness({
+        ...requestTarget,
         strategyName: candidate.strategyName,
         strategyVersionId: candidate.strategyVersionId,
       });
       const isCurrentCompletion = candidateIdentityMatches(candidateIdentity.current, checkedCandidateIdentity);
       if (isCurrentCompletion) {
-        setReadinessState({ strategyVersionId: checkedCandidateId, value: result });
+        setReadinessState({ strategyVersionId: checkedCandidateRequestIdentity, value: result });
         setTransient({ kind: "idle" });
       }
       if (!isCurrentCompletion) {
@@ -273,7 +289,7 @@ export function DryRunDecisionPanel({
   }
 
   async function start() {
-    if (!candidate || !manualApproval || !operatorToken) return;
+    if (!candidate || !requestTarget || !candidateRequestIdentity || !manualApproval || !operatorToken) return;
     setTransient({ kind: "starting" });
     const lifecycleId = createActionLifecycleId("dry-run");
     recordAction(createActionEvidence({
@@ -283,13 +299,14 @@ export function DryRunDecisionPanel({
     }));
     try {
       const result = await startControlledDryRun({
+        ...requestTarget,
         manualApproval: true,
         strategyName: candidate.strategyName,
         strategyVersionId: candidate.strategyVersionId,
       }, operatorToken);
       setLastControlReport(result);
-      setReadinessState({ strategyVersionId: candidate.strategyVersionId, value: null });
-      setApprovalState({ strategyVersionId: candidate.strategyVersionId, value: null });
+      setReadinessState({ strategyVersionId: candidateRequestIdentity, value: null });
+      setApprovalState({ strategyVersionId: candidateRequestIdentity, value: null });
       const status = result.status === "SUCCESS" ? "SUCCESS" : result.status === "BLOCKED" ? "BLOCKED" : "FAILED";
       recordAction(createActionEvidence({
         action: "启动 controlled dry-run", lifecycleId, status,
@@ -412,7 +429,7 @@ export function DryRunDecisionPanel({
             <input
               checked={manualApproval}
               onChange={(event) => setApprovalState({
-                strategyVersionId: candidateId,
+                strategyVersionId: candidateRequestIdentity,
                 value: event.target.checked,
               })}
               type="checkbox"

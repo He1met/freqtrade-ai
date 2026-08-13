@@ -18,8 +18,8 @@ export type BacktestProfileDraft = {
 
 export const DEFAULT_BACKTEST_PROFILE_DRAFT: BacktestProfileDraft = {
   profileName: "local-strategy-lab",
-  pair: "BTC/USDT",
-  timeframe: "5m",
+  pair: "",
+  timeframe: "",
   timerange: "",
 };
 
@@ -38,6 +38,10 @@ export const EMPTY_LAB_SELECTION: LabSelection = {
   backtestResultId: null,
   scoreId: null,
 };
+
+export function displayOptionalTradeCount(value: number | null | undefined): string {
+  return typeof value === "number" && Number.isFinite(value) ? String(value) : "UNKNOWN";
+}
 
 function exactDatabaseId(
   source: DataSourceTraceSummary | undefined,

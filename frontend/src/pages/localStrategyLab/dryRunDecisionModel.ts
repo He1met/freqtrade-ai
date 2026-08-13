@@ -7,6 +7,7 @@ import type {
   RuntimeStatusSummary,
 } from "../../api/types";
 import {
+  candidateWorkbenchChain,
   isCurrentCoreVersion,
   type LabSelection,
 } from "./candidateWorkbenchModel.ts";
@@ -27,6 +28,12 @@ export type DryRunDecisionAction = "check" | "refresh" | "start" | "stop" | null
 export type DryRunCandidate = {
   strategyVersionId: string;
   strategyName: string | null;
+};
+
+export type DryRunRequestTarget = {
+  pair: string;
+  timeframe: string;
+  exchange: string;
 };
 
 export type DryRunTransientState =
@@ -102,6 +109,39 @@ export function readinessReason({
 
 function sameId(left: string | number | null | undefined, right: string | number | null | undefined): boolean {
   return left !== null && left !== undefined && right !== null && right !== undefined && String(left) === String(right);
+}
+
+function record(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function requiredText(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+export function deriveDryRunRequestTarget(
+  data: MvpData,
+  selection: LabSelection,
+): DryRunRequestTarget | null {
+  if (!selection.strategyVersionId || !selection.backtestRunId) return null;
+  const run = candidateWorkbenchChain(data, selection).runs.find(
+    (item) => item.id === selection.backtestRunId,
+  );
+  if (!run) return null;
+
+  const snapshot = record(run.configSnapshot);
+  const nestedProfile = record(snapshot.profile);
+  const profile = Object.keys(nestedProfile).length ? nestedProfile : snapshot;
+  const dataSource = record(profile.data_source);
+  const exchangeSnapshot = record(profile.exchange);
+  const pair = requiredText(profile.pair);
+  const timeframe = requiredText(profile.timeframe);
+  const exchange = requiredText(dataSource.exchange)
+    ?? requiredText(exchangeSnapshot.name)
+    ?? requiredText(profile.exchange);
+  return pair && timeframe && exchange ? { pair, timeframe, exchange } : null;
 }
 
 export function deriveDryRunCandidate(data: MvpData, selection: LabSelection): DryRunCandidate | null {
