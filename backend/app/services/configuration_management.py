@@ -30,11 +30,15 @@ from app.schemas.strategy_platform import (
 )
 from app.services.configuration_resolver import (
     ConfigurationResolverService,
-    validate_configuration_payload,
+    validate_configuration_payload_for_type,
+    validate_configuration_type_schema_registry,
 )
 
 _MANAGEMENT_CONTRACT = "configuration-management-v1"
-_GENERIC_HANDLER = "generic-json-v1"
+_WRITABLE_HANDLERS = {
+    "generic-json-v1",
+    "strategy-platform-closed-json-schema-v1",
+}
 _FORBIDDEN_SECRET_KEYS = {
     "api_key",
     "api_secret",
@@ -50,6 +54,7 @@ _FORBIDDEN_EXECUTABLE_KEYS = {
     "executable_code",
 }
 _SCHEMA_KEYS = {
+    "anyOf",
     "type",
     "title",
     "description",
@@ -614,7 +619,7 @@ class ConfigurationManagementService:
         if require_manageable:
             capability = type_row.editor_capability
             if (
-                type_row.handler_key != _GENERIC_HANDLER
+                type_row.handler_key not in _WRITABLE_HANDLERS
                 or not isinstance(capability, Mapping)
                 or capability.get("write_enabled") is not True
                 or capability.get("read_only") is True
@@ -627,14 +632,7 @@ class ConfigurationManagementService:
                         "handler_key": type_row.handler_key,
                     },
                 )
-            schema = capability.get("json_schema")
-            if not isinstance(schema, Mapping):
-                raise StrategyPlatformReadError(
-                    "CONFIGURATION_SCHEMA_UNAVAILABLE",
-                    "Writable configuration type has no strict JSON schema.",
-                    context={"config_type": type_key},
-                )
-            _validate_schema_definition(schema, path="$schema")
+            validate_configuration_type_schema_registry(type_row)
         return type_row
 
     def _require_version(
@@ -778,7 +776,6 @@ class ConfigurationManagementService:
         allow_draft_root: bool,
     ) -> dict[int, ConfigurationVersion]:
         resolved_by_id: dict[int, ConfigurationVersion] = {}
-        resolved_by_type: dict[str, ConfigurationVersion] = {}
         visiting: set[int] = set()
 
         def visit(version: ConfigurationVersion, *, is_root: bool = False) -> None:
@@ -802,30 +799,17 @@ class ConfigurationManagementService:
                         "lifecycle_status": version.lifecycle_status,
                     },
                 )
-            type_row = self._require_type(version.type_key, require_manageable=True)
-            if version.schema_version != type_row.schema_version:
-                raise StrategyPlatformReadError(
-                    "CONFIGURATION_SCHEMA_INCOMPATIBLE",
-                    "Configuration version schema is incompatible with its registered type.",
-                    context={
-                        "version_id": version.id,
-                        "version_schema": version.schema_version,
-                        "registered_schema": type_row.schema_version,
-                    },
-                )
-            self._validate_payload_contract(type_row, version.payload_json, version_id=version.id)
-            existing = resolved_by_type.get(version.type_key)
-            if existing is not None and existing.id != version.id:
-                raise StrategyPlatformReadError(
-                    "CONFIGURATION_DEPENDENCY_CONFLICT",
-                    "Configuration graph resolves more than one version for a type.",
-                    context={
-                        "config_type": version.type_key,
-                        "version_ids": sorted((existing.id, version.id)),
-                    },
-                )
+            type_row = self._require_type(
+                version.type_key,
+                require_manageable=is_root,
+            )
+            self._validate_payload_contract(
+                type_row,
+                version.payload_json,
+                schema_version=version.schema_version,
+                version_id=version.id,
+            )
             resolved_by_id[version.id] = version
-            resolved_by_type[version.type_key] = version
             visiting.add(version.id)
             for edge in self.repository.list_dependencies((version.id,)):
                 child = self._require_version(edge.depends_on_version_id)
@@ -836,17 +820,19 @@ class ConfigurationManagementService:
         return resolved_by_id
 
     def _validate_payload_contract(
-        self, type_row, payload: Any, *, version_id: int
+        self,
+        type_row,
+        payload: Any,
+        *,
+        schema_version: str | None = None,
+        version_id: int,
     ) -> None:
-        validate_configuration_payload(payload, version_id=version_id)
-        schema = type_row.editor_capability.get("json_schema")
-        if not isinstance(schema, Mapping):
-            raise StrategyPlatformReadError(
-                "CONFIGURATION_SCHEMA_UNAVAILABLE",
-                "Writable configuration type has no strict JSON schema.",
-                context={"config_type": type_row.type_key},
-            )
-        _validate_json_value(payload, schema, path="$", version_id=version_id)
+        validate_configuration_payload_for_type(
+            type_row,
+            payload,
+            schema_version=schema_version or type_row.schema_version,
+            version_id=version_id,
+        )
 
     def _require_scope_compatibility(
         self,
@@ -857,8 +843,16 @@ class ConfigurationManagementService:
         scope_key: str,
     ) -> None:
         conflicts = []
+        versions_by_type: dict[str, set[int]] = {}
+        for version in graph.values():
+            versions_by_type.setdefault(version.type_key, set()).add(version.id)
         for version in sorted(graph.values(), key=lambda item: (item.type_key, item.id)):
             if version.id == root_version_id:
+                continue
+            # Registry-like metric/family dependencies are exact edge-bound
+            # members, not a single scope activation.  A type-level activation
+            # can only constrain a closure that contains one exact version.
+            if len(versions_by_type[version.type_key]) > 1:
                 continue
             activation = self.repository.get_activation(
                 config_type=version.type_key,
@@ -968,6 +962,23 @@ def _validate_schema_definition(schema: Mapping[str, Any], *, path: str) -> None
             "Configuration schema contains unsupported keywords.",
             context={"path": path, "keywords": unknown},
         )
+    if "anyOf" in schema:
+        candidates = schema["anyOf"]
+        structural = set(schema) - {"anyOf"}
+        if (
+            not isinstance(candidates, list)
+            or not candidates
+            or any(not isinstance(candidate, Mapping) for candidate in candidates)
+            or structural
+        ):
+            raise StrategyPlatformReadError(
+                "CONFIGURATION_SCHEMA_INVALID",
+                "Configuration schema anyOf must contain only strict schema branches.",
+                context={"path": path, "keywords": sorted(structural)},
+            )
+        for index, candidate in enumerate(candidates):
+            _validate_schema_definition(candidate, path=f"{path}.anyOf[{index}]")
+        return
     schema_type = schema.get("type")
     if schema_type not in {"object", "array", "string", "integer", "number", "boolean", "null"}:
         raise StrategyPlatformReadError(
@@ -1101,6 +1112,25 @@ def _validate_json_value(
     path: str,
     version_id: int,
 ) -> None:
+    candidates = schema.get("anyOf")
+    if candidates is not None:
+        for candidate in candidates:
+            try:
+                _validate_json_value(
+                    value,
+                    candidate,
+                    path=path,
+                    version_id=version_id,
+                )
+                return
+            except StrategyPlatformReadError as exc:
+                if exc.code != "CONFIGURATION_PAYLOAD_SCHEMA_INVALID":
+                    raise
+        _schema_value_error(
+            version_id,
+            path,
+            f"value matches none of {len(candidates)} declared schemas",
+        )
     schema_type = schema["type"]
     valid_type = {
         "object": isinstance(value, Mapping),
