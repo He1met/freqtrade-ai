@@ -2,6 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  normalizePersistedScoreBreakdown,
+  optionalFiniteScore,
+} from "../src/api/scoreEvidence.ts";
+
+import {
   buildRankingViewModel,
   isAcceptableRankingEntry,
   rankingConclusion,
@@ -165,4 +170,22 @@ test("ranking conclusion keeps elimination and warnings explicit", () => {
     ).label,
     "已淘汰",
   );
+});
+
+test("ranking normalization never invents a score or fixed component weights", () => {
+  assert.equal(optionalFiniteScore(undefined), null);
+  assert.deepEqual(normalizePersistedScoreBreakdown(undefined), []);
+  assert.deepEqual(normalizePersistedScoreBreakdown([{ name: "profit_score", score: 90 }]), [{
+    name: "profit_score",
+    score: 90,
+    weight: null,
+    contribution: null,
+  }]);
+});
+
+test("ranking without an authoritative total score is not acceptable", () => {
+  const missingScoreEntry = entry();
+  missingScoreEntry.totalScore = null;
+
+  assert.equal(isAcceptableRankingEntry(missingScoreEntry, stage()), false);
 });

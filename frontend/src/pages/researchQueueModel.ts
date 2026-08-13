@@ -17,12 +17,12 @@ export type ResearchQueueProjection = {
 };
 
 export type ResearchQueueSort = "queue" | "generated-newest" | "generated-oldest" | "name";
-export const TERMINAL_STATUSES: CandidateResearchQueueStatus[] = ["VALIDATED", "REJECTED", "FAILED", "DEPLOYED"];
+export const TERMINAL_STATUSES: CandidateResearchQueueStatus[] = ["VALIDATED", "REJECTED", "FAILED", "DEPLOYED", "UNKNOWN"];
 
 const LABELS: Record<CandidateResearchQueueStatus, string> = {
   PENDING: "待回测", CLAIMED: "已领取", RUNNING: "回测验证中", VALIDATED: "已验证",
   REJECTED: "已拒绝", FAILED: "失败", QUALIFIED_PENDING_DEPLOYMENT: "合格待部署",
-  DEPLOYING: "Demo 部署中", DEPLOYED: "已部署",
+  DEPLOYING: "Demo 部署中", DEPLOYED: "已部署", UNKNOWN: "状态未知",
 };
 
 export function researchQueueStatusLabel(status: CandidateResearchQueueStatus) { return LABELS[status] ?? "状态未知"; }
@@ -30,6 +30,7 @@ export function researchQueueStatusTone(status: CandidateResearchQueueStatus): "
   if (["VALIDATED", "QUALIFIED_PENDING_DEPLOYMENT", "DEPLOYED"].includes(status)) return "success";
   if (status === "FAILED") return "danger";
   if (status === "REJECTED") return "warning";
+  if (status === "UNKNOWN") return "neutral";
   return "info";
 }
 export function researchQueueActionAdvice(status: CandidateResearchQueueStatus): string | null {
@@ -52,10 +53,6 @@ export function safeEvidenceHref(href: string | null): string | null {
   catch { return null; }
 }
 
-function legacyStatus(status: string): CandidateResearchQueueStatus {
-  return status === "QUALIFIED" ? "VALIDATED" : status === "REJECTED" ? "REJECTED" : "FAILED";
-}
-
 export function projectResearchQueue(queue: CandidateResearchQueueRead | null, workspace: StrategyResearchWorkspace | null, queueError: string | null): ResearchQueueProjection {
   if (queue) return {
     available: true, asOf: queue.as_of, batch: queue.batch, health: queue.health,
@@ -67,19 +64,20 @@ export function projectResearchQueue(queue: CandidateResearchQueueRead | null, w
     candidate_id: String(candidate.id), candidate_name: candidate.candidate_name,
     pair: candidate.pair ?? null, timeframe: candidate.timeframe ?? null,
     generated_at: candidate.created_at ?? batch.created_at, queue_position: candidate.unit_slot ?? null,
-    status: legacyStatus(candidate.status), current_step: "历史批次终态（非队列投影）",
+    status: "UNKNOWN", current_step: "历史研究状态（非队列投影）",
     completed_steps: [], next_step: null, progress_percent: null, started_at: null,
     completed_at: batch.completed_at, elapsed_seconds: null, preceding_count: null, attempt: null,
     reason_code: candidate.rejection_reasons[0]?.code ?? null,
-    reason_message: candidate.rejection_reasons[0]?.message ?? null,
+    reason_message: candidate.rejection_reasons[0]?.message
+      ?? `历史 research_status=${candidate.status}；未映射为候选验证队列终态。`,
     evidence: candidate.source_path ? [{ label: "源码证据", href: null, reference: candidate.source_path }] : [],
     actions: { cancel_available: false, retry_available: false, reason_code: "LEGACY_TERMINAL_READ_ONLY" },
   })) ?? [];
   return {
     available: false, asOf: workspace?.as_of ?? null, health: null, active: null, waiting: [], completed,
-    batch: batch ? { run_id: batch.run_id, expected_count: 60, generation_status: "GENERATED", generated_count: batch.generated_count,
+    batch: batch ? { run_id: batch.run_id, expected_count: batch.requested_count, generation_status: "GENERATED", generated_count: batch.generated_count,
       enqueued_count: 0, active_count: 0, waiting_count: 0, completed_count: batch.candidates.length,
-      remaining_count: Math.max(0, 60 - batch.candidates.length) } : null,
+      remaining_count: Math.max(0, batch.requested_count - batch.candidates.length) } : null,
     fallbackReason: queueError || "WAITING_FOR_CANDIDATE_QUEUE_READ_API",
   };
 }

@@ -6,7 +6,7 @@ import { fetchJson, postJson } from "./http";
 export type CandidateResearchQueueStatus =
   | "PENDING" | "CLAIMED" | "RUNNING" | "VALIDATED"
   | "REJECTED" | "FAILED" | "QUALIFIED_PENDING_DEPLOYMENT"
-  | "DEPLOYING" | "DEPLOYED";
+  | "DEPLOYING" | "DEPLOYED" | "UNKNOWN";
 
 export type CandidateResearchQueueEvidence = {
   label: string;
@@ -48,7 +48,7 @@ export type CandidateResearchQueueRead = {
   serial_execution: true;
   batch: {
     run_id: string;
-    expected_count: 60;
+    expected_count: number;
     generation_status: "NOT_GENERATED" | "GENERATING" | "GENERATED";
     generated_count: number;
     enqueued_count: number;

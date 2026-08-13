@@ -163,7 +163,7 @@ export function Strategies() {
             onClick={() => void runFormalResearch()}
             type="button"
           >
-            {startingResearch ? "正在提交…" : "手动运行一轮研究（10 条）"}
+            {startingResearch ? "正在提交…" : "手动运行一轮研究"}
           </button>
         )}
         description="正式候选从生成、验证、入库到部署评审的唯一入口；Local Strategy Lab 不计入此生命周期。"
@@ -279,7 +279,7 @@ export function Strategies() {
             {latestResearch.failure_reason ? <p className="formal-problem">失败原因：{latestResearch.failure_reason}</p> : null}
           </>
         ) : (
-          <EmptyState title="尚无持久化研究批次" description="数据库中没有正式批次，表示尚未完成生成与入库；不能解释为 60 条候选已验证不合格。" />
+          <EmptyState title="尚无持久化研究批次" description="数据库中没有正式批次，表示尚未完成生成与入库；不能解释为已有候选已验证不合格。" />
         )}
       </section>
 
@@ -423,7 +423,7 @@ export function Strategies() {
               <li key={entry.scoreId}>
                 <span>#{entry.rank}</span>
                 <strong>{entry.strategyName} · v{entry.versionNumber}</strong>
-                <span>{entry.totalScore.toFixed(1)} 分</span>
+                <span>{entry.totalScore === null ? "评分未知" : `${entry.totalScore.toFixed(1)} 分`}</span>
               </li>
             ))}
           </ol>

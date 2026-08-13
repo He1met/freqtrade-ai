@@ -13,6 +13,7 @@ import {
   buildLocalBacktestProfile,
   candidateWorkbenchChain,
   DEFAULT_BACKTEST_PROFILE_DRAFT,
+  displayOptionalTradeCount,
   ingestBlockReason,
   sanitizedBlockedReasons,
   type BacktestProfileDraft,
@@ -582,7 +583,10 @@ export function CandidateWorkbench({
             <SelectField
               label="StrategyScore"
               onChange={(value) => select("scoreId", value)}
-              options={chain.scores.map((score) => ({ id: score.scoreId, label: `Score ${score.scoreId} · ${score.totalScore.toFixed(1)}` }))}
+              options={chain.scores.map((score) => ({
+                id: score.scoreId,
+                label: `Score ${score.scoreId} · ${score.totalScore === null ? "UNKNOWN" : score.totalScore.toFixed(1)}`,
+              }))}
               placeholder="请选择同一 result 的 score"
               value={selection.scoreId}
             />
@@ -590,7 +594,7 @@ export function CandidateWorkbench({
           {selectedScore ? (
             <div className="lab-workbench__score">
               <span>持久评分</span>
-              <strong>{selectedScore.totalScore.toFixed(1)}</strong>
+              <strong>{selectedScore.totalScore === null ? "UNKNOWN" : selectedScore.totalScore.toFixed(1)}</strong>
               <CopyableValue label="StrategyScore ID" value={selectedScore.scoreId} />
             </div>
           ) : null}
@@ -613,7 +617,7 @@ export function CandidateWorkbench({
                   ) : null}
                   {promotion.evidence ? (
                     <small>
-                      净收益已计成本 · OOS {promotion.evidence.out_of_sample?.total_trades ?? 0} 笔 · 市场状态 {promotion.evidence.walk_forward?.market_states?.join(" / ") ?? "缺失"}
+                      净收益已计成本 · OOS {displayOptionalTradeCount(promotion.evidence.out_of_sample?.total_trades)} 笔 · 市场状态 {promotion.evidence.walk_forward?.market_states?.join(" / ") ?? "缺失"}
                     </small>
                   ) : null}
                   {promotion.approval ? (

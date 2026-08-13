@@ -25,7 +25,12 @@ export function isAcceptableRankingEntry(
   entry: RankingEntry,
   stage: LocalStrategyLabEvidenceStage | undefined,
 ): boolean {
-  if (!stage?.canAccept || !entry.scoreId || !entry.backtestResultId) {
+  if (
+    !stage?.canAccept
+    || !entry.scoreId
+    || !entry.backtestResultId
+    || entry.totalScore === null
+  ) {
     return false;
   }
   const ids = entry.dataSource.databaseIds;

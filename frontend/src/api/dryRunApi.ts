@@ -5,6 +5,7 @@ import type {
   DryRunReadinessReport,
 } from "./types";
 import { postJson } from "./http";
+import { requiredDryRunTargetField } from "./dryRunTarget.ts";
 import {
   normalizeDryRunControl,
   normalizeDryRunReadiness,
@@ -15,7 +16,9 @@ import {
 export async function checkDryRunReadiness(payload: DryRunReadinessPayload, signal?: AbortSignal): Promise<DryRunReadinessReport> {
   const raw = await postJson<RawDryRunReadinessReport>("/dry-run/readiness", {
     strategy_version_id: Number(payload.strategyVersionId), strategy_name: payload.strategyName || undefined,
-    pair: payload.pair ?? "BTC/USDT:USDT", timeframe: payload.timeframe ?? "15m", exchange: payload.exchange ?? "okx",
+    pair: requiredDryRunTargetField(payload.pair, "pair"),
+    timeframe: requiredDryRunTargetField(payload.timeframe, "timeframe"),
+    exchange: requiredDryRunTargetField(payload.exchange, "exchange"),
   }, { signal });
   return normalizeDryRunReadiness(raw);
 }
@@ -27,7 +30,9 @@ export async function startControlledDryRun(
 ): Promise<DryRunControlReport> {
   const raw = await postJson<RawDryRunControlReport>("/dry-run/control/start", {
     strategy_version_id: Number(payload.strategyVersionId), strategy_name: payload.strategyName || undefined,
-    pair: payload.pair ?? "BTC/USDT:USDT", timeframe: payload.timeframe ?? "15m", exchange: payload.exchange ?? "okx",
+    pair: requiredDryRunTargetField(payload.pair, "pair"),
+    timeframe: requiredDryRunTargetField(payload.timeframe, "timeframe"),
+    exchange: requiredDryRunTargetField(payload.exchange, "exchange"),
     manual_approval: payload.manualApproval === true,
   }, {
     idempotencyKey: `dry-run-start-${crypto.randomUUID()}`,

@@ -7,11 +7,24 @@ import {
   backtestBlockReason,
   buildLocalBacktestProfile,
   candidateWorkbenchChain,
+  DEFAULT_BACKTEST_PROFILE_DRAFT,
+  displayOptionalTradeCount,
   ingestBlockReason,
   reconcileLabSelection,
   sanitizedBlockedReasons,
   selectLabEntity,
 } from "../src/pages/localStrategyLab/candidateWorkbenchModel.ts";
+
+test("backtest draft does not invent a default pair or timeframe", () => {
+  assert.equal(DEFAULT_BACKTEST_PROFILE_DRAFT.pair, "");
+  assert.equal(DEFAULT_BACKTEST_PROFILE_DRAFT.timeframe, "");
+});
+
+test("missing OOS trade evidence stays UNKNOWN instead of becoming zero", () => {
+  assert.equal(displayOptionalTradeCount(undefined), "UNKNOWN");
+  assert.equal(displayOptionalTradeCount(null), "UNKNOWN");
+  assert.equal(displayOptionalTradeCount(0), "0");
+});
 
 function source(ids, overrides = {}) {
   return {

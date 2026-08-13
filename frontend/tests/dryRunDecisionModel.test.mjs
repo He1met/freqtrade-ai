@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { requiredDryRunTargetField } from "../src/api/dryRunTarget.ts";
+
 import {
   candidateIdentityMatches,
   deriveDryRunCandidate,
   deriveDryRunDecision,
+  deriveDryRunRequestTarget,
   inactiveActionLabel,
   readinessMatchesCandidate,
   readinessTerminalStatus,
@@ -238,6 +241,52 @@ test("Dry-run uses only the shared selected strategy version", () => {
   assert.equal(deriveDryRunCandidate(data, { ...selection, strategyVersionId: null }), null);
   assert.equal(deriveDryRunCandidate(data, { ...selection, strategyVersionId: "999" }), null);
   assert.equal(deriveDryRunCandidate(data, selection).strategyVersionId, "201");
+});
+
+test("Dry-run target comes only from the selected persisted BacktestProfile", () => {
+  const runSource = {
+    sourceType: "database",
+    coreData: true,
+    databaseIds: { backtest_run_id: 501, strategy_version_id: 201 },
+    artifactRefs: {},
+    environment: { scope: "current", runnable: true, migrationVerified: false, reason: "current" },
+  };
+  const targetData = {
+    strategyVersions: [],
+    backtestRuns: [{
+      id: "501",
+      strategyVersionId: "201",
+      configSnapshot: {
+        profile: {
+          pair: "ETH/USDT:USDT",
+          timeframe: "1h",
+          data_source: { exchange: "kraken" },
+        },
+      },
+      dataSource: runSource,
+    }],
+    backtestTasks: [],
+    backtestResults: [],
+    ranking: [],
+  };
+  const targetSelection = { ...selection, backtestRunId: "501" };
+
+  assert.deepEqual(deriveDryRunRequestTarget(targetData, targetSelection), {
+    pair: "ETH/USDT:USDT",
+    timeframe: "1h",
+    exchange: "kraken",
+  });
+  targetData.backtestRuns[0].configSnapshot.profile.data_source = {};
+  assert.equal(deriveDryRunRequestTarget(targetData, targetSelection), null);
+  assert.equal(deriveDryRunRequestTarget(targetData, { ...targetSelection, backtestRunId: null }), null);
+});
+
+test("Dry-run API target guard rejects incomplete fields before request construction", () => {
+  assert.throws(
+    () => requiredDryRunTargetField("", "pair"),
+    /缺少显式 pair；未发送 API 请求/,
+  );
+  assert.equal(requiredDryRunTargetField(" ETH/USDT:USDT ", "pair"), "ETH/USDT:USDT");
 });
 
 test("all nine states expose at most one action and one blocker", () => {
