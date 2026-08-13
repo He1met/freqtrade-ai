@@ -12,6 +12,7 @@ from app.api.operational_readiness import router as operational_readiness_router
 from app.api.ranking import router as ranking_router
 from app.api.research_jobs import router as research_jobs_router
 from app.api.runtime import router as runtime_router
+from app.api.runtime_v13 import router as runtime_v13_router
 from app.api.strategies import router as strategies_router
 from app.api.strategy_generation import router as strategy_generation_router
 from app.api.strategy_platform import router as strategy_platform_router
@@ -54,6 +55,7 @@ app.include_router(ranking_router)
 app.include_router(research_jobs_router)
 app.include_router(runtime_router)
 app.include_router(runtime_router, prefix="/api")
+app.include_router(runtime_v13_router)
 app.include_router(operational_readiness_router)
 app.include_router(okx_demo_reconciliation_router)
 app.include_router(okx_demo_observability_router)

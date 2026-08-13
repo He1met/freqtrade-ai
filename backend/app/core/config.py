@@ -42,6 +42,8 @@ class Settings(BaseModel):
     allow_live_trading: bool = False
     allow_dry_run_trading: bool = False
     allow_controlled_dry_run_process: bool = False
+    v13_no_trade_mode: bool = False
+    v13_configuration_bundle_snapshot_id: Optional[int] = None
     execution_target_manifest: ExecutionTargetManifest
     demo_automation_policy: OkxDemoAutomationPolicy = Field(
         default_factory=OkxDemoAutomationPolicy
@@ -121,8 +123,32 @@ def get_settings() -> Settings:
         allow_live_trading=security_section.get("allow_live_trading", False),
         allow_dry_run_trading=security_section.get("allow_dry_run_trading", False),
         allow_controlled_dry_run_process=security_section.get("allow_controlled_dry_run_process", False),
+        v13_no_trade_mode=_exact_optional_flag(
+            "FREQTRADE_AI_V13_NO_TRADE_MODE"
+        ),
+        v13_configuration_bundle_snapshot_id=_optional_positive_integer(
+            "FREQTRADE_AI_CONFIGURATION_BUNDLE_SNAPSHOT_ID"
+        ),
         execution_target_manifest=parse_execution_target_manifest(execution_section),
         demo_automation_policy=parse_demo_automation_policy(
             demo_automation_section
         ),
     )
+
+
+def _exact_optional_flag(name: str) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return False
+    if value not in {"0", "1"}:
+        raise ValueError(f"{name} must be exactly 0 or 1")
+    return value == "1"
+
+
+def _optional_positive_integer(name: str) -> Optional[int]:
+    value = os.getenv(name)
+    if value is None:
+        return None
+    if not value.isdigit() or int(value) <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return int(value)

@@ -14,6 +14,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from typing import Any, Protocol
 
+from app.core.strategy_platform_v13_contract import (
+    V13_RESEARCH_SCOPE_KEY,
+    V13_RESEARCH_SCOPE_TYPE,
+    V13_RESEARCH_WORKFLOW_KIND,
+)
 from app.core.strategy_platform_errors import StrategyPlatformReadError
 from app.services.strategy_platform_adapter_registry import (
     INSTALLED_ADAPTER_MANIFEST,
@@ -22,9 +27,9 @@ from app.services.strategy_platform_adapter_registry import (
 )
 
 
-ACTIVATION_SCOPE_TYPE = "WORKFLOW"
-ACTIVATION_SCOPE_KEY = "production-research-v13"
-ACTIVATION_WORKFLOW_KIND = "RESEARCH"
+ACTIVATION_SCOPE_TYPE = V13_RESEARCH_SCOPE_TYPE
+ACTIVATION_SCOPE_KEY = V13_RESEARCH_SCOPE_KEY
+ACTIVATION_WORKFLOW_KIND = V13_RESEARCH_WORKFLOW_KIND
 ACTIVATION_CONTRACT = "strategy-platform-v13-owner-activation-v1"
 
 
