@@ -6331,6 +6331,21 @@ def test_postgresql_v28_terminal_history_real_atomic_dump_restore_and_reharden(
         delayed_manifest_path.write_text(
             json.dumps(delayed_manifest), encoding="utf-8"
         )
+        restore_stderr: list[str] = []
+        original_subprocess_run = postgres_backup.subprocess.run
+
+        def observable_restore_run(*args, **kwargs):
+            completed = original_subprocess_run(*args, **kwargs)
+            if completed.returncode != 0:
+                stderr = completed.stderr
+                if isinstance(stderr, bytes):
+                    stderr = stderr.decode("utf-8", errors="replace")
+                restore_stderr.append(str(stderr))
+            return completed
+
+        monkeypatch.setattr(
+            postgres_backup.subprocess, "run", observable_restore_run
+        )
         with ThreadPoolExecutor(max_workers=1) as executor:
             restore_future = executor.submit(
                 postgres_backup.restore_backup,
@@ -6367,7 +6382,15 @@ def test_postgresql_v28_terminal_history_real_atomic_dump_restore_and_reharden(
                         "(id,paused,updated_at) "
                         "VALUES(1,FALSE,clock_timestamp())"
                     ))
-            restore_future.result(timeout=10)
+            try:
+                restore_future.result(timeout=10)
+            except postgres_backup.BackupBlocked as exc:
+                pytest.fail(
+                    "{}; psql stderr: {}".format(
+                        exc,
+                        restore_stderr[-1] if restore_stderr else "<not captured>",
+                    )
+                )
         with Session(destination_engine) as restored:
             assert restored.get(
                 OkxDemoCanaryConsentHandoff, handoff_id
