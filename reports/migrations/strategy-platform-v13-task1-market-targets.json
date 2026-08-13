@@ -1,0 +1,65 @@
+{
+  "schema_version": "strategy-platform-v13-market-target-manifest-v1",
+  "targets": [
+    {
+      "data_kind": "futures",
+      "exchange": "okx",
+      "instrument_id": "BTC-USDT-SWAP",
+      "market_type": "futures",
+      "max_close_lag_seconds": 1200,
+      "pair": "BTC/USDT:USDT",
+      "path": "okx/futures/BTC_USDT_USDT-5m-futures.feather",
+      "timeframe": "5m"
+    },
+    {
+      "data_kind": "futures",
+      "exchange": "okx",
+      "instrument_id": "BTC-USDT-SWAP",
+      "market_type": "futures",
+      "max_close_lag_seconds": 1200,
+      "pair": "BTC/USDT:USDT",
+      "path": "okx/futures/BTC_USDT_USDT-15m-futures.feather",
+      "timeframe": "15m"
+    },
+    {
+      "data_kind": "futures",
+      "exchange": "okx",
+      "instrument_id": "ETH-USDT-SWAP",
+      "market_type": "futures",
+      "max_close_lag_seconds": 1200,
+      "pair": "ETH/USDT:USDT",
+      "path": "okx/futures/ETH_USDT_USDT-5m-futures.feather",
+      "timeframe": "5m"
+    },
+    {
+      "data_kind": "futures",
+      "exchange": "okx",
+      "instrument_id": "ETH-USDT-SWAP",
+      "market_type": "futures",
+      "max_close_lag_seconds": 1200,
+      "pair": "ETH/USDT:USDT",
+      "path": "okx/futures/ETH_USDT_USDT-15m-futures.feather",
+      "timeframe": "15m"
+    },
+    {
+      "data_kind": "futures",
+      "exchange": "okx",
+      "instrument_id": "SOL-USDT-SWAP",
+      "market_type": "futures",
+      "max_close_lag_seconds": 1200,
+      "pair": "SOL/USDT:USDT",
+      "path": "okx/futures/SOL_USDT_USDT-5m-futures.feather",
+      "timeframe": "5m"
+    },
+    {
+      "data_kind": "futures",
+      "exchange": "okx",
+      "instrument_id": "SOL-USDT-SWAP",
+      "market_type": "futures",
+      "max_close_lag_seconds": 1200,
+      "pair": "SOL/USDT:USDT",
+      "path": "okx/futures/SOL_USDT_USDT-15m-futures.feather",
+      "timeframe": "15m"
+    }
+  ]
+}

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -12,7 +13,12 @@ from app.models.strategy_platform import (
     ConfigurationBundleSnapshot,
     ConfigurationVersion,
 )
+from app.models.strategy_platform_extensions import AdapterDefinition
 from app.repositories.strategy_platform import StrategyPlatformConfigurationRepository
+from app.services.strategy_platform_adapter_registry import (
+    installed_adapter_manifest_digest,
+    validate_declared_adapter_coverage,
+)
 from app.schemas.strategy_platform import (
     ActiveConfigurationRead,
     ConfigurationBundleResolutionRead,
@@ -37,8 +43,6 @@ _SAFETY_CAPABILITY = {
     "allow_real_funds": False,
     "single_writer_required": True,
 }
-
-
 class ConfigurationResolverService:
     """Resolve and snapshot immutable configuration graphs on an owner DB session."""
 
@@ -146,7 +150,6 @@ class ConfigurationResolverService:
         self._require_type(aggregate_config_type)
 
         resolved_by_id: dict[int, ConfigurationVersion] = {}
-        resolved_by_type: dict[str, ConfigurationVersion] = {}
         dependency_reads: list[ConfigurationDependencyRead] = []
         visiting: set[int] = set()
         visited: set[int] = set()
@@ -162,18 +165,7 @@ class ConfigurationResolverService:
                 return
             version = self._require_version(version_id)
             self._validate_version(version)
-            existing = resolved_by_type.get(version.type_key)
-            if existing is not None and existing.id != version.id:
-                raise StrategyPlatformReadError(
-                    "CONFIGURATION_DEPENDENCY_CONFLICT",
-                    "Configuration graph resolves more than one version for a type.",
-                    context={
-                        "config_type": version.type_key,
-                        "version_ids": sorted((existing.id, version.id)),
-                    },
-                )
             resolved_by_id[version.id] = version
-            resolved_by_type[version.type_key] = version
             visiting.add(version.id)
             for dependency in self.repository.list_dependencies((version.id,)):
                 child = self._require_version(dependency.depends_on_version_id)
@@ -217,14 +209,17 @@ class ConfigurationResolverService:
                 row.depends_on_version_id,
             ),
         )
-        resolved_versions_json = {row.type_key: row.id for row in ordered_versions}
+        resolved_versions_json = {
+            _bundle_map_key(row): row.id for row in ordered_versions
+        }
         resolved_digests_json = {
-            row.type_key: row.config_digest for row in ordered_versions
+            _bundle_map_key(row): row.config_digest for row in ordered_versions
         }
         capability_snapshot = {
             **_SAFETY_CAPABILITY,
             "resolution_contract": "strategy-platform-owner-resolver-v1",
             "resolved_type_count": len(ordered_versions),
+            **_adapter_registry_capability(self.db),
         }
         bundle_digest = _bundle_digest(
             workflow_kind=workflow_kind,
@@ -328,19 +323,20 @@ class ConfigurationResolverService:
                 context={"bundle_id": snapshot.id},
             )
         resolved_versions: list[ConfigurationVersion] = []
-        for type_key, version_id in sorted(version_map.items()):
+        for map_key, version_id in sorted(version_map.items()):
             version = versions_by_id[version_id]
+            expected_type = _bundle_map_expected_type(map_key, version_id)
             self._validate_version(
                 version,
-                expected_type=type_key,
+                expected_type=expected_type,
                 allow_historical=True,
             )
-            if version.config_digest != digest_map[type_key]:
+            if version.config_digest != digest_map[map_key]:
                 raise StrategyPlatformReadError(
                     "BUNDLE_VERSION_DIGEST_MISMATCH",
                     "Configuration bundle references a version with a "
                     "different digest.",
-                    context={"bundle_id": snapshot.id, "config_type": type_key},
+                    context={"bundle_id": snapshot.id, "config_type": expected_type},
                 )
             resolved_versions.append(version)
         aggregate = versions_by_id.get(snapshot.aggregate_profile_version_id)
@@ -581,6 +577,93 @@ def validate_configuration_capability_snapshot(snapshot: Any) -> None:
             "BUNDLE_SAFETY_CAPABILITY_INVALID",
             "Configuration bundle does not preserve Demo-only safety capabilities.",
         )
+
+
+def _adapter_registry_capability(db: Session) -> dict[str, Any]:
+    rows = db.query(AdapterDefinition).order_by(AdapterDefinition.adapter_key).all()
+    # Read compatibility for pre-V1.3 owner databases: their configuration
+    # graphs remain resolvable with an explicit empty-registry snapshot.  The
+    # Task 1 seeder itself fails closed unless it installs the full registry.
+    if any(row.contains_secret_material for row in rows):
+        raise StrategyPlatformReadError(
+            "ADAPTER_REGISTRY_SECRET_MATERIAL",
+            "Persisted adapter registry must remain metadata-only.",
+        )
+    payload = [
+        {
+            "adapter_key": row.adapter_key,
+            "adapter_kind": row.adapter_kind,
+            "implementation_version": row.implementation_version,
+            "input_schema_version": row.input_schema_version,
+            "output_schema_version": row.output_schema_version,
+            "capabilities": row.capabilities,
+            "display_metadata": row.display_metadata,
+            "enabled": row.enabled,
+            "registry_metadata_only": row.registry_metadata_only,
+            "contains_secret_material": False,
+            "contains_executable_payload": row.contains_executable_payload,
+        }
+        for row in rows
+    ]
+    manifest_digest: str | None = None
+    if payload:
+        installed = validate_declared_adapter_coverage(
+            Path(__file__).resolve().parents[3]
+        )
+        manifest_digest = installed_adapter_manifest_digest(installed)
+        expected = [
+            {
+                "adapter_key": adapter.adapter_key,
+                "adapter_kind": adapter.adapter_kind,
+                "implementation_version": adapter.implementation_version,
+                "input_schema_version": adapter.input_schema_version,
+                "output_schema_version": adapter.output_schema_version,
+                "capabilities": dict(adapter.capabilities),
+                "display_metadata": {
+                    "input_schema": adapter.input_schema,
+                    "output_schema": adapter.output_schema,
+                    "source_ref": adapter.source_ref,
+                    "source_sha256": adapter.source_sha256,
+                    "installed_manifest_digest": manifest_digest,
+                },
+                "enabled": True,
+                "registry_metadata_only": True,
+                "contains_secret_material": False,
+                "contains_executable_payload": False,
+            }
+            for adapter in installed
+        ]
+        if payload != expected:
+            raise StrategyPlatformReadError(
+                "ADAPTER_REGISTRY_DRIFT",
+                "Persisted adapter registry does not match installed implementations.",
+            )
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    capability = {
+        "adapter_registry_contract": "strategy-platform-adapter-registry-v1",
+        "adapter_registry_digest": hashlib.sha256(
+            serialized.encode("utf-8")
+        ).hexdigest(),
+        "adapter_registry_keys": [row["adapter_key"] for row in payload],
+        "resolved_adapter_count": len(payload),
+    }
+    if manifest_digest is not None:
+        capability["installed_adapter_manifest_digest"] = manifest_digest
+    return capability
+
+
+def _bundle_map_key(version: ConfigurationVersion) -> str:
+    """Allow registry graphs to carry multiple independently versioned members."""
+
+    return f"{version.type_key}:{version.id}"
+
+
+def _bundle_map_expected_type(map_key: str, version_id: int) -> str:
+    suffix = f":{version_id}"
+    if map_key.endswith(suffix) and len(map_key) > len(suffix):
+        return map_key[: -len(suffix)]
+    # Read compatibility for pre-V1.3 snapshots whose key was just type_key.
+    return map_key
 
 
 def _bundle_digest(

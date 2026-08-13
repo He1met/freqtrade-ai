@@ -522,6 +522,14 @@ def test_20260727_02_upgrades_to_risk_chain_atomically(postgres_engine) -> None:
     ]
     Base.metadata.create_all(postgres_engine, tables=pre_bridge_tables)
     with postgres_engine.begin() as connection:
+        connection.execute(
+            text(
+                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE "
+                "rolname='freqtrade_ai_attestor') THEN CREATE ROLE "
+                "freqtrade_ai_attestor NOLOGIN NOINHERIT NOSUPERUSER NOCREATEROLE "
+                "NOCREATEDB NOREPLICATION NOBYPASSRLS; END IF; END $$"
+            )
+        )
         connection.execute(text("DROP TABLE okx_demo_automation_guard_events"))
         connection.execute(text("DROP TABLE okx_demo_automation_guard_states"))
         connection.execute(
@@ -545,8 +553,20 @@ def test_20260727_02_upgrades_to_risk_chain_atomically(postgres_engine) -> None:
                 "full_chain_runs_signal_evaluation_id_fkey"
             )
         )
+        connection.execute(
+            text(
+                "ALTER TABLE trade_intents "
+                "DROP CONSTRAINT IF EXISTS trade_intents_signal_evaluation_id_fkey, "
+                "DROP CONSTRAINT IF EXISTS trade_intents_deployment_id_fkey"
+            )
+        )
         connection.execute(text("DROP TABLE signal_evaluations"))
-        connection.execute(text("DROP TABLE strategy_deployments"))
+        connection.execute(
+            text(
+                "ALTER TABLE strategy_deployments DROP CONSTRAINT IF EXISTS "
+                "strategy_deployments_candidate_approval_id_fkey"
+            )
+        )
         for table_name in (
             "full_chain_signal_snapshots",
             "full_chain_stage_runs",
@@ -564,8 +584,14 @@ def test_20260727_02_upgrades_to_risk_chain_atomically(postgres_engine) -> None:
         )
         connection.execute(text("DROP TABLE okx_demo_canary_lifecycles"))
         connection.execute(text("DROP TABLE okx_demo_submission_grants"))
-        connection.execute(text("DROP TABLE approved_executions"))
-        connection.execute(text("DROP TABLE risk_budgets"))
+        connection.execute(
+            text(
+                "ALTER TABLE approved_executions "
+                "DROP CONSTRAINT IF EXISTS approved_executions_intent_identity_fkey, "
+                "DROP CONSTRAINT IF EXISTS approved_executions_decision_intent_fkey, "
+                "DROP CONSTRAINT IF EXISTS approved_executions_payload_identity_fkey"
+            )
+        )
         connection.execute(
             text(
                 "ALTER TABLE trade_intents "

@@ -295,6 +295,18 @@ class TradeIntent(Base):
     strategy_score_id: Mapped[Optional[int]] = mapped_column(
         BigInteger().with_variant(Integer, "sqlite"), ForeignKey("strategy_scores.id")
     )
+    deployment_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey("strategy_deployments.id", ondelete="RESTRICT"),
+    )
+    signal_evaluation_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey("signal_evaluations.id", ondelete="RESTRICT"),
+    )
+    runtime_instance_row_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey("strategy_runtime_instances.id", ondelete="RESTRICT"),
+    )
     instrument_id: Mapped[Optional[str]] = mapped_column(String(80))
     side: Mapped[Optional[str]] = mapped_column(String(16))
     position_side: Mapped[Optional[str]] = mapped_column(String(16))

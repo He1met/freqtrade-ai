@@ -93,11 +93,11 @@ class StrategyResearchCandidate(Base):
             name="strategy_research_candidates_batch_unit_unique",
         ),
         CheckConstraint(
-            "pair IS NULL OR pair IN ('BTC/USDT:USDT','ETH/USDT:USDT','SOL/USDT:USDT')",
+            "pair IS NULL OR length(pair) > 0",
             name="strategy_research_candidates_pair_check",
         ),
         CheckConstraint(
-            "timeframe IS NULL OR timeframe IN ('5m','15m')",
+            "timeframe IS NULL OR length(timeframe) > 0",
             name="strategy_research_candidates_timeframe_check",
         ),
         CheckConstraint(
@@ -165,6 +165,10 @@ class MarketDataQualityReceipt(Base):
         UniqueConstraint(
             "evidence_digest", name="market_data_quality_receipts_digest_unique"
         ),
+        UniqueConstraint(
+            "idempotency_key",
+            name="market_data_quality_receipts_idempotency_unique",
+        ),
         CheckConstraint(
             "length(file_sha256) = 64 AND length(evidence_digest) = 64",
             name="market_data_quality_receipts_digest_check",
@@ -176,6 +180,21 @@ class MarketDataQualityReceipt(Base):
             "AND misaligned_timestamp_count = 0 AND null_ohlcv_count = 0 "
             "AND invalid_ohlc_count = 0 AND negative_volume_count = 0)",
             name="market_data_quality_receipts_passed_check",
+        ),
+        CheckConstraint(
+            "contract_version <> 'market-data-quality-v13-v1' OR ("
+            "idempotency_key IS NOT NULL AND quality_scope = "
+            "'MIGRATION_SOURCE_CONSISTENCY_AS_OF_SOURCE_RECEIPT' AND "
+            "quality_decision = 'NOT_STRATEGY_QUALIFICATION' AND "
+            "file_identity_digest IS NOT NULL AND length(file_identity_digest)=64 AND "
+            "source_identity_digest IS NOT NULL AND length(source_identity_digest)=64 AND "
+            "aggregate_receipt_digest IS NOT NULL "
+            "AND length(aggregate_receipt_digest)=64 AND "
+            "migration_artifact_digest IS NOT NULL "
+            "AND length(migration_artifact_digest)=64 AND "
+            "freshness_basis='ORIGINAL_AGGREGATE_RECEIPT_DOWNLOADED_AT' AND "
+            "freshness_seconds IS NULL AND status='PASSED')",
+            name="market_data_quality_receipts_v13_scope_check",
         ),
         Index(
             "market_data_quality_receipts_pair_time_idx",
@@ -193,6 +212,7 @@ class MarketDataQualityReceipt(Base):
     id: Mapped[int] = mapped_column(
         BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True
     )
+    idempotency_key: Mapped[Optional[str]] = mapped_column(String(64))
     contract_version: Mapped[str] = mapped_column(String(40), nullable=False)
     exchange: Mapped[str] = mapped_column(String(40), nullable=False)
     pair: Mapped[str] = mapped_column(String(80), nullable=False)
@@ -218,6 +238,13 @@ class MarketDataQualityReceipt(Base):
     invalid_ohlc_count: Mapped[int] = mapped_column(Integer, nullable=False)
     negative_volume_count: Mapped[int] = mapped_column(Integer, nullable=False)
     freshness_seconds: Mapped[Optional[int]] = mapped_column(BigInteger)
+    quality_scope: Mapped[Optional[str]] = mapped_column(String(80))
+    quality_decision: Mapped[Optional[str]] = mapped_column(String(80))
+    file_identity_digest: Mapped[Optional[str]] = mapped_column(String(64))
+    source_identity_digest: Mapped[Optional[str]] = mapped_column(String(64))
+    aggregate_receipt_digest: Mapped[Optional[str]] = mapped_column(String(64))
+    migration_artifact_digest: Mapped[Optional[str]] = mapped_column(String(64))
+    freshness_basis: Mapped[Optional[str]] = mapped_column(String(80))
     status: Mapped[str] = mapped_column(String(20), nullable=False)
     reason_codes: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     evidence_digest: Mapped[str] = mapped_column(String(64), nullable=False)

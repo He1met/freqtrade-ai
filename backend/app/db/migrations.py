@@ -28,6 +28,12 @@ from sqlalchemy.schema import (
 
 from app import models  # noqa: F401 - imports every model into Base.metadata
 from app.core.exceptions import ConfigurationError
+from app.db.strategy_platform_v13_task1 import (
+    TASK1_MIGRATION_KEY,
+    TASK1_SCHEMA_VERSION,
+    canonical_digest,
+    install_strategy_platform_v13_task1_schema,
+)
 from app.models.base import Base
 
 
@@ -79,7 +85,8 @@ NATURAL_SIGNAL_EVALUATOR_RECEIPT_BASE_VERSION = "20260810_42"
 NATURAL_SIGNAL_RISK_BUDGET_BASE_VERSION = "20260811_43"
 STALE_NATURAL_APPROVAL_RELEASE_BASE_VERSION = "20260811_44"
 STRATEGY_PLATFORM_V1_BASE_VERSION = "20260811_45"
-SCHEMA_VERSION = "20260813_46"
+STRATEGY_PLATFORM_V1_FOUNDATION_VERSION = "20260813_46"
+SCHEMA_VERSION = TASK1_SCHEMA_VERSION
 VERSION_TABLE = "freqtrade_ai_schema_migrations"
 ATTESTATION_PROOF_KEY_ENV = "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"
 OPERATOR_TOKEN_ENV = "FREQTRADE_AI_OPERATOR_TOKEN"
@@ -158,6 +165,279 @@ STRATEGY_PLATFORM_V1_PREREQUISITE_TABLES = (
     "quality_gate_profiles",
     "quality_gate_profile_versions",
     "quality_gate_rules",
+)
+
+# Exact post-cutover owner-database ACL contract.  These sets intentionally
+# mirror the controlled SQL allowlists instead of deriving authority from the
+# abandoned runtime ACL model.  A new table or legacy capability therefore
+# requires an explicit review in both the mutation plan and this read verifier.
+STRATEGY_PLATFORM_V13_OWNER_READ_TABLES = frozenset(
+    {
+        "adapter_definitions",
+        "capacity_profile_versions",
+        "configuration_activations",
+        "configuration_audit_events",
+        "configuration_bundle_snapshots",
+        "configuration_dependencies",
+        "configuration_types",
+        "configuration_versions",
+        "deployment_profile_versions",
+        "diversity_profile_versions",
+        "diversity_rules",
+        "evidence_freshness_profile_versions",
+        "evidence_freshness_rules",
+        "execution_target_definition_versions",
+        "execution_target_definitions",
+        "generation_profile_families",
+        "generation_profile_versions",
+        "market_data_policy_versions",
+        "market_data_profile_versions",
+        "market_regime_definitions",
+        "metric_definition_versions",
+        "metric_definitions",
+        "monitoring_profile_versions",
+        "optimization_profile_versions",
+        "promotion_profile_versions",
+        "promotion_rules",
+        "provider_model_config_versions",
+        "quality_gate_profile_versions",
+        "quality_gate_profiles",
+        "quality_gate_rules",
+        "research_profile_versions",
+        "research_target_config_sets",
+        "research_target_configs",
+        "risk_profile_versions",
+        "risk_rules",
+        "runtime_profile_versions",
+        "scheduler_profile_versions",
+        "scoring_profile_versions",
+        "scoring_rules",
+        "strategy_family_definition_versions",
+        "strategy_family_definitions",
+        "strategy_platform_migration_runs",
+        "strategy_source_definition_versions",
+        "strategy_source_definitions",
+        "timeframe_definition_versions",
+        "timeframe_definitions",
+        "trigger_source_definition_versions",
+        "trigger_source_definitions",
+        "ui_presentation_profile_versions",
+        "validation_window_config_sets",
+        "validation_window_configs",
+        "validation_window_expectations",
+        "validation_window_purposes",
+        "worker_execution_profile_versions",
+    }
+)
+STRATEGY_PLATFORM_V13_OWNER_ONLY_TABLES = frozenset(
+    {
+        "market_data_file_records",
+        "market_data_update_items",
+        "market_data_update_jobs",
+        "optimization_runs",
+        "optimization_trials",
+        "quality_rule_evaluations",
+        "strategy_evaluation_summaries",
+        "strategy_platform_migration_conflicts",
+        "strategy_platform_migration_entity_mappings",
+        "strategy_platform_migration_table_snapshots",
+        "strategy_position_ledger_entries",
+        "strategy_position_reconciliation_items",
+        "strategy_runtime_instances",
+        "strategy_submissions",
+        "strategy_targets",
+        "validation_window_score_components",
+        "validation_window_scores",
+    }
+)
+STRATEGY_PLATFORM_V13_LEGACY_CAPABILITY_TABLES = frozenset(
+    {
+        "approved_executions",
+        "backtest_results",
+        "backtest_runs",
+        "backtest_tasks",
+        "exchange_fills",
+        "exchange_orders",
+        "exchange_positions",
+        "execution_manifests",
+        "execution_scopes",
+        "full_chain_runs",
+        "full_chain_signal_snapshots",
+        "full_chain_stage_runs",
+        "local_test_batches",
+        "local_test_db_events",
+        "market_data_quality_receipts",
+        "okx_demo_accepted_not_found_terminalizations",
+        "okx_demo_account_snapshots",
+        "okx_demo_attestation_secrets",
+        "okx_demo_attested_sessions",
+        "okx_demo_automation_guard_events",
+        "okx_demo_automation_guard_states",
+        "okx_demo_canary_consent_handoffs",
+        "okx_demo_canary_lifecycles",
+        "okx_demo_exchange_events",
+        "okx_demo_fill_snapshots",
+        "okx_demo_operator_consent_secrets",
+        "okx_demo_order_snapshots",
+        "okx_demo_position_snapshots",
+        "okx_demo_reconciliation_states",
+        "okx_demo_recovery_batches",
+        "okx_demo_recovery_grants",
+        "okx_demo_soak_events",
+        "okx_demo_soak_probes",
+        "okx_demo_soak_runs",
+        "okx_demo_submission_grants",
+        "okx_demo_trusted_snapshots",
+        "okx_order_write_attempts",
+        "okx_order_writer_leases",
+        "reconciliation_runs",
+        "research_job_attempts",
+        "research_jobs",
+        "research_worker_control",
+        "risk_budgets",
+        "risk_decisions",
+        "signal_evaluations",
+        "strategies",
+        "strategy_candidate_approvals",
+        "strategy_deployments",
+        "strategy_failure_reasons",
+        "strategy_generation_runs",
+        "strategy_research_attempt_events",
+        "strategy_research_batches",
+        "strategy_research_candidate_bridge_events",
+        "strategy_research_candidates",
+        "strategy_scores",
+        "strategy_validation_plans",
+        "strategy_validation_windows",
+        "strategy_versions",
+        "trade_intents",
+    }
+)
+STRATEGY_PLATFORM_V13_LEGACY_CAPABILITY_SEQUENCES = frozenset(
+    {
+        "approved_executions_id_seq",
+        "backtest_results_id_seq",
+        "backtest_runs_id_seq",
+        "backtest_tasks_id_seq",
+        "exchange_fills_id_seq",
+        "exchange_orders_id_seq",
+        "exchange_positions_id_seq",
+        "execution_manifests_id_seq",
+        "full_chain_runs_id_seq",
+        "full_chain_signal_snapshots_id_seq",
+        "full_chain_stage_runs_id_seq",
+        "local_test_batches_id_seq",
+        "local_test_db_events_id_seq",
+        "market_data_quality_receipts_id_seq",
+        "okx_demo_accepted_not_found_terminalizations_id_seq",
+        "okx_demo_account_snapshots_database_id_seq",
+        "okx_demo_automation_guard_events_id_seq",
+        "okx_demo_exchange_events_database_id_seq",
+        "okx_demo_fill_snapshots_database_id_seq",
+        "okx_demo_order_snapshots_database_id_seq",
+        "okx_demo_position_snapshots_database_id_seq",
+        "okx_demo_reconciliation_states_database_id_seq",
+        "okx_demo_recovery_batches_database_id_seq",
+        "okx_demo_recovery_grants_database_id_seq",
+        "okx_demo_soak_events_id_seq",
+        "okx_demo_soak_probes_id_seq",
+        "okx_demo_soak_runs_id_seq",
+        "okx_demo_trusted_snapshots_database_id_seq",
+        "okx_order_write_attempts_id_seq",
+        "reconciliation_runs_id_seq",
+        "research_job_attempts_id_seq",
+        "research_jobs_id_seq",
+        "risk_decisions_id_seq",
+        "signal_evaluations_id_seq",
+        "strategies_id_seq",
+        "strategy_candidate_approvals_id_seq",
+        "strategy_deployments_id_seq",
+        "strategy_failure_reasons_id_seq",
+        "strategy_generation_runs_id_seq",
+        "strategy_research_attempt_events_id_seq",
+        "strategy_research_batches_id_seq",
+        "strategy_research_candidate_bridge_events_id_seq",
+        "strategy_research_candidates_id_seq",
+        "strategy_scores_id_seq",
+        "strategy_validation_plans_id_seq",
+        "strategy_validation_windows_id_seq",
+        "strategy_versions_id_seq",
+        "trade_intents_id_seq",
+    }
+)
+STRATEGY_PLATFORM_V13_LEGACY_CAPABILITY_FUNCTIONS = frozenset(
+    {
+        ("apply_okx_demo_reconciliation_gate", "bigint"),
+        ("bridge_okx_demo_managed_fill", "bigint"),
+        ("can_resume_okx_demo_canary_recovery", "bigint"),
+        ("claim_atomic_okx_demo_canary_dispatch", "bigint,text,text,bigint,text"),
+        ("claim_okx_demo_canary_consent", "text,text,bigint,jsonb"),
+        ("claim_okx_demo_continuous_dispatch", "bigint,text"),
+        (
+            "commit_atomic_okx_demo_canary_prepare",
+            "text,text,bigint,bigint,bigint,bigint,jsonb,jsonb,jsonb",
+        ),
+        ("create_okx_demo_canary_cleanup_intent", "character varying,bigint,bigint"),
+        ("create_okx_demo_canary_lifecycle", "character varying"),
+        ("create_okx_demo_canary_lineage", "jsonb"),
+        ("eligible_atomic_okx_demo_canary_predecessor", ""),
+        ("fail_okx_demo_canary_grant_before_prepare", "text"),
+        ("fail_requested_okx_demo_canary_consent", "text,text,text"),
+        (
+            "finalize_okx_demo_canary_consent",
+            "text,text,bigint,bigint,bigint,bigint,jsonb",
+        ),
+        ("finalize_okx_demo_reconciliation_run", "bigint,jsonb,jsonb,text,text"),
+        ("finalized_okx_demo_canary_consent", "text"),
+        ("freeze_okx_demo_reconciliation_gate", "text,text,timestamp with time zone"),
+        ("issue_okx_demo_canary_recovery_grant", "character varying,bigint,text,bigint"),
+        ("issue_okx_demo_submission_grant", "jsonb"),
+        ("lock_okx_demo_reconciliation_state", ""),
+        ("okx_demo_canary_consent_eligibility", ""),
+        ("okx_demo_continuous_opening_allowed", "text"),
+        ("pending_okx_demo_canary_consent", ""),
+        ("persist_okx_demo_natural_risk_chain", "jsonb"),
+        ("prepare_okx_demo_canary_residual_child", "bigint,bigint"),
+        ("record_okx_demo_automation_failure", "text,text,bigint,text"),
+        ("record_okx_demo_automation_health", "bigint,text"),
+        ("release_expired_okx_demo_approval", "bigint"),
+        ("request_atomic_okx_demo_canary_consent", "text,text,text,text"),
+        ("request_okx_demo_canary_consent", "text,text,text,text"),
+        ("revoke_okx_demo_attested_session", "text,text,text,bigint"),
+        ("revoke_restarted_okx_demo_canary_grant", "text,text"),
+        ("settle_okx_demo_canary_handoff", "text"),
+        (
+            "transition_okx_demo_canary_lifecycle",
+            "character varying,text,bigint,bigint,character varying,bigint",
+        ),
+        (
+            "validate_atomic_okx_demo_dispatch_authority",
+            "bigint,text,text,bigint,text,text",
+        ),
+        ("write_okx_demo_attested_session", "text,text,text,bigint,bigint,text,text"),
+        (
+            "write_okx_demo_trusted_snapshot",
+            "text,text,text,text,jsonb,text,timestamp with time zone,"
+            "timestamp with time zone",
+        ),
+    }
+)
+STRATEGY_PLATFORM_V13_GUARD_FUNCTIONS = frozenset(
+    {
+        "guard_configuration_version",
+        "guard_configuration_activation",
+        "guard_configuration_bundle_snapshot",
+        "guard_configuration_dependency",
+        "prevent_strategy_platform_mutation",
+        "guard_configuration_child",
+        "guard_strategy_validation_plan",
+        "guard_strategy_validation_window",
+        "guard_strategy_platform_migration_audit",
+        "guard_strategy_platform_v13_bundle_required",
+        "guard_strategy_platform_qualified_mapping",
+        "guard_strategy_platform_v13_config_child",
+        "guard_strategy_submission_payload",
+    }
 )
 
 CANARY_LINEAGE_BOUNDARY_TABLES = frozenset(
@@ -1242,7 +1522,79 @@ def _normalized_sql_definition(value: object) -> Optional[str]:
         r"\1",
         rendered,
     )
+    # PostgreSQL deparses SQLAlchemy's CAST(column AS text) using ``column::text``.
+    # The cast operator was removed above; remove the equivalent CAST wrapper too.
+    rendered = re.sub(
+        r"cast\(([a-z_][a-z0-9_]*)as"
+        r"(?:charactervarying|text|boolean|integer|bigint|numeric)\)",
+        r"\1",
+        rendered,
+    )
+    # PostgreSQL expresses NOT IN as ``<> ALL (ARRAY[...])`` and may wrap the
+    # complete expression.  Retain every member while making both spellings equal.
+    rendered = re.sub(
+        r"\(?([a-z_][a-z0-9_]*)<>all\(array\[(.*?)\]\)\)?",
+        r"\1notin(\2)",
+        rendered,
+    )
+    # pg_get_constraintdef adds precedence-only parentheses around arithmetic.
+    rendered = re.sub(
+        r"\(([a-z_][a-z0-9_]*(?:[+\-*/][a-z_0-9]+)+)\)",
+        r"\1",
+        rendered,
+    )
+    rendered = _strip_boolean_or_grouping_parentheses(rendered)
     return rendered
+
+
+def _strip_boolean_or_grouping_parentheses(value: str) -> str:
+    """Remove only parentheses that wrap one whole top-level OR branch.
+
+    PostgreSQL drops the branch grouping from ``A OR (B AND C)`` because AND
+    already binds more tightly than OR.  SQLAlchemy preserves it.  Function calls,
+    IN lists and nested comparisons remain byte-for-byte significant.
+    """
+
+    while True:
+        stack: list[int] = []
+        pairs: list[tuple[int, int]] = []
+        in_quote = False
+        index = 0
+        while index < len(value):
+            character = value[index]
+            if character == "'":
+                if in_quote and index + 1 < len(value) and value[index + 1] == "'":
+                    index += 2
+                    continue
+                in_quote = not in_quote
+            elif not in_quote:
+                if character == "(":
+                    stack.append(index)
+                elif character == ")" and stack:
+                    pairs.append((stack.pop(), index))
+            index += 1
+
+        candidate: Optional[tuple[int, int]] = None
+        for start, end in sorted(
+            pairs,
+            key=lambda pair: pair[1] - pair[0],
+            reverse=True,
+        ):
+            prefix = value[:start]
+            suffix = value[end + 1 :]
+            is_or_branch = (start == 0 or prefix.endswith("or")) and (
+                end == len(value) - 1 or suffix.startswith("or")
+            )
+            preceded_by_identifier = start > 0 and (
+                value[start - 1].isalnum() or value[start - 1] == "_"
+            ) and not prefix.endswith("or")
+            if is_or_branch and not preceded_by_identifier:
+                candidate = (start, end)
+                break
+        if candidate is None:
+            return value
+        start, end = candidate
+        value = value[:start] + value[start + 1 : end] + value[end + 1 :]
 
 
 def _normalized_index_definition(value: object) -> Optional[str]:
@@ -1260,11 +1612,33 @@ def _normalized_index_definition(value: object) -> Optional[str]:
         if unwrapped == rendered:
             break
         rendered = unwrapped
+    # PostgreSQL 16 may deparse IN-list literals as individually parenthesized
+    # values (for example ``status IN (('RUNNING'),('BLOCKED'))``).  SQLAlchemy
+    # metadata renders the equivalent ``status IN ('RUNNING','BLOCKED')``.
+    rendered = re.sub(r"\(('[^']*')\)", r"\1", rendered)
+    # PostgreSQL can emit either ``= ANY (ARRAY[...])`` or
+    # ``= ANY ((ARRAY[...])::text[])``.  Handle the doubly-parenthesized form
+    # first so the rewrite never consumes only one side and leaves a dangling
+    # parenthesis in a restored database's predicate.
     rendered = re.sub(
-        r"([a-z_][a-z0-9_]*)=any\(\(?array\[(.*?)\]\)?\)",
+        r"([a-z_][a-z0-9_]*)=any\(\(array\[(.*?)\]\)\)",
         r"\1in(\2)",
         rendered,
     )
+    rendered = re.sub(
+        r"([a-z_][a-z0-9_]*)=any\(array\[(.*?)\]\)",
+        r"\1in(\2)",
+        rendered,
+    )
+    rendered = re.sub(
+        r"and\(+([a-z_][a-z0-9_]*in\([^()]*\))\)+",
+        r"and\1",
+        rendered,
+    )
+    while rendered.startswith("(") and rendered.count("(") > rendered.count(")"):
+        rendered = rendered[1:]
+    while rendered.endswith(")") and rendered.count(")") > rendered.count("("):
+        rendered = rendered[:-1]
     while rendered.startswith("(") and rendered.endswith(")"):
         depth = 0
         closes_at_end = True
@@ -1307,6 +1681,26 @@ def _inspected_index_signature(index: dict) -> tuple[tuple[str, ...], bool, Opti
         bool(index.get("unique", False)),
         _normalized_index_definition(dialect_options.get("postgresql_where")),
     )
+
+
+STRATEGY_PLATFORM_V13_TASK1_CRITICAL_CHECK_DEFINITIONS = frozenset(
+    {
+        "deployment_profile_versions_safety_check",
+        "execution_target_definition_versions_safety_check",
+        "market_data_policy_versions_overlap_shape_check",
+        "market_data_quality_receipts_v13_scope_check",
+        "risk_profile_versions_safety_check",
+        "runtime_profile_versions_safety_check",
+        "strategy_evaluation_summaries_counts_check",
+        "strategy_evaluation_summaries_status_check",
+        "strategy_platform_migration_mapping_qualified_evidence_check",
+        "strategy_platform_migration_mapping_quality_status_check",
+        "strategy_platform_migration_runs_evidence_digest_check",
+        "strategy_platform_migration_runs_forward_only_check",
+        "strategy_platform_migration_runs_terminal_shape_check",
+        "strategy_runtime_instances_safety_check",
+    }
+)
 
 
 CRITICAL_CHECK_DEFINITIONS = {
@@ -1399,15 +1793,45 @@ CRITICAL_CHECK_DEFINITIONS = {
     "okx_demo_recovery_grants_status_check",
     "okx_demo_recovery_grants_digest_quantity_check",
     "execution_manifests_authorization_check",
-}
+} | STRATEGY_PLATFORM_V13_TASK1_CRITICAL_CHECK_DEFINITIONS
 
 
-def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
+def _critical_check_definition_problems(
+    *,
+    table_name: str,
+    table: object,
+    actual_check_definitions: dict[str, Optional[str]],
+    dialect: object,
+) -> list[str]:
+    expected_check_definitions = {
+        constraint.name: _normalized_sql_definition(
+            constraint.sqltext.compile(dialect=dialect)
+        )
+        for constraint in table.constraints
+        if isinstance(constraint, CheckConstraint)
+        and constraint.name in CRITICAL_CHECK_DEFINITIONS
+    }
+    return [
+        f"check definition mismatch: {table_name}.{check_name}"
+        for check_name, definition in expected_check_definitions.items()
+        if actual_check_definitions.get(check_name) is not None
+        and actual_check_definitions[check_name] != definition
+    ]
+
+
+def schema_problems(
+    bind: Union[Connection, Engine],
+    *,
+    _include_legacy_runtime_acl: bool = True,
+) -> list[str]:
     """Compare the live PostgreSQL schema to the SQLAlchemy metadata contract."""
 
     if isinstance(bind, Engine):
         with bind.connect() as connection:
-            return schema_problems(connection)
+            return schema_problems(
+                connection,
+                _include_legacy_runtime_acl=_include_legacy_runtime_acl,
+            )
 
     problems: list[str] = []
     if bind.dialect.name != "postgresql":
@@ -1564,20 +1988,14 @@ def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
         }
         for check_name in sorted(expected_checks - set(actual_check_definitions)):
             problems.append(f"missing check constraint: {name}.{check_name}")
-        expected_check_definitions = {
-            constraint.name: _normalized_sql_definition(
-                constraint.sqltext.compile(dialect=bind.dialect)
+        problems.extend(
+            _critical_check_definition_problems(
+                table_name=name,
+                table=table,
+                actual_check_definitions=actual_check_definitions,
+                dialect=bind.dialect,
             )
-            for constraint in table.constraints
-            if isinstance(constraint, CheckConstraint)
-            and constraint.name in CRITICAL_CHECK_DEFINITIONS
-        }
-        for check_name, definition in expected_check_definitions.items():
-            actual_definition = actual_check_definitions.get(check_name)
-            if actual_definition is not None and actual_definition != definition:
-                problems.append(
-                    f"check definition mismatch: {name}.{check_name}"
-                )
+        )
     trigger_rows = bind.execute(
         text(
             """
@@ -1600,6 +2018,54 @@ def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
         for name, trigger_definition, function_definition in trigger_rows
     }
     expected_trigger_fragments = {
+        "strategy_platform_migration_runs_append_only": (
+            "beforedeleteorupdateon",
+            "strategyplatformmigrationauditisappend-only",
+            "terminalstrategyplatformmigrationrunisimmutable",
+        ),
+        "strategy_platform_migration_table_snapshots_append_only": (
+            "beforedeleteorupdateon",
+            "strategyplatformmigrationevidenceisimmutable",
+        ),
+        "strategy_platform_migration_entity_mappings_append_only": (
+            "beforedeleteorupdateon",
+            "strategyplatformmigrationevidenceisimmutable",
+        ),
+        "strategy_platform_migration_conflicts_append_only": (
+            "beforedeleteorupdateon",
+            "strategyplatformmigrationevidenceisimmutable",
+        ),
+        "research_jobs_v13_bundle_required": (
+            "beforeinserton",
+            "newv1.3workflowrowsrequireconfigurationbundlesnapshots",
+        ),
+        "strategy_deployments_v13_bundle_required": (
+            "beforeinserton",
+            "newv1.3workflowrowsrequireconfigurationbundlesnapshots",
+        ),
+        "strategy_validation_plans_v13_bundle_required": (
+            "beforeinserton",
+            "newv1.3workflowrowsrequireconfigurationbundlesnapshots",
+        ),
+        "strategy_platform_mapping_qualified_guard": (
+            "beforeinsertorupdateof",
+            "qualifiedmappingrequiresdynamicqualityevidence",
+            "qualifiedmappingevidenceisunrelatedtothemappedentity",
+        ),
+        "strategy_source_definition_versions_draft_only": (
+            "beforeinsertordeleteorupdateon",
+            "validatedconfigurationchildrenareimmutable",
+        ),
+        "research_profile_versions_draft_only": (
+            "beforeinsertordeleteorupdateon",
+            "configurationchildversionidentityisimmutable",
+            "validatedconfigurationchildrenareimmutable",
+        ),
+        "strategy_submissions_safe_payload": (
+            "beforeinsertorupdateofpayload_snapshoton",
+            "strategysubmissionpayloadcannotcontainsecretvalues",
+            "strategysubmissionpayloadcannotcontainexecutablecode",
+        ),
         "trade_intents_active_approval_immutable": (
             "beforeupdateon",
             "activeapprovedintentisimmutable",
@@ -1678,6 +2144,8 @@ def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
         combined = "".join(definitions)
         if any(fragment not in combined for fragment in fragments):
             problems.append(f"trigger definition mismatch: {trigger_name}")
+    if not _include_legacy_runtime_acl:
+        return problems
     for table_name in RUNTIME_APPEND_ONLY_TABLES:
         owner = bind.execute(
             text(
@@ -2846,6 +3314,556 @@ def schema_problems(bind: Union[Connection, Engine]) -> list[str]:
         problems.extend(_natural_signal_risk_chain_boundary_problems(bind, schema_name))
         problems.extend(_expired_approval_attestor_acl_problems(bind, schema_name))
         problems.extend(_strategy_validation_acl_problems(bind, schema_name))
+    return problems
+
+
+def strategy_platform_v13_owner_schema_problems(
+    bind: Union[Connection, Engine],
+    *,
+    expected_database: Optional[str] = None,
+) -> list[str]:
+    """Verify the post-cutover V1.3 owner database without legacy runtime ACLs.
+
+    ``schema_problems`` remains the verifier for the retired runtime contract.
+    This entry point deliberately reuses its structural, trigger, and critical
+    CHECK attestation, then applies the exact fail-closed read-ACL contract used
+    after Task 1.  It reads secret-table cardinality only; no secret column is
+    selected.  ``expected_database`` is optional so an otherwise identical
+    backup-restore database can be independently verified.
+    """
+
+    if isinstance(bind, Engine):
+        with bind.connect() as connection:
+            return strategy_platform_v13_owner_schema_problems(
+                connection,
+                expected_database=expected_database,
+            )
+    if bind.dialect.name != "postgresql":
+        return ["database dialect is not PostgreSQL"]
+
+    problems = schema_problems(bind, _include_legacy_runtime_acl=False)
+    database_name, schema_name, search_path = bind.execute(
+        text(
+            "SELECT current_database(), current_schema(), "
+            "current_schemas(false)::text[]"
+        )
+    ).one()
+    if expected_database is not None and database_name != expected_database:
+        problems.append(
+            "V1.3 owner database mismatch: observed={}, expected={}".format(
+                database_name,
+                expected_database,
+            )
+        )
+    if schema_name != "public" or list(search_path) != ["public"]:
+        problems.append(
+            "V1.3 owner schema path mismatch: schema={} path={}".format(
+                schema_name,
+                list(search_path),
+            )
+        )
+        return problems
+
+    inspector = inspect(bind)
+    table_names = set(inspector.get_table_names(schema=schema_name))
+    if VERSION_TABLE in table_names:
+        version = bind.execute(
+            text(
+                f"SELECT version FROM {VERSION_TABLE} "
+                "ORDER BY applied_at DESC, version DESC LIMIT 1"
+            )
+        ).scalar_one_or_none()
+        if version != SCHEMA_VERSION:
+            problems.append(
+                "V1.3 owner schema version mismatch: observed={}, expected={}".format(
+                    version or "<missing>",
+                    SCHEMA_VERSION,
+                )
+            )
+    else:
+        problems.append("V1.3 owner schema marker is missing")
+
+    if "strategy_platform_migration_runs" in table_names:
+        migration_run = bind.execute(
+            text(
+                "SELECT status,target_schema_version,source_snapshot_digest,"
+                "target_snapshot_digest,report_digest,evidence_manifest,"
+                "evidence_manifest_digest,report_path,completed_at,error_code,"
+                "error_message,destructive_write_count,overwritten_row_count,"
+                "deleted_row_count FROM strategy_platform_migration_runs "
+                "WHERE migration_key=:migration_key ORDER BY id DESC LIMIT 1"
+            ),
+            {"migration_key": TASK1_MIGRATION_KEY},
+        ).mappings().first()
+        if migration_run is None:
+            problems.append("V1.3 Task 1 SUCCEEDED migration run is missing")
+        else:
+            if (
+                migration_run["status"] != "SUCCEEDED"
+                or migration_run["target_schema_version"] != SCHEMA_VERSION
+                or migration_run["completed_at"] is None
+                or migration_run["error_code"] is not None
+                or migration_run["error_message"] is not None
+                or not migration_run["report_path"]
+            ):
+                problems.append("V1.3 Task 1 migration terminal state mismatch")
+            for digest_column in (
+                "source_snapshot_digest",
+                "target_snapshot_digest",
+                "report_digest",
+                "evidence_manifest_digest",
+            ):
+                digest = migration_run[digest_column]
+                if not isinstance(digest, str) or not re.fullmatch(
+                    r"[0-9a-f]{64}", digest
+                ):
+                    problems.append(
+                        "V1.3 Task 1 migration digest mismatch: {}".format(
+                            digest_column
+                        )
+                    )
+            manifest = migration_run["evidence_manifest"]
+            if not isinstance(manifest, dict) or not manifest:
+                problems.append("V1.3 Task 1 evidence manifest is empty")
+            elif canonical_digest(manifest) != migration_run["evidence_manifest_digest"]:
+                problems.append("V1.3 Task 1 evidence manifest digest mismatch")
+            if any(
+                migration_run[column] != 0
+                for column in (
+                    "destructive_write_count",
+                    "overwritten_row_count",
+                    "deleted_row_count",
+                )
+            ):
+                problems.append("V1.3 Task 1 migration is not forward-only")
+    else:
+        problems.append("V1.3 Task 1 migration audit table is missing")
+
+    required_roles = {
+        row["rolname"]: row
+        for row in bind.execute(
+            text(
+                "SELECT oid,rolname,rolcanlogin,rolinherit,rolsuper,rolcreaterole,"
+                "rolcreatedb,rolreplication,rolbypassrls FROM pg_roles "
+                "WHERE rolname IN ('freqtrade','freqtrade_ai_attestor')"
+            )
+        ).mappings()
+    }
+    runtime = required_roles.get("freqtrade")
+    attestor = required_roles.get("freqtrade_ai_attestor")
+    if runtime is None:
+        problems.append("V1.3 runtime role is missing: freqtrade")
+    elif (
+        runtime["rolcanlogin"] is not True
+        or any(
+            runtime[column]
+            for column in (
+                "rolsuper",
+                "rolcreaterole",
+                "rolcreatedb",
+                "rolreplication",
+                "rolbypassrls",
+            )
+        )
+    ):
+        problems.append("V1.3 runtime role attributes mismatch")
+    if attestor is None:
+        problems.append("V1.3 attestor role is missing: freqtrade_ai_attestor")
+    elif (
+        attestor["rolcanlogin"] is not False
+        or attestor["rolinherit"] is not False
+        or any(
+            attestor[column]
+            for column in (
+                "rolsuper",
+                "rolcreaterole",
+                "rolcreatedb",
+                "rolreplication",
+                "rolbypassrls",
+            )
+        )
+    ):
+        problems.append("V1.3 attestor role attributes mismatch")
+    if runtime is None or attestor is None:
+        return problems
+
+    if bind.execute(
+        text(
+            "SELECT EXISTS (SELECT 1 FROM pg_auth_members "
+            "WHERE member=:runtime_oid OR roleid=:runtime_oid)"
+        ),
+        {"runtime_oid": runtime["oid"]},
+    ).scalar_one():
+        problems.append("V1.3 runtime role has a membership edge")
+
+    schema_security = bind.execute(
+        text(
+            "SELECT has_schema_privilege(:runtime_oid, 'public', 'USAGE'),"
+            "has_schema_privilege(:runtime_oid, 'public', 'CREATE'),"
+            "has_database_privilege(:runtime_oid, current_database(), 'CREATE')"
+        ),
+        {"runtime_oid": runtime["oid"]},
+    ).one()
+    if schema_security[0] is not True:
+        problems.append("V1.3 runtime schema USAGE is missing")
+    if schema_security[1] or schema_security[2]:
+        problems.append("V1.3 runtime retains object CREATE privilege")
+
+    expected_v13_tables = (
+        STRATEGY_PLATFORM_V13_OWNER_READ_TABLES
+        | STRATEGY_PLATFORM_V13_OWNER_ONLY_TABLES
+    )
+    expected_catalog = expected_v13_tables | STRATEGY_PLATFORM_V13_LEGACY_CAPABILITY_TABLES
+    relation_rows = {
+        row["relname"]: row
+        for row in bind.execute(
+            text(
+                """
+                SELECT relation.relname,
+                       pg_get_userbyid(relation.relowner) AS owner_name,
+                       has_table_privilege(
+                           :runtime_oid, relation.oid, 'SELECT'
+                       ) AS runtime_select,
+                       has_table_privilege(
+                           :runtime_oid, relation.oid,
+                           'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'
+                       ) AS runtime_dml,
+                       (SELECT count(*)
+                          FROM aclexplode(relation.relacl) acl
+                         WHERE acl.grantee=:runtime_oid
+                           AND acl.privilege_type='SELECT'
+                           AND acl.is_grantable IS FALSE) AS direct_runtime_select,
+                       EXISTS (
+                           SELECT 1 FROM aclexplode(relation.relacl) acl
+                            WHERE acl.grantee IN (0,:runtime_oid)
+                              AND NOT (
+                                  acl.grantee=:runtime_oid
+                                  AND acl.privilege_type='SELECT'
+                                  AND acl.is_grantable IS FALSE
+                              )
+                       ) AS unexpected_runtime_public_acl,
+                       EXISTS (
+                           SELECT 1 FROM aclexplode(relation.relacl) acl
+                            WHERE acl.grantee<>relation.relowner
+                       ) AS nonowner_acl,
+                       EXISTS (
+                           SELECT 1
+                             FROM pg_attribute attribute
+                             CROSS JOIN LATERAL aclexplode(attribute.attacl) acl
+                            WHERE attribute.attrelid=relation.oid
+                              AND attribute.attnum>0
+                              AND attribute.attisdropped IS FALSE
+                              AND acl.grantee IN (0,:runtime_oid)
+                       ) AS runtime_public_column_acl,
+                       EXISTS (
+                           SELECT 1
+                             FROM pg_attribute attribute
+                             CROSS JOIN LATERAL aclexplode(attribute.attacl) acl
+                            WHERE attribute.attrelid=relation.oid
+                              AND attribute.attnum>0
+                              AND attribute.attisdropped IS FALSE
+                              AND acl.grantee<>relation.relowner
+                       ) AS nonowner_column_acl
+                  FROM pg_class relation
+                  JOIN pg_namespace namespace
+                    ON namespace.oid=relation.relnamespace
+                 WHERE namespace.nspname='public'
+                   AND relation.relkind IN ('r','p')
+                   AND relation.relname=ANY(CAST(:relation_names AS text[]))
+                """
+            ),
+            {
+                "runtime_oid": runtime["oid"],
+                "relation_names": sorted(expected_catalog),
+            },
+        ).mappings()
+    }
+    missing_relations = sorted(expected_catalog - set(relation_rows))
+    if missing_relations:
+        problems.append(
+            "V1.3 owner ACL relation set mismatch: missing={}".format(
+                ",".join(missing_relations)
+            )
+        )
+    current_user = bind.execute(text("SELECT current_user")).scalar_one()
+    for table_name in sorted(STRATEGY_PLATFORM_V13_OWNER_READ_TABLES):
+        row = relation_rows.get(table_name)
+        if row is None:
+            continue
+        if row["owner_name"] != current_user:
+            problems.append(f"V1.3 owner relation owner mismatch: {table_name}")
+        if (
+            row["runtime_select"] is not True
+            or row["runtime_dml"] is True
+            or row["direct_runtime_select"] != 1
+            or row["unexpected_runtime_public_acl"] is True
+            or row["runtime_public_column_acl"] is True
+        ):
+            problems.append(f"V1.3 direct read ACL mismatch: {table_name}")
+    for table_name in sorted(STRATEGY_PLATFORM_V13_OWNER_ONLY_TABLES):
+        row = relation_rows.get(table_name)
+        if row is None:
+            continue
+        if row["owner_name"] != current_user:
+            problems.append(f"V1.3 owner relation owner mismatch: {table_name}")
+        if (
+            row["runtime_select"] is True
+            or row["runtime_dml"] is True
+            or row["direct_runtime_select"] != 0
+            or row["unexpected_runtime_public_acl"] is True
+            or row["runtime_public_column_acl"] is True
+        ):
+            problems.append(f"V1.3 owner-only ACL mismatch: {table_name}")
+    for table_name in sorted(STRATEGY_PLATFORM_V13_LEGACY_CAPABILITY_TABLES):
+        row = relation_rows.get(table_name)
+        if row is None:
+            continue
+        if (
+            row["owner_name"] == "freqtrade"
+            or row["runtime_select"] is True
+            or row["runtime_dml"] is True
+            or row["nonowner_acl"] is True
+            or row["nonowner_column_acl"] is True
+        ):
+            problems.append(f"V1.3 legacy table capability remains: {table_name}")
+
+    sequence_rows = {
+        row["relname"]: row
+        for row in bind.execute(
+            text(
+                """
+                SELECT relation.relname,
+                       pg_get_userbyid(relation.relowner) AS owner_name,
+                       has_sequence_privilege(
+                           :runtime_oid, relation.oid, 'USAGE,SELECT,UPDATE'
+                       ) AS runtime_privilege,
+                       EXISTS (
+                           SELECT 1
+                             FROM aclexplode(
+                                 COALESCE(
+                                     relation.relacl,
+                                     acldefault('S', relation.relowner)
+                                 )
+                             ) acl
+                            WHERE acl.grantee IN (0,:runtime_oid)
+                              AND acl.privilege_type IN ('USAGE','SELECT','UPDATE')
+                       ) AS runtime_public_acl,
+                       EXISTS (
+                           SELECT 1 FROM aclexplode(relation.relacl) acl
+                            WHERE acl.grantee<>relation.relowner
+                       ) AS nonowner_acl
+                  FROM pg_class relation
+                  JOIN pg_namespace namespace
+                    ON namespace.oid=relation.relnamespace
+                 WHERE namespace.nspname='public'
+                   AND relation.relkind='S'
+                   AND relation.relname=ANY(CAST(:sequence_names AS text[]))
+                """
+            ),
+            {
+                "runtime_oid": runtime["oid"],
+                "sequence_names": sorted(
+                    STRATEGY_PLATFORM_V13_LEGACY_CAPABILITY_SEQUENCES
+                ),
+            },
+        ).mappings()
+    }
+    missing_sequences = sorted(
+        STRATEGY_PLATFORM_V13_LEGACY_CAPABILITY_SEQUENCES - set(sequence_rows)
+    )
+    if missing_sequences:
+        problems.append(
+            "V1.3 legacy sequence set mismatch: missing={}".format(
+                ",".join(missing_sequences)
+            )
+        )
+    for sequence_name, row in sequence_rows.items():
+        if (
+            row["owner_name"] == "freqtrade"
+            or row["runtime_privilege"] is True
+            or row["runtime_public_acl"] is True
+            or row["nonowner_acl"] is True
+        ):
+            problems.append(
+                f"V1.3 legacy sequence capability remains: {sequence_name}"
+            )
+
+    v13_sequence_rows = bind.execute(
+        text(
+            """
+            SELECT DISTINCT sequence_relation.relname,
+                   pg_get_userbyid(sequence_relation.relowner) AS owner_name,
+                   has_sequence_privilege(
+                       :runtime_oid, sequence_relation.oid,
+                       'USAGE,SELECT,UPDATE'
+                   ) AS runtime_privilege,
+                   EXISTS (
+                       SELECT 1
+                         FROM aclexplode(
+                             COALESCE(
+                                 sequence_relation.relacl,
+                                 acldefault('S', sequence_relation.relowner)
+                             )
+                         ) acl
+                        WHERE acl.grantee IN (0,:runtime_oid)
+                          AND acl.privilege_type IN ('USAGE','SELECT','UPDATE')
+                   ) AS runtime_public_acl
+              FROM pg_class table_relation
+              JOIN pg_namespace table_namespace
+                ON table_namespace.oid=table_relation.relnamespace
+               AND table_namespace.nspname='public'
+              JOIN pg_depend dependency
+                ON dependency.refobjid=table_relation.oid
+               AND dependency.classid='pg_class'::regclass
+               AND dependency.refclassid='pg_class'::regclass
+               AND dependency.deptype IN ('a','i')
+              JOIN pg_class sequence_relation
+                ON sequence_relation.oid=dependency.objid
+               AND sequence_relation.relkind='S'
+             WHERE table_relation.relname=ANY(CAST(:table_names AS text[]))
+            """
+        ),
+        {
+            "runtime_oid": runtime["oid"],
+            "table_names": sorted(expected_v13_tables),
+        },
+    ).mappings()
+    for row in v13_sequence_rows:
+        if (
+            row["owner_name"] == "freqtrade"
+            or row["runtime_privilege"] is True
+            or row["runtime_public_acl"] is True
+        ):
+            problems.append(
+                "V1.3 sequence runtime capability remains: {}".format(
+                    row["relname"]
+                )
+            )
+
+    for function_name, identity_arguments in sorted(
+        STRATEGY_PLATFORM_V13_LEGACY_CAPABILITY_FUNCTIONS
+    ):
+        identity = f"public.{function_name}({identity_arguments})"
+        row = bind.execute(
+            text(
+                """
+                SELECT pg_get_userbyid(function_row.proowner) AS owner_name,
+                       function_row.prosecdef,
+                       has_function_privilege(
+                           :runtime_oid, function_row.oid, 'EXECUTE'
+                       ) AS runtime_execute,
+                       has_function_privilege(
+                           0, function_row.oid, 'EXECUTE'
+                       ) AS public_execute,
+                       EXISTS (
+                           SELECT 1 FROM aclexplode(function_row.proacl) acl
+                            WHERE acl.grantee<>function_row.proowner
+                       ) AS nonowner_acl
+                  FROM pg_proc function_row
+                 WHERE function_row.oid=to_regprocedure(:identity)
+                """
+            ),
+            {"runtime_oid": runtime["oid"], "identity": identity},
+        ).mappings().first()
+        if row is None:
+            problems.append(f"V1.3 legacy function is missing: {identity}")
+        elif (
+            row["owner_name"] != "freqtrade_ai_attestor"
+            or row["prosecdef"] is not True
+            or row["runtime_execute"] is True
+            or row["public_execute"] is True
+            or row["nonowner_acl"] is True
+        ):
+            problems.append(f"V1.3 legacy function capability remains: {identity}")
+
+    guard_rows = {
+        row["proname"]: row
+        for row in bind.execute(
+            text(
+                """
+                SELECT function_row.proname,
+                       pg_get_userbyid(function_row.proowner) AS owner_name,
+                       function_row.prosecdef,
+                       has_function_privilege(
+                           :runtime_oid, function_row.oid, 'EXECUTE'
+                       ) AS runtime_execute,
+                       has_function_privilege(
+                           0, function_row.oid, 'EXECUTE'
+                       ) AS public_execute,
+                       EXISTS (
+                           SELECT 1 FROM aclexplode(function_row.proacl) acl
+                            WHERE acl.grantee<>function_row.proowner
+                       ) AS nonowner_acl
+                  FROM pg_proc function_row
+                  JOIN pg_namespace namespace
+                    ON namespace.oid=function_row.pronamespace
+                 WHERE namespace.nspname='public'
+                   AND function_row.pronargs=0
+                   AND function_row.proname=ANY(CAST(:function_names AS text[]))
+                """
+            ),
+            {
+                "runtime_oid": runtime["oid"],
+                "function_names": sorted(STRATEGY_PLATFORM_V13_GUARD_FUNCTIONS),
+            },
+        ).mappings()
+    }
+    missing_guards = sorted(STRATEGY_PLATFORM_V13_GUARD_FUNCTIONS - set(guard_rows))
+    if missing_guards:
+        problems.append(
+            "V1.3 guard function set mismatch: missing={}".format(
+                ",".join(missing_guards)
+            )
+        )
+    for function_name, row in guard_rows.items():
+        if (
+            row["owner_name"] != current_user
+            or row["prosecdef"] is True
+            or row["runtime_execute"] is True
+            or row["public_execute"] is True
+            or row["nonowner_acl"] is True
+        ):
+            problems.append(f"V1.3 guard function ACL mismatch: {function_name}")
+
+    if bind.execute(
+        text(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                  FROM pg_default_acl default_acl
+                  LEFT JOIN pg_namespace namespace
+                    ON namespace.oid=default_acl.defaclnamespace
+                  CROSS JOIN LATERAL aclexplode(default_acl.defaclacl) acl
+                 WHERE (
+                           default_acl.defaclnamespace=0
+                           OR namespace.nspname='public'
+                       )
+                   AND default_acl.defaclobjtype IN ('r','S','f')
+                   AND acl.grantee IN (0,:runtime_oid)
+            )
+            """
+        ),
+        {"runtime_oid": runtime["oid"]},
+    ).scalar_one():
+        problems.append("V1.3 default ACL grants future runtime capability")
+
+    for table_name in (
+        "okx_demo_attestation_secrets",
+        "okx_demo_operator_consent_secrets",
+    ):
+        if table_name not in table_names:
+            problems.append(f"V1.3 secret table is missing: {table_name}")
+            continue
+        excluded_material_row_count = bind.execute(
+            text(f'SELECT count(*) FROM "{table_name}"')
+        ).scalar_one()
+        if excluded_material_row_count != 0:
+            problems.append(
+                "V1.3 secret table is not empty: {} count={}".format(
+                    table_name,
+                    excluded_material_row_count,
+                )
+            )
     return problems
 
 
@@ -7735,7 +8753,33 @@ def _add_strategy_platform_v1_foundation(connection: Connection) -> None:
                 END IF;
                 IF OLD.status IN ('QUALIFIED','REJECTED','FAILED','BLOCKED')
                    AND OLD.status = NEW.status
-                   AND OLD IS DISTINCT FROM NEW THEN
+                   AND (
+                       to_jsonb(OLD) - ARRAY[
+                           'strategy_target_id',
+                           'quality_gate_profile_version_id',
+                           'validation_window_config_set_id',
+                           'configuration_bundle_snapshot_id',
+                           'cycle_number',
+                           'trigger_source_key',
+                           'trigger_metadata',
+                           'started_at',
+                           'policy_snapshot_digest',
+                           'market_data_snapshot_digest'
+                       ]::text[]
+                   ) IS DISTINCT FROM (
+                       to_jsonb(NEW) - ARRAY[
+                           'strategy_target_id',
+                           'quality_gate_profile_version_id',
+                           'validation_window_config_set_id',
+                           'configuration_bundle_snapshot_id',
+                           'cycle_number',
+                           'trigger_source_key',
+                           'trigger_metadata',
+                           'started_at',
+                           'policy_snapshot_digest',
+                           'market_data_snapshot_digest'
+                       ]::text[]
+                   ) THEN
                     RAISE EXCEPTION 'terminal strategy validation plan is immutable';
                 END IF;
                 RETURN NEW;
@@ -7781,7 +8825,20 @@ def _add_strategy_platform_v1_foundation(connection: Connection) -> None:
                    OR (OLD.backtest_result_id IS NOT NULL
                        AND OLD.backtest_result_id IS DISTINCT FROM NEW.backtest_result_id)
                    OR (OLD.execution_id IS NOT NULL
-                       AND OLD.execution_id IS DISTINCT FROM NEW.execution_id) THEN
+                       AND OLD.execution_id IS DISTINCT FROM NEW.execution_id)
+                   OR (OLD.net_profit_after_cost IS NOT NULL
+                       AND OLD.net_profit_after_cost IS DISTINCT FROM
+                           NEW.net_profit_after_cost)
+                   OR (OLD.max_drawdown IS NOT NULL
+                       AND OLD.max_drawdown IS DISTINCT FROM NEW.max_drawdown)
+                   OR (OLD.volatility IS NOT NULL
+                       AND OLD.volatility IS DISTINCT FROM NEW.volatility)
+                   OR (OLD.total_trades IS NOT NULL
+                       AND OLD.total_trades IS DISTINCT FROM NEW.total_trades)
+                   OR (OLD.failure_code IS NOT NULL
+                       AND OLD.failure_code IS DISTINCT FROM NEW.failure_code)
+                   OR (OLD.failure_message IS NOT NULL
+                       AND OLD.failure_message IS DISTINCT FROM NEW.failure_message) THEN
                     RAISE EXCEPTION 'strategy validation window identity is immutable';
                 END IF;
                 IF OLD.status IS DISTINCT FROM NEW.status AND NOT (
@@ -7796,7 +8853,35 @@ def _add_strategy_platform_v1_foundation(connection: Connection) -> None:
                 END IF;
                 IF OLD.status IN ('PASSED','REJECTED','FAILED','BLOCKED')
                    AND OLD.status = NEW.status
-                   AND OLD IS DISTINCT FROM NEW THEN
+                   AND (
+                       to_jsonb(OLD) - ARRAY[
+                           'window_config_id',
+                           'window_key_snapshot',
+                           'name_zh_snapshot',
+                           'description_zh_snapshot',
+                           'attempt_number',
+                           'net_profit_after_cost',
+                           'max_drawdown',
+                           'volatility',
+                           'total_trades',
+                           'failure_code',
+                           'failure_message'
+                       ]::text[]
+                   ) IS DISTINCT FROM (
+                       to_jsonb(NEW) - ARRAY[
+                           'window_config_id',
+                           'window_key_snapshot',
+                           'name_zh_snapshot',
+                           'description_zh_snapshot',
+                           'attempt_number',
+                           'net_profit_after_cost',
+                           'max_drawdown',
+                           'volatility',
+                           'total_trades',
+                           'failure_code',
+                           'failure_message'
+                       ]::text[]
+                   ) THEN
                     RAISE EXCEPTION 'terminal strategy validation window is immutable';
                 END IF;
                 RETURN NEW;
@@ -7811,6 +8896,11 @@ def _add_strategy_platform_v1_foundation(connection: Connection) -> None:
             """
         )
     )
+
+    # P0/P1 V1.3 contracts are installed only after their foundation parents and
+    # additive legacy columns exist.  The installer is itself checkfirst/idempotent
+    # and never seeds business data or changes grants.
+    install_strategy_platform_v13_task1_schema(connection)
 
 
 def _add_controlled_canary_lifecycle_boundary(connection: Connection) -> None:
@@ -13230,7 +14320,11 @@ def _finalize_current_canary_boundaries(connection: Connection) -> list[str]:
     return schema_problems(connection)
 
 
-def upgrade_database(engine: Engine) -> str:
+def upgrade_database(
+    engine: Engine,
+    *,
+    strategy_platform_v13_controlled: bool = False,
+) -> str:
     """Upgrade a local PostgreSQL database atomically to ``SCHEMA_VERSION``.
 
     A schema created by the old unversioned SQL file is accepted only when every
@@ -13242,15 +14336,89 @@ def upgrade_database(engine: Engine) -> str:
     expected_table_names = set(_expected_tables())
     try:
         with engine.begin() as connection:
+            # Shared upgrades must fail quickly instead of waiting indefinitely on
+            # a runtime transaction.  These settings are transaction-local.
+            connection.execute(text("SET LOCAL lock_timeout = '3s'"))
+            connection.execute(text("SET LOCAL statement_timeout = '15min'"))
+            acquired = connection.execute(
+                text("SELECT pg_try_advisory_xact_lock(:key)"),
+                {"key": 1_308_202_608_130_047},
+            ).scalar_one()
+            if acquired is not True:
+                raise SchemaMigrationBlocked(
+                    "Strategy Platform V1.3 schema migration lock is already held"
+                )
             _create_version_table(connection)
             current_version = _current_version(connection)
             if current_version == SCHEMA_VERSION:
-                problems = schema_problems(connection)
+                database_name = connection.execute(
+                    text("SELECT current_database()")
+                ).scalar_one()
+                completed_owner_run = False
+                if inspect(connection).has_table(
+                    "strategy_platform_migration_runs", schema="public"
+                ):
+                    completed_owner_run = connection.execute(
+                        text(
+                            "SELECT EXISTS (SELECT 1 FROM "
+                            "strategy_platform_migration_runs WHERE "
+                            "migration_key="
+                            "'strategy-platform-v13-task1-real-data-v1' "
+                            "AND execution_scope='DESIGN_LAB' "
+                            "AND status='SUCCEEDED')"
+                        )
+                    ).scalar_one()
+                if (
+                    strategy_platform_v13_controlled
+                    and database_name == "freqtrade_ai_design_lab"
+                    and completed_owner_run is True
+                ):
+                    problems = strategy_platform_v13_owner_schema_problems(
+                        connection,
+                        expected_database=database_name,
+                    )
+                else:
+                    problems = schema_problems(connection)
                 if problems:
                     raise SchemaMigrationBlocked(
                         "Recorded schema version does not match ORM metadata: " + "; ".join(problems)
                     )
                 return current_version
+            if current_version in {
+                STRATEGY_PLATFORM_V1_BASE_VERSION,
+                STRATEGY_PLATFORM_V1_FOUNDATION_VERSION,
+            } and not strategy_platform_v13_controlled:
+                raise SchemaMigrationBlocked(
+                    "BLOCKED_STRATEGY_PLATFORM_V13_CONTROLLED_UPGRADE_REQUIRED: "
+                    "v46/v47 takes ACCESS EXCLUSIVE locks and must run only in the "
+                    "isolated design lab or a separately attested shared migration window"
+                )
+            if current_version in {
+                STRATEGY_PLATFORM_V1_BASE_VERSION,
+                STRATEGY_PLATFORM_V1_FOUNDATION_VERSION,
+            } and strategy_platform_v13_controlled:
+                database_name = connection.execute(
+                    text("SELECT current_database()")
+                ).scalar_one()
+                if database_name != "freqtrade_ai_design_lab":
+                    raise SchemaMigrationBlocked(
+                        "BLOCKED_STRATEGY_PLATFORM_V13_DESIGN_LAB_ONLY: the generic "
+                        "controlled flag is valid only for freqtrade_ai_design_lab; "
+                        "shared cutover requires the dedicated maintenance-fenced path"
+                    )
+            if current_version == STRATEGY_PLATFORM_V1_FOUNDATION_VERSION:
+                _add_strategy_platform_v1_foundation(connection)
+                problems = schema_problems(connection)
+                if problems:
+                    raise SchemaMigrationBlocked(
+                        "Strategy Platform V1.3 complete schema upgrade does not match "
+                        "ORM metadata: " + "; ".join(problems)
+                    )
+                connection.execute(
+                    text(f"INSERT INTO {VERSION_TABLE} (version) VALUES (:version)"),
+                    {"version": SCHEMA_VERSION},
+                )
+                return SCHEMA_VERSION
             if current_version == STRATEGY_PLATFORM_V1_BASE_VERSION:
                 _add_strategy_platform_v1_foundation(connection)
                 problems = schema_problems(connection)

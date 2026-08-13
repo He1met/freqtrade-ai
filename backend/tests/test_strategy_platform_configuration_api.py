@@ -245,9 +245,13 @@ def test_owner_can_create_validate_switch_and_retire_immutable_versions(
     assert validated.status_code == 200
     assert validated.json()["version"]["lifecycle_status"] == "VALIDATED"
     assert validated.json()["validation_bundle"]["capability_snapshot"] == {
+        "adapter_registry_contract": "strategy-platform-adapter-registry-v1",
+        "adapter_registry_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "adapter_registry_keys": [],
         "allow_real_funds": False,
         "demo_only": True,
         "resolution_contract": "strategy-platform-owner-resolver-v1",
+        "resolved_adapter_count": 0,
         "resolved_type_count": 2,
         "single_writer_required": True,
     }

@@ -430,6 +430,8 @@ def _looks_like_type_annotation(value: str) -> bool:
         "Any",
         "None",
         "null",
+        "True",
+        "False",
         "true",
         "false",
     }

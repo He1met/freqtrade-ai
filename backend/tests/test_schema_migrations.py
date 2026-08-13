@@ -1,4 +1,6 @@
 import pytest
+from sqlalchemy import CheckConstraint
+from sqlalchemy.dialects import postgresql
 
 from app.core.exceptions import ConfigurationError
 from app.db.migrations import (
@@ -47,14 +49,25 @@ from app.db.migrations import (
     STRATEGY_DEPLOYMENT_BASE_VERSION,
     SINGLE_ACTIVE_DEPLOYMENT_BASE_VERSION,
     STRATEGY_VALIDATION_BASE_VERSION,
+    STRATEGY_PLATFORM_V13_TASK1_CRITICAL_CHECK_DEFINITIONS,
+    STRATEGY_PLATFORM_V13_GUARD_FUNCTIONS,
+    STRATEGY_PLATFORM_V13_LEGACY_CAPABILITY_FUNCTIONS,
+    STRATEGY_PLATFORM_V13_LEGACY_CAPABILITY_SEQUENCES,
+    STRATEGY_PLATFORM_V13_LEGACY_CAPABILITY_TABLES,
+    STRATEGY_PLATFORM_V13_OWNER_ONLY_TABLES,
+    STRATEGY_PLATFORM_V13_OWNER_READ_TABLES,
     SCHEMA_VERSION,
+    _critical_check_definition_problems,
     _demo_automation_policy_digest,
+    _normalized_index_definition,
+    _normalized_sql_definition,
     _rebind_demo_automation_guard_policy,
     SOAK_BASE_VERSION,
     TARGET_LINEAGE_BASE_VERSION,
     TRUSTED_SNAPSHOT_BASE_VERSION,
     psql_database_url,
     schema_problems,
+    strategy_platform_v13_owner_schema_problems,
     verify_schema,
     _add_controlled_canary_lifecycle_boundary,
     _add_canary_consent_handoff_boundary,
@@ -67,6 +80,84 @@ from app.db.migrations import (
     _add_natural_signal_risk_chain_boundary,
 )
 from app.db.session import create_database_engine
+from app.models.base import Base
+
+
+V13_TASK1_CRITICAL_CHECK_TABLES = {
+    "deployment_profile_versions_safety_check": "deployment_profile_versions",
+    "execution_target_definition_versions_safety_check": (
+        "execution_target_definition_versions"
+    ),
+    "market_data_policy_versions_overlap_shape_check": (
+        "market_data_policy_versions"
+    ),
+    "market_data_quality_receipts_v13_scope_check": (
+        "market_data_quality_receipts"
+    ),
+    "risk_profile_versions_safety_check": "risk_profile_versions",
+    "runtime_profile_versions_safety_check": "runtime_profile_versions",
+    "strategy_evaluation_summaries_counts_check": (
+        "strategy_evaluation_summaries"
+    ),
+    "strategy_evaluation_summaries_status_check": (
+        "strategy_evaluation_summaries"
+    ),
+    "strategy_platform_migration_mapping_qualified_evidence_check": (
+        "strategy_platform_migration_entity_mappings"
+    ),
+    "strategy_platform_migration_mapping_quality_status_check": (
+        "strategy_platform_migration_entity_mappings"
+    ),
+    "strategy_platform_migration_runs_evidence_digest_check": (
+        "strategy_platform_migration_runs"
+    ),
+    "strategy_platform_migration_runs_forward_only_check": (
+        "strategy_platform_migration_runs"
+    ),
+    "strategy_platform_migration_runs_terminal_shape_check": (
+        "strategy_platform_migration_runs"
+    ),
+    "strategy_runtime_instances_safety_check": "strategy_runtime_instances",
+}
+
+
+POSTGRESQL_V13_CHECK_DEPARSE_SAMPLES = {
+    "market_data_policy_versions_overlap_shape_check": (
+        "overlap_by_timeframe IS NULL AND incremental_overlap_seconds IS NOT NULL "
+        "AND incremental_overlap_seconds >= 0 OR overlap_by_timeframe IS NOT NULL "
+        "AND incremental_overlap_seconds IS NULL AND "
+        "length(overlap_by_timeframe::text) > 2"
+    ),
+    "market_data_quality_receipts_v13_scope_check": (
+        "contract_version <> 'market-data-quality-v13-v1'::text OR "
+        "idempotency_key IS NOT NULL AND quality_scope = "
+        "'MIGRATION_SOURCE_CONSISTENCY_AS_OF_SOURCE_RECEIPT'::text AND "
+        "quality_decision = 'NOT_STRATEGY_QUALIFICATION'::text AND "
+        "file_identity_digest IS NOT NULL AND length(file_identity_digest) = 64 "
+        "AND source_identity_digest IS NOT NULL AND "
+        "length(source_identity_digest) = 64 AND aggregate_receipt_digest IS NOT NULL "
+        "AND length(aggregate_receipt_digest) = 64 AND "
+        "migration_artifact_digest IS NOT NULL AND "
+        "length(migration_artifact_digest) = 64 AND freshness_basis = "
+        "'ORIGINAL_AGGREGATE_RECEIPT_DOWNLOADED_AT'::text AND "
+        "freshness_seconds IS NULL AND status = 'PASSED'::text"
+    ),
+    "strategy_evaluation_summaries_counts_check": (
+        "required_window_count >= 0 AND passed_window_count >= 0 AND "
+        "failed_window_count >= 0 AND "
+        "(passed_window_count + failed_window_count) <= required_window_count"
+    ),
+    "strategy_platform_migration_runs_terminal_shape_check": (
+        "(status <> ALL (ARRAY['SUCCEEDED'::text, 'FAILED'::text, "
+        "'BLOCKED'::text])) OR status = 'SUCCEEDED'::text AND "
+        "target_snapshot_digest IS NOT NULL AND report_digest IS NOT NULL AND "
+        "completed_at IS NOT NULL AND error_code IS NULL AND error_message IS NULL "
+        "AND evidence_manifest::text <> '{}'::text OR "
+        "(status = ANY (ARRAY['FAILED'::text, 'BLOCKED'::text])) AND "
+        "completed_at IS NOT NULL AND error_code IS NOT NULL AND "
+        "error_message IS NOT NULL"
+    ),
+}
 
 
 def test_psql_url_strips_sqlalchemy_driver_and_password() -> None:
@@ -92,6 +183,9 @@ def test_schema_verification_fails_closed_for_sqlite() -> None:
     assert result.schema_version is None
     assert result.problems == ("database dialect is not PostgreSQL",)
     assert schema_problems(engine) == ["database dialect is not PostgreSQL"]
+    assert strategy_platform_v13_owner_schema_problems(engine) == [
+        "database dialect is not PostgreSQL"
+    ]
 
 
 def test_schema_version_is_explicit_and_stable() -> None:
@@ -141,7 +235,125 @@ def test_schema_version_is_explicit_and_stable() -> None:
     assert NATURAL_SIGNAL_RISK_BUDGET_BASE_VERSION == "20260811_43"
     assert STALE_NATURAL_APPROVAL_RELEASE_BASE_VERSION == "20260811_44"
     assert STRATEGY_PLATFORM_V1_BASE_VERSION == "20260811_45"
-    assert SCHEMA_VERSION == "20260813_46"
+    assert SCHEMA_VERSION == "20260813_47"
+
+
+def test_v47_task1_critical_check_attestation_set_is_explicit() -> None:
+    assert STRATEGY_PLATFORM_V13_TASK1_CRITICAL_CHECK_DEFINITIONS == frozenset(
+        V13_TASK1_CRITICAL_CHECK_TABLES
+    )
+
+
+def test_v47_owner_acl_catalogs_are_exact_and_disjoint() -> None:
+    assert len(STRATEGY_PLATFORM_V13_OWNER_READ_TABLES) == 54
+    assert len(STRATEGY_PLATFORM_V13_OWNER_ONLY_TABLES) == 17
+    assert len(STRATEGY_PLATFORM_V13_LEGACY_CAPABILITY_TABLES) == 59
+    assert len(STRATEGY_PLATFORM_V13_LEGACY_CAPABILITY_SEQUENCES) == 48
+    assert len(STRATEGY_PLATFORM_V13_LEGACY_CAPABILITY_FUNCTIONS) == 37
+    assert len(STRATEGY_PLATFORM_V13_GUARD_FUNCTIONS) == 13
+    assert (
+        STRATEGY_PLATFORM_V13_OWNER_READ_TABLES
+        & STRATEGY_PLATFORM_V13_OWNER_ONLY_TABLES
+    ) == frozenset()
+    assert (
+        (
+            STRATEGY_PLATFORM_V13_OWNER_READ_TABLES
+            | STRATEGY_PLATFORM_V13_OWNER_ONLY_TABLES
+        )
+        & STRATEGY_PLATFORM_V13_LEGACY_CAPABILITY_TABLES
+    ) == frozenset()
+
+
+@pytest.mark.parametrize(
+    "postgresql_definition",
+    (
+        "((stopped_at IS NULL) AND ((status)::text = ANY "
+        "(ARRAY[('UNKNOWN'::character varying)::text, "
+        "('STARTING'::character varying)::text, "
+        "('HEALTHY'::character varying)::text, "
+        "('DEGRADED'::character varying)::text])))",
+        "((stopped_at IS NULL) AND ((status)::text = ANY "
+        "((ARRAY['UNKNOWN'::character varying, "
+        "'STARTING'::character varying, 'HEALTHY'::character varying, "
+        "'DEGRADED'::character varying])::text[])))",
+    ),
+)
+def test_v47_runtime_index_predicate_accepts_restore_deparse_variants(
+    postgresql_definition: str,
+) -> None:
+    assert _normalized_index_definition(postgresql_definition) == (
+        "stopped_atisnullandstatusin("
+        "'unknown','starting','healthy','degraded')"
+    )
+
+
+def test_v47_owner_schema_verifier_replaces_only_retired_runtime_acl_checks() -> None:
+    import inspect as pyinspect
+
+    source = pyinspect.getsource(strategy_platform_v13_owner_schema_problems)
+    for fragment in (
+        "_include_legacy_runtime_acl=False",
+        "expected_database",
+        "TASK1_MIGRATION_KEY",
+        'migration_run["status"] != "SUCCEEDED"',
+        "canonical_digest(manifest)",
+        "STRATEGY_PLATFORM_V13_OWNER_READ_TABLES",
+        "STRATEGY_PLATFORM_V13_OWNER_ONLY_TABLES",
+        "STRATEGY_PLATFORM_V13_LEGACY_CAPABILITY_TABLES",
+        "STRATEGY_PLATFORM_V13_LEGACY_CAPABILITY_SEQUENCES",
+        "STRATEGY_PLATFORM_V13_LEGACY_CAPABILITY_FUNCTIONS",
+        "STRATEGY_PLATFORM_V13_GUARD_FUNCTIONS",
+        "SELECT count(*)",
+    ):
+        assert fragment in source
+
+
+@pytest.mark.parametrize(
+    ("constraint_name", "postgresql_definition"),
+    sorted(POSTGRESQL_V13_CHECK_DEPARSE_SAMPLES.items()),
+)
+def test_v47_task1_schema_attestation_accepts_equivalent_postgresql_deparse(
+    constraint_name: str,
+    postgresql_definition: str,
+) -> None:
+    table_name = V13_TASK1_CRITICAL_CHECK_TABLES[constraint_name]
+    table = Base.metadata.tables[table_name]
+
+    assert _critical_check_definition_problems(
+        table_name=table_name,
+        table=table,
+        actual_check_definitions={
+            constraint_name: _normalized_sql_definition(postgresql_definition)
+        },
+        dialect=postgresql.dialect(),
+    ) == []
+
+
+@pytest.mark.parametrize(
+    ("constraint_name", "table_name"),
+    sorted(V13_TASK1_CRITICAL_CHECK_TABLES.items()),
+)
+def test_v47_task1_schema_attestation_rejects_same_name_weakened_checks(
+    constraint_name: str,
+    table_name: str,
+) -> None:
+    table = Base.metadata.tables[table_name]
+    assert any(
+        isinstance(constraint, CheckConstraint)
+        and constraint.name == constraint_name
+        for constraint in table.constraints
+    )
+
+    problems = _critical_check_definition_problems(
+        table_name=table_name,
+        table=table,
+        actual_check_definitions={constraint_name: "true"},
+        dialect=postgresql.dialect(),
+    )
+
+    assert problems == [
+        f"check definition mismatch: {table_name}.{constraint_name}"
+    ]
 
 
 def test_v41_guard_policy_digests_match_the_exact_v39_and_v40_contracts() -> None:

@@ -22,6 +22,9 @@ from app.db.migrations import (
     verify_schema,
 )
 from app.db.session import create_database_engine, create_session_factory
+from app.db.strategy_platform_v13_task1 import (
+    STRATEGY_PLATFORM_V13_EXTENSION_TABLES,
+)
 from app.models import BacktestRun, Base, ResearchJob, Strategy, StrategyGenerationRun
 from app.models.execution_lineage import (
     LOCAL_DRY_RUN_SCOPE_ID,
@@ -60,6 +63,14 @@ pytestmark = pytest.mark.skipif(
     reason="POSTGRES_WORKER_URL is required for the PostgreSQL worker gate",
 )
 
+_RETIRED_LEGACY_DIRECT_UPGRADE = pytest.mark.skip(
+    reason=(
+        "LEGACY_DIRECT_UPGRADE_RETIRED: V1.3 is installed only through the "
+        "controlled v45/v46 design-lab migration; older runtime schemas are not "
+        "direct cutover sources"
+    )
+)
+
 
 @pytest.fixture()
 def postgres_engine():
@@ -86,6 +97,21 @@ def _detach_signal_evaluations_from_full_chain(connection) -> None:
             "full_chain_runs_signal_evaluation_id_fkey"
         )
     )
+
+
+def _detach_signal_evaluations_from_trade_intents(connection) -> None:
+    connection.execute(
+        text(
+            "ALTER TABLE trade_intents "
+            "DROP CONSTRAINT IF EXISTS trade_intents_signal_evaluation_id_fkey, "
+            "DROP CONSTRAINT IF EXISTS trade_intents_deployment_id_fkey"
+        )
+    )
+
+
+def _drop_v13_extension_tables(connection) -> None:
+    for table_name in reversed(STRATEGY_PLATFORM_V13_EXTENSION_TABLES):
+        connection.execute(text(f'DROP TABLE IF EXISTS "{table_name}" CASCADE'))
 
 
 def test_fill_snapshot_repeat_upgrade_drops_only_cross_generation_unique(
@@ -117,12 +143,15 @@ def test_fill_snapshot_repeat_upgrade_drops_only_cross_generation_unique(
     assert "okx_demo_fill_snapshots_event_unique" in constraints
 
 
+@_RETIRED_LEGACY_DIRECT_UPGRADE
 def test_strategy_deployment_queue_upgrades_from_previous_schema(
     postgres_engine,
 ) -> None:
     assert upgrade_database(postgres_engine) == SCHEMA_VERSION
     with postgres_engine.begin() as connection:
+        _drop_v13_extension_tables(connection)
         _detach_signal_evaluations_from_full_chain(connection)
+        _detach_signal_evaluations_from_trade_intents(connection)
         connection.execute(text("DROP TABLE signal_evaluations"))
         connection.execute(text("DROP TABLE strategy_deployments"))
         connection.execute(text(f"DELETE FROM {VERSION_TABLE}"))
@@ -192,6 +221,7 @@ def test_strategy_deployment_queue_upgrades_from_previous_schema(
     assert "status" in str(single_consumer.get("dialect_options"))
 
 
+@_RETIRED_LEGACY_DIRECT_UPGRADE
 def test_validation_matrix_fresh_and_upgrade_schema_match_orm(
     postgres_engine,
 ) -> None:
@@ -202,6 +232,7 @@ def test_validation_matrix_fresh_and_upgrade_schema_match_orm(
     }.issubset(set(inspect(postgres_engine).get_table_names()))
 
     with postgres_engine.begin() as connection:
+        _drop_v13_extension_tables(connection)
         for table_name in reversed(STRATEGY_PLATFORM_V1_TABLES):
             connection.execute(text(f'DROP TABLE IF EXISTS "{table_name}" CASCADE'))
         connection.execute(
@@ -371,48 +402,52 @@ def _create_frozen_early_target_lineage_schema(connection) -> None:
     )
 
 
+@_RETIRED_LEGACY_DIRECT_UPGRADE
 def test_incremental_worker_migration_preserves_existing_runtime_rows(postgres_engine) -> None:
     old_tables = [
         table
         for table in Base.metadata.tables.values()
         if table.name
-        not in {
-            "approved_executions",
-            "exchange_fills",
-            "exchange_orders",
-            "exchange_positions",
-            "execution_manifests",
-            "full_chain_runs",
-            "full_chain_signal_snapshots",
-            "full_chain_stage_runs",
-            "okx_demo_canary_consent_handoffs",
-            "okx_demo_canary_lifecycles",
-            "okx_demo_accepted_not_found_terminalizations",
-            "okx_demo_automation_guard_events",
-            "okx_demo_automation_guard_states",
-            "okx_order_write_attempts",
-            "okx_order_writer_leases",
-            "okx_demo_account_snapshots",
-            "okx_demo_exchange_events",
-            "okx_demo_fill_snapshots",
-            "okx_demo_order_snapshots",
-            "okx_demo_position_snapshots",
-            "okx_demo_reconciliation_states",
+        not in set(STRATEGY_PLATFORM_V13_EXTENSION_TABLES).union(
+            STRATEGY_PLATFORM_V1_TABLES,
+            {
+                "approved_executions",
+                "exchange_fills",
+                "exchange_orders",
+                "exchange_positions",
+                "execution_manifests",
+                "full_chain_runs",
+                "full_chain_signal_snapshots",
+                "full_chain_stage_runs",
+                "okx_demo_canary_consent_handoffs",
+                "okx_demo_canary_lifecycles",
+                "okx_demo_accepted_not_found_terminalizations",
+                "okx_demo_automation_guard_events",
+                "okx_demo_automation_guard_states",
+                "okx_order_write_attempts",
+                "okx_order_writer_leases",
+                "okx_demo_account_snapshots",
+                "okx_demo_exchange_events",
+                "okx_demo_fill_snapshots",
+                "okx_demo_order_snapshots",
+                "okx_demo_position_snapshots",
+                "okx_demo_reconciliation_states",
                 "okx_demo_recovery_batches",
                 "okx_demo_recovery_grants",
                 "okx_demo_submission_grants",
                 "reconciliation_runs",
-            "research_job_attempts",
-            "research_jobs",
-            "research_worker_control",
-            "risk_decisions",
-            "risk_budgets",
-            "signal_evaluations",
-            "strategy_candidate_approvals",
-            "strategy_deployments",
-            "strategy_research_candidate_bridge_events",
-            "trade_intents",
-        }
+                "research_job_attempts",
+                "research_jobs",
+                "research_worker_control",
+                "risk_decisions",
+                "risk_budgets",
+                "signal_evaluations",
+                "strategy_candidate_approvals",
+                "strategy_deployments",
+                "strategy_research_candidate_bridge_events",
+                "trade_intents",
+            },
+        )
     ]
     Base.metadata.create_all(postgres_engine, tables=old_tables)
     with postgres_engine.begin() as connection:
@@ -1027,6 +1062,7 @@ def test_postgresql_trade_intent_client_order_id_is_unique_per_target(
         db.rollback()
 
 
+@_RETIRED_LEGACY_DIRECT_UPGRADE
 def test_frozen_old_research_job_ddl_upgrades_data_and_removes_global_unique(
     postgres_engine,
 ) -> None:
@@ -1037,6 +1073,7 @@ def test_frozen_old_research_job_ddl_upgrades_data_and_removes_global_unique(
     ]
     Base.metadata.create_all(postgres_engine, tables=pre_bridge_tables)
     with postgres_engine.begin() as connection:
+        _drop_v13_extension_tables(connection)
         connection.execute(
             text(
                 "ALTER TABLE okx_demo_canary_consent_handoffs "
@@ -1049,6 +1086,7 @@ def test_frozen_old_research_job_ddl_upgrades_data_and_removes_global_unique(
             )
         )
         _detach_signal_evaluations_from_full_chain(connection)
+        _detach_signal_evaluations_from_trade_intents(connection)
         connection.execute(text(
             "DROP TABLE okx_demo_accepted_not_found_terminalizations CASCADE"
         ))
