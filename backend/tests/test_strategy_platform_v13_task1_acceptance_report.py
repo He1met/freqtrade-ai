@@ -39,9 +39,19 @@ def test_task1_acceptance_report_binds_current_immutable_artifacts() -> None:
         "READ_ONLY_HISTORICAL_SOURCE"
     )
     assert report["architecture_boundary"]["legacy_database_read_only_enforced"] is False
+    assert report["architecture_boundary"]["legacy_runtime_retired"] is True
     assert report["architecture_boundary"]["shared_in_place_migration_performed"] is False
     assert report["architecture_boundary"]["okx_live_accessed"] is False
     assert report["architecture_boundary"]["orders_or_signals_created"] is False
+    retirement = report["legacy_retirement"]
+    assert retirement["status"] == "LEGACY_RETIRED"
+    assert retirement["mode"] == "MIGRATION_SUSPENDED"
+    assert retirement["services_terminal"] is True
+    assert retirement["managed_orphans_absent"] is True
+    assert retirement["service_ports_unbound"] is True
+    assert retirement["writer_lock_unheld"] is True
+    assert retirement["resume_eligible"] is False
+    assert retirement["v13_started"] is False
 
     sql_artifacts = report["read_only_sql_artifacts"]
     assert sql_artifacts["reconciliation_sha256"] == _sha256(RECONCILIATION_PATH)
@@ -79,5 +89,6 @@ def test_task1_acceptance_report_is_private_and_keeps_remaining_gates_explicit()
     assert report["real_data_counts"]["qualified_evaluation_summaries"] == 0
     assert report["real_data_counts"]["unmapped"] == 0
     assert report["real_data_counts"]["conflicts"] == 0
-    assert any("supervisor" in gate for gate in report["remaining_gates"])
+    assert any("retired legacy generation" in gate for gate in report["remaining_gates"])
     assert any("static" in gate or "AST" in gate for gate in report["remaining_gates"])
+    assert len(report["known_configuration_cutover_gaps"]) == 3

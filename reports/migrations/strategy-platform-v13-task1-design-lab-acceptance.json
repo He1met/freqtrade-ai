@@ -1,19 +1,44 @@
 {
   "schema_version": "strategy-platform-v13-task1-design-lab-acceptance-v1",
-  "generated_at": "2026-08-13T15:38:38+08:00",
+  "generated_at": "2026-08-13T15:43:32+08:00",
   "database_migration_subgate": "ACCEPTED",
   "overall_task1_status": "NOT_ACCEPTED_STATIC_RUNTIME_CUTOVER_PENDING",
   "architecture_boundary": {
     "legacy_database": "freqtrade_ai",
     "legacy_database_target_mode": "READ_ONLY_HISTORICAL_SOURCE",
-    "legacy_database_observed_mode": "WRITABLE_CAPABILITIES_REMAIN_CUTOVER_PENDING",
+    "legacy_database_observed_mode": "LEGACY_RUNTIME_RETIRED_DATABASE_READ_ONLY_NOT_ENFORCED",
     "legacy_database_read_only_enforced": false,
+    "legacy_runtime_retired": true,
     "v13_owner_database": "freqtrade_ai_design_lab",
     "shared_in_place_migration_performed": false,
     "credential_attestation": "OUT_OF_SCOPE",
     "runtime_execution_evidence": "UNKNOWN",
     "okx_live_accessed": false,
     "orders_or_signals_created": false
+  },
+  "legacy_retirement": {
+    "status": "LEGACY_RETIRED",
+    "implementation_commit": "0401c568322e988a196d21b3e82ef0548ee6f6ee",
+    "pull_request": 702,
+    "ci_run": 31676238343,
+    "ci_attempt": 2,
+    "request_id": "task1-retire-legacy-20260813-001",
+    "cutover_generation": "00000000000000000001",
+    "mode": "MIGRATION_SUSPENDED",
+    "target_schema_version": "20260813_47",
+    "control_requested_at": "2026-08-13T07:35:33Z",
+    "replacement_observed_at": "2026-08-13T07:35:46Z",
+    "retired_at": "2026-08-13T07:36:16Z",
+    "child_snapshot_sha256": "4cafae212797e6b2f00f800bbdaf3e5e49bfd63c3fd26d7098bcc949e8e66b5b",
+    "observation_sha256": "3d0edf96d93c8dd2dedd03bc01b59954cc609ea59c47c81fff7c5fdf7d609587",
+    "observed_matches_control": true,
+    "services_terminal": true,
+    "managed_orphans_absent": true,
+    "service_ports_unbound": true,
+    "writer_lock_unheld": true,
+    "launch_agent_disabled_and_absent": true,
+    "resume_eligible": false,
+    "v13_started": false
   },
   "sanitized_source_snapshot": {
     "isolation": "SERIALIZABLE_READ_ONLY_DEFERRABLE_EXPORTED_SNAPSHOT",
@@ -132,9 +157,15 @@
     "backend_skipped": 214,
     "backend_failed": 0
   },
+  "known_configuration_cutover_gaps": [
+    "diversity-threshold-v1 is the historical fixed 60-candidate/6-target adapter; a dynamic profile-bound adapter version is not active",
+    "the active scoring profile preserves four component weights but does not yet persist all normalization coefficients, quality subweights, elimination thresholds, and warning thresholds",
+    "the least-privilege runtime frozen-bundle reader is not implemented; the owner-only resolver must not be exposed by widening runtime ACL"
+  ],
   "remaining_gates": [
-    "The canonical supervisor must load and attest the maintenance generation before old-service retirement",
-    "The formal runtime must bind the V1.3 owner database and remove hidden configurable-business fallbacks",
+    "The retired legacy generation must remain suspended and must never be resumed",
+    "The formal V1.3 runtime must bind the owner database through a least-privilege frozen-bundle reader and remain fail-closed while attestation is UNKNOWN",
+    "A dynamic profile-bound diversity adapter and complete scoring contract must be activated before their historical constants are removed",
     "The section 9.1 static and AST production-path contract must pass before overall Task 1 acceptance"
   ]
 }
