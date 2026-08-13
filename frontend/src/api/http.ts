@@ -64,6 +64,42 @@ export async function fetchJson<T>(path: string, signal?: AbortSignal): Promise<
   return response.json() as Promise<T>;
 }
 
+export async function fetchOwnerJson<T>(
+  path: string,
+  operatorToken: string,
+  signal?: AbortSignal,
+): Promise<T> {
+  const response = await fetch(`${apiBaseUrl()}${path}`, {
+    headers: {
+      Accept: "application/json",
+      "X-Operator-Token": operatorToken,
+    },
+    signal,
+  });
+  if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+  return response.json() as Promise<T>;
+}
+
+export async function postOwnerReadJson<T>(
+  path: string,
+  body: unknown,
+  operatorToken: string,
+  signal?: AbortSignal,
+): Promise<T> {
+  const response = await fetch(`${apiBaseUrl()}${path}`, {
+    body: JSON.stringify(body),
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "X-Operator-Token": operatorToken,
+    },
+    method: "POST",
+    signal,
+  });
+  if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+  return response.json() as Promise<T>;
+}
+
 type OperatorRequestOptions = {
   idempotencyKey?: string;
   operatorToken?: string;
