@@ -78,6 +78,7 @@ STOP_EVENT = threading.Event()
 LAST_CREDENTIAL_GENERATION: Optional[str] = None
 LAST_FAILED_CREDENTIAL_GENERATION: Optional[str] = None
 LAST_FAILED_CREDENTIAL_RETRY_AT = 0.0
+LAST_TERMINAL_CREDENTIAL_GENERATION: Optional[str] = None
 
 
 def timestamp() -> str:
@@ -133,12 +134,80 @@ def run_runtime(command: str, timeout: int = COMMAND_TIMEOUT_SECONDS) -> Dict[st
     return payload
 
 
-def verify_or_recover() -> bool:
+def safe_runtime_failure_details(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Return only bounded, allowlisted startup diagnostics."""
+
+    details: Dict[str, Any] = {}
+    runtime_stage = payload.get("startup_stage")
+    runtime_elapsed_ms = payload.get("startup_stage_elapsed_ms")
+    command_elapsed_ms = payload.get("command_elapsed_ms")
+    runtime_failure_stage = payload.get("okx_runtime_failure_stage")
+    runtime_failure_type = payload.get("okx_runtime_failure_type")
+    runtime_failure_category = payload.get("okx_runtime_failure_category")
+    if (
+        runtime_stage in SAFE_RUNTIME_STARTUP_STAGES
+        and isinstance(runtime_elapsed_ms, int)
+        and 0 <= runtime_elapsed_ms <= COMMAND_TIMEOUT_SECONDS * 1000
+    ):
+        details["runtime_stage"] = runtime_stage
+        details["runtime_stage_elapsed_ms"] = runtime_elapsed_ms
+    if (
+        isinstance(command_elapsed_ms, int)
+        and 0 <= command_elapsed_ms <= COMMAND_TIMEOUT_SECONDS * 1000
+    ):
+        details["runtime_command_elapsed_ms"] = command_elapsed_ms
+    if (
+        runtime_failure_stage in SAFE_OKX_RUNTIME_FAILURE_STAGES
+        and runtime_failure_category in SAFE_OKX_RUNTIME_FAILURE_CATEGORIES
+        and runtime_failure_type in SAFE_OKX_RUNTIME_FAILURE_TYPES
+    ):
+        details["okx_runtime_failure_stage"] = runtime_failure_stage
+        details["okx_runtime_failure_category"] = runtime_failure_category
+        details["okx_runtime_failure_type"] = runtime_failure_type
+    return details
+
+
+def is_terminal_credential_attestation_failure(
+    payload: Dict[str, Any],
+) -> bool:
+    """Recognize only the existing fail-closed credential diagnostic."""
+
+    return (
+        payload.get("okx_runtime_failure_stage") == "read-attestation"
+        and payload.get("okx_runtime_failure_category") == "ATTESTATION"
+        and payload.get("okx_runtime_failure_type")
+        == "OkxDemoCredentialsUnavailable"
+    )
+
+
+def record_terminal_credential_failure(
+    generation: str,
+    stage: str,
+    payload: Dict[str, Any],
+) -> bool:
+    """Latch one credential generation without exposing credential details."""
+
+    global LAST_FAILED_CREDENTIAL_GENERATION
+    global LAST_FAILED_CREDENTIAL_RETRY_AT
+    global LAST_TERMINAL_CREDENTIAL_GENERATION
+
+    LAST_FAILED_CREDENTIAL_GENERATION = generation
+    LAST_FAILED_CREDENTIAL_RETRY_AT = 0.0
+    LAST_TERMINAL_CREDENTIAL_GENERATION = generation
+    emit(
+        "runtime_recovery_blocked",
+        stage=stage,
+        terminal_for_credential_generation=True,
+        **safe_runtime_failure_details(payload),
+    )
+    return False
+
+
+def verify_or_recover(generation: Optional[str] = None) -> bool:
     verification = run_runtime("verify")
     if verification["return_code"] == 0:
         emit("runtime_verified", status=verification.get("status"))
         return True
-
     emit(
         "runtime_recovery_started",
         verify_status=verification.get("status"),
@@ -151,6 +220,15 @@ def verify_or_recover() -> bool:
 
     started = run_runtime("up")
     if started["return_code"] != 0:
+        if (
+            generation is not None
+            and is_terminal_credential_attestation_failure(started)
+        ):
+            return record_terminal_credential_failure(
+                generation,
+                "up",
+                started,
+            )
         emit(
             "runtime_recovery_blocked",
             stage="up",
@@ -190,6 +268,7 @@ def controlled_credential_restart(generation: str) -> bool:
     global LAST_CREDENTIAL_GENERATION
     global LAST_FAILED_CREDENTIAL_GENERATION
     global LAST_FAILED_CREDENTIAL_RETRY_AT
+    global LAST_TERMINAL_CREDENTIAL_GENERATION
 
     def record_failure(
         stage: str,
@@ -197,6 +276,16 @@ def controlled_credential_restart(generation: str) -> bool:
     ) -> bool:
         global LAST_FAILED_CREDENTIAL_GENERATION
         global LAST_FAILED_CREDENTIAL_RETRY_AT
+        if (
+            stage == "credential-rotation-up"
+            and runtime_payload is not None
+            and is_terminal_credential_attestation_failure(runtime_payload)
+        ):
+            return record_terminal_credential_failure(
+                generation,
+                stage,
+                runtime_payload,
+            )
         LAST_FAILED_CREDENTIAL_GENERATION = generation
         LAST_FAILED_CREDENTIAL_RETRY_AT = (
             time.monotonic() + CREDENTIAL_RETRY_COOLDOWN_SECONDS
@@ -206,47 +295,7 @@ def controlled_credential_restart(generation: str) -> bool:
             "retry_after_seconds": CREDENTIAL_RETRY_COOLDOWN_SECONDS,
         }
         if runtime_payload is not None:
-            runtime_stage = runtime_payload.get("startup_stage")
-            runtime_elapsed_ms = runtime_payload.get(
-                "startup_stage_elapsed_ms"
-            )
-            command_elapsed_ms = runtime_payload.get("command_elapsed_ms")
-            runtime_failure_stage = runtime_payload.get(
-                "okx_runtime_failure_stage"
-            )
-            runtime_failure_type = runtime_payload.get(
-                "okx_runtime_failure_type"
-            )
-            runtime_failure_category = runtime_payload.get(
-                "okx_runtime_failure_category"
-            )
-            if (
-                runtime_stage in SAFE_RUNTIME_STARTUP_STAGES
-                and isinstance(runtime_elapsed_ms, int)
-                and 0 <= runtime_elapsed_ms <= COMMAND_TIMEOUT_SECONDS * 1000
-            ):
-                details["runtime_stage"] = runtime_stage
-                details["runtime_stage_elapsed_ms"] = runtime_elapsed_ms
-            if (
-                isinstance(command_elapsed_ms, int)
-                and 0
-                <= command_elapsed_ms
-                <= COMMAND_TIMEOUT_SECONDS * 1000
-            ):
-                details["runtime_command_elapsed_ms"] = (
-                    command_elapsed_ms
-                )
-            if (
-                runtime_failure_stage in SAFE_OKX_RUNTIME_FAILURE_STAGES
-                and runtime_failure_category
-                in SAFE_OKX_RUNTIME_FAILURE_CATEGORIES
-                and runtime_failure_type in SAFE_OKX_RUNTIME_FAILURE_TYPES
-            ):
-                details["okx_runtime_failure_stage"] = runtime_failure_stage
-                details["okx_runtime_failure_category"] = (
-                    runtime_failure_category
-                )
-                details["okx_runtime_failure_type"] = runtime_failure_type
+            details.update(safe_runtime_failure_details(runtime_payload))
         emit("runtime_recovery_blocked", **details)
         return False
 
@@ -265,6 +314,7 @@ def controlled_credential_restart(generation: str) -> bool:
     LAST_CREDENTIAL_GENERATION = generation
     LAST_FAILED_CREDENTIAL_GENERATION = None
     LAST_FAILED_CREDENTIAL_RETRY_AT = 0.0
+    LAST_TERMINAL_CREDENTIAL_GENERATION = None
     emit(
         "credential_rotation_completed",
         command_elapsed_ms={
@@ -279,14 +329,38 @@ def controlled_credential_restart(generation: str) -> bool:
 def supervise_once() -> bool:
     global LAST_FAILED_CREDENTIAL_GENERATION
     global LAST_FAILED_CREDENTIAL_RETRY_AT
+    global LAST_TERMINAL_CREDENTIAL_GENERATION
     generation = credential_generation()
     if generation is None:
         emit("credential_capability_unavailable")
+        if LAST_TERMINAL_CREDENTIAL_GENERATION is not None:
+            emit(
+                "runtime_recovery_suppressed",
+                status="BLOCKED",
+                terminal_for_credential_generation=True,
+                credential_generation_status="UNAVAILABLE",
+                okx_runtime_failure_stage="read-attestation",
+                okx_runtime_failure_category="ATTESTATION",
+                okx_runtime_failure_type="OkxDemoCredentialsUnavailable",
+            )
+            return False
         frozen = run_runtime("supervisor-freeze-openings")
         if frozen.get("return_code") != 0:
             emit("runtime_recovery_blocked", stage="freeze-openings")
             return False
         return verify_or_recover()
+    if generation == LAST_TERMINAL_CREDENTIAL_GENERATION:
+        emit(
+            "runtime_recovery_suppressed",
+            status="BLOCKED",
+            terminal_for_credential_generation=True,
+            okx_runtime_failure_stage="read-attestation",
+            okx_runtime_failure_category="ATTESTATION",
+            okx_runtime_failure_type="OkxDemoCredentialsUnavailable",
+        )
+        return False
+    if LAST_TERMINAL_CREDENTIAL_GENERATION is not None:
+        LAST_TERMINAL_CREDENTIAL_GENERATION = None
     if (
         LAST_CREDENTIAL_GENERATION is None
         or generation != LAST_CREDENTIAL_GENERATION
@@ -306,7 +380,7 @@ def supervise_once() -> bool:
         emit("credential_rotation_detected")
         return controlled_credential_restart(generation)
     run_runtime("supervisor-thaw-openings")
-    return verify_or_recover()
+    return verify_or_recover(generation)
 
 
 def _stop(_signum: int, _frame: Optional[object]) -> None:

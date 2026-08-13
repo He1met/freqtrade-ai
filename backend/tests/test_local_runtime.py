@@ -1375,12 +1375,125 @@ def test_worker_has_dedicated_pid_log_and_backend_working_directory():
     assert runtime.SERVICE_WORKING_DIRECTORIES["worker"] == REPO_ROOT / "backend"
 
 
+@pytest.mark.parametrize(
+    ("ps_state", "expected"),
+    [
+        ("R", "RUNNING"),
+        ("S+", "RUNNING"),
+        ("Z", "ZOMBIE"),
+        ("Z+", "ZOMBIE"),
+        ("X", "EXITED"),
+        ("?", "INACCESSIBLE"),
+    ],
+)
+def test_process_state_distinguishes_live_zombie_and_dead_markers(
+    monkeypatch,
+    ps_state,
+    expected,
+):
+    runtime = load_runtime_module()
+    observed = {}
+    monkeypatch.setattr(runtime.os, "kill", lambda _pid, _signal: None)
+
+    def fake_run(command, **kwargs):
+        observed["command"] = command
+        observed["kwargs"] = kwargs
+        return SimpleNamespace(returncode=0, stdout=ps_state + "\n")
+
+    monkeypatch.setattr(runtime.subprocess, "run", fake_run)
+
+    assert runtime.process_state(4321) == expected
+    assert observed["command"] == ["ps", "-p", "4321", "-o", "state="]
+    assert observed["kwargs"]["timeout"] == 5
+
+
+def test_process_state_distinguishes_exited_and_inaccessible_pids(monkeypatch):
+    runtime = load_runtime_module()
+
+    monkeypatch.setattr(
+        runtime.os,
+        "kill",
+        lambda *_args: (_ for _ in ()).throw(ProcessLookupError),
+    )
+    monkeypatch.setattr(
+        runtime.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("ps must not run for an exited PID"),
+    )
+    assert runtime.process_state(4321) == runtime.PROCESS_STATE_EXITED
+
+    monkeypatch.setattr(
+        runtime.os,
+        "kill",
+        lambda *_args: (_ for _ in ()).throw(PermissionError),
+    )
+    assert runtime.process_state(4321) == runtime.PROCESS_STATE_INACCESSIBLE
+
+
+def test_process_state_fails_closed_when_ps_is_unavailable(monkeypatch):
+    runtime = load_runtime_module()
+    monkeypatch.setattr(runtime.os, "kill", lambda *_args: None)
+    monkeypatch.setattr(
+        runtime.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("no ps")),
+    )
+
+    assert runtime.process_state(4321) == runtime.PROCESS_STATE_INACCESSIBLE
+
+
+def test_process_state_rechecks_exit_race_after_empty_ps(monkeypatch):
+    runtime = load_runtime_module()
+    probes = []
+
+    def fake_kill(*_args):
+        probes.append(True)
+        if len(probes) == 2:
+            raise ProcessLookupError
+
+    monkeypatch.setattr(runtime.os, "kill", fake_kill)
+    monkeypatch.setattr(
+        runtime.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stdout=""),
+    )
+
+    assert runtime.process_state(4321) == runtime.PROCESS_STATE_EXITED
+    assert len(probes) == 2
+
+
+def test_process_status_does_not_report_zombie_as_running(monkeypatch, tmp_path):
+    runtime = load_runtime_module()
+    pid_path = tmp_path / runtime.PID_FILES["backend"]
+    pid_path.write_text("4321\n", encoding="utf-8")
+    pid_path.chmod(0o600)
+    monkeypatch.setattr(
+        runtime,
+        "process_state",
+        lambda _pid: runtime.PROCESS_STATE_ZOMBIE,
+    )
+
+    assert runtime.process_status(tmp_path, "backend") == {
+        "service": "backend",
+        "pid": 4321,
+        "running": False,
+        "process_state": "ZOMBIE",
+        "pid_file": str(pid_path),
+    }
+
+
 def test_worker_pid_validation_requires_command_marker_and_backend_cwd(monkeypatch):
     runtime = load_runtime_module()
     responses = iter(
         (
-            SimpleNamespace(stdout="python -m app.workers.deepseek_backtest_worker\n"),
-            SimpleNamespace(stdout="n{}\n".format(REPO_ROOT / "backend")),
+            SimpleNamespace(
+                returncode=0,
+                stdout="python -m app.workers.deepseek_backtest_worker\n",
+            ),
+            SimpleNamespace(
+                returncode=0,
+                stdout="n{}\n".format(REPO_ROOT / "backend"),
+            ),
         )
     )
     monkeypatch.setattr(runtime.subprocess, "run", lambda *args, **kwargs: next(responses))
@@ -1393,10 +1506,43 @@ def test_worker_pid_validation_rejects_unrelated_process(monkeypatch):
     monkeypatch.setattr(
         runtime.subprocess,
         "run",
-        lambda *args, **kwargs: SimpleNamespace(stdout="python unrelated.py\n"),
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout="python unrelated.py\n",
+        ),
     )
 
     assert runtime.is_managed_process(1234, "worker") is False
+
+
+def test_managed_process_identity_fails_closed_when_cwd_is_unavailable(
+    monkeypatch,
+):
+    runtime = load_runtime_module()
+    responses = iter(
+        (
+            SimpleNamespace(
+                returncode=0,
+                stdout="python -m app.workers.deepseek_backtest_worker\n",
+            ),
+            SimpleNamespace(returncode=1, stdout=""),
+        )
+    )
+    monkeypatch.setattr(
+        runtime.subprocess,
+        "run",
+        lambda *_args, **_kwargs: next(responses),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "process_state",
+        lambda _pid: runtime.PROCESS_STATE_RUNNING,
+    )
+
+    assert (
+        runtime.managed_process_identity(1234, "worker")
+        == runtime.MANAGED_PROCESS_INACCESSIBLE
+    )
 
 
 def test_down_stops_worker_before_frontend_and_backend(monkeypatch, tmp_path):
@@ -1889,6 +2035,94 @@ def test_okx_startup_failure_diagnostic_survives_cleanup(
     assert stopped == list(runtime.SERVICE_STOP_ORDER)
 
 
+def test_zombie_cleanup_preserves_terminal_attestation_diagnostic(
+    monkeypatch,
+    tmp_path,
+):
+    runtime = load_runtime_module()
+    install_ready_okx_runtime(monkeypatch, runtime)
+    pids = {
+        service: 4100 + index
+        for index, service in enumerate(runtime.SERVICE_START_ORDER)
+    }
+    signals = []
+    monkeypatch.setattr(
+        runtime,
+        "backend_python",
+        lambda: Path("/venv/bin/python"),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "frontend_vite",
+        lambda: Path("/frontend/vite"),
+    )
+    monkeypatch.setattr(runtime, "port_available", lambda _port: True)
+    monkeypatch.setattr(runtime, "ensure_schema", lambda _url: None)
+    monkeypatch.setattr(runtime, "ensure_worker_queue_idle", lambda _url: None)
+    monkeypatch.setattr(runtime, "wait_for_url", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        runtime,
+        "wait_for_process",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def fake_start_service(service, *_args, **_kwargs):
+        path = tmp_path / runtime.PID_FILES[service]
+        path.write_text("{}\n".format(pids[service]), encoding="utf-8")
+        path.chmod(0o600)
+
+    monkeypatch.setattr(runtime, "start_service", fake_start_service)
+    monkeypatch.setattr(
+        runtime,
+        "wait_for_okx_runtime",
+        lambda _state_dir: (_ for _ in ()).throw(
+            runtime.RuntimeBlocked(
+                "safe generic failure",
+                okx_runtime_failure_stage="read-attestation",
+                okx_runtime_failure_category="ATTESTATION",
+                okx_runtime_failure_type="OkxDemoCredentialsUnavailable",
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "process_state",
+        lambda pid: (
+            runtime.PROCESS_STATE_ZOMBIE
+            if pid in pids.values()
+            else runtime.PROCESS_STATE_EXITED
+        ),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "orphaned_managed_process_map",
+        lambda _state_dir, services: {service: [] for service in services},
+    )
+    monkeypatch.setattr(runtime, "_writer_lock_holder", lambda _path: None)
+    monkeypatch.setattr(
+        runtime.os,
+        "killpg",
+        lambda pid, signum: signals.append((pid, signum)),
+    )
+
+    with pytest.raises(runtime.RuntimeBlocked) as raised:
+        runtime.start(tmp_path)
+
+    assert "cleaned up" in str(raised.value)
+    assert "cleanup is incomplete" not in str(raised.value)
+    assert raised.value.okx_runtime_failure_stage == "read-attestation"
+    assert raised.value.okx_runtime_failure_category == "ATTESTATION"
+    assert (
+        raised.value.okx_runtime_failure_type
+        == "OkxDemoCredentialsUnavailable"
+    )
+    assert signals == []
+    assert all(
+        not (tmp_path / runtime.PID_FILES[service]).exists()
+        for service in runtime.SERVICE_START_ORDER
+    )
+
+
 def test_parent_clears_stale_failure_before_child_can_exit_without_main(
     monkeypatch,
     tmp_path,
@@ -1962,25 +2196,54 @@ def test_parent_clears_stale_failure_before_child_can_exit_without_main(
     assert captured.value.okx_runtime_failure_type is None
 
 
-def test_cleanup_stale_runtime_removes_dead_pid_and_readiness(
+@pytest.mark.parametrize("terminal_state", ["EXITED", "ZOMBIE"])
+def test_cleanup_stale_runtime_removes_terminal_pid_and_readiness(
+    monkeypatch,
+    tmp_path,
+    terminal_state,
+):
+    runtime = load_runtime_module()
+    pid_path = tmp_path / runtime.PID_FILES["okx_runtime"]
+    pid_path.write_text(
+        "12345\n",
+        encoding="utf-8",
+    )
+    pid_path.chmod(0o600)
+    readiness_path = tmp_path / runtime.OKX_RUNTIME_READY_FILE
+    readiness_path.write_text(
+        "{}\n",
+        encoding="utf-8",
+    )
+    readiness_path.chmod(0o600)
+    monkeypatch.setattr(runtime, "process_state", lambda _pid: terminal_state)
+
+    runtime.cleanup_stale_runtime_state(tmp_path)
+
+    assert not pid_path.exists()
+    assert not readiness_path.exists()
+
+
+def test_cleanup_stale_runtime_preserves_inaccessible_pid_evidence(
     monkeypatch,
     tmp_path,
 ):
     runtime = load_runtime_module()
-    (tmp_path / runtime.PID_FILES["okx_runtime"]).write_text(
-        "12345\n",
-        encoding="utf-8",
+    pid_path = tmp_path / runtime.PID_FILES["okx_runtime"]
+    pid_path.write_text("12345\n", encoding="utf-8")
+    pid_path.chmod(0o600)
+    readiness_path = tmp_path / runtime.OKX_RUNTIME_READY_FILE
+    readiness_path.write_text("{}\n", encoding="utf-8")
+    readiness_path.chmod(0o600)
+    monkeypatch.setattr(
+        runtime,
+        "process_state",
+        lambda _pid: runtime.PROCESS_STATE_INACCESSIBLE,
     )
-    (tmp_path / runtime.OKX_RUNTIME_READY_FILE).write_text(
-        "{}\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(runtime, "process_running", lambda _pid: False)
 
     runtime.cleanup_stale_runtime_state(tmp_path)
 
-    assert not (tmp_path / runtime.PID_FILES["okx_runtime"]).exists()
-    assert not (tmp_path / runtime.OKX_RUNTIME_READY_FILE).exists()
+    assert pid_path.exists()
+    assert readiness_path.exists()
 
 
 def test_okx_runtime_readiness_reports_blocked_openings_without_secrets(
@@ -2266,6 +2529,36 @@ def test_repeated_start_refuses_without_stopping_healthy_runtime(
     assert stopped == []
 
 
+def test_start_refuses_inaccessible_tracked_process(monkeypatch, tmp_path):
+    runtime = load_runtime_module()
+    discovered = []
+    monkeypatch.setattr(runtime, "cleanup_stale_runtime_state", lambda _path: None)
+    monkeypatch.setattr(
+        runtime,
+        "process_status",
+        lambda _state_dir, service: {
+            "service": service,
+            "pid": 9002 if service == "backend" else None,
+            "running": False,
+            "process_state": (
+                runtime.PROCESS_STATE_INACCESSIBLE
+                if service == "backend"
+                else runtime.PROCESS_STATE_EXITED
+            ),
+        },
+    )
+    monkeypatch.setattr(
+        runtime,
+        "cleanup_orphaned_managed_processes",
+        lambda _path: discovered.append(True),
+    )
+
+    with pytest.raises(runtime.RuntimeBlocked, match="repeated up was refused"):
+        runtime.start(tmp_path)
+
+    assert discovered == []
+
+
 def test_orphan_cleanup_signals_only_marker_and_cwd_verified_process(
     monkeypatch,
     tmp_path,
@@ -2279,6 +2572,7 @@ def test_orphan_cleanup_signals_only_marker_and_cwd_verified_process(
         lambda *_args, **_kwargs: (
             process_snapshots.append(True)
             or SimpleNamespace(
+                returncode=0,
                 stdout=(
                     "321 python -m app.adapters.okx_demo.runtime_service\n"
                     "654 python unrelated.py\n"
@@ -2291,11 +2585,22 @@ def test_orphan_cleanup_signals_only_marker_and_cwd_verified_process(
         "is_managed_process",
         lambda pid, service: pid == 321 and service == "okx_runtime",
     )
-    running = iter((True, False))
     monkeypatch.setattr(
         runtime,
-        "process_running",
-        lambda _pid: next(running),
+        "managed_process_identity",
+        lambda pid, service: (
+            runtime.MANAGED_PROCESS_MATCH
+            if pid == 321 and service == "okx_runtime"
+            else runtime.MANAGED_PROCESS_NO_MATCH
+        ),
+    )
+    states = iter(
+        (runtime.PROCESS_STATE_RUNNING, runtime.PROCESS_STATE_EXITED)
+    )
+    monkeypatch.setattr(
+        runtime,
+        "process_state",
+        lambda _pid: next(states),
     )
     monkeypatch.setattr(
         runtime.os,
@@ -2310,6 +2615,84 @@ def test_orphan_cleanup_signals_only_marker_and_cwd_verified_process(
     assert process_snapshots == [True]
 
 
+def test_orphan_discovery_fails_closed_on_process_snapshot_error(
+    monkeypatch,
+    tmp_path,
+):
+    runtime = load_runtime_module()
+    monkeypatch.setattr(
+        runtime.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stdout=""),
+    )
+
+    with pytest.raises(runtime.RuntimeBlocked, match="discovery is unavailable"):
+        runtime.orphaned_managed_process_map(tmp_path, ("backend",))
+
+
+def test_orphan_discovery_fails_closed_on_inaccessible_ownership(
+    monkeypatch,
+    tmp_path,
+):
+    runtime = load_runtime_module()
+    monkeypatch.setattr(
+        runtime.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout="321 python -m uvicorn app.main:app\n",
+        ),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "managed_process_identity",
+        lambda *_args: runtime.MANAGED_PROCESS_INACCESSIBLE,
+    )
+
+    with pytest.raises(
+        runtime.RuntimeBlocked,
+        match="ownership could not be established",
+    ):
+        runtime.orphaned_managed_process_map(tmp_path, ("backend",))
+
+
+def test_orphan_cleanup_blocks_when_sigkill_does_not_terminate_process(
+    monkeypatch,
+    tmp_path,
+):
+    runtime = load_runtime_module()
+    monkeypatch.setattr(
+        runtime,
+        "orphaned_managed_process_map",
+        lambda _state_dir, services: {
+            service: ([321] if service == "backend" else [])
+            for service in services
+        },
+    )
+    monkeypatch.setattr(
+        runtime,
+        "process_state",
+        lambda _pid: runtime.PROCESS_STATE_RUNNING,
+    )
+    monkeypatch.setattr(runtime, "is_managed_process", lambda *_args: True)
+    moments = iter((0.0, 11.0, 20.0, 26.0))
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: next(moments))
+    signals = []
+    monkeypatch.setattr(
+        runtime.os,
+        "killpg",
+        lambda pid, signum: signals.append((pid, signum)),
+    )
+
+    with pytest.raises(runtime.RuntimeBlocked, match="terminal state"):
+        runtime.cleanup_orphaned_managed_processes(tmp_path)
+
+    assert signals == [
+        (321, runtime.signal.SIGTERM),
+        (321, runtime.signal.SIGKILL),
+    ]
+
+
 def test_stop_service_preserves_pid_when_process_group_cannot_be_signaled(
     monkeypatch,
     tmp_path,
@@ -2319,7 +2702,11 @@ def test_stop_service_preserves_pid_when_process_group_cannot_be_signaled(
     pid_path = tmp_path / runtime.PID_FILES["backend"]
     pid_path.write_text("321\n", encoding="utf-8")
     pid_path.chmod(0o600)
-    monkeypatch.setattr(runtime, "process_running", lambda _pid: True)
+    monkeypatch.setattr(
+        runtime,
+        "process_state",
+        lambda _pid: runtime.PROCESS_STATE_RUNNING,
+    )
     monkeypatch.setattr(
         runtime,
         "is_managed_process",
@@ -2339,6 +2726,167 @@ def test_stop_service_preserves_pid_when_process_group_cannot_be_signaled(
         "pid": pid,
         "reason": "managed process group could not be signaled safely",
     }
+    assert pid_path.exists()
+
+
+def test_stop_service_removes_zombie_pid_without_signaling(monkeypatch, tmp_path):
+    runtime = load_runtime_module()
+    pid = 322
+    pid_path = tmp_path / runtime.PID_FILES["backend"]
+    pid_path.write_text("{}\n".format(pid), encoding="utf-8")
+    pid_path.chmod(0o600)
+    signals = []
+    monkeypatch.setattr(
+        runtime,
+        "process_state",
+        lambda _pid: runtime.PROCESS_STATE_ZOMBIE,
+    )
+    monkeypatch.setattr(
+        runtime,
+        "is_managed_process",
+        lambda *_args: pytest.fail("zombies are terminal before ownership checks"),
+    )
+    monkeypatch.setattr(
+        runtime.os,
+        "killpg",
+        lambda *args: signals.append(args),
+    )
+
+    result = runtime.stop_service(tmp_path, "backend")
+
+    assert result == {
+        "service": "backend",
+        "status": "stale-pid-removed",
+        "pid": pid,
+    }
+    assert signals == []
+    assert not pid_path.exists()
+
+
+def test_stop_service_treats_post_term_zombie_as_stopped(monkeypatch, tmp_path):
+    runtime = load_runtime_module()
+    pid = 323
+    pid_path = tmp_path / runtime.PID_FILES["backend"]
+    pid_path.write_text("{}\n".format(pid), encoding="utf-8")
+    pid_path.chmod(0o600)
+    states = iter(
+        (runtime.PROCESS_STATE_RUNNING, runtime.PROCESS_STATE_ZOMBIE)
+    )
+    signals = []
+    monkeypatch.setattr(runtime, "process_state", lambda _pid: next(states))
+    monkeypatch.setattr(runtime, "is_managed_process", lambda *_args: True)
+    monkeypatch.setattr(
+        runtime.os,
+        "killpg",
+        lambda signaled_pid, signum: signals.append((signaled_pid, signum)),
+    )
+
+    result = runtime.stop_service(tmp_path, "backend")
+
+    assert result == {"service": "backend", "status": "stopped", "pid": pid}
+    assert signals == [(pid, runtime.signal.SIGTERM)]
+    assert not pid_path.exists()
+
+
+def test_stop_service_rechecks_pid_after_sigkill_group_lookup_failure(
+    monkeypatch,
+    tmp_path,
+):
+    runtime = load_runtime_module()
+    pid = 325
+    pid_path = tmp_path / runtime.PID_FILES["backend"]
+    pid_path.write_text("{}\n".format(pid), encoding="utf-8")
+    pid_path.chmod(0o600)
+    moments = iter((0.0, 11.0))
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: next(moments))
+    monkeypatch.setattr(
+        runtime,
+        "process_state",
+        lambda _pid: runtime.PROCESS_STATE_RUNNING,
+    )
+    monkeypatch.setattr(runtime, "is_managed_process", lambda *_args: True)
+    signals = []
+
+    def fake_killpg(signaled_pid, signum):
+        signals.append((signaled_pid, signum))
+        if signum == runtime.signal.SIGKILL:
+            raise ProcessLookupError
+
+    monkeypatch.setattr(runtime.os, "killpg", fake_killpg)
+
+    result = runtime.stop_service(tmp_path, "backend")
+
+    assert result["status"] == "BLOCKED"
+    assert "did not reach a terminal state" in result["reason"]
+    assert signals == [
+        (pid, runtime.signal.SIGTERM),
+        (pid, runtime.signal.SIGKILL),
+    ]
+    assert pid_path.exists()
+
+
+def test_stop_service_accepts_exit_race_before_sigkill(monkeypatch, tmp_path):
+    runtime = load_runtime_module()
+    pid = 326
+    pid_path = tmp_path / runtime.PID_FILES["backend"]
+    pid_path.write_text("{}\n".format(pid), encoding="utf-8")
+    pid_path.chmod(0o600)
+    moments = iter((0.0, 11.0))
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: next(moments))
+    states = iter(
+        (
+            runtime.PROCESS_STATE_RUNNING,
+            runtime.PROCESS_STATE_RUNNING,
+            runtime.PROCESS_STATE_ZOMBIE,
+        )
+    )
+    monkeypatch.setattr(runtime, "process_state", lambda _pid: next(states))
+    ownership = iter((True, False))
+    monkeypatch.setattr(
+        runtime,
+        "is_managed_process",
+        lambda *_args: next(ownership),
+    )
+    signals = []
+    monkeypatch.setattr(
+        runtime.os,
+        "killpg",
+        lambda signaled_pid, signum: signals.append((signaled_pid, signum)),
+    )
+
+    result = runtime.stop_service(tmp_path, "backend")
+
+    assert result == {"service": "backend", "status": "stopped", "pid": pid}
+    assert signals == [(pid, runtime.signal.SIGTERM)]
+    assert not pid_path.exists()
+
+
+def test_stop_service_preserves_inaccessible_pid_without_signaling(
+    monkeypatch,
+    tmp_path,
+):
+    runtime = load_runtime_module()
+    pid = 324
+    pid_path = tmp_path / runtime.PID_FILES["backend"]
+    pid_path.write_text("{}\n".format(pid), encoding="utf-8")
+    pid_path.chmod(0o600)
+    signals = []
+    monkeypatch.setattr(
+        runtime,
+        "process_state",
+        lambda _pid: runtime.PROCESS_STATE_INACCESSIBLE,
+    )
+    monkeypatch.setattr(
+        runtime.os,
+        "killpg",
+        lambda *args: signals.append(args),
+    )
+
+    result = runtime.stop_service(tmp_path, "backend")
+
+    assert result["status"] == "BLOCKED"
+    assert "could not be established" in result["reason"]
+    assert signals == []
     assert pid_path.exists()
 
 
@@ -2450,6 +2998,39 @@ def test_incomplete_startup_cleanup_never_claims_clean(monkeypatch, tmp_path):
                 ]
             },
         )
+
+
+def test_startup_cleanup_accepts_zombie_as_terminal(monkeypatch, tmp_path):
+    runtime = load_runtime_module()
+    monkeypatch.setattr(
+        runtime,
+        "process_status",
+        lambda _state_dir, service: {
+            "service": service,
+            "pid": 89 if service == "backend" else None,
+            "running": False,
+            "process_state": (
+                runtime.PROCESS_STATE_ZOMBIE
+                if service == "backend"
+                else runtime.PROCESS_STATE_EXITED
+            ),
+        },
+    )
+    monkeypatch.setattr(
+        runtime,
+        "orphaned_managed_process_map",
+        lambda _state_dir, services: {service: [] for service in services},
+    )
+    monkeypatch.setattr(runtime, "_writer_lock_holder", lambda _path: None)
+
+    runtime.require_complete_startup_cleanup(
+        tmp_path,
+        {
+            "services": [
+                {"service": "backend", "status": "stale-pid-removed"}
+            ]
+        },
+    )
 
 
 def test_recent_logs_refuses_symlink(monkeypatch, tmp_path):

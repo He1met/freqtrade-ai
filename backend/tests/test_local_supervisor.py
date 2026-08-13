@@ -498,6 +498,160 @@ def test_supervisor_propagates_allowlisted_okx_runtime_failure_diagnostic(
         '"okx_runtime_failure_type": "OkxDemoCredentialsUnavailable"'
         in emitted
     )
+    assert '"terminal_for_credential_generation": true' in emitted
+    assert (
+        supervisor.LAST_TERMINAL_CREDENTIAL_GENERATION
+        == "generation-new"
+    )
+
+
+def test_same_generation_attestation_failure_becomes_terminal(
+    monkeypatch,
+    capsys,
+):
+    supervisor = load_module(
+        SUPERVISOR_PATH,
+        "local_supervisor_same_generation_terminal",
+    )
+    supervisor.LAST_CREDENTIAL_GENERATION = "generation-7"
+    calls = []
+    responses = {
+        "supervisor-capability": {
+            "status": "READY",
+            "_generation": "generation-7",
+            "return_code": 0,
+        },
+        "supervisor-thaw-openings": {
+            "status": "BLOCKED",
+            "return_code": 2,
+        },
+        "verify": {
+            "status": "BLOCKED",
+            "reason": "runtime unavailable",
+            "return_code": 2,
+        },
+        "down": {"services": [], "return_code": 0},
+        "up": {
+            "status": "BLOCKED",
+            "reason": "credential detail must not be emitted",
+            "return_code": 2,
+            "startup_stage": "okx-runtime-readiness",
+            "okx_runtime_failure_stage": "read-attestation",
+            "okx_runtime_failure_category": "ATTESTATION",
+            "okx_runtime_failure_type": "OkxDemoCredentialsUnavailable",
+        },
+    }
+    monkeypatch.setattr(
+        supervisor,
+        "run_runtime",
+        lambda command: calls.append(command) or responses[command],
+    )
+
+    assert supervisor.supervise_once() is False
+    assert calls == [
+        "supervisor-capability",
+        "supervisor-thaw-openings",
+        "verify",
+        "down",
+        "up",
+    ]
+    assert (
+        supervisor.LAST_TERMINAL_CREDENTIAL_GENERATION
+        == "generation-7"
+    )
+    emitted = capsys.readouterr().out
+    assert '"terminal_for_credential_generation": true' in emitted
+    assert "credential detail must not be emitted" not in emitted
+
+    calls.clear()
+    assert supervisor.supervise_once() is False
+    assert calls == ["supervisor-capability"]
+    assert '"event": "runtime_recovery_suppressed"' in capsys.readouterr().out
+
+
+def test_new_generation_clears_terminal_attestation_latch(monkeypatch):
+    supervisor = load_module(
+        SUPERVISOR_PATH,
+        "local_supervisor_new_generation_after_terminal",
+    )
+    supervisor.LAST_CREDENTIAL_GENERATION = "generation-7"
+    supervisor.LAST_TERMINAL_CREDENTIAL_GENERATION = "generation-7"
+    calls = []
+    responses = {
+        "supervisor-capability": {
+            "status": "READY",
+            "_generation": "generation-8",
+            "return_code": 0,
+        },
+        "down": {"services": [], "return_code": 0},
+        "up": {"status": "RUNNING", "return_code": 0},
+        "verify": {"status": "VERIFIED", "return_code": 0},
+    }
+    monkeypatch.setattr(
+        supervisor,
+        "run_runtime",
+        lambda command: calls.append(command) or responses[command],
+    )
+
+    assert supervisor.supervise_once() is True
+    assert calls == ["supervisor-capability", "down", "up", "verify"]
+    assert supervisor.LAST_CREDENTIAL_GENERATION == "generation-8"
+    assert supervisor.LAST_TERMINAL_CREDENTIAL_GENERATION is None
+
+
+def test_unavailable_capability_does_not_bypass_terminal_latch(
+    monkeypatch,
+    capsys,
+):
+    supervisor = load_module(
+        SUPERVISOR_PATH,
+        "local_supervisor_terminal_capability_unavailable",
+    )
+    supervisor.LAST_TERMINAL_CREDENTIAL_GENERATION = "generation-7"
+    calls = []
+    monkeypatch.setattr(
+        supervisor,
+        "run_runtime",
+        lambda command: (
+            calls.append(command)
+            or {
+                "status": "BLOCKED",
+                "return_code": 2,
+            }
+        ),
+    )
+
+    assert supervisor.supervise_once() is False
+    assert calls == ["supervisor-capability"]
+    emitted = capsys.readouterr().out
+    assert '"credential_generation_status": "UNAVAILABLE"' in emitted
+    assert '"event": "runtime_recovery_suppressed"' in emitted
+
+
+def test_near_miss_attestation_diagnostic_is_not_terminal(monkeypatch):
+    supervisor = load_module(
+        SUPERVISOR_PATH,
+        "local_supervisor_nonterminal_attestation",
+    )
+    responses = {
+        "verify": {"status": "BLOCKED", "return_code": 2},
+        "down": {"services": [], "return_code": 0},
+        "up": {
+            "status": "BLOCKED",
+            "return_code": 2,
+            "okx_runtime_failure_stage": "read-attestation",
+            "okx_runtime_failure_category": "RUNTIME",
+            "okx_runtime_failure_type": "OkxDemoCredentialsUnavailable",
+        },
+    }
+    monkeypatch.setattr(
+        supervisor,
+        "run_runtime",
+        lambda command: responses[command],
+    )
+
+    assert supervisor.verify_or_recover("generation-7") is False
+    assert supervisor.LAST_TERMINAL_CREDENTIAL_GENERATION is None
 
 
 def test_factory_diagnostic_crosses_runtime_sidecar_and_supervisor_allowlist(

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
+import errno
 import fcntl
 import json
 import os
@@ -161,6 +162,18 @@ OKX_RUNTIME_FAILURE_FILE = "okx-runtime.failure.json"
 OKX_WRITER_LOCK_FILE = "okx-demo-order-writer.lock"
 CONTROL_LOCK_FILE = "runtime-control.lock"
 OPENINGS_FREEZE_FILE = "okx-runtime.freeze-openings"
+PROCESS_STATE_RUNNING = "RUNNING"
+PROCESS_STATE_ZOMBIE = "ZOMBIE"
+PROCESS_STATE_EXITED = "EXITED"
+PROCESS_STATE_INACCESSIBLE = "INACCESSIBLE"
+MANAGED_PROCESS_MATCH = "MATCH"
+MANAGED_PROCESS_NO_MATCH = "NO_MATCH"
+MANAGED_PROCESS_INACCESSIBLE = "INACCESSIBLE"
+TERMINAL_PROCESS_STATES = frozenset(
+    {PROCESS_STATE_ZOMBIE, PROCESS_STATE_EXITED}
+)
+PROCESS_STATE_PROBE_TIMEOUT_SECONDS = 5
+FINAL_PROCESS_TERMINATION_TIMEOUT_SECONDS = 5
 SECRET_LINE = re.compile(
     r"(?i)(api[_-]?key|token|secret|password|passphrase|authorization|"
     r"ok-access-(?:key|sign|passphrase))([\"']?\s*[:=]\s*[\"']?)([^\s,;\"']+)"
@@ -278,14 +291,67 @@ def port_available(port: int) -> bool:
     return True
 
 
-def process_running(pid: int) -> bool:
+def process_state(pid: int) -> str:
+    """Classify a PID without treating existence as process availability."""
+
     if pid <= 0:
-        return False
+        return PROCESS_STATE_EXITED
     try:
         os.kill(pid, 0)
-    except OSError:
-        return False
-    return True
+    except ProcessLookupError:
+        return PROCESS_STATE_EXITED
+    except PermissionError:
+        return PROCESS_STATE_INACCESSIBLE
+    except OSError as exc:
+        if exc.errno == errno.ESRCH:
+            return PROCESS_STATE_EXITED
+        return PROCESS_STATE_INACCESSIBLE
+
+    try:
+        completed = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "state="],
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=PROCESS_STATE_PROBE_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return PROCESS_STATE_INACCESSIBLE
+
+    states = [
+        line.strip()
+        for line in completed.stdout.splitlines()
+        if line.strip()
+    ]
+    if completed.returncode == 0 and len(states) == 1:
+        fields = states[0].split()
+        if len(fields) == 1:
+            marker = fields[0][:1].upper()
+            if marker == "Z":
+                return PROCESS_STATE_ZOMBIE
+            if marker == "X":
+                return PROCESS_STATE_EXITED
+            if marker in {"D", "I", "R", "S", "T", "U", "W"}:
+                return PROCESS_STATE_RUNNING
+            return PROCESS_STATE_INACCESSIBLE
+
+    # The process may have exited between the initial existence probe and ps.
+    # Any other ambiguous result must remain fail-closed.
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return PROCESS_STATE_EXITED
+    except PermissionError:
+        return PROCESS_STATE_INACCESSIBLE
+    except OSError as exc:
+        if exc.errno == errno.ESRCH:
+            return PROCESS_STATE_EXITED
+        return PROCESS_STATE_INACCESSIBLE
+    return PROCESS_STATE_INACCESSIBLE
+
+
+def process_running(pid: int) -> bool:
+    return process_state(pid) == PROCESS_STATE_RUNNING
 
 
 def read_pid(path: Path) -> Optional[int]:
@@ -372,11 +438,17 @@ def runtime_control_lock(state_dir: Path):
 def process_status(state_dir: Path, service: str) -> Dict[str, Any]:
     pid_path = state_dir / PID_FILES[service]
     pid = read_pid(pid_path)
-    running = pid is not None and process_running(pid)
-    return {"service": service, "pid": pid, "running": running, "pid_file": str(pid_path)}
+    state = process_state(pid) if pid is not None else PROCESS_STATE_EXITED
+    return {
+        "service": service,
+        "pid": pid,
+        "running": state == PROCESS_STATE_RUNNING,
+        "process_state": state,
+        "pid_file": str(pid_path),
+    }
 
 
-def is_managed_process(pid: int, service: str) -> bool:
+def managed_process_identity(pid: int, service: str) -> str:
     """Refuse to signal a reused/stale PID that is not our local process."""
 
     try:
@@ -385,24 +457,46 @@ def is_managed_process(pid: int, service: str) -> bool:
             check=False,
             text=True,
             capture_output=True,
+            timeout=PROCESS_STATE_PROBE_TIMEOUT_SECONDS,
         )
-    except OSError:
-        return False
+    except (OSError, subprocess.TimeoutExpired):
+        return MANAGED_PROCESS_INACCESSIBLE
+    if completed.returncode != 0:
+        return (
+            MANAGED_PROCESS_NO_MATCH
+            if process_state(pid) in TERMINAL_PROCESS_STATES
+            else MANAGED_PROCESS_INACCESSIBLE
+        )
     command = completed.stdout.strip()
     expected = SERVICE_PROCESS_MARKERS[service]
     if expected not in command:
-        return False
+        return MANAGED_PROCESS_NO_MATCH
     try:
         cwd_result = subprocess.run(
             ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
             check=False,
             text=True,
             capture_output=True,
+            timeout=PROCESS_STATE_PROBE_TIMEOUT_SECONDS,
         )
-    except OSError:
-        return False
+    except (OSError, subprocess.TimeoutExpired):
+        return MANAGED_PROCESS_INACCESSIBLE
+    if cwd_result.returncode != 0:
+        return (
+            MANAGED_PROCESS_NO_MATCH
+            if process_state(pid) in TERMINAL_PROCESS_STATES
+            else MANAGED_PROCESS_INACCESSIBLE
+        )
     expected_cwd = SERVICE_WORKING_DIRECTORIES[service]
-    return "n{}".format(expected_cwd) in cwd_result.stdout
+    return (
+        MANAGED_PROCESS_MATCH
+        if "n{}".format(expected_cwd) in cwd_result.stdout
+        else MANAGED_PROCESS_NO_MATCH
+    )
+
+
+def is_managed_process(pid: int, service: str) -> bool:
+    return managed_process_identity(pid, service) == MANAGED_PROCESS_MATCH
 
 
 def base_service_environment() -> Dict[str, str]:
@@ -1419,6 +1513,12 @@ def start_service(
     current = process_status(state_dir, service)
     if current["running"]:
         raise RuntimeBlocked("{} is already managed by this runtime (pid {})".format(service, current["pid"]))
+    if current.get("process_state") == PROCESS_STATE_INACCESSIBLE:
+        raise RuntimeBlocked(
+            "{} process state is inaccessible; refusing a competing start".format(
+                service
+            )
+        )
     log_path = state_dir / LOG_FILES[service]
     log_descriptor = os.open(
         log_path,
@@ -1768,8 +1868,10 @@ def cleanup_stale_runtime_state(state_dir: Path) -> None:
     for service in SERVICE_START_ORDER:
         pid_path = state_dir / PID_FILES[service]
         pid = read_pid(pid_path)
-        if pid is not None and not process_running(pid):
-            pid_path.unlink(missing_ok=True)
+        if pid is not None:
+            state = process_state(pid)
+            if state in TERMINAL_PROCESS_STATES:
+                pid_path.unlink(missing_ok=True)
         elif pid is None:
             try:
                 metadata = pid_path.lstat()
@@ -1783,7 +1885,7 @@ def cleanup_stale_runtime_state(state_dir: Path) -> None:
                 # live child is rediscovered by marker+cwd before startup.
                 pid_path.unlink(missing_ok=True)
     okx_status = process_status(state_dir, "okx_runtime")
-    if not okx_status["running"]:
+    if okx_status.get("process_state") in TERMINAL_PROCESS_STATES:
         (state_dir / OKX_RUNTIME_READY_FILE).unlink(missing_ok=True)
 
 
@@ -1852,6 +1954,8 @@ def orphaned_managed_process_map(
         )
     except (OSError, subprocess.TimeoutExpired):
         raise RuntimeBlocked("managed process discovery is unavailable") from None
+    if completed.returncode != 0:
+        raise RuntimeBlocked("managed process discovery is unavailable")
     candidates: Dict[str, list[int]] = {
         service: [] for service in services
     }
@@ -1868,7 +1972,12 @@ def orphaned_managed_process_map(
                 continue
             if pid in {os.getpid(), tracked[service]}:
                 continue
-            if is_managed_process(pid, service):
+            identity = managed_process_identity(pid, service)
+            if identity == MANAGED_PROCESS_INACCESSIBLE:
+                raise RuntimeBlocked(
+                    "managed process ownership could not be established safely"
+                )
+            if identity == MANAGED_PROCESS_MATCH:
                 candidates[service].append(pid)
     return candidates
 
@@ -1892,16 +2001,61 @@ def cleanup_orphaned_managed_processes(state_dir: Path) -> None:
             try:
                 os.killpg(pid, signal.SIGTERM)
             except ProcessLookupError:
-                continue
+                if process_state(pid) in TERMINAL_PROCESS_STATES:
+                    continue
+                raise RuntimeBlocked(
+                    "managed orphan process group could not be resolved safely"
+                ) from None
+            except PermissionError:
+                raise RuntimeBlocked(
+                    "managed orphan process group could not be signaled safely"
+                ) from None
             deadline = time.monotonic() + 10
-            alive = True
-            while time.monotonic() < deadline:
-                alive = process_running(pid)
-                if not alive:
-                    break
+            state = process_state(pid)
+            while (
+                time.monotonic() < deadline
+                and state == PROCESS_STATE_RUNNING
+            ):
                 time.sleep(0.1)
-            if alive:
+                state = process_state(pid)
+            if state in TERMINAL_PROCESS_STATES:
+                continue
+            if state == PROCESS_STATE_INACCESSIBLE:
+                raise RuntimeBlocked(
+                    "managed orphan process state is inaccessible"
+                )
+            if not is_managed_process(pid, service):
+                state = process_state(pid)
+                if state in TERMINAL_PROCESS_STATES:
+                    continue
+                raise RuntimeBlocked(
+                    "managed orphan process identity changed before termination"
+                )
+            try:
                 os.killpg(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                state = process_state(pid)
+            except PermissionError:
+                raise RuntimeBlocked(
+                    "managed orphan process group could not be terminated safely"
+                ) from None
+            else:
+                state = process_state(pid)
+            if state == PROCESS_STATE_RUNNING:
+                deadline = (
+                    time.monotonic()
+                    + FINAL_PROCESS_TERMINATION_TIMEOUT_SECONDS
+                )
+                while (
+                    time.monotonic() < deadline
+                    and state == PROCESS_STATE_RUNNING
+                ):
+                    time.sleep(0.1)
+                    state = process_state(pid)
+            if state not in TERMINAL_PROCESS_STATES:
+                raise RuntimeBlocked(
+                    "managed orphan process group did not reach a terminal state"
+                )
 
 
 def stop_service(state_dir: Path, service: str) -> Dict[str, Any]:
@@ -1909,10 +2063,26 @@ def stop_service(state_dir: Path, service: str) -> Dict[str, Any]:
     pid = read_pid(pid_path)
     if pid is None:
         return {"service": service, "status": "not-managed"}
-    if not process_running(pid):
+    state = process_state(pid)
+    if state in TERMINAL_PROCESS_STATES:
         pid_path.unlink(missing_ok=True)
         return {"service": service, "status": "stale-pid-removed", "pid": pid}
+    if state == PROCESS_STATE_INACCESSIBLE:
+        return {
+            "service": service,
+            "status": "BLOCKED",
+            "pid": pid,
+            "reason": "managed process state could not be established safely",
+        }
     if not is_managed_process(pid, service):
+        state = process_state(pid)
+        if state in TERMINAL_PROCESS_STATES:
+            pid_path.unlink(missing_ok=True)
+            return {
+                "service": service,
+                "status": "stale-pid-removed",
+                "pid": pid,
+            }
         return {
             "service": service,
             "status": "BLOCKED",
@@ -1931,11 +2101,37 @@ def stop_service(state_dir: Path, service: str) -> Dict[str, Any]:
             "reason": "managed process group could not be signaled safely",
         }
     deadline = time.monotonic() + 10
-    while time.monotonic() < deadline and process_running(pid):
+    state = process_state(pid)
+    while time.monotonic() < deadline and state == PROCESS_STATE_RUNNING:
         time.sleep(0.1)
-    if process_running(pid):
+        state = process_state(pid)
+    if state == PROCESS_STATE_INACCESSIBLE:
+        return {
+            "service": service,
+            "status": "BLOCKED",
+            "pid": pid,
+            "reason": "managed process termination could not be verified safely",
+        }
+    if state == PROCESS_STATE_RUNNING:
+        if not is_managed_process(pid, service):
+            state = process_state(pid)
+            if state in TERMINAL_PROCESS_STATES:
+                pid_path.unlink(missing_ok=True)
+                return {
+                    "service": service,
+                    "status": "stopped",
+                    "pid": pid,
+                }
+            return {
+                "service": service,
+                "status": "BLOCKED",
+                "pid": pid,
+                "reason": "managed process identity changed during termination",
+            }
         try:
             os.killpg(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            state = process_state(pid)
         except PermissionError:
             return {
                 "service": service,
@@ -1943,6 +2139,25 @@ def stop_service(state_dir: Path, service: str) -> Dict[str, Any]:
                 "pid": pid,
                 "reason": "managed process group could not be terminated safely",
             }
+        else:
+            deadline = (
+                time.monotonic()
+                + FINAL_PROCESS_TERMINATION_TIMEOUT_SECONDS
+            )
+            state = process_state(pid)
+            while (
+                time.monotonic() < deadline
+                and state == PROCESS_STATE_RUNNING
+            ):
+                time.sleep(0.1)
+                state = process_state(pid)
+    if state not in TERMINAL_PROCESS_STATES:
+        return {
+            "service": service,
+            "status": "BLOCKED",
+            "pid": pid,
+            "reason": "managed process group did not reach a terminal state",
+        }
     pid_path.unlink(missing_ok=True)
     return {"service": service, "status": "stopped", "pid": pid}
 
@@ -1965,10 +2180,17 @@ def require_complete_startup_cleanup(
         for item in stopped.get("services", [])
         if item.get("status") == "BLOCKED"
     ]
-    remaining = [
-        service
+    statuses = {
+        service: process_status(state_dir, service)
         for service in SERVICE_START_ORDER
-        if process_status(state_dir, service)["running"]
+    }
+    remaining = [
+        service for service, status in statuses.items() if status["running"]
+    ]
+    inaccessible = [
+        service
+        for service, status in statuses.items()
+        if status.get("process_state") == PROCESS_STATE_INACCESSIBLE
     ]
     orphaned = orphaned_managed_process_map(
         state_dir,
@@ -1978,12 +2200,20 @@ def require_complete_startup_cleanup(
         service: pids for service, pids in orphaned.items() if pids
     }
     lock_holder = _writer_lock_holder(state_dir)
-    if blocked or remaining or orphaned or lock_holder is not None:
+    if (
+        blocked
+        or remaining
+        or inaccessible
+        or orphaned
+        or lock_holder is not None
+    ):
         raise RuntimeBlocked(
             "runtime startup failed and cleanup is incomplete; "
-            "blocked={}, remaining={}, orphaned={}, writer_lock_held={}".format(
+            "blocked={}, remaining={}, inaccessible={}, orphaned={}, "
+            "writer_lock_held={}".format(
                 blocked,
                 remaining,
+                inaccessible,
                 sorted(orphaned),
                 lock_holder is not None,
             )
@@ -1993,15 +2223,22 @@ def require_complete_startup_cleanup(
 def start(state_dir: Path) -> Dict[str, Any]:
     state_dir.mkdir(parents=True, exist_ok=True)
     cleanup_stale_runtime_state(state_dir)
-    running = [
-        service
+    statuses = {
+        service: process_status(state_dir, service)
         for service in SERVICE_START_ORDER
-        if process_status(state_dir, service)["running"]
+    }
+    running = [
+        service for service, status in statuses.items() if status["running"]
     ]
-    if running:
+    inaccessible = [
+        service
+        for service, status in statuses.items()
+        if status.get("process_state") == PROCESS_STATE_INACCESSIBLE
+    ]
+    if running or inaccessible:
         raise RuntimeBlocked(
             "runtime is already managed; repeated up was refused: {}".format(
-                ", ".join(running)
+                ", ".join(running + inaccessible)
             )
         )
     cleanup_orphaned_managed_processes(state_dir)
