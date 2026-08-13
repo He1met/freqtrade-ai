@@ -6173,6 +6173,72 @@ def test_postgresql_v28_missing_consent_key_requires_explicit_terminalization(
     assert verify_schema(postgres_writer_engine).ready is True
 
 
+def _adapt_retired_v28_dump_to_v47_configuration_lifecycle(
+    backup_path: Path,
+    manifest_path: Path,
+) -> None:
+    """Keep the retired v28 restore fixture independent of V1.3 test setup.
+
+    The autouse PostgreSQL fixture adds one synthetic VALIDATED configuration
+    bundle so current V1.3 workflow INSERTs remain legal.  A plain data-only
+    dump cannot replay a terminal configuration version through the current
+    INSERT guard: versions must be inserted as DRAFT and then validated.  This
+    test-only adapter rewrites exactly that synthetic row into the public
+    lifecycle transition without disabling any restore trigger or changing the
+    production backup contract under test.
+    """
+
+    dump_text = backup_path.read_text(encoding="utf-8")
+    header_prefix = "COPY public.configuration_versions ("
+    header_start = dump_text.index(header_prefix)
+    header_end = dump_text.index(") FROM stdin;\n", header_start)
+    columns = dump_text[
+        header_start + len(header_prefix):header_end
+    ].split(", ")
+    type_index = columns.index("type_key")
+    version_index = columns.index("version_number")
+    status_index = columns.index("lifecycle_status")
+    validated_index = columns.index("validated_at")
+    rows_start = header_end + len(") FROM stdin;\n")
+    rows_end = dump_text.index("\\.\n", rows_start)
+    rows = dump_text[rows_start:rows_end].splitlines()
+    matched = []
+    validated_at = None
+    for index, row in enumerate(rows):
+        values = row.split("\t")
+        if (
+            values[type_index] == "test-fixture-profile"
+            and values[version_index] == "1"
+        ):
+            assert values[status_index] == "VALIDATED"
+            assert values[validated_index] not in {"", r"\N"}
+            assert "'" not in values[validated_index]
+            validated_at = values[validated_index]
+            values[status_index] = "DRAFT"
+            values[validated_index] = r"\N"
+            rows[index] = "\t".join(values)
+            matched.append(index)
+    assert len(matched) == 1
+    assert validated_at is not None
+    transition = (
+        "UPDATE public.configuration_versions "
+        "SET lifecycle_status='VALIDATED', validated_at='{}'::timestamptz "
+        "WHERE type_key='test-fixture-profile' AND version_number=1 "
+        "AND lifecycle_status='DRAFT';\n"
+    ).format(validated_at)
+    adapted = (
+        dump_text[:rows_start]
+        + "\n".join(rows)
+        + "\n\\.\n"
+        + transition
+        + dump_text[rows_end + len("\\.\n"):]
+    )
+    backup_path.write_text(adapted, encoding="utf-8")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["sha256"] = hashlib.sha256(backup_path.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+
 def test_postgresql_v28_terminal_history_real_atomic_dump_restore_and_reharden(
     postgres_writer_engine, monkeypatch, tmp_path
 ) -> None:
@@ -6222,6 +6288,9 @@ def test_postgresql_v28_terminal_history_real_atomic_dump_restore_and_reharden(
         database_url=source_url,
         output_dir=tmp_path,
         pg_dump_binary=pg_dump_binary,
+    )
+    _adapt_retired_v28_dump_to_v47_configuration_lifecycle(
+        backup_path, manifest_path
     )
 
     destination_name = "test_okx_restore_{}".format(uuid4().hex)
