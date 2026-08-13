@@ -235,8 +235,8 @@ def _adapter_registry_digest(rows: Sequence[Mapping[str, Any]]) -> str:
                 "display_metadata": _json_value(row["display_metadata"]),
                 "enabled": row["enabled"],
                 "registry_metadata_only": row["registry_metadata_only"],
-                "contains_secret_material": False,
-                "contains_executable_payload": False,
+                "contains_secret_material": (row["contains_secret_material"]),
+                "contains_executable_payload": row["contains_executable_payload"],
             }
         )
     if not payload:
