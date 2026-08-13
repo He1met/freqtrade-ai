@@ -76,7 +76,11 @@ export async function fetchOwnerJson<T>(
     },
     signal,
   });
-  if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+  if (!response.ok) {
+    let detail: unknown = null;
+    try { detail = await response.json(); } catch { detail = null; }
+    throw new StrategyGenerationApiError(response, detail);
+  }
   return response.json() as Promise<T>;
 }
 
@@ -96,7 +100,11 @@ export async function postOwnerReadJson<T>(
     method: "POST",
     signal,
   });
-  if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+  if (!response.ok) {
+    let detail: unknown = null;
+    try { detail = await response.json(); } catch { detail = null; }
+    throw new StrategyGenerationApiError(response, detail);
+  }
   return response.json() as Promise<T>;
 }
 

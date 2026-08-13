@@ -122,6 +122,29 @@ class ConfigurationResolverService:
             lock=lock_activation,
         )
 
+        return self.resolve_version(
+            workflow_kind=workflow_kind,
+            aggregate_config_type=aggregate_config_type,
+            scope_type=scope_type,
+            scope_key=scope_key,
+            aggregate_version_id=activation.version_id,
+        )
+
+    def resolve_version(
+        self,
+        *,
+        workflow_kind: str,
+        aggregate_config_type: str,
+        scope_type: str,
+        scope_key: str,
+        aggregate_version_id: int,
+    ) -> ConfigurationBundleResolutionRead:
+        """Preview one exact validated graph without consulting an activation."""
+
+        self.repository.require_owner_connection()
+        self._require_non_empty_scope(workflow_kind, scope_type, scope_key)
+        self._require_type(aggregate_config_type)
+
         resolved_by_id: dict[int, ConfigurationVersion] = {}
         resolved_by_type: dict[str, ConfigurationVersion] = {}
         dependency_reads: list[ConfigurationDependencyRead] = []
@@ -167,8 +190,8 @@ class ConfigurationResolverService:
             visiting.remove(version.id)
             visited.add(version.id)
 
-        visit(activation.version_id)
-        aggregate = resolved_by_id[activation.version_id]
+        visit(aggregate_version_id)
+        aggregate = resolved_by_id[aggregate_version_id]
         if aggregate.type_key != aggregate_config_type:
             raise StrategyPlatformReadError(
                 "ACTIVE_CONFIGURATION_TYPE_MISMATCH",
@@ -343,7 +366,7 @@ class ConfigurationResolverService:
                 "Stored configuration bundle digest does not match its contents.",
                 context={"bundle_id": snapshot.id},
             )
-        _validate_capability_snapshot(snapshot.capability_snapshot)
+        validate_configuration_capability_snapshot(snapshot.capability_snapshot)
         dependencies = []
         allowed_ids = set(versions_by_id)
         for edge in self.repository.list_dependencies(allowed_ids):
@@ -478,7 +501,7 @@ class ConfigurationResolverService:
                     "registered_schema": type_row.schema_version,
                 },
             )
-        _validate_payload(version.payload_json, version_id=version.id)
+        validate_configuration_payload(version.payload_json, version_id=version.id)
 
     @staticmethod
     def _type_read(row) -> ConfigurationTypeRead:
@@ -503,7 +526,7 @@ class ConfigurationResolverService:
             )
 
 
-def _validate_payload(payload: Any, *, version_id: int) -> None:
+def validate_configuration_payload(payload: Any, *, version_id: int) -> None:
     if not isinstance(payload, Mapping):
         raise StrategyPlatformReadError(
             "CONFIGURATION_PAYLOAD_INVALID",
@@ -550,7 +573,7 @@ def _raise_safety(version_id: int, field: str) -> None:
     )
 
 
-def _validate_capability_snapshot(snapshot: Any) -> None:
+def validate_configuration_capability_snapshot(snapshot: Any) -> None:
     if not isinstance(snapshot, Mapping) or any(
         snapshot.get(key) != expected for key, expected in _SAFETY_CAPABILITY.items()
     ):
@@ -570,7 +593,7 @@ def _bundle_digest(
     resolved_digests_json: Mapping[str, str],
     capability_snapshot: Mapping[str, Any],
 ) -> str:
-    _validate_capability_snapshot(capability_snapshot)
+    validate_configuration_capability_snapshot(capability_snapshot)
     payload = {
         "digest_contract": "configuration-bundle-digest-v1",
         "workflow_kind": workflow_kind,

@@ -16,6 +16,7 @@ export const navigationSections: NavigationSection[] = [
     items: [
       { to: "/", label: "总览" },
       { to: "/strategies", label: "策略工厂" },
+      { to: "/configuration", label: "配置中心" },
       { to: "/research-queue", label: "研究队列" },
       { to: "/okx-demo", label: "模拟盘" },
     ],

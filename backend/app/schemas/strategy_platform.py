@@ -3,7 +3,14 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+def _non_empty_trimmed(value: str) -> str:
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError("value must contain non-whitespace characters")
+    return normalized
 
 
 class ConfigurationTypeRead(BaseModel):
@@ -43,6 +50,70 @@ class ConfigurationVersionListRead(BaseModel):
     scope_key: str
     active_version_id: Optional[int]
     items: list[ConfigurationVersionRead]
+
+
+class ConfigurationDependencyWrite(BaseModel):
+    depends_on_version_id: int = Field(gt=0)
+    relation_key: str = Field(min_length=1, max_length=120)
+
+    _normalize_relation_key = field_validator("relation_key")(_non_empty_trimmed)
+
+
+class ConfigurationDraftCreateRequest(BaseModel):
+    scope_type: str = Field(min_length=1, max_length=80)
+    scope_key: str = Field(min_length=1, max_length=160)
+    change_summary: str = Field(min_length=1, max_length=4000)
+    source_version_id: Optional[int] = Field(default=None, gt=0)
+    payload_json: Optional[dict[str, Any]] = None
+    dependencies: Optional[list[ConfigurationDependencyWrite]] = None
+
+    _normalize_scope = field_validator("scope_type", "scope_key")(_non_empty_trimmed)
+    _normalize_summary = field_validator("change_summary")(_non_empty_trimmed)
+
+
+class ConfigurationVersionActionRequest(BaseModel):
+    scope_type: str = Field(min_length=1, max_length=80)
+    scope_key: str = Field(min_length=1, max_length=160)
+    reason: Optional[str] = Field(default=None, max_length=4000)
+
+    _normalize_scope = field_validator("scope_type", "scope_key")(_non_empty_trimmed)
+
+
+class ConfigurationAuditEventRead(BaseModel):
+    id: int
+    configuration_version_id: int
+    event_type: str
+    actor: str
+    request_id: str
+    scope_type: Optional[str]
+    scope_key: Optional[str]
+    reason: Optional[str]
+    event_snapshot: dict[str, Any]
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ConfigurationAuditEventListRead(BaseModel):
+    config_type: str
+    scope_type: str
+    scope_key: str
+    items: list[ConfigurationAuditEventRead]
+
+
+class ConfigurationDiffEntryRead(BaseModel):
+    path: str
+    before: Any = None
+    after: Any = None
+
+
+class ConfigurationVersionDiffRead(BaseModel):
+    config_type: str
+    scope_type: str
+    scope_key: str
+    from_version_id: int
+    to_version_id: int
+    items: list[ConfigurationDiffEntryRead]
 
 
 class ActiveConfigurationRead(BaseModel):
@@ -89,6 +160,35 @@ class ConfigurationBundleSnapshotRead(ConfigurationBundleResolutionRead):
     persisted: bool = True
     snapshot_id: int
     created_at: datetime
+
+
+class ConfigurationDependencyListRead(BaseModel):
+    items: list[ConfigurationDependencyRead]
+
+
+class ConfigurationVersionDetailRead(BaseModel):
+    version: ConfigurationVersionRead
+    dependencies: list[ConfigurationDependencyRead]
+
+
+class ConfigurationWriteResult(BaseModel):
+    schema_version: str = "configuration-management-v1"
+    request_id: str
+    idempotent_replay: bool = False
+    operation: str
+    scope_type: str
+    scope_key: str
+    version: ConfigurationVersionRead
+    dependencies: list[ConfigurationDependencyRead] = Field(default_factory=list)
+    previous_active_version_id: Optional[int] = None
+    active_version_id: Optional[int] = None
+    validation_bundle: Optional[ConfigurationBundleResolutionRead] = None
+
+
+class ConfigurationBundleSnapshotListRead(BaseModel):
+    scope_type: str
+    scope_key: str
+    items: list[ConfigurationBundleSnapshotRead]
 
 
 class StrategyCatalogCurrentVersionRead(BaseModel):
