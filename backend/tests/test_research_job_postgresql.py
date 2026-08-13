@@ -15,6 +15,7 @@ from app.db.migrations import (
     SCHEMA_VERSION,
     STRATEGY_DEPLOYMENT_BASE_VERSION,
     STRATEGY_VALIDATION_BASE_VERSION,
+    STRATEGY_PLATFORM_V1_TABLES,
     TARGET_LINEAGE_BASE_VERSION,
     VERSION_TABLE,
     upgrade_database,
@@ -201,6 +202,16 @@ def test_validation_matrix_fresh_and_upgrade_schema_match_orm(
     }.issubset(set(inspect(postgres_engine).get_table_names()))
 
     with postgres_engine.begin() as connection:
+        for table_name in reversed(STRATEGY_PLATFORM_V1_TABLES):
+            connection.execute(text(f'DROP TABLE IF EXISTS "{table_name}" CASCADE'))
+        connection.execute(
+            text(
+                "ALTER TABLE research_jobs "
+                "DROP COLUMN configuration_bundle_snapshot_id; "
+                "ALTER TABLE strategy_deployments "
+                "DROP COLUMN configuration_bundle_snapshot_id"
+            )
+        )
         connection.execute(text("DROP TABLE strategy_validation_windows"))
         connection.execute(text("DROP TABLE strategy_validation_plans"))
         connection.execute(text(f"DELETE FROM {VERSION_TABLE}"))

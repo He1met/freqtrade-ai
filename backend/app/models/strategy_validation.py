@@ -5,6 +5,7 @@ from sqlalchemy import (
     BigInteger,
     CheckConstraint,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     JSON,
@@ -24,8 +25,19 @@ class StrategyValidationPlan(Base):
     __tablename__ = "strategy_validation_plans"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('DECLARED', 'RUNNING', 'PASSED', 'BLOCKED')",
+            "status IN ('DECLARED', 'QUEUED', 'RUNNING', 'PASSED', "
+            "'QUALIFIED', 'REJECTED', 'FAILED', 'BLOCKED')",
             name="strategy_validation_plans_status_check",
+        ),
+        CheckConstraint(
+            "cycle_number IS NULL OR cycle_number > 0",
+            name="strategy_validation_plans_cycle_number_check",
+        ),
+        CheckConstraint(
+            "(policy_snapshot_digest IS NULL OR length(policy_snapshot_digest) = 64) "
+            "AND (market_data_snapshot_digest IS NULL "
+            "OR length(market_data_snapshot_digest) = 64)",
+            name="strategy_validation_plans_snapshot_digest_check",
         ),
         UniqueConstraint(
             "promotion_backtest_result_id",
@@ -35,6 +47,11 @@ class StrategyValidationPlan(Base):
             "strategy_version_id",
             "plan_digest",
             name="strategy_validation_plans_version_digest_unique",
+        ),
+        UniqueConstraint(
+            "strategy_target_id",
+            "cycle_number",
+            name="strategy_validation_plans_target_cycle_unique",
         ),
     )
 
@@ -48,6 +65,28 @@ class StrategyValidationPlan(Base):
         ForeignKey("strategy_versions.id", ondelete="RESTRICT"),
         nullable=False,
     )
+    strategy_target_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey("strategy_targets.id", ondelete="RESTRICT"),
+    )
+    quality_gate_profile_version_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey(
+            "quality_gate_profile_versions.configuration_version_id",
+            ondelete="RESTRICT",
+        ),
+    )
+    validation_window_config_set_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey("validation_window_config_sets.id", ondelete="RESTRICT"),
+    )
+    configuration_bundle_snapshot_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey("configuration_bundle_snapshots.id", ondelete="RESTRICT"),
+    )
+    cycle_number: Mapped[Optional[int]] = mapped_column(Integer)
+    trigger_source_key: Mapped[Optional[str]] = mapped_column(String(120))
+    trigger_metadata: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     promotion_backtest_result_id: Mapped[int] = mapped_column(
         BigInteger().with_variant(Integer, "sqlite"),
         ForeignKey("backtest_results.id", ondelete="RESTRICT"),
@@ -61,7 +100,10 @@ class StrategyValidationPlan(Base):
     promotion_evidence: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     evidence_digest: Mapped[Optional[str]] = mapped_column(String(64))
     blocked_reason: Mapped[Optional[str]] = mapped_column(Text)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    policy_snapshot_digest: Mapped[Optional[str]] = mapped_column(String(64))
+    market_data_snapshot_digest: Mapped[Optional[str]] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -82,17 +124,23 @@ class StrategyValidationWindow(Base):
     __tablename__ = "strategy_validation_windows"
     __table_args__ = (
         CheckConstraint(
-            "window_kind IN ('OOS', 'WALK_FORWARD')",
-            name="strategy_validation_windows_kind_check",
+            "status IN ('DECLARED', 'READY', 'RUNNING', 'PASSED', "
+            "'REJECTED', 'FAILED', 'BLOCKED')",
+            name="strategy_validation_windows_status_check",
         ),
         CheckConstraint(
-            "status IN ('DECLARED', 'READY', 'PASSED', 'BLOCKED')",
-            name="strategy_validation_windows_status_check",
+            "attempt_number > 0",
+            name="strategy_validation_windows_attempt_number_check",
+        ),
+        CheckConstraint(
+            "total_trades IS NULL OR total_trades >= 0",
+            name="strategy_validation_windows_total_trades_check",
         ),
         UniqueConstraint(
             "validation_plan_id",
-            "ordinal",
-            name="strategy_validation_windows_plan_ordinal_unique",
+            "window_config_id",
+            "attempt_number",
+            name="strategy_validation_windows_plan_config_attempt_unique",
         ),
         UniqueConstraint("backtest_run_id", name="strategy_validation_windows_run_unique"),
         UniqueConstraint("backtest_task_id", name="strategy_validation_windows_task_unique"),
@@ -113,8 +161,16 @@ class StrategyValidationWindow(Base):
         ForeignKey("strategy_validation_plans.id", ondelete="CASCADE"),
         nullable=False,
     )
+    window_config_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey("validation_window_configs.id", ondelete="RESTRICT"),
+    )
     ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
-    window_kind: Mapped[str] = mapped_column(String(24), nullable=False)
+    window_kind: Mapped[Optional[str]] = mapped_column(String(24))
+    window_key_snapshot: Mapped[Optional[str]] = mapped_column(String(120))
+    name_zh_snapshot: Mapped[Optional[str]] = mapped_column(String(160))
+    description_zh_snapshot: Mapped[Optional[str]] = mapped_column(Text)
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     required_market_state: Mapped[Optional[str]] = mapped_column(String(24))
     market_state: Mapped[Optional[str]] = mapped_column(String(24))
     market_state_source: Mapped[Optional[str]] = mapped_column(String(80))
@@ -141,7 +197,13 @@ class StrategyValidationWindow(Base):
     execution_id: Mapped[Optional[str]] = mapped_column(String(160))
     artifact_manifest_checksum: Mapped[Optional[str]] = mapped_column(String(64))
     result_checksum: Mapped[Optional[str]] = mapped_column(String(64))
+    net_profit_after_cost: Mapped[Optional[float]] = mapped_column(Float)
+    max_drawdown: Mapped[Optional[float]] = mapped_column(Float)
+    volatility: Mapped[Optional[float]] = mapped_column(Float)
+    total_trades: Mapped[Optional[int]] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="DECLARED")
+    failure_code: Mapped[Optional[str]] = mapped_column(String(160))
+    failure_message: Mapped[Optional[str]] = mapped_column(Text)
     blocked_reason: Mapped[Optional[str]] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

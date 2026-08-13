@@ -95,6 +95,10 @@ class StrategyDeployment(Base):
         ForeignKey("strategy_versions.id", ondelete="RESTRICT"),
         nullable=False,
     )
+    configuration_bundle_snapshot_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey("configuration_bundle_snapshots.id", ondelete="RESTRICT"),
+    )
     candidate_digest: Mapped[str] = mapped_column(String(64), nullable=False)
     promotion_policy_version: Mapped[str] = mapped_column(String(80), nullable=False)
     deployment_policy_digest: Mapped[str] = mapped_column(String(64), nullable=False)

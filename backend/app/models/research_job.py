@@ -97,6 +97,10 @@ class ResearchJob(Base):
         BigInteger().with_variant(Integer, "sqlite"),
         ForeignKey("strategy_scores.id", ondelete="SET NULL"),
     )
+    configuration_bundle_snapshot_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey("configuration_bundle_snapshots.id", ondelete="RESTRICT"),
+    )
     evidence_snapshot: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     error_message: Mapped[Optional[str]] = mapped_column(Text)
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
