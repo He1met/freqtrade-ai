@@ -303,6 +303,8 @@ def test_v47_owner_schema_verifier_replaces_only_retired_runtime_acl_checks() ->
         "STRATEGY_PLATFORM_V13_LEGACY_CAPABILITY_SEQUENCES",
         "STRATEGY_PLATFORM_V13_LEGACY_CAPABILITY_FUNCTIONS",
         "STRATEGY_PLATFORM_V13_GUARD_FUNCTIONS",
+        "direct_runtime_select_tables",
+        "V1.3 direct read ACL set mismatch",
         "SELECT count(*)",
     ):
         assert fragment in source

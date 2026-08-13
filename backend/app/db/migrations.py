@@ -3586,6 +3586,40 @@ def strategy_platform_v13_owner_schema_problems(
             )
         )
     current_user = bind.execute(text("SELECT current_user")).scalar_one()
+    direct_runtime_select_tables = set(
+        bind.execute(
+            text(
+                "SELECT relation.relname FROM pg_class relation "
+                "JOIN pg_namespace namespace "
+                "ON namespace.oid=relation.relnamespace "
+                "CROSS JOIN LATERAL aclexplode("
+                "COALESCE(relation.relacl,acldefault('r',relation.relowner))) acl "
+                "WHERE namespace.nspname='public' "
+                "AND relation.relkind IN ('r','p') "
+                "AND acl.grantee=:runtime_oid "
+                "AND acl.privilege_type='SELECT' "
+                "AND acl.is_grantable IS FALSE"
+            ),
+            {"runtime_oid": runtime["oid"]},
+        ).scalars()
+    )
+    if direct_runtime_select_tables != STRATEGY_PLATFORM_V13_OWNER_READ_TABLES:
+        problems.append(
+            "V1.3 direct read ACL set mismatch: missing={} unexpected={}".format(
+                ",".join(
+                    sorted(
+                        STRATEGY_PLATFORM_V13_OWNER_READ_TABLES
+                        - direct_runtime_select_tables
+                    )
+                ),
+                ",".join(
+                    sorted(
+                        direct_runtime_select_tables
+                        - STRATEGY_PLATFORM_V13_OWNER_READ_TABLES
+                    )
+                ),
+            )
+        )
     for table_name in sorted(STRATEGY_PLATFORM_V13_OWNER_READ_TABLES):
         row = relation_rows.get(table_name)
         if row is None:

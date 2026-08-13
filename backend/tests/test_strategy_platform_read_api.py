@@ -26,6 +26,9 @@ from app.models import (
     ValidationWindowScore,
 )
 from app.services.configuration_resolver import ConfigurationResolverService
+from app.services.strategy_platform_configuration_validation import (
+    infer_closed_json_schema,
+)
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
@@ -64,13 +67,24 @@ def client(db: Session):
 
 
 def _configuration_type(type_key: str, name: str) -> ConfigurationType:
+    payloads = {
+        "research-profile": {"profile": "production", "candidate_count": 60},
+        "research-targets": {
+            "targets": [{"pair": "BTC/USDT:USDT", "timeframe": "5m"}]
+        },
+        "validation-windows": {"window_count": 2},
+    }
     return ConfigurationType(
         type_key=type_key,
         name_zh=name,
         description_zh=f"{name} contract",
         schema_version="v1",
         handler_key="generic-json-v1",
-        editor_capability={"read_only": True},
+        editor_capability={
+            "read_only": True,
+            "json_schema": infer_closed_json_schema(payloads[type_key]),
+            "schema_is_closed": True,
+        },
         enabled=True,
     )
 
@@ -470,7 +484,7 @@ def test_materialize_blocks_when_scope_activation_changes(db: Session) -> None:
         "research-profile",
         2,
         "9",
-        {"profile": "replacement"},
+        {"profile": "replacement", "candidate_count": 30},
     )
     db.add(replacement)
     db.flush()

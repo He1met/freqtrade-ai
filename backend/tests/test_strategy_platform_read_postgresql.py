@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 
 import pytest
@@ -34,15 +35,32 @@ def postgres_engine():
 
 
 def _seed_resolvable_graph(engine) -> None:
+    editor_capability = json.dumps(
+        {
+            "json_schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {},
+                "required": [],
+            },
+            "schema_is_closed": True,
+        },
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
     with engine.begin() as connection:
         connection.execute(
             text(
                 "INSERT INTO configuration_types("
                 "type_key,name_zh,description_zh,schema_version,handler_key,"
                 "editor_capability,enabled) VALUES "
-                "('research-profile','研究装配','test','v1','generic-json-v1','{}',true),"
-                "('research-targets','研究目标','test','v1','generic-json-v1','{}',true)"
-            )
+                "('research-profile','研究装配','test','v1','generic-json-v1',"
+                "CAST(:editor_capability AS json),true),"
+                "('research-targets','研究目标','test','v1','generic-json-v1',"
+                "CAST(:editor_capability AS json),true)"
+            ),
+            {"editor_capability": editor_capability},
         )
         child_id = connection.execute(
             text(

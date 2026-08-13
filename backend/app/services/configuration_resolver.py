@@ -486,18 +486,12 @@ class ConfigurationResolverService:
                     "lifecycle_status": version.lifecycle_status,
                 },
             )
-        if not allow_historical and version.schema_version != type_row.schema_version:
-            raise StrategyPlatformReadError(
-                "CONFIGURATION_SCHEMA_INCOMPATIBLE",
-                "Configuration version schema is incompatible with its "
-                "registered type.",
-                context={
-                    "version_id": version.id,
-                    "version_schema": version.schema_version,
-                    "registered_schema": type_row.schema_version,
-                },
-            )
-        validate_configuration_payload(version.payload_json, version_id=version.id)
+        validate_configuration_payload_for_type(
+            type_row,
+            version.payload_json,
+            schema_version=version.schema_version,
+            version_id=version.id,
+        )
 
     @staticmethod
     def _type_read(row) -> ConfigurationTypeRead:
@@ -559,6 +553,124 @@ def validate_configuration_payload(payload: Any, *, version_id: int) -> None:
                 walk(child)
 
     walk(payload)
+
+
+def validate_configuration_type_schema_registry(type_row: Any) -> None:
+    """Validate the auditable schema registry declared by one config type.
+
+    Existing single-schema types remain an exact one-version registry.  Once a
+    type declares ``schema_versions``, its legacy ``json_schema`` field remains
+    the current-schema projection and must be structurally equivalent to the
+    registry entry named by ``ConfigurationType.schema_version``.
+    """
+
+    schemas = _configuration_schema_versions(type_row)
+    # Import locally because the lifecycle service depends on this resolver.
+    # Calls happen only after both modules have completed initialization.
+    from app.services.configuration_management import _validate_schema_definition
+
+    for schema_version, schema in sorted(schemas.items()):
+        _validate_schema_definition(
+            schema,
+            path=f"$schema_versions.{schema_version}",
+        )
+
+
+def validate_configuration_payload_for_type(
+    type_row: Any,
+    payload: Any,
+    *,
+    schema_version: str,
+    version_id: int,
+) -> None:
+    """Validate a version against its own exact, registered schema."""
+
+    schemas = _configuration_schema_versions(type_row)
+    schema = schemas.get(schema_version)
+    if schema is None:
+        raise StrategyPlatformReadError(
+            "CONFIGURATION_SCHEMA_UNKNOWN",
+            "Configuration version references an unregistered schema version.",
+            context={
+                "config_type": type_row.type_key,
+                "version_id": version_id,
+                "version_schema": schema_version,
+                "registered_schema_versions": sorted(schemas),
+            },
+        )
+    validate_configuration_payload(payload, version_id=version_id)
+    # See the module-cycle note in validate_configuration_type_schema_registry.
+    from app.services.configuration_management import (
+        _validate_json_value,
+        _validate_schema_definition,
+    )
+
+    _validate_schema_definition(
+        schema,
+        path=f"$schema_versions.{schema_version}",
+    )
+    _validate_json_value(payload, schema, path="$", version_id=version_id)
+def _configuration_schema_versions(type_row: Any) -> dict[str, Mapping[str, Any]]:
+    capability = type_row.editor_capability
+    if not isinstance(capability, Mapping):
+        raise StrategyPlatformReadError(
+            "CONFIGURATION_SCHEMA_UNAVAILABLE",
+            "Configuration type has no auditable schema capability.",
+            context={"config_type": type_row.type_key},
+        )
+    current_schema = capability.get("json_schema")
+    if not isinstance(current_schema, Mapping):
+        raise StrategyPlatformReadError(
+            "CONFIGURATION_SCHEMA_UNAVAILABLE",
+            "Configuration type has no strict current JSON schema.",
+            context={"config_type": type_row.type_key},
+        )
+    declared = capability.get("schema_versions")
+    if declared is None:
+        # Backward-compatible representation for types not yet evolved: the
+        # sole known schema is still exact and unknown historical versions fail.
+        return {type_row.schema_version: current_schema}
+    if not isinstance(declared, Mapping) or not declared:
+        raise StrategyPlatformReadError(
+            "CONFIGURATION_SCHEMA_REGISTRY_INVALID",
+            "Configuration schema_versions must be a non-empty object.",
+            context={"config_type": type_row.type_key},
+        )
+    schemas: dict[str, Mapping[str, Any]] = {}
+    for schema_version, schema in declared.items():
+        if (
+            not isinstance(schema_version, str)
+            or not schema_version.strip()
+            or schema_version != schema_version.strip()
+            or not isinstance(schema, Mapping)
+        ):
+            raise StrategyPlatformReadError(
+                "CONFIGURATION_SCHEMA_REGISTRY_INVALID",
+                "Configuration schema_versions contains an invalid entry.",
+                context={"config_type": type_row.type_key},
+            )
+        schemas[schema_version] = schema
+    registered_current = schemas.get(type_row.schema_version)
+    if registered_current is None:
+        raise StrategyPlatformReadError(
+            "CONFIGURATION_SCHEMA_CURRENT_VERSION_MISSING",
+            "Current configuration schema is absent from schema_versions.",
+            context={
+                "config_type": type_row.type_key,
+                "current_schema_version": type_row.schema_version,
+                "registered_schema_versions": sorted(schemas),
+            },
+        )
+    if dict(current_schema) != dict(registered_current):
+        raise StrategyPlatformReadError(
+            "CONFIGURATION_SCHEMA_DRIFT",
+            "Current json_schema does not match its schema_versions entry.",
+            context={
+                "config_type": type_row.type_key,
+                "current_schema_version": type_row.schema_version,
+            },
+        )
+    return schemas
 
 
 def _raise_safety(version_id: int, field: str) -> None:
