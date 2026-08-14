@@ -159,7 +159,7 @@ jobs:
           DATABASE_URL: ${{ env.POSTGRES_PHASE8_URL }}
         run: npm run test:e2e
 
-      - name: Verify isolated Local Strategy Lab acceptance profiles
+      - name: Verify isolated Local Strategy Lab acceptance profiles twice
         working-directory: frontend
         env:
           E2E_TMP_PARENT: ${{ runner.temp }}
