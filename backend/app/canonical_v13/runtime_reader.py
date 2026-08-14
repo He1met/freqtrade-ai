@@ -8,6 +8,7 @@ they never discover mutable activation state themselves.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import Mapping
 from uuid import UUID
@@ -341,11 +342,31 @@ def _load_windows(
             )
         member = by_key.get(raw["window_key"])
         coverage = raw.get("coverage")
+        try:
+            start_at = datetime.fromisoformat(str(raw.get("start_at")))
+            end_at = datetime.fromisoformat(str(raw.get("end_at")))
+        except ValueError as exc:
+            raise CanonicalFrozenReaderBlocked(
+                "RESEARCH_WINDOW_MEMBER_INVALID",
+                "WINDOW timestamps must be ISO-8601 text",
+            ) from exc
         if (
             member is None
             or not isinstance(coverage, dict)
-            or canonical_digest(raw) != member["member_digest"]
+            or start_at.tzinfo is None
+            or end_at.tzinfo is None
         ):
+            raise CanonicalFrozenReaderBlocked(
+                "RESEARCH_WINDOW_MEMBER_DIGEST_DRIFT", raw["window_key"]
+            )
+        normalized = {
+            "window_key": raw["window_key"],
+            "required": raw["required"],
+            "start_at": start_at.astimezone(timezone.utc).isoformat(),
+            "end_at": end_at.astimezone(timezone.utc).isoformat(),
+            "coverage": dict(coverage),
+        }
+        if canonical_digest(normalized) != member["member_digest"]:
             raise CanonicalFrozenReaderBlocked(
                 "RESEARCH_WINDOW_MEMBER_DIGEST_DRIFT", raw["window_key"]
             )
@@ -354,8 +375,8 @@ def _load_windows(
                 snapshot_member_id=member["id"],
                 window_key=raw["window_key"],
                 required=raw["required"],
-                start_at=raw["start_at"],
-                end_at=raw["end_at"],
+                start_at=normalized["start_at"],
+                end_at=normalized["end_at"],
                 minimum_closed_candles=coverage["minimum_closed_candles"],
                 member_digest=member["member_digest"],
             )
