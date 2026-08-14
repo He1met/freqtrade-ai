@@ -95,7 +95,7 @@ def test_frontend_and_backend_share_one_canonical_prefix_and_split_dev_proxy() -
     assert f'CANONICAL_V13_API_ROOT = "{API_PREFIX}"' in client_source
     assert f'"{API_PREFIX}"' in vite_source
     assert vite_source.index(f'"{API_PREFIX}"') < vite_source.index('"/api"')
-    assert "127.0.0.1:8001" in vite_source
+    assert "127.0.0.1:8011" in vite_source
     assert "127.0.0.1:8000" in vite_source
 
 
