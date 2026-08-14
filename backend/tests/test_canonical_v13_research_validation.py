@@ -180,21 +180,36 @@ def _freeze_and_activate_bundle(connection):
                 "required": True,
                 "start_at": NOW.isoformat(),
                 "end_at": (NOW + timedelta(hours=1)).isoformat(),
-                "coverage": {"minimum_closed_candles": 12},
+                "coverage": {
+                    "minimum_closed_candles": 12,
+                    "warmup_closed_candles": 2,
+                    "integrity_margin_closed_candles": 1,
+                    "freshness_max_age_seconds": 3600,
+                },
             },
             {
                 "window_key": "required-b",
                 "required": True,
                 "start_at": (NOW + timedelta(hours=1)).isoformat(),
                 "end_at": (NOW + timedelta(hours=2)).isoformat(),
-                "coverage": {"minimum_closed_candles": 12},
+                "coverage": {
+                    "minimum_closed_candles": 12,
+                    "warmup_closed_candles": 2,
+                    "integrity_margin_closed_candles": 1,
+                    "freshness_max_age_seconds": 3600,
+                },
             },
             {
                 "window_key": "optional-c",
                 "required": False,
                 "start_at": (NOW + timedelta(hours=2)).isoformat(),
                 "end_at": (NOW + timedelta(hours=3)).isoformat(),
-                "coverage": {"minimum_closed_candles": 12},
+                "coverage": {
+                    "minimum_closed_candles": 12,
+                    "warmup_closed_candles": 2,
+                    "integrity_margin_closed_candles": 1,
+                    "freshness_max_age_seconds": 3600,
+                },
             },
         ]
     }

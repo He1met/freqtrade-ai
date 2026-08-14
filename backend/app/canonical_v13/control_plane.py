@@ -540,9 +540,19 @@ def _freeze_kind_members(
             _exact_keys(
                 coverage,
                 required={"minimum_closed_candles"},
+                optional={
+                    "warmup_closed_candles",
+                    "integrity_margin_closed_candles",
+                    "freshness_max_age_seconds",
+                },
                 field="window.coverage",
             )
             minimum_closed_candles = coverage["minimum_closed_candles"]
+            warmup_closed_candles = coverage.get("warmup_closed_candles")
+            integrity_margin_closed_candles = coverage.get(
+                "integrity_margin_closed_candles"
+            )
+            freshness_max_age_seconds = coverage.get("freshness_max_age_seconds")
             start_at = _timestamp(window.get("start_at"), field="start_at")
             end_at = _timestamp(window.get("end_at"), field="end_at")
             if (
@@ -551,6 +561,30 @@ def _freeze_kind_members(
                 or isinstance(minimum_closed_candles, bool)
                 or not isinstance(minimum_closed_candles, int)
                 or minimum_closed_candles <= 0
+                or (
+                    warmup_closed_candles is not None
+                    and (
+                        isinstance(warmup_closed_candles, bool)
+                        or not isinstance(warmup_closed_candles, int)
+                        or warmup_closed_candles < 0
+                    )
+                )
+                or (
+                    integrity_margin_closed_candles is not None
+                    and (
+                        isinstance(integrity_margin_closed_candles, bool)
+                        or not isinstance(integrity_margin_closed_candles, int)
+                        or integrity_margin_closed_candles < 0
+                    )
+                )
+                or (
+                    freshness_max_age_seconds is not None
+                    and (
+                        isinstance(freshness_max_age_seconds, bool)
+                        or not isinstance(freshness_max_age_seconds, int)
+                        or freshness_max_age_seconds <= 0
+                    )
+                )
                 or end_at <= start_at
             ):
                 raise CanonicalControlPlaneBlocked(
@@ -562,7 +596,27 @@ def _freeze_kind_members(
                 "required": window["required"],
                 "start_at": start_at.isoformat(),
                 "end_at": end_at.isoformat(),
-                "coverage": {"minimum_closed_candles": minimum_closed_candles},
+                "coverage": {
+                    "minimum_closed_candles": minimum_closed_candles,
+                    **(
+                        {"warmup_closed_candles": warmup_closed_candles}
+                        if warmup_closed_candles is not None
+                        else {}
+                    ),
+                    **(
+                        {
+                            "integrity_margin_closed_candles":
+                            integrity_margin_closed_candles
+                        }
+                        if integrity_margin_closed_candles is not None
+                        else {}
+                    ),
+                    **(
+                        {"freshness_max_age_seconds": freshness_max_age_seconds}
+                        if freshness_max_age_seconds is not None
+                        else {}
+                    ),
+                },
             }
             _member(
                 connection,

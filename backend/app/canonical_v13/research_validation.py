@@ -841,10 +841,27 @@ def _snapshot_windows(
                 "BLOCKED_WINDOW_SNAPSHOT_DRIFT", "window identity/required flag drifted"
             )
         minimum_closed_candles = coverage.get("minimum_closed_candles")
+        allowed_coverage = {
+            "minimum_closed_candles",
+            "warmup_closed_candles",
+            "integrity_margin_closed_candles",
+            "freshness_max_age_seconds",
+        }
+        optional_values = {
+            key: coverage[key] for key in allowed_coverage - {"minimum_closed_candles"}
+            if key in coverage
+        }
         if (
-            isinstance(minimum_closed_candles, bool)
+            bool(set(coverage) - allowed_coverage)
+            or isinstance(minimum_closed_candles, bool)
             or not isinstance(minimum_closed_candles, int)
             or minimum_closed_candles <= 0
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < (1 if key == "freshness_max_age_seconds" else 0)
+                for key, value in optional_values.items()
+            )
         ):
             raise CanonicalResearchValidationBlocked(
                 "BLOCKED_WINDOW_SNAPSHOT_DRIFT", "window coverage contract drifted"
@@ -856,7 +873,10 @@ def _snapshot_windows(
             "required": required,
             "start_at": start_at.isoformat(),
             "end_at": end_at.isoformat(),
-            "coverage": {"minimum_closed_candles": minimum_closed_candles},
+            "coverage": {
+                "minimum_closed_candles": minimum_closed_candles,
+                **optional_values,
+            },
         }
         member = members.get(f"window:{window_key}")
         expected_digest = canonical_research_digest(normalized)
