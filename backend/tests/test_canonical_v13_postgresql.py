@@ -7,6 +7,9 @@ from sqlalchemy import create_engine
 from sqlalchemy.exc import DBAPIError
 
 from app.canonical_v13.bootstrap import verify_postgresql_bootstrap
+from app.canonical_v13.configuration_governance import (
+    create_audited_configuration_draft,
+)
 from app.canonical_v13.genesis import (
     assert_postgresql_acl_sql,
     install_canonical_genesis,
@@ -78,6 +81,38 @@ def test_empty_postgresql_genesis_mapping_acl_and_repeat_noop() -> None:
                 )
             assert denied.value.orig.sqlstate == "42501"
             savepoint.rollback()
+            transaction.rollback()
+
+        with engine.connect() as connection:
+            transaction = connection.begin()
+            connection.exec_driver_sql(
+                f"SET LOCAL ROLE {mapping.physical('canonical_control_writer')}"
+            )
+            result = create_audited_configuration_draft(
+                connection,
+                actor_identity="canonical-v13-ci-control",
+                idempotency_key="configuration-draft-acl-v1",
+                profile_key="configuration-draft-acl-v1",
+                configuration_kind="DIVERSITY",
+                scope_key="ci",
+                workflow_key="research",
+                schema_json={"type": "object", "additionalProperties": False},
+                payload_json={
+                    "rules": [
+                        {
+                            "rule_key": "exact",
+                            "algorithm": "exact-v1",
+                            "metric": "duplicate_count",
+                            "operator": "==",
+                            "threshold": 0,
+                        }
+                    ]
+                },
+                adapter_identity="canonical-v13-ci-adapter",
+                adapter_digest="a" * 64,
+                dependencies=(),
+            )
+            assert result["idempotent_replay"] is False
             transaction.rollback()
     finally:
         engine.dispose()
