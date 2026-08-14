@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import builtins
 import inspect as python_inspect
 
 import pytest
@@ -15,6 +16,9 @@ from app.canonical_v13.intake import (
     inspect_intake_artifact,
     select_latest_source_artifact,
 )
+
+
+ALPHA_SOURCE = b"from freqtrade.strategy import IStrategy\nclass Alpha(IStrategy):\n    pass\n"
 from app.canonical_v13.manifest import CANONICAL_BUSINESS_SCHEMA
 from app.canonical_v13.models import (
     AUDIT_EVENTS_TABLE,
@@ -30,9 +34,9 @@ from app.canonical_v13.models import (
 def _snapshot(
     *,
     entry: str = "legacy/alpha.py",
-    strategy: str = "legacy-alpha",
+    strategy: str = "Alpha",
     current: str = "version-2",
-    content: bytes = b"class Alpha:\r\n    pass\r\n",
+    content: bytes = ALPHA_SOURCE,
 ) -> ExternalSourceEntrySnapshot:
     return ExternalSourceEntrySnapshot(
         archive_snapshot_digest="a" * 64,
@@ -40,7 +44,7 @@ def _snapshot(
         source_strategy_key=strategy,
         current_version_id=current,
         versions=(
-            ExternalVersionSnapshot(strategy, "version-1", 1, b"class Old:\n    pass\n"),
+            ExternalVersionSnapshot(strategy, "version-1", 1, b"old source is not selected"),
             ExternalVersionSnapshot(strategy, "version-2", 2, content),
         ),
     )
@@ -65,7 +69,7 @@ def test_latest_selector_proves_current_owner_and_highest_version() -> None:
     selected = select_latest_source_artifact(_snapshot())
     assert selected.version_id == "version-2"
     assert selected.version_number == 2
-    assert selected.artifact_bytes.startswith(b"class Alpha")
+    assert b"class Alpha(IStrategy)" in selected.artifact_bytes
     assert len(selected.source_entry_digest) == 64
 
 
@@ -87,7 +91,10 @@ def test_latest_selector_proves_current_owner_and_highest_version() -> None:
         (
             replace(
                 _snapshot(),
-                versions=(_snapshot().versions[0], replace(_snapshot().versions[1], version_number=1)),
+                versions=(
+                    _snapshot().versions[0],
+                    replace(_snapshot().versions[1], version_number=1),
+                ),
             ),
             "BLOCKED_AMBIGUOUS_LATEST_SOURCE",
         ),
@@ -119,17 +126,24 @@ def test_intake_inspection_rejects_unsafe_bytes(content: bytes, code: str) -> No
     assert raised.value.code == code
 
 
-def test_inspection_only_normalizes_encoding_and_never_validates_or_executes() -> None:
-    result = inspect_intake_artifact(b"\xef\xbb\xbfclass A:\r\n    pass\r\n")
-    assert result.normalized_content == "class A:\n    pass\n"
-    assert result.checks["static_validation"] == "NOT_RUN"
+def test_inspection_parses_ast_without_compiling_importing_or_executing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("strategy source was executed")
+
+    monkeypatch.setattr(builtins, "exec", forbidden)
+    monkeypatch.setattr(builtins, "eval", forbidden)
+    result = inspect_intake_artifact(ALPHA_SOURCE, expected_strategy_class="Alpha")
+    assert result.strategy_class == "Alpha"
+    assert result.checks["ast_parse"] == "PASSED"
+    assert result.checks["static_validation"] == "PASSED"
     assert result.checks["lookahead_validation"] == "NOT_RUN"
     assert result.checks["backtest"] == "NOT_RUN"
     assert result.checks["execution"] == "NOT_AUTHORIZED"
 
     source = python_inspect.getsource(__import__("app.canonical_v13.intake", fromlist=["*"]))
     for forbidden in (
-        "import ast",
         "import subprocess",
         "import importlib",
         "builtins.compile(",
@@ -137,6 +151,47 @@ def test_inspection_only_normalizes_encoding_and_never_validates_or_executes() -
         "builtins.eval(",
     ):
         assert forbidden not in source
+
+
+@pytest.mark.parametrize(
+    ("content", "expected", "code"),
+    [
+        (b"class Alpha(:\n", "Alpha", "REJECTED_INVALID_PYTHON_AST"),
+        (b"class Alpha:\n    pass\n", "Alpha", "REJECTED_STRATEGY_BASE"),
+        (
+            b"from freqtrade.strategy import IStrategy\nclass Other(IStrategy):\n    pass\n",
+            "Alpha",
+            "REJECTED_STRATEGY_CLASS_MISMATCH",
+        ),
+        (
+            b"import os\n"
+            b"from freqtrade.strategy import IStrategy\n"
+            b"class Alpha(IStrategy):\n    pass\n",
+            "Alpha",
+            "REJECTED_IMPORT_NOT_ALLOWED",
+        ),
+        (
+            b"from freqtrade.strategy import IStrategy\n"
+            b"open('x')\n"
+            b"class Alpha(IStrategy):\n    pass\n",
+            "Alpha",
+            "REJECTED_MODULE_LEVEL_EXECUTION",
+        ),
+        (
+            b"from freqtrade.strategy import IStrategy\n"
+            b"class Alpha(IStrategy):\n"
+            b"    def x(self):\n        return open('x')\n",
+            "Alpha",
+            "REJECTED_DANGEROUS_CALL",
+        ),
+    ],
+)
+def test_inspection_rejects_unsafe_ast(
+    content: bytes, expected: str, code: str
+) -> None:
+    with pytest.raises(CanonicalIntakeBlocked) as raised:
+        inspect_intake_artifact(content, expected_strategy_class=expected)
+    assert raised.value.code == code
 
 
 def test_controlled_submission_is_atomic_idempotent_and_stops_unvalidated() -> None:
@@ -201,7 +256,7 @@ def test_same_artifact_is_shared_but_strategy_identity_is_never_merged() -> None
                 caller_identity="phase2-test-caller",
                 idempotency_key="beta",
                 display_name="Beta",
-                snapshot=_snapshot(entry="legacy/beta.py", strategy="legacy-beta"),
+                snapshot=_snapshot(entry="legacy/beta.py", strategy="Alpha"),
             )
         assert alpha.artifact_id == beta.artifact_id
         assert alpha.strategy_id != beta.strategy_id
@@ -249,7 +304,10 @@ def test_reused_key_or_changed_source_entry_is_blocked_without_row_growth() -> N
                     caller_identity="another-caller",
                     idempotency_key="another-key",
                     display_name="Changed name",
-                    snapshot=_snapshot(content=b"class Changed:\n    pass\n"),
+                    snapshot=_snapshot(
+                        content=b"from freqtrade.strategy import IStrategy\n"
+                        b"class Alpha(IStrategy):\n    changed = True\n"
+                    ),
                 )
         assert drifted.value.code == "BLOCKED_SOURCE_ENTRY_DRIFT"
         counts_after = {

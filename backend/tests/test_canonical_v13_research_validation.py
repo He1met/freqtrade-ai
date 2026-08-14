@@ -63,7 +63,10 @@ from app.canonical_v13.research_validation import (
 
 
 NOW = datetime(2026, 8, 14, tzinfo=timezone.utc)
-SOURCE = "class CanonicalFixtureStrategy:\n    pass\n"
+SOURCE = (
+    "from freqtrade.strategy import IStrategy\n"
+    "class CanonicalFixtureStrategy(IStrategy):\n    pass\n"
+)
 SCHEMA = {"type": "object", "additionalProperties": False}
 ADAPTER_DIGEST = "a" * 64
 ADAPTER_MANIFEST_DIGEST = "b" * 64
