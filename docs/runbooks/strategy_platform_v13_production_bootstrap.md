@@ -165,6 +165,34 @@ research、optimization 六个路由的 deep-link/refresh/URL state，以及未�
 
 ## 6. P0 configuration rollout 边界
 
+PostgreSQL referential-integrity triggers execute parent-row locking checks under
+the canonical table owner. The exact ACL reset must therefore restore the seven
+standard table privileges for the NOLOGIN `canonical_schema_owner` on each of the
+46 canonical tables. This does not create a second application writer: no service
+principal may inherit the schema-owner role, and application DML remains governed
+by the per-table writer allowlist.
+
+For the historical ACL state containing only the schema-owner's exact
+`SELECT, INSERT` privileges on `schema_metadata`, review the offline plan and run
+the one-shot audited repair during maintenance:
+
+```bash
+cd backend
+python scripts/canonical_v13_bootstrap.py owner-table-acl-plan
+FREQTRADE_AI_CANONICAL_V13_PROVISIONER_DATABASE_URL=\
+'postgresql+psycopg:///freqtrade_ai_v13' \
+FREQTRADE_AI_CANONICAL_V13_UPGRADE_ACTOR=\
+'<accepted-release-manifest-identity>' \
+  python scripts/canonical_v13_bootstrap.py owner-table-acl-repair
+python scripts/canonical_v13_bootstrap.py verify-research-provisioned
+```
+
+The repair accepts only that exact two-privilege legacy state, requires all nine
+research tables to remain empty, uses 46 explicit table statements (never `ON ALL
+TABLES`), writes one immutable audit receipt, and fails closed on partial ACLs.
+Re-run the exact repair command only to prove `NO_OP_ALREADY_CURRENT` before
+leaving maintenance.
+
 七类 P0 必须逐一通过 `/api/canonical-v13/configurations/{kind}/drafts` 和
 `/{kind}/{version_id}/validate`。每个 command 都必须携带唯一 `actor_identity` 与
 `idempotency_key`；成功事务同时写入 immutable version/snapshot、`idempotency_receipts` 和

@@ -465,6 +465,7 @@ def postgresql_acl_statements(
             f"REVOKE ALL PRIVILEGES ON TABLE {qualified} FROM {role}"
             for role in roles
         )
+    statements.extend(postgresql_owner_table_grant_statements(resolved))
 
     for writer, table_names in WRITER_TABLE_ALLOWLIST.items():
         physical_writer = resolved.physical(writer)
@@ -491,6 +492,21 @@ def postgresql_acl_statements(
             for table_name in table_names
         )
     return tuple(statements)
+
+
+def postgresql_owner_table_grant_statements(
+    role_mapping: CanonicalRoleMapping | None = None,
+) -> tuple[str, ...]:
+    """Restore standard table-owner rights after the exact ACL reset."""
+
+    resolved = role_mapping or CanonicalRoleMapping.identity()
+    owner = resolved.physical("canonical_schema_owner")
+    return tuple(
+        "GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER "
+        "ON TABLE "
+        f"{CANONICAL_BUSINESS_SCHEMA}.{table_name} TO {owner}"
+        for table_name in CANONICAL_TABLE_NAMES
+    )
 
 
 def render_postgresql_acl_sql(
@@ -552,6 +568,7 @@ __all__ = [
     "install_canonical_genesis",
     "postgresql_acl_problems",
     "postgresql_acl_statements",
+    "postgresql_owner_table_grant_statements",
     "render_postgresql_acl_sql",
     "render_postgresql_genesis_ddl",
     "render_postgresql_owner_sql",

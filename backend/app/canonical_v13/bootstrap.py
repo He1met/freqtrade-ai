@@ -12,6 +12,7 @@ from sqlalchemy import Connection, text
 from app.canonical_v13.genesis import verify_canonical_genesis
 from app.canonical_v13.manifest import (
     CANONICAL_BUSINESS_SCHEMA,
+    CANONICAL_TABLE_NAMES,
     READER_IDENTITIES,
     READER_TABLE_ALLOWLIST,
     TABLE_MANIFEST_BY_NAME,
@@ -92,6 +93,7 @@ def verify_postgresql_bootstrap(
     role_mapping: CanonicalRoleMapping,
     require_zero_business_rows: bool = True,
     service_principals: Mapping[str, str] | None = None,
+    require_owner_table_grants: bool = True,
 ) -> BootstrapVerification:
     """Verify genesis, physical capabilities, owners, and exact grants."""
 
@@ -251,6 +253,13 @@ def verify_postgresql_bootstrap(
         problems.append(
             f"schema owner expected={owner!r} observed={schema_owner!r}"
         )
+    if require_owner_table_grants:
+        problems.extend(
+            postgresql_owner_table_grant_problems(
+                connection,
+                role_mapping=role_mapping,
+            )
+        )
 
     actual_grants = {
         tuple(str(value) for value in row)
@@ -288,13 +297,77 @@ def verify_postgresql_bootstrap(
     )
 
 
+def postgresql_owner_table_grant_problems(
+    connection: Connection,
+    *,
+    role_mapping: CanonicalRoleMapping,
+) -> tuple[str, ...]:
+    expected = expected_postgresql_owner_table_grants(role_mapping)
+    actual = postgresql_owner_table_grants(
+        connection,
+        role_mapping=role_mapping,
+    )
+    missing = expected - actual
+    extra = actual - expected
+    problems: list[str] = []
+    if missing:
+        problems.append(f"missing owner table grants count={len(missing)}")
+    if extra:
+        problems.append(f"extra owner table grants count={len(extra)}")
+    return tuple(problems)
+
+
+def expected_postgresql_owner_table_grants(
+    role_mapping: CanonicalRoleMapping,
+) -> frozenset[tuple[str, str, str]]:
+    owner = role_mapping.physical("canonical_schema_owner")
+    privilege_types = (
+        "DELETE",
+        "INSERT",
+        "REFERENCES",
+        "SELECT",
+        "TRIGGER",
+        "TRUNCATE",
+        "UPDATE",
+    )
+    return frozenset(
+        (owner, table_name, privilege)
+        for table_name in CANONICAL_TABLE_NAMES
+        for privilege in privilege_types
+    )
+
+
+def postgresql_owner_table_grants(
+    connection: Connection,
+    *,
+    role_mapping: CanonicalRoleMapping,
+) -> frozenset[tuple[str, str, str]]:
+    owner = role_mapping.physical("canonical_schema_owner")
+    return frozenset(
+        tuple(str(value) for value in row)
+        for row in connection.execute(
+            text(
+                """
+                SELECT grantee, table_name, privilege_type
+                FROM information_schema.role_table_grants
+                WHERE table_schema=:schema AND grantee=:owner
+                """
+            ),
+            {"schema": CANONICAL_BUSINESS_SCHEMA, "owner": owner},
+        )
+    )
+
+
 __all__ = [
     "LOCAL_DATABASE_NAME",
     "LOCAL_ROLE_PREFIX",
     "LOCAL_RESEARCH_SERVICE_PRINCIPALS",
     "LOCAL_SERVICE_PRINCIPALS",
     "BootstrapVerification",
+    "expected_postgresql_owner_table_grants",
     "local_role_mapping",
     "local_legacy_research_writer_role",
+    "postgresql_owner_table_grant_problems",
+    "postgresql_owner_table_grants",
     "verify_postgresql_bootstrap",
 ]
