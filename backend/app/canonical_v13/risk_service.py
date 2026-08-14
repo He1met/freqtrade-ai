@@ -1,0 +1,83 @@
+"""Risk-writer-only TEST_SIMULATED intent and decision service."""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Mapping
+from uuid import UUID, uuid4
+
+from sqlalchemy import Connection, select
+
+from app.canonical_v13.execution_common import (
+    CanonicalExecutionChainBlocked,
+    canonical_execution_digest,
+    require_canonical_execution,
+    require_digest,
+)
+from app.canonical_v13.models import RISK_DECISIONS_TABLE, SIGNALS_TABLE, TRADE_INTENTS_TABLE
+
+
+def create_simulated_intent(
+    connection: Connection, *, signal_id: UUID, intent_json: Mapping[str, object]
+) -> UUID:
+    effective = require_canonical_execution(connection)
+    if effective.execute(
+        select(SIGNALS_TABLE.c.id).where(SIGNALS_TABLE.c.id == signal_id)
+    ).scalar_one_or_none() is None:
+        raise CanonicalExecutionChainBlocked("BLOCKED_SIGNAL_UNSET", str(signal_id))
+    payload = dict(intent_json)
+    if payload.get("evidence_class") != "TEST_SIMULATED":
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_REAL_INTENT_OUT_OF_SCOPE", "only isolated intents are allowed"
+        )
+    intent_id = uuid4()
+    effective.execute(
+        TRADE_INTENTS_TABLE.insert().values(
+            id=intent_id,
+            signal_id=signal_id,
+            status="INTENT_ACCEPTED",
+            intent_json=payload,
+            intent_digest=canonical_execution_digest(payload),
+            created_at=datetime.now(timezone.utc),
+        )
+    )
+    return intent_id
+
+
+def decide_simulated_risk(
+    connection: Connection,
+    *,
+    trade_intent_id: UUID,
+    accepted: bool,
+    policy_snapshot_digest: str,
+) -> UUID:
+    effective = require_canonical_execution(connection)
+    require_digest(policy_snapshot_digest, field="policy_snapshot_digest")
+    if effective.execute(
+        select(TRADE_INTENTS_TABLE.c.id).where(
+            TRADE_INTENTS_TABLE.c.id == trade_intent_id,
+            TRADE_INTENTS_TABLE.c.status == "INTENT_ACCEPTED",
+        )
+    ).scalar_one_or_none() is None:
+        raise CanonicalExecutionChainBlocked("BLOCKED_INTENT_UNSET", str(trade_intent_id))
+    decision_id = uuid4()
+    payload = {
+        "contract": "canonical-v13-simulated-risk-v1",
+        "evidence_class": "TEST_SIMULATED",
+        "policy_snapshot_digest": policy_snapshot_digest,
+        "accepted": accepted,
+    }
+    effective.execute(
+        RISK_DECISIONS_TABLE.insert().values(
+            id=decision_id,
+            trade_intent_id=trade_intent_id,
+            status="RISK_ACCEPTED" if accepted else "REJECTED",
+            decision_json=payload,
+            decision_digest=canonical_execution_digest(payload),
+            created_at=datetime.now(timezone.utc),
+        )
+    )
+    return decision_id
+
+
+__all__ = ["create_simulated_intent", "decide_simulated_risk"]
