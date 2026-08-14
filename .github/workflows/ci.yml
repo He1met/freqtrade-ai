@@ -247,6 +247,20 @@ jobs:
                       "NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
                       "NOINHERIT NOREPLICATION NOBYPASSRLS"
                   )
+              service_memberships = {
+                  "api_login": "api_reader",
+                  "control_login": "control_writer",
+                  "validation_login": "validation_writer",
+                  "scoring_login": "scoring_writer",
+                  "qualification_login": "qualification_writer",
+                  "optimization_login": "optimization_writer",
+              }
+              for principal_suffix in service_memberships:
+                  principal = f"freqtrade_ai_v13_ci_{principal_suffix}"
+                  connection.execute(
+                      f"CREATE ROLE {principal} LOGIN NOSUPERUSER NOCREATEDB "
+                      "NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS"
+                  )
               connection.execute(
                   "CREATE DATABASE freqtrade_ai_v13_ci_test "
                   "OWNER freqtrade_ai_v13_ci_schema_owner TEMPLATE template0"

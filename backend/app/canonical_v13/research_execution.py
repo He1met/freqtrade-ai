@@ -19,10 +19,12 @@ from app.canonical_v13.research_authorization import (
 )
 from app.canonical_v13.research_validation import (
     EphemeralAttemptReceipt,
+    EphemeralLaunchSpec,
     RunningValidationAttempt,
     TerminalAttemptResult,
     record_terminal_attempt,
     simulate_ephemeral_attempt,
+    start_validation_attempt,
     validate_ephemeral_launch_spec,
 )
 
@@ -117,11 +119,6 @@ def execute_consumed_research_attempt(
             "BLOCKED_EXPLICIT_AUTHORITY_REQUIRED",
             "each attempt requires one immutable authorization receipt",
         )
-    if executor.environment_class != "ISOLATED_TEST":
-        raise CanonicalResearchExecutionBlocked(
-            "BLOCKED_EXPLICIT_AUTHORITY_REQUIRED",
-            "real research execution is outside this isolated acceptance",
-        )
     try:
         verify_research_authorization_consumption(authorization_consumption)
     except CanonicalResearchAuthorizationBlocked as exc:
@@ -157,10 +154,45 @@ def execute_consumed_research_attempt(
     )
 
 
+def start_consumed_research_attempt(
+    connection: Connection,
+    *,
+    launch_spec: EphemeralLaunchSpec,
+    authorization_consumption: ResearchAuthorizationConsumption,
+) -> RunningValidationAttempt:
+    """Start the exact attempt reserved and consumed by the control writer."""
+
+    validate_ephemeral_launch_spec(launch_spec)
+    try:
+        verify_research_authorization_consumption(authorization_consumption)
+    except CanonicalResearchAuthorizationBlocked as exc:
+        raise CanonicalResearchExecutionBlocked(
+            "BLOCKED_EXECUTION_AUTHORIZATION_DIGEST_DRIFT",
+            "control-plane authorization receipt did not verify",
+        ) from exc
+    if (
+        authorization_consumption.lineage != launch_spec.lineage
+        or authorization_consumption.validation_plan_id
+        != launch_spec.validation_plan_id
+        or authorization_consumption.validation_plan_digest
+        != launch_spec.validation_plan_digest
+    ):
+        raise CanonicalResearchExecutionBlocked(
+            "BLOCKED_EXECUTION_AUTHORIZATION_LINEAGE",
+            "consumed authorization does not bind this launch spec",
+        )
+    return start_validation_attempt(
+        connection,
+        launch_spec=launch_spec,
+        validation_attempt_id=authorization_consumption.attempt_id,
+    )
+
+
 __all__ = [
     "AuthorizedResearchExecutionResult",
     "CanonicalResearchExecutionBlocked",
     "IsolatedResearchExecutorPort",
     "SimulatedResearchExecutor",
     "execute_consumed_research_attempt",
+    "start_consumed_research_attempt",
 ]

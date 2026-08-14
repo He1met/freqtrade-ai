@@ -52,10 +52,26 @@ from app.canonical_v13.dto import (
     OptimizationListProjectionDTO,
     OptimizationProjectionDTO,
     ReadinessProjectionDTO,
+    ResearchAttemptStartCommandDTO,
+    ResearchAttemptStartReceiptDTO,
+    ResearchAuthorizationCommandDTO,
+    ResearchAuthorizationConsumeCommandDTO,
+    ResearchAuthorizationConsumptionReceiptDTO,
+    ResearchAuthorizationReceiptDTO,
+    ResearchAuthorizationRevokeCommandDTO,
+    ResearchAuthorizationRevokeReceiptDTO,
     ResearchBundleActivateCommandDTO,
     ResearchBundleActivationDTO,
     ResearchBundlePreviewCommandDTO,
     ResearchBundlePreviewDTO,
+    ResearchChainProjectionDTO,
+    ResearchLineageDTO,
+    ResearchQualificationCommandDTO,
+    ResearchQualificationReceiptDTO,
+    ResearchScoreCommandDTO,
+    ResearchScoreReceiptDTO,
+    ValidationPlanCommandDTO,
+    ValidationPlanReceiptDTO,
     StrategyCatalogProjectionDTO,
     StrategyProjectionDTO,
     SubmissionCommandDTO,
@@ -81,6 +97,33 @@ from app.canonical_v13.market import CanonicalMarketBlocked
 from app.canonical_v13.research_evaluation import (
     CanonicalEvaluationBlocked,
     gate_optimization,
+)
+from app.canonical_v13.research_authorization import (
+    CanonicalResearchAuthorizationBlocked,
+    ResearchAuthorizationConsumption,
+    authorize_research_execution,
+    consume_research_execution_authorization,
+    revoke_research_execution_authorization,
+    verify_persisted_research_authorization_consumption,
+)
+from app.canonical_v13.research_execution import (
+    CanonicalResearchExecutionBlocked,
+    start_consumed_research_attempt,
+)
+from app.canonical_v13.research_orchestration import (
+    CanonicalResearchOrchestrationBlocked,
+    read_research_chain_projection,
+)
+from app.canonical_v13.research_qualification import persist_qualification_receipt
+from app.canonical_v13.research_scoring import persist_scoring_receipt
+from app.canonical_v13.research_validation import (
+    CanonicalResearchValidationBlocked,
+    ResearchLineage,
+    build_ephemeral_launch_spec,
+    build_lookahead_receipt,
+    declare_validation_plan,
+    mark_validation_plan_ready,
+    validate_static_source,
 )
 from app.canonical_v13.runtime_contract import (
     CanonicalRuntimeContractBlocked,
@@ -113,6 +156,7 @@ from app.canonical_v13.models import (
     STRATEGY_ARTIFACTS_TABLE,
     STRATEGY_SUBMISSIONS_TABLE,
     STRATEGY_VERSIONS_TABLE,
+    VALIDATION_PLANS_TABLE,
 )
 
 
@@ -139,6 +183,11 @@ _CANONICAL_DOMAIN_ERRORS = (
     CanonicalGenesisBlocked,
     CanonicalIntakeBlocked,
     CanonicalMarketBlocked,
+    CanonicalResearchAuthorizationBlocked,
+    CanonicalResearchExecutionBlocked,
+    CanonicalResearchOrchestrationBlocked,
+    CanonicalResearchValidationBlocked,
+    CanonicalEvaluationBlocked,
 )
 
 
@@ -165,6 +214,59 @@ def _effective_connection(connection: Connection) -> Connection:
             schema_translate_map={CANONICAL_BUSINESS_SCHEMA: None}
         )
     return connection
+
+
+def _research_lineage(value: ResearchLineageDTO) -> ResearchLineage:
+    return ResearchLineage(**value.model_dump())
+
+
+def _authorization_consumption(
+    value: ResearchAuthorizationConsumptionReceiptDTO,
+) -> ResearchAuthorizationConsumption:
+    return ResearchAuthorizationConsumption(
+        authorization_id=value.authorization_id,
+        consumption_id=value.consumption_id,
+        attempt_id=value.attempt_id,
+        lineage=_research_lineage(value.lineage),
+        validation_plan_id=value.validation_plan_id,
+        validation_plan_digest=value.validation_plan_digest,
+        actor_identity=value.actor_identity,
+        authorization_receipt_digest=value.authorization_receipt_digest,
+        request_digest=value.request_digest,
+        receipt_digest=value.receipt_digest,
+        consumed_at=value.consumed_at,
+        environment_class=value.environment_class,
+    )
+
+
+def _require_exact_ready_validation_plan(
+    connection: Connection,
+    *,
+    lineage: ResearchLineage,
+    validation_plan_id: UUID,
+    validation_plan_digest: str,
+) -> None:
+    plan = connection.execute(
+        select(VALIDATION_PLANS_TABLE).where(
+            VALIDATION_PLANS_TABLE.c.id == validation_plan_id
+        )
+    ).mappings().one_or_none()
+    if (
+        plan is None
+        or plan["status"] != "READY"
+        or plan["validation_plan_digest"] != validation_plan_digest
+        or plan["strategy_version_id"] != lineage.strategy_version_id
+        or plan["research_target_id"] != lineage.research_target_id
+        or plan["configuration_bundle_id"] != lineage.configuration_bundle_id
+        or plan["configuration_bundle_digest"]
+        != lineage.configuration_bundle_digest
+        or plan["market_snapshot_id"] != lineage.market_snapshot_id
+        or plan["market_snapshot_digest"] != lineage.market_snapshot_digest
+    ):
+        raise CanonicalAPIBlocked(
+            "BLOCKED_AUTHORIZATION_PLAN_NOT_READY",
+            "authorization requires one exact READY validation plan",
+        )
 
 
 def _qualification_status(connection: Connection, strategy_version_id: UUID) -> str:
@@ -696,6 +798,9 @@ def create_canonical_v13_app(
     *,
     reader_connection_factory: CanonicalConnectionFactory,
     control_connection_factory: CanonicalConnectionFactory,
+    validation_connection_factory: CanonicalConnectionFactory | None = None,
+    scoring_connection_factory: CanonicalConnectionFactory | None = None,
+    qualification_connection_factory: CanonicalConnectionFactory | None = None,
 ) -> FastAPI:
     """Create a standalone app with capability-separated database identities."""
 
@@ -737,6 +842,18 @@ def create_canonical_v13_app(
 
     def run_control(handler: Callable[[Connection], _T]) -> _T:
         return run(control_connection_factory, handler)
+
+    def run_research(
+        factory: CanonicalConnectionFactory | None,
+        capability: str,
+        handler: Callable[[Connection], _T],
+    ) -> _T:
+        if factory is None:
+            raise CanonicalAPIBlocked(
+                "BLOCKED_RESEARCH_CAPABILITY_UNPROVISIONED",
+                f"{capability} connection factory is not provisioned",
+            )
+        return run(factory, handler)
 
     async def domain_error_handler(_request: Request, exc: Exception) -> JSONResponse:
         code = getattr(exc, "code", "BLOCKED_CANONICAL_API_FAILURE")
@@ -986,6 +1103,304 @@ def create_canonical_v13_app(
             return ResearchBundleActivationDTO(**result.__dict__)
 
         return run_control(execute)
+
+    @app.post(
+        f"{API_PREFIX}/research/validation-plans",
+        response_model=ValidationPlanReceiptDTO,
+        status_code=201,
+    )
+    def create_validation_plan(
+        command: ValidationPlanCommandDTO,
+    ) -> ValidationPlanReceiptDTO:
+        def execute(connection: Connection) -> ValidationPlanReceiptDTO:
+            lineage = _research_lineage(command.lineage)
+            artifact = connection.execute(
+                select(STRATEGY_ARTIFACTS_TABLE)
+                .select_from(
+                    STRATEGY_VERSIONS_TABLE.join(
+                        STRATEGY_ARTIFACTS_TABLE,
+                        STRATEGY_ARTIFACTS_TABLE.c.id
+                        == STRATEGY_VERSIONS_TABLE.c.artifact_id,
+                    )
+                )
+                .where(STRATEGY_VERSIONS_TABLE.c.id == lineage.strategy_version_id)
+            ).mappings().one_or_none()
+            if artifact is None:
+                raise CanonicalAPIBlocked(
+                    "BLOCKED_STRATEGY_ARTIFACT_MISSING",
+                    "validation plan requires one canonical strategy artifact",
+                )
+            static_receipt = validate_static_source(
+                artifact["normalized_content"],
+                strategy_version_id=lineage.strategy_version_id,
+                expected_artifact_digest=artifact["content_digest"],
+                validator_identity=command.static_validator_identity,
+                validator_digest=command.static_validator_digest,
+            )
+            supplied = command.lookahead_receipt
+            lookahead = build_lookahead_receipt(
+                lineage=lineage,
+                artifact_digest=supplied.artifact_digest,
+                analyzer_identity=supplied.analyzer_identity,
+                analyzer_digest=supplied.analyzer_digest,
+                evidence_digest=supplied.evidence_digest,
+                status=supplied.status,
+                has_bias=supplied.has_bias,
+                observed_signal_count=supplied.observed_signal_count,
+            )
+            if (
+                lookahead.request_digest != supplied.request_digest
+                or lookahead.receipt_digest != supplied.receipt_digest
+            ):
+                raise CanonicalResearchValidationBlocked(
+                    "BLOCKED_LOOKAHEAD_RECEIPT_DIGEST_DRIFT",
+                    "submitted lookahead receipt does not recompute",
+                )
+            declared = declare_validation_plan(
+                connection,
+                lineage=lineage,
+                static_receipt=static_receipt,
+                lookahead_receipt=lookahead,
+                orchestrator_identity=command.orchestrator_identity,
+            )
+            ready = mark_validation_plan_ready(
+                connection,
+                validation_plan_id=declared.validation_plan_id,
+                expected_plan_digest=declared.validation_plan_digest,
+                static_receipt=static_receipt,
+                lookahead_receipt=lookahead,
+                orchestrator_identity=command.orchestrator_identity,
+            )
+            return ValidationPlanReceiptDTO(
+                validation_plan_id=ready.validation_plan_id,
+                validation_plan_digest=ready.validation_plan_digest,
+                status="READY",
+                window_count=ready.window_count,
+                required_window_count=ready.required_window_count,
+                static_receipt_digest=static_receipt.receipt_digest,
+                lookahead_receipt_digest=lookahead.receipt_digest,
+                repeat_noop=declared.repeat_noop and ready.repeat_noop,
+            )
+
+        return run_research(
+            validation_connection_factory, "validation", execute
+        )
+
+    @app.post(
+        f"{API_PREFIX}/research/authorizations",
+        response_model=ResearchAuthorizationReceiptDTO,
+        status_code=201,
+    )
+    def authorize_research(
+        command: ResearchAuthorizationCommandDTO,
+    ) -> ResearchAuthorizationReceiptDTO:
+        lineage = _research_lineage(command.lineage)
+        run_read(
+            lambda connection: _require_exact_ready_validation_plan(
+                connection,
+                lineage=lineage,
+                validation_plan_id=command.validation_plan_id,
+                validation_plan_digest=command.validation_plan_digest,
+            )
+        )
+
+        def execute(connection: Connection) -> ResearchAuthorizationReceiptDTO:
+            authorized_at = datetime.now(timezone.utc)
+            result = authorize_research_execution(
+                connection,
+                lineage=lineage,
+                attempt_id=command.attempt_id,
+                validation_plan_id=command.validation_plan_id,
+                validation_plan_digest=command.validation_plan_digest,
+                actor_identity=command.actor_identity,
+                purpose=command.purpose,
+                authorized_at=authorized_at,
+                expires_at=authorized_at + timedelta(seconds=command.ttl_seconds),
+                environment_class="PRODUCTION_RESEARCH",
+            )
+            return ResearchAuthorizationReceiptDTO(
+                authorization_id=result.authorization_id,
+                attempt_id=result.attempt_id,
+                validation_plan_id=result.validation_plan_id,
+                validation_plan_digest=result.validation_plan_digest,
+                actor_identity=result.actor_identity,
+                purpose=result.purpose,
+                request_digest=result.request_digest,
+                receipt_digest=result.receipt_digest,
+                authorized_at=result.authorized_at,
+                expires_at=result.expires_at,
+                one_shot=True,
+                environment_class="PRODUCTION_RESEARCH",
+            )
+
+        return run_control(execute)
+
+    @app.post(
+        f"{API_PREFIX}/research/authorizations/{{authorization_id}}/consume",
+        response_model=ResearchAuthorizationConsumptionReceiptDTO,
+    )
+    def consume_research_authorization(
+        authorization_id: UUID,
+        command: ResearchAuthorizationConsumeCommandDTO,
+    ) -> ResearchAuthorizationConsumptionReceiptDTO:
+        def execute(
+            connection: Connection,
+        ) -> ResearchAuthorizationConsumptionReceiptDTO:
+            lineage = _research_lineage(command.lineage)
+            result = consume_research_execution_authorization(
+                connection,
+                authorization_id=authorization_id,
+                expected_lineage=lineage,
+                validation_plan_id=command.validation_plan_id,
+                validation_plan_digest=command.validation_plan_digest,
+                attempt_id=command.attempt_id,
+                actor_identity=command.actor_identity,
+                consumed_at=datetime.now(timezone.utc),
+            )
+            if result.environment_class != "PRODUCTION_RESEARCH":
+                raise CanonicalAPIBlocked(
+                    "BLOCKED_AUTHORIZATION_ENVIRONMENT",
+                    "production control surface received another environment",
+                )
+            return ResearchAuthorizationConsumptionReceiptDTO(
+                authorization_id=result.authorization_id,
+                consumption_id=result.consumption_id,
+                attempt_id=result.attempt_id,
+                lineage=ResearchLineageDTO(**result.lineage.__dict__),
+                validation_plan_id=result.validation_plan_id,
+                validation_plan_digest=result.validation_plan_digest,
+                actor_identity=result.actor_identity,
+                authorization_receipt_digest=result.authorization_receipt_digest,
+                request_digest=result.request_digest,
+                receipt_digest=result.receipt_digest,
+                consumed_at=result.consumed_at,
+                environment_class="PRODUCTION_RESEARCH",
+            )
+
+        return run_control(execute)
+
+    @app.post(
+        f"{API_PREFIX}/research/authorizations/{{authorization_id}}/revoke",
+        response_model=ResearchAuthorizationRevokeReceiptDTO,
+    )
+    def revoke_research_authorization(
+        authorization_id: UUID,
+        command: ResearchAuthorizationRevokeCommandDTO,
+    ) -> ResearchAuthorizationRevokeReceiptDTO:
+        event_id = run_control(
+            lambda connection: revoke_research_execution_authorization(
+                connection,
+                authorization_id=authorization_id,
+                actor_identity=command.actor_identity,
+                reason=command.reason,
+                revoked_at=datetime.now(timezone.utc),
+            )
+        )
+        return ResearchAuthorizationRevokeReceiptDTO(
+            authorization_id=authorization_id,
+            revocation_event_id=event_id,
+        )
+
+    @app.post(
+        f"{API_PREFIX}/research/attempts",
+        response_model=ResearchAttemptStartReceiptDTO,
+        status_code=201,
+    )
+    def start_research_attempt(
+        command: ResearchAttemptStartCommandDTO,
+    ) -> ResearchAttemptStartReceiptDTO:
+        consumption = _authorization_consumption(
+            command.authorization_consumption
+        )
+        run_read(
+            lambda connection: verify_persisted_research_authorization_consumption(
+                connection, consumption=consumption
+            )
+        )
+
+        def execute(connection: Connection) -> ResearchAttemptStartReceiptDTO:
+            spec = build_ephemeral_launch_spec(
+                connection,
+                validation_plan_id=command.validation_plan_id,
+                expected_plan_digest=command.validation_plan_digest,
+                executor_identity=command.executor_identity,
+                executor_image_digest=command.executor_image_digest,
+            )
+            running = start_consumed_research_attempt(
+                connection,
+                launch_spec=spec,
+                authorization_consumption=consumption,
+            )
+            return ResearchAttemptStartReceiptDTO(
+                validation_attempt_id=running.validation_attempt_id,
+                validation_plan_id=spec.validation_plan_id,
+                attempt_number=running.attempt_number,
+                status="RUNNING",
+                request_digest=running.request_digest,
+            )
+
+        return run_research(
+            validation_connection_factory, "validation", execute
+        )
+
+    @app.post(
+        f"{API_PREFIX}/research/scores",
+        response_model=ResearchScoreReceiptDTO,
+        status_code=201,
+    )
+    def score_research_target(
+        command: ResearchScoreCommandDTO,
+    ) -> ResearchScoreReceiptDTO:
+        def execute(connection: Connection) -> ResearchScoreReceiptDTO:
+            receipt = persist_scoring_receipt(
+                connection,
+                validation_plan_id=command.validation_plan_id,
+                validation_attempt_id=command.validation_attempt_id,
+                scorer_identity=command.scorer_identity,
+            )
+            return ResearchScoreReceiptDTO(
+                **{
+                    **receipt.__dict__,
+                    "overall_score": str(receipt.overall_score),
+                }
+            )
+
+        return run_research(scoring_connection_factory, "scoring", execute)
+
+    @app.post(
+        f"{API_PREFIX}/research/qualifications",
+        response_model=ResearchQualificationReceiptDTO,
+        status_code=201,
+    )
+    def qualify_research_target(
+        command: ResearchQualificationCommandDTO,
+    ) -> ResearchQualificationReceiptDTO:
+        def execute(connection: Connection) -> ResearchQualificationReceiptDTO:
+            receipt = persist_qualification_receipt(
+                connection,
+                validation_plan_id=command.validation_plan_id,
+                validation_attempt_id=command.validation_attempt_id,
+                qualifier_identity=command.qualifier_identity,
+            )
+            return ResearchQualificationReceiptDTO(**receipt.__dict__)
+
+        return run_research(
+            qualification_connection_factory, "qualification", execute
+        )
+
+    @app.get(
+        f"{API_PREFIX}/research/validation-plans/{{validation_plan_id}}",
+        response_model=ResearchChainProjectionDTO,
+    )
+    def research_chain_status(
+        validation_plan_id: UUID,
+    ) -> ResearchChainProjectionDTO:
+        projection = run_read(
+            lambda connection: read_research_chain_projection(
+                connection, validation_plan_id=validation_plan_id
+            )
+        )
+        return ResearchChainProjectionDTO(**projection.__dict__)
 
     @app.get(
         f"{API_PREFIX}/market-data", response_model=MarketInventoryProjectionDTO

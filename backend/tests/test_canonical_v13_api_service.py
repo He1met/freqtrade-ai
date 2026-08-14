@@ -32,6 +32,7 @@ def test_launch_agent_payload_is_loopback_only_and_contains_no_database_secret()
     assert "PASSWORD" not in serialized
     assert service.READER_KEYCHAIN_SERVICE not in serialized
     assert service.CONTROL_KEYCHAIN_SERVICE not in serialized
+    assert all(spec[2] not in serialized for spec in service.RESEARCH_PRINCIPAL_SPECS)
 
 
 def test_database_urls_are_built_only_from_fixed_principal_and_keychain_reference(
@@ -61,6 +62,23 @@ def test_scram_verifier_is_deterministic_and_never_contains_input_material() -> 
     )
 
 
+def test_production_environment_uses_six_fixed_keychain_backed_principals(
+    monkeypatch,
+) -> None:
+    service = _load_service("canonical_v13_api_service_six_identities")
+    monkeypatch.setattr(service, "_read_keychain", lambda _service: "x" * 64)
+    environment = service._production_database_environment()
+    assert len(environment) == 6
+    assert {
+        value.split("://", 1)[1].split(":", 1)[0]
+        for value in environment.values()
+    } == {
+        service.READER_PRINCIPAL,
+        service.CONTROL_PRINCIPAL,
+        *(spec[0] for spec in service.RESEARCH_PRINCIPAL_SPECS),
+    }
+
+
 def test_provision_fails_closed_before_database_write_on_existing_keychain(
     monkeypatch,
 ) -> None:
@@ -76,11 +94,44 @@ def test_provision_fails_closed_before_database_write_on_existing_keychain(
         match="BLOCKED_KEYCHAIN_ITEM_ALREADY_EXISTS",
     ):
         service.provision_principals()
+    with pytest.raises(
+        service.CanonicalServiceBlocked,
+        match="BLOCKED_KEYCHAIN_ITEM_ALREADY_EXISTS",
+    ):
+        service.provision_research_principals()
+
+
+def test_research_provision_requires_empty_current_authority_before_writes(
+    monkeypatch,
+) -> None:
+    service = _load_service("canonical_v13_api_service_research_preflight")
+    monkeypatch.setattr(service, "_read_keychain", lambda _service: None)
+
+    def blocked_preflight() -> None:
+        raise service.CanonicalServiceBlocked(
+            "BLOCKED_RESEARCH_AUTHORITY_PREFLIGHT"
+        )
+
+    monkeypatch.setattr(
+        service,
+        "_require_research_authority_preprovisioned",
+        blocked_preflight,
+    )
+    monkeypatch.setattr(
+        service,
+        "_admin_connection",
+        lambda: pytest.fail("principal writes must not begin after failed preflight"),
+    )
+    with pytest.raises(
+        service.CanonicalServiceBlocked,
+        match="BLOCKED_RESEARCH_AUTHORITY_PREFLIGHT",
+    ):
+        service.provision_research_principals()
 
 
 def test_service_manager_has_no_delete_or_uninstall_command() -> None:
     source = SERVICE_PATH.read_text(encoding="utf-8")
-    assert 'choices=("provision", "serve", "install", "status", "restart")' in source
+    assert '"provision-research",' in source
     assert '"uninstall"' not in source
 
 

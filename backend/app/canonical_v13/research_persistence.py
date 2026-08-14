@@ -3,7 +3,8 @@
 This module only validates connection locators.  It does not connect, create an
 engine, execute research, or expose credentials.  The production orchestrator uses
 the result to keep validation, scoring, qualification, and optimization transactions
-on four distinct PostgreSQL roles aimed at one canonical database.
+on four distinct PostgreSQL LOGIN principals, each bound to one NOLOGIN capability
+role and aimed at one canonical database.
 """
 
 from __future__ import annotations
@@ -57,6 +58,21 @@ class ResearchPersistenceURLs:
             ) from exc
 
 
+def research_service_principal(
+    role_mapping: CanonicalRoleMapping, logical_role: str
+) -> str:
+    if logical_role not in RESEARCH_PERSISTENCE_ENV_BY_CAPABILITY:
+        raise CanonicalResearchPersistenceBlocked(
+            f"BLOCKED_RESEARCH_PERSISTENCE_CAPABILITY: {logical_role!r}"
+        )
+    capability_role = role_mapping.physical(logical_role)
+    if not capability_role.endswith("_writer"):
+        raise CanonicalResearchPersistenceBlocked(
+            f"BLOCKED_RESEARCH_ROLE_MAPPING: {logical_role!r}"
+        )
+    return capability_role.removesuffix("_writer") + "_login"
+
+
 def _database_locator(url: URL) -> tuple[object, ...]:
     return (
         url.drivername,
@@ -98,11 +114,11 @@ def resolve_research_persistence_urls(
             raise CanonicalResearchPersistenceBlocked(
                 f"BLOCKED_RESEARCH_DATABASE_URL_INVALID: {environment_name}"
             )
-        expected_role = role_mapping.physical(logical_role)
-        if parsed.username != expected_role:
+        expected_principal = research_service_principal(role_mapping, logical_role)
+        if parsed.username != expected_principal:
             raise CanonicalResearchPersistenceBlocked(
                 "BLOCKED_RESEARCH_ROLE_IDENTITY: "
-                f"{logical_role} requires its exact role"
+                f"{logical_role} requires its exact LOGIN principal"
             )
         urls[logical_role] = parsed
 
@@ -131,5 +147,6 @@ __all__ = [
     "VALIDATION_DATABASE_URL_ENV",
     "CanonicalResearchPersistenceBlocked",
     "ResearchPersistenceURLs",
+    "research_service_principal",
     "resolve_research_persistence_urls",
 ]

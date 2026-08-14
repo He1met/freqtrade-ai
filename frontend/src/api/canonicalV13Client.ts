@@ -9,6 +9,7 @@ import type {
   MarketSnapshotProjection,
   OptimizationListProjection,
   ReadinessProjection,
+  ResearchChainProjection,
   ResearchBundleActivateCommand,
   ResearchBundleActivation,
   ResearchBundlePreview,
@@ -93,6 +94,7 @@ function validateSuccessDto(contract: string, value: unknown): void {
     marketSnapshot: { snapshot_id: "string", snapshot_digest: "string", status: "string", reason_codes: "array", members: "array" },
     readiness: { status: "string", reason_codes: "array", configuration_bundle_id: "nullable-string", deployment_id: "nullable-string", runtime_instance_id: "nullable-string" },
     optimizations: { status: "string", items: "array" },
+    researchChain: { validation_plan_id: "string", validation_plan_digest: "string", strategy_version_id: "string", research_target_id: "string", target_key: "string", plan_status: "string", validation_attempt_id: "nullable-string", attempt_status: "nullable-string", attempt_receipt_digest: "nullable-string", target_score_id: "nullable-string", overall_score: "nullable-string", score_digest: "nullable-string", qualification_decision_id: "nullable-string", qualification_status: "nullable-string", qualification_reason_code: "nullable-string", qualification_decision_digest: "nullable-string" },
   };
   const shape = shapes[contract];
   if (!shape) throw new CanonicalV13ClientContractError("UNKNOWN_SUCCESS_DTO", contract);
@@ -256,4 +258,12 @@ export function fetchCanonicalRuntimeReadiness(signal?: AbortSignal) {
 
 export function fetchCanonicalOptimizations(signal?: AbortSignal) {
   return request<OptimizationListProjection>("/optimizations", "optimizations", { signal });
+}
+
+export function fetchCanonicalResearchChain(validationPlanId: string, signal?: AbortSignal) {
+  return request<ResearchChainProjection>(
+    `/research/validation-plans/${segment(validationPlanId)}`,
+    "researchChain",
+    { signal },
+  );
 }

@@ -114,6 +114,34 @@ test("invalid URL state on every canonical page performs zero API requests", asy
   expect(calls).toEqual([]);
 });
 
+test("research plan URL renders only the canonical chain projection", async ({ page }) => {
+  const calls = await installCanonicalMocks(page, {
+    [`/api/canonical-v13/research/validation-plans/${ID_A}`]: {
+      validation_plan_id: ID_A,
+      validation_plan_digest: DIGEST,
+      strategy_version_id: ID_B,
+      research_target_id: ID_A,
+      target_key: "btc-5m",
+      plan_status: "COMPLETE",
+      validation_attempt_id: ID_B,
+      attempt_status: "SUCCEEDED",
+      attempt_receipt_digest: DIGEST,
+      target_score_id: ID_A,
+      overall_score: "99.00000000",
+      score_digest: DIGEST,
+      qualification_decision_id: ID_B,
+      qualification_status: "REJECTED",
+      qualification_reason_code: "REQUIRED_WINDOW_GATE_FAILED",
+      qualification_decision_digest: DIGEST,
+    },
+  });
+  await page.goto(`/v13/research?plan=${ID_A}`);
+  await expect(page.getByRole("heading", { name: "Exact research chain" })).toBeVisible();
+  await expect(page.getByText("REQUIRED_WINDOW_GATE_FAILED", { exact: true })).toBeVisible();
+  await expect(page.getByText("99.00000000", { exact: true })).toBeVisible();
+  expect(calls).toContain(`GET /api/canonical-v13/research/validation-plans/${ID_A}`);
+});
+
 test("strategy selection is explicit, deep-linkable, refreshable, and restorable", async ({ page }) => {
   const item = (id: string, name: string) => ({
     strategy_id: id,

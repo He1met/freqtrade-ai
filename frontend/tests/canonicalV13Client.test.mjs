@@ -12,6 +12,7 @@ import {
   fetchCanonicalMarketSnapshot,
   fetchCanonicalOptimizations,
   fetchCanonicalResearchReadiness,
+  fetchCanonicalResearchChain,
   fetchCanonicalRuntimeReadiness,
   fetchCanonicalStrategies,
   fetchCanonicalStrategy,
@@ -23,7 +24,7 @@ import {
 const ID = "123e4567-e89b-42d3-a456-426614174000";
 const DIGEST = "a".repeat(64);
 
-test("the client exposes exactly the thirteen canonical routes with one fetch each", async (context) => {
+test("the client exposes the canonical projection routes with one fetch each", async (context) => {
   const originalFetch = globalThis.fetch;
   const calls = [];
   context.after(() => { globalThis.fetch = originalFetch; });
@@ -67,6 +68,20 @@ test("the client exposes exactly the thirteen canonical routes with one fetch ea
       submission_id: ID,
       unset_kinds: [],
       validation_status: "UNVALIDATED",
+      validation_plan_id: ID,
+      validation_plan_digest: DIGEST,
+      research_target_id: ID,
+      target_key: "btc-5m",
+      plan_status: "READY",
+      validation_attempt_id: null,
+      attempt_status: null,
+      attempt_receipt_digest: null,
+      target_score_id: null,
+      overall_score: null,
+      score_digest: null,
+      qualification_decision_id: null,
+      qualification_reason_code: null,
+      qualification_decision_digest: null,
       version_id: ID,
     });
   };
@@ -109,8 +124,9 @@ test("the client exposes exactly the thirteen canonical routes with one fetch ea
   await fetchCanonicalResearchReadiness("scope", "workflow");
   await fetchCanonicalRuntimeReadiness();
   await fetchCanonicalOptimizations();
+  await fetchCanonicalResearchChain(ID);
 
-  assert.equal(calls.length, 13);
+  assert.equal(calls.length, 14);
   assert.deepEqual(calls, [
     { input: `${CANONICAL_V13_API_ROOT}/submissions`, method: "POST" },
     { input: `${CANONICAL_V13_API_ROOT}/strategies`, method: "GET" },
@@ -125,6 +141,7 @@ test("the client exposes exactly the thirteen canonical routes with one fetch ea
     { input: `${CANONICAL_V13_API_ROOT}/readiness/research?scope_key=scope&workflow_key=workflow`, method: "GET" },
     { input: `${CANONICAL_V13_API_ROOT}/readiness/runtime`, method: "GET" },
     { input: `${CANONICAL_V13_API_ROOT}/optimizations`, method: "GET" },
+    { input: `${CANONICAL_V13_API_ROOT}/research/validation-plans/${ID}`, method: "GET" },
   ]);
 });
 

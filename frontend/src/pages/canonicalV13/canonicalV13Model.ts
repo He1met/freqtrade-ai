@@ -11,7 +11,7 @@ export const CANONICAL_URL_KEYS = {
   strategies: ["strategy"],
   configuration: ["scope", "workflow", "profile", "version"],
   "market-data": ["profile", "snapshot", "target"],
-  research: ["scope", "workflow", "target", "strategy"],
+  research: ["scope", "workflow", "target", "strategy", "plan"],
   optimization: ["strategy", "target"],
 } as const satisfies Record<CanonicalPageKey, readonly string[]>;
 
@@ -23,7 +23,7 @@ export type CanonicalUrlParseResult =
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CONTROL = /[\u0000-\u001f\u007f]/;
-const UUID_KEYS = new Set(["profile", "strategy", "version", "snapshot"]);
+const UUID_KEYS = new Set(["profile", "strategy", "version", "snapshot", "plan"]);
 
 function validValue(key: string, value: string): boolean {
   if (!value || value.trim() !== value || value.length > 200 || CONTROL.test(value)) return false;
@@ -103,6 +103,8 @@ const STATUS: Readonly<Record<string, Omit<CanonicalStatusPresentation, "known" 
   ARCHIVED: { label: "已归档", tone: "neutral" },
   AVAILABLE: { label: "可用", tone: "success" },
   BLOCKED: { label: "已阻塞", tone: "warning" },
+  COMPLETE: { label: "已完成", tone: "success" },
+  DECLARED: { label: "已声明", tone: "info" },
   DRAFT: { label: "草稿", tone: "neutral" },
   EMPTY: { label: "空目录", tone: "neutral" },
   FAILED: { label: "失败", tone: "danger" },

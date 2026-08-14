@@ -30,26 +30,38 @@ FREQTRADE_AI_CANONICAL_V13_PROVISIONER_DATABASE_URL='postgresql+psycopg:///freqt
   python scripts/canonical_v13_bootstrap.py verify
 ```
 
-## 2. 最小 API principals 与 Keychain
+## 2. API/control/research principals 与 Keychain
 
-只建立两个 LOGIN principals：
+API 启动前必须建立六个彼此不同的 LOGIN principals：
 
 | LOGIN principal | 唯一 membership | Keychain service |
 | --- | --- | --- |
 | `freqtrade_ai_v13_api_login` | `freqtrade_ai_v13_api_reader` | `freqtrade-ai/v13/api-reader-password` |
 | `freqtrade_ai_v13_control_login` | `freqtrade_ai_v13_control_writer` | `freqtrade-ai/v13/control-password` |
+| `freqtrade_ai_v13_validation_login` | `freqtrade_ai_v13_validation_writer` | `freqtrade-ai/v13/research-validation-password` |
+| `freqtrade_ai_v13_scoring_login` | `freqtrade_ai_v13_scoring_writer` | `freqtrade-ai/v13/research-scoring-password` |
+| `freqtrade_ai_v13_qualification_login` | `freqtrade_ai_v13_qualification_writer` | `freqtrade-ai/v13/research-qualification-password` |
+| `freqtrade_ai_v13_optimization_login` | `freqtrade_ai_v13_optimization_writer` | `freqtrade-ai/v13/research-optimization-password` |
 
 `scripts/canonical_v13_api_service.py provision` 仅在两个 LOGIN 和两个 Keychain item 全部不存在、
 capability roles 完整且当前连接确为本机 `freqtrade_ai_v13` superuser 时执行。随机值只存在内存、
 PostgreSQL password verifier 和 macOS Keychain；不会进入 argv、stdout/stderr、repo、Issue、plist
 或 dotenv。任一已存在/半完成状态均 `BLOCKED`，绝不覆盖。
 
-worker、research/backtest、runtime、order、fill、ledger principals 本阶段禁止创建。
+runtime、order、fill、ledger principals 本阶段禁止创建。
 
-production research activation 另需四个互不相同的 LOGIN，每个只继承一个 capability：
+production research control surface 另需四个互不相同的 LOGIN，每个只继承一个 capability：
 `validation_writer`、`scoring_writer`、`qualification_writer`、`optimization_writer`。它们不由
-API principal 脚本自动创建；精确升级和回滚顺序见
+原有 `provision` 自动创建；恢复任务必须先完成并验证 authority upgrade，再在四个 LOGIN/Keychain
+项均不存在时显式执行 `python scripts/canonical_v13_api_service.py provision-research`。该操作不修改
+reader/control principal，任一半存在状态都 fail closed 且不覆盖。精确升级和回滚顺序见
 [`strategy_platform_v13_research_authority_upgrade.md`](strategy_platform_v13_research_authority_upgrade.md)。
+
+恢复任务的固定次序是：`authority-apply` → `authority-verify`（此时 split roles 仍为零 membership）→
+`provision-research` → `verify-research-provisioned`。最后一步要求六个 LOGIN 均为非 superuser、
+`INHERIT`、每个只有 exact membership，且 canonical ACL/owner/manifest 无漂移。若要 rollback，必须
+另行取得删除 principal/Keychain 的授权，先移除四个 research memberships，再执行 authority rollback；
+不得让 verifier 为迁就已 provision 的 membership 而放宽。
 
 ## 3. Backup 与独立 restore acceptance
 
@@ -78,14 +90,18 @@ python scripts/canonical_v13_api_service.py status --port 8011
 ```
 
 LaunchAgent plist 只含 Python/script/port 与非 secret 环境；服务子进程自行按固定 service/account
-读取 Keychain，在内存构造两个 DSN，并调用
-`app.canonical_v13.production:create_app`。绑定固定为 `127.0.0.1`，access log 关闭；它不 mount
+读取 Keychain，在内存构造六个 DSN，并调用
+`app.canonical_v13.production:create_app`。四个 research DSN 必须使用上表 exact LOGIN principal，
+不能使用 NOLOGIN capability role；六个 username 必须不同且 locator 必须是同一个 canonical
+database。绑定固定为
+`127.0.0.1`，access log 关闭；它不 mount
 legacy API、不执行 genesis、不激活配置、不启动 research/runtime/trading。
 
 验收必须覆盖：
 
 - `/healthz` = `HEALTHY` 且 `TRADING_DISABLED`；
-- `/readyz` = `READY`，reader/control `current_user` 不同；
+- `/readyz` = `READY`，reader/control/validation/scoring/qualification/optimization 六个
+  `current_user` 全部不同；
 - strategies `EMPTY`、七类 P0 `UNSET`、market `MARKET_SNAPSHOT_UNSET`；
 - research/runtime `BLOCKED`、optimization `PENDING_FIRST_BACKTEST`；
 - control preview `BLOCKED` 且不写 bundle；
@@ -93,6 +109,9 @@ legacy API、不执行 genesis、不激活配置、不启动 research/runtime/tr
 
 UI/reverse proxy、公网访问、策略 intake、market、backtest、qualification、activation、runtime、
 OKX 和交易链均属于后续独立授权门。
+
+production research 的 control-plane 与 one-shot worker 操作见
+[`strategy_platform_v13_production_research.md`](strategy_platform_v13_production_research.md)。
 
 ## 5. 独立 canonical UI gateway（no-trade）
 
