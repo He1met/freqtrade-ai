@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   acceptanceRepeatCount,
+  allocateIsolatedPort,
   validateAcceptanceProfiles,
 } from "./labAcceptanceProfiles.mjs";
 
@@ -35,10 +36,17 @@ async function waitForReleased(port, phase) {
 
 const profiles = validateAcceptanceProfiles();
 const repeats = acceptanceRepeatCount();
+const usedPorts = new Set();
 for (let repeat = 1; repeat <= repeats; repeat += 1) {
   for (const profile of profiles) {
-    await waitForReleased(profile.backendPort, "backend preflight");
-    await waitForReleased(profile.frontendPort, "frontend preflight");
+    const backendPort = await allocateIsolatedPort({
+      usedPorts,
+      isAvailable: portAvailable,
+    });
+    const frontendPort = await allocateIsolatedPort({
+      usedPorts,
+      isAvailable: portAvailable,
+    });
     const result = spawnSync(
       process.execPath,
       [
@@ -52,18 +60,19 @@ for (let repeat = 1; repeat <= repeats; repeat += 1) {
         env: {
           ...process.env,
           E2E_SEED_PROFILE: profile.name,
-          E2E_BACKEND_PORT: String(profile.backendPort),
-          E2E_FRONTEND_PORT: String(profile.frontendPort),
+          E2E_BACKEND_PORT: String(backendPort),
+          E2E_FRONTEND_PORT: String(frontendPort),
         },
         stdio: "inherit",
       },
     );
-    await waitForReleased(profile.backendPort, "backend teardown");
-    await waitForReleased(profile.frontendPort, "frontend teardown");
+    await waitForReleased(backendPort, "backend teardown");
+    await waitForReleased(frontendPort, "frontend teardown");
     if (result.error) throw result.error;
     if (result.status !== 0) process.exit(result.status ?? 1);
     process.stdout.write(
-      `acceptance profile ${profile.name} repeat ${repeat}/${repeats}: ports released\n`,
+      `acceptance profile ${profile.name} repeat ${repeat}/${repeats}: ` +
+        `ports ${backendPort}/${frontendPort} released\n`,
     );
   }
 }
