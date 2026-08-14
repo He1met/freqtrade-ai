@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
+import hmac
 import json
 import os
 import plistlib
@@ -46,6 +49,28 @@ STDERR_LOG = LOG_DIR / "canonical-api-error.log"
 
 class CanonicalServiceBlocked(RuntimeError):
     pass
+
+
+def _scram_verifier(material: str, *, salt: bytes | None = None) -> str:
+    """Create a PostgreSQL SCRAM verifier without placing plaintext in SQL."""
+
+    resolved_salt = secrets.token_bytes(16) if salt is None else salt
+    if len(resolved_salt) < 16:
+        raise CanonicalServiceBlocked("BLOCKED_SCRAM_SALT_INVALID")
+    iterations = 4096
+    salted = hashlib.pbkdf2_hmac(
+        "sha256", material.encode("utf-8"), resolved_salt, iterations
+    )
+    client_key = hmac.new(salted, b"Client Key", hashlib.sha256).digest()
+    stored_key = hashlib.sha256(client_key).digest()
+    server_key = hmac.new(salted, b"Server Key", hashlib.sha256).digest()
+    encoded_salt = base64.b64encode(resolved_salt).decode("ascii")
+    encoded_stored = base64.b64encode(stored_key).decode("ascii")
+    encoded_server = base64.b64encode(server_key).decode("ascii")
+    return (
+        f"SCRAM-SHA-256${iterations}:{encoded_salt}$"
+        f"{encoded_stored}:{encoded_server}"
+    )
 
 
 def _security_command() -> Path:
@@ -178,13 +203,16 @@ def provision_principals() -> dict[str, object]:
                     (READER_PRINCIPAL, READER_CAPABILITY, reader_material),
                     (CONTROL_PRINCIPAL, CONTROL_CAPABILITY, control_material),
                 ):
+                    auth_verifier = _scram_verifier(material)
                     connection.execute(
                         sql.SQL(
                             "CREATE ROLE {} LOGIN NOSUPERUSER NOCREATEDB "
                             "NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS "
-                            "CONNECTION LIMIT 8 PASSWORD %s"
-                        ).format(sql.Identifier(principal)),
-                        (material,),
+                            "CONNECTION LIMIT 8 PASSWORD {}"
+                        ).format(
+                            sql.Identifier(principal),
+                            sql.Literal(auth_verifier),
+                        )
                     )
                     connection.execute(
                         sql.SQL("GRANT {} TO {}").format(
