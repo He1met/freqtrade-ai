@@ -189,7 +189,10 @@ def test_trial_metrics_and_controlled_resubmission_lineage_are_durable(
             snapshot=_snapshot(
                 entry="optimization/trial-1.py",
                 strategy="optimization-trial-1",
-                content=b"class Optimized:\n    pass\n",
+                content=(
+                    b"from freqtrade.strategy import IStrategy\n"
+                    b"class Optimized(IStrategy):\n    pass\n"
+                ),
             ),
         )
         link_controlled_submission_version(

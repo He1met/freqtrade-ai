@@ -8,6 +8,7 @@ persists one canonical strategy/version/receipt transaction.
 
 from __future__ import annotations
 
+import ast
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -32,6 +33,7 @@ from app.canonical_v13.models import (
 
 
 DEFAULT_MAX_ARTIFACT_BYTES: Final = 1_000_000
+INTAKE_SAFETY_CONTRACT: Final = "canonical-v13-intake-static-safety-v1"
 _HEX_DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _CONTROL_CHARACTER = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _SECRET_PATTERNS: Final[tuple[tuple[str, re.Pattern[str]], ...]] = (
@@ -45,6 +47,35 @@ _SECRET_PATTERNS: Final[tuple[tuple[str, re.Pattern[str]], ...]] = (
             r"\s*[:=]\s*['\"][^'\"\r\n]{12,}['\"]"
         ),
     ),
+)
+_ALLOWED_IMPORTS: Final[frozenset[str]] = frozenset(
+    {"freqtrade.strategy", "functools", "pandas", "talib.abstract"}
+)
+_ALLOWED_FROM_IMPORTS: Final[dict[str, frozenset[str]]] = {
+    "freqtrade.strategy": frozenset({"IStrategy"}),
+    "functools": frozenset({"reduce"}),
+    "pandas": frozenset({"DataFrame"}),
+}
+_ALLOWED_DIRECT_IMPORTS: Final[dict[str, str]] = {"talib.abstract": "ta"}
+_BANNED_CALL_NAMES: Final[frozenset[str]] = frozenset(
+    {"__import__", "compile", "eval", "exec", "input", "open"}
+)
+_BANNED_ATTRIBUTE_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "connect",
+        "create_connection",
+        "fork",
+        "popen",
+        "remove",
+        "rename",
+        "replace",
+        "rmdir",
+        "socket",
+        "spawn",
+        "system",
+        "unlink",
+        "urlopen",
+    }
 )
 
 
@@ -90,6 +121,7 @@ class IntakeInspection:
     normalized_content: str
     normalized_bytes: bytes
     content_digest: str
+    strategy_class: str
     checks: dict[str, object]
 
 
@@ -251,9 +283,10 @@ def select_latest_source_artifact(
 def inspect_intake_artifact(
     artifact_bytes: bytes,
     *,
+    expected_strategy_class: str | None = None,
     max_artifact_bytes: int = DEFAULT_MAX_ARTIFACT_BYTES,
 ) -> IntakeInspection:
-    """Perform byte/envelope checks only; never parse or execute strategy code."""
+    """Perform byte and AST-only checks without importing or executing source."""
 
     if max_artifact_bytes <= 0 or isinstance(max_artifact_bytes, bool):
         raise ValueError("max_artifact_bytes must be a positive integer")
@@ -284,20 +317,144 @@ def inspect_intake_artifact(
                 "REJECTED_SECRET_SHAPED_CONTENT",
                 f"strategy artifact matched secret safety rule {reason}",
             )
+    try:
+        tree = ast.parse(normalized_content, filename="<canonical-intake>", mode="exec")
+    except (SyntaxError, ValueError) as exc:
+        raise CanonicalIntakeBlocked(
+            "REJECTED_INVALID_PYTHON_AST", "strategy artifact is not valid Python AST"
+        ) from exc
+
+    classes = [node for node in tree.body if isinstance(node, ast.ClassDef)]
+    if len(classes) != 1:
+        raise CanonicalIntakeBlocked(
+            "REJECTED_STRATEGY_CLASS_SHAPE",
+            "artifact must define exactly one top-level strategy class",
+        )
+    strategy_class = classes[0]
+    if expected_strategy_class is not None:
+        expected_strategy_class = _require_identity(
+            expected_strategy_class,
+            field="expected_strategy_class",
+            max_length=200,
+        )
+        if strategy_class.name != expected_strategy_class:
+            raise CanonicalIntakeBlocked(
+                "REJECTED_STRATEGY_CLASS_MISMATCH",
+                "selected artifact class does not match the latest-only manifest",
+            )
+    if strategy_class.decorator_list:
+        raise CanonicalIntakeBlocked(
+            "REJECTED_DYNAMIC_STRATEGY_SHAPE",
+            "strategy class decorators are not allowed at intake",
+        )
+    base_names = {
+        base.id
+        if isinstance(base, ast.Name)
+        else base.attr
+        if isinstance(base, ast.Attribute)
+        else ""
+        for base in strategy_class.bases
+    }
+    if "IStrategy" not in base_names:
+        raise CanonicalIntakeBlocked(
+            "REJECTED_STRATEGY_BASE",
+            "top-level strategy class must inherit IStrategy",
+        )
+
+    imported_modules: set[str] = set()
+    import_bindings: set[str] = set()
+    imported_istrategy = False
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if _ALLOWED_DIRECT_IMPORTS.get(alias.name) != alias.asname:
+                    raise CanonicalIntakeBlocked(
+                        "REJECTED_IMPORT_NOT_ALLOWED",
+                        "direct import binding is outside the canonical allowlist",
+                    )
+                imported_modules.add(alias.name)
+                import_bindings.add(f"import:{alias.name}:as:{alias.asname}")
+        elif isinstance(node, ast.ImportFrom):
+            if node.level or not node.module:
+                raise CanonicalIntakeBlocked(
+                    "REJECTED_IMPORT_NOT_ALLOWED", "relative imports are not allowed"
+                )
+            allowed_names = _ALLOWED_FROM_IMPORTS.get(node.module, frozenset())
+            for alias in node.names:
+                if alias.name not in allowed_names or alias.asname is not None:
+                    raise CanonicalIntakeBlocked(
+                        "REJECTED_IMPORT_NOT_ALLOWED",
+                        "from-import binding is outside the canonical allowlist",
+                    )
+                import_bindings.add(f"from:{node.module}:import:{alias.name}")
+                imported_istrategy = imported_istrategy or (
+                    node.module == "freqtrade.strategy" and alias.name == "IStrategy"
+                )
+            imported_modules.add(node.module)
+        elif isinstance(node, ast.ClassDef):
+            continue
+        elif (
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            continue
+        else:
+            raise CanonicalIntakeBlocked(
+                "REJECTED_MODULE_LEVEL_EXECUTION",
+                "module scope may contain only imports, a docstring, and the strategy class",
+            )
+    disallowed_imports = sorted(imported_modules - _ALLOWED_IMPORTS)
+    if disallowed_imports:
+        raise CanonicalIntakeBlocked(
+            "REJECTED_IMPORT_NOT_ALLOWED",
+            "strategy artifact imports a module outside the canonical allowlist",
+        )
+    if not imported_istrategy:
+        raise CanonicalIntakeBlocked(
+            "REJECTED_STRATEGY_BASE",
+            "IStrategy must be imported from freqtrade.strategy",
+        )
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.decorator_list:
+            raise CanonicalIntakeBlocked(
+                "REJECTED_DYNAMIC_STRATEGY_SHAPE",
+                "function decorators are not allowed at intake",
+            )
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id in _BANNED_CALL_NAMES:
+                raise CanonicalIntakeBlocked(
+                    "REJECTED_DANGEROUS_CALL", "strategy artifact contains a banned call"
+                )
+            if (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr.lower() in _BANNED_ATTRIBUTE_NAMES
+            ):
+                raise CanonicalIntakeBlocked(
+                    "REJECTED_DANGEROUS_CALL", "strategy artifact contains a banned call"
+                )
     content_digest = sha256(normalized_bytes).hexdigest()
     return IntakeInspection(
         normalized_content=normalized_content,
         normalized_bytes=normalized_bytes,
         content_digest=content_digest,
+        strategy_class=strategy_class.name,
         checks={
-            "contract": "canonical-v13-intake-envelope-v1",
+            "contract": INTAKE_SAFETY_CONTRACT,
             "envelope": "PASSED",
             "size": "PASSED",
             "encoding": "UTF-8",
             "digest": "SHA-256",
             "secret_scan": "PASSED",
             "path_traversal": "PASSED",
-            "static_validation": "NOT_RUN",
+            "ast_parse": "PASSED",
+            "strategy_class": strategy_class.name,
+            "strategy_base": "IStrategy",
+            "import_allowlist": sorted(imported_modules),
+            "import_bindings": sorted(import_bindings),
+            "module_level_execution": "ABSENT",
+            "dangerous_calls": "ABSENT",
+            "static_validation": "PASSED",
             "lookahead_validation": "NOT_RUN",
             "backtest": "NOT_RUN",
             "execution": "NOT_AUTHORIZED",
@@ -352,6 +509,8 @@ def _accepted_result(
         or version["validation_status"] != "UNVALIDATED"
         or version["execution_authorized"] is not False
         or receipt["status"] != "INTAKE_ACCEPTED"
+        or receipt["checks_json"].get("contract") != INTAKE_SAFETY_CONTRACT
+        or receipt["checks_json"].get("static_validation") != "PASSED"
     ):
         raise CanonicalIntakeBlocked(
             "BLOCKED_INTAKE_RECEIPT_DRIFT", "persisted intake is not canonical"
@@ -397,7 +556,8 @@ def controlled_submit_latest(
     display_name = _require_identity(display_name, field="display_name", max_length=240)
     selected = select_latest_source_artifact(snapshot)
     inspection = inspect_intake_artifact(
-        selected.artifact_bytes, max_artifact_bytes=max_artifact_bytes
+        selected.artifact_bytes,
+        max_artifact_bytes=max_artifact_bytes,
     )
     request_payload = {
         "contract": "canonical-v13-controlled-submission-v1",
@@ -408,6 +568,8 @@ def controlled_submit_latest(
         "selected_source_version_id": selected.version_id,
         "selected_source_version_number": selected.version_number,
         "artifact_digest": inspection.content_digest,
+        "intake_safety_contract": INTAKE_SAFETY_CONTRACT,
+        "strategy_class": inspection.strategy_class,
         "display_name": display_name,
     }
     request_digest = _digest_json(request_payload)
@@ -599,6 +761,7 @@ __all__ = [
     "DEFAULT_MAX_ARTIFACT_BYTES",
     "ExternalSourceEntrySnapshot",
     "ExternalVersionSnapshot",
+    "INTAKE_SAFETY_CONTRACT",
     "IntakeInspection",
     "SelectedLatestArtifact",
     "controlled_submit_latest",

@@ -136,7 +136,10 @@ def _submission(connection):
                     source_strategy_key="external-evaluation",
                     version_id="external-v1",
                     version_number=1,
-                    artifact_bytes=b"class EvaluationStrategy:\n    pass\n",
+                    artifact_bytes=(
+                        b"from freqtrade.strategy import IStrategy\n"
+                        b"class EvaluationStrategy(IStrategy):\n    pass\n"
+                    ),
                 ),
             ),
         ),

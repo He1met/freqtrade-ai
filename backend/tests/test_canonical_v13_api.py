@@ -77,7 +77,10 @@ def _client():
 
 
 def _submission_payload(*, idempotency_key: str = "submit-1") -> dict[str, object]:
-    content = b"class CanonicalStrategy:\n    pass\n"
+    content = (
+        b"from freqtrade.strategy import IStrategy\n"
+        b"class CanonicalStrategy(IStrategy):\n    pass\n"
+    )
     return {
         "caller_identity": "canonical-api-test",
         "idempotency_key": idempotency_key,
