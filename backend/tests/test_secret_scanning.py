@@ -135,6 +135,30 @@ secret_id: ACTIVE
     assert report.status == "PASS"
 
 
+def test_secret_scan_allows_non_secret_authorization_references_but_not_headers(
+    tmp_path,
+) -> None:
+    write_file(
+        tmp_path / "config" / "authorization.py",
+        """
+authorization_id = uuid4()
+authorization_receipt_digest = receipt.digest
+authorization_consumption: ResearchAuthorizationConsumption | None
+_SECRET_PATTERNS: Final[tuple[object, ...]] = ()
+authorization = sk-live-header-secret
+""".strip(),
+    )
+
+    report = scan_repo_for_secrets(
+        tmp_path,
+        scan_paths=["config"],
+        tracked_only=False,
+    )
+
+    assert report.status == "BLOCKED"
+    assert [finding.key for finding in report.findings] == ["authorization"]
+
+
 def test_secret_scan_blocks_secret_shaped_authorization_metadata_values(
     tmp_path,
 ) -> None:

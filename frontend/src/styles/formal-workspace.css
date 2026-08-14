@@ -43,7 +43,7 @@
 .formal-context-banner a { color: var(--formal-brand-dark); font-size: 13px; font-weight: 800; white-space: nowrap; }
 
 .formal-context-banner[data-context="local-lab"] {
-  padding: 7px 12px;
+  padding: 6px 12px;
 }
 
 .formal-context-banner[data-context="local-lab"] div {

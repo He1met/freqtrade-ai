@@ -16,12 +16,24 @@ import { Ranking } from "./pages/Ranking";
 import { ResearchQueue } from "./pages/ResearchQueue";
 import { Strategies } from "./pages/Strategies";
 import { StrategyDetail } from "./pages/StrategyDetail";
+import { CanonicalConfigurationPage } from "./pages/canonicalV13/CanonicalConfigurationPage";
+import { CanonicalMarketDataPage } from "./pages/canonicalV13/CanonicalMarketDataPage";
+import { CanonicalOptimizationPage } from "./pages/canonicalV13/CanonicalOptimizationPage";
+import { CanonicalResearchPage } from "./pages/canonicalV13/CanonicalResearchPage";
+import { CanonicalStrategiesPage } from "./pages/canonicalV13/CanonicalStrategiesPage";
+import { CanonicalSubmissionPage } from "./pages/canonicalV13/CanonicalSubmissionPage";
 
 export function App() {
   return (
     <Routes>
       <Route element={<AppLayout />}>
         <Route index element={<Dashboard />} />
+        <Route path="v13/submission" element={<CanonicalSubmissionPage />} />
+        <Route path="v13/strategies" element={<CanonicalStrategiesPage />} />
+        <Route path="v13/configuration" element={<CanonicalConfigurationPage />} />
+        <Route path="v13/market-data" element={<CanonicalMarketDataPage />} />
+        <Route path="v13/research" element={<CanonicalResearchPage />} />
+        <Route path="v13/optimization" element={<CanonicalOptimizationPage />} />
         <Route path="strategies" element={<Strategies />} />
         <Route path="strategies/:strategyId" element={<StrategyDetail />} />
         <Route path="configuration" element={<ConfigurationCenter />} />

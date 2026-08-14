@@ -1,0 +1,409 @@
+from __future__ import annotations
+
+from datetime import timedelta
+from decimal import Decimal
+from uuid import uuid4
+
+import pytest
+from sqlalchemy import func, select
+
+from app.canonical_v13.deployment_approval import approve_demo_deployment
+from app.canonical_v13.deployment_control import create_demo_deployment, launch_demo_runtime
+from app.canonical_v13.accounting import post_simulated_ledger_entry
+from app.canonical_v13.execution_common import CanonicalExecutionChainBlocked
+from app.canonical_v13.fill_service import record_simulated_fill
+from app.canonical_v13.order_service import record_simulated_order
+from app.canonical_v13.reconciliation import reconcile_simulated_chain
+from app.canonical_v13.risk_service import create_simulated_intent, decide_simulated_risk
+from app.canonical_v13.signal_service import record_simulated_signal
+from app.canonical_v13.models import (
+    DEPLOYMENTS_TABLE,
+    DEPLOYMENT_APPROVALS_TABLE,
+    FILLS_TABLE,
+    LEDGER_ENTRIES_TABLE,
+    ORDERS_TABLE,
+    QUALIFICATION_DECISIONS_TABLE,
+    RECONCILIATION_RUNS_TABLE,
+    RISK_DECISIONS_TABLE,
+    RUNTIME_INSTANCES_TABLE,
+    RUNTIME_RECEIPTS_TABLE,
+    SIGNALS_TABLE,
+    TRADE_INTENTS_TABLE,
+    VALIDATION_PLANS_TABLE,
+)
+from app.canonical_v13.research_evaluation import qualify_target, score_target
+from app.canonical_v13.runtime_contract import (
+    CanonicalRuntimeContractBlocked,
+    FrozenRuntimeLaunchSpec,
+    assess_runtime_observation,
+    build_runtime_observation_receipt,
+)
+from tests.test_canonical_v13_research_evaluation import (
+    NOW,
+    _passing_metrics,
+    _validated_attempt,
+    canonical_connection,
+)
+
+
+def _count(connection, table) -> int:
+    return int(connection.execute(select(func.count()).select_from(table)).scalar_one())
+
+
+def _qualified(connection):
+    plan_id, attempt_id = _validated_attempt(
+        connection, metrics_by_window=_passing_metrics()
+    )
+    score_target(
+        connection,
+        validation_plan_id=plan_id,
+        validation_attempt_id=attempt_id,
+        scorer_identity="isolated-scorer-v1",
+    )
+    decision = qualify_target(
+        connection,
+        validation_plan_id=plan_id,
+        validation_attempt_id=attempt_id,
+        qualifier_identity="isolated-qualifier-v1",
+    )
+    return plan_id, decision
+
+
+class TestLauncher:
+    evidence_class = "TEST_SIMULATED"
+
+    def launch(self, spec: FrozenRuntimeLaunchSpec):
+        return build_runtime_observation_receipt(
+            runtime_instance_id=uuid4(),
+            launch_spec=spec,
+            status="HEALTHY",
+            observed_at=NOW,
+            evidence_class=self.evidence_class,
+        )
+
+
+def _runtime_fixture(connection):
+    plan_id, decision = _qualified(connection)
+    approval = approve_demo_deployment(
+        connection,
+        qualification_decision_id=decision.qualification_decision_id,
+        actor_identity="isolated-human-approver",
+        reason="isolated contract acceptance only",
+    )
+    deployment = create_demo_deployment(
+        connection, deployment_approval_id=approval.deployment_approval_id
+    )
+    runtime_id = launch_demo_runtime(
+        connection,
+        deployment_id=deployment.deployment_id,
+        runtime_identity="isolated-long-lived-runtime-fixture",
+        image_digest="f" * 64,
+        service_account="canonical_runtime_reader",
+        credential_reference="test-reference-never-resolved",
+        launcher=TestLauncher(),
+    )
+    plan = connection.execute(
+        select(VALIDATION_PLANS_TABLE).where(VALIDATION_PLANS_TABLE.c.id == plan_id)
+    ).mappings().one()
+    return plan, decision, deployment, runtime_id
+
+
+def test_simulator_runtime_never_activates_deployment_or_becomes_production_ready(
+    canonical_connection,
+):
+    with canonical_connection.begin():
+        _plan, decision, deployment, runtime_id = _runtime_fixture(
+            canonical_connection
+        )
+        deployment_status = canonical_connection.execute(
+            select(DEPLOYMENTS_TABLE.c.status).where(
+                DEPLOYMENTS_TABLE.c.id == deployment.deployment_id
+            )
+        ).scalar_one()
+        runtime = canonical_connection.execute(
+            select(RUNTIME_INSTANCES_TABLE).where(
+                RUNTIME_INSTANCES_TABLE.c.id == runtime_id
+            )
+        ).mappings().one()
+    assert decision.status == "QUALIFIED"
+    assert deployment_status == "PENDING"
+    assert runtime["status"] == "HEALTHY"
+    assert runtime["order_writer_capability"] is False
+
+    spec = FrozenRuntimeLaunchSpec(
+        deployment_id=deployment.deployment_id,
+        approval_id=uuid4(),
+        qualification_decision_id=decision.qualification_decision_id,
+        strategy_version_id=uuid4(),
+        configuration_bundle_id=uuid4(),
+        configuration_bundle_digest="1" * 64,
+        market_snapshot_id=uuid4(),
+        market_snapshot_digest="2" * 64,
+        deployment_capability_digest="3" * 64,
+        runtime_identity="isolated-long-lived-runtime-fixture",
+        image_digest="f" * 64,
+        service_account="canonical_runtime_reader",
+        network_policy="DEMO_EXCHANGE_ONLY",
+        credential_reference="test-reference-never-resolved",
+    )
+    receipt = build_runtime_observation_receipt(
+        runtime_instance_id=runtime_id,
+        launch_spec=spec,
+        status="HEALTHY",
+        observed_at=NOW,
+        evidence_class="TEST_SIMULATED",
+    )
+    status, reasons = assess_runtime_observation(
+        receipt,
+        evaluated_at=NOW + timedelta(minutes=1),
+        maximum_heartbeat_age=timedelta(minutes=5),
+    )
+    assert status == "BLOCKED"
+    assert reasons == ("RUNTIME_EVIDENCE_NOT_PRODUCTION",)
+
+    with pytest.raises(
+        CanonicalRuntimeContractBlocked, match="BLOCKED_RUNTIME_CAPABILITY_DRIFT"
+    ):
+        assess_runtime_observation(
+            build_runtime_observation_receipt(
+                runtime_instance_id=runtime_id,
+                launch_spec=FrozenRuntimeLaunchSpec(
+                    **{**spec.__dict__, "service_account": "canonical_research_writer"}
+                ),
+                status="HEALTHY",
+                observed_at=NOW,
+                evidence_class="TEST_SIMULATED",
+            ),
+            evaluated_at=NOW,
+            maximum_heartbeat_age=timedelta(minutes=5),
+        )
+
+
+def test_writer_separated_simulated_chain_and_reconciliation(canonical_connection):
+    with canonical_connection.begin():
+        plan, _decision, deployment, runtime_id = _runtime_fixture(
+            canonical_connection
+        )
+        signal_id = record_simulated_signal(
+            canonical_connection,
+            deployment_id=deployment.deployment_id,
+            runtime_instance_id=runtime_id,
+            research_target_id=plan["research_target_id"],
+            signal_json={"evidence_class": "TEST_SIMULATED", "side": "buy"},
+        )
+        intent_id = create_simulated_intent(
+            canonical_connection,
+            signal_id=signal_id,
+            intent_json={
+                "evidence_class": "TEST_SIMULATED",
+                "quantity": "0.001",
+            },
+        )
+        risk_id = decide_simulated_risk(
+            canonical_connection,
+            trade_intent_id=intent_id,
+            accepted=True,
+            policy_snapshot_digest="3" * 64,
+        )
+        order_id = record_simulated_order(
+            canonical_connection,
+            risk_decision_id=risk_id,
+            writer_identity="canonical-order-writer-simulator",
+            idempotency_key="isolated-order-one",
+            outcome="ACCEPTED",
+        )
+        fill_id = record_simulated_fill(
+            canonical_connection,
+            order_id=order_id,
+            exchange_fill_id="isolated-fill-one",
+            fill_json={"evidence_class": "TEST_SIMULATED", "amount": "0.001"},
+        )
+        ledger_id = post_simulated_ledger_entry(
+            canonical_connection,
+            fill_id=fill_id,
+            entry_key="isolated-ledger-one",
+            asset="BTC",
+            amount=Decimal("0.001"),
+            entry_type="DEMO_FILL",
+        )
+        reconciliation_id = reconcile_simulated_chain(
+            canonical_connection,
+            order_id=order_id,
+            fill_id=fill_id,
+            ledger_entry_id=ledger_id,
+        )
+        assert record_simulated_fill(
+            canonical_connection,
+            order_id=order_id,
+            exchange_fill_id="isolated-fill-one",
+            fill_json={"evidence_class": "TEST_SIMULATED", "amount": "0.001"},
+        ) == fill_id
+        assert post_simulated_ledger_entry(
+            canonical_connection,
+            fill_id=fill_id,
+            entry_key="isolated-ledger-one",
+            asset="BTC",
+            amount=Decimal("0.001"),
+            entry_type="DEMO_FILL",
+        ) == ledger_id
+        assert reconcile_simulated_chain(
+            canonical_connection,
+            order_id=order_id,
+            fill_id=fill_id,
+            ledger_entry_id=ledger_id,
+        ) == reconciliation_id
+    assert reconciliation_id
+    for table in (
+        SIGNALS_TABLE,
+        TRADE_INTENTS_TABLE,
+        RISK_DECISIONS_TABLE,
+        ORDERS_TABLE,
+        FILLS_TABLE,
+        LEDGER_ENTRIES_TABLE,
+        RECONCILIATION_RUNS_TABLE,
+    ):
+        assert _count(canonical_connection, table) == 1
+
+
+def test_uncertain_order_is_terminally_blocked_from_fill_and_retry_is_idempotent(
+    canonical_connection,
+):
+    with canonical_connection.begin():
+        plan, _decision, deployment, runtime_id = _runtime_fixture(
+            canonical_connection
+        )
+        signal_id = record_simulated_signal(
+            canonical_connection,
+            deployment_id=deployment.deployment_id,
+            runtime_instance_id=runtime_id,
+            research_target_id=plan["research_target_id"],
+            signal_json={"evidence_class": "TEST_SIMULATED", "side": "buy"},
+        )
+        intent_id = create_simulated_intent(
+            canonical_connection,
+            signal_id=signal_id,
+            intent_json={"evidence_class": "TEST_SIMULATED", "quantity": "0.001"},
+        )
+        risk_id = decide_simulated_risk(
+            canonical_connection,
+            trade_intent_id=intent_id,
+            accepted=True,
+            policy_snapshot_digest="3" * 64,
+        )
+        order_id = record_simulated_order(
+            canonical_connection,
+            risk_decision_id=risk_id,
+            writer_identity="canonical-order-writer-simulator",
+            idempotency_key="isolated-uncertain-order",
+            outcome="UNCERTAIN",
+        )
+        repeated = record_simulated_order(
+            canonical_connection,
+            risk_decision_id=risk_id,
+            writer_identity="canonical-order-writer-simulator",
+            idempotency_key="isolated-uncertain-order",
+            outcome="UNCERTAIN",
+        )
+        with pytest.raises(CanonicalExecutionChainBlocked) as blocked:
+            record_simulated_fill(
+                canonical_connection,
+                order_id=order_id,
+                exchange_fill_id="forbidden-fill",
+                fill_json={"evidence_class": "TEST_SIMULATED"},
+            )
+    assert repeated == order_id
+    assert blocked.value.code == "BLOCKED_ACCEPTED_ORDER_REQUIRED"
+    assert _count(canonical_connection, ORDERS_TABLE) == 1
+    assert _count(canonical_connection, FILLS_TABLE) == 0
+    assert _count(canonical_connection, LEDGER_ENTRIES_TABLE) == 0
+
+
+def test_bare_active_rows_cannot_fake_runtime_ready(canonical_connection):
+    from app.canonical_v13.api import _runtime_readiness
+
+    with canonical_connection.begin():
+        _plan, _decision, deployment, runtime_id = _runtime_fixture(
+            canonical_connection
+        )
+        canonical_connection.execute(
+            DEPLOYMENTS_TABLE.update()
+            .where(DEPLOYMENTS_TABLE.c.id == deployment.deployment_id)
+            .values(status="ACTIVE")
+        )
+        projection = _runtime_readiness(canonical_connection)
+    assert projection.status == "BLOCKED"
+    assert "RUNTIME_RECEIPT_CAPABILITY_DRIFT" in projection.reason_codes
+
+
+def test_future_production_shaped_heartbeat_remains_blocked(canonical_connection):
+    from app.canonical_v13.api import _runtime_readiness
+
+    with canonical_connection.begin():
+        _plan, _decision, deployment_result, runtime_id = _runtime_fixture(
+            canonical_connection
+        )
+        deployment = canonical_connection.execute(
+            select(DEPLOYMENTS_TABLE).where(
+                DEPLOYMENTS_TABLE.c.id == deployment_result.deployment_id
+            )
+        ).mappings().one()
+        approval = canonical_connection.execute(
+            select(DEPLOYMENT_APPROVALS_TABLE).where(
+                DEPLOYMENT_APPROVALS_TABLE.c.id
+                == deployment["deployment_approval_id"]
+            )
+        ).mappings().one()
+        qualification = canonical_connection.execute(
+            select(QUALIFICATION_DECISIONS_TABLE).where(
+                QUALIFICATION_DECISIONS_TABLE.c.id
+                == approval["qualification_decision_id"]
+            )
+        ).mappings().one()
+        runtime = canonical_connection.execute(
+            select(RUNTIME_INSTANCES_TABLE).where(
+                RUNTIME_INSTANCES_TABLE.c.id == runtime_id
+            )
+        ).mappings().one()
+        spec = FrozenRuntimeLaunchSpec(
+            deployment_id=deployment["id"],
+            approval_id=approval["id"],
+            qualification_decision_id=qualification["id"],
+            strategy_version_id=deployment["strategy_version_id"],
+            configuration_bundle_id=deployment["configuration_bundle_id"],
+            configuration_bundle_digest=deployment["configuration_bundle_digest"],
+            market_snapshot_id=deployment["market_snapshot_id"],
+            market_snapshot_digest=deployment["market_snapshot_digest"],
+            deployment_capability_digest=deployment["capability_digest"],
+            runtime_identity=runtime["runtime_identity"],
+            image_digest=runtime["image_digest"],
+            service_account=runtime["service_account"],
+            network_policy=runtime["network_policy"],
+            credential_reference=runtime["credential_reference"],
+        )
+        future = NOW + timedelta(days=3650)
+        receipt = build_runtime_observation_receipt(
+            runtime_instance_id=runtime_id,
+            launch_spec=spec,
+            status="HEALTHY",
+            observed_at=future,
+            evidence_class="PRODUCTION_DEMO_RUNTIME",
+        )
+        canonical_connection.execute(
+            DEPLOYMENTS_TABLE.update()
+            .where(DEPLOYMENTS_TABLE.c.id == deployment["id"])
+            .values(status="ACTIVE")
+        )
+        canonical_connection.execute(
+            RUNTIME_RECEIPTS_TABLE.update()
+            .where(RUNTIME_RECEIPTS_TABLE.c.runtime_instance_id == runtime_id)
+            .values(
+                evidence_class=receipt.evidence_class,
+                observed_at=receipt.observed_at,
+                observation_json={"future-test": True},
+                observation_digest=receipt.observation_digest,
+                receipt_digest=receipt.receipt_digest,
+            )
+        )
+        projection = _runtime_readiness(canonical_connection)
+    assert projection.status == "BLOCKED"
+    assert "RUNTIME_HEARTBEAT_IN_FUTURE" in projection.reason_codes

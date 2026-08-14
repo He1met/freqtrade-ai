@@ -12,10 +12,11 @@ import { dashboardActivityState, dashboardViewState } from "../src/pages/dashboa
 test("desktop navigation groups every route once while preserving detail route matching", () => {
   assert.deepEqual(
     navigationSections.map((section) => section.label),
-    ["正式工作台", "开发实验", "高级与历史"],
+    ["V1.3 Canonical", "开发实验", "Legacy 与历史"],
   );
   assert.equal(new Set(navigationItems.map((item) => item.to)).size, navigationItems.length);
-  assert.equal(navigationLabelForPath("/strategies/42"), "策略工厂");
+  assert.equal(navigationLabelForPath("/v13/strategies"), "策略目录");
+  assert.equal(navigationLabelForPath("/strategies/42"), "Legacy 策略工厂");
   assert.equal(navigationLabelForPath("/missing"), "页面未找到");
   assert.equal(isNavigationItemActive("/generation-runs-old", { to: "/generation-runs", label: "生成批次" }), false);
 });
