@@ -9,6 +9,7 @@ import {
 } from "./helpers/e2eConfigSafety.ts";
 import {
   acceptanceRepeatCount,
+  allocateIsolatedPort,
   LAB_ACCEPTANCE_PROFILES,
   validateAcceptanceProfiles,
 } from "./helpers/labAcceptanceProfiles.mjs";
@@ -33,19 +34,12 @@ test("E2E path validation accepts a real absolute directory", () => {
   );
 });
 
-test("lab acceptance profiles use distinct ports outside the random E2E bands", () => {
+test("lab acceptance profiles are exact and unique", () => {
   assert.equal(validateAcceptanceProfiles(), LAB_ACCEPTANCE_PROFILES);
   assert.deepEqual(
     LAB_ACCEPTANCE_PROFILES.map((profile) => profile.name),
     ["complete-current", "empty", "missing-result", "missing-strategy", "long-evidence"],
   );
-  const ports = LAB_ACCEPTANCE_PROFILES.flatMap((profile) => [
-    profile.backendPort,
-    profile.frontendPort,
-  ]);
-  assert.equal(new Set(ports).size, ports.length);
-  assert.equal(ports.some((port) => port >= 20_000 && port <= 40_000), false);
-  assert.equal(ports.includes(8000) || ports.includes(5173), false);
 });
 
 test("CI repeats the complete isolated acceptance matrix", () => {
@@ -54,20 +48,37 @@ test("CI repeats the complete isolated acceptance matrix", () => {
   assert.equal(acceptanceRepeatCount({ CI: "true" }), 2);
 });
 
-test("lab acceptance port validation rejects duplicates and unsafe bands", () => {
+test("lab acceptance profile validation rejects duplicate authority", () => {
   assert.throws(
     () =>
       validateAcceptanceProfiles([
-        { name: "one", backendPort: 41_001, frontendPort: 42_001 },
-        { name: "two", backendPort: 41_001, frontendPort: 42_002 },
+        { name: "one" },
+        { name: "one" },
       ]),
-    /unique integers/,
+    /names must be non-empty and unique/,
   );
-  assert.throws(
-    () =>
-      validateAcceptanceProfiles([
-        { name: "one", backendPort: 20_001, frontendPort: 42_001 },
-      ]),
-    /isolated band/,
+});
+
+test("isolated port allocation skips used and occupied candidates without reuse", async () => {
+  const usedPorts = new Set([50_000]);
+  const probed = [];
+  const selected = await allocateIsolatedPort({
+    usedPorts,
+    start: 50_000,
+    isAvailable: async (port) => {
+      probed.push(port);
+      return port === 50_002;
+    },
+  });
+  assert.equal(selected, 50_002);
+  assert.deepEqual(probed, [50_001, 50_002]);
+  assert.deepEqual([...usedPorts], [50_000, 50_002]);
+  await assert.rejects(
+    allocateIsolatedPort({
+      usedPorts,
+      start: 20_000,
+      isAvailable: async () => true,
+    }),
+    /outside the safe band/,
   );
 });
