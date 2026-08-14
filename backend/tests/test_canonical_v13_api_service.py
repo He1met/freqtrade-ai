@@ -66,3 +66,36 @@ def test_service_manager_has_no_delete_or_uninstall_command() -> None:
     source = SERVICE_PATH.read_text(encoding="utf-8")
     assert 'choices=("provision", "serve", "install", "status", "restart")' in source
     assert '"uninstall"' not in source
+
+
+def test_release_checkout_requires_clean_exact_origin_main(monkeypatch) -> None:
+    service = _load_service("canonical_v13_api_service_checkout")
+    monkeypatch.setattr(service, "REPO_ROOT", Path("/Users/local/release"))
+    responses = iter(
+        (
+            type("Result", (), {"returncode": 0, "stdout": ""})(),
+            type("Result", (), {"returncode": 0, "stdout": "abc\n"})(),
+            type("Result", (), {"returncode": 0, "stdout": "abc\n"})(),
+        )
+    )
+    monkeypatch.setattr(service, "_run", lambda _command: next(responses))
+    monkeypatch.setattr(service, "BACKEND_PYTHON", Path(__file__))
+    service._require_release_checkout()
+
+
+def test_release_checkout_rejects_dirty_or_non_main_head(monkeypatch) -> None:
+    service = _load_service("canonical_v13_api_service_checkout_blocked")
+    monkeypatch.setattr(service, "REPO_ROOT", Path("/Users/local/release"))
+    responses = iter(
+        (
+            type("Result", (), {"returncode": 0, "stdout": " M user-file\n"})(),
+            type("Result", (), {"returncode": 0, "stdout": "abc\n"})(),
+            type("Result", (), {"returncode": 0, "stdout": "def\n"})(),
+        )
+    )
+    monkeypatch.setattr(service, "_run", lambda _command: next(responses))
+    with pytest.raises(
+        service.CanonicalServiceBlocked,
+        match="BLOCKED_CANONICAL_RELEASE_CHECKOUT_REQUIRED",
+    ):
+        service._require_release_checkout()

@@ -206,13 +206,13 @@ def provision_principals() -> dict[str, object]:
 
 
 def _database_url(principal: str, service: str) -> str:
-    material = _read_keychain(service)
-    if material is None:
+    value = _read_keychain(service)
+    if value is None:
         raise CanonicalServiceBlocked("BLOCKED_KEYCHAIN_ITEM_MISSING")
     return URL.create(
         "postgresql+psycopg",
         username=principal,
-        password=material,
+        password=value.strip(),
         host=DATABASE_HOST,
         port=DATABASE_PORT,
         database=DATABASE_NAME,
@@ -261,12 +261,20 @@ def _run(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _require_main_checkout() -> None:
+def _require_release_checkout() -> None:
     if ".codex/worktrees" in str(REPO_ROOT):
-        raise CanonicalServiceBlocked("BLOCKED_CANONICAL_MAIN_CHECKOUT_REQUIRED")
-    branch = _run(["git", "branch", "--show-current"])
-    if branch.returncode != 0 or branch.stdout.strip() != "main":
-        raise CanonicalServiceBlocked("BLOCKED_CANONICAL_MAIN_CHECKOUT_REQUIRED")
+        raise CanonicalServiceBlocked("BLOCKED_CANONICAL_RELEASE_CHECKOUT_REQUIRED")
+    status_result = _run(["git", "status", "--porcelain"])
+    head_result = _run(["git", "rev-parse", "HEAD"])
+    main_result = _run(["git", "rev-parse", "origin/main"])
+    if (
+        status_result.returncode != 0
+        or status_result.stdout.strip()
+        or head_result.returncode != 0
+        or main_result.returncode != 0
+        or head_result.stdout.strip() != main_result.stdout.strip()
+    ):
+        raise CanonicalServiceBlocked("BLOCKED_CANONICAL_RELEASE_CHECKOUT_REQUIRED")
     if not BACKEND_PYTHON.is_file():
         raise CanonicalServiceBlocked("BLOCKED_BACKEND_VIRTUALENV_MISSING")
 
@@ -306,7 +314,7 @@ def _plist_payload(port: int) -> dict[str, object]:
 
 
 def install(port: int) -> dict[str, object]:
-    _require_main_checkout()
+    _require_release_checkout()
     if shutil.which("launchctl") is None:
         raise CanonicalServiceBlocked("BLOCKED_LAUNCHCTL_REQUIRED")
     if not _port_available(port):
@@ -360,7 +368,7 @@ def status(port: int) -> dict[str, object]:
 
 
 def restart(port: int) -> dict[str, object]:
-    _require_main_checkout()
+    _require_release_checkout()
     if not PLIST_PATH.is_file():
         raise CanonicalServiceBlocked("BLOCKED_LAUNCH_AGENT_MISSING")
     kicked = _run(["launchctl", "kickstart", "-k", _launchctl_target()])

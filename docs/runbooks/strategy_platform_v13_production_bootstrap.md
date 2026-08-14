@@ -61,7 +61,9 @@ shasum -a 256 "$BACKUP_PATH"
 
 ## 4. 独立 loopback API
 
-仅从 canonical main checkout 安装：
+仅从 clean release checkout 安装：该 checkout 可以是独立 detached worktree，但其 `HEAD` 必须
+精确等于 `origin/main`，worktree 必须 clean，且不得位于 Codex 临时 worktree 路径。不要为了
+部署清理、reset、stash 或覆盖已有 dirty main checkout；应另建专用 clean release worktree。
 
 ```bash
 python scripts/canonical_v13_api_service.py install --port 8011
