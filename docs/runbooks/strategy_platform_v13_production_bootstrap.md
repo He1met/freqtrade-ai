@@ -86,3 +86,36 @@ legacy API、不执行 genesis、不激活配置、不启动 research/runtime/tr
 
 UI/reverse proxy、公网访问、策略 intake、market、backtest、qualification、activation、runtime、
 OKX 和交易链均属于后续独立授权门。
+
+## 5. 独立 canonical UI gateway（no-trade）
+
+UI 只能从与 `origin/main` 精确一致的 clean release checkout 构建和安装。先在
+`frontend/` 执行 lockfile 固定的 `npm ci --ignore-scripts` 与 `npm run build`，再安装独立
+LaunchAgent：
+
+```bash
+python scripts/canonical_v13_ui_service.py install --port 8012
+python scripts/canonical_v13_ui_service.py status --port 8012
+```
+
+`com.he1met.freqtrade-ai.v13-canonical-ui` 只监听 `127.0.0.1:8012`，静态提供 build artifact，
+并且只把 `/api/canonical-v13` 转发至 `127.0.0.1:8011`。任何其他 `/api/*` 都返回
+`BLOCKED_LEGACY_API_DISABLED`；没有 legacy backend fallback、DSN、Keychain material 或公网
+listener。API 与 UI 使用两个独立 label/process，UI gateway 无数据库连接能力。
+
+真实浏览器验收至少覆盖 canonical submission、strategies、configuration、market-data、
+research、optimization 六个路由的 deep-link/refresh/URL state，以及未知 enum、空态和 API
+错误 fail-closed。验收不授权策略 intake、market acquisition、research/backtest 或交易。
+
+## 6. P0 configuration rollout 边界
+
+七类 P0 必须逐一通过 `/api/canonical-v13/configurations/{kind}/drafts` 和
+`/{kind}/{version_id}/validate`。每个 command 都必须携带唯一 `actor_identity` 与
+`idempotency_key`；成功事务同时写入 immutable version/snapshot、`idempotency_receipts` 和
+`audit_events`，相同请求 replay 返回同一 receipt，key reuse 或 receipt/audit drift 均 fail
+closed。禁止直接 INSERT/UPDATE 配置业务表。
+
+`RESEARCH_AGGREGATE` 只依赖前六类 frozen snapshots。bundle activation 仍必须通过 fresh
+market snapshot gate；缺少 market 时只允许 preview=`BLOCKED/MARKET_SNAPSHOT_UNSET`，不得为
+满足 rollout 文案而伪造 activation 或第二套 active pointer。此时 research/runtime 保持
+`BLOCKED`，optimization 保持 `PENDING_FIRST_BACKTEST`，trading 保持 `TRADING_DISABLED`。
