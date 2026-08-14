@@ -23,8 +23,10 @@ from app.canonical_v13.research_execution import (
     CanonicalResearchExecutionBlocked,
     SimulatedResearchExecutor,
     execute_consumed_research_attempt,
+    start_consumed_research_attempt,
 )
 from app.canonical_v13.research_validation import (
+    build_ephemeral_attempt_receipt,
     build_ephemeral_launch_spec,
     start_validation_attempt,
 )
@@ -55,9 +57,10 @@ def _running(connection):
     return prepared, start_validation_attempt(connection, launch_spec=spec)
 
 
-def _authorize(connection, prepared, **changes):
+def _authorize(connection, prepared, attempt_id, **changes):
     values = {
         "lineage": prepared.lineage,
+        "attempt_id": attempt_id,
         "validation_plan_id": prepared.plan_id,
         "validation_plan_digest": prepared.plan_digest,
         "actor_identity": "explicit-isolated-test-authority",
@@ -67,6 +70,40 @@ def _authorize(connection, prepared, **changes):
     }
     values.update(changes)
     return authorize_research_execution(connection, **values)
+
+
+def _authorized_running(connection, *, environment_class="ISOLATED_TEST"):
+    prepared = _prepare_ready_plan(connection)
+    attempt_id = uuid4()
+    authorization = _authorize(
+        connection,
+        prepared,
+        attempt_id,
+        environment_class=environment_class,
+    )
+    consumption = consume_research_execution_authorization(
+        connection,
+        authorization_id=authorization.authorization_id,
+        expected_lineage=prepared.lineage,
+        validation_plan_id=prepared.plan_id,
+        validation_plan_digest=prepared.plan_digest,
+        attempt_id=attempt_id,
+        actor_identity="isolated-executor",
+        consumed_at=NOW + timedelta(seconds=1),
+    )
+    spec = build_ephemeral_launch_spec(
+        connection,
+        validation_plan_id=prepared.plan_id,
+        expected_plan_digest=prepared.plan_digest,
+        executor_identity="canonical-ephemeral-simulator-v1",
+        executor_image_digest=EXECUTOR_IMAGE_DIGEST,
+    )
+    running = start_consumed_research_attempt(
+        connection,
+        launch_spec=spec,
+        authorization_consumption=consumption,
+    )
+    return prepared, running, authorization, consumption
 
 
 def test_missing_authority_is_blocked_before_executor_or_results(canonical_connection):
@@ -89,17 +126,8 @@ def test_one_shot_authority_executes_only_isolated_fixture_and_never_deploys(
     canonical_connection,
 ):
     with canonical_connection.begin():
-        prepared, running = _running(canonical_connection)
-        authorization = _authorize(canonical_connection, prepared)
-        consumption = consume_research_execution_authorization(
-            canonical_connection,
-            authorization_id=authorization.authorization_id,
-            expected_lineage=prepared.lineage,
-            validation_plan_id=prepared.plan_id,
-            validation_plan_digest=prepared.plan_digest,
-            attempt_id=running.validation_attempt_id,
-            actor_identity="isolated-executor",
-            consumed_at=NOW + timedelta(seconds=1),
+        prepared, running, authorization, consumption = _authorized_running(
+            canonical_connection
         )
         result = execute_consumed_research_attempt(
             canonical_connection,
@@ -123,7 +151,7 @@ def test_one_shot_authority_executes_only_isolated_fixture_and_never_deploys(
             expected_lineage=prepared.lineage,
             validation_plan_id=prepared.plan_id,
             validation_plan_digest=prepared.plan_digest,
-            attempt_id=uuid4(),
+            attempt_id=running.validation_attempt_id,
             actor_identity="isolated-executor",
             consumed_at=NOW + timedelta(seconds=2),
         )
@@ -132,10 +160,12 @@ def test_one_shot_authority_executes_only_isolated_fixture_and_never_deploys(
 
 def test_expired_or_mixed_lineage_authority_writes_no_consumption(canonical_connection):
     with canonical_connection.begin():
-        prepared, running = _running(canonical_connection)
+        prepared = _prepare_ready_plan(canonical_connection)
+        attempt_id = uuid4()
         authorization = _authorize(
             canonical_connection,
             prepared,
+            attempt_id,
             expires_at=NOW + timedelta(seconds=1),
         )
         before = _count(canonical_connection, AUDIT_EVENTS_TABLE)
@@ -146,7 +176,7 @@ def test_expired_or_mixed_lineage_authority_writes_no_consumption(canonical_conn
                 expected_lineage=prepared.lineage,
                 validation_plan_id=prepared.plan_id,
                 validation_plan_digest=prepared.plan_digest,
-                attempt_id=running.validation_attempt_id,
+                attempt_id=attempt_id,
                 actor_identity="isolated-executor",
                 consumed_at=NOW + timedelta(seconds=2),
             )
@@ -155,7 +185,9 @@ def test_expired_or_mixed_lineage_authority_writes_no_consumption(canonical_conn
     assert before == after
 
 
-def test_real_environment_adapter_remains_explicitly_blocked(canonical_connection):
+def test_production_environment_accepts_exact_networkless_writerless_adapter(
+    canonical_connection,
+):
     unsafe_type = type(
         "RealExecutor",
         (),
@@ -166,32 +198,37 @@ def test_real_environment_adapter_remains_explicitly_blocked(canonical_connectio
             "exchange_capabilities": (),
             "order_capabilities": (),
             "writer_capabilities": (),
-            "execute": lambda self, attempt: None,
+            "execute": lambda self, attempt: build_ephemeral_attempt_receipt(
+                attempt, metrics_by_window_key=_metrics()
+            ),
         },
     )
     with canonical_connection.begin():
-        prepared, running = _running(canonical_connection)
-        authorization = _authorize(
+        prepared, running, _authorization, consumption = _authorized_running(
             canonical_connection,
-            prepared,
             environment_class="PRODUCTION_RESEARCH",
         )
-        consumption = consume_research_execution_authorization(
+        result = execute_consumed_research_attempt(
             canonical_connection,
-            authorization_id=authorization.authorization_id,
-            expected_lineage=prepared.lineage,
-            validation_plan_id=prepared.plan_id,
-            validation_plan_digest=prepared.plan_digest,
-            attempt_id=running.validation_attempt_id,
-            actor_identity="production-executor",
-            consumed_at=NOW + timedelta(seconds=1),
+            running_attempt=running,
+            authorization_consumption=consumption,
+            executor=unsafe_type(),
         )
-        with pytest.raises(CanonicalResearchExecutionBlocked) as blocked:
-            execute_consumed_research_attempt(
+    assert result.environment_class == "PRODUCTION_RESEARCH"
+    assert result.attempt_status == "SUCCEEDED"
+    assert _count(canonical_connection, VALIDATION_WINDOW_RESULTS_TABLE) == 2
+
+
+def test_authorization_requires_short_lifetime(
+    canonical_connection,
+) -> None:
+    with canonical_connection.begin():
+        prepared = _prepare_ready_plan(canonical_connection)
+        with pytest.raises(CanonicalResearchAuthorizationBlocked) as lifetime:
+            _authorize(
                 canonical_connection,
-                running_attempt=running,
-                authorization_consumption=consumption,
-                executor=unsafe_type(),
+                prepared,
+                uuid4(),
+                expires_at=NOW + timedelta(minutes=16),
             )
-    assert blocked.value.code == "BLOCKED_EXPLICIT_AUTHORITY_REQUIRED"
-    assert _count(canonical_connection, VALIDATION_WINDOW_RESULTS_TABLE) == 0
+    assert lifetime.value.code == "BLOCKED_AUTHORIZATION_LIFETIME"

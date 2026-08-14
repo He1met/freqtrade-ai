@@ -31,6 +31,11 @@ from app.canonical_v13.market import (
     seal_market_snapshot,
     validate_market_profile,
 )
+from app.canonical_v13.research_validation import (
+    ResearchLineage,
+    build_lookahead_receipt,
+    canonical_research_digest,
+)
 from app.canonical_v13.models import (
     AUDIT_EVENTS_TABLE,
     CONFIGURATION_ACTIVATIONS_TABLE,
@@ -72,6 +77,9 @@ def _client():
     app = create_canonical_v13_app(
         reader_connection_factory=connection_factory,
         control_connection_factory=connection_factory,
+        validation_connection_factory=connection_factory,
+        scoring_connection_factory=connection_factory,
+        qualification_connection_factory=connection_factory,
     )
     return engine, TestClient(app, raise_server_exceptions=False)
 
@@ -353,6 +361,23 @@ def test_factory_is_standalone_and_exact_routes_are_frozen() -> None:
             ),
             (f"{API_PREFIX}/research-bundles/preview", "POST"),
             (f"{API_PREFIX}/research-bundles/{{bundle_id}}/activate", "POST"),
+            (f"{API_PREFIX}/research/validation-plans", "POST"),
+            (
+                f"{API_PREFIX}/research/validation-plans/{{validation_plan_id}}",
+                "GET",
+            ),
+            (f"{API_PREFIX}/research/authorizations", "POST"),
+            (
+                f"{API_PREFIX}/research/authorizations/{{authorization_id}}/consume",
+                "POST",
+            ),
+            (
+                f"{API_PREFIX}/research/authorizations/{{authorization_id}}/revoke",
+                "POST",
+            ),
+            (f"{API_PREFIX}/research/attempts", "POST"),
+            (f"{API_PREFIX}/research/scores", "POST"),
+            (f"{API_PREFIX}/research/qualifications", "POST"),
             (f"{API_PREFIX}/market-data", "GET"),
             (f"{API_PREFIX}/market-data/snapshots/{{snapshot_id}}", "GET"),
             (f"{API_PREFIX}/readiness/research", "GET"),
@@ -371,8 +396,177 @@ def test_factory_is_standalone_and_exact_routes_are_frozen() -> None:
             for method, operation in path.items()
             if method in {"get", "post", "put", "patch", "delete"}
         ]
-        assert len(operation_ids) == 13
+        assert len(operation_ids) == 21
         assert len(set(operation_ids)) == len(operation_ids)
+    finally:
+        client.close()
+        engine.dispose()
+
+
+def test_production_research_control_surface_binds_exact_attempt_and_projects_status() -> None:
+    engine, client = _client()
+    try:
+        submission = client.post(
+            f"{API_PREFIX}/submissions", json=_submission_payload()
+        ).json()
+        seed = _seed_ready_bundle(engine)
+        preview = client.post(
+            f"{API_PREFIX}/research-bundles/preview", json=seed
+        ).json()
+        activation = client.post(
+            f"{API_PREFIX}/research-bundles/{preview['prospective_bundle_id']}/activate",
+            json={
+                **seed,
+                "actor_identity": "production-research-control-test",
+                "expected_bundle_digest": preview["bundle_digest"],
+            },
+        ).json()
+        with engine.connect() as raw:
+            connection = raw.execution_options(
+                schema_translate_map={CANONICAL_BUSINESS_SCHEMA: None}
+            )
+            target_id = connection.execute(
+                select(RESEARCH_TARGETS_TABLE.c.id)
+            ).scalar_one()
+        lineage = ResearchLineage(
+            strategy_version_id=UUID(submission["strategy_version_id"]),
+            research_target_id=target_id,
+            configuration_bundle_id=UUID(activation["configuration_bundle_id"]),
+            configuration_bundle_digest=activation["bundle_digest"],
+            market_snapshot_id=UUID(seed["market_snapshot_id"]),
+            market_snapshot_digest=preview["market_snapshot_digest"],
+        )
+        lookahead = build_lookahead_receipt(
+            lineage=lineage,
+            artifact_digest=submission["artifact_digest"],
+            analyzer_identity="production-freqtrade-lookahead-v1",
+            analyzer_digest="c" * 64,
+            evidence_digest=canonical_research_digest(
+                {"has_bias": False, "source": "mocked-freqtrade"}
+            ),
+            status="PASSED",
+            has_bias=False,
+            observed_signal_count=3,
+        )
+        lineage_payload = {
+            key: str(value) if isinstance(value, UUID) else value
+            for key, value in lineage.__dict__.items()
+        }
+        plan_response = client.post(
+            f"{API_PREFIX}/research/validation-plans",
+            json={
+                "lineage": lineage_payload,
+                "static_validator_identity": "canonical-static-validator-v1",
+                "static_validator_digest": "d" * 64,
+                "lookahead_receipt": {
+                    key: value
+                    for key, value in lookahead.__dict__.items()
+                    if key != "lineage"
+                },
+                "orchestrator_identity": "production-research-orchestrator-v1",
+            },
+        )
+        assert plan_response.status_code == 201, plan_response.json()
+        plan = plan_response.json()
+        attempt_id = uuid4()
+        rejected_authorization = client.post(
+            f"{API_PREFIX}/research/authorizations",
+            json={
+                "attempt_id": str(attempt_id),
+                "lineage": lineage_payload,
+                "validation_plan_id": plan["validation_plan_id"],
+                "validation_plan_digest": "f" * 64,
+                "actor_identity": "production-research-authority",
+                "purpose": "ONE_NO_TRADE_RESEARCH_ATTEMPT",
+                "ttl_seconds": 300,
+            },
+        )
+        assert rejected_authorization.status_code == 409
+        assert (
+            rejected_authorization.json()["error"]["code"]
+            == "BLOCKED_AUTHORIZATION_PLAN_NOT_READY"
+        )
+        authorization_response = client.post(
+            f"{API_PREFIX}/research/authorizations",
+            json={
+                "attempt_id": str(attempt_id),
+                "lineage": lineage_payload,
+                "validation_plan_id": plan["validation_plan_id"],
+                "validation_plan_digest": plan["validation_plan_digest"],
+                "actor_identity": "production-research-authority",
+                "purpose": "ONE_NO_TRADE_RESEARCH_ATTEMPT",
+                "ttl_seconds": 300,
+            },
+        )
+        assert authorization_response.status_code == 201
+        authorization = authorization_response.json()
+        consumption_response = client.post(
+            f"{API_PREFIX}/research/authorizations/{authorization['authorization_id']}/consume",
+            json={
+                "attempt_id": str(attempt_id),
+                "lineage": lineage_payload,
+                "validation_plan_id": plan["validation_plan_id"],
+                "validation_plan_digest": plan["validation_plan_digest"],
+                "actor_identity": "production-research-orchestrator",
+            },
+        )
+        assert consumption_response.status_code == 200
+        consumption = consumption_response.json()
+        forged_consumption = dict(consumption)
+        forged_consumption["consumption_id"] = str(uuid4())
+        forged_consumption["receipt_digest"] = canonical_research_digest(
+            {
+                "consumption_id": forged_consumption["consumption_id"],
+                "request_digest": forged_consumption["request_digest"],
+            }
+        )
+        forged_start = client.post(
+            f"{API_PREFIX}/research/attempts",
+            json={
+                "validation_plan_id": plan["validation_plan_id"],
+                "validation_plan_digest": plan["validation_plan_digest"],
+                "executor_identity": "production-freqtrade-worker-v1",
+                "executor_image_digest": "e" * 64,
+                "authorization_consumption": forged_consumption,
+            },
+        )
+        assert forged_start.status_code == 409
+        assert forged_start.json()["error"]["code"] == (
+            "BLOCKED_AUTHORIZATION_CONSUMPTION_NOT_PERSISTED"
+        )
+        started_response = client.post(
+            f"{API_PREFIX}/research/attempts",
+            json={
+                "validation_plan_id": plan["validation_plan_id"],
+                "validation_plan_digest": plan["validation_plan_digest"],
+                "executor_identity": "production-freqtrade-worker-v1",
+                "executor_image_digest": "e" * 64,
+                "authorization_consumption": consumption,
+            },
+        )
+        assert started_response.status_code == 201, started_response.json()
+        started = started_response.json()
+        assert started["validation_attempt_id"] == str(attempt_id)
+        assert started["status"] == "RUNNING"
+
+        status = client.get(
+            f"{API_PREFIX}/research/validation-plans/{plan['validation_plan_id']}"
+        )
+        assert status.status_code == 200
+        assert status.json()["plan_status"] == "RUNNING"
+        assert status.json()["attempt_status"] == "RUNNING"
+        assert status.json()["qualification_status"] is None
+
+        premature_score = client.post(
+            f"{API_PREFIX}/research/scores",
+            json={
+                "validation_plan_id": plan["validation_plan_id"],
+                "validation_attempt_id": str(attempt_id),
+                "scorer_identity": "production-target-scorer",
+            },
+        )
+        assert premature_score.status_code == 409
+        assert premature_score.json()["status"] == "BLOCKED"
     finally:
         client.close()
         engine.dispose()

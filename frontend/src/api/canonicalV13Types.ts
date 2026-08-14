@@ -266,3 +266,22 @@ export type OptimizationListProjection = {
   status: "PENDING_FIRST_BACKTEST" | "AVAILABLE";
   items: OptimizationProjection[];
 };
+
+export type ResearchChainProjection = {
+  validation_plan_id: CanonicalId;
+  validation_plan_digest: Sha256Digest;
+  strategy_version_id: CanonicalId;
+  research_target_id: CanonicalId;
+  target_key: string;
+  plan_status: "DECLARED" | "READY" | "RUNNING" | "COMPLETE" | "FAILED" | "BLOCKED";
+  validation_attempt_id: CanonicalId | null;
+  attempt_status: "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED" | "BLOCKED" | null;
+  attempt_receipt_digest: Sha256Digest | null;
+  target_score_id: CanonicalId | null;
+  overall_score: string | null;
+  score_digest: Sha256Digest | null;
+  qualification_decision_id: CanonicalId | null;
+  qualification_status: "QUALIFIED" | "REJECTED" | "BLOCKED" | "FAILED" | null;
+  qualification_reason_code: string | null;
+  qualification_decision_digest: Sha256Digest | null;
+};

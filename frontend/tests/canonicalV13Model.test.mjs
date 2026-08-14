@@ -17,7 +17,7 @@ test("canonical URL key matrix is exact and stable", () => {
     strategies: ["strategy"],
     configuration: ["scope", "workflow", "profile", "version"],
     "market-data": ["profile", "snapshot", "target"],
-    research: ["scope", "workflow", "target", "strategy"],
+    research: ["scope", "workflow", "target", "strategy", "plan"],
     optimization: ["strategy", "target"],
   });
   assert.equal(

@@ -293,4 +293,180 @@ class OptimizationListProjectionDTO(CanonicalProjectionDTO):
     items: list[OptimizationProjectionDTO]
 
 
+class ResearchLineageDTO(CanonicalProjectionDTO):
+    strategy_version_id: UUID
+    research_target_id: UUID
+    configuration_bundle_id: UUID
+    configuration_bundle_digest: str = Field(pattern=SHA256_PATTERN)
+    market_snapshot_id: UUID
+    market_snapshot_digest: str = Field(pattern=SHA256_PATTERN)
+
+
+class LookaheadReceiptCommandDTO(CanonicalCommandDTO):
+    artifact_digest: str = Field(pattern=SHA256_PATTERN)
+    analyzer_identity: str = Field(min_length=1, max_length=200)
+    analyzer_digest: str = Field(pattern=SHA256_PATTERN)
+    evidence_digest: str = Field(pattern=SHA256_PATTERN)
+    status: Literal["PASSED", "FAILED", "BLOCKED"]
+    has_bias: Optional[bool]
+    observed_signal_count: int = Field(ge=0)
+    request_digest: str = Field(pattern=SHA256_PATTERN)
+    receipt_digest: str = Field(pattern=SHA256_PATTERN)
+
+
+class ValidationPlanCommandDTO(CanonicalCommandDTO):
+    lineage: ResearchLineageDTO
+    static_validator_identity: str = Field(min_length=1, max_length=200)
+    static_validator_digest: str = Field(pattern=SHA256_PATTERN)
+    lookahead_receipt: LookaheadReceiptCommandDTO
+    orchestrator_identity: str = Field(min_length=1, max_length=200)
+
+
+class ValidationPlanReceiptDTO(CanonicalProjectionDTO):
+    validation_plan_id: UUID
+    validation_plan_digest: str = Field(pattern=SHA256_PATTERN)
+    status: Literal["READY"]
+    window_count: int = Field(gt=0)
+    required_window_count: int = Field(gt=0)
+    static_receipt_digest: str = Field(pattern=SHA256_PATTERN)
+    lookahead_receipt_digest: str = Field(pattern=SHA256_PATTERN)
+    repeat_noop: bool
+
+
+class ResearchAuthorizationCommandDTO(CanonicalCommandDTO):
+    attempt_id: UUID
+    lineage: ResearchLineageDTO
+    validation_plan_id: UUID
+    validation_plan_digest: str = Field(pattern=SHA256_PATTERN)
+    actor_identity: str = Field(min_length=1, max_length=160)
+    purpose: str = Field(min_length=1, max_length=240)
+    ttl_seconds: int = Field(ge=1, le=900)
+
+
+class ResearchAuthorizationReceiptDTO(CanonicalProjectionDTO):
+    authorization_id: UUID
+    attempt_id: UUID
+    validation_plan_id: UUID
+    validation_plan_digest: str = Field(pattern=SHA256_PATTERN)
+    actor_identity: str
+    purpose: str
+    request_digest: str = Field(pattern=SHA256_PATTERN)
+    receipt_digest: str = Field(pattern=SHA256_PATTERN)
+    authorized_at: datetime
+    expires_at: datetime
+    one_shot: Literal[True]
+    environment_class: Literal["PRODUCTION_RESEARCH"]
+
+
+class ResearchAuthorizationConsumeCommandDTO(CanonicalCommandDTO):
+    attempt_id: UUID
+    lineage: ResearchLineageDTO
+    validation_plan_id: UUID
+    validation_plan_digest: str = Field(pattern=SHA256_PATTERN)
+    actor_identity: str = Field(min_length=1, max_length=160)
+
+
+class ResearchAuthorizationConsumptionReceiptDTO(CanonicalProjectionDTO):
+    authorization_id: UUID
+    consumption_id: UUID
+    attempt_id: UUID
+    lineage: ResearchLineageDTO
+    validation_plan_id: UUID
+    validation_plan_digest: str = Field(pattern=SHA256_PATTERN)
+    actor_identity: str
+    authorization_receipt_digest: str = Field(pattern=SHA256_PATTERN)
+    request_digest: str = Field(pattern=SHA256_PATTERN)
+    receipt_digest: str = Field(pattern=SHA256_PATTERN)
+    consumed_at: datetime
+    environment_class: Literal["PRODUCTION_RESEARCH"]
+
+
+class ResearchAuthorizationRevokeCommandDTO(CanonicalCommandDTO):
+    actor_identity: str = Field(min_length=1, max_length=160)
+    reason: str = Field(min_length=1, max_length=240)
+
+
+class ResearchAuthorizationRevokeReceiptDTO(CanonicalProjectionDTO):
+    authorization_id: UUID
+    revocation_event_id: UUID
+    status: Literal["REVOKED"] = "REVOKED"
+
+
+class ResearchAttemptStartCommandDTO(CanonicalCommandDTO):
+    validation_plan_id: UUID
+    validation_plan_digest: str = Field(pattern=SHA256_PATTERN)
+    executor_identity: str = Field(min_length=1, max_length=200)
+    executor_image_digest: str = Field(pattern=SHA256_PATTERN)
+    authorization_consumption: ResearchAuthorizationConsumptionReceiptDTO
+
+
+class ResearchAttemptStartReceiptDTO(CanonicalProjectionDTO):
+    validation_attempt_id: UUID
+    validation_plan_id: UUID
+    attempt_number: int = Field(gt=0)
+    status: Literal["RUNNING"]
+    request_digest: str = Field(pattern=SHA256_PATTERN)
+    environment_class: Literal["PRODUCTION_RESEARCH"] = "PRODUCTION_RESEARCH"
+
+
+class ResearchScoreCommandDTO(CanonicalCommandDTO):
+    validation_plan_id: UUID
+    validation_attempt_id: UUID
+    scorer_identity: str = Field(min_length=1, max_length=200)
+
+
+class ResearchScoreReceiptDTO(CanonicalProjectionDTO):
+    contract: Literal["canonical-v13-scoring-receipt-v1"]
+    target_score_id: UUID
+    validation_plan_id: UUID
+    validation_attempt_id: UUID
+    scoring_snapshot_id: UUID
+    overall_score: str
+    required_window_result_set_digest: str = Field(pattern=SHA256_PATTERN)
+    score_digest: str = Field(pattern=SHA256_PATTERN)
+    required_window_count: int = Field(gt=0)
+    repeat_noop: bool
+
+
+class ResearchQualificationCommandDTO(CanonicalCommandDTO):
+    validation_plan_id: UUID
+    validation_attempt_id: UUID
+    qualifier_identity: str = Field(min_length=1, max_length=200)
+
+
+class ResearchQualificationReceiptDTO(CanonicalProjectionDTO):
+    contract: Literal["canonical-v13-qualification-receipt-v1"]
+    qualification_decision_id: UUID
+    target_score_id: UUID
+    validation_plan_id: UUID
+    validation_attempt_id: UUID
+    quality_snapshot_id: UUID
+    status: Literal["QUALIFIED", "REJECTED", "BLOCKED", "FAILED"]
+    reason_code: str
+    decision_digest: str = Field(pattern=SHA256_PATTERN)
+    evidence_count: int = Field(gt=0)
+    repeat_noop: bool
+
+
+class ResearchChainProjectionDTO(CanonicalProjectionDTO):
+    validation_plan_id: UUID
+    validation_plan_digest: str = Field(pattern=SHA256_PATTERN)
+    strategy_version_id: UUID
+    research_target_id: UUID
+    target_key: str
+    plan_status: Literal["DECLARED", "READY", "RUNNING", "COMPLETE", "FAILED", "BLOCKED"]
+    validation_attempt_id: Optional[UUID]
+    attempt_status: Optional[Literal["PENDING", "RUNNING", "SUCCEEDED", "FAILED", "BLOCKED"]]
+    attempt_receipt_digest: Optional[str] = Field(default=None, pattern=SHA256_PATTERN)
+    target_score_id: Optional[UUID]
+    overall_score: Optional[str]
+    score_digest: Optional[str] = Field(default=None, pattern=SHA256_PATTERN)
+    qualification_decision_id: Optional[UUID]
+    qualification_status: Optional[Literal["QUALIFIED", "REJECTED", "BLOCKED", "FAILED"]]
+    qualification_reason_code: Optional[str]
+    qualification_decision_digest: Optional[str] = Field(
+        default=None, pattern=SHA256_PATTERN
+    )
+
+
 __all__ = [name for name in tuple(globals()) if name.endswith("DTO")]

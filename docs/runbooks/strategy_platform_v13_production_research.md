@@ -1,0 +1,134 @@
+# Canonical V1.3 production no-trade research
+
+本 runbook 描述可调用但默认 fail-closed 的 production research slice。它只使用 46-table
+canonical database，不连接 legacy/v47，不访问 Keychain/OKX，不启动 long-lived runtime，也不产生
+signal、trade intent、order、fill 或 real-funds 行为。
+
+## 1. 两类执行器必须分开
+
+- `SimulatedResearchExecutor` 只用于 `ISOLATED_TEST` fixture；其 metrics 是调用方显式测试输入，
+  绝不是 production backtest evidence。
+- `FreqtradeProductionResearchAdapter` 只接受 `PRODUCTION_RESEARCH` one-shot receipt。它通过 pinned
+  OCI image 调用 Freqtrade worker；容器固定 `--rm --network none --read-only --cap-drop ALL`，无
+  credential/exchange/order/database writer capability，并限制 CPU、memory、PID、tmpfs、timeout 和
+  combined output。
+- container 使用外层 launchd service 当前的非 root UID/GID，以只读方式访问 exact inputs；若
+  orchestrator 本身为 root 则在启动 OCI runtime 前 `BLOCKED_SANDBOX_ROOT_IDENTITY`。
+- strategy artifact、frozen bundle、market snapshot files、validation plan 都在外部 orchestrator
+  中按 canonical digest 验证，再以 read-only mount 交给 sandbox。sandbox environment 不继承 host
+  environment，因此拿不到 DSN、API key、Keychain 或 exchange credential。
+- sandbox 只返回 exact JSON envelope。外部 orchestrator 关闭 sandbox 后，分别使用 validation、
+  scoring、qualification writer 的独立事务持久化 receipt；scoring 入口不 import/call qualification，
+  PostgreSQL ACL 也不能写 qualification tables。
+
+## 2. control-plane activation 不等于 worker execution
+
+control/API 只提供这些 canonical endpoints：
+
+```text
+POST /api/canonical-v13/research/validation-plans
+POST /api/canonical-v13/research/authorizations
+POST /api/canonical-v13/research/authorizations/{id}/consume
+POST /api/canonical-v13/research/authorizations/{id}/revoke
+POST /api/canonical-v13/research/attempts
+GET  /api/canonical-v13/research/validation-plans/{id}
+POST /api/canonical-v13/research/scores
+POST /api/canonical-v13/research/qualifications
+```
+
+这些 endpoint 不启动 Freqtrade。CLI 的 `plan/authorize/consume/revoke/start/status/score/qualify`
+只是 loopback API client；API base 必须显式为 `http://127.0.0.1:<port>` 或 localhost。command body
+从 operator-controlled absolute JSON file 读取，不接受 DSN 参数，也不输出 DSN。
+
+```bash
+cd backend
+FREQTRADE_AI_CANONICAL_V13_API_BASE_URL=http://127.0.0.1:8011 \
+  python scripts/canonical_v13_research.py status --id <validation-plan-uuid>
+```
+
+`worker-execute` 是另一个显式动作，只消费已启动 RUNNING attempt 的 exact consumption receipt；
+它不会解析 active pointer、选择 latest plan、重用授权或启动 service。
+
+authorization command 只接受 `ttl_seconds`（1..900），`authorized_at`、`expires_at`、consume/revoke
+时间全部由 loopback API 的 UTC clock 生成，caller 不能回填时间来绕过过期门。
+start 与 worker 都会先从 immutable `audit_events` 重建 exact authorization/consumption receipt；
+只提供一个自洽但未持久化的 digest envelope 不能启动或执行 attempt。
+
+## 3. formal 顺序
+
+每个 strategy version × research target 必须串行执行：
+
+1. 外层 static AST validator 验证 canonical artifact，失败立即停止；
+2. pinned Freqtrade lookahead analyzer 产生 exact digest receipt，`has_bias=true/UNKNOWN` 都不能创建
+   READY plan；
+3. validation writer 从 frozen WINDOW snapshot 创建 exact plan，required windows 不能为空；
+4. control writer 为预先生成的 exact `attempt_id` 创建 `PRODUCTION_RESEARCH` one-shot authorization；
+5. control writer consume 一次；validation writer 以同一 attempt ID 启动；
+6. one-shot sandbox 对 exact required-window set backtest；optional window 不可替代 required window；
+7. validation writer 原子持久化 terminal attempt/window receipts；
+8. scoring writer 只写一个 `target_scores` receipt；
+9. qualifier writer先逐 required window 执行 hard gates，再读取 minimum score。任何 hard gate 失败
+   都是 `REJECTED/REQUIRED_WINDOW_GATE_FAILED`，高分不能覆盖；0 个 QUALIFIED 是有效结果；
+10. 只有 persisted `QUALIFIED` decision 才能作为 optimization baseline。
+
+worker、score、qualification 任一步缺失或 receipt/digest/lineage 漂移均保持 `BLOCKED/UNKNOWN`；不得由
+URL、UI 或 caller 本地推断。UI 只读取 canonical chain projection，显示 plan/attempt/score/decision
+的服务端状态和脱敏 digest。
+
+## 4. dynamic targets 与 cap=6
+
+target set 和 per-target cap 只能来自 frozen TARGET/GENERATION snapshots。batch planner 要求候选映射
+与 target set 精确等集；同一 strategy version 不得跨 target 重复。每个 target 独立按其 persisted
+`candidate_cap` 串行 chunk，不存在代码默认 target 或默认总数。
+
+当前单 target release profile 的 cap 必须显式为 6。未来对 31 个已入库 strategy versions 的只读
+规划结果应精确为 `6,6,6,6,6,1` 六批；本 release/任务不执行这些 production backtests。
+
+## 5. worker 显式环境
+
+`worker-execute` 的 reader/validation/scoring/qualification PostgreSQL DSN 必须分别使用
+`freqtrade_ai_v13_api_login`、`freqtrade_ai_v13_validation_login`、
+`freqtrade_ai_v13_scoring_login`、`freqtrade_ai_v13_qualification_login`，不得把 NOLOGIN capability
+role 当成连接身份。除此之外还要求每项显式设置：
+
+```text
+FREQTRADE_AI_CANONICAL_V13_RESEARCH_EXECUTION_ENABLED=PRODUCTION_RESEARCH_NO_TRADE_V1
+FREQTRADE_AI_CANONICAL_V13_RESEARCH_OCI_RUNTIME=<absolute executable path>
+FREQTRADE_AI_CANONICAL_V13_RESEARCH_IMAGE=<image>@sha256:<64 lowercase hex>
+FREQTRADE_AI_CANONICAL_V13_MARKET_ARTIFACT_ROOT=<absolute immutable root>
+FREQTRADE_AI_CANONICAL_V13_RESEARCH_WORKSPACE_ROOT=<absolute private temp root>
+FREQTRADE_AI_CANONICAL_V13_RESEARCH_CPU_LIMIT=1.0
+FREQTRADE_AI_CANONICAL_V13_RESEARCH_MEMORY_MB=<256..4096>
+FREQTRADE_AI_CANONICAL_V13_RESEARCH_TIMEOUT_SECONDS=<30..3600>
+FREQTRADE_AI_CANONICAL_V13_RESEARCH_OUTPUT_BYTES=<4096..8388608>
+FREQTRADE_AI_CANONICAL_V13_RESEARCH_PIDS_LIMIT=<16..256>
+FREQTRADE_AI_CANONICAL_V13_RESEARCH_TMPFS_MB=<32..512>
+```
+
+缺任何值、image 未 pin、runtime/path/symlink 不安全、四个 DB locator/identity 不分离，均在启动
+sandbox 前 `BLOCKED`。本 runbook 不授权配置这些值；恢复任务必须先更新 release pin 和完成独立
+provisioning/attestation。
+
+## 6. optimization 与重新验证
+
+`create_optimization_run` 只接受 persisted `QUALIFIED` baseline。trial 不能覆盖 baseline version；
+选中 trial 必须先经 controlled submission 创建新的 `UNVALIDATED` strategy version，且
+`execution_authorized=false`。新 version 必须从 static、lookahead、exact plan、one-shot backtest、
+score、qualification 全链重新执行；不得复制 baseline score/qualification 或直接 promotion。
+
+## 7. 首回测前的独立门
+
+以下全部有 exact evidence 才能执行第一个 production attempt：
+
+1. clean release checkout pin 到包含本 contract 的 remote `main` SHA，main push CI 全绿；
+2. authority upgrade 为 `CURRENT`，46 tables 未变，旧 broad writer 零 ACL/membership；
+3. 六个 API/research LOGIN exact membership 与同库 locator 验证通过；
+4. canonical market artifact 文件存在、root-relative locator、size/digest/coverage/freshness 全匹配；
+5. frozen bundle/target/window/scoring/quality snapshots 与 exact digest 已人工复核；
+6. pinned OCI image digest、worker contract、resource limits 和 network-none attestation 已复核；
+7. static 与 lookahead receipts 已通过；exact plan READY；attempt-specific authorization 未过期且未
+   consume/revoke；
+8. `TRADING_DISABLED`、无 runtime/signal/order/fill side effect，并有 rollback/incident owner。
+
+任一门缺失时为 `NO_OP/BLOCKED`。authority rollback 只在九张 research 表仍全空时允许；一旦产生
+任何 research row，不能回授 broad writer，必须设计新的显式迁移。

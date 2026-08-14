@@ -5,6 +5,7 @@ import pytest
 from app.canonical_v13.research_persistence import (
     RESEARCH_PERSISTENCE_ENV_BY_CAPABILITY,
     CanonicalResearchPersistenceBlocked,
+    research_service_principal,
     resolve_research_persistence_urls,
 )
 from app.canonical_v13.role_mapping import CanonicalRoleMapping
@@ -14,7 +15,8 @@ def _environment(mapping: CanonicalRoleMapping) -> dict[str, str]:
     return {
         environment_name: (
             "postgresql+psycopg://"
-            f"{mapping.physical(logical_role)}:not-a-secret@127.0.0.1/canonical_v13"
+            f"{research_service_principal(mapping, logical_role)}"
+            ":not-a-secret@127.0.0.1/canonical_v13"
         )
         for logical_role, environment_name in (
             RESEARCH_PERSISTENCE_ENV_BY_CAPABILITY.items()
@@ -55,7 +57,7 @@ def test_research_persistence_requires_exact_distinct_roles_on_one_database() ->
 
     split = dict(environment)
     split[scoring_environment] = (
-        "postgresql+psycopg://v13_scoring_writer@127.0.0.1/other"
+        "postgresql+psycopg://v13_scoring_login@127.0.0.1/other"
     )
     with pytest.raises(
         CanonicalResearchPersistenceBlocked,

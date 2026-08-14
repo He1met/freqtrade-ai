@@ -1363,10 +1363,45 @@ def build_ephemeral_launch_spec(
 
 
 def start_validation_attempt(
-    connection: Connection, *, launch_spec: EphemeralLaunchSpec
+    connection: Connection,
+    *,
+    launch_spec: EphemeralLaunchSpec,
+    validation_attempt_id: UUID | None = None,
 ) -> RunningValidationAttempt:
     effective = _require_canonical(connection)
     request_digest = validate_ephemeral_launch_spec(launch_spec)
+    if validation_attempt_id is not None:
+        existing = effective.execute(
+            select(VALIDATION_ATTEMPTS_TABLE).where(
+                VALIDATION_ATTEMPTS_TABLE.c.id == validation_attempt_id
+            )
+        ).mappings().one_or_none()
+        if existing is not None:
+            plan_status = effective.execute(
+                select(VALIDATION_PLANS_TABLE.c.status).where(
+                    VALIDATION_PLANS_TABLE.c.id == launch_spec.validation_plan_id
+                )
+            ).scalar_one_or_none()
+            if (
+                existing["validation_plan_id"] != launch_spec.validation_plan_id
+                or existing["status"] != "RUNNING"
+                or existing["executor_identity"] != launch_spec.executor_identity
+                or existing["executor_image_digest"]
+                != launch_spec.executor_image_digest
+                or existing["request_digest"] != request_digest
+                or plan_status != "RUNNING"
+            ):
+                raise CanonicalResearchValidationBlocked(
+                    "BLOCKED_ATTEMPT_IDENTITY_DRIFT",
+                    "reserved attempt identity already binds another state",
+                )
+            return RunningValidationAttempt(
+                validation_attempt_id=validation_attempt_id,
+                attempt_number=existing["attempt_number"],
+                status="RUNNING",
+                request_digest=request_digest,
+                launch_spec=launch_spec,
+            )
     plan_statement = select(VALIDATION_PLANS_TABLE).where(
             VALIDATION_PLANS_TABLE.c.id == launch_spec.validation_plan_id
         )
@@ -1410,7 +1445,7 @@ def start_validation_attempt(
         ).scalar_one()
         or 0
     ) + 1
-    attempt_id = uuid4()
+    attempt_id = validation_attempt_id or uuid4()
     now = datetime.now(timezone.utc)
     effective.execute(
         VALIDATION_ATTEMPTS_TABLE.insert().values(
@@ -1442,6 +1477,68 @@ def start_validation_attempt(
         status="RUNNING",
         request_digest=request_digest,
         launch_spec=launch_spec,
+    )
+
+
+def load_running_validation_attempt(
+    connection: Connection,
+    *,
+    validation_attempt_id: UUID,
+    expected_plan_digest: str,
+) -> RunningValidationAttempt:
+    """Rebuild one exact RUNNING launch envelope without choosing mutable state."""
+
+    effective = _require_canonical(connection)
+    expected_plan_digest = _digest(expected_plan_digest, field="expected_plan_digest")
+    attempt = effective.execute(
+        select(VALIDATION_ATTEMPTS_TABLE).where(
+            VALIDATION_ATTEMPTS_TABLE.c.id == validation_attempt_id
+        )
+    ).mappings().one_or_none()
+    if attempt is None or attempt["status"] != "RUNNING":
+        raise CanonicalResearchValidationBlocked(
+            "BLOCKED_VALIDATION_ATTEMPT_NOT_RUNNING",
+            "worker requires one exact RUNNING attempt",
+        )
+    plan = effective.execute(
+        select(VALIDATION_PLANS_TABLE).where(
+            VALIDATION_PLANS_TABLE.c.id == attempt["validation_plan_id"]
+        )
+    ).mappings().one_or_none()
+    if (
+        plan is None
+        or plan["status"] != "RUNNING"
+        or plan["validation_plan_digest"] != expected_plan_digest
+    ):
+        raise CanonicalResearchValidationBlocked(
+            "BLOCKED_VALIDATION_PLAN_NOT_RUNNING",
+            "attempt plan is absent, terminal, or has another digest",
+        )
+    lineage = _plan_lineage(plan)
+    _bundle_context(effective, lineage=lineage)
+    _version, artifact = _strategy_artifact(effective, lineage.strategy_version_id)
+    spec = EphemeralLaunchSpec(
+        lineage=lineage,
+        validation_plan_id=plan["id"],
+        validation_plan_digest=plan["validation_plan_digest"],
+        artifact_id=artifact["id"],
+        artifact_digest=artifact["content_digest"],
+        executor_identity=attempt["executor_identity"],
+        executor_image_digest=attempt["executor_image_digest"],
+        windows=_persisted_plan_windows(effective, plan["id"]),
+    )
+    request_digest = validate_ephemeral_launch_spec(spec)
+    if request_digest != attempt["request_digest"]:
+        raise CanonicalResearchValidationBlocked(
+            "BLOCKED_ATTEMPT_REQUEST_DIGEST_DRIFT",
+            "persisted RUNNING attempt no longer recomputes",
+        )
+    return RunningValidationAttempt(
+        validation_attempt_id=attempt["id"],
+        attempt_number=attempt["attempt_number"],
+        status="RUNNING",
+        request_digest=request_digest,
+        launch_spec=spec,
     )
 
 
@@ -1483,17 +1580,17 @@ def ephemeral_attempt_receipt_digest(receipt: EphemeralAttemptReceipt) -> str:
     return canonical_research_digest(_attempt_receipt_payload(receipt))
 
 
-def simulate_ephemeral_attempt(
+def build_ephemeral_attempt_receipt(
     running_attempt: RunningValidationAttempt,
     *,
     metrics_by_window_key: Mapping[str, Mapping[str, object]],
     status: str = "SUCCEEDED",
 ) -> EphemeralAttemptReceipt:
-    """Wrap explicit fixture metrics in receipts; no strategy or backtest is run."""
+    """Wrap an already-produced exact metrics envelope in immutable receipts."""
 
     if status not in _TERMINAL_ATTEMPT_STATUSES:
         raise CanonicalResearchValidationBlocked(
-            "BLOCKED_ATTEMPT_STATUS", "simulator requires a terminal attempt status"
+            "BLOCKED_ATTEMPT_STATUS", "receipt builder requires a terminal attempt status"
         )
     spec = running_attempt.launch_spec
     expected_request = validate_ephemeral_launch_spec(spec)
@@ -1506,7 +1603,7 @@ def simulate_ephemeral_attempt(
     if status == "SUCCEEDED" and supplied != set(required):
         raise CanonicalResearchValidationBlocked(
             "BLOCKED_REQUIRED_WINDOW_RESULT_SET",
-            "successful simulator receipt needs the exact dynamic required-window set",
+            "successful receipt needs the exact dynamic required-window set",
         )
     if status != "SUCCEEDED" and supplied:
         raise CanonicalResearchValidationBlocked(
@@ -1560,6 +1657,21 @@ def simulate_ephemeral_attempt(
             **provisional_receipt.__dict__,
             "receipt_digest": ephemeral_attempt_receipt_digest(provisional_receipt),
         }
+    )
+
+
+def simulate_ephemeral_attempt(
+    running_attempt: RunningValidationAttempt,
+    *,
+    metrics_by_window_key: Mapping[str, Mapping[str, object]],
+    status: str = "SUCCEEDED",
+) -> EphemeralAttemptReceipt:
+    """Test-only alias; it never executes strategy or Freqtrade code."""
+
+    return build_ephemeral_attempt_receipt(
+        running_attempt,
+        metrics_by_window_key=metrics_by_window_key,
+        status=status,
     )
 
 
@@ -1753,12 +1865,14 @@ __all__ = [
     "ValidationPlanResult",
     "ValidatorDecision",
     "WindowMetricsReceipt",
+    "build_ephemeral_attempt_receipt",
     "build_ephemeral_launch_spec",
     "build_lookahead_receipt",
     "canonical_research_digest",
     "declare_validation_plan",
     "ephemeral_attempt_receipt_digest",
     "mark_validation_plan_ready",
+    "load_running_validation_attempt",
     "record_terminal_attempt",
     "simulate_ephemeral_attempt",
     "start_validation_attempt",

@@ -38,6 +38,28 @@ READER_CAPABILITY = "freqtrade_ai_v13_api_reader"
 CONTROL_CAPABILITY = "freqtrade_ai_v13_control_writer"
 READER_KEYCHAIN_SERVICE = "freqtrade-ai/v13/api-reader-password"
 CONTROL_KEYCHAIN_SERVICE = "freqtrade-ai/v13/control-password"
+RESEARCH_PRINCIPAL_SPECS = (
+    (
+        "freqtrade_ai_v13_validation_login",
+        "freqtrade_ai_v13_validation_writer",
+        "freqtrade-ai/v13/research-validation-password",
+    ),
+    (
+        "freqtrade_ai_v13_scoring_login",
+        "freqtrade_ai_v13_scoring_writer",
+        "freqtrade-ai/v13/research-scoring-password",
+    ),
+    (
+        "freqtrade_ai_v13_qualification_login",
+        "freqtrade_ai_v13_qualification_writer",
+        "freqtrade-ai/v13/research-qualification-password",
+    ),
+    (
+        "freqtrade_ai_v13_optimization_login",
+        "freqtrade_ai_v13_optimization_writer",
+        "freqtrade-ai/v13/research-optimization-password",
+    ),
+)
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BACKEND_PYTHON = REPO_ROOT / "backend" / ".venv" / "bin" / "python"
 SCRIPT_PATH = Path(__file__).resolve()
@@ -233,6 +255,109 @@ def provision_principals() -> dict[str, object]:
     }
 
 
+def _require_research_authority_preprovisioned() -> None:
+    sys.path.insert(0, str(REPO_ROOT / "backend"))
+    from sqlalchemy import create_engine  # noqa: PLC0415
+
+    from app.canonical_v13.authority_upgrade import (  # noqa: PLC0415
+        verify_authority_upgrade_state,
+    )
+    from app.canonical_v13.bootstrap import (  # noqa: PLC0415
+        local_legacy_research_writer_role,
+        local_role_mapping,
+    )
+
+    engine = create_engine(
+        URL.create("postgresql+psycopg", database=DATABASE_NAME),
+        pool_pre_ping=True,
+    )
+    try:
+        with engine.connect() as connection:
+            verification = verify_authority_upgrade_state(
+                connection,
+                role_mapping=local_role_mapping(),
+                legacy_research_writer_role=local_legacy_research_writer_role(),
+                require_no_research_rows=True,
+            )
+    except Exception as exc:
+        raise CanonicalServiceBlocked(
+            "BLOCKED_RESEARCH_AUTHORITY_PREFLIGHT"
+        ) from exc
+    finally:
+        engine.dispose()
+    if not verification.accepted or verification.state != "CURRENT":
+        raise CanonicalServiceBlocked("BLOCKED_RESEARCH_AUTHORITY_PREFLIGHT")
+
+
+def provision_research_principals() -> dict[str, object]:
+    """Add four exact research LOGINs without modifying existing API principals."""
+
+    services = tuple(spec[2] for spec in RESEARCH_PRINCIPAL_SPECS)
+    if any(_read_keychain(service) is not None for service in services):
+        raise CanonicalServiceBlocked("BLOCKED_KEYCHAIN_ITEM_ALREADY_EXISTS")
+    _require_research_authority_preprovisioned()
+    principals = tuple(spec[0] for spec in RESEARCH_PRINCIPAL_SPECS)
+    capabilities = tuple(spec[1] for spec in RESEARCH_PRINCIPAL_SPECS)
+    with _admin_connection() as connection:
+        existing = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT rolname FROM pg_roles WHERE rolname = ANY(%s)",
+                (list(principals),),
+            )
+        }
+        observed_capabilities = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT rolname FROM pg_roles WHERE rolname = ANY(%s)",
+                (list(capabilities),),
+            )
+        }
+    if existing:
+        raise CanonicalServiceBlocked("BLOCKED_LOGIN_PRINCIPAL_ALREADY_EXISTS")
+    if observed_capabilities != set(capabilities):
+        raise CanonicalServiceBlocked("BLOCKED_CAPABILITY_ROLE_MISSING")
+
+    materials = {principal: secrets.token_urlsafe(48) for principal in principals}
+    added: list[str] = []
+    provisioned = False
+    try:
+        for principal, _capability, service in RESEARCH_PRINCIPAL_SPECS:
+            _add_keychain(service, materials[principal])
+            added.append(service)
+        with _admin_connection() as connection:
+            with connection.transaction():
+                for principal, capability, _service in RESEARCH_PRINCIPAL_SPECS:
+                    auth_verifier = _scram_verifier(materials[principal])
+                    connection.execute(
+                        sql.SQL(
+                            "CREATE ROLE {} LOGIN NOSUPERUSER NOCREATEDB "
+                            "NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS "
+                            "CONNECTION LIMIT 4 PASSWORD {}"
+                        ).format(
+                            sql.Identifier(principal),
+                            sql.Literal(auth_verifier),
+                        )
+                    )
+                    connection.execute(
+                        sql.SQL("GRANT {} TO {}").format(
+                            sql.Identifier(capability), sql.Identifier(principal)
+                        )
+                    )
+        provisioned = True
+    finally:
+        if not provisioned:
+            for service in reversed(added):
+                _delete_new_keychain(service)
+    return {
+        "status": "PROVISIONED",
+        "database": DATABASE_NAME,
+        "principals": list(principals),
+        "capabilities": list(capabilities),
+        "keychain_items": len(added),
+    }
+
+
 def _database_url(principal: str, service: str) -> str:
     value = _read_keychain(service)
     if value is None:
@@ -253,6 +378,43 @@ def canonical_control_database_url() -> str:
     return _database_url(CONTROL_PRINCIPAL, CONTROL_KEYCHAIN_SERVICE)
 
 
+def _production_database_environment() -> dict[str, str]:
+    sys.path.insert(0, str(REPO_ROOT / "backend"))
+    from app.canonical_v13.production import (  # noqa: PLC0415
+        CONTROL_DATABASE_URL_ENV,
+        READER_DATABASE_URL_ENV,
+    )
+    from app.canonical_v13.research_persistence import (  # noqa: PLC0415
+        OPTIMIZATION_DATABASE_URL_ENV,
+        QUALIFICATION_DATABASE_URL_ENV,
+        SCORING_DATABASE_URL_ENV,
+        VALIDATION_DATABASE_URL_ENV,
+    )
+
+    research_environment_names = (
+        VALIDATION_DATABASE_URL_ENV,
+        SCORING_DATABASE_URL_ENV,
+        QUALIFICATION_DATABASE_URL_ENV,
+        OPTIMIZATION_DATABASE_URL_ENV,
+    )
+    return {
+        READER_DATABASE_URL_ENV: _database_url(
+            READER_PRINCIPAL, READER_KEYCHAIN_SERVICE
+        ),
+        CONTROL_DATABASE_URL_ENV: _database_url(
+            CONTROL_PRINCIPAL, CONTROL_KEYCHAIN_SERVICE
+        ),
+        **{
+            environment_name: _database_url(principal, service)
+            for environment_name, (principal, _capability, service) in zip(
+                research_environment_names,
+                RESEARCH_PRINCIPAL_SPECS,
+                strict=True,
+            )
+        },
+    }
+
+
 def require_release_checkout() -> None:
     """Expose the existing clean/exact-main release guard to sibling tools."""
 
@@ -264,22 +426,11 @@ def serve(port: int) -> None:
         raise CanonicalServiceBlocked("BLOCKED_INVALID_LOOPBACK_PORT")
     sys.path.insert(0, str(REPO_ROOT / "backend"))
     from app.canonical_v13.production import (  # noqa: PLC0415
-        CONTROL_DATABASE_URL_ENV,
-        READER_DATABASE_URL_ENV,
         create_app,
     )
     import uvicorn  # noqa: PLC0415
 
-    app = create_app(
-        {
-            READER_DATABASE_URL_ENV: _database_url(
-                READER_PRINCIPAL, READER_KEYCHAIN_SERVICE
-            ),
-            CONTROL_DATABASE_URL_ENV: _database_url(
-                CONTROL_PRINCIPAL, CONTROL_KEYCHAIN_SERVICE
-            ),
-        }
-    )
+    app = create_app(_production_database_environment())
     uvicorn.run(app, host="127.0.0.1", port=port, access_log=False)
 
 
@@ -359,9 +510,12 @@ def install(port: int) -> dict[str, object]:
         raise CanonicalServiceBlocked("BLOCKED_LAUNCHCTL_REQUIRED")
     if not _port_available(port):
         raise CanonicalServiceBlocked("BLOCKED_LOOPBACK_PORT_IN_USE")
-    if _read_keychain(READER_KEYCHAIN_SERVICE) is None:
-        raise CanonicalServiceBlocked("BLOCKED_KEYCHAIN_ITEM_MISSING")
-    if _read_keychain(CONTROL_KEYCHAIN_SERVICE) is None:
+    required_services = (
+        READER_KEYCHAIN_SERVICE,
+        CONTROL_KEYCHAIN_SERVICE,
+        *(spec[2] for spec in RESEARCH_PRINCIPAL_SPECS),
+    )
+    if any(_read_keychain(service) is None for service in required_services):
         raise CanonicalServiceBlocked("BLOCKED_KEYCHAIN_ITEM_MISSING")
     PLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -426,13 +580,23 @@ def restart(port: int) -> dict[str, object]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "command", choices=("provision", "serve", "install", "status", "restart")
+        "command",
+        choices=(
+            "provision",
+            "provision-research",
+            "serve",
+            "install",
+            "status",
+            "restart",
+        ),
     )
     parser.add_argument("--port", type=int, default=DEFAULT_API_PORT)
     args = parser.parse_args(argv)
     try:
         if args.command == "provision":
             payload = provision_principals()
+        elif args.command == "provision-research":
+            payload = provision_research_principals()
         elif args.command == "serve":
             serve(args.port)
             return 0

@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
 from typing import Mapping
 from uuid import UUID, uuid4
 
-from sqlalchemy import Connection, select
+from sqlalchemy import Connection, func, select
 
 from app.canonical_v13.genesis import verify_canonical_genesis
 from app.canonical_v13.manifest import CANONICAL_BUSINESS_SCHEMA
@@ -20,6 +20,7 @@ from app.canonical_v13.research_validation import ResearchLineage
 AUTHORIZATION_EVENT = "RESEARCH_EXECUTION_AUTHORIZED"
 CONSUMED_EVENT = "RESEARCH_EXECUTION_AUTHORIZATION_CONSUMED"
 REVOKED_EVENT = "RESEARCH_EXECUTION_AUTHORIZATION_REVOKED"
+MAX_RESEARCH_GRANT_AGE = timedelta(minutes=15)
 
 
 class CanonicalResearchAuthorizationBlocked(RuntimeError):
@@ -32,6 +33,7 @@ class CanonicalResearchAuthorizationBlocked(RuntimeError):
 @dataclass(frozen=True)
 class ResearchExecutionAuthorization:
     authorization_id: UUID
+    attempt_id: UUID
     lineage: ResearchLineage
     validation_plan_id: UUID
     validation_plan_digest: str
@@ -115,6 +117,7 @@ def _lineage(lineage: ResearchLineage) -> dict[str, str]:
 def _authorization_evidence(
     *,
     authorization_id: UUID,
+    attempt_id: UUID,
     lineage: ResearchLineage,
     validation_plan_id: UUID,
     validation_plan_digest: str,
@@ -125,8 +128,9 @@ def _authorization_evidence(
     environment_class: str,
 ) -> dict[str, object]:
     return {
-        "contract": "canonical-v13-one-shot-research-authorization-v1",
+        "contract": "canonical-v13-one-shot-research-authorization-v2",
         "authorization_id": str(authorization_id),
+        "attempt_id": str(attempt_id),
         "lineage": _lineage(lineage),
         "validation_plan_id": str(validation_plan_id),
         "validation_plan_digest": validation_plan_digest,
@@ -150,6 +154,7 @@ def authorize_research_execution(
     connection: Connection,
     *,
     lineage: ResearchLineage,
+    attempt_id: UUID,
     validation_plan_id: UUID,
     validation_plan_digest: str,
     actor_identity: str,
@@ -174,10 +179,16 @@ def authorize_research_execution(
         raise CanonicalResearchAuthorizationBlocked(
             "BLOCKED_AUTHORIZATION_EXPIRY", "authorization must expire in the future"
         )
+    if expires_at - authorized_at > MAX_RESEARCH_GRANT_AGE:
+        raise CanonicalResearchAuthorizationBlocked(
+            "BLOCKED_AUTHORIZATION_LIFETIME",
+            "authorization lifetime exceeds the fixed maximum",
+        )
     effective = _require_canonical(connection)
     authorization_id = uuid4()
     evidence = _authorization_evidence(
         authorization_id=authorization_id,
+        attempt_id=attempt_id,
         lineage=lineage,
         validation_plan_id=validation_plan_id,
         validation_plan_digest=validation_plan_digest,
@@ -206,6 +217,7 @@ def authorize_research_execution(
     )
     return ResearchExecutionAuthorization(
         authorization_id=authorization_id,
+        attempt_id=attempt_id,
         lineage=lineage,
         validation_plan_id=validation_plan_id,
         validation_plan_digest=validation_plan_digest,
@@ -219,15 +231,29 @@ def authorize_research_execution(
     )
 
 
+def _serialize_authorization_terminal(
+    connection: Connection, authorization_id: UUID
+) -> None:
+    if connection.dialect.name != "postgresql":
+        return
+    lock_key = int.from_bytes(
+        sha256(
+            b"canonical-v13-research-authorization-terminal-v1:"
+            + authorization_id.bytes
+        ).digest()[:8],
+        byteorder="big",
+        signed=True,
+    )
+    connection.execute(select(func.pg_advisory_xact_lock(lock_key))).scalar_one()
+
+
 def _persisted_authorization(
-    connection: Connection, authorization_id: UUID, *, lock: bool = False
+    connection: Connection, authorization_id: UUID
 ) -> Mapping[str, object]:
     statement = select(AUDIT_EVENTS_TABLE).where(
-            AUDIT_EVENTS_TABLE.c.id == authorization_id,
-            AUDIT_EVENTS_TABLE.c.event_type == AUTHORIZATION_EVENT,
-        )
-    if lock and connection.dialect.name != "sqlite":
-        statement = statement.with_for_update()
+        AUDIT_EVENTS_TABLE.c.id == authorization_id,
+        AUDIT_EVENTS_TABLE.c.event_type == AUTHORIZATION_EVENT,
+    )
     row = connection.execute(statement).mappings().one_or_none()
     if row is None:
         raise CanonicalResearchAuthorizationBlocked(
@@ -266,14 +292,15 @@ def consume_research_execution_authorization(
 
     consumed_at = _utc(consumed_at)
     effective = _require_canonical(connection)
-    # Serialize consume against revoke on PostgreSQL.  The partial unique index
-    # on authorization audit events is the final duplicate-consumption guard.
-    receipt_record = _persisted_authorization(
-        effective, authorization_id, lock=True
-    )
+    # The immutable audit table deliberately grants no UPDATE capability, so a
+    # transaction-scoped advisory lock serializes consume against revoke without
+    # broadening ACLs.  The partial unique index remains the duplicate-event guard.
+    _serialize_authorization_terminal(effective, authorization_id)
+    receipt_record = _persisted_authorization(effective, authorization_id)
     evidence = receipt_record["evidence_json"]
     expected = _authorization_evidence(
         authorization_id=authorization_id,
+        attempt_id=attempt_id,
         lineage=expected_lineage,
         validation_plan_id=validation_plan_id,
         validation_plan_digest=validation_plan_digest,
@@ -385,6 +412,56 @@ def verify_research_authorization_consumption(
             "BLOCKED_EXECUTION_AUTHORIZATION_DIGEST_DRIFT",
             "authorization consumption receipt drifted",
         )
+
+
+def verify_persisted_research_authorization_consumption(
+    connection: Connection,
+    *,
+    consumption: ResearchAuthorizationConsumption,
+) -> None:
+    """Require the exact immutable authorization and consumption audit rows."""
+
+    verify_research_authorization_consumption(consumption)
+    effective = _require_canonical(connection)
+    persisted_grant = _persisted_authorization(
+        effective, consumption.authorization_id
+    )
+    evidence = {
+        "contract": "canonical-v13-research-authorization-consumption-v1",
+        "authorization_id": str(consumption.authorization_id),
+        "attempt_id": str(consumption.attempt_id),
+        "lineage": _lineage(consumption.lineage),
+        "validation_plan_id": str(consumption.validation_plan_id),
+        "validation_plan_digest": consumption.validation_plan_digest,
+        "actor_identity": consumption.actor_identity,
+        "consumed_at": _utc(consumption.consumed_at).isoformat(),
+        "authorization_receipt_digest": consumption.authorization_receipt_digest,
+        "environment_class": consumption.environment_class,
+    }
+    row = effective.execute(
+        select(AUDIT_EVENTS_TABLE).where(
+            AUDIT_EVENTS_TABLE.c.id == consumption.consumption_id,
+            AUDIT_EVENTS_TABLE.c.event_type == CONSUMED_EVENT,
+            AUDIT_EVENTS_TABLE.c.aggregate_type
+            == "research_execution_authorization",
+            AUDIT_EVENTS_TABLE.c.aggregate_id == str(consumption.authorization_id),
+        )
+    ).mappings().one_or_none()
+    if (
+        row is None
+        or persisted_grant["receipt_digest"]
+        != consumption.authorization_receipt_digest
+        or row["actor_identity"] != consumption.actor_identity
+        or row["request_digest"] != consumption.request_digest
+        or row["receipt_digest"] != consumption.receipt_digest
+        or row["evidence_json"] != evidence
+    ):
+        raise CanonicalResearchAuthorizationBlocked(
+            "BLOCKED_AUTHORIZATION_CONSUMPTION_NOT_PERSISTED",
+            "exact authorization consumption audit evidence is absent or drifted",
+        )
+
+
 def revoke_research_execution_authorization(
     connection: Connection,
     *,
@@ -394,7 +471,8 @@ def revoke_research_execution_authorization(
     revoked_at: datetime,
 ) -> UUID:
     effective = _require_canonical(connection)
-    _persisted_authorization(effective, authorization_id, lock=True)
+    _serialize_authorization_terminal(effective, authorization_id)
+    _persisted_authorization(effective, authorization_id)
     terminal = effective.execute(
         select(AUDIT_EVENTS_TABLE.c.id).where(
             AUDIT_EVENTS_TABLE.c.aggregate_id == str(authorization_id),
@@ -428,11 +506,13 @@ def revoke_research_execution_authorization(
 
 
 __all__ = [
+    "MAX_RESEARCH_GRANT_AGE",
     "CanonicalResearchAuthorizationBlocked",
     "ResearchAuthorizationConsumption",
     "ResearchExecutionAuthorization",
     "authorize_research_execution",
     "consume_research_execution_authorization",
     "revoke_research_execution_authorization",
+    "verify_persisted_research_authorization_consumption",
     "verify_research_authorization_consumption",
 ]
