@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+import re
 
 import pytest
 
@@ -43,6 +44,21 @@ def test_database_urls_are_built_only_from_fixed_principal_and_keychain_referenc
     )
     assert url.startswith("postgresql+psycopg://freqtrade_ai_v13_api_login:")
     assert url.endswith("@127.0.0.1:5432/freqtrade_ai_v13")
+
+
+def test_scram_verifier_is_deterministic_and_never_contains_input_material() -> None:
+    service = _load_service("canonical_v13_api_service_scram")
+    material = "x" * 64
+    verifier = service._scram_verifier(material, salt=b"0123456789abcdef")
+    assert verifier == service._scram_verifier(
+        material, salt=b"0123456789abcdef"
+    )
+    assert material not in verifier
+    assert re.fullmatch(
+        r"SCRAM-SHA-256\$4096:[A-Za-z0-9+/=]+\$"
+        r"[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+",
+        verifier,
+    )
 
 
 def test_provision_fails_closed_before_database_write_on_existing_keychain(
