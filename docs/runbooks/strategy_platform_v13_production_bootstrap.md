@@ -190,6 +190,9 @@ python scripts/canonical_v13_bootstrap.py verify-research-provisioned
 The repair accepts only that exact two-privilege legacy state, requires all nine
 research tables to remain empty, uses 46 explicit table statements (never `ON ALL
 TABLES`), writes one immutable audit receipt, and fails closed on partial ACLs.
+Its internal authority gate accepts only the four exact, already-provisioned
+research LOGIN memberships; the public pre-provision `authority-verify` command
+retains its zero-membership contract.
 Re-run the exact repair command only to prove `NO_OP_ALREADY_CURRENT` before
 leaving maintenance.
 

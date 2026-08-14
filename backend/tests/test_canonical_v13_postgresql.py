@@ -161,6 +161,37 @@ def test_empty_postgresql_genesis_mapping_acl_and_repeat_noop() -> None:
             assert current.accepted is True
             assert current.state == "CURRENT"
 
+            research_memberships = {
+                f"{ROLE_PREFIX}validation_writer": f"{ROLE_PREFIX}validation_login",
+                f"{ROLE_PREFIX}scoring_writer": f"{ROLE_PREFIX}scoring_login",
+                f"{ROLE_PREFIX}qualification_writer": f"{ROLE_PREFIX}qualification_login",
+                f"{ROLE_PREFIX}optimization_writer": f"{ROLE_PREFIX}optimization_login",
+            }
+            for capability_role, service_principal in research_memberships.items():
+                connection.exec_driver_sql(
+                    f"GRANT {capability_role} TO {service_principal}"
+                )
+            default_membership_gate = verify_authority_upgrade_state(
+                connection,
+                role_mapping=mapping,
+                legacy_research_writer_role=legacy_role,
+            )
+            assert default_membership_gate.accepted is False
+            provisioned_membership_gate = verify_authority_upgrade_state(
+                connection,
+                role_mapping=mapping,
+                legacy_research_writer_role=legacy_role,
+                allowed_isolated_memberships=frozenset(
+                    research_memberships.items()
+                ),
+            )
+            assert provisioned_membership_gate.accepted is True
+            assert provisioned_membership_gate.state == "CURRENT"
+            for capability_role, service_principal in research_memberships.items():
+                connection.exec_driver_sql(
+                    f"REVOKE {capability_role} FROM {service_principal}"
+                )
+
             for statement in _statements(
                 render_authority_rollback_acl_sql(
                     role_mapping=mapping,

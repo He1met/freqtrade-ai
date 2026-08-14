@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 import json
 from types import MappingProxyType
-from typing import Final, Mapping
+from typing import Collection, Final, Mapping
 from uuid import uuid4
 
 from sqlalchemy import Connection, func, select, text
@@ -292,6 +292,7 @@ def _role_problems(
     required_roles: tuple[str, ...],
     optional_roles: tuple[str, ...],
     isolated_roles: tuple[str, ...],
+    allowed_isolated_memberships: Collection[tuple[str, str]] = (),
 ) -> tuple[list[str], int]:
     all_roles = tuple(dict.fromkeys((*required_roles, *optional_roles)))
     rows = connection.execute(
@@ -314,23 +315,34 @@ def _role_problems(
         if str(row[0]) in isolated_roles and any(bool(value) for value in row[1:]):
             problems.append(f"capability role is not isolated NOLOGIN: {row[0]}")
 
-    memberships = connection.execute(
-        text(
-            """
-            SELECT parent.rolname, member.rolname
-            FROM pg_catalog.pg_auth_members membership
-            JOIN pg_catalog.pg_roles member ON member.oid=membership.member
-            JOIN pg_catalog.pg_roles parent ON parent.oid=membership.roleid
-            WHERE member.rolname = ANY(:roles)
-               OR parent.rolname = ANY(:roles)
-            """
-        ),
-        {"roles": list(isolated_roles)},
-    ).all()
-    if memberships:
+    memberships = {
+        (str(row[0]), str(row[1]))
+        for row in connection.execute(
+            text(
+                """
+                SELECT parent.rolname, member.rolname
+                FROM pg_catalog.pg_auth_members membership
+                JOIN pg_catalog.pg_roles member ON member.oid=membership.member
+                JOIN pg_catalog.pg_roles parent ON parent.oid=membership.roleid
+                WHERE member.rolname = ANY(:roles)
+                   OR parent.rolname = ANY(:roles)
+                """
+            ),
+            {"roles": list(isolated_roles)},
+        )
+    }
+    expected_memberships = set(allowed_isolated_memberships)
+    missing_memberships = expected_memberships - memberships
+    extra_memberships = memberships - expected_memberships
+    if missing_memberships:
         problems.append(
-            "legacy/split research roles must have zero memberships "
-            f"count={len(memberships)}"
+            "missing allowed research role memberships "
+            f"count={len(missing_memberships)}"
+        )
+    if extra_memberships:
+        problems.append(
+            "unexpected legacy/split research role memberships "
+            f"count={len(extra_memberships)}"
         )
     return problems, len(rows)
 
@@ -468,6 +480,7 @@ def verify_authority_upgrade_state(
     role_mapping: CanonicalRoleMapping,
     legacy_research_writer_role: str,
     require_no_research_rows: bool = True,
+    allowed_isolated_memberships: Collection[tuple[str, str]] = (),
 ) -> AuthorityUpgradeVerification:
     """Classify an exact previous/current ACL state without mutating it."""
 
@@ -531,6 +544,7 @@ def verify_authority_upgrade_state(
             legacy_research_writer_role,
             *(current_roles[role] for role in SPLIT_RESEARCH_WRITER_IDENTITIES),
         ),
+        allowed_isolated_memberships=allowed_isolated_memberships,
     )
     problems.extend(role_problems)
     owner = role_mapping.physical("canonical_schema_owner")
