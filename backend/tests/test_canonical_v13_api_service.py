@@ -62,6 +62,19 @@ def test_scram_verifier_is_deterministic_and_never_contains_input_material() -> 
     )
 
 
+def test_keychain_presence_probe_never_reads_secret_value(monkeypatch) -> None:
+    service = _load_service("canonical_v13_api_service_keychain_presence")
+    observed: list[str] = []
+
+    def run(command, **_kwargs):
+        observed.extend(command)
+        return type("Result", (), {"returncode": 0})()
+
+    monkeypatch.setattr(service.subprocess, "run", run)
+    assert service._keychain_item_exists(service.READER_KEYCHAIN_SERVICE) is True
+    assert "-w" not in observed
+
+
 def test_production_environment_uses_six_fixed_keychain_backed_principals(
     monkeypatch,
 ) -> None:
@@ -129,9 +142,116 @@ def test_research_provision_requires_empty_current_authority_before_writes(
         service.provision_research_principals()
 
 
+def test_research_database_connect_repair_fails_closed_on_non_exact_state(
+    monkeypatch,
+) -> None:
+    service = _load_service("canonical_v13_api_service_connect_repair")
+    monkeypatch.setattr(service, "_keychain_item_exists", lambda _service: True)
+    verification = type("Verification", (), {"problems": ()})()
+    monkeypatch.setattr(
+        service,
+        "_verify_research_provisioned_state",
+        lambda: verification,
+    )
+    monkeypatch.setattr(
+        service,
+        "_admin_connection",
+        lambda: pytest.fail("repair writes require the exact all-missing state"),
+    )
+    with pytest.raises(
+        service.CanonicalServiceBlocked,
+        match="BLOCKED_RESEARCH_CONNECT_REPAIR_PREFLIGHT",
+    ):
+        service.repair_research_database_connect()
+
+
+def test_research_connect_grants_target_only_four_capability_roles() -> None:
+    service = _load_service("canonical_v13_api_service_connect_grants")
+
+    class Connection:
+        def __init__(self) -> None:
+            self.statements: list[object] = []
+
+        def execute(self, statement: object) -> None:
+            self.statements.append(statement)
+
+    connection = Connection()
+    service._grant_research_database_connect(connection)
+    assert len(connection.statements) == 4
+    rendered = "\n".join(str(value) for value in connection.statements)
+    assert "GRANT" in rendered
+    assert service.DATABASE_NAME in rendered
+    assert all(spec[1] in rendered for spec in service.RESEARCH_PRINCIPAL_SPECS)
+    assert all(spec[0] not in rendered for spec in service.RESEARCH_PRINCIPAL_SPECS)
+
+
+def test_research_connect_repair_accepts_only_all_missing_then_postverifies(
+    monkeypatch,
+) -> None:
+    service = _load_service("canonical_v13_api_service_connect_repair_success")
+    monkeypatch.setattr(service, "_keychain_item_exists", lambda _service: True)
+    verifications = iter(
+        (
+            type(
+                "Verification",
+                (),
+                {
+                    "accepted": False,
+                    "problems": ("missing service database CONNECT count=4",),
+                },
+            )(),
+            type("Verification", (), {"accepted": True, "problems": ()})(),
+        )
+    )
+    monkeypatch.setattr(
+        service,
+        "_verify_research_provisioned_state",
+        lambda: next(verifications),
+    )
+
+    class Transaction:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+    class Connection:
+        def __init__(self) -> None:
+            self.grants = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def transaction(self) -> Transaction:
+            return Transaction()
+
+        def execute(self, statement, _parameters=None):
+            if isinstance(statement, str):
+                return [(spec[1], False) for spec in service.RESEARCH_PRINCIPAL_SPECS]
+            self.grants += 1
+            return None
+
+    connection = Connection()
+    monkeypatch.setattr(service, "_admin_connection", lambda: connection)
+    result = service.repair_research_database_connect()
+    assert result == {
+        "status": "REPAIRED",
+        "database": service.DATABASE_NAME,
+        "capabilities": [spec[1] for spec in service.RESEARCH_PRINCIPAL_SPECS],
+        "database_connect_grants": 4,
+        "keychain_items_modified": 0,
+    }
+    assert connection.grants == 4
+
+
 def test_service_manager_has_no_delete_or_uninstall_command() -> None:
     source = SERVICE_PATH.read_text(encoding="utf-8")
     assert '"provision-research",' in source
+    assert '"repair-research-connect",' in source
     assert '"uninstall"' not in source
 
 

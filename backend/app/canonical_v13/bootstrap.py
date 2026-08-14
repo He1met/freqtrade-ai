@@ -182,6 +182,48 @@ def verify_postgresql_bootstrap(
                 problems.append(
                     f"service principal privilege drift: {row[0]}"
                 )
+        expected_connect_roles = {
+            role_mapping.physical(logical)
+            for logical in service_principals.values()
+        }
+        relevant_database_roles = (
+            set(service_principals) | expected_connect_roles
+        )
+        connect_roles = {
+            str(value)
+            for value in connection.execute(
+                text(
+                    """
+                    SELECT grantee.rolname
+                    FROM pg_catalog.pg_database database
+                    CROSS JOIN LATERAL aclexplode(
+                        COALESCE(
+                            database.datacl,
+                            acldefault('d', database.datdba)
+                        )
+                    ) database_acl
+                    JOIN pg_catalog.pg_roles grantee
+                      ON grantee.oid = database_acl.grantee
+                    WHERE database.datname = current_database()
+                      AND grantee.rolname = ANY(:roles)
+                      AND database_acl.privilege_type = 'CONNECT'
+                    """
+                ),
+                {"roles": list(relevant_database_roles)},
+            ).scalars()
+        }
+        missing_connect = expected_connect_roles - connect_roles
+        extra_connect = connect_roles - expected_connect_roles
+        if missing_connect:
+            problems.append(
+                "missing service database CONNECT "
+                f"count={len(missing_connect)}"
+            )
+        if extra_connect:
+            problems.append(
+                "unexpected service database CONNECT "
+                f"count={len(extra_connect)}"
+            )
 
     owner = role_mapping.physical("canonical_schema_owner")
     owner_drift = connection.execute(

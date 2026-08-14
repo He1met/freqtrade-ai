@@ -133,6 +133,29 @@ def _read_keychain(service: str) -> str | None:
     return material
 
 
+def _keychain_item_exists(service: str) -> bool:
+    completed = subprocess.run(
+        [
+            str(_security_command()),
+            "find-generic-password",
+            "-a",
+            _keychain_account(),
+            "-s",
+            service,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        stdin=subprocess.DEVNULL,
+    )
+    if completed.returncode == 44:
+        return False
+    if completed.returncode != 0:
+        raise CanonicalServiceBlocked("BLOCKED_KEYCHAIN_READ_FAILED")
+    return True
+
+
 def _add_keychain(service: str, material: str) -> None:
     if _read_keychain(service) is not None:
         raise CanonicalServiceBlocked("BLOCKED_KEYCHAIN_ITEM_ALREADY_EXISTS")
@@ -289,6 +312,18 @@ def _require_research_authority_preprovisioned() -> None:
         raise CanonicalServiceBlocked("BLOCKED_RESEARCH_AUTHORITY_PREFLIGHT")
 
 
+def _grant_research_database_connect(
+    connection: psycopg.Connection[Any],
+) -> None:
+    for _principal, capability, _service in RESEARCH_PRINCIPAL_SPECS:
+        connection.execute(
+            sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(
+                sql.Identifier(DATABASE_NAME),
+                sql.Identifier(capability),
+            )
+        )
+
+
 def provision_research_principals() -> dict[str, object]:
     """Add four exact research LOGINs without modifying existing API principals."""
 
@@ -344,6 +379,7 @@ def provision_research_principals() -> dict[str, object]:
                             sql.Identifier(capability), sql.Identifier(principal)
                         )
                     )
+                _grant_research_database_connect(connection)
         provisioned = True
     finally:
         if not provisioned:
@@ -355,6 +391,82 @@ def provision_research_principals() -> dict[str, object]:
         "principals": list(principals),
         "capabilities": list(capabilities),
         "keychain_items": len(added),
+    }
+
+
+def _verify_research_provisioned_state():
+    sys.path.insert(0, str(REPO_ROOT / "backend"))
+    from sqlalchemy import create_engine  # noqa: PLC0415
+
+    from app.canonical_v13.bootstrap import (  # noqa: PLC0415
+        LOCAL_RESEARCH_SERVICE_PRINCIPALS,
+        LOCAL_SERVICE_PRINCIPALS,
+        local_role_mapping,
+        verify_postgresql_bootstrap,
+    )
+
+    service_principals = dict(LOCAL_SERVICE_PRINCIPALS)
+    service_principals.update(LOCAL_RESEARCH_SERVICE_PRINCIPALS)
+    engine = create_engine(
+        URL.create("postgresql+psycopg", database=DATABASE_NAME),
+        pool_pre_ping=True,
+    )
+    try:
+        with engine.connect() as connection:
+            return verify_postgresql_bootstrap(
+                connection,
+                role_mapping=local_role_mapping(),
+                require_zero_business_rows=False,
+                service_principals=service_principals,
+            )
+    finally:
+        engine.dispose()
+
+
+def repair_research_database_connect() -> dict[str, object]:
+    """Repair only the exact all-missing CONNECT state without touching secrets."""
+
+    services = tuple(spec[2] for spec in RESEARCH_PRINCIPAL_SPECS)
+    if any(not _keychain_item_exists(service) for service in services):
+        raise CanonicalServiceBlocked("BLOCKED_RESEARCH_KEYCHAIN_INCOMPLETE")
+    before = _verify_research_provisioned_state()
+    if before.problems != ("missing service database CONNECT count=4",):
+        raise CanonicalServiceBlocked("BLOCKED_RESEARCH_CONNECT_REPAIR_PREFLIGHT")
+
+    capabilities = tuple(spec[1] for spec in RESEARCH_PRINCIPAL_SPECS)
+    with _admin_connection() as connection:
+        connect_states = {
+            str(row[0]): bool(row[1])
+            for row in connection.execute(
+                """
+                SELECT rolname,
+                       has_database_privilege(
+                           rolname, current_database(), 'CONNECT'
+                       )
+                FROM pg_catalog.pg_roles
+                WHERE rolname = ANY(%s)
+                """,
+                (list(capabilities),),
+            )
+        }
+        if set(connect_states) != set(capabilities) or any(
+            connect_states.values()
+        ):
+            raise CanonicalServiceBlocked(
+                "BLOCKED_RESEARCH_CONNECT_REPAIR_PARTIAL"
+            )
+        with connection.transaction():
+            _grant_research_database_connect(connection)
+
+    after = _verify_research_provisioned_state()
+    if not after.accepted:
+        raise CanonicalServiceBlocked("BLOCKED_RESEARCH_CONNECT_REPAIR_POSTVERIFY")
+    return {
+        "status": "REPAIRED",
+        "database": DATABASE_NAME,
+        "capabilities": list(capabilities),
+        "database_connect_grants": len(capabilities),
+        "keychain_items_modified": 0,
     }
 
 
@@ -584,6 +696,7 @@ def main(argv: list[str] | None = None) -> int:
         choices=(
             "provision",
             "provision-research",
+            "repair-research-connect",
             "serve",
             "install",
             "status",
@@ -597,6 +710,8 @@ def main(argv: list[str] | None = None) -> int:
             payload = provision_principals()
         elif args.command == "provision-research":
             payload = provision_research_principals()
+        elif args.command == "repair-research-connect":
+            payload = repair_research_database_connect()
         elif args.command == "serve":
             serve(args.port)
             return 0
@@ -609,7 +724,7 @@ def main(argv: list[str] | None = None) -> int:
     except CanonicalServiceBlocked as exc:
         payload = {"status": "BLOCKED", "reason": str(exc)}
     print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
-    return 0 if payload["status"] in {"PROVISIONED", "INSTALLED", "READY", "RESTARTED"} else 2
+    return 0 if payload["status"] in {"PROVISIONED", "REPAIRED", "INSTALLED", "READY", "RESTARTED"} else 2
 
 
 if __name__ == "__main__":
