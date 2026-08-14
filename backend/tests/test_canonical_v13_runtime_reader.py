@@ -73,8 +73,10 @@ def _execution_counts(connection) -> dict[str, int]:
     return {name: _count(connection, name) for name in EXECUTION_TABLE_NAMES}
 
 
-def _activate_fixture(connection):
-    snapshot_ids, market_snapshot_id = _freeze_bundle_inputs(connection)
+def _activate_fixture(connection, *, window_utc_z: bool = False):
+    snapshot_ids, market_snapshot_id = _freeze_bundle_inputs(
+        connection, window_utc_z=window_utc_z
+    )
     preview = preview_research_bundle(
         connection,
         scope_key="isolated-research",
@@ -143,6 +145,21 @@ def test_control_resolver_and_explicit_frozen_reader_have_separate_contracts(
     assert frozen.capability["order_submission"] == "DISABLED"
     assert before == after
     assert set(after.values()) == {0}
+
+
+def test_reader_normalizes_z_window_payload_to_frozen_member_digest(
+    canonical_connection,
+) -> None:
+    with canonical_connection.begin():
+        activation = _activate_fixture(canonical_connection, window_utc_z=True)
+        frozen = read_frozen_research_bundle(
+            canonical_connection,
+            configuration_bundle_id=activation.configuration_bundle_id,
+            expected_bundle_digest=activation.bundle_digest,
+        )
+
+    assert frozen.windows[0].start_at.endswith("+00:00")
+    assert frozen.windows[0].end_at.endswith("+00:00")
 
 
 def test_reader_rejects_digest_and_capability_drift(canonical_connection) -> None:

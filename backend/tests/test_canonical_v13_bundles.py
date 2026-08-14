@@ -114,6 +114,7 @@ def _freeze_bundle_inputs(
     *,
     minimum_closed_candles: int = 72,
     market_row_count: int = 72,
+    window_utc_z: bool = False,
 ):
     target = _draft(
         connection,
@@ -143,8 +144,16 @@ def _freeze_bundle_inputs(
                 {
                     "window_key": "fixture-required",
                     "required": True,
-                    "start_at": NOW.isoformat(),
-                    "end_at": (NOW + timedelta(hours=6)).isoformat(),
+                    "start_at": (
+                        NOW.isoformat().replace("+00:00", "Z")
+                        if window_utc_z
+                        else NOW.isoformat()
+                    ),
+                    "end_at": (
+                        (NOW + timedelta(hours=6)).isoformat().replace("+00:00", "Z")
+                        if window_utc_z
+                        else (NOW + timedelta(hours=6)).isoformat()
+                    ),
                     "coverage": {
                         "minimum_closed_candles": minimum_closed_candles
                     },
