@@ -20,6 +20,7 @@ from app.canonical_v13.genesis import (
     render_postgresql_acl_sql,
     render_postgresql_genesis_ddl,
     render_postgresql_owner_sql,
+    postgresql_owner_table_grant_statements,
 )
 from app.canonical_v13.role_mapping import (
     LOGICAL_ROLE_IDENTITIES,
@@ -87,6 +88,14 @@ def test_mapped_owner_and_acl_are_exact_and_contain_no_logical_role_targets() ->
     acl = render_postgresql_acl_sql(mapping)
     ddl = render_postgresql_genesis_ddl(mapping)
     assert_postgresql_acl_sql(acl, mapping)
+    owner_grants = postgresql_owner_table_grant_statements(mapping)
+    assert len(owner_grants) == 46
+    assert (
+        "GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER "
+        "ON TABLE "
+        "strategy_platform_v13.configuration_profiles TO "
+        f"{mapping.physical('canonical_schema_owner')}"
+    ) in owner_grants
     assert f"OWNER TO {mapping.physical('canonical_schema_owner')}" in owner
     for statement in owner.rstrip(";\n").split(";\n"):
         assert statement in ddl
@@ -122,8 +131,36 @@ def test_bootstrap_render_cli_is_offline_and_never_requires_a_database_url() -> 
     assert payload["database_name"] == LOCAL_DATABASE_NAME
     assert payload["role_prefix"] == LOCAL_ROLE_PREFIX
     assert payload["capability_role_count"] == 18
-    assert payload["acl_statement_count"] == 1095
+    assert payload["acl_statement_count"] == 1141
     assert "DATABASE_URL" not in completed.stdout
+
+
+def test_owner_table_acl_plan_is_offline_exact_and_non_destructive() -> None:
+    environment = {
+        "PATH": os.environ.get("PATH", ""),
+        "PYTHONPATH": str(REPOSITORY_ROOT / "backend"),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "FREQTRADE_AI_DISABLE_ENV_FILE": "1",
+        "FREQTRADE_AI_TEST_DISABLE_ENV_FILE": "1",
+    }
+    completed = subprocess.run(
+        [sys.executable, str(BOOTSTRAP_SCRIPT), "owner-table-acl-plan"],
+        cwd=REPOSITORY_ROOT / "backend",
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    payload = json.loads(completed.stdout)
+    assert payload["status"] == "READY"
+    assert payload["contract"] == "canonical-v13-owner-table-acl-v1"
+    assert payload["table_statement_count"] == 46
+    assert payload["target_privilege_fact_count"] == 322
+    assert payload["legacy_privilege_fact_count"] == 2
+    assert len(payload["owner_acl_digest"]) == 64
+    assert payload["destructive_table_operations"] == []
+    assert payload["requires_zero_research_rows"] is True
 
 
 def test_restore_verifier_requires_an_explicit_strict_restore_database(
