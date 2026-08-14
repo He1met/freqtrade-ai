@@ -1,5 +1,13 @@
 # Freqtrade AI 策略平台 V1 设计稿
 
+> **历史证据，不是 canonical production 设计权威。** 本文记录已合并
+> #694/#696/#698/#705/#706/#708/#710 所属的 v46/v47 design-lab、legacy
+> migration 与控制面原型轨道。自 GitHub #714/#715 起，新的唯一权威是
+> [`strategy_platform_v13_canonical_design.md`](strategy_platform_v13_canonical_design.md)。
+> 新生产 schema、API、UI、research executor 与 trading runtime 不得把本文中的
+> legacy 表、v47 marker、迁移 ID、固定 60/6、历史 receipt 或 design-lab activation
+> 当作生产事实或 fallback。本文只可作为不可变历史审计和可复用思想的来源。
+
 - 文档状态：`V1.3 已确认 / 当前实施基线`
 - 版本：`v1.3`
 - 日期：`2026-08-13`
