@@ -63,6 +63,20 @@ reader/control principal，任一半存在状态都 fail closed 且不覆盖。�
 另行取得删除 principal/Keychain 的授权，先移除四个 research memberships，再执行 authority rollback；
 不得让 verifier 为迁就已 provision 的 membership 而放宽。
 
+`provision-research` 必须同时把 canonical database 的 `CONNECT` 只授予四个 split capability
+roles；`verify-research-provisioned` 必须验证六个 LOGIN 均具有 effective database `CONNECT`。
+若旧版本已原子创建四个 LOGIN/Keychain/membership，但四个 capability roles 的 `CONNECT` 精确
+全部缺失，且 verifier 的唯一问题是 `missing service database CONNECT count=4`，可在 maintenance
+window 内执行一次：
+
+```bash
+python scripts/canonical_v13_api_service.py repair-research-connect
+```
+
+该命令只增加四条 capability database `CONNECT`，不读取 secret value，也不输出、覆盖、轮换或重建 Keychain
+material；任何部分完成状态、其他 verifier 问题或 Keychain 缺项都 `BLOCKED`。完成后仍必须重新
+运行 `verify-research-provisioned` 和六 identity 实际连接验收。
+
 ## 3. Backup 与独立 restore acceptance
 
 backup 输出目录必须位于 operator-controlled 非仓库位置，权限 `0700`；文件使用 custom format，

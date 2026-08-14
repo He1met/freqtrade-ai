@@ -371,6 +371,24 @@ def test_postgresql_research_roles_enforce_independent_receipt_writers() -> None
                 connection.exec_driver_sql(
                     f"GRANT {mapping.physical(logical_role)} TO {principal}"
                 )
+            connection.exec_driver_sql(
+                "REVOKE CONNECT ON DATABASE freqtrade_ai_v13_ci_test FROM PUBLIC"
+            )
+            missing_connect = verify_postgresql_bootstrap(
+                connection,
+                role_mapping=mapping,
+                require_zero_business_rows=False,
+                service_principals=service_principals,
+            )
+            assert missing_connect.accepted is False
+            assert "missing service database CONNECT count=6" in (
+                missing_connect.problems
+            )
+            for logical_role in service_principals.values():
+                connection.exec_driver_sql(
+                    "GRANT CONNECT ON DATABASE freqtrade_ai_v13_ci_test "
+                    f"TO {mapping.physical(logical_role)}"
+                )
             provisioned = verify_postgresql_bootstrap(
                 connection,
                 role_mapping=mapping,
