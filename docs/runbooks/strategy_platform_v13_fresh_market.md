@@ -27,6 +27,25 @@ latest fully closed 15-minute candle when the new WINDOW draft is reviewed.
 The required 30-day window remains 2,880 candles; the downloader extends the
 start by exactly 408 candles from the frozen payload.
 
+Prepare and review that immutable update with the dedicated no-trade command.
+The end bound has no clock-derived default and must be supplied explicitly:
+
+```bash
+backend/.venv/bin/python scripts/canonical_v13_market_window_rollout.py plan \
+  --end-at 2026-08-14T10:45:00Z
+```
+
+After verifying that this is a fully closed 15-minute candle, use `apply` with
+the exact same argument. The command reads the canonical configuration catalog,
+requires one exact production profile per P0 kind and a validated latest
+version, then creates only a new WINDOW version and a new dependent
+RESEARCH_AGGREGATE version through the audited control API. Content-bound
+idempotency keys make an exact replay a no-op. An unreviewed latest draft,
+duplicate profile authority, missing snapshot, changed request, non-no-trade
+health response, or unexpected bundle readiness blocks before continuing.
+Until a fresh market snapshot is separately accepted, the final preview must
+remain `BLOCKED / MARKET_SNAPSHOT_UNSET` with no bundle or activation row.
+
 ## Preconditions
 
 1. Release checkout is clean and exactly equals `origin/main`.
