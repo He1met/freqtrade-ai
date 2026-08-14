@@ -198,6 +198,10 @@ def owner_table_acl_repair() -> dict[str, object]:
     legacy = _legacy_owner_table_grants(mapping)
     service_principals = dict(LOCAL_SERVICE_PRINCIPALS)
     service_principals.update(LOCAL_RESEARCH_SERVICE_PRINCIPALS)
+    allowed_research_memberships = frozenset(
+        (mapping.physical(logical_role), principal)
+        for principal, logical_role in LOCAL_RESEARCH_SERVICE_PRINCIPALS.items()
+    )
     engine = create_engine(_database_url(), pool_pre_ping=True)
     try:
         with engine.begin() as connection:
@@ -218,6 +222,7 @@ def owner_table_acl_repair() -> dict[str, object]:
                 role_mapping=mapping,
                 legacy_research_writer_role=local_legacy_research_writer_role(),
                 require_no_research_rows=True,
+                allowed_isolated_memberships=allowed_research_memberships,
             )
             if not authority.accepted or authority.state != "CURRENT":
                 raise BootstrapBlocked(
@@ -306,6 +311,7 @@ def owner_table_acl_repair() -> dict[str, object]:
                 role_mapping=mapping,
                 legacy_research_writer_role=local_legacy_research_writer_role(),
                 require_no_research_rows=True,
+                allowed_isolated_memberships=allowed_research_memberships,
             )
             if not authority_after.accepted or authority_after.state != "CURRENT":
                 raise BootstrapBlocked(
