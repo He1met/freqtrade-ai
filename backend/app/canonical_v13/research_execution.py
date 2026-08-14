@@ -103,11 +103,11 @@ def execute_consumed_research_attempt(
     authorization_consumption: ResearchAuthorizationConsumption | None,
     executor: IsolatedResearchExecutorPort,
 ) -> AuthorizedResearchExecutionResult:
-    """Accept a control receipt, then invoke and persist through the research writer.
+    """Accept a control receipt, then persist through the validation writer.
 
     Authorization issuance/consumption is deliberately a separate control-writer
     transaction.  This function never writes ``audit_events`` and therefore remains
-    executable by the isolated ``canonical_research_writer`` identity.
+    executable by the isolated ``canonical_validation_writer`` identity.
     """
 
     _validate_executor(executor)

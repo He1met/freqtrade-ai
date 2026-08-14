@@ -13,6 +13,7 @@ from app.canonical_v13.genesis import (
     verify_canonical_genesis,
 )
 from app.canonical_v13.manifest import (
+    CANONICAL_AUTHORITY_REVISION,
     CANONICAL_BUSINESS_SCHEMA,
     CANONICAL_DATABASE_PURPOSE,
     CANONICAL_GENESIS_VERSION,
@@ -32,6 +33,7 @@ from app.canonical_v13.role_mapping import (
 
 
 __all__ = [
+    "CANONICAL_AUTHORITY_REVISION",
     "CANONICAL_BUSINESS_SCHEMA",
     "CANONICAL_DATABASE_PURPOSE",
     "CANONICAL_GENESIS_IDENTITY",

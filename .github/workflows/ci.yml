@@ -234,6 +234,8 @@ jobs:
               connection.execute("CREATE DATABASE freqtrade_ai_worker_test")
               capability_roles = (
                   "schema_owner", "control_writer", "research_writer",
+                  "validation_writer", "scoring_writer",
+                  "qualification_writer", "optimization_writer",
                   "approval_writer", "deployment_writer", "signal_writer",
                   "risk_writer", "order_writer", "fill_writer", "ledger_writer",
                   "reconciliation_writer", "projection_writer", "api_reader",

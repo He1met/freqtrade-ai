@@ -597,7 +597,7 @@ def test_launch_spec_rejects_any_network_credential_exchange_order_or_writer_cap
         replace(spec, credential_mounts=("secret",)),
         replace(spec, exchange_capabilities=("exchange-client",)),
         replace(spec, order_capabilities=("submit-order",)),
-        replace(spec, writer_capabilities=("canonical_research_writer",)),
+        replace(spec, writer_capabilities=("canonical_validation_writer",)),
         replace(spec, order_submission=True),
     )
     for unsafe in unsafe_specs:

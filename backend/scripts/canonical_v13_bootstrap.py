@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
 import json
 import os
 import sys
@@ -14,10 +15,19 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.canonical_v13.bootstrap import (
     LOCAL_DATABASE_NAME,
+    LOCAL_RESEARCH_SERVICE_PRINCIPALS,
     LOCAL_ROLE_PREFIX,
     LOCAL_SERVICE_PRINCIPALS,
+    local_legacy_research_writer_role,
     local_role_mapping,
     verify_postgresql_bootstrap,
+)
+from app.canonical_v13.authority_upgrade import (
+    CanonicalAuthorityUpgradeBlocked,
+    apply_authority_upgrade,
+    render_authority_upgrade_plan,
+    rollback_authority_upgrade,
+    verify_authority_upgrade_state,
 )
 from app.canonical_v13.genesis import (
     assert_postgresql_acl_sql,
@@ -27,6 +37,7 @@ from app.canonical_v13.genesis import (
 
 
 DATABASE_URL_ENV = "FREQTRADE_AI_CANONICAL_V13_PROVISIONER_DATABASE_URL"
+UPGRADE_ACTOR_ENV = "FREQTRADE_AI_CANONICAL_V13_UPGRADE_ACTOR"
 
 
 class BootstrapBlocked(RuntimeError):
@@ -60,16 +71,23 @@ def render_plan() -> dict[str, object]:
     }
 
 
-def verify() -> dict[str, object]:
+def verify(
+    *,
+    require_zero_business_rows: bool = True,
+    require_research_principals: bool = False,
+) -> dict[str, object]:
     mapping = local_role_mapping()
+    service_principals = dict(LOCAL_SERVICE_PRINCIPALS)
+    if require_research_principals:
+        service_principals.update(LOCAL_RESEARCH_SERVICE_PRINCIPALS)
     engine = create_engine(_database_url(), pool_pre_ping=True)
     try:
         with engine.connect() as connection:
             result = verify_postgresql_bootstrap(
                 connection,
                 role_mapping=mapping,
-                require_zero_business_rows=True,
-                service_principals=LOCAL_SERVICE_PRINCIPALS,
+                require_zero_business_rows=require_zero_business_rows,
+                service_principals=service_principals,
             )
     finally:
         engine.dispose()
@@ -80,23 +98,112 @@ def verify() -> dict[str, object]:
         "role_mapping_digest": mapping.mapping_digest,
         "table_count": result.table_count,
         "business_row_count": result.business_row_count,
+        "require_zero_business_rows": require_zero_business_rows,
+        "require_research_principals": require_research_principals,
         "capability_role_count": result.capability_role_count,
         "explicit_acl_count": result.explicit_acl_count,
     }
 
 
+def authority_plan() -> dict[str, object]:
+    return render_authority_upgrade_plan(
+        role_mapping=local_role_mapping(),
+        legacy_research_writer_role=local_legacy_research_writer_role(),
+    )
+
+
+def authority_verify() -> dict[str, object]:
+    engine = create_engine(_database_url(), pool_pre_ping=True)
+    try:
+        with engine.connect() as connection:
+            result = verify_authority_upgrade_state(
+                connection,
+                role_mapping=local_role_mapping(),
+                legacy_research_writer_role=local_legacy_research_writer_role(),
+                require_no_research_rows=True,
+            )
+    finally:
+        engine.dispose()
+    return {
+        **asdict(result),
+        "status": "ACCEPTED" if result.accepted else "BLOCKED",
+    }
+
+
+def _upgrade_actor() -> str:
+    actor = os.environ.get(UPGRADE_ACTOR_ENV, "")
+    if not actor:
+        raise BootstrapBlocked(f"BLOCKED_UPGRADE_ACTOR_UNSET: {UPGRADE_ACTOR_ENV}")
+    return actor
+
+
+def authority_apply(*, rollback: bool) -> dict[str, object]:
+    engine = create_engine(_database_url(), pool_pre_ping=True)
+    try:
+        with engine.begin() as connection:
+            operation = (
+                rollback_authority_upgrade if rollback else apply_authority_upgrade
+            )
+            result = operation(
+                connection,
+                role_mapping=local_role_mapping(),
+                legacy_research_writer_role=local_legacy_research_writer_role(),
+                actor_identity=_upgrade_actor(),
+            )
+    finally:
+        engine.dispose()
+    return {**asdict(result), "status": result.status}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("render", "verify"))
+    parser.add_argument(
+        "command",
+        choices=(
+            "render",
+            "verify",
+            "verify-current",
+            "verify-research-provisioned",
+            "authority-plan",
+            "authority-verify",
+            "authority-apply",
+            "authority-rollback",
+        ),
+    )
     args = parser.parse_args(argv)
     try:
-        payload = render_plan() if args.command == "render" else verify()
+        if args.command == "render":
+            payload = render_plan()
+        elif args.command in {
+            "verify",
+            "verify-current",
+            "verify-research-provisioned",
+        }:
+            payload = verify(
+                require_zero_business_rows=args.command == "verify",
+                require_research_principals=(
+                    args.command == "verify-research-provisioned"
+                ),
+            )
+        elif args.command == "authority-plan":
+            payload = authority_plan()
+        elif args.command == "authority-verify":
+            payload = authority_verify()
+        else:
+            payload = authority_apply(rollback=args.command == "authority-rollback")
     except BootstrapBlocked as exc:
+        payload = {"status": "BLOCKED", "reason": str(exc)}
+    except CanonicalAuthorityUpgradeBlocked as exc:
         payload = {"status": "BLOCKED", "reason": str(exc)}
     except (SQLAlchemyError, ValueError):
         payload = {"status": "BLOCKED", "reason": "bootstrap verification failed"}
     print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
-    return 0 if payload["status"] in {"READY", "ACCEPTED"} else 2
+    return (
+        0
+        if payload["status"]
+        in {"READY", "ACCEPTED", "UPGRADED", "ROLLED_BACK", "NO_OP_ALREADY_CURRENT"}
+        else 2
+    )
 
 
 if __name__ == "__main__":
