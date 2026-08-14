@@ -42,6 +42,7 @@ test("the client exposes exactly the thirteen canonical routes with one fetch ea
       display_name: "Strategy",
       execution_authorized: false,
       execution_side_effects: 0,
+      idempotency_receipt_id: ID,
       idempotent_replay: false,
       intake_status: "INTAKE_ACCEPTED",
       items: [],
@@ -52,6 +53,7 @@ test("the client exposes exactly the thirteen canonical routes with one fetch ea
       prospective_bundle_id: null,
       qualification_status: "NOT_EVALUATED",
       reason_codes: [],
+      receipt_digest: DIGEST,
       repeat_noop: false,
       runtime_instance_id: null,
       snapshot_digest: DIGEST,
@@ -69,9 +71,11 @@ test("the client exposes exactly the thirteen canonical routes with one fetch ea
     });
   };
   const draft = {
+    actor_identity: "canonical-p0-operator",
     adapter_digest: DIGEST,
     adapter_identity: "adapter",
     dependencies: [],
+    idempotency_key: "draft-target-v1",
     payload_json: {},
     profile_key: "profile",
     schema_json: {},
@@ -93,7 +97,11 @@ test("the client exposes exactly the thirteen canonical routes with one fetch ea
   await fetchCanonicalStrategy(ID);
   await fetchCanonicalConfigurations();
   await createCanonicalConfigurationDraft("TARGET", draft);
-  await validateCanonicalConfiguration("TARGET", ID, { adapter_manifest_digest: DIGEST });
+  await validateCanonicalConfiguration("TARGET", ID, {
+    actor_identity: "canonical-p0-operator",
+    adapter_manifest_digest: DIGEST,
+    idempotency_key: "validate-target-v1",
+  });
   await previewCanonicalResearchBundle(preview);
   await activateCanonicalResearchBundle(ID, { ...preview, actor_identity: "actor", expected_bundle_digest: DIGEST });
   await fetchCanonicalMarketInventory();

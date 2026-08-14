@@ -32,12 +32,14 @@ from app.canonical_v13.market import (
     validate_market_profile,
 )
 from app.canonical_v13.models import (
+    AUDIT_EVENTS_TABLE,
     CONFIGURATION_ACTIVATIONS_TABLE,
     CONFIGURATION_BUNDLES_TABLE,
     CONFIGURATION_PROFILES_TABLE,
     CONFIGURATION_SNAPSHOTS_TABLE,
     CONFIGURATION_VERSIONS_TABLE,
     DEPLOYMENTS_TABLE,
+    IDEMPOTENCY_RECEIPTS_TABLE,
     OPTIMIZATION_RUNS_TABLE,
     ORDERS_TABLE,
     RUNTIME_INSTANCES_TABLE,
@@ -141,6 +143,8 @@ def _draft_payload(kind: str) -> dict[str, object]:
         "RESEARCH_AGGREGATE": {"assembly_key": "production-research-v13"},
     }
     return {
+        "actor_identity": "canonical-p0-operator",
+        "idempotency_key": f"draft-{kind.lower()}",
         "profile_key": f"profile-{kind.lower()}",
         "scope_key": "production-research-v13",
         "workflow_key": "research",
@@ -565,10 +569,31 @@ def test_config_command_and_projection_use_kind_specific_contract() -> None:
         draft_body = draft.json()
         assert draft_body["configuration_kind"] == "DIVERSITY"
         assert draft_body["lifecycle_status"] == "DRAFT"
+        assert draft_body["idempotent_replay"] is False
+        draft_replay = client.post(
+            f"{API_PREFIX}/configurations/DIVERSITY/drafts",
+            json=_draft_payload("DIVERSITY"),
+        )
+        assert draft_replay.status_code == 201
+        assert draft_replay.json()["version_id"] == draft_body["version_id"]
+        assert draft_replay.json()["receipt_digest"] == draft_body["receipt_digest"]
+        assert draft_replay.json()["idempotent_replay"] is True
+        drifted_command = _draft_payload("DIVERSITY")
+        drifted_command["profile_key"] = "another-profile"
+        drifted = client.post(
+            f"{API_PREFIX}/configurations/DIVERSITY/drafts",
+            json=drifted_command,
+        )
+        assert drifted.status_code == 409
+        assert drifted.json()["error"]["code"] == "BLOCKED_IDEMPOTENCY_KEY_REUSE"
 
         wrong_route = client.post(
             f"{API_PREFIX}/configurations/SCORING/{draft_body['version_id']}/validate",
-            json={"adapter_manifest_digest": "b" * 64},
+            json={
+                "actor_identity": "canonical-p0-operator",
+                "idempotency_key": "validate-diversity-wrong-route",
+                "adapter_manifest_digest": "b" * 64,
+            },
         )
         assert wrong_route.status_code == 409
         assert wrong_route.json()["error"]["code"] == (
@@ -582,10 +607,27 @@ def test_config_command_and_projection_use_kind_specific_contract() -> None:
 
         validated = client.post(
             f"{API_PREFIX}/configurations/DIVERSITY/{draft_body['version_id']}/validate",
-            json={"adapter_manifest_digest": "b" * 64},
+            json={
+                "actor_identity": "canonical-p0-operator",
+                "idempotency_key": "validate-diversity-v1",
+                "adapter_manifest_digest": "b" * 64,
+            },
         )
         assert validated.status_code == 200, validated.text
         assert validated.json()["lifecycle_status"] == "VALIDATED"
+        assert validated.json()["idempotent_replay"] is False
+        replay = client.post(
+            f"{API_PREFIX}/configurations/DIVERSITY/{draft_body['version_id']}/validate",
+            json={
+                "actor_identity": "canonical-p0-operator",
+                "idempotency_key": "validate-diversity-v1",
+                "adapter_manifest_digest": "b" * 64,
+            },
+        )
+        assert replay.status_code == 200
+        assert replay.json()["snapshot_id"] == validated.json()["snapshot_id"]
+        assert replay.json()["receipt_digest"] == validated.json()["receipt_digest"]
+        assert replay.json()["idempotent_replay"] is True
 
         catalog = client.get(f"{API_PREFIX}/configurations").json()
         assert catalog["status"] == "AVAILABLE"
@@ -602,6 +644,8 @@ def test_config_command_and_projection_use_kind_specific_contract() -> None:
         assert _count(engine, CONFIGURATION_PROFILES_TABLE) == 1
         assert _count(engine, CONFIGURATION_VERSIONS_TABLE) == 1
         assert _count(engine, CONFIGURATION_SNAPSHOTS_TABLE) == 1
+        assert _count(engine, IDEMPOTENCY_RECEIPTS_TABLE) == 2
+        assert _count(engine, AUDIT_EVENTS_TABLE) == 2
     finally:
         client.close()
         engine.dispose()
@@ -618,7 +662,11 @@ def test_arbitrary_generic_payload_cannot_validate_or_fake_readiness() -> None:
         assert draft.status_code == 201
         validate = client.post(
             f"{API_PREFIX}/configurations/SCORING/{draft.json()['version_id']}/validate",
-            json={"adapter_manifest_digest": "b" * 64},
+            json={
+                "actor_identity": "canonical-p0-operator",
+                "idempotency_key": "validate-invalid-scoring",
+                "adapter_manifest_digest": "b" * 64,
+            },
         )
         assert validate.status_code == 422
         assert validate.json()["status"] == "BLOCKED"

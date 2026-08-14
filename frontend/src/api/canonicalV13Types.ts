@@ -81,6 +81,8 @@ export type ConfigurationDependencyCommand = {
 };
 
 export type ConfigurationDraftCommand = {
+  actor_identity: string;
+  idempotency_key: string;
   profile_key: string;
   scope_key: string;
   workflow_key: string;
@@ -92,6 +94,8 @@ export type ConfigurationDraftCommand = {
 };
 
 export type ConfigurationValidateCommand = {
+  actor_identity: string;
+  idempotency_key: string;
   adapter_manifest_digest: Sha256Digest;
 };
 
@@ -103,6 +107,9 @@ export type ConfigurationDraftResult = {
   lifecycle_status: "DRAFT";
   schema_digest: Sha256Digest;
   payload_digest: Sha256Digest;
+  idempotency_receipt_id: CanonicalId;
+  receipt_digest: Sha256Digest;
+  idempotent_replay: boolean;
 };
 
 export type ConfigurationValidationResult = {
@@ -116,6 +123,9 @@ export type ConfigurationValidationResult = {
   target_count: number;
   total_candidate_count: number;
   repeat_noop: boolean;
+  idempotency_receipt_id: CanonicalId;
+  receipt_digest: Sha256Digest;
+  idempotent_replay: boolean;
 };
 
 export type ConfigurationVersionProjection = {

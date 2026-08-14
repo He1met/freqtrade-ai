@@ -101,6 +101,8 @@ class ConfigurationDependencyCommandDTO(CanonicalCommandDTO):
 
 
 class ConfigurationDraftCommandDTO(CanonicalCommandDTO):
+    actor_identity: str = Field(min_length=1, max_length=160)
+    idempotency_key: str = Field(min_length=1, max_length=200)
     profile_key: str = Field(min_length=1, max_length=160)
     scope_key: str = Field(min_length=1, max_length=200)
     workflow_key: str = Field(min_length=1, max_length=160)
@@ -112,6 +114,8 @@ class ConfigurationDraftCommandDTO(CanonicalCommandDTO):
 
 
 class ConfigurationValidateCommandDTO(CanonicalCommandDTO):
+    actor_identity: str = Field(min_length=1, max_length=160)
+    idempotency_key: str = Field(min_length=1, max_length=200)
     adapter_manifest_digest: str = Field(pattern=SHA256_PATTERN)
 
 
@@ -123,6 +127,9 @@ class ConfigurationDraftResultDTO(CanonicalProjectionDTO):
     lifecycle_status: Literal["DRAFT"]
     schema_digest: str = Field(pattern=SHA256_PATTERN)
     payload_digest: str = Field(pattern=SHA256_PATTERN)
+    idempotency_receipt_id: UUID
+    receipt_digest: str = Field(pattern=SHA256_PATTERN)
+    idempotent_replay: bool
 
 
 class ConfigurationValidationResultDTO(CanonicalProjectionDTO):
@@ -136,6 +143,9 @@ class ConfigurationValidationResultDTO(CanonicalProjectionDTO):
     target_count: int = Field(ge=0)
     total_candidate_count: int = Field(ge=0)
     repeat_noop: bool
+    idempotency_receipt_id: UUID
+    receipt_digest: str = Field(pattern=SHA256_PATTERN)
+    idempotent_replay: bool
 
 
 class ConfigurationVersionProjectionDTO(CanonicalProjectionDTO):

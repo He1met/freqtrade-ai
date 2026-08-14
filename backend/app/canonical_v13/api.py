@@ -29,8 +29,11 @@ from app.canonical_v13.bundles import (
 from app.canonical_v13.control_plane import (
     CanonicalControlPlaneBlocked,
     ConfigurationDependencyInput,
-    create_configuration_draft,
-    validate_configuration_version,
+)
+from app.canonical_v13.configuration_governance import (
+    CanonicalConfigurationGovernanceBlocked,
+    create_audited_configuration_draft,
+    validate_audited_configuration_version,
 )
 from app.canonical_v13.dto import (
     CanonicalErrorDetailDTO,
@@ -132,6 +135,7 @@ _CANONICAL_DOMAIN_ERRORS = (
     CanonicalAPIBlocked,
     CanonicalBundleBlocked,
     CanonicalControlPlaneBlocked,
+    CanonicalConfigurationGovernanceBlocked,
     CanonicalGenesisBlocked,
     CanonicalIntakeBlocked,
     CanonicalMarketBlocked,
@@ -883,8 +887,10 @@ def create_canonical_v13_app(
         kind: str, command: ConfigurationDraftCommandDTO
     ) -> ConfigurationDraftResultDTO:
         def execute(connection: Connection) -> ConfigurationDraftResultDTO:
-            result = create_configuration_draft(
+            result = create_audited_configuration_draft(
                 connection,
+                actor_identity=command.actor_identity,
+                idempotency_key=command.idempotency_key,
                 profile_key=command.profile_key,
                 configuration_kind=kind,
                 scope_key=command.scope_key,
@@ -902,7 +908,7 @@ def create_canonical_v13_app(
                     for item in command.dependencies
                 ),
             )
-            return ConfigurationDraftResultDTO(**result.__dict__)
+            return ConfigurationDraftResultDTO(**result)
 
         return run_control(execute)
 
@@ -914,17 +920,15 @@ def create_canonical_v13_app(
         kind: str, version_id: UUID, command: ConfigurationValidateCommandDTO
     ) -> ConfigurationValidationResultDTO:
         def execute(connection: Connection) -> ConfigurationValidationResultDTO:
-            result = validate_configuration_version(
+            result = validate_audited_configuration_version(
                 connection,
+                actor_identity=command.actor_identity,
+                idempotency_key=command.idempotency_key,
+                configuration_kind=kind,
                 version_id=version_id,
                 adapter_manifest_digest=command.adapter_manifest_digest,
             )
-            if result.configuration_kind != kind:
-                raise CanonicalAPIBlocked(
-                    "BLOCKED_CONFIGURATION_KIND_MISMATCH",
-                    "route kind differs from the configuration version",
-                )
-            return ConfigurationValidationResultDTO(**result.__dict__)
+            return ConfigurationValidationResultDTO(**result)
 
         return run_control(execute)
 
