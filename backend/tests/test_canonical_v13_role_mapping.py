@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -28,6 +29,17 @@ from app.canonical_v13.role_mapping import (
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+BOOTSTRAP_SCRIPT = REPOSITORY_ROOT / "backend/scripts/canonical_v13_bootstrap.py"
+
+
+def _load_bootstrap_script():
+    spec = importlib.util.spec_from_file_location(
+        "canonical_v13_bootstrap_restore_test", BOOTSTRAP_SCRIPT
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_local_mapping_is_total_unique_and_digest_stable() -> None:
@@ -95,7 +107,7 @@ def test_bootstrap_render_cli_is_offline_and_never_requires_a_database_url() -> 
     completed = subprocess.run(
         [
             sys.executable,
-            str(REPOSITORY_ROOT / "backend/scripts/canonical_v13_bootstrap.py"),
+            str(BOOTSTRAP_SCRIPT),
             "render",
         ],
         cwd=REPOSITORY_ROOT / "backend",
@@ -112,3 +124,56 @@ def test_bootstrap_render_cli_is_offline_and_never_requires_a_database_url() -> 
     assert payload["capability_role_count"] == 18
     assert payload["acl_statement_count"] == 1095
     assert "DATABASE_URL" not in completed.stdout
+
+
+def test_restore_verifier_requires_an_explicit_strict_restore_database(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bootstrap = _load_bootstrap_script()
+    monkeypatch.delenv(bootstrap.RESTORE_DATABASE_NAME_ENV, raising=False)
+    with pytest.raises(bootstrap.BootstrapBlocked, match="RESTORE_DATABASE_NAME_UNSET"):
+        bootstrap._restore_database_name()
+
+    for invalid_name in (
+        LOCAL_DATABASE_NAME,
+        "freqtrade_ai_v13_restore",
+        "freqtrade_ai_v13_restore_Upper",
+        "freqtrade_ai_v13_restore_bad-name",
+        "another_database_restore_20260815",
+    ):
+        monkeypatch.setenv(bootstrap.RESTORE_DATABASE_NAME_ENV, invalid_name)
+        with pytest.raises(
+            bootstrap.BootstrapBlocked, match="RESTORE_DATABASE_NAME_INVALID"
+        ):
+            bootstrap._restore_database_name()
+
+    restore_database = "freqtrade_ai_v13_restore_20260815_d465e031"
+    monkeypatch.setenv(bootstrap.RESTORE_DATABASE_NAME_ENV, restore_database)
+    assert bootstrap._restore_database_name() == restore_database
+
+
+def test_restore_database_url_is_exact_and_does_not_relax_production_verifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bootstrap = _load_bootstrap_script()
+    restore_database = "freqtrade_ai_v13_restore_20260815_d465e031"
+    restore_url = f"postgresql+psycopg:///{restore_database}"
+    monkeypatch.setenv(bootstrap.DATABASE_URL_ENV, restore_url)
+
+    with pytest.raises(
+        bootstrap.BootstrapBlocked, match="CANONICAL_DATABASE_NAME_MISMATCH"
+    ):
+        bootstrap._database_url()
+    assert (
+        bootstrap._database_url(expected_database_name=restore_database)
+        == restore_url
+    )
+
+    monkeypatch.setenv(
+        bootstrap.DATABASE_URL_ENV,
+        "postgresql+psycopg:///freqtrade_ai_v13_restore_another",
+    )
+    with pytest.raises(
+        bootstrap.BootstrapBlocked, match="CANONICAL_DATABASE_NAME_MISMATCH"
+    ):
+        bootstrap._database_url(expected_database_name=restore_database)

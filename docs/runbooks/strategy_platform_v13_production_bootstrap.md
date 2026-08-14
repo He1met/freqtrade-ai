@@ -75,7 +75,23 @@ shasum -a 256 "$BACKUP_PATH"
 ```
 
 恢复目标必须是一个此前不存在的唯一数据库名，由 `freqtrade_ai_v13_schema_owner` 拥有。恢复后
-运行同一个 bootstrap verifier，要求 46 表、identity/digest、ACL/owner 和业务行 0 全部匹配。
+目标名必须严格匹配 `freqtrade_ai_v13_restore_<lowercase_identity>`。使用显式 restore-only
+verifier；普通 production verifier 仍只接受精确 `freqtrade_ai_v13`，不得用 restore override
+放宽生产目标校验：
+
+```bash
+cd backend
+FREQTRADE_AI_CANONICAL_V13_PROVISIONER_DATABASE_URL=\
+'postgresql+psycopg:///freqtrade_ai_v13_restore_<lowercase_identity>' \
+FREQTRADE_AI_CANONICAL_V13_RESTORE_DATABASE_NAME=\
+'freqtrade_ai_v13_restore_<lowercase_identity>' \
+  python scripts/canonical_v13_bootstrap.py authority-verify-restore
+```
+
+结果必须为 `ACCEPTED`、`verification_scope=INDEPENDENT_RESTORE`、
+`state=PREVIOUS_READY`（升级前 backup）或 exact compatible current state，并证明
+authority identity/digest、ACL/owner 和九张 research 表零行均匹配。表总数必须另以
+canonical schema inventory 复核为 46；backup 文件完整性由前一步记录的 SHA-256 绑定。
 验证库保留，除非取得独立删除授权。不得用旧库或现有测试库作为恢复目标。
 
 ## 4. 独立 loopback API

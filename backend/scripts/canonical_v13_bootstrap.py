@@ -7,6 +7,7 @@ import argparse
 from dataclasses import asdict
 import json
 import os
+import re
 import sys
 
 from sqlalchemy import create_engine
@@ -37,6 +38,7 @@ from app.canonical_v13.genesis import (
 
 
 DATABASE_URL_ENV = "FREQTRADE_AI_CANONICAL_V13_PROVISIONER_DATABASE_URL"
+RESTORE_DATABASE_NAME_ENV = "FREQTRADE_AI_CANONICAL_V13_RESTORE_DATABASE_NAME"
 UPGRADE_ACTOR_ENV = "FREQTRADE_AI_CANONICAL_V13_UPGRADE_ACTOR"
 
 
@@ -44,16 +46,28 @@ class BootstrapBlocked(RuntimeError):
     pass
 
 
-def _database_url() -> str:
+def _database_url(*, expected_database_name: str = LOCAL_DATABASE_NAME) -> str:
     raw = os.environ.get(DATABASE_URL_ENV, "")
     if not raw:
         raise BootstrapBlocked(f"BLOCKED_DATABASE_URL_UNSET: {DATABASE_URL_ENV}")
     parsed = make_url(raw)
     if parsed.drivername != "postgresql+psycopg":
         raise BootstrapBlocked("BLOCKED_POSTGRESQL_REQUIRED")
-    if parsed.database != LOCAL_DATABASE_NAME:
+    if parsed.database != expected_database_name:
         raise BootstrapBlocked("BLOCKED_CANONICAL_DATABASE_NAME_MISMATCH")
     return raw
+
+
+def _restore_database_name() -> str:
+    database_name = os.environ.get(RESTORE_DATABASE_NAME_ENV, "")
+    if not database_name:
+        raise BootstrapBlocked(
+            f"BLOCKED_RESTORE_DATABASE_NAME_UNSET: {RESTORE_DATABASE_NAME_ENV}"
+        )
+    pattern = rf"{re.escape(LOCAL_DATABASE_NAME)}_restore_[a-z0-9][a-z0-9_]*"
+    if re.fullmatch(pattern, database_name) is None:
+        raise BootstrapBlocked("BLOCKED_RESTORE_DATABASE_NAME_INVALID")
+    return database_name
 
 
 def render_plan() -> dict[str, object]:
@@ -112,8 +126,14 @@ def authority_plan() -> dict[str, object]:
     )
 
 
-def authority_verify() -> dict[str, object]:
-    engine = create_engine(_database_url(), pool_pre_ping=True)
+def authority_verify(
+    *, restore_database_name: str | None = None
+) -> dict[str, object]:
+    expected_database_name = restore_database_name or LOCAL_DATABASE_NAME
+    engine = create_engine(
+        _database_url(expected_database_name=expected_database_name),
+        pool_pre_ping=True,
+    )
     try:
         with engine.connect() as connection:
             result = verify_authority_upgrade_state(
@@ -126,6 +146,10 @@ def authority_verify() -> dict[str, object]:
         engine.dispose()
     return {
         **asdict(result),
+        "database_name": expected_database_name,
+        "verification_scope": (
+            "INDEPENDENT_RESTORE" if restore_database_name else "PRODUCTION"
+        ),
         "status": "ACCEPTED" if result.accepted else "BLOCKED",
     }
 
@@ -166,6 +190,7 @@ def main(argv: list[str] | None = None) -> int:
             "verify-research-provisioned",
             "authority-plan",
             "authority-verify",
+            "authority-verify-restore",
             "authority-apply",
             "authority-rollback",
         ),
@@ -187,8 +212,14 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.command == "authority-plan":
             payload = authority_plan()
-        elif args.command == "authority-verify":
-            payload = authority_verify()
+        elif args.command in {"authority-verify", "authority-verify-restore"}:
+            payload = authority_verify(
+                restore_database_name=(
+                    _restore_database_name()
+                    if args.command == "authority-verify-restore"
+                    else None
+                )
+            )
         else:
             payload = authority_apply(rollback=args.command == "authority-rollback")
     except BootstrapBlocked as exc:
