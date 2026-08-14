@@ -247,6 +247,18 @@ def _database_url(principal: str, service: str) -> str:
     ).render_as_string(hide_password=False)
 
 
+def canonical_control_database_url() -> str:
+    """Return the in-memory control DSN without printing or persisting it."""
+
+    return _database_url(CONTROL_PRINCIPAL, CONTROL_KEYCHAIN_SERVICE)
+
+
+def require_release_checkout() -> None:
+    """Expose the existing clean/exact-main release guard to sibling tools."""
+
+    _require_release_checkout()
+
+
 def serve(port: int) -> None:
     if not 1024 <= port <= 65535:
         raise CanonicalServiceBlocked("BLOCKED_INVALID_LOOPBACK_PORT")
