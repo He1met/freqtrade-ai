@@ -51,8 +51,6 @@ def _existing_receipt(
         IDEMPOTENCY_RECEIPTS_TABLE.c.actor_identity == actor_identity,
         IDEMPOTENCY_RECEIPTS_TABLE.c.idempotency_key == idempotency_key,
     )
-    if connection.dialect.name != "sqlite":
-        statement = statement.with_for_update()
     return connection.execute(statement).mappings().one_or_none()
 
 
