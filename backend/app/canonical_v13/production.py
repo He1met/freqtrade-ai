@@ -11,12 +11,14 @@ from collections.abc import Mapping
 from contextlib import contextmanager
 import os
 
-from fastapi import FastAPI
-from sqlalchemy import Connection, Engine, create_engine
+from fastapi import FastAPI, HTTPException
+from sqlalchemy import Connection, Engine, create_engine, text
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import ArgumentError
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.canonical_v13.api import create_canonical_v13_app
+from app.canonical_v13.genesis import verify_canonical_genesis
 
 
 READER_DATABASE_URL_ENV = "FREQTRADE_AI_CANONICAL_V13_READER_DATABASE_URL"
@@ -92,6 +94,50 @@ def create_app(environment: Mapping[str, str] | None = None) -> FastAPI:
         reader_connection_factory=_connection_factory(reader_engine),
         control_connection_factory=_connection_factory(control_engine),
     )
+
+    @app.get("/healthz")
+    def healthz() -> dict[str, object]:
+        return {
+            "status": "HEALTHY",
+            "service": "canonical-v13-api",
+            "trading_capability": "TRADING_DISABLED",
+        }
+
+    @app.get("/readyz")
+    def readyz() -> dict[str, object]:
+        identities: dict[str, str] = {}
+        try:
+            for capability, engine in (
+                ("reader", reader_engine),
+                ("control", control_engine),
+            ):
+                with engine.connect() as connection:
+                    verification = verify_canonical_genesis(connection)
+                    if not verification.accepted:
+                        raise CanonicalProductionConfigurationBlocked(
+                            "BLOCKED_WRONG_CANONICAL_DATABASE"
+                        )
+                    identities[capability] = str(
+                        connection.execute(text("SELECT current_user")).scalar_one()
+                    )
+            if identities["reader"] == identities["control"]:
+                raise CanonicalProductionConfigurationBlocked(
+                    "BLOCKED_CANONICAL_ROLE_SEPARATION"
+                )
+        except CanonicalProductionConfigurationBlocked as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from None
+        except (SQLAlchemyError, OSError):
+            raise HTTPException(
+                status_code=503,
+                detail="BLOCKED_CANONICAL_DATABASE_UNAVAILABLE",
+            ) from None
+        return {
+            "status": "READY",
+            "service": "canonical-v13-api",
+            "reader_identity": identities["reader"],
+            "control_identity": identities["control"],
+            "trading_capability": "TRADING_DISABLED",
+        }
 
     def dispose_engines() -> None:
         control_engine.dispose()

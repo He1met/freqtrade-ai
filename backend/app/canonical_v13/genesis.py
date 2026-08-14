@@ -34,6 +34,7 @@ from app.canonical_v13.models import (
     SCHEMA_METADATA_TABLE,
     CanonicalBase,
 )
+from app.canonical_v13.role_mapping import CanonicalRoleMapping
 
 
 GENESIS_METADATA_KEY: Final = "canonical-v13-genesis"
@@ -384,7 +385,9 @@ def install_canonical_genesis(
     )
 
 
-def render_postgresql_genesis_ddl() -> str:
+def render_postgresql_genesis_ddl(
+    role_mapping: CanonicalRoleMapping | None = None,
+) -> str:
     """Render PostgreSQL genesis DDL offline; no engine or connection is created."""
 
     assert_canonical_manifest()
@@ -400,29 +403,41 @@ def render_postgresql_genesis_ddl() -> str:
         statements.append(str(CreateTable(table).compile(dialect=dialect)).strip())
         for index in sorted(table.indexes, key=lambda value: value.name or ""):
             statements.append(str(CreateIndex(index).compile(dialect=dialect)).strip())
-    statements.extend(render_postgresql_owner_sql().rstrip(";\n").split(";\n"))
+    statements.extend(
+        render_postgresql_owner_sql(role_mapping).rstrip(";\n").split(";\n")
+    )
     return ";\n\n".join(statement.rstrip(";") for statement in statements) + ";\n"
 
 
-def render_postgresql_owner_sql() -> str:
+def render_postgresql_owner_sql(
+    role_mapping: CanonicalRoleMapping | None = None,
+) -> str:
     """Render owner transfer only, ordered after every create/index operation."""
 
+    resolved = role_mapping or CanonicalRoleMapping.identity()
+    owner = resolved.physical("canonical_schema_owner")
     statements = [
         f"ALTER TABLE {CANONICAL_BUSINESS_SCHEMA}.{table.name} "
-        "OWNER TO canonical_schema_owner"
+        f"OWNER TO {owner}"
         for table in CanonicalBase.metadata.sorted_tables
     ]
     statements.append(
-        f"ALTER SCHEMA {CANONICAL_BUSINESS_SCHEMA} OWNER TO canonical_schema_owner"
+        f"ALTER SCHEMA {CANONICAL_BUSINESS_SCHEMA} OWNER TO {owner}"
     )
     return ";\n".join(statements) + ";\n"
 
 
-def postgresql_acl_statements() -> tuple[str, ...]:
+def postgresql_acl_statements(
+    role_mapping: CanonicalRoleMapping | None = None,
+) -> tuple[str, ...]:
     """Return an exact per-table ACL plan; wildcard table grants are forbidden."""
 
     assert_canonical_manifest()
-    roles = (*WRITER_IDENTITIES, *READER_IDENTITIES)
+    resolved = role_mapping or CanonicalRoleMapping.identity()
+    roles = tuple(
+        resolved.physical(role)
+        for role in (*WRITER_IDENTITIES, *READER_IDENTITIES)
+    )
     statements: list[str] = [
         f"REVOKE ALL PRIVILEGES ON SCHEMA {CANONICAL_BUSINESS_SCHEMA} FROM PUBLIC"
     ]
@@ -439,35 +454,46 @@ def postgresql_acl_statements() -> tuple[str, ...]:
         )
 
     for writer, table_names in WRITER_TABLE_ALLOWLIST.items():
+        physical_writer = resolved.physical(writer)
         for table_name in table_names:
             privileges = TABLE_MANIFEST_BY_NAME[table_name].writer_privileges
             statements.append(
                 "GRANT "
                 + ", ".join(privileges)
-                + f" ON TABLE {CANONICAL_BUSINESS_SCHEMA}.{table_name} TO {writer}"
+                + f" ON TABLE {CANONICAL_BUSINESS_SCHEMA}.{table_name} "
+                + f"TO {physical_writer}"
             )
     for writer, table_names in WRITER_READ_ALLOWLIST.items():
+        physical_writer = resolved.physical(writer)
         statements.extend(
-            f"GRANT SELECT ON TABLE {CANONICAL_BUSINESS_SCHEMA}.{table_name} TO {writer}"
+            f"GRANT SELECT ON TABLE {CANONICAL_BUSINESS_SCHEMA}.{table_name} "
+            f"TO {physical_writer}"
             for table_name in table_names
         )
     for reader, table_names in READER_TABLE_ALLOWLIST.items():
+        physical_reader = resolved.physical(reader)
         statements.extend(
-            f"GRANT SELECT ON TABLE {CANONICAL_BUSINESS_SCHEMA}.{table_name} TO {reader}"
+            f"GRANT SELECT ON TABLE {CANONICAL_BUSINESS_SCHEMA}.{table_name} "
+            f"TO {physical_reader}"
             for table_name in table_names
         )
     return tuple(statements)
 
 
-def render_postgresql_acl_sql() -> str:
-    return ";\n".join(postgresql_acl_statements()) + ";\n"
+def render_postgresql_acl_sql(
+    role_mapping: CanonicalRoleMapping | None = None,
+) -> str:
+    return ";\n".join(postgresql_acl_statements(role_mapping)) + ";\n"
 
 
-def postgresql_acl_problems(sql: str) -> tuple[str, ...]:
+def postgresql_acl_problems(
+    sql: str,
+    role_mapping: CanonicalRoleMapping | None = None,
+) -> tuple[str, ...]:
     """Static exact-plan verification for reviewed PostgreSQL ACL evidence."""
 
     problems: list[str] = []
-    expected = render_postgresql_acl_sql()
+    expected = render_postgresql_acl_sql(role_mapping)
     if sql != expected:
         problems.append("ACL text differs from the exact canonical allowlist")
     upper = sql.upper()
@@ -490,8 +516,11 @@ def postgresql_acl_problems(sql: str) -> tuple[str, ...]:
     return tuple(problems)
 
 
-def assert_postgresql_acl_sql(sql: str) -> None:
-    problems = postgresql_acl_problems(sql)
+def assert_postgresql_acl_sql(
+    sql: str,
+    role_mapping: CanonicalRoleMapping | None = None,
+) -> None:
+    problems = postgresql_acl_problems(sql, role_mapping)
     if problems:
         raise CanonicalGenesisBlocked(
             "BLOCKED_ACL_DESIGN_DRIFT", "; ".join(problems)

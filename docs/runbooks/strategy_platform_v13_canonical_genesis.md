@@ -23,8 +23,10 @@
 
 1. 精确 database name/host、空库创建 receipt 和不指向 legacy 的双人复核；
 2. 可恢复备份/快照、恢复演练位置与回滚负责人；
-3. `canonical_schema_owner` 为 `NOLOGIN` owner；manifest 中 reader/writer roles 已存在，
-   没有 membership 继承或组合超权角色；
+3. `canonical_*` 只表示代码中的逻辑 capability。唯一
+   `CanonicalRoleMapping` contract 将其映射为物理 PostgreSQL role；正式本机环境使用
+   `freqtrade_ai_v13_*`。`freqtrade_ai_v13_schema_owner` 为 `NOLOGIN` owner，其他
+   capability roles 同样保持 `NOLOGIN/NOINHERIT`；
 4. provisioning identity 有受控 DDL/GRANT/owner-transfer 权限，但不是 application runtime；
 5. 维护窗口、审计 actor/request id 和失败后禁止服务接入的 fence。
 
@@ -44,11 +46,13 @@ from app.canonical_v13.genesis import (
     render_postgresql_genesis_ddl,
     render_postgresql_owner_sql,
 )
+from app.canonical_v13.bootstrap import local_role_mapping
 
-ddl = render_postgresql_genesis_ddl()
-acl = render_postgresql_acl_sql()
-owner = render_postgresql_owner_sql()
-assert_postgresql_acl_sql(acl)
+mapping = local_role_mapping()
+ddl = render_postgresql_genesis_ddl(mapping)
+acl = render_postgresql_acl_sql(mapping)
+owner = render_postgresql_owner_sql(mapping)
+assert_postgresql_acl_sql(acl, mapping)
 print({"ddl_bytes": len(ddl), "acl_bytes": len(acl), "owner_bytes": len(owner)})
 PY
 ```
@@ -65,9 +69,10 @@ installer identity 行。不得把“SQL 可编译”记录为真实 migration/A
 2. 调用 `install_canonical_genesis(connection, installer_identity=<reviewed actor>)`；
    installer 会先做 database-wide user-object preflight，再只使用独立
    `CanonicalBase.metadata` 创建 schema/tables/indexes，插入 identity，并确认业务行 0；
-3. 应用 `render_postgresql_acl_sql()` 的 exact per-table revoke/grant；
-4. 最后应用 `render_postgresql_owner_sql()`，先逐表转给 `canonical_schema_owner`，最后转移
-   schema owner；
+3. 以同一个显式 `CanonicalRoleMapping` 应用 `render_postgresql_acl_sql(mapping)` 的 exact
+   per-table revoke/grant；
+4. 以同一个 mapping 应用 `render_postgresql_owner_sql(mapping)`，先逐表转给物理 schema
+   owner，最后转移 schema owner；
 5. 在同一事务内以 provisioning identity 再运行 `verify_canonical_genesis(...,
    require_zero_business_rows=True)`；
 6. 所有结果完全匹配才 `COMMIT`，否则 `ROLLBACK`。
@@ -109,3 +114,6 @@ canonical DSN 配给 legacy process，或把 legacy router mount 到 canonical p
 - 后续 market、首次真实 backtest、qualification、approval、runtime/交易链各自的显式授权。
 
 这些门通过前，production activation/runtime/trading 必须保持 `BLOCKED`。
+
+Phase 2 的角色、Keychain、backup/restore 与 loopback API 步骤见
+[`strategy_platform_v13_production_bootstrap.md`](strategy_platform_v13_production_bootstrap.md)。
