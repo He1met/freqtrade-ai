@@ -190,6 +190,7 @@ jobs:
     timeout-minutes: 15
     env:
       POSTGRES_WORKER_URL: postgresql+psycopg://postgres@127.0.0.1:5432/freqtrade_ai_worker_test
+      CANONICAL_V13_POSTGRES_URL: postgresql+psycopg://postgres@127.0.0.1:5432/freqtrade_ai_v13_ci_test
     services:
       postgres:
         image: postgres:16
@@ -231,6 +232,23 @@ jobs:
                   "NOCREATEDB NOINHERIT NOREPLICATION NOBYPASSRLS"
               )
               connection.execute("CREATE DATABASE freqtrade_ai_worker_test")
+              capability_roles = (
+                  "schema_owner", "control_writer", "research_writer",
+                  "approval_writer", "deployment_writer", "signal_writer",
+                  "risk_writer", "order_writer", "fill_writer", "ledger_writer",
+                  "reconciliation_writer", "projection_writer", "api_reader",
+                  "research_reader", "runtime_reader",
+              )
+              for suffix in capability_roles:
+                  connection.execute(
+                      f"CREATE ROLE freqtrade_ai_v13_ci_{suffix} "
+                      "NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
+                      "NOINHERIT NOREPLICATION NOBYPASSRLS"
+                  )
+              connection.execute(
+                  "CREATE DATABASE freqtrade_ai_v13_ci_test "
+                  "OWNER freqtrade_ai_v13_ci_schema_owner TEMPLATE template0"
+              )
           PY
 
       - name: Verify PostgreSQL ACL, writer, worker, risk, and deployment contracts
@@ -244,7 +262,8 @@ jobs:
             tests/test_strategy_platform_configuration_postgresql.py \
             tests/test_strategy_platform_read_postgresql.py \
             tests/test_strategy_platform_postgresql.py \
-            tests/test_strategy_deployment_repository.py
+            tests/test_strategy_deployment_repository.py \
+            tests/test_canonical_v13_postgresql.py
 
   natural-chain-preflight:
     name: Isolated natural-chain zero-order preflight

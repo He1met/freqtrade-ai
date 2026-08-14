@@ -76,8 +76,8 @@ def test_dependencies_and_legacy_bootstrap_boundaries_are_explicit() -> None:
     ).read_text()
     for required in (
         "BLOCKED_NON_EMPTY_CANONICAL_DATABASE",
-        "render_postgresql_acl_sql()",
-        "render_postgresql_owner_sql()",
+        "render_postgresql_acl_sql(mapping)",
+        "render_postgresql_owner_sql(mapping)",
         "require_zero_business_rows=True",
         production.READER_DATABASE_URL_ENV,
         production.CONTROL_DATABASE_URL_ENV,
@@ -146,6 +146,9 @@ def test_production_composition_requires_two_roles_on_one_postgresql_database(
         assert {route.path for route in app.routes if route.path.startswith(API_PREFIX)}
         assert app.state.canonical_reader_engine is engines[0]
         assert app.state.canonical_control_engine is engines[1]
+        routes = {route.path for route in app.routes}
+        assert "/healthz" in routes
+        assert "/readyz" in routes
     finally:
         for engine in engines:
             engine.dispose()

@@ -25,6 +25,10 @@ from app.canonical_v13.manifest import (
     WRITER_TABLE_ALLOWLIST,
 )
 from app.canonical_v13.models import CANONICAL_TABLES, CanonicalBase
+from app.canonical_v13.role_mapping import (
+    CanonicalRoleMapping,
+    CanonicalRoleMappingBlocked,
+)
 
 
 __all__ = [
@@ -39,6 +43,8 @@ __all__ = [
     "CANONICAL_TABLES",
     "CanonicalBase",
     "CanonicalGenesisBlocked",
+    "CanonicalRoleMapping",
+    "CanonicalRoleMappingBlocked",
     "GenesisInstallResult",
     "GenesisVerification",
     "P0_CONFIGURATION_KINDS",
