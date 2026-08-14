@@ -168,7 +168,10 @@ def test_simulator_runtime_never_activates_deployment_or_becomes_production_read
             build_runtime_observation_receipt(
                 runtime_instance_id=runtime_id,
                 launch_spec=FrozenRuntimeLaunchSpec(
-                    **{**spec.__dict__, "service_account": "canonical_research_writer"}
+                    **{
+                        **spec.__dict__,
+                        "service_account": "canonical_validation_writer",
+                    }
                 ),
                 status="HEALTHY",
                 observed_at=NOW,

@@ -10,6 +10,7 @@ import pytest
 
 from app.canonical_v13.bootstrap import (
     LOCAL_DATABASE_NAME,
+    LOCAL_RESEARCH_SERVICE_PRINCIPALS,
     LOCAL_ROLE_PREFIX,
     local_role_mapping,
 )
@@ -36,6 +37,12 @@ def test_local_mapping_is_total_unique_and_digest_stable() -> None:
     assert all(role.startswith(LOCAL_ROLE_PREFIX) for role in mapping.roles.values())
     assert len(mapping.mapping_digest) == 64
     assert mapping == CanonicalRoleMapping.from_prefix(LOCAL_ROLE_PREFIX)
+    assert tuple(LOCAL_RESEARCH_SERVICE_PRINCIPALS.values()) == (
+        "canonical_validation_writer",
+        "canonical_scoring_writer",
+        "canonical_qualification_writer",
+        "canonical_optimization_writer",
+    )
 
 
 @pytest.mark.parametrize(
@@ -102,6 +109,6 @@ def test_bootstrap_render_cli_is_offline_and_never_requires_a_database_url() -> 
     assert payload["status"] == "READY"
     assert payload["database_name"] == LOCAL_DATABASE_NAME
     assert payload["role_prefix"] == LOCAL_ROLE_PREFIX
-    assert payload["capability_role_count"] == 15
-    assert payload["acl_statement_count"] == 914
+    assert payload["capability_role_count"] == 18
+    assert payload["acl_statement_count"] == 1095
     assert "DATABASE_URL" not in completed.stdout

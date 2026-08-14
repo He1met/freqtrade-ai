@@ -237,12 +237,21 @@ def _identity_rows(connection: Connection) -> tuple[dict[str, object], ...]:
     return tuple(dict(row._mapping) for row in result)
 
 
-def _identity_problems(row: dict[str, object]) -> tuple[str, ...]:
+def _identity_problems(
+    row: dict[str, object],
+    *,
+    accepted_manifest_digests: tuple[str, ...] | None = None,
+) -> tuple[str, ...]:
     expected = CANONICAL_GENESIS_IDENTITY.as_database_values()
+    accepted_digests = accepted_manifest_digests or (CANONICAL_MANIFEST_DIGEST,)
     return tuple(
         f"{key} expected={expected_value!r} observed={row.get(key)!r}"
         for key, expected_value in expected.items()
-        if row.get(key) != expected_value
+        if (
+            row.get(key) not in accepted_digests
+            if key == "manifest_digest"
+            else row.get(key) != expected_value
+        )
     )
 
 
@@ -264,6 +273,7 @@ def verify_canonical_genesis(
     *,
     require_zero_business_rows: bool = False,
     include_business_row_count: bool = False,
+    accepted_manifest_digests: tuple[str, ...] | None = None,
 ) -> GenesisVerification:
     """Verify exact tables and genesis identity; never repairs observed drift."""
 
@@ -290,7 +300,10 @@ def verify_canonical_genesis(
                 f"expected one {GENESIS_METADATA_KEY!r} identity row, found {len(rows)}"
             )
         else:
-            identity_drift = _identity_problems(rows[0])
+            identity_drift = _identity_problems(
+                rows[0],
+                accepted_manifest_digests=accepted_manifest_digests,
+            )
             problems.extend(identity_drift)
             manifest_digest = str(rows[0]["manifest_digest"])
         if require_zero_business_rows or include_business_row_count:

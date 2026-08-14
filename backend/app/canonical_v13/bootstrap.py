@@ -30,6 +30,14 @@ LOCAL_SERVICE_PRINCIPALS: Final[Mapping[str, str]] = MappingProxyType(
         "freqtrade_ai_v13_control_login": "canonical_control_writer",
     }
 )
+LOCAL_RESEARCH_SERVICE_PRINCIPALS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "freqtrade_ai_v13_validation_login": "canonical_validation_writer",
+        "freqtrade_ai_v13_scoring_login": "canonical_scoring_writer",
+        "freqtrade_ai_v13_qualification_login": "canonical_qualification_writer",
+        "freqtrade_ai_v13_optimization_login": "canonical_optimization_writer",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -44,6 +52,12 @@ class BootstrapVerification:
 
 def local_role_mapping() -> CanonicalRoleMapping:
     return CanonicalRoleMapping.from_prefix(LOCAL_ROLE_PREFIX)
+
+
+def local_legacy_research_writer_role() -> str:
+    """Physical rollback anchor used only by the authority upgrade contract."""
+
+    return LOCAL_ROLE_PREFIX + "research_writer"
 
 
 def _expected_table_grants(
@@ -235,8 +249,10 @@ def verify_postgresql_bootstrap(
 __all__ = [
     "LOCAL_DATABASE_NAME",
     "LOCAL_ROLE_PREFIX",
+    "LOCAL_RESEARCH_SERVICE_PRINCIPALS",
     "LOCAL_SERVICE_PRINCIPALS",
     "BootstrapVerification",
     "local_role_mapping",
+    "local_legacy_research_writer_role",
     "verify_postgresql_bootstrap",
 ]

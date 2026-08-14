@@ -22,6 +22,7 @@ CANONICAL_MANIFEST_KEY: Final = "canonical-v13-table-manifest-v1"
 CANONICAL_LEGACY_IMPORT_MODE: Final = "EXTERNAL_LATEST_ONLY"
 CANONICAL_TRADING_CAPABILITY: Final = "TRADING_DISABLED"
 CANONICAL_PRODUCTION_DEFAULT: Final = "UNSET"
+CANONICAL_AUTHORITY_REVISION: Final = "20260815_research_writers_v2"
 
 P0_CONFIGURATION_KINDS: Final[tuple[str, ...]] = (
     "TARGET",
@@ -37,7 +38,10 @@ INDEPENDENT_MARKET_PROFILE_KIND: Final = "MARKET_DATA"
 WRITER_IDENTITIES: Final[tuple[str, ...]] = (
     "canonical_schema_owner",
     "canonical_control_writer",
-    "canonical_research_writer",
+    "canonical_validation_writer",
+    "canonical_scoring_writer",
+    "canonical_qualification_writer",
+    "canonical_optimization_writer",
     "canonical_approval_writer",
     "canonical_deployment_writer",
     "canonical_signal_writer",
@@ -157,11 +161,13 @@ _WRITER_TABLE_ALLOWLIST = {
         *_TABLES_BY_DOMAIN["control_plane"],
         *_TABLES_BY_DOMAIN["market"],
     ),
-    "canonical_research_writer": (
-        *_TABLES_BY_DOMAIN["validation"],
-        *_TABLES_BY_DOMAIN["scoring_qualification"],
-        *_TABLES_BY_DOMAIN["optimization"],
+    "canonical_validation_writer": _TABLES_BY_DOMAIN["validation"],
+    "canonical_scoring_writer": ("target_scores",),
+    "canonical_qualification_writer": (
+        "qualification_decisions",
+        "qualification_window_evidence",
     ),
+    "canonical_optimization_writer": _TABLES_BY_DOMAIN["optimization"],
     "canonical_approval_writer": ("deployment_approvals",),
     "canonical_deployment_writer": (
         "deployments",
@@ -240,7 +246,7 @@ READER_TABLE_ALLOWLIST: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType(
 _WRITER_READ_ALLOWLIST = {
     "canonical_schema_owner": (),
     "canonical_control_writer": ("schema_metadata",),
-    "canonical_research_writer": (
+    "canonical_validation_writer": (
         "schema_metadata",
         "strategy_artifacts",
         "strategy_versions",
@@ -253,6 +259,52 @@ _WRITER_READ_ALLOWLIST = {
         "research_target_allocations",
         "market_snapshots",
         "market_snapshot_members",
+    ),
+    "canonical_scoring_writer": (
+        "schema_metadata",
+        "strategy_versions",
+        "configuration_snapshots",
+        "configuration_snapshot_members",
+        "configuration_bundles",
+        "configuration_bundle_members",
+        "research_targets",
+        "market_snapshots",
+        "validation_plans",
+        "validation_plan_windows",
+        "validation_attempts",
+        "validation_window_results",
+    ),
+    "canonical_qualification_writer": (
+        "schema_metadata",
+        "strategy_versions",
+        "configuration_snapshots",
+        "configuration_snapshot_members",
+        "configuration_bundles",
+        "configuration_bundle_members",
+        "research_targets",
+        "market_snapshots",
+        "validation_plans",
+        "validation_plan_windows",
+        "validation_attempts",
+        "validation_window_results",
+        "target_scores",
+    ),
+    "canonical_optimization_writer": (
+        "schema_metadata",
+        "strategy_versions",
+        "configuration_snapshots",
+        "configuration_snapshot_members",
+        "configuration_bundles",
+        "configuration_bundle_members",
+        "research_targets",
+        "market_snapshots",
+        "validation_plans",
+        "validation_plan_windows",
+        "validation_attempts",
+        "validation_window_results",
+        "target_scores",
+        "qualification_decisions",
+        "qualification_window_evidence",
     ),
     "canonical_approval_writer": (
         "schema_metadata",
@@ -409,6 +461,7 @@ def canonical_manifest_payload() -> dict[str, object]:
 
     return {
         "design_authority_key": DESIGN_AUTHORITY_KEY,
+        "authority_revision": CANONICAL_AUTHORITY_REVISION,
         "identity": {
             "database_purpose": CANONICAL_DATABASE_PURPOSE,
             "business_schema": CANONICAL_BUSINESS_SCHEMA,

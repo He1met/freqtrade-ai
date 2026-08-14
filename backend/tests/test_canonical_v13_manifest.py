@@ -28,6 +28,7 @@ from app.canonical_v13.genesis import (
     render_postgresql_genesis_ddl,
 )
 from app.canonical_v13.manifest import (
+    CANONICAL_AUTHORITY_REVISION,
     CANONICAL_BUSINESS_SCHEMA,
     CANONICAL_DATABASE_PURPOSE,
     CANONICAL_GENESIS_VERSION,
@@ -115,6 +116,7 @@ EXPECTED_TABLES_BY_DOMAIN = {
 
 
 def test_exact_identity_and_table_manifest_matches_frozen_design() -> None:
+    assert CANONICAL_AUTHORITY_REVISION == "20260815_research_writers_v2"
     assert CANONICAL_DATABASE_PURPOSE == "FREQTRADE_AI_V13_CANONICAL"
     assert CANONICAL_BUSINESS_SCHEMA == "strategy_platform_v13"
     assert CANONICAL_GENESIS_VERSION == "20260814_01"
@@ -178,6 +180,22 @@ def test_each_table_has_one_writer_and_reader_maps_are_explicit() -> None:
             table_writer_counts[table] += 1
     assert set(table_writer_counts.values()) == {1}
     assert WRITER_TABLE_ALLOWLIST["canonical_projection_writer"] == ()
+    assert WRITER_TABLE_ALLOWLIST["canonical_validation_writer"] == (
+        "validation_plans",
+        "validation_plan_windows",
+        "validation_attempts",
+        "validation_window_results",
+    )
+    assert WRITER_TABLE_ALLOWLIST["canonical_scoring_writer"] == ("target_scores",)
+    assert WRITER_TABLE_ALLOWLIST["canonical_qualification_writer"] == (
+        "qualification_decisions",
+        "qualification_window_evidence",
+    )
+    assert WRITER_TABLE_ALLOWLIST["canonical_optimization_writer"] == (
+        "optimization_runs",
+        "optimization_trials",
+    )
+    assert "canonical_research_writer" not in WRITER_TABLE_ALLOWLIST
 
     for entry in CANONICAL_TABLE_MANIFEST:
         assert entry.table in WRITER_TABLE_ALLOWLIST[entry.writer]

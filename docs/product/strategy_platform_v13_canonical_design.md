@@ -2,6 +2,7 @@
 
 - 权威状态：`FROZEN_FOR_IMPLEMENTATION`
 - 设计版本：`canonical-v13-phase0-20260814`
+- 权限修订：`20260815_research_writers_v2`
 - 协调入口：GitHub #714；阶段入口：#715 → #724
 - 生产起点：空数据库；旧数据库只允许作为外部只读档案
 - 历史轨道：v46/v47、#705、#708、#710 只作 design-lab/legacy evidence
@@ -48,6 +49,7 @@ receipt 或 v47 design-lab 状态寻找 fallback。
 | business schema | `strategy_platform_v13` |
 | genesis version | `20260814_01` |
 | manifest key | `canonical-v13-table-manifest-v1` |
+| authority revision | `20260815_research_writers_v2`（进入 manifest digest） |
 | legacy import mode | `EXTERNAL_LATEST_ONLY` |
 | production default target/count/cap | `UNSET` |
 | trading capability at genesis | `TRADING_DISABLED` |
@@ -219,8 +221,8 @@ acceptance、optimization run。schema/intake/API/UI 的验收不得反向依赖
 及 digest、market snapshot 及 digest、validation plan 及 digest、actor、purpose、environment、
 expiry，并由独立 `RESEARCH_EXECUTION_AUTHORIZATION_CONSUMED` receipt 一次性消费。
 授权与消费属于 `canonical_control_writer` 的独立事务；ephemeral executor 只把可重算的 immutable
-consumption receipt 交给 `canonical_research_writer`，research connection 不读写 `audit_events`，
-control connection 也不写 validation 表。授权根行锁与 authorization 专用 partial UNIQUE index
+consumption receipt 交给外部 orchestrator，再由 `canonical_validation_writer` 的独立事务持久化；
+validation connection 不读写 `audit_events`，control connection 也不写 validation 表。授权根行锁与 authorization 专用 partial UNIQUE index
 序列化 consume/revoke，禁止 SQLite 单连接假装跨角色原子事务。catalog 的
 `strategy_versions.execution_authorized` 仅是历史兼容布尔列，不能授权任何 canonical attempt，
 不能替代 per-run receipt。`PENDING` qualification 只存在于 projection；DB 只插入一次 terminal
@@ -235,7 +237,10 @@ metrics、environment、request/result receipt digest；选中 trial 必须通�
 | --- | --- | --- |
 | `canonical_schema_owner` | genesis/schema metadata；受控 DDL | 业务执行、runtime、order |
 | `canonical_control_writer` | intake/catalog、配置、market receipt/snapshot、activation、audit | score、qualification、deployment、order |
-| `canonical_research_writer` | plan/attempt/window result/score/qualification/optimization | config activation、deployment、exchange |
+| `canonical_validation_writer` | validation plan/window、attempt、raw window result | target score、qualification、optimization、audit |
+| `canonical_scoring_writer` | `target_scores` only | qualification、validation result、optimization |
+| `canonical_qualification_writer` | `qualification_decisions` 与 window evidence only | target score、validation result、optimization |
+| `canonical_optimization_writer` | optimization run/trial only | baseline qualification、score、strategy version 原地提升 |
 | `canonical_approval_writer` | deployment approvals | qualification、runtime、order |
 | `canonical_deployment_writer` | deployments、runtime identity/receipt | qualification、central order |
 | `canonical_signal_writer` | signals only | intent/risk/order/fill/ledger |
@@ -262,8 +267,8 @@ owner role 或 `SECURITY DEFINER` 绕过边界。所有非唯一 FK 必须有显
 - 每个 attempt 短生命周期；输入是 immutable artifact、plan、bundle、market snapshot。
 - 无 credential mount、无 exchange client、无 order/risk/ledger 权限、无 production writer
   lease；默认 network disabled。
-- 输出只是一份 content-addressed attempt receipt/metrics artifact，由
-  `canonical_research_writer` 验证后写入。
+- 输出只是一份 content-addressed attempt receipt/metrics artifact；策略沙箱不持有数据库凭据，
+  由外部 orchestrator 交给 `canonical_validation_writer` 验证后写入。
 - container/process 退出即终止，不允许 heartbeat 变成长驻 trading runtime。
 
 ### 6.2 long-lived trading runtime

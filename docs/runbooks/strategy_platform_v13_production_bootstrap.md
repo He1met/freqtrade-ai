@@ -10,8 +10,10 @@
   `CanonicalRoleMapping.from_prefix("freqtrade_ai_v13_")`。
 - installer、ACL renderer 和 verifier 必须接收同一个 mapping。缺项、额外项、重复物理角色、
   非 PostgreSQL-safe identifier 或 digest drift 均 fail closed。
-- 15 个 capability roles 保持 `NOLOGIN/NOINHERIT`。schema owner/provisioner 永不作为服务
+- 18 个 current capability roles 保持 `NOLOGIN/NOINHERIT`。schema owner/provisioner 永不作为服务
   LOGIN。
+- 原 `freqtrade_ai_v13_research_writer` 只作为可审计 rollback anchor 保留：authority upgrade
+  后必须无 schema/table ACL、无 membership，不能作为 production service identity。
 
 无连接的计划渲染：
 
@@ -43,6 +45,11 @@ PostgreSQL password verifier 和 macOS Keychain；不会进入 argv、stdout/std
 或 dotenv。任一已存在/半完成状态均 `BLOCKED`，绝不覆盖。
 
 worker、research/backtest、runtime、order、fill、ledger principals 本阶段禁止创建。
+
+production research activation 另需四个互不相同的 LOGIN，每个只继承一个 capability：
+`validation_writer`、`scoring_writer`、`qualification_writer`、`optimization_writer`。它们不由
+API principal 脚本自动创建；精确升级和回滚顺序见
+[`strategy_platform_v13_research_authority_upgrade.md`](strategy_platform_v13_research_authority_upgrade.md)。
 
 ## 3. Backup 与独立 restore acceptance
 
