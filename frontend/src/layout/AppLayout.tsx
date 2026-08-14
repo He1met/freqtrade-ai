@@ -142,7 +142,7 @@ export function AppLayout() {
           </aside>
         ) : historicalRoute ? (
           <aside className="formal-context-banner" data-kind="historical">
-            <div><strong>高级与历史证据</strong><span>本页保留兼容查询，不推进正式候选、部署或订单生命周期。</span></div>
+            <div><strong>高级与历史证据</strong><span>本页保留 legacy 兼容查询，但不是 V1.3 canonical production 权威，也不会作为 canonical fallback。</span></div>
             <Link to="/strategies">返回策略工厂</Link>
           </aside>
         ) : null}
