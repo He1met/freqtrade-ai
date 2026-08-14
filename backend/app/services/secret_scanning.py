@@ -107,6 +107,13 @@ AUTHORIZATION_METADATA_SAFE_VALUES = {
     ),
 }
 
+NON_SECRET_REFERENCE_KEYS = {
+    "authorization_consumption",
+    "authorization_id",
+    "authorization_receipt_digest",
+    "secret_patterns",
+}
+
 
 @dataclass(frozen=True)
 class SecretScanFinding:
@@ -386,6 +393,8 @@ def _normalize(value: str) -> str:
 def _is_secret_key(key: str) -> bool:
     normalized = _normalize(key)
     parts = normalized.split("_")
+    if normalized in NON_SECRET_REFERENCE_KEYS:
+        return False
     if normalized.startswith(("hide_", "redact_", "masked_")):
         return False
     if normalized.endswith(("_finding", "_findings", "_line", "_lines", "_path", "_paths")):

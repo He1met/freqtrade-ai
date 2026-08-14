@@ -268,10 +268,10 @@ def consume_research_execution_authorization(
     effective = _require_canonical(connection)
     # Serialize consume against revoke on PostgreSQL.  The partial unique index
     # on authorization audit events is the final duplicate-consumption guard.
-    authorization = _persisted_authorization(
+    receipt_record = _persisted_authorization(
         effective, authorization_id, lock=True
     )
-    evidence = authorization["evidence_json"]
+    evidence = receipt_record["evidence_json"]
     expected = _authorization_evidence(
         authorization_id=authorization_id,
         lineage=expected_lineage,
@@ -317,7 +317,7 @@ def consume_research_execution_authorization(
         "validation_plan_digest": validation_plan_digest,
         "actor_identity": actor_identity,
         "consumed_at": consumed_at.isoformat(),
-        "authorization_receipt_digest": authorization["receipt_digest"],
+        "authorization_receipt_digest": receipt_record["receipt_digest"],
         "environment_class": evidence["environment_class"],
     }
     request_digest = _digest(consumption_evidence)
@@ -345,7 +345,7 @@ def consume_research_execution_authorization(
         validation_plan_id=validation_plan_id,
         validation_plan_digest=validation_plan_digest,
         actor_identity=actor_identity,
-        authorization_receipt_digest=authorization["receipt_digest"],
+        authorization_receipt_digest=receipt_record["receipt_digest"],
         request_digest=request_digest,
         receipt_digest=receipt_digest,
         consumed_at=consumed_at,
