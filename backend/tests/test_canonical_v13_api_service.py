@@ -70,6 +70,12 @@ def test_keychain_presence_probe_never_reads_secret_value(monkeypatch) -> None:
         observed.extend(command)
         return type("Result", (), {"returncode": 0})()
 
+    monkeypatch.setattr(
+        service,
+        "_security_command",
+        lambda: Path("/usr/bin/security"),
+    )
+    monkeypatch.setattr(service, "_keychain_account", lambda: "ci-operator")
     monkeypatch.setattr(service.subprocess, "run", run)
     assert service._keychain_item_exists(service.READER_KEYCHAIN_SERVICE) is True
     assert "-w" not in observed
