@@ -97,7 +97,7 @@ canonical API 只能由 `app.canonical_v13.production:create_app` factory 启动
 或 runtime。GET projection 只使用 reader；POST control command 只使用 control writer。
 每个请求先验证 canonical database identity；不匹配返回 fail-closed 503/409，不 fallback。
 
-开发环境 Vite 将 `/api/canonical-v13` 单独转发到 `127.0.0.1:8001`，其他 `/api` 仍指向
+开发环境 Vite 将 `/api/canonical-v13` 单独转发到 `127.0.0.1:8011`，其他 `/api` 仍指向
 legacy `127.0.0.1:8000`。生产 reverse proxy 必须做同样的 longest-prefix 分流；禁止把
 canonical DSN 配给 legacy process，或把 legacy router mount 到 canonical process。
 
