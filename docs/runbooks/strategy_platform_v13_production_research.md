@@ -109,6 +109,19 @@ FREQTRADE_AI_CANONICAL_V13_RESEARCH_TMPFS_MB=<32..512>
 sandbox 前 `BLOCKED`。本 runbook 不授权配置这些值；恢复任务必须先更新 release pin 和完成独立
 provisioning/attestation。
 
+### 5.1 canonical worker image
+
+仓库内 `containers/canonical-v13-research/Containerfile` 是 production research worker 的唯一构建
+入口。其 `FROM` 必须固定到 reviewed Freqtrade platform manifest digest，不能以 `stable`、
+`latest` 或其他 mutable tag 作为 authority。构建后必须重新记录派生镜像的 immutable digest，
+验证 `linux/arm64`、空 `ENTRYPOINT`、固定 worker path，并用 adapter 的完整 security flags 只运行
+`preflight`；不得用该验收步骤运行 `backtest`。
+
+worker 只接受 canonical request/bundle/plan/strategy 和 `/input/market-*.data`。它先逐项验证
+canonical JSON、SHA-256、no-trade capability、target/window lineage，再在 `/work` 中生成临时
+Freqtrade data/config/result。任何解析、执行或输出漂移都只返回 exact `BLOCKED` envelope，不输出
+host environment、input 内容或底层异常文本。
+
 ## 6. optimization 与重新验证
 
 `create_optimization_run` 只接受 persisted `QUALIFIED` baseline。trial 不能覆盖 baseline version；
