@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from contextlib import contextmanager
 import os
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from sqlalchemy import Connection, Engine, create_engine, text
@@ -20,6 +21,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.canonical_v13.api import create_canonical_v13_app
 from app.canonical_v13.genesis import verify_canonical_genesis
+from app.canonical_v13.okx_public_market import OkxPublicHistoryCandleDownloader
 from app.canonical_v13.bootstrap import LOCAL_SERVICE_PRINCIPALS, local_role_mapping
 from app.canonical_v13.research_persistence import (
     RESEARCH_PERSISTENCE_ENV_BY_CAPABILITY,
@@ -75,7 +77,11 @@ def _connection_factory(engine: Engine):
     return factory
 
 
-def create_app(environment: Mapping[str, str] | None = None) -> FastAPI:
+def create_app(
+    environment: Mapping[str, str] | None = None,
+    *,
+    market_artifact_root: Path | None = None,
+) -> FastAPI:
     """Build the standalone app; database connections remain request-scoped."""
 
     resolved_environment = os.environ if environment is None else environment
@@ -143,6 +149,12 @@ def create_app(environment: Mapping[str, str] | None = None) -> FastAPI:
         ),
         qualification_connection_factory=_connection_factory(
             research_engines["canonical_qualification_writer"]
+        ),
+        market_artifact_root=market_artifact_root,
+        market_downloader_factory=(
+            OkxPublicHistoryCandleDownloader
+            if market_artifact_root is not None
+            else None
         ),
     )
 

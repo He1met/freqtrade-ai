@@ -12,6 +12,7 @@ import binascii
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Optional, Protocol, TypeVar
 from uuid import UUID
 
@@ -45,6 +46,10 @@ from app.canonical_v13.dto import (
     ConfigurationValidateCommandDTO,
     ConfigurationValidationResultDTO,
     ConfigurationVersionProjectionDTO,
+    FreshMarketApplyCommandDTO,
+    FreshMarketPlanCommandDTO,
+    FreshMarketPlanDTO,
+    FreshMarketReceiptDTO,
     MarketInventoryProjectionDTO,
     MarketSnapshotMemberProjectionDTO,
     MarketSnapshotProjectionDTO,
@@ -94,6 +99,21 @@ from app.canonical_v13.manifest import (
     P0_CONFIGURATION_KINDS,
 )
 from app.canonical_v13.market import CanonicalMarketBlocked
+from app.canonical_v13.fresh_market_rollout import (
+    CanonicalFreshMarketRolloutBlocked,
+    acquire_register_and_seal_fresh_market,
+)
+from app.canonical_v13.market_acquisition import (
+    CanonicalMarketAcquisitionBlocked,
+    MarketDownloaderPort,
+)
+from app.canonical_v13.market_planning import (
+    CanonicalMarketPlanningBlocked,
+    FreshMarketPlan,
+    fresh_market_plan_digest,
+    fresh_market_plan_facts,
+    plan_fresh_market_acquisition,
+)
 from app.canonical_v13.research_evaluation import (
     CanonicalEvaluationBlocked,
     gate_optimization,
@@ -183,6 +203,9 @@ _CANONICAL_DOMAIN_ERRORS = (
     CanonicalGenesisBlocked,
     CanonicalIntakeBlocked,
     CanonicalMarketBlocked,
+    CanonicalFreshMarketRolloutBlocked,
+    CanonicalMarketAcquisitionBlocked,
+    CanonicalMarketPlanningBlocked,
     CanonicalResearchAuthorizationBlocked,
     CanonicalResearchExecutionBlocked,
     CanonicalResearchOrchestrationBlocked,
@@ -801,6 +824,8 @@ def create_canonical_v13_app(
     validation_connection_factory: CanonicalConnectionFactory | None = None,
     scoring_connection_factory: CanonicalConnectionFactory | None = None,
     qualification_connection_factory: CanonicalConnectionFactory | None = None,
+    market_artifact_root: Path | None = None,
+    market_downloader_factory: Callable[[], MarketDownloaderPort] | None = None,
 ) -> FastAPI:
     """Create a standalone app with capability-separated database identities."""
 
@@ -808,6 +833,10 @@ def create_canonical_v13_app(
         raise TypeError("reader_connection_factory must be callable")
     if not callable(control_connection_factory):
         raise TypeError("control_connection_factory must be callable")
+    if market_downloader_factory is not None and not callable(
+        market_downloader_factory
+    ):
+        raise TypeError("market_downloader_factory must be callable")
     app = FastAPI(
         title="Freqtrade AI canonical V1.3 API",
         version="canonical-v13-phase4-v1",
@@ -1407,6 +1436,98 @@ def create_canonical_v13_app(
     )
     def market_inventory() -> MarketInventoryProjectionDTO:
         return run_read(_market_inventory)
+
+    def build_market_plan(
+        connection: Connection, command: FreshMarketPlanCommandDTO
+    ) -> FreshMarketPlan:
+        return plan_fresh_market_acquisition(
+            connection,
+            target_snapshot_id=command.target_snapshot_id,
+            expected_target_snapshot_digest=command.target_snapshot_digest,
+            window_snapshot_id=command.window_snapshot_id,
+            expected_window_snapshot_digest=command.window_snapshot_digest,
+            target_key=command.target_key,
+        )
+
+    def market_plan_dto(plan: FreshMarketPlan) -> FreshMarketPlanDTO:
+        facts = fresh_market_plan_facts(plan)
+        facts.pop("contract")
+        return FreshMarketPlanDTO(
+            **facts,
+            plan_digest=fresh_market_plan_digest(plan),
+        )
+
+    @app.post(
+        f"{API_PREFIX}/market-data/acquisitions/plan",
+        response_model=FreshMarketPlanDTO,
+    )
+    def plan_market_acquisition(
+        command: FreshMarketPlanCommandDTO,
+    ) -> FreshMarketPlanDTO:
+        return run_control(
+            lambda connection: market_plan_dto(build_market_plan(connection, command))
+        )
+
+    @app.post(
+        f"{API_PREFIX}/market-data/acquisitions/apply",
+        response_model=FreshMarketReceiptDTO,
+        status_code=201,
+    )
+    def apply_market_acquisition(
+        command: FreshMarketApplyCommandDTO,
+    ) -> FreshMarketReceiptDTO:
+        if market_artifact_root is None or market_downloader_factory is None:
+            raise CanonicalAPIBlocked(
+                "BLOCKED_MARKET_ACQUISITION_NOT_CONFIGURED",
+                "production market artifact root/downloader is unavailable",
+            )
+        if not market_artifact_root.is_absolute() or market_artifact_root.is_symlink():
+            raise CanonicalAPIBlocked(
+                "BLOCKED_MARKET_ARTIFACT_ROOT", "artifact root is not a real directory"
+            )
+        try:
+            root = market_artifact_root.resolve(strict=True)
+        except OSError as exc:
+            raise CanonicalAPIBlocked(
+                "BLOCKED_MARKET_ARTIFACT_ROOT", "artifact root is unavailable"
+            ) from exc
+        if not root.is_dir() or root.is_symlink():
+            raise CanonicalAPIBlocked(
+                "BLOCKED_MARKET_ARTIFACT_ROOT", "artifact root is not a real directory"
+            )
+
+        def execute(connection: Connection) -> FreshMarketReceiptDTO:
+            plan = build_market_plan(connection, command)
+            digest = fresh_market_plan_digest(plan)
+            if digest != command.expected_plan_digest:
+                raise CanonicalAPIBlocked(
+                    "BLOCKED_MARKET_PLAN_DIGEST_DRIFT",
+                    "fresh-market plan differs from reviewed digest",
+                )
+            result = acquire_register_and_seal_fresh_market(
+                connection,
+                plan=plan,
+                downloader=market_downloader_factory(),
+                artifact_root=root,
+                observed_at=datetime.now(timezone.utc),
+                profile_key=command.profile_key,
+                scope_key=command.scope_key,
+                inspector_identity="canonical-v13-okx-public-inspector-v1",
+            )
+            return FreshMarketReceiptDTO(
+                plan_digest=digest,
+                market_profile_version_id=result.market_profile_version_id,
+                artifact_id=result.artifact_id,
+                artifact_locator=result.artifact_locator,
+                artifact_digest=result.artifact_digest,
+                receipt_id=result.receipt_id,
+                market_snapshot_id=result.market_snapshot_id,
+                market_snapshot_digest=result.market_snapshot_digest,
+                artifact_file_replay=result.artifact_file_replay,
+                database_replay=result.database_replay,
+            )
+
+        return run_control(execute)
 
     @app.get(
         f"{API_PREFIX}/market-data/snapshots/{{snapshot_id}}",

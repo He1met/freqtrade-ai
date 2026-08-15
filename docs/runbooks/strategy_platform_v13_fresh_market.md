@@ -51,32 +51,44 @@ remain `BLOCKED / MARKET_SNAPSHOT_UNSET` with no bundle or activation row.
 1. Release checkout is clean and exactly equals `origin/main`.
 2. The dedicated database is `freqtrade_ai_v13`; never use `freqtrade_ai` or
    `freqtrade_ai_design_lab`.
-3. The existing control LOGIN Keychain item is readable. Do not print, export,
-   rotate, or persist its value. An exit 51 from `/usr/bin/security` is a hard
-   OS blocker.
-4. The artifact root is a new absolute canonical data directory. It and every
+3. The canonical API is `HEALTHY/READY/TRADING_DISABLED`. The client never reads
+   Keychain or receives a DSN; the already-running API keeps its request-scoped
+   control connection private.
+4. The server-configured artifact root is an absolute canonical data directory. It and every
    existing parent below it must be real directories, not symlinks.
 5. Record exact TARGET/WINDOW snapshot UUIDs and digests from the reader
    projection. Review the new WINDOW payload and its audit/idempotency receipts.
 
 ## Dry review and execution
 
-The command has no implicit database, target, range, or data-root defaults:
+The command has no implicit target or range defaults. First request and review
+the complete server-derived plan and its digest:
 
 ```bash
-backend/.venv/bin/python scripts/canonical_v13_fresh_market.py \
-  --artifact-root /absolute/new/canonical/user_data/data \
+backend/.venv/bin/python scripts/canonical_v13_fresh_market.py plan \
+  --target-snapshot-id TARGET_UUID \
+  --target-snapshot-digest TARGET_SHA256 \
+  --window-snapshot-id WINDOW_UUID \
+  --window-snapshot-digest WINDOW_SHA256 \
+  --target-key btc-usdt-swap-15m
+```
+
+Then bind the reviewed digest on apply:
+
+```bash
+backend/.venv/bin/python scripts/canonical_v13_fresh_market.py apply \
   --target-snapshot-id TARGET_UUID \
   --target-snapshot-digest TARGET_SHA256 \
   --window-snapshot-id WINDOW_UUID \
   --window-snapshot-digest WINDOW_SHA256 \
   --target-key btc-usdt-swap-15m \
+  --expected-plan-digest PLAN_SHA256 \
   --profile-key production-v13-okx-public-btc-usdt-swap-15m \
   --scope-key production-research-v13
 ```
 
-The short-lived command obtains only the existing control DSN in memory from
-macOS Keychain. It paginates with a fixed timeout, finite retry count, and an
+The short-lived client calls only the loopback canonical API and has no
+credential/DSN surface. The API paginates with a fixed timeout, finite retry count, and an
 IP-rate-limit interval. It accepts only confirmed candles, normalizes UTC,
 deduplicates exact repeats, rejects conflicting duplicates and any interval
 gap, writes deterministic NDJSON mode 0600 under a SHA-256-bearing
