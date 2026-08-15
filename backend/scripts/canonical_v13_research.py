@@ -30,6 +30,7 @@ from app.canonical_v13.freqtrade_production import (
     FreqtradeProductionResearchAdapter,
     PRODUCTION_LOOKAHEAD_ACTIVATION,
     ProductionResearchLimits,
+    RemotePodmanVolumeSandboxRunner,
     execute_production_static_lookahead_gate,
     materialize_production_lookahead_inputs,
     materialize_production_research_inputs,
@@ -415,14 +416,9 @@ def _gate_execute(
         )
         if attempt.get("status") == "BLOCKED":
             return attempt
-        if attempt.get("repeat_noop") is True and attempt.get("status") == "RUNNING":
-            return {
-                "status": "BLOCKED",
-                "reason_code": "BLOCKED_GATE_ATTEMPT_ALREADY_RUNNING",
-                "gate_attempt_id": attempt["gate_attempt_id"],
-            }
         if attempt.get("repeat_noop") is True and attempt.get("status") != "PENDING":
-            return _request(environment, method="GET", path=f"/research/gates/{attempt['gate_attempt_id']}", payload=None)
+            if attempt.get("status") != "RUNNING":
+                return _request(environment, method="GET", path=f"/research/gates/{attempt['gate_attempt_id']}", payload=None)
         lease = _request(
             environment,
             method="POST",
@@ -437,7 +433,7 @@ def _gate_execute(
             image_reference=_required(environment, IMAGE_ENV),
             limits=limits,
             input_factory=inputs,
-            runner=BoundedSubprocessSandboxRunner(),
+            runner=RemotePodmanVolumeSandboxRunner(),
         )
         with engine.connect() as connection:
             receipt = execute_production_static_lookahead_gate(

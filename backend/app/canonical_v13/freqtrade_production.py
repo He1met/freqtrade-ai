@@ -265,6 +265,152 @@ class BoundedSubprocessSandboxRunner:
         )
 
 
+class RemotePodmanVolumeSandboxRunner(BoundedSubprocessSandboxRunner):
+    """Stage materialized inputs into a short-lived remote Podman volume."""
+
+    @staticmethod
+    def _run_control(argv: Sequence[str]) -> None:
+        result = subprocess.run(
+            tuple(argv),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            shell=False,
+            env={"LANG": "C", "LC_ALL": "C"},
+            close_fds=True,
+            check=False,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            raise CanonicalProductionResearchBlocked(
+                "BLOCKED_SANDBOX_STAGING_FAILED",
+                "remote sandbox input staging failed",
+            )
+
+    @staticmethod
+    def _cleanup(runtime: str, *argv: str) -> None:
+        try:
+            subprocess.run(
+                (runtime, *argv),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                shell=False,
+                env={"LANG": "C", "LC_ALL": "C"},
+                close_fds=True,
+                check=False,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+    def run(
+        self,
+        argv: Sequence[str],
+        *,
+        timeout_seconds: int,
+        max_output_bytes: int,
+    ) -> SandboxCommandResult:
+        if not argv or not Path(argv[0]).is_absolute():
+            raise CanonicalProductionResearchBlocked(
+                "BLOCKED_SANDBOX_RUNTIME_PATH", "sandbox runtime must be absolute"
+            )
+        command = list(argv)
+        try:
+            container_name = command[command.index("--name") + 1]
+            image_index = next(
+                index
+                for index, value in enumerate(command)
+                if _IMAGE.fullmatch(value) is not None
+            )
+            user_identity = command[command.index("--user") + 1]
+        except (StopIteration, ValueError, IndexError):
+            raise CanonicalProductionResearchBlocked(
+                "BLOCKED_SANDBOX_STAGING_COMMAND",
+                "remote sandbox command cannot be staged",
+            ) from None
+        if not _SAFE_KEY.fullmatch(container_name):
+            raise CanonicalProductionResearchBlocked(
+                "BLOCKED_SANDBOX_IDENTITY", "sandbox name is invalid"
+            )
+        volume_name = f"{container_name}-input"
+        staging_name = f"{container_name}-stage"
+        bind_mounts: list[tuple[Path, str]] = []
+        rewritten: list[str] = []
+        index = 0
+        while index < len(command):
+            if index + 1 < len(command) and command[index] == "--mount":
+                fields = dict(
+                    field.split("=", 1)
+                    for field in command[index + 1].split(",")
+                    if "=" in field
+                )
+                if fields.get("type") == "bind":
+                    source = Path(fields.get("src", ""))
+                    destination = fields.get("dst", "")
+                    if (
+                        not source.is_absolute()
+                        or not source.exists()
+                        or not destination.startswith("/input")
+                    ):
+                        raise CanonicalProductionResearchBlocked(
+                            "BLOCKED_SANDBOX_STAGING_INPUT",
+                            "remote sandbox input is invalid",
+                        )
+                    bind_mounts.append((source, destination))
+                    index += 2
+                    continue
+            rewritten.append(command[index])
+            index += 1
+        if not bind_mounts or bind_mounts[0][1] != "/input":
+            raise CanonicalProductionResearchBlocked(
+                "BLOCKED_SANDBOX_STAGING_INPUT",
+                "remote sandbox root input is missing",
+            )
+        runtime = command[0]
+        image = command[image_index]
+        rewritten_image_index = image_index - (2 * len(bind_mounts))
+        try:
+            self._run_control((runtime, "volume", "create", volume_name))
+            self._run_control(
+                (
+                    runtime,
+                    "create",
+                    "--name",
+                    staging_name,
+                    "--network",
+                    "none",
+                    "--read-only",
+                    "--cap-drop",
+                    "ALL",
+                    "--security-opt",
+                    "no-new-privileges",
+                    "--user",
+                    user_identity,
+                    "--mount",
+                    f"type=volume,src={volume_name},dst=/input",
+                    image,
+                )
+            )
+            for source, destination in bind_mounts:
+                source_spec = f"{source}/." if source.is_dir() else str(source)
+                self._run_control(
+                    (runtime, "cp", source_spec, f"{staging_name}:{destination}")
+                )
+            rewritten[rewritten_image_index:rewritten_image_index] = [
+                "--mount",
+                f"type=volume,src={volume_name},dst=/input,readonly",
+            ]
+            return super().run(
+                rewritten,
+                timeout_seconds=timeout_seconds,
+                max_output_bytes=max_output_bytes,
+            )
+        finally:
+            self._cleanup(runtime, "rm", "--force", staging_name)
+            self._cleanup(runtime, "volume", "rm", "--force", volume_name)
+
+
 def _canonical_bytes(value: object) -> bytes:
     try:
         return json.dumps(

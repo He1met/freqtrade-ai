@@ -22,6 +22,7 @@ from app.canonical_v13.freqtrade_production import (
     FreqtradeProductionResearchAdapter,
     ProductionLookaheadInputSet,
     ProductionResearchLimits,
+    RemotePodmanVolumeSandboxRunner,
     SandboxCommandResult,
     execute_production_static_lookahead_gate,
     materialize_production_research_inputs,
@@ -78,6 +79,58 @@ class CapturingRunner:
             stderr=b"",
         )
 
+
+def test_remote_podman_runner_stages_bind_inputs_and_cleans_volume(
+    monkeypatch, tmp_path: Path
+) -> None:
+    runtime = tmp_path / "podman-remote"
+    runtime.write_text("runtime")
+    runtime.chmod(0o755)
+    workspace = tmp_path / "input"
+    workspace.mkdir()
+    (workspace / "request.json").write_text("{}")
+    market = tmp_path / "market.data"
+    market.write_text("data")
+    observed: list[tuple[str, ...]] = []
+
+    def control(argv, **_kwargs):
+        observed.append(tuple(argv))
+        return SimpleNamespace(returncode=0)
+
+    def execute(_self, argv, **_kwargs):
+        observed.append(tuple(argv))
+        return SandboxCommandResult(return_code=0, stdout=b"{}", stderr=b"")
+
+    monkeypatch.setattr("app.canonical_v13.freqtrade_production.subprocess.run", control)
+    monkeypatch.setattr(
+        "app.canonical_v13.freqtrade_production.BoundedSubprocessSandboxRunner.run",
+        execute,
+    )
+    image = f"research@sha256:{EXECUTOR_IMAGE_DIGEST}"
+    result = RemotePodmanVolumeSandboxRunner().run(
+        (
+            str(runtime),
+            "run",
+            "--name",
+            "canonical-v13-lookahead-test",
+            "--user",
+            "501:20",
+            "--mount",
+            f"type=bind,src={workspace},dst=/input,readonly",
+            "--mount",
+            f"type=bind,src={market},dst=/input/market.data,readonly",
+            image,
+            "worker",
+        ),
+        timeout_seconds=60,
+        max_output_bytes=1024,
+    )
+    assert result.return_code == 0
+    execution = next(call for call in observed if len(call) > 1 and call[1] == "run")
+    assert not any("type=bind" in value for value in execution)
+    assert any("type=volume" in value and "readonly" in value for value in execution)
+    assert sum(1 for call in observed if len(call) > 1 and call[1] == "cp") == 2
+    assert any(call[1:3] == ("volume", "rm") for call in observed)
 
 def _running(connection):
     prepared = _prepare_ready_plan(connection)
