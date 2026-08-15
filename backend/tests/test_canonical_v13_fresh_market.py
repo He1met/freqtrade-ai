@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
 from urllib.error import URLError
@@ -39,6 +39,9 @@ from app.canonical_v13.market_planning import (
 from app.canonical_v13.okx_public_market import (
     OKX_HISTORY_CANDLES_URL,
     OkxPublicHistoryCandleDownloader,
+)
+from app.canonical_v13.offline_exchange_metadata import (
+    OfflineExchangeMetadataPayload,
 )
 
 
@@ -274,6 +277,27 @@ class _CompleteFakeDownloader:
         )
 
 
+class _CompleteFakeMetadataDownloader:
+    provenance_class = "PRODUCTION_PUBLIC_EXCHANGE_METADATA"
+    network_access = "PUBLIC_MARKET_DATA_ONLY"
+    credential_access = "NONE"
+
+    def acquire(self, request, *, observed_at):
+        content = b'{"contract":"test-offline-exchange-metadata"}'
+        digest = sha256(content).hexdigest()
+        acquired = datetime(2026, 8, 14, 1, 30, tzinfo=timezone.utc)
+        return OfflineExchangeMetadataPayload(
+            content=content,
+            locator=f"canonical_v13/fake/exchange-metadata/{digest}.json",
+            content_digest=digest,
+            observed_at=acquired,
+            fresh_until=acquired + timedelta(hours=1),
+            market_count=1,
+            leverage_tier_count=2,
+            receipt_digest="f" * 64,
+        )
+
+
 def _count(connection, table) -> int:
     return int(connection.execute(select(func.count()).select_from(table)).scalar_one())
 
@@ -301,6 +325,7 @@ def test_rollout_is_immutable_append_only_and_idempotent(
             profile_key="fresh-okx-btc-15m",
             scope_key="production-research-v13",
             inspector_identity="canonical-v13-market-inspector-v1",
+            metadata_downloader=_CompleteFakeMetadataDownloader(),
         )
         replay = acquire_register_and_seal_fresh_market(
             canonical_connection,
@@ -311,9 +336,10 @@ def test_rollout_is_immutable_append_only_and_idempotent(
             profile_key="fresh-okx-btc-15m",
             scope_key="production-research-v13",
             inspector_identity="canonical-v13-market-inspector-v1",
+            metadata_downloader=_CompleteFakeMetadataDownloader(),
         )
-        assert _count(canonical_connection, MARKET_ARTIFACTS_TABLE) == 1
-        assert _count(canonical_connection, MARKET_RECEIPTS_TABLE) == 1
+        assert _count(canonical_connection, MARKET_ARTIFACTS_TABLE) == 2
+        assert _count(canonical_connection, MARKET_RECEIPTS_TABLE) == 2
         assert _count(canonical_connection, MARKET_SNAPSHOTS_TABLE) == 1
     assert first.database_replay is False
     assert replay.database_replay is True
@@ -359,6 +385,7 @@ def test_artifact_symlink_and_staleness_fail_closed(
                 profile_key="stale-okx-btc-15m",
                 scope_key="production-research-v13",
                 inspector_identity="canonical-v13-market-inspector-v1",
+                metadata_downloader=_CompleteFakeMetadataDownloader(),
             )
         assert stale.value.code == "BLOCKED_MARKET_EVIDENCE_STALE"
-        assert _count(canonical_connection, MARKET_ARTIFACTS_TABLE) == 0
+        assert _count(canonical_connection, MARKET_ARTIFACTS_TABLE) == 1

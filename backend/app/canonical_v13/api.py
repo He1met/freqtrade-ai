@@ -114,6 +114,9 @@ from app.canonical_v13.market_planning import (
     fresh_market_plan_facts,
     plan_fresh_market_acquisition,
 )
+from app.canonical_v13.offline_exchange_metadata import (
+    OkxPublicOfflineExchangeMetadataDownloader,
+)
 from app.canonical_v13.research_evaluation import (
     CanonicalEvaluationBlocked,
     gate_optimization,
@@ -826,6 +829,9 @@ def create_canonical_v13_app(
     qualification_connection_factory: CanonicalConnectionFactory | None = None,
     market_artifact_root: Path | None = None,
     market_downloader_factory: Callable[[], MarketDownloaderPort] | None = None,
+    exchange_metadata_downloader_factory: Callable[
+        [], OkxPublicOfflineExchangeMetadataDownloader
+    ] | None = None,
 ) -> FastAPI:
     """Create a standalone app with capability-separated database identities."""
 
@@ -837,6 +843,10 @@ def create_canonical_v13_app(
         market_downloader_factory
     ):
         raise TypeError("market_downloader_factory must be callable")
+    if exchange_metadata_downloader_factory is not None and not callable(
+        exchange_metadata_downloader_factory
+    ):
+        raise TypeError("exchange_metadata_downloader_factory must be callable")
     app = FastAPI(
         title="Freqtrade AI canonical V1.3 API",
         version="canonical-v13-phase4-v1",
@@ -1476,7 +1486,11 @@ def create_canonical_v13_app(
     def apply_market_acquisition(
         command: FreshMarketApplyCommandDTO,
     ) -> FreshMarketReceiptDTO:
-        if market_artifact_root is None or market_downloader_factory is None:
+        if (
+            market_artifact_root is None
+            or market_downloader_factory is None
+            or exchange_metadata_downloader_factory is None
+        ):
             raise CanonicalAPIBlocked(
                 "BLOCKED_MARKET_ACQUISITION_NOT_CONFIGURED",
                 "production market artifact root/downloader is unavailable",
@@ -1513,6 +1527,7 @@ def create_canonical_v13_app(
                 profile_key=command.profile_key,
                 scope_key=command.scope_key,
                 inspector_identity="canonical-v13-okx-public-inspector-v1",
+                metadata_downloader=exchange_metadata_downloader_factory(),
             )
             return FreshMarketReceiptDTO(
                 plan_digest=digest,
@@ -1525,6 +1540,11 @@ def create_canonical_v13_app(
                 market_snapshot_digest=result.market_snapshot_digest,
                 artifact_file_replay=result.artifact_file_replay,
                 database_replay=result.database_replay,
+                exchange_metadata_artifact_id=result.exchange_metadata_artifact_id,
+                exchange_metadata_receipt_id=result.exchange_metadata_receipt_id,
+                exchange_metadata_locator=result.exchange_metadata_locator,
+                exchange_metadata_digest=result.exchange_metadata_digest,
+                exchange_metadata_receipt_digest=result.exchange_metadata_receipt_digest,
             )
 
         return run_control(execute)

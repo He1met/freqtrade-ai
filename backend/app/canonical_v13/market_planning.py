@@ -71,6 +71,8 @@ def fresh_market_plan_facts(plan: FreshMarketPlan) -> dict[str, object]:
         "integrity_margin_closed_candles": plan.integrity_margin_closed_candles,
         "freshness_max_age_seconds": plan.freshness_max_age_seconds,
         "source": "OKX_PUBLIC_MARKET_DATA_ONLY",
+        "offline_exchange_metadata_contract": "canonical-v13-okx-offline-exchange-metadata-v1",
+        "offline_exchange_adapter_identity": "freqtrade-2026.6-ccxt-4.5.61-okx-offline-v1",
         "credential_access": "NONE",
         "trading_capability": "TRADING_DISABLED",
         "execution_side_effects": 0,

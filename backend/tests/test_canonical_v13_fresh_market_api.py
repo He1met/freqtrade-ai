@@ -73,6 +73,11 @@ def test_market_plan_digest_must_be_reviewed_before_public_only_apply(
             artifact_digest="d" * 64,
             artifact_file_replay=False,
             database_replay=False,
+            exchange_metadata_artifact_id=uuid4(),
+            exchange_metadata_receipt_id=uuid4(),
+            exchange_metadata_locator="canonical_v13/okx-public/metadata.json",
+            exchange_metadata_digest="f" * 64,
+            exchange_metadata_receipt_digest="1" * 64,
         )
 
     monkeypatch.setattr(canonical_api, "plan_fresh_market_acquisition", fake_plan)
@@ -84,6 +89,7 @@ def test_market_plan_digest_must_be_reviewed_before_public_only_apply(
         control_connection_factory=connection_factory,
         market_artifact_root=tmp_path,
         market_downloader_factory=lambda: object(),
+        exchange_metadata_downloader_factory=lambda: object(),
     )
     client = TestClient(app, raise_server_exceptions=False)
     command = {

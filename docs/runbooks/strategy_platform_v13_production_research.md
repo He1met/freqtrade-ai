@@ -57,6 +57,17 @@ Freqtrade `lookahead-analysis`。它不调用 control API，不创建 validation
 window key/digest 出现一次，聚合 signal count、bias 和 status 必须与逐 window evidence 一致；缺失、
 重复或漂移均 fail closed。
 
+public market apply 同时冻结 exact target 的 OKX exchange metadata artifact。它只调用 allowlist
+中的 `/api/v5/public/instruments` 与 `/api/v5/public/position-tiers`，不读取 credential；响应按 pinned
+Freqtrade `2026.6` / CCXT `4.5.61` 合同规范化、以 SHA-256 定址，并通过 immutable
+artifact/inspection/receipt 绑定 validated market profile、TARGET/WINDOW snapshots、market snapshot
+与 configuration bundle。reviewed plan digest 包含 metadata contract 与 adapter identity。
+
+one-shot worker 只读接收该 artifact，并继续以 `--network none` 运行。它使用 Freqtrade 明确支持的
+`validate=False` offline adapter path 创建 OKX exchange，再注入已验证的 market 与 leverage tiers。
+worker 不接收 DB URL、OKX credential、socket 或 network capability。metadata 缺失、过期、混入其他
+target、digest 漂移或 tier 不完整时一律 `BLOCKED`，不得推断或合成数值。
+
 authorization command 只接受 `ttl_seconds`（1..900），`authorized_at`、`expires_at`、consume/revoke
 时间全部由 loopback API 的 UTC clock 生成，caller 不能回填时间来绕过过期门。
 start 与 worker 都会先从 immutable `audit_events` 重建 exact authorization/consumption receipt；

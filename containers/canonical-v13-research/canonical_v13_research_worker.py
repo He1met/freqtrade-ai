@@ -287,7 +287,85 @@ def validate_lookahead_inputs(
         digest, size = _file_digest(path)
         if digest != _hex_digest(item["content_digest"]) or size != item["size_bytes"]:
             raise Blocked("market file digest drifted")
+    metadata = request.get("exchange_metadata")
+    if not isinstance(metadata, dict) or set(metadata) != {
+        "path", "content_digest", "size_bytes", "receipt_digest"
+    }:
+        raise Blocked("offline exchange metadata contract drifted")
+    metadata_path = Path(str(metadata["path"]))
+    if metadata_path != Path("/input/exchange-metadata.json"):
+        raise Blocked("offline exchange metadata path drifted")
+    digest, size = _file_digest(metadata_path)
+    if (
+        digest != _hex_digest(metadata["content_digest"])
+        or size != metadata["size_bytes"]
+    ):
+        raise Blocked("offline exchange metadata digest drifted")
+    _hex_digest(metadata["receipt_digest"])
     return request, bundle
+
+
+def _install_offline_exchange_patch(metadata_path: Path) -> None:
+    metadata = _load_object(metadata_path)
+    if (
+        metadata.get("contract")
+        != "canonical-v13-okx-offline-exchange-metadata-v1"
+        or metadata.get("freqtrade_version") != "2026.6"
+        or metadata.get("ccxt_version") != "4.5.61"
+        or metadata.get("credential_access") != "NONE"
+        or metadata.get("network_access") != "PUBLIC_MARKET_DATA_ONLY"
+    ):
+        raise Blocked("offline exchange metadata identity drifted")
+    markets = metadata.get("markets")
+    tiers = metadata.get("leverage_tiers")
+    if (
+        not isinstance(markets, dict)
+        or set(markets) != {"BTC/USDT:USDT"}
+        or not isinstance(tiers, dict)
+        or set(tiers) != set(markets)
+        or not isinstance(tiers["BTC/USDT:USDT"], list)
+        or not tiers["BTC/USDT:USDT"]
+    ):
+        raise Blocked("offline exchange metadata set is invalid")
+
+    from freqtrade.resolvers.exchange_resolver import ExchangeResolver
+
+    original = ExchangeResolver.load_exchange
+
+    def load_exchange(config, *, exchange_config=None, validate=True, load_leverage_tiers=False):
+        exchange = original(
+            config,
+            exchange_config=exchange_config,
+            validate=False,
+            load_leverage_tiers=False,
+        )
+        market_rows = [dict(row) for row in markets.values() if isinstance(row, dict)]
+        if len(market_rows) != 1:
+            raise Blocked("offline market row is invalid")
+        exchange._api.set_markets(market_rows)
+        exchange._api_async.set_markets(market_rows)
+        exchange._markets = exchange._api.markets
+        exchange._last_markets_refresh = int(datetime.now(timezone.utc).timestamp() * 1000)
+        exchange._leverage_tiers = {
+            pair: [exchange.parse_leverage_tier(row) for row in rows]
+            for pair, rows in tiers.items()
+        }
+        if set(exchange._markets) != set(markets) or set(exchange._leverage_tiers) != set(markets):
+            raise Blocked("offline exchange hydration is incomplete")
+        return exchange
+
+    ExchangeResolver.load_exchange = staticmethod(load_exchange)
+
+
+def _run_freqtrade_offline(argv: list[str]) -> int:
+    if len(argv) < 2 or argv[0] != "--metadata":
+        return 2
+    _install_offline_exchange_patch(Path(argv[1]))
+    Path("/work/user_data").mkdir(parents=True, exist_ok=True)
+    from freqtrade.main import main as freqtrade_main
+
+    freqtrade_main(argv[2:])
+    return 0
 
 
 def _prepare_data(request: dict[str, object], target: dict[str, object]):
@@ -523,7 +601,10 @@ def lookahead(args: argparse.Namespace) -> dict[str, object]:
             raise Blocked("lookahead window has insufficient closed-candle coverage")
         export_path = Path(f"/work/lookahead-{index:04d}.csv")
         command = (
-            "/home/ftuser/.local/bin/freqtrade",
+            "/opt/freqtrade-ai/bin/canonical-v13-research-worker",
+            "freqtrade-offline",
+            "--metadata",
+            str(request["exchange_metadata"]["path"]),
             "lookahead-analysis",
             "--no-color",
             "--config",
@@ -603,6 +684,8 @@ def lookahead(args: argparse.Namespace) -> dict[str, object]:
 
 
 def main() -> int:
+    if len(sys.argv) > 1 and sys.argv[1] == "freqtrade-offline":
+        return _run_freqtrade_offline(sys.argv[2:])
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("preflight")
