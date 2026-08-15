@@ -86,6 +86,13 @@ def test_cli_rejects_non_loopback_control_and_unactivated_worker(
     assert "DATABASE_URL" in result["reason_code"]
 
 
+def test_worker_cli_uses_remote_podman_volume_staging() -> None:
+    source = Path(cli.__file__).read_text(encoding="utf-8")
+
+    assert "runner=RemotePodmanVolumeSandboxRunner()" in source
+    assert "runner=BoundedSubprocessSandboxRunner()" not in source
+
+
 def test_control_cli_returns_blocked_exit_for_canonical_api_error(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:
