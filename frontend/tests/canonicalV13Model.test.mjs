@@ -61,3 +61,12 @@ test("unknown API enum is an explicit contract failure, never a success tone", (
     tone: "danger",
   });
 });
+
+test("persisted gate PASSED is a known success contract", () => {
+  assert.deepEqual(canonicalStatusPresentation("PASSED"), {
+    known: true,
+    label: "已通过",
+    raw: "PASSED",
+    tone: "success",
+  });
+});
