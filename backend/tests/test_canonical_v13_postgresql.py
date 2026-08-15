@@ -308,6 +308,11 @@ def test_postgresql_gate_receipt_upgrade_from_exact_predecessor() -> None:
             connection.exec_driver_sql(
                 f"DROP FUNCTION {schema}.guard_research_gate_attempts_lifecycle()"
             )
+            connection.exec_driver_sql(
+                f"REVOKE SELECT ON {schema}.market_profiles, "
+                f"{schema}.market_profile_versions FROM "
+                f"{mapping.physical('canonical_validation_writer')}"
+            )
             connection.execute(
                 SCHEMA_METADATA_TABLE.update().values(
                     manifest_digest=PREVIOUS_GATE_MANIFEST_DIGEST
@@ -327,6 +332,31 @@ def test_postgresql_gate_receipt_upgrade_from_exact_predecessor() -> None:
             assert upgraded.destructive_operation_count == 0
             assert upgraded.receipt_digest is not None
             assert verified.status == "ACCEPTED"
+            assert verify_postgresql_bootstrap(
+                connection,
+                role_mapping=mapping,
+                require_zero_business_rows=False,
+            ).accepted is True
+
+            connection.exec_driver_sql(
+                f"REVOKE SELECT ON {schema}.market_profiles FROM "
+                f"{mapping.physical('canonical_validation_writer')}"
+            )
+            repaired = apply_gate_receipt_upgrade(
+                connection,
+                role_mapping=mapping,
+                actor_identity="canonical-v13-ci-gate-acl-repair",
+                observed_at=datetime(2026, 8, 15, 0, 1, tzinfo=timezone.utc),
+            )
+            assert repaired.status == "ACCEPTED"
+            assert repaired.created_table_count == 0
+            assert repaired.added_column_count == 0
+            assert repaired.receipt_digest is not None
+            assert verify_postgresql_bootstrap(
+                connection,
+                role_mapping=mapping,
+                require_zero_business_rows=False,
+            ).accepted is True
             transaction.rollback()
     finally:
         engine.dispose()

@@ -75,6 +75,98 @@ def _new_shape(connection: Connection) -> tuple[set[str], set[str]]:
     return tables, columns
 
 
+def _validation_dependency_grants(
+    connection: Connection, validation_role: str
+) -> set[tuple[str, str]]:
+    return {
+        (str(row[0]), str(row[1]))
+        for row in connection.execute(
+            text(
+                """
+                SELECT table_name, privilege_type
+                FROM information_schema.role_table_grants
+                WHERE table_schema=:schema AND grantee=:validation_role
+                  AND table_name IN ('market_profiles','market_profile_versions')
+                """
+            ),
+            {
+                "schema": CANONICAL_BUSINESS_SCHEMA,
+                "validation_role": validation_role,
+            },
+        )
+    }
+
+
+def _repair_current_dependency_grants(
+    connection: Connection,
+    *,
+    role_mapping: CanonicalRoleMapping,
+    actor_identity: str,
+    observed_at: datetime | None,
+) -> GateReceiptUpgradeResult:
+    validation = role_mapping.physical("canonical_validation_writer")
+    expected = {
+        ("market_profiles", "SELECT"),
+        ("market_profile_versions", "SELECT"),
+    }
+    observed = _validation_dependency_grants(connection, validation)
+    if observed == expected:
+        return verify_gate_receipt_upgrade(connection)
+    if not observed < expected:
+        raise CanonicalGateReceiptUpgradeBlocked(
+            "BLOCKED_GATE_RECEIPT_DEPENDENCY_ACL_DRIFT",
+            "validation dependency grants differ from the reviewed repair state",
+        )
+    missing_tables = sorted(table for table, _privilege in expected - observed)
+    for table_name in missing_tables:
+        connection.execute(
+            text(
+                f"GRANT SELECT ON TABLE {CANONICAL_BUSINESS_SCHEMA}.{table_name} "
+                f"TO {validation}"
+            )
+        )
+    now = (observed_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    payload = {
+        "contract": UPGRADE_CONTRACT,
+        "repair": "validation_dependency_select_grants",
+        "tables": missing_tables,
+        "actor_identity": actor_identity,
+        "applied_at": now.isoformat(),
+    }
+    request_digest = _digest({**payload, "applied_at": None})
+    receipt_digest = _digest(
+        {"request_digest": request_digest, "applied_at": now.isoformat()}
+    )
+    connection.execute(
+        AUDIT_EVENTS_TABLE.insert().values(
+            id=uuid4(),
+            event_type="CANONICAL_GATE_RECEIPT_DEPENDENCY_ACL_REPAIRED",
+            aggregate_type="canonical_gate_receipt_upgrade",
+            aggregate_id=UPGRADE_CONTRACT,
+            actor_identity=actor_identity,
+            request_digest=request_digest,
+            receipt_digest=receipt_digest,
+            evidence_json=payload,
+            created_at=now,
+        )
+    )
+    if _validation_dependency_grants(connection, validation) != expected:
+        raise CanonicalGateReceiptUpgradeBlocked(
+            "BLOCKED_GATE_RECEIPT_DEPENDENCY_ACL_REPAIR",
+            "validation dependency grants did not converge",
+        )
+    verified = verify_gate_receipt_upgrade(connection)
+    return GateReceiptUpgradeResult(
+        verified.status,
+        PREVIOUS_MANIFEST_DIGEST,
+        CANONICAL_MANIFEST_DIGEST,
+        0,
+        0,
+        0,
+        receipt_digest,
+    )
+
+
 def verify_gate_receipt_upgrade(connection: Connection) -> GateReceiptUpgradeResult:
     manifest = _current_manifest(connection)
     tables, columns = _new_shape(connection)
@@ -305,7 +397,12 @@ def apply_gate_receipt_upgrade(
         raise CanonicalGateReceiptUpgradeBlocked("BLOCKED_GATE_RECEIPT_UPGRADE_ACTOR", "actor identity is invalid")
     current = _current_manifest(connection)
     if current == CANONICAL_MANIFEST_DIGEST:
-        return verify_gate_receipt_upgrade(connection)
+        return _repair_current_dependency_grants(
+            connection,
+            role_mapping=role_mapping,
+            actor_identity=actor_identity,
+            observed_at=observed_at,
+        )
     if current != PREVIOUS_MANIFEST_DIGEST:
         raise CanonicalGateReceiptUpgradeBlocked("BLOCKED_GATE_RECEIPT_UPGRADE_BASE", "installed manifest is not the accepted predecessor")
     tables, columns = _new_shape(connection)
@@ -331,6 +428,7 @@ def apply_gate_receipt_upgrade(
         connection.execute(text(f"GRANT SELECT ON TABLE {schema}.{table_name} TO {api_reader}, {research_reader}, {scoring}"))
     connection.execute(text(f"GRANT SELECT, INSERT, UPDATE ON TABLE {schema}.research_gate_attempts TO {validation}"))
     connection.execute(text(f"GRANT SELECT, INSERT ON TABLE {schema}.research_gate_receipts TO {validation}"))
+    connection.execute(text(f"GRANT SELECT ON TABLE {schema}.market_profiles, {schema}.market_profile_versions TO {validation}"))
     install_gate_receipt_triggers(connection)
     guard_roles = tuple(
         role_mapping.physical(role)
