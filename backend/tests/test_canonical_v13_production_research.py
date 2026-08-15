@@ -27,6 +27,7 @@ from app.canonical_v13.freqtrade_production import (
     execute_production_static_lookahead_gate,
     materialize_production_research_inputs,
 )
+from app.canonical_v13.api import _research_readiness
 from app.canonical_v13.genesis import install_canonical_genesis
 from app.canonical_v13.manifest import CANONICAL_BUSINESS_SCHEMA
 from app.canonical_v13.models import (
@@ -688,13 +689,21 @@ def test_production_chain_uses_consumed_exact_attempt_then_separate_receipts() -
     assert result.qualification_receipt is not None
     assert result.qualification_receipt.status == "QUALIFIED"
     with engine.connect() as raw:
+        connection = raw.execution_options(
+            schema_translate_map={CANONICAL_BUSINESS_SCHEMA: None}
+        )
         projection = read_research_chain_projection(
-            raw.execution_options(
-                schema_translate_map={CANONICAL_BUSINESS_SCHEMA: None}
-            ),
+            connection,
             validation_plan_id=prepared.plan_id,
+        )
+        readiness = _research_readiness(
+            connection,
+            scope_key="isolated-research",
+            workflow_key="RESEARCH",
         )
     assert projection.plan_status == "COMPLETE"
     assert projection.attempt_status == "SUCCEEDED"
     assert projection.qualification_status == "QUALIFIED"
+    assert readiness.status == "READY"
+    assert readiness.reason_codes == []
     engine.dispose()

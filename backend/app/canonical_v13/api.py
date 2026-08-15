@@ -642,11 +642,36 @@ def _research_readiness(
     if preview.bundle_digest != bundle["bundle_digest"]:
         reasons.append("ACTIVE_BUNDLE_DIGEST_DRIFT")
     unique_reasons = list(dict.fromkeys(reasons))
+    completed_qualification_count = int(
+        connection.execute(
+            select(func.count())
+            .select_from(QUALIFICATION_DECISIONS_TABLE)
+            .where(
+                QUALIFICATION_DECISIONS_TABLE.c.configuration_bundle_id
+                == bundle["id"],
+                QUALIFICATION_DECISIONS_TABLE.c.configuration_bundle_digest
+                == bundle["bundle_digest"],
+                QUALIFICATION_DECISIONS_TABLE.c.market_snapshot_id
+                == bundle["market_snapshot_id"],
+                QUALIFICATION_DECISIONS_TABLE.c.market_snapshot_digest
+                == bundle["market_snapshot_digest"],
+                QUALIFICATION_DECISIONS_TABLE.c.status
+                != "PENDING",
+            )
+        ).scalar_one()
+    )
+    if unique_reasons:
+        status = "BLOCKED"
+        readiness_reasons = unique_reasons
+    elif completed_qualification_count:
+        status = "READY"
+        readiness_reasons = []
+    else:
+        status = "PENDING_FIRST_BACKTEST"
+        readiness_reasons = ["PENDING_FIRST_BACKTEST"]
     return ReadinessProjectionDTO(
-        status="BLOCKED" if unique_reasons else "PENDING_FIRST_BACKTEST",
-        reason_codes=(
-            unique_reasons if unique_reasons else ["PENDING_FIRST_BACKTEST"]
-        ),
+        status=status,
+        reason_codes=readiness_reasons,
         scope_key=activation["scope_key"],
         workflow_key=activation["workflow_key"],
         configuration_bundle_id=bundle["id"],

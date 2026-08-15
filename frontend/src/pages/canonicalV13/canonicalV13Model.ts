@@ -115,6 +115,7 @@ const STATUS: Readonly<Record<string, Omit<CanonicalStatusPresentation, "known" 
   PENDING: { label: "等待中", tone: "info" },
   PENDING_BASELINE: { label: "等待基线", tone: "info" },
   PENDING_FIRST_BACKTEST: { label: "等待首次回测", tone: "warning" },
+  PASSED: { label: "已通过", tone: "success" },
   QUALIFIED: { label: "已合格", tone: "success" },
   READY: { label: "就绪", tone: "success" },
   REJECTED: { label: "已拒绝", tone: "danger" },
