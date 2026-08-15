@@ -99,6 +99,14 @@ def _timestamp(value: object) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _freqtrade_timerange(start: datetime, end: datetime) -> str:
+    """Preserve exact intraday UTC bounds using Freqtrade's Unix syntax."""
+
+    if end <= start:
+        raise Blocked("window interval is invalid")
+    return f"{int(start.timestamp())}-{int(end.timestamp())}"
+
+
 def _single_configuration(bundle: dict[str, object], kind: str) -> dict[str, object]:
     rows = bundle.get("configurations")
     if not isinstance(rows, list):
@@ -431,7 +439,7 @@ def _run_window(target: dict[str, object], strategy_class: str, window: dict[str
         "/home/ftuser/.local/bin/freqtrade", "backtesting", "--config", str(config_path),
         "--datadir", "/work/data", "--strategy-path", "/input", "--strategy", strategy_class,
         "--pairs", str(target["pair"]), "--timeframe", str(target["timeframe"]),
-        "--timerange", f"{start:%Y%m%d%H%M%S}-{end:%Y%m%d%H%M%S}", "--fee", str(fee),
+        "--timerange", _freqtrade_timerange(start, end), "--fee", str(fee),
         "--cache", "none", "--export", "trades", "--backtest-directory", str(result_dir), "--no-color",
     )
     completed = subprocess.run(
@@ -525,7 +533,7 @@ def lookahead(args: argparse.Namespace) -> dict[str, object]:
             "--userdir",
             "/work/user_data",
             "--timerange",
-            f"{start:%Y%m%d%H%M%S}-{end:%Y%m%d%H%M%S}",
+            _freqtrade_timerange(start, end),
             "--timeframe",
             str(target["timeframe"]),
             "--fee",
