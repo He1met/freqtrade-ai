@@ -1,12 +1,40 @@
 from __future__ import annotations
 
 from io import BytesIO
+from hashlib import sha256
 import json
 from pathlib import Path
 from urllib.error import HTTPError
 from uuid import uuid4
 
+import pytest
+
 from scripts import canonical_v13_research as cli
+
+
+def test_gate_release_identity_binds_clean_head_image_and_worker_source(monkeypatch) -> None:
+    worker = (
+        Path(cli.__file__).resolve().parents[2]
+        / "containers/canonical-v13-research/canonical_v13_research_worker.py"
+    )
+    outputs = iter(("1" * 40 + "\n", ""))
+
+    def run(*_args, **_kwargs):
+        return type("Result", (), {"stdout": next(outputs)})()
+
+    monkeypatch.setattr(cli.subprocess, "run", run)
+    payload = {
+        "release_commit": "1" * 40,
+        "executor_image_digest": "2" * 64,
+        "worker_source_digest": sha256(worker.read_bytes()).hexdigest(),
+    }
+    cli._verify_gate_release_identity(
+        {cli.IMAGE_ENV: "canonical-v13-research@sha256:" + "2" * 64}, payload
+    )
+    with pytest.raises(cli.ResearchCLIBlocked, match="BLOCKED_GATE_RELEASE_IDENTITY"):
+        cli._verify_gate_release_identity(
+            {cli.IMAGE_ENV: "canonical-v13-research@sha256:" + "3" * 64}, payload
+        )
 
 
 def test_control_cli_uses_loopback_api_and_exact_command_file(
@@ -84,3 +112,33 @@ def test_control_cli_returns_blocked_exit_for_canonical_api_error(
         "error": {"code": "BLOCKED_AUTHORIZATION_PLAN_NOT_READY"},
         "status": "BLOCKED",
     }
+
+
+def test_gate_cli_continues_only_for_strategy_level_insufficient_trades(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    command = tmp_path / "gate.json"
+    command.write_text(json.dumps({"fixture": True}))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(mode=0o700)
+    monkeypatch.setenv(cli.WORKSPACE_ROOT_ENV, str(workspace))
+    monkeypatch.setattr(
+        cli,
+        "_gate_execute",
+        lambda _environment, _payload: {
+            "status": "BLOCKED",
+            "terminal_reason_code": "LOOKAHEAD_INSUFFICIENT_TRADES",
+        },
+    )
+    assert cli.main(["gate", "--command-file", str(command)]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "BLOCKED"
+
+    monkeypatch.setattr(
+        cli,
+        "_gate_execute",
+        lambda _environment, _payload: {
+            "status": "BLOCKED",
+            "terminal_reason_code": "LOOKAHEAD_PROCESS_FAILED",
+        },
+    )
+    assert cli.main(["gate", "--command-file", str(command)]) == 2

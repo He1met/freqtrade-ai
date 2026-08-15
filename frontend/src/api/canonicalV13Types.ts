@@ -285,3 +285,34 @@ export type ResearchChainProjection = {
   qualification_reason_code: string | null;
   qualification_decision_digest: Sha256Digest | null;
 };
+
+export type GateProjection = {
+  gate_attempt_id: CanonicalId;
+  strategy_version_id: CanonicalId;
+  research_target_id: CanonicalId;
+  configuration_bundle_id: CanonicalId;
+  configuration_bundle_digest: Sha256Digest;
+  market_snapshot_id: CanonicalId;
+  market_snapshot_digest: Sha256Digest;
+  status: "PENDING" | "RUNNING" | "PASSED" | "FAILED" | "BLOCKED";
+  terminal_reason_code: string | null;
+  static_status: "PASSED" | "FAILED" | "BLOCKED" | null;
+  static_reason_code: string | null;
+  static_receipt_id: CanonicalId | null;
+  static_receipt_digest: Sha256Digest | null;
+  lookahead_status: "PASSED" | "FAILED" | "BLOCKED" | null;
+  lookahead_reason_code: string | null;
+  lookahead_receipt_id: CanonicalId | null;
+  lookahead_receipt_digest: Sha256Digest | null;
+  observed_signal_count: number | null;
+  observed_trade_count: number | null;
+  required_trade_count: number | null;
+  validation_eligible: boolean;
+  created_at: IsoDateTime;
+  completed_at: IsoDateTime | null;
+};
+
+export type GateListProjection = {
+  status: "AVAILABLE" | "EMPTY";
+  items: GateProjection[];
+};

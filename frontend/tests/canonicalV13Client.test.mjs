@@ -12,6 +12,7 @@ import {
   fetchCanonicalMarketSnapshot,
   fetchCanonicalOptimizations,
   fetchCanonicalResearchReadiness,
+  fetchCanonicalResearchGates,
   fetchCanonicalResearchChain,
   fetchCanonicalRuntimeReadiness,
   fetchCanonicalStrategies,
@@ -125,8 +126,9 @@ test("the client exposes the canonical projection routes with one fetch each", a
   await fetchCanonicalRuntimeReadiness();
   await fetchCanonicalOptimizations();
   await fetchCanonicalResearchChain(ID);
+  await fetchCanonicalResearchGates();
 
-  assert.equal(calls.length, 14);
+  assert.equal(calls.length, 15);
   assert.deepEqual(calls, [
     { input: `${CANONICAL_V13_API_ROOT}/submissions`, method: "POST" },
     { input: `${CANONICAL_V13_API_ROOT}/strategies`, method: "GET" },
@@ -142,6 +144,7 @@ test("the client exposes the canonical projection routes with one fetch each", a
     { input: `${CANONICAL_V13_API_ROOT}/readiness/runtime`, method: "GET" },
     { input: `${CANONICAL_V13_API_ROOT}/optimizations`, method: "GET" },
     { input: `${CANONICAL_V13_API_ROOT}/research/validation-plans/${ID}`, method: "GET" },
+    { input: `${CANONICAL_V13_API_ROOT}/research/gates`, method: "GET" },
   ]);
 });
 

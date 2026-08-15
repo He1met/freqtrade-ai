@@ -5,6 +5,7 @@ import type {
   ConfigurationDraftResult,
   ConfigurationValidateCommand,
   ConfigurationValidationResult,
+  GateListProjection,
   MarketInventoryProjection,
   MarketSnapshotProjection,
   OptimizationListProjection,
@@ -95,11 +96,12 @@ function validateSuccessDto(contract: string, value: unknown): void {
     readiness: { status: "string", reason_codes: "array", configuration_bundle_id: "nullable-string", deployment_id: "nullable-string", runtime_instance_id: "nullable-string" },
     optimizations: { status: "string", items: "array" },
     researchChain: { validation_plan_id: "string", validation_plan_digest: "string", strategy_version_id: "string", research_target_id: "string", target_key: "string", plan_status: "string", validation_attempt_id: "nullable-string", attempt_status: "nullable-string", attempt_receipt_digest: "nullable-string", target_score_id: "nullable-string", overall_score: "nullable-string", score_digest: "nullable-string", qualification_decision_id: "nullable-string", qualification_status: "nullable-string", qualification_reason_code: "nullable-string", qualification_decision_digest: "nullable-string" },
+    gates: { status: "string", items: "array" },
   };
   const shape = shapes[contract];
   if (!shape) throw new CanonicalV13ClientContractError("UNKNOWN_SUCCESS_DTO", contract);
   assertShape(contract, value, shape);
-  if (["strategies", "configurations", "marketInventory", "marketSnapshot", "optimizations"].includes(contract)) {
+  if (["strategies", "configurations", "marketInventory", "marketSnapshot", "optimizations", "gates"].includes(contract)) {
     const itemsKey = contract === "marketInventory" ? "snapshots" : contract === "marketSnapshot" ? "members" : "items";
     assertRecordArray(`${contract}.${itemsKey}`, value[itemsKey]);
     if (contract === "configurations") {
@@ -266,4 +268,8 @@ export function fetchCanonicalResearchChain(validationPlanId: string, signal?: A
     "researchChain",
     { signal },
   );
+}
+
+export function fetchCanonicalResearchGates(signal?: AbortSignal) {
+  return request<GateListProjection>("/research/gates", "gates", { signal });
 }

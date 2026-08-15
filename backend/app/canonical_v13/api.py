@@ -50,6 +50,14 @@ from app.canonical_v13.dto import (
     FreshMarketPlanCommandDTO,
     FreshMarketPlanDTO,
     FreshMarketReceiptDTO,
+    GateAttemptCommandDTO,
+    GateAttemptReceiptDTO,
+    GateLeaseCommandDTO,
+    GateLeaseReceiptDTO,
+    GateListProjectionDTO,
+    GatePersistedReceiptDTO,
+    GateProjectionDTO,
+    LookaheadGateReceiptCommandDTO,
     MarketInventoryProjectionDTO,
     MarketSnapshotMemberProjectionDTO,
     MarketSnapshotProjectionDTO,
@@ -81,6 +89,7 @@ from app.canonical_v13.dto import (
     StrategyProjectionDTO,
     SubmissionCommandDTO,
     SubmissionReceiptDTO,
+    StaticGateReceiptCommandDTO,
 )
 from app.canonical_v13.deployment_approval import deployment_approval_digest
 from app.canonical_v13.deployment_control import deployment_capability_digest
@@ -139,9 +148,20 @@ from app.canonical_v13.research_orchestration import (
 )
 from app.canonical_v13.research_qualification import persist_qualification_receipt
 from app.canonical_v13.research_scoring import persist_scoring_receipt
+from app.canonical_v13.research_gates import (
+    CanonicalGateBlocked,
+    claim_gate_attempt,
+    create_gate_attempt,
+    list_gate_projections,
+    persist_lookahead_gate_receipt,
+    persist_static_gate_receipt,
+    read_gate_projection,
+)
 from app.canonical_v13.research_validation import (
     CanonicalResearchValidationBlocked,
     ResearchLineage,
+    StaticFinding,
+    StaticValidationReceipt,
     build_ephemeral_launch_spec,
     build_lookahead_receipt,
     declare_validation_plan,
@@ -172,6 +192,7 @@ from app.canonical_v13.models import (
     MARKET_SNAPSHOT_MEMBERS_TABLE,
     OPTIMIZATION_RUNS_TABLE,
     QUALIFICATION_DECISIONS_TABLE,
+    RESEARCH_GATE_RECEIPTS_TABLE,
     RESEARCH_TARGETS_TABLE,
     RUNTIME_INSTANCES_TABLE,
     RUNTIME_RECEIPTS_TABLE,
@@ -212,6 +233,7 @@ _CANONICAL_DOMAIN_ERRORS = (
     CanonicalResearchAuthorizationBlocked,
     CanonicalResearchExecutionBlocked,
     CanonicalResearchOrchestrationBlocked,
+    CanonicalGateBlocked,
     CanonicalResearchValidationBlocked,
     CanonicalEvaluationBlocked,
 )
@@ -1144,6 +1166,124 @@ def create_canonical_v13_app(
         return run_control(execute)
 
     @app.post(
+        f"{API_PREFIX}/research/gates/attempts",
+        response_model=GateAttemptReceiptDTO,
+        status_code=201,
+    )
+    def create_planless_gate_attempt(command: GateAttemptCommandDTO) -> GateAttemptReceiptDTO:
+        result = run_research(
+            validation_connection_factory,
+            "validation",
+            lambda connection: create_gate_attempt(
+                connection,
+                lineage=_research_lineage(command.lineage),
+                idempotency_key=command.idempotency_key,
+                release_commit=command.release_commit,
+                executor_image_digest=command.executor_image_digest,
+                worker_source_digest=command.worker_source_digest,
+            ),
+        )
+        return GateAttemptReceiptDTO(
+            gate_attempt_id=result.gate_attempt_id,
+            request_digest=result.request_digest,
+            status=result.status,
+            repeat_noop=result.repeat_noop,
+            lineage=ResearchLineageDTO(**result.lineage.__dict__),
+        )
+
+    @app.post(
+        f"{API_PREFIX}/research/gates/attempts/{{gate_attempt_id}}/claim",
+        response_model=GateLeaseReceiptDTO,
+    )
+    def claim_planless_gate_attempt(gate_attempt_id: UUID, command: GateLeaseCommandDTO) -> GateLeaseReceiptDTO:
+        del command
+        result = run_research(
+            validation_connection_factory,
+            "validation",
+            lambda connection: claim_gate_attempt(connection, gate_attempt_id=gate_attempt_id),
+        )
+        return GateLeaseReceiptDTO(**result.__dict__)
+
+    @app.post(
+        f"{API_PREFIX}/research/gates/attempts/{{gate_attempt_id}}/static-receipts",
+        response_model=GatePersistedReceiptDTO,
+        status_code=201,
+    )
+    def persist_planless_static_receipt(gate_attempt_id: UUID, command: StaticGateReceiptCommandDTO) -> GatePersistedReceiptDTO:
+        receipt = StaticValidationReceipt(
+            strategy_version_id=command.strategy_version_id,
+            artifact_digest=command.artifact_digest,
+            validator_identity=command.validator_identity,
+            validator_digest=command.validator_digest,
+            status=command.status,
+            findings=tuple(StaticFinding(**item.model_dump()) for item in command.findings),
+            request_digest=command.request_digest,
+            receipt_digest=command.receipt_digest,
+        )
+        digest = run_research(
+            validation_connection_factory,
+            "validation",
+            lambda connection: persist_static_gate_receipt(
+                connection, gate_attempt_id=gate_attempt_id, lease_token=command.lease_token, receipt=receipt
+            ),
+        )
+        return GatePersistedReceiptDTO(gate_attempt_id=gate_attempt_id, gate_type="STATIC", receipt_digest=digest)
+
+    @app.post(
+        f"{API_PREFIX}/research/gates/attempts/{{gate_attempt_id}}/lookahead-receipts",
+        response_model=GatePersistedReceiptDTO,
+        status_code=201,
+    )
+    def persist_planless_lookahead_receipt(gate_attempt_id: UUID, command: LookaheadGateReceiptCommandDTO) -> GatePersistedReceiptDTO:
+        projection = run_read(lambda connection: read_gate_projection(connection, gate_attempt_id=gate_attempt_id))
+        lineage = ResearchLineage(
+            strategy_version_id=projection.strategy_version_id,
+            research_target_id=projection.research_target_id,
+            configuration_bundle_id=projection.configuration_bundle_id,
+            configuration_bundle_digest=projection.configuration_bundle_digest,
+            market_snapshot_id=projection.market_snapshot_id,
+            market_snapshot_digest=projection.market_snapshot_digest,
+        )
+        receipt = build_lookahead_receipt(
+            lineage=lineage,
+            artifact_digest=command.artifact_digest,
+            analyzer_identity=command.analyzer_identity,
+            analyzer_digest=command.analyzer_digest,
+            evidence_digest=command.evidence_digest,
+            status=command.status,
+            has_bias=command.has_bias,
+            observed_signal_count=command.observed_signal_count,
+            failure_stage=command.failure_stage,
+            failure_code=command.failure_code,
+            tool_return_code=command.tool_return_code,
+            stdout_digest=command.stdout_digest,
+            stderr_digest=command.stderr_digest,
+            redacted_detail=command.redacted_detail,
+            blocked_observed_trade_count=command.blocked_observed_trade_count,
+            blocked_required_trade_count=command.blocked_required_trade_count,
+        )
+        if receipt.request_digest != command.request_digest or receipt.receipt_digest != command.receipt_digest:
+            raise CanonicalGateBlocked("BLOCKED_GATE_RECEIPT_DIGEST_DRIFT", "lookahead receipt does not recompute")
+        digest = run_research(
+            validation_connection_factory,
+            "validation",
+            lambda connection: persist_lookahead_gate_receipt(
+                connection, gate_attempt_id=gate_attempt_id, lease_token=command.lease_token, receipt=receipt
+            ),
+        )
+        return GatePersistedReceiptDTO(gate_attempt_id=gate_attempt_id, gate_type="LOOKAHEAD", receipt_digest=digest)
+
+    @app.get(f"{API_PREFIX}/research/gates", response_model=GateListProjectionDTO)
+    def planless_gate_list(limit: int = Query(default=200, ge=1, le=200)) -> GateListProjectionDTO:
+        items = run_read(lambda connection: list_gate_projections(connection, limit=limit))
+        return GateListProjectionDTO(status="AVAILABLE" if items else "EMPTY", items=[GateProjectionDTO(**item.__dict__) for item in items])
+
+    @app.get(f"{API_PREFIX}/research/gates/{{gate_attempt_id}}", response_model=GateProjectionDTO)
+    def planless_gate_status(gate_attempt_id: UUID) -> GateProjectionDTO:
+        item = run_read(lambda connection: read_gate_projection(connection, gate_attempt_id=gate_attempt_id))
+        return GateProjectionDTO(**item.__dict__)
+
+    @app.post(
         f"{API_PREFIX}/research/validation-plans",
         response_model=ValidationPlanReceiptDTO,
         status_code=201,
@@ -1169,45 +1309,59 @@ def create_canonical_v13_app(
                     "BLOCKED_STRATEGY_ARTIFACT_MISSING",
                     "validation plan requires one canonical strategy artifact",
                 )
+            rows = connection.execute(
+                select(RESEARCH_GATE_RECEIPTS_TABLE).where(
+                    RESEARCH_GATE_RECEIPTS_TABLE.c.id.in_(
+                        (command.static_gate_receipt_id, command.lookahead_gate_receipt_id)
+                    )
+                )
+            ).mappings().all()
+            by_id = {row["id"]: row for row in rows}
+            static_row = by_id.get(command.static_gate_receipt_id)
+            lookahead_row = by_id.get(command.lookahead_gate_receipt_id)
+            if static_row is None or lookahead_row is None:
+                raise CanonicalResearchValidationBlocked(
+                    "BLOCKED_GATE_RECEIPT_UNAVAILABLE",
+                    "validation plan requires persisted v3 gate receipts",
+                )
+            static_evidence = static_row["evidence_json"]
+            lookahead_evidence = lookahead_row["evidence_json"]
+            if not isinstance(static_evidence, dict) or not isinstance(lookahead_evidence, dict):
+                raise CanonicalResearchValidationBlocked(
+                    "BLOCKED_GATE_RECEIPT_DIGEST_DRIFT", "gate evidence shape drifted"
+                )
             static_receipt = validate_static_source(
                 artifact["normalized_content"],
                 strategy_version_id=lineage.strategy_version_id,
                 expected_artifact_digest=artifact["content_digest"],
-                validator_identity=command.static_validator_identity,
-                validator_digest=command.static_validator_digest,
+                validator_identity=str(static_evidence.get("validator_identity")),
+                validator_digest=str(static_evidence.get("validator_digest")),
             )
-            supplied = command.lookahead_receipt
             lookahead = build_lookahead_receipt(
                 lineage=lineage,
-                artifact_digest=supplied.artifact_digest,
-                analyzer_identity=supplied.analyzer_identity,
-                analyzer_digest=supplied.analyzer_digest,
-                evidence_digest=supplied.evidence_digest,
-                status=supplied.status,
-                has_bias=supplied.has_bias,
-                observed_signal_count=supplied.observed_signal_count,
-                failure_stage=supplied.failure_stage,
-                failure_code=supplied.failure_code,
-                tool_return_code=supplied.tool_return_code,
-                stdout_digest=supplied.stdout_digest,
-                stderr_digest=supplied.stderr_digest,
-                redacted_detail=supplied.redacted_detail,
-                blocked_observed_trade_count=supplied.blocked_observed_trade_count,
-                blocked_required_trade_count=supplied.blocked_required_trade_count,
+                artifact_digest=lookahead_row["artifact_digest"],
+                analyzer_identity=str(lookahead_evidence.get("analyzer_identity")),
+                analyzer_digest=str(lookahead_evidence.get("analyzer_digest")),
+                evidence_digest=str(lookahead_evidence.get("source_evidence_digest")),
+                status=lookahead_row["terminal_status"],
+                has_bias=lookahead_evidence.get("has_bias"),
+                observed_signal_count=int(lookahead_row["observed_signal_count"] or 0),
+                failure_stage=lookahead_row["failure_stage"],
+                failure_code=lookahead_row["reason_code"] if lookahead_row["terminal_status"] == "BLOCKED" else None,
+                tool_return_code=lookahead_row["tool_return_code"],
+                stdout_digest=lookahead_row["stdout_digest"],
+                stderr_digest=lookahead_row["stderr_digest"],
+                redacted_detail=lookahead_evidence.get("redacted_detail"),
+                blocked_observed_trade_count=lookahead_row["observed_trade_count"],
+                blocked_required_trade_count=lookahead_row["required_trade_count"],
             )
-            if (
-                lookahead.request_digest != supplied.request_digest
-                or lookahead.receipt_digest != supplied.receipt_digest
-            ):
-                raise CanonicalResearchValidationBlocked(
-                    "BLOCKED_LOOKAHEAD_RECEIPT_DIGEST_DRIFT",
-                    "submitted lookahead receipt does not recompute",
-                )
             declared = declare_validation_plan(
                 connection,
                 lineage=lineage,
                 static_receipt=static_receipt,
                 lookahead_receipt=lookahead,
+                static_gate_receipt_id=command.static_gate_receipt_id,
+                lookahead_gate_receipt_id=command.lookahead_gate_receipt_id,
                 orchestrator_identity=command.orchestrator_identity,
             )
             ready = mark_validation_plan_ready(
@@ -1216,6 +1370,8 @@ def create_canonical_v13_app(
                 expected_plan_digest=declared.validation_plan_digest,
                 static_receipt=static_receipt,
                 lookahead_receipt=lookahead,
+                static_gate_receipt_id=command.static_gate_receipt_id,
+                lookahead_gate_receipt_id=command.lookahead_gate_receipt_id,
                 orchestrator_identity=command.orchestrator_identity,
             )
             return ValidationPlanReceiptDTO(
@@ -1224,8 +1380,8 @@ def create_canonical_v13_app(
                 status="READY",
                 window_count=ready.window_count,
                 required_window_count=ready.required_window_count,
-                static_receipt_digest=static_receipt.receipt_digest,
-                lookahead_receipt_digest=lookahead.receipt_digest,
+                static_receipt_digest=static_row["receipt_digest"],
+                lookahead_receipt_digest=lookahead_row["receipt_digest"],
                 repeat_noop=declared.repeat_noop and ready.repeat_noop,
             )
 

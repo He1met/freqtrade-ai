@@ -2,7 +2,7 @@
 
 - 权威状态：`FROZEN_FOR_IMPLEMENTATION`
 - 设计版本：`canonical-v13-phase0-20260814`
-- 权限修订：`20260815_research_writers_v2`
+- 权限修订：`20260815_planless_gate_receipts_v3`
 - 协调入口：GitHub #714；阶段入口：#715 → #724
 - 生产起点：空数据库；旧数据库只允许作为外部只读档案
 - 历史轨道：v46/v47、#705、#708、#710 只作 design-lab/legacy evidence
@@ -10,6 +10,12 @@
 本文是 canonical V1.3 production 的唯一设计权威。实现与本文冲突时必须停止并返回
 `BLOCKED_DESIGN_DRIFT`；不得从旧 ORM、旧 migration、旧 API、旧 UI、本地常量、历史
 receipt 或 v47 design-lab 状态寻找 fallback。
+
+static/lookahead 的唯一 production 权威是 `research_gate_attempts` 与 append-only
+`research_gate_receipts`。receipt 在 attempt 创建时冻结 bundle、market、TARGET/WINDOW、profile、
+artifact、release/image/source lineage；freshness 是新 attempt 的门，而不是让已完成历史证据随
+时间失效。validation plan 必须引用同一 PASSED attempt 的两条 v3 receipt；旧 v1/v2 证据不得
+backfill 或搬运到新 lineage。
 
 ## 1. 不可协商边界
 

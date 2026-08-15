@@ -22,7 +22,7 @@ CANONICAL_MANIFEST_KEY: Final = "canonical-v13-table-manifest-v1"
 CANONICAL_LEGACY_IMPORT_MODE: Final = "EXTERNAL_LATEST_ONLY"
 CANONICAL_TRADING_CAPABILITY: Final = "TRADING_DISABLED"
 CANONICAL_PRODUCTION_DEFAULT: Final = "UNSET"
-CANONICAL_AUTHORITY_REVISION: Final = "20260815_research_writers_v2"
+CANONICAL_AUTHORITY_REVISION: Final = "20260815_planless_gate_receipts_v3"
 
 P0_CONFIGURATION_KINDS: Final[tuple[str, ...]] = (
     "TARGET",
@@ -109,6 +109,8 @@ _TABLES_BY_DOMAIN = {
         "market_snapshot_members",
     ),
     "validation": (
+        "research_gate_attempts",
+        "research_gate_receipts",
         "validation_plans",
         "validation_plan_windows",
         "validation_attempts",
@@ -205,6 +207,8 @@ _RESEARCH_READER_TABLES = (
     "market_receipts",
     "market_snapshots",
     "market_snapshot_members",
+    "research_gate_attempts",
+    "research_gate_receipts",
     "validation_plans",
     "validation_plan_windows",
 )
@@ -259,6 +263,8 @@ _WRITER_READ_ALLOWLIST = {
         "research_target_allocations",
         "market_snapshots",
         "market_snapshot_members",
+        "market_profiles",
+        "market_profile_versions",
     ),
     "canonical_scoring_writer": (
         "schema_metadata",
@@ -273,6 +279,8 @@ _WRITER_READ_ALLOWLIST = {
         "validation_plan_windows",
         "validation_attempts",
         "validation_window_results",
+        "research_gate_attempts",
+        "research_gate_receipts",
     ),
     "canonical_qualification_writer": (
         "schema_metadata",
@@ -350,6 +358,7 @@ _MUTABLE_TABLES = frozenset(
         "market_profile_versions",
         "validation_plans",
         "validation_attempts",
+        "research_gate_attempts",
         "optimization_runs",
         "deployment_approvals",
         "deployments",

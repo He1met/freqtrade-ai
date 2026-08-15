@@ -9,7 +9,10 @@ from typing import Final, Mapping
 
 from sqlalchemy import Connection, text
 
-from app.canonical_v13.genesis import verify_canonical_genesis
+from app.canonical_v13.genesis import (
+    GATE_GUARD_FUNCTION_NAMES,
+    verify_canonical_genesis,
+)
 from app.canonical_v13.manifest import (
     CANONICAL_BUSINESS_SCHEMA,
     CANONICAL_TABLE_NAMES,
@@ -242,6 +245,51 @@ def verify_postgresql_bootstrap(
     ).all()
     if owner_drift:
         problems.append(f"relation owner drift count={len(owner_drift)}")
+    function_owner_drift = connection.execute(
+        text(
+            """
+            SELECT procedure.proname, pg_get_userbyid(procedure.proowner)
+            FROM pg_catalog.pg_proc procedure
+            JOIN pg_catalog.pg_namespace namespace ON namespace.oid=procedure.pronamespace
+            WHERE namespace.nspname=:schema AND procedure.proname = ANY(:function_names)
+              AND pg_get_userbyid(procedure.proowner) <> :owner
+            """
+        ),
+        {
+            "schema": CANONICAL_BUSINESS_SCHEMA,
+            "function_names": list(GATE_GUARD_FUNCTION_NAMES),
+            "owner": owner,
+        },
+    ).all()
+    if function_owner_drift:
+        problems.append(f"guard function owner drift count={len(function_owner_drift)}")
+    function_grants = {
+        (str(row[0]), "PUBLIC" if row[1] is None else str(row[1]), str(row[2]))
+        for row in connection.execute(
+            text(
+                """
+                SELECT procedure.proname, grantee.rolname, acl.privilege_type
+                FROM pg_catalog.pg_proc procedure
+                JOIN pg_catalog.pg_namespace namespace ON namespace.oid=procedure.pronamespace
+                CROSS JOIN LATERAL aclexplode(
+                    COALESCE(procedure.proacl, acldefault('f', procedure.proowner))
+                ) acl
+                LEFT JOIN pg_catalog.pg_roles grantee ON grantee.oid=acl.grantee
+                WHERE namespace.nspname=:schema AND procedure.proname = ANY(:function_names)
+                """
+            ),
+            {
+                "schema": CANONICAL_BUSINESS_SCHEMA,
+                "function_names": list(GATE_GUARD_FUNCTION_NAMES),
+            },
+        )
+    }
+    expected_function_grants = {
+        (function_name, owner, "EXECUTE")
+        for function_name in GATE_GUARD_FUNCTION_NAMES
+    }
+    if function_grants != expected_function_grants:
+        problems.append("guard function ACL drift")
     schema_owner = connection.execute(
         text(
             "SELECT pg_get_userbyid(nspowner) FROM pg_catalog.pg_namespace "

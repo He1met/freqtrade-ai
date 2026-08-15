@@ -36,6 +36,11 @@ from app.canonical_v13.authority_upgrade import (
     rollback_authority_upgrade,
     verify_authority_upgrade_state,
 )
+from app.canonical_v13.gate_receipt_upgrade import (
+    CanonicalGateReceiptUpgradeBlocked,
+    apply_gate_receipt_upgrade,
+    verify_gate_receipt_upgrade,
+)
 from app.canonical_v13.genesis import (
     assert_postgresql_acl_sql,
     postgresql_owner_table_grant_statements,
@@ -383,6 +388,25 @@ def authority_apply(*, rollback: bool) -> dict[str, object]:
     return {**asdict(result), "status": result.status}
 
 
+def gate_receipt_upgrade(*, apply: bool) -> dict[str, object]:
+    engine = create_engine(_database_url(), pool_pre_ping=True)
+    try:
+        context = engine.begin() if apply else engine.connect()
+        with context as connection:
+            result = (
+                apply_gate_receipt_upgrade(
+                    connection,
+                    role_mapping=local_role_mapping(),
+                    actor_identity=_upgrade_actor(),
+                )
+                if apply
+                else verify_gate_receipt_upgrade(connection)
+            )
+    finally:
+        engine.dispose()
+    return {**asdict(result), "status": result.status}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -399,6 +423,8 @@ def main(argv: list[str] | None = None) -> int:
             "authority-verify-restore",
             "authority-apply",
             "authority-rollback",
+            "gate-receipts-verify",
+            "gate-receipts-apply",
         ),
     )
     args = parser.parse_args(argv)
@@ -430,11 +456,15 @@ def main(argv: list[str] | None = None) -> int:
                     else None
                 )
             )
+        elif args.command in {"gate-receipts-verify", "gate-receipts-apply"}:
+            payload = gate_receipt_upgrade(apply=args.command == "gate-receipts-apply")
         else:
             payload = authority_apply(rollback=args.command == "authority-rollback")
     except BootstrapBlocked as exc:
         payload = {"status": "BLOCKED", "reason": str(exc)}
     except CanonicalAuthorityUpgradeBlocked as exc:
+        payload = {"status": "BLOCKED", "reason": str(exc)}
+    except CanonicalGateReceiptUpgradeBlocked as exc:
         payload = {"status": "BLOCKED", "reason": str(exc)}
     except (SQLAlchemyError, ValueError):
         payload = {"status": "BLOCKED", "reason": "bootstrap verification failed"}

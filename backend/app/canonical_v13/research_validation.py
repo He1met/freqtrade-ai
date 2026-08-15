@@ -32,12 +32,13 @@ from app.canonical_v13.manifest import (
     P0_CONFIGURATION_KINDS,
 )
 from app.canonical_v13.models import (
-    CONFIGURATION_ACTIVATIONS_TABLE,
     CONFIGURATION_BUNDLE_MEMBERS_TABLE,
     CONFIGURATION_BUNDLES_TABLE,
     CONFIGURATION_SNAPSHOT_MEMBERS_TABLE,
     CONFIGURATION_SNAPSHOTS_TABLE,
     MARKET_SNAPSHOT_MEMBERS_TABLE,
+    RESEARCH_GATE_ATTEMPTS_TABLE,
+    RESEARCH_GATE_RECEIPTS_TABLE,
     RESEARCH_TARGETS_TABLE,
     STRATEGY_ARTIFACTS_TABLE,
     STRATEGY_VERSIONS_TABLE,
@@ -264,6 +265,20 @@ def _canonical_json(value: object) -> str:
 
 def canonical_research_digest(value: object) -> str:
     return sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def canonical_gate_receipt_digest(values: Mapping[str, Any]) -> str:
+    """Digest one persisted gate receipt row without its database identity."""
+
+    normalized: dict[str, Any] = {}
+    for key, value in values.items():
+        if isinstance(value, UUID):
+            normalized[key] = str(value)
+        elif isinstance(value, datetime):
+            normalized[key] = _utc(value).isoformat()
+        else:
+            normalized[key] = value
+    return canonical_research_digest(normalized)
 
 
 def static_validator_digest() -> str:
@@ -909,22 +924,6 @@ def _bundle_context(
         raise CanonicalResearchValidationBlocked(
             "BLOCKED_RESEARCH_BUNDLE_DIGEST_DRIFT", "bundle digest does not recompute"
         )
-    activation = connection.execute(
-        select(CONFIGURATION_ACTIVATIONS_TABLE).where(
-            CONFIGURATION_ACTIVATIONS_TABLE.c.scope_key == bundle["scope_key"],
-            CONFIGURATION_ACTIVATIONS_TABLE.c.workflow_key == bundle["workflow_key"],
-        )
-    ).mappings().one_or_none()
-    if (
-        activation is None
-        or activation["configuration_bundle_id"] != lineage.configuration_bundle_id
-        or activation["bundle_digest"] != lineage.configuration_bundle_digest
-    ):
-        raise CanonicalResearchValidationBlocked(
-            "BLOCKED_RESEARCH_BUNDLE_UNSET",
-            "the requested frozen research bundle is not the active pointer",
-        )
-
     target = connection.execute(
         select(RESEARCH_TARGETS_TABLE).where(
             RESEARCH_TARGETS_TABLE.c.id == lineage.research_target_id
@@ -1122,6 +1121,8 @@ def _plan_payload(
     windows: Sequence[PlanWindowBinding],
     static_receipt_digest: str,
     lookahead_receipt_digest: str,
+    static_gate_receipt_id: UUID,
+    lookahead_gate_receipt_id: UUID,
     orchestrator_identity: str,
 ) -> dict[str, object]:
     return {
@@ -1143,8 +1144,74 @@ def _plan_payload(
         ],
         "static_receipt_digest": static_receipt_digest,
         "lookahead_receipt_digest": lookahead_receipt_digest,
+        "static_gate_receipt_id": str(static_gate_receipt_id),
+        "lookahead_gate_receipt_id": str(lookahead_gate_receipt_id),
         "orchestrator_identity": orchestrator_identity,
     }
+
+
+def _persisted_gate_pair(
+    connection: Connection,
+    *,
+    lineage: ResearchLineage,
+    artifact_digest: str,
+    static_gate_receipt_id: UUID,
+    lookahead_gate_receipt_id: UUID,
+) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+    rows = connection.execute(
+        select(RESEARCH_GATE_RECEIPTS_TABLE).where(
+            RESEARCH_GATE_RECEIPTS_TABLE.c.id.in_(
+                (static_gate_receipt_id, lookahead_gate_receipt_id)
+            )
+        )
+    ).mappings().all()
+    by_id = {row["id"]: row for row in rows}
+    for row in rows:
+        persisted_payload = {
+            key: value for key, value in row.items() if key not in {"id", "receipt_digest"}
+        }
+        if canonical_gate_receipt_digest(persisted_payload) != row["receipt_digest"]:
+            raise CanonicalResearchValidationBlocked(
+                "BLOCKED_GATE_RECEIPT_DIGEST_DRIFT",
+                "persisted gate receipt digest drifted",
+            )
+    static = by_id.get(static_gate_receipt_id)
+    lookahead = by_id.get(lookahead_gate_receipt_id)
+    if static is None or lookahead is None:
+        raise CanonicalResearchValidationBlocked(
+            "BLOCKED_GATE_RECEIPT_UNAVAILABLE",
+            "validation plan requires two persisted v3 gate receipts",
+        )
+    expected = {
+        "strategy_version_id": lineage.strategy_version_id,
+        "research_target_id": lineage.research_target_id,
+        "configuration_bundle_id": lineage.configuration_bundle_id,
+        "configuration_bundle_digest": lineage.configuration_bundle_digest,
+        "market_snapshot_id": lineage.market_snapshot_id,
+        "market_snapshot_digest": lineage.market_snapshot_digest,
+        "artifact_digest": artifact_digest,
+    }
+    attempt_ids = {static["gate_attempt_id"], lookahead["gate_attempt_id"]}
+    attempt = connection.execute(
+        select(RESEARCH_GATE_ATTEMPTS_TABLE).where(
+            RESEARCH_GATE_ATTEMPTS_TABLE.c.id == static["gate_attempt_id"]
+        )
+    ).mappings().one_or_none()
+    if (
+        len(attempt_ids) != 1
+        or attempt is None
+        or attempt["status"] != "PASSED"
+        or static["gate_type"] != "STATIC"
+        or lookahead["gate_type"] != "LOOKAHEAD"
+        or static["terminal_status"] != "PASSED"
+        or lookahead["terminal_status"] != "PASSED"
+        or any(row[key] != value for row in (static, lookahead) for key, value in expected.items())
+    ):
+        raise CanonicalResearchValidationBlocked(
+            "BLOCKED_GATE_RECEIPT_LINEAGE",
+            "persisted gate receipts are not one eligible frozen lineage",
+        )
+    return static, lookahead
 
 
 def declare_validation_plan(
@@ -1153,6 +1220,8 @@ def declare_validation_plan(
     lineage: ResearchLineage,
     static_receipt: StaticValidationReceipt,
     lookahead_receipt: LookaheadAnalysisReceipt,
+    static_gate_receipt_id: UUID,
+    lookahead_gate_receipt_id: UUID,
     orchestrator_identity: str,
 ) -> ValidationPlanResult:
     """Declare a plan by copying exact dynamic WINDOW snapshot member identities."""
@@ -1178,6 +1247,13 @@ def declare_validation_plan(
             "BLOCKED_LOOKAHEAD_VALIDATION_FAILED",
             ",".join(lookahead_decision.reason_codes),
         )
+    persisted_static, persisted_lookahead = _persisted_gate_pair(
+        effective,
+        lineage=lineage,
+        artifact_digest=artifact["content_digest"],
+        static_gate_receipt_id=static_gate_receipt_id,
+        lookahead_gate_receipt_id=lookahead_gate_receipt_id,
+    )
     plan_digest = canonical_research_digest(
         _plan_payload(
             lineage=lineage,
@@ -1185,8 +1261,10 @@ def declare_validation_plan(
             window_snapshot_id=window_snapshot["id"],
             window_snapshot_digest=window_snapshot["snapshot_digest"],
             windows=windows,
-            static_receipt_digest=static_receipt.receipt_digest,
-            lookahead_receipt_digest=lookahead_receipt.receipt_digest,
+            static_receipt_digest=persisted_static["receipt_digest"],
+            lookahead_receipt_digest=persisted_lookahead["receipt_digest"],
+            static_gate_receipt_id=static_gate_receipt_id,
+            lookahead_gate_receipt_id=lookahead_gate_receipt_id,
             orchestrator_identity=orchestrator_identity,
         )
     )
@@ -1226,6 +1304,8 @@ def declare_validation_plan(
             market_snapshot_id=lineage.market_snapshot_id,
             market_snapshot_digest=lineage.market_snapshot_digest,
             window_snapshot_id=window_snapshot["id"],
+            static_gate_receipt_id=static_gate_receipt_id,
+            lookahead_gate_receipt_id=lookahead_gate_receipt_id,
             validation_plan_digest=plan_digest,
             status="DECLARED",
             created_at=now,
@@ -1323,6 +1403,8 @@ def mark_validation_plan_ready(
     expected_plan_digest: str,
     static_receipt: StaticValidationReceipt,
     lookahead_receipt: LookaheadAnalysisReceipt,
+    static_gate_receipt_id: UUID,
+    lookahead_gate_receipt_id: UUID,
     orchestrator_identity: str,
 ) -> ValidationPlanResult:
     expected_plan_digest = _digest(expected_plan_digest, field="expected_plan_digest")
@@ -1372,6 +1454,21 @@ def mark_validation_plan_ready(
         raise CanonicalResearchValidationBlocked(
             "BLOCKED_LOOKAHEAD_VALIDATION_FAILED", ",".join(decision.reason_codes)
         )
+    persisted_static, persisted_lookahead = _persisted_gate_pair(
+        effective,
+        lineage=lineage,
+        artifact_digest=artifact["content_digest"],
+        static_gate_receipt_id=static_gate_receipt_id,
+        lookahead_gate_receipt_id=lookahead_gate_receipt_id,
+    )
+    if (
+        plan["static_gate_receipt_id"] != static_gate_receipt_id
+        or plan["lookahead_gate_receipt_id"] != lookahead_gate_receipt_id
+    ):
+        raise CanonicalResearchValidationBlocked(
+            "BLOCKED_GATE_RECEIPT_LINEAGE",
+            "validation plan gate receipt identities drifted",
+        )
     recomputed = canonical_research_digest(
         _plan_payload(
             lineage=lineage,
@@ -1379,8 +1476,10 @@ def mark_validation_plan_ready(
             window_snapshot_id=window_snapshot["id"],
             window_snapshot_digest=window_snapshot["snapshot_digest"],
             windows=current_windows,
-            static_receipt_digest=static_receipt.receipt_digest,
-            lookahead_receipt_digest=lookahead_receipt.receipt_digest,
+            static_receipt_digest=persisted_static["receipt_digest"],
+            lookahead_receipt_digest=persisted_lookahead["receipt_digest"],
+            static_gate_receipt_id=static_gate_receipt_id,
+            lookahead_gate_receipt_id=lookahead_gate_receipt_id,
             orchestrator_identity=orchestrator_identity,
         )
     )
@@ -2041,6 +2140,7 @@ __all__ = [
     "build_ephemeral_attempt_receipt",
     "build_ephemeral_launch_spec",
     "build_lookahead_receipt",
+    "canonical_gate_receipt_digest",
     "canonical_research_digest",
     "declare_validation_plan",
     "ephemeral_attempt_receipt_digest",
