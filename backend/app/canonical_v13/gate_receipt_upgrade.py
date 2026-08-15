@@ -27,6 +27,7 @@ from app.canonical_v13.role_mapping import CanonicalRoleMapping
 
 
 PREVIOUS_MANIFEST_DIGEST: Final = "8668da01999d0f19947d08b2934a05277e1cb998e4abb05a27d6022534f677d6"
+PREVIOUS_GATE_MANIFEST_DIGEST: Final = "d5ade09cb4f33241a486ed001295baec81d8428eef39bcd2c7d7bfcede51b081"
 UPGRADE_CONTRACT: Final = "canonical-v13-planless-gate-receipts-upgrade-v1"
 GATE_GUARD_FUNCTION_NAMES: Final = (
     "guard_research_gate_attempts_lifecycle",
@@ -86,7 +87,11 @@ def _validation_dependency_grants(
                 SELECT table_name, privilege_type
                 FROM information_schema.role_table_grants
                 WHERE table_schema=:schema AND grantee=:validation_role
-                  AND table_name IN ('market_profiles','market_profile_versions')
+                  AND table_name IN (
+                    'configuration_profiles','configuration_versions',
+                    'configuration_dependencies','market_profiles',
+                    'market_profile_versions'
+                  )
                 """
             ),
             {
@@ -106,11 +111,15 @@ def _repair_current_dependency_grants(
 ) -> GateReceiptUpgradeResult:
     validation = role_mapping.physical("canonical_validation_writer")
     expected = {
+        ("configuration_profiles", "SELECT"),
+        ("configuration_versions", "SELECT"),
+        ("configuration_dependencies", "SELECT"),
         ("market_profiles", "SELECT"),
         ("market_profile_versions", "SELECT"),
     }
     observed = _validation_dependency_grants(connection, validation)
-    if observed == expected:
+    current_manifest = _current_manifest(connection)
+    if observed == expected and current_manifest == CANONICAL_MANIFEST_DIGEST:
         return verify_gate_receipt_upgrade(connection)
     if not observed < expected:
         raise CanonicalGateReceiptUpgradeBlocked(
@@ -126,9 +135,12 @@ def _repair_current_dependency_grants(
             )
         )
     now = (observed_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    previous_manifest = current_manifest
     payload = {
         "contract": UPGRADE_CONTRACT,
-        "repair": "validation_dependency_select_grants",
+        "repair": "validation_gate_api_dependency_select_grants",
+        "previous_manifest_digest": previous_manifest,
+        "current_manifest_digest": CANONICAL_MANIFEST_DIGEST,
         "tables": missing_tables,
         "actor_identity": actor_identity,
         "applied_at": now.isoformat(),
@@ -150,6 +162,12 @@ def _repair_current_dependency_grants(
             created_at=now,
         )
     )
+    if previous_manifest == PREVIOUS_GATE_MANIFEST_DIGEST:
+        connection.execute(
+            SCHEMA_METADATA_TABLE.update().values(
+                manifest_digest=CANONICAL_MANIFEST_DIGEST
+            )
+        )
     if _validation_dependency_grants(connection, validation) != expected:
         raise CanonicalGateReceiptUpgradeBlocked(
             "BLOCKED_GATE_RECEIPT_DEPENDENCY_ACL_REPAIR",
@@ -158,7 +176,7 @@ def _repair_current_dependency_grants(
     verified = verify_gate_receipt_upgrade(connection)
     return GateReceiptUpgradeResult(
         verified.status,
-        PREVIOUS_MANIFEST_DIGEST,
+        previous_manifest,
         CANONICAL_MANIFEST_DIGEST,
         0,
         0,
@@ -396,7 +414,7 @@ def apply_gate_receipt_upgrade(
     if not actor_identity or actor_identity.strip() != actor_identity or len(actor_identity) > 160:
         raise CanonicalGateReceiptUpgradeBlocked("BLOCKED_GATE_RECEIPT_UPGRADE_ACTOR", "actor identity is invalid")
     current = _current_manifest(connection)
-    if current == CANONICAL_MANIFEST_DIGEST:
+    if current in {CANONICAL_MANIFEST_DIGEST, PREVIOUS_GATE_MANIFEST_DIGEST}:
         return _repair_current_dependency_grants(
             connection,
             role_mapping=role_mapping,
@@ -428,7 +446,11 @@ def apply_gate_receipt_upgrade(
         connection.execute(text(f"GRANT SELECT ON TABLE {schema}.{table_name} TO {api_reader}, {research_reader}, {scoring}"))
     connection.execute(text(f"GRANT SELECT, INSERT, UPDATE ON TABLE {schema}.research_gate_attempts TO {validation}"))
     connection.execute(text(f"GRANT SELECT, INSERT ON TABLE {schema}.research_gate_receipts TO {validation}"))
-    connection.execute(text(f"GRANT SELECT ON TABLE {schema}.market_profiles, {schema}.market_profile_versions TO {validation}"))
+    connection.execute(text(
+        f"GRANT SELECT ON TABLE {schema}.configuration_profiles, "
+        f"{schema}.configuration_versions, {schema}.configuration_dependencies, "
+        f"{schema}.market_profiles, {schema}.market_profile_versions TO {validation}"
+    ))
     install_gate_receipt_triggers(connection)
     guard_roles = tuple(
         role_mapping.physical(role)

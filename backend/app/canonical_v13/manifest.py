@@ -22,7 +22,7 @@ CANONICAL_MANIFEST_KEY: Final = "canonical-v13-table-manifest-v1"
 CANONICAL_LEGACY_IMPORT_MODE: Final = "EXTERNAL_LATEST_ONLY"
 CANONICAL_TRADING_CAPABILITY: Final = "TRADING_DISABLED"
 CANONICAL_PRODUCTION_DEFAULT: Final = "UNSET"
-CANONICAL_AUTHORITY_REVISION: Final = "20260815_planless_gate_receipts_v3"
+CANONICAL_AUTHORITY_REVISION: Final = "20260815_planless_gate_receipts_v3_acl2"
 
 P0_CONFIGURATION_KINDS: Final[tuple[str, ...]] = (
     "TARGET",
@@ -255,6 +255,9 @@ _WRITER_READ_ALLOWLIST = {
         "strategy_artifacts",
         "strategy_versions",
         "configuration_activations",
+        "configuration_profiles",
+        "configuration_versions",
+        "configuration_dependencies",
         "configuration_snapshots",
         "configuration_snapshot_members",
         "configuration_bundles",
