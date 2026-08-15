@@ -25,6 +25,11 @@ def test_worker_source_is_self_contained_and_containerfile_pins_reviewed_base() 
     assert "freqtradeorg/freqtrade@sha256:c730f60992863baafc8f13469291731e4b5e0ada82d8a9b449dcf5db24d00f76" in containerfile
     assert "ENTRYPOINT []" in containerfile
     assert "/opt/freqtrade-ai/bin/canonical-v13-research-worker" in containerfile
+    worker = _load_worker()
+    assert worker.FREQTRADE_SUBPROCESS_ENV["HOME"] == "/work/home"
+    assert worker.FREQTRADE_SUBPROCESS_ENV["PYTHONPATH"] == (
+        "/freqtrade:/home/ftuser/.local/lib/python3.14/site-packages"
+    )
 
 
 def test_worker_rejects_noncanonical_json(tmp_path: Path) -> None:
