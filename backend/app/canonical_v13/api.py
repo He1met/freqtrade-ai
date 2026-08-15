@@ -1186,6 +1186,9 @@ def create_canonical_v13_app(
                 status=supplied.status,
                 has_bias=supplied.has_bias,
                 observed_signal_count=supplied.observed_signal_count,
+                blocked_reason_code=supplied.blocked_reason_code,
+                blocked_observed_trade_count=supplied.blocked_observed_trade_count,
+                blocked_required_trade_count=supplied.blocked_required_trade_count,
             )
             if (
                 lookahead.request_digest != supplied.request_digest

@@ -294,13 +294,16 @@ def test_production_lookahead_adapter_is_planless_and_uses_same_sandbox_flags(
         market_snapshot_digest="c" * 64,
     )
     evidence = {
-        "contract": "canonical-v13-freqtrade-lookahead-output-v1",
+        "contract": "canonical-v13-freqtrade-lookahead-output-v2",
         "request_digest": request_digest,
         "strategy_version_id": str(lineage.strategy_version_id),
         "research_target_id": str(lineage.research_target_id),
         "status": "PASSED",
         "has_bias": False,
         "observed_signal_count": 20,
+        "blocked_reason_code": None,
+        "blocked_observed_trade_count": None,
+        "blocked_required_trade_count": None,
         "window_results": [
             {
                 "window_key": "required-a",
@@ -339,6 +342,7 @@ def test_production_lookahead_adapter_is_planless_and_uses_same_sandbox_flags(
     assert receipt.status == "PASSED"
     assert receipt.has_bias is False
     assert receipt.observed_signal_count == 20
+    assert receipt.blocked_reason_code is None
     assert runner.argv is not None
     assert "lookahead" in runner.argv
     assert "backtest" not in runner.argv
@@ -368,6 +372,35 @@ def test_production_lookahead_adapter_is_planless_and_uses_same_sandbox_flags(
         match="required window output is incomplete",
     ):
         incomplete_adapter.execute(lineage=lineage, artifact_digest="f" * 64)
+
+    blocked_evidence = {
+        **evidence,
+        "status": "BLOCKED",
+        "has_bias": None,
+        "observed_signal_count": 0,
+        "blocked_reason_code": "LOOKAHEAD_INSUFFICIENT_TRADES",
+        "blocked_observed_trade_count": 3,
+        "blocked_required_trade_count": 10,
+        "window_results": [],
+    }
+    blocked_adapter = FreqtradeProductionLookaheadAdapter(
+        activation=PRODUCTION_LOOKAHEAD_ACTIVATION,
+        runtime_path=runtime,
+        image_reference=f"freqtrade-ai/research@sha256:{EXECUTOR_IMAGE_DIGEST}",
+        limits=ProductionResearchLimits(timeout_seconds=60, max_output_bytes=32_768),
+        input_factory=inputs,
+        runner=CapturingRunner(
+            {
+                **blocked_evidence,
+                "evidence_digest": canonical_research_digest(blocked_evidence),
+            }
+        ),
+    )
+    blocked = blocked_adapter.execute(lineage=lineage, artifact_digest="f" * 64)
+    assert blocked.status == "BLOCKED"
+    assert blocked.blocked_reason_code == "LOOKAHEAD_INSUFFICIENT_TRADES"
+    assert blocked.blocked_observed_trade_count == 3
+    assert blocked.blocked_required_trade_count == 10
 
 
 def test_dynamic_single_target_cap_schedules_31_as_five_sixes_and_one(

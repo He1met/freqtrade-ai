@@ -12,6 +12,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import zipfile
@@ -20,7 +21,7 @@ import zipfile
 REQUEST_CONTRACT = "canonical-v13-freqtrade-backtest-request-v1"
 OUTPUT_CONTRACT = "canonical-v13-freqtrade-backtest-output-v1"
 LOOKAHEAD_REQUEST_CONTRACT = "canonical-v13-freqtrade-lookahead-request-v1"
-LOOKAHEAD_OUTPUT_CONTRACT = "canonical-v13-freqtrade-lookahead-output-v1"
+LOOKAHEAD_OUTPUT_CONTRACT = "canonical-v13-freqtrade-lookahead-output-v2"
 PREFLIGHT_CONTRACT = "canonical-v13-research-worker-preflight-v1"
 EXPECTED_CAPABILITY = {
     "trading": "TRADING_DISABLED",
@@ -41,6 +42,27 @@ HEX = frozenset("0123456789abcdef")
 
 class Blocked(RuntimeError):
     pass
+
+
+class LookaheadBlocked(Blocked):
+    def __init__(
+        self,
+        reason_code: str,
+        *,
+        observed_trade_count: int | None = None,
+        required_trade_count: int | None = None,
+    ) -> None:
+        self.reason_code = reason_code
+        self.observed_trade_count = observed_trade_count
+        self.required_trade_count = required_trade_count
+        super().__init__(reason_code)
+
+
+_INSUFFICIENT_TRADES = re.compile(
+    r"found (?P<observed>\d+) trades which is less than minimum_trade_amount "
+    r"(?P<required>\d+)\."
+)
+_MAXIMUM_LOOKAHEAD_LOG_BYTES = 1_000_000
 
 
 def _canonical_bytes(value: object) -> bytes:
@@ -600,6 +622,7 @@ def lookahead(args: argparse.Namespace) -> dict[str, object]:
         if closed_candle_count < int(window["minimum_closed_candles"]):
             raise Blocked("lookahead window has insufficient closed-candle coverage")
         export_path = Path(f"/work/lookahead-{index:04d}.csv")
+        log_path = Path(f"/work/lookahead-{index:04d}.stderr")
         command = (
             "/opt/freqtrade-ai/bin/canonical-v13-research-worker",
             "freqtrade-offline",
@@ -630,23 +653,36 @@ def lookahead(args: argparse.Namespace) -> dict[str, object]:
             "--strategy-list",
             strategy_class,
         )
-        completed = subprocess.run(
-            command,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            env=FREQTRADE_SUBPROCESS_ENV,
-            close_fds=True,
-            timeout=840,
-            check=False,
-        )
-        if completed.returncode != 0 or not export_path.is_file():
-            raise Blocked("Freqtrade lookahead process failed")
+        with log_path.open("wb") as stderr:
+            completed = subprocess.run(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=stderr,
+                env=FREQTRADE_SUBPROCESS_ENV,
+                close_fds=True,
+                timeout=840,
+                check=False,
+            )
+        if log_path.stat().st_size > _MAXIMUM_LOOKAHEAD_LOG_BYTES:
+            raise LookaheadBlocked("LOOKAHEAD_LOG_LIMIT_EXCEEDED")
+        log_text = log_path.read_text(encoding="utf-8", errors="replace")
+        if completed.returncode != 0:
+            raise LookaheadBlocked("LOOKAHEAD_PROCESS_FAILED")
+        if not export_path.is_file():
+            raise LookaheadBlocked("LOOKAHEAD_EXPORT_MISSING")
         with export_path.open(encoding="utf-8", newline="") as handle:
             rows = list(csv.DictReader(handle))
         selected = [row for row in rows if row.get("strategy") == strategy_class]
         if len(selected) != 1:
-            raise Blocked("Freqtrade lookahead result is ambiguous")
+            insufficient = _INSUFFICIENT_TRADES.search(log_text)
+            if insufficient is not None:
+                raise LookaheadBlocked(
+                    "LOOKAHEAD_INSUFFICIENT_TRADES",
+                    observed_trade_count=int(insufficient.group("observed")),
+                    required_trade_count=int(insufficient.group("required")),
+                )
+            raise LookaheadBlocked("LOOKAHEAD_RESULT_AMBIGUOUS")
         row = selected[0]
         if row.get("has_bias") not in {"True", "False"}:
             raise Blocked("Freqtrade lookahead bias result is invalid")
@@ -678,6 +714,9 @@ def lookahead(args: argparse.Namespace) -> dict[str, object]:
         "status": "FAILED" if has_bias else "PASSED",
         "has_bias": has_bias,
         "observed_signal_count": observed_signal_count,
+        "blocked_reason_code": None,
+        "blocked_observed_trade_count": None,
+        "blocked_required_trade_count": None,
         "window_results": window_results,
     }
     return {**evidence, "evidence_digest": _digest(evidence)}
@@ -718,11 +757,23 @@ def main() -> int:
     else:
         try:
             result = lookahead(args)
-        except Exception:
+        except Exception as exc:
             try:
                 request = _load_object(args.request)
             except Exception:
                 return 2
+            if isinstance(exc, LookaheadBlocked):
+                blocked_reason_code = exc.reason_code
+                blocked_observed_trade_count = exc.observed_trade_count
+                blocked_required_trade_count = exc.required_trade_count
+            elif isinstance(exc, Blocked):
+                blocked_reason_code = "LOOKAHEAD_WORKER_BLOCKED"
+                blocked_observed_trade_count = None
+                blocked_required_trade_count = None
+            else:
+                blocked_reason_code = "LOOKAHEAD_WORKER_INTERNAL_ERROR"
+                blocked_observed_trade_count = None
+                blocked_required_trade_count = None
             evidence = {
                 "contract": LOOKAHEAD_OUTPUT_CONTRACT,
                 "request_digest": request.get("request_digest"),
@@ -731,6 +782,9 @@ def main() -> int:
                 "status": "BLOCKED",
                 "has_bias": None,
                 "observed_signal_count": 0,
+                "blocked_reason_code": blocked_reason_code,
+                "blocked_observed_trade_count": blocked_observed_trade_count,
+                "blocked_required_trade_count": blocked_required_trade_count,
                 "window_results": [],
             }
             result = {**evidence, "evidence_digest": _digest(evidence)}
