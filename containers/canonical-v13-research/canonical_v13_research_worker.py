@@ -317,7 +317,9 @@ def _prepare_data(request: dict[str, object], target: dict[str, object]):
     ).sort_values("date")
     if frame.empty or frame["date"].duplicated().any() or not frame["date"].is_monotonic_increasing:
         raise Blocked("market rows are empty, duplicated, or unordered")
-    FeatherDataHandler(Path("/work/data")).ohlcv_store(
+    data_root = Path("/work/data")
+    (data_root / "futures").mkdir(parents=True, exist_ok=True)
+    FeatherDataHandler(data_root).ohlcv_store(
         str(target["pair"]), str(target["timeframe"]), frame, CandleType.FUTURES
     )
     return frame
