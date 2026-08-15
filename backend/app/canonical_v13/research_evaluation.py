@@ -450,7 +450,17 @@ def _load_plan_windows(
         configured_window = configured[key]
         snapshot_member = members.get(f"window:{key}")
         plan_window = plan_windows[key]
-        expected_member_digest = _digest_json(configured_window)
+        expected_member_digest = _digest_json(
+            {
+                **configured_window,
+                "start_at": _parse_timestamp(
+                    configured_window["start_at"], field="start_at"
+                ).isoformat(),
+                "end_at": _parse_timestamp(
+                    configured_window["end_at"], field="end_at"
+                ).isoformat(),
+            }
+        )
         if (
             snapshot_member is None
             or snapshot_member["member_digest"] != expected_member_digest

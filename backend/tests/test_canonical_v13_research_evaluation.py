@@ -97,6 +97,10 @@ def _count(connection, table) -> int:
     return int(connection.execute(select(func.count()).select_from(table)).scalar_one())
 
 
+def _z(value: datetime) -> str:
+    return value.isoformat().replace("+00:00", "Z")
+
+
 def _draft(connection, kind, payload, *, dependencies=()):
     return create_configuration_draft(
         connection,
@@ -168,22 +172,22 @@ def _bundle(connection, *, aggregation="MEAN", quality_threshold=50):
             {
                 "window_key": "required-recent",
                 "required": True,
-                "start_at": NOW.isoformat(),
-                "end_at": (NOW + timedelta(hours=6)).isoformat(),
+                "start_at": _z(NOW),
+                "end_at": _z(NOW + timedelta(hours=6)),
                 "coverage": {"minimum_closed_candles": 72},
             },
             {
                 "window_key": "optional-context",
                 "required": False,
-                "start_at": (NOW - timedelta(hours=6)).isoformat(),
-                "end_at": NOW.isoformat(),
+                "start_at": _z(NOW - timedelta(hours=6)),
+                "end_at": _z(NOW),
                 "coverage": {"minimum_closed_candles": 72},
             },
             {
                 "window_key": "required-stress",
                 "required": True,
-                "start_at": (NOW - timedelta(hours=12)).isoformat(),
-                "end_at": (NOW - timedelta(hours=6)).isoformat(),
+                "start_at": _z(NOW - timedelta(hours=12)),
+                "end_at": _z(NOW - timedelta(hours=6)),
                 "coverage": {"minimum_closed_candles": 72},
             },
         ]
