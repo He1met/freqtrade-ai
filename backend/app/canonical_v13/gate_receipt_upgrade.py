@@ -28,6 +28,7 @@ from app.canonical_v13.role_mapping import CanonicalRoleMapping
 
 PREVIOUS_MANIFEST_DIGEST: Final = "8668da01999d0f19947d08b2934a05277e1cb998e4abb05a27d6022534f677d6"
 PREVIOUS_GATE_MANIFEST_DIGEST: Final = "d5ade09cb4f33241a486ed001295baec81d8428eef39bcd2c7d7bfcede51b081"
+PREVIOUS_GATE_API_MANIFEST_DIGEST: Final = "d9ddfbc5943b9e50fc812c022d0298570248b09d1bb94dfb5d50f229bc1ded24"
 UPGRADE_CONTRACT: Final = "canonical-v13-planless-gate-receipts-upgrade-v1"
 GATE_GUARD_FUNCTION_NAMES: Final = (
     "guard_research_gate_attempts_lifecycle",
@@ -90,7 +91,8 @@ def _validation_dependency_grants(
                   AND table_name IN (
                     'configuration_profiles','configuration_versions',
                     'configuration_dependencies','market_profiles',
-                    'market_profile_versions'
+                    'market_profile_versions','market_artifacts',
+                    'market_inspections','market_receipts'
                   )
                 """
             ),
@@ -116,6 +118,9 @@ def _repair_current_dependency_grants(
         ("configuration_dependencies", "SELECT"),
         ("market_profiles", "SELECT"),
         ("market_profile_versions", "SELECT"),
+        ("market_artifacts", "SELECT"),
+        ("market_inspections", "SELECT"),
+        ("market_receipts", "SELECT"),
     }
     observed = _validation_dependency_grants(connection, validation)
     current_manifest = _current_manifest(connection)
@@ -162,7 +167,10 @@ def _repair_current_dependency_grants(
             created_at=now,
         )
     )
-    if previous_manifest == PREVIOUS_GATE_MANIFEST_DIGEST:
+    if previous_manifest in {
+        PREVIOUS_GATE_MANIFEST_DIGEST,
+        PREVIOUS_GATE_API_MANIFEST_DIGEST,
+    }:
         connection.execute(
             SCHEMA_METADATA_TABLE.update().values(
                 manifest_digest=CANONICAL_MANIFEST_DIGEST
@@ -414,7 +422,11 @@ def apply_gate_receipt_upgrade(
     if not actor_identity or actor_identity.strip() != actor_identity or len(actor_identity) > 160:
         raise CanonicalGateReceiptUpgradeBlocked("BLOCKED_GATE_RECEIPT_UPGRADE_ACTOR", "actor identity is invalid")
     current = _current_manifest(connection)
-    if current in {CANONICAL_MANIFEST_DIGEST, PREVIOUS_GATE_MANIFEST_DIGEST}:
+    if current in {
+        CANONICAL_MANIFEST_DIGEST,
+        PREVIOUS_GATE_MANIFEST_DIGEST,
+        PREVIOUS_GATE_API_MANIFEST_DIGEST,
+    }:
         return _repair_current_dependency_grants(
             connection,
             role_mapping=role_mapping,
@@ -449,7 +461,9 @@ def apply_gate_receipt_upgrade(
     connection.execute(text(
         f"GRANT SELECT ON TABLE {schema}.configuration_profiles, "
         f"{schema}.configuration_versions, {schema}.configuration_dependencies, "
-        f"{schema}.market_profiles, {schema}.market_profile_versions TO {validation}"
+        f"{schema}.market_profiles, {schema}.market_profile_versions, "
+        f"{schema}.market_artifacts, {schema}.market_inspections, "
+        f"{schema}.market_receipts TO {validation}"
     ))
     install_gate_receipt_triggers(connection)
     guard_roles = tuple(

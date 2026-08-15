@@ -2,7 +2,7 @@
 
 - 权威状态：`FROZEN_FOR_IMPLEMENTATION`
 - 设计版本：`canonical-v13-phase0-20260814`
-- 权限修订：`20260815_planless_gate_receipts_v3_acl2`
+- 权限修订：`20260815_planless_gate_receipts_v3_acl3`
 - 协调入口：GitHub #714；阶段入口：#715 → #724
 - 生产起点：空数据库；旧数据库只允许作为外部只读档案
 - 历史轨道：v46/v47、#705、#708、#710 只作 design-lab/legacy evidence
