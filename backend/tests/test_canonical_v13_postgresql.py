@@ -23,6 +23,7 @@ from app.canonical_v13.configuration_governance import (
     create_audited_configuration_draft,
 )
 from app.canonical_v13.gate_receipt_upgrade import (
+    PREVIOUS_GATE_MANIFEST_DIGEST as PREVIOUS_PLANLESS_GATE_MANIFEST_DIGEST,
     PREVIOUS_MANIFEST_DIGEST as PREVIOUS_GATE_MANIFEST_DIGEST,
     apply_gate_receipt_upgrade,
     verify_gate_receipt_upgrade,
@@ -332,6 +333,32 @@ def test_postgresql_gate_receipt_upgrade_from_exact_predecessor() -> None:
             assert upgraded.destructive_operation_count == 0
             assert upgraded.receipt_digest is not None
             assert verified.status == "ACCEPTED"
+            assert verify_postgresql_bootstrap(
+                connection,
+                role_mapping=mapping,
+                require_zero_business_rows=False,
+            ).accepted is True
+
+            connection.execute(
+                SCHEMA_METADATA_TABLE.update().values(
+                    manifest_digest=PREVIOUS_PLANLESS_GATE_MANIFEST_DIGEST
+                )
+            )
+            connection.exec_driver_sql(
+                f"REVOKE SELECT ON {schema}.configuration_profiles, "
+                f"{schema}.configuration_versions, "
+                f"{schema}.configuration_dependencies FROM "
+                f"{mapping.physical('canonical_validation_writer')}"
+            )
+            revised = apply_gate_receipt_upgrade(
+                connection,
+                role_mapping=mapping,
+                actor_identity="canonical-v13-ci-gate-api-acl-revision",
+                observed_at=datetime(2026, 8, 15, 0, 0, 30, tzinfo=timezone.utc),
+            )
+            assert revised.status == "ACCEPTED"
+            assert revised.previous_manifest_digest == PREVIOUS_PLANLESS_GATE_MANIFEST_DIGEST
+            assert revised.receipt_digest is not None
             assert verify_postgresql_bootstrap(
                 connection,
                 role_mapping=mapping,
