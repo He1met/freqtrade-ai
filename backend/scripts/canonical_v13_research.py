@@ -22,8 +22,12 @@ from app.canonical_v13.dto import ResearchAuthorizationConsumptionReceiptDTO
 from app.canonical_v13.bootstrap import LOCAL_SERVICE_PRINCIPALS, local_role_mapping
 from app.canonical_v13.freqtrade_production import (
     BoundedSubprocessSandboxRunner,
+    FreqtradeProductionLookaheadAdapter,
     FreqtradeProductionResearchAdapter,
+    PRODUCTION_LOOKAHEAD_ACTIVATION,
     ProductionResearchLimits,
+    execute_production_static_lookahead_gate,
+    materialize_production_lookahead_inputs,
     materialize_production_research_inputs,
 )
 from app.canonical_v13.production import READER_DATABASE_URL_ENV
@@ -40,6 +44,7 @@ from app.canonical_v13.research_validation import ResearchLineage
 
 API_BASE_ENV = "FREQTRADE_AI_CANONICAL_V13_API_BASE_URL"
 ACTIVATION_ENV = "FREQTRADE_AI_CANONICAL_V13_RESEARCH_EXECUTION_ENABLED"
+LOOKAHEAD_ACTIVATION_ENV = "FREQTRADE_AI_CANONICAL_V13_LOOKAHEAD_EXECUTION_ENABLED"
 OCI_RUNTIME_ENV = "FREQTRADE_AI_CANONICAL_V13_RESEARCH_OCI_RUNTIME"
 IMAGE_ENV = "FREQTRADE_AI_CANONICAL_V13_RESEARCH_IMAGE"
 MARKET_ROOT_ENV = "FREQTRADE_AI_CANONICAL_V13_MARKET_ARTIFACT_ROOT"
@@ -266,11 +271,76 @@ def _worker_execute(
             engine.dispose()
 
 
+def _gate_execute(
+    environment: dict[str, str], payload: dict[str, object]
+) -> dict[str, object]:
+    if set(payload) != {"lineage"} or not isinstance(payload["lineage"], dict):
+        raise ResearchCLIBlocked("BLOCKED_GATE_COMMAND_FIELDS")
+    lineage = ResearchLineage(
+        **{
+            key: UUID(str(value)) if key.endswith("_id") else str(value)
+            for key, value in payload["lineage"].items()
+        }
+    )
+    reader_url = make_url(_required(environment, READER_DATABASE_URL_ENV))
+    expected_reader = next(
+        principal
+        for principal, capability in LOCAL_SERVICE_PRINCIPALS.items()
+        if capability == "canonical_api_reader"
+    )
+    if (
+        reader_url.drivername != "postgresql+psycopg"
+        or reader_url.username != expected_reader
+        or reader_url.database != "freqtrade_ai_v13"
+    ):
+        raise ResearchCLIBlocked("BLOCKED_RESEARCH_ROLE_IDENTITY")
+    engine = create_engine(reader_url, pool_pre_ping=True)
+    market_root = Path(_required(environment, MARKET_ROOT_ENV))
+    workspace_root = Path(_required(environment, WORKSPACE_ROOT_ENV))
+
+    @contextmanager
+    def inputs(requested_lineage: ResearchLineage):
+        with engine.connect() as connection:
+            with materialize_production_lookahead_inputs(
+                connection,
+                lineage=requested_lineage,
+                market_artifact_root=market_root,
+                workspace_root=workspace_root,
+            ) as materialized:
+                yield materialized
+
+    limits = ProductionResearchLimits(
+        cpu_count=_required(environment, CPU_LIMIT_ENV),
+        memory_mb=_positive_int(environment, MEMORY_LIMIT_ENV),
+        timeout_seconds=_positive_int(environment, TIMEOUT_LIMIT_ENV),
+        max_output_bytes=_positive_int(environment, OUTPUT_LIMIT_ENV),
+        pids_limit=_positive_int(environment, PIDS_LIMIT_ENV),
+        tmpfs_mb=_positive_int(environment, TMPFS_LIMIT_ENV),
+    )
+    try:
+        adapter = FreqtradeProductionLookaheadAdapter(
+            activation=_required(environment, LOOKAHEAD_ACTIVATION_ENV),
+            runtime_path=Path(_required(environment, OCI_RUNTIME_ENV)),
+            image_reference=_required(environment, IMAGE_ENV),
+            limits=limits,
+            input_factory=inputs,
+            runner=BoundedSubprocessSandboxRunner(),
+        )
+        with engine.connect() as connection:
+            receipt = execute_production_static_lookahead_gate(
+                connection, lineage=lineage, adapter=adapter
+            )
+        return {"status": "ACCEPTED", "receipt": asdict(receipt)}
+    finally:
+        engine.dispose()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "command",
         choices=(
+            "gate",
             "plan",
             "authorize",
             "consume",
@@ -288,7 +358,11 @@ def main(argv: list[str] | None = None) -> int:
     environment = dict(os.environ)
     try:
         payload = _json_file(args.command_file) if args.command_file else None
-        if args.command == "worker-execute":
+        if args.command == "gate":
+            if payload is None:
+                raise ResearchCLIBlocked("BLOCKED_COMMAND_FILE_REQUIRED")
+            result = _gate_execute(environment, payload)
+        elif args.command == "worker-execute":
             if payload is None:
                 raise ResearchCLIBlocked("BLOCKED_COMMAND_FILE_REQUIRED")
             result = _worker_execute(environment, payload)

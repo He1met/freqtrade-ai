@@ -49,6 +49,14 @@ FREQTRADE_AI_CANONICAL_V13_API_BASE_URL=http://127.0.0.1:8011 \
 `worker-execute` 是另一个显式动作，只消费已启动 RUNNING attempt 的 exact consumption receipt；
 它不会解析 active pointer、选择 latest plan、重用授权或启动 service。
 
+`gate` 是与 `worker-execute` 分离的前置动作。它只通过 canonical reader 读取调用方给出的 exact
+strategy/target/bundle/market lineage，先执行不加载策略代码的 static AST validation；static PASS 后，
+才在同一类 network-none、read-only、nonroot OCI sandbox 中对 frozen required-window set 执行
+Freqtrade `lookahead-analysis`。它不调用 control API，不创建 validation plan/attempt/authorization，
+也没有 validation/scoring/qualification writer DSN。每个 required window 必须在输出中以 exact
+window key/digest 出现一次，聚合 signal count、bias 和 status 必须与逐 window evidence 一致；缺失、
+重复或漂移均 fail closed。
+
 authorization command 只接受 `ttl_seconds`（1..900），`authorized_at`、`expires_at`、consume/revoke
 时间全部由 loopback API 的 UTC clock 生成，caller 不能回填时间来绕过过期门。
 start 与 worker 都会先从 immutable `audit_events` 重建 exact authorization/consumption receipt；
@@ -108,6 +116,31 @@ FREQTRADE_AI_CANONICAL_V13_RESEARCH_TMPFS_MB=<32..512>
 缺任何值、image 未 pin、runtime/path/symlink 不安全、四个 DB locator/identity 不分离，均在启动
 sandbox 前 `BLOCKED`。本 runbook 不授权配置这些值；恢复任务必须先更新 release pin 和完成独立
 provisioning/attestation。
+
+static/lookahead gate 只需要 canonical reader DSN，并使用独立 activation：
+
+```text
+FREQTRADE_AI_CANONICAL_V13_LOOKAHEAD_EXECUTION_ENABLED=PRODUCTION_LOOKAHEAD_NO_TRADE_V1
+```
+
+其余 OCI image、runtime、market root、workspace root 与资源上限变量和上表相同。示例 command file
+只包含 exact lineage，不含 plan 或 attempt：
+
+```json
+{
+  "lineage": {
+    "strategy_version_id": "<uuid>",
+    "research_target_id": "<uuid>",
+    "configuration_bundle_id": "<uuid>",
+    "configuration_bundle_digest": "<sha256>",
+    "market_snapshot_id": "<uuid>",
+    "market_snapshot_digest": "<sha256>"
+  }
+}
+```
+
+调用形式为 `python scripts/canonical_v13_research.py gate --command-file <absolute-json>`。生产执行前
+仍须逐项复核 accepted release/image pin、freshness、单执行锁和零副作用；本命令存在不代表这些门已满足。
 
 ### 5.1 canonical worker image
 

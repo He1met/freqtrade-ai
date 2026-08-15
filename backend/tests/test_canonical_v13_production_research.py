@@ -14,9 +14,12 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.pool import StaticPool
 
 from app.canonical_v13.freqtrade_production import (
+    PRODUCTION_LOOKAHEAD_ACTIVATION,
     PRODUCTION_RESEARCH_ACTIVATION,
     CanonicalProductionResearchBlocked,
+    FreqtradeProductionLookaheadAdapter,
     FreqtradeProductionResearchAdapter,
+    ProductionLookaheadInputSet,
     ProductionResearchLimits,
     SandboxCommandResult,
     materialize_production_research_inputs,
@@ -36,8 +39,10 @@ from app.canonical_v13.research_orchestration import (
     read_research_chain_projection,
 )
 from app.canonical_v13.research_validation import (
+    ResearchLineage,
     build_ephemeral_launch_spec,
     build_ephemeral_attempt_receipt,
+    canonical_research_digest,
     start_validation_attempt,
 )
 from app.canonical_v13.runtime_reader import read_frozen_research_bundle
@@ -255,6 +260,114 @@ def test_production_adapter_rejects_root_outer_identity(
             input_factory=lambda _attempt: None,  # type: ignore[arg-type]
             runner=CapturingRunner({}),
         )
+
+
+def test_production_lookahead_adapter_is_planless_and_uses_same_sandbox_flags(
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / "podman-remote"
+    runtime.write_text("#!/bin/sh\nexit 1\n")
+    runtime.chmod(0o755)
+    workspace = tmp_path / "gate-input"
+    workspace.mkdir()
+    request_digest = "a" * 64
+    (workspace / "lookahead-request.json").write_text(
+        json.dumps(
+            {
+                "request_digest": request_digest,
+                "windows": [
+                    {
+                        "window_key": "required-a",
+                        "window_member_digest": "d" * 64,
+                        "minimum_closed_candles": 10,
+                    }
+                ],
+            }
+        )
+    )
+    lineage = ResearchLineage(
+        strategy_version_id=uuid4(),
+        research_target_id=uuid4(),
+        configuration_bundle_id=uuid4(),
+        configuration_bundle_digest="b" * 64,
+        market_snapshot_id=uuid4(),
+        market_snapshot_digest="c" * 64,
+    )
+    evidence = {
+        "contract": "canonical-v13-freqtrade-lookahead-output-v1",
+        "request_digest": request_digest,
+        "strategy_version_id": str(lineage.strategy_version_id),
+        "research_target_id": str(lineage.research_target_id),
+        "status": "PASSED",
+        "has_bias": False,
+        "observed_signal_count": 20,
+        "window_results": [
+            {
+                "window_key": "required-a",
+                "window_member_digest": "d" * 64,
+                "has_bias": False,
+                "observed_signal_count": 20,
+                "biased_entry_signal_count": 0,
+                "biased_exit_signal_count": 0,
+            }
+        ],
+    }
+    payload = {
+        **evidence,
+        "evidence_digest": canonical_research_digest(evidence),
+    }
+
+    @contextmanager
+    def inputs(_lineage):
+        yield ProductionLookaheadInputSet(
+            workspace=workspace,
+            request_path=workspace / "lookahead-request.json",
+            mounts=(),
+            input_manifest_digest="e" * 64,
+        )
+
+    runner = CapturingRunner(payload)
+    adapter = FreqtradeProductionLookaheadAdapter(
+        activation=PRODUCTION_LOOKAHEAD_ACTIVATION,
+        runtime_path=runtime,
+        image_reference=f"freqtrade-ai/research@sha256:{EXECUTOR_IMAGE_DIGEST}",
+        limits=ProductionResearchLimits(timeout_seconds=60, max_output_bytes=32_768),
+        input_factory=inputs,
+        runner=runner,
+    )
+    receipt = adapter.execute(lineage=lineage, artifact_digest="f" * 64)
+    assert receipt.status == "PASSED"
+    assert receipt.has_bias is False
+    assert receipt.observed_signal_count == 20
+    assert runner.argv is not None
+    assert "lookahead" in runner.argv
+    assert "backtest" not in runner.argv
+    assert "--network" in runner.argv
+    assert runner.argv[runner.argv.index("--network") + 1] == "none"
+    assert "--read-only" in runner.argv
+    assert runner.argv[runner.argv.index("--cap-drop") + 1] == "ALL"
+    assert "validation-plan.json" not in runner.argv
+
+    incomplete_evidence = {**evidence, "window_results": []}
+    incomplete_runner = CapturingRunner(
+        {
+            **incomplete_evidence,
+            "evidence_digest": canonical_research_digest(incomplete_evidence),
+        }
+    )
+    incomplete_adapter = FreqtradeProductionLookaheadAdapter(
+        activation=PRODUCTION_LOOKAHEAD_ACTIVATION,
+        runtime_path=runtime,
+        image_reference=f"freqtrade-ai/research@sha256:{EXECUTOR_IMAGE_DIGEST}",
+        limits=ProductionResearchLimits(timeout_seconds=60, max_output_bytes=32_768),
+        input_factory=inputs,
+        runner=incomplete_runner,
+    )
+    with pytest.raises(
+        CanonicalProductionResearchBlocked,
+        match="required window output is incomplete",
+    ):
+        incomplete_adapter.execute(lineage=lineage, artifact_digest="f" * 64)
 
 
 def test_dynamic_single_target_cap_schedules_31_as_five_sixes_and_one(

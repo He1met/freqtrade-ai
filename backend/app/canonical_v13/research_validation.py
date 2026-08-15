@@ -57,6 +57,16 @@ _PLAN_CONTRACT: Final = "canonical-v13-validation-plan-v1"
 _EXECUTOR_CONTRACT: Final = "canonical-v13-ephemeral-no-exchange-v1"
 _WINDOW_RESULT_CONTRACT: Final = "canonical-v13-window-metrics-receipt-v1"
 _ATTEMPT_RECEIPT_CONTRACT: Final = "canonical-v13-attempt-receipt-v1"
+STATIC_VALIDATOR_IDENTITY: Final = _STATIC_VALIDATOR_CONTRACT
+STATIC_VALIDATOR_RULE_IDS: Final = (
+    "capability.credential_access",
+    "capability.external_side_effect",
+    "capability.network_or_exchange_import",
+    "lookahead.iloc_negative",
+    "lookahead.shift_negative",
+    "syntax.invalid_python",
+    "unsafe.dynamic_execution",
+)
 
 
 class CanonicalResearchValidationBlocked(RuntimeError):
@@ -223,6 +233,18 @@ def _canonical_json(value: object) -> str:
 
 def canonical_research_digest(value: object) -> str:
     return sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def static_validator_digest() -> str:
+    """Return the accepted digest of the exact non-executing AST rule set."""
+
+    return canonical_research_digest(
+        {
+            "contract": _STATIC_VALIDATOR_CONTRACT,
+            "rule_ids": list(STATIC_VALIDATOR_RULE_IDS),
+            "source_execution": False,
+        }
+    )
 
 
 def _digest(value: str, *, field: str) -> str:
@@ -1861,6 +1883,8 @@ __all__ = [
     "RunningValidationAttempt",
     "StaticFinding",
     "StaticValidationReceipt",
+    "STATIC_VALIDATOR_IDENTITY",
+    "STATIC_VALIDATOR_RULE_IDS",
     "TerminalAttemptResult",
     "ValidationPlanResult",
     "ValidatorDecision",
@@ -1876,6 +1900,7 @@ __all__ = [
     "record_terminal_attempt",
     "simulate_ephemeral_attempt",
     "start_validation_attempt",
+    "static_validator_digest",
     "validate_ephemeral_launch_spec",
     "validate_lookahead_receipt",
     "validate_static_source",
