@@ -1409,16 +1409,18 @@ def create_canonical_v13_app(
                 lookahead_gate_receipt_id=command.lookahead_gate_receipt_id,
                 orchestrator_identity=command.orchestrator_identity,
             )
-            ready = mark_validation_plan_ready(
-                connection,
-                validation_plan_id=declared.validation_plan_id,
-                expected_plan_digest=declared.validation_plan_digest,
-                static_receipt=static_receipt,
-                lookahead_receipt=lookahead,
-                static_gate_receipt_id=command.static_gate_receipt_id,
-                lookahead_gate_receipt_id=command.lookahead_gate_receipt_id,
-                orchestrator_identity=command.orchestrator_identity,
-            )
+            ready = declared
+            if declared.status in {"DECLARED", "READY"}:
+                ready = mark_validation_plan_ready(
+                    connection,
+                    validation_plan_id=declared.validation_plan_id,
+                    expected_plan_digest=declared.validation_plan_digest,
+                    static_receipt=static_receipt,
+                    lookahead_receipt=lookahead,
+                    static_gate_receipt_id=command.static_gate_receipt_id,
+                    lookahead_gate_receipt_id=command.lookahead_gate_receipt_id,
+                    orchestrator_identity=command.orchestrator_identity,
+                )
             return ValidationPlanReceiptDTO(
                 validation_plan_id=ready.validation_plan_id,
                 validation_plan_digest=ready.validation_plan_digest,
