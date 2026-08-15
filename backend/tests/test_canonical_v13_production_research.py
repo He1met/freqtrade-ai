@@ -7,6 +7,7 @@ import inspect
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -22,6 +23,7 @@ from app.canonical_v13.freqtrade_production import (
     ProductionLookaheadInputSet,
     ProductionResearchLimits,
     SandboxCommandResult,
+    execute_production_static_lookahead_gate,
     materialize_production_research_inputs,
 )
 from app.canonical_v13.genesis import install_canonical_genesis
@@ -40,10 +42,13 @@ from app.canonical_v13.research_orchestration import (
 )
 from app.canonical_v13.research_validation import (
     ResearchLineage,
+    StaticValidationReceipt,
     build_ephemeral_launch_spec,
     build_ephemeral_attempt_receipt,
+    build_lookahead_receipt,
     canonical_research_digest,
     start_validation_attempt,
+    validate_lookahead_receipt,
 )
 from app.canonical_v13.runtime_reader import read_frozen_research_bundle
 from tests.test_canonical_v13_research_validation import (
@@ -294,7 +299,7 @@ def test_production_lookahead_adapter_is_planless_and_uses_same_sandbox_flags(
         market_snapshot_digest="c" * 64,
     )
     evidence = {
-        "contract": "canonical-v13-freqtrade-lookahead-output-v1",
+        "contract": "canonical-v13-freqtrade-lookahead-output-v2",
         "request_digest": request_digest,
         "strategy_version_id": str(lineage.strategy_version_id),
         "research_target_id": str(lineage.research_target_id),
@@ -311,6 +316,12 @@ def test_production_lookahead_adapter_is_planless_and_uses_same_sandbox_flags(
                 "biased_exit_signal_count": 0,
             }
         ],
+        "failure_stage": None,
+        "failure_code": None,
+        "tool_return_code": 0,
+        "stdout_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stderr_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "redacted_detail": None,
     }
     payload = {
         **evidence,
@@ -368,6 +379,66 @@ def test_production_lookahead_adapter_is_planless_and_uses_same_sandbox_flags(
         match="required window output is incomplete",
     ):
         incomplete_adapter.execute(lineage=lineage, artifact_digest="f" * 64)
+
+
+def test_blocked_lookahead_diagnostic_is_machine_readable_and_ineligible(
+    monkeypatch, tmp_path: Path
+) -> None:
+    lineage = ResearchLineage(
+        strategy_version_id=uuid4(),
+        research_target_id=uuid4(),
+        configuration_bundle_id=uuid4(),
+        configuration_bundle_digest="a" * 64,
+        market_snapshot_id=uuid4(),
+        market_snapshot_digest="b" * 64,
+    )
+    lookahead = build_lookahead_receipt(
+        lineage=lineage,
+        artifact_digest="c" * 64,
+        analyzer_identity="production-freqtrade-lookahead-v1",
+        analyzer_digest="d" * 64,
+        evidence_digest="e" * 64,
+        status="BLOCKED",
+        has_bias=None,
+        observed_signal_count=0,
+        failure_stage="OUTPUT_INTERPRETATION",
+        failure_code="LOOKAHEAD_INSUFFICIENT_OBSERVATIONS",
+        tool_return_code=0,
+        stdout_digest="f" * 64,
+        stderr_digest="1" * 64,
+        redacted_detail="Freqtrade produced no lookahead observations",
+    )
+    decision = validate_lookahead_receipt(
+        lookahead,
+        expected_lineage=lineage,
+        expected_artifact_digest="c" * 64,
+    )
+    assert decision.status == "BLOCKED"
+    assert decision.reason_codes == (
+        "LOOKAHEAD_INSUFFICIENT_OBSERVATIONS",
+        "LOOKAHEAD_EVIDENCE_BLOCKED",
+        "LOOKAHEAD_OBSERVATIONS_UNSET",
+    )
+    static = StaticValidationReceipt(
+        strategy_version_id=lineage.strategy_version_id,
+        artifact_digest="c" * 64,
+        validator_identity="canonical-v13-static-validator-v1",
+        validator_digest="2" * 64,
+        status="PASSED",
+        findings=(),
+        request_digest="3" * 64,
+        receipt_digest="4" * 64,
+    )
+    monkeypatch.setattr(
+        "app.canonical_v13.freqtrade_production.validate_production_static_gate",
+        lambda *_args, **_kwargs: static,
+    )
+    adapter = SimpleNamespace(execute=lambda **_kwargs: lookahead)
+    gate = execute_production_static_lookahead_gate(
+        object(), lineage=lineage, adapter=adapter
+    )
+    assert gate.status == "LOOKAHEAD_BLOCKED"
+    assert gate.validation_eligible is False
 
 
 def test_dynamic_single_target_cap_schedules_31_as_five_sixes_and_one(

@@ -1186,6 +1186,12 @@ def create_canonical_v13_app(
                 status=supplied.status,
                 has_bias=supplied.has_bias,
                 observed_signal_count=supplied.observed_signal_count,
+                failure_stage=supplied.failure_stage,
+                failure_code=supplied.failure_code,
+                tool_return_code=supplied.tool_return_code,
+                stdout_digest=supplied.stdout_digest,
+                stderr_digest=supplied.stderr_digest,
+                redacted_detail=supplied.redacted_detail,
             )
             if (
                 lookahead.request_digest != supplied.request_digest

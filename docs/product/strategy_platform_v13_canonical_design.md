@@ -184,6 +184,12 @@ actor/adapter identity + request/receipt digest
 | validation attempt | `PENDING → RUNNING → SUCCEEDED | FAILED | BLOCKED` | ephemeral executor receipt |
 | qualification | `PENDING → QUALIFIED | REJECTED | BLOCKED | FAILED` | qualifier only |
 | optimization | `NOT_STARTED/PENDING_BASELINE → RUNNING → SUCCEEDED | FAILED | BLOCKED` | optimizer receipt |
+
+Lookahead 的 `FAILED` 仅表示有可验证的 bias evidence（`has_bias=true`）。工具成功退出但没有
+产生足够 observations、没有唯一策略结果或缺少可解释 evidence 时，终态必须是
+`LOOKAHEAD_BLOCKED`，`validation_eligible=false`；不得改写为 PASS 或 bias FAILED，也不得创建
+validation plan。BLOCKED receipt 必须携带 allowlisted `failure_stage`、`failure_code`、
+`tool_return_code`、stdout/stderr digest 与固定脱敏 detail，且这些字段参与 receipt digest。
 | approval | `NOT_REQUESTED → PENDING → APPROVED | REJECTED`; `APPROVED → REVOKED` | human approval service |
 | deployment | `NOT_DEPLOYED → PENDING → ACTIVE | FAILED`; `ACTIVE → DISABLED` | deployment controller |
 | runtime | `UNKNOWN → STARTING → HEALTHY | DEGRADED | FAILED`; terminal `STOPPED` | long-lived runtime receipt |

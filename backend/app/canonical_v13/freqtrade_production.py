@@ -45,6 +45,8 @@ from app.canonical_v13.models import (
 from app.canonical_v13.research_validation import (
     EphemeralAttemptReceipt,
     LookaheadAnalysisReceipt,
+    LOOKAHEAD_FAILURE_DETAILS,
+    LOOKAHEAD_FAILURE_STAGES,
     ResearchLineage,
     RunningValidationAttempt,
     STATIC_VALIDATOR_IDENTITY,
@@ -64,6 +66,7 @@ PRODUCTION_RESEARCH_ACTIVATION = "PRODUCTION_RESEARCH_NO_TRADE_V1"
 PRODUCTION_LOOKAHEAD_ACTIVATION = "PRODUCTION_LOOKAHEAD_NO_TRADE_V1"
 PRODUCTION_LOOKAHEAD_ANALYZER_IDENTITY = "production-freqtrade-lookahead-v1"
 _IMAGE = re.compile(r"^[a-z0-9][a-z0-9._/-]*@sha256:([0-9a-f]{64})$")
+_HEX_DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_KEY = re.compile(r"^[A-Za-z0-9_.:/-]{1,240}$")
 
 
@@ -136,6 +139,7 @@ class ProductionStaticLookaheadGateReceipt:
     static_receipt: StaticValidationReceipt
     lookahead_receipt: LookaheadAnalysisReceipt | None
     status: str
+    validation_eligible: bool
 
 
 @dataclass(frozen=True)
@@ -1253,6 +1257,12 @@ class FreqtradeProductionLookaheadAdapter:
             "has_bias",
             "observed_signal_count",
             "window_results",
+            "failure_stage",
+            "failure_code",
+            "tool_return_code",
+            "stdout_digest",
+            "stderr_digest",
+            "redacted_detail",
             "evidence_digest",
         }
         if not isinstance(payload, dict) or set(payload) != required:
@@ -1261,7 +1271,7 @@ class FreqtradeProductionLookaheadAdapter:
             )
         evidence = {key: value for key, value in payload.items() if key != "evidence_digest"}
         if (
-            payload["contract"] != "canonical-v13-freqtrade-lookahead-output-v1"
+            payload["contract"] != "canonical-v13-freqtrade-lookahead-output-v2"
             or payload["request_digest"] != request.get("request_digest")
             or payload["strategy_version_id"] != str(lineage.strategy_version_id)
             or payload["research_target_id"] != str(lineage.research_target_id)
@@ -1271,6 +1281,10 @@ class FreqtradeProductionLookaheadAdapter:
             or not isinstance(payload["observed_signal_count"], int)
             or payload["observed_signal_count"] < 0
             or not isinstance(payload["window_results"], list)
+            or not isinstance(payload["stdout_digest"], str)
+            or not isinstance(payload["stderr_digest"], str)
+            or _HEX_DIGEST.fullmatch(payload["stdout_digest"]) is None
+            or _HEX_DIGEST.fullmatch(payload["stderr_digest"]) is None
             or canonical_research_digest(evidence) != payload["evidence_digest"]
         ):
             raise CanonicalProductionResearchBlocked(
@@ -1286,12 +1300,34 @@ class FreqtradeProductionLookaheadAdapter:
                 payload["has_bias"] is not None
                 or payload["observed_signal_count"] != 0
                 or payload["window_results"]
+                or payload["failure_stage"] not in LOOKAHEAD_FAILURE_STAGES
+                or payload["failure_code"] not in LOOKAHEAD_FAILURE_DETAILS
+                or payload["redacted_detail"]
+                != LOOKAHEAD_FAILURE_DETAILS.get(payload["failure_code"])
+                or (
+                    payload["tool_return_code"] is not None
+                    and (
+                        isinstance(payload["tool_return_code"], bool)
+                        or not isinstance(payload["tool_return_code"], int)
+                        or not -255 <= payload["tool_return_code"] <= 255
+                    )
+                )
             ):
                 raise CanonicalProductionResearchBlocked(
                     "BLOCKED_LOOKAHEAD_OUTPUT_LINEAGE",
                     "blocked worker output is internally inconsistent",
                 )
         else:
+            if (
+                payload["failure_stage"] is not None
+                or payload["failure_code"] is not None
+                or payload["redacted_detail"] is not None
+                or payload["tool_return_code"] != 0
+            ):
+                raise CanonicalProductionResearchBlocked(
+                    "BLOCKED_LOOKAHEAD_OUTPUT_LINEAGE",
+                    "successful lookahead output contains failure diagnostics",
+                )
             expected_bindings = [
                 (item.get("window_key"), item.get("window_member_digest"))
                 for item in expected_windows
@@ -1356,6 +1392,12 @@ class FreqtradeProductionLookaheadAdapter:
             status=str(payload["status"]),
             has_bias=payload["has_bias"],
             observed_signal_count=int(payload["observed_signal_count"]),
+            failure_stage=payload["failure_stage"],
+            failure_code=payload["failure_code"],
+            tool_return_code=payload["tool_return_code"],
+            stdout_digest=str(payload["stdout_digest"]),
+            stderr_digest=str(payload["stderr_digest"]),
+            redacted_detail=payload["redacted_detail"],
         )
 
     def execute(
@@ -1398,22 +1440,28 @@ def execute_production_static_lookahead_gate(
             static_receipt=static_receipt,
             lookahead_receipt=None,
             status="STATIC_FAILED",
+            validation_eligible=False,
         )
     lookahead_receipt = adapter.execute(
         lineage=lineage, artifact_digest=static_receipt.artifact_digest
     )
-    status = (
-        "PASSED"
-        if lookahead_receipt.status == "PASSED"
+    eligible = (
+        lookahead_receipt.status == "PASSED"
         and lookahead_receipt.has_bias is False
         and lookahead_receipt.observed_signal_count > 0
-        else "LOOKAHEAD_FAILED"
     )
+    if eligible:
+        status = "PASSED"
+    elif lookahead_receipt.status == "FAILED" and lookahead_receipt.has_bias is True:
+        status = "LOOKAHEAD_FAILED"
+    else:
+        status = "LOOKAHEAD_BLOCKED"
     return ProductionStaticLookaheadGateReceipt(
         lineage=lineage,
         static_receipt=static_receipt,
         lookahead_receipt=lookahead_receipt,
         status=status,
+        validation_eligible=eligible,
     )
 
 

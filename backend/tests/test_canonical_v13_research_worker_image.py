@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -50,6 +51,23 @@ def test_worker_preserves_intraday_window_with_freqtrade_unix_timerange() -> Non
     start = datetime(2026, 7, 16, 2, 45, tzinfo=timezone.utc)
     end = datetime(2026, 8, 15, 2, 45, tzinfo=timezone.utc)
     assert worker._freqtrade_timerange(start, end) == "1784169900-1786761900"
+
+
+def test_worker_preserves_freqtrade_main_return_code(monkeypatch) -> None:
+    worker = _load_worker()
+    freqtrade = ModuleType("freqtrade")
+    main_module = ModuleType("freqtrade.main")
+    main_module.main = lambda _argv: 17
+    monkeypatch.setitem(sys.modules, "freqtrade", freqtrade)
+    monkeypatch.setitem(sys.modules, "freqtrade.main", main_module)
+    monkeypatch.setattr(worker, "_install_offline_exchange_patch", lambda _path: None)
+    monkeypatch.setattr(worker.Path, "mkdir", lambda *_args, **_kwargs: None)
+    assert (
+        worker._run_freqtrade_offline(
+            ["--metadata", "/input/metadata", "lookahead-analysis"]
+        )
+        == 17
+    )
 
 
 def test_worker_creates_freqtrade_futures_data_directory() -> None:
@@ -140,6 +158,7 @@ def test_worker_lookahead_runs_every_required_window_and_hashes_evidence(
     monkeypatch.setattr(worker.Path, "mkdir", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(worker.Path, "write_bytes", lambda *_args: 1)
     calls: list[tuple[str, ...]] = []
+    empty_export = {"value": False}
 
     def run(command, **_kwargs):
         command = tuple(command)
@@ -155,7 +174,7 @@ def test_worker_lookahead_runs_every_required_window_and_hashes_evidence(
             "open",
             lambda self, **_kwargs: __import__("io").StringIO(
                 "strategy,has_bias,total_signals,biased_entry_signals,biased_exit_signals\n"
-                "Exact,False,20,0,0\n"
+                + ("" if empty_export["value"] else "Exact,False,20,0,0\n")
             ),
         )
         return SimpleNamespace(returncode=0)
@@ -171,3 +190,16 @@ def test_worker_lookahead_runs_every_required_window_and_hashes_evidence(
     assert len(result["window_results"]) == 2
     evidence = {key: value for key, value in result.items() if key != "evidence_digest"}
     assert result["evidence_digest"] == worker._digest(evidence)
+
+    empty_export["value"] = True
+    monkeypatch.setattr(worker, "_strategy_class", lambda _path: "Exact")
+    blocked = worker.lookahead(
+        SimpleNamespace(request=None, bundle=None, strategy=strategy)
+    )
+    assert blocked["status"] == "BLOCKED"
+    assert blocked["has_bias"] is None
+    assert blocked["observed_signal_count"] == 0
+    assert blocked["failure_stage"] == "OUTPUT_INTERPRETATION"
+    assert blocked["failure_code"] == "LOOKAHEAD_INSUFFICIENT_OBSERVATIONS"
+    assert blocked["tool_return_code"] == 0
+    assert blocked["window_results"] == []

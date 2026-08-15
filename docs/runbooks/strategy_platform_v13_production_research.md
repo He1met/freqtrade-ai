@@ -90,6 +90,12 @@ start 与 worker 都会先从 immutable `audit_events` 重建 exact authorizatio
    都是 `REJECTED/REQUIRED_WINDOW_GATE_FAILED`，高分不能覆盖；0 个 QUALIFIED 是有效结果；
 10. 只有 persisted `QUALIFIED` decision 才能作为 optimization baseline。
 
+Lookahead 结果语义只有一个权威：positive observations 且 `has_bias=false` 才是 PASS；
+`has_bias=true` 才是 bias FAILED。Freqtrade 空 export、observations 不足、结果不唯一、工具非零退出或
+worker exception 都是 `LOOKAHEAD_BLOCKED` 与 `validation_eligible=false`，不得进入 validation plan
+或 backtest。BLOCKED envelope 只允许固定 `failure_stage/failure_code/tool_return_code`、stdout/stderr
+SHA-256 digest 和 allowlisted 脱敏 detail；不得包含源码、路径、UUID、credential 或原始日志。
+
 worker、score、qualification 任一步缺失或 receipt/digest/lineage 漂移均保持 `BLOCKED/UNKNOWN`；不得由
 URL、UI 或 caller 本地推断。UI 只读取 canonical chain projection，显示 plan/attempt/score/decision
 的服务端状态和脱敏 digest。
