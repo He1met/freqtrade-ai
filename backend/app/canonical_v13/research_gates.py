@@ -377,8 +377,8 @@ def create_gate_attempt(
 
 def claim_gate_attempt(connection: Connection, *, gate_attempt_id: UUID, observed_at: datetime | None = None) -> GateLeaseReceipt:
     now = _utc(observed_at)
-    token = uuid4().hex + uuid4().hex
-    token_digest = sha256(token.encode()).hexdigest()
+    lease_nonce = uuid4().hex + uuid4().hex
+    token_digest = sha256(lease_nonce.encode()).hexdigest()
     updated = connection.execute(
         update(RESEARCH_GATE_ATTEMPTS_TABLE)
         .where(RESEARCH_GATE_ATTEMPTS_TABLE.c.id == gate_attempt_id, RESEARCH_GATE_ATTEMPTS_TABLE.c.status == "PENDING")
@@ -386,7 +386,7 @@ def claim_gate_attempt(connection: Connection, *, gate_attempt_id: UUID, observe
     )
     if updated.rowcount != 1:
         raise CanonicalGateBlocked("BLOCKED_GATE_ATTEMPT_NOT_CLAIMABLE", "attempt is not pending")
-    return GateLeaseReceipt(gate_attempt_id, "RUNNING", token, now + timedelta(seconds=LEASE_SECONDS))
+    return GateLeaseReceipt(gate_attempt_id, "RUNNING", lease_nonce, now + timedelta(seconds=LEASE_SECONDS))
 
 
 def _attempt_for_lease(connection: Connection, gate_attempt_id: UUID, lease_token: str, now: datetime) -> Mapping[str, Any]:
