@@ -3,9 +3,10 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -51,6 +52,23 @@ def test_worker_preserves_intraday_window_with_freqtrade_unix_timerange() -> Non
     start = datetime(2026, 7, 16, 2, 45, tzinfo=timezone.utc)
     end = datetime(2026, 8, 15, 2, 45, tzinfo=timezone.utc)
     assert worker._freqtrade_timerange(start, end) == "1784169900-1786761900"
+
+
+def test_worker_preserves_freqtrade_main_return_code(monkeypatch) -> None:
+    worker = _load_worker()
+    freqtrade = ModuleType("freqtrade")
+    main_module = ModuleType("freqtrade.main")
+    main_module.main = lambda _argv: 17
+    monkeypatch.setitem(sys.modules, "freqtrade", freqtrade)
+    monkeypatch.setitem(sys.modules, "freqtrade.main", main_module)
+    monkeypatch.setattr(worker, "_install_offline_exchange_patch", lambda _path: None)
+    monkeypatch.setattr(worker.Path, "mkdir", lambda *_args, **_kwargs: None)
+    assert (
+        worker._run_freqtrade_offline(
+            ["--metadata", "/input/metadata", "lookahead-analysis"]
+        )
+        == 17
+    )
 
 
 def test_worker_creates_freqtrade_futures_data_directory() -> None:
@@ -157,7 +175,6 @@ def test_worker_lookahead_runs_every_required_window_and_hashes_evidence(
 
     monkeypatch.setattr(worker.Path, "open", open_path)
     calls: list[tuple[str, ...]] = []
-
     def run(command, **_kwargs):
         command = tuple(command)
         calls.append(command)
@@ -178,11 +195,10 @@ def test_worker_lookahead_runs_every_required_window_and_hashes_evidence(
     assert result["status"] == "PASSED"
     assert result["has_bias"] is False
     assert result["observed_signal_count"] == 40
-    assert result["blocked_reason_code"] is None
+    assert result["failure_code"] is None
     assert len(result["window_results"]) == 2
     evidence = {key: value for key, value in result.items() if key != "evidence_digest"}
     assert result["evidence_digest"] == worker._digest(evidence)
-
 
 def test_worker_classifies_pinned_freqtrade_insufficient_trade_log() -> None:
     worker = _load_worker()

@@ -1186,7 +1186,12 @@ def create_canonical_v13_app(
                 status=supplied.status,
                 has_bias=supplied.has_bias,
                 observed_signal_count=supplied.observed_signal_count,
-                blocked_reason_code=supplied.blocked_reason_code,
+                failure_stage=supplied.failure_stage,
+                failure_code=supplied.failure_code,
+                tool_return_code=supplied.tool_return_code,
+                stdout_digest=supplied.stdout_digest,
+                stderr_digest=supplied.stderr_digest,
+                redacted_detail=supplied.redacted_detail,
                 blocked_observed_trade_count=supplied.blocked_observed_trade_count,
                 blocked_required_trade_count=supplied.blocked_required_trade_count,
             )

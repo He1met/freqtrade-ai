@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 
 
 SHA256_PATTERN = r"^[0-9a-f]{64}$"
+EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 
 class CanonicalCommandDTO(BaseModel):
@@ -378,11 +379,28 @@ class LookaheadReceiptCommandDTO(CanonicalCommandDTO):
     status: Literal["PASSED", "FAILED", "BLOCKED"]
     has_bias: Optional[bool]
     observed_signal_count: int = Field(ge=0)
-    blocked_reason_code: Optional[str] = Field(default=None, min_length=1, max_length=120)
     blocked_observed_trade_count: Optional[int] = Field(default=None, ge=0)
     blocked_required_trade_count: Optional[int] = Field(default=None, gt=0)
     request_digest: str = Field(pattern=SHA256_PATTERN)
     receipt_digest: str = Field(pattern=SHA256_PATTERN)
+    failure_stage: Optional[
+        Literal["FREQTRADE_PROCESS", "OUTPUT_INTERPRETATION", "WORKER"]
+    ] = None
+    failure_code: Optional[
+        Literal[
+            "LOOKAHEAD_EXPORT_MISSING",
+            "LOOKAHEAD_INSUFFICIENT_TRADES",
+            "LOOKAHEAD_LOG_LIMIT_EXCEEDED",
+            "LOOKAHEAD_PROCESS_FAILED",
+            "LOOKAHEAD_RESULT_AMBIGUOUS",
+            "LOOKAHEAD_WORKER_BLOCKED",
+            "LOOKAHEAD_WORKER_INTERNAL_ERROR",
+        ]
+    ] = None
+    tool_return_code: Optional[int] = Field(default=0, ge=-255, le=255)
+    stdout_digest: str = Field(default=EMPTY_SHA256, pattern=SHA256_PATTERN)
+    stderr_digest: str = Field(default=EMPTY_SHA256, pattern=SHA256_PATTERN)
+    redacted_detail: Optional[str] = Field(default=None, max_length=160)
 
 
 class ValidationPlanCommandDTO(CanonicalCommandDTO):

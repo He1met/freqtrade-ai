@@ -53,6 +53,28 @@ _TERMINAL_ATTEMPT_STATUSES: Final = frozenset({"SUCCEEDED", "FAILED", "BLOCKED"}
 _SAFE_NETWORK_MODE: Final = "none"
 _STATIC_VALIDATOR_CONTRACT: Final = "canonical-v13-static-validator-v1"
 _LOOKAHEAD_CONTRACT: Final = "canonical-v13-lookahead-receipt-v1"
+_EMPTY_DIGEST: Final = sha256(b"").hexdigest()
+LOOKAHEAD_FAILURE_DETAILS: Final = {
+    "LOOKAHEAD_EXPORT_MISSING": "Freqtrade lookahead export is unavailable",
+    "LOOKAHEAD_INSUFFICIENT_TRADES": "Freqtrade observed fewer trades than required",
+    "LOOKAHEAD_LOG_LIMIT_EXCEEDED": "Freqtrade lookahead log exceeded the safe limit",
+    "LOOKAHEAD_PROCESS_FAILED": "Freqtrade lookahead did not complete successfully",
+    "LOOKAHEAD_RESULT_AMBIGUOUS": "Freqtrade lookahead result does not uniquely match the strategy",
+    "LOOKAHEAD_WORKER_BLOCKED": "lookahead worker rejected the frozen input",
+    "LOOKAHEAD_WORKER_INTERNAL_ERROR": "lookahead worker failed closed",
+}
+LOOKAHEAD_FAILURE_STAGES: Final = frozenset(
+    {"FREQTRADE_PROCESS", "OUTPUT_INTERPRETATION", "WORKER"}
+)
+LOOKAHEAD_FAILURE_STAGE_BY_CODE: Final = {
+    "LOOKAHEAD_EXPORT_MISSING": "OUTPUT_INTERPRETATION",
+    "LOOKAHEAD_INSUFFICIENT_TRADES": "OUTPUT_INTERPRETATION",
+    "LOOKAHEAD_LOG_LIMIT_EXCEEDED": "FREQTRADE_PROCESS",
+    "LOOKAHEAD_PROCESS_FAILED": "FREQTRADE_PROCESS",
+    "LOOKAHEAD_RESULT_AMBIGUOUS": "OUTPUT_INTERPRETATION",
+    "LOOKAHEAD_WORKER_BLOCKED": "WORKER",
+    "LOOKAHEAD_WORKER_INTERNAL_ERROR": "WORKER",
+}
 _PLAN_CONTRACT: Final = "canonical-v13-validation-plan-v1"
 _EXECUTOR_CONTRACT: Final = "canonical-v13-ephemeral-no-exchange-v1"
 _WINDOW_RESULT_CONTRACT: Final = "canonical-v13-window-metrics-receipt-v1"
@@ -67,17 +89,7 @@ STATIC_VALIDATOR_RULE_IDS: Final = (
     "syntax.invalid_python",
     "unsafe.dynamic_execution",
 )
-LOOKAHEAD_BLOCK_REASON_CODES: Final = frozenset(
-    {
-        "LOOKAHEAD_EXPORT_MISSING",
-        "LOOKAHEAD_INSUFFICIENT_TRADES",
-        "LOOKAHEAD_LOG_LIMIT_EXCEEDED",
-        "LOOKAHEAD_PROCESS_FAILED",
-        "LOOKAHEAD_RESULT_AMBIGUOUS",
-        "LOOKAHEAD_WORKER_BLOCKED",
-        "LOOKAHEAD_WORKER_INTERNAL_ERROR",
-    }
-)
+LOOKAHEAD_BLOCK_REASON_CODES: Final = frozenset(LOOKAHEAD_FAILURE_DETAILS)
 
 
 class CanonicalResearchValidationBlocked(RuntimeError):
@@ -129,11 +141,16 @@ class LookaheadAnalysisReceipt:
     status: str
     has_bias: bool | None
     observed_signal_count: int
-    blocked_reason_code: str | None
     blocked_observed_trade_count: int | None
     blocked_required_trade_count: int | None
     request_digest: str
     receipt_digest: str
+    failure_stage: str | None = None
+    failure_code: str | None = None
+    tool_return_code: int | None = 0
+    stdout_digest: str = _EMPTY_DIGEST
+    stderr_digest: str = _EMPTY_DIGEST
+    redacted_detail: str | None = None
 
 
 @dataclass(frozen=True)
@@ -541,7 +558,12 @@ def _lookahead_receipt_payload(receipt: LookaheadAnalysisReceipt) -> dict[str, o
         "status": receipt.status,
         "has_bias": receipt.has_bias,
         "observed_signal_count": receipt.observed_signal_count,
-        "blocked_reason_code": receipt.blocked_reason_code,
+        "failure_stage": receipt.failure_stage,
+        "failure_code": receipt.failure_code,
+        "tool_return_code": receipt.tool_return_code,
+        "stdout_digest": receipt.stdout_digest,
+        "stderr_digest": receipt.stderr_digest,
+        "redacted_detail": receipt.redacted_detail,
         "blocked_observed_trade_count": receipt.blocked_observed_trade_count,
         "blocked_required_trade_count": receipt.blocked_required_trade_count,
     }
@@ -552,7 +574,7 @@ def _validate_lookahead_block_reason(
     status: str,
     has_bias: bool | None,
     observed_signal_count: int,
-    blocked_reason_code: str | None,
+    failure_code: str | None,
     blocked_observed_trade_count: int | None,
     blocked_required_trade_count: int | None,
 ) -> None:
@@ -561,12 +583,12 @@ def _validate_lookahead_block_reason(
         if (
             has_bias is not None
             or observed_signal_count != 0
-            or blocked_reason_code not in LOOKAHEAD_BLOCK_REASON_CODES
+            or failure_code not in LOOKAHEAD_BLOCK_REASON_CODES
         ):
             raise CanonicalResearchValidationBlocked(
                 "BLOCKED_LOOKAHEAD_REASON", "blocked lookahead needs one safe reason"
             )
-        if blocked_reason_code == "LOOKAHEAD_INSUFFICIENT_TRADES":
+        if failure_code == "LOOKAHEAD_INSUFFICIENT_TRADES":
             if (
                 any(
                     isinstance(value, bool) or not isinstance(value, int)
@@ -582,7 +604,7 @@ def _validate_lookahead_block_reason(
             raise CanonicalResearchValidationBlocked(
                 "BLOCKED_LOOKAHEAD_REASON", "blocked counts belong only to insufficient trades"
             )
-    elif blocked_reason_code is not None or any(value is not None for value in blocked_counts):
+    elif failure_code is not None or any(value is not None for value in blocked_counts):
         raise CanonicalResearchValidationBlocked(
             "BLOCKED_LOOKAHEAD_REASON", "non-blocked lookahead cannot carry a blocked reason"
         )
@@ -598,7 +620,12 @@ def build_lookahead_receipt(
     status: str,
     has_bias: bool | None,
     observed_signal_count: int,
-    blocked_reason_code: str | None = None,
+    failure_stage: str | None = None,
+    failure_code: str | None = None,
+    tool_return_code: int | None = 0,
+    stdout_digest: str = _EMPTY_DIGEST,
+    stderr_digest: str = _EMPTY_DIGEST,
+    redacted_detail: str | None = None,
     blocked_observed_trade_count: int | None = None,
     blocked_required_trade_count: int | None = None,
 ) -> LookaheadAnalysisReceipt:
@@ -609,6 +636,8 @@ def build_lookahead_receipt(
     analyzer_identity = _identity(analyzer_identity, field="analyzer_identity")
     analyzer_digest = _digest(analyzer_digest, field="analyzer_digest")
     evidence_digest = _digest(evidence_digest, field="evidence_digest")
+    stdout_digest = _digest(stdout_digest, field="stdout_digest")
+    stderr_digest = _digest(stderr_digest, field="stderr_digest")
     if status not in {"PASSED", "FAILED", "BLOCKED"}:
         raise CanonicalResearchValidationBlocked(
             "BLOCKED_LOOKAHEAD_STATUS", "lookahead status is invalid"
@@ -625,7 +654,7 @@ def build_lookahead_receipt(
         status=status,
         has_bias=has_bias,
         observed_signal_count=observed_signal_count,
-        blocked_reason_code=blocked_reason_code,
+        failure_code=failure_code,
         blocked_observed_trade_count=blocked_observed_trade_count,
         blocked_required_trade_count=blocked_required_trade_count,
     )
@@ -638,11 +667,16 @@ def build_lookahead_receipt(
         status=status,
         has_bias=has_bias,
         observed_signal_count=observed_signal_count,
-        blocked_reason_code=blocked_reason_code,
         blocked_observed_trade_count=blocked_observed_trade_count,
         blocked_required_trade_count=blocked_required_trade_count,
         request_digest="",
         receipt_digest="",
+        failure_stage=failure_stage,
+        failure_code=failure_code,
+        tool_return_code=tool_return_code,
+        stdout_digest=stdout_digest,
+        stderr_digest=stderr_digest,
+        redacted_detail=redacted_detail,
     )
     request_digest = canonical_research_digest(_lookahead_request_payload(provisional))
     provisional = LookaheadAnalysisReceipt(
@@ -673,6 +707,8 @@ def validate_lookahead_receipt(
     _digest(receipt.artifact_digest, field="lookahead.artifact_digest")
     _digest(receipt.analyzer_digest, field="lookahead.analyzer_digest")
     _digest(receipt.evidence_digest, field="lookahead.evidence_digest")
+    _digest(receipt.stdout_digest, field="lookahead.stdout_digest")
+    _digest(receipt.stderr_digest, field="lookahead.stderr_digest")
     _identity(receipt.analyzer_identity, field="lookahead.analyzer_identity")
     expected_request = canonical_research_digest(_lookahead_request_payload(receipt))
     expected_receipt = canonical_research_digest(_lookahead_receipt_payload(receipt))
@@ -688,13 +724,45 @@ def validate_lookahead_receipt(
         status=receipt.status,
         has_bias=receipt.has_bias,
         observed_signal_count=receipt.observed_signal_count,
-        blocked_reason_code=receipt.blocked_reason_code,
+        failure_code=receipt.failure_code,
         blocked_observed_trade_count=receipt.blocked_observed_trade_count,
         blocked_required_trade_count=receipt.blocked_required_trade_count,
     )
+    if receipt.status == "BLOCKED":
+        if (
+            receipt.failure_stage not in LOOKAHEAD_FAILURE_STAGES
+            or receipt.failure_code not in LOOKAHEAD_FAILURE_DETAILS
+            or receipt.failure_stage
+            != LOOKAHEAD_FAILURE_STAGE_BY_CODE.get(receipt.failure_code or "")
+            or receipt.redacted_detail
+            != LOOKAHEAD_FAILURE_DETAILS.get(receipt.failure_code or "")
+            or (
+                receipt.tool_return_code is not None
+                and (
+                    isinstance(receipt.tool_return_code, bool)
+                    or not isinstance(receipt.tool_return_code, int)
+                    or not -255 <= receipt.tool_return_code <= 255
+                )
+            )
+        ):
+            raise CanonicalResearchValidationBlocked(
+                "BLOCKED_LOOKAHEAD_FAILURE_DIAGNOSTIC",
+                "blocked lookahead receipt lacks an allowlisted diagnostic",
+            )
+    elif (
+        receipt.failure_stage is not None
+        or receipt.failure_code is not None
+        or receipt.redacted_detail is not None
+        or receipt.tool_return_code != 0
+    ):
+        raise CanonicalResearchValidationBlocked(
+            "BLOCKED_LOOKAHEAD_FAILURE_DIAGNOSTIC",
+            "non-blocked lookahead receipt contains failure diagnostics",
+        )
     reasons: list[str] = []
     if receipt.status == "BLOCKED":
-        reasons.append(receipt.blocked_reason_code or "LOOKAHEAD_EVIDENCE_BLOCKED")
+        assert receipt.failure_code is not None
+        reasons.extend((receipt.failure_code, "LOOKAHEAD_EVIDENCE_BLOCKED"))
     elif receipt.status != "PASSED" or receipt.has_bias is not False:
         reasons.append("LOOKAHEAD_BIAS_DETECTED")
     if receipt.observed_signal_count <= 0:

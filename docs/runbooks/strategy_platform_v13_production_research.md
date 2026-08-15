@@ -68,10 +68,11 @@ one-shot worker 只读接收该 artifact，并继续以 `--network none` 运行�
 worker 不接收 DB URL、OKX credential、socket 或 network capability。metadata 缺失、过期、混入其他
 target、digest 漂移或 tier 不完整时一律 `BLOCKED`，不得推断或合成数值。
 
-Lookahead worker output v2 对 `BLOCKED` 强制携带一个 allowlisted reason code。Pinned Freqtrade
+Lookahead worker output v3 对 `BLOCKED` 强制携带一个 allowlisted failure code。Pinned Freqtrade
 日志只在 `/work` tmpfs 内有界捕获；不会输出或持久化原始日志。若 baseline trades 少于 Freqtrade
 要求的 `minimum_trade_amount=10`，receipt 精确记录 `LOOKAHEAD_INSUFFICIENT_TRADES`、实际
-trade count 与 required count，继续保持 `has_bias=null` / signals `0`；该结果既不是 bias PASS，
+trade count 与 required count，继续保持 `has_bias=null` / signals `0`；其中 signals `0` 是 unset
+placeholder，不得解释为真实零信号。该结果既不是 bias PASS，
 也不是策略失败。其他 process/export/ambiguous/internal 情况使用各自稳定 reason code，禁止统一压成
 无原因的 BLOCKED envelope。
 
@@ -96,6 +97,12 @@ start 与 worker 都会先从 immutable `audit_events` 重建 exact authorizatio
 9. qualifier writer先逐 required window 执行 hard gates，再读取 minimum score。任何 hard gate 失败
    都是 `REJECTED/REQUIRED_WINDOW_GATE_FAILED`，高分不能覆盖；0 个 QUALIFIED 是有效结果；
 10. 只有 persisted `QUALIFIED` decision 才能作为 optimization baseline。
+
+Lookahead 结果语义只有一个权威：positive observations 且 `has_bias=false` 才是 PASS；
+`has_bias=true` 才是 bias FAILED。Freqtrade 空 export、observations 不足、结果不唯一、工具非零退出或
+worker exception 都是 `LOOKAHEAD_BLOCKED` 与 `validation_eligible=false`，不得进入 validation plan
+或 backtest。BLOCKED envelope 只允许固定 `failure_stage/failure_code/tool_return_code`、stdout/stderr
+SHA-256 digest 和 allowlisted 脱敏 detail；不得包含源码、路径、UUID、credential 或原始日志。
 
 worker、score、qualification 任一步缺失或 receipt/digest/lineage 漂移均保持 `BLOCKED/UNKNOWN`；不得由
 URL、UI 或 caller 本地推断。UI 只读取 canonical chain projection，显示 plan/attempt/score/decision

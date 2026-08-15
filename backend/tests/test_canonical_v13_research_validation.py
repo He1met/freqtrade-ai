@@ -544,7 +544,12 @@ def test_lookahead_validator_requires_explicit_unbiased_digest_bound_receipt() -
         status="BLOCKED",
         has_bias=None,
         observed_signal_count=0,
-        blocked_reason_code="LOOKAHEAD_INSUFFICIENT_TRADES",
+        failure_stage="OUTPUT_INTERPRETATION",
+        failure_code="LOOKAHEAD_INSUFFICIENT_TRADES",
+        tool_return_code=0,
+        stdout_digest="5" * 64,
+        stderr_digest="6" * 64,
+        redacted_detail="Freqtrade observed fewer trades than required",
         blocked_observed_trade_count=3,
         blocked_required_trade_count=10,
     )
@@ -556,6 +561,7 @@ def test_lookahead_validator_requires_explicit_unbiased_digest_bound_receipt() -
     assert insufficient_decision.status == "BLOCKED"
     assert insufficient_decision.reason_codes == (
         "LOOKAHEAD_INSUFFICIENT_TRADES",
+        "LOOKAHEAD_EVIDENCE_BLOCKED",
         "LOOKAHEAD_OBSERVATIONS_UNSET",
     )
     with pytest.raises(CanonicalResearchValidationBlocked) as raised:
