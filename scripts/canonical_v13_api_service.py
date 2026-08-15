@@ -542,7 +542,10 @@ def serve(port: int) -> None:
     )
     import uvicorn  # noqa: PLC0415
 
-    app = create_app(_production_database_environment())
+    app = create_app(
+        _production_database_environment(),
+        market_artifact_root=REPO_ROOT / "user_data" / "data",
+    )
     uvicorn.run(app, host="127.0.0.1", port=port, access_log=False)
 
 

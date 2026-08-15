@@ -1,123 +1,87 @@
 #!/usr/bin/env python3
-"""Acquire and register one fresh OKX public candle artifact in canonical V1.3."""
+"""Plan or apply one public-only market refresh through the canonical API."""
 
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
 import json
-from pathlib import Path
-import sys
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 from uuid import UUID
 
-from sqlalchemy import create_engine
-from sqlalchemy.exc import SQLAlchemyError
 
-from canonical_v13_api_service import (
-    CanonicalServiceBlocked,
-    canonical_control_database_url,
-    require_release_checkout,
-)
-
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT / "backend"))
-
-from app.canonical_v13.fresh_market_rollout import (  # noqa: E402
-    CanonicalFreshMarketRolloutBlocked,
-    acquire_register_and_seal_fresh_market,
-)
-from app.canonical_v13.market_acquisition import (  # noqa: E402
-    CanonicalMarketAcquisitionBlocked,
-)
-from app.canonical_v13.market_planning import (  # noqa: E402
-    CanonicalMarketPlanningBlocked,
-    plan_fresh_market_acquisition,
-)
-from app.canonical_v13.okx_public_market import (  # noqa: E402
-    OkxPublicHistoryCandleDownloader,
-)
+API_ROOT = "http://127.0.0.1:8011/api/canonical-v13"
 
 
 class CanonicalFreshMarketCommandBlocked(RuntimeError):
     pass
 
 
-def apply(args: argparse.Namespace) -> dict[str, object]:
-    require_release_checkout()
-    artifact_root = args.artifact_root.resolve(strict=True)
-    if not artifact_root.is_dir() or artifact_root.is_symlink():
-        raise CanonicalFreshMarketCommandBlocked("BLOCKED_MARKET_ARTIFACT_ROOT")
-    engine = create_engine(canonical_control_database_url(), pool_pre_ping=True)
+def _post(path: str, body: dict[str, object]) -> dict[str, object]:
+    request = Request(
+        API_ROOT + path,
+        data=json.dumps(body, separators=(",", ":")).encode("utf-8"),
+        headers={"Accept": "application/json", "Content-Type": "application/json"},
+        method="POST",
+    )
     try:
-        with engine.begin() as connection:
-            plan = plan_fresh_market_acquisition(
-                connection,
-                target_snapshot_id=args.target_snapshot_id,
-                expected_target_snapshot_digest=args.target_snapshot_digest,
-                window_snapshot_id=args.window_snapshot_id,
-                expected_window_snapshot_digest=args.window_snapshot_digest,
-                target_key=args.target_key,
-            )
-            result = acquire_register_and_seal_fresh_market(
-                connection,
-                plan=plan,
-                downloader=OkxPublicHistoryCandleDownloader(),
-                artifact_root=artifact_root,
-                observed_at=datetime.now(timezone.utc),
-                profile_key=args.profile_key,
-                scope_key=args.scope_key,
-                inspector_identity="canonical-v13-okx-public-inspector-v1",
-            )
-    finally:
-        engine.dispose()
-    return {
-        "status": "ACCEPTED",
-        "source": "OKX_PUBLIC_MARKET_DATA_ONLY",
-        "credential_access": "NONE",
-        "target_key": args.target_key,
-        "target_snapshot_id": str(args.target_snapshot_id),
-        "window_snapshot_id": str(args.window_snapshot_id),
-        "market_profile_version_id": str(result.market_profile_version_id),
-        "artifact_id": str(result.artifact_id),
-        "artifact_locator": result.artifact_locator,
-        "artifact_digest": result.artifact_digest,
-        "receipt_id": str(result.receipt_id),
-        "market_snapshot_id": str(result.market_snapshot_id),
-        "market_snapshot_digest": result.market_snapshot_digest,
-        "artifact_file_replay": result.artifact_file_replay,
-        "database_replay": result.database_replay,
-        "trading_capability": "TRADING_DISABLED",
-        "execution_side_effects": 0,
-    }
+        with urlopen(request, timeout=120) as response:
+            payload = json.loads(response.read())
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:1000]
+        raise CanonicalFreshMarketCommandBlocked(
+            f"BLOCKED_CANONICAL_API_HTTP_{exc.code}:{detail}"
+        ) from exc
+    except (OSError, URLError, ValueError, json.JSONDecodeError) as exc:
+        raise CanonicalFreshMarketCommandBlocked(
+            "BLOCKED_CANONICAL_API_UNAVAILABLE"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise CanonicalFreshMarketCommandBlocked("BLOCKED_CANONICAL_API_RESPONSE")
+    return payload
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--artifact-root", type=Path, required=True)
+    parser.add_argument("command", choices=("plan", "apply"))
     parser.add_argument("--target-snapshot-id", type=UUID, required=True)
     parser.add_argument("--target-snapshot-digest", required=True)
     parser.add_argument("--window-snapshot-id", type=UUID, required=True)
     parser.add_argument("--window-snapshot-digest", required=True)
     parser.add_argument("--target-key", required=True)
-    parser.add_argument("--profile-key", required=True)
-    parser.add_argument("--scope-key", required=True)
+    parser.add_argument("--expected-plan-digest")
+    parser.add_argument("--profile-key")
+    parser.add_argument("--scope-key")
     args = parser.parse_args(argv)
+    body: dict[str, object] = {
+        "target_snapshot_id": str(args.target_snapshot_id),
+        "target_snapshot_digest": args.target_snapshot_digest,
+        "window_snapshot_id": str(args.window_snapshot_id),
+        "window_snapshot_digest": args.window_snapshot_digest,
+        "target_key": args.target_key,
+    }
+    if args.command == "apply":
+        if not all((args.expected_plan_digest, args.profile_key, args.scope_key)):
+            parser.error(
+                "apply requires --expected-plan-digest, --profile-key, and --scope-key"
+            )
+        body.update(
+            {
+                "expected_plan_digest": args.expected_plan_digest,
+                "profile_key": args.profile_key,
+                "scope_key": args.scope_key,
+            }
+        )
     try:
-        payload = apply(args)
-    except (
-        CanonicalFreshMarketCommandBlocked,
-        CanonicalFreshMarketRolloutBlocked,
-        CanonicalMarketAcquisitionBlocked,
-        CanonicalMarketPlanningBlocked,
-        CanonicalServiceBlocked,
-        SQLAlchemyError,
-        OSError,
-    ) as exc:
-        code = getattr(exc, "code", None) or str(exc).split(":", 1)[0]
-        print(json.dumps({"status": "BLOCKED", "reason_code": code}, sort_keys=True))
+        result = _post(f"/market-data/acquisitions/{args.command}", body)
+    except CanonicalFreshMarketCommandBlocked as exc:
+        print(
+            json.dumps(
+                {"status": "BLOCKED", "reason_code": str(exc).split(":", 1)[0]}
+            )
+        )
         return 2
-    print(json.dumps(payload, sort_keys=True))
+    print(json.dumps(result, sort_keys=True))
     return 0
 
 

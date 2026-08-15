@@ -379,6 +379,8 @@ def test_factory_is_standalone_and_exact_routes_are_frozen() -> None:
             (f"{API_PREFIX}/research/scores", "POST"),
             (f"{API_PREFIX}/research/qualifications", "POST"),
             (f"{API_PREFIX}/market-data", "GET"),
+            (f"{API_PREFIX}/market-data/acquisitions/plan", "POST"),
+            (f"{API_PREFIX}/market-data/acquisitions/apply", "POST"),
             (f"{API_PREFIX}/market-data/snapshots/{{snapshot_id}}", "GET"),
             (f"{API_PREFIX}/readiness/research", "GET"),
             (f"{API_PREFIX}/readiness/runtime", "GET"),
@@ -396,7 +398,7 @@ def test_factory_is_standalone_and_exact_routes_are_frozen() -> None:
             for method, operation in path.items()
             if method in {"get", "post", "put", "patch", "delete"}
         ]
-        assert len(operation_ids) == 21
+        assert len(operation_ids) == 23
         assert len(set(operation_ids)) == len(operation_ids)
     finally:
         client.close()

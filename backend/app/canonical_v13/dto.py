@@ -262,6 +262,63 @@ class MarketSnapshotProjectionDTO(CanonicalProjectionDTO):
     created_at: datetime
 
 
+class FreshMarketPlanCommandDTO(CanonicalCommandDTO):
+    target_snapshot_id: UUID
+    target_snapshot_digest: str = Field(pattern=SHA256_PATTERN)
+    window_snapshot_id: UUID
+    window_snapshot_digest: str = Field(pattern=SHA256_PATTERN)
+    target_key: str = Field(min_length=1, max_length=160)
+
+
+class FreshMarketApplyCommandDTO(FreshMarketPlanCommandDTO):
+    expected_plan_digest: str = Field(pattern=SHA256_PATTERN)
+    profile_key: str = Field(min_length=1, max_length=160)
+    scope_key: str = Field(min_length=1, max_length=200)
+
+
+class FreshMarketPlanDTO(CanonicalProjectionDTO):
+    status: Literal["PLANNED"] = "PLANNED"
+    plan_digest: str = Field(pattern=SHA256_PATTERN)
+    target_snapshot_id: UUID
+    target_snapshot_digest: str = Field(pattern=SHA256_PATTERN)
+    window_snapshot_id: UUID
+    window_snapshot_digest: str = Field(pattern=SHA256_PATTERN)
+    research_target_id: UUID
+    target_key: str
+    instrument: str
+    pair: str
+    timeframe: str
+    data_kind: str
+    requested_start: datetime
+    requested_end: datetime
+    minimum_closed_candles: int = Field(gt=0)
+    warmup_closed_candles: int = Field(ge=0)
+    integrity_margin_closed_candles: int = Field(ge=0)
+    freshness_max_age_seconds: int = Field(gt=0)
+    source: Literal["OKX_PUBLIC_MARKET_DATA_ONLY"] = "OKX_PUBLIC_MARKET_DATA_ONLY"
+    credential_access: Literal["NONE"] = "NONE"
+    trading_capability: Literal["TRADING_DISABLED"] = "TRADING_DISABLED"
+    execution_side_effects: Literal[0] = 0
+
+
+class FreshMarketReceiptDTO(CanonicalProjectionDTO):
+    status: Literal["ACCEPTED"] = "ACCEPTED"
+    plan_digest: str = Field(pattern=SHA256_PATTERN)
+    market_profile_version_id: UUID
+    artifact_id: UUID
+    artifact_locator: str
+    artifact_digest: str = Field(pattern=SHA256_PATTERN)
+    receipt_id: UUID
+    market_snapshot_id: UUID
+    market_snapshot_digest: str = Field(pattern=SHA256_PATTERN)
+    artifact_file_replay: bool
+    database_replay: bool
+    source: Literal["OKX_PUBLIC_MARKET_DATA_ONLY"] = "OKX_PUBLIC_MARKET_DATA_ONLY"
+    credential_access: Literal["NONE"] = "NONE"
+    trading_capability: Literal["TRADING_DISABLED"] = "TRADING_DISABLED"
+    execution_side_effects: Literal[0] = 0
+
+
 class ReadinessProjectionDTO(CanonicalProjectionDTO):
     status: Literal["READY", "BLOCKED", "PENDING_FIRST_BACKTEST"]
     reason_codes: list[str]

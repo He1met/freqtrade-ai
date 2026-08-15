@@ -49,6 +49,38 @@ class FreshMarketPlan:
     freshness_max_age_seconds: int
 
 
+def fresh_market_plan_facts(plan: FreshMarketPlan) -> dict[str, object]:
+    """Return the complete canonical projection used for operator review."""
+
+    return {
+        "contract": "canonical-v13-fresh-market-plan-v1",
+        "target_snapshot_id": str(plan.target_snapshot_id),
+        "target_snapshot_digest": plan.target_snapshot_digest,
+        "window_snapshot_id": str(plan.window_snapshot_id),
+        "window_snapshot_digest": plan.window_snapshot_digest,
+        "research_target_id": str(plan.research_target_id),
+        "target_key": plan.target_key,
+        "instrument": plan.instrument,
+        "pair": plan.pair,
+        "timeframe": plan.timeframe,
+        "data_kind": plan.data_kind,
+        "requested_start": plan.requested_start.astimezone(timezone.utc).isoformat(),
+        "requested_end": plan.requested_end.astimezone(timezone.utc).isoformat(),
+        "minimum_closed_candles": plan.minimum_closed_candles,
+        "warmup_closed_candles": plan.warmup_closed_candles,
+        "integrity_margin_closed_candles": plan.integrity_margin_closed_candles,
+        "freshness_max_age_seconds": plan.freshness_max_age_seconds,
+        "source": "OKX_PUBLIC_MARKET_DATA_ONLY",
+        "credential_access": "NONE",
+        "trading_capability": "TRADING_DISABLED",
+        "execution_side_effects": 0,
+    }
+
+
+def fresh_market_plan_digest(plan: FreshMarketPlan) -> str:
+    return canonical_digest(fresh_market_plan_facts(plan))
+
+
 def _effective(connection: Connection) -> Connection:
     if connection.dialect.name == "sqlite":
         return connection.execution_options(
@@ -241,5 +273,7 @@ def plan_fresh_market_acquisition(
 __all__ = [
     "CanonicalMarketPlanningBlocked",
     "FreshMarketPlan",
+    "fresh_market_plan_digest",
+    "fresh_market_plan_facts",
     "plan_fresh_market_acquisition",
 ]
