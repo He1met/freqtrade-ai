@@ -412,6 +412,7 @@ def test_factory_is_standalone_and_exact_routes_are_frozen() -> None:
             (f"{API_PREFIX}/research-bundles/{{bundle_id}}/activate", "POST"),
             (f"{API_PREFIX}/research/gates/attempts", "POST"),
             (f"{API_PREFIX}/research/gates/attempts/{{gate_attempt_id}}/claim", "POST"),
+            (f"{API_PREFIX}/research/gates/recover-expired", "POST"),
             (f"{API_PREFIX}/research/gates/attempts/{{gate_attempt_id}}/static-receipts", "POST"),
             (f"{API_PREFIX}/research/gates/attempts/{{gate_attempt_id}}/lookahead-receipts", "POST"),
             (f"{API_PREFIX}/research/gates", "GET"),
@@ -453,8 +454,32 @@ def test_factory_is_standalone_and_exact_routes_are_frozen() -> None:
             for method, operation in path.items()
             if method in {"get", "post", "put", "patch", "delete"}
         ]
-        assert len(operation_ids) == 29
+        assert len(operation_ids) == 30
         assert len(set(operation_ids)) == len(operation_ids)
+    finally:
+        client.close()
+        engine.dispose()
+
+
+def test_gate_recovery_api_uses_validation_writer_and_returns_only_count(
+    monkeypatch,
+) -> None:
+    engine, client = _client()
+    observed = {}
+
+    def recover(connection):
+        observed["connection"] = connection
+        return 2
+
+    monkeypatch.setattr(canonical_api, "recover_expired_gate_attempts", recover)
+    try:
+        response = client.post(
+            f"{API_PREFIX}/research/gates/recover-expired",
+            json={"actor_identity": "canonical-v13-gate-recovery"},
+        )
+        assert response.status_code == 200
+        assert response.json() == {"status": "ACCEPTED", "recovered_count": 2}
+        assert observed["connection"] is not None
     finally:
         client.close()
         engine.dispose()

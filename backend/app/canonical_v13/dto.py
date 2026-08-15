@@ -448,6 +448,15 @@ class GateLeaseReceiptDTO(CanonicalProjectionDTO):
     lease_expires_at: datetime
 
 
+class GateRecoveryCommandDTO(CanonicalCommandDTO):
+    actor_identity: str = Field(min_length=1, max_length=200)
+
+
+class GateRecoveryReceiptDTO(CanonicalProjectionDTO):
+    status: Literal["ACCEPTED"]
+    recovered_count: int = Field(ge=0)
+
+
 class StaticFindingDTO(CanonicalProjectionDTO):
     rule_id: str
     line: int = Field(ge=0)

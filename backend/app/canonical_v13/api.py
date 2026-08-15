@@ -54,6 +54,8 @@ from app.canonical_v13.dto import (
     GateAttemptReceiptDTO,
     GateLeaseCommandDTO,
     GateLeaseReceiptDTO,
+    GateRecoveryCommandDTO,
+    GateRecoveryReceiptDTO,
     GateListProjectionDTO,
     GatePersistedReceiptDTO,
     GateProjectionDTO,
@@ -156,6 +158,7 @@ from app.canonical_v13.research_gates import (
     persist_lookahead_gate_receipt,
     persist_static_gate_receipt,
     read_gate_projection,
+    recover_expired_gate_attempts,
 )
 from app.canonical_v13.research_validation import (
     CanonicalResearchValidationBlocked,
@@ -1203,6 +1206,23 @@ def create_canonical_v13_app(
             lambda connection: claim_gate_attempt(connection, gate_attempt_id=gate_attempt_id),
         )
         return GateLeaseReceiptDTO(**result.__dict__)
+
+    @app.post(
+        f"{API_PREFIX}/research/gates/recover-expired",
+        response_model=GateRecoveryReceiptDTO,
+    )
+    def recover_planless_gate_attempts(
+        command: GateRecoveryCommandDTO,
+    ) -> GateRecoveryReceiptDTO:
+        del command
+        recovered_count = run_research(
+            validation_connection_factory,
+            "validation",
+            recover_expired_gate_attempts,
+        )
+        return GateRecoveryReceiptDTO(
+            status="ACCEPTED", recovered_count=recovered_count
+        )
 
     @app.post(
         f"{API_PREFIX}/research/gates/attempts/{{gate_attempt_id}}/static-receipts",
