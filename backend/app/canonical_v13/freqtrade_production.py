@@ -1103,6 +1103,134 @@ def materialize_production_research_inputs(
         raise CanonicalProductionResearchBlocked(
             "BLOCKED_RESEARCH_INPUT_LINEAGE", "bundle and attempt market lineage differ"
         )
+    profile = reader_connection.execute(
+        select(MARKET_PROFILE_VERSIONS_TABLE)
+        .select_from(
+            MARKET_SNAPSHOTS_TABLE.join(
+                MARKET_PROFILE_VERSIONS_TABLE,
+                MARKET_PROFILE_VERSIONS_TABLE.c.id
+                == MARKET_SNAPSHOTS_TABLE.c.market_profile_version_id,
+            )
+        )
+        .where(MARKET_SNAPSHOTS_TABLE.c.id == spec.lineage.market_snapshot_id)
+    ).mappings().one_or_none()
+    metadata_binding = (
+        profile["payload_json"].get("offline_exchange_metadata")
+        if profile is not None and isinstance(profile["payload_json"], dict)
+        else None
+    )
+    if (
+        profile is None
+        or profile["lifecycle_status"] != "VALIDATED"
+        or canonical_research_digest(profile["payload_json"])
+        != profile["payload_digest"]
+        or not isinstance(metadata_binding, dict)
+    ):
+        raise CanonicalProductionResearchBlocked(
+            "BLOCKED_OFFLINE_EXCHANGE_METADATA_UNSET",
+            "validated market profile has no frozen exchange metadata",
+        )
+    try:
+        metadata_artifact_id = UUID(str(metadata_binding["artifact_id"]))
+        metadata_receipt_id = UUID(str(metadata_binding["receipt_id"]))
+    except (KeyError, ValueError) as exc:
+        raise CanonicalProductionResearchBlocked(
+            "BLOCKED_OFFLINE_EXCHANGE_METADATA_LINEAGE", "metadata identity is invalid"
+        ) from exc
+    metadata_row = reader_connection.execute(
+        select(
+            MARKET_ARTIFACTS_TABLE.c.locator,
+            MARKET_ARTIFACTS_TABLE.c.content_digest,
+            MARKET_ARTIFACTS_TABLE.c.size_bytes,
+            MARKET_ARTIFACTS_TABLE.c.media_type,
+            MARKET_RECEIPTS_TABLE.c.status,
+            MARKET_RECEIPTS_TABLE.c.receipt_digest,
+            MARKET_INSPECTIONS_TABLE.c.inspection_json,
+            MARKET_INSPECTIONS_TABLE.c.inspection_digest,
+        )
+        .select_from(
+            MARKET_ARTIFACTS_TABLE.join(
+                MARKET_RECEIPTS_TABLE,
+                MARKET_RECEIPTS_TABLE.c.market_artifact_id
+                == MARKET_ARTIFACTS_TABLE.c.id,
+            ).join(
+                MARKET_INSPECTIONS_TABLE,
+                MARKET_INSPECTIONS_TABLE.c.id
+                == MARKET_RECEIPTS_TABLE.c.market_inspection_id,
+            )
+        )
+        .where(
+            MARKET_ARTIFACTS_TABLE.c.id == metadata_artifact_id,
+            MARKET_RECEIPTS_TABLE.c.id == metadata_receipt_id,
+        )
+    ).mappings().one_or_none()
+    inspection = metadata_row["inspection_json"] if metadata_row is not None else None
+    if (
+        metadata_row is None
+        or metadata_row["status"] != "ACCEPTED"
+        or metadata_row["content_digest"] != metadata_binding.get("artifact_digest")
+        or metadata_row["receipt_digest"] != metadata_binding.get("receipt_digest")
+        or metadata_row["locator"] != metadata_binding.get("artifact_locator")
+        or not isinstance(inspection, dict)
+        or inspection.get("contract")
+        != "canonical-v13-offline-exchange-metadata-inspection-v1"
+        or inspection.get("acquisition_receipt_digest")
+        != metadata_binding.get("acquisition_receipt_digest")
+        or canonical_research_digest(inspection) != metadata_row["inspection_digest"]
+        or canonical_research_digest(
+            {
+                "artifact_digest": metadata_row["content_digest"],
+                "inspection_digest": metadata_row["inspection_digest"],
+                "status": "ACCEPTED",
+            }
+        )
+        != metadata_row["receipt_digest"]
+    ):
+        raise CanonicalProductionResearchBlocked(
+            "BLOCKED_OFFLINE_EXCHANGE_METADATA_LINEAGE", "metadata receipt drifted"
+        )
+    metadata_source = _safe_market_path(market_root, str(metadata_row["locator"]))
+    metadata_content = metadata_source.read_bytes()
+    try:
+        metadata_observed_at = datetime.fromisoformat(str(inspection["observed_at"]))
+        metadata_payload = verify_offline_exchange_metadata(
+            metadata_content,
+            expected_digest=str(metadata_row["content_digest"]),
+            observed_at=metadata_observed_at,
+            expected_receipt_digest=str(
+                metadata_binding.get("acquisition_receipt_digest")
+            ),
+        )
+    except Exception as exc:
+        raise CanonicalProductionResearchBlocked(
+            getattr(exc, "code", "BLOCKED_OFFLINE_EXCHANGE_METADATA"),
+            "frozen offline exchange metadata is invalid",
+        ) from exc
+    target_snapshot_id = str(
+        next(
+            item.snapshot_id
+            for item in frozen.configurations
+            if item.configuration_kind == "TARGET"
+        )
+    )
+    window_snapshot_id = str(
+        next(
+            item.snapshot_id
+            for item in frozen.configurations
+            if item.configuration_kind == "WINDOW"
+        )
+    )
+    frozen_target = frozen.targets[0]
+    if (
+        metadata_payload.get("target_snapshot_id") != target_snapshot_id
+        or metadata_payload.get("window_snapshot_id") != window_snapshot_id
+        or metadata_payload.get("target_key") != frozen_target.target_key
+        or metadata_payload.get("pair") != frozen_target.pair
+    ):
+        raise CanonicalProductionResearchBlocked(
+            "BLOCKED_OFFLINE_EXCHANGE_METADATA_LINEAGE",
+            "metadata target/bundle binding drifted",
+        )
     market_rows = (
         reader_connection.execute(
             select(
@@ -1174,6 +1302,24 @@ def materialize_production_research_inputs(
                     size_bytes=size,
                 )
             )
+        metadata_path = workspace / "exchange-metadata.json"
+        metadata_digest, metadata_size = _copy_verified_read_only(
+            metadata_source, metadata_path
+        )
+        if (
+            metadata_digest != metadata_row["content_digest"]
+            or metadata_size != metadata_row["size_bytes"]
+        ):
+            raise CanonicalProductionResearchBlocked(
+                "BLOCKED_OFFLINE_EXCHANGE_METADATA_DIGEST", "metadata file drifted"
+            )
+        metadata_mount = ReadOnlyMount(
+            source=metadata_path,
+            destination="/input/exchange-metadata.json",
+            content_digest=metadata_digest,
+            size_bytes=metadata_size,
+        )
+        mounts.append(metadata_mount)
         strategy_path = workspace / "strategy.py"
         bundle_path = workspace / "bundle.json"
         plan_path = workspace / "validation-plan.json"
@@ -1226,7 +1372,14 @@ def materialize_production_research_inputs(
                     "size_bytes": item.size_bytes,
                 }
                 for item in mounts
+                if item.destination.startswith("/input/market-")
             ],
+            "exchange_metadata": {
+                "path": metadata_mount.destination,
+                "content_digest": metadata_mount.content_digest,
+                "size_bytes": metadata_mount.size_bytes,
+                "receipt_digest": metadata_row["receipt_digest"],
+            },
         }
         for path, content in (
             (strategy_path, strategy_bytes),

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import io
 import json
 import sys
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -85,6 +87,73 @@ def test_worker_extracts_exactly_one_strategy_class(tmp_path: Path) -> None:
     path.write_text("class A(IStrategy): pass\nclass B(IStrategy): pass\n")
     with pytest.raises(worker.Blocked, match="exactly one"):
         worker._strategy_class(path)
+
+
+def test_worker_backtest_window_uses_frozen_offline_exchange_metadata(
+    monkeypatch, tmp_path: Path
+) -> None:
+    worker = _load_worker()
+    request = {
+        "validation_attempt_id": "11111111-1111-1111-1111-111111111111",
+        "attempt_request_digest": "a" * 64,
+        "exchange_metadata": {"path": "/input/exchange-metadata.json"},
+    }
+    bundle = {"targets": [{"pair": "BTC/USDT:USDT", "timeframe": "15m"}]}
+    plan = {
+        "windows": [
+            {
+                "required": True,
+                "window_key": "required-a",
+                "window_member_digest": "b" * 64,
+            }
+        ]
+    }
+    observed: list[tuple[object, ...]] = []
+    monkeypatch.setattr(worker, "validate_inputs", lambda *_args: (request, bundle, plan))
+    monkeypatch.setattr(worker, "_strategy_class", lambda _path: "Exact")
+    monkeypatch.setattr(worker, "_quality_assumptions", lambda _bundle: (0.0005, 0.0002, []))
+    monkeypatch.setattr(worker, "_prepare_data", lambda *_args: None)
+    monkeypatch.setattr(worker.Path, "mkdir", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        worker,
+        "_run_window",
+        lambda *args: observed.append(args) or {"total_trades": 1, "trades": []},
+    )
+    monkeypatch.setattr(
+        worker,
+        "_result_metrics",
+        lambda *_args: {"trade_count": 1},
+    )
+    args = SimpleNamespace(
+        request=tmp_path / "request.json",
+        bundle=tmp_path / "bundle.json",
+        plan=tmp_path / "plan.json",
+        strategy=tmp_path / "strategy.py",
+    )
+    result = worker.backtest(args)
+    assert result["status"] == "SUCCEEDED"
+    assert observed[0][-1] == "/input/exchange-metadata.json"
+
+
+def test_worker_backtest_subprocess_uses_offline_entrypoint() -> None:
+    worker = _load_worker()
+    source = inspect.getsource(worker._run_window)
+    assert '"freqtrade-offline"' in source
+    assert '"--metadata"' in source
+    assert '"/home/ftuser/.local/bin/freqtrade"' not in source
+
+
+def test_worker_reads_only_primary_backtest_payload_from_export(tmp_path: Path) -> None:
+    worker = _load_worker()
+    archive_path = tmp_path / "backtest-result-2026-08-15_00-00-00.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr(
+            "backtest-result-2026-08-15_00-00-00.json",
+            json.dumps({"strategy": {"Exact": {"total_trades": 3}}}),
+        )
+        archive.writestr("backtest-result-2026-08-15_00-00-00.meta.json", "{}")
+        archive.writestr("backtest-result-2026-08-15_00-00-00_config.json", "{}")
+    assert worker._read_export(tmp_path, "Exact") == {"total_trades": 3}
 
 
 def test_worker_lookahead_runs_every_required_window_and_hashes_evidence(

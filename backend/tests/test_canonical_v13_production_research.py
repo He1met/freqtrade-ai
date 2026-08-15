@@ -29,7 +29,11 @@ from app.canonical_v13.freqtrade_production import (
 )
 from app.canonical_v13.genesis import install_canonical_genesis
 from app.canonical_v13.manifest import CANONICAL_BUSINESS_SCHEMA
-from app.canonical_v13.models import MARKET_ARTIFACTS_TABLE
+from app.canonical_v13.models import (
+    MARKET_ARTIFACTS_TABLE,
+    MARKET_INSPECTIONS_TABLE,
+)
+from app.canonical_v13.offline_exchange_metadata import MEDIA_TYPE as OFFLINE_METADATA_MEDIA_TYPE
 from app.canonical_v13 import research_scoring
 from app.canonical_v13.research_authorization import (
     authorize_research_execution,
@@ -174,10 +178,23 @@ def test_production_adapter_mounts_only_digest_checked_read_only_inputs(
     with canonical_connection.begin():
         _prepared, running = _running(canonical_connection)
         market = (
-            canonical_connection.execute(select(MARKET_ARTIFACTS_TABLE))
+            canonical_connection.execute(
+                select(MARKET_ARTIFACTS_TABLE).where(
+                    MARKET_ARTIFACTS_TABLE.c.media_type != OFFLINE_METADATA_MEDIA_TYPE
+                )
+            )
             .mappings()
             .one()
         )
+        metadata = canonical_connection.execute(
+            select(MARKET_ARTIFACTS_TABLE, MARKET_INSPECTIONS_TABLE.c.inspection_json)
+            .join(
+                MARKET_INSPECTIONS_TABLE,
+                MARKET_INSPECTIONS_TABLE.c.market_artifact_id
+                == MARKET_ARTIFACTS_TABLE.c.id,
+            )
+            .where(MARKET_ARTIFACTS_TABLE.c.media_type == OFFLINE_METADATA_MEDIA_TYPE)
+        ).mappings().one()
 
     market_root = tmp_path / "market-root"
     workspace_root = tmp_path / "workspace-root"
@@ -186,6 +203,29 @@ def test_production_adapter_mounts_only_digest_checked_read_only_inputs(
     market_path = market_root.joinpath(*market["locator"].split("/"))
     market_path.parent.mkdir(parents=True)
     market_path.write_bytes(b"isolated phase6 market fixture")
+    metadata_facts = {
+        "contract": "canonical-v13-okx-offline-exchange-metadata-v1",
+        "source_identity": "okx-public-instruments-position-tiers-v1",
+        "adapter_identity": "freqtrade-2026.6-ccxt-4.5.61-okx-offline-v1",
+        "freqtrade_version": "2026.6",
+        "ccxt_version": "4.5.61",
+        **{
+            key: metadata["inspection_json"][key]
+            for key in (
+                "target_key", "instrument", "pair", "timeframe", "data_kind",
+                "target_snapshot_id", "target_snapshot_digest", "window_snapshot_id",
+                "window_snapshot_digest", "observed_at", "fresh_until",
+                "network_access", "credential_access",
+            )
+        },
+        "markets": {"BTC/USDT:USDT": {"symbol": "BTC/USDT:USDT"}},
+        "leverage_tiers": {"BTC/USDT:USDT": [{"minNotional": 0, "maxNotional": 1}]},
+    }
+    metadata_path = market_root.joinpath(*metadata["locator"].split("/"))
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    metadata_path.write_bytes(
+        json.dumps(metadata_facts, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode()
+    )
     runtime = tmp_path / "docker"
     runtime.write_text("#!/bin/sh\nexit 1\n")
     runtime.chmod(0o755)
@@ -202,6 +242,12 @@ def test_production_adapter_mounts_only_digest_checked_read_only_inputs(
             assert all(
                 mount.source.parent == materialized.workspace
                 and mount.source.stat().st_mode & 0o222 == 0
+                for mount in materialized.mounts
+            )
+            request = json.loads(materialized.request_path.read_text())
+            assert request["exchange_metadata"]["path"] == "/input/exchange-metadata.json"
+            assert any(
+                mount.destination == "/input/exchange-metadata.json"
                 for mount in materialized.mounts
             )
             yield materialized
