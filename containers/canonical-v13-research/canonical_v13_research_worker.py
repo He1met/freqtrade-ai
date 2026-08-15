@@ -712,7 +712,10 @@ def lookahead(args: argparse.Namespace) -> dict[str, object]:
                 check=False,
             )
         if log_path.stat().st_size > _MAXIMUM_LOOKAHEAD_LOG_BYTES:
-            log_digest, _ = _file_digest(log_path)
+            log_hasher = sha256(bytes(captured_stderr))
+            with log_path.open("rb") as stream:
+                while chunk := stream.read(1024 * 1024):
+                    log_hasher.update(chunk)
             return _lookahead_output(
                 request,
                 status="BLOCKED",
@@ -723,7 +726,7 @@ def lookahead(args: argparse.Namespace) -> dict[str, object]:
                 failure_code="LOOKAHEAD_LOG_LIMIT_EXCEEDED",
                 tool_return_code=completed.returncode,
                 stdout_digest=sha256(bytes(captured_stdout)).hexdigest(),
-                stderr_digest=log_digest,
+                stderr_digest=log_hasher.hexdigest(),
                 redacted_detail="Freqtrade lookahead log exceeded the safe limit",
             )
         log_bytes = log_path.read_bytes()
