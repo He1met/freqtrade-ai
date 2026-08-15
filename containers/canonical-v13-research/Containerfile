@@ -4,6 +4,8 @@ USER root
 COPY --chmod=0555 containers/canonical-v13-research/canonical_v13_research_worker.py /opt/freqtrade-ai/bin/canonical-v13-research-worker
 RUN chmod 0755 /home/ftuser
 
+ENV PYTHONPATH=/freqtrade:/home/ftuser/.local/lib/python3.14/site-packages
+
 LABEL org.opencontainers.image.title="Freqtrade Ai canonical V1.3 no-trade research worker" \
       org.opencontainers.image.base.name="docker.io/freqtradeorg/freqtrade@sha256:c730f60992863baafc8f13469291731e4b5e0ada82d8a9b449dcf5db24d00f76" \
       org.opencontainers.image.freqtrade.commit="b604e2fd70539f7f73d3c62c16ce0b155bbab319"
