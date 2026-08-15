@@ -28,6 +28,14 @@ EXPECTED_CAPABILITY = {
     "order_submission": "DISABLED",
     "allow_real_funds": False,
 }
+FREQTRADE_SUBPROCESS_ENV = {
+    "HOME": "/work/home",
+    "LANG": "C.UTF-8",
+    "LC_ALL": "C.UTF-8",
+    "PATH": "/usr/local/bin:/usr/bin:/bin",
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "PYTHONPATH": "/freqtrade:/home/ftuser/.local/lib/python3.14/site-packages",
+}
 HEX = frozenset("0123456789abcdef")
 
 
@@ -428,13 +436,7 @@ def _run_window(target: dict[str, object], strategy_class: str, window: dict[str
     )
     completed = subprocess.run(
         command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        env={
-            "HOME": "/work/home",
-            "LANG": "C.UTF-8",
-            "LC_ALL": "C.UTF-8",
-            "PATH": "/usr/local/bin:/usr/bin:/bin",
-            "PYTHONDONTWRITEBYTECODE": "1",
-        },
+        env=FREQTRADE_SUBPROCESS_ENV,
         close_fds=True, timeout=840, check=False,
     )
     if completed.returncode != 0:
@@ -542,13 +544,7 @@ def lookahead(args: argparse.Namespace) -> dict[str, object]:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            env={
-                "HOME": "/work/home",
-                "LANG": "C.UTF-8",
-                "LC_ALL": "C.UTF-8",
-                "PATH": "/usr/local/bin:/usr/bin:/bin",
-                "PYTHONDONTWRITEBYTECODE": "1",
-            },
+            env=FREQTRADE_SUBPROCESS_ENV,
             close_fds=True,
             timeout=840,
             check=False,
