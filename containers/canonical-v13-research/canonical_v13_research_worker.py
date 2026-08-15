@@ -234,6 +234,21 @@ def validate_inputs(
         digest, size = _file_digest(path)
         if digest != _hex_digest(item["content_digest"]) or size != item["size_bytes"]:
             raise Blocked("market file digest drifted")
+    metadata = request.get("exchange_metadata")
+    if not isinstance(metadata, dict) or set(metadata) != {
+        "path", "content_digest", "size_bytes", "receipt_digest"
+    }:
+        raise Blocked("offline exchange metadata contract drifted")
+    metadata_path = Path(str(metadata["path"]))
+    if metadata_path != Path("/input/exchange-metadata.json"):
+        raise Blocked("offline exchange metadata path drifted")
+    digest, size = _file_digest(metadata_path)
+    if (
+        digest != _hex_digest(metadata["content_digest"])
+        or size != metadata["size_bytes"]
+    ):
+        raise Blocked("offline exchange metadata digest drifted")
+    _hex_digest(metadata["receipt_digest"])
     return request, bundle, plan
 
 
@@ -514,7 +529,14 @@ def _read_export(result_dir: Path, strategy_class: str) -> dict[str, object]:
     if len(archives) != 1:
         raise Blocked("Freqtrade export archive is ambiguous")
     with zipfile.ZipFile(archives[0]) as archive:
-        names = [name for name in archive.namelist() if name.endswith(".json") and not name.endswith(".meta.json")]
+        names = [
+            name
+            for name in archive.namelist()
+            if Path(name).name.startswith("backtest-result-")
+            and name.endswith(".json")
+            and not name.endswith(".meta.json")
+            and not name.endswith("_config.json")
+        ]
         if len(names) != 1:
             raise Blocked("Freqtrade export payload is ambiguous")
         payload = json.loads(archive.read(names[0]))
@@ -560,7 +582,13 @@ def preflight_evidence() -> dict[str, object]:
     }
 
 
-def _run_window(target: dict[str, object], strategy_class: str, window: dict[str, object], fee: float) -> dict[str, object]:
+def _run_window(
+    target: dict[str, object],
+    strategy_class: str,
+    window: dict[str, object],
+    fee: float,
+    metadata_path: str,
+) -> dict[str, object]:
     start = _timestamp(window.get("window_start"))
     end = _timestamp(window.get("window_end"))
     if end <= start:
@@ -583,8 +611,13 @@ def _run_window(target: dict[str, object], strategy_class: str, window: dict[str
     config_path = Path("/work/config.json")
     config_path.write_bytes(_canonical_bytes(config))
     command = (
-        "/home/ftuser/.local/bin/freqtrade", "backtesting", "--config", str(config_path),
+        "/opt/freqtrade-ai/bin/canonical-v13-research-worker",
+        "freqtrade-offline",
+        "--metadata",
+        metadata_path,
+        "backtesting", "--config", str(config_path),
         "--datadir", "/work/data", "--strategy-path", "/input", "--strategy", strategy_class,
+        "--userdir", "/work/user_data",
         "--pairs", str(target["pair"]), "--timeframe", str(target["timeframe"]),
         "--timerange", _freqtrade_timerange(start, end), "--fee", str(fee),
         "--cache", "none", "--export", "trades", "--backtest-directory", str(result_dir), "--no-color",
@@ -605,12 +638,19 @@ def backtest(args: argparse.Namespace) -> dict[str, object]:
     strategy_class = _strategy_class(args.strategy)
     fee, slippage, gates = _quality_assumptions(bundle)
     Path("/work/home").mkdir(parents=True, exist_ok=True)
+    Path("/work/user_data").mkdir(parents=True, exist_ok=True)
     _prepare_data(request, target)
     windows = []
     for window in plan["windows"]:  # type: ignore[union-attr]
         if window.get("required") is not True:
             continue
-        result = _run_window(target, strategy_class, window, fee)
+        result = _run_window(
+            target,
+            strategy_class,
+            window,
+            fee,
+            str(request["exchange_metadata"]["path"]),
+        )
         windows.append(
             {
                 "window_key": window["window_key"],

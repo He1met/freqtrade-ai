@@ -4,6 +4,7 @@ import builtins
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
+import json
 from uuid import UUID, uuid4
 
 import pytest
@@ -43,12 +44,19 @@ from app.canonical_v13.market_acquisition import (
 from app.canonical_v13.models import (
     CONFIGURATION_ACTIVATIONS_TABLE,
     CONFIGURATION_SNAPSHOT_MEMBERS_TABLE,
+    MARKET_ARTIFACTS_TABLE,
+    MARKET_INSPECTIONS_TABLE,
+    MARKET_RECEIPTS_TABLE,
     RESEARCH_GATE_RECEIPTS_TABLE,
     RESEARCH_TARGETS_TABLE,
     VALIDATION_ATTEMPTS_TABLE,
     VALIDATION_PLANS_TABLE,
     VALIDATION_PLAN_WINDOWS_TABLE,
     VALIDATION_WINDOW_RESULTS_TABLE,
+)
+from app.canonical_v13.offline_exchange_metadata import (
+    MEDIA_TYPE as OFFLINE_METADATA_MEDIA_TYPE,
+    offline_exchange_metadata_receipt_digest,
 )
 from app.canonical_v13.research_gates import (
     CanonicalGateBlocked,
@@ -344,11 +352,132 @@ def _freeze_and_activate_bundle(connection):
             == target_snapshot.snapshot_id
         )
     ).scalar_one()
+    metadata_observed_at = NOW + timedelta(hours=4)
+    metadata_fresh_until = metadata_observed_at + timedelta(hours=1)
+    metadata_facts = {
+        "contract": "canonical-v13-okx-offline-exchange-metadata-v1",
+        "source_identity": "okx-public-instruments-position-tiers-v1",
+        "adapter_identity": "freqtrade-2026.6-ccxt-4.5.61-okx-offline-v1",
+        "freqtrade_version": "2026.6",
+        "ccxt_version": "4.5.61",
+        "target_key": "btc-5m",
+        "instrument": "BTC-USDT-SWAP",
+        "pair": "BTC/USDT:USDT",
+        "timeframe": "5m",
+        "data_kind": "futures",
+        "target_snapshot_id": str(target_snapshot.snapshot_id),
+        "target_snapshot_digest": target_snapshot.snapshot_digest,
+        "window_snapshot_id": str(window_snapshot.snapshot_id),
+        "window_snapshot_digest": window_snapshot.snapshot_digest,
+        "observed_at": metadata_observed_at.isoformat(),
+        "fresh_until": metadata_fresh_until.isoformat(),
+        "network_access": "PUBLIC_MARKET_DATA_ONLY",
+        "credential_access": "NONE",
+        "markets": {"BTC/USDT:USDT": {"symbol": "BTC/USDT:USDT"}},
+        "leverage_tiers": {"BTC/USDT:USDT": [{"minNotional": 0, "maxNotional": 1}]},
+    }
+    metadata_content = json.dumps(
+        metadata_facts, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+    ).encode()
+    metadata_digest = sha256(metadata_content).hexdigest()
+    metadata_acquisition_receipt = offline_exchange_metadata_receipt_digest(
+        content_digest=metadata_digest,
+        observed_at=metadata_observed_at.isoformat(),
+        fresh_until=metadata_fresh_until.isoformat(),
+    )
+    metadata_artifact_id = uuid4()
+    metadata_inspection_id = uuid4()
+    metadata_receipt_id = uuid4()
+    metadata_locator = f"canonical_v13/fixture/exchange-metadata/{metadata_digest}.json"
+    metadata_inspection = {
+        "contract": "canonical-v13-offline-exchange-metadata-inspection-v1",
+        "status": "ACCEPTED",
+        "source_identity": "okx-public-instruments-position-tiers-v1",
+        "provenance_class": "PRODUCTION_PUBLIC_EXCHANGE_METADATA",
+        "target_key": "btc-5m",
+        "instrument": "BTC-USDT-SWAP",
+        "pair": "BTC/USDT:USDT",
+        "timeframe": "5m",
+        "data_kind": "futures",
+        "target_snapshot_id": str(target_snapshot.snapshot_id),
+        "target_snapshot_digest": target_snapshot.snapshot_digest,
+        "window_snapshot_id": str(window_snapshot.snapshot_id),
+        "window_snapshot_digest": window_snapshot.snapshot_digest,
+        "observed_at": metadata_observed_at.isoformat(),
+        "fresh_until": metadata_fresh_until.isoformat(),
+        "market_count": 1,
+        "leverage_tier_count": 1,
+        "content_digest": metadata_digest,
+        "acquisition_receipt_digest": metadata_acquisition_receipt,
+        "network_access": "PUBLIC_MARKET_DATA_ONLY",
+        "credential_access": "NONE",
+    }
+    metadata_inspection_digest = sha256(
+        json.dumps(metadata_inspection, separators=(",", ":"), sort_keys=True).encode()
+    ).hexdigest()
+    metadata_table_receipt_digest = sha256(
+        json.dumps(
+            {
+                "artifact_digest": metadata_digest,
+                "inspection_digest": metadata_inspection_digest,
+                "status": "ACCEPTED",
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+    connection.execute(
+        MARKET_ARTIFACTS_TABLE.insert().values(
+            id=metadata_artifact_id,
+            content_digest=metadata_digest,
+            locator=metadata_locator,
+            size_bytes=len(metadata_content),
+            media_type=OFFLINE_METADATA_MEDIA_TYPE,
+            created_at=metadata_observed_at,
+        )
+    )
+    connection.execute(
+        MARKET_INSPECTIONS_TABLE.insert().values(
+            id=metadata_inspection_id,
+            market_artifact_id=metadata_artifact_id,
+            status="ACCEPTED",
+            inspection_json=metadata_inspection,
+            inspection_digest=metadata_inspection_digest,
+            inspector_identity="canonical-v13-fixture-metadata-inspector-v1",
+            created_at=metadata_observed_at,
+        )
+    )
+    connection.execute(
+        MARKET_RECEIPTS_TABLE.insert().values(
+            id=metadata_receipt_id,
+            market_artifact_id=metadata_artifact_id,
+            market_inspection_id=metadata_inspection_id,
+            status="ACCEPTED",
+            artifact_digest=metadata_digest,
+            inspection_digest=metadata_inspection_digest,
+            receipt_digest=metadata_table_receipt_digest,
+            created_at=metadata_observed_at,
+        )
+    )
     _profile_id, market_version_id, _payload_digest = create_market_profile_draft(
         connection,
         profile_key="phase6-market",
         scope_key="isolated-research",
-        payload={"source": "isolated-fixture", "network_access": "NONE"},
+        payload={
+            "source": "isolated-fixture",
+            "network_access": "NONE",
+            "offline_exchange_metadata": {
+                "artifact_id": str(metadata_artifact_id),
+                "artifact_locator": metadata_locator,
+                "artifact_digest": metadata_digest,
+                "receipt_id": str(metadata_receipt_id),
+                "receipt_digest": metadata_table_receipt_digest,
+                "acquisition_receipt_digest": metadata_acquisition_receipt,
+                "observed_at": metadata_observed_at.isoformat(),
+                "fresh_until": metadata_fresh_until.isoformat(),
+                "adapter_identity": "freqtrade-2026.6-ccxt-4.5.61-okx-offline-v1",
+            },
+        },
     )
     validate_market_profile(connection, version_id=market_version_id)
     acquisition_payload, acquisition_receipt = acquire_market_evidence(
@@ -957,3 +1086,6 @@ def test_plan_without_persisted_gate_pair_fails_closed_before_writes(canonical_c
     assert raised.value.code == "BLOCKED_GATE_RECEIPT_UNAVAILABLE"
     assert _count(canonical_connection, VALIDATION_PLANS_TABLE) == 0
     assert _count(canonical_connection, VALIDATION_PLAN_WINDOWS_TABLE) == 0
+    MARKET_ARTIFACTS_TABLE,
+    MARKET_INSPECTIONS_TABLE,
+    MARKET_RECEIPTS_TABLE,
