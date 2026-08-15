@@ -25,7 +25,6 @@ from sqlalchemy.engine import make_url
 from app.canonical_v13.dto import ResearchAuthorizationConsumptionReceiptDTO
 from app.canonical_v13.bootstrap import LOCAL_SERVICE_PRINCIPALS, local_role_mapping
 from app.canonical_v13.freqtrade_production import (
-    BoundedSubprocessSandboxRunner,
     FreqtradeProductionLookaheadAdapter,
     FreqtradeProductionResearchAdapter,
     PRODUCTION_LOOKAHEAD_ACTIVATION,
@@ -332,7 +331,7 @@ def _worker_execute(
             image_reference=_required(environment, IMAGE_ENV),
             limits=limits,
             input_factory=inputs,
-            runner=BoundedSubprocessSandboxRunner(),
+            runner=RemotePodmanVolumeSandboxRunner(),
         )
         result = execute_production_research_chain(
             audit_connection_factory=lambda: factory("reader"),
