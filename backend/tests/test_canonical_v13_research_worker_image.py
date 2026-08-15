@@ -52,6 +52,12 @@ def test_worker_preserves_intraday_window_with_freqtrade_unix_timerange() -> Non
     assert worker._freqtrade_timerange(start, end) == "1784169900-1786761900"
 
 
+def test_worker_creates_freqtrade_futures_data_directory() -> None:
+    source = WORKER.read_text()
+    assert '(data_root / "futures").mkdir(parents=True, exist_ok=True)' in source
+    assert "FeatherDataHandler(data_root).ohlcv_store(" in source
+
+
 def test_worker_extracts_exactly_one_strategy_class(tmp_path: Path) -> None:
     worker = _load_worker()
     path = tmp_path / "strategy.py"
