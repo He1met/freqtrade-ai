@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from hashlib import sha256
 import json
 import os
@@ -23,26 +24,42 @@ import tempfile
 import time
 from types import MappingProxyType
 from typing import Protocol
+from uuid import UUID
 
 from sqlalchemy import Connection, select
 
+from app.canonical_v13.market_acquisition import (
+    MarketAcquisitionReceipt,
+    verify_market_acquisition_receipt,
+)
 from app.canonical_v13.models import (
     MARKET_ARTIFACTS_TABLE,
+    MARKET_INSPECTIONS_TABLE,
     MARKET_RECEIPTS_TABLE,
     MARKET_SNAPSHOT_MEMBERS_TABLE,
     STRATEGY_ARTIFACTS_TABLE,
+    STRATEGY_VERSIONS_TABLE,
 )
 from app.canonical_v13.research_validation import (
     EphemeralAttemptReceipt,
+    LookaheadAnalysisReceipt,
+    ResearchLineage,
     RunningValidationAttempt,
+    STATIC_VALIDATOR_IDENTITY,
+    StaticValidationReceipt,
     build_ephemeral_attempt_receipt,
+    build_lookahead_receipt,
     canonical_research_digest,
+    static_validator_digest,
     validate_ephemeral_launch_spec,
+    validate_static_source,
 )
 from app.canonical_v13.runtime_reader import read_frozen_research_bundle
 
 
 PRODUCTION_RESEARCH_ACTIVATION = "PRODUCTION_RESEARCH_NO_TRADE_V1"
+PRODUCTION_LOOKAHEAD_ACTIVATION = "PRODUCTION_LOOKAHEAD_NO_TRADE_V1"
+PRODUCTION_LOOKAHEAD_ANALYZER_IDENTITY = "production-freqtrade-lookahead-v1"
 _IMAGE = re.compile(r"^[a-z0-9][a-z0-9._/-]*@sha256:([0-9a-f]{64})$")
 _SAFE_KEY = re.compile(r"^[A-Za-z0-9_.:/-]{1,240}$")
 
@@ -103,6 +120,22 @@ class ProductionResearchInputSet:
 
 
 @dataclass(frozen=True)
+class ProductionLookaheadInputSet:
+    workspace: Path
+    request_path: Path
+    mounts: tuple[ReadOnlyMount, ...]
+    input_manifest_digest: str
+
+
+@dataclass(frozen=True)
+class ProductionStaticLookaheadGateReceipt:
+    lineage: ResearchLineage
+    static_receipt: StaticValidationReceipt
+    lookahead_receipt: LookaheadAnalysisReceipt | None
+    status: str
+
+
+@dataclass(frozen=True)
 class SandboxCommandResult:
     return_code: int
     stdout: bytes
@@ -123,6 +156,12 @@ class ProductionResearchInputFactory(Protocol):
     def __call__(
         self, running_attempt: RunningValidationAttempt
     ) -> AbstractContextManager[ProductionResearchInputSet]: ...
+
+
+class ProductionLookaheadInputFactory(Protocol):
+    def __call__(
+        self, lineage: ResearchLineage
+    ) -> AbstractContextManager[ProductionLookaheadInputSet]: ...
 
 
 class BoundedSubprocessSandboxRunner:
@@ -324,6 +363,392 @@ def _copy_verified_read_only(source: Path, destination: Path) -> tuple[str, int]
             os.close(destination_descriptor)
         os.close(source_descriptor)
     return digest.hexdigest(), size
+
+
+def _validated_roots(
+    market_artifact_root: Path, workspace_root: Path
+) -> tuple[Path, Path]:
+    for root, code in (
+        (market_artifact_root, "BLOCKED_MARKET_ARTIFACT_ROOT"),
+        (workspace_root, "BLOCKED_RESEARCH_WORKSPACE_ROOT"),
+    ):
+        if (
+            not root.is_absolute()
+            or not root.is_dir()
+            or root.is_symlink()
+            or root.resolve(strict=True) != root
+        ):
+            raise CanonicalProductionResearchBlocked(
+                code, "root must be absolute and safe"
+            )
+        _validate_mount_source(root, code=code)
+    return (
+        market_artifact_root.resolve(strict=True),
+        workspace_root.resolve(strict=True),
+    )
+
+
+def _frozen_bundle_payload(frozen: object) -> dict[str, object]:
+    payload = {
+        "configuration_bundle_id": str(frozen.configuration_bundle_id),
+        "configuration_bundle_digest": frozen.configuration_bundle_digest,
+        "market_snapshot_id": str(frozen.market_snapshot_id),
+        "market_snapshot_digest": frozen.market_snapshot_digest,
+        "capability": dict(frozen.capability),
+        "configurations": [
+            {
+                "configuration_kind": item.configuration_kind,
+                "snapshot_id": str(item.snapshot_id),
+                "snapshot_digest": item.snapshot_digest,
+                "payload": dict(item.payload),
+            }
+            for item in frozen.configurations
+        ],
+        "targets": [asdict(item) for item in frozen.targets],
+    }
+    for target in payload["targets"]:
+        target["research_target_id"] = str(target["research_target_id"])
+    return payload
+
+
+def _strategy_artifact_for_lineage(
+    reader_connection: Connection, lineage: ResearchLineage
+) -> Mapping[str, object]:
+    artifact = (
+        reader_connection.execute(
+            select(STRATEGY_ARTIFACTS_TABLE)
+            .select_from(
+                STRATEGY_VERSIONS_TABLE.join(
+                    STRATEGY_ARTIFACTS_TABLE,
+                    STRATEGY_ARTIFACTS_TABLE.c.id
+                    == STRATEGY_VERSIONS_TABLE.c.artifact_id,
+                )
+            )
+            .where(STRATEGY_VERSIONS_TABLE.c.id == lineage.strategy_version_id)
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if artifact is None or str(artifact["encoding"]).upper() != "UTF-8":
+        raise CanonicalProductionResearchBlocked(
+            "BLOCKED_STRATEGY_ARTIFACT_UNSET", "UTF-8 strategy artifact is required"
+        )
+    strategy_bytes = str(artifact["normalized_content"]).encode("utf-8")
+    if (
+        sha256(strategy_bytes).hexdigest() != artifact["content_digest"]
+        or len(strategy_bytes) != artifact["size_bytes"]
+    ):
+        raise CanonicalProductionResearchBlocked(
+            "BLOCKED_STRATEGY_ARTIFACT_DIGEST_DRIFT",
+            "strategy content no longer matches its immutable identity",
+        )
+    return artifact
+
+
+def validate_production_static_gate(
+    reader_connection: Connection, *, lineage: ResearchLineage
+) -> StaticValidationReceipt:
+    """Run the non-executing AST gate without creating a plan or DB row."""
+
+    artifact = _strategy_artifact_for_lineage(reader_connection, lineage)
+    return validate_static_source(
+        str(artifact["normalized_content"]),
+        strategy_version_id=lineage.strategy_version_id,
+        expected_artifact_digest=str(artifact["content_digest"]),
+        validator_identity=STATIC_VALIDATOR_IDENTITY,
+        validator_digest=static_validator_digest(),
+    )
+
+
+@contextmanager
+def materialize_production_lookahead_inputs(
+    reader_connection: Connection,
+    *,
+    lineage: ResearchLineage,
+    market_artifact_root: Path,
+    workspace_root: Path,
+    observed_at: datetime | None = None,
+) -> Iterator[ProductionLookaheadInputSet]:
+    """Materialize one fresh, digest-bound lookahead input set without DB writes."""
+
+    market_root, scratch_root = _validated_roots(
+        market_artifact_root, workspace_root
+    )
+    artifact = _strategy_artifact_for_lineage(reader_connection, lineage)
+    strategy_bytes = str(artifact["normalized_content"]).encode("utf-8")
+    frozen = read_frozen_research_bundle(
+        reader_connection,
+        configuration_bundle_id=lineage.configuration_bundle_id,
+        expected_bundle_digest=lineage.configuration_bundle_digest,
+    )
+    if (
+        frozen.market_snapshot_id != lineage.market_snapshot_id
+        or frozen.market_snapshot_digest != lineage.market_snapshot_digest
+        or {target.research_target_id for target in frozen.targets}
+        != {lineage.research_target_id}
+    ):
+        raise CanonicalProductionResearchBlocked(
+            "BLOCKED_RESEARCH_INPUT_LINEAGE",
+            "lookahead lineage differs from the frozen target/bundle/market set",
+        )
+    window_payload = next(
+        (
+            dict(item.payload)
+            for item in frozen.configurations
+            if item.configuration_kind == "WINDOW"
+        ),
+        None,
+    )
+    raw_windows = None if window_payload is None else window_payload.get("windows")
+    if not isinstance(raw_windows, list):
+        raise CanonicalProductionResearchBlocked(
+            "BLOCKED_RESEARCH_WINDOWS_UNSET", "WINDOW payload is unavailable"
+        )
+    required_window_rows = [
+        row
+        for row in raw_windows
+        if isinstance(row, dict) and row.get("required") is True
+    ]
+    if not required_window_rows or any(
+        not isinstance(row.get("coverage"), dict)
+        or isinstance(row["coverage"].get("freshness_max_age_seconds"), bool)
+        or not isinstance(row["coverage"].get("freshness_max_age_seconds"), int)
+        or row["coverage"]["freshness_max_age_seconds"] <= 0
+        for row in required_window_rows
+    ):
+        raise CanonicalProductionResearchBlocked(
+            "BLOCKED_MARKET_FRESHNESS_CONTRACT",
+            "every required window needs one positive freshness limit",
+        )
+    freshness_limits = {
+        int(row["coverage"]["freshness_max_age_seconds"])
+        for row in required_window_rows
+    }
+    if len(freshness_limits) != 1:
+        raise CanonicalProductionResearchBlocked(
+            "BLOCKED_MARKET_FRESHNESS_CONTRACT",
+            "required windows must share one explicit freshness limit",
+        )
+    freshness_limit = next(iter(freshness_limits))
+    market_rows = (
+        reader_connection.execute(
+            select(
+                MARKET_ARTIFACTS_TABLE.c.locator,
+                MARKET_ARTIFACTS_TABLE.c.content_digest,
+                MARKET_ARTIFACTS_TABLE.c.size_bytes,
+                MARKET_SNAPSHOT_MEMBERS_TABLE.c.coverage_start,
+                MARKET_SNAPSHOT_MEMBERS_TABLE.c.coverage_end,
+                MARKET_RECEIPTS_TABLE.c.status,
+                MARKET_RECEIPTS_TABLE.c.artifact_digest,
+                MARKET_RECEIPTS_TABLE.c.inspection_digest.label(
+                    "receipt_inspection_digest"
+                ),
+                MARKET_RECEIPTS_TABLE.c.receipt_digest,
+                MARKET_INSPECTIONS_TABLE.c.inspection_json,
+                MARKET_INSPECTIONS_TABLE.c.inspection_digest,
+            )
+            .select_from(
+                MARKET_SNAPSHOT_MEMBERS_TABLE.join(
+                    MARKET_ARTIFACTS_TABLE,
+                    MARKET_ARTIFACTS_TABLE.c.id
+                    == MARKET_SNAPSHOT_MEMBERS_TABLE.c.market_artifact_id,
+                )
+                .join(
+                    MARKET_RECEIPTS_TABLE,
+                    MARKET_RECEIPTS_TABLE.c.id
+                    == MARKET_SNAPSHOT_MEMBERS_TABLE.c.market_receipt_id,
+                )
+                .join(
+                    MARKET_INSPECTIONS_TABLE,
+                    MARKET_INSPECTIONS_TABLE.c.id
+                    == MARKET_RECEIPTS_TABLE.c.market_inspection_id,
+                )
+            )
+            .where(
+                MARKET_SNAPSHOT_MEMBERS_TABLE.c.market_snapshot_id
+                == lineage.market_snapshot_id,
+                MARKET_SNAPSHOT_MEMBERS_TABLE.c.research_target_id
+                == lineage.research_target_id,
+            )
+        )
+        .mappings()
+        .all()
+    )
+    if not market_rows:
+        raise CanonicalProductionResearchBlocked(
+            "BLOCKED_MARKET_ARTIFACT_UNSET", "target has no sealed market artifact"
+        )
+    now = (observed_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    frozen_target = frozen.targets[0]
+    market_sources: list[tuple[Path, str, int, str]] = []
+    for index, row in enumerate(sorted(market_rows, key=lambda item: item["locator"])):
+        inspection = row["inspection_json"]
+        acquisition_json = (
+            inspection.get("acquisition_receipt_json")
+            if isinstance(inspection, dict)
+            else None
+        )
+        try:
+            acquisition_receipt = MarketAcquisitionReceipt(**acquisition_json)
+        except (TypeError, ValueError):
+            acquisition_receipt = None
+        if (
+            row["status"] != "ACCEPTED"
+            or not isinstance(inspection, dict)
+            or canonical_research_digest(inspection) != row["inspection_digest"]
+            or row["artifact_digest"] != row["content_digest"]
+            or row["receipt_inspection_digest"] != row["inspection_digest"]
+            or canonical_research_digest(
+                {
+                    "artifact_digest": row["content_digest"],
+                    "inspection_digest": row["inspection_digest"],
+                    "status": "ACCEPTED",
+                }
+            )
+            != row["receipt_digest"]
+            or inspection.get("provenance_class") != "PRODUCTION_PUBLIC_MARKET_DATA"
+            or acquisition_receipt is None
+            or not verify_market_acquisition_receipt(acquisition_receipt)
+            or acquisition_receipt.receipt_digest
+            != inspection.get("acquisition_receipt_digest")
+            or acquisition_receipt.content_digest != row["content_digest"]
+            or acquisition_receipt.acquired_at != inspection.get("acquired_at")
+            or acquisition_receipt.observed_closed_candles
+            != inspection.get("row_count")
+            or acquisition_receipt.observed_first_open
+            != inspection.get("first_open_at")
+            or acquisition_receipt.observed_last_close
+            != inspection.get("last_close_at")
+            or acquisition_receipt.target_key != frozen_target.target_key
+            or acquisition_receipt.instrument != frozen_target.instrument
+            or acquisition_receipt.pair != frozen_target.pair
+            or acquisition_receipt.timeframe != frozen_target.timeframe
+            or acquisition_receipt.data_kind != frozen_target.data_kind
+            or acquisition_receipt.credential_access != "NONE"
+            or acquisition_receipt.network_access != "PUBLIC_MARKET_DATA_ONLY"
+        ):
+            raise CanonicalProductionResearchBlocked(
+                "BLOCKED_MARKET_RECEIPT_NOT_ACCEPTED",
+                "market receipt is not accepted public-only evidence",
+            )
+        try:
+            acquired_at = datetime.fromisoformat(str(inspection["acquired_at"]))
+        except (KeyError, ValueError) as exc:
+            raise CanonicalProductionResearchBlocked(
+                "BLOCKED_MARKET_FRESHNESS_CONTRACT",
+                "market acquisition time is invalid",
+            ) from exc
+        if (
+            str(inspection.get("first_open_at"))
+            != row["coverage_start"].astimezone(timezone.utc).isoformat()
+            or str(inspection.get("last_close_at"))
+            != row["coverage_end"].astimezone(timezone.utc).isoformat()
+        ):
+            raise CanonicalProductionResearchBlocked(
+                "BLOCKED_MARKET_COVERAGE_DRIFT",
+                "snapshot coverage differs from inspected public evidence",
+            )
+        if (
+            acquired_at.tzinfo is None
+            or not 0 <= (now - acquired_at).total_seconds() <= freshness_limit
+        ):
+            raise CanonicalProductionResearchBlocked(
+                "BLOCKED_MARKET_FRESHNESS_EXPIRED",
+                "market acquisition is outside the frozen freshness limit",
+            )
+        market_sources.append(
+            (
+                _safe_market_path(market_root, str(row["locator"])),
+                str(row["content_digest"]),
+                int(row["size_bytes"]),
+                f"/input/market-{index:04d}.data",
+            )
+        )
+    workspace = Path(
+        tempfile.mkdtemp(prefix=f"v13-lookahead-{lineage.strategy_version_id}-", dir=scratch_root)
+    )
+    try:
+        mounts: list[ReadOnlyMount] = []
+        for source, expected_digest, expected_size, destination in market_sources:
+            copied_path = workspace / Path(destination).name
+            digest, size = _copy_verified_read_only(source, copied_path)
+            if digest != expected_digest or size != expected_size:
+                raise CanonicalProductionResearchBlocked(
+                    "BLOCKED_MARKET_ARTIFACT_DIGEST_DRIFT",
+                    "market artifact differs from canonical evidence",
+                )
+            mounts.append(ReadOnlyMount(copied_path, destination, digest, size))
+        required_windows = [item for item in frozen.windows if item.required]
+        if not required_windows:
+            raise CanonicalProductionResearchBlocked(
+                "BLOCKED_RESEARCH_WINDOWS_UNSET", "required window set is empty"
+            )
+        request_without_digest = {
+            "contract": "canonical-v13-freqtrade-lookahead-request-v1",
+            "strategy_version_id": str(lineage.strategy_version_id),
+            "research_target_id": str(lineage.research_target_id),
+            "artifact_digest": str(artifact["content_digest"]),
+            "bundle_digest": frozen.configuration_bundle_digest,
+            "market_snapshot_digest": frozen.market_snapshot_digest,
+            "windows": [
+                {
+                    "window_key": item.window_key,
+                    "window_member_digest": item.member_digest,
+                    "window_start": item.start_at,
+                    "window_end": item.end_at,
+                    "minimum_closed_candles": item.minimum_closed_candles,
+                }
+                for item in required_windows
+            ],
+            "market_files": [
+                {
+                    "path": item.destination,
+                    "content_digest": item.content_digest,
+                    "size_bytes": item.size_bytes,
+                }
+                for item in mounts
+            ],
+        }
+        request_payload = {
+            **request_without_digest,
+            "request_digest": canonical_research_digest(request_without_digest),
+        }
+        strategy_path = workspace / "strategy.py"
+        bundle_path = workspace / "bundle.json"
+        request_path = workspace / "lookahead-request.json"
+        for path, content in (
+            (strategy_path, strategy_bytes),
+            (bundle_path, _canonical_bytes(_frozen_bundle_payload(frozen))),
+            (request_path, _canonical_bytes(request_payload)),
+        ):
+            _write_read_only(path, content)
+        manifest = {
+            "contract": "canonical-v13-production-lookahead-input-set-v1",
+            "files": {
+                path.name: _file_digest(path)[0]
+                for path in (strategy_path, bundle_path, request_path)
+            },
+            "market": [
+                {
+                    "destination": item.destination,
+                    "content_digest": item.content_digest,
+                    "size_bytes": item.size_bytes,
+                }
+                for item in mounts
+            ],
+        }
+        workspace.chmod(0o500)
+        yield ProductionLookaheadInputSet(
+            workspace=workspace,
+            request_path=request_path,
+            mounts=tuple(mounts),
+            input_manifest_digest=canonical_research_digest(manifest),
+        )
+    finally:
+        workspace.chmod(0o700)
+        for child in workspace.iterdir():
+            child.chmod(0o600)
+        shutil.rmtree(workspace)
 
 
 @contextmanager
@@ -549,6 +974,311 @@ def materialize_production_research_inputs(
         shutil.rmtree(workspace)
 
 
+class FreqtradeProductionLookaheadAdapter:
+    """One-shot OCI lookahead gate that cannot create a plan or attempt."""
+
+    environment_class = "PRODUCTION_LOOKAHEAD_GATE"
+    network_mode = "none"
+    credential_mounts: tuple[str, ...] = ()
+    exchange_capabilities: tuple[str, ...] = ()
+    order_capabilities: tuple[str, ...] = ()
+    writer_capabilities: tuple[str, ...] = ()
+
+    def __init__(
+        self,
+        *,
+        activation: str,
+        runtime_path: Path,
+        image_reference: str,
+        limits: ProductionResearchLimits,
+        input_factory: ProductionLookaheadInputFactory,
+        runner: SandboxRunnerPort,
+    ) -> None:
+        if activation != PRODUCTION_LOOKAHEAD_ACTIVATION:
+            raise CanonicalProductionResearchBlocked(
+                "BLOCKED_PRODUCTION_LOOKAHEAD_NOT_ACTIVATED",
+                "exact no-trade lookahead activation is required",
+            )
+        if (
+            not runtime_path.is_absolute()
+            or not runtime_path.is_file()
+            or runtime_path.is_symlink()
+            or runtime_path.resolve(strict=True) != runtime_path
+            or not os.access(runtime_path, os.X_OK)
+        ):
+            raise CanonicalProductionResearchBlocked(
+                "BLOCKED_SANDBOX_RUNTIME_PATH", "OCI runtime path is unavailable"
+            )
+        match = _IMAGE.fullmatch(image_reference)
+        if match is None:
+            raise CanonicalProductionResearchBlocked(
+                "BLOCKED_EXECUTOR_IMAGE_UNPINNED", "image must be pinned by SHA-256"
+            )
+        if os.getuid() == 0:
+            raise CanonicalProductionResearchBlocked(
+                "BLOCKED_SANDBOX_ROOT_IDENTITY",
+                "production lookahead must run from an unprivileged service account",
+            )
+        limits.validate()
+        self._runtime_path = runtime_path
+        self._image_reference = image_reference
+        self._image_digest = match.group(1)
+        self._sandbox_identity = f"{os.getuid()}:{os.getgid()}"
+        self._limits = limits
+        self._input_factory = input_factory
+        self._runner = runner
+
+    def _command(
+        self, lineage: ResearchLineage, inputs: ProductionLookaheadInputSet
+    ) -> tuple[str, ...]:
+        name = f"canonical-v13-lookahead-{lineage.strategy_version_id}"
+        if not _SAFE_KEY.fullmatch(name):
+            raise CanonicalProductionResearchBlocked(
+                "BLOCKED_SANDBOX_IDENTITY", "lineage cannot form a safe container name"
+            )
+        argv = [
+            str(self._runtime_path),
+            "run",
+            "--rm",
+            "--init",
+            "--stop-timeout",
+            "5",
+            "--name",
+            name,
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--pids-limit",
+            str(self._limits.pids_limit),
+            "--cpus",
+            self._limits.cpu_count,
+            "--memory",
+            f"{self._limits.memory_mb}m",
+            "--memory-swap",
+            f"{self._limits.memory_mb}m",
+            "--user",
+            self._sandbox_identity,
+            "--tmpfs",
+            f"/work:rw,noexec,nosuid,nodev,size={self._limits.tmpfs_mb}m",
+            "--mount",
+            f"type=bind,src={inputs.workspace},dst=/input,readonly",
+        ]
+        for mount in inputs.mounts:
+            argv.extend(
+                (
+                    "--mount",
+                    f"type=bind,src={mount.source},dst={mount.destination},readonly",
+                )
+            )
+        argv.extend(
+            (
+                self._image_reference,
+                "/opt/freqtrade-ai/bin/canonical-v13-research-worker",
+                "lookahead",
+                "--request",
+                "/input/lookahead-request.json",
+                "--bundle",
+                "/input/bundle.json",
+                "--strategy",
+                "/input/strategy.py",
+                "--output",
+                "-",
+            )
+        )
+        return tuple(argv)
+
+    def _parse_output(
+        self,
+        *,
+        lineage: ResearchLineage,
+        artifact_digest: str,
+        request: Mapping[str, object],
+        raw: bytes,
+    ) -> LookaheadAnalysisReceipt:
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise CanonicalProductionResearchBlocked(
+                "BLOCKED_LOOKAHEAD_OUTPUT_INVALID",
+                "worker output is not one JSON object",
+            ) from exc
+        required = {
+            "contract",
+            "request_digest",
+            "strategy_version_id",
+            "research_target_id",
+            "status",
+            "has_bias",
+            "observed_signal_count",
+            "window_results",
+            "evidence_digest",
+        }
+        if not isinstance(payload, dict) or set(payload) != required:
+            raise CanonicalProductionResearchBlocked(
+                "BLOCKED_LOOKAHEAD_OUTPUT_INVALID", "worker output fields drifted"
+            )
+        evidence = {key: value for key, value in payload.items() if key != "evidence_digest"}
+        if (
+            payload["contract"] != "canonical-v13-freqtrade-lookahead-output-v1"
+            or payload["request_digest"] != request.get("request_digest")
+            or payload["strategy_version_id"] != str(lineage.strategy_version_id)
+            or payload["research_target_id"] != str(lineage.research_target_id)
+            or payload["status"] not in {"PASSED", "FAILED", "BLOCKED"}
+            or payload["has_bias"] not in {True, False, None}
+            or isinstance(payload["observed_signal_count"], bool)
+            or not isinstance(payload["observed_signal_count"], int)
+            or payload["observed_signal_count"] < 0
+            or not isinstance(payload["window_results"], list)
+            or canonical_research_digest(evidence) != payload["evidence_digest"]
+        ):
+            raise CanonicalProductionResearchBlocked(
+                "BLOCKED_LOOKAHEAD_OUTPUT_LINEAGE", "worker output lineage drifted"
+            )
+        expected_windows = request.get("windows")
+        if not isinstance(expected_windows, list) or not expected_windows:
+            raise CanonicalProductionResearchBlocked(
+                "BLOCKED_LOOKAHEAD_OUTPUT_LINEAGE", "required window set is unavailable"
+            )
+        if payload["status"] == "BLOCKED":
+            if (
+                payload["has_bias"] is not None
+                or payload["observed_signal_count"] != 0
+                or payload["window_results"]
+            ):
+                raise CanonicalProductionResearchBlocked(
+                    "BLOCKED_LOOKAHEAD_OUTPUT_LINEAGE",
+                    "blocked worker output is internally inconsistent",
+                )
+        else:
+            expected_bindings = [
+                (item.get("window_key"), item.get("window_member_digest"))
+                for item in expected_windows
+                if isinstance(item, dict)
+            ]
+            window_results = payload["window_results"]
+            actual_bindings: list[tuple[object, object]] = []
+            total_signals = 0
+            any_bias = False
+            for item in window_results:
+                if not isinstance(item, dict) or set(item) != {
+                    "window_key",
+                    "window_member_digest",
+                    "has_bias",
+                    "observed_signal_count",
+                    "biased_entry_signal_count",
+                    "biased_exit_signal_count",
+                }:
+                    raise CanonicalProductionResearchBlocked(
+                        "BLOCKED_LOOKAHEAD_OUTPUT_LINEAGE",
+                        "window result fields drifted",
+                    )
+                counts = (
+                    item["observed_signal_count"],
+                    item["biased_entry_signal_count"],
+                    item["biased_exit_signal_count"],
+                )
+                if (
+                    item["has_bias"] not in {True, False}
+                    or any(
+                        isinstance(value, bool)
+                        or not isinstance(value, int)
+                        or value < 0
+                        for value in counts
+                    )
+                ):
+                    raise CanonicalProductionResearchBlocked(
+                        "BLOCKED_LOOKAHEAD_OUTPUT_LINEAGE",
+                        "window result values are invalid",
+                    )
+                actual_bindings.append(
+                    (item["window_key"], item["window_member_digest"])
+                )
+                total_signals += item["observed_signal_count"]
+                any_bias = any_bias or item["has_bias"]
+            if (
+                actual_bindings != expected_bindings
+                or payload["observed_signal_count"] != total_signals
+                or payload["has_bias"] != any_bias
+                or payload["status"] != ("FAILED" if any_bias else "PASSED")
+            ):
+                raise CanonicalProductionResearchBlocked(
+                    "BLOCKED_LOOKAHEAD_OUTPUT_LINEAGE",
+                    "required window output is incomplete or inconsistent",
+                )
+        return build_lookahead_receipt(
+            lineage=lineage,
+            artifact_digest=artifact_digest,
+            analyzer_identity=PRODUCTION_LOOKAHEAD_ANALYZER_IDENTITY,
+            analyzer_digest=self._image_digest,
+            evidence_digest=str(payload["evidence_digest"]),
+            status=str(payload["status"]),
+            has_bias=payload["has_bias"],
+            observed_signal_count=int(payload["observed_signal_count"]),
+        )
+
+    def execute(
+        self, *, lineage: ResearchLineage, artifact_digest: str
+    ) -> LookaheadAnalysisReceipt:
+        with self._input_factory(lineage) as inputs:
+            request = json.loads(inputs.request_path.read_text(encoding="utf-8"))
+            result = self._runner.run(
+                self._command(lineage, inputs),
+                timeout_seconds=self._limits.timeout_seconds,
+                max_output_bytes=self._limits.max_output_bytes,
+            )
+            if result.return_code != 0 or result.stderr:
+                raise CanonicalProductionResearchBlocked(
+                    "BLOCKED_LOOKAHEAD_PROCESS_FAILED",
+                    "sandbox returned a non-zero code or unexpected stderr",
+                )
+            return self._parse_output(
+                lineage=lineage,
+                artifact_digest=artifact_digest,
+                request=request,
+                raw=result.stdout,
+            )
+
+
+def execute_production_static_lookahead_gate(
+    reader_connection: Connection,
+    *,
+    lineage: ResearchLineage,
+    adapter: FreqtradeProductionLookaheadAdapter,
+) -> ProductionStaticLookaheadGateReceipt:
+    """Execute only static then lookahead; never persist or create a plan."""
+
+    static_receipt = validate_production_static_gate(
+        reader_connection, lineage=lineage
+    )
+    if static_receipt.status != "PASSED" or static_receipt.findings:
+        return ProductionStaticLookaheadGateReceipt(
+            lineage=lineage,
+            static_receipt=static_receipt,
+            lookahead_receipt=None,
+            status="STATIC_FAILED",
+        )
+    lookahead_receipt = adapter.execute(
+        lineage=lineage, artifact_digest=static_receipt.artifact_digest
+    )
+    status = (
+        "PASSED"
+        if lookahead_receipt.status == "PASSED"
+        and lookahead_receipt.has_bias is False
+        and lookahead_receipt.observed_signal_count > 0
+        else "LOOKAHEAD_FAILED"
+    )
+    return ProductionStaticLookaheadGateReceipt(
+        lineage=lineage,
+        static_receipt=static_receipt,
+        lookahead_receipt=lookahead_receipt,
+        status=status,
+    )
+
+
 class FreqtradeProductionResearchAdapter:
     """One-shot OCI adapter; it never receives a SQLAlchemy connection or DSN."""
 
@@ -766,15 +1496,24 @@ class FreqtradeProductionResearchAdapter:
 
 
 __all__ = [
+    "PRODUCTION_LOOKAHEAD_ACTIVATION",
+    "PRODUCTION_LOOKAHEAD_ANALYZER_IDENTITY",
     "PRODUCTION_RESEARCH_ACTIVATION",
     "BoundedSubprocessSandboxRunner",
     "CanonicalProductionResearchBlocked",
+    "FreqtradeProductionLookaheadAdapter",
     "FreqtradeProductionResearchAdapter",
+    "ProductionLookaheadInputFactory",
+    "ProductionLookaheadInputSet",
     "ProductionResearchInputFactory",
     "ProductionResearchInputSet",
     "ProductionResearchLimits",
+    "ProductionStaticLookaheadGateReceipt",
     "ReadOnlyMount",
     "SandboxCommandResult",
     "SandboxRunnerPort",
+    "execute_production_static_lookahead_gate",
+    "materialize_production_lookahead_inputs",
     "materialize_production_research_inputs",
+    "validate_production_static_gate",
 ]

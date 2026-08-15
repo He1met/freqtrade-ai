@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import csv
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
@@ -18,6 +19,8 @@ import zipfile
 
 REQUEST_CONTRACT = "canonical-v13-freqtrade-backtest-request-v1"
 OUTPUT_CONTRACT = "canonical-v13-freqtrade-backtest-output-v1"
+LOOKAHEAD_REQUEST_CONTRACT = "canonical-v13-freqtrade-lookahead-request-v1"
+LOOKAHEAD_OUTPUT_CONTRACT = "canonical-v13-freqtrade-lookahead-output-v1"
 PREFLIGHT_CONTRACT = "canonical-v13-research-worker-preflight-v1"
 EXPECTED_CAPABILITY = {
     "trading": "TRADING_DISABLED",
@@ -187,7 +190,91 @@ def validate_inputs(
     return request, bundle, plan
 
 
-def _prepare_data(request: dict[str, object], target: dict[str, object]) -> None:
+def validate_lookahead_inputs(
+    request_path: Path, bundle_path: Path, strategy_path: Path
+) -> tuple[dict[str, object], dict[str, object]]:
+    request = _load_object(request_path)
+    bundle = _load_object(bundle_path)
+    if request.get("contract") != LOOKAHEAD_REQUEST_CONTRACT:
+        raise Blocked("lookahead request contract drifted")
+    for field in (
+        "request_digest",
+        "artifact_digest",
+        "bundle_digest",
+        "market_snapshot_digest",
+    ):
+        _hex_digest(request.get(field))
+    expected_request = {
+        key: value for key, value in request.items() if key != "request_digest"
+    }
+    if _digest(expected_request) != request["request_digest"]:
+        raise Blocked("lookahead request digest drifted")
+    strategy_digest, _ = _file_digest(strategy_path)
+    if strategy_digest != request["artifact_digest"]:
+        raise Blocked("strategy digest drifted")
+    if bundle.get("configuration_bundle_digest") != request["bundle_digest"]:
+        raise Blocked("bundle digest drifted")
+    if bundle.get("market_snapshot_digest") != request["market_snapshot_digest"]:
+        raise Blocked("market snapshot digest drifted")
+    capability = bundle.get("capability")
+    if not isinstance(capability, dict) or any(
+        capability.get(key) != value for key, value in EXPECTED_CAPABILITY.items()
+    ):
+        raise Blocked("no-trade capability drifted")
+    targets = bundle.get("targets")
+    if not isinstance(targets, list) or len(targets) != 1 or not isinstance(targets[0], dict):
+        raise Blocked("worker requires one exact target")
+    target = targets[0]
+    if target.get("research_target_id") != request.get("research_target_id"):
+        raise Blocked("lookahead target lineage drifted")
+    windows = request.get("windows")
+    if not isinstance(windows, list) or not windows:
+        raise Blocked("lookahead required window set is empty")
+    seen_window_keys: set[str] = set()
+    for window in windows:
+        if not isinstance(window, dict) or set(window) != {
+            "window_key",
+            "window_member_digest",
+            "window_start",
+            "window_end",
+            "minimum_closed_candles",
+        }:
+            raise Blocked("lookahead window contract drifted")
+        key = str(window["window_key"])
+        if not key or key in seen_window_keys:
+            raise Blocked("lookahead window key is invalid")
+        seen_window_keys.add(key)
+        _hex_digest(window["window_member_digest"])
+        start = _timestamp(window["window_start"])
+        end = _timestamp(window["window_end"])
+        minimum_closed_candles = window["minimum_closed_candles"]
+        if (
+            end <= start
+            or isinstance(minimum_closed_candles, bool)
+            or not isinstance(minimum_closed_candles, int)
+            or minimum_closed_candles <= 0
+        ):
+            raise Blocked("lookahead window interval is invalid")
+    market_files = request.get("market_files")
+    if not isinstance(market_files, list) or not market_files:
+        raise Blocked("market file set is empty")
+    for item in market_files:
+        if not isinstance(item, dict) or set(item) != {
+            "path",
+            "content_digest",
+            "size_bytes",
+        }:
+            raise Blocked("market file contract drifted")
+        path = Path(str(item["path"]))
+        if not path.is_absolute() or path.parent != Path("/input"):
+            raise Blocked("market path is outside /input")
+        digest, size = _file_digest(path)
+        if digest != _hex_digest(item["content_digest"]) or size != item["size_bytes"]:
+            raise Blocked("market file digest drifted")
+    return request, bundle
+
+
+def _prepare_data(request: dict[str, object], target: dict[str, object]):
     import pandas as pd
     from freqtrade.data.history.datahandlers.featherdatahandler import FeatherDataHandler
     from freqtrade.enums import CandleType
@@ -217,6 +304,7 @@ def _prepare_data(request: dict[str, object], target: dict[str, object]) -> None
     FeatherDataHandler(Path("/work/data")).ohlcv_store(
         str(target["pair"]), str(target["timeframe"]), frame, CandleType.FUTURES
     )
+    return frame
 
 
 def _operator_pass(value: float, operator: object, threshold: object) -> bool:
@@ -382,6 +470,132 @@ def backtest(args: argparse.Namespace) -> dict[str, object]:
     }
 
 
+def lookahead(args: argparse.Namespace) -> dict[str, object]:
+    request, bundle = validate_lookahead_inputs(
+        args.request, args.bundle, args.strategy
+    )
+    target = bundle["targets"][0]  # type: ignore[index]
+    strategy_class = _strategy_class(args.strategy)
+    fee, _slippage, _gates = _quality_assumptions(bundle)
+    Path("/work/home").mkdir(parents=True, exist_ok=True)
+    Path("/work/user_data").mkdir(parents=True, exist_ok=True)
+    frame = _prepare_data(request, target)
+    config = {
+        "dry_run": True,
+        "dry_run_wallet": 10000,
+        "stake_currency": "USDT",
+        "stake_amount": 100,
+        "max_open_trades": 1,
+        "timeframe": str(target["timeframe"]),
+        "trading_mode": "futures",
+        "margin_mode": "isolated",
+        "entry_pricing": {"price_side": "other", "use_order_book": False},
+        "exit_pricing": {"price_side": "other", "use_order_book": False},
+        "exchange": {
+            "name": "okx",
+            "pair_whitelist": [str(target["pair"])],
+            "enable_ws": False,
+        },
+        "pairlists": [{"method": "StaticPairList"}],
+    }
+    config_path = Path("/work/lookahead-config.json")
+    config_path.write_bytes(_canonical_bytes(config))
+    window_results: list[dict[str, object]] = []
+    for index, window in enumerate(request["windows"]):  # type: ignore[union-attr]
+        start = _timestamp(window["window_start"])
+        end = _timestamp(window["window_end"])
+        closed_candle_count = int(
+            ((frame["date"] >= start) & (frame["date"] < end)).sum()
+        )
+        if closed_candle_count < int(window["minimum_closed_candles"]):
+            raise Blocked("lookahead window has insufficient closed-candle coverage")
+        export_path = Path(f"/work/lookahead-{index:04d}.csv")
+        command = (
+            "/home/ftuser/.local/bin/freqtrade",
+            "lookahead-analysis",
+            "--no-color",
+            "--config",
+            str(config_path),
+            "--datadir",
+            "/work/data",
+            "--strategy-path",
+            "/input",
+            "--userdir",
+            "/work/user_data",
+            "--timerange",
+            f"{start:%Y%m%d%H%M%S}-{end:%Y%m%d%H%M%S}",
+            "--timeframe",
+            str(target["timeframe"]),
+            "--fee",
+            str(fee),
+            "--minimum-trade-amount",
+            "10",
+            "--targeted-trade-amount",
+            "20",
+            "--lookahead-analysis-exportfilename",
+            str(export_path),
+            "--strategy-list",
+            strategy_class,
+        )
+        completed = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env={
+                "HOME": "/work/home",
+                "LANG": "C.UTF-8",
+                "LC_ALL": "C.UTF-8",
+                "PATH": "/usr/local/bin:/usr/bin:/bin",
+                "PYTHONDONTWRITEBYTECODE": "1",
+            },
+            close_fds=True,
+            timeout=840,
+            check=False,
+        )
+        if completed.returncode != 0 or not export_path.is_file():
+            raise Blocked("Freqtrade lookahead process failed")
+        with export_path.open(encoding="utf-8", newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        selected = [row for row in rows if row.get("strategy") == strategy_class]
+        if len(selected) != 1:
+            raise Blocked("Freqtrade lookahead result is ambiguous")
+        row = selected[0]
+        if row.get("has_bias") not in {"True", "False"}:
+            raise Blocked("Freqtrade lookahead bias result is invalid")
+        try:
+            total_signals = int(row["total_signals"])
+            biased_entry = int(row["biased_entry_signals"])
+            biased_exit = int(row["biased_exit_signals"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise Blocked("Freqtrade lookahead counts are invalid") from exc
+        if min(total_signals, biased_entry, biased_exit) < 0:
+            raise Blocked("Freqtrade lookahead counts are negative")
+        window_results.append(
+            {
+                "window_key": window["window_key"],
+                "window_member_digest": window["window_member_digest"],
+                "has_bias": row["has_bias"] == "True",
+                "observed_signal_count": total_signals,
+                "biased_entry_signal_count": biased_entry,
+                "biased_exit_signal_count": biased_exit,
+            }
+        )
+    has_bias = any(bool(row["has_bias"]) for row in window_results)
+    observed_signal_count = sum(int(row["observed_signal_count"]) for row in window_results)
+    evidence = {
+        "contract": LOOKAHEAD_OUTPUT_CONTRACT,
+        "request_digest": request["request_digest"],
+        "strategy_version_id": request["strategy_version_id"],
+        "research_target_id": request["research_target_id"],
+        "status": "FAILED" if has_bias else "PASSED",
+        "has_bias": has_bias,
+        "observed_signal_count": observed_signal_count,
+        "window_results": window_results,
+    }
+    return {**evidence, "evidence_digest": _digest(evidence)}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -390,10 +604,14 @@ def main() -> int:
     for name in ("request", "bundle", "plan", "strategy"):
         run.add_argument(f"--{name}", type=Path, required=True)
     run.add_argument("--output", choices=("-",), required=True)
+    gate = subparsers.add_parser("lookahead")
+    for name in ("request", "bundle", "strategy"):
+        gate.add_argument(f"--{name}", type=Path, required=True)
+    gate.add_argument("--output", choices=("-",), required=True)
     args = parser.parse_args()
     if args.command == "preflight":
         result: dict[str, object] = preflight_evidence()
-    else:
+    elif args.command == "backtest":
         try:
             result = backtest(args)
         except Exception:
@@ -408,6 +626,25 @@ def main() -> int:
                 "status": "BLOCKED",
                 "windows": [],
             }
+    else:
+        try:
+            result = lookahead(args)
+        except Exception:
+            try:
+                request = _load_object(args.request)
+            except Exception:
+                return 2
+            evidence = {
+                "contract": LOOKAHEAD_OUTPUT_CONTRACT,
+                "request_digest": request.get("request_digest"),
+                "strategy_version_id": request.get("strategy_version_id"),
+                "research_target_id": request.get("research_target_id"),
+                "status": "BLOCKED",
+                "has_bias": None,
+                "observed_signal_count": 0,
+                "window_results": [],
+            }
+            result = {**evidence, "evidence_digest": _digest(evidence)}
     sys.stdout.buffer.write(_canonical_bytes(result) + b"\n")
     return 0
 
