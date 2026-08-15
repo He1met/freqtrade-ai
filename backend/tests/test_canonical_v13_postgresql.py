@@ -23,6 +23,7 @@ from app.canonical_v13.configuration_governance import (
     create_audited_configuration_draft,
 )
 from app.canonical_v13.gate_receipt_upgrade import (
+    PREVIOUS_GATE_API_MANIFEST_DIGEST,
     PREVIOUS_GATE_MANIFEST_DIGEST as PREVIOUS_PLANLESS_GATE_MANIFEST_DIGEST,
     PREVIOUS_MANIFEST_DIGEST as PREVIOUS_GATE_MANIFEST_DIGEST,
     apply_gate_receipt_upgrade,
@@ -47,6 +48,7 @@ from app.canonical_v13.research_authorization import (
     verify_persisted_research_authorization_consumption,
 )
 from app.canonical_v13.research_execution import start_consumed_research_attempt
+from app.canonical_v13.research_gates import create_gate_attempt
 from app.canonical_v13.research_qualification import persist_qualification_receipt
 from app.canonical_v13.research_scoring import persist_scoring_receipt
 from app.canonical_v13.research_validation import (
@@ -56,6 +58,7 @@ from app.canonical_v13.research_validation import (
 )
 from tests.test_canonical_v13_research_validation import (
     EXECUTOR_IMAGE_DIGEST,
+    GATE_NOW,
     _prepare_ready_plan,
 )
 
@@ -365,6 +368,34 @@ def test_postgresql_gate_receipt_upgrade_from_exact_predecessor() -> None:
                 require_zero_business_rows=False,
             ).accepted is True
 
+            connection.execute(
+                SCHEMA_METADATA_TABLE.update().values(
+                    manifest_digest=PREVIOUS_GATE_API_MANIFEST_DIGEST
+                )
+            )
+            connection.exec_driver_sql(
+                f"REVOKE SELECT ON {schema}.market_artifacts, "
+                f"{schema}.market_inspections, {schema}.market_receipts FROM "
+                f"{mapping.physical('canonical_validation_writer')}"
+            )
+            market_revised = apply_gate_receipt_upgrade(
+                connection,
+                role_mapping=mapping,
+                actor_identity="canonical-v13-ci-gate-market-acl-revision",
+                observed_at=datetime(2026, 8, 15, 0, 0, 45, tzinfo=timezone.utc),
+            )
+            assert market_revised.status == "ACCEPTED"
+            assert (
+                market_revised.previous_manifest_digest
+                == PREVIOUS_GATE_API_MANIFEST_DIGEST
+            )
+            assert market_revised.receipt_digest is not None
+            assert verify_postgresql_bootstrap(
+                connection,
+                role_mapping=mapping,
+                require_zero_business_rows=False,
+            ).accepted is True
+
             connection.exec_driver_sql(
                 f"REVOKE SELECT ON {schema}.market_profiles FROM "
                 f"{mapping.physical('canonical_validation_writer')}"
@@ -552,6 +583,21 @@ def test_postgresql_research_roles_enforce_independent_receipt_writers() -> None
                 executor_identity="canonical-v13-ci-freqtrade-worker",
                 executor_image_digest=EXECUTOR_IMAGE_DIGEST,
             )
+
+        with service_engines["validation"].begin() as connection:
+            gate = create_gate_attempt(
+                connection,
+                lineage=prepared.lineage,
+                idempotency_key=(
+                    "postgresql-validation-login-planless-gate-v3:"
+                    f"{prepared.lineage.strategy_version_id}"
+                ),
+                release_commit="2" * 40,
+                executor_image_digest=EXECUTOR_IMAGE_DIGEST,
+                worker_source_digest="e" * 64,
+                observed_at=GATE_NOW,
+            )
+            assert gate.status == "PENDING"
 
         with service_engines["control"].begin() as connection:
             assert connection.execute(text("SELECT current_user")).scalar_one() == (
