@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -38,6 +39,13 @@ def test_worker_rejects_noncanonical_json(tmp_path: Path) -> None:
     path.write_text(json.dumps({"a": 1}, indent=2))
     with pytest.raises(worker.Blocked, match="canonical JSON"):
         worker._load_object(path)
+
+
+def test_worker_preserves_intraday_window_with_freqtrade_unix_timerange() -> None:
+    worker = _load_worker()
+    start = datetime(2026, 7, 16, 2, 45, tzinfo=timezone.utc)
+    end = datetime(2026, 8, 15, 2, 45, tzinfo=timezone.utc)
+    assert worker._freqtrade_timerange(start, end) == "1784169900-1786761900"
 
 
 def test_worker_extracts_exactly_one_strategy_class(tmp_path: Path) -> None:
