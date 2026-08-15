@@ -535,6 +535,29 @@ def test_lookahead_validator_requires_explicit_unbiased_digest_bound_receipt() -
         expected_lineage=lineage,
         expected_artifact_digest="3" * 64,
     ).status == "FAILED"
+    insufficient = build_lookahead_receipt(
+        lineage=lineage,
+        artifact_digest="3" * 64,
+        analyzer_identity="lookahead-simulator-v1",
+        analyzer_digest=LOOKAHEAD_ANALYZER_DIGEST,
+        evidence_digest="4" * 64,
+        status="BLOCKED",
+        has_bias=None,
+        observed_signal_count=0,
+        blocked_reason_code="LOOKAHEAD_INSUFFICIENT_TRADES",
+        blocked_observed_trade_count=3,
+        blocked_required_trade_count=10,
+    )
+    insufficient_decision = validate_lookahead_receipt(
+        insufficient,
+        expected_lineage=lineage,
+        expected_artifact_digest="3" * 64,
+    )
+    assert insufficient_decision.status == "BLOCKED"
+    assert insufficient_decision.reason_codes == (
+        "LOOKAHEAD_INSUFFICIENT_TRADES",
+        "LOOKAHEAD_OBSERVATIONS_UNSET",
+    )
     with pytest.raises(CanonicalResearchValidationBlocked) as raised:
         validate_lookahead_receipt(
             replace(receipt, evidence_digest="5" * 64),

@@ -378,6 +378,9 @@ class LookaheadReceiptCommandDTO(CanonicalCommandDTO):
     status: Literal["PASSED", "FAILED", "BLOCKED"]
     has_bias: Optional[bool]
     observed_signal_count: int = Field(ge=0)
+    blocked_reason_code: Optional[str] = Field(default=None, min_length=1, max_length=120)
+    blocked_observed_trade_count: Optional[int] = Field(default=None, ge=0)
+    blocked_required_trade_count: Optional[int] = Field(default=None, gt=0)
     request_digest: str = Field(pattern=SHA256_PATTERN)
     receipt_digest: str = Field(pattern=SHA256_PATTERN)
 

@@ -68,6 +68,13 @@ one-shot worker 只读接收该 artifact，并继续以 `--network none` 运行�
 worker 不接收 DB URL、OKX credential、socket 或 network capability。metadata 缺失、过期、混入其他
 target、digest 漂移或 tier 不完整时一律 `BLOCKED`，不得推断或合成数值。
 
+Lookahead worker output v2 对 `BLOCKED` 强制携带一个 allowlisted reason code。Pinned Freqtrade
+日志只在 `/work` tmpfs 内有界捕获；不会输出或持久化原始日志。若 baseline trades 少于 Freqtrade
+要求的 `minimum_trade_amount=10`，receipt 精确记录 `LOOKAHEAD_INSUFFICIENT_TRADES`、实际
+trade count 与 required count，继续保持 `has_bias=null` / signals `0`；该结果既不是 bias PASS，
+也不是策略失败。其他 process/export/ambiguous/internal 情况使用各自稳定 reason code，禁止统一压成
+无原因的 BLOCKED envelope。
+
 authorization command 只接受 `ttl_seconds`（1..900），`authorized_at`、`expires_at`、consume/revoke
 时间全部由 loopback API 的 UTC clock 生成，caller 不能回填时间来绕过过期门。
 start 与 worker 都会先从 immutable `audit_events` 重建 exact authorization/consumption receipt；
