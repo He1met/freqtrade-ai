@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from contextlib import contextmanager
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import inspect as python_inspect
@@ -31,10 +32,16 @@ from app.canonical_v13.market import (
     seal_market_snapshot,
     validate_market_profile,
 )
+from app.canonical_v13.market_acquisition import (
+    MarketAcquisitionPayload,
+    MarketAcquisitionRequest,
+    acquire_market_evidence,
+)
 from app.canonical_v13.research_validation import (
     ResearchLineage,
     build_lookahead_receipt,
     canonical_research_digest,
+    validate_static_source,
 )
 from app.canonical_v13.models import (
     AUDIT_EVENTS_TABLE,
@@ -58,6 +65,24 @@ from app.canonical_v13.models import (
 _HEX = "a" * 64
 _MANIFEST_DIGEST = "b" * 64
 _NOW = datetime(2026, 8, 14, tzinfo=timezone.utc)
+_GATE_NOW = _NOW + timedelta(hours=6)
+_API_OBSERVED_NOW = datetime.now(timezone.utc)
+
+
+class _ApiFixtureMarketDownloader:
+    provenance_class = "TEST_SIMULATED"
+    network_access = "NONE"
+    credential_access = "NONE"
+
+    def acquire(self, request: MarketAcquisitionRequest) -> MarketAcquisitionPayload:
+        return MarketAcquisitionPayload(
+            content=b"isolated canonical API market fixture",
+            locator="fixtures/api-BTC-USDT-SWAP-5m.parquet",
+            media_type="application/x-parquet",
+            observed_first_open=_NOW,
+            observed_last_close=_GATE_NOW,
+            observed_closed_candles=72,
+        )
 
 
 def _client():
@@ -231,7 +256,7 @@ def _seed_ready_bundle(engine) -> dict[str, object]:
                         "required": True,
                         "start_at": _NOW.isoformat(),
                         "end_at": (_NOW + timedelta(hours=6)).isoformat(),
-                        "coverage": {"minimum_closed_candles": 72},
+                        "coverage": {"minimum_closed_candles": 72, "freshness_max_age_seconds": 3600},
                     }
                 ]
             },
@@ -299,11 +324,25 @@ def _seed_ready_bundle(engine) -> dict[str, object]:
             payload={"source": "isolated-fixture", "network_access": "NONE"},
         )
         validate_market_profile(connection, version_id=market_version_id)
+        acquisition_payload, acquisition_receipt = acquire_market_evidence(
+            MarketAcquisitionRequest(
+                source_identity="canonical-api-market-fixture-v1",
+                target_key="api-btc-5m",
+                instrument="BTC-USDT-SWAP",
+                pair="BTC/USDT:USDT",
+                timeframe="5m",
+                data_kind="futures",
+                requested_start=_NOW,
+                requested_end=_GATE_NOW,
+            ),
+            downloader=_ApiFixtureMarketDownloader(),
+            observed_at=_API_OBSERVED_NOW,
+        )
         evidence = accept_market_artifact(
             connection,
-            locator="fixtures/api-BTC-USDT-SWAP-5m.parquet",
-            content=b"isolated canonical API market fixture",
-            media_type="application/x-parquet",
+            locator=acquisition_payload.locator,
+            content=acquisition_payload.content,
+            media_type=acquisition_payload.media_type,
             inspector_identity="canonical-api-fixture-inspector-v1",
             facts=MarketInspectionFacts(
                 row_count=72,
@@ -313,7 +352,17 @@ def _seed_ready_bundle(engine) -> dict[str, object]:
                 duplicate_count=0,
                 null_count=0,
                 monotonic=True,
+                source_identity=acquisition_receipt.source_identity,
+                provenance_class=acquisition_receipt.provenance_class,
+                target_key=acquisition_receipt.target_key,
+                instrument=acquisition_receipt.instrument,
+                pair=acquisition_receipt.pair,
+                timeframe=acquisition_receipt.timeframe,
+                data_kind=acquisition_receipt.data_kind,
+                acquired_at=_API_OBSERVED_NOW,
+                acquisition_receipt_digest=acquisition_receipt.receipt_digest,
             ),
+            acquisition_receipt=acquisition_receipt,
         )
         market_snapshot = seal_market_snapshot(
             connection,
@@ -361,6 +410,12 @@ def test_factory_is_standalone_and_exact_routes_are_frozen() -> None:
             ),
             (f"{API_PREFIX}/research-bundles/preview", "POST"),
             (f"{API_PREFIX}/research-bundles/{{bundle_id}}/activate", "POST"),
+            (f"{API_PREFIX}/research/gates/attempts", "POST"),
+            (f"{API_PREFIX}/research/gates/attempts/{{gate_attempt_id}}/claim", "POST"),
+            (f"{API_PREFIX}/research/gates/attempts/{{gate_attempt_id}}/static-receipts", "POST"),
+            (f"{API_PREFIX}/research/gates/attempts/{{gate_attempt_id}}/lookahead-receipts", "POST"),
+            (f"{API_PREFIX}/research/gates", "GET"),
+            (f"{API_PREFIX}/research/gates/{{gate_attempt_id}}", "GET"),
             (f"{API_PREFIX}/research/validation-plans", "POST"),
             (
                 f"{API_PREFIX}/research/validation-plans/{{validation_plan_id}}",
@@ -398,7 +453,7 @@ def test_factory_is_standalone_and_exact_routes_are_frozen() -> None:
             for method, operation in path.items()
             if method in {"get", "post", "put", "patch", "delete"}
         ]
-        assert len(operation_ids) == 23
+        assert len(operation_ids) == 29
         assert len(set(operation_ids)) == len(operation_ids)
     finally:
         client.close()
@@ -450,21 +505,74 @@ def test_production_research_control_surface_binds_exact_attempt_and_projects_st
             has_bias=False,
             observed_signal_count=3,
         )
+        with engine.connect() as raw:
+            connection = raw.execution_options(
+                schema_translate_map={CANONICAL_BUSINESS_SCHEMA: None}
+            )
+            static_receipt = validate_static_source(
+                (
+                    b"from freqtrade.strategy import IStrategy\n"
+                    b"class CanonicalStrategy(IStrategy):\n    pass\n"
+                ).decode(),
+                strategy_version_id=lineage.strategy_version_id,
+                expected_artifact_digest=submission["artifact_digest"],
+                validator_identity="canonical-static-validator-v1",
+                validator_digest="d" * 64,
+            )
         lineage_payload = {
             key: str(value) if isinstance(value, UUID) else value
             for key, value in lineage.__dict__.items()
+        }
+        gate_response = client.post(
+            f"{API_PREFIX}/research/gates/attempts",
+            json={
+                "lineage": lineage_payload,
+                "idempotency_key": "canonical-api-gate-v3",
+                "release_commit": "1" * 40,
+                "executor_image_digest": "c" * 64,
+                "worker_source_digest": "e" * 64,
+            },
+        )
+        assert gate_response.status_code == 201, gate_response.json()
+        gate = gate_response.json()
+        lease_response = client.post(
+            f"{API_PREFIX}/research/gates/attempts/{gate['gate_attempt_id']}/claim",
+            json={"actor_identity": "canonical-api-gate-runner-v3"},
+        )
+        assert lease_response.status_code == 200, lease_response.json()
+        lease = lease_response.json()
+        static_payload = asdict(static_receipt)
+        static_payload["strategy_version_id"] = str(static_payload["strategy_version_id"])
+        static_payload["lease_token"] = lease["lease_token"]
+        static_response = client.post(
+            f"{API_PREFIX}/research/gates/attempts/{gate['gate_attempt_id']}/static-receipts",
+            json=static_payload,
+        )
+        assert static_response.status_code == 201, static_response.json()
+        lookahead_payload = asdict(lookahead)
+        lookahead_payload.pop("lineage")
+        lookahead_payload["lease_token"] = lease["lease_token"]
+        lookahead_response = client.post(
+            f"{API_PREFIX}/research/gates/attempts/{gate['gate_attempt_id']}/lookahead-receipts",
+            json=lookahead_payload,
+        )
+        assert lookahead_response.status_code == 201, lookahead_response.json()
+        gate_projection_response = client.get(
+            f"{API_PREFIX}/research/gates/{gate['gate_attempt_id']}"
+        )
+        assert gate_projection_response.status_code == 200
+        gate_projection = gate_projection_response.json()
+        assert gate_projection["validation_eligible"] is True
+        gate_ids = {
+            "STATIC": gate_projection["static_receipt_id"],
+            "LOOKAHEAD": gate_projection["lookahead_receipt_id"],
         }
         plan_response = client.post(
             f"{API_PREFIX}/research/validation-plans",
             json={
                 "lineage": lineage_payload,
-                "static_validator_identity": "canonical-static-validator-v1",
-                "static_validator_digest": "d" * 64,
-                "lookahead_receipt": {
-                    key: value
-                    for key, value in lookahead.__dict__.items()
-                    if key != "lineage"
-                },
+                "static_gate_receipt_id": gate_ids["STATIC"],
+                "lookahead_gate_receipt_id": gate_ids["LOOKAHEAD"],
                 "orchestrator_identity": "production-research-orchestrator-v1",
             },
         )

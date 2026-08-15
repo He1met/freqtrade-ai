@@ -22,6 +22,11 @@ from app.canonical_v13.authority_upgrade import (
 from app.canonical_v13.configuration_governance import (
     create_audited_configuration_draft,
 )
+from app.canonical_v13.gate_receipt_upgrade import (
+    PREVIOUS_MANIFEST_DIGEST as PREVIOUS_GATE_MANIFEST_DIGEST,
+    apply_gate_receipt_upgrade,
+    verify_gate_receipt_upgrade,
+)
 from app.canonical_v13.genesis import (
     assert_postgresql_acl_sql,
     install_canonical_genesis,
@@ -90,11 +95,13 @@ def test_empty_postgresql_genesis_mapping_acl_and_repeat_noop() -> None:
                 role_mapping=mapping,
                 require_zero_business_rows=True,
             )
+            gate_upgrade = verify_gate_receipt_upgrade(connection)
         assert first.created is True or first.repeat_noop is True
         assert accepted.accepted is True
         assert accepted.problems == ()
-        assert accepted.table_count == 46
+        assert accepted.table_count == 48
         assert accepted.business_row_count == 0
+        assert gate_upgrade.status == "ACCEPTED"
 
         with engine.begin() as connection:
             repeat = install_canonical_genesis(
@@ -268,6 +275,58 @@ def test_empty_postgresql_genesis_mapping_acl_and_repeat_noop() -> None:
             )
             assert reapplied.status == "UPGRADED"
             assert reapplied.generation == 2
+            transaction.rollback()
+    finally:
+        engine.dispose()
+
+
+def test_postgresql_gate_receipt_upgrade_from_exact_predecessor() -> None:
+    assert DATABASE_URL is not None
+    mapping = CanonicalRoleMapping.from_prefix(ROLE_PREFIX)
+    engine = create_engine(DATABASE_URL)
+    schema = "strategy_platform_v13"
+    try:
+        with engine.connect() as connection:
+            transaction = connection.begin()
+            connection.exec_driver_sql(
+                f"DROP TRIGGER validation_plans_gate_receipts ON {schema}.validation_plans"
+            )
+            connection.exec_driver_sql(
+                f"ALTER TABLE {schema}.validation_plans DROP COLUMN static_gate_receipt_id"
+            )
+            connection.exec_driver_sql(
+                f"ALTER TABLE {schema}.validation_plans DROP COLUMN lookahead_gate_receipt_id"
+            )
+            connection.exec_driver_sql(f"DROP TABLE {schema}.research_gate_receipts")
+            connection.exec_driver_sql(f"DROP TABLE {schema}.research_gate_attempts")
+            connection.exec_driver_sql(
+                f"DROP FUNCTION {schema}.guard_validation_plan_gate_receipts()"
+            )
+            connection.exec_driver_sql(
+                f"DROP FUNCTION {schema}.guard_research_gate_receipts_append_only()"
+            )
+            connection.exec_driver_sql(
+                f"DROP FUNCTION {schema}.guard_research_gate_attempts_lifecycle()"
+            )
+            connection.execute(
+                SCHEMA_METADATA_TABLE.update().values(
+                    manifest_digest=PREVIOUS_GATE_MANIFEST_DIGEST
+                )
+            )
+
+            upgraded = apply_gate_receipt_upgrade(
+                connection,
+                role_mapping=mapping,
+                actor_identity="canonical-v13-ci-gate-upgrade",
+                observed_at=datetime(2026, 8, 15, tzinfo=timezone.utc),
+            )
+            verified = verify_gate_receipt_upgrade(connection)
+            assert upgraded.status == "ACCEPTED"
+            assert upgraded.created_table_count == 2
+            assert upgraded.added_column_count == 2
+            assert upgraded.destructive_operation_count == 0
+            assert upgraded.receipt_digest is not None
+            assert verified.status == "ACCEPTED"
             transaction.rollback()
     finally:
         engine.dispose()

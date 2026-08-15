@@ -12,7 +12,7 @@
   外部只读历史来源，禁止成为 canonical database、连接 fallback 或 migration bootstrap。
 - `backend/app/main.py` 继续承载 legacy API，不 import/mount canonical，不执行 canonical
   genesis。canonical API 使用独立进程和独立连接角色。
-- genesis 只创建 46-table canonical manifest 与一条 identity；业务行必须为 0，七类 P0
+- genesis 只创建 48-table canonical manifest 与一条 identity；业务行必须为 0，七类 P0
   配置、target/count/per-target cap、market snapshot、activation 均保持 `UNSET/BLOCKED`。
 - genesis、owner/ACL、activation、research、runtime、order 是不同授权动作。完成前一项不
   授权后一项。
@@ -103,7 +103,7 @@ canonical DSN 配给 legacy process，或把 legacy router mount 到 canonical p
 
 ## 6. 独立验收与仍然 BLOCKED 的门
 
-提交审查前可接受的本地证据仅包括：46-table manifest、离线 DDL/ACL、source-layout import、
+提交审查前可接受的本地证据仅包括：48-table manifest、离线 DDL/ACL、source-layout import、
 独立 OpenAPI routes、SQLite domain/API tests 和 mocked browser tests。
 
 真实接入仍须分别取得：

@@ -6,9 +6,13 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 from dataclasses import asdict
+import fcntl
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
+import re
+import subprocess
 import sys
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
@@ -55,10 +59,40 @@ TIMEOUT_LIMIT_ENV = "FREQTRADE_AI_CANONICAL_V13_RESEARCH_TIMEOUT_SECONDS"
 OUTPUT_LIMIT_ENV = "FREQTRADE_AI_CANONICAL_V13_RESEARCH_OUTPUT_BYTES"
 PIDS_LIMIT_ENV = "FREQTRADE_AI_CANONICAL_V13_RESEARCH_PIDS_LIMIT"
 TMPFS_LIMIT_ENV = "FREQTRADE_AI_CANONICAL_V13_RESEARCH_TMPFS_MB"
+_HEX_DIGEST = re.compile(r"^[0-9a-f]{64}$")
+_RELEASE_COMMIT = re.compile(r"^[0-9a-f]{40}$")
+_PINNED_IMAGE = re.compile(r"^.+@sha256:([0-9a-f]{64})$")
 
 
 class ResearchCLIBlocked(RuntimeError):
     pass
+
+
+@contextmanager
+def _gate_writer_lock(environment: dict[str, str]):
+    root = Path(_required(environment, WORKSPACE_ROOT_ENV))
+    try:
+        info = root.stat()
+    except OSError as exc:
+        raise ResearchCLIBlocked("BLOCKED_GATE_OWNER_LOCK_ROOT") from exc
+    if root.is_symlink() or not root.is_dir() or info.st_uid != os.getuid() or info.st_mode & 0o777 != 0o700:
+        raise ResearchCLIBlocked("BLOCKED_GATE_OWNER_LOCK_ROOT")
+    path = root / ".canonical-v13-gate-writer.lock"
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+    handle = os.fdopen(descriptor, "r+")
+    try:
+        if os.fstat(handle.fileno()).st_uid != os.getuid() or os.fstat(handle.fileno()).st_mode & 0o777 != 0o600:
+            raise ResearchCLIBlocked("BLOCKED_GATE_OWNER_LOCK_FILE")
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise ResearchCLIBlocked("BLOCKED_GATE_WRITER_ALREADY_ACTIVE") from exc
+        yield
+    finally:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
 
 
 def _json_file(path: Path) -> dict[str, object]:
@@ -71,6 +105,54 @@ def _json_file(path: Path) -> dict[str, object]:
     if not isinstance(payload, dict):
         raise ResearchCLIBlocked("BLOCKED_COMMAND_FILE_INVALID")
     return payload
+
+
+def _verify_gate_release_identity(environment: dict[str, str], payload: dict[str, object]) -> None:
+    release_commit = payload.get("release_commit")
+    image_digest = payload.get("executor_image_digest")
+    worker_source_digest = payload.get("worker_source_digest")
+    image_match = _PINNED_IMAGE.fullmatch(_required(environment, IMAGE_ENV))
+    if (
+        not isinstance(release_commit, str)
+        or _RELEASE_COMMIT.fullmatch(release_commit) is None
+        or not isinstance(image_digest, str)
+        or _HEX_DIGEST.fullmatch(image_digest) is None
+        or not isinstance(worker_source_digest, str)
+        or _HEX_DIGEST.fullmatch(worker_source_digest) is None
+        or image_match is None
+        or image_match.group(1) != image_digest
+    ):
+        raise ResearchCLIBlocked("BLOCKED_GATE_RELEASE_IDENTITY")
+    repository = Path(__file__).resolve().parents[2]
+    worker = repository / "containers/canonical-v13-research/canonical_v13_research_worker.py"
+    if not worker.is_file() or worker.is_symlink() or worker.stat().st_size > 1_048_576:
+        raise ResearchCLIBlocked("BLOCKED_GATE_WORKER_SOURCE")
+    if sha256(worker.read_bytes()).hexdigest() != worker_source_digest:
+        raise ResearchCLIBlocked("BLOCKED_GATE_WORKER_SOURCE_DIGEST")
+    git = Path("/usr/bin/git")
+    if not git.is_file() or not os.access(git, os.X_OK):
+        raise ResearchCLIBlocked("BLOCKED_GATE_RELEASE_GIT")
+    try:
+        head = subprocess.run(
+            (str(git), "-C", str(repository), "rev-parse", "HEAD"),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={"PATH": "/usr/bin:/bin"},
+        ).stdout.strip()
+        dirty = subprocess.run(
+            (str(git), "-C", str(repository), "status", "--porcelain=v1"),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={"PATH": "/usr/bin:/bin"},
+        ).stdout
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ResearchCLIBlocked("BLOCKED_GATE_RELEASE_GIT") from exc
+    if head != release_commit or dirty:
+        raise ResearchCLIBlocked("BLOCKED_GATE_RELEASE_CHECKOUT")
 
 
 def _api_base(environment: dict[str, str]) -> str:
@@ -274,8 +356,9 @@ def _worker_execute(
 def _gate_execute(
     environment: dict[str, str], payload: dict[str, object]
 ) -> dict[str, object]:
-    if set(payload) != {"lineage"} or not isinstance(payload["lineage"], dict):
+    if set(payload) != {"lineage", "idempotency_key", "release_commit", "executor_image_digest", "worker_source_digest"} or not isinstance(payload["lineage"], dict):
         raise ResearchCLIBlocked("BLOCKED_GATE_COMMAND_FIELDS")
+    _verify_gate_release_identity(environment, payload)
     lineage = ResearchLineage(
         **{
             key: UUID(str(value)) if key.endswith("_id") else str(value)
@@ -318,6 +401,36 @@ def _gate_execute(
         tmpfs_mb=_positive_int(environment, TMPFS_LIMIT_ENV),
     )
     try:
+        attempt = _request(
+            environment,
+            method="POST",
+            path="/research/gates/attempts",
+            payload={
+                "lineage": payload["lineage"],
+                "idempotency_key": payload["idempotency_key"],
+                "release_commit": payload["release_commit"],
+                "executor_image_digest": payload["executor_image_digest"],
+                "worker_source_digest": payload["worker_source_digest"],
+            },
+        )
+        if attempt.get("status") == "BLOCKED":
+            return attempt
+        if attempt.get("repeat_noop") is True and attempt.get("status") == "RUNNING":
+            return {
+                "status": "BLOCKED",
+                "reason_code": "BLOCKED_GATE_ATTEMPT_ALREADY_RUNNING",
+                "gate_attempt_id": attempt["gate_attempt_id"],
+            }
+        if attempt.get("repeat_noop") is True and attempt.get("status") != "PENDING":
+            return _request(environment, method="GET", path=f"/research/gates/{attempt['gate_attempt_id']}", payload=None)
+        lease = _request(
+            environment,
+            method="POST",
+            path=f"/research/gates/attempts/{attempt['gate_attempt_id']}/claim",
+            payload={"actor_identity": "canonical-v13-planless-gate-runner"},
+        )
+        if lease.get("status") == "BLOCKED":
+            return lease
         adapter = FreqtradeProductionLookaheadAdapter(
             activation=_required(environment, LOOKAHEAD_ACTIVATION_ENV),
             runtime_path=Path(_required(environment, OCI_RUNTIME_ENV)),
@@ -330,7 +443,29 @@ def _gate_execute(
             receipt = execute_production_static_lookahead_gate(
                 connection, lineage=lineage, adapter=adapter
             )
-        return {"status": "ACCEPTED", "receipt": asdict(receipt)}
+        static_payload = asdict(receipt.static_receipt)
+        static_payload["strategy_version_id"] = str(static_payload["strategy_version_id"])
+        static_payload["lease_token"] = lease["lease_token"]
+        persisted_static = _request(
+            environment,
+            method="POST",
+            path=f"/research/gates/attempts/{attempt['gate_attempt_id']}/static-receipts",
+            payload=static_payload,
+        )
+        if persisted_static.get("status") == "BLOCKED" or receipt.lookahead_receipt is None:
+            return persisted_static if persisted_static.get("status") == "BLOCKED" else _request(environment, method="GET", path=f"/research/gates/{attempt['gate_attempt_id']}", payload=None)
+        lookahead_payload = asdict(receipt.lookahead_receipt)
+        lookahead_payload.pop("lineage", None)
+        lookahead_payload["lease_token"] = lease["lease_token"]
+        persisted_lookahead = _request(
+            environment,
+            method="POST",
+            path=f"/research/gates/attempts/{attempt['gate_attempt_id']}/lookahead-receipts",
+            payload=lookahead_payload,
+        )
+        if persisted_lookahead.get("status") == "BLOCKED":
+            return persisted_lookahead
+        return _request(environment, method="GET", path=f"/research/gates/{attempt['gate_attempt_id']}", payload=None)
     finally:
         engine.dispose()
 
@@ -361,7 +496,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "gate":
             if payload is None:
                 raise ResearchCLIBlocked("BLOCKED_COMMAND_FILE_REQUIRED")
-            result = _gate_execute(environment, payload)
+            with _gate_writer_lock(environment):
+                result = _gate_execute(environment, payload)
         elif args.command == "worker-execute":
             if payload is None:
                 raise ResearchCLIBlocked("BLOCKED_COMMAND_FILE_REQUIRED")
@@ -397,7 +533,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         result = {"status": "BLOCKED", "reason_code": code}
     print(json.dumps(result, ensure_ascii=False, sort_keys=True, default=str))
-    return 0 if result.get("status") not in {"BLOCKED"} else 2
+    strategy_level_block = (
+        args.command == "gate"
+        and result.get("status") == "BLOCKED"
+        and result.get("terminal_reason_code") == "LOOKAHEAD_INSUFFICIENT_TRADES"
+    )
+    return 0 if result.get("status") != "BLOCKED" or strategy_level_block else 2
 
 
 if __name__ == "__main__":

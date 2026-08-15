@@ -85,6 +85,8 @@ EXPECTED_TABLES_BY_DOMAIN = {
         "market_snapshot_members",
     ),
     "validation": (
+        "research_gate_attempts",
+        "research_gate_receipts",
         "validation_plans",
         "validation_plan_windows",
         "validation_attempts",
@@ -116,7 +118,7 @@ EXPECTED_TABLES_BY_DOMAIN = {
 
 
 def test_exact_identity_and_table_manifest_matches_frozen_design() -> None:
-    assert CANONICAL_AUTHORITY_REVISION == "20260815_research_writers_v2"
+    assert CANONICAL_AUTHORITY_REVISION == "20260815_planless_gate_receipts_v3"
     assert CANONICAL_DATABASE_PURPOSE == "FREQTRADE_AI_V13_CANONICAL"
     assert CANONICAL_BUSINESS_SCHEMA == "strategy_platform_v13"
     assert CANONICAL_GENESIS_VERSION == "20260814_01"
@@ -129,7 +131,7 @@ def test_exact_identity_and_table_manifest_matches_frozen_design() -> None:
         for tables in EXPECTED_TABLES_BY_DOMAIN.values()
         for table in tables
     )
-    assert len(CANONICAL_TABLE_NAMES) == 46
+    assert len(CANONICAL_TABLE_NAMES) == 48
     assert manifest_problems() == ()
 
 
@@ -181,6 +183,8 @@ def test_each_table_has_one_writer_and_reader_maps_are_explicit() -> None:
     assert set(table_writer_counts.values()) == {1}
     assert WRITER_TABLE_ALLOWLIST["canonical_projection_writer"] == ()
     assert WRITER_TABLE_ALLOWLIST["canonical_validation_writer"] == (
+        "research_gate_attempts",
+        "research_gate_receipts",
         "validation_plans",
         "validation_plan_windows",
         "validation_attempts",
@@ -361,13 +365,13 @@ def test_postgresql_types_constraints_and_locking_compile_offline() -> None:
         if isinstance(column.type, JSON)
     )
 
-    assert len(tables) == 46
-    assert len(foreign_keys) == 79
-    assert len(checks) == 42
-    assert len(uniques) == 43
-    assert len(indexes) == 73
-    assert len(datetimes) == 47
-    assert len(json_columns) == 20
+    assert len(tables) == 48
+    assert len(foreign_keys) == 96
+    assert len(checks) == 50
+    assert len(uniques) == 47
+    assert len(indexes) == 90
+    assert len(datetimes) == 52
+    assert len(json_columns) == 21
     assert all(key.deferrable is not True for key in foreign_keys)
     assert all(column.type.timezone is True for column in datetimes)
     assert all(column.server_default is None for table in tables for column in table.columns)

@@ -1,8 +1,32 @@
 # Canonical V1.3 production no-trade research
 
-本 runbook 描述可调用但默认 fail-closed 的 production research slice。它只使用 46-table
+本 runbook 描述可调用但默认 fail-closed 的 production research slice。它只使用 48-table
 canonical database，不连接 legacy/v47，不访问 Keychain/OKX，不启动 long-lived runtime，也不产生
 signal、trade intent、order、fill 或 real-funds 行为。
+
+`research_gate_attempts` 与 append-only `research_gate_receipts` 是 production static/lookahead
+唯一权威。gate attempt 创建时绑定当时已 ACCEPTED 且 fresh 的 bundle/market snapshot，以及
+TARGET/WINDOW snapshot、market profile、strategy artifact、release/image/worker source digests。
+freshness 只限制新 attempt 的创建；完成 receipt 永久绑定 frozen lineage，active pointer 更新或
+时间流逝不得使其失效或替换 lineage。需要新数据时必须创建新 gate attempt。
+每次创建还必须携带 batch/version-scoped `idempotency_key`；同 key 同请求返回同一 attempt，
+同 key 异请求 fail closed。lease 过期的 orphan 原子转为 `BLOCKED/GATE_LEASE_EXPIRED`，如需重验
+必须使用新 key 创建新 attempt，不得覆盖或搬运旧 receipt。
+
+`validation_plans` 必须显式引用同一个 PASSED attempt 的 STATIC 与 LOOKAHEAD v3 receipt IDs，
+并保持相同 frozen lineage。旧 v1/v2 或评论证据不 backfill、不复制、不迁移为 v3。只有 API
+投影可声明 `validation_eligible`；UI 不自行推导 PASS/BLOCKED。
+
+Existing 46-table installations first run the additive owner-only upgrade:
+
+```bash
+python backend/scripts/canonical_v13_bootstrap.py gate-receipts-apply
+python backend/scripts/canonical_v13_bootstrap.py gate-receipts-verify
+```
+
+该升级只增加两表、两个 validation-plan FK column、两个 FK index 与三个约束 trigger；guard
+function 归 schema owner 且 PUBLIC/service roles 无 EXECUTE。升级不创建或回填任何 gate、plan、
+backtest、score 或 qualification 行。
 
 ## 1. 两类执行器必须分开
 
@@ -26,6 +50,12 @@ signal、trade intent、order、fill 或 real-funds 行为。
 control/API 只提供这些 canonical endpoints：
 
 ```text
+POST /api/canonical-v13/research/gates/attempts
+POST /api/canonical-v13/research/gates/attempts/{id}/claim
+POST /api/canonical-v13/research/gates/attempts/{id}/static-receipts
+POST /api/canonical-v13/research/gates/attempts/{id}/lookahead-receipts
+GET  /api/canonical-v13/research/gates
+GET  /api/canonical-v13/research/gates/{id}
 POST /api/canonical-v13/research/validation-plans
 POST /api/canonical-v13/research/authorizations
 POST /api/canonical-v13/research/authorizations/{id}/consume
@@ -52,8 +82,9 @@ FREQTRADE_AI_CANONICAL_V13_API_BASE_URL=http://127.0.0.1:8011 \
 `gate` 是与 `worker-execute` 分离的前置动作。它只通过 canonical reader 读取调用方给出的 exact
 strategy/target/bundle/market lineage，先执行不加载策略代码的 static AST validation；static PASS 后，
 才在同一类 network-none、read-only、nonroot OCI sandbox 中对 frozen required-window set 执行
-Freqtrade `lookahead-analysis`。它不调用 control API，不创建 validation plan/attempt/authorization，
-也没有 validation/scoring/qualification writer DSN。每个 required window 必须在输出中以 exact
+Freqtrade `lookahead-analysis`。它通过 audited loopback API 创建 planless gate attempt 并原子提交
+typed receipt，但不创建 validation plan/attempt/authorization，也没有任何 writer DSN；validation
+writer credential 只存在于 API service。每个 required window 必须在输出中以 exact
 window key/digest 出现一次，聚合 signal count、bias 和 status 必须与逐 window evidence 一致；缺失、
 重复或漂移均 fail closed。
 
@@ -149,10 +180,14 @@ FREQTRADE_AI_CANONICAL_V13_LOOKAHEAD_EXECUTION_ENABLED=PRODUCTION_LOOKAHEAD_NO_T
 ```
 
 其余 OCI image、runtime、market root、workspace root 与资源上限变量和上表相同。示例 command file
-只包含 exact lineage，不含 plan 或 attempt：
+包含 exact lineage、可重试 key 与已验收 release/image/source identity，不含 plan 或 validation attempt：
 
 ```json
 {
+  "idempotency_key": "<batch-v3>:<strategy-version-uuid>",
+  "release_commit": "<40-char-commit>",
+  "executor_image_digest": "<sha256>",
+  "worker_source_digest": "<sha256>",
   "lineage": {
     "strategy_version_id": "<uuid>",
     "research_target_id": "<uuid>",
@@ -192,7 +227,7 @@ score、qualification 全链重新执行；不得复制 baseline score/qualifica
 以下全部有 exact evidence 才能执行第一个 production attempt：
 
 1. clean release checkout pin 到包含本 contract 的 remote `main` SHA，main push CI 全绿；
-2. authority upgrade 为 `CURRENT`，46 tables 未变，旧 broad writer 零 ACL/membership；
+2. authority upgrade 与 gate-receipt additive upgrade 均为 `CURRENT/ACCEPTED`，48 tables，旧 broad writer 零 ACL/membership；
 3. 六个 API/research LOGIN exact membership 与同库 locator 验证通过；
 4. canonical market artifact 文件存在、root-relative locator、size/digest/coverage/freshness 全匹配；
 5. frozen bundle/target/window/scoring/quality snapshots 与 exact digest 已人工复核；
@@ -201,5 +236,5 @@ score、qualification 全链重新执行；不得复制 baseline score/qualifica
    consume/revoke；
 8. `TRADING_DISABLED`、无 runtime/signal/order/fill side effect，并有 rollback/incident owner。
 
-任一门缺失时为 `NO_OP/BLOCKED`。authority rollback 只在九张 research 表仍全空时允许；一旦产生
+任一门缺失时为 `NO_OP/BLOCKED`。authority rollback 只在十一张 research 表仍全空时允许；一旦产生
 任何 research row，不能回授 broad writer，必须设计新的显式迁移。

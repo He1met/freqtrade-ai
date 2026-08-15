@@ -1,8 +1,8 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { useSearchParams } from "react-router-dom";
 
-import { fetchCanonicalResearchChain, fetchCanonicalResearchReadiness, fetchCanonicalRuntimeReadiness } from "../../api/canonicalV13Client";
-import type { ReadinessProjection, ResearchChainProjection } from "../../api/canonicalV13Types";
+import { fetchCanonicalResearchChain, fetchCanonicalResearchGates, fetchCanonicalResearchReadiness, fetchCanonicalRuntimeReadiness } from "../../api/canonicalV13Client";
+import type { GateListProjection, ReadinessProjection, ResearchChainProjection } from "../../api/canonicalV13Types";
 import { CopyableValue, PageHeader } from "../../components/DisplayPrimitives";
 import { CanonicalQueryError, CanonicalStatePanel, CanonicalStatus, useCanonicalQuery } from "./CanonicalStatePanel";
 import { canonicalStatusPresentation, parseCanonicalUrlState, serializeCanonicalUrlState } from "./canonicalV13Model";
@@ -80,6 +80,29 @@ function ResearchChainCard({ planId }: { planId: string }) {
   );
 }
 
+function GateReceiptsCard() {
+  const query = useCanonicalQuery(fetchCanonicalResearchGates, ["canonical-gates-v3"]);
+  if (query.loading) return <CanonicalStatePanel description="正在读取 canonical v3 gate receipts。" kind="loading" title="加载 static/lookahead receipts" />;
+  if (query.error) return <CanonicalQueryError error={query.error} title="Gate receipt 状态未知" />;
+  const projection = query.data as GateListProjection;
+  if (!projection.items.length) return <CanonicalStatePanel description="尚无持久化 planless v3 gate receipt；UI 不使用历史评论或 legacy 状态推断。" kind="pending" title="Gate receipts EMPTY" />;
+  return (
+    <section className="canonical-v13-panel" data-readiness="gate-receipts">
+      <div className="canonical-v13-heading-row"><h2>Canonical static / lookahead gates</h2><CanonicalStatus status={projection.status} /></div>
+      <div className="canonical-v13-table-wrap"><table><thead><tr><th>Strategy version</th><th>Static</th><th>Lookahead</th><th>Eligibility</th><th>Reason / counts</th><th>Frozen lineage</th></tr></thead><tbody>
+        {projection.items.map((item) => <tr key={item.gate_attempt_id}>
+          <td><CopyableValue value={item.strategy_version_id} /></td>
+          <td><CanonicalStatus status={item.static_status ?? "UNSET"} /></td>
+          <td><CanonicalStatus status={item.lookahead_status ?? "UNSET"} /></td>
+          <td>{item.validation_eligible ? "ELIGIBLE" : "INELIGIBLE"}</td>
+          <td>{item.lookahead_reason_code ?? item.static_reason_code ?? item.terminal_reason_code ?? "NONE"}{item.required_trade_count !== null ? ` · ${item.observed_trade_count ?? "UNSET"}/${item.required_trade_count}` : ""}</td>
+          <td><CopyableValue value={item.configuration_bundle_id} /> / <CopyableValue value={item.market_snapshot_id} /></td>
+        </tr>)}
+      </tbody></table></div>
+    </section>
+  );
+}
+
 export function CanonicalResearchPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const url = parseCanonicalUrlState("research", searchParams);
@@ -138,6 +161,7 @@ export function CanonicalResearchPage() {
         <ReadinessCard dependencyKey="runtime" loader={fetchCanonicalRuntimeReadiness} title="Runtime readiness" />
       </div> : null}
       {url.valid && url.values.plan ? <ResearchChainCard planId={url.values.plan} /> : null}
+      {url.valid ? <GateReceiptsCard /> : null}
       {(url.values.target || url.values.strategy) ? (
         <CanonicalStatePanel
           description="Target/strategy 仅保存 committed URL selection；当前 #719 readiness DTO 未提供按这两项过滤的事实，UI 不据此重算 readiness。"

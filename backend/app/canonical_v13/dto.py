@@ -405,9 +405,8 @@ class LookaheadReceiptCommandDTO(CanonicalCommandDTO):
 
 class ValidationPlanCommandDTO(CanonicalCommandDTO):
     lineage: ResearchLineageDTO
-    static_validator_identity: str = Field(min_length=1, max_length=200)
-    static_validator_digest: str = Field(pattern=SHA256_PATTERN)
-    lookahead_receipt: LookaheadReceiptCommandDTO
+    static_gate_receipt_id: UUID
+    lookahead_gate_receipt_id: UUID
     orchestrator_identity: str = Field(min_length=1, max_length=200)
 
 
@@ -420,6 +419,93 @@ class ValidationPlanReceiptDTO(CanonicalProjectionDTO):
     static_receipt_digest: str = Field(pattern=SHA256_PATTERN)
     lookahead_receipt_digest: str = Field(pattern=SHA256_PATTERN)
     repeat_noop: bool
+
+
+class GateAttemptCommandDTO(CanonicalCommandDTO):
+    lineage: ResearchLineageDTO
+    idempotency_key: str = Field(min_length=1, max_length=200)
+    release_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+    executor_image_digest: str = Field(pattern=SHA256_PATTERN)
+    worker_source_digest: str = Field(pattern=SHA256_PATTERN)
+
+
+class GateAttemptReceiptDTO(CanonicalProjectionDTO):
+    gate_attempt_id: UUID
+    request_digest: str = Field(pattern=SHA256_PATTERN)
+    status: Literal["PENDING", "RUNNING", "PASSED", "FAILED", "BLOCKED"]
+    repeat_noop: bool
+    lineage: ResearchLineageDTO
+
+
+class GateLeaseCommandDTO(CanonicalCommandDTO):
+    actor_identity: str = Field(min_length=1, max_length=200)
+
+
+class GateLeaseReceiptDTO(CanonicalProjectionDTO):
+    gate_attempt_id: UUID
+    status: Literal["RUNNING"]
+    lease_token: str = Field(pattern=r"^[0-9a-f]{64}$")
+    lease_expires_at: datetime
+
+
+class StaticFindingDTO(CanonicalProjectionDTO):
+    rule_id: str
+    line: int = Field(ge=0)
+    column: int = Field(ge=0)
+    message: str
+
+
+class StaticGateReceiptCommandDTO(CanonicalCommandDTO):
+    lease_token: str = Field(pattern=r"^[0-9a-f]{64}$")
+    strategy_version_id: UUID
+    artifact_digest: str = Field(pattern=SHA256_PATTERN)
+    validator_identity: str
+    validator_digest: str = Field(pattern=SHA256_PATTERN)
+    status: Literal["PASSED", "FAILED"]
+    findings: list[StaticFindingDTO]
+    request_digest: str = Field(pattern=SHA256_PATTERN)
+    receipt_digest: str = Field(pattern=SHA256_PATTERN)
+
+
+class LookaheadGateReceiptCommandDTO(LookaheadReceiptCommandDTO):
+    lease_token: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class GatePersistedReceiptDTO(CanonicalProjectionDTO):
+    gate_attempt_id: UUID
+    gate_type: Literal["STATIC", "LOOKAHEAD"]
+    receipt_digest: str = Field(pattern=SHA256_PATTERN)
+
+
+class GateProjectionDTO(CanonicalProjectionDTO):
+    gate_attempt_id: UUID
+    strategy_version_id: UUID
+    research_target_id: UUID
+    configuration_bundle_id: UUID
+    configuration_bundle_digest: str = Field(pattern=SHA256_PATTERN)
+    market_snapshot_id: UUID
+    market_snapshot_digest: str = Field(pattern=SHA256_PATTERN)
+    status: Literal["PENDING", "RUNNING", "PASSED", "FAILED", "BLOCKED"]
+    terminal_reason_code: Optional[str]
+    static_status: Optional[Literal["PASSED", "FAILED", "BLOCKED"]]
+    static_reason_code: Optional[str]
+    static_receipt_id: Optional[UUID]
+    static_receipt_digest: Optional[str] = Field(default=None, pattern=SHA256_PATTERN)
+    lookahead_status: Optional[Literal["PASSED", "FAILED", "BLOCKED"]]
+    lookahead_reason_code: Optional[str]
+    lookahead_receipt_id: Optional[UUID]
+    lookahead_receipt_digest: Optional[str] = Field(default=None, pattern=SHA256_PATTERN)
+    observed_signal_count: Optional[int]
+    observed_trade_count: Optional[int]
+    required_trade_count: Optional[int]
+    validation_eligible: bool
+    created_at: datetime
+    completed_at: Optional[datetime]
+
+
+class GateListProjectionDTO(CanonicalProjectionDTO):
+    status: Literal["AVAILABLE", "EMPTY"]
+    items: list[GateProjectionDTO]
 
 
 class ResearchAuthorizationCommandDTO(CanonicalCommandDTO):

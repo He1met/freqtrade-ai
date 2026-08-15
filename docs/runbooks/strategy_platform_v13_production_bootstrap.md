@@ -104,8 +104,8 @@ FREQTRADE_AI_CANONICAL_V13_RESTORE_DATABASE_NAME=\
 
 结果必须为 `ACCEPTED`、`verification_scope=INDEPENDENT_RESTORE`、
 `state=PREVIOUS_READY`（升级前 backup）或 exact compatible current state，并证明
-authority identity/digest、ACL/owner 和九张 research 表零行均匹配。表总数必须另以
-canonical schema inventory 复核为 46；backup 文件完整性由前一步记录的 SHA-256 绑定。
+authority identity/digest、ACL/owner 和十一张 research 表零行均匹配。表总数必须另以
+canonical schema inventory 复核为 48；backup 文件完整性由前一步记录的 SHA-256 绑定。
 验证库保留，除非取得独立删除授权。不得用旧库或现有测试库作为恢复目标。
 
 ## 4. 独立 loopback API
@@ -168,7 +168,7 @@ research、optimization 六个路由的 deep-link/refresh/URL state，以及未�
 PostgreSQL referential-integrity triggers execute parent-row locking checks under
 the canonical table owner. The exact ACL reset must therefore restore the seven
 standard table privileges for the NOLOGIN `canonical_schema_owner` on each of the
-46 canonical tables. This does not create a second application writer: no service
+48 canonical tables. This does not create a second application writer: no service
 principal may inherit the schema-owner role, and application DML remains governed
 by the per-table writer allowlist.
 
@@ -187,8 +187,8 @@ FREQTRADE_AI_CANONICAL_V13_UPGRADE_ACTOR=\
 python scripts/canonical_v13_bootstrap.py verify-research-provisioned
 ```
 
-The repair accepts only that exact two-privilege legacy state, requires all nine
-research tables to remain empty, uses 46 explicit table statements (never `ON ALL
+The repair accepts only that exact two-privilege legacy state, requires all eleven
+research tables to remain empty, uses 48 explicit table statements (never `ON ALL
 TABLES`), writes one immutable audit receipt, and fails closed on partial ACLs.
 Its internal authority gate accepts only the four exact, already-provisioned
 research LOGIN memberships; the public pre-provision `authority-verify` command

@@ -35,14 +35,29 @@ from app.canonical_v13.market import (
     seal_market_snapshot,
     validate_market_profile,
 )
+from app.canonical_v13.market_acquisition import (
+    MarketAcquisitionPayload,
+    MarketAcquisitionRequest,
+    acquire_market_evidence,
+)
 from app.canonical_v13.models import (
     CONFIGURATION_ACTIVATIONS_TABLE,
     CONFIGURATION_SNAPSHOT_MEMBERS_TABLE,
+    RESEARCH_GATE_RECEIPTS_TABLE,
     RESEARCH_TARGETS_TABLE,
     VALIDATION_ATTEMPTS_TABLE,
     VALIDATION_PLANS_TABLE,
     VALIDATION_PLAN_WINDOWS_TABLE,
     VALIDATION_WINDOW_RESULTS_TABLE,
+)
+from app.canonical_v13.research_gates import (
+    CanonicalGateBlocked,
+    claim_gate_attempt,
+    create_gate_attempt,
+    persist_lookahead_gate_receipt,
+    persist_static_gate_receipt,
+    read_gate_projection,
+    recover_expired_gate_attempts,
 )
 from app.canonical_v13.research_validation import (
     CanonicalResearchValidationBlocked,
@@ -63,6 +78,7 @@ from app.canonical_v13.research_validation import (
 
 
 NOW = datetime(2026, 8, 14, tzinfo=timezone.utc)
+GATE_NOW = NOW + timedelta(hours=4)
 SOURCE = (
     "from freqtrade.strategy import IStrategy\n"
     "class CanonicalFixtureStrategy(IStrategy):\n    pass\n"
@@ -75,6 +91,22 @@ LOOKAHEAD_ANALYZER_DIGEST = "d" * 64
 EXECUTOR_IMAGE_DIGEST = "e" * 64
 
 
+class _FixtureMarketDownloader:
+    provenance_class = "TEST_SIMULATED"
+    network_access = "NONE"
+    credential_access = "NONE"
+
+    def acquire(self, request: MarketAcquisitionRequest) -> MarketAcquisitionPayload:
+        return MarketAcquisitionPayload(
+            content=b"isolated phase6 market fixture",
+            locator="fixtures/phase6-market.parquet",
+            media_type="application/x-parquet",
+            observed_first_open=NOW,
+            observed_last_close=NOW + timedelta(hours=4),
+            observed_closed_candles=48,
+        )
+
+
 @dataclass(frozen=True)
 class PreparedResearch:
     lineage: ResearchLineage
@@ -83,6 +115,9 @@ class PreparedResearch:
     lookahead_receipt: object
     plan_id: UUID
     plan_digest: str
+    gate_attempt_id: UUID
+    gate_lease_token: str
+    gate_idempotency_key: str
 
 
 @pytest.fixture
@@ -316,11 +351,25 @@ def _freeze_and_activate_bundle(connection):
         payload={"source": "isolated-fixture", "network_access": "NONE"},
     )
     validate_market_profile(connection, version_id=market_version_id)
+    acquisition_payload, acquisition_receipt = acquire_market_evidence(
+        MarketAcquisitionRequest(
+            source_identity="phase6-market-fixture-v1",
+            target_key="btc-5m",
+            instrument="BTC-USDT-SWAP",
+            pair="BTC/USDT:USDT",
+            timeframe="5m",
+            data_kind="futures",
+            requested_start=NOW,
+            requested_end=NOW + timedelta(hours=4),
+        ),
+        downloader=_FixtureMarketDownloader(),
+        observed_at=NOW + timedelta(hours=4),
+    )
     evidence = accept_market_artifact(
         connection,
-        locator="fixtures/phase6-market.parquet",
-        content=b"isolated phase6 market fixture",
-        media_type="application/x-parquet",
+        locator=acquisition_payload.locator,
+        content=acquisition_payload.content,
+        media_type=acquisition_payload.media_type,
         inspector_identity="phase6-market-inspector-v1",
         facts=MarketInspectionFacts(
             row_count=48,
@@ -330,7 +379,17 @@ def _freeze_and_activate_bundle(connection):
             duplicate_count=0,
             null_count=0,
             monotonic=True,
+            source_identity=acquisition_receipt.source_identity,
+            provenance_class=acquisition_receipt.provenance_class,
+            target_key=acquisition_receipt.target_key,
+            instrument=acquisition_receipt.instrument,
+            pair=acquisition_receipt.pair,
+            timeframe=acquisition_receipt.timeframe,
+            data_kind=acquisition_receipt.data_kind,
+            acquired_at=NOW + timedelta(hours=4),
+            acquisition_receipt_digest=acquisition_receipt.receipt_digest,
         ),
+        acquisition_receipt=acquisition_receipt,
     )
     market_snapshot = seal_market_snapshot(
         connection,
@@ -401,11 +460,47 @@ def _prepare_ready_plan(connection) -> PreparedResearch:
         has_bias=False,
         observed_signal_count=3,
     )
+    gate_idempotency_key = (
+        f"fixture-gate-primary-v3:{intake.strategy_version_id}:"
+        f"{lineage.configuration_bundle_id}"
+    )
+    gate = create_gate_attempt(
+        connection,
+        lineage=lineage,
+        idempotency_key=gate_idempotency_key,
+        release_commit="1" * 40,
+        executor_image_digest=EXECUTOR_IMAGE_DIGEST,
+        worker_source_digest="f" * 64,
+        observed_at=GATE_NOW,
+    )
+    lease = claim_gate_attempt(connection, gate_attempt_id=gate.gate_attempt_id, observed_at=GATE_NOW)
+    persist_static_gate_receipt(
+        connection,
+        gate_attempt_id=gate.gate_attempt_id,
+        lease_token=lease.lease_token,
+        receipt=static_receipt,
+        observed_at=GATE_NOW,
+    )
+    persist_lookahead_gate_receipt(
+        connection,
+        gate_attempt_id=gate.gate_attempt_id,
+        lease_token=lease.lease_token,
+        receipt=lookahead_receipt,
+        observed_at=GATE_NOW,
+    )
+    rows = connection.execute(
+        select(RESEARCH_GATE_RECEIPTS_TABLE).where(
+            RESEARCH_GATE_RECEIPTS_TABLE.c.gate_attempt_id == gate.gate_attempt_id
+        )
+    ).mappings().all()
+    gate_ids = {row["gate_type"]: row["id"] for row in rows}
     plan = declare_validation_plan(
         connection,
         lineage=lineage,
         static_receipt=static_receipt,
         lookahead_receipt=lookahead_receipt,
+        static_gate_receipt_id=gate_ids["STATIC"],
+        lookahead_gate_receipt_id=gate_ids["LOOKAHEAD"],
         orchestrator_identity="canonical-research-orchestrator-v1",
     )
     ready = mark_validation_plan_ready(
@@ -414,6 +509,8 @@ def _prepare_ready_plan(connection) -> PreparedResearch:
         expected_plan_digest=plan.validation_plan_digest,
         static_receipt=static_receipt,
         lookahead_receipt=lookahead_receipt,
+        static_gate_receipt_id=gate_ids["STATIC"],
+        lookahead_gate_receipt_id=gate_ids["LOOKAHEAD"],
         orchestrator_identity="canonical-research-orchestrator-v1",
     )
     assert ready.status == "READY"
@@ -424,7 +521,121 @@ def _prepare_ready_plan(connection) -> PreparedResearch:
         lookahead_receipt=lookahead_receipt,
         plan_id=plan.validation_plan_id,
         plan_digest=plan.validation_plan_digest,
+        gate_attempt_id=gate.gate_attempt_id,
+        gate_lease_token=lease.lease_token,
+        gate_idempotency_key=gate_idempotency_key,
     )
+
+
+def test_planless_gate_receipts_survive_pointer_churn_and_recovery_is_fail_closed(
+    canonical_connection,
+) -> None:
+    with canonical_connection.begin():
+        prepared = _prepare_ready_plan(canonical_connection)
+        before = read_gate_projection(
+            canonical_connection, gate_attempt_id=prepared.gate_attempt_id
+        )
+        assert before.validation_eligible is True
+        replayed_attempt = create_gate_attempt(
+            canonical_connection,
+            lineage=prepared.lineage,
+            idempotency_key=prepared.gate_idempotency_key,
+            release_commit="1" * 40,
+            executor_image_digest=EXECUTOR_IMAGE_DIGEST,
+            worker_source_digest="f" * 64,
+            observed_at=GATE_NOW + timedelta(hours=2),
+        )
+        assert replayed_attempt.repeat_noop is True
+        assert replayed_attempt.gate_attempt_id == prepared.gate_attempt_id
+        with pytest.raises(CanonicalGateBlocked) as attempt_conflict:
+            create_gate_attempt(
+                canonical_connection,
+                lineage=prepared.lineage,
+                idempotency_key=prepared.gate_idempotency_key,
+                release_commit="2" * 40,
+                executor_image_digest=EXECUTOR_IMAGE_DIGEST,
+                worker_source_digest="f" * 64,
+                observed_at=GATE_NOW + timedelta(minutes=1),
+            )
+        assert attempt_conflict.value.code == "BLOCKED_GATE_IDEMPOTENCY_CONFLICT"
+        receipt_count = _count(canonical_connection, RESEARCH_GATE_RECEIPTS_TABLE)
+        assert persist_static_gate_receipt(
+            canonical_connection,
+            gate_attempt_id=prepared.gate_attempt_id,
+            lease_token=prepared.gate_lease_token,
+            receipt=prepared.static_receipt,
+            observed_at=GATE_NOW + timedelta(minutes=1),
+        ) == before.static_receipt_digest
+        assert persist_lookahead_gate_receipt(
+            canonical_connection,
+            gate_attempt_id=prepared.gate_attempt_id,
+            lease_token=prepared.gate_lease_token,
+            receipt=prepared.lookahead_receipt,
+            observed_at=GATE_NOW + timedelta(minutes=1),
+        ) == before.lookahead_receipt_digest
+        assert _count(canonical_connection, RESEARCH_GATE_RECEIPTS_TABLE) == receipt_count
+        conflicting = validate_static_source(
+            SOURCE,
+            strategy_version_id=prepared.lineage.strategy_version_id,
+            expected_artifact_digest=prepared.artifact_digest,
+            validator_identity="canonical-static-validator-v2",
+            validator_digest="9" * 64,
+        )
+        with pytest.raises(CanonicalGateBlocked) as conflict:
+            persist_static_gate_receipt(
+                canonical_connection,
+                gate_attempt_id=prepared.gate_attempt_id,
+                lease_token=prepared.gate_lease_token,
+                receipt=conflicting,
+                observed_at=GATE_NOW + timedelta(minutes=1),
+            )
+        assert conflict.value.code == "BLOCKED_GATE_IDEMPOTENCY_CONFLICT"
+        orphan = create_gate_attempt(
+            canonical_connection,
+            lineage=prepared.lineage,
+            idempotency_key=f"fixture-gate-orphan-v3:{prepared.lineage.strategy_version_id}",
+            release_commit="2" * 40,
+            executor_image_digest=EXECUTOR_IMAGE_DIGEST,
+            worker_source_digest="f" * 64,
+            observed_at=GATE_NOW,
+        )
+        claim_gate_attempt(
+            canonical_connection, gate_attempt_id=orphan.gate_attempt_id, observed_at=GATE_NOW
+        )
+        canonical_connection.execute(
+            CONFIGURATION_ACTIVATIONS_TABLE.update().values(scope_key="superseded-pointer")
+        )
+        after = read_gate_projection(
+            canonical_connection, gate_attempt_id=prepared.gate_attempt_id
+        )
+        assert after == before
+        receipt_rows = canonical_connection.execute(
+            select(RESEARCH_GATE_RECEIPTS_TABLE).where(
+                RESEARCH_GATE_RECEIPTS_TABLE.c.gate_attempt_id
+                == prepared.gate_attempt_id
+            )
+        ).mappings().all()
+        receipt_ids = {row["gate_type"]: row["id"] for row in receipt_rows}
+        replayed_plan = declare_validation_plan(
+            canonical_connection,
+            lineage=prepared.lineage,
+            static_receipt=prepared.static_receipt,
+            lookahead_receipt=prepared.lookahead_receipt,
+            static_gate_receipt_id=receipt_ids["STATIC"],
+            lookahead_gate_receipt_id=receipt_ids["LOOKAHEAD"],
+            orchestrator_identity="canonical-research-orchestrator-v1",
+        )
+        assert replayed_plan.repeat_noop is True
+        assert replayed_plan.validation_plan_id == prepared.plan_id
+        assert recover_expired_gate_attempts(
+            canonical_connection, observed_at=GATE_NOW + timedelta(minutes=21)
+        ) == 1
+        recovered = read_gate_projection(
+            canonical_connection, gate_attempt_id=orphan.gate_attempt_id
+        )
+        assert recovered.status == "BLOCKED"
+        assert recovered.terminal_reason_code == "GATE_LEASE_EXPIRED"
+        assert recovered.validation_eligible is False
 
 
 def _start(connection, prepared):
@@ -707,7 +918,7 @@ def test_terminal_attempt_is_immutable_even_for_identical_receipt(
     assert _count(canonical_connection, VALIDATION_WINDOW_RESULTS_TABLE) == 2
 
 
-def test_no_active_bundle_fails_closed_before_plan_writes(canonical_connection) -> None:
+def test_plan_without_persisted_gate_pair_fails_closed_before_writes(canonical_connection) -> None:
     with canonical_connection.begin():
         intake = _submit_strategy(canonical_connection)
         lineage, _window_snapshot_id = _freeze_and_activate_bundle(canonical_connection)
@@ -738,9 +949,11 @@ def test_no_active_bundle_fails_closed_before_plan_writes(canonical_connection) 
                 lineage=lineage,
                 static_receipt=static_receipt,
                 lookahead_receipt=lookahead_receipt,
+                static_gate_receipt_id=uuid4(),
+                lookahead_gate_receipt_id=uuid4(),
                 orchestrator_identity="canonical-research-orchestrator-v1",
             )
 
-    assert raised.value.code == "BLOCKED_RESEARCH_BUNDLE_UNSET"
+    assert raised.value.code == "BLOCKED_GATE_RECEIPT_UNAVAILABLE"
     assert _count(canonical_connection, VALIDATION_PLANS_TABLE) == 0
     assert _count(canonical_connection, VALIDATION_PLAN_WINDOWS_TABLE) == 0

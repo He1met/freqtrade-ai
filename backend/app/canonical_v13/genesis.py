@@ -35,6 +35,7 @@ from app.canonical_v13.models import (
     CanonicalBase,
 )
 from app.canonical_v13.role_mapping import CanonicalRoleMapping
+from app.canonical_v13.gate_receipt_upgrade import GATE_GUARD_FUNCTION_NAMES
 
 
 GENESIS_METADATA_KEY: Final = "canonical-v13-genesis"
@@ -133,8 +134,9 @@ def _postgresql_user_objects(connection: Connection) -> tuple[str, ...]:
 
     PostgreSQL's ``public`` schema exists in a fresh database, so the namespace
     itself is allowed.  Objects in it are not.  The canonical schema may contain
-    only the exact table/index objects emitted by this metadata; views,
-    sequences, functions, and standalone user types remain forbidden.
+    only the exact table/index objects emitted by this metadata and the three
+    fail-closed gate guard functions; views, sequences, other functions, and
+    standalone user types remain forbidden.
     """
 
     if connection.dialect.name != "postgresql":
@@ -185,6 +187,10 @@ def _postgresql_user_objects(connection: Connection) -> tuple[str, ...]:
         for index in table.indexes
         if index.name is not None
     )
+    canonical_tables_complete = set(_existing_tables(connection)) == set(
+        CANONICAL_TABLE_NAMES
+    )
+    expected_guard_functions = set(GATE_GUARD_FUNCTION_NAMES)
     problems: list[str] = []
     for row in rows:
         kind = str(row["object_kind"])
@@ -197,6 +203,8 @@ def _postgresql_user_objects(connection: Connection) -> tuple[str, ...]:
                 allowed = name in CANONICAL_TABLE_NAMES
             elif relation_kind == "i":
                 allowed = name in expected_indexes
+        elif kind == "FUNCTION" and schema == CANONICAL_BUSINESS_SCHEMA:
+            allowed = canonical_tables_complete and name in expected_guard_functions
         if not allowed:
             problems.append(f"{kind.lower()}:{schema}.{name}")
     return tuple(problems)
@@ -372,6 +380,12 @@ def install_canonical_genesis(
     if effective.dialect.name == "postgresql":
         effective.execute(CreateSchema(CANONICAL_BUSINESS_SCHEMA, if_not_exists=True))
     CanonicalBase.metadata.create_all(bind=effective, checkfirst=False)
+    if effective.dialect.name == "postgresql":
+        from app.canonical_v13.gate_receipt_upgrade import (  # noqa: PLC0415
+            install_gate_receipt_triggers,
+        )
+
+        install_gate_receipt_triggers(effective)
     effective.execute(
         SCHEMA_METADATA_TABLE.insert().values(
             metadata_key=GENESIS_METADATA_KEY,
@@ -416,6 +430,11 @@ def render_postgresql_genesis_ddl(
         statements.append(str(CreateTable(table).compile(dialect=dialect)).strip())
         for index in sorted(table.indexes, key=lambda value: value.name or ""):
             statements.append(str(CreateIndex(index).compile(dialect=dialect)).strip())
+    from app.canonical_v13.gate_receipt_upgrade import (  # noqa: PLC0415
+        gate_receipt_trigger_statements,
+    )
+
+    statements.extend(gate_receipt_trigger_statements())
     statements.extend(
         render_postgresql_owner_sql(role_mapping).rstrip(";\n").split(";\n")
     )
@@ -434,6 +453,10 @@ def render_postgresql_owner_sql(
         f"OWNER TO {owner}"
         for table in CanonicalBase.metadata.sorted_tables
     ]
+    statements.extend(
+        f"ALTER FUNCTION {CANONICAL_BUSINESS_SCHEMA}.{function_name}() OWNER TO {owner}"
+        for function_name in GATE_GUARD_FUNCTION_NAMES
+    )
     statements.append(
         f"ALTER SCHEMA {CANONICAL_BUSINESS_SCHEMA} OWNER TO {owner}"
     )
@@ -466,6 +489,15 @@ def postgresql_acl_statements(
             for role in roles
         )
     statements.extend(postgresql_owner_table_grant_statements(resolved))
+    owner = resolved.physical("canonical_schema_owner")
+    for function_name in GATE_GUARD_FUNCTION_NAMES:
+        qualified = f"{CANONICAL_BUSINESS_SCHEMA}.{function_name}()"
+        statements.append(f"REVOKE ALL PRIVILEGES ON FUNCTION {qualified} FROM PUBLIC")
+        statements.extend(
+            f"REVOKE ALL PRIVILEGES ON FUNCTION {qualified} FROM {role}"
+            for role in roles
+        )
+        statements.append(f"GRANT EXECUTE ON FUNCTION {qualified} TO {owner}")
 
     for writer, table_names in WRITER_TABLE_ALLOWLIST.items():
         physical_writer = resolved.physical(writer)
@@ -561,6 +593,7 @@ __all__ = [
     "CanonicalGenesisBlocked",
     "CanonicalGenesisIdentity",
     "GENESIS_METADATA_KEY",
+    "GATE_GUARD_FUNCTION_NAMES",
     "GenesisInstallResult",
     "GenesisVerification",
     "assert_postgresql_acl_sql",
