@@ -692,6 +692,21 @@ def test_production_research_control_surface_binds_exact_attempt_and_projects_st
         assert status.json()["attempt_status"] == "RUNNING"
         assert status.json()["qualification_status"] is None
 
+        replayed_plan_response = client.post(
+            f"{API_PREFIX}/research/validation-plans",
+            json={
+                "lineage": lineage_payload,
+                "static_gate_receipt_id": gate_ids["STATIC"],
+                "lookahead_gate_receipt_id": gate_ids["LOOKAHEAD"],
+                "orchestrator_identity": "production-research-orchestrator-v1",
+            },
+        )
+        assert replayed_plan_response.status_code == 201
+        replayed_plan = replayed_plan_response.json()
+        assert replayed_plan["validation_plan_id"] == plan["validation_plan_id"]
+        assert replayed_plan["validation_plan_digest"] == plan["validation_plan_digest"]
+        assert replayed_plan["repeat_noop"] is True
+
         premature_score = client.post(
             f"{API_PREFIX}/research/scores",
             json={
