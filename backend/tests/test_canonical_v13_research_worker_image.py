@@ -80,6 +80,7 @@ def test_worker_lookahead_runs_every_required_window_and_hashes_evidence(
         "request_digest": "a" * 64,
         "strategy_version_id": "11111111-1111-1111-1111-111111111111",
         "research_target_id": "22222222-2222-2222-2222-222222222222",
+        "exchange_metadata": {"path": "/input/exchange-metadata.json"},
         "windows": [
             {
                 "window_key": "required-a",

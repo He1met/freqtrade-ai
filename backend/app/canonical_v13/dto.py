@@ -296,6 +296,12 @@ class FreshMarketPlanDTO(CanonicalProjectionDTO):
     integrity_margin_closed_candles: int = Field(ge=0)
     freshness_max_age_seconds: int = Field(gt=0)
     source: Literal["OKX_PUBLIC_MARKET_DATA_ONLY"] = "OKX_PUBLIC_MARKET_DATA_ONLY"
+    offline_exchange_metadata_contract: Literal[
+        "canonical-v13-okx-offline-exchange-metadata-v1"
+    ] = "canonical-v13-okx-offline-exchange-metadata-v1"
+    offline_exchange_adapter_identity: Literal[
+        "freqtrade-2026.6-ccxt-4.5.61-okx-offline-v1"
+    ] = "freqtrade-2026.6-ccxt-4.5.61-okx-offline-v1"
     credential_access: Literal["NONE"] = "NONE"
     trading_capability: Literal["TRADING_DISABLED"] = "TRADING_DISABLED"
     execution_side_effects: Literal[0] = 0
@@ -313,6 +319,11 @@ class FreshMarketReceiptDTO(CanonicalProjectionDTO):
     market_snapshot_digest: str = Field(pattern=SHA256_PATTERN)
     artifact_file_replay: bool
     database_replay: bool
+    exchange_metadata_artifact_id: UUID
+    exchange_metadata_receipt_id: UUID
+    exchange_metadata_locator: str
+    exchange_metadata_digest: str = Field(pattern=SHA256_PATTERN)
+    exchange_metadata_receipt_digest: str = Field(pattern=SHA256_PATTERN)
     source: Literal["OKX_PUBLIC_MARKET_DATA_ONLY"] = "OKX_PUBLIC_MARKET_DATA_ONLY"
     credential_access: Literal["NONE"] = "NONE"
     trading_capability: Literal["TRADING_DISABLED"] = "TRADING_DISABLED"

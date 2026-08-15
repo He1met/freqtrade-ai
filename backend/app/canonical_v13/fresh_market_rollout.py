@@ -5,9 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
+import json
 from pathlib import Path
 import os
 from uuid import UUID
+from uuid import uuid4
 
 from sqlalchemy import Connection, select
 
@@ -25,6 +27,11 @@ from app.canonical_v13.market_acquisition import (
     acquire_market_evidence,
 )
 from app.canonical_v13.market_planning import FreshMarketPlan
+from app.canonical_v13.offline_exchange_metadata import (
+    MEDIA_TYPE as OFFLINE_METADATA_MEDIA_TYPE,
+    OfflineExchangeMetadataRequest,
+    OkxPublicOfflineExchangeMetadataDownloader,
+)
 from app.canonical_v13.models import (
     MARKET_ARTIFACTS_TABLE,
     MARKET_INSPECTIONS_TABLE,
@@ -52,6 +59,11 @@ class FreshMarketRolloutResult:
     artifact_digest: str
     artifact_file_replay: bool
     database_replay: bool
+    exchange_metadata_artifact_id: UUID
+    exchange_metadata_receipt_id: UUID
+    exchange_metadata_locator: str
+    exchange_metadata_digest: str
+    exchange_metadata_receipt_digest: str
 
 
 def persist_immutable_market_artifact(
@@ -75,7 +87,10 @@ def persist_immutable_market_artifact(
             "BLOCKED_MARKET_ARTIFACT_LOCATOR", "locator is not root-relative POSIX"
         )
     expected_digest = sha256(content).hexdigest()
-    if not parts[-1].endswith(f"-{expected_digest}.jsonl"):
+    if not (
+        parts[-1].endswith(f"-{expected_digest}.jsonl")
+        or parts[-1] == f"{expected_digest}.json"
+    ):
         raise CanonicalFreshMarketRolloutBlocked(
             "BLOCKED_MARKET_ARTIFACT_DIGEST_PATH", "locator does not bind content"
         )
@@ -119,6 +134,7 @@ def acquire_register_and_seal_fresh_market(
     profile_key: str,
     scope_key: str,
     inspector_identity: str,
+    metadata_downloader: OkxPublicOfflineExchangeMetadataDownloader | None = None,
 ) -> FreshMarketRolloutResult:
     """Acquire through the port, persist immutable bytes, then append canonical evidence."""
 
@@ -126,6 +142,140 @@ def acquire_register_and_seal_fresh_market(
         raise CanonicalFreshMarketRolloutBlocked(
             "BLOCKED_MARKET_TIMEZONE_UNSET", "observed_at must be timezone-aware"
         )
+    metadata_downloader = metadata_downloader or OkxPublicOfflineExchangeMetadataDownloader()
+    metadata = metadata_downloader.acquire(
+        OfflineExchangeMetadataRequest(
+            target_key=plan.target_key,
+            instrument=plan.instrument,
+            pair=plan.pair,
+            timeframe=plan.timeframe,
+            data_kind=plan.data_kind,
+            target_snapshot_id=str(plan.target_snapshot_id),
+            target_snapshot_digest=plan.target_snapshot_digest,
+            window_snapshot_id=str(plan.window_snapshot_id),
+            window_snapshot_digest=plan.window_snapshot_digest,
+            freshness_max_age_seconds=plan.freshness_max_age_seconds,
+        ),
+        observed_at=observed_at,
+    )
+    persist_immutable_market_artifact(
+        root=artifact_root, locator=metadata.locator, content=metadata.content
+    )
+    metadata_artifact = connection.execute(
+        select(MARKET_ARTIFACTS_TABLE).where(
+            MARKET_ARTIFACTS_TABLE.c.content_digest == metadata.content_digest
+        )
+    ).mappings().one_or_none()
+    metadata_table_receipt_digest: str
+    if metadata_artifact is None:
+        metadata_artifact_id = uuid4()
+        metadata_inspection_id = uuid4()
+        metadata_receipt_id = uuid4()
+        now = observed_at.astimezone(timezone.utc)
+        inspection_json = {
+            "contract": "canonical-v13-offline-exchange-metadata-inspection-v1",
+            "status": "ACCEPTED",
+            "source_identity": "okx-public-instruments-position-tiers-v1",
+            "provenance_class": metadata_downloader.provenance_class,
+            "target_key": plan.target_key,
+            "instrument": plan.instrument,
+            "pair": plan.pair,
+            "timeframe": plan.timeframe,
+            "data_kind": plan.data_kind,
+            "target_snapshot_id": str(plan.target_snapshot_id),
+            "target_snapshot_digest": plan.target_snapshot_digest,
+            "window_snapshot_id": str(plan.window_snapshot_id),
+            "window_snapshot_digest": plan.window_snapshot_digest,
+            "observed_at": metadata.observed_at.isoformat(),
+            "fresh_until": metadata.fresh_until.isoformat(),
+            "market_count": metadata.market_count,
+            "leverage_tier_count": metadata.leverage_tier_count,
+            "content_digest": metadata.content_digest,
+            "acquisition_receipt_digest": metadata.receipt_digest,
+            "network_access": "PUBLIC_MARKET_DATA_ONLY",
+            "credential_access": "NONE",
+        }
+        inspection_digest = sha256(
+            json.dumps(inspection_json, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        metadata_table_receipt_digest = sha256(
+            json.dumps(
+                {
+                    "artifact_digest": metadata.content_digest,
+                    "inspection_digest": inspection_digest,
+                    "status": "ACCEPTED",
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        connection.execute(
+            MARKET_ARTIFACTS_TABLE.insert().values(
+                id=metadata_artifact_id,
+                content_digest=metadata.content_digest,
+                locator=metadata.locator,
+                size_bytes=len(metadata.content),
+                media_type=OFFLINE_METADATA_MEDIA_TYPE,
+                created_at=now,
+            )
+        )
+        connection.execute(
+            MARKET_INSPECTIONS_TABLE.insert().values(
+                id=metadata_inspection_id,
+                market_artifact_id=metadata_artifact_id,
+                status="ACCEPTED",
+                inspection_json=inspection_json,
+                inspection_digest=inspection_digest,
+                inspector_identity="canonical-v13-okx-public-metadata-inspector-v1",
+                created_at=now,
+            )
+        )
+        connection.execute(
+            MARKET_RECEIPTS_TABLE.insert().values(
+                id=metadata_receipt_id,
+                market_artifact_id=metadata_artifact_id,
+                market_inspection_id=metadata_inspection_id,
+                status="ACCEPTED",
+                artifact_digest=metadata.content_digest,
+                inspection_digest=inspection_digest,
+                receipt_digest=metadata_table_receipt_digest,
+                created_at=now,
+            )
+        )
+    else:
+        if (
+            metadata_artifact["locator"] != metadata.locator
+            or metadata_artifact["size_bytes"] != len(metadata.content)
+            or metadata_artifact["media_type"] != OFFLINE_METADATA_MEDIA_TYPE
+        ):
+            raise CanonicalFreshMarketRolloutBlocked(
+                "BLOCKED_OFFLINE_METADATA_REPLAY_DRIFT", "artifact envelope differs"
+            )
+        metadata_artifact_id = metadata_artifact["id"]
+        metadata_receipts = connection.execute(
+            select(MARKET_RECEIPTS_TABLE, MARKET_INSPECTIONS_TABLE.c.inspection_json)
+            .join(
+                MARKET_INSPECTIONS_TABLE,
+                MARKET_INSPECTIONS_TABLE.c.id
+                == MARKET_RECEIPTS_TABLE.c.market_inspection_id,
+            )
+            .where(MARKET_RECEIPTS_TABLE.c.market_artifact_id == metadata_artifact_id)
+        ).mappings().all()
+        matching_receipts = [
+            row
+            for row in metadata_receipts
+            if isinstance(row["inspection_json"], dict)
+            and row["inspection_json"].get("acquisition_receipt_digest")
+            == metadata.receipt_digest
+        ]
+        if len(matching_receipts) != 1 or matching_receipts[0]["status"] != "ACCEPTED":
+            raise CanonicalFreshMarketRolloutBlocked(
+                "BLOCKED_OFFLINE_METADATA_REPLAY_DRIFT", "accepted receipt is absent"
+            )
+        metadata_receipt = matching_receipts[0]
+        metadata_receipt_id = metadata_receipt["id"]
+        metadata_table_receipt_digest = metadata_receipt["receipt_digest"]
+
     request = MarketAcquisitionRequest(
         source_identity="okx-public-history-candles-v1",
         target_key=plan.target_key,
@@ -182,6 +332,17 @@ def acquire_register_and_seal_fresh_market(
         "warmup_closed_candles": plan.warmup_closed_candles,
         "integrity_margin_closed_candles": plan.integrity_margin_closed_candles,
         "freshness_max_age_seconds": plan.freshness_max_age_seconds,
+        "offline_exchange_metadata": {
+            "artifact_id": str(metadata_artifact_id),
+            "artifact_locator": metadata.locator,
+            "artifact_digest": metadata.content_digest,
+            "receipt_id": str(metadata_receipt_id),
+            "receipt_digest": metadata_table_receipt_digest,
+            "acquisition_receipt_digest": metadata.receipt_digest,
+            "observed_at": metadata.observed_at.isoformat(),
+            "fresh_until": metadata.fresh_until.isoformat(),
+            "adapter_identity": "freqtrade-2026.6-ccxt-4.5.61-okx-offline-v1",
+        },
     }
     _profile_id, profile_version_id, _profile_digest = create_market_profile_draft(
         connection,
@@ -263,6 +424,11 @@ def acquire_register_and_seal_fresh_market(
             artifact_digest=content_digest,
             artifact_file_replay=file_replay,
             database_replay=True,
+            exchange_metadata_artifact_id=metadata_artifact_id,
+            exchange_metadata_receipt_id=metadata_receipt_id,
+            exchange_metadata_locator=metadata.locator,
+            exchange_metadata_digest=metadata.content_digest,
+            exchange_metadata_receipt_digest=metadata_table_receipt_digest,
         )
     evidence = accept_market_artifact(
         connection,
@@ -313,6 +479,11 @@ def acquire_register_and_seal_fresh_market(
         artifact_digest=evidence.content_digest,
         artifact_file_replay=file_replay,
         database_replay=evidence.idempotent_replay and snapshot.idempotent_replay,
+        exchange_metadata_artifact_id=metadata_artifact_id,
+        exchange_metadata_receipt_id=metadata_receipt_id,
+        exchange_metadata_locator=metadata.locator,
+        exchange_metadata_digest=metadata.content_digest,
+        exchange_metadata_receipt_digest=metadata_table_receipt_digest,
     )
 
 

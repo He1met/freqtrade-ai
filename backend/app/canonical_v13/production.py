@@ -22,6 +22,9 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.canonical_v13.api import create_canonical_v13_app
 from app.canonical_v13.genesis import verify_canonical_genesis
 from app.canonical_v13.okx_public_market import OkxPublicHistoryCandleDownloader
+from app.canonical_v13.offline_exchange_metadata import (
+    OkxPublicOfflineExchangeMetadataDownloader,
+)
 from app.canonical_v13.bootstrap import LOCAL_SERVICE_PRINCIPALS, local_role_mapping
 from app.canonical_v13.research_persistence import (
     RESEARCH_PERSISTENCE_ENV_BY_CAPABILITY,
@@ -153,6 +156,11 @@ def create_app(
         market_artifact_root=market_artifact_root,
         market_downloader_factory=(
             OkxPublicHistoryCandleDownloader
+            if market_artifact_root is not None
+            else None
+        ),
+        exchange_metadata_downloader_factory=(
+            OkxPublicOfflineExchangeMetadataDownloader
             if market_artifact_root is not None
             else None
         ),
