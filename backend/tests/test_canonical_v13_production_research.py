@@ -299,13 +299,15 @@ def test_production_lookahead_adapter_is_planless_and_uses_same_sandbox_flags(
         market_snapshot_digest="c" * 64,
     )
     evidence = {
-        "contract": "canonical-v13-freqtrade-lookahead-output-v2",
+        "contract": "canonical-v13-freqtrade-lookahead-output-v3",
         "request_digest": request_digest,
         "strategy_version_id": str(lineage.strategy_version_id),
         "research_target_id": str(lineage.research_target_id),
         "status": "PASSED",
         "has_bias": False,
         "observed_signal_count": 20,
+        "blocked_observed_trade_count": None,
+        "blocked_required_trade_count": None,
         "window_results": [
             {
                 "window_key": "required-a",
@@ -350,6 +352,7 @@ def test_production_lookahead_adapter_is_planless_and_uses_same_sandbox_flags(
     assert receipt.status == "PASSED"
     assert receipt.has_bias is False
     assert receipt.observed_signal_count == 20
+    assert receipt.failure_code is None
     assert runner.argv is not None
     assert "lookahead" in runner.argv
     assert "backtest" not in runner.argv
@@ -380,6 +383,40 @@ def test_production_lookahead_adapter_is_planless_and_uses_same_sandbox_flags(
     ):
         incomplete_adapter.execute(lineage=lineage, artifact_digest="f" * 64)
 
+    blocked_evidence = {
+        **evidence,
+        "status": "BLOCKED",
+        "has_bias": None,
+        "observed_signal_count": 0,
+        "blocked_observed_trade_count": 3,
+        "blocked_required_trade_count": 10,
+        "window_results": [],
+        "failure_stage": "OUTPUT_INTERPRETATION",
+        "failure_code": "LOOKAHEAD_INSUFFICIENT_TRADES",
+        "tool_return_code": 0,
+        "stdout_digest": "f" * 64,
+        "stderr_digest": "1" * 64,
+        "redacted_detail": "Freqtrade observed fewer trades than required",
+    }
+    blocked_adapter = FreqtradeProductionLookaheadAdapter(
+        activation=PRODUCTION_LOOKAHEAD_ACTIVATION,
+        runtime_path=runtime,
+        image_reference=f"freqtrade-ai/research@sha256:{EXECUTOR_IMAGE_DIGEST}",
+        limits=ProductionResearchLimits(timeout_seconds=60, max_output_bytes=32_768),
+        input_factory=inputs,
+        runner=CapturingRunner(
+            {
+                **blocked_evidence,
+                "evidence_digest": canonical_research_digest(blocked_evidence),
+            }
+        ),
+    )
+    blocked = blocked_adapter.execute(lineage=lineage, artifact_digest="f" * 64)
+    assert blocked.status == "BLOCKED"
+    assert blocked.failure_code == "LOOKAHEAD_INSUFFICIENT_TRADES"
+    assert blocked.blocked_observed_trade_count == 3
+    assert blocked.blocked_required_trade_count == 10
+
 
 def test_blocked_lookahead_diagnostic_is_machine_readable_and_ineligible(
     monkeypatch, tmp_path: Path
@@ -402,11 +439,13 @@ def test_blocked_lookahead_diagnostic_is_machine_readable_and_ineligible(
         has_bias=None,
         observed_signal_count=0,
         failure_stage="OUTPUT_INTERPRETATION",
-        failure_code="LOOKAHEAD_INSUFFICIENT_OBSERVATIONS",
+        failure_code="LOOKAHEAD_INSUFFICIENT_TRADES",
         tool_return_code=0,
         stdout_digest="f" * 64,
         stderr_digest="1" * 64,
-        redacted_detail="Freqtrade produced no lookahead observations",
+        redacted_detail="Freqtrade observed fewer trades than required",
+        blocked_observed_trade_count=3,
+        blocked_required_trade_count=10,
     )
     decision = validate_lookahead_receipt(
         lookahead,
@@ -415,7 +454,7 @@ def test_blocked_lookahead_diagnostic_is_machine_readable_and_ineligible(
     )
     assert decision.status == "BLOCKED"
     assert decision.reason_codes == (
-        "LOOKAHEAD_INSUFFICIENT_OBSERVATIONS",
+        "LOOKAHEAD_INSUFFICIENT_TRADES",
         "LOOKAHEAD_EVIDENCE_BLOCKED",
         "LOOKAHEAD_OBSERVATIONS_UNSET",
     )

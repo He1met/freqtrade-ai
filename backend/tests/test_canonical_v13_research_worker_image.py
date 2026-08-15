@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import sys
 from datetime import datetime, timezone
@@ -157,25 +158,32 @@ def test_worker_lookahead_runs_every_required_window_and_hashes_evidence(
     )
     monkeypatch.setattr(worker.Path, "mkdir", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(worker.Path, "write_bytes", lambda *_args: 1)
-    calls: list[tuple[str, ...]] = []
-    empty_export = {"value": False}
+    monkeypatch.setattr(worker.Path, "stat", lambda *_args, **_kwargs: SimpleNamespace(st_size=0))
+    original_path_open = worker.Path.open
 
+    exports: set[Path] = set()
+
+    def open_path(path, mode="r", *args, **kwargs):
+        if path.suffix == ".stderr":
+            return io.BytesIO() if "b" in mode else io.StringIO("")
+        if path in exports:
+            return io.StringIO(
+                "strategy,has_bias,total_signals,biased_entry_signals,biased_exit_signals\n"
+                "Exact,False,20,0,0\n"
+            )
+        return original_path_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(worker.Path, "open", open_path)
+    calls: list[tuple[str, ...]] = []
     def run(command, **_kwargs):
         command = tuple(command)
         calls.append(command)
         export = Path(command[command.index("--lookahead-analysis-exportfilename") + 1])
+        exports.add(export)
         monkeypatch.setattr(
             worker.Path,
             "is_file",
             lambda self: self == export,
-        )
-        monkeypatch.setattr(
-            worker.Path,
-            "open",
-            lambda self, **_kwargs: __import__("io").StringIO(
-                "strategy,has_bias,total_signals,biased_entry_signals,biased_exit_signals\n"
-                + ("" if empty_export["value"] else "Exact,False,20,0,0\n")
-            ),
         )
         return SimpleNamespace(returncode=0)
 
@@ -187,19 +195,17 @@ def test_worker_lookahead_runs_every_required_window_and_hashes_evidence(
     assert result["status"] == "PASSED"
     assert result["has_bias"] is False
     assert result["observed_signal_count"] == 40
+    assert result["failure_code"] is None
     assert len(result["window_results"]) == 2
     evidence = {key: value for key, value in result.items() if key != "evidence_digest"}
     assert result["evidence_digest"] == worker._digest(evidence)
 
-    empty_export["value"] = True
-    monkeypatch.setattr(worker, "_strategy_class", lambda _path: "Exact")
-    blocked = worker.lookahead(
-        SimpleNamespace(request=None, bundle=None, strategy=strategy)
+def test_worker_classifies_pinned_freqtrade_insufficient_trade_log() -> None:
+    worker = _load_worker()
+    match = worker._INSUFFICIENT_TRADES.search(
+        "found 3 trades which is less than minimum_trade_amount 10. "
+        "Cancelling this backtest lookahead bias test."
     )
-    assert blocked["status"] == "BLOCKED"
-    assert blocked["has_bias"] is None
-    assert blocked["observed_signal_count"] == 0
-    assert blocked["failure_stage"] == "OUTPUT_INTERPRETATION"
-    assert blocked["failure_code"] == "LOOKAHEAD_INSUFFICIENT_OBSERVATIONS"
-    assert blocked["tool_return_code"] == 0
-    assert blocked["window_results"] == []
+    assert match is not None
+    assert int(match.group("observed")) == 3
+    assert int(match.group("required")) == 10

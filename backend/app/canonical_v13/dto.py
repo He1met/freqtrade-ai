@@ -379,6 +379,8 @@ class LookaheadReceiptCommandDTO(CanonicalCommandDTO):
     status: Literal["PASSED", "FAILED", "BLOCKED"]
     has_bias: Optional[bool]
     observed_signal_count: int = Field(ge=0)
+    blocked_observed_trade_count: Optional[int] = Field(default=None, ge=0)
+    blocked_required_trade_count: Optional[int] = Field(default=None, gt=0)
     request_digest: str = Field(pattern=SHA256_PATTERN)
     receipt_digest: str = Field(pattern=SHA256_PATTERN)
     failure_stage: Optional[
@@ -386,11 +388,13 @@ class LookaheadReceiptCommandDTO(CanonicalCommandDTO):
     ] = None
     failure_code: Optional[
         Literal[
-            "LOOKAHEAD_TOOL_RETURNED_NONZERO",
             "LOOKAHEAD_EXPORT_MISSING",
-            "LOOKAHEAD_INSUFFICIENT_OBSERVATIONS",
+            "LOOKAHEAD_INSUFFICIENT_TRADES",
+            "LOOKAHEAD_LOG_LIMIT_EXCEEDED",
+            "LOOKAHEAD_PROCESS_FAILED",
             "LOOKAHEAD_RESULT_AMBIGUOUS",
-            "LOOKAHEAD_WORKER_EXCEPTION",
+            "LOOKAHEAD_WORKER_BLOCKED",
+            "LOOKAHEAD_WORKER_INTERNAL_ERROR",
         ]
     ] = None
     tool_return_code: Optional[int] = Field(default=0, ge=-255, le=255)

@@ -12,6 +12,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import zipfile
@@ -20,7 +21,7 @@ import zipfile
 REQUEST_CONTRACT = "canonical-v13-freqtrade-backtest-request-v1"
 OUTPUT_CONTRACT = "canonical-v13-freqtrade-backtest-output-v1"
 LOOKAHEAD_REQUEST_CONTRACT = "canonical-v13-freqtrade-lookahead-request-v1"
-LOOKAHEAD_OUTPUT_CONTRACT = "canonical-v13-freqtrade-lookahead-output-v2"
+LOOKAHEAD_OUTPUT_CONTRACT = "canonical-v13-freqtrade-lookahead-output-v3"
 PREFLIGHT_CONTRACT = "canonical-v13-research-worker-preflight-v1"
 EXPECTED_CAPABILITY = {
     "trading": "TRADING_DISABLED",
@@ -41,6 +42,36 @@ HEX = frozenset("0123456789abcdef")
 
 class Blocked(RuntimeError):
     pass
+
+
+class LookaheadBlocked(Blocked):
+    def __init__(
+        self,
+        reason_code: str,
+        *,
+        observed_trade_count: int | None = None,
+        required_trade_count: int | None = None,
+    ) -> None:
+        self.reason_code = reason_code
+        self.observed_trade_count = observed_trade_count
+        self.required_trade_count = required_trade_count
+        super().__init__(reason_code)
+
+
+_INSUFFICIENT_TRADES = re.compile(
+    r"found (?P<observed>\d+) trades which is less than minimum_trade_amount "
+    r"(?P<required>\d+)\."
+)
+_MAXIMUM_LOOKAHEAD_LOG_BYTES = 1_000_000
+_LOOKAHEAD_FAILURE_DETAILS = {
+    "LOOKAHEAD_EXPORT_MISSING": "Freqtrade lookahead export is unavailable",
+    "LOOKAHEAD_INSUFFICIENT_TRADES": "Freqtrade observed fewer trades than required",
+    "LOOKAHEAD_LOG_LIMIT_EXCEEDED": "Freqtrade lookahead log exceeded the safe limit",
+    "LOOKAHEAD_PROCESS_FAILED": "Freqtrade lookahead did not complete successfully",
+    "LOOKAHEAD_RESULT_AMBIGUOUS": "Freqtrade lookahead result does not uniquely match the strategy",
+    "LOOKAHEAD_WORKER_BLOCKED": "lookahead worker rejected the frozen input",
+    "LOOKAHEAD_WORKER_INTERNAL_ERROR": "lookahead worker failed closed",
+}
 
 
 def _canonical_bytes(value: object) -> bytes:
@@ -377,9 +408,11 @@ def _lookahead_output(
     failure_stage: str | None,
     failure_code: str | None,
     tool_return_code: int | None,
-    stdout: bytes,
-    stderr: bytes,
+    stdout_digest: str,
+    stderr_digest: str,
     redacted_detail: str | None,
+    blocked_observed_trade_count: int | None = None,
+    blocked_required_trade_count: int | None = None,
 ) -> dict[str, object]:
     evidence = {
         "contract": LOOKAHEAD_OUTPUT_CONTRACT,
@@ -389,12 +422,14 @@ def _lookahead_output(
         "status": status,
         "has_bias": has_bias,
         "observed_signal_count": observed_signal_count,
+        "blocked_observed_trade_count": blocked_observed_trade_count,
+        "blocked_required_trade_count": blocked_required_trade_count,
         "window_results": window_results,
         "failure_stage": failure_stage,
         "failure_code": failure_code,
         "tool_return_code": tool_return_code,
-        "stdout_digest": sha256(stdout).hexdigest(),
-        "stderr_digest": sha256(stderr).hexdigest(),
+        "stdout_digest": stdout_digest,
+        "stderr_digest": stderr_digest,
         "redacted_detail": redacted_detail,
     }
     return {**evidence, "evidence_digest": _digest(evidence)}
@@ -634,6 +669,7 @@ def lookahead(args: argparse.Namespace) -> dict[str, object]:
         if closed_candle_count < int(window["minimum_closed_candles"]):
             raise Blocked("lookahead window has insufficient closed-candle coverage")
         export_path = Path(f"/work/lookahead-{index:04d}.csv")
+        log_path = Path(f"/work/lookahead-{index:04d}.stderr")
         command = (
             "/opt/freqtrade-ai/bin/canonical-v13-research-worker",
             "freqtrade-offline",
@@ -664,19 +700,35 @@ def lookahead(args: argparse.Namespace) -> dict[str, object]:
             "--strategy-list",
             strategy_class,
         )
-        completed = subprocess.run(
-            command,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            env=FREQTRADE_SUBPROCESS_ENV,
-            close_fds=True,
-            timeout=840,
-            check=False,
-        )
-        stdout = getattr(completed, "stdout", None) or b""
-        stderr = getattr(completed, "stderr", None) or b""
-        captured_stdout.extend(stdout)
-        captured_stderr.extend(stderr)
+        with log_path.open("wb") as stderr:
+            completed = subprocess.run(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=stderr,
+                env=FREQTRADE_SUBPROCESS_ENV,
+                close_fds=True,
+                timeout=840,
+                check=False,
+            )
+        if log_path.stat().st_size > _MAXIMUM_LOOKAHEAD_LOG_BYTES:
+            log_digest, _ = _file_digest(log_path)
+            return _lookahead_output(
+                request,
+                status="BLOCKED",
+                has_bias=None,
+                observed_signal_count=0,
+                window_results=[],
+                failure_stage="FREQTRADE_PROCESS",
+                failure_code="LOOKAHEAD_LOG_LIMIT_EXCEEDED",
+                tool_return_code=completed.returncode,
+                stdout_digest=sha256(bytes(captured_stdout)).hexdigest(),
+                stderr_digest=log_digest,
+                redacted_detail="Freqtrade lookahead log exceeded the safe limit",
+            )
+        log_bytes = log_path.read_bytes()
+        captured_stderr.extend(log_bytes)
+        log_text = log_bytes.decode("utf-8", errors="replace")
         if completed.returncode != 0:
             return _lookahead_output(
                 request,
@@ -685,10 +737,10 @@ def lookahead(args: argparse.Namespace) -> dict[str, object]:
                 observed_signal_count=0,
                 window_results=[],
                 failure_stage="FREQTRADE_PROCESS",
-                failure_code="LOOKAHEAD_TOOL_RETURNED_NONZERO",
+                failure_code="LOOKAHEAD_PROCESS_FAILED",
                 tool_return_code=completed.returncode,
-                stdout=bytes(captured_stdout),
-                stderr=bytes(captured_stderr),
+                stdout_digest=sha256(bytes(captured_stdout)).hexdigest(),
+                stderr_digest=sha256(bytes(captured_stderr)).hexdigest(),
                 redacted_detail="Freqtrade lookahead did not complete successfully",
             )
         if not export_path.is_file():
@@ -701,28 +753,31 @@ def lookahead(args: argparse.Namespace) -> dict[str, object]:
                 failure_stage="OUTPUT_INTERPRETATION",
                 failure_code="LOOKAHEAD_EXPORT_MISSING",
                 tool_return_code=completed.returncode,
-                stdout=bytes(captured_stdout),
-                stderr=bytes(captured_stderr),
+                stdout_digest=sha256(bytes(captured_stdout)).hexdigest(),
+                stderr_digest=sha256(bytes(captured_stderr)).hexdigest(),
                 redacted_detail="Freqtrade lookahead export is unavailable",
             )
         with export_path.open(encoding="utf-8", newline="") as handle:
             rows = list(csv.DictReader(handle))
         selected = [row for row in rows if row.get("strategy") == strategy_class]
-        if not rows:
-            return _lookahead_output(
-                request,
-                status="BLOCKED",
-                has_bias=None,
-                observed_signal_count=0,
-                window_results=[],
-                failure_stage="OUTPUT_INTERPRETATION",
-                failure_code="LOOKAHEAD_INSUFFICIENT_OBSERVATIONS",
-                tool_return_code=completed.returncode,
-                stdout=bytes(captured_stdout),
-                stderr=bytes(captured_stderr),
-                redacted_detail="Freqtrade produced no lookahead observations",
-            )
         if len(selected) != 1:
+            insufficient = _INSUFFICIENT_TRADES.search(log_text)
+            if insufficient is not None:
+                return _lookahead_output(
+                    request,
+                    status="BLOCKED",
+                    has_bias=None,
+                    observed_signal_count=0,
+                    window_results=[],
+                    failure_stage="OUTPUT_INTERPRETATION",
+                    failure_code="LOOKAHEAD_INSUFFICIENT_TRADES",
+                    tool_return_code=completed.returncode,
+                    stdout_digest=sha256(bytes(captured_stdout)).hexdigest(),
+                    stderr_digest=sha256(bytes(captured_stderr)).hexdigest(),
+                    redacted_detail="Freqtrade observed fewer trades than required",
+                    blocked_observed_trade_count=int(insufficient.group("observed")),
+                    blocked_required_trade_count=int(insufficient.group("required")),
+                )
             return _lookahead_output(
                 request,
                 status="BLOCKED",
@@ -732,8 +787,8 @@ def lookahead(args: argparse.Namespace) -> dict[str, object]:
                 failure_stage="OUTPUT_INTERPRETATION",
                 failure_code="LOOKAHEAD_RESULT_AMBIGUOUS",
                 tool_return_code=completed.returncode,
-                stdout=bytes(captured_stdout),
-                stderr=bytes(captured_stderr),
+                stdout_digest=sha256(bytes(captured_stdout)).hexdigest(),
+                stderr_digest=sha256(bytes(captured_stderr)).hexdigest(),
                 redacted_detail="Freqtrade lookahead result does not uniquely match the strategy",
             )
         row = selected[0]
@@ -768,8 +823,8 @@ def lookahead(args: argparse.Namespace) -> dict[str, object]:
         failure_stage=None,
         failure_code=None,
         tool_return_code=0,
-        stdout=bytes(captured_stdout),
-        stderr=bytes(captured_stderr),
+        stdout_digest=sha256(bytes(captured_stdout)).hexdigest(),
+        stderr_digest=sha256(bytes(captured_stderr)).hexdigest(),
         redacted_detail=None,
     )
 
@@ -809,23 +864,49 @@ def main() -> int:
     else:
         try:
             result = lookahead(args)
-        except Exception:
+        except Exception as exc:
             try:
                 request = _load_object(args.request)
             except Exception:
                 return 2
+            if isinstance(exc, LookaheadBlocked):
+                failure_code = exc.reason_code
+                blocked_observed_trade_count = exc.observed_trade_count
+                blocked_required_trade_count = exc.required_trade_count
+                failure_stage = (
+                    "OUTPUT_INTERPRETATION"
+                    if failure_code
+                    in {
+                        "LOOKAHEAD_EXPORT_MISSING",
+                        "LOOKAHEAD_INSUFFICIENT_TRADES",
+                        "LOOKAHEAD_RESULT_AMBIGUOUS",
+                    }
+                    else "FREQTRADE_PROCESS"
+                )
+            elif isinstance(exc, Blocked):
+                failure_code = "LOOKAHEAD_WORKER_BLOCKED"
+                blocked_observed_trade_count = None
+                blocked_required_trade_count = None
+                failure_stage = "WORKER"
+            else:
+                failure_code = "LOOKAHEAD_WORKER_INTERNAL_ERROR"
+                blocked_observed_trade_count = None
+                blocked_required_trade_count = None
+                failure_stage = "WORKER"
             result = _lookahead_output(
                 request,
                 status="BLOCKED",
                 has_bias=None,
                 observed_signal_count=0,
                 window_results=[],
-                failure_stage="WORKER",
-                failure_code="LOOKAHEAD_WORKER_EXCEPTION",
+                failure_stage=failure_stage,
+                failure_code=failure_code,
                 tool_return_code=None,
-                stdout=b"",
-                stderr=b"",
-                redacted_detail="lookahead worker failed closed",
+                stdout_digest=sha256(b"").hexdigest(),
+                stderr_digest=sha256(b"").hexdigest(),
+                redacted_detail=_LOOKAHEAD_FAILURE_DETAILS[failure_code],
+                blocked_observed_trade_count=blocked_observed_trade_count,
+                blocked_required_trade_count=blocked_required_trade_count,
             )
     sys.stdout.buffer.write(_canonical_bytes(result) + b"\n")
     return 0

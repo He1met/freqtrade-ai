@@ -44,8 +44,10 @@ from app.canonical_v13.models import (
 )
 from app.canonical_v13.research_validation import (
     EphemeralAttemptReceipt,
+    LOOKAHEAD_BLOCK_REASON_CODES,
     LookaheadAnalysisReceipt,
     LOOKAHEAD_FAILURE_DETAILS,
+    LOOKAHEAD_FAILURE_STAGE_BY_CODE,
     LOOKAHEAD_FAILURE_STAGES,
     ResearchLineage,
     RunningValidationAttempt,
@@ -1256,6 +1258,8 @@ class FreqtradeProductionLookaheadAdapter:
             "status",
             "has_bias",
             "observed_signal_count",
+            "blocked_observed_trade_count",
+            "blocked_required_trade_count",
             "window_results",
             "failure_stage",
             "failure_code",
@@ -1271,7 +1275,7 @@ class FreqtradeProductionLookaheadAdapter:
             )
         evidence = {key: value for key, value in payload.items() if key != "evidence_digest"}
         if (
-            payload["contract"] != "canonical-v13-freqtrade-lookahead-output-v2"
+            payload["contract"] != "canonical-v13-freqtrade-lookahead-output-v3"
             or payload["request_digest"] != request.get("request_digest")
             or payload["strategy_version_id"] != str(lineage.strategy_version_id)
             or payload["research_target_id"] != str(lineage.research_target_id)
@@ -1296,12 +1300,17 @@ class FreqtradeProductionLookaheadAdapter:
                 "BLOCKED_LOOKAHEAD_OUTPUT_LINEAGE", "required window set is unavailable"
             )
         if payload["status"] == "BLOCKED":
+            blocked_reason = payload["failure_code"]
+            blocked_observed = payload["blocked_observed_trade_count"]
+            blocked_required = payload["blocked_required_trade_count"]
             if (
                 payload["has_bias"] is not None
                 or payload["observed_signal_count"] != 0
                 or payload["window_results"]
                 or payload["failure_stage"] not in LOOKAHEAD_FAILURE_STAGES
                 or payload["failure_code"] not in LOOKAHEAD_FAILURE_DETAILS
+                or payload["failure_stage"]
+                != LOOKAHEAD_FAILURE_STAGE_BY_CODE.get(payload["failure_code"])
                 or payload["redacted_detail"]
                 != LOOKAHEAD_FAILURE_DETAILS.get(payload["failure_code"])
                 or (
@@ -1312,10 +1321,30 @@ class FreqtradeProductionLookaheadAdapter:
                         or not -255 <= payload["tool_return_code"] <= 255
                     )
                 )
+                or not isinstance(blocked_reason, str)
+                or blocked_reason not in LOOKAHEAD_BLOCK_REASON_CODES
             ):
                 raise CanonicalProductionResearchBlocked(
                     "BLOCKED_LOOKAHEAD_OUTPUT_LINEAGE",
                     "blocked worker output is internally inconsistent",
+                )
+            if blocked_reason == "LOOKAHEAD_INSUFFICIENT_TRADES":
+                if (
+                    any(
+                        isinstance(value, bool) or not isinstance(value, int)
+                        for value in (blocked_observed, blocked_required)
+                    )
+                    or blocked_observed < 0
+                    or blocked_required <= blocked_observed
+                ):
+                    raise CanonicalProductionResearchBlocked(
+                        "BLOCKED_LOOKAHEAD_OUTPUT_LINEAGE",
+                        "insufficient-trade evidence is invalid",
+                    )
+            elif blocked_observed is not None or blocked_required is not None:
+                raise CanonicalProductionResearchBlocked(
+                    "BLOCKED_LOOKAHEAD_OUTPUT_LINEAGE",
+                    "blocked trade counts do not match the reason",
                 )
         else:
             if (
@@ -1323,6 +1352,8 @@ class FreqtradeProductionLookaheadAdapter:
                 or payload["failure_code"] is not None
                 or payload["redacted_detail"] is not None
                 or payload["tool_return_code"] != 0
+                or payload["blocked_observed_trade_count"] is not None
+                or payload["blocked_required_trade_count"] is not None
             ):
                 raise CanonicalProductionResearchBlocked(
                     "BLOCKED_LOOKAHEAD_OUTPUT_LINEAGE",
@@ -1398,6 +1429,8 @@ class FreqtradeProductionLookaheadAdapter:
             stdout_digest=str(payload["stdout_digest"]),
             stderr_digest=str(payload["stderr_digest"]),
             redacted_detail=payload["redacted_detail"],
+            blocked_observed_trade_count=payload["blocked_observed_trade_count"],
+            blocked_required_trade_count=payload["blocked_required_trade_count"],
         )
 
     def execute(
