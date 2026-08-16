@@ -13,7 +13,7 @@ function NavigationLinks({ items }: { items: typeof navigationItems }) {
   return (
     <div className="desktop-nav-links">
       {items.map((item) => (
-        <NavLink key={item.to} to={item.to} end={item.to === "/"}>
+        <NavLink key={item.to} to={item.to} end={item.end ?? item.to === "/"}>
           {item.label}
         </NavLink>
       ))}
@@ -61,9 +61,9 @@ export function AppLayout() {
   const mainRef = useRef<HTMLElement>(null);
   const developmentRoute = pathname.startsWith("/operator-dashboard") || pathname.startsWith("/local-strategy-lab");
   const developmentReturn = pathname.startsWith("/local-strategy-lab")
-    ? { label: "返回策略工厂", to: "/strategies" }
-    : { label: "返回模拟盘", to: "/okx-demo" };
-  const historicalRoute = ["/generation-runs", "/backtest-runs", "/backtest-tasks", "/hyperopt-runs", "/ranking", "/live-governance"]
+    ? { label: "返回策略目录", to: "/v13/strategies" }
+    : { label: "返回研究与运行", to: "/v13/research" };
+  const historicalRoute = ["/legacy/dashboard", "/generation-runs", "/backtest-runs", "/backtest-tasks", "/hyperopt-runs", "/ranking", "/live-governance"]
     .some((prefix) => pathname.startsWith(prefix));
 
   useEffect(() => {
@@ -119,12 +119,12 @@ export function AppLayout() {
             {navigationSections.map((section) => section.collapsible ? (
               <details className="mobile-nav-section mobile-nav-disclosure" key={section.label} open={section.items.some((item) => isNavigationItemActive(pathname, item)) || undefined}>
                 <summary><strong>{section.label}</strong><small>{section.description}</small></summary>
-                {section.items.map((item) => <NavLink key={item.to} to={item.to}>{item.label}</NavLink>)}
+                {section.items.map((item) => <NavLink end={item.end} key={item.to} to={item.to}>{item.label}</NavLink>)}
               </details>
             ) : (
               <section className="mobile-nav-section" key={section.label}>
                 <h2>{section.label}</h2>
-                {section.items.map((item) => <NavLink key={item.to} to={item.to} end={item.to === "/"}>{item.label}</NavLink>)}
+                {section.items.map((item) => <NavLink key={item.to} to={item.to} end={item.end ?? item.to === "/"}>{item.label}</NavLink>)}
               </section>
             ))}
           </nav>
@@ -143,7 +143,7 @@ export function AppLayout() {
         ) : historicalRoute ? (
           <aside className="formal-context-banner" data-kind="historical">
             <div><strong>高级与历史证据</strong><span>本页保留 legacy 兼容查询，但不是 V1.3 canonical production 权威，也不会作为 canonical fallback。</span></div>
-            <Link to="/strategies">返回策略工厂</Link>
+            <Link to="/v13">返回 V1.3 工作台</Link>
           </aside>
         ) : null}
         <Outlet />

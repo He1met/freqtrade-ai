@@ -4,17 +4,17 @@ test("legacy and development routes provide a one-hop return to the formal works
   for (const path of ["/generation-runs", "/backtest-runs", "/backtest-tasks", "/hyperopt-runs", "/ranking", "/live-governance"]) {
     await page.goto(path);
     await expect(page.getByText("高级与历史证据")).toBeVisible();
-    await expect(page.getByRole("link", { name: "返回策略工厂" })).toHaveAttribute("href", "/strategies");
+    await expect(page.getByRole("link", { name: "返回 V1.3 工作台" })).toHaveAttribute("href", "/v13");
   }
 
   await page.goto("/local-strategy-lab");
   const localLabBanner = page.locator('[data-context="local-lab"]');
   await expect(localLabBanner.getByText("开发实验", { exact: true })).toBeVisible();
   await expect(localLabBanner.getByText(/不进入正式候选生命周期/)).toBeVisible();
-  await expect(page.getByRole("link", { name: "返回策略工厂" })).toHaveAttribute("href", "/strategies");
+  await expect(page.getByRole("link", { name: "返回策略目录" })).toHaveAttribute("href", "/v13/strategies");
 
   await page.goto("/operator-dashboard");
-  await expect(page.getByRole("link", { name: "返回模拟盘" })).toHaveAttribute("href", "/okx-demo");
+  await expect(page.getByRole("link", { name: "返回研究与运行" })).toHaveAttribute("href", "/v13/research");
 });
 
 test("desktop formal pages trust only the explicit candidate lifecycle projection", async ({ page }, testInfo) => {
@@ -101,7 +101,7 @@ test("desktop formal pages trust only the explicit candidate lifecycle projectio
     body: JSON.stringify(workspacePayload),
   }));
 
-  await page.goto("/");
+  await page.goto("/legacy/dashboard");
   await expect(page.getByText("1 个候选已有权威 bridge 证据")).toBeVisible();
   await expect(page.getByText("0 个", { exact: true }).first()).toBeVisible();
 

@@ -7,7 +7,7 @@ import {
 } from "./helpers/desktopGate";
 
 const routes = [
-  { path: "/", heading: "总览" },
+  { path: "/legacy/dashboard", heading: "总览" },
   { path: "/strategies", heading: "策略工厂" },
   { path: "/generation-runs", heading: "生成批次" },
   { path: "/local-strategy-lab", heading: "本地策略实验室（Local Strategy Lab）" },

@@ -1,3 +1,11 @@
+import type {
+  ConfigurationCatalogProjection,
+  MarketInventoryProjection,
+  OptimizationListProjection,
+  ReadinessProjection,
+  StrategyCatalogProjection,
+} from "../../api/canonicalV13Types";
+
 export type CanonicalPageKey =
   | "submission"
   | "strategies"
@@ -138,6 +146,111 @@ export function canonicalStatusPresentation(status: string): CanonicalStatusPres
 
 export function canonicalStatusesKnown(...statuses: readonly string[]): boolean {
   return statuses.every((status) => canonicalStatusPresentation(status).known);
+}
+
+export type CanonicalHomeEvidence = {
+  configurations: ConfigurationCatalogProjection | null;
+  market: MarketInventoryProjection | null;
+  optimization: OptimizationListProjection | null;
+  research: ReadinessProjection | null;
+  runtime: ReadinessProjection | null;
+  strategies: StrategyCatalogProjection | null;
+};
+
+export type CanonicalHomeDecision = {
+  kind: "blocked" | "pending" | "ready" | "unknown";
+  title: string;
+  summary: string;
+  rawStatus: string;
+  reasonCodes: readonly string[];
+  nextAction: { label: string; to: string };
+};
+
+const UNKNOWN_HOME_DECISION: CanonicalHomeDecision = {
+  kind: "unknown",
+  title: "项目状态未知",
+  summary: "至少一个必需的 Canonical API projection 不可用或包含未知合同状态；页面不会从其他来源补齐。",
+  rawStatus: "CANONICAL_API_UNAVAILABLE",
+  reasonCodes: [],
+  nextAction: { label: "查看研究与运行", to: "/v13/research" },
+};
+
+export function canonicalHomeDecision(evidence: CanonicalHomeEvidence): CanonicalHomeDecision {
+  const { configurations, market, optimization, research, runtime, strategies } = evidence;
+  if (!configurations || !market || !optimization || !research || !runtime || !strategies) {
+    return UNKNOWN_HOME_DECISION;
+  }
+  const projectionStatuses = [
+    strategies.status,
+    configurations.status,
+    market.status,
+    research.status,
+    runtime.status,
+    optimization.status,
+    ...strategies.items.flatMap((item) => [item.catalog_status, item.intake_status, item.validation_status, item.qualification_status]),
+    ...configurations.items.flatMap((profile) => profile.versions.map((version) => version.lifecycle_status)),
+    ...optimization.items.map((item) => item.status),
+  ];
+  if (!canonicalStatusesKnown(...projectionStatuses)) return UNKNOWN_HOME_DECISION;
+
+  if (strategies.status === "EMPTY") {
+    return {
+      kind: "blocked",
+      title: "尚无 canonical 策略",
+      summary: "策略目录由 API 明确返回 EMPTY；这不代表加载失败，也不会从 Legacy 补齐。",
+      rawStatus: "EMPTY",
+      reasonCodes: [],
+      nextAction: { label: "提交第一个策略", to: "/v13/submission" },
+    };
+  }
+  if (configurations.status === "UNSET" || configurations.unset_kinds.length > 0) {
+    return {
+      kind: "blocked",
+      title: "研究配置尚未完整",
+      summary: "配置目录明确存在未设置项；页面不会生成隐藏默认值。",
+      rawStatus: "UNSET",
+      reasonCodes: configurations.unset_kinds.map((kind) => `${kind}_UNSET`),
+      nextAction: { label: "查看配置缺口", to: "/v13/configuration" },
+    };
+  }
+  if (market.status === "MARKET_SNAPSHOT_UNSET") {
+    return {
+      kind: "blocked",
+      title: "行情证据尚未设置",
+      summary: "Market inventory 由 API 明确返回 MARKET_SNAPSHOT_UNSET；历史 receipt 不会作为 fallback。",
+      rawStatus: market.status,
+      reasonCodes: [market.status],
+      nextAction: { label: "查看行情证据", to: "/v13/market-data" },
+    };
+  }
+  if (research.status === "BLOCKED") {
+    return {
+      kind: "blocked",
+      title: "研究流程被阻断",
+      summary: "研究 readiness 由 Canonical API 明确返回 BLOCKED。",
+      rawStatus: research.status,
+      reasonCodes: research.reason_codes,
+      nextAction: { label: "查看研究阻断", to: "/v13/research" },
+    };
+  }
+  if (research.status === "PENDING_FIRST_BACKTEST") {
+    return {
+      kind: "pending",
+      title: "等待首次回测事实",
+      summary: "研究 bundle 已冻结，但 API 尚未提供获授权的首次回测事实。",
+      rawStatus: research.status,
+      reasonCodes: research.reason_codes,
+      nextAction: { label: "查看研究状态", to: "/v13/research" },
+    };
+  }
+  return {
+    kind: "ready",
+    title: "研究准备已就绪",
+    summary: "Research readiness 由 Canonical API 明确返回 READY；runtime 与 qualification 仍按各自 projection 独立展示。",
+    rawStatus: research.status,
+    reasonCodes: research.reason_codes,
+    nextAction: { label: "进入策略目录", to: "/v13/strategies" },
+  };
 }
 
 export function canonicalErrorText(error: unknown): string {

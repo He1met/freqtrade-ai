@@ -77,9 +77,35 @@ async function installCanonicalMocks(page: Page, overrides: Record<string, MockO
   return calls;
 }
 
-test("six canonical routes render true empty, blocked, and pending states without legacy requests", async ({ page }) => {
+test("default route opens the V1.3 workbench with project state and one next action", async ({ page }) => {
+  const calls = await installCanonicalMocks(page);
+  await page.goto("/");
+  await expect(page).toHaveURL(/\/v13$/);
+  await expect(page.getByRole("heading", { level: 1, name: "V1.3 用户工作台" })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 2, name: "尚无 canonical 策略" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "提交第一个策略" })).toHaveAttribute("href", "/v13/submission");
+  await expect(page.getByRole("navigation", { name: "主导航" }).getByRole("link", { name: "工作台首页" })).toBeVisible();
+  expect(calls.length).toBeGreaterThan(0);
+  expect(calls.every((call) => call.includes("/api/canonical-v13/"))).toBe(true);
+});
+
+test("V1.3 workbench keeps the project unknown when a required API projection fails", async ({ page }) => {
+  await installCanonicalMocks(page, {
+    "/api/canonical-v13/strategies": async (route) => route.fulfill({
+      contentType: "application/json",
+      status: 503,
+      body: JSON.stringify({ status: "BLOCKED", error: { code: "CATALOG_UNAVAILABLE", detail: "catalog unavailable" } }),
+    }),
+  });
+  await page.goto("/v13");
+  await expect(page.getByRole("heading", { level: 2, name: "项目状态未知" })).toBeVisible();
+  await expect(page.getByText("研究已就绪", { exact: true })).toHaveCount(0);
+});
+
+test("seven canonical routes render true empty, blocked, and pending states without legacy requests", async ({ page }) => {
   const calls = await installCanonicalMocks(page);
   const routes = [
+    ["/v13", "V1.3 用户工作台"],
     ["/v13/submission", "Strategy Submission"],
     ["/v13/strategies", "Strategy Catalog"],
     ["/v13/configuration", "Configuration Center"],
