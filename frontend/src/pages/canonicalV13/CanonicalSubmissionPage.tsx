@@ -92,10 +92,10 @@ export function CanonicalSubmissionPage() {
       <PageHeader
         description="只提交显式 captured source envelope；INTAKE_ACCEPTED 不代表已验证、已合格或获准执行。"
         eyebrow="V1.3 canonical-only"
-        title="Strategy Submission"
+        title="策略受控入库"
       />
       {!url.valid ? (
-        <CanonicalStatePanel description="Submission 页面不接受 URL 选择参数。" kind="unknown" reasonCodes={url.problems} title="INVALID_URL_STATE" />
+        <CanonicalStatePanel description="策略入库页面不接受 URL 选择参数。" kind="unknown" reasonCodes={url.problems} title="页面地址无效" />
       ) : null}
       <form className="canonical-v13-panel canonical-v13-form" onSubmit={(event) => void submit(event)}>
         <h2>受控入库 envelope</h2>
@@ -112,16 +112,16 @@ export function CanonicalSubmissionPage() {
       </form>
       {error ? <CanonicalQueryError error={error} title="Submission 被拒绝或阻塞" /> : null}
       {receipt && !receiptContractKnown ? (
-        <CanonicalStatePanel description="Submission receipt 返回未知 enum；receipt 事实与成功状态保持隐藏。" kind="unknown" reasonCodes={["UNKNOWN_CONTRACT_VALUE"]} title="Submission receipt 合同漂移" />
+        <CanonicalStatePanel description="入库 receipt 返回未知 enum；receipt 事实与成功状态保持隐藏。" kind="unknown" reasonCodes={["UNKNOWN_CONTRACT_VALUE"]} title="入库回执合同漂移" />
       ) : null}
       {receipt && receiptContractKnown ? (
         <section className="canonical-v13-panel" aria-label="Submission receipt">
-          <div className="canonical-v13-heading-row"><h2>Immutable intake receipt</h2><CanonicalStatus status={receipt.intake_status} /></div>
+          <div className="canonical-v13-heading-row"><h2>不可变入库回执</h2><CanonicalStatus status={receipt.intake_status} /></div>
           <div className="canonical-v13-status-grid">
-            <div><span>Catalog</span><CanonicalStatus status={receipt.catalog_status} /></div>
-            <div><span>Validation</span><CanonicalStatus status={receipt.validation_status} /></div>
-            <div><span>Qualification</span><CanonicalStatus status={receipt.qualification_status} /></div>
-            <div><span>Execution authorized</span><strong>{receipt.execution_authorized ? "是" : "否"}</strong></div>
+            <div><span>目录</span><CanonicalStatus status={receipt.catalog_status} /></div>
+            <div><span>验证</span><CanonicalStatus status={receipt.validation_status} /></div>
+            <div><span>资格</span><CanonicalStatus status={receipt.qualification_status} /></div>
+            <div><span>执行授权</span><strong>{receipt.execution_authorized ? "是" : "否"}</strong></div>
           </div>
           <dl className="canonical-v13-definition-list">
             <div><dt>Strategy ID</dt><dd><CopyableValue value={receipt.strategy_id} /></dd></div>

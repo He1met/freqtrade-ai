@@ -99,6 +99,11 @@ test("V1.3 workbench keeps the project unknown when a required API projection fa
   });
   await page.goto("/v13");
   await expect(page.getByRole("heading", { level: 2, name: "项目状态未知" })).toBeVisible();
+  await expect(page.getByText("未知原因码", { exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "返回工作台核对 API" })).toHaveAttribute("href", "/v13");
+  const raw = page.getByRole("group", { name: "原始诊断：CATALOG_UNAVAILABLE" });
+  await raw.getByText("查看原始诊断", { exact: true }).click();
+  await expect(raw.getByText("CATALOG_UNAVAILABLE", { exact: true })).toBeVisible();
   await expect(page.getByText("研究已就绪", { exact: true })).toHaveCount(0);
 });
 
@@ -106,18 +111,18 @@ test("seven canonical routes render true empty, blocked, and pending states with
   const calls = await installCanonicalMocks(page);
   const routes = [
     ["/v13", "V1.3 用户工作台"],
-    ["/v13/submission", "Strategy Submission"],
-    ["/v13/strategies", "Strategy Catalog"],
-    ["/v13/configuration", "Configuration Center"],
-    ["/v13/market-data", "Market Data"],
-    ["/v13/research", "Research / Runtime Readiness"],
-    ["/v13/optimization", "Optimization"],
+    ["/v13/submission", "策略受控入库"],
+    ["/v13/strategies", "策略目录"],
+    ["/v13/configuration", "配置中心"],
+    ["/v13/market-data", "行情证据"],
+    ["/v13/research", "研究与 Runtime 状态"],
+    ["/v13/optimization", "优化与回测结果"],
   ] as const;
   for (const [path, heading] of routes) {
     await page.goto(path);
     await expect(page.getByRole("heading", { level: 1, name: heading })).toBeVisible();
   }
-  await expect(page.getByText("PENDING_FIRST_BACKTEST", { exact: true })).toBeVisible();
+  await expect(page.getByText("等待首次回测", { exact: true }).first()).toBeVisible();
   expect(calls.every((call) => call.includes("/api/canonical-v13/"))).toBe(true);
   expect(calls.some((call) => call.includes("/api/v1") || call.includes("/api/strategies"))).toBe(false);
 });
@@ -134,7 +139,10 @@ test("invalid URL state on every canonical page performs zero API requests", asy
   ];
   for (const path of invalidRoutes) {
     await page.goto(path);
-    await expect(page.getByText("INVALID_URL_STATE", { exact: true })).toBeVisible();
+    const state = page.locator('.canonical-v13-state[data-state="unknown"]');
+    await expect(state).toBeVisible();
+    await expect(state.getByRole("list", { name: "阻塞原因与解决建议" })).toBeVisible();
+    await expect(state.getByRole("link").first()).toHaveAttribute("href", /^\/v13/);
   }
   await page.waitForTimeout(100);
   expect(calls).toEqual([]);
@@ -162,8 +170,11 @@ test("research plan URL renders only the canonical chain projection", async ({ p
     },
   });
   await page.goto(`/v13/research?plan=${ID_A}`);
-  await expect(page.getByRole("heading", { name: "Exact research chain" })).toBeVisible();
-  await expect(page.getByText("REQUIRED_WINDOW_GATE_FAILED", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "精确研究链路" })).toBeVisible();
+  await expect(page.getByText("必需窗口 Gate 未通过", { exact: true })).toBeVisible();
+  const reason = page.getByRole("group", { name: "原始诊断：REQUIRED_WINDOW_GATE_FAILED" });
+  await reason.getByText("诊断码", { exact: true }).click();
+  await expect(reason.getByText("REQUIRED_WINDOW_GATE_FAILED", { exact: true })).toBeVisible();
   await expect(page.getByText("99.00000000", { exact: true })).toBeVisible();
   expect(calls).toContain(`GET /api/canonical-v13/research/validation-plans/${ID_A}`);
 });
@@ -213,9 +224,17 @@ test("research and runtime errors remain independent", async ({ page }) => {
     }),
   });
   await page.goto("/v13/research");
-  await expect(page.getByText("Research readiness状态未知", { exact: true })).toBeVisible();
-  await expect(page.getByText("TRADING_DISABLED", { exact: true })).toBeVisible();
-  await expect(page.getByText("ACTIVE_DEPLOYMENT_UNSET", { exact: true })).toBeVisible();
+  await expect(page.getByText("研究准备状态未知", { exact: true })).toBeVisible();
+  await expect(page.getByText("Canonical 数据库身份不匹配", { exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "返回工作台核对服务" }).first()).toBeVisible();
+  await expect(page.getByText("交易能力已明确禁用", { exact: true })).toBeVisible();
+  await expect(page.getByText("尚无启用中的部署", { exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "查看 Runtime 诊断" }).first()).toHaveAttribute("href", "/v13/research");
+
+  const raw = page.getByRole("group", { name: "原始诊断：TRADING_DISABLED" });
+  await expect(raw).not.toHaveAttribute("open", "");
+  await raw.getByText("查看原始诊断", { exact: true }).click();
+  await expect(raw.getByText("TRADING_DISABLED", { exact: true })).toBeVisible();
 });
 
 test("unknown enum disables projection actions and renders contract drift", async ({ page }) => {
@@ -223,7 +242,11 @@ test("unknown enum disables projection actions and renders contract drift", asyn
     "/api/canonical-v13/strategies": { status: "FUTURE_GREEN", items: [] },
   });
   await page.goto("/v13/strategies");
-  await expect(page.getByText("Strategy projection 合同漂移", { exact: true })).toBeVisible();
-  await expect(page.getByText("UNKNOWN_CONTRACT_VALUE", { exact: true })).toBeVisible();
+  await expect(page.getByText("策略目录合同漂移", { exact: true })).toBeVisible();
+  await expect(page.getByText("接口合同无法识别", { exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "返回工作台核对 API" })).toHaveAttribute("href", "/v13");
+  const raw = page.getByRole("group", { name: "原始诊断：UNKNOWN_CONTRACT_VALUE" });
+  await raw.getByText("查看原始诊断", { exact: true }).click();
+  await expect(raw.getByText("UNKNOWN_CONTRACT_VALUE", { exact: true })).toBeVisible();
   await expect(page.locator(".canonical-v13-select-card")).toHaveCount(0);
 });

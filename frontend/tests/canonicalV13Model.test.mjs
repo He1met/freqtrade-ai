@@ -2,8 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  CANONICAL_ENUMERATED_REASON_CODES,
+  CANONICAL_ENUMERATED_STATUS_CODES,
   CANONICAL_URL_KEYS,
   canonicalHomeDecision,
+  canonicalReasonGuidance,
+  canonicalStatusGuidance,
   canonicalStatusPresentation,
   parseCanonicalUrlState,
   serializeCanonicalUrlState,
@@ -110,6 +114,44 @@ test("persisted gate PASSED is a known success contract", () => {
     raw: "PASSED",
     tone: "success",
   });
+});
+
+test("every enumerated status has one centralized Chinese explanation and next entry", () => {
+  assert.ok(CANONICAL_ENUMERATED_STATUS_CODES.length >= 25);
+  for (const code of CANONICAL_ENUMERATED_STATUS_CODES) {
+    const guidance = canonicalStatusGuidance(code);
+    assert.equal(guidance.known, true, code);
+    assert.equal(guidance.raw, code, code);
+    assert.match(`${guidance.label}${guidance.explanation}${guidance.actionLabel}`, /[\u3400-\u9fff]/, code);
+    assert.match(guidance.actionTo, /^\/v13(?:\/|$)/, code);
+  }
+});
+
+test("enumerated blocker reasons have Chinese cause and action while raw codes stay exact", () => {
+  assert.ok(CANONICAL_ENUMERATED_REASON_CODES.length >= 40);
+  for (const code of CANONICAL_ENUMERATED_REASON_CODES) {
+    const guidance = canonicalReasonGuidance(code);
+    assert.equal(guidance.known, true, code);
+    assert.equal(guidance.raw, code, code);
+    assert.match(`${guidance.label}${guidance.explanation}${guidance.actionLabel}`, /[\u3400-\u9fff]/, code);
+    assert.match(guidance.actionTo, /^\/v13(?:\/|$)/, code);
+  }
+  assert.equal(canonicalReasonGuidance("REQUIRED_WINDOW_COVERAGE_MISSING:baseline").known, true);
+  assert.equal(canonicalReasonGuidance("TARGET_SNAPSHOT_DIGEST_DRIFT").known, true);
+});
+
+test("unknown status and reason codes fail closed without changing raw diagnostics", () => {
+  const status = canonicalStatusGuidance("FUTURE_GREEN");
+  assert.equal(status.known, false);
+  assert.equal(status.raw, "FUTURE_GREEN");
+  assert.equal(status.tone, "danger");
+  assert.doesNotMatch(status.label, /就绪|成功|通过/);
+
+  const reason = canonicalReasonGuidance("FUTURE_QUALIFICATION_OK");
+  assert.equal(reason.known, false);
+  assert.equal(reason.raw, "FUTURE_QUALIFICATION_OK");
+  assert.equal(reason.tone, "danger");
+  assert.doesNotMatch(`${reason.label}${reason.explanation}`, /已合格|可执行|运行正常/);
 });
 
 test("home follows the explicit canonical journey without promoting later readiness", () => {

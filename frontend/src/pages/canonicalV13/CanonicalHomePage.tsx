@@ -9,8 +9,8 @@ import {
   fetchCanonicalStrategies,
 } from "../../api/canonicalV13Client";
 import { PageHeader } from "../../components/DisplayPrimitives";
-import { CanonicalStatePanel, CanonicalStatus, useCanonicalQuery } from "./CanonicalStatePanel";
-import { canonicalErrorText, canonicalHomeDecision } from "./canonicalV13Model";
+import { canonicalErrorDiagnostic, CanonicalReasonList, CanonicalStatePanel, CanonicalStatus, useCanonicalQuery } from "./CanonicalStatePanel";
+import { canonicalHomeDecision, canonicalReasonGuidance } from "./canonicalV13Model";
 
 export function CanonicalHomePage() {
   const strategies = useCanonicalQuery(fetchCanonicalStrategies, []);
@@ -37,6 +37,10 @@ export function CanonicalHomePage() {
     ["Runtime", runtime.error],
     ["优化", optimization.error],
   ].filter((entry) => entry[1]);
+  const errorDiagnostics = errors.map(([label, error]) => ({ label: String(label), ...canonicalErrorDiagnostic(error) }));
+  const decisionReasonCodes = decision?.kind === "unknown"
+    ? (errorDiagnostics.length ? errorDiagnostics.map((item) => item.code) : ["UNKNOWN_CONTRACT_VALUE"])
+    : decision?.reasonCodes ?? [];
   const cards = [
     {
       description: strategies.data ? `${strategies.data.items.length} 个 API 策略记录` : "Projection 暂不可用",
@@ -57,13 +61,17 @@ export function CanonicalHomePage() {
       to: "/v13/market-data",
     },
     {
-      description: research.data?.reason_codes.length ? research.data.reason_codes.join(" · ") : "无 API reason code",
+      description: research.data?.reason_codes.length
+        ? research.data.reason_codes.map((code) => canonicalReasonGuidance(code).label).join(" · ")
+        : "API 未返回阻断原因",
       label: "研究状态",
       status: research.data?.status ?? "UNKNOWN",
       to: "/v13/research",
     },
     {
-      description: runtime.data?.reason_codes.length ? runtime.data.reason_codes.join(" · ") : "无 API reason code",
+      description: runtime.data?.reason_codes.length
+        ? runtime.data.reason_codes.map((code) => canonicalReasonGuidance(code).label).join(" · ")
+        : "API 未返回阻断原因",
       label: "Runtime 状态",
       status: runtime.data?.status ?? "UNKNOWN",
       to: "/v13/research",
@@ -93,11 +101,7 @@ export function CanonicalHomePage() {
               <CanonicalStatus status={decision.rawStatus} />
             </div>
             <p>{decision.summary}</p>
-            {decision.reasonCodes.length ? (
-              <ul aria-label="当前主要阻断">
-                {decision.reasonCodes.map((code) => <li key={code}><code>{code}</code></li>)}
-              </ul>
-            ) : null}
+            <CanonicalReasonList reasonCodes={decisionReasonCodes} />
           </div>
           <Link className="formal-primary-button canonical-v13-home-action" to={decision.nextAction.to}>{decision.nextAction.label}</Link>
         </section>
@@ -120,7 +124,7 @@ export function CanonicalHomePage() {
       {errors.length ? (
         <details className="canonical-v13-home-diagnostics">
           <summary>查看 API 错误诊断</summary>
-          <ul>{errors.map(([label, error]) => <li key={String(label)}><strong>{String(label)}</strong><code>{canonicalErrorText(error)}</code></li>)}</ul>
+          <ul>{errorDiagnostics.map((item) => <li key={item.label}><strong>{item.label}</strong><code>{item.code}: {item.detail}</code></li>)}</ul>
         </details>
       ) : null}
     </div>
