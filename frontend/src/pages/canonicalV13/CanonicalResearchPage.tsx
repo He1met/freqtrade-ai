@@ -1,9 +1,10 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { useSearchParams } from "react-router-dom";
 
-import { fetchCanonicalResearchChain, fetchCanonicalResearchGates, fetchCanonicalResearchReadiness, fetchCanonicalRuntimeReadiness } from "../../api/canonicalV13Client";
+import { fetchCanonicalResearchChain, fetchCanonicalResearchGates, fetchCanonicalResearchReadiness, fetchCanonicalRuntimeReadiness, fetchCanonicalStrategy } from "../../api/canonicalV13Client";
 import type { GateListProjection, ReadinessProjection, ResearchChainProjection } from "../../api/canonicalV13Types";
 import { CopyableValue, PageHeader } from "../../components/DisplayPrimitives";
+import { CanonicalResearchStepper } from "./CanonicalResearchStepper";
 import { CanonicalInlineReason, CanonicalQueryError, CanonicalStatePanel, CanonicalStatus, useCanonicalQuery } from "./CanonicalStatePanel";
 import { canonicalStatusesKnown, canonicalStatusPresentation, parseCanonicalUrlState, serializeCanonicalUrlState } from "./canonicalV13Model";
 
@@ -45,14 +46,7 @@ function ReadinessCard({
   );
 }
 
-function ResearchChainCard({ planId }: { planId: string }) {
-  const query = useCanonicalQuery(
-    (signal) => fetchCanonicalResearchChain(planId, signal),
-    [planId],
-  );
-  if (query.loading) return <CanonicalStatePanel description="正在读取 exact validation plan。" kind="loading" title="加载研究链路" />;
-  if (query.error) return <CanonicalQueryError error={query.error} title="研究链路状态未知" />;
-  const chain = query.data as ResearchChainProjection;
+function ResearchChainCard({ chain }: { chain: ResearchChainProjection }) {
   for (const status of [chain.plan_status, chain.attempt_status, chain.qualification_status]) {
     if (status && !canonicalStatusPresentation(status).known) {
       return <CanonicalStatePanel description={`API 返回未知状态 ${status}；UI 不推断 qualification。`} kind="unknown" reasonCodes={["UNKNOWN_CONTRACT_VALUE"]} title="研究链路合同漂移" />;
@@ -125,6 +119,18 @@ export function CanonicalResearchPage() {
   const [strategy, setStrategy] = useState(url.values.strategy ?? "");
   const [plan, setPlan] = useState(url.values.plan ?? "");
   const [selectionProblem, setSelectionProblem] = useState<string | null>(null);
+  const selectedStrategyId = url.valid ? url.values.strategy ?? null : null;
+  const selectedPlanId = url.valid ? url.values.plan ?? null : null;
+  const selectedStrategy = useCanonicalQuery(
+    (signal) => fetchCanonicalStrategy(selectedStrategyId ?? "", signal),
+    [selectedStrategyId],
+    Boolean(selectedStrategyId),
+  );
+  const selectedChain = useCanonicalQuery(
+    (signal) => fetchCanonicalResearchChain(selectedPlanId ?? "", signal),
+    [selectedPlanId],
+    Boolean(selectedPlanId),
+  );
   useEffect(() => {
     setScope(url.values.scope ?? "");
     setWorkflow(url.values.workflow ?? "");
@@ -150,6 +156,12 @@ export function CanonicalResearchPage() {
     }
   }
 
+  const committedResearchQuery = url.valid ? serializeCanonicalUrlState("research", url.values) : "";
+  const committedResearchHref = `/v13/research${committedResearchQuery ? `?${committedResearchQuery}` : ""}`;
+  const selectedStrategyHref = selectedStrategyId
+    ? `/v13/strategies?${serializeCanonicalUrlState("strategies", { strategy: selectedStrategyId })}`
+    : "/v13/strategies";
+
   return (
     <div className="canonical-v13-page">
       <PageHeader description="Research 与 Runtime readiness 独立读取；任一失败不会覆盖另一方事实。" eyebrow="V1.3 canonical-only" title="研究与 Runtime 状态" />
@@ -163,6 +175,21 @@ export function CanonicalResearchPage() {
       </form>
       {selectionProblem ? <CanonicalStatePanel description="Scope/workflow 必须成对，strategy/plan 必须是 UUID；未提交新的读取。" kind="unknown" reasonCodes={[selectionProblem]} title="研究选择无效" /> : null}
       {!url.valid ? <CanonicalStatePanel description="scope/workflow 必须成对，strategy/plan 必须是 UUID；research 请求未发送。" kind="unknown" reasonCodes={url.problems} title="页面地址无效" /> : null}
+      {url.valid && !selectedStrategyId && !selectedPlanId ? <CanonicalStatePanel description="选择策略后，页面才会从 Canonical API 投影连续研究步骤。" kind="empty" title="尚未选择研究策略" /> : null}
+      {url.valid && selectedPlanId && !selectedStrategyId ? <CanonicalStatePanel description="当前 URL 只有 validation plan，无法核对它是否属于目标策略当前版本。" kind="unknown" reasonCodes={["RESEARCH_STRATEGY_CONTEXT_REQUIRED"]} title="研究策略上下文缺失" /> : null}
+      {selectedStrategy.loading ? <CanonicalStatePanel description="正在读取所选策略的 canonical projection。" kind="loading" title="加载策略研究上下文" /> : null}
+      {selectedStrategy.error ? <CanonicalQueryError error={selectedStrategy.error} title="所选策略研究上下文未知" /> : null}
+      {selectedChain.loading ? <CanonicalStatePanel description="正在读取 exact validation plan。" kind="loading" title="加载研究链路" /> : null}
+      {selectedChain.error ? <CanonicalQueryError error={selectedChain.error} title="研究链路状态未知" /> : null}
+      {selectedStrategyId && selectedStrategy.data && (!selectedPlanId || selectedChain.data) ? (
+        <CanonicalResearchStepper
+          chain={selectedChain.data}
+          researchHref={committedResearchHref}
+          selection={{ planId: selectedPlanId, strategyId: selectedStrategyId, targetId: url.values.target ?? null }}
+          strategy={selectedStrategy.data}
+          strategyHref={selectedStrategyHref}
+        />
+      ) : null}
       {url.valid ? <div className="canonical-v13-readiness-grid">
         <>
           <ReadinessCard
@@ -173,7 +200,7 @@ export function CanonicalResearchPage() {
         </>
         <ReadinessCard dependencyKey="runtime" loader={fetchCanonicalRuntimeReadiness} title="Runtime 准备" />
       </div> : null}
-      {url.valid && url.values.plan ? <ResearchChainCard planId={url.values.plan} /> : null}
+      {url.valid && selectedChain.data ? <ResearchChainCard chain={selectedChain.data} /> : null}
       {url.valid ? <GateReceiptsCard /> : null}
       {(url.values.target || url.values.strategy) ? (
         <CanonicalStatePanel

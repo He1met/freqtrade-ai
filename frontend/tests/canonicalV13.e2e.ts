@@ -2,7 +2,49 @@ import { expect, test, type Page, type Route } from "@playwright/test";
 
 const ID_A = "123e4567-e89b-42d3-a456-426614174000";
 const ID_B = "123e4567-e89b-42d3-a456-426614174001";
+const ID_C = "123e4567-e89b-42d3-a456-426614174002";
+const ID_D = "123e4567-e89b-42d3-a456-426614174003";
 const DIGEST = "a".repeat(64);
+
+function canonicalStrategy(overrides: Record<string, unknown> = {}) {
+  return {
+    strategy_id: ID_A,
+    display_name: "Alpha",
+    catalog_status: "DRAFT",
+    intake_status: "INTAKE_ACCEPTED",
+    current_version_id: ID_B,
+    version_number: 1,
+    artifact_id: ID_C,
+    artifact_digest: DIGEST,
+    validation_status: "VALIDATED",
+    qualification_status: "NOT_EVALUATED",
+    execution_authorized: false,
+    created_at: "2026-08-14T00:00:00Z",
+    ...overrides,
+  };
+}
+
+function canonicalResearchChain(overrides: Record<string, unknown> = {}) {
+  return {
+    validation_plan_id: ID_C,
+    validation_plan_digest: DIGEST,
+    strategy_version_id: ID_B,
+    research_target_id: ID_D,
+    target_key: "btc-5m",
+    plan_status: "COMPLETE",
+    validation_attempt_id: ID_D,
+    attempt_status: "SUCCEEDED",
+    attempt_receipt_digest: DIGEST,
+    target_score_id: ID_C,
+    overall_score: "81.00000000",
+    score_digest: DIGEST,
+    qualification_decision_id: ID_D,
+    qualification_status: "REJECTED",
+    qualification_reason_code: "REQUIRED_WINDOW_GATE_FAILED",
+    qualification_decision_digest: DIGEST,
+    ...overrides,
+  };
+}
 
 const emptyResponses: Record<string, unknown> = {
   "/api/canonical-v13/strategies": { status: "EMPTY", items: [] },
@@ -47,6 +89,7 @@ const emptyResponses: Record<string, unknown> = {
     runtime_instance_id: null,
   },
   "/api/canonical-v13/optimizations": { status: "PENDING_FIRST_BACKTEST", items: [] },
+  "/api/canonical-v13/research/gates": { status: "EMPTY", items: [] },
 };
 
 type MockOverride = unknown | ((route: Route) => Promise<void> | void);
@@ -207,12 +250,67 @@ test("strategy selection is explicit, deep-linkable, refreshable, and restorable
 
   await page.getByRole("button", { name: /Alpha/ }).click();
   await expect(page).toHaveURL(new RegExp(`strategy=${ID_A}`));
-  await expect(page.getByRole("heading", { level: 2, name: "Alpha" })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 2, name: "Alpha", exact: true })).toBeVisible();
   await page.reload();
-  await expect(page.getByRole("heading", { level: 2, name: "Alpha" })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 2, name: "Alpha", exact: true })).toBeVisible();
   await page.goBack();
   await expect(page).not.toHaveURL(/strategy=/);
   await expect(page.getByText("尚未选择策略")).toBeVisible();
+});
+
+test("the default journey reaches a target strategy research state in three clicks", async ({ page }) => {
+  const alpha = canonicalStrategy();
+  await installCanonicalMocks(page, {
+    "/api/canonical-v13/strategies": { status: "AVAILABLE", items: [alpha] },
+    [`/api/canonical-v13/strategies/${ID_A}`]: alpha,
+  });
+
+  await page.goto("/");
+  await page.getByRole("navigation", { name: "主导航" }).getByRole("link", { name: "策略目录" }).click();
+  await page.getByRole("button", { name: /Alpha/ }).click();
+  await page.locator(".canonical-v13-workflow-research-link").click();
+
+  await expect(page).toHaveURL(new RegExp(`/v13/research\\?strategy=${ID_A}$`));
+  await expect(page.getByRole("heading", { level: 2, name: "Alpha 的研究流程" })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Alpha 的策略研究流程" })).toBeVisible();
+  await page.reload();
+  await expect(page).toHaveURL(new RegExp(`/v13/research\\?strategy=${ID_A}$`));
+  await expect(page.getByRole("heading", { level: 2, name: "Alpha 的研究流程" })).toBeVisible();
+  await page.goBack();
+  await expect(page).toHaveURL(new RegExp(`/v13/strategies\\?strategy=${ID_A}$`));
+  await expect(page.getByRole("heading", { level: 2, name: "Alpha", exact: true })).toBeVisible();
+});
+
+test("an exact strategy and plan URL renders five API-derived research steps", async ({ page }) => {
+  const alpha = canonicalStrategy({ qualification_status: "REJECTED" });
+  await installCanonicalMocks(page, {
+    [`/api/canonical-v13/strategies/${ID_A}`]: alpha,
+    [`/api/canonical-v13/research/validation-plans/${ID_C}`]: canonicalResearchChain(),
+  });
+
+  await page.goto(`/v13/research?strategy=${ID_A}&plan=${ID_C}`);
+  const workflow = page.getByRole("navigation", { name: "Alpha 的策略研究流程" });
+  await expect(workflow.locator("li")).toHaveCount(5);
+  await expect(workflow.locator('[data-step-state="complete"]')).toHaveCount(4);
+  await expect(workflow.locator('[data-step-state="blocked"]')).toHaveCount(1);
+  await expect(workflow.locator('[aria-current="step"]')).toContainText("资格决策");
+  await workflow.getByText("高级诊断", { exact: true }).first().click();
+  await expect(workflow.getByText("INTAKE_ACCEPTED", { exact: true }).last()).toBeVisible();
+});
+
+test("lineage mismatch leaves all later research steps unknown", async ({ page }) => {
+  const alpha = canonicalStrategy();
+  await installCanonicalMocks(page, {
+    [`/api/canonical-v13/strategies/${ID_A}`]: alpha,
+    [`/api/canonical-v13/research/validation-plans/${ID_C}`]: canonicalResearchChain({ strategy_version_id: ID_A }),
+  });
+
+  await page.goto(`/v13/research?strategy=${ID_A}&plan=${ID_C}`);
+  const workflow = page.getByRole("navigation", { name: "Alpha 的策略研究流程" });
+  await expect(workflow.locator('[data-step-state="complete"]')).toHaveCount(2);
+  await expect(workflow.locator('[data-step-state="unknown"]')).toHaveCount(3);
+  await expect(workflow.getByText("策略与研究计划 Lineage 不一致", { exact: true })).toHaveCount(3);
+  await expect(workflow.locator('li:nth-child(n+3)[data-step-state="complete"]')).toHaveCount(0);
 });
 
 test("research and runtime errors remain independent", async ({ page }) => {

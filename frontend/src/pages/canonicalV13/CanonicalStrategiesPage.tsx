@@ -3,8 +3,9 @@ import { useSearchParams } from "react-router-dom";
 import { fetchCanonicalStrategies, fetchCanonicalStrategy } from "../../api/canonicalV13Client";
 import type { StrategyProjection } from "../../api/canonicalV13Types";
 import { CopyableValue, PageHeader } from "../../components/DisplayPrimitives";
+import { CanonicalResearchStepper } from "./CanonicalResearchStepper";
 import { CanonicalQueryError, CanonicalStatePanel, CanonicalStatus, useCanonicalQuery } from "./CanonicalStatePanel";
-import { canonicalStatusesKnown, parseCanonicalUrlState, withCanonicalUrlValue } from "./canonicalV13Model";
+import { canonicalStatusesKnown, parseCanonicalUrlState, serializeCanonicalUrlState, withCanonicalUrlValue } from "./canonicalV13Model";
 
 function StrategyDetail({ strategyId }: { strategyId: string }) {
   const query = useCanonicalQuery((signal) => fetchCanonicalStrategy(strategyId, signal), [strategyId]);
@@ -14,21 +15,31 @@ function StrategyDetail({ strategyId }: { strategyId: string }) {
   if (!canonicalStatusesKnown(strategy.catalog_status, strategy.intake_status, strategy.validation_status, strategy.qualification_status)) {
     return <CanonicalStatePanel description="策略详情返回未知 enum；详情与成功状态保持隐藏。" kind="unknown" reasonCodes={["UNKNOWN_CONTRACT_VALUE"]} title="策略详情合同漂移" />;
   }
+  const researchQuery = serializeCanonicalUrlState("research", { strategy: strategy.strategy_id });
   return (
-    <section className="canonical-v13-panel" aria-label="Canonical strategy detail">
-      <div className="canonical-v13-heading-row"><h2>{strategy.display_name}</h2><CanonicalStatus status={strategy.catalog_status} /></div>
-      <div className="canonical-v13-status-grid">
-        <div><span>受控入库</span><CanonicalStatus status={strategy.intake_status} /></div>
-        <div><span>验证</span><CanonicalStatus status={strategy.validation_status} /></div>
-        <div><span>资格</span><CanonicalStatus status={strategy.qualification_status} /></div>
-        <div><span>执行授权</span><strong>{strategy.execution_authorized ? "是" : "否"}</strong></div>
-      </div>
-      <dl className="canonical-v13-definition-list">
-        <div><dt>Strategy ID</dt><dd><CopyableValue value={strategy.strategy_id} /></dd></div>
-        <div><dt>Version</dt><dd>{strategy.version_number}</dd></div>
-        <div><dt>Artifact digest</dt><dd><CopyableValue value={strategy.artifact_digest} /></dd></div>
-      </dl>
-    </section>
+    <>
+      <section className="canonical-v13-panel" aria-label="Canonical strategy detail">
+        <div className="canonical-v13-heading-row"><h2>{strategy.display_name}</h2><CanonicalStatus status={strategy.catalog_status} /></div>
+        <div className="canonical-v13-status-grid">
+          <div><span>受控入库</span><CanonicalStatus status={strategy.intake_status} /></div>
+          <div><span>验证</span><CanonicalStatus status={strategy.validation_status} /></div>
+          <div><span>资格</span><CanonicalStatus status={strategy.qualification_status} /></div>
+          <div><span>执行授权</span><strong>{strategy.execution_authorized ? "是" : "否"}</strong></div>
+        </div>
+        <dl className="canonical-v13-definition-list">
+          <div><dt>Strategy ID</dt><dd><CopyableValue value={strategy.strategy_id} /></dd></div>
+          <div><dt>Version</dt><dd>{strategy.version_number}</dd></div>
+          <div><dt>Artifact digest</dt><dd><CopyableValue value={strategy.artifact_digest} /></dd></div>
+        </dl>
+      </section>
+      <CanonicalResearchStepper
+        chain={null}
+        researchHref={`/v13/research?${researchQuery}`}
+        selection={{ planId: null, strategyId, targetId: null }}
+        strategy={strategy}
+        strategyHref={`/v13/strategies?strategy=${encodeURIComponent(strategy.strategy_id)}`}
+      />
+    </>
   );
 }
 
