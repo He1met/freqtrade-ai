@@ -154,6 +154,31 @@ def create_demo_deployment(
         decision=decision,
         bundle=bundle,
     )
+    existing = effective.execute(
+        select(DEPLOYMENTS_TABLE).where(
+            DEPLOYMENTS_TABLE.c.deployment_approval_id == deployment_approval_id
+        )
+    ).mappings().one_or_none()
+    if existing is not None:
+        if (
+            existing["strategy_version_id"] != decision["strategy_version_id"]
+            or existing["configuration_bundle_id"] != bundle["id"]
+            or existing["configuration_bundle_digest"] != bundle["bundle_digest"]
+            or existing["market_snapshot_id"] != bundle["market_snapshot_id"]
+            or existing["market_snapshot_digest"] != bundle["market_snapshot_digest"]
+            or existing["demo_only"] is not True
+            or existing["allow_real_funds"] is not False
+            or existing["capability_digest"] != capability_digest
+        ):
+            raise CanonicalDeploymentBlocked(
+                "BLOCKED_DEPLOYMENT_REPLAY_DRIFT",
+                "approval already has a different deployment receipt",
+            )
+        return DeploymentResult(
+            deployment_id=existing["id"],
+            capability_digest=capability_digest,
+            status=existing["status"],
+        )
     deployment_id = uuid4()
     effective.execute(
         DEPLOYMENTS_TABLE.insert().values(
@@ -194,7 +219,7 @@ def launch_demo_runtime(
     deployment = effective.execute(
         select(DEPLOYMENTS_TABLE).where(DEPLOYMENTS_TABLE.c.id == deployment_id)
     ).mappings().one_or_none()
-    if deployment is None or deployment["status"] != "PENDING":
+    if deployment is None or deployment["status"] not in {"PENDING", "ACTIVE"}:
         raise CanonicalDeploymentBlocked(
             "BLOCKED_DEPLOYMENT_NOT_PENDING", str(deployment_id)
         )
@@ -227,6 +252,34 @@ def launch_demo_runtime(
         credential_reference=credential_reference,
     )
     launch_digest = frozen_runtime_launch_spec_digest(spec)
+    existing_runtime = effective.execute(
+        select(RUNTIME_INSTANCES_TABLE).where(
+            RUNTIME_INSTANCES_TABLE.c.deployment_id == deployment_id
+        )
+    ).mappings().one_or_none()
+    if existing_runtime is not None:
+        if (
+            existing_runtime["runtime_identity"] != runtime_identity
+            or existing_runtime["image_digest"] != image_digest
+            or existing_runtime["launch_spec_digest"] != launch_digest
+            or existing_runtime["service_account"] != service_account
+            or existing_runtime["network_policy"] != spec.network_policy
+            or existing_runtime["credential_reference"] != credential_reference
+            or existing_runtime["runtime_class"] != spec.runtime_class
+            or existing_runtime["filesystem_mode"] != spec.filesystem_mode
+            or existing_runtime["research_executor_capability"] is not False
+            or existing_runtime["order_writer_capability"] is not False
+        ):
+            raise CanonicalDeploymentBlocked(
+                "BLOCKED_RUNTIME_REPLAY_DRIFT",
+                "deployment already has a different runtime launch receipt",
+            )
+        return existing_runtime["id"]
+    if deployment["status"] != "PENDING":
+        raise CanonicalDeploymentBlocked(
+            "BLOCKED_DEPLOYMENT_NOT_PENDING",
+            "an ACTIVE deployment cannot create a replacement runtime identity",
+        )
     if launcher.evidence_class != "TEST_SIMULATED":
         raise CanonicalDeploymentBlocked(
             "BLOCKED_RUNTIME_LAUNCH_OUT_OF_SCOPE",

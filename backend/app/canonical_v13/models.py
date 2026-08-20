@@ -912,6 +912,10 @@ DEPLOYMENT_APPROVALS_TABLE = _table(
         "status",
         ("NOT_REQUESTED", "PENDING", "APPROVED", "REJECTED", "REVOKED"),
     ),
+    UniqueConstraint(
+        "qualification_decision_id",
+        name="deployment_approvals_qualification_unique",
+    ),
 )
 
 DEPLOYMENTS_TABLE = _table(
@@ -936,6 +940,10 @@ DEPLOYMENTS_TABLE = _table(
     CheckConstraint(
         "demo_only IS TRUE AND allow_real_funds IS FALSE",
         name="deployments_demo_only_no_real_funds",
+    ),
+    UniqueConstraint(
+        "deployment_approval_id",
+        name="deployments_approval_unique",
     ),
 )
 
@@ -964,6 +972,10 @@ RUNTIME_INSTANCES_TABLE = _table(
         "order_writer_capability IS FALSE",
         name="runtime_instances_no_order_writer_capability",
     ),
+    UniqueConstraint(
+        "deployment_id",
+        name="runtime_instances_deployment_unique",
+    ),
 )
 
 RUNTIME_RECEIPTS_TABLE = _table(
@@ -990,6 +1002,10 @@ RUNTIME_RECEIPTS_TABLE = _table(
         "order_writer_capability IS FALSE",
         name="runtime_receipts_no_order_writer_capability",
     ),
+    UniqueConstraint(
+        "receipt_digest",
+        name="runtime_receipts_receipt_digest_unique",
+    ),
 )
 
 
@@ -1008,6 +1024,12 @@ SIGNALS_TABLE = _table(
     Column("signal_json", JSON, nullable=False),
     _digest("signal_digest"),
     _created_at(),
+    UniqueConstraint(
+        "runtime_instance_id",
+        "research_target_id",
+        "signal_digest",
+        name="signals_runtime_target_digest_unique",
+    ),
 )
 
 TRADE_INTENTS_TABLE = _table(

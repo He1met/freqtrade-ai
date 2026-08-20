@@ -30,6 +30,22 @@ def create_simulated_intent(
         raise CanonicalExecutionChainBlocked(
             "BLOCKED_REAL_INTENT_OUT_OF_SCOPE", "only isolated intents are allowed"
         )
+    intent_digest = canonical_execution_digest(payload)
+    existing = effective.execute(
+        select(TRADE_INTENTS_TABLE).where(
+            TRADE_INTENTS_TABLE.c.signal_id == signal_id
+        )
+    ).mappings().one_or_none()
+    if existing is not None:
+        if (
+            existing["status"] != "INTENT_ACCEPTED"
+            or existing["intent_json"] != payload
+            or existing["intent_digest"] != intent_digest
+        ):
+            raise CanonicalExecutionChainBlocked(
+                "BLOCKED_INTENT_REPLAY_DRIFT", "persisted intent differs"
+            )
+        return existing["id"]
     intent_id = uuid4()
     effective.execute(
         TRADE_INTENTS_TABLE.insert().values(
@@ -37,7 +53,7 @@ def create_simulated_intent(
             signal_id=signal_id,
             status="INTENT_ACCEPTED",
             intent_json=payload,
-            intent_digest=canonical_execution_digest(payload),
+            intent_digest=intent_digest,
             created_at=datetime.now(timezone.utc),
         )
     )
@@ -60,20 +76,37 @@ def decide_simulated_risk(
         )
     ).scalar_one_or_none() is None:
         raise CanonicalExecutionChainBlocked("BLOCKED_INTENT_UNSET", str(trade_intent_id))
-    decision_id = uuid4()
     payload = {
         "contract": "canonical-v13-simulated-risk-v1",
         "evidence_class": "TEST_SIMULATED",
         "policy_snapshot_digest": policy_snapshot_digest,
         "accepted": accepted,
     }
+    decision_digest = canonical_execution_digest(payload)
+    existing = effective.execute(
+        select(RISK_DECISIONS_TABLE).where(
+            RISK_DECISIONS_TABLE.c.trade_intent_id == trade_intent_id
+        )
+    ).mappings().one_or_none()
+    if existing is not None:
+        expected_status = "RISK_ACCEPTED" if accepted else "REJECTED"
+        if (
+            existing["status"] != expected_status
+            or existing["decision_json"] != payload
+            or existing["decision_digest"] != decision_digest
+        ):
+            raise CanonicalExecutionChainBlocked(
+                "BLOCKED_RISK_REPLAY_DRIFT", "persisted risk decision differs"
+            )
+        return existing["id"]
+    decision_id = uuid4()
     effective.execute(
         RISK_DECISIONS_TABLE.insert().values(
             id=decision_id,
             trade_intent_id=trade_intent_id,
             status="RISK_ACCEPTED" if accepted else "REJECTED",
             decision_json=payload,
-            decision_digest=canonical_execution_digest(payload),
+            decision_digest=decision_digest,
             created_at=datetime.now(timezone.utc),
         )
     )

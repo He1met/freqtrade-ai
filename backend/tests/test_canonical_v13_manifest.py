@@ -368,7 +368,7 @@ def test_postgresql_types_constraints_and_locking_compile_offline() -> None:
     assert len(tables) == 48
     assert len(foreign_keys) == 96
     assert len(checks) == 50
-    assert len(uniques) == 47
+    assert len(uniques) == 52
     assert len(indexes) == 90
     assert len(datetimes) == 52
     assert len(json_columns) == 21
