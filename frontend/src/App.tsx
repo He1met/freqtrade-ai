@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 
 import { AppLayout } from "./layout/AppLayout";
+import { AdvancedEntryPage } from "./pages/AdvancedEntryPage";
 import { BacktestRuns } from "./pages/BacktestRuns";
 import { BacktestTasks } from "./pages/BacktestTasks";
 import { ConfigurationCenter } from "./pages/ConfigurationCenter";
@@ -36,6 +37,7 @@ export function App() {
         <Route path="v13/market-data" element={<CanonicalMarketDataPage />} />
         <Route path="v13/research" element={<CanonicalResearchPage />} />
         <Route path="v13/optimization" element={<CanonicalOptimizationPage />} />
+        <Route path="advanced" element={<AdvancedEntryPage />} />
         <Route path="legacy/dashboard" element={<Dashboard />} />
         <Route path="strategies" element={<Strategies />} />
         <Route path="strategies/:strategyId" element={<StrategyDetail />} />

@@ -3,6 +3,7 @@ import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
 
 import "./../styles/dashboard-shell.css";
 import {
+  advancedNavigationSections,
   isNavigationItemActive,
   navigationItems,
   navigationLabelForPath,
@@ -59,12 +60,11 @@ export function AppLayout() {
   const currentLabel = navigationLabelForPath(pathname);
   const [mobileOpen, setMobileOpen] = useState(false);
   const mainRef = useRef<HTMLElement>(null);
-  const developmentRoute = pathname.startsWith("/operator-dashboard") || pathname.startsWith("/local-strategy-lab");
+  const developmentRoute = advancedNavigationSections.find((section) => section.kind === "development")?.items.some((item) => isNavigationItemActive(pathname, item)) ?? false;
   const developmentReturn = pathname.startsWith("/local-strategy-lab")
     ? { label: "返回策略目录", to: "/v13/strategies" }
     : { label: "返回研究与运行", to: "/v13/research" };
-  const historicalRoute = ["/legacy/dashboard", "/generation-runs", "/backtest-runs", "/backtest-tasks", "/hyperopt-runs", "/ranking", "/live-governance"]
-    .some((prefix) => pathname.startsWith(prefix));
+  const historicalRoute = advancedNavigationSections.find((section) => section.kind === "legacy")?.items.some((item) => isNavigationItemActive(pathname, item)) ?? false;
 
   useEffect(() => {
     setMobileOpen(false);

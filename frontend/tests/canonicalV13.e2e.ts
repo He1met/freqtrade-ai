@@ -700,3 +700,21 @@ test("canonical pages expose unique IDs, labelled controls, live selector counts
   });
   expect(audit).toEqual({ duplicates: [], unnamed: [] });
 });
+
+test("default navigation exposes one advanced entry while preserved legacy routes keep a clear boundary", async ({ page }) => {
+  const calls = await installCanonicalMocks(page);
+  await page.goto("/v13");
+  const navigation = page.getByRole("navigation", { name: "主导航" });
+  await expect(navigation.getByRole("link", { name: "高级入口" })).toBeVisible();
+  await expect(navigation.getByRole("link", { name: /Legacy|生成批次|回测批次|Local Strategy Lab/ })).toHaveCount(0);
+
+  await navigation.getByRole("link", { name: "高级入口" }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "高级入口" })).toBeVisible();
+  await expect(page.getByRole("note")).toContainText("V1.3 页面只读取 /api/canonical-v13");
+  await expect(page.getByRole("link", { name: /Legacy 总览/ })).toHaveAttribute("href", "/legacy/dashboard");
+  expect(calls.every((call) => call.includes("/api/canonical-v13/"))).toBe(true);
+  await page.getByRole("link", { name: /Legacy 总览/ }).click();
+  await expect(page.getByText("高级与历史证据", { exact: true })).toBeVisible();
+  await expect(page.getByText(/不是 V1.3 canonical production 权威/)).toBeVisible();
+  await expect(page.getByRole("link", { name: "返回 V1.3 工作台" })).toHaveAttribute("href", "/v13");
+});
