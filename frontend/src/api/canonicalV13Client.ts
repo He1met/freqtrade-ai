@@ -11,6 +11,7 @@ import type {
   OptimizationListProjection,
   ReadinessProjection,
   ResearchPlanCatalogProjection,
+  ResearchResultsProjection,
   ResearchChainProjection,
   ResearchBundleActivateCommand,
   ResearchBundleActivation,
@@ -54,7 +55,7 @@ type RequestOptions = {
   signal?: AbortSignal;
 };
 
-type Shape = Readonly<Record<string, "array" | "boolean" | "number" | "object" | "string" | "nullable-string">>;
+type Shape = Readonly<Record<string, "array" | "boolean" | "number" | "object" | "string" | "nullable-object" | "nullable-string">>;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -68,6 +69,7 @@ function assertShape(contract: string, value: unknown, shape: Shape): asserts va
     const field = value[key];
     const valid = kind === "array" ? Array.isArray(field)
       : kind === "object" ? isRecord(field)
+        : kind === "nullable-object" ? field === null || isRecord(field)
         : kind === "nullable-string" ? field === null || typeof field === "string"
           : typeof field === kind;
     if (!valid) {
@@ -98,6 +100,7 @@ function validateSuccessDto(contract: string, value: unknown): void {
     optimizations: { status: "string", items: "array" },
     researchChain: { validation_plan_id: "string", validation_plan_digest: "string", strategy_version_id: "string", research_target_id: "string", target_key: "string", plan_status: "string", validation_attempt_id: "nullable-string", attempt_status: "nullable-string", attempt_receipt_digest: "nullable-string", target_score_id: "nullable-string", overall_score: "nullable-string", score_digest: "nullable-string", qualification_decision_id: "nullable-string", qualification_status: "nullable-string", qualification_reason_code: "nullable-string", qualification_decision_digest: "nullable-string" },
     researchPlans: { status: "string", items: "array" },
+    researchResults: { validation_plan_id: "string", validation_plan_digest: "string", strategy_version_id: "string", research_target_id: "string", target_key: "string", configuration_bundle_id: "string", configuration_bundle_digest: "string", market_snapshot_id: "string", market_snapshot_digest: "string", plan_status: "string", attempt: "nullable-object", windows: "array", score: "nullable-object", qualification: "nullable-object" },
     gates: { status: "string", items: "array" },
   };
   const shape = shapes[contract];
@@ -131,6 +134,42 @@ function validateSuccessDto(contract: string, value: unknown): void {
     if (contract === "researchPlans") {
       for (const [index, plan] of (value.items as Record<string, unknown>[]).entries()) {
         assertShape(`researchPlans.items[${index}]`, plan, shapes.researchChain);
+      }
+    }
+  }
+  if (contract === "researchResults") {
+    assertRecordArray("researchResults.windows", value.windows);
+    for (const [index, window] of (value.windows as Record<string, unknown>[]).entries()) {
+      assertShape(`researchResults.windows[${index}]`, window, {
+        qualification_evidence: "nullable-object",
+        required: "boolean",
+        result: "nullable-object",
+        validation_plan_window_id: "string",
+        window_end: "string",
+        window_key: "string",
+        window_member_digest: "string",
+        window_start: "string",
+      });
+      if (isRecord(window.result)) {
+        assertShape(`researchResults.windows[${index}].result`, window.result, {
+          created_at: "string",
+          metrics_digest: "string",
+          metrics_json: "object",
+          receipt_digest: "string",
+          validation_window_result_id: "string",
+        });
+      }
+      if (isRecord(window.qualification_evidence)) {
+        assertShape(`researchResults.windows[${index}].qualification_evidence`, window.qualification_evidence, {
+          evidence_digest: "string",
+          gates: "array",
+          hard_gate_passed: "boolean",
+          qualification_window_evidence_id: "string",
+        });
+        assertRecordArray(
+          `researchResults.windows[${index}].qualification_evidence.gates`,
+          window.qualification_evidence.gates,
+        );
       }
     }
   }
@@ -295,6 +334,14 @@ export function fetchCanonicalResearchChain(validationPlanId: string, signal?: A
 
 export function fetchCanonicalResearchPlans(signal?: AbortSignal) {
   return request<ResearchPlanCatalogProjection>("/research/validation-plans", "researchPlans", { signal });
+}
+
+export function fetchCanonicalResearchResults(validationPlanId: string, signal?: AbortSignal) {
+  return request<ResearchResultsProjection>(
+    `/research/validation-plans/${segment(validationPlanId)}/results`,
+    "researchResults",
+    { signal },
+  );
 }
 
 export function fetchCanonicalResearchGates(signal?: AbortSignal) {

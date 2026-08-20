@@ -46,6 +46,80 @@ function canonicalResearchChain(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function canonicalResearchResults(overrides: Record<string, unknown> = {}) {
+  return {
+    validation_plan_id: ID_C,
+    validation_plan_digest: DIGEST,
+    strategy_version_id: ID_B,
+    research_target_id: ID_D,
+    target_key: "btc-5m",
+    configuration_bundle_id: ID_A,
+    configuration_bundle_digest: DIGEST,
+    market_snapshot_id: ID_B,
+    market_snapshot_digest: DIGEST,
+    plan_status: "COMPLETE",
+    attempt: {
+      validation_attempt_id: ID_D,
+      attempt_number: 1,
+      status: "SUCCEEDED",
+      executor_identity: "canonical-research-worker",
+      executor_image_digest: DIGEST,
+      receipt_digest: DIGEST,
+      created_at: "2026-08-14T00:00:00Z",
+      completed_at: "2026-08-14T01:00:00Z",
+    },
+    windows: [{
+      validation_plan_window_id: ID_A,
+      window_key: "oos-2026-07",
+      required: true,
+      window_start: "2026-07-01T00:00:00Z",
+      window_end: "2026-08-01T00:00:00Z",
+      window_member_digest: DIGEST,
+      result: {
+        validation_window_result_id: ID_B,
+        metrics_json: { net_return_after_cost: -0.031, max_drawdown: 0.12, trade_count: 24 },
+        metrics_digest: DIGEST,
+        receipt_digest: DIGEST,
+        created_at: "2026-08-14T01:00:00Z",
+      },
+      qualification_evidence: {
+        qualification_window_evidence_id: ID_C,
+        hard_gate_passed: false,
+        evidence_digest: DIGEST,
+        gates: [{
+          gate_key: "positive-return",
+          metric: "net_return_after_cost",
+          operator: ">",
+          threshold: "0",
+          observed: "-0.031",
+          passed: false,
+        }],
+      },
+    }],
+    score: {
+      target_score_id: ID_C,
+      scoring_snapshot_id: ID_A,
+      overall_score: "81.00000000",
+      required_window_result_set_digest: DIGEST,
+      score_digest: DIGEST,
+      scorer_identity: "canonical-scorer",
+      created_at: "2026-08-14T01:01:00Z",
+    },
+    qualification: {
+      qualification_decision_id: ID_D,
+      target_score_id: ID_C,
+      quality_snapshot_id: ID_A,
+      status: "REJECTED",
+      reason_code: "REQUIRED_WINDOW_GATE_FAILED",
+      decision_digest: DIGEST,
+      qualifier_identity: "canonical-qualifier",
+      evidence_count: 1,
+      created_at: "2026-08-14T01:02:00Z",
+    },
+    ...overrides,
+  };
+}
+
 const emptyResponses: Record<string, unknown> = {
   "/api/canonical-v13/strategies": { status: "EMPTY", items: [] },
   "/api/canonical-v13/configurations": {
@@ -234,11 +308,15 @@ test("research plan URL renders only the canonical chain projection", async ({ p
       qualification_reason_code: "REQUIRED_WINDOW_GATE_FAILED",
       qualification_decision_digest: DIGEST,
     },
+    [`/api/canonical-v13/research/validation-plans/${ID_A}/results`]: canonicalResearchResults({
+      validation_plan_id: ID_A,
+      research_target_id: ID_A,
+    }),
   });
   await page.goto(`/v13/research?plan=${ID_A}`);
   await expect(page.getByRole("heading", { name: "精确研究链路" })).toBeVisible();
-  await expect(page.getByText("必需窗口 Gate 未通过", { exact: true })).toBeVisible();
-  const reason = page.getByRole("group", { name: "原始诊断：REQUIRED_WINDOW_GATE_FAILED" });
+  await expect(page.getByText("必需窗口 Gate 未通过", { exact: true }).first()).toBeVisible();
+  const reason = page.getByRole("group", { name: "原始诊断：REQUIRED_WINDOW_GATE_FAILED" }).first();
   await reason.getByText("诊断码", { exact: true }).click();
   await expect(reason.getByText("REQUIRED_WINDOW_GATE_FAILED", { exact: true })).toBeVisible();
   await expect(page.getByText("99.00000000", { exact: true })).toBeVisible();
@@ -334,6 +412,7 @@ test("research selectors preserve API IDs while showing names and exact lineage"
     [`/api/canonical-v13/strategies/${ID_A}`]: alpha,
     "/api/canonical-v13/research/validation-plans": { status: "AVAILABLE", items: [plan] },
     [`/api/canonical-v13/research/validation-plans/${ID_C}`]: plan,
+    [`/api/canonical-v13/research/validation-plans/${ID_C}/results`]: canonicalResearchResults(),
   });
   await page.goto("/v13/research");
 
@@ -405,11 +484,35 @@ test("the default journey reaches a target strategy research state in three clic
   await expect(page.getByRole("heading", { level: 2, name: "Alpha", exact: true })).toBeVisible();
 });
 
+test("strategy context links to exact API backtest metrics and qualification evidence", async ({ page }) => {
+  const alpha = canonicalStrategy({ qualification_status: "REJECTED" });
+  const plan = canonicalResearchChain();
+  await installCanonicalMocks(page, {
+    "/api/canonical-v13/strategies": { status: "AVAILABLE", items: [alpha] },
+    [`/api/canonical-v13/strategies/${ID_A}`]: alpha,
+    "/api/canonical-v13/research/validation-plans": { status: "AVAILABLE", items: [plan] },
+    [`/api/canonical-v13/research/validation-plans/${ID_C}`]: plan,
+    [`/api/canonical-v13/research/validation-plans/${ID_C}/results`]: canonicalResearchResults(),
+  });
+  await page.goto(`/v13/strategies?strategy=${ID_A}`);
+  await page.getByRole("link", { name: /查看 exact 回测证据/ }).click();
+
+  await expect(page.getByRole("heading", { level: 2, name: "回测与资格结果" })).toBeVisible();
+  await expect(page.getByRole("meter", { name: "API Overall score" })).toHaveAttribute("aria-valuenow", "81");
+  await expect(page.getByRole("region", { name: "窗口指标对比" })).toContainText("-0.031");
+  await expect(page.getByText("Hard Gate 未通过", { exact: true })).toBeVisible();
+  await expect(page.getByText("net_return_after_cost: -0.031 > 0", { exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "回测与资格结果" }).getByText("必需窗口 Gate 未通过", { exact: true })).toBeVisible();
+  await expect(page.getByText("已合格", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("研究已就绪", { exact: true })).toHaveCount(0);
+});
+
 test("an exact strategy and plan URL renders five API-derived research steps", async ({ page }) => {
   const alpha = canonicalStrategy({ qualification_status: "REJECTED" });
   await installCanonicalMocks(page, {
     [`/api/canonical-v13/strategies/${ID_A}`]: alpha,
     [`/api/canonical-v13/research/validation-plans/${ID_C}`]: canonicalResearchChain(),
+    [`/api/canonical-v13/research/validation-plans/${ID_C}/results`]: canonicalResearchResults(),
   });
 
   await page.goto(`/v13/research?strategy=${ID_A}&plan=${ID_C}`);
@@ -427,6 +530,7 @@ test("lineage mismatch leaves all later research steps unknown", async ({ page }
   await installCanonicalMocks(page, {
     [`/api/canonical-v13/strategies/${ID_A}`]: alpha,
     [`/api/canonical-v13/research/validation-plans/${ID_C}`]: canonicalResearchChain({ strategy_version_id: ID_A }),
+    [`/api/canonical-v13/research/validation-plans/${ID_C}/results`]: canonicalResearchResults({ strategy_version_id: ID_A }),
   });
 
   await page.goto(`/v13/research?strategy=${ID_A}&plan=${ID_C}`);

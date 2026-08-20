@@ -1,7 +1,7 @@
 import { useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 
-import { fetchCanonicalStrategies, fetchCanonicalStrategy } from "../../api/canonicalV13Client";
+import { fetchCanonicalResearchPlans, fetchCanonicalStrategies, fetchCanonicalStrategy } from "../../api/canonicalV13Client";
 import type { StrategyProjection } from "../../api/canonicalV13Types";
 import { CopyableValue, PageHeader } from "../../components/DisplayPrimitives";
 import { CanonicalResearchStepper } from "./CanonicalResearchStepper";
@@ -11,6 +11,7 @@ import { filterCanonicalSelectorOptions, strategySelectorOptions } from "./canon
 
 function StrategyDetail({ strategyId }: { strategyId: string }) {
   const query = useCanonicalQuery((signal) => fetchCanonicalStrategy(strategyId, signal), [strategyId]);
+  const plans = useCanonicalQuery(fetchCanonicalResearchPlans, [strategyId]);
   if (query.loading) return <CanonicalStatePanel description="正在读取所选 canonical strategy。" kind="loading" title="加载策略详情" />;
   if (query.error) return <CanonicalQueryError error={query.error} title="所选策略无法读取" />;
   const strategy = query.data as StrategyProjection;
@@ -18,6 +19,10 @@ function StrategyDetail({ strategyId }: { strategyId: string }) {
     return <CanonicalStatePanel description="策略详情返回未知 enum；详情与成功状态保持隐藏。" kind="unknown" reasonCodes={["UNKNOWN_CONTRACT_VALUE"]} title="策略详情合同漂移" />;
   }
   const researchQuery = serializeCanonicalUrlState("research", { strategy: strategy.strategy_id });
+  const planStatusesKnown = plans.data
+    ? canonicalStatusesKnown(plans.data.status, ...plans.data.items.flatMap((plan) => [plan.plan_status, plan.attempt_status, plan.qualification_status].filter((status) => status !== null)))
+    : true;
+  const relatedPlans = plans.data?.items.filter((plan) => plan.strategy_version_id === strategy.current_version_id) ?? [];
   return (
     <>
       <section className="canonical-v13-panel" aria-label="Canonical strategy detail">
@@ -42,6 +47,28 @@ function StrategyDetail({ strategyId }: { strategyId: string }) {
         strategy={strategy}
         strategyHref={`/v13/strategies?strategy=${encodeURIComponent(strategy.strategy_id)}`}
       />
+      {plans.loading ? <CanonicalStatePanel description="正在读取当前策略版本的研究计划与结果摘要。" kind="loading" title="加载相关回测结果" /> : null}
+      {plans.error ? <CanonicalQueryError error={plans.error} title="相关回测结果未知" /> : null}
+      {plans.data && !planStatusesKnown ? <CanonicalStatePanel description="相关 plan projection 含未知状态；结果入口保持隐藏。" kind="unknown" reasonCodes={["UNKNOWN_CONTRACT_VALUE"]} title="研究结果合同漂移" /> : null}
+      {plans.data && planStatusesKnown ? (
+        <section className="canonical-v13-panel" aria-labelledby="strategy-related-results">
+          <div className="canonical-v13-heading-row"><h2 id="strategy-related-results">当前版本的研究与回测结果</h2><span>{relatedPlans.length} 个 API plan</span></div>
+          {relatedPlans.length ? <div className="canonical-v13-card-list">{relatedPlans.map((plan) => {
+            const href = serializeCanonicalUrlState("research", {
+              plan: plan.validation_plan_id,
+              strategy: strategy.strategy_id,
+              target: plan.research_target_id,
+            });
+            return <Link className="canonical-v13-data-card canonical-v13-result-link" key={plan.validation_plan_id} to={`/v13/research?${href}`}>
+              <strong>{plan.target_key}</strong>
+              <span>Plan：<CanonicalStatus status={plan.plan_status} /></span>
+              <span>资格：<CanonicalStatus status={plan.qualification_status ?? "UNSET"} /></span>
+              <b>{plan.overall_score === null ? "尚无 API 分数" : `API 分数 ${plan.overall_score}`}</b>
+              <em>查看 exact 回测证据 →</em>
+            </Link>;
+          })}</div> : <CanonicalStatePanel description="Canonical API 未返回当前策略版本的 validation plan；不从历史页面补充回测结果。" kind="empty" title="尚无相关研究结果" />}
+        </section>
+      ) : null}
     </>
   );
 }

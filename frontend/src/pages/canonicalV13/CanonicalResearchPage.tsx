@@ -6,6 +6,7 @@ import {
   fetchCanonicalResearchGates,
   fetchCanonicalResearchPlans,
   fetchCanonicalResearchReadiness,
+  fetchCanonicalResearchResults,
   fetchCanonicalRuntimeReadiness,
   fetchCanonicalStrategies,
   fetchCanonicalStrategy,
@@ -13,6 +14,7 @@ import {
 import type { GateListProjection, ReadinessProjection, ResearchChainProjection } from "../../api/canonicalV13Types";
 import { CopyableValue, PageHeader } from "../../components/DisplayPrimitives";
 import { CanonicalResearchStepper } from "./CanonicalResearchStepper";
+import { CanonicalResearchResults } from "./CanonicalResearchResults";
 import { CanonicalSearchSelect, type CanonicalSelectorAvailability } from "./CanonicalSearchSelect";
 import { CanonicalInlineReason, CanonicalQueryError, CanonicalStatePanel, CanonicalStatus, useCanonicalQuery } from "./CanonicalStatePanel";
 import { canonicalStatusesKnown, canonicalStatusPresentation, parseCanonicalUrlState, serializeCanonicalUrlState } from "./canonicalV13Model";
@@ -127,6 +129,7 @@ export function CanonicalResearchPage() {
   const selectedPlanId = url.valid ? url.values.plan ?? null : null;
   const selectedStrategy = useCanonicalQuery((signal) => fetchCanonicalStrategy(selectedStrategyId ?? "", signal), [selectedStrategyId], Boolean(selectedStrategyId));
   const selectedChain = useCanonicalQuery((signal) => fetchCanonicalResearchChain(selectedPlanId ?? "", signal), [selectedPlanId], Boolean(selectedPlanId));
+  const selectedResults = useCanonicalQuery((signal) => fetchCanonicalResearchResults(selectedPlanId ?? "", signal), [selectedPlanId], Boolean(selectedPlanId));
 
   const configurationKnown = configurations.data
     ? canonicalStatusesKnown(configurations.data.status, ...configurations.data.items.flatMap((profile) => profile.versions.map((version) => version.lifecycle_status)))
@@ -150,6 +153,18 @@ export function CanonicalResearchPage() {
   const strategyStale = Boolean(selectedStrategyId && strategyAvailability === "ready" && canonicalSelectionState(strategyOptions, selectedStrategyId) === "stale");
   const targetStale = Boolean(url.values.target && selectedStrategySummary && planAvailability === "ready" && canonicalSelectionState(targetOptions, url.values.target) === "stale");
   const planStale = Boolean(selectedPlanId && selectedStrategySummary && planAvailability === "ready" && canonicalSelectionState(planOptions, selectedPlanId) === "stale");
+  const resultsKnown = selectedResults.data
+    ? canonicalStatusesKnown(
+      selectedResults.data.plan_status,
+      ...(selectedResults.data.attempt ? [selectedResults.data.attempt.status] : []),
+      ...(selectedResults.data.qualification ? [selectedResults.data.qualification.status] : []),
+    )
+    : true;
+  const resultsLineageConflict = Boolean(selectedResults.data && (
+    selectedResults.data.validation_plan_id !== selectedPlanId
+    || (selectedStrategySummary && selectedResults.data.strategy_version_id !== selectedStrategySummary.current_version_id)
+    || (url.values.target && selectedResults.data.research_target_id !== url.values.target)
+  ));
 
   function commit(values: Readonly<Record<string, string | null | undefined>>) {
     setSearchParams(serializeCanonicalUrlState("research", values));
@@ -201,6 +216,10 @@ export function CanonicalResearchPage() {
       {selectedStrategy.error ? <CanonicalQueryError error={selectedStrategy.error} title="所选策略研究上下文未知" /> : null}
       {selectedChain.loading ? <CanonicalStatePanel description="正在读取 exact validation plan。" kind="loading" title="加载研究链路" /> : null}
       {selectedChain.error ? <CanonicalQueryError error={selectedChain.error} title="研究链路状态未知" /> : null}
+      {selectedResults.loading ? <CanonicalStatePanel description="正在读取 exact plan 的回测窗口、分数与资格 evidence。" kind="loading" title="加载回测结果" /> : null}
+      {selectedResults.error ? <CanonicalQueryError error={selectedResults.error} title="回测结果状态未知" /> : null}
+      {selectedResults.data && !resultsKnown ? <CanonicalStatePanel description="回测结果 projection 含未知状态；图表与摘要保持隐藏。" kind="unknown" reasonCodes={["UNKNOWN_CONTRACT_VALUE"]} title="回测结果合同漂移" /> : null}
+      {resultsLineageConflict ? <CanonicalStatePanel description="Results projection 与 URL 中所选策略、目标或 plan 不一致；页面拒绝展示。" kind="unknown" reasonCodes={["RESEARCH_RESULT_LINEAGE_MISMATCH"]} title="回测结果 Lineage 不一致" /> : null}
       {selectedStrategyId && selectedStrategy.data && !strategyStale && !targetStale && !planStale && (!selectedPlanId || selectedChain.data) ? (
         <CanonicalResearchStepper chain={selectedChain.data} researchHref={committedResearchHref} selection={{ planId: selectedPlanId, strategyId: selectedStrategyId, targetId: url.values.target ?? null }} strategy={selectedStrategy.data} strategyHref={selectedStrategyHref} />
       ) : null}
@@ -208,7 +227,8 @@ export function CanonicalResearchPage() {
         <ReadinessCard dependencyKey={`${url.values.scope ?? ""}:${url.values.workflow ?? ""}`} loader={(signal) => fetchCanonicalResearchReadiness(url.values.scope, url.values.workflow, signal)} title="研究准备" />
         <ReadinessCard dependencyKey="runtime" loader={fetchCanonicalRuntimeReadiness} title="Runtime 准备" />
       </div> : null}
-      {url.valid && selectedChain.data ? <ResearchChainCard chain={selectedChain.data} /> : null}
+      {url.valid && selectedChain.data && !planStale ? <ResearchChainCard chain={selectedChain.data} /> : null}
+      {url.valid && selectedResults.data && resultsKnown && !resultsLineageConflict && !strategyStale && !targetStale && !planStale ? <CanonicalResearchResults projection={selectedResults.data} /> : null}
       {url.valid ? <GateReceiptsCard /> : null}
       {(url.values.target || url.values.strategy) ? <CanonicalStatePanel description="Target/strategy 仅保存 committed URL selection；当前 readiness DTO 未提供按这两项过滤的事实，UI 不据此重算 readiness。" kind="pending" title="选择上下文" /> : null}
     </div>

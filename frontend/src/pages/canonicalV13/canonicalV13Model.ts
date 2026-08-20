@@ -416,6 +416,7 @@ const REASON: Readonly<Record<string, GuidanceDefinition>> = {
   RESEARCH_SCOPE_INCOMPLETE: guidance("研究范围选择不完整", "Scope 与 Workflow 必须成对提供；API 不会使用隐藏默认值。", "重新选择研究范围", "/v13/configuration", "warning"),
   RESEARCH_STRATEGY_CONTEXT_REQUIRED: guidance("研究策略上下文缺失", "Validation plan URL 没有同时携带所选 strategy；步骤条无法验证 lineage。", "返回策略目录选择策略", "/v13/strategies", "warning"),
   RESEARCH_STRATEGY_LINEAGE_MISMATCH: guidance("策略与研究计划 Lineage 不一致", "Exact validation plan 的 strategy version 与所选策略当前版本不一致。", "重新选择策略或计划", "/v13/research", "danger"),
+  RESEARCH_RESULT_LINEAGE_MISMATCH: guidance("回测结果 Lineage 不一致", "Results projection 的 strategy、target 或 validation plan 与当前 URL selection 不一致。", "重新选择研究计划", "/v13/research", "danger"),
   RESEARCH_STRATEGY_UNAVAILABLE: guidance("所选策略无法读取", "未取得所选策略的 Canonical API projection；所有研究步骤保持未知。", "返回策略目录", "/v13/strategies", "danger"),
   RESEARCH_UPSTREAM_INCOMPLETE: guidance("上游研究阶段尚未完成", "入库或验证阶段没有明确完成事实；后续步骤不会被点亮。", "查看策略状态", "/v13/strategies", "warning"),
   RUNTIME_HEALTH_RECEIPT_MISSING: RUNTIME_BLOCKER,

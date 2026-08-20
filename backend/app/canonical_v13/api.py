@@ -81,7 +81,15 @@ from app.canonical_v13.dto import (
     ResearchBundlePreviewCommandDTO,
     ResearchBundlePreviewDTO,
     ResearchChainProjectionDTO,
+    ResearchAttemptProjectionDTO,
+    ResearchGateEvaluationProjectionDTO,
+    ResearchQualificationProjectionDTO,
+    ResearchQualificationWindowEvidenceProjectionDTO,
     ResearchPlanCatalogProjectionDTO,
+    ResearchResultsProjectionDTO,
+    ResearchScoreProjectionDTO,
+    ResearchWindowProjectionDTO,
+    ResearchWindowResultProjectionDTO,
     ResearchLineageDTO,
     ResearchQualificationCommandDTO,
     ResearchQualificationReceiptDTO,
@@ -197,6 +205,7 @@ from app.canonical_v13.models import (
     MARKET_SNAPSHOT_MEMBERS_TABLE,
     OPTIMIZATION_RUNS_TABLE,
     QUALIFICATION_DECISIONS_TABLE,
+    QUALIFICATION_WINDOW_EVIDENCE_TABLE,
     RESEARCH_GATE_RECEIPTS_TABLE,
     RESEARCH_TARGETS_TABLE,
     RUNTIME_INSTANCES_TABLE,
@@ -205,7 +214,11 @@ from app.canonical_v13.models import (
     STRATEGY_ARTIFACTS_TABLE,
     STRATEGY_SUBMISSIONS_TABLE,
     STRATEGY_VERSIONS_TABLE,
+    TARGET_SCORES_TABLE,
+    VALIDATION_ATTEMPTS_TABLE,
     VALIDATION_PLANS_TABLE,
+    VALIDATION_PLAN_WINDOWS_TABLE,
+    VALIDATION_WINDOW_RESULTS_TABLE,
 )
 
 
@@ -552,6 +565,192 @@ def _research_plan_catalog(
     return ResearchPlanCatalogProjectionDTO(
         status="AVAILABLE" if items else "EMPTY",
         items=items,
+    )
+
+
+def _research_results_projection(
+    connection: Connection, validation_plan_id: UUID
+) -> ResearchResultsProjectionDTO:
+    plan = connection.execute(
+        select(VALIDATION_PLANS_TABLE).where(
+            VALIDATION_PLANS_TABLE.c.id == validation_plan_id
+        )
+    ).mappings().one_or_none()
+    if plan is None:
+        raise CanonicalAPIBlocked(
+            "BLOCKED_VALIDATION_PLAN_NOT_FOUND",
+            "canonical validation plan is absent",
+        )
+    target_key = connection.execute(
+        select(RESEARCH_TARGETS_TABLE.c.target_key).where(
+            RESEARCH_TARGETS_TABLE.c.id == plan["research_target_id"]
+        )
+    ).scalar_one()
+    attempt = connection.execute(
+        select(VALIDATION_ATTEMPTS_TABLE)
+        .where(VALIDATION_ATTEMPTS_TABLE.c.validation_plan_id == validation_plan_id)
+        .order_by(
+            VALIDATION_ATTEMPTS_TABLE.c.attempt_number.desc(),
+            VALIDATION_ATTEMPTS_TABLE.c.id.desc(),
+        )
+        .limit(1)
+    ).mappings().one_or_none()
+    plan_windows = connection.execute(
+        select(VALIDATION_PLAN_WINDOWS_TABLE)
+        .where(VALIDATION_PLAN_WINDOWS_TABLE.c.validation_plan_id == validation_plan_id)
+        .order_by(
+            VALIDATION_PLAN_WINDOWS_TABLE.c.window_start,
+            VALIDATION_PLAN_WINDOWS_TABLE.c.window_key,
+            VALIDATION_PLAN_WINDOWS_TABLE.c.id,
+        )
+    ).mappings().all()
+    result_rows = [] if attempt is None else connection.execute(
+        select(VALIDATION_WINDOW_RESULTS_TABLE).where(
+            VALIDATION_WINDOW_RESULTS_TABLE.c.validation_attempt_id == attempt["id"]
+        )
+    ).mappings().all()
+    results_by_window = {
+        row["validation_plan_window_id"]: row for row in result_rows
+    }
+    plan_window_ids = {window["id"] for window in plan_windows}
+    if not set(results_by_window).issubset(plan_window_ids):
+        raise CanonicalAPIBlocked(
+            "BLOCKED_RESEARCH_RESULT_LINEAGE",
+            "validation attempt contains a result from another plan",
+        )
+    score = connection.execute(
+        select(TARGET_SCORES_TABLE).where(
+            TARGET_SCORES_TABLE.c.validation_plan_id == validation_plan_id,
+            TARGET_SCORES_TABLE.c.validation_plan_digest
+            == plan["validation_plan_digest"],
+        )
+    ).mappings().one_or_none()
+    qualification = connection.execute(
+        select(QUALIFICATION_DECISIONS_TABLE).where(
+            QUALIFICATION_DECISIONS_TABLE.c.validation_plan_id == validation_plan_id,
+            QUALIFICATION_DECISIONS_TABLE.c.validation_plan_digest
+            == plan["validation_plan_digest"],
+        )
+    ).mappings().one_or_none()
+    if (score is not None or qualification is not None) and attempt is None:
+        raise CanonicalAPIBlocked(
+            "BLOCKED_RESEARCH_RESULT_LINEAGE",
+            "score or qualification exists without a validation attempt",
+        )
+    if qualification is not None and (
+        score is None or qualification["target_score_id"] != score["id"]
+    ):
+        raise CanonicalAPIBlocked(
+            "BLOCKED_RESEARCH_RESULT_LINEAGE",
+            "qualification does not reference the exact target score",
+        )
+    evidence_rows = [] if qualification is None else connection.execute(
+        select(QUALIFICATION_WINDOW_EVIDENCE_TABLE).where(
+            QUALIFICATION_WINDOW_EVIDENCE_TABLE.c.qualification_decision_id
+            == qualification["id"]
+        )
+    ).mappings().all()
+    evidence_by_window = {
+        row["validation_plan_window_id"]: row for row in evidence_rows
+    }
+    if not set(evidence_by_window).issubset(plan_window_ids):
+        raise CanonicalAPIBlocked(
+            "BLOCKED_RESEARCH_RESULT_LINEAGE",
+            "qualification contains evidence from another plan",
+        )
+    for window_id, evidence in evidence_by_window.items():
+        result = results_by_window.get(window_id)
+        if (
+            result is None
+            or evidence["validation_window_result_id"] != result["id"]
+        ):
+            raise CanonicalAPIBlocked(
+                "BLOCKED_RESEARCH_RESULT_LINEAGE",
+                "qualification evidence does not reference the displayed window result",
+            )
+    windows: list[ResearchWindowProjectionDTO] = []
+    for window in plan_windows:
+        result = results_by_window.get(window["id"])
+        evidence = evidence_by_window.get(window["id"])
+        evidence_projection = None
+        if evidence is not None:
+            payload = evidence["evidence_json"]
+            gates = payload.get("gates") if isinstance(payload, dict) else None
+            if not isinstance(gates, list) or not all(
+                isinstance(gate, dict) for gate in gates
+            ):
+                raise CanonicalAPIBlocked(
+                    "BLOCKED_QUALIFICATION_EVIDENCE_CONTRACT",
+                    "qualification window evidence has no canonical gates",
+                )
+            evidence_projection = ResearchQualificationWindowEvidenceProjectionDTO(
+                qualification_window_evidence_id=evidence["id"],
+                hard_gate_passed=evidence["hard_gate_passed"],
+                gates=[ResearchGateEvaluationProjectionDTO(**gate) for gate in gates],
+                evidence_digest=evidence["evidence_digest"],
+            )
+        windows.append(
+            ResearchWindowProjectionDTO(
+                validation_plan_window_id=window["id"],
+                window_key=window["window_key"],
+                required=window["required"],
+                window_start=window["window_start"],
+                window_end=window["window_end"],
+                window_member_digest=window["window_member_digest"],
+                result=None if result is None else ResearchWindowResultProjectionDTO(
+                    validation_window_result_id=result["id"],
+                    metrics_json=result["metrics_json"],
+                    metrics_digest=result["metrics_digest"],
+                    receipt_digest=result["receipt_digest"],
+                    created_at=result["created_at"],
+                ),
+                qualification_evidence=evidence_projection,
+            )
+        )
+    return ResearchResultsProjectionDTO(
+        validation_plan_id=plan["id"],
+        validation_plan_digest=plan["validation_plan_digest"],
+        strategy_version_id=plan["strategy_version_id"],
+        research_target_id=plan["research_target_id"],
+        target_key=target_key,
+        configuration_bundle_id=plan["configuration_bundle_id"],
+        configuration_bundle_digest=plan["configuration_bundle_digest"],
+        market_snapshot_id=plan["market_snapshot_id"],
+        market_snapshot_digest=plan["market_snapshot_digest"],
+        plan_status=plan["status"],
+        attempt=None if attempt is None else ResearchAttemptProjectionDTO(
+            validation_attempt_id=attempt["id"],
+            attempt_number=attempt["attempt_number"],
+            status=attempt["status"],
+            executor_identity=attempt["executor_identity"],
+            executor_image_digest=attempt["executor_image_digest"],
+            receipt_digest=attempt["receipt_digest"],
+            created_at=attempt["created_at"],
+            completed_at=attempt["completed_at"],
+        ),
+        windows=windows,
+        score=None if score is None else ResearchScoreProjectionDTO(
+            target_score_id=score["id"],
+            scoring_snapshot_id=score["scoring_snapshot_id"],
+            overall_score=str(score["overall_score"]),
+            required_window_result_set_digest=score[
+                "required_window_result_set_digest"
+            ],
+            score_digest=score["score_digest"],
+            scorer_identity=score["scorer_identity"],
+            created_at=score["created_at"],
+        ),
+        qualification=None if qualification is None else ResearchQualificationProjectionDTO(
+            qualification_decision_id=qualification["id"],
+            target_score_id=qualification["target_score_id"],
+            quality_snapshot_id=qualification["quality_snapshot_id"],
+            status=qualification["status"],
+            reason_code=qualification["reason_code"],
+            decision_digest=qualification["decision_digest"],
+            qualifier_identity=qualification["qualifier_identity"],
+            evidence_count=len(evidence_rows),
+            created_at=qualification["created_at"],
+        ),
     )
 
 
@@ -1716,6 +1915,19 @@ def create_canonical_v13_app(
             )
         )
         return ResearchChainProjectionDTO(**projection.__dict__)
+
+    @app.get(
+        f"{API_PREFIX}/research/validation-plans/{{validation_plan_id}}/results",
+        response_model=ResearchResultsProjectionDTO,
+    )
+    def research_results(
+        validation_plan_id: UUID,
+    ) -> ResearchResultsProjectionDTO:
+        return run_read(
+            lambda connection: _research_results_projection(
+                connection, validation_plan_id
+            )
+        )
 
     @app.get(
         f"{API_PREFIX}/market-data", response_model=MarketInventoryProjectionDTO

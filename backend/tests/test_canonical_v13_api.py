@@ -54,11 +54,17 @@ from app.canonical_v13.models import (
     IDEMPOTENCY_RECEIPTS_TABLE,
     OPTIMIZATION_RUNS_TABLE,
     ORDERS_TABLE,
+    QUALIFICATION_DECISIONS_TABLE,
+    QUALIFICATION_WINDOW_EVIDENCE_TABLE,
     RUNTIME_INSTANCES_TABLE,
     RESEARCH_TARGETS_TABLE,
     SIGNALS_TABLE,
     STRATEGIES_TABLE,
+    TARGET_SCORES_TABLE,
     VALIDATION_ATTEMPTS_TABLE,
+    VALIDATION_PLANS_TABLE,
+    VALIDATION_PLAN_WINDOWS_TABLE,
+    VALIDATION_WINDOW_RESULTS_TABLE,
 )
 
 
@@ -423,6 +429,10 @@ def test_factory_is_standalone_and_exact_routes_are_frozen() -> None:
                 f"{API_PREFIX}/research/validation-plans/{{validation_plan_id}}",
                 "GET",
             ),
+            (
+                f"{API_PREFIX}/research/validation-plans/{{validation_plan_id}}/results",
+                "GET",
+            ),
             (f"{API_PREFIX}/research/authorizations", "POST"),
             (
                 f"{API_PREFIX}/research/authorizations/{{authorization_id}}/consume",
@@ -455,7 +465,7 @@ def test_factory_is_standalone_and_exact_routes_are_frozen() -> None:
             for method, operation in path.items()
             if method in {"get", "post", "put", "patch", "delete"}
         ]
-        assert len(operation_ids) == 31
+        assert len(operation_ids) == 32
         assert len(set(operation_ids)) == len(operation_ids)
     finally:
         client.close()
@@ -685,6 +695,24 @@ def test_production_research_control_surface_binds_exact_attempt_and_projects_st
         assert started["validation_attempt_id"] == str(attempt_id)
         assert started["status"] == "RUNNING"
 
+        results = client.get(
+            f"{API_PREFIX}/research/validation-plans/{plan['validation_plan_id']}/results"
+        )
+        assert results.status_code == 200, results.json()
+        result_projection = results.json()
+        assert result_projection["validation_plan_id"] == plan["validation_plan_id"]
+        assert result_projection["strategy_version_id"] == submission["strategy_version_id"]
+        assert result_projection["target_key"] == "api-btc-5m"
+        assert result_projection["attempt"]["validation_attempt_id"] == str(attempt_id)
+        assert result_projection["attempt"]["status"] == "RUNNING"
+        assert result_projection["score"] is None
+        assert result_projection["qualification"] is None
+        assert len(result_projection["windows"]) == 1
+        assert result_projection["windows"][0]["window_key"] == "api-required"
+        assert result_projection["windows"][0]["required"] is True
+        assert result_projection["windows"][0]["result"] is None
+        assert result_projection["windows"][0]["qualification_evidence"] is None
+
         status = client.get(
             f"{API_PREFIX}/research/validation-plans/{plan['validation_plan_id']}"
         )
@@ -724,6 +752,139 @@ def test_production_research_control_surface_binds_exact_attempt_and_projects_st
         )
         assert premature_score.status_code == 409
         assert premature_score.json()["status"] == "BLOCKED"
+
+        result_id = uuid4()
+        score_id = uuid4()
+        decision_id = uuid4()
+        evidence_id = uuid4()
+        metrics = {
+            "net_return_after_cost": -0.031,
+            "max_drawdown": 0.12,
+            "trade_count": 24,
+        }
+        with engine.begin() as raw:
+            connection = raw.execution_options(
+                schema_translate_map={CANONICAL_BUSINESS_SCHEMA: None}
+            )
+            plan_row = connection.execute(
+                select(VALIDATION_PLANS_TABLE).where(
+                    VALIDATION_PLANS_TABLE.c.id == UUID(plan["validation_plan_id"])
+                )
+            ).mappings().one()
+            window_row = connection.execute(
+                select(VALIDATION_PLAN_WINDOWS_TABLE).where(
+                    VALIDATION_PLAN_WINDOWS_TABLE.c.validation_plan_id
+                    == plan_row["id"]
+                )
+            ).mappings().one()
+            connection.execute(
+                VALIDATION_ATTEMPTS_TABLE.update()
+                .where(VALIDATION_ATTEMPTS_TABLE.c.id == attempt_id)
+                .values(status="SUCCEEDED", receipt_digest="9" * 64, completed_at=_GATE_NOW)
+            )
+            connection.execute(
+                VALIDATION_PLANS_TABLE.update()
+                .where(VALIDATION_PLANS_TABLE.c.id == plan_row["id"])
+                .values(status="COMPLETE")
+            )
+            connection.execute(
+                VALIDATION_WINDOW_RESULTS_TABLE.insert().values(
+                    id=result_id,
+                    validation_attempt_id=attempt_id,
+                    validation_plan_window_id=window_row["id"],
+                    metrics_json=metrics,
+                    metrics_digest="8" * 64,
+                    receipt_digest="7" * 64,
+                    created_at=_GATE_NOW,
+                )
+            )
+            lineage_values = {
+                "strategy_version_id": plan_row["strategy_version_id"],
+                "research_target_id": plan_row["research_target_id"],
+                "configuration_bundle_id": plan_row["configuration_bundle_id"],
+                "configuration_bundle_digest": plan_row["configuration_bundle_digest"],
+                "market_snapshot_id": plan_row["market_snapshot_id"],
+                "market_snapshot_digest": plan_row["market_snapshot_digest"],
+                "validation_plan_id": plan_row["id"],
+                "validation_plan_digest": plan_row["validation_plan_digest"],
+            }
+            connection.execute(
+                TARGET_SCORES_TABLE.insert().values(
+                    id=score_id,
+                    **lineage_values,
+                    scoring_snapshot_id=UUID(seed["snapshot_ids"]["SCORING"]),
+                    overall_score="81.00000000",
+                    required_window_result_set_digest="6" * 64,
+                    score_digest="5" * 64,
+                    scorer_identity="canonical-api-scorer",
+                    created_at=_GATE_NOW,
+                )
+            )
+            connection.execute(
+                QUALIFICATION_DECISIONS_TABLE.insert().values(
+                    id=decision_id,
+                    **lineage_values,
+                    target_score_id=score_id,
+                    quality_snapshot_id=UUID(
+                        seed["snapshot_ids"]["QUALITY_QUALIFICATION"]
+                    ),
+                    status="REJECTED",
+                    reason_code="REQUIRED_WINDOW_GATE_FAILED",
+                    decision_digest="4" * 64,
+                    qualifier_identity="canonical-api-qualifier",
+                    created_at=_GATE_NOW,
+                )
+            )
+            connection.execute(
+                QUALIFICATION_WINDOW_EVIDENCE_TABLE.insert().values(
+                    id=evidence_id,
+                    qualification_decision_id=decision_id,
+                    validation_plan_window_id=window_row["id"],
+                    validation_window_result_id=result_id,
+                    hard_gate_passed=False,
+                    evidence_json={
+                        "gates": [
+                            {
+                                "gate_key": "positive-return",
+                                "metric": "net_return_after_cost",
+                                "operator": ">",
+                                "threshold": "0",
+                                "observed": "-0.031",
+                                "passed": False,
+                            }
+                        ]
+                    },
+                    evidence_digest="3" * 64,
+                )
+            )
+        completed_results = client.get(
+            f"{API_PREFIX}/research/validation-plans/{plan['validation_plan_id']}/results"
+        )
+        assert completed_results.status_code == 200, completed_results.json()
+        completed = completed_results.json()
+        assert completed["attempt"]["status"] == "SUCCEEDED"
+        assert completed["windows"][0]["result"]["metrics_json"] == metrics
+        assert completed["windows"][0]["qualification_evidence"] == {
+            "qualification_window_evidence_id": str(evidence_id),
+            "hard_gate_passed": False,
+            "gates": [
+                {
+                    "gate_key": "positive-return",
+                    "metric": "net_return_after_cost",
+                    "operator": ">",
+                    "threshold": "0",
+                    "observed": "-0.031",
+                    "passed": False,
+                }
+            ],
+            "evidence_digest": "3" * 64,
+        }
+        assert completed["score"]["overall_score"] == "81.00000000"
+        assert completed["qualification"]["status"] == "REJECTED"
+        assert completed["qualification"]["reason_code"] == (
+            "REQUIRED_WINDOW_GATE_FAILED"
+        )
+        assert completed["qualification"]["evidence_count"] == 1
     finally:
         client.close()
         engine.dispose()
@@ -1142,6 +1303,13 @@ def test_wrong_database_identity_and_missing_resources_fail_closed() -> None:
         assert missing_market.status_code == 404
         assert missing_market.json()["error"]["code"] == (
             "BLOCKED_MARKET_SNAPSHOT_NOT_FOUND"
+        )
+        missing_results = client.get(
+            f"{API_PREFIX}/research/validation-plans/{uuid4()}/results"
+        )
+        assert missing_results.status_code == 404
+        assert missing_results.json()["error"]["code"] == (
+            "BLOCKED_VALIDATION_PLAN_NOT_FOUND"
         )
     finally:
         client.close()

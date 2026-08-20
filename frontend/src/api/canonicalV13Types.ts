@@ -299,6 +299,91 @@ export type ResearchChainProjection = {
   qualification_decision_digest: Sha256Digest | null;
 };
 
+export type ResearchAttemptProjection = {
+  validation_attempt_id: CanonicalId;
+  attempt_number: number;
+  status: "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED" | "BLOCKED";
+  executor_identity: string;
+  executor_image_digest: Sha256Digest;
+  receipt_digest: Sha256Digest | null;
+  created_at: IsoDateTime;
+  completed_at: IsoDateTime | null;
+};
+
+export type ResearchWindowResultProjection = {
+  validation_window_result_id: CanonicalId;
+  metrics_json: Record<string, unknown>;
+  metrics_digest: Sha256Digest;
+  receipt_digest: Sha256Digest;
+  created_at: IsoDateTime;
+};
+
+export type ResearchGateEvaluationProjection = {
+  gate_key: string;
+  metric: string;
+  operator: ">=" | ">" | "<=" | "<" | "==";
+  threshold: string;
+  observed: string;
+  passed: boolean;
+};
+
+export type ResearchQualificationWindowEvidenceProjection = {
+  qualification_window_evidence_id: CanonicalId;
+  hard_gate_passed: boolean;
+  gates: ResearchGateEvaluationProjection[];
+  evidence_digest: Sha256Digest;
+};
+
+export type ResearchWindowProjection = {
+  validation_plan_window_id: CanonicalId;
+  window_key: string;
+  required: boolean;
+  window_start: IsoDateTime;
+  window_end: IsoDateTime;
+  window_member_digest: Sha256Digest;
+  result: ResearchWindowResultProjection | null;
+  qualification_evidence: ResearchQualificationWindowEvidenceProjection | null;
+};
+
+export type ResearchScoreProjection = {
+  target_score_id: CanonicalId;
+  scoring_snapshot_id: CanonicalId;
+  overall_score: string;
+  required_window_result_set_digest: Sha256Digest;
+  score_digest: Sha256Digest;
+  scorer_identity: string;
+  created_at: IsoDateTime;
+};
+
+export type ResearchQualificationProjection = {
+  qualification_decision_id: CanonicalId;
+  target_score_id: CanonicalId;
+  quality_snapshot_id: CanonicalId;
+  status: "PENDING" | "QUALIFIED" | "REJECTED" | "BLOCKED" | "FAILED";
+  reason_code: string;
+  decision_digest: Sha256Digest;
+  qualifier_identity: string;
+  evidence_count: number;
+  created_at: IsoDateTime;
+};
+
+export type ResearchResultsProjection = {
+  validation_plan_id: CanonicalId;
+  validation_plan_digest: Sha256Digest;
+  strategy_version_id: CanonicalId;
+  research_target_id: CanonicalId;
+  target_key: string;
+  configuration_bundle_id: CanonicalId;
+  configuration_bundle_digest: Sha256Digest;
+  market_snapshot_id: CanonicalId;
+  market_snapshot_digest: Sha256Digest;
+  plan_status: ResearchChainProjection["plan_status"];
+  attempt: ResearchAttemptProjection | null;
+  windows: ResearchWindowProjection[];
+  score: ResearchScoreProjection | null;
+  qualification: ResearchQualificationProjection | null;
+};
+
 export type ResearchPlanCatalogProjection = {
   status: "EMPTY" | "AVAILABLE";
   items: ResearchChainProjection[];
