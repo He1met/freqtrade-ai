@@ -60,6 +60,7 @@ const emptyResponses: Record<string, unknown> = {
     validated_profile_count: 0,
     artifact_count: 0,
     accepted_receipt_count: 0,
+    profiles: [],
     snapshots: [],
   },
   "/api/canonical-v13/readiness/research": {
@@ -90,6 +91,7 @@ const emptyResponses: Record<string, unknown> = {
   },
   "/api/canonical-v13/optimizations": { status: "PENDING_FIRST_BACKTEST", items: [] },
   "/api/canonical-v13/research/gates": { status: "EMPTY", items: [] },
+  "/api/canonical-v13/research/validation-plans": { status: "EMPTY", items: [] },
 };
 
 type MockOverride = unknown | ((route: Route) => Promise<void> | void);
@@ -168,6 +170,27 @@ test("seven canonical routes render true empty, blocked, and pending states with
   await expect(page.getByText("等待首次回测", { exact: true }).first()).toBeVisible();
   expect(calls.every((call) => call.includes("/api/canonical-v13/"))).toBe(true);
   expect(calls.some((call) => call.includes("/api/v1") || call.includes("/api/strategies"))).toBe(false);
+});
+
+test("default V1.3 pages expose selectors instead of manual internal identity inputs", async ({ page }) => {
+  await installCanonicalMocks(page);
+  await page.goto("/v13/submission");
+  await expect(page.getByLabel("Current version identity", { exact: true })).toHaveCount(0);
+
+  await page.goto("/v13/configuration");
+  await expect(page.getByLabel("Scope / Workflow 上下文", { exact: true })).toHaveJSProperty("tagName", "SELECT");
+  await expect(page.getByLabel("配置 Profile", { exact: true })).toHaveJSProperty("tagName", "SELECT");
+
+  await page.goto("/v13/research");
+  await expect(page.getByLabel("策略", { exact: true })).toHaveJSProperty("tagName", "SELECT");
+  await expect(page.getByLabel("Validation plan", { exact: true })).toHaveJSProperty("tagName", "SELECT");
+
+  await page.goto("/v13/optimization");
+  await expect(page.getByLabel("策略", { exact: true })).toHaveJSProperty("tagName", "SELECT");
+
+  await page.goto("/v13/market-data");
+  await expect(page.getByLabel("行情 Profile / 版本", { exact: true })).toHaveJSProperty("tagName", "SELECT");
+  await expect(page.getByLabel("行情快照", { exact: true })).toHaveJSProperty("tagName", "SELECT");
 });
 
 test("invalid URL state on every canonical page performs zero API requests", async ({ page }) => {
@@ -256,6 +279,107 @@ test("strategy selection is explicit, deep-linkable, refreshable, and restorable
   await page.goBack();
   await expect(page).not.toHaveURL(/strategy=/);
   await expect(page.getByText("尚未选择策略")).toBeVisible();
+});
+
+test("configuration context profile and version use API selectors across history and refresh", async ({ page }) => {
+  const configuration = {
+    status: "AVAILABLE",
+    configured_kinds: ["TARGET"],
+    unset_kinds: ["WINDOW", "GENERATION", "DIVERSITY", "QUALITY_QUALIFICATION", "SCORING", "RESEARCH_AGGREGATE"],
+    items: [{
+      profile_id: ID_A,
+      profile_key: "primary-targets",
+      configuration_kind: "TARGET",
+      scope_key: "research",
+      workflow_key: "canonical",
+      versions: [{
+        version_id: ID_B,
+        version_number: 2,
+        lifecycle_status: "VALIDATED",
+        schema_json: {},
+        payload_json: { source: "api" },
+        schema_digest: DIGEST,
+        payload_digest: DIGEST,
+        adapter_identity: "canonical-target-adapter",
+        adapter_digest: DIGEST,
+        snapshot_id: ID_C,
+        snapshot_digest: DIGEST,
+        created_at: "2026-08-14T00:00:00Z",
+        validated_at: "2026-08-14T01:00:00Z",
+      }],
+    }],
+  };
+  await installCanonicalMocks(page, { "/api/canonical-v13/configurations": configuration });
+  await page.goto("/v13/configuration");
+
+  await page.getByLabel("Scope / Workflow 上下文", { exact: true }).selectOption(JSON.stringify(["research", "canonical"]));
+  await expect(page).toHaveURL(/scope=research&workflow=canonical/);
+  await page.getByLabel("配置 Profile", { exact: true }).selectOption(ID_A);
+  await page.getByLabel("配置版本", { exact: true }).selectOption(ID_B);
+  await expect(page.getByRole("heading", { level: 2, name: "primary-targets · 版本 2" })).toBeVisible();
+  await expect(page).toHaveURL(new RegExp(`profile=${ID_A}.*version=${ID_B}`));
+
+  await page.reload();
+  await expect(page.getByRole("heading", { level: 2, name: "primary-targets · 版本 2" })).toBeVisible();
+  await page.goBack();
+  await expect(page).not.toHaveURL(/version=/);
+  await expect(page.getByText("尚未选择配置版本", { exact: true })).toBeVisible();
+});
+
+test("research selectors preserve API IDs while showing names and exact lineage", async ({ page }) => {
+  const alpha = canonicalStrategy();
+  const plan = canonicalResearchChain();
+  await installCanonicalMocks(page, {
+    "/api/canonical-v13/strategies": { status: "AVAILABLE", items: [alpha] },
+    [`/api/canonical-v13/strategies/${ID_A}`]: alpha,
+    "/api/canonical-v13/research/validation-plans": { status: "AVAILABLE", items: [plan] },
+    [`/api/canonical-v13/research/validation-plans/${ID_C}`]: plan,
+  });
+  await page.goto("/v13/research");
+
+  await page.getByLabel("策略", { exact: true }).selectOption(ID_A);
+  await expect(page).toHaveURL(new RegExp(`strategy=${ID_A}`));
+  await page.getByLabel("研究目标", { exact: true }).selectOption(ID_D);
+  await page.getByLabel("Validation plan", { exact: true }).selectOption(ID_C);
+  await expect(page).toHaveURL(new RegExp(`target=${ID_D}.*strategy=${ID_A}.*plan=${ID_C}`));
+  await expect(page.getByRole("heading", { level: 2, name: "Alpha 的研究流程" })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 2, name: "精确研究链路" })).toBeVisible();
+  await expect(page.getByLabel("策略", { exact: true })).toHaveValue(ID_A);
+});
+
+test("stale and failed selector projections remain explicit and never choose the first option", async ({ page }) => {
+  const configuration = {
+    status: "AVAILABLE",
+    configured_kinds: ["TARGET"],
+    unset_kinds: [],
+    items: [{
+      profile_id: ID_A,
+      profile_key: "only-api-profile",
+      configuration_kind: "TARGET",
+      scope_key: "research",
+      workflow_key: "canonical",
+      versions: [],
+    }],
+  };
+  await installCanonicalMocks(page, { "/api/canonical-v13/configurations": configuration });
+  await page.goto(`/v13/configuration?scope=research&workflow=canonical&profile=${ID_C}`);
+  await expect(page.getByText("所选配置 Profile 不存在", { exact: true })).toBeVisible();
+  await expect(page.getByText("当前 URL 中的对象不在最新 API 选项内；页面不会自动改选第一项。", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("配置 Profile", { exact: true })).toHaveValue("");
+
+  await page.unrouteAll({ behavior: "wait" });
+  await installCanonicalMocks(page, {
+    "/api/canonical-v13/configurations": async (route) => route.fulfill({
+      contentType: "application/json",
+      status: 403,
+      body: JSON.stringify({ status: "BLOCKED", error: { code: "CONFIGURATION_READ_FORBIDDEN", detail: "permission denied" } }),
+    }),
+  });
+  await page.goto("/v13/configuration");
+  await expect(page.getByText("配置选择器暂不可用", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Scope / Workflow 上下文", { exact: true })).toBeDisabled();
+  await expect(page.getByText("未知原因码", { exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "返回工作台核对 API" })).toHaveAttribute("href", "/v13");
 });
 
 test("the default journey reaches a target strategy research state in three clicks", async ({ page }) => {

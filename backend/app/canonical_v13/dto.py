@@ -231,12 +231,25 @@ class MarketSnapshotSummaryDTO(CanonicalProjectionDTO):
     created_at: datetime
 
 
+class MarketProfileVersionProjectionDTO(CanonicalProjectionDTO):
+    market_profile_id: UUID
+    profile_key: str
+    scope_key: str
+    version_id: UUID
+    version_number: int
+    lifecycle_status: Literal["DRAFT", "VALIDATED", "RETIRED"]
+    payload_digest: str = Field(pattern=SHA256_PATTERN)
+    created_at: datetime
+    validated_at: Optional[datetime]
+
+
 class MarketInventoryProjectionDTO(CanonicalProjectionDTO):
     status: Literal["MARKET_SNAPSHOT_UNSET", "AVAILABLE"]
     profile_count: int = Field(ge=0)
     validated_profile_count: int = Field(ge=0)
     artifact_count: int = Field(ge=0)
     accepted_receipt_count: int = Field(ge=0)
+    profiles: list[MarketProfileVersionProjectionDTO]
     snapshots: list[MarketSnapshotSummaryDTO]
 
 
@@ -651,6 +664,11 @@ class ResearchChainProjectionDTO(CanonicalProjectionDTO):
     qualification_decision_digest: Optional[str] = Field(
         default=None, pattern=SHA256_PATTERN
     )
+
+
+class ResearchPlanCatalogProjectionDTO(CanonicalProjectionDTO):
+    status: Literal["EMPTY", "AVAILABLE"]
+    items: list[ResearchChainProjectionDTO]
 
 
 __all__ = [name for name in tuple(globals()) if name.endswith("DTO")]

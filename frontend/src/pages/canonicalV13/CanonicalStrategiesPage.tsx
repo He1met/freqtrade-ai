@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { fetchCanonicalStrategies, fetchCanonicalStrategy } from "../../api/canonicalV13Client";
@@ -6,6 +7,7 @@ import { CopyableValue, PageHeader } from "../../components/DisplayPrimitives";
 import { CanonicalResearchStepper } from "./CanonicalResearchStepper";
 import { CanonicalQueryError, CanonicalStatePanel, CanonicalStatus, useCanonicalQuery } from "./CanonicalStatePanel";
 import { canonicalStatusesKnown, parseCanonicalUrlState, serializeCanonicalUrlState, withCanonicalUrlValue } from "./canonicalV13Model";
+import { filterCanonicalSelectorOptions, strategySelectorOptions } from "./canonicalV13Selectors";
 
 function StrategyDetail({ strategyId }: { strategyId: string }) {
   const query = useCanonicalQuery((signal) => fetchCanonicalStrategy(strategyId, signal), [strategyId]);
@@ -26,11 +28,12 @@ function StrategyDetail({ strategyId }: { strategyId: string }) {
           <div><span>资格</span><CanonicalStatus status={strategy.qualification_status} /></div>
           <div><span>执行授权</span><strong>{strategy.execution_authorized ? "是" : "否"}</strong></div>
         </div>
-        <dl className="canonical-v13-definition-list">
+        <p>当前版本 {strategy.version_number}</p>
+        <details className="canonical-v13-advanced-evidence"><summary>高级标识与摘要</summary><dl className="canonical-v13-definition-list">
           <div><dt>Strategy ID</dt><dd><CopyableValue value={strategy.strategy_id} /></dd></div>
-          <div><dt>Version</dt><dd>{strategy.version_number}</dd></div>
+          <div><dt>Version ID</dt><dd><CopyableValue value={strategy.current_version_id} /></dd></div>
           <div><dt>Artifact digest</dt><dd><CopyableValue value={strategy.artifact_digest} /></dd></div>
-        </dl>
+        </dl></details>
       </section>
       <CanonicalResearchStepper
         chain={null}
@@ -47,10 +50,13 @@ export function CanonicalStrategiesPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const url = parseCanonicalUrlState("strategies", searchParams);
   const catalog = useCanonicalQuery(fetchCanonicalStrategies, [], url.valid);
+  const [search, setSearch] = useState("");
   const selected = url.values.strategy ?? null;
   const catalogContractKnown = catalog.data
     ? canonicalStatusesKnown(catalog.data.status, ...catalog.data.items.flatMap((item) => [item.catalog_status, item.intake_status, item.validation_status, item.qualification_status]))
     : true;
+  const strategyOptions = strategySelectorOptions(catalogContractKnown ? catalog.data : null);
+  const matchingStrategyIds = new Set(filterCanonicalSelectorOptions(strategyOptions, search).map((option) => option.value));
 
   function selectStrategy(strategyId: string | null) {
     setSearchParams(withCanonicalUrlValue("strategies", url.values, "strategy", strategyId));
@@ -67,8 +73,9 @@ export function CanonicalStrategiesPage() {
       {catalogContractKnown && catalog.data?.status === "AVAILABLE" ? (
         <section className="canonical-v13-panel">
           <div className="canonical-v13-heading-row"><h2>Canonical 策略</h2><CanonicalStatus status={catalog.data.status} /></div>
+          <label className="canonical-v13-card-search">搜索策略<input disabled={catalog.loading} onChange={(event) => setSearch(event.target.value)} placeholder="按名称或状态搜索" type="search" value={search} /></label>
           <div className="canonical-v13-card-list">
-            {catalog.data.items.map((strategy) => (
+            {catalog.data.items.filter((strategy) => matchingStrategyIds.has(strategy.strategy_id)).map((strategy) => (
               <button
                 aria-pressed={selected === strategy.strategy_id}
                 className="canonical-v13-select-card"
@@ -77,11 +84,12 @@ export function CanonicalStrategiesPage() {
                 type="button"
               >
                 <strong>{strategy.display_name}</strong>
-                <span>{strategy.strategy_id}</span>
+                <span>版本 {strategy.version_number}</span>
                 <span className="canonical-v13-card-statuses"><CanonicalStatus status={strategy.validation_status} /><CanonicalStatus status={strategy.qualification_status} /></span>
               </button>
             ))}
           </div>
+          {search && !matchingStrategyIds.size ? <CanonicalStatePanel description="当前 API 策略选项中没有匹配名称或状态；未改写已提交 selection。" kind="empty" title="没有匹配策略" /> : null}
         </section>
       ) : null}
       {selected && url.valid && catalogContractKnown ? (

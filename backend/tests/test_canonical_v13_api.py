@@ -418,6 +418,7 @@ def test_factory_is_standalone_and_exact_routes_are_frozen() -> None:
             (f"{API_PREFIX}/research/gates", "GET"),
             (f"{API_PREFIX}/research/gates/{{gate_attempt_id}}", "GET"),
             (f"{API_PREFIX}/research/validation-plans", "POST"),
+            (f"{API_PREFIX}/research/validation-plans", "GET"),
             (
                 f"{API_PREFIX}/research/validation-plans/{{validation_plan_id}}",
                 "GET",
@@ -454,7 +455,7 @@ def test_factory_is_standalone_and_exact_routes_are_frozen() -> None:
             for method, operation in path.items()
             if method in {"get", "post", "put", "patch", "delete"}
         ]
-        assert len(operation_ids) == 30
+        assert len(operation_ids) == 31
         assert len(set(operation_ids)) == len(operation_ids)
     finally:
         client.close()
@@ -691,6 +692,12 @@ def test_production_research_control_surface_binds_exact_attempt_and_projects_st
         assert status.json()["plan_status"] == "RUNNING"
         assert status.json()["attempt_status"] == "RUNNING"
         assert status.json()["qualification_status"] is None
+        plan_catalog = client.get(f"{API_PREFIX}/research/validation-plans")
+        assert plan_catalog.status_code == 200
+        assert plan_catalog.json() == {
+            "status": "AVAILABLE",
+            "items": [status.json()],
+        }
 
         replayed_plan_response = client.post(
             f"{API_PREFIX}/research/validation-plans",
@@ -782,8 +789,11 @@ def test_true_empty_projections_are_stable_and_never_fake_ready() -> None:
             "validated_profile_count": 0,
             "artifact_count": 0,
             "accepted_receipt_count": 0,
+            "profiles": [],
             "snapshots": [],
         }
+        plans = client.get(f"{API_PREFIX}/research/validation-plans").json()
+        assert plans == {"status": "EMPTY", "items": []}
         research = client.get(f"{API_PREFIX}/readiness/research").json()
         assert research["status"] == "BLOCKED"
         assert research["reason_codes"] == ["RESEARCH_BUNDLE_UNSET"]

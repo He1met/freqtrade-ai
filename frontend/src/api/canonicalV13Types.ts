@@ -206,12 +206,25 @@ export type MarketSnapshotSummary = {
   created_at: IsoDateTime;
 };
 
+export type MarketProfileVersionProjection = {
+  market_profile_id: CanonicalId;
+  profile_key: string;
+  scope_key: string;
+  version_id: CanonicalId;
+  version_number: number;
+  lifecycle_status: "DRAFT" | "VALIDATED" | "RETIRED";
+  payload_digest: Sha256Digest;
+  created_at: IsoDateTime;
+  validated_at: IsoDateTime | null;
+};
+
 export type MarketInventoryProjection = {
   status: "MARKET_SNAPSHOT_UNSET" | "AVAILABLE";
   profile_count: number;
   validated_profile_count: number;
   artifact_count: number;
   accepted_receipt_count: number;
+  profiles: MarketProfileVersionProjection[];
   snapshots: MarketSnapshotSummary[];
 };
 
@@ -284,6 +297,11 @@ export type ResearchChainProjection = {
   qualification_status: "QUALIFIED" | "REJECTED" | "BLOCKED" | "FAILED" | null;
   qualification_reason_code: string | null;
   qualification_decision_digest: Sha256Digest | null;
+};
+
+export type ResearchPlanCatalogProjection = {
+  status: "EMPTY" | "AVAILABLE";
+  items: ResearchChainProjection[];
 };
 
 export type GateProjection = {

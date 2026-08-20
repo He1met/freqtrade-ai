@@ -61,6 +61,7 @@ from app.canonical_v13.dto import (
     GateProjectionDTO,
     LookaheadGateReceiptCommandDTO,
     MarketInventoryProjectionDTO,
+    MarketProfileVersionProjectionDTO,
     MarketSnapshotMemberProjectionDTO,
     MarketSnapshotProjectionDTO,
     MarketSnapshotSummaryDTO,
@@ -80,6 +81,7 @@ from app.canonical_v13.dto import (
     ResearchBundlePreviewCommandDTO,
     ResearchBundlePreviewDTO,
     ResearchChainProjectionDTO,
+    ResearchPlanCatalogProjectionDTO,
     ResearchLineageDTO,
     ResearchQualificationCommandDTO,
     ResearchQualificationReceiptDTO,
@@ -468,6 +470,38 @@ def _market_inventory(connection: Connection) -> MarketInventoryProjectionDTO:
             MARKET_SNAPSHOTS_TABLE.c.id,
         )
     ).mappings().all()
+    profile_rows = connection.execute(
+        select(MARKET_PROFILES_TABLE).order_by(
+            MARKET_PROFILES_TABLE.c.profile_key,
+            MARKET_PROFILES_TABLE.c.id,
+        )
+    ).mappings().all()
+    profiles: list[MarketProfileVersionProjectionDTO] = []
+    for profile in profile_rows:
+        version_rows = connection.execute(
+            select(MARKET_PROFILE_VERSIONS_TABLE)
+            .where(
+                MARKET_PROFILE_VERSIONS_TABLE.c.market_profile_id == profile["id"]
+            )
+            .order_by(
+                MARKET_PROFILE_VERSIONS_TABLE.c.version_number,
+                MARKET_PROFILE_VERSIONS_TABLE.c.id,
+            )
+        ).mappings().all()
+        profiles.extend(
+            MarketProfileVersionProjectionDTO(
+                market_profile_id=profile["id"],
+                profile_key=profile["profile_key"],
+                scope_key=profile["scope_key"],
+                version_id=version["id"],
+                version_number=version["version_number"],
+                lifecycle_status=version["lifecycle_status"],
+                payload_digest=version["payload_digest"],
+                created_at=version["created_at"],
+                validated_at=version["validated_at"],
+            )
+            for version in version_rows
+        )
     snapshots = [
         MarketSnapshotSummaryDTO(
             snapshot_id=row["id"],
@@ -493,7 +527,31 @@ def _market_inventory(connection: Connection) -> MarketInventoryProjectionDTO:
         validated_profile_count=validated_profile_count,
         artifact_count=artifact_count,
         accepted_receipt_count=accepted_receipt_count,
+        profiles=profiles,
         snapshots=snapshots,
+    )
+
+
+def _research_plan_catalog(
+    connection: Connection,
+) -> ResearchPlanCatalogProjectionDTO:
+    plan_ids = connection.execute(
+        select(VALIDATION_PLANS_TABLE.c.id).order_by(
+            VALIDATION_PLANS_TABLE.c.created_at,
+            VALIDATION_PLANS_TABLE.c.id,
+        )
+    ).scalars().all()
+    items = [
+        ResearchChainProjectionDTO(
+            **read_research_chain_projection(
+                connection, validation_plan_id=validation_plan_id
+            ).__dict__
+        )
+        for validation_plan_id in plan_ids
+    ]
+    return ResearchPlanCatalogProjectionDTO(
+        status="AVAILABLE" if items else "EMPTY",
+        items=items,
     )
 
 
@@ -1637,6 +1695,13 @@ def create_canonical_v13_app(
         return run_research(
             qualification_connection_factory, "qualification", execute
         )
+
+    @app.get(
+        f"{API_PREFIX}/research/validation-plans",
+        response_model=ResearchPlanCatalogProjectionDTO,
+    )
+    def research_plan_catalog() -> ResearchPlanCatalogProjectionDTO:
+        return run_read(_research_plan_catalog)
 
     @app.get(
         f"{API_PREFIX}/research/validation-plans/{{validation_plan_id}}",

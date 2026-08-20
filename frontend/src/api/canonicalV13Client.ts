@@ -10,6 +10,7 @@ import type {
   MarketSnapshotProjection,
   OptimizationListProjection,
   ReadinessProjection,
+  ResearchPlanCatalogProjection,
   ResearchChainProjection,
   ResearchBundleActivateCommand,
   ResearchBundleActivation,
@@ -91,23 +92,45 @@ function validateSuccessDto(contract: string, value: unknown): void {
     configurationValidation: { snapshot_id: "string", version_id: "string", lifecycle_status: "string", snapshot_digest: "string", repeat_noop: "boolean", idempotency_receipt_id: "string", receipt_digest: "string", idempotent_replay: "boolean" },
     bundlePreview: { status: "string", reason_codes: "array", snapshot_ids: "object", snapshot_digests: "object", bundle_digest: "nullable-string", prospective_bundle_id: "nullable-string" },
     bundleActivation: { configuration_bundle_id: "string", configuration_activation_id: "string", bundle_digest: "string", repeat_noop: "boolean", created_bundle: "boolean", execution_side_effects: "number" },
-    marketInventory: { status: "string", profile_count: "number", artifact_count: "number", snapshots: "array" },
+    marketInventory: { status: "string", profile_count: "number", artifact_count: "number", profiles: "array", snapshots: "array" },
     marketSnapshot: { snapshot_id: "string", snapshot_digest: "string", status: "string", reason_codes: "array", members: "array" },
     readiness: { status: "string", reason_codes: "array", configuration_bundle_id: "nullable-string", deployment_id: "nullable-string", runtime_instance_id: "nullable-string" },
     optimizations: { status: "string", items: "array" },
     researchChain: { validation_plan_id: "string", validation_plan_digest: "string", strategy_version_id: "string", research_target_id: "string", target_key: "string", plan_status: "string", validation_attempt_id: "nullable-string", attempt_status: "nullable-string", attempt_receipt_digest: "nullable-string", target_score_id: "nullable-string", overall_score: "nullable-string", score_digest: "nullable-string", qualification_decision_id: "nullable-string", qualification_status: "nullable-string", qualification_reason_code: "nullable-string", qualification_decision_digest: "nullable-string" },
+    researchPlans: { status: "string", items: "array" },
     gates: { status: "string", items: "array" },
   };
   const shape = shapes[contract];
   if (!shape) throw new CanonicalV13ClientContractError("UNKNOWN_SUCCESS_DTO", contract);
   assertShape(contract, value, shape);
-  if (["strategies", "configurations", "marketInventory", "marketSnapshot", "optimizations", "gates"].includes(contract)) {
+  if (["strategies", "configurations", "marketInventory", "marketSnapshot", "optimizations", "researchPlans", "gates"].includes(contract)) {
     const itemsKey = contract === "marketInventory" ? "snapshots" : contract === "marketSnapshot" ? "members" : "items";
     assertRecordArray(`${contract}.${itemsKey}`, value[itemsKey]);
     if (contract === "configurations") {
       for (const [index, profile] of (value.items as Record<string, unknown>[]).entries()) {
         assertShape(`configurations.items[${index}]`, profile, { profile_id: "string", configuration_kind: "string", versions: "array" });
         assertRecordArray(`configurations.items[${index}].versions`, profile.versions);
+      }
+    }
+    if (contract === "marketInventory") {
+      assertRecordArray("marketInventory.profiles", value.profiles);
+      for (const [index, profile] of (value.profiles as Record<string, unknown>[]).entries()) {
+        assertShape(`marketInventory.profiles[${index}]`, profile, {
+          created_at: "string",
+          lifecycle_status: "string",
+          market_profile_id: "string",
+          payload_digest: "string",
+          profile_key: "string",
+          scope_key: "string",
+          validated_at: "nullable-string",
+          version_id: "string",
+          version_number: "number",
+        });
+      }
+    }
+    if (contract === "researchPlans") {
+      for (const [index, plan] of (value.items as Record<string, unknown>[]).entries()) {
+        assertShape(`researchPlans.items[${index}]`, plan, shapes.researchChain);
       }
     }
   }
@@ -268,6 +291,10 @@ export function fetchCanonicalResearchChain(validationPlanId: string, signal?: A
     "researchChain",
     { signal },
   );
+}
+
+export function fetchCanonicalResearchPlans(signal?: AbortSignal) {
+  return request<ResearchPlanCatalogProjection>("/research/validation-plans", "researchPlans", { signal });
 }
 
 export function fetchCanonicalResearchGates(signal?: AbortSignal) {

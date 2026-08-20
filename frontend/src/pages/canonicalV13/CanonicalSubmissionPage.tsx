@@ -19,17 +19,22 @@ type SubmissionForm = {
   versionNumber: string;
 };
 
-const EMPTY_FORM: SubmissionForm = {
-  archiveDigest: "",
-  artifactContent: "",
-  callerIdentity: "",
-  displayName: "",
-  idempotencyKey: "",
-  sourceEntryKey: "",
-  sourceStrategyKey: "",
-  versionId: "",
-  versionNumber: "",
-};
+function createEmptyForm(): SubmissionForm {
+  const versionId = typeof globalThis.crypto?.randomUUID === "function"
+    ? globalThis.crypto.randomUUID()
+    : "";
+  return {
+    archiveDigest: "",
+    artifactContent: "",
+    callerIdentity: "",
+    displayName: "",
+    idempotencyKey: "",
+    sourceEntryKey: "",
+    sourceStrategyKey: "",
+    versionId,
+    versionNumber: "",
+  };
+}
 
 function utf8Base64(value: string): string {
   const bytes = new TextEncoder().encode(value);
@@ -41,7 +46,7 @@ function utf8Base64(value: string): string {
 export function CanonicalSubmissionPage() {
   const [searchParams] = useSearchParams();
   const url = parseCanonicalUrlState("submission", searchParams);
-  const [form, setForm] = useState<SubmissionForm>(EMPTY_FORM);
+  const [form, setForm] = useState<SubmissionForm>(createEmptyForm);
   const [receipt, setReceipt] = useState<SubmissionReceipt | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -105,11 +110,15 @@ export function CanonicalSubmissionPage() {
         <label>Archive snapshot SHA-256<input minLength={64} maxLength={64} pattern="[0-9a-f]{64}" required value={form.archiveDigest} onChange={(event) => field("archiveDigest", event.target.value)} /></label>
         <label>Root-relative source entry<input placeholder="archive/strategy.py" required value={form.sourceEntryKey} onChange={(event) => field("sourceEntryKey", event.target.value)} /></label>
         <label>Source strategy key<input required value={form.sourceStrategyKey} onChange={(event) => field("sourceStrategyKey", event.target.value)} /></label>
-        <label>Current version identity<input required value={form.versionId} onChange={(event) => field("versionId", event.target.value)} /></label>
         <label>Current version number<input inputMode="numeric" min="1" required type="number" value={form.versionNumber} onChange={(event) => field("versionNumber", event.target.value)} /></label>
+        <details className="canonical-v13-form-wide canonical-v13-advanced-evidence"><summary>自动生成的高级请求标识</summary>
+          <p>Current version identity 由浏览器为本次新对象请求生成；它不代表 API 已接收入库。</p>
+          {form.versionId ? <CopyableValue label="Version identity" value={form.versionId} /> : "当前浏览器无法生成 UUID。"}
+        </details>
         <label className="canonical-v13-form-wide">Captured UTF-8 artifact<textarea required rows={10} value={form.artifactContent} onChange={(event) => field("artifactContent", event.target.value)} /></label>
-        <button className="formal-primary-button" disabled={submitting || !url.valid} type="submit">{submitting ? "正在提交…" : "提交 canonical intake"}</button>
+        <button className="formal-primary-button" disabled={submitting || !url.valid || !form.versionId} type="submit">{submitting ? "正在提交…" : "提交 canonical intake"}</button>
       </form>
+      {!form.versionId ? <CanonicalStatePanel description="当前浏览器没有提供安全的 randomUUID；入库保持禁用，不要求用户手工补写。" kind="blocked" reasonCodes={["CANONICAL_ID_GENERATION_UNAVAILABLE"]} title="无法生成版本标识" /> : null}
       {error ? <CanonicalQueryError error={error} title="Submission 被拒绝或阻塞" /> : null}
       {receipt && !receiptContractKnown ? (
         <CanonicalStatePanel description="入库 receipt 返回未知 enum；receipt 事实与成功状态保持隐藏。" kind="unknown" reasonCodes={["UNKNOWN_CONTRACT_VALUE"]} title="入库回执合同漂移" />
