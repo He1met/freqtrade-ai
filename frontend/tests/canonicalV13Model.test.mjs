@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  CANONICAL_ENUMERATED_REASON_CODES,
+  CANONICAL_ENUMERATED_STATUS_CODES,
   CANONICAL_URL_KEYS,
+  canonicalHomeDecision,
+  canonicalReasonGuidance,
+  canonicalStatusGuidance,
   canonicalStatusPresentation,
   parseCanonicalUrlState,
   serializeCanonicalUrlState,
@@ -10,6 +15,46 @@ import {
 } from "../src/pages/canonicalV13/canonicalV13Model.ts";
 
 const ID = "123e4567-e89b-42d3-a456-426614174000";
+
+const HOME_EVIDENCE = {
+  configurations: { status: "AVAILABLE", configured_kinds: [], unset_kinds: [], items: [] },
+  market: {
+    status: "AVAILABLE",
+    profile_count: 1,
+    validated_profile_count: 1,
+    artifact_count: 1,
+    accepted_receipt_count: 1,
+    snapshots: [],
+  },
+  optimization: { status: "PENDING_FIRST_BACKTEST", items: [] },
+  research: {
+    status: "READY",
+    reason_codes: [],
+    scope_key: "production",
+    workflow_key: "research",
+    configuration_bundle_id: ID,
+    bundle_digest: "a".repeat(64),
+    market_snapshot_id: ID,
+    target_count: 1,
+    total_candidate_count: 1,
+    deployment_id: null,
+    runtime_instance_id: null,
+  },
+  runtime: {
+    status: "BLOCKED",
+    reason_codes: ["TRADING_DISABLED"],
+    scope_key: null,
+    workflow_key: null,
+    configuration_bundle_id: null,
+    bundle_digest: null,
+    market_snapshot_id: null,
+    target_count: null,
+    total_candidate_count: null,
+    deployment_id: null,
+    runtime_instance_id: null,
+  },
+  strategies: { status: "AVAILABLE", items: [] },
+};
 
 test("canonical URL key matrix is exact and stable", () => {
   assert.deepEqual(CANONICAL_URL_KEYS, {
@@ -69,4 +114,76 @@ test("persisted gate PASSED is a known success contract", () => {
     raw: "PASSED",
     tone: "success",
   });
+});
+
+test("every enumerated status has one centralized Chinese explanation and next entry", () => {
+  assert.ok(CANONICAL_ENUMERATED_STATUS_CODES.length >= 25);
+  for (const code of CANONICAL_ENUMERATED_STATUS_CODES) {
+    const guidance = canonicalStatusGuidance(code);
+    assert.equal(guidance.known, true, code);
+    assert.equal(guidance.raw, code, code);
+    assert.match(`${guidance.label}${guidance.explanation}${guidance.actionLabel}`, /[\u3400-\u9fff]/, code);
+    assert.match(guidance.actionTo, /^\/v13(?:\/|$)/, code);
+  }
+});
+
+test("enumerated blocker reasons have Chinese cause and action while raw codes stay exact", () => {
+  assert.ok(CANONICAL_ENUMERATED_REASON_CODES.length >= 40);
+  for (const code of CANONICAL_ENUMERATED_REASON_CODES) {
+    const guidance = canonicalReasonGuidance(code);
+    assert.equal(guidance.known, true, code);
+    assert.equal(guidance.raw, code, code);
+    assert.match(`${guidance.label}${guidance.explanation}${guidance.actionLabel}`, /[\u3400-\u9fff]/, code);
+    assert.match(guidance.actionTo, /^\/v13(?:\/|$)/, code);
+  }
+  assert.equal(canonicalReasonGuidance("REQUIRED_WINDOW_COVERAGE_MISSING:baseline").known, true);
+  assert.equal(canonicalReasonGuidance("TARGET_SNAPSHOT_DIGEST_DRIFT").known, true);
+});
+
+test("unknown status and reason codes fail closed without changing raw diagnostics", () => {
+  const status = canonicalStatusGuidance("FUTURE_GREEN");
+  assert.equal(status.known, false);
+  assert.equal(status.raw, "FUTURE_GREEN");
+  assert.equal(status.tone, "danger");
+  assert.doesNotMatch(status.label, /就绪|成功|通过/);
+
+  const reason = canonicalReasonGuidance("FUTURE_QUALIFICATION_OK");
+  assert.equal(reason.known, false);
+  assert.equal(reason.raw, "FUTURE_QUALIFICATION_OK");
+  assert.equal(reason.tone, "danger");
+  assert.doesNotMatch(`${reason.label}${reason.explanation}`, /已合格|可执行|运行正常/);
+});
+
+test("home follows the explicit canonical journey without promoting later readiness", () => {
+  assert.deepEqual(canonicalHomeDecision({
+    ...HOME_EVIDENCE,
+    strategies: { status: "EMPTY", items: [] },
+  }), {
+    kind: "blocked",
+    title: "尚无 canonical 策略",
+    summary: "策略目录由 API 明确返回 EMPTY；这不代表加载失败，也不会从 Legacy 补齐。",
+    rawStatus: "EMPTY",
+    reasonCodes: [],
+    nextAction: { label: "提交第一个策略", to: "/v13/submission" },
+  });
+
+  assert.deepEqual(canonicalHomeDecision({
+    ...HOME_EVIDENCE,
+    research: { ...HOME_EVIDENCE.research, status: "BLOCKED", reason_codes: ["RESEARCH_BUNDLE_UNSET"] },
+  }), {
+    kind: "blocked",
+    title: "研究流程被阻断",
+    summary: "研究 readiness 由 Canonical API 明确返回 BLOCKED。",
+    rawStatus: "BLOCKED",
+    reasonCodes: ["RESEARCH_BUNDLE_UNSET"],
+    nextAction: { label: "查看研究阻断", to: "/v13/research" },
+  });
+});
+
+test("home fails closed when any required canonical projection is unavailable", () => {
+  const decision = canonicalHomeDecision({ ...HOME_EVIDENCE, market: null });
+  assert.equal(decision.kind, "unknown");
+  assert.equal(decision.title, "项目状态未知");
+  assert.equal(decision.rawStatus, "CANONICAL_API_UNAVAILABLE");
+  assert.doesNotMatch(decision.title, /就绪|成功/);
 });

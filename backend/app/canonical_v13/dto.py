@@ -231,12 +231,25 @@ class MarketSnapshotSummaryDTO(CanonicalProjectionDTO):
     created_at: datetime
 
 
+class MarketProfileVersionProjectionDTO(CanonicalProjectionDTO):
+    market_profile_id: UUID
+    profile_key: str
+    scope_key: str
+    version_id: UUID
+    version_number: int
+    lifecycle_status: Literal["DRAFT", "VALIDATED", "RETIRED"]
+    payload_digest: str = Field(pattern=SHA256_PATTERN)
+    created_at: datetime
+    validated_at: Optional[datetime]
+
+
 class MarketInventoryProjectionDTO(CanonicalProjectionDTO):
     status: Literal["MARKET_SNAPSHOT_UNSET", "AVAILABLE"]
     profile_count: int = Field(ge=0)
     validated_profile_count: int = Field(ge=0)
     artifact_count: int = Field(ge=0)
     accepted_receipt_count: int = Field(ge=0)
+    profiles: list[MarketProfileVersionProjectionDTO]
     snapshots: list[MarketSnapshotSummaryDTO]
 
 
@@ -651,6 +664,96 @@ class ResearchChainProjectionDTO(CanonicalProjectionDTO):
     qualification_decision_digest: Optional[str] = Field(
         default=None, pattern=SHA256_PATTERN
     )
+
+
+class ResearchAttemptProjectionDTO(CanonicalProjectionDTO):
+    validation_attempt_id: UUID
+    attempt_number: int = Field(gt=0)
+    status: Literal["PENDING", "RUNNING", "SUCCEEDED", "FAILED", "BLOCKED"]
+    executor_identity: str
+    executor_image_digest: str = Field(pattern=SHA256_PATTERN)
+    receipt_digest: Optional[str] = Field(default=None, pattern=SHA256_PATTERN)
+    created_at: datetime
+    completed_at: Optional[datetime]
+
+
+class ResearchWindowResultProjectionDTO(CanonicalProjectionDTO):
+    validation_window_result_id: UUID
+    metrics_json: dict[str, Any]
+    metrics_digest: str = Field(pattern=SHA256_PATTERN)
+    receipt_digest: str = Field(pattern=SHA256_PATTERN)
+    created_at: datetime
+
+
+class ResearchGateEvaluationProjectionDTO(CanonicalProjectionDTO):
+    gate_key: str
+    metric: str
+    operator: Literal[">=", ">", "<=", "<", "=="]
+    threshold: str
+    observed: str
+    passed: bool
+
+
+class ResearchQualificationWindowEvidenceProjectionDTO(CanonicalProjectionDTO):
+    qualification_window_evidence_id: UUID
+    hard_gate_passed: bool
+    gates: list[ResearchGateEvaluationProjectionDTO]
+    evidence_digest: str = Field(pattern=SHA256_PATTERN)
+
+
+class ResearchWindowProjectionDTO(CanonicalProjectionDTO):
+    validation_plan_window_id: UUID
+    window_key: str
+    required: bool
+    window_start: datetime
+    window_end: datetime
+    window_member_digest: str = Field(pattern=SHA256_PATTERN)
+    result: Optional[ResearchWindowResultProjectionDTO]
+    qualification_evidence: Optional[ResearchQualificationWindowEvidenceProjectionDTO]
+
+
+class ResearchScoreProjectionDTO(CanonicalProjectionDTO):
+    target_score_id: UUID
+    scoring_snapshot_id: UUID
+    overall_score: str
+    required_window_result_set_digest: str = Field(pattern=SHA256_PATTERN)
+    score_digest: str = Field(pattern=SHA256_PATTERN)
+    scorer_identity: str
+    created_at: datetime
+
+
+class ResearchQualificationProjectionDTO(CanonicalProjectionDTO):
+    qualification_decision_id: UUID
+    target_score_id: UUID
+    quality_snapshot_id: UUID
+    status: Literal["PENDING", "QUALIFIED", "REJECTED", "BLOCKED", "FAILED"]
+    reason_code: str
+    decision_digest: str = Field(pattern=SHA256_PATTERN)
+    qualifier_identity: str
+    evidence_count: int = Field(ge=0)
+    created_at: datetime
+
+
+class ResearchResultsProjectionDTO(CanonicalProjectionDTO):
+    validation_plan_id: UUID
+    validation_plan_digest: str = Field(pattern=SHA256_PATTERN)
+    strategy_version_id: UUID
+    research_target_id: UUID
+    target_key: str
+    configuration_bundle_id: UUID
+    configuration_bundle_digest: str = Field(pattern=SHA256_PATTERN)
+    market_snapshot_id: UUID
+    market_snapshot_digest: str = Field(pattern=SHA256_PATTERN)
+    plan_status: Literal["DECLARED", "READY", "RUNNING", "COMPLETE", "FAILED", "BLOCKED"]
+    attempt: Optional[ResearchAttemptProjectionDTO]
+    windows: list[ResearchWindowProjectionDTO]
+    score: Optional[ResearchScoreProjectionDTO]
+    qualification: Optional[ResearchQualificationProjectionDTO]
+
+
+class ResearchPlanCatalogProjectionDTO(CanonicalProjectionDTO):
+    status: Literal["EMPTY", "AVAILABLE"]
+    items: list[ResearchChainProjectionDTO]
 
 
 __all__ = [name for name in tuple(globals()) if name.endswith("DTO")]

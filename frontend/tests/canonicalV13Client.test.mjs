@@ -14,6 +14,8 @@ import {
   fetchCanonicalResearchReadiness,
   fetchCanonicalResearchGates,
   fetchCanonicalResearchChain,
+  fetchCanonicalResearchPlans,
+  fetchCanonicalResearchResults,
   fetchCanonicalRuntimeReadiness,
   fetchCanonicalStrategies,
   fetchCanonicalStrategy,
@@ -37,6 +39,7 @@ test("the client exposes the canonical projection routes with one fetch each", a
       catalog_status: "DRAFT",
       configuration_activation_id: ID,
       configuration_bundle_id: ID,
+      configuration_bundle_digest: DIGEST,
       configuration_kind: "TARGET",
       configured_kinds: [],
       created_bundle: false,
@@ -50,8 +53,11 @@ test("the client exposes the canonical projection routes with one fetch each", a
       items: [],
       lifecycle_status: "DRAFT",
       members: [],
+      market_snapshot_id: ID,
+      market_snapshot_digest: DIGEST,
       profile_count: 0,
       profile_id: ID,
+      profiles: [],
       prospective_bundle_id: null,
       qualification_status: "NOT_EVALUATED",
       reason_codes: [],
@@ -83,6 +89,10 @@ test("the client exposes the canonical projection routes with one fetch each", a
       qualification_decision_id: null,
       qualification_reason_code: null,
       qualification_decision_digest: null,
+      attempt: null,
+      windows: [],
+      score: null,
+      qualification: null,
       version_id: ID,
     });
   };
@@ -126,9 +136,11 @@ test("the client exposes the canonical projection routes with one fetch each", a
   await fetchCanonicalRuntimeReadiness();
   await fetchCanonicalOptimizations();
   await fetchCanonicalResearchChain(ID);
+  await fetchCanonicalResearchPlans();
+  await fetchCanonicalResearchResults(ID);
   await fetchCanonicalResearchGates();
 
-  assert.equal(calls.length, 15);
+  assert.equal(calls.length, 17);
   assert.deepEqual(calls, [
     { input: `${CANONICAL_V13_API_ROOT}/submissions`, method: "POST" },
     { input: `${CANONICAL_V13_API_ROOT}/strategies`, method: "GET" },
@@ -144,6 +156,8 @@ test("the client exposes the canonical projection routes with one fetch each", a
     { input: `${CANONICAL_V13_API_ROOT}/readiness/runtime`, method: "GET" },
     { input: `${CANONICAL_V13_API_ROOT}/optimizations`, method: "GET" },
     { input: `${CANONICAL_V13_API_ROOT}/research/validation-plans/${ID}`, method: "GET" },
+    { input: `${CANONICAL_V13_API_ROOT}/research/validation-plans`, method: "GET" },
+    { input: `${CANONICAL_V13_API_ROOT}/research/validation-plans/${ID}/results`, method: "GET" },
     { input: `${CANONICAL_V13_API_ROOT}/research/gates`, method: "GET" },
   ]);
 });

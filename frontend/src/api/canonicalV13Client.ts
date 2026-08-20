@@ -10,6 +10,8 @@ import type {
   MarketSnapshotProjection,
   OptimizationListProjection,
   ReadinessProjection,
+  ResearchPlanCatalogProjection,
+  ResearchResultsProjection,
   ResearchChainProjection,
   ResearchBundleActivateCommand,
   ResearchBundleActivation,
@@ -53,7 +55,7 @@ type RequestOptions = {
   signal?: AbortSignal;
 };
 
-type Shape = Readonly<Record<string, "array" | "boolean" | "number" | "object" | "string" | "nullable-string">>;
+type Shape = Readonly<Record<string, "array" | "boolean" | "number" | "object" | "string" | "nullable-object" | "nullable-string">>;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -67,6 +69,7 @@ function assertShape(contract: string, value: unknown, shape: Shape): asserts va
     const field = value[key];
     const valid = kind === "array" ? Array.isArray(field)
       : kind === "object" ? isRecord(field)
+        : kind === "nullable-object" ? field === null || isRecord(field)
         : kind === "nullable-string" ? field === null || typeof field === "string"
           : typeof field === kind;
     if (!valid) {
@@ -91,23 +94,82 @@ function validateSuccessDto(contract: string, value: unknown): void {
     configurationValidation: { snapshot_id: "string", version_id: "string", lifecycle_status: "string", snapshot_digest: "string", repeat_noop: "boolean", idempotency_receipt_id: "string", receipt_digest: "string", idempotent_replay: "boolean" },
     bundlePreview: { status: "string", reason_codes: "array", snapshot_ids: "object", snapshot_digests: "object", bundle_digest: "nullable-string", prospective_bundle_id: "nullable-string" },
     bundleActivation: { configuration_bundle_id: "string", configuration_activation_id: "string", bundle_digest: "string", repeat_noop: "boolean", created_bundle: "boolean", execution_side_effects: "number" },
-    marketInventory: { status: "string", profile_count: "number", artifact_count: "number", snapshots: "array" },
+    marketInventory: { status: "string", profile_count: "number", artifact_count: "number", profiles: "array", snapshots: "array" },
     marketSnapshot: { snapshot_id: "string", snapshot_digest: "string", status: "string", reason_codes: "array", members: "array" },
     readiness: { status: "string", reason_codes: "array", configuration_bundle_id: "nullable-string", deployment_id: "nullable-string", runtime_instance_id: "nullable-string" },
     optimizations: { status: "string", items: "array" },
     researchChain: { validation_plan_id: "string", validation_plan_digest: "string", strategy_version_id: "string", research_target_id: "string", target_key: "string", plan_status: "string", validation_attempt_id: "nullable-string", attempt_status: "nullable-string", attempt_receipt_digest: "nullable-string", target_score_id: "nullable-string", overall_score: "nullable-string", score_digest: "nullable-string", qualification_decision_id: "nullable-string", qualification_status: "nullable-string", qualification_reason_code: "nullable-string", qualification_decision_digest: "nullable-string" },
+    researchPlans: { status: "string", items: "array" },
+    researchResults: { validation_plan_id: "string", validation_plan_digest: "string", strategy_version_id: "string", research_target_id: "string", target_key: "string", configuration_bundle_id: "string", configuration_bundle_digest: "string", market_snapshot_id: "string", market_snapshot_digest: "string", plan_status: "string", attempt: "nullable-object", windows: "array", score: "nullable-object", qualification: "nullable-object" },
     gates: { status: "string", items: "array" },
   };
   const shape = shapes[contract];
   if (!shape) throw new CanonicalV13ClientContractError("UNKNOWN_SUCCESS_DTO", contract);
   assertShape(contract, value, shape);
-  if (["strategies", "configurations", "marketInventory", "marketSnapshot", "optimizations", "gates"].includes(contract)) {
+  if (["strategies", "configurations", "marketInventory", "marketSnapshot", "optimizations", "researchPlans", "gates"].includes(contract)) {
     const itemsKey = contract === "marketInventory" ? "snapshots" : contract === "marketSnapshot" ? "members" : "items";
     assertRecordArray(`${contract}.${itemsKey}`, value[itemsKey]);
     if (contract === "configurations") {
       for (const [index, profile] of (value.items as Record<string, unknown>[]).entries()) {
         assertShape(`configurations.items[${index}]`, profile, { profile_id: "string", configuration_kind: "string", versions: "array" });
         assertRecordArray(`configurations.items[${index}].versions`, profile.versions);
+      }
+    }
+    if (contract === "marketInventory") {
+      assertRecordArray("marketInventory.profiles", value.profiles);
+      for (const [index, profile] of (value.profiles as Record<string, unknown>[]).entries()) {
+        assertShape(`marketInventory.profiles[${index}]`, profile, {
+          created_at: "string",
+          lifecycle_status: "string",
+          market_profile_id: "string",
+          payload_digest: "string",
+          profile_key: "string",
+          scope_key: "string",
+          validated_at: "nullable-string",
+          version_id: "string",
+          version_number: "number",
+        });
+      }
+    }
+    if (contract === "researchPlans") {
+      for (const [index, plan] of (value.items as Record<string, unknown>[]).entries()) {
+        assertShape(`researchPlans.items[${index}]`, plan, shapes.researchChain);
+      }
+    }
+  }
+  if (contract === "researchResults") {
+    assertRecordArray("researchResults.windows", value.windows);
+    for (const [index, window] of (value.windows as Record<string, unknown>[]).entries()) {
+      assertShape(`researchResults.windows[${index}]`, window, {
+        qualification_evidence: "nullable-object",
+        required: "boolean",
+        result: "nullable-object",
+        validation_plan_window_id: "string",
+        window_end: "string",
+        window_key: "string",
+        window_member_digest: "string",
+        window_start: "string",
+      });
+      if (isRecord(window.result)) {
+        assertShape(`researchResults.windows[${index}].result`, window.result, {
+          created_at: "string",
+          metrics_digest: "string",
+          metrics_json: "object",
+          receipt_digest: "string",
+          validation_window_result_id: "string",
+        });
+      }
+      if (isRecord(window.qualification_evidence)) {
+        assertShape(`researchResults.windows[${index}].qualification_evidence`, window.qualification_evidence, {
+          evidence_digest: "string",
+          gates: "array",
+          hard_gate_passed: "boolean",
+          qualification_window_evidence_id: "string",
+        });
+        assertRecordArray(
+          `researchResults.windows[${index}].qualification_evidence.gates`,
+          window.qualification_evidence.gates,
+        );
       }
     }
   }
@@ -266,6 +328,18 @@ export function fetchCanonicalResearchChain(validationPlanId: string, signal?: A
   return request<ResearchChainProjection>(
     `/research/validation-plans/${segment(validationPlanId)}`,
     "researchChain",
+    { signal },
+  );
+}
+
+export function fetchCanonicalResearchPlans(signal?: AbortSignal) {
+  return request<ResearchPlanCatalogProjection>("/research/validation-plans", "researchPlans", { signal });
+}
+
+export function fetchCanonicalResearchResults(validationPlanId: string, signal?: AbortSignal) {
+  return request<ResearchResultsProjection>(
+    `/research/validation-plans/${segment(validationPlanId)}/results`,
+    "researchResults",
     { signal },
   );
 }
