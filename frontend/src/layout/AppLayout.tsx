@@ -100,7 +100,13 @@ export function AppLayout() {
         </nav>
         <details
           className="mobile-nav"
-          onKeyDown={(event) => { if (event.key === "Escape") setMobileOpen(false); }}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              event.preventDefault();
+              event.currentTarget.open = false;
+              setMobileOpen(false);
+            }
+          }}
           onToggle={(event) => setMobileOpen(event.currentTarget.open)}
           open={mobileOpen}
         >

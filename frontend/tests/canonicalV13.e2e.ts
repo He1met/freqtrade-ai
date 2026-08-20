@@ -576,3 +576,127 @@ test("unknown enum disables projection actions and renders contract drift", asyn
   await expect(raw.getByText("UNKNOWN_CONTRACT_VALUE", { exact: true })).toBeVisible();
   await expect(page.locator(".canonical-v13-select-card")).toHaveCount(0);
 });
+
+test("partial research evidence stays explicit and never invents zero values or a decision", async ({ page }) => {
+  const partial = canonicalResearchResults({
+    score: null,
+    qualification: null,
+    windows: [{
+      validation_plan_window_id: ID_A,
+      window_key: "oos-awaiting-result",
+      required: true,
+      window_start: "2026-07-01T00:00:00Z",
+      window_end: "2026-08-01T00:00:00Z",
+      window_member_digest: DIGEST,
+      result: null,
+      qualification_evidence: null,
+    }],
+  });
+  await installCanonicalMocks(page, {
+    [`/api/canonical-v13/research/validation-plans/${ID_C}`]: canonicalResearchChain({
+      target_score_id: null,
+      overall_score: null,
+      score_digest: null,
+      qualification_decision_id: null,
+      qualification_status: null,
+      qualification_reason_code: null,
+      qualification_decision_digest: null,
+    }),
+    [`/api/canonical-v13/research/validation-plans/${ID_C}/results`]: partial,
+  });
+
+  await page.goto(`/v13/research?plan=${ID_C}`);
+  const results = page.getByRole("region", { name: "回测与资格结果" });
+  await expect(results.getByText("未提供", { exact: true })).toBeVisible();
+  await expect(results.getByText("尚无决策", { exact: true })).toBeVisible();
+  await expect(results.getByText("API 未提供窗口结果", { exact: true })).toBeVisible();
+  await expect(results.getByText("Canonical API 未返回该窗口的 persisted result；不显示零值或 fallback。", { exact: true })).toBeVisible();
+  await expect(results.getByRole("meter")).toHaveCount(0);
+  await expect(results.getByText("已合格", { exact: true })).toHaveCount(0);
+});
+
+test("mobile workbench and exact research flow fit a 390px viewport with touch targets", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const alpha = canonicalStrategy({ qualification_status: "REJECTED" });
+  await installCanonicalMocks(page, {
+    "/api/canonical-v13/strategies": { status: "AVAILABLE", items: [alpha] },
+    [`/api/canonical-v13/strategies/${ID_A}`]: alpha,
+    "/api/canonical-v13/research/validation-plans": { status: "AVAILABLE", items: [canonicalResearchChain()] },
+    [`/api/canonical-v13/research/validation-plans/${ID_C}`]: canonicalResearchChain(),
+    [`/api/canonical-v13/research/validation-plans/${ID_C}/results`]: canonicalResearchResults(),
+  });
+
+  await page.goto("/v13");
+  await expect(page.getByRole("navigation", { name: "主导航" })).toBeHidden();
+  const mobileMenu = page.getByRole("group").filter({ has: page.getByLabel(/打开主导航/) });
+  await page.getByLabel(/打开主导航/).click();
+  await expect(page.getByRole("navigation", { name: "移动端主导航" })).toBeVisible();
+  await page.getByRole("navigation", { name: "移动端主导航" }).getByRole("link", { name: "策略目录" }).click();
+  await page.getByRole("button", { name: /Alpha/ }).click();
+  await page.getByRole("link", { name: /查看 exact 回测证据/ }).click();
+  await expect(page.getByRole("heading", { level: 2, name: "回测与资格结果" })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Alpha 的策略研究流程" }).locator("li")).toHaveCount(5);
+  const viewportWidth = await page.evaluate(() => document.documentElement.clientWidth);
+  const pageWidth = await page.evaluate(() => document.documentElement.scrollWidth);
+  expect(pageWidth).toBe(viewportWidth);
+
+  const targetHeights = await page.locator(".mobile-nav summary, .canonical-v13-workflow-research-link, .canonical-v13-search-select select").evaluateAll((elements) =>
+    elements.filter((element) => (element as HTMLElement).offsetParent !== null).map((element) => Math.round(element.getBoundingClientRect().height)),
+  );
+  expect(targetHeights.length).toBeGreaterThan(0);
+  expect(targetHeights.every((height) => height >= 48)).toBe(true);
+  await expect(mobileMenu).toHaveCount(1);
+});
+
+test("keyboard users can skip navigation, see focus, and open the mobile menu", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await installCanonicalMocks(page);
+  await page.goto("/v13");
+
+  await expect(page.locator("#main-content")).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  const menuSummary = page.getByLabel(/打开主导航/);
+  await expect(menuSummary).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(page.getByRole("link", { name: "跳到主要内容" })).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#main-content")).toBeFocused();
+
+  await page.keyboard.press("Shift+Tab");
+  await expect(menuSummary).toBeFocused();
+  const focusOutline = await menuSummary.evaluate((element) => getComputedStyle(element).outlineStyle);
+  expect(focusOutline).not.toBe("none");
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("navigation", { name: "移动端主导航" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("navigation", { name: "移动端主导航" })).toBeHidden();
+});
+
+test("canonical pages expose unique IDs, labelled controls, live selector counts, and alert errors", async ({ page }) => {
+  await installCanonicalMocks(page, {
+    "/api/canonical-v13/configurations": async (route) => route.fulfill({
+      contentType: "application/json",
+      status: 503,
+      body: JSON.stringify({ status: "BLOCKED", error: { code: "CONFIGURATION_API_UNAVAILABLE", detail: "unavailable" } }),
+    }),
+  });
+  await page.goto("/v13/configuration");
+
+  await expect(page.getByRole("heading", { level: 1 })).toHaveCount(1);
+  await expect(page.getByRole("alert")).toContainText("配置选择器暂不可用");
+  await expect(page.locator('[aria-live="polite"]')).toHaveCount(3);
+  const audit = await page.evaluate(() => {
+    const ids = [...document.querySelectorAll<HTMLElement>("[id]")].map((element) => element.id).filter(Boolean);
+    const duplicates = ids.filter((id, index) => ids.indexOf(id) !== index);
+    const unnamed = [...document.querySelectorAll<HTMLElement>("input, select, button, a[href], summary")]
+      .filter((element) => element.offsetParent !== null)
+      .filter((element) => {
+        const id = element.id;
+        const labelled = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : null;
+        return !(element.getAttribute("aria-label") || element.getAttribute("aria-labelledby") || labelled || element.closest("label") || element.textContent?.trim() || element.getAttribute("title"));
+      })
+      .map((element) => element.outerHTML);
+    return { duplicates: [...new Set(duplicates)], unnamed };
+  });
+  expect(audit).toEqual({ duplicates: [], unnamed: [] });
+});

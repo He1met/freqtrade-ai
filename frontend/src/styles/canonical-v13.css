@@ -240,6 +240,7 @@
 .canonical-v13-gate-list li[data-passed="false"] > b { color: var(--formal-danger); }
 
 .canonical-v13-result-table { width: 100%; min-width: 640px; border-collapse: collapse; }
+.canonical-v13-table-wrap { width: 100%; max-width: 100%; min-width: 0; overflow-x: auto; }
 .canonical-v13-result-table caption { padding: 0 0 10px; color: var(--formal-muted); text-align: left; font-size: 12px; font-weight: 800; }
 .canonical-v13-result-table th,
 .canonical-v13-result-table td { border: 1px solid var(--formal-border); padding: 9px 11px; text-align: left; }
@@ -575,4 +576,14 @@
   .canonical-v13-result-summary,
   .canonical-v13-window-grid { grid-template-columns: 1fr; }
   .canonical-v13-selector-panel { padding: 14px; }
+  .canonical-v13-search-select input,
+  .canonical-v13-search-select select,
+  .canonical-v13-card-search input,
+  .canonical-v13-form input,
+  .canonical-v13-filter input,
+  .canonical-v13-select-card,
+  .canonical-v13-workflow-research-link,
+  .canonical-v13-home-action,
+  .canonical-v13-text-button { min-height: 48px; }
+  .canonical-v13-text-button { display: inline-flex; align-items: center; padding: 0 10px; }
 }

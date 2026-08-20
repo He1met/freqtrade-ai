@@ -2352,6 +2352,11 @@ th {
     flex-direction: column;
   }
 
+  .mobile-nav-list a,
+  .mobile-nav-list summary {
+    min-height: 48px;
+  }
+
   .main-panel {
     padding: 22px 16px;
   }
