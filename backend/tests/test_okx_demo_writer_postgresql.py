@@ -10,7 +10,7 @@ import shutil
 from threading import Barrier
 import time
 from types import SimpleNamespace
-from typing import Optional
+from typing import Callable, Optional
 from uuid import uuid4
 
 import pytest
@@ -7924,8 +7924,7 @@ def test_postgresql_runtime_role_completes_real_writer_happy_lifecycle(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(OkxDemoAutomationGuard, "policy_digest", lambda: "3" * 64)
-    test_now = datetime.now(timezone.utc)
-    approval_id, _ = _seed_continuous_demo_guard(postgres_writer_engine)
+    approval_id, _, test_now = _seed_continuous_demo_guard(postgres_writer_engine)
     with Session(postgres_writer_engine) as admin_session:
         approval = admin_session.get(ApprovedExecution, approval_id)
         identity = {
@@ -8083,8 +8082,7 @@ def test_postgresql_runtime_dispatches_fresh_actionable_in_same_cycle_without_ex
     """Prove the runtime bridge reaches the writer claim before short evidence expiry."""
 
     monkeypatch.setattr(OkxDemoAutomationGuard, "policy_digest", lambda: "3" * 64)
-    test_now = datetime.now(timezone.utc)
-    approval_id, _ = _seed_continuous_demo_guard(postgres_writer_engine)
+    approval_id, _, test_now = _seed_continuous_demo_guard(postgres_writer_engine)
     result = OkxDemoExecutionOrchestrationResult(
         evaluation_id=82,
         status="ACTIONABLE",
@@ -8766,11 +8764,14 @@ def _seed_continuous_demo_guard(
     postgres_writer_engine,
     *,
     policy_digest: str = "3" * 64,
-) -> tuple[int, int]:
+    now_provider: Optional[Callable[[], datetime]] = None,
+) -> tuple[int, int, datetime]:
     """Seed only fresh read/reconciliation facts and the owner guard state."""
 
     upgrade_database(postgres_writer_engine)
-    now = datetime.now(timezone.utc)
+    now = (
+        now_provider() if now_provider is not None else datetime.now(timezone.utc)
+    )
     factory = create_session_factory(postgres_writer_engine)
     with factory() as session:
         approval_id, _ = _seed_approved_order(
@@ -8831,14 +8832,44 @@ def _seed_continuous_demo_guard(
                 "run": run_id,
             },
         )
-    return approval_id, run_id
+    return approval_id, run_id, now
+
+
+def test_postgresql_continuous_guard_seed_samples_clock_after_upgrade(
+    postgres_writer_engine,
+) -> None:
+    observed_versions = []
+    provided_times = []
+
+    def now_after_upgrade() -> datetime:
+        with postgres_writer_engine.connect() as connection:
+            observed_versions.append(
+                connection.execute(
+                    text(f"SELECT version FROM {VERSION_TABLE}")
+                ).scalar_one()
+            )
+        provided_times.append(datetime.now(timezone.utc))
+        return provided_times[-1]
+
+    _, run_id, seeded_at = _seed_continuous_demo_guard(
+        postgres_writer_engine,
+        now_provider=now_after_upgrade,
+    )
+
+    with Session(postgres_writer_engine) as session:
+        run = session.get(ReconciliationRun, run_id)
+        assert run is not None
+        assert run.completed_at == provided_times[0]
+        assert run.authoritative_observed_at == provided_times[0]
+    assert observed_versions == [SCHEMA_VERSION]
+    assert seeded_at == provided_times[0]
 
 
 def test_postgresql_continuous_guard_claim_is_single_use_and_rate_limited(
     postgres_writer_engine,
 ) -> None:
     policy_digest = "3" * 64
-    approval_id, _ = _seed_continuous_demo_guard(
+    approval_id, _, _ = _seed_continuous_demo_guard(
         postgres_writer_engine,
         policy_digest=policy_digest,
     )
@@ -8899,7 +8930,7 @@ def test_postgresql_continuous_guard_enforces_both_global_rate_windows(
     event_age: str,
 ) -> None:
     policy_digest = "3" * 64
-    approval_id, run_id = _seed_continuous_demo_guard(
+    approval_id, run_id, _ = _seed_continuous_demo_guard(
         postgres_writer_engine,
         policy_digest=policy_digest,
     )
@@ -8933,7 +8964,7 @@ def test_postgresql_continuous_guard_cooldown_health_and_manual_latch(
     postgres_writer_engine,
 ) -> None:
     policy_digest = "3" * 64
-    _, run_id = _seed_continuous_demo_guard(
+    _, run_id, _ = _seed_continuous_demo_guard(
         postgres_writer_engine,
         policy_digest=policy_digest,
     )
@@ -9028,7 +9059,7 @@ def test_postgresql_v42_rebinds_v40_guard_and_requires_fresh_health(
         ),
         max_active_strategies=9,
     )
-    approval_id, run_id = _seed_continuous_demo_guard(
+    approval_id, run_id, _ = _seed_continuous_demo_guard(
         postgres_writer_engine,
         policy_digest=old_digest,
     )
