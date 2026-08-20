@@ -47,8 +47,33 @@ def record_simulated_signal(
         raise CanonicalExecutionChainBlocked(
             "BLOCKED_REAL_SIGNAL_OUT_OF_SCOPE", "only isolated signal fixtures are allowed"
         )
-    signal_id = uuid4()
     payload = dict(signal_json)
+    signal_digest = canonical_execution_digest(payload)
+    existing = effective.execute(
+        select(SIGNALS_TABLE).where(
+            SIGNALS_TABLE.c.runtime_instance_id == runtime_instance_id,
+            SIGNALS_TABLE.c.research_target_id == research_target_id,
+            SIGNALS_TABLE.c.signal_digest == signal_digest,
+        )
+    ).mappings().one_or_none()
+    if existing is not None:
+        if (
+            existing["deployment_id"] != deployment_id
+            or existing["strategy_version_id"] != deployment["strategy_version_id"]
+            or existing["configuration_bundle_id"]
+            != deployment["configuration_bundle_id"]
+            or existing["configuration_bundle_digest"]
+            != deployment["configuration_bundle_digest"]
+            or existing["market_snapshot_id"] != deployment["market_snapshot_id"]
+            or existing["market_snapshot_digest"]
+            != deployment["market_snapshot_digest"]
+            or existing["signal_json"] != payload
+        ):
+            raise CanonicalExecutionChainBlocked(
+                "BLOCKED_SIGNAL_REPLAY_DRIFT", "persisted signal lineage differs"
+            )
+        return existing["id"]
+    signal_id = uuid4()
     effective.execute(
         SIGNALS_TABLE.insert().values(
             id=signal_id,
@@ -61,7 +86,7 @@ def record_simulated_signal(
             market_snapshot_id=deployment["market_snapshot_id"],
             market_snapshot_digest=deployment["market_snapshot_digest"],
             signal_json=payload,
-            signal_digest=canonical_execution_digest(payload),
+            signal_digest=signal_digest,
             created_at=datetime.now(timezone.utc),
         )
     )

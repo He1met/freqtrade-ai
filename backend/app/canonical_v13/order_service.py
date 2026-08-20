@@ -16,6 +16,9 @@ from app.canonical_v13.execution_common import (
 from app.canonical_v13.models import ORDERS_TABLE, RISK_DECISIONS_TABLE
 
 
+CANONICAL_ORDER_WRITER_IDENTITY = "canonical_order_writer"
+
+
 def record_simulated_order(
     connection: Connection,
     *,
@@ -26,6 +29,11 @@ def record_simulated_order(
 ) -> UUID:
     effective = require_canonical_execution(connection)
     writer_identity = require_identity(writer_identity, field="writer_identity")
+    if writer_identity != CANONICAL_ORDER_WRITER_IDENTITY:
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_NON_CANONICAL_ORDER_WRITER",
+            "only the canonical order writer identity may persist an order receipt",
+        )
     idempotency_key = require_identity(idempotency_key, field="idempotency_key")
     decision = effective.execute(
         select(RISK_DECISIONS_TABLE).where(
@@ -82,4 +90,4 @@ def record_simulated_order(
     return order_id
 
 
-__all__ = ["record_simulated_order"]
+__all__ = ["CANONICAL_ORDER_WRITER_IDENTITY", "record_simulated_order"]

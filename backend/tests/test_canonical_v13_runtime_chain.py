@@ -82,6 +82,15 @@ class TestLauncher:
         )
 
 
+class CountingLauncher(TestLauncher):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def launch(self, spec: FrozenRuntimeLaunchSpec):
+        self.calls += 1
+        return super().launch(spec)
+
+
 def _runtime_fixture(connection):
     plan_id, decision = _qualified(connection)
     approval = approve_demo_deployment(
@@ -194,6 +203,13 @@ def test_writer_separated_simulated_chain_and_reconciliation(canonical_connectio
             research_target_id=plan["research_target_id"],
             signal_json={"evidence_class": "TEST_SIMULATED", "side": "buy"},
         )
+        assert record_simulated_signal(
+            canonical_connection,
+            deployment_id=deployment.deployment_id,
+            runtime_instance_id=runtime_id,
+            research_target_id=plan["research_target_id"],
+            signal_json={"evidence_class": "TEST_SIMULATED", "side": "buy"},
+        ) == signal_id
         intent_id = create_simulated_intent(
             canonical_connection,
             signal_id=signal_id,
@@ -202,16 +218,30 @@ def test_writer_separated_simulated_chain_and_reconciliation(canonical_connectio
                 "quantity": "0.001",
             },
         )
+        assert create_simulated_intent(
+            canonical_connection,
+            signal_id=signal_id,
+            intent_json={
+                "evidence_class": "TEST_SIMULATED",
+                "quantity": "0.001",
+            },
+        ) == intent_id
         risk_id = decide_simulated_risk(
             canonical_connection,
             trade_intent_id=intent_id,
             accepted=True,
             policy_snapshot_digest="3" * 64,
         )
+        assert decide_simulated_risk(
+            canonical_connection,
+            trade_intent_id=intent_id,
+            accepted=True,
+            policy_snapshot_digest="3" * 64,
+        ) == risk_id
         order_id = record_simulated_order(
             canonical_connection,
             risk_decision_id=risk_id,
-            writer_identity="canonical-order-writer-simulator",
+            writer_identity="canonical_order_writer",
             idempotency_key="isolated-order-one",
             outcome="ACCEPTED",
         )
@@ -296,14 +326,14 @@ def test_uncertain_order_is_terminally_blocked_from_fill_and_retry_is_idempotent
         order_id = record_simulated_order(
             canonical_connection,
             risk_decision_id=risk_id,
-            writer_identity="canonical-order-writer-simulator",
+            writer_identity="canonical_order_writer",
             idempotency_key="isolated-uncertain-order",
             outcome="UNCERTAIN",
         )
         repeated = record_simulated_order(
             canonical_connection,
             risk_decision_id=risk_id,
-            writer_identity="canonical-order-writer-simulator",
+            writer_identity="canonical_order_writer",
             idempotency_key="isolated-uncertain-order",
             outcome="UNCERTAIN",
         )
@@ -319,6 +349,103 @@ def test_uncertain_order_is_terminally_blocked_from_fill_and_retry_is_idempotent
     assert _count(canonical_connection, ORDERS_TABLE) == 1
     assert _count(canonical_connection, FILLS_TABLE) == 0
     assert _count(canonical_connection, LEDGER_ENTRIES_TABLE) == 0
+
+
+def test_approval_deployment_and_runtime_exact_replay_are_noops(
+    canonical_connection,
+):
+    with canonical_connection.begin():
+        _plan_id, decision = _qualified(canonical_connection)
+        approval = approve_demo_deployment(
+            canonical_connection,
+            qualification_decision_id=decision.qualification_decision_id,
+            actor_identity="isolated-human-approver",
+            reason="isolated contract acceptance only",
+        )
+        repeated_approval = approve_demo_deployment(
+            canonical_connection,
+            qualification_decision_id=decision.qualification_decision_id,
+            actor_identity="isolated-human-approver",
+            reason="isolated contract acceptance only",
+        )
+        deployment = create_demo_deployment(
+            canonical_connection,
+            deployment_approval_id=approval.deployment_approval_id,
+        )
+        repeated_deployment = create_demo_deployment(
+            canonical_connection,
+            deployment_approval_id=approval.deployment_approval_id,
+        )
+        launcher = CountingLauncher()
+        runtime_id = launch_demo_runtime(
+            canonical_connection,
+            deployment_id=deployment.deployment_id,
+            runtime_identity="isolated-long-lived-runtime-replay",
+            image_digest="f" * 64,
+            service_account="canonical_runtime_reader",
+            credential_reference="test-reference-never-resolved",
+            launcher=launcher,
+        )
+        canonical_connection.execute(
+            DEPLOYMENTS_TABLE.update()
+            .where(DEPLOYMENTS_TABLE.c.id == deployment.deployment_id)
+            .values(status="ACTIVE")
+        )
+        repeated_runtime_id = launch_demo_runtime(
+            canonical_connection,
+            deployment_id=deployment.deployment_id,
+            runtime_identity="isolated-long-lived-runtime-replay",
+            image_digest="f" * 64,
+            service_account="canonical_runtime_reader",
+            credential_reference="test-reference-never-resolved",
+            launcher=launcher,
+        )
+
+    assert repeated_approval == approval
+    assert repeated_deployment == deployment
+    assert repeated_runtime_id == runtime_id
+    assert launcher.calls == 1
+    assert _count(canonical_connection, DEPLOYMENT_APPROVALS_TABLE) == 1
+    assert _count(canonical_connection, DEPLOYMENTS_TABLE) == 1
+    assert _count(canonical_connection, RUNTIME_INSTANCES_TABLE) == 1
+    assert _count(canonical_connection, RUNTIME_RECEIPTS_TABLE) == 1
+
+
+def test_noncanonical_order_writer_identity_is_blocked(canonical_connection):
+    with canonical_connection.begin():
+        plan, _decision, deployment, runtime_id = _runtime_fixture(
+            canonical_connection
+        )
+        signal_id = record_simulated_signal(
+            canonical_connection,
+            deployment_id=deployment.deployment_id,
+            runtime_instance_id=runtime_id,
+            research_target_id=plan["research_target_id"],
+            signal_json={"evidence_class": "TEST_SIMULATED", "side": "buy"},
+        )
+        intent_id = create_simulated_intent(
+            canonical_connection,
+            signal_id=signal_id,
+            intent_json={"evidence_class": "TEST_SIMULATED", "quantity": "0.001"},
+        )
+        risk_id = decide_simulated_risk(
+            canonical_connection,
+            trade_intent_id=intent_id,
+            accepted=True,
+            policy_snapshot_digest="3" * 64,
+        )
+        with pytest.raises(
+            CanonicalExecutionChainBlocked,
+            match="BLOCKED_NON_CANONICAL_ORDER_WRITER",
+        ):
+            record_simulated_order(
+                canonical_connection,
+                risk_decision_id=risk_id,
+                writer_identity="runtime-self-reported-writer",
+                idempotency_key="forbidden-writer",
+                outcome="ACCEPTED",
+            )
+    assert _count(canonical_connection, ORDERS_TABLE) == 0
 
 
 def test_bare_active_rows_cannot_fake_runtime_ready(canonical_connection):

@@ -119,7 +119,13 @@ def approve_demo_deployment(
         raise CanonicalDeploymentApprovalBlocked(
             "BLOCKED_APPROVAL_AUTHORITY_UNSET", "actor and reason are required"
         )
-    approval_id = uuid4()
+    existing = effective.execute(
+        select(DEPLOYMENT_APPROVALS_TABLE).where(
+            DEPLOYMENT_APPROVALS_TABLE.c.qualification_decision_id
+            == qualification_decision_id
+        )
+    ).mappings().one_or_none()
+    approval_id = existing["id"] if existing is not None else uuid4()
     approval_digest = deployment_approval_digest(
         approval_id=approval_id,
         qualification_decision_id=qualification_decision_id,
@@ -127,6 +133,23 @@ def approve_demo_deployment(
         actor_identity=actor_identity,
         reason=reason,
     )
+    if existing is not None:
+        if (
+            existing["strategy_version_id"] != decision["strategy_version_id"]
+            or existing["status"] != "APPROVED"
+            or existing["actor_identity"] != actor_identity
+            or existing["reason"] != reason
+            or existing["approval_digest"] != approval_digest
+        ):
+            raise CanonicalDeploymentApprovalBlocked(
+                "BLOCKED_APPROVAL_REPLAY_DRIFT",
+                "qualification already has a different approval receipt",
+            )
+        return DeploymentApprovalResult(
+            deployment_approval_id=approval_id,
+            approval_digest=approval_digest,
+            status="APPROVED",
+        )
     effective.execute(
         DEPLOYMENT_APPROVALS_TABLE.insert().values(
             id=approval_id,
