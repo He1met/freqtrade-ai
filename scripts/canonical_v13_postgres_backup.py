@@ -53,7 +53,7 @@ IDENTITY_TABLE: Final = "schema_metadata"
 RESTORE_NAME_PATTERN: Final = re.compile(
     rf"{re.escape(LOCAL_DATABASE_NAME)}_restore_[a-z0-9][a-z0-9_]*"
 )
-KNOWN_EXTERNAL_SECRET_TABLES: Final[tuple[str, ...]] = (
+KNOWN_EXTERNAL_EXCLUDED_TABLES: Final[tuple[str, ...]] = (
     "public.okx_demo_attestation_secrets",
     "public.okx_demo_operator_consent_secrets",
 )
@@ -312,7 +312,7 @@ def build_manifest(
         "identity_tables_preserved_on_restore": [IDENTITY_TABLE],
         "secret_exclusion_policy": {
             "included_schemas": [CANONICAL_BUSINESS_SCHEMA],
-            "external_secret_tables_excluded": list(KNOWN_EXTERNAL_SECRET_TABLES),
+            "excluded_external_tables": list(KNOWN_EXTERNAL_EXCLUDED_TABLES),
             "safe_digest_or_reference_columns": list(
                 SAFE_SENSITIVE_METADATA_COLUMNS
             ),
@@ -357,7 +357,7 @@ def validate_manifest(
     restore = payload.get("restore_contract")
     if policy != {
         "included_schemas": [CANONICAL_BUSINESS_SCHEMA],
-        "external_secret_tables_excluded": list(KNOWN_EXTERNAL_SECRET_TABLES),
+        "excluded_external_tables": list(KNOWN_EXTERNAL_EXCLUDED_TABLES),
         "safe_digest_or_reference_columns": list(SAFE_SENSITIVE_METADATA_COLUMNS),
         "credential_values_recorded": False,
         "keychain_accessed": False,

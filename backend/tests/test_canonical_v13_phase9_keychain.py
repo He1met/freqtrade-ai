@@ -8,7 +8,7 @@ import pytest
 from app.canonical_v13.phase9_keychain import (
     CanonicalPhase9KeychainBlocked,
     OKX_DEMO_GENERATION_SERVICE,
-    OKX_DEMO_SECRET_SERVICES,
+    OKX_DEMO_KEYCHAIN_SERVICES,
     read_canonical_okx_demo_capability,
 )
 
@@ -35,7 +35,7 @@ def test_canonical_loader_reads_only_fixed_services_and_returns_sealed_environme
         return subprocess.CompletedProcess(command, 0, values[command[-2]] + "\n", "")
 
     capability = read_canonical_okx_demo_capability(runner=runner)
-    assert len(observed) == len(OKX_DEMO_SECRET_SERVICES) + 1
+    assert len(observed) == len(OKX_DEMO_KEYCHAIN_SERVICES) + 1
     assert {entry[0][-2] for entry in observed} == set(values)
     assert all(entry[1]["stdin"] is subprocess.DEVNULL for entry in observed)
     assert all(entry[1]["timeout"] == 5 for entry in observed)

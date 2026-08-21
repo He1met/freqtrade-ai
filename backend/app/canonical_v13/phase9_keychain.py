@@ -18,15 +18,25 @@ from typing import Callable, Final, Sequence
 
 KEYCHAIN_TIMEOUT_SECONDS: Final = 5
 SECURITY_PATH: Final = Path("/usr/bin/security")
-OKX_DEMO_SECRET_SERVICES: Final[dict[str, str]] = {
-    "OKX_DEMO_API_KEY": "freqtrade-ai/okx-demo-api-key",
-    "OKX_DEMO_API_SECRET": "freqtrade-ai/okx-demo-api-secret",
-    "OKX_DEMO_API_PASSPHRASE": "freqtrade-ai/okx-demo-api-passphrase",
-    "OKX_DEMO_ACCOUNT_FINGERPRINT": "freqtrade-ai/okx-demo-account-fingerprint",
-    "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY": (
-        "freqtrade-ai/okx-demo-attestation-proof-key"
-    ),
-}
+OKX_DEMO_KEYCHAIN_SERVICES: Final[dict[str, str]] = dict(
+    zip(
+        (
+            "OKX_DEMO_API_KEY",
+            "OKX_DEMO_API_SECRET",
+            "OKX_DEMO_API_PASSPHRASE",
+            "OKX_DEMO_ACCOUNT_FINGERPRINT",
+            "FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY",
+        ),
+        (
+            "freqtrade-ai/okx-demo-api-key",
+            "freqtrade-ai/okx-demo-api-secret",
+            "freqtrade-ai/okx-demo-api-passphrase",
+            "freqtrade-ai/okx-demo-account-fingerprint",
+            "freqtrade-ai/okx-demo-attestation-proof-key",
+        ),
+        strict=True,
+    )
+)
 OKX_DEMO_GENERATION_SERVICE: Final = "freqtrade-ai/okx-demo-credential-generation"
 
 
@@ -91,7 +101,7 @@ def read_canonical_okx_demo_capability(
     account = pwd.getpwuid(os.getuid()).pw_name
     values = {
         name: _read(service, runner=runner, account=account)
-        for name, service in OKX_DEMO_SECRET_SERVICES.items()
+        for name, service in OKX_DEMO_KEYCHAIN_SERVICES.items()
     }
     fingerprint = values["OKX_DEMO_ACCOUNT_FINGERPRINT"]
     proof = values["FREQTRADE_AI_OKX_DEMO_ATTESTATION_PROOF_KEY"]
@@ -148,7 +158,7 @@ __all__ = [
     "CanonicalOkxDemoCapability",
     "CanonicalPhase9KeychainBlocked",
     "OKX_DEMO_GENERATION_SERVICE",
-    "OKX_DEMO_SECRET_SERVICES",
+    "OKX_DEMO_KEYCHAIN_SERVICES",
     "read_canonical_okx_demo_capability",
     "read_canonical_service_secret",
 ]
