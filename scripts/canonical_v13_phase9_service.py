@@ -1601,7 +1601,8 @@ def supervise(
         authority_port = authority_port or _production_authority_port()
         lease_holder_token = lease_holder_token or _read_order_holder_token()
     if production_compose and service_key == "long_lived_runtime":
-        worker_port = worker_port or _production_runtime_worker_factory().build(plan)
+        if plan.stage != "NO_ORDER_SOAK":
+            worker_port = worker_port or _production_runtime_worker_factory().build(plan)
         runtime_container_port = runtime_container_port or RuntimeContainerPort()
     require_current_order_writer_canary_authority(
         plan=plan, observed_at=_now(), port=authority_port
