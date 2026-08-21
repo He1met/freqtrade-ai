@@ -975,6 +975,45 @@ def test_restart_stop_and_recovery_write_independent_receipts(
     )
 
 
+def test_runtime_stop_waits_beyond_container_grace_for_lease_release(
+    monkeypatch, tmp_path
+) -> None:
+    service = _load_script("canonical_phase9_runtime_stop_budget_test")
+    _configure_roots(service, tmp_path, monkeypatch)
+    monkeypatch.setattr(service.shutil, "which", lambda _name: "/bin/launchctl")
+    monkeypatch.setattr(
+        service,
+        "_run",
+        lambda command: subprocess.CompletedProcess(command, 0, "", ""),
+    )
+    prepared = _prepare_runtime(service)
+    service.confirm("long_lived_runtime", prepared["plan_digest"])
+
+    elapsed = [0.0]
+    lease_release_at = service.RUNTIME_CONTAINER_STOP_GRACE_SECONDS + 0.5
+
+    class DelayedLeasePort:
+        def __init__(self, _root) -> None:
+            pass
+
+        def read(self, _service_key):
+            return object() if elapsed[0] < lease_release_at else None
+
+    monkeypatch.setattr(service, "FileLeasePort", DelayedLeasePort)
+    monkeypatch.setattr(service.time, "monotonic", lambda: elapsed[0])
+    monkeypatch.setattr(
+        service.time,
+        "sleep",
+        lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds),
+    )
+
+    stopped = service.stop("long_lived_runtime")
+
+    assert stopped["status"] == "STOPPED"
+    assert elapsed[0] >= lease_release_at
+    assert elapsed[0] < service.SUPERVISOR_TEARDOWN_TIMEOUT_SECONDS
+
+
 def test_runtime_restart_blocks_before_bootstrap_if_container_survives_bootout(
     monkeypatch, tmp_path
 ) -> None:
