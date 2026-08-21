@@ -82,6 +82,8 @@ LAUNCH_AGENT_ROOT = Path.home() / "Library" / "LaunchAgents"
 LOG_ROOT = Path.home() / "Library" / "Logs" / "FreqtradeAiV13"
 HEARTBEAT_SECONDS = 10
 LEASE_TTL_SECONDS = 35
+RUNTIME_CONTAINER_STOP_GRACE_SECONDS = 10
+SUPERVISOR_TEARDOWN_TIMEOUT_SECONDS = RUNTIME_CONTAINER_STOP_GRACE_SECONDS + 5
 _STOP = False
 ORDER_HOLDER_KEYCHAIN_SERVICE = "freqtrade-ai/v13/phase9-order-holder-token"
 RUNTIME_CREDENTIAL_REFERENCE = "none:public-okx-market-only"
@@ -187,7 +189,12 @@ class RuntimeContainerPort:
 
     def stop(self, plan: Phase9LaunchPlan, container_id: str) -> None:
         result = self._execute(
-            [PODMAN_PATH, "stop", "--time=10", container_id]
+            [
+                PODMAN_PATH,
+                "stop",
+                f"--time={RUNTIME_CONTAINER_STOP_GRACE_SECONDS}",
+                container_id,
+            ]
         )
         if result.returncode != 0:
             raise CanonicalPhase9SupervisorBlocked(
@@ -1013,7 +1020,11 @@ def stop(service_key: str) -> dict[str, object]:
         }
     completed = _run(["launchctl", "bootout", _launchctl_target(service_key)])
     lease_port = FileLeasePort(SUPPORT_ROOT)
-    deadline = time.monotonic() + 10
+    # The runtime releases its file lease only after the rootless container has
+    # completed its graceful stop.  Keep this supervisory confirmation window
+    # strictly larger than the container grace period so normal teardown cannot
+    # be misclassified as an orphaned live lease.
+    deadline = time.monotonic() + SUPERVISOR_TEARDOWN_TIMEOUT_SECONDS
     while lease_port.read(service_key) is not None and time.monotonic() < deadline:
         time.sleep(0.1)
     if lease_port.read(service_key) is not None:
