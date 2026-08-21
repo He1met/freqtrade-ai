@@ -54,6 +54,11 @@ LOCAL_PHASE9_SERVICE_PRINCIPALS: Final[Mapping[str, str]] = MappingProxyType(
         "freqtrade_ai_v13_reconciliation_login": "canonical_reconciliation_writer",
     }
 )
+LOCAL_RUNTIME_SERVICE_PRINCIPALS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "freqtrade_ai_v13_runtime_login": "canonical_runtime_reader",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -413,6 +418,7 @@ def postgresql_owner_table_grants(
 __all__ = [
     "LOCAL_DATABASE_NAME",
     "LOCAL_PHASE9_SERVICE_PRINCIPALS",
+    "LOCAL_RUNTIME_SERVICE_PRINCIPALS",
     "LOCAL_ROLE_PREFIX",
     "LOCAL_RESEARCH_SERVICE_PRINCIPALS",
     "LOCAL_SERVICE_PRINCIPALS",

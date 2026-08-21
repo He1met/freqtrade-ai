@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from contextlib import contextmanager
 import importlib.util
 import json
 from pathlib import Path
 import plistlib
 import subprocess
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -20,6 +22,7 @@ from app.canonical_v13.phase9_runtime_supervisor import (
     heartbeat_lease,
     release_lease,
 )
+from app.canonical_v13.phase9_okx_demo import RedactedOkxDemoProbe
 
 
 NOW = datetime(2026, 8, 21, 1, 2, 3, tzinfo=timezone.utc)
@@ -140,6 +143,61 @@ def _configure_roots(module, tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(module, "BACKEND_PYTHON", tmp_path / "venv" / "python")
     monkeypatch.setattr(module, "_require_release_checkout", lambda: RELEASE_DIGEST)
     monkeypatch.setattr(module, "_now", lambda: NOW)
+
+
+def _redacted_probe(*, observed_at: datetime, expires_at: datetime):
+    resource_observed = observed_at
+    resource_expires = expires_at
+    return RedactedOkxDemoProbe(
+        execution_target="OKX_DEMO",
+        instrument="BTC-USDT-SWAP",
+        account_fingerprint_digest="1" * 64,
+        credential_generation_digest="2" * 64,
+        permissions={"read": True, "trade": True, "withdraw": False},
+        simulated_trading=True,
+        allow_real_funds=False,
+        observed_at=observed_at,
+        expires_at=expires_at,
+        contract_value="0.01",
+        contract_value_currency="BTC",
+        lot_size="1",
+        min_size="1",
+        tick_size="0.1",
+        mark_price="100000",
+        current_long_leverage="14",
+        current_short_leverage="14",
+        exchange_max_leverage="20",
+        limit_price="100000",
+        maximum_buy_contracts="2",
+        long_contracts="0",
+        short_contracts="0",
+        active_position_count=0,
+        pending_order_count=0,
+        instrument_digest="3" * 64,
+        instrument_observed_at=resource_observed,
+        instrument_expires_at=resource_expires,
+        mark_price_digest="4" * 64,
+        mark_price_observed_at=resource_observed,
+        mark_price_expires_at=resource_expires,
+        account_config_digest="5" * 64,
+        account_config_observed_at=resource_observed,
+        account_config_expires_at=resource_expires,
+        leverage_digest="6" * 64,
+        leverage_observed_at=resource_observed,
+        leverage_expires_at=resource_expires,
+        exchange_max_leverage_digest="7" * 64,
+        exchange_max_leverage_observed_at=resource_observed,
+        exchange_max_leverage_expires_at=resource_expires,
+        positions_digest="8" * 64,
+        positions_observed_at=resource_observed,
+        positions_expires_at=resource_expires,
+        pending_orders_digest="9" * 64,
+        pending_orders_observed_at=resource_observed,
+        pending_orders_expires_at=resource_expires,
+        maximum_order_quantity_digest="0" * 64,
+        maximum_order_quantity_observed_at=resource_observed,
+        maximum_order_quantity_expires_at=resource_expires,
+    )
 
 
 def _prepare_runtime(service, stage: str = "NO_ORDER_SOAK"):
@@ -1081,3 +1139,398 @@ def test_cli_prepare_writer_requires_and_binds_all_canary_authority_fields(
     authority = observed[0][2]["order_writer_canary_authority"]
     assert authority == _writer_authority()
     assert authority.effective_leverage == "14"
+
+
+def test_cli_routes_sealed_runtime_and_canary_operator_commands(
+    monkeypatch, capsys
+) -> None:
+    service = _load_script("canonical_phase9_production_commands_test")
+    observed = []
+    monkeypatch.setattr(
+        service,
+        "confirm_runtime_observation",
+        lambda digest: observed.append(("confirm-runtime", digest))
+        or {"status": "ACTIVE"},
+    )
+    monkeypatch.setattr(
+        service,
+        "probe_canary",
+        lambda deployment_id: observed.append(("probe", deployment_id))
+        or {"status": "READY"},
+    )
+    monkeypatch.setattr(
+        service,
+        "dispatch_canary",
+        lambda digest, risk_id: observed.append(("dispatch", digest, risk_id))
+        or {"status": "ACCEPTED"},
+    )
+    monkeypatch.setattr(
+        service,
+        "recover_canary",
+        lambda digest, order_id: observed.append(("recover", digest, order_id))
+        or {"status": "RECOVERED"},
+    )
+    monkeypatch.setattr(
+        service,
+        "accept_recovery_soak",
+        lambda qualification_id: observed.append(("accept-recovery", qualification_id))
+        or {"status": "ACCEPTED"},
+    )
+    risk_id = UUID("00000000-0000-4000-8000-000000000091")
+    order_id = UUID("00000000-0000-4000-8000-000000000092")
+    assert service.main(
+        [
+            "confirm-runtime-observation",
+            "--service",
+            "long_lived_runtime",
+            "--plan-digest",
+                RELEASE_DIGEST,
+        ]
+    ) == 0
+    assert service.main(
+        [
+            "accept-recovery-soak",
+            "--service",
+            "recovery_control",
+            "--qualification-decision-id",
+            str(QUALIFICATION_ID := UUID("00000000-0000-4000-8000-000000000099")),
+        ]
+    ) == 0
+    assert service.main(
+        [
+            "probe-canary",
+            "--service",
+            "order_writer",
+            "--deployment-id",
+            str(DEPLOYMENT_ID),
+        ]
+    ) == 0
+    assert service.main(
+        [
+            "dispatch-canary",
+            "--service",
+            "order_writer",
+            "--plan-digest",
+            RELEASE_DIGEST,
+            "--risk-decision-id",
+            str(risk_id),
+        ]
+    ) == 0
+    assert service.main(
+        [
+            "recover-canary",
+            "--service",
+            "order_writer",
+            "--plan-digest",
+            RELEASE_DIGEST,
+            "--order-id",
+            str(order_id),
+        ]
+    ) == 0
+    assert observed == [
+        ("confirm-runtime", RELEASE_DIGEST),
+        ("accept-recovery", QUALIFICATION_ID),
+        ("probe", DEPLOYMENT_ID),
+        ("dispatch", RELEASE_DIGEST, risk_id),
+        ("recover", RELEASE_DIGEST, order_id),
+    ]
+    assert [
+        json.loads(line)["status"] for line in capsys.readouterr().out.splitlines()
+    ] == ["ACTIVE", "ACCEPTED", "READY", "ACCEPTED", "RECOVERED"]
+
+
+def test_cli_supervise_enables_production_composition(monkeypatch) -> None:
+    service = _load_script("canonical_phase9_production_supervise_test")
+    observed = []
+    monkeypatch.setattr(
+        service,
+        "supervise",
+        lambda service_key, plan_digest, **kwargs: observed.append(
+            (service_key, plan_digest, kwargs)
+        ),
+    )
+    assert service.main(
+        [
+            "supervise",
+            "--service",
+            "order_writer",
+            "--plan-digest",
+            RELEASE_DIGEST,
+        ]
+    ) == 0
+    assert observed == [
+        ("order_writer", RELEASE_DIGEST, {"production_compose": True})
+    ]
+
+
+def test_get_only_order_replay_appends_server_sealed_noop_receipt(monkeypatch) -> None:
+    service = _load_script("canonical_phase9_order_replay_receipt_test")
+    plan = _writer_plan()
+    lease = Phase9Lease(
+        service_key=plan.service_key,
+        generation=plan.generation,
+        plan_digest=plan.plan_digest,
+        release_digest=plan.release_digest,
+        deployment_id=plan.deployment_id,
+        deployment_capability_digest=plan.deployment_capability_digest,
+        image_digest=plan.image_digest,
+        holder_token_digest="8" * 64,
+        pid=321,
+        acquired_at=NOW - timedelta(seconds=5),
+        heartbeat_at=NOW - timedelta(seconds=1),
+        expires_at=NOW + timedelta(seconds=20),
+        order_writer_canary_authority=plan.order_writer_canary_authority,
+    )
+    order_id = UUID("00000000-0000-4000-8000-000000000092")
+    result = SimpleNamespace(
+        order_id=order_id,
+        exchange_order_id="redacted-demo-order",
+        receipt_digest="9" * 64,
+        repeat_noop=True,
+    )
+    receipts = []
+    monkeypatch.setattr(service, "_require_release_checkout", lambda: None)
+    monkeypatch.setattr(service, "_load_plan", lambda _service: (plan, {"status": "RUNNING"}))
+    monkeypatch.setattr(service.FileLeasePort, "read", lambda _self, _service: lease)
+    monkeypatch.setattr(service.UnixProcessProbe, "is_alive", lambda _self, _pid: True)
+    monkeypatch.setattr(service, "_now", lambda: NOW)
+    monkeypatch.setattr(service, "_read_order_holder_token", lambda: "h" * 64)
+    monkeypatch.setattr(
+        service,
+        "_production_order_operator",
+        lambda **_kwargs: SimpleNamespace(
+            recover_canary=lambda **_inner_kwargs: result
+        ),
+    )
+    monkeypatch.setattr(service, "_append_receipt", receipts.append)
+    payload = service.recover_canary(plan.plan_digest, order_id)
+    assert payload["repeat_noop"] is True
+    assert payload["replay_evidence_receipt_digest"] == receipts[0].receipt_digest
+    assert receipts[0].action == "ORDER_REPLAY"
+    assert receipts[0].status == "CONFIRMED"
+    assert receipts[0].details == {
+        "order_id": str(order_id),
+        "order_receipt_digest": "9" * 64,
+        "repeat_noop": True,
+        "transport_mode": "GET_ONLY",
+    }
+
+
+def test_cli_routes_independent_fill_ledger_reconciliation_workers(
+    monkeypatch, capsys
+) -> None:
+    service = _load_script("canonical_phase9_post_order_workers_test")
+    order_id = UUID("00000000-0000-4000-8000-000000000093")
+    fill_id = UUID("00000000-0000-4000-8000-000000000094")
+    observed = []
+    monkeypatch.setattr(
+        service,
+        "collect_canary_fills",
+        lambda value: observed.append(("fill", value)) or {"status": "RECORDED"},
+    )
+    monkeypatch.setattr(
+        service,
+        "post_canary_ledger",
+        lambda value: observed.append(("ledger", value)) or {"status": "POSTED"},
+    )
+    monkeypatch.setattr(
+        service,
+        "reconcile_canary",
+        lambda value: observed.append(("reconciliation", value))
+        or {"status": "SUCCEEDED"},
+    )
+    assert service.main(
+        [
+            "collect-canary-fills",
+            "--service",
+            "fill_writer",
+            "--order-id",
+            str(order_id),
+        ]
+    ) == 0
+    assert service.main(
+        [
+            "post-canary-ledger",
+            "--service",
+            "ledger_writer",
+            "--fill-id",
+            str(fill_id),
+        ]
+    ) == 0
+    assert service.main(
+        [
+            "reconcile-canary",
+            "--service",
+            "reconciliation_writer",
+            "--order-id",
+            str(order_id),
+        ]
+    ) == 0
+    assert observed == [
+        ("fill", order_id),
+        ("ledger", fill_id),
+        ("reconciliation", order_id),
+    ]
+    assert [
+        json.loads(line)["status"] for line in capsys.readouterr().out.splitlines()
+    ] == ["RECORDED", "POSTED", "SUCCEEDED"]
+
+
+def test_production_runtime_factory_reads_dedicated_signer_and_two_db_identities(
+    monkeypatch,
+) -> None:
+    service = _load_script("canonical_phase9_runtime_factory_test")
+    observed = []
+    monkeypatch.setattr(
+        service,
+        "_phase9_database_url",
+        lambda capability: observed.append(("database", capability))
+        or f"postgresql+psycopg://{capability}@127.0.0.1/freqtrade_ai_v13",
+    )
+    monkeypatch.setattr(
+        "app.canonical_v13.phase9_keychain.read_canonical_service_secret",
+        lambda key: observed.append(("signer", key)) or "s" * 64,
+    )
+    factory = service._production_runtime_worker_factory()
+    assert factory._signing_key == "s" * 64
+    assert observed == [
+        ("signer", service.RUNTIME_SIGNAL_SIGNER_KEYCHAIN_SERVICE),
+        ("database", "canonical_runtime_reader"),
+        ("database", "canonical_signal_writer"),
+    ]
+
+
+def test_probe_saga_commits_deployment_before_approval_fk_insert(monkeypatch) -> None:
+    service = _load_script("canonical_phase9_probe_transaction_order_test")
+    events = []
+
+    @contextmanager
+    def deployment_factory():
+        events.append("deployment-open")
+        yield object()
+        events.append("deployment-commit")
+
+    @contextmanager
+    def approval_factory():
+        events.append("approval-open")
+        yield object()
+        events.append("approval-commit")
+
+    factories = iter((deployment_factory, approval_factory))
+    monkeypatch.setattr(service, "_require_release_checkout", lambda: None)
+    monkeypatch.setattr(service, "_now", lambda: NOW)
+    monkeypatch.setattr(service, "_phase9_database_url", lambda _capability: "dsn")
+    monkeypatch.setattr(service, "_connection_factory", lambda _dsn: next(factories))
+    monkeypatch.setattr(service, "_production_okx_session_factory", lambda: object())
+    probe = SimpleNamespace(instrument="BTC-USDT-SWAP")
+    monkeypatch.setattr(
+        service, "_sealed_probe_for_saga", lambda *_args, **_kwargs: probe
+    )
+    attestation = SimpleNamespace(
+        attestation_id=ATTESTATION_ID,
+        attestation_digest=ATTESTATION_DIGEST,
+        repeat_noop=False,
+    )
+    receipt = SimpleNamespace(
+        probe_receipt_id=UUID("00000000-0000-4000-8000-000000000095"),
+        receipt_digest="f" * 64,
+        observed_at=NOW,
+        expires_at=NOW + timedelta(seconds=30),
+        repeat_noop=False,
+    )
+    monkeypatch.setattr(
+        service,
+        "record_current_canary_attestation",
+        lambda *_args, **_kwargs: events.append("attestation-insert")
+        or (probe, attestation),
+    )
+    monkeypatch.setattr(
+        service,
+        "record_current_canary_probe_receipt",
+        lambda *_args, **_kwargs: events.append("probe-receipt-insert") or receipt,
+    )
+    assert service.probe_canary(DEPLOYMENT_ID)["status"] == "READY"
+    assert events == [
+        "deployment-open",
+        "attestation-insert",
+        "deployment-commit",
+        "approval-open",
+        "probe-receipt-insert",
+        "approval-commit",
+    ]
+
+
+def test_expired_orphan_probe_saga_is_reprobed_without_execution_write(
+    monkeypatch, tmp_path
+) -> None:
+    service = _load_script("canonical_phase9_expired_probe_saga_test")
+    monkeypatch.setattr(service, "SUPPORT_ROOT", tmp_path)
+    expired = _redacted_probe(
+        observed_at=NOW - timedelta(seconds=40),
+        expires_at=NOW - timedelta(seconds=10),
+    )
+    fresh = _redacted_probe(
+        observed_at=NOW,
+        expires_at=NOW + timedelta(seconds=30),
+    )
+    probes = iter((expired, fresh))
+    events = []
+
+    @contextmanager
+    def session_factory():
+        probe = next(probes)
+        events.append("authenticated-get")
+        yield SimpleNamespace(probe=lambda **_kwargs: probe)
+
+    first = service._sealed_probe_for_saga(
+        DEPLOYMENT_ID,
+        session_factory,
+        evaluated_at=NOW - timedelta(seconds=20),
+        linked_probe_receipt_exists=lambda: False,
+    )
+    assert first is expired
+    recovered = service._sealed_probe_for_saga(
+        DEPLOYMENT_ID,
+        session_factory,
+        evaluated_at=NOW,
+        linked_probe_receipt_exists=lambda: False,
+    )
+    assert recovered is fresh
+    assert events == ["authenticated-get", "authenticated-get"]
+    persisted = json.loads(
+        service._probe_saga_path(DEPLOYMENT_ID).read_text(encoding="utf-8")
+    )
+    assert persisted["probe"]["expires_at"] == fresh.expires_at.isoformat()
+
+
+def test_expired_linked_probe_saga_blocks_without_reprobe(monkeypatch, tmp_path) -> None:
+    service = _load_script("canonical_phase9_linked_probe_saga_test")
+    monkeypatch.setattr(service, "SUPPORT_ROOT", tmp_path)
+    expired = _redacted_probe(
+        observed_at=NOW - timedelta(seconds=40),
+        expires_at=NOW - timedelta(seconds=10),
+    )
+    events = []
+
+    @contextmanager
+    def session_factory():
+        events.append("authenticated-get")
+        yield SimpleNamespace(probe=lambda **_kwargs: expired)
+
+    service._sealed_probe_for_saga(
+        DEPLOYMENT_ID,
+        session_factory,
+        evaluated_at=NOW - timedelta(seconds=20),
+        linked_probe_receipt_exists=lambda: False,
+    )
+    with pytest.raises(
+        CanonicalPhase9SupervisorBlocked,
+        match="BLOCKED_PHASE9_PROBE_SAGA_LINKED_EXPIRED",
+    ):
+        service._sealed_probe_for_saga(
+            DEPLOYMENT_ID,
+            session_factory,
+            evaluated_at=NOW,
+            linked_probe_receipt_exists=lambda: True,
+        )
+    assert events == ["authenticated-get"]

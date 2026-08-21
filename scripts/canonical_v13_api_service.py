@@ -77,6 +77,14 @@ PHASE9_PRINCIPAL_SPECS = tuple(
         "reconciliation",
     )
 )
+RUNTIME_READER_PRINCIPAL_SPEC = (
+    "freqtrade_ai_v13_runtime_login",
+    "freqtrade_ai_v13_runtime_reader",
+    "freqtrade-ai/v13/runtime-reader-password",
+)
+RUNTIME_SIGNAL_SIGNER_KEYCHAIN_SERVICE = (
+    "freqtrade-ai/v13/runtime-signal-receipt-hmac-v1"
+)
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BACKEND_PYTHON = REPO_ROOT / "backend" / ".venv" / "bin" / "python"
 SCRIPT_PATH = Path(__file__).resolve()
@@ -509,6 +517,75 @@ def provision_phase9_principals() -> dict[str, object]:
     }
 
 
+def provision_runtime_reader() -> dict[str, object]:
+    """Provision one non-API runtime reader LOGIN plus its receipt HMAC key."""
+
+    principal, capability, password_service = RUNTIME_READER_PRINCIPAL_SPEC
+    services = (password_service, RUNTIME_SIGNAL_SIGNER_KEYCHAIN_SERVICE)
+    if any(_read_keychain(service) is not None for service in services):
+        raise CanonicalServiceBlocked("BLOCKED_KEYCHAIN_ITEM_ALREADY_EXISTS")
+    _require_phase9_schema_preprovisioned()
+    with _admin_connection() as connection:
+        existing = connection.execute(
+            "SELECT rolname FROM pg_roles WHERE rolname = ANY(%s)",
+            ([principal],),
+        ).fetchall()
+        capability_exists = connection.execute(
+            "SELECT rolname FROM pg_roles WHERE rolname = ANY(%s)",
+            ([capability],),
+        ).fetchall()
+    if existing:
+        raise CanonicalServiceBlocked("BLOCKED_LOGIN_PRINCIPAL_ALREADY_EXISTS")
+    if {str(row[0]) for row in capability_exists} != {capability}:
+        raise CanonicalServiceBlocked("BLOCKED_CAPABILITY_ROLE_MISSING")
+    database_login_material = secrets.token_urlsafe(48)
+    signer_key = secrets.token_urlsafe(64)
+    added: list[str] = []
+    provisioned = False
+    try:
+        for service, value in (
+            (password_service, database_login_material),
+            (RUNTIME_SIGNAL_SIGNER_KEYCHAIN_SERVICE, signer_key),
+        ):
+            _add_keychain(service, value)
+            added.append(service)
+        with _admin_connection() as connection:
+            with connection.transaction():
+                connection.execute(
+                    sql.SQL(
+                        "CREATE ROLE {} LOGIN NOSUPERUSER NOCREATEDB "
+                        "NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS "
+                        "CONNECTION LIMIT 2 PASSWORD {}"
+                    ).format(
+                        sql.Identifier(principal),
+                        sql.Literal(_scram_verifier(database_login_material)),
+                    )
+                )
+                connection.execute(
+                    sql.SQL("GRANT {} TO {}").format(
+                        sql.Identifier(capability), sql.Identifier(principal)
+                    )
+                )
+                connection.execute(
+                    sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(
+                        sql.Identifier(DATABASE_NAME), sql.Identifier(capability)
+                    )
+                )
+        provisioned = True
+    finally:
+        if not provisioned:
+            for service in reversed(added):
+                _delete_new_keychain(service)
+    return {
+        "status": "PROVISIONED",
+        "database": DATABASE_NAME,
+        "principals": [principal],
+        "capabilities": [capability],
+        "keychain_items": 2,
+        "api_reads_runtime_identity": False,
+    }
+
+
 def _verify_research_provisioned_state():
     sys.path.insert(0, str(REPO_ROOT / "backend"))
     from sqlalchemy import create_engine  # noqa: PLC0415
@@ -601,7 +678,9 @@ def canonical_control_database_url() -> str:
     return _database_url(CONTROL_PRINCIPAL, CONTROL_KEYCHAIN_SERVICE)
 
 
-def _production_database_environment() -> dict[str, str]:
+def _production_database_environment(
+    *, phase9_capabilities: tuple[str, ...] | None = None
+) -> dict[str, str]:
     sys.path.insert(0, str(REPO_ROOT / "backend"))
     from app.canonical_v13.production import (  # noqa: PLC0415
         CONTROL_DATABASE_URL_ENV,
@@ -623,7 +702,24 @@ def _production_database_environment() -> dict[str, str]:
         QUALIFICATION_DATABASE_URL_ENV,
         OPTIMIZATION_DATABASE_URL_ENV,
     )
-    phase9_environment_names = tuple(PHASE9_PERSISTENCE_ENV_BY_CAPABILITY.values())
+    resolved_phase9_capabilities = (
+        tuple(PHASE9_PERSISTENCE_ENV_BY_CAPABILITY)
+        if phase9_capabilities is None
+        else phase9_capabilities
+    )
+    if any(
+        capability not in PHASE9_PERSISTENCE_ENV_BY_CAPABILITY
+        for capability in resolved_phase9_capabilities
+    ):
+        raise CanonicalServiceBlocked("BLOCKED_PHASE9_PERSISTENCE_CAPABILITY_SET")
+    phase9_specs = {
+        logical_capability: (principal, service)
+        for logical_capability, (principal, _physical_capability, service) in zip(
+            PHASE9_PERSISTENCE_ENV_BY_CAPABILITY,
+            PHASE9_PRINCIPAL_SPECS,
+            strict=True,
+        )
+    }
     return {
         READER_DATABASE_URL_ENV: _database_url(
             READER_PRINCIPAL, READER_KEYCHAIN_SERVICE
@@ -640,12 +736,10 @@ def _production_database_environment() -> dict[str, str]:
             )
         },
         **{
-            environment_name: _database_url(principal, service)
-            for environment_name, (principal, _capability, service) in zip(
-                phase9_environment_names,
-                PHASE9_PRINCIPAL_SPECS,
-                strict=True,
+            PHASE9_PERSISTENCE_ENV_BY_CAPABILITY[capability]: _database_url(
+                *phase9_specs[capability]
             )
+            for capability in resolved_phase9_capabilities
         },
     }
 
@@ -663,10 +757,15 @@ def serve(port: int) -> None:
     from app.canonical_v13.production import (  # noqa: PLC0415
         create_app,
     )
+    from app.canonical_v13.phase9_persistence import (  # noqa: PLC0415
+        API_PHASE9_CAPABILITIES,
+    )
     import uvicorn  # noqa: PLC0415
 
     app = create_app(
-        _production_database_environment(),
+        _production_database_environment(
+            phase9_capabilities=API_PHASE9_CAPABILITIES
+        ),
         market_artifact_root=REPO_ROOT / "user_data" / "data",
     )
     uvicorn.run(app, host="127.0.0.1", port=port, access_log=False)
@@ -820,6 +919,7 @@ def main(argv: list[str] | None = None) -> int:
             "provision",
             "provision-research",
             "provision-phase9",
+            "provision-runtime-reader",
             "repair-research-connect",
             "serve",
             "install",
@@ -836,6 +936,8 @@ def main(argv: list[str] | None = None) -> int:
             payload = provision_research_principals()
         elif args.command == "provision-phase9":
             payload = provision_phase9_principals()
+        elif args.command == "provision-runtime-reader":
+            payload = provision_runtime_reader()
         elif args.command == "repair-research-connect":
             payload = repair_research_database_connect()
         elif args.command == "serve":

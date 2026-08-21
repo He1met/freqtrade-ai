@@ -471,9 +471,9 @@ def test_factory_is_standalone_and_exact_routes_are_frozen() -> None:
                 "POST",
             ),
             (f"{API_PREFIX}/phase9/risk-budgets", "POST"),
-            (f"{API_PREFIX}/phase9/signals", "POST"),
-            (f"{API_PREFIX}/phase9/intents", "POST"),
-            (f"{API_PREFIX}/phase9/risk-decisions", "POST"),
+                (f"{API_PREFIX}/phase9/intents", "POST"),
+                (f"{API_PREFIX}/phase9/shadow-risk-decisions", "POST"),
+                (f"{API_PREFIX}/phase9/risk-decisions", "POST"),
             (f"{API_PREFIX}/optimizations", "GET"),
         }
         canonical_routes = {

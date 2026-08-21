@@ -83,8 +83,8 @@ from app.canonical_v13.dto import (
     Phase9RiskBudgetReceiptDTO,
     Phase9RiskDecisionCommandDTO,
     Phase9RiskDecisionReceiptDTO,
-    Phase9SignalCommandDTO,
-    Phase9SignalReceiptDTO,
+    Phase9ShadowRiskDecisionCommandDTO,
+    Phase9ShadowRiskDecisionReceiptDTO,
     ReadinessProjectionDTO,
     ResearchAttemptStartCommandDTO,
     ResearchAttemptStartReceiptDTO,
@@ -135,13 +135,13 @@ from app.canonical_v13.execution_common import CanonicalExecutionChainBlocked
 from app.canonical_v13.phase9_execution_authority import (
     authorize_demo_risk_budget,
     decide_central_demo_risk,
+    decide_signal_risk_shadow,
 )
 from app.canonical_v13.phase9_canary_policy import (
     authorize_canary_risk_policy,
     terminate_canary_risk_policy,
 )
 from app.canonical_v13.risk_service import create_production_demo_intent
-from app.canonical_v13.signal_service import record_production_demo_signal
 from app.canonical_v13.genesis import (
     CanonicalGenesisBlocked,
     verify_canonical_genesis,
@@ -2434,11 +2434,10 @@ def create_canonical_v13_app(
                 connection,
                 qualification_decision_id=command.qualification_decision_id,
                 deployment_approval_id=command.deployment_approval_id,
-                execution_attestation_id=command.execution_attestation_id,
+                probe_receipt_id=command.probe_receipt_id,
                 actor_identity=command.actor_identity,
                 idempotency_key=command.idempotency_key,
                 reason=command.reason,
-                redacted_evidence=command.redacted_evidence,
             )
             return Phase9CanaryRiskPolicyReceiptDTO(
                 policy_id=result.policy_id,
@@ -2510,24 +2509,6 @@ def create_canonical_v13_app(
         )
 
     @app.post(
-        f"{API_PREFIX}/phase9/signals",
-        response_model=Phase9SignalReceiptDTO,
-        status_code=201,
-    )
-    def phase9_signal(command: Phase9SignalCommandDTO) -> Phase9SignalReceiptDTO:
-        def execute(connection: Connection) -> Phase9SignalReceiptDTO:
-            signal_id = record_production_demo_signal(
-                connection,
-                deployment_id=command.deployment_id,
-                runtime_instance_id=command.runtime_instance_id,
-                research_target_id=command.research_target_id,
-                signal_json=command.signal_json,
-            )
-            return Phase9SignalReceiptDTO(signal_id=signal_id)
-
-        return run_phase9(signal_connection_factory, "canonical_signal_writer", execute)
-
-    @app.post(
         f"{API_PREFIX}/phase9/intents",
         response_model=Phase9IntentReceiptDTO,
         status_code=201,
@@ -2538,6 +2519,26 @@ def create_canonical_v13_app(
                 connection, signal_id=command.signal_id, intent_json=command.intent_json
             )
             return Phase9IntentReceiptDTO(trade_intent_id=intent_id)
+
+        return run_phase9(risk_connection_factory, "canonical_risk_writer", execute)
+
+    @app.post(
+        f"{API_PREFIX}/phase9/shadow-risk-decisions",
+        response_model=Phase9ShadowRiskDecisionReceiptDTO,
+        status_code=201,
+    )
+    def phase9_shadow_risk_decision(
+        command: Phase9ShadowRiskDecisionCommandDTO,
+    ) -> Phase9ShadowRiskDecisionReceiptDTO:
+        def execute(connection: Connection) -> Phase9ShadowRiskDecisionReceiptDTO:
+            return Phase9ShadowRiskDecisionReceiptDTO(
+                **asdict(
+                    decide_signal_risk_shadow(
+                        connection,
+                        trade_intent_id=command.trade_intent_id,
+                    )
+                )
+            )
 
         return run_phase9(risk_connection_factory, "canonical_risk_writer", execute)
 

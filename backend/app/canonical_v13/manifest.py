@@ -22,7 +22,7 @@ CANONICAL_MANIFEST_KEY: Final = "canonical-v13-table-manifest-v1"
 CANONICAL_LEGACY_IMPORT_MODE: Final = "EXTERNAL_LATEST_ONLY"
 CANONICAL_TRADING_CAPABILITY: Final = "TRADING_DISABLED"
 CANONICAL_PRODUCTION_DEFAULT: Final = "UNSET"
-CANONICAL_AUTHORITY_REVISION: Final = "20260821_phase9_canary_v2_acl5"
+CANONICAL_AUTHORITY_REVISION: Final = "20260821_phase9_dispatch_outcome_v1_acl9"
 
 P0_CONFIGURATION_KINDS: Final[tuple[str, ...]] = (
     "TARGET",
@@ -132,6 +132,7 @@ _TABLES_BY_DOMAIN = {
         "runtime_receipts",
     ),
     "execution": (
+        "execution_canary_probe_receipts",
         "execution_canary_risk_policies",
         "execution_risk_budget_authorizations",
         "execution_risk_reservations",
@@ -141,6 +142,8 @@ _TABLES_BY_DOMAIN = {
         "trade_intents",
         "risk_decisions",
         "orders",
+        "order_dispatch_receipts",
+        "order_dispatch_outcome_receipts",
         "fills",
         "ledger_entries",
         "reconciliation_runs",
@@ -179,6 +182,7 @@ _WRITER_TABLE_ALLOWLIST = {
     "canonical_optimization_writer": _TABLES_BY_DOMAIN["optimization"],
     "canonical_approval_writer": (
         "deployment_approvals",
+        "execution_canary_probe_receipts",
         "execution_canary_risk_policies",
         "execution_risk_budget_authorizations",
     ),
@@ -194,7 +198,12 @@ _WRITER_TABLE_ALLOWLIST = {
         "risk_decisions",
         "execution_risk_reservations",
     ),
-    "canonical_order_writer": ("orders", "order_writer_leases"),
+    "canonical_order_writer": (
+        "orders",
+        "order_dispatch_receipts",
+        "order_dispatch_outcome_receipts",
+        "order_writer_leases",
+    ),
     "canonical_fill_writer": ("fills",),
     "canonical_ledger_writer": ("ledger_entries",),
     "canonical_reconciliation_writer": (
@@ -265,7 +274,25 @@ READER_TABLE_ALLOWLIST: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType(
 # over-privileged API-reader connection merely to follow a foreign key.
 _WRITER_READ_ALLOWLIST = {
     "canonical_schema_owner": (),
-    "canonical_control_writer": ("schema_metadata",),
+    "canonical_control_writer": (
+        "schema_metadata",
+        "deployment_approvals",
+        "deployments",
+        "runtime_instances",
+        "runtime_receipts",
+        "order_writer_leases",
+        "execution_canary_risk_policies",
+        "execution_risk_budget_authorizations",
+        "execution_risk_reservations",
+        "signals",
+        "trade_intents",
+        "risk_decisions",
+        "orders",
+        "fills",
+        "ledger_entries",
+        "reconciliation_runs",
+        "reconciliation_items",
+    ),
     "canonical_validation_writer": (
         "schema_metadata",
         "strategy_artifacts",
@@ -379,8 +406,14 @@ _WRITER_READ_ALLOWLIST = {
         "execution_canary_risk_policies",
         "execution_risk_reservations",
         "execution_attestations",
+        "execution_canary_probe_receipts",
     ),
-    "canonical_fill_writer": ("schema_metadata", "orders"),
+    "canonical_fill_writer": (
+        "schema_metadata",
+        "orders",
+        "risk_decisions",
+        "trade_intents",
+    ),
     "canonical_ledger_writer": ("schema_metadata", "fills"),
     "canonical_reconciliation_writer": (
         "schema_metadata",

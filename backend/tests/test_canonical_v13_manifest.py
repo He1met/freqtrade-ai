@@ -105,6 +105,7 @@ EXPECTED_TABLES_BY_DOMAIN = {
         "runtime_receipts",
     ),
     "execution": (
+        "execution_canary_probe_receipts",
         "execution_canary_risk_policies",
         "execution_risk_budget_authorizations",
         "execution_risk_reservations",
@@ -114,6 +115,8 @@ EXPECTED_TABLES_BY_DOMAIN = {
         "trade_intents",
         "risk_decisions",
         "orders",
+        "order_dispatch_receipts",
+        "order_dispatch_outcome_receipts",
         "fills",
         "ledger_entries",
         "reconciliation_runs",
@@ -123,7 +126,10 @@ EXPECTED_TABLES_BY_DOMAIN = {
 
 
 def test_exact_identity_and_table_manifest_matches_frozen_design() -> None:
-    assert CANONICAL_AUTHORITY_REVISION == "20260821_phase9_canary_v2_acl5"
+    assert (
+        CANONICAL_AUTHORITY_REVISION
+        == "20260821_phase9_dispatch_outcome_v1_acl9"
+    )
     assert CANONICAL_DATABASE_PURPOSE == "FREQTRADE_AI_V13_CANONICAL"
     assert CANONICAL_BUSINESS_SCHEMA == "strategy_platform_v13"
     assert CANONICAL_GENESIS_VERSION == "20260814_01"
@@ -134,7 +140,7 @@ def test_exact_identity_and_table_manifest_matches_frozen_design() -> None:
     assert CANONICAL_TABLE_NAMES == tuple(
         table for tables in EXPECTED_TABLES_BY_DOMAIN.values() for table in tables
     )
-    assert len(CANONICAL_TABLE_NAMES) == 53
+    assert len(CANONICAL_TABLE_NAMES) == 56
     assert manifest_problems() == ()
 
 
@@ -328,10 +334,32 @@ def test_postgresql_ddl_and_acl_are_offline_exact_allowlists() -> None:
         "execution_canary_risk_policies",
         "execution_risk_reservations",
         "execution_attestations",
+        "execution_canary_probe_receipts",
     )
     assert WRITER_TABLE_ALLOWLIST["canonical_order_writer"] == (
         "orders",
+        "order_dispatch_receipts",
+        "order_dispatch_outcome_receipts",
         "order_writer_leases",
+    )
+    assert WRITER_READ_ALLOWLIST["canonical_control_writer"] == (
+        "schema_metadata",
+        "deployment_approvals",
+        "deployments",
+        "runtime_instances",
+        "runtime_receipts",
+        "order_writer_leases",
+        "execution_canary_risk_policies",
+        "execution_risk_budget_authorizations",
+        "execution_risk_reservations",
+        "signals",
+        "trade_intents",
+        "risk_decisions",
+        "orders",
+        "fills",
+        "ledger_entries",
+        "reconciliation_runs",
+        "reconciliation_items",
     )
 
     reconciliation_items = CanonicalBase.metadata.tables[
@@ -375,13 +403,13 @@ def test_postgresql_types_constraints_and_locking_compile_offline() -> None:
         if isinstance(column.type, JSON)
     )
 
-    assert len(tables) == 53
-    assert len(foreign_keys) == 109
-    assert len(checks) == 65
-    assert len(uniques) == 63
-    assert len(indexes) == 98
-    assert len(datetimes) == 63
-    assert len(json_columns) == 22
+    assert len(tables) == 56
+    assert len(foreign_keys) == 119
+    assert len(checks) == 74
+    assert len(uniques) == 73
+    assert len(indexes) == 103
+    assert len(datetimes) == 96
+    assert len(json_columns) == 26
     assert all(key.deferrable is not True for key in foreign_keys)
     assert all(column.type.timezone is True for column in datetimes)
     assert all(

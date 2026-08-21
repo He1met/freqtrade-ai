@@ -29,15 +29,22 @@ from app.canonical_v13.execution_common import (
 from app.canonical_v13.models import (
     DEPLOYMENTS_TABLE,
     EXECUTION_ATTESTATIONS_TABLE,
+    EXECUTION_CANARY_PROBE_RECEIPTS_TABLE,
     EXECUTION_CANARY_RISK_POLICIES_TABLE,
     EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE,
     EXECUTION_RISK_RESERVATIONS_TABLE,
     ORDERS_TABLE,
+    ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE,
+    ORDER_DISPATCH_RECEIPTS_TABLE,
     ORDER_WRITER_LEASES_TABLE,
     RISK_DECISIONS_TABLE,
     TRADE_INTENTS_TABLE,
 )
 from app.canonical_v13.order_service import CANONICAL_ORDER_WRITER_IDENTITY
+from app.canonical_v13.phase9_okx_demo import (
+    RedactedOkxDemoDispatchGuard,
+    redacted_dispatch_guard_payload,
+)
 from app.canonical_v13.phase9_topology import PHASE9_SERVICE_SPECS
 
 
@@ -47,6 +54,15 @@ CANONICAL_ORDER_WRITER_PROCESS_IDENTITY = PHASE9_SERVICE_SPECS[
 
 
 class DemoOrderTransport(Protocol):
+    def dispatch_guard(
+        self,
+        *,
+        instrument: str,
+        limit_price: str,
+        effective_leverage: str,
+        minimum_size: str,
+    ) -> RedactedOkxDemoDispatchGuard: ...
+
     def place(self, body: Mapping[str, str]) -> Mapping[str, Any]: ...
 
     def query(self, *, instrument: str, client_order_id: str) -> Mapping[str, Any]: ...
@@ -93,9 +109,18 @@ def _now(value: datetime | None) -> datetime:
 
 
 def _exchange_body(order_request: Mapping[str, str]) -> dict[str, str]:
-    required = {"instId", "tdMode", "clOrdId", "side", "posSide", "ordType", "sz"}
+    required = {
+        "instId",
+        "tdMode",
+        "clOrdId",
+        "side",
+        "posSide",
+        "ordType",
+        "sz",
+        "px",
+    }
     observed = dict(order_request)
-    if not required.issubset(observed) or set(observed) - (required | {"px"}):
+    if set(observed) != required:
         raise CanonicalExecutionChainBlocked(
             "BLOCKED_ORDER_REQUEST_FIELDS", "order request field set is not allowlisted"
         )
@@ -103,7 +128,7 @@ def _exchange_body(order_request: Mapping[str, str]) -> dict[str, str]:
         observed["tdMode"] != "isolated"
         or observed["side"] != "buy"
         or observed["posSide"] != "long"
-        or observed["ordType"] not in {"post_only", "limit"}
+        or observed["ordType"] != "limit"
         or not all(isinstance(value, str) and value for value in observed.values())
     ):
         raise CanonicalExecutionChainBlocked(
@@ -196,6 +221,7 @@ def _acquire_writer_lease(
             status="ACTIVE",
             expires_at=expires_at,
             lease_digest=lease_digest,
+            created_at=now,
         )
     )
     return generation
@@ -339,6 +365,7 @@ def prepare_demo_order(
         )
     try:
         requested_size = Decimal(body["sz"])
+        requested_price = Decimal(body["px"])
     except InvalidOperation:
         raise CanonicalExecutionChainBlocked(
             "BLOCKED_ORDER_SIZE", "order size must be a canonical decimal"
@@ -346,6 +373,8 @@ def prepare_demo_order(
     if (
         not requested_size.is_finite()
         or requested_size != Decimal(str(policy["minimum_contract_size"]))
+        or not requested_price.is_finite()
+        or requested_price != Decimal(str(policy["limit_price"]))
         or _persisted_utc(policy["expires_at"]) <= now
     ):
         raise CanonicalExecutionChainBlocked(
@@ -492,6 +521,53 @@ def _load_dispatch(
     return dict(order), _exchange_body(body)
 
 
+def _load_dispatch_guard_inputs(
+    connection: Connection, order_id: UUID
+) -> tuple[dict[str, Any], dict[str, str], dict[str, Any], dict[str, Any]]:
+    effective = require_canonical_execution(connection)
+    order, body = _load_dispatch(effective, order_id)
+    if order["receipt_digest"] is not None and order["exchange_order_id"]:
+        return order, body, {}, {}
+    if order["status"] != "SUBMITTED":
+        raise CanonicalOrderRecoveryRequired(
+            "BLOCKED_ORDER_GET_ONLY_RECOVERY_REQUIRED",
+            "order dispatch was already claimed and must not POST again",
+        )
+    decision = effective.execute(
+        select(RISK_DECISIONS_TABLE).where(
+            RISK_DECISIONS_TABLE.c.id == order["risk_decision_id"]
+        )
+    ).mappings().one()
+    reservation = effective.execute(
+        select(EXECUTION_RISK_RESERVATIONS_TABLE).where(
+            EXECUTION_RISK_RESERVATIONS_TABLE.c.trade_intent_id
+            == decision["trade_intent_id"]
+        )
+    ).mappings().one()
+    budget = effective.execute(
+        select(EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE).where(
+            EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE.c.id
+            == reservation["risk_budget_authorization_id"]
+        )
+    ).mappings().one()
+    policy = effective.execute(
+        select(EXECUTION_CANARY_RISK_POLICIES_TABLE).where(
+            EXECUTION_CANARY_RISK_POLICIES_TABLE.c.id
+            == budget["execution_canary_risk_policy_id"]
+        )
+    ).mappings().one()
+    attestation = effective.execute(
+        select(EXECUTION_ATTESTATIONS_TABLE).where(
+            EXECUTION_ATTESTATIONS_TABLE.c.id == policy["execution_attestation_id"]
+        )
+    ).mappings().one()
+    return dict(order), body, dict(policy), dict(attestation)
+
+
+def _guard_payload(guard: RedactedOkxDemoDispatchGuard) -> dict[str, object]:
+    return redacted_dispatch_guard_payload(guard)
+
+
 def _claim_dispatch(
     connection: Connection,
     *,
@@ -499,6 +575,7 @@ def _claim_dispatch(
     holder_identity: str,
     holder_token_digest: str,
     lease_generation: int,
+    guard: RedactedOkxDemoDispatchGuard,
     evaluated_at: datetime | None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     effective = require_canonical_execution(connection)
@@ -570,6 +647,16 @@ def _claim_dispatch(
         .mappings()
         .one()
     )
+    probe = (
+        effective.execute(
+            select(EXECUTION_CANARY_PROBE_RECEIPTS_TABLE).where(
+                EXECUTION_CANARY_PROBE_RECEIPTS_TABLE.c.id
+                == policy["probe_receipt_id"]
+            )
+        )
+        .mappings()
+        .one()
+    )
     if (
         policy["status"] != "ACTIVE"
         or policy["receipt_digest"] != budget["source_receipt_digest"]
@@ -581,11 +668,164 @@ def _claim_dispatch(
             < _persisted_utc(attestation["expires_at"])
         )
         or _persisted_utc(policy["expires_at"]) <= now
+        or probe["execution_attestation_id"] != attestation["id"]
+        or probe["receipt_digest"] is None
     ):
         raise CanonicalExecutionChainBlocked(
             "BLOCKED_ORDER_DISPATCH_AUTHORITY_STALE",
             "fresh exact policy and execution attestation are required before POST",
         )
+    if not isinstance(guard, RedactedOkxDemoDispatchGuard):
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_ORDER_DISPATCH_GUARD_TYPE",
+            "sealed typed dispatch guard is required before POST",
+        )
+    guard_payload = _guard_payload(guard)
+    guard_digest = canonical_execution_digest(guard_payload)
+    try:
+        guard_limit = Decimal(guard.limit_price)
+        guard_leverage = Decimal(guard.effective_leverage)
+        guard_minimum = Decimal(guard.minimum_size)
+        guard_maximum = Decimal(guard.maximum_buy_contracts)
+        guard_long = Decimal(guard.long_contracts)
+        guard_short = Decimal(guard.short_contracts)
+    except InvalidOperation:
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_ORDER_DISPATCH_GUARD_VALUE",
+            "dispatch guard decimal facts are invalid",
+        ) from None
+    guard_times = (
+        guard.positions_observed_at,
+        guard.positions_expires_at,
+        guard.pending_orders_observed_at,
+        guard.pending_orders_expires_at,
+        guard.maximum_order_quantity_observed_at,
+        guard.maximum_order_quantity_expires_at,
+        guard.leverage_observed_at,
+        guard.leverage_expires_at,
+        guard.observed_at,
+        guard.expires_at,
+    )
+    if any(value.tzinfo is None for value in guard_times):
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_ORDER_DISPATCH_GUARD_FRESHNESS",
+            "dispatch guard times must be timezone-aware",
+        )
+    observed = max(
+        _persisted_utc(guard.positions_observed_at),
+        _persisted_utc(guard.pending_orders_observed_at),
+        _persisted_utc(guard.maximum_order_quantity_observed_at),
+        _persisted_utc(guard.leverage_observed_at),
+    )
+    resource_expiry = min(
+        _persisted_utc(guard.positions_expires_at),
+        _persisted_utc(guard.pending_orders_expires_at),
+        _persisted_utc(guard.maximum_order_quantity_expires_at),
+        _persisted_utc(guard.leverage_expires_at),
+    )
+    if (
+        guard.execution_target != "OKX_DEMO"
+        or guard.instrument != body["instId"]
+        or guard.account_fingerprint_digest != attestation["account_fingerprint_digest"]
+        or guard.credential_generation_digest
+        != attestation["credential_generation_digest"]
+        or guard_limit != Decimal(str(policy["limit_price"]))
+        or guard_limit != Decimal(body["px"])
+        or guard_leverage != Decimal(str(policy["effective_leverage"]))
+        or guard_minimum != Decimal(str(policy["minimum_contract_size"]))
+        or guard_maximum < guard_minimum
+        or guard_long != 0
+        or guard_short != 0
+        or guard.active_position_count != 0
+        or guard.pending_order_count != 0
+        or not all(
+            value.is_finite()
+            for value in (
+                guard_limit,
+                guard_leverage,
+                guard_minimum,
+                guard_maximum,
+                guard_long,
+                guard_short,
+            )
+        )
+        or guard_limit <= 0
+        or guard_leverage <= 0
+        or guard_minimum <= 0
+        or guard_maximum < 0
+        or observed != _persisted_utc(guard.observed_at)
+        or _persisted_utc(guard.expires_at) > resource_expiry
+        or observed > now + timedelta(seconds=5)
+        or _persisted_utc(guard.expires_at) <= now
+    ):
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_ORDER_DISPATCH_GUARD_DRIFT",
+            "fresh flat exact-capacity guard must match policy and credential lineage",
+        )
+    resource_contracts = (
+        (
+            "positions",
+            guard.positions_observed_at,
+            guard.positions_expires_at,
+            guard.positions_digest,
+            {
+                "instrument": guard.instrument,
+                "margin_mode": "isolated",
+                "long_contracts": "0",
+                "short_contracts": "0",
+                "active_position_count": 0,
+            },
+        ),
+        (
+            "pending_orders",
+            guard.pending_orders_observed_at,
+            guard.pending_orders_expires_at,
+            guard.pending_orders_digest,
+            {"instrument": guard.instrument, "pending_order_count": 0},
+        ),
+        (
+            "maximum_order_quantity",
+            guard.maximum_order_quantity_observed_at,
+            guard.maximum_order_quantity_expires_at,
+            guard.maximum_order_quantity_digest,
+            {
+                "instrument": guard.instrument,
+                "margin_mode": "isolated",
+                "limit_price": guard.limit_price,
+                "effective_leverage": guard.effective_leverage,
+                "maximum_buy_contracts": guard.maximum_buy_contracts,
+            },
+        ),
+        (
+            "leverage",
+            guard.leverage_observed_at,
+            guard.leverage_expires_at,
+            guard.leverage_digest,
+            {
+                "instrument": guard.instrument,
+                "account_fingerprint_digest": guard.account_fingerprint_digest,
+                "long": guard.effective_leverage,
+                "short": guard.current_short_leverage,
+            },
+        ),
+    )
+    for resource, resource_observed, resource_expires, supplied, facts in resource_contracts:
+        expected = canonical_execution_digest(
+            {
+                "execution_target": "OKX_DEMO",
+                "resource": resource,
+                "source": "okx_demo_rest",
+                "authenticated": True,
+                "observed_at": _persisted_utc(resource_observed).isoformat(),
+                "expires_at": _persisted_utc(resource_expires).isoformat(),
+                "facts": facts,
+            }
+        )
+        if supplied != expected:
+            raise CanonicalExecutionChainBlocked(
+                "BLOCKED_ORDER_DISPATCH_GUARD_RESOURCE_DIGEST",
+                f"{resource} dispatch guard digest drifted",
+            )
     if order["status"] != "SUBMITTED":
         raise CanonicalOrderRecoveryRequired(
             "BLOCKED_ORDER_GET_ONLY_RECOVERY_REQUIRED",
@@ -600,13 +840,31 @@ def _claim_dispatch(
         .mappings()
         .one_or_none()
     )
+    expected_lease_digest = (
+        canonical_execution_digest(
+            {
+                "execution_target": "OKX_DEMO",
+                "holder_identity": lease["holder_identity"],
+                "holder_token_digest": lease["holder_token_digest"],
+                "generation": int(lease["generation"]),
+                "expires_at": _persisted_utc(lease["expires_at"]).isoformat(),
+            }
+        )
+        if lease is not None
+        else None
+    )
     if (
         lease is None
         or lease["status"] != "ACTIVE"
         or lease["holder_identity"] != holder_identity
         or lease["holder_token_digest"] != holder_token_digest
         or int(lease["generation"]) != lease_generation
-        or _persisted_utc(lease["expires_at"]) <= now
+        or lease["lease_digest"] != expected_lease_digest
+        or not (
+            _persisted_utc(lease["created_at"])
+            <= now
+            < _persisted_utc(lease["expires_at"])
+        )
     ):
         raise CanonicalExecutionChainBlocked(
             "BLOCKED_ORDER_WRITER_LEASE_FENCED",
@@ -626,6 +884,69 @@ def _claim_dispatch(
             "BLOCKED_ORDER_GET_ONLY_RECOVERY_REQUIRED",
             "order dispatch claim lost and must not POST",
         )
+    claim = {
+        "contract": "canonical-v13-okx-demo-order-dispatch-claim-v1",
+        "order_id": str(order_id),
+        "attempt_ordinal": 1,
+        "request_digest": order["request_digest"],
+        "holder_identity": holder_identity,
+        "holder_token_digest": holder_token_digest,
+        "lease_generation": lease_generation,
+        "lease_digest": lease["lease_digest"],
+        "lease_acquired_at": _persisted_utc(lease["created_at"]).isoformat(),
+        "lease_expires_at": _persisted_utc(lease["expires_at"]).isoformat(),
+        "risk_decision_id": str(decision["id"]),
+        "canary_risk_policy_id": str(policy["id"]),
+        "probe_receipt_id": str(probe["id"]),
+        "execution_attestation_id": str(attestation["id"]),
+        "guard_digest": guard_digest,
+        "claimed_at": now.isoformat(),
+    }
+    effective.execute(
+        ORDER_DISPATCH_RECEIPTS_TABLE.insert().values(
+            order_id=order_id,
+            risk_decision_id=decision["id"],
+            canary_risk_policy_id=policy["id"],
+            probe_receipt_id=probe["id"],
+            execution_attestation_id=attestation["id"],
+            attempt_ordinal=1,
+            request_digest=order["request_digest"],
+            holder_identity=holder_identity,
+            holder_token_digest=holder_token_digest,
+            lease_generation=lease_generation,
+            lease_digest=lease["lease_digest"],
+            lease_acquired_at=lease["created_at"],
+            lease_expires_at=lease["expires_at"],
+            account_fingerprint_digest=guard.account_fingerprint_digest,
+            credential_generation_digest=guard.credential_generation_digest,
+            limit_price=guard_limit,
+            effective_leverage=guard_leverage,
+            minimum_size=guard_minimum,
+            maximum_buy_contracts=guard_maximum,
+            long_contracts=guard_long,
+            short_contracts=guard_short,
+            active_position_count=guard.active_position_count,
+            pending_order_count=guard.pending_order_count,
+            positions_digest=guard.positions_digest,
+            positions_observed_at=guard.positions_observed_at,
+            positions_expires_at=guard.positions_expires_at,
+            pending_orders_digest=guard.pending_orders_digest,
+            pending_orders_observed_at=guard.pending_orders_observed_at,
+            pending_orders_expires_at=guard.pending_orders_expires_at,
+            maximum_order_quantity_digest=guard.maximum_order_quantity_digest,
+            maximum_order_quantity_observed_at=guard.maximum_order_quantity_observed_at,
+            maximum_order_quantity_expires_at=guard.maximum_order_quantity_expires_at,
+            guard_leverage_digest=guard.leverage_digest,
+            guard_leverage_observed_at=guard.leverage_observed_at,
+            guard_leverage_expires_at=guard.leverage_expires_at,
+            guard_observed_at=guard.observed_at,
+            guard_expires_at=guard.expires_at,
+            guard_json=guard_payload,
+            guard_digest=guard_digest,
+            claim_digest=canonical_execution_digest(claim),
+            claimed_at=now,
+        )
+    )
     return {**order, "status": "DISPATCHING"}, body
 
 
@@ -635,29 +956,134 @@ def _persist_exchange_receipt(
     order_id: UUID,
     exchange_order_id: str,
     safe_response: Mapping[str, str],
+    outcome_mode: str,
 ) -> DispatchedDemoOrder:
     effective = require_canonical_execution(connection)
     lock_execution_boundary(effective, key=f"demo-order-receipt:{order_id}")
-    order = (
-        effective.execute(select(ORDERS_TABLE).where(ORDERS_TABLE.c.id == order_id))
-        .mappings()
-        .one()
-    )
-    if order["receipt_digest"] is not None:
-        if order["exchange_order_id"] != exchange_order_id:
-            raise CanonicalExecutionChainBlocked(
-                "BLOCKED_ORDER_EXCHANGE_ID_DRIFT", str(order_id)
-            )
-        return DispatchedDemoOrder(
-            order_id, exchange_order_id, order["receipt_digest"], True
+    if outcome_mode not in {"POST", "GET_RECOVERY"}:
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_ORDER_OUTCOME_MODE", str(outcome_mode)
         )
+    order, body = _load_dispatch(effective, order_id)
+    claim = (
+        effective.execute(
+            select(ORDER_DISPATCH_RECEIPTS_TABLE).where(
+                ORDER_DISPATCH_RECEIPTS_TABLE.c.order_id == order_id
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    existing = (
+        effective.execute(
+            select(ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE).where(
+                ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE.c.order_id == order_id
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if claim is None:
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_ORDER_DISPATCH_CLAIM_UNSET", str(order_id)
+        )
+    safe = dict(safe_response)
+    if safe != {
+        "ordId": exchange_order_id,
+        "clOrdId": safe.get("clOrdId"),
+        "sCode": "0",
+    } or not safe.get("clOrdId"):
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_ORDER_OUTCOME_RESPONSE", "safe exchange identity is invalid"
+        )
+    safe_response_digest = canonical_execution_digest(safe)
+    if existing is not None:
+        expected_outcome = canonical_execution_digest(
+            {
+                "contract": "canonical-v13-order-dispatch-outcome-v1",
+                "outcome_id": str(existing["id"]),
+                "order_id": str(order_id),
+                "dispatch_claim_id": str(claim["id"]),
+                "claim_digest": claim["claim_digest"],
+                "client_order_id": existing["client_order_id"],
+                "exchange_order_id": existing["exchange_order_id"],
+                "safe_response_digest": existing["safe_response_digest"],
+                "outcome_mode": existing["outcome_mode"],
+                "recorded_at": _persisted_utc(existing["recorded_at"]).isoformat(),
+            }
+        )
+        expected_order = canonical_execution_digest(
+            {
+                "contract": "canonical-v13-okx-demo-order-receipt-v2",
+                "order_id": str(order_id),
+                "request_digest": order["request_digest"],
+                "dispatch_claim_digest": claim["claim_digest"],
+                "dispatch_outcome_receipt_digest": expected_outcome,
+            }
+        )
+        if (
+            existing["receipt_digest"] != expected_outcome
+            or existing["dispatch_claim_id"] != claim["id"]
+            or existing["claim_digest"] != claim["claim_digest"]
+            or existing["client_order_id"] != safe["clOrdId"]
+            or existing["exchange_order_id"] != exchange_order_id
+            or existing["safe_response_json"] != safe
+            or existing["safe_response_digest"] != safe_response_digest
+            or existing["outcome_mode"] != outcome_mode
+            or order["exchange_order_id"] != exchange_order_id
+            or order["receipt_digest"] != expected_order
+        ):
+            raise CanonicalExecutionChainBlocked(
+                "BLOCKED_ORDER_DISPATCH_OUTCOME_DRIFT", str(order_id)
+            )
+        return DispatchedDemoOrder(order_id, exchange_order_id, expected_order, True)
+    if order["receipt_digest"] is not None or order["status"] != "DISPATCHING":
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_ORDER_DISPATCH_OUTCOME_DRIFT", str(order_id)
+        )
+    client_order_id = body.get("clOrdId")
+    if client_order_id != safe["clOrdId"]:
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_ORDER_OUTCOME_RESPONSE", "client order identity drifted"
+        )
+    outcome_id = uuid4()
+    recorded_at = datetime.now(timezone.utc)
+    outcome_receipt_digest = canonical_execution_digest(
+        {
+            "contract": "canonical-v13-order-dispatch-outcome-v1",
+            "outcome_id": str(outcome_id),
+            "order_id": str(order_id),
+            "dispatch_claim_id": str(claim["id"]),
+            "claim_digest": claim["claim_digest"],
+            "client_order_id": client_order_id,
+            "exchange_order_id": exchange_order_id,
+            "safe_response_digest": safe_response_digest,
+            "outcome_mode": outcome_mode,
+            "recorded_at": recorded_at.isoformat(),
+        }
+    )
+    effective.execute(
+        ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE.insert().values(
+            id=outcome_id,
+            order_id=order_id,
+            dispatch_claim_id=claim["id"],
+            claim_digest=claim["claim_digest"],
+            client_order_id=client_order_id,
+            exchange_order_id=exchange_order_id,
+            safe_response_json=safe,
+            safe_response_digest=safe_response_digest,
+            outcome_mode=outcome_mode,
+            receipt_digest=outcome_receipt_digest,
+            recorded_at=recorded_at,
+        )
+    )
     receipt_digest = canonical_execution_digest(
         {
-            "contract": "canonical-v13-okx-demo-order-receipt-v1",
+            "contract": "canonical-v13-okx-demo-order-receipt-v2",
             "order_id": str(order_id),
             "request_digest": order["request_digest"],
-            "exchange_order_id": exchange_order_id,
-            "safe_response": dict(safe_response),
+            "dispatch_claim_digest": claim["claim_digest"],
+            "dispatch_outcome_receipt_digest": outcome_receipt_digest,
         }
     )
     effective.execute(
@@ -672,6 +1098,32 @@ def _persist_exchange_receipt(
     return DispatchedDemoOrder(order_id, exchange_order_id, receipt_digest, False)
 
 
+def _replay_persisted_exchange_receipt(
+    connection: Connection, *, order_id: UUID
+) -> DispatchedDemoOrder:
+    effective = require_canonical_execution(connection)
+    outcome = (
+        effective.execute(
+            select(ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE).where(
+                ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE.c.order_id == order_id
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if outcome is None:
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_ORDER_DISPATCH_OUTCOME_UNSET", str(order_id)
+        )
+    return _persist_exchange_receipt(
+        effective,
+        order_id=order_id,
+        exchange_order_id=str(outcome["exchange_order_id"]),
+        safe_response=dict(outcome["safe_response_json"]),
+        outcome_mode=str(outcome["outcome_mode"]),
+    )
+
+
 def dispatch_demo_order(
     connection_factory: ConnectionFactory,
     *,
@@ -683,17 +1135,29 @@ def dispatch_demo_order(
     evaluated_at: datetime | None = None,
 ) -> DispatchedDemoOrder:
     with connection_factory() as connection:
+        order, body, policy, _attestation = _load_dispatch_guard_inputs(
+            connection, order_id
+        )
+    if order["receipt_digest"] is not None and order["exchange_order_id"]:
+        with connection_factory() as connection:
+            return _replay_persisted_exchange_receipt(
+                connection, order_id=order_id
+            )
+    guard = transport.dispatch_guard(
+        instrument=body["instId"],
+        limit_price=str(policy["limit_price"]),
+        effective_leverage=str(policy["effective_leverage"]),
+        minimum_size=str(policy["minimum_contract_size"]),
+    )
+    with connection_factory() as connection:
         order, body = _claim_dispatch(
             connection,
             order_id=order_id,
             holder_identity=holder_identity,
             holder_token_digest=holder_token_digest,
             lease_generation=lease_generation,
+            guard=guard,
             evaluated_at=evaluated_at,
-        )
-    if order["receipt_digest"] is not None and order["exchange_order_id"]:
-        return DispatchedDemoOrder(
-            order_id, order["exchange_order_id"], order["receipt_digest"], True
         )
     try:
         payload = transport.place(body)
@@ -713,6 +1177,7 @@ def dispatch_demo_order(
             order_id=order_id,
             exchange_order_id=exchange_order_id,
             safe_response=safe_response,
+            outcome_mode="POST",
         )
 
 
@@ -725,9 +1190,10 @@ def recover_demo_order_get_only(
     with connection_factory() as connection:
         order, body = _load_dispatch(connection, order_id)
     if order["receipt_digest"] is not None and order["exchange_order_id"]:
-        return DispatchedDemoOrder(
-            order_id, order["exchange_order_id"], order["receipt_digest"], True
-        )
+        with connection_factory() as connection:
+            return _replay_persisted_exchange_receipt(
+                connection, order_id=order_id
+            )
     try:
         payload = transport.query(
             instrument=body["instId"], client_order_id=body["clOrdId"]
@@ -746,6 +1212,7 @@ def recover_demo_order_get_only(
             order_id=order_id,
             exchange_order_id=exchange_order_id,
             safe_response=safe_response,
+            outcome_mode="GET_RECOVERY",
         )
 
 

@@ -8,10 +8,12 @@ order writer is disabled unless a canary plan explicitly enables it.
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
+from contextlib import contextmanager
+from dataclasses import asdict, fields
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
+import importlib.util
 import os
 from pathlib import Path
 import plistlib
@@ -45,6 +47,24 @@ from app.canonical_v13.phase9_runtime_supervisor import (  # noqa: E402
     validate_supervised_worker_receipt,
     verify_launch_plan,
 )
+from app.canonical_v13.phase9_production_composition import (  # noqa: E402
+    CanonicalFillWriterOperator,
+    CanonicalLedgerWriterOperator,
+    CanonicalOrderWriterOperator,
+    CanonicalPhase9CompositionBlocked,
+    CanonicalReconciliationWriterOperator,
+    DatabaseOrderWriterAuthorityVerifier,
+    RecordedCanaryProbe,
+    confirm_running_runtime_from_supervisor,
+    record_current_canary_attestation,
+    record_current_canary_probe_receipt,
+)
+from app.canonical_v13.phase9_recovery_composition import (  # noqa: E402
+    accept_phase9_recovery_soak,
+)
+from app.canonical_v13.phase9_recovery_acceptance import (  # noqa: E402
+    CanonicalPhase9RecoveryAcceptanceBlocked,
+)
 from app.canonical_v13.phase9_topology import PHASE9_SERVICE_SPECS  # noqa: E402
 
 
@@ -58,6 +78,11 @@ LOG_ROOT = Path.home() / "Library" / "Logs" / "FreqtradeAiV13"
 HEARTBEAT_SECONDS = 10
 LEASE_TTL_SECONDS = 35
 _STOP = False
+ORDER_HOLDER_KEYCHAIN_SERVICE = "freqtrade-ai/v13/phase9-order-holder-token"
+RUNTIME_CREDENTIAL_REFERENCE = "none:public-okx-market-only"
+RUNTIME_SIGNAL_SIGNER_KEYCHAIN_SERVICE = (
+    "freqtrade-ai/v13/runtime-signal-receipt-hmac-v1"
+)
 
 
 def _authority_from_payload(payload: object) -> OrderWriterCanaryAuthority | None:
@@ -195,6 +220,110 @@ def _run(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
         timeout=30,
+    )
+
+
+def _load_script_module(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise CanonicalPhase9SupervisorBlocked(
+            "BLOCKED_PHASE9_PRODUCTION_COMPOSITION", name
+        )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _phase9_database_url(capability: str) -> str:
+    api_service = _load_script_module(
+        "canonical_v13_api_service_phase9_boundary",
+        REPO_ROOT / "scripts" / "canonical_v13_api_service.py",
+    )
+    for principal, physical_capability, keychain_service in api_service.PHASE9_PRINCIPAL_SPECS:
+        if physical_capability == f"freqtrade_ai_v13_{capability.removeprefix('canonical_')}":
+            return api_service._database_url(principal, keychain_service)
+    if capability == "canonical_runtime_reader":
+        principal, _physical, keychain_service = (
+            api_service.RUNTIME_READER_PRINCIPAL_SPEC
+        )
+        return api_service._database_url(principal, keychain_service)
+    raise CanonicalPhase9SupervisorBlocked(
+        "BLOCKED_PHASE9_DATABASE_CAPABILITY", capability
+    )
+
+
+def _control_database_url() -> str:
+    api_service = _load_script_module(
+        "canonical_v13_api_service_phase9_control_boundary",
+        REPO_ROOT / "scripts" / "canonical_v13_api_service.py",
+    )
+    return api_service.canonical_control_database_url()
+
+
+def _connection_factory(database_url: str):
+    from sqlalchemy import create_engine  # noqa: PLC0415
+
+    engine = create_engine(database_url, pool_pre_ping=True)
+
+    @contextmanager
+    def factory():
+        with engine.begin() as connection:
+            yield connection
+
+    return factory
+
+
+def _read_order_holder_token() -> str:
+    api_service = _load_script_module(
+        "canonical_v13_api_service_phase9_holder_boundary",
+        REPO_ROOT / "scripts" / "canonical_v13_api_service.py",
+    )
+    holder_fence_material = api_service._read_keychain(
+        ORDER_HOLDER_KEYCHAIN_SERVICE
+    )
+    if holder_fence_material is None or len(holder_fence_material) < 48:
+        raise CanonicalPhase9SupervisorBlocked(
+            "BLOCKED_PHASE9_ORDER_HOLDER", "stable Keychain holder token is required"
+        )
+    return holder_fence_material
+
+
+def _production_authority_port() -> DatabaseOrderWriterAuthorityVerifier:
+    return DatabaseOrderWriterAuthorityVerifier(
+        _connection_factory(_phase9_database_url("canonical_order_writer"))
+    )
+
+
+def _production_runtime_worker_factory():
+    """Compose B from public market data and two isolated DB capabilities."""
+
+    from app.canonical_v13.okx_public_market import (  # noqa: PLC0415
+        OkxPublicHistoryCandleDownloader,
+    )
+    from app.canonical_v13.phase9_production_runtime import (  # noqa: PLC0415
+        ProductionRuntimeWorkerFactory,
+    )
+    from app.canonical_v13.phase9_keychain import (  # noqa: PLC0415
+        CanonicalPhase9KeychainBlocked,
+        read_canonical_service_secret,
+    )
+
+    try:
+        signing_key = read_canonical_service_secret(
+            RUNTIME_SIGNAL_SIGNER_KEYCHAIN_SERVICE
+        )
+    except CanonicalPhase9KeychainBlocked as exc:
+        raise CanonicalPhase9SupervisorBlocked(exc.code, exc.detail) from None
+
+    return ProductionRuntimeWorkerFactory(
+        runtime_connection_factory=_connection_factory(
+            _phase9_database_url("canonical_runtime_reader")
+        ),
+        signal_connection_factory=_connection_factory(
+            _phase9_database_url("canonical_signal_writer")
+        ),
+        downloader=OkxPublicHistoryCandleDownloader(),
+        signing_key=signing_key,
     )
 
 
@@ -369,6 +498,109 @@ def _append_receipt(receipt: object) -> None:
         handle.write("\n")
         handle.flush()
         os.fsync(handle.fileno())
+
+
+def _latest_running_heartbeat(service_key: str, plan: Phase9LaunchPlan):
+    try:
+        lines = _receipt_path(service_key).read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise CanonicalPhase9SupervisorBlocked(
+            "BLOCKED_PHASE9_RUNTIME_HEARTBEAT_UNSET", service_key
+        ) from exc
+    for line in reversed(lines):
+        try:
+            payload = json.loads(line)
+            if (
+                payload.get("action") == "HEARTBEAT"
+                and payload.get("status") == "RUNNING"
+                and payload.get("plan_digest") == plan.plan_digest
+                and int(payload.get("generation")) == plan.generation
+            ):
+                receipt = build_lifecycle_receipt(
+                    service_key=str(payload["service_key"]),
+                    action=str(payload["action"]),
+                    status=str(payload["status"]),
+                    generation=int(payload["generation"]),
+                    observed_at=datetime.fromisoformat(str(payload["observed_at"])),
+                    plan_digest=str(payload["plan_digest"]),
+                    holder_token_digest=str(payload["holder_token_digest"]),
+                    details=dict(payload["details"]),
+                    receipt_id=UUID(str(payload["receipt_id"])),
+                )
+                if receipt.receipt_digest != payload.get("receipt_digest"):
+                    continue
+                return receipt
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+    raise CanonicalPhase9SupervisorBlocked(
+        "BLOCKED_PHASE9_RUNTIME_HEARTBEAT_UNSET", service_key
+    )
+
+
+def _verified_lifecycle_receipts(service_key: str):
+    try:
+        lines = _receipt_path(service_key).read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise CanonicalPhase9SupervisorBlocked(
+            "BLOCKED_PHASE9_RECOVERY_RECEIPTS_UNSET", service_key
+        ) from exc
+    receipts = []
+    for line in lines:
+        try:
+            payload = json.loads(line)
+            receipt = build_lifecycle_receipt(
+                service_key=str(payload["service_key"]),
+                action=str(payload["action"]),
+                status=str(payload["status"]),
+                generation=int(payload["generation"]),
+                observed_at=datetime.fromisoformat(str(payload["observed_at"])),
+                plan_digest=(
+                    str(payload["plan_digest"])
+                    if payload.get("plan_digest") is not None
+                    else None
+                ),
+                holder_token_digest=(
+                    str(payload["holder_token_digest"])
+                    if payload.get("holder_token_digest") is not None
+                    else None
+                ),
+                details=dict(payload["details"]),
+                receipt_id=UUID(str(payload["receipt_id"])),
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise CanonicalPhase9SupervisorBlocked(
+                "BLOCKED_PHASE9_RECOVERY_RECEIPT_CORRUPT", service_key
+            ) from exc
+        if receipt.receipt_digest != payload.get("receipt_digest"):
+            raise CanonicalPhase9SupervisorBlocked(
+                "BLOCKED_PHASE9_RECOVERY_RECEIPT_CORRUPT", service_key
+            )
+        receipts.append(receipt)
+    return tuple(receipts)
+
+
+class FilesystemRecoverySupervisorEvidence:
+    """Read current supervisor state without mutating launchd or lease files."""
+
+    def latest_lifecycle(self, *, service_key: str, action: str):
+        for receipt in reversed(_verified_lifecycle_receipts(service_key)):
+            if receipt.action == action:
+                return receipt
+        raise CanonicalPhase9SupervisorBlocked(
+            "BLOCKED_PHASE9_RECOVERY_RECEIPT_UNSET", f"{service_key}:{action}"
+        )
+
+    def launch_agent_loaded(self, service_key: str) -> bool:
+        return (
+            _run(["launchctl", "print", _launchctl_target(service_key)]).returncode
+            == 0
+        )
+
+    def file_lease(self, service_key: str):
+        return FileLeasePort(SUPPORT_ROOT).read(service_key)
+
+    def process_alive(self, pid: int) -> bool:
+        return UnixProcessProbe().is_alive(pid)
 
 
 def plist_payload(plan: Phase9LaunchPlan) -> dict[str, object]:
@@ -802,12 +1034,395 @@ def _record_worker_heartbeat(
     )
 
 
+def confirm_runtime_observation(plan_digest: str) -> dict[str, object]:
+    """Promote PENDING to ACTIVE only from the current live supervisor evidence."""
+
+    _require_release_checkout()
+    plan, state = _load_plan("long_lived_runtime")
+    lease = FileLeasePort(SUPPORT_ROOT).read("long_lived_runtime")
+    observed_at = _now()
+    if (
+        state.get("status") != "RUNNING"
+        or plan.plan_digest != plan_digest
+        or lease is None
+        or lease.expires_at <= observed_at
+        or not UnixProcessProbe().is_alive(lease.pid)
+    ):
+        raise CanonicalPhase9SupervisorBlocked(
+            "BLOCKED_PHASE9_RUNTIME_OBSERVATION",
+            "exact RUNNING state, live holder, and fresh lease are required",
+        )
+    heartbeat = _latest_running_heartbeat("long_lived_runtime", plan)
+    factory = _connection_factory(
+        _phase9_database_url("canonical_deployment_writer")
+    )
+    with factory() as connection:
+        runtime_id = confirm_running_runtime_from_supervisor(
+            connection,
+            plan=plan,
+            lease=lease,
+            heartbeat_receipt=heartbeat,
+            observed_at=observed_at,
+            credential_reference=RUNTIME_CREDENTIAL_REFERENCE,
+        )
+    return {
+        "status": "ACTIVE",
+        "service": plan.service_key,
+        "deployment_id": str(plan.deployment_id),
+        "runtime_instance_id": str(runtime_id),
+        "plan_digest": plan.plan_digest,
+        "runtime_receipt_digest": heartbeat.receipt_digest,
+    }
+
+
+def _production_okx_session_factory():
+    from app.canonical_v13.phase9_keychain import (  # noqa: PLC0415
+        CanonicalPhase9KeychainBlocked,
+        read_canonical_okx_demo_capability,
+    )
+    from app.canonical_v13.phase9_okx_demo import (  # noqa: PLC0415
+        create_canonical_okx_demo_session,
+    )
+
+    def session_factory():
+        try:
+            capability = read_canonical_okx_demo_capability()
+        except CanonicalPhase9KeychainBlocked as exc:
+            raise CanonicalPhase9SupervisorBlocked(exc.code, exc.detail) from None
+        return create_canonical_okx_demo_session(
+            capability.environment,
+            credential_generation_digest=capability.credential_generation_digest,
+            lock_path=SUPPORT_ROOT / "canonical-order-writer.transport.lock",
+        )
+
+    return session_factory
+
+
+def _production_order_operator(
+    *, plan: Phase9LaunchPlan, lease: Phase9Lease, holder_token: str
+) -> CanonicalOrderWriterOperator:
+    connection_factory = _connection_factory(
+        _phase9_database_url("canonical_order_writer")
+    )
+    return CanonicalOrderWriterOperator(
+        plan=plan,
+        supervisor_lease=lease,
+        authority_port=_production_authority_port(),
+        holder_token=holder_token,
+        connection_factory=connection_factory,
+        session_factory=_production_okx_session_factory(),
+    )
+
+
+def _probe_saga_path(deployment_id: UUID) -> Path:
+    return SUPPORT_ROOT / f"canary-probe-{deployment_id}.saga.json"
+
+
+def _sealed_probe_for_saga(
+    deployment_id: UUID,
+    session_factory,
+    *,
+    evaluated_at: datetime,
+    linked_probe_receipt_exists,
+):
+    """Recover only a server-sealed safe probe; callers never provide evidence."""
+
+    from app.canonical_v13.phase9_okx_demo import RedactedOkxDemoProbe  # noqa: PLC0415
+
+    path = _probe_saga_path(deployment_id)
+
+    def seal_current_probe():
+        with session_factory() as session:
+            current = session.probe(instrument="BTC-USDT-SWAP")
+        _atomic_json(
+            path,
+            {
+                "contract": "canonical-v13-okx-demo-probe-saga-v1",
+                "deployment_id": str(deployment_id),
+                "probe": _json_safe(asdict(current)),
+            },
+        )
+        return current
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return seal_current_probe()
+    except (OSError, ValueError, TypeError) as exc:
+        raise CanonicalPhase9SupervisorBlocked(
+            "BLOCKED_PHASE9_PROBE_SAGA", "sealed probe saga is corrupt"
+        ) from exc
+    raw = payload.get("probe") if isinstance(payload, dict) else None
+    expected = {field.name for field in fields(RedactedOkxDemoProbe)}
+    if (
+        payload.get("contract") != "canonical-v13-okx-demo-probe-saga-v1"
+        or payload.get("deployment_id") != str(deployment_id)
+        or not isinstance(raw, dict)
+        or set(raw) != expected
+    ):
+        raise CanonicalPhase9SupervisorBlocked(
+            "BLOCKED_PHASE9_PROBE_SAGA", "sealed probe saga identity drifted"
+        )
+    for name in tuple(expected):
+        if name.endswith("_at") or name.endswith("_expires_at") or name == "expires_at":
+            raw[name] = datetime.fromisoformat(str(raw[name]))
+    raw["permissions"] = dict(raw["permissions"])
+    sealed = RedactedOkxDemoProbe(**raw)
+    if sealed.expires_at > evaluated_at:
+        return sealed
+    if linked_probe_receipt_exists():
+        raise CanonicalPhase9SupervisorBlocked(
+            "BLOCKED_PHASE9_PROBE_SAGA_LINKED_EXPIRED",
+            "expired sealed probe is already linked and cannot be replaced",
+        )
+    # An attestation committed before the approval-writer step is immutable but
+    # does not authorize execution by itself.  If its sealed evidence expires,
+    # atomically replace only the local safe saga with a new authenticated probe;
+    # the orphan attestation remains auditable and cannot be rebound.
+    return seal_current_probe()
+
+
+def _linked_probe_receipt_exists(approval_factory, deployment_id: UUID) -> bool:
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.canonical_v13.models import (  # noqa: PLC0415
+        EXECUTION_CANARY_PROBE_RECEIPTS_TABLE,
+    )
+
+    with approval_factory() as approval_connection:
+        effective = getattr(approval_connection, "connection", approval_connection)
+        return (
+            effective.execute(
+                select(EXECUTION_CANARY_PROBE_RECEIPTS_TABLE.c.id).where(
+                    EXECUTION_CANARY_PROBE_RECEIPTS_TABLE.c.deployment_id
+                    == deployment_id
+                )
+            ).first()
+            is not None
+        )
+
+
+def probe_canary(deployment_id: UUID) -> dict[str, object]:
+    """Persist one sealed probe through separately owned capability transactions."""
+
+    _require_release_checkout()
+    now = _now()
+    deployment_factory = _connection_factory(
+        _phase9_database_url("canonical_deployment_writer")
+    )
+    approval_factory = _connection_factory(
+        _phase9_database_url("canonical_approval_writer")
+    )
+    session_factory = _production_okx_session_factory()
+    probe = _sealed_probe_for_saga(
+        deployment_id,
+        session_factory,
+        evaluated_at=now,
+        linked_probe_receipt_exists=lambda: _linked_probe_receipt_exists(
+            approval_factory, deployment_id
+        ),
+    )
+
+    class SealedProbeSession:
+        def probe(self, *, instrument: str):
+            if instrument != probe.instrument:
+                raise CanonicalPhase9SupervisorBlocked(
+                    "BLOCKED_PHASE9_PROBE_INSTRUMENT", instrument
+                )
+            return probe
+
+    # Commit the deployment-owned FK parent before opening the approval writer
+    # transaction.  The sealed safe probe file makes a crash between these two
+    # steps an exact idempotent replay without another authenticated probe.
+    with deployment_factory() as deployment_connection:
+        sealed_probe, attestation = record_current_canary_attestation(
+            deployment_connection,
+            deployment_id=deployment_id,
+            session=SealedProbeSession(),
+            evaluated_at=now,
+        )
+    with approval_factory() as approval_connection:
+        probe_receipt = record_current_canary_probe_receipt(
+            approval_connection,
+            deployment_id=deployment_id,
+            probe=sealed_probe,
+            attestation=attestation,
+            evaluated_at=now,
+        )
+    recorded = RecordedCanaryProbe(attestation, probe_receipt)
+    return {
+        "status": "READY",
+        "deployment_id": str(deployment_id),
+        "attestation_id": str(recorded.attestation.attestation_id),
+        "attestation_digest": recorded.attestation.attestation_digest,
+        "probe_receipt_id": str(recorded.probe_receipt.probe_receipt_id),
+        "probe_receipt_digest": recorded.probe_receipt.receipt_digest,
+        "observed_at": recorded.probe_receipt.observed_at.isoformat(),
+        "expires_at": recorded.probe_receipt.expires_at.isoformat(),
+        "repeat_noop": (
+            recorded.attestation.repeat_noop
+            and recorded.probe_receipt.repeat_noop
+        ),
+        "execution_target": "OKX_DEMO",
+        "allow_real_funds": False,
+    }
+
+
+def dispatch_canary(plan_digest: str, risk_decision_id: UUID) -> dict[str, object]:
+    """Dispatch one exact persisted canary request through the canonical saga."""
+
+    _require_release_checkout()
+    plan, state = _load_plan("order_writer")
+    lease = FileLeasePort(SUPPORT_ROOT).read("order_writer")
+    now = _now()
+    if (
+        state.get("status") != "RUNNING"
+        or plan.plan_digest != plan_digest
+        or lease is None
+        or lease.expires_at <= now
+        or not UnixProcessProbe().is_alive(lease.pid)
+    ):
+        raise CanonicalPhase9SupervisorBlocked(
+            "BLOCKED_PHASE9_ORDER_SUPERVISOR_FENCE", "writer supervisor is not live"
+        )
+    result = _production_order_operator(
+        plan=plan, lease=lease, holder_token=_read_order_holder_token()
+    ).dispatch_canary(risk_decision_id=risk_decision_id, evaluated_at=now)
+    return {
+        "status": "ACCEPTED",
+        "order_id": str(result.order_id),
+        "exchange_order_id": result.exchange_order_id,
+        "receipt_digest": result.receipt_digest,
+        "repeat_noop": result.repeat_noop,
+    }
+
+
+def recover_canary(plan_digest: str, order_id: UUID) -> dict[str, object]:
+    """Use only GET recovery for a previously uncertain canonical Demo order."""
+
+    _require_release_checkout()
+    plan, state = _load_plan("order_writer")
+    lease = FileLeasePort(SUPPORT_ROOT).read("order_writer")
+    now = _now()
+    if (
+        state.get("status") != "RUNNING"
+        or plan.plan_digest != plan_digest
+        or lease is None
+        or lease.expires_at <= now
+        or not UnixProcessProbe().is_alive(lease.pid)
+    ):
+        raise CanonicalPhase9SupervisorBlocked(
+            "BLOCKED_PHASE9_ORDER_SUPERVISOR_FENCE", "writer plan/lease is unavailable"
+        )
+    result = _production_order_operator(
+        plan=plan, lease=lease, holder_token=_read_order_holder_token()
+    ).recover_canary(order_id=order_id, evaluated_at=now)
+    replay_receipt = build_lifecycle_receipt(
+        service_key="order_writer",
+        action="ORDER_REPLAY",
+        status="CONFIRMED" if result.repeat_noop else "RECOVERED",
+        generation=plan.generation,
+        observed_at=now,
+        plan_digest=plan.plan_digest,
+        details={
+            "order_id": str(result.order_id),
+            "order_receipt_digest": result.receipt_digest,
+            "repeat_noop": result.repeat_noop,
+            "transport_mode": "GET_ONLY",
+        },
+    )
+    _append_receipt(replay_receipt)
+    return {
+        "status": "RECOVERED",
+        "order_id": str(result.order_id),
+        "exchange_order_id": result.exchange_order_id,
+        "receipt_digest": result.receipt_digest,
+        "repeat_noop": result.repeat_noop,
+        "replay_evidence_receipt_digest": replay_receipt.receipt_digest,
+    }
+
+
+def collect_canary_fills(order_id: UUID) -> dict[str, object]:
+    """GET-only fill collection under the independently resolved fill identity."""
+
+    _require_release_checkout()
+    operator = CanonicalFillWriterOperator(
+        connection_factory=_connection_factory(
+            _phase9_database_url("canonical_fill_writer")
+        ),
+        session_factory=_production_okx_session_factory(),
+    )
+    fill_ids = operator.collect(order_id=order_id)
+    return {
+        "status": "RECORDED",
+        "order_id": str(order_id),
+        "fill_ids": [str(value) for value in fill_ids],
+        "fill_count": len(fill_ids),
+        "execution_target": "OKX_DEMO",
+        "allow_real_funds": False,
+    }
+
+
+def post_canary_ledger(fill_id: UUID) -> dict[str, object]:
+    """Post a server-derived ledger entry under canonical_ledger_writer only."""
+
+    _require_release_checkout()
+    entry_id = CanonicalLedgerWriterOperator(
+        _connection_factory(_phase9_database_url("canonical_ledger_writer"))
+    ).post(fill_id=fill_id)
+    return {
+        "status": "POSTED",
+        "fill_id": str(fill_id),
+        "ledger_entry_id": str(entry_id),
+        "execution_target": "OKX_DEMO",
+        "allow_real_funds": False,
+    }
+
+
+def reconcile_canary(order_id: UUID) -> dict[str, object]:
+    """Reconcile persisted lineage under canonical_reconciliation_writer only."""
+
+    _require_release_checkout()
+    run_ids = CanonicalReconciliationWriterOperator(
+        _connection_factory(_phase9_database_url("canonical_reconciliation_writer"))
+    ).reconcile(order_id=order_id)
+    return {
+        "status": "SUCCEEDED",
+        "order_id": str(order_id),
+        "reconciliation_run_ids": [str(value) for value in run_ids],
+        "run_count": len(run_ids),
+        "execution_target": "OKX_DEMO",
+        "allow_real_funds": False,
+    }
+
+
+def accept_recovery_soak(qualification_decision_id: UUID) -> dict[str, object]:
+    """Accept D only from current DB and read-only supervisor evidence ports."""
+
+    _require_release_checkout()
+    with _connection_factory(_control_database_url())() as connection:
+        result = accept_phase9_recovery_soak(
+            connection,
+            qualification_decision_id=qualification_decision_id,
+            supervisor=FilesystemRecoverySupervisorEvidence(),
+            observed_at=_now(),
+        )
+    return {
+        **result,
+        "qualification_decision_id": str(qualification_decision_id),
+        "execution_target": "OKX_DEMO",
+        "allow_real_funds": False,
+    }
+
+
 def supervise(
     service_key: str,
     plan_digest: str,
     *,
     worker_port: RuntimeWorkerSupervisorPort | None = None,
     authority_port: OrderWriterCanaryAuthorityPort | None = None,
+    lease_holder_token: str | None = None,
+    production_compose: bool = False,
 ) -> None:
     plan, state = _load_plan(service_key)
     if (
@@ -817,6 +1432,11 @@ def supervise(
         raise CanonicalPhase9SupervisorBlocked(
             "BLOCKED_PHASE9_SUPERVISE_UNCONFIRMED", service_key
         )
+    if production_compose and service_key == "order_writer":
+        authority_port = authority_port or _production_authority_port()
+        lease_holder_token = lease_holder_token or _read_order_holder_token()
+    if production_compose and service_key == "long_lived_runtime":
+        worker_port = worker_port or _production_runtime_worker_factory().build(plan)
     require_current_order_writer_canary_authority(
         plan=plan, observed_at=_now(), port=authority_port
     )
@@ -842,7 +1462,7 @@ def supervise(
             "BLOCKED_PHASE9_RUNTIME_WORKER_UNSET",
             "long-lived runtime requires an explicitly composed worker port",
         )
-    lease_holder_nonce = secrets.token_urlsafe(48)
+    lease_holder_nonce = lease_holder_token or secrets.token_urlsafe(48)
     lease_port = FileLeasePort(SUPPORT_ROOT)
     lease, receipt = claim_lease(
         lease_port,
@@ -911,10 +1531,27 @@ def main(argv: list[str] | None = None) -> int:
             "stop",
             "recover",
             "supervise",
+            "confirm-runtime-observation",
+            "probe-canary",
+            "dispatch-canary",
+            "recover-canary",
+            "collect-canary-fills",
+            "post-canary-ledger",
+            "reconcile-canary",
+            "accept-recovery-soak",
         ),
     )
     parser.add_argument(
-        "--service", required=True, choices=("long_lived_runtime", "order_writer")
+        "--service",
+        required=True,
+        choices=(
+            "long_lived_runtime",
+            "order_writer",
+            "fill_writer",
+            "ledger_writer",
+            "reconciliation_writer",
+            "recovery_control",
+        ),
     )
     parser.add_argument(
         "--stage", choices=("NO_ORDER_SOAK", "SIGNAL_RISK_SHADOW", "OKX_DEMO_CANARY")
@@ -934,6 +1571,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--mark-price-snapshot-digest")
     parser.add_argument("--effective-leverage")
     parser.add_argument("--position-policy", default="LONG_ONLY")
+    parser.add_argument("--risk-decision-id", type=UUID)
+    parser.add_argument("--order-id", type=UUID)
+    parser.add_argument("--fill-id", type=UUID)
+    parser.add_argument("--qualification-decision-id", type=UUID)
     args = parser.parse_args(argv)
     try:
         if args.command == "prepare":
@@ -992,7 +1633,15 @@ def main(argv: list[str] | None = None) -> int:
                 raise CanonicalPhase9SupervisorBlocked(
                     "BLOCKED_PHASE9_PLAN_DIGEST", "--plan-digest is required"
                 )
-            payload = confirm(args.service, args.plan_digest)
+            payload = confirm(
+                args.service,
+                args.plan_digest,
+                authority_port=(
+                    _production_authority_port()
+                    if args.service == "order_writer"
+                    else None
+                ),
+            )
         elif args.command == "status":
             payload = status(args.service)
         elif args.command == "restart":
@@ -1000,20 +1649,112 @@ def main(argv: list[str] | None = None) -> int:
                 raise CanonicalPhase9SupervisorBlocked(
                     "BLOCKED_PHASE9_PLAN_DIGEST", "--plan-digest is required"
                 )
-            payload = restart(args.service, args.plan_digest)
+            payload = restart(
+                args.service,
+                args.plan_digest,
+                authority_port=(
+                    _production_authority_port()
+                    if args.service == "order_writer"
+                    else None
+                ),
+            )
         elif args.command == "stop":
             payload = stop(args.service)
         elif args.command == "recover":
-            payload = recover(args.service)
+            payload = recover(
+                args.service,
+                authority_port=(
+                    _production_authority_port()
+                    if args.service == "order_writer"
+                    else None
+                ),
+            )
+        elif args.command == "confirm-runtime-observation":
+            if args.service != "long_lived_runtime" or not args.plan_digest:
+                raise CanonicalPhase9SupervisorBlocked(
+                    "BLOCKED_PHASE9_RUNTIME_OBSERVATION",
+                    "long_lived_runtime and --plan-digest are required",
+                )
+            payload = confirm_runtime_observation(args.plan_digest)
+        elif args.command == "probe-canary":
+            if args.service != "order_writer" or args.deployment_id is None:
+                raise CanonicalPhase9SupervisorBlocked(
+                    "BLOCKED_PHASE9_PROBE_COMMAND",
+                    "order_writer and --deployment-id are required",
+                )
+            payload = probe_canary(args.deployment_id)
+        elif args.command == "dispatch-canary":
+            if (
+                args.service != "order_writer"
+                or not args.plan_digest
+                or args.risk_decision_id is None
+            ):
+                raise CanonicalPhase9SupervisorBlocked(
+                    "BLOCKED_PHASE9_ORDER_COMMAND",
+                    "order_writer, --plan-digest, and --risk-decision-id are required",
+                )
+            payload = dispatch_canary(args.plan_digest, args.risk_decision_id)
+        elif args.command == "recover-canary":
+            if (
+                args.service != "order_writer"
+                or not args.plan_digest
+                or args.order_id is None
+            ):
+                raise CanonicalPhase9SupervisorBlocked(
+                    "BLOCKED_PHASE9_ORDER_COMMAND",
+                    "order_writer, --plan-digest, and --order-id are required",
+                )
+            payload = recover_canary(args.plan_digest, args.order_id)
+        elif args.command == "collect-canary-fills":
+            if args.service != "fill_writer" or args.order_id is None:
+                raise CanonicalPhase9SupervisorBlocked(
+                    "BLOCKED_PHASE9_FILL_COMMAND",
+                    "fill_writer and --order-id are required",
+                )
+            payload = collect_canary_fills(args.order_id)
+        elif args.command == "post-canary-ledger":
+            if args.service != "ledger_writer" or args.fill_id is None:
+                raise CanonicalPhase9SupervisorBlocked(
+                    "BLOCKED_PHASE9_LEDGER_COMMAND",
+                    "ledger_writer and --fill-id are required",
+                )
+            payload = post_canary_ledger(args.fill_id)
+        elif args.command == "reconcile-canary":
+            if args.service != "reconciliation_writer" or args.order_id is None:
+                raise CanonicalPhase9SupervisorBlocked(
+                    "BLOCKED_PHASE9_RECONCILIATION_COMMAND",
+                    "reconciliation_writer and --order-id are required",
+                )
+            payload = reconcile_canary(args.order_id)
+        elif args.command == "accept-recovery-soak":
+            if (
+                args.service != "recovery_control"
+                or args.qualification_decision_id is None
+            ):
+                raise CanonicalPhase9SupervisorBlocked(
+                    "BLOCKED_PHASE9_RECOVERY_ACCEPTANCE_COMMAND",
+                    "recovery_control and --qualification-decision-id are required",
+                )
+            payload = accept_recovery_soak(args.qualification_decision_id)
         else:
             if not args.plan_digest:
                 raise CanonicalPhase9SupervisorBlocked(
                     "BLOCKED_PHASE9_PLAN_DIGEST", "--plan-digest is required"
                 )
-            supervise(args.service, args.plan_digest)
+            supervise(args.service, args.plan_digest, production_compose=True)
             return 0
-    except CanonicalPhase9SupervisorBlocked as exc:
+    except (
+        CanonicalPhase9SupervisorBlocked,
+        CanonicalPhase9CompositionBlocked,
+        CanonicalPhase9RecoveryAcceptanceBlocked,
+    ) as exc:
         payload = {"status": "BLOCKED", "reason": exc.code, "detail": exc.detail}
+    except Exception as exc:
+        payload = {
+            "status": "BLOCKED",
+            "reason": "BLOCKED_PHASE9_PRODUCTION_COMMAND",
+            "detail": type(exc).__name__,
+        }
     print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
     return (
         0
@@ -1026,6 +1767,12 @@ def main(argv: list[str] | None = None) -> int:
             "STOPPED",
             "RECOVERED",
             "NO_OP",
+            "ACTIVE",
+            "ACCEPTED",
+            "READY",
+            "RECORDED",
+            "POSTED",
+            "SUCCEEDED",
         }
         else 2
     )

@@ -160,7 +160,7 @@ def test_production_composition_requires_two_roles_on_one_postgresql_database(
         )
     assert "BLOCKED_CANONICAL_DATABASE_SPLIT" in str(split.value)
 
-    engines = [create_engine("sqlite+pysqlite:///:memory:") for _ in range(14)]
+    engines = [create_engine("sqlite+pysqlite:///:memory:") for _ in range(10)]
     calls = []
 
     def fake_create_engine(url, **kwargs):
@@ -170,7 +170,7 @@ def test_production_composition_requires_two_roles_on_one_postgresql_database(
     monkeypatch.setattr(production, "create_engine", fake_create_engine)
     app = production.create_app(base)
     try:
-        assert len(calls) == 14
+        assert len(calls) == 9
         assert all(call[1] == {"pool_pre_ping": True} for call in calls)
         assert {route.path for route in app.routes if route.path.startswith(API_PREFIX)}
         assert app.state.canonical_reader_engine is engines[0]
@@ -179,7 +179,7 @@ def test_production_composition_requires_two_roles_on_one_postgresql_database(
             production.RESEARCH_PERSISTENCE_ENV_BY_CAPABILITY
         )
         assert set(app.state.canonical_phase9_engines) == set(
-            production.PHASE9_PERSISTENCE_ENV_BY_CAPABILITY
+            production.API_PHASE9_CAPABILITIES
         )
         routes = {route.path for route in app.routes}
         assert "/healthz" in routes

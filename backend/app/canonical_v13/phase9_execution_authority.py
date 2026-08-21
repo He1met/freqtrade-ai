@@ -32,6 +32,7 @@ from app.canonical_v13.models import (
     EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE,
     EXECUTION_RISK_RESERVATIONS_TABLE,
     QUALIFICATION_DECISIONS_TABLE,
+    RESEARCH_TARGETS_TABLE,
     RISK_DECISIONS_TABLE,
     SIGNALS_TABLE,
     TRADE_INTENTS_TABLE,
@@ -61,6 +62,15 @@ class RedactedExecutionAttestationResult:
 class CentralRiskDecisionResult:
     risk_decision_id: UUID
     reservation_id: UUID
+    status: str
+    reason_code: str
+    decision_digest: str
+    repeat_noop: bool
+
+
+@dataclass(frozen=True)
+class ShadowRiskDecisionResult:
+    risk_decision_id: UUID
     status: str
     reason_code: str
     decision_digest: str
@@ -377,6 +387,7 @@ def decide_central_demo_risk(
 
     effective = require_canonical_execution(connection)
     now = _utc(evaluated_at or datetime.now(timezone.utc), field="evaluated_at")
+    lock_execution_boundary(effective, key=f"central-risk-intent:{trade_intent_id}")
     existing = (
         effective.execute(
             select(RISK_DECISIONS_TABLE).where(
@@ -504,12 +515,14 @@ def decide_central_demo_risk(
     try:
         declared_notional = Decimal(str(intent["intent_json"].get("notional")))
         requested_size = Decimal(str(exchange_body.get("sz")))
+        requested_price = Decimal(str(exchange_body.get("px")))
     except Exception:
         raise CanonicalExecutionChainBlocked(
             "BLOCKED_INTENT_NOTIONAL", "intent notional or exchange size is invalid"
         ) from None
     _positive_decimal(declared_notional, field="intent.notional")
     _positive_decimal(requested_size, field="exchange_body.sz")
+    _positive_decimal(requested_price, field="exchange_body.px")
     requested_notional = (
         requested_size
         * Decimal(str(policy["contract_value"]))
@@ -540,8 +553,10 @@ def decide_central_demo_risk(
         status, reason_code = "BLOCKED", "RISK_BUDGET_EXPIRED"
     elif (
         exchange_body.get("instId") != requested_instrument
+        or exchange_body.get("tdMode") != "isolated"
         or exchange_body.get("side") != "buy"
         or exchange_body.get("posSide") != "long"
+        or exchange_body.get("ordType") != "limit"
     ):
         status, reason_code = "REJECTED", "RISK_LONG_ONLY_POLICY"
     elif requested_instrument != budget["instrument"]:
@@ -550,6 +565,8 @@ def decide_central_demo_risk(
         status, reason_code = "REJECTED", "RISK_NOTIONAL_DECLARATION_DRIFT"
     elif requested_size != Decimal(str(policy["minimum_contract_size"])):
         status, reason_code = "REJECTED", "RISK_MINIMUM_CONTRACT_SIZE_REQUIRED"
+    elif requested_price != Decimal(str(policy["limit_price"])):
+        status, reason_code = "REJECTED", "RISK_FROZEN_LIMIT_PRICE_REQUIRED"
     elif requested_notional > remaining_notional:
         status, reason_code = "REJECTED", "RISK_NOTIONAL_BUDGET_EXHAUSTED"
     elif remaining_count <= 0:
@@ -582,6 +599,9 @@ def decide_central_demo_risk(
     )
     decision_payload = {
         "contract": "canonical-v13-central-demo-risk-v1",
+        "decision_mode": "EXECUTION",
+        "order_submission_enabled": status == "RISK_ACCEPTED",
+        "execution_authorized": status == "RISK_ACCEPTED",
         "reservation_id": str(reservation_id),
         "reservation_digest": reservation_digest,
         "risk_budget_authorization_id": str(risk_budget_authorization_id),
@@ -612,12 +632,229 @@ def decide_central_demo_risk(
     )
 
 
+def decide_signal_risk_shadow(
+    connection: Connection,
+    *,
+    trade_intent_id: UUID,
+    evaluated_at: datetime | None = None,
+) -> ShadowRiskDecisionResult:
+    """Evaluate a Demo intent without creating execution authority or a reservation.
+
+    The accepted/rejected outcome is derived only from the immutable qualified target
+    and the intent envelope.  A shadow acceptance is deliberately persisted with no
+    budget or reservation and with both execution flags false, so it cannot be
+    consumed by the order writer.
+    """
+
+    effective = require_canonical_execution(connection)
+    now = _utc(evaluated_at or datetime.now(timezone.utc), field="evaluated_at")
+    lock_execution_boundary(effective, key=f"shadow-risk-intent:{trade_intent_id}")
+    existing = (
+        effective.execute(
+            select(RISK_DECISIONS_TABLE).where(
+                RISK_DECISIONS_TABLE.c.trade_intent_id == trade_intent_id
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    intent = (
+        effective.execute(
+            select(TRADE_INTENTS_TABLE).where(
+                TRADE_INTENTS_TABLE.c.id == trade_intent_id,
+                TRADE_INTENTS_TABLE.c.status == "INTENT_ACCEPTED",
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    signal = (
+        effective.execute(
+            select(SIGNALS_TABLE).where(SIGNALS_TABLE.c.id == intent["signal_id"])
+        )
+        .mappings()
+        .one_or_none()
+        if intent is not None
+        else None
+    )
+    target = (
+        effective.execute(
+            select(RESEARCH_TARGETS_TABLE).where(
+                RESEARCH_TARGETS_TABLE.c.id == signal["research_target_id"]
+            )
+        )
+        .mappings()
+        .one_or_none()
+        if signal is not None
+        else None
+    )
+    deployment = (
+        effective.execute(
+            select(DEPLOYMENTS_TABLE).where(
+                DEPLOYMENTS_TABLE.c.id == signal["deployment_id"]
+            )
+        )
+        .mappings()
+        .one_or_none()
+        if signal is not None
+        else None
+    )
+    approval = (
+        effective.execute(
+            select(DEPLOYMENT_APPROVALS_TABLE).where(
+                DEPLOYMENT_APPROVALS_TABLE.c.id
+                == deployment["deployment_approval_id"]
+            )
+        )
+        .mappings()
+        .one_or_none()
+        if deployment is not None
+        else None
+    )
+    qualification = (
+        effective.execute(
+            select(QUALIFICATION_DECISIONS_TABLE).where(
+                QUALIFICATION_DECISIONS_TABLE.c.id
+                == approval["qualification_decision_id"]
+            )
+        )
+        .mappings()
+        .one_or_none()
+        if approval is not None
+        else None
+    )
+    if (
+        intent is None
+        or signal is None
+        or target is None
+        or deployment is None
+        or approval is None
+        or approval["status"] != "APPROVED"
+        or qualification is None
+        or qualification["status"] != "QUALIFIED"
+        or qualification["research_target_id"] != target["id"]
+        or qualification["strategy_version_id"] != signal["strategy_version_id"]
+        or qualification["configuration_bundle_id"]
+        != signal["configuration_bundle_id"]
+        or qualification["configuration_bundle_digest"]
+        != signal["configuration_bundle_digest"]
+        or qualification["market_snapshot_id"] != signal["market_snapshot_id"]
+        or qualification["market_snapshot_digest"]
+        != signal["market_snapshot_digest"]
+        or deployment["status"] != "ACTIVE"
+        or deployment["demo_only"] is not True
+        or deployment["allow_real_funds"] is not False
+        or signal["signal_json"].get("evidence_class") != "PRODUCTION_OKX_DEMO"
+        or signal["signal_json"].get("natural_signal") is not True
+        or signal["signal_json"].get("allow_real_funds") is not False
+        or canonical_execution_digest(dict(signal["signal_json"]))
+        != signal["signal_digest"]
+        or canonical_execution_digest(dict(intent["intent_json"]))
+        != intent["intent_digest"]
+        or target["instrument"] != "BTC-USDT-SWAP"
+        or target["pair"] != "BTC/USDT:USDT"
+        or target["data_kind"] != "futures"
+    ):
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_SHADOW_RISK_LINEAGE",
+            "shadow risk requires the active exact qualified Demo target lineage",
+        )
+    body = intent["intent_json"].get("exchange_body")
+    baseline_accepted = (
+        isinstance(body, Mapping)
+        and intent["intent_json"].get("execution_target") == EXECUTION_TARGET
+        and intent["intent_json"].get("allow_real_funds") is False
+        and intent["intent_json"].get("instrument") == target["instrument"]
+        and body.get("instId") == target["instrument"]
+        and body.get("tdMode") == "isolated"
+        and body.get("side") == "buy"
+        and body.get("posSide") == "long"
+    )
+    if not baseline_accepted:
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_SHADOW_RISK_BASELINE",
+            "shadow receipt requires one exact accepted long-only baseline intent",
+        )
+    baseline_body = dict(body)
+    counterfactual_body = {
+        **baseline_body,
+        "side": "sell",
+        "posSide": "short",
+    }
+    checks = [
+        {
+            "check_id": "EXACT_LONG_ONLY_BASELINE",
+            "input_digest": canonical_execution_digest(baseline_body),
+            "outcome": "ACCEPTED",
+            "reason_code": "SHADOW_EXACT_TARGET_LONG_ONLY_ACCEPTED",
+            "order_submission_enabled": False,
+            "execution_authorized": False,
+        },
+        {
+            "check_id": "LONG_ONLY_REJECTED_COUNTERFACTUAL",
+            "input_digest": canonical_execution_digest(counterfactual_body),
+            "outcome": "REJECTED",
+            "reason_code": "SHADOW_SHORT_SELL_COUNTERFACTUAL_REJECTED",
+            "order_submission_enabled": False,
+            "execution_authorized": False,
+        },
+    ]
+    status = "RISK_ACCEPTED"
+    reason_code = "SHADOW_BASELINE_AND_COUNTERFACTUAL_VERIFIED"
+    payload = {
+        "contract": "canonical-v13-signal-risk-shadow-decision-v1",
+        "decision_mode": "SIGNAL_RISK_SHADOW",
+        "trade_intent_id": str(trade_intent_id),
+        "intent_digest": intent["intent_digest"],
+        "research_target_id": str(target["id"]),
+        "research_target_digest": target["target_digest"],
+        "checks": checks,
+        "status": status,
+        "reason_code": reason_code,
+        "order_submission_enabled": False,
+        "execution_authorized": False,
+        "risk_budget_authorization_id": None,
+        "reservation_id": None,
+        "allow_real_funds": False,
+    }
+    decision_digest = canonical_execution_digest(payload)
+    if existing is not None:
+        if (
+            existing["status"] != status
+            or existing["decision_json"] != payload
+            or existing["decision_digest"] != decision_digest
+        ):
+            raise CanonicalExecutionChainBlocked(
+                "BLOCKED_SHADOW_RISK_REPLAY_DRIFT",
+                "persisted decision is not the exact non-executable shadow receipt",
+            )
+        return ShadowRiskDecisionResult(
+            existing["id"], status, reason_code, decision_digest, True
+        )
+    decision_id = uuid4()
+    effective.execute(
+        RISK_DECISIONS_TABLE.insert().values(
+            id=decision_id,
+            trade_intent_id=trade_intent_id,
+            status=status,
+            decision_json=payload,
+            decision_digest=decision_digest,
+            created_at=now,
+        )
+    )
+    return ShadowRiskDecisionResult(
+        decision_id, status, reason_code, decision_digest, False
+    )
+
+
 __all__ = [
     "ATTESTATION_MAXIMUM_TTL",
     "CentralRiskDecisionResult",
     "RedactedExecutionAttestationResult",
     "RiskBudgetAuthorizationResult",
+    "ShadowRiskDecisionResult",
     "authorize_demo_risk_budget",
     "decide_central_demo_risk",
+    "decide_signal_risk_shadow",
     "record_redacted_demo_attestation",
 ]

@@ -20,14 +20,18 @@ from app.canonical_v13.models import (
     DEPLOYMENT_APPROVALS_TABLE,
     DEPLOYMENTS_TABLE,
     EXECUTION_ATTESTATIONS_TABLE,
+    EXECUTION_CANARY_PROBE_RECEIPTS_TABLE,
     EXECUTION_CANARY_RISK_POLICIES_TABLE,
     EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE,
     EXECUTION_RISK_RESERVATIONS_TABLE,
     FILLS_TABLE,
     LEDGER_ENTRIES_TABLE,
     ORDERS_TABLE,
+    ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE,
+    ORDER_DISPATCH_RECEIPTS_TABLE,
     ORDER_WRITER_LEASES_TABLE,
     QUALIFICATION_DECISIONS_TABLE,
+    RESEARCH_TARGETS_TABLE,
     RECONCILIATION_ITEMS_TABLE,
     RECONCILIATION_RUNS_TABLE,
     RISK_DECISIONS_TABLE,
@@ -35,6 +39,10 @@ from app.canonical_v13.models import (
     RUNTIME_RECEIPTS_TABLE,
     SIGNALS_TABLE,
     TRADE_INTENTS_TABLE,
+)
+from app.canonical_v13.execution_common import CanonicalExecutionChainBlocked
+from app.canonical_v13.phase9_canary_policy import (
+    validate_persisted_canary_probe_receipt,
 )
 from app.canonical_v13.order_service import CANONICAL_ORDER_WRITER_IDENTITY
 from app.canonical_v13.phase9_topology import phase9_topology_digest
@@ -83,6 +91,7 @@ _EXECUTION_TABLES = {
     "runtime_receipts": RUNTIME_RECEIPTS_TABLE,
     "execution_risk_budget_authorizations": EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE,
     "execution_canary_risk_policies": EXECUTION_CANARY_RISK_POLICIES_TABLE,
+    "execution_canary_probe_receipts": EXECUTION_CANARY_PROBE_RECEIPTS_TABLE,
     "execution_risk_reservations": EXECUTION_RISK_RESERVATIONS_TABLE,
     "execution_attestations": EXECUTION_ATTESTATIONS_TABLE,
     "order_writer_leases": ORDER_WRITER_LEASES_TABLE,
@@ -90,6 +99,8 @@ _EXECUTION_TABLES = {
     "trade_intents": TRADE_INTENTS_TABLE,
     "risk_decisions": RISK_DECISIONS_TABLE,
     "orders": ORDERS_TABLE,
+    "order_dispatch_outcome_receipts": ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE,
+    "order_dispatch_receipts": ORDER_DISPATCH_RECEIPTS_TABLE,
     "fills": FILLS_TABLE,
     "ledger_entries": LEDGER_ENTRIES_TABLE,
     "reconciliation_runs": RECONCILIATION_RUNS_TABLE,
@@ -104,12 +115,15 @@ _ZERO_REQUIRED_BY_STAGE = {
             "execution_risk_reservations",
             "execution_risk_budget_authorizations",
             "execution_canary_risk_policies",
+            "execution_canary_probe_receipts",
             "execution_attestations",
             "order_writer_leases",
             "signals",
             "trade_intents",
             "risk_decisions",
             "orders",
+            "order_dispatch_outcome_receipts",
+            "order_dispatch_receipts",
             "fills",
             "ledger_entries",
             "reconciliation_runs",
@@ -118,8 +132,14 @@ _ZERO_REQUIRED_BY_STAGE = {
     ),
     "SIGNAL_RISK_SHADOW": frozenset(
         {
+            "execution_risk_reservations",
+            "execution_risk_budget_authorizations",
+            "execution_canary_risk_policies",
+            "execution_canary_probe_receipts",
+            "execution_attestations",
             "order_writer_leases",
             "orders",
+            "order_dispatch_outcome_receipts",
             "fills",
             "ledger_entries",
             "reconciliation_runs",
@@ -130,6 +150,25 @@ _ZERO_REQUIRED_BY_STAGE = {
     "RECOVERY_SOAK": frozenset(),
 }
 PHASE9_ACCEPTANCE_STAGES: Final[tuple[str, ...]] = tuple(_ZERO_REQUIRED_BY_STAGE)
+
+_STRICT_CANARY_GLOBAL_TABLES: Final[tuple[str, ...]] = (
+    "execution_risk_budget_authorizations",
+    "execution_canary_risk_policies",
+    "execution_canary_probe_receipts",
+    "execution_risk_reservations",
+    "execution_attestations",
+    "order_writer_leases",
+    "signals",
+    "trade_intents",
+    "risk_decisions",
+    "orders",
+    "order_dispatch_outcome_receipts",
+    "order_dispatch_receipts",
+    "fills",
+    "ledger_entries",
+    "reconciliation_runs",
+    "reconciliation_items",
+)
 
 
 def _effective(connection: Connection) -> Connection:
@@ -158,6 +197,273 @@ def _digest(value: object) -> str:
             sort_keys=True,
         ).encode("utf-8")
     ).hexdigest()
+
+
+def _decimal_text(value: object) -> str:
+    decimal_value = Decimal(str(value))
+    rendered = format(decimal_value, "f")
+    if "." in rendered:
+        rendered = rendered.rstrip("0").rstrip(".")
+    return rendered or "0"
+
+
+def _persisted_decimal_equal(
+    connection: Connection, left: object, right: object
+) -> bool:
+    left_decimal = Decimal(str(left))
+    right_decimal = Decimal(str(right))
+    if connection.dialect.name != "sqlite":
+        return left_decimal == right_decimal
+    # SQLite has no fixed-point NUMERIC storage and the test adapter round-trips
+    # through float. Production PostgreSQL remains exact; this tolerance only
+    # neutralizes that fixture adapter artifact before digest recomputation.
+    return abs(left_decimal - right_decimal) <= Decimal("1e-12")
+
+
+def _dispatch_claim_is_exact(
+    connection: Connection,
+    *,
+    claim: Mapping[str, object],
+    order: Mapping[str, object],
+    risk: Mapping[str, object],
+    policy: Mapping[str, object],
+    probe: Mapping[str, object],
+    attestation: Mapping[str, object],
+    lease: Mapping[str, object],
+) -> bool:
+    guard = claim["guard_json"]
+    if not isinstance(guard, Mapping):
+        return False
+    try:
+        claimed_at = _persisted_utc(claim["claimed_at"])
+        resource_times = {
+            name: (
+                _persisted_utc(claim[f"{name}_observed_at"]),
+                _persisted_utc(claim[f"{name}_expires_at"]),
+            )
+            for name in ("positions", "pending_orders", "maximum_order_quantity")
+        }
+        resource_times["leverage"] = (
+            _persisted_utc(claim["guard_leverage_observed_at"]),
+            _persisted_utc(claim["guard_leverage_expires_at"]),
+        )
+        observed_at = _persisted_utc(claim["guard_observed_at"])
+        expires_at = _persisted_utc(claim["guard_expires_at"])
+        decimal_names = (
+            "current_short_leverage",
+            "limit_price",
+            "effective_leverage",
+            "minimum_size",
+            "maximum_buy_contracts",
+            "long_contracts",
+            "short_contracts",
+        )
+        if not all(isinstance(guard[name], str) for name in decimal_names):
+            return False
+        current_short = guard["current_short_leverage"]
+        limit_price = guard["limit_price"]
+        effective_leverage = guard["effective_leverage"]
+        minimum_size = guard["minimum_size"]
+        maximum_buy = guard["maximum_buy_contracts"]
+        long_contracts = guard["long_contracts"]
+        short_contracts = guard["short_contracts"]
+        if not all(Decimal(guard[name]).is_finite() for name in decimal_names):
+            return False
+    except (KeyError, TypeError, ValueError, ArithmeticError):
+        return False
+    if (
+        observed_at != max(value[0] for value in resource_times.values())
+        or expires_at > min(value[1] for value in resource_times.values())
+        or any(
+            not (start <= claimed_at < end)
+            for start, end in resource_times.values()
+        )
+        or not (observed_at <= claimed_at < expires_at)
+    ):
+        return False
+    # C/D are historical acceptance checks.  The short-lived authority must
+    # have been fresh when the irreversible dispatch claim was acquired; it
+    # need not still be fresh when fills and recovery evidence are inspected.
+    try:
+        probe_resource_windows = [
+            (
+                _persisted_utc(probe[f"{prefix}_observed_at"]),
+                _persisted_utc(probe[f"{prefix}_expires_at"]),
+            )
+            for prefix in (
+                "instrument",
+                "mark_price",
+                "account_config",
+                "leverage",
+                "exchange_max_leverage",
+                "positions",
+                "pending_orders",
+                "maximum_order_quantity",
+            )
+        ]
+        probe_observed_at = _persisted_utc(probe["observed_at"])
+        probe_expires_at = _persisted_utc(probe["expires_at"])
+        attestation_observed_at = _persisted_utc(attestation["observed_at"])
+        attestation_expires_at = _persisted_utc(attestation["expires_at"])
+        policy_accepted_at = _persisted_utc(policy["accepted_at"])
+        policy_expires_at = _persisted_utc(policy["expires_at"])
+        lease_acquired_at = _persisted_utc(claim["lease_acquired_at"])
+        lease_expires_at = _persisted_utc(claim["lease_expires_at"])
+    except (CanonicalExecutionChainBlocked, KeyError, TypeError, ValueError):
+        return False
+    if (
+        any(
+            not (observed <= claimed_at < expires)
+            for observed, expires in probe_resource_windows
+        )
+        or not (probe_observed_at <= claimed_at < probe_expires_at)
+        or not (attestation_observed_at <= claimed_at < attestation_expires_at)
+        or not (policy_accepted_at <= claimed_at < policy_expires_at)
+        or not (lease_acquired_at <= claimed_at < lease_expires_at)
+    ):
+        return False
+    resource_facts = {
+        "positions": {
+            "instrument": policy["instrument"],
+            "margin_mode": "isolated",
+            "long_contracts": "0",
+            "short_contracts": "0",
+            "active_position_count": 0,
+        },
+        "pending_orders": {
+            "instrument": policy["instrument"],
+            "pending_order_count": 0,
+        },
+        "maximum_order_quantity": {
+            "instrument": policy["instrument"],
+            "margin_mode": "isolated",
+            "limit_price": limit_price,
+            "effective_leverage": effective_leverage,
+            "maximum_buy_contracts": maximum_buy,
+        },
+        "leverage": {
+            "instrument": policy["instrument"],
+            "account_fingerprint_digest": claim["account_fingerprint_digest"],
+            "long": effective_leverage,
+            "short": current_short,
+        },
+    }
+    digest_fields = {
+        "positions": "positions_digest",
+        "pending_orders": "pending_orders_digest",
+        "maximum_order_quantity": "maximum_order_quantity_digest",
+        "leverage": "guard_leverage_digest",
+    }
+    for resource, facts in resource_facts.items():
+        start, end = resource_times[resource]
+        expected = _digest(
+            {
+                "execution_target": "OKX_DEMO",
+                "resource": resource,
+                "source": "okx_demo_rest",
+                "authenticated": True,
+                "observed_at": start.isoformat(),
+                "expires_at": end.isoformat(),
+                "facts": facts,
+            }
+        )
+        if claim[digest_fields[resource]] != expected:
+            return False
+    expected_guard = {
+        "contract": "canonical-v13-okx-demo-dispatch-guard-v1",
+        "execution_target": "OKX_DEMO",
+        "instrument": policy["instrument"],
+        "account_fingerprint_digest": claim["account_fingerprint_digest"],
+        "credential_generation_digest": claim["credential_generation_digest"],
+        "limit_price": limit_price,
+        "effective_leverage": effective_leverage,
+        "current_short_leverage": current_short,
+        "minimum_size": minimum_size,
+        "maximum_buy_contracts": maximum_buy,
+        "long_contracts": long_contracts,
+        "short_contracts": short_contracts,
+        "active_position_count": claim["active_position_count"],
+        "pending_order_count": claim["pending_order_count"],
+        "observed_at": observed_at.isoformat(),
+        "expires_at": expires_at.isoformat(),
+        "positions_digest": claim["positions_digest"],
+        "positions_observed_at": resource_times["positions"][0].isoformat(),
+        "positions_expires_at": resource_times["positions"][1].isoformat(),
+        "pending_orders_digest": claim["pending_orders_digest"],
+        "pending_orders_observed_at": resource_times["pending_orders"][0].isoformat(),
+        "pending_orders_expires_at": resource_times["pending_orders"][1].isoformat(),
+        "maximum_order_quantity_digest": claim["maximum_order_quantity_digest"],
+        "maximum_order_quantity_observed_at": resource_times[
+            "maximum_order_quantity"
+        ][0].isoformat(),
+        "maximum_order_quantity_expires_at": resource_times[
+            "maximum_order_quantity"
+        ][1].isoformat(),
+        "leverage_digest": claim["guard_leverage_digest"],
+        "leverage_observed_at": resource_times["leverage"][0].isoformat(),
+        "leverage_expires_at": resource_times["leverage"][1].isoformat(),
+    }
+    claim_payload = {
+        "contract": "canonical-v13-okx-demo-order-dispatch-claim-v1",
+        "order_id": str(order["id"]),
+        "attempt_ordinal": claim["attempt_ordinal"],
+        "request_digest": claim["request_digest"],
+        "holder_identity": claim["holder_identity"],
+        "holder_token_digest": claim["holder_token_digest"],
+        "lease_generation": claim["lease_generation"],
+        "lease_digest": claim["lease_digest"],
+        "lease_acquired_at": lease_acquired_at.isoformat(),
+        "lease_expires_at": lease_expires_at.isoformat(),
+        "risk_decision_id": str(risk["id"]),
+        "canary_risk_policy_id": str(policy["id"]),
+        "probe_receipt_id": str(probe["id"]),
+        "execution_attestation_id": str(attestation["id"]),
+        "guard_digest": claim["guard_digest"],
+        "claimed_at": claimed_at.isoformat(),
+    }
+    return (
+        dict(guard) == expected_guard
+        and claim["guard_digest"] == _digest(expected_guard)
+        and claim["claim_digest"] == _digest(claim_payload)
+        and claim["order_id"] == order["id"]
+        and claim["risk_decision_id"] == risk["id"]
+        and claim["canary_risk_policy_id"] == policy["id"]
+        and claim["probe_receipt_id"] == probe["id"]
+        and claim["execution_attestation_id"] == attestation["id"]
+        and claim["request_digest"] == order["request_digest"]
+        and claim["holder_identity"] == "canonical-v13-order-writer-v1"
+        and claim["lease_digest"]
+        == _digest(
+            {
+                "execution_target": "OKX_DEMO",
+                "holder_identity": claim["holder_identity"],
+                "holder_token_digest": claim["holder_token_digest"],
+                "generation": claim["lease_generation"],
+                "expires_at": lease_expires_at.isoformat(),
+            }
+        )
+        and claim["account_fingerprint_digest"]
+        == attestation["account_fingerprint_digest"]
+        == probe["account_fingerprint_digest"]
+        and claim["credential_generation_digest"]
+        == attestation["credential_generation_digest"]
+        == probe["credential_generation_digest"]
+        and _persisted_decimal_equal(
+            connection, claim["limit_price"], policy["limit_price"]
+        )
+        and _persisted_decimal_equal(
+            connection, claim["effective_leverage"], policy["effective_leverage"]
+        )
+        and _persisted_decimal_equal(
+            connection, claim["minimum_size"], policy["minimum_contract_size"]
+        )
+        and Decimal(str(claim["maximum_buy_contracts"]))
+        >= Decimal(str(claim["minimum_size"]))
+        and Decimal(str(claim["long_contracts"])) == 0
+        and Decimal(str(claim["short_contracts"])) == 0
+        and claim["active_position_count"] == 0
+        and claim["pending_order_count"] == 0
+    )
 
 
 def _handoff_from_decision(
@@ -380,6 +686,90 @@ def _inspect_lineage(
         else []
     )
     counts["risk_decisions"] = len(risks)
+    if stage == "SIGNAL_RISK_SHADOW":
+        target = connection.execute(
+            select(RESEARCH_TARGETS_TABLE).where(
+                RESEARCH_TARGETS_TABLE.c.id == handoff.research_target_id
+            )
+        ).mappings().one_or_none()
+        intent_by_id = {row["id"]: row for row in intents}
+        signal_by_id = {row["id"]: row for row in signals}
+        exact_shadow = []
+        for row in risks:
+            intent = intent_by_id.get(row["trade_intent_id"])
+            signal = signal_by_id.get(intent["signal_id"]) if intent else None
+            payload = row["decision_json"]
+            body = intent["intent_json"].get("exchange_body") if intent else None
+            if not isinstance(payload, Mapping) or not isinstance(body, Mapping):
+                continue
+            baseline_body = dict(body)
+            counterfactual_body = {
+                **baseline_body,
+                "side": "sell",
+                "posSide": "short",
+            }
+            expected_checks = [
+                {
+                    "check_id": "EXACT_LONG_ONLY_BASELINE",
+                    "input_digest": _digest(baseline_body),
+                    "outcome": "ACCEPTED",
+                    "reason_code": "SHADOW_EXACT_TARGET_LONG_ONLY_ACCEPTED",
+                    "order_submission_enabled": False,
+                    "execution_authorized": False,
+                },
+                {
+                    "check_id": "LONG_ONLY_REJECTED_COUNTERFACTUAL",
+                    "input_digest": _digest(counterfactual_body),
+                    "outcome": "REJECTED",
+                    "reason_code": "SHADOW_SHORT_SELL_COUNTERFACTUAL_REJECTED",
+                    "order_submission_enabled": False,
+                    "execution_authorized": False,
+                },
+            ]
+            if (
+                target is not None
+                and signal is not None
+                and _digest(dict(signal["signal_json"])) == signal["signal_digest"]
+                and signal["signal_json"].get("evidence_class")
+                == "PRODUCTION_OKX_DEMO"
+                and signal["signal_json"].get("natural_signal") is True
+                and signal["signal_json"].get("allow_real_funds") is False
+                and _digest(dict(intent["intent_json"])) == intent["intent_digest"]
+                and intent["intent_json"].get("execution_target") == "OKX_DEMO"
+                and intent["intent_json"].get("allow_real_funds") is False
+                and intent["intent_json"].get("instrument") == target["instrument"]
+                and body.get("instId") == target["instrument"]
+                and body.get("tdMode") == "isolated"
+                and body.get("side") == "buy"
+                and body.get("posSide") == "long"
+                and row["status"] == "RISK_ACCEPTED"
+                and payload.get("contract")
+                == "canonical-v13-signal-risk-shadow-decision-v1"
+                and payload.get("decision_mode") == "SIGNAL_RISK_SHADOW"
+                and payload.get("trade_intent_id") == str(intent["id"])
+                and payload.get("intent_digest") == intent["intent_digest"]
+                and payload.get("research_target_id") == str(target["id"])
+                and payload.get("research_target_digest") == target["target_digest"]
+                and payload.get("checks") == expected_checks
+                and payload.get("status") == "RISK_ACCEPTED"
+                and payload.get("reason_code")
+                == "SHADOW_BASELINE_AND_COUNTERFACTUAL_VERIFIED"
+                and payload.get("order_submission_enabled") is False
+                and payload.get("execution_authorized") is False
+                and payload.get("risk_budget_authorization_id") is None
+                and payload.get("reservation_id") is None
+                and payload.get("allow_real_funds") is False
+                and _digest(dict(payload)) == row["decision_digest"]
+            ):
+                exact_shadow.append(row)
+        if len(signals) != 1:
+            reasons.append("EXACT_SINGLE_SHADOW_SIGNAL_REQUIRED")
+        if len(intents) != 1:
+            reasons.append("EXACT_SINGLE_SHADOW_INTENT_REQUIRED")
+        if len(risks) != 1 or len(exact_shadow) != 1:
+            reasons.append("EXACT_SINGLE_SHADOW_DECISION_RECEIPT_REQUIRED")
+        return counts
+
     budgets = (
         connection.execute(
             select(EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE).where(
@@ -401,6 +791,7 @@ def _inspect_lineage(
         .mappings()
         .all()
     )
+    counts["execution_canary_risk_policies"] = len(risk_policy_sources)
     reservations = (
         connection.execute(
             select(EXECUTION_RISK_RESERVATIONS_TABLE).where(
@@ -417,16 +808,213 @@ def _inspect_lineage(
         reasons.append("EXACT_SIGNAL_EVIDENCE_UNSET")
     if not intents:
         reasons.append("EXACT_TRADE_INTENT_EVIDENCE_UNSET")
-    if not any(row["status"] == "RISK_ACCEPTED" for row in risks):
+    execution_risks = [
+        row
+        for row in risks
+        if isinstance(row["decision_json"], Mapping)
+        and row["decision_json"].get("decision_mode") == "EXECUTION"
+        and row["decision_json"].get("execution_authorized")
+        == (row["status"] == "RISK_ACCEPTED")
+        and row["decision_json"].get("order_submission_enabled")
+        == (row["status"] == "RISK_ACCEPTED")
+    ]
+    if not any(row["status"] == "RISK_ACCEPTED" for row in execution_risks):
         reasons.append("EXACT_RISK_ACCEPTED_EVIDENCE_UNSET")
-    if not any(row["status"] == "REJECTED" for row in risks):
-        reasons.append("EXACT_RISK_REJECTED_EVIDENCE_UNSET")
+    if len([row for row in execution_risks if row["status"] == "RISK_ACCEPTED"]) != 1:
+        reasons.append("EXACT_SINGLE_EXECUTION_RISK_ACCEPTED_REQUIRED")
     if len(budgets) != 1:
         reasons.append("EXACT_RISK_BUDGET_AUTHORIZATION_EVIDENCE_UNSET")
     exact_policy_source = []
     for source in risk_policy_sources:
+        probe_rows = (
+            connection.execute(
+                select(EXECUTION_CANARY_PROBE_RECEIPTS_TABLE).where(
+                    EXECUTION_CANARY_PROBE_RECEIPTS_TABLE.c.id
+                    == source["probe_receipt_id"]
+                )
+            )
+            .mappings()
+            .all()
+        )
+        counts["execution_canary_probe_receipts"] += len(probe_rows)
+        probe_is_exact = False
+        probe_validated = False
+        if len(probe_rows) == 1:
+            probe = probe_rows[0]
+            try:
+                validate_persisted_canary_probe_receipt(
+                    connection,
+                    probe_receipt_id=probe["id"],
+                    evaluated_at=_persisted_utc(source["accepted_at"]),
+                )
+            except CanonicalExecutionChainBlocked:
+                pass
+            else:
+                probe_validated = True
+                probe_is_exact = (
+                    probe["deployment_id"] == deployment["id"]
+                    and probe["execution_attestation_id"]
+                    == source["execution_attestation_id"]
+                    and probe["instrument"] == source["instrument"]
+                    and probe["instrument_digest"]
+                    == source["metadata_receipt_digest"]
+                    and probe["mark_price_digest"]
+                    == source["mark_price_receipt_digest"]
+                    and _persisted_decimal_equal(
+                        connection,
+                        probe["minimum_size"],
+                        source["minimum_contract_size"],
+                    )
+                    and _persisted_decimal_equal(
+                        connection, probe["contract_value"], source["contract_value"]
+                    )
+                    and probe["contract_value_ccy"]
+                    == source["contract_value_ccy"]
+                    and _persisted_decimal_equal(
+                        connection, probe["mark_price"], source["mark_price"]
+                    )
+                    and _persisted_decimal_equal(
+                        connection, probe["limit_price"], source["limit_price"]
+                    )
+                    and _persisted_decimal_equal(
+                        connection,
+                        probe["maximum_buy_contracts"],
+                        source["maximum_buy_contracts"],
+                    )
+                    and Decimal(str(probe["long_contracts"])) == 0
+                    and Decimal(str(probe["short_contracts"])) == 0
+                    and probe["active_position_count"] == 0
+                    and probe["pending_order_count"] == 0
+                    and _persisted_decimal_equal(
+                        connection,
+                        probe["exchange_max_leverage"],
+                        source["exchange_max_leverage"],
+                    )
+                )
+        if len(probe_rows) != 1:
+            reasons.append("CANONICAL_RISK_POLICY_PROBE_RECEIPT_DRIFT")
+            reasons.append("CANONICAL_RISK_POLICY_PROBE_VALIDATION_BLOCKED")
+            continue
+        request_payload = {
+            "contract": "canonical-v13-canary-risk-policy-request-v1",
+            "qualification_decision_id": str(source["qualification_decision_id"]),
+            "deployment_approval_id": str(source["deployment_approval_id"]),
+            "probe_receipt_id": str(source["probe_receipt_id"]),
+            "actor_identity": source["actor_identity"],
+            "idempotency_key": source["idempotency_key"],
+            "reason": source["reason"],
+        }
+        request_is_exact = _digest(request_payload) == source["request_digest"]
+        policy_payload = {
+            "contract": "canonical-v13-canary-risk-policy-v1",
+            "request_digest": source["request_digest"],
+            "qualification_decision_id": str(source["qualification_decision_id"]),
+            "qualification_decision_digest": handoff.qualification_decision_digest,
+            "probe_receipt_id": str(source["probe_receipt_id"]),
+            "probe_receipt_digest": (
+                probe["receipt_digest"] if len(probe_rows) == 1 else ""
+            ),
+            "strategy_version_id": str(source["strategy_version_id"]),
+            "strategy_artifact_id": str(source["strategy_artifact_id"]),
+            "strategy_artifact_digest": source["strategy_artifact_digest"],
+            "research_target_id": str(source["research_target_id"]),
+            "research_target_digest": source["research_target_digest"],
+            "configuration_bundle_id": str(source["configuration_bundle_id"]),
+            "configuration_bundle_digest": source["configuration_bundle_digest"],
+            "market_snapshot_id": str(source["market_snapshot_id"]),
+            "market_snapshot_digest": source["market_snapshot_digest"],
+            "execution_target": source["execution_target"],
+            "instrument": source["instrument"],
+            "position_policy": source["position_policy"],
+            "max_order_count": source["max_order_count"],
+            "minimum_contract_size": _decimal_text(probe["minimum_size"]),
+            "contract_value": _decimal_text(probe["contract_value"]),
+            "contract_value_ccy": source["contract_value_ccy"],
+            "mark_price": _decimal_text(probe["mark_price"]),
+            "limit_price": _decimal_text(probe["limit_price"]),
+            "maximum_buy_contracts": _decimal_text(
+                probe["maximum_buy_contracts"]
+            ),
+            "max_notional": _decimal_text(
+                Decimal(probe["minimum_size"])
+                * Decimal(probe["contract_value"])
+                * Decimal(probe["mark_price"])
+            ),
+            "strategy_max_leverage": "14",
+            "exchange_max_leverage": _decimal_text(probe["exchange_max_leverage"]),
+            "effective_leverage": _decimal_text(probe["current_long_leverage"]),
+            "metadata_receipt_digest": source["metadata_receipt_digest"],
+            "mark_price_receipt_digest": source["mark_price_receipt_digest"],
+            "attestation_digest": source["attestation_digest"],
+            "allow_real_funds": False,
+        }
+        policy_is_exact = _digest(policy_payload) == source["policy_digest"]
+        receipt_payload = {
+            "contract": "canonical-v13-canary-risk-policy-receipt-v1",
+            "policy_id": str(source["id"]),
+            "request_digest": source["request_digest"],
+            "policy_digest": source["policy_digest"],
+            "accepted_at": _persisted_utc(source["accepted_at"]).isoformat(),
+            "expires_at": _persisted_utc(source["expires_at"]).isoformat(),
+            # This is the immutable issuance receipt.  Termination changes the
+            # row state but cannot rewrite the originally accepted receipt.
+            "status": "ACTIVE",
+        }
+        receipt_is_exact = _digest(receipt_payload) == source["receipt_digest"]
+        if not probe_is_exact:
+            reasons.append("CANONICAL_RISK_POLICY_PROBE_RECEIPT_DRIFT")
+        if not probe_validated:
+            reasons.append("CANONICAL_RISK_POLICY_PROBE_VALIDATION_BLOCKED")
+        if not request_is_exact:
+            reasons.append("CANONICAL_RISK_POLICY_REQUEST_DIGEST_DRIFT")
+        if not policy_is_exact:
+            reasons.append("CANONICAL_RISK_POLICY_DIGEST_DRIFT")
+        if not receipt_is_exact:
+            reasons.append("CANONICAL_RISK_POLICY_RECEIPT_DIGEST_DRIFT")
+        exact_linked_budgets = []
+        for budget in budgets:
+            authorization_payload = {
+                "contract": "canonical-v13-demo-risk-budget-authorization-v1",
+                "execution_canary_risk_policy_id": str(source["id"]),
+                "deployment_approval_id": str(approval["id"]),
+                "approval_digest": approval["approval_digest"],
+                "qualification_decision_id": str(handoff.qualification_decision_id),
+                "qualification_decision_digest": handoff.qualification_decision_digest,
+                "execution_target": "OKX_DEMO",
+                "instrument": source["instrument"],
+                "max_notional": str(Decimal(str(source["max_notional"]))),
+                "max_order_count": source["max_order_count"],
+                "position_policy": source["position_policy"],
+                "effective_leverage": str(source["effective_leverage"]),
+                "actor_identity": budget["actor_identity"],
+                "reason": budget["reason"],
+                "policy_digest": source["policy_digest"],
+                "source_receipt_digest": source["receipt_digest"],
+                "expires_at": _persisted_utc(source["expires_at"]).isoformat(),
+                "allow_real_funds": False,
+            }
+            if (
+                budget["execution_canary_risk_policy_id"] == source["id"]
+                and budget["deployment_approval_id"] == approval["id"]
+                and budget["execution_target"] == "OKX_DEMO"
+                and budget["instrument"] == source["instrument"]
+                and budget["max_order_count"] == 1
+                and budget["policy_digest"] == source["policy_digest"]
+                and budget["source_receipt_digest"] == source["receipt_digest"]
+                and _persisted_utc(budget["expires_at"])
+                == _persisted_utc(source["expires_at"])
+                and _digest(authorization_payload) == budget["authorization_digest"]
+            ):
+                exact_linked_budgets.append(budget)
         if (
-            source["strategy_version_id"] == handoff.strategy_version_id
+            probe_is_exact
+            and request_is_exact
+            and policy_is_exact
+            and receipt_is_exact
+            and source["qualification_decision_id"]
+            == handoff.qualification_decision_id
+            and source["deployment_approval_id"] == approval["id"]
+            and source["strategy_version_id"] == handoff.strategy_version_id
             and source["research_target_id"] == handoff.research_target_id
             and source["configuration_bundle_id"] == handoff.configuration_bundle_id
             and source["configuration_bundle_digest"]
@@ -435,35 +1023,58 @@ def _inspect_lineage(
             and source["market_snapshot_digest"] == handoff.market_snapshot_digest
             and source["execution_target"] == "OKX_DEMO"
             and source["allow_real_funds"] is False
+            and (
+                (
+                    stage == "OKX_DEMO_CANARY"
+                    and source["status"] in {"ACTIVE", "TERMINATED"}
+                )
+                or (stage == "RECOVERY_SOAK" and source["status"] == "TERMINATED")
+            )
+            and (
+                source["terminated_at"] is None
+                and source["termination_digest"] is None
+                if source["status"] == "ACTIVE"
+                else source["terminated_at"] is not None
+                and source["termination_digest"] is not None
+            )
             and source["position_policy"] == "LONG_ONLY"
             and source["max_order_count"] == 1
             and Decimal(str(source["strategy_max_leverage"])) == Decimal("14")
+            and _persisted_decimal_equal(
+                connection,
+                source["effective_leverage"],
+                Decimal(str(probe["current_long_leverage"])),
+            )
             and Decimal(str(source["effective_leverage"]))
             <= min(
                 Decimal(str(source["strategy_max_leverage"])),
                 Decimal(str(source["exchange_max_leverage"])),
             )
-            and Decimal(str(source["max_notional"]))
-            == Decimal(str(source["minimum_contract_size"]))
-            * Decimal(str(source["contract_value"]))
-            * Decimal(str(source["mark_price"]))
+            and _persisted_decimal_equal(
+                connection, source["limit_price"], probe["limit_price"]
+            )
+            and _persisted_decimal_equal(
+                connection,
+                source["maximum_buy_contracts"],
+                probe["maximum_buy_contracts"],
+            )
+            and Decimal(str(source["maximum_buy_contracts"]))
+            >= Decimal(str(source["minimum_contract_size"]))
+            and _persisted_decimal_equal(
+                connection,
+                source["max_notional"],
+                Decimal(str(source["minimum_contract_size"]))
+                * Decimal(str(source["contract_value"]))
+                * Decimal(str(source["mark_price"])),
+            )
             and _persisted_utc(source["expires_at"])
             - _persisted_utc(source["accepted_at"])
             == timedelta(minutes=30)
-            and any(
-                budget["source_receipt_digest"] == source["receipt_digest"]
-                and budget["execution_canary_risk_policy_id"] == source["id"]
-                for budget in budgets
-            )
+            and len(exact_linked_budgets) == 1
         ):
             exact_policy_source.append(source)
     if not risk_policy_sources:
-        reasons.extend(
-            (
-                "CANONICAL_PHASE9_RISK_BUDGET_SOURCE_UNSET",
-                "CANONICAL_RISK_POLICY_LINEAGE_UNSET",
-            )
-        )
+        reasons.append("CANONICAL_RISK_POLICY_LINEAGE_UNSET")
     elif len(exact_policy_source) != 1:
         reasons.append("CANONICAL_RISK_POLICY_LINEAGE_UNSET")
     accepted_reservation_digests = {
@@ -471,16 +1082,20 @@ def _inspect_lineage(
         for row in reservations
         if row["status"] == "RISK_ACCEPTED"
     }
+    if (
+        len(reservations) != 1
+        or len(accepted_reservation_digests) != 1
+        or len(execution_risks) != 1
+    ):
+        reasons.append("EXACT_SINGLE_EXECUTION_RISK_RESERVATION_REQUIRED")
     if any(
-        row["status"] == "RISK_ACCEPTED"
+        row in execution_risks
+        and row["status"] == "RISK_ACCEPTED"
         and row["decision_json"].get("reservation_digest")
         not in accepted_reservation_digests
         for row in risks
     ):
         reasons.append("EXACT_RISK_BUDGET_RESERVATION_EVIDENCE_UNSET")
-    if stage == "SIGNAL_RISK_SHADOW":
-        return counts
-
     attestations = (
         connection.execute(
             select(EXECUTION_ATTESTATIONS_TABLE).where(
@@ -490,25 +1105,22 @@ def _inspect_lineage(
         .mappings()
         .all()
     )
-    fresh_attestations = []
+    exact_attestations = []
     for row in attestations:
-        observed_at = row["observed_at"]
-        expires_at = row["expires_at"]
-        if observed_at.tzinfo is None:
-            observed_at = observed_at.replace(tzinfo=timezone.utc)
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
         if (
             row["status"] == "READY"
             and row["execution_target"] == "OKX_DEMO"
             and row["permissions_json"]
             == {"read": True, "trade": True, "withdraw": False}
-            and observed_at <= evaluated_at < expires_at
+            and len(exact_policy_source) == 1
+            and row["id"] == exact_policy_source[0]["execution_attestation_id"]
+            and row["attestation_digest"]
+            == exact_policy_source[0]["attestation_digest"]
         ):
-            fresh_attestations.append(row)
-    counts["execution_attestations"] = len(fresh_attestations)
-    if len(fresh_attestations) != 1:
-        reasons.append("EXACT_FRESH_OKX_DEMO_ATTESTATION_EVIDENCE_UNSET")
+            exact_attestations.append(row)
+    counts["execution_attestations"] = len(attestations)
+    if len(attestations) != 1 or len(exact_attestations) != 1:
+        reasons.append("EXACT_OKX_DEMO_ATTESTATION_EVIDENCE_UNSET")
     leases = (
         connection.execute(
             select(ORDER_WRITER_LEASES_TABLE).where(
@@ -539,11 +1151,13 @@ def _inspect_lineage(
             and row["lease_digest"] == expected_lease_digest
         ):
             exact_leases.append(row)
-    counts["order_writer_leases"] = len(exact_leases)
-    if len(exact_leases) != 1:
+    counts["order_writer_leases"] = len(leases)
+    if len(leases) != 1 or len(exact_leases) != 1:
         reasons.append("EXACT_SINGLE_ORDER_WRITER_LEASE_EVIDENCE_UNSET")
 
-    accepted_ids = [row["id"] for row in risks if row["status"] == "RISK_ACCEPTED"]
+    accepted_ids = [
+        row["id"] for row in execution_risks if row["status"] == "RISK_ACCEPTED"
+    ]
     orders = (
         connection.execute(
             select(ORDERS_TABLE).where(
@@ -570,6 +1184,141 @@ def _inspect_lineage(
         reasons.append("EXACT_SINGLE_OKX_DEMO_ORDER_EVIDENCE_UNSET")
         return counts
     order = valid_orders[0]
+    accepted_risk = next(
+        row for row in execution_risks if row["id"] == order["risk_decision_id"]
+    )
+    claim_policy = exact_policy_source[0] if len(exact_policy_source) == 1 else None
+    claim_probe = (
+        connection.execute(
+            select(EXECUTION_CANARY_PROBE_RECEIPTS_TABLE).where(
+                EXECUTION_CANARY_PROBE_RECEIPTS_TABLE.c.id
+                == claim_policy["probe_receipt_id"]
+            )
+        )
+        .mappings()
+        .one_or_none()
+        if claim_policy is not None
+        else None
+    )
+    claim_attestation = (
+        connection.execute(
+            select(EXECUTION_ATTESTATIONS_TABLE).where(
+                EXECUTION_ATTESTATIONS_TABLE.c.id
+                == claim_policy["execution_attestation_id"]
+            )
+        )
+        .mappings()
+        .one_or_none()
+        if claim_policy is not None
+        else None
+    )
+    claims = (
+        connection.execute(
+            select(ORDER_DISPATCH_RECEIPTS_TABLE).where(
+                ORDER_DISPATCH_RECEIPTS_TABLE.c.order_id == order["id"]
+            )
+        )
+        .mappings()
+        .all()
+    )
+    counts["order_dispatch_receipts"] = len(claims)
+    exact_claims = []
+    for claim in claims:
+        if (
+            claim["attempt_ordinal"] == 1
+            and len(exact_leases) == 1
+            and claim_policy is not None
+            and claim_probe is not None
+            and claim_attestation is not None
+            and _dispatch_claim_is_exact(
+                connection,
+                claim=claim,
+                order=order,
+                risk=accepted_risk,
+                policy=claim_policy,
+                probe=claim_probe,
+                attestation=claim_attestation,
+                lease=exact_leases[0],
+            )
+        ):
+            exact_claims.append(claim)
+    if len(exact_claims) != 1:
+        reasons.append("EXACT_SINGLE_ORDER_POST_RECEIPT_UNPROVEN")
+    order_intent = next(
+        (row for row in intents if row["id"] == accepted_risk["trade_intent_id"]),
+        None,
+    )
+    exchange_body = (
+        order_intent["intent_json"].get("exchange_body")
+        if order_intent is not None
+        and isinstance(order_intent["intent_json"], Mapping)
+        else None
+    )
+    if not isinstance(exchange_body, Mapping):
+        exchange_body = {}
+    outcomes = (
+        connection.execute(
+            select(ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE).where(
+                ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE.c.order_id == order["id"]
+            )
+        )
+        .mappings()
+        .all()
+    )
+    counts["order_dispatch_outcome_receipts"] = len(outcomes)
+    exact_outcomes = []
+    if len(exact_claims) == 1:
+        claim = exact_claims[0]
+        for outcome in outcomes:
+            safe_response = outcome["safe_response_json"]
+            if not isinstance(safe_response, Mapping):
+                continue
+            safe_response_digest = _digest(dict(safe_response))
+            outcome_payload = {
+                "contract": "canonical-v13-order-dispatch-outcome-v1",
+                "outcome_id": str(outcome["id"]),
+                "order_id": str(order["id"]),
+                "dispatch_claim_id": str(claim["id"]),
+                "claim_digest": claim["claim_digest"],
+                "client_order_id": outcome["client_order_id"],
+                "exchange_order_id": outcome["exchange_order_id"],
+                "safe_response_digest": safe_response_digest,
+                "outcome_mode": outcome["outcome_mode"],
+                "recorded_at": _persisted_utc(outcome["recorded_at"]).isoformat(),
+            }
+            outcome_digest = _digest(outcome_payload)
+            order_digest = _digest(
+                {
+                    "contract": "canonical-v13-okx-demo-order-receipt-v2",
+                    "order_id": str(order["id"]),
+                    "request_digest": order["request_digest"],
+                    "dispatch_claim_digest": claim["claim_digest"],
+                    "dispatch_outcome_receipt_digest": outcome_digest,
+                }
+            )
+            if (
+                outcome["dispatch_claim_id"] == claim["id"]
+                and outcome["claim_digest"] == claim["claim_digest"]
+                and outcome["client_order_id"] == exchange_body.get("clOrdId")
+                and outcome["exchange_order_id"] == order["exchange_order_id"]
+                and safe_response.get("clOrdId") == outcome["client_order_id"]
+                and safe_response.get("ordId") == outcome["exchange_order_id"]
+                and safe_response.get("sCode") == "0"
+                and outcome["safe_response_digest"] == safe_response_digest
+                and outcome["outcome_mode"] == "POST"
+                and outcome["receipt_digest"] == outcome_digest
+                and order["receipt_digest"] == order_digest
+                and _persisted_utc(outcome["recorded_at"])
+                >= _persisted_utc(claim["claimed_at"])
+            ):
+                exact_outcomes.append(outcome)
+    if len(outcomes) != 1 or len(exact_outcomes) != 1:
+        reasons.append("EXACT_SINGLE_ORDER_POST_OUTCOME_UNPROVEN")
+
+    try:
+        requested_size = Decimal(str(exchange_body["sz"]))
+    except (KeyError, TypeError, ArithmeticError):
+        requested_size = Decimal(0)
     fills = (
         connection.execute(
             select(FILLS_TABLE).where(FILLS_TABLE.c.order_id == order["id"])
@@ -577,15 +1326,38 @@ def _inspect_lineage(
         .mappings()
         .all()
     )
-    fills = [
+    exact_fills = [
         row
         for row in fills
-        if row["fill_json"].get("evidence_class") == "PRODUCTION_OKX_DEMO"
+        if isinstance(row["fill_json"], Mapping)
+        and row["fill_json"].get("evidence_class") == "PRODUCTION_OKX_DEMO"
         and row["fill_json"].get("allow_real_funds") is False
         and row["fill_json"].get("exchange_order_id") == order["exchange_order_id"]
+        and row["fill_json"].get("exchange_fill_id") == row["exchange_fill_id"]
+        and row["fill_json"].get("instrument") == exchange_body.get("instId")
+        and row["fill_json"].get("side") == exchange_body.get("side") == "buy"
+        and row["fill_json"].get("position_side")
+        == exchange_body.get("posSide")
+        == "long"
+        and row["receipt_digest"]
+        == _digest(
+            {
+                "contract": "canonical-v13-okx-demo-fill-v1",
+                "order_id": str(order["id"]),
+                "order_receipt_digest": order["receipt_digest"],
+                "fill": dict(row["fill_json"]),
+            }
+        )
     ]
-    counts["fills"] = len(fills)
-    fill_ids = [row["id"] for row in fills]
+    counts["fills"] = len(exact_fills)
+    fill_ids = [row["id"] for row in exact_fills]
+    try:
+        filled_size = sum(
+            (Decimal(str(row["fill_json"]["size"])) for row in exact_fills),
+            Decimal(0),
+        )
+    except (KeyError, ArithmeticError):
+        filled_size = Decimal(0)
     ledgers = (
         connection.execute(
             select(LEDGER_ENTRIES_TABLE).where(
@@ -597,8 +1369,35 @@ def _inspect_lineage(
         if fill_ids
         else []
     )
-    counts["ledger_entries"] = len(ledgers)
-    ledger_ids = [row["id"] for row in ledgers]
+    exact_ledgers = []
+    for fill in exact_fills:
+        matching = [row for row in ledgers if row["fill_id"] == fill["id"]]
+        if len(matching) != 1:
+            continue
+        ledger = matching[0]
+        expected_payload = {
+            "contract": "canonical-v13-okx-demo-ledger-entry-v1",
+            "fill_id": str(fill["id"]),
+            "fill_receipt_digest": fill["receipt_digest"],
+            "entry_key": ledger["entry_key"],
+            "asset": ledger["asset"],
+            "amount": _decimal_text(fill["fill_json"]["size"]),
+            "entry_type": ledger["entry_type"],
+            "evidence_class": "PRODUCTION_OKX_DEMO",
+            "allow_real_funds": False,
+        }
+        if (
+            ledger["entry_key"]
+            == f"okx-demo-fill:{fill['exchange_fill_id']}:long-contracts"
+            and ledger["asset"] == fill["fill_json"]["instrument"]
+            and Decimal(str(ledger["amount"]))
+            == Decimal(str(fill["fill_json"]["size"]))
+            and ledger["entry_type"] == "OKX_DEMO_LONG_FILL_CONTRACTS"
+            and ledger["entry_digest"] == _digest(expected_payload)
+        ):
+            exact_ledgers.append(ledger)
+    counts["ledger_entries"] = len(exact_ledgers)
+    ledger_ids = [row["id"] for row in exact_ledgers]
     items = (
         connection.execute(
             select(RECONCILIATION_ITEMS_TABLE).where(
@@ -613,8 +1412,14 @@ def _inspect_lineage(
         if fill_ids and ledger_ids
         else []
     )
-    counts["reconciliation_items"] = len(items)
-    run_ids = [row["reconciliation_run_id"] for row in items]
+    exact_items = [
+        row
+        for row in items
+        if row["item_type"] == "OKX_DEMO_ORDER_FILL_LEDGER_CHAIN"
+        and row["evidence_digest"] == _digest(dict(row["evidence_json"]))
+    ]
+    counts["reconciliation_items"] = len(exact_items)
+    run_ids = [row["reconciliation_run_id"] for row in exact_items]
     runs = (
         connection.execute(
             select(RECONCILIATION_RUNS_TABLE).where(
@@ -628,18 +1433,115 @@ def _inspect_lineage(
         if run_ids
         else []
     )
-    counts["reconciliation_runs"] = len(runs)
-    if len(fills) != 1:
-        reasons.append("EXACT_SINGLE_FILL_EVIDENCE_UNSET")
-    if not ledgers:
+    exact_runs = [
+        row
+        for row in runs
+        if row["receipt_digest"]
+        == _digest({"run_id": str(row["id"]), "scope_digest": row["scope_digest"]})
+    ]
+    counts["reconciliation_runs"] = len(exact_runs)
+    if (
+        not exact_fills
+        or len(exact_fills) != len(fills)
+        or len({row["exchange_fill_id"] for row in exact_fills}) != len(exact_fills)
+        or filled_size != requested_size
+    ):
+        reasons.append("EXACT_COMPLETE_FILL_EVIDENCE_UNSET")
+    if len(exact_ledgers) != len(exact_fills) or len(ledgers) != len(exact_fills):
         reasons.append("EXACT_LEDGER_EVIDENCE_UNSET")
-    if not items or not runs:
+    if (
+        len(exact_items) != len(exact_fills)
+        or len(items) != len(exact_fills)
+        or len(exact_runs) != len(exact_fills)
+        or len(runs) != len(exact_fills)
+        or len(set(run_ids)) != len(exact_fills)
+    ):
         reasons.append("EXACT_RECONCILIATION_EVIDENCE_UNSET")
+    if stage == "RECOVERY_SOAK":
+        policy = exact_policy_source[0] if len(exact_policy_source) == 1 else None
+        linked_budgets = (
+            [
+                row
+                for row in budgets
+                if policy is not None
+                and row["execution_canary_risk_policy_id"] == policy["id"]
+            ]
+            if policy is not None
+            else []
+        )
+        accepted_reservations = [
+            row for row in reservations if row["status"] == "RISK_ACCEPTED"
+        ]
+        exact_fill_evidence = []
+        for fill in exact_fills:
+            matching_ledger = [
+                row for row in exact_ledgers if row["fill_id"] == fill["id"]
+            ]
+            matching_item = [
+                row for row in exact_items if row["fill_id"] == fill["id"]
+            ]
+            if len(matching_ledger) != 1 or len(matching_item) != 1:
+                continue
+            ledger = matching_ledger[0]
+            item = matching_item[0]
+            run = next(
+                (
+                    row
+                    for row in exact_runs
+                    if row["id"] == item["reconciliation_run_id"]
+                ),
+                None,
+            )
+            if run is None:
+                continue
+            exact_fill_evidence.append(
+                {
+                    "fill_id": str(fill["id"]),
+                    "fill_receipt_digest": fill["receipt_digest"],
+                    "ledger_entry_id": str(ledger["id"]),
+                    "ledger_entry_digest": ledger["entry_digest"],
+                    "reconciliation_run_id": str(run["id"]),
+                    "reconciliation_receipt_digest": run["receipt_digest"],
+                    "size": _decimal_text(fill["fill_json"]["size"]),
+                }
+            )
+        exact_fill_evidence.sort(key=lambda value: value["fill_id"])
+        terminal_is_exact = False
+        if (
+            policy is not None
+            and policy["status"] == "TERMINATED"
+            and policy["terminated_at"] is not None
+            and len(linked_budgets) == 1
+            and len(accepted_reservations) == 1
+            and len(exact_fill_evidence) == len(exact_fills)
+            and len(exact_fills) == len(exact_runs)
+        ):
+            terminal_payload = {
+                "contract": "canonical-v13-canary-risk-policy-termination-v2",
+                "policy_id": str(policy["id"]),
+                "policy_receipt_digest": policy["receipt_digest"],
+                "authorization_digest": linked_budgets[0]["authorization_digest"],
+                "reservation_digest": accepted_reservations[0]["reservation_digest"],
+                "order_id": str(order["id"]),
+                "order_receipt_digest": order["receipt_digest"],
+                "complete_fill_ledger_reconciliation": exact_fill_evidence,
+                "actor_identity": policy["actor_identity"],
+                "terminated_at": _persisted_utc(policy["terminated_at"]).isoformat(),
+            }
+            terminal_is_exact = (
+                policy["termination_digest"] == _digest(terminal_payload)
+                and all(row["completed_at"] is not None for row in exact_runs)
+            )
+        if not terminal_is_exact:
+            reasons.append("EXACT_CANARY_POLICY_TERMINATION_V2_UNPROVEN")
     return counts
 
 
 def _recovery_acceptance_is_exact(
-    event: Mapping[str, object], *, handoff: Phase9QualificationHandoff
+    connection: Connection,
+    event: Mapping[str, object],
+    *,
+    handoff: Phase9QualificationHandoff,
 ) -> bool:
     evidence = event["evidence_json"]
     if not isinstance(evidence, Mapping):
@@ -651,6 +1553,55 @@ def _recovery_acceptance_is_exact(
         isinstance(value, Mapping) for value in (restart, recovery, writer_stop)
     ):
         return False
+    policy = (
+        connection.execute(
+            select(EXECUTION_CANARY_RISK_POLICIES_TABLE).where(
+                EXECUTION_CANARY_RISK_POLICIES_TABLE.c.qualification_decision_id
+                == handoff.qualification_decision_id
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    exact_orders = (
+        connection.execute(
+            select(ORDERS_TABLE.c.receipt_digest)
+            .select_from(
+                ORDERS_TABLE.join(
+                    RISK_DECISIONS_TABLE,
+                    RISK_DECISIONS_TABLE.c.id == ORDERS_TABLE.c.risk_decision_id,
+                )
+                .join(
+                    TRADE_INTENTS_TABLE,
+                    TRADE_INTENTS_TABLE.c.id == RISK_DECISIONS_TABLE.c.trade_intent_id,
+                )
+                .join(
+                    SIGNALS_TABLE,
+                    SIGNALS_TABLE.c.id == TRADE_INTENTS_TABLE.c.signal_id,
+                )
+            )
+            .where(SIGNALS_TABLE.c.research_target_id == handoff.research_target_id)
+        )
+        .mappings()
+        .all()
+    )
+    exact_order = exact_orders[0] if len(exact_orders) == 1 else None
+    latest_runtime_receipt = connection.execute(
+        select(RUNTIME_RECEIPTS_TABLE.c.receipt_digest)
+        .select_from(
+            RUNTIME_RECEIPTS_TABLE.join(
+                RUNTIME_INSTANCES_TABLE,
+                RUNTIME_INSTANCES_TABLE.c.id
+                == RUNTIME_RECEIPTS_TABLE.c.runtime_instance_id,
+            ).join(
+                DEPLOYMENTS_TABLE,
+                DEPLOYMENTS_TABLE.c.id == RUNTIME_INSTANCES_TABLE.c.deployment_id,
+            )
+        )
+        .where(DEPLOYMENTS_TABLE.c.strategy_version_id == handoff.strategy_version_id)
+        .order_by(RUNTIME_RECEIPTS_TABLE.c.observed_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
     return (
         event["event_type"] == "PHASE9_RECOVERY_SOAK_ACCEPTED"
         and event["aggregate_type"] == "canonical_phase9_recovery"
@@ -662,6 +1613,14 @@ def _recovery_acceptance_is_exact(
         and evidence.get("active_db_writer_lease_count") == 0
         and evidence.get("zombie_process_count") == 0
         and evidence.get("exact_order_count") == 1
+        and policy is not None
+        and policy["status"] == "TERMINATED"
+        and evidence.get("policy_termination_receipt_digest")
+        == policy["termination_digest"]
+        and exact_order is not None
+        and evidence.get("order_replay_receipt_digest")
+        == exact_order["receipt_digest"]
+        and evidence.get("observability_receipt_digest") == latest_runtime_receipt
         and restart.get("service_key") == "long_lived_runtime"
         and restart.get("action") == "RESTART"
         and restart.get("status") == "CONFIRMED"
@@ -796,7 +1755,7 @@ def inspect_phase9_readiness(
     if stage in {"OKX_DEMO_CANARY", "RECOVERY_SOAK"}:
         if execution_counts["orders"] != 1 or lineage_counts["orders"] != 1:
             reasons.append("EXACT_SINGLE_CANARY_ORDER_COUNT_REQUIRED")
-        for table_name in ("fills", "ledger_entries", "reconciliation_items"):
+        for table_name in _STRICT_CANARY_GLOBAL_TABLES:
             if execution_counts[table_name] != lineage_counts[table_name]:
                 reasons.append(f"UNRELATED_{table_name.upper()}_EVIDENCE_PRESENT")
     if stage == "RECOVERY_SOAK":
@@ -815,7 +1774,9 @@ def inspect_phase9_readiness(
         exact_recovery = [
             event
             for event in recovery_events
-            if _recovery_acceptance_is_exact(event, handoff=qualification_handoff)
+            if _recovery_acceptance_is_exact(
+                effective, event, handoff=qualification_handoff
+            )
         ]
         lineage_counts["recovery_acceptance_receipts"] = len(exact_recovery)
         if len(recovery_events) != 1 or len(exact_recovery) != 1:

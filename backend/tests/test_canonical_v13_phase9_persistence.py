@@ -4,6 +4,7 @@ import pytest
 
 from app.canonical_v13.bootstrap import local_role_mapping
 from app.canonical_v13.phase9_persistence import (
+    API_PHASE9_CAPABILITIES,
     PHASE9_PERSISTENCE_ENV_BY_CAPABILITY,
     CanonicalPhase9PersistenceBlocked,
     phase9_service_principal,
@@ -32,6 +33,20 @@ def test_phase9_persistence_requires_eight_distinct_exact_logins_on_one_database
     assert len(resolved.urls) == 8
     assert len({url.username for url in resolved.urls.values()}) == 8
     assert {url.database for url in resolved.urls.values()} == {"freqtrade_ai_v13"}
+
+
+def test_api_phase9_persistence_resolves_only_four_routed_capabilities() -> None:
+    environment = _environment()
+    for capability in set(PHASE9_PERSISTENCE_ENV_BY_CAPABILITY) - set(
+        API_PHASE9_CAPABILITIES
+    ):
+        environment.pop(PHASE9_PERSISTENCE_ENV_BY_CAPABILITY[capability])
+    resolved = resolve_phase9_persistence_urls(
+        environment,
+        role_mapping=local_role_mapping(),
+        capabilities=API_PHASE9_CAPABILITIES,
+    )
+    assert tuple(resolved.urls) == API_PHASE9_CAPABILITIES
 
 
 def test_phase9_persistence_fails_closed_on_missing_wrong_or_split_identity() -> None:

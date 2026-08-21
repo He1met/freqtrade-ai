@@ -111,7 +111,7 @@ def test_acl_repair_locks_exact_accepted_54_table_contract() -> None:
     assert _inserted_tables(sql) == EXPECTED_READ_TABLES
     assert len(EXPECTED_READ_TABLES) == 54
     assert "expected 54, observed %" in sql
-    assert "expected 55, observed %" in sql
+    assert "expected 56, observed %" in sql
     assert "BLOCKED_SCHEMA_MARKER_SELECT_DRIFT" in sql
     assert "BLOCKED_POST_REPAIR_TOTAL_SELECT_CARDINALITY" in sql
 

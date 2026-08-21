@@ -15,6 +15,7 @@ from app.canonical_v13.models import (
     AUDIT_EVENTS_TABLE,
     DEPLOYMENT_APPROVALS_TABLE,
     DEPLOYMENTS_TABLE,
+    EXECUTION_CANARY_RISK_POLICIES_TABLE,
     ORDERS_TABLE,
     ORDER_WRITER_LEASES_TABLE,
     RISK_DECISIONS_TABLE,
@@ -22,6 +23,9 @@ from app.canonical_v13.models import (
     RUNTIME_RECEIPTS_TABLE,
     SIGNALS_TABLE,
     TRADE_INTENTS_TABLE,
+)
+from app.canonical_v13.phase9_canary_policy import (
+    validate_terminated_canary_risk_policy,
 )
 from app.canonical_v13.phase9_runtime_supervisor import (
     Phase9LifecycleReceipt,
@@ -43,6 +47,7 @@ class Phase9RecoveryAcceptance:
     runtime_recovery: Phase9LifecycleReceipt
     writer_stop: Phase9LifecycleReceipt
     order_replay_receipt_digest: str
+    policy_termination_receipt_digest: str
     observability_receipt_digest: str
     active_supervisor_lease_count: int
     zombie_process_count: int
@@ -131,6 +136,10 @@ def record_phase9_recovery_acceptance(
         )
     _require_digest("order_replay_receipt_digest", evidence.order_replay_receipt_digest)
     _require_digest(
+        "policy_termination_receipt_digest",
+        evidence.policy_termination_receipt_digest,
+    )
+    _require_digest(
         "observability_receipt_digest", evidence.observability_receipt_digest
     )
     if (
@@ -188,6 +197,25 @@ def record_phase9_recovery_acceptance(
         .all()
     )
     exact_orders = len(exact_order_rows)
+    terminal_policies = (
+        connection.execute(
+            select(EXECUTION_CANARY_RISK_POLICIES_TABLE).where(
+                EXECUTION_CANARY_RISK_POLICIES_TABLE.c.qualification_decision_id
+                == evidence.qualification_decision_id,
+                EXECUTION_CANARY_RISK_POLICIES_TABLE.c.status == "TERMINATED",
+            )
+        )
+        .mappings()
+        .all()
+    )
+    terminal_policy = terminal_policies[0] if len(terminal_policies) == 1 else None
+    terminal_receipt = (
+        validate_terminated_canary_risk_policy(
+            connection, policy_id=terminal_policy["id"]
+        )
+        if terminal_policy is not None
+        else None
+    )
     latest_runtime_receipt = None
     if exact_orders == 1:
         latest_runtime_receipt = connection.execute(
@@ -202,12 +230,16 @@ def record_phase9_recovery_acceptance(
     if (
         active_db_leases
         or exact_orders != 1
+        or terminal_receipt is None
+        or terminal_receipt.termination_digest
+        != evidence.policy_termination_receipt_digest
         or exact_order_rows[0]["receipt_digest"] != evidence.order_replay_receipt_digest
         or latest_runtime_receipt != evidence.observability_receipt_digest
     ):
         raise CanonicalPhase9RecoveryAcceptanceBlocked(
             "BLOCKED_RECOVERY_DATABASE_STATE",
-            "writer lease, exact order replay, or runtime observability evidence differs",
+            "writer lease, policy termination, exact order replay, or runtime "
+            "observability evidence differs",
         )
     payload = {
         "contract": "canonical-v13-phase9-recovery-acceptance-v1",

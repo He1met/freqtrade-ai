@@ -20,13 +20,11 @@ withdraw、输出凭据、第二个 order writer、绕过人工 approval、伪�
 | bundle digest | `91634b332a9ae5a5d99463f37fa6ef67c821de33109f855d3735e74dde009ee8` |
 | market digest | `f15fe60f3dc810f71bb17cf272a65c4eefeadfe284bd9d1114068992f15980b9` |
 
-截至本次 current-state 只读核对，exact bundle 及 canonical schema 中不存在可执行的正式 risk
-policy/budget source；`CANONICAL_PHASE9_RISK_BUDGET_SOURCE_UNSET` 与
-`CANONICAL_RISK_POLICY_LINEAGE_UNSET` 因而是 B 的 accepted-decision 和 C 的硬阻塞。legacy
-`freqtrade_ai` policy/budget 不绑定上述 exact lineage，禁止回退使用。不得调用 Phase 9 写入口发明金额、
-重置额度或把 research quality limits 当 execution budget；必须先由独立、已批准的 canonical
-configuration 变更交付 frozen policy、额度、expiry、policy digest 与 exact-lineage source receipt，
-随后重新从第 1 节开始验收。
+执行额度只能由 C 阶段的 sealed probe receipt 推导：固定 exact QUALIFIED target
+`BTC-USDT-SWAP`、`LONG_ONLY`、一单、30 分钟 one-shot policy，金额为交易所最小合约数量乘 linear
+`ctVal` 再乘新鲜 mark。effective leverage 冻结为 authenticated current long leverage，且必须
+`0 < current_long <= min(14, exchange_max_leverage)`；系统不得自动 set leverage。禁止输入金额、重置额度、把 B 的
+shadow acceptance 当 execution authority，或回退使用 legacy `freqtrade_ai` policy/budget。
 
 严格链为：
 
@@ -65,12 +63,16 @@ backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py phase9-schem
 custom-format backup，记录 SHA-256，并恢复到全新
 `freqtrade_ai_v13_restore_<lowercase_identity>`。restore 必须通过 owner、manifest、ACL 和行计数核对。
 
-Phase 9 additive upgrade 将 manifest 提升至 52 tables，并新增：
+Phase 9 additive upgrade 将 manifest 提升至 56 tables，并新增：
 
+- `execution_canary_probe_receipts`
+- `execution_canary_risk_policies`
 - `execution_risk_budget_authorizations`
 - `execution_risk_reservations`
 - `execution_attestations`
 - `order_writer_leases`
+- `order_dispatch_receipts`（exactly-one POST 的 immutable claim）
+- `order_dispatch_outcome_receipts`（exactly-one POST/GET recovery outcome）
 
 以及 approval/deployment/runtime/signal 的唯一性约束。apply 前先锁定 execution boundary 并要求旧
 Phase 9 表为空；upgrade actor、DDL、ACL 和 manifest 以 immutable audit receipt 绑定。
@@ -79,10 +81,17 @@ Phase 9 表为空；upgrade actor、DDL、ACL 和 manifest 以 immutable audit r
 export FREQTRADE_AI_CANONICAL_V13_UPGRADE_ACTOR='operator:<explicit-identity>'
 backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py phase9-schema-apply
 python scripts/canonical_v13_api_service.py provision-phase9
+python scripts/canonical_v13_api_service.py provision-runtime-reader
 backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py verify-phase9-provisioned
 ```
 
-8 个 Phase 9 LOGIN 必须 distinct、同一 canonical database、只继承一个 capability。不得把
+Phase 9 的 8 个 writer LOGIN（approval/deployment/signal/risk/order/fill/ledger/reconciliation）必须
+distinct、同一 canonical database、只继承一个 capability；另有 1 个独立 runtime reader LOGIN。
+全 manifest 共 15 个 distinct service LOGIN（2 API + 4 research + 8 Phase 9 writers +
+1 runtime reader），其中 14 个是 writer LOGIN。
+`canonical_approval_writer` 是 sealed probe receipt、one-shot policy 与 budget authorization 的唯一
+writer，`canonical_risk_writer` 只能写 intent、shadow/execution decision 与 execution reservation。
+不得把
 `SELECT ... FOR UPDATE` 需求转换为额外 ACL。`phase9-schema-rollback` 只允许所有 Phase 9 表仍为空
 时使用；产生 A 阶段记录后，恢复方案必须是 stop services + forward recovery 或已验 backup restore，
 不能删除证据行。
@@ -94,7 +103,7 @@ backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py verify-phase
 
 - `/healthz` 为 `HEALTHY / TRADING_DISABLED`；`/readyz` 为 `READY`；
 - API/UI 各一个 loopback process，无 legacy fallback；
-- 14 个 service LOGIN identity 均 distinct；
+- 15 个 service LOGIN identity 均 distinct；
 - runtime readiness 仍 `TRADING_DISABLED / ACTIVE_DEPLOYMENT_UNSET`；
 - credential reads、signals、intents、orders、fills、ledger、reconciliation 均为 0。
 
@@ -130,9 +139,14 @@ order writer 保持 stopped/unloaded，DB writer lease 为 0。runtime 从 exact
 新鲜 public market evidence 生成 deterministic natural-signal receipt；独立
 `canonical_signal_writer` 验证 receipt digest、runtime heartbeat、exact deployment 后才持久化。
 
-随后依次创建 intent 和 central risk decision。risk authority 必须使用已正式授权且未过期的 budget，
-原子保留 notional/order count；必须分别验证一条真实可达的 `RISK_ACCEPTED` 与一条安全拒绝合同，
-但不得为测试消耗/重置/发明生产预算。所有重放返回原 receipt 且计数不变。
+随后依次创建唯一 intent 和唯一 `SIGNAL_RISK_SHADOW` decision。shadow authority 只依据 exact
+qualified target 与 long-only Demo intent envelope，在同一 immutable receipt 中封存一条真实 accepted
+baseline check，以及 server-derived `side=sell/posSide=short` deterministic rejected counterfactual check；
+不得写第二个 signal/intent/risk row。两个 check 都必须明确
+`order_submission_enabled=false`、`execution_authorized=false`，receipt 无 budget ID、无 reservation ID。
+所有重放返回原 receipt 且计数不变。B 阶段的 probe receipt、policy、budget、reservation、attestation、
+order writer lease、orders/fills/ledger/reconciliation 必须全部为 0；shadow 的 `RISK_ACCEPTED` 状态绝不
+满足 C 或 order writer。
 
 ```bash
 backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py phase9-readiness \
@@ -143,7 +157,7 @@ backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py phase9-readi
 
 ## 6. C — OKX_DEMO_CANARY
 
-只有 A/B READY 且存在当前正式 risk budget 时才读取既有 Keychain。输出只能包含摘要/布尔值；不得
+只有 A/B READY 后才可读取既有 Keychain。输出只能包含摘要/布尔值；不得
 打印 environment、headers、raw account payload 或 subprocess command。fresh attestation 必须同时证明：
 
 - 固定 `https://openapi.okx.com`、`x-simulated-trading: 1`、`OKX_DEMO`；
@@ -151,9 +165,37 @@ backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py phase9-readi
 - permissions 精确为 `read=true, trade=true, withdraw=false`；
 - Futures/long-short/isolated 模式及目标 SWAP live；
 - credential generation、instrument metadata、价格、余额/仓位/挂单/reconciliation 均新鲜；
-- 最小交易所 size 对应 notional 不超过 remaining formal budget。
+- instrument metadata 来自 public instruments，exchange maximum leverage 必须来自 authenticated
+  `GET /api/v5/account/adjust-leverage-info`，不得由当前 leverage 或客户端 JSON 推断；
+- authenticated positions 必须是 exact target、isolated 且 long/short 合约总数均为 0；pending orders
+  必须为空，同时 `adjust-leverage-info.existOrd=false`；
+- server 将 fresh mark 按 tick 向下对齐为 positive frozen limit price，并以 authenticated current long
+  leverage 调用 `GET /api/v5/account/max-size`；exact singular `maxBuy` 必须不小于 `minSz`；
+- 最小交易所 size 对应 notional 不超过由 sealed evidence 生成且未耗尽的 one-shot budget。
 
-若缺 risk budget、预算已耗尽、市场/allowlist/credential 未知或 attestation 过期，立即 `BLOCKED`，
+server-side probe 必须先生成 typed `RedactedOkxDemoProbe`，创建同一 deployment 的 redacted attestation，
+再由非公开 `persist_canary_probe_receipt(...)` 写入 immutable
+`execution_canary_probe_receipts`。HTTP 不接受 raw facts；policy command 只接受 `probe_receipt_id`，并
+重算八类资源 digest、各 observed/expires、combined digest、attestation/deployment lineage。八类为
+instrument、mark、account config、leverage、exchange maximum leverage、positions、pending orders 与
+maximum order quantity。随后才可
+创建 30 分钟 policy、一次 budget authorization，并为独立于 B 的新 intent 创建唯一
+`decision_mode=EXECUTION` 的 `RISK_ACCEPTED` reservation。
+
+仓库已声明下列 release-only composition 命令；它在进程内创建 sealed session，且不提供 raw facts 参数：
+
+```bash
+python scripts/canonical_v13_phase9_service.py probe-canary \
+  --service order_writer --deployment-id <exact-active-demo-deployment-id>
+```
+
+但当前实现只打开 `canonical_approval_writer` connection，随后先调用需要写
+`execution_attestations` 的 `record_redacted_demo_attestation(...)`；该表只属于
+`canonical_deployment_writer` capability，因此 PostgreSQL ACL 下该命令不可达。必须先由 composition
+按现有双 capability 边界安全串接 deployment-writer attestation 与 approval-writer sealed receipt，并
+补 production-role 端到端测试；在此之前禁止执行该命令，C 保持 `BLOCKED`。修复后只把脱敏输出的
+exact `probe_receipt_id` 交给 canary policy API。禁止用 SQL、fixture 或 raw JSON 手工补行。若缺
+receipt/policy/budget、预算已耗尽、市场/allowlist/credential 未知或 attestation 过期，立即 `BLOCKED`，
 不得创建 order。禁止为了通过门禁创建或重置金额。
 
 writer 使用独立 `canonical_order_writer` LOGIN 和独立 LaunchAgent：
@@ -161,13 +203,34 @@ writer 使用独立 `canonical_order_writer` LOGIN 和独立 LaunchAgent：
 ```bash
 python scripts/canonical_v13_phase9_service.py prepare \
   --service order_writer --stage OKX_DEMO_CANARY --enable-order-writer \
-  --release-digest <sha256-of-canonical-v13-release-colon-main-sha>
+  --release-digest <sha256-of-canonical-v13-release-colon-main-sha> \
+  --deployment-id <exact-deployment-id> \
+  --deployment-capability-digest <exact-deployment-capability-digest> \
+  --image-digest <accepted-order-writer-image-digest> \
+  --execution-canary-risk-policy-id <exact-policy-id> \
+  --execution-canary-risk-policy-digest <exact-policy-digest> \
+  --attestation-id <exact-attestation-id> \
+  --attestation-digest <exact-attestation-digest> \
+  --attestation-expires-at <timezone-aware-ISO8601> \
+  --instrument-metadata-digest <exact-instrument-resource-digest> \
+  --mark-price-snapshot-digest <exact-mark-resource-digest> \
+  --effective-leverage <exact-authenticated-current-long-within-cap> \
+  --position-policy LONG_ONLY
 python scripts/canonical_v13_phase9_service.py confirm \
   --service order_writer --plan-digest <exact>
 ```
 
-先在 DB durable prepare order request 与 idempotency key，再且仅再执行一次 allowlisted
-`POST /api/v5/trade/order`。timeout/unknown outcome 禁止再次 POST，只能用 GET order identity 恢复。
+先在 DB durable prepare exact `ordType=limit`、`px=frozen limit_price`、`sz=minSz` request 与
+idempotency key。唯一 POST 紧前，同一 sealed private session 必须再次 authenticated 读取 positions、
+pending orders、current leverage 与 `max-size`；只有 fresh flat/no-pending、current long leverage 仍等于
+policy effective leverage、`maxBuy>=minSz` 才可将 guard-bound exact-one claim 写入 immutable
+`order_dispatch_receipts`。claim digest 必须绑定 order/risk/policy/probe/attestation、credential generation、
+lease generation/digest/acquired/expires、四类 resource digests/windows 与 exact request，并证明
+`lease_acquired_at <= claimed_at < lease_expires_at`；随后且仅随后执行一次 allowlisted
+`POST /api/v5/trade/order`。POST success 或 GET recovery 只能首次写入一条
+`order_dispatch_outcome_receipts`，绑定 claim digest、`clOrdId`、exchange order identity、redacted safe
+response digest 与 `POST|GET_RECOVERY` mode；order receipt 必须由该 immutable outcome receipt 重算。
+timeout/unknown outcome 禁止再次 guard 或 POST，只能用 GET order identity 恢复；重放必须返回原 receipt。
 收到 fill 后，由 distinct fill/ledger/reconciliation writers 依次写 exact chain；每步重放 no-op，最后：
 
 ```bash
@@ -186,9 +249,23 @@ python scripts/canonical_v13_phase9_service.py stop --service order_writer
 python scripts/canonical_v13_phase9_service.py restart \
   --service long_lived_runtime --plan-digest <exact>
 python scripts/canonical_v13_phase9_service.py recover --service long_lived_runtime
+python scripts/canonical_v13_phase9_service.py confirm-runtime-observation \
+  --service long_lived_runtime --plan-digest <exact-runtime-plan-digest>
+python scripts/canonical_v13_phase9_service.py stop --service long_lived_runtime
+python scripts/canonical_v13_phase9_service.py accept-recovery-soak \
+  --service recovery_control \
+  --qualification-decision-id <exact-qualified-decision-id>
 backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py phase9-readiness \
   --stage RECOVERY_SOAK "${PHASE9_IDS[@]}"
 ```
+
+`accept-recovery-soak` 不接受 lifecycle、order、process 或 observability 的 caller raw
+facts。它使用独立 `canonical_control_writer` 登录，只读重算 exact qualification order/runtime
+lineage，并严格读取 append-only supervisor receipts 与当前 filesystem/launchd 状态。只有以下条件
+同时成立才写入单一 append-only acceptance receipt：GET-only order replay 已是 exact no-op、writer
+STOP 先于 runtime RESTART/RECOVER、最新 HEALTHY runtime observation 晚于 recovery、两个
+LaunchAgent 均 unloaded、两个 file lease 均不存在、DB active order-writer lease 与 zombie process
+均为零。任何 receipt 损坏、orphan lease、live holder 或 lineage drift 均 fail closed。
 
 只有 D `READY`、post-execution backup/restore verifier 通过、所有 receipts 可重算、服务唯一且没有锁或
 未决 recovery，才可关闭 #724。然后汇总 Phase 0–9 current evidence，最后关闭 #714。

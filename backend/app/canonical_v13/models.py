@@ -1035,12 +1035,103 @@ RUNTIME_RECEIPTS_TABLE = _table(
 # A human approval writer freezes the exact budget; the risk writer may only append
 # reservations derived from it. Credential attestations contain digests and safe
 # capability facts only, never raw Keychain material or authorization headers.
+EXECUTION_CANARY_PROBE_RECEIPTS_TABLE = _table(
+    "execution_canary_probe_receipts",
+    _uuid_id(),
+    _uuid_fk("deployment_id", "deployments"),
+    _uuid_fk("execution_attestation_id", "execution_attestations", unique=True),
+    Column("execution_target", String(24), nullable=False),
+    Column("instrument", String(80), nullable=False),
+    _digest("account_fingerprint_digest"),
+    _digest("credential_generation_digest"),
+    Column("permissions_json", JSON, nullable=False),
+    Column("simulated_trading", Boolean, nullable=False),
+    Column("allow_real_funds", Boolean, nullable=False),
+    Column("contract_value", String(80), nullable=False),
+    Column("contract_value_ccy", String(24), nullable=False),
+    Column("lot_size", String(80), nullable=False),
+    Column("minimum_size", String(80), nullable=False),
+    Column("tick_size", String(80), nullable=False),
+    Column("mark_price", String(80), nullable=False),
+    Column("current_long_leverage", String(80), nullable=False),
+    Column("current_short_leverage", String(80), nullable=False),
+    Column("exchange_max_leverage", String(80), nullable=False),
+    Column("limit_price", String(80), nullable=False),
+    Column("maximum_buy_contracts", String(80), nullable=False),
+    Column("long_contracts", String(80), nullable=False),
+    Column("short_contracts", String(80), nullable=False),
+    Column("active_position_count", Integer, nullable=False),
+    Column("pending_order_count", Integer, nullable=False),
+    _digest("instrument_digest"),
+    _created_at("instrument_observed_at"),
+    Column("instrument_expires_at", DateTime(timezone=True), nullable=False),
+    _digest("mark_price_digest"),
+    _created_at("mark_price_observed_at"),
+    Column("mark_price_expires_at", DateTime(timezone=True), nullable=False),
+    _digest("account_config_digest"),
+    _created_at("account_config_observed_at"),
+    Column("account_config_expires_at", DateTime(timezone=True), nullable=False),
+    _digest("leverage_digest"),
+    _created_at("leverage_observed_at"),
+    Column("leverage_expires_at", DateTime(timezone=True), nullable=False),
+    _digest("exchange_max_leverage_digest"),
+    _created_at("exchange_max_leverage_observed_at"),
+    Column("exchange_max_leverage_expires_at", DateTime(timezone=True), nullable=False),
+    _digest("positions_digest"),
+    _created_at("positions_observed_at"),
+    Column("positions_expires_at", DateTime(timezone=True), nullable=False),
+    _digest("pending_orders_digest"),
+    _created_at("pending_orders_observed_at"),
+    Column("pending_orders_expires_at", DateTime(timezone=True), nullable=False),
+    _digest("maximum_order_quantity_digest"),
+    _created_at("maximum_order_quantity_observed_at"),
+    Column("maximum_order_quantity_expires_at", DateTime(timezone=True), nullable=False),
+    _created_at("observed_at"),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("safe_facts_json", JSON, nullable=False),
+    _digest("safe_facts_digest"),
+    _digest("receipt_digest"),
+    _created_at("created_at"),
+    CheckConstraint(
+        "execution_target = 'OKX_DEMO' AND simulated_trading IS TRUE "
+        "AND allow_real_funds IS FALSE",
+        name="execution_canary_probe_receipts_demo_only",
+    ),
+    CheckConstraint(
+        "instrument_expires_at > instrument_observed_at "
+        "AND mark_price_expires_at > mark_price_observed_at "
+        "AND account_config_expires_at > account_config_observed_at "
+        "AND leverage_expires_at > leverage_observed_at "
+        "AND exchange_max_leverage_expires_at > exchange_max_leverage_observed_at "
+        "AND positions_expires_at > positions_observed_at "
+        "AND pending_orders_expires_at > pending_orders_observed_at "
+        "AND maximum_order_quantity_expires_at > maximum_order_quantity_observed_at "
+        "AND expires_at > observed_at",
+        name="execution_canary_probe_receipts_freshness_windows",
+    ),
+    CheckConstraint(
+        "CAST(long_contracts AS NUMERIC) = 0 "
+        "AND CAST(short_contracts AS NUMERIC) = 0 "
+        "AND active_position_count = 0 AND pending_order_count = 0 "
+        "AND CAST(maximum_buy_contracts AS NUMERIC) "
+        ">= CAST(minimum_size AS NUMERIC) "
+        "AND CAST(limit_price AS NUMERIC) > 0",
+        name="execution_canary_probe_receipts_flat_capacity",
+    ),
+    UniqueConstraint(
+        "receipt_digest",
+        name="execution_canary_probe_receipts_receipt_digest_unique",
+    ),
+)
+
+
 EXECUTION_CANARY_RISK_POLICIES_TABLE = _table(
     "execution_canary_risk_policies",
     _uuid_id(),
     _uuid_fk("qualification_decision_id", "qualification_decisions", unique=True),
     _uuid_fk("deployment_approval_id", "deployment_approvals", unique=True),
     _uuid_fk("execution_attestation_id", "execution_attestations", unique=True),
+    _uuid_fk("probe_receipt_id", "execution_canary_probe_receipts", unique=True),
     _uuid_fk("strategy_version_id", "strategy_versions"),
     _uuid_fk("strategy_artifact_id", "strategy_artifacts"),
     _digest("strategy_artifact_digest"),
@@ -1058,6 +1149,8 @@ EXECUTION_CANARY_RISK_POLICIES_TABLE = _table(
     Column("contract_value", Numeric(36, 18), nullable=False),
     Column("contract_value_ccy", String(24), nullable=False),
     Column("mark_price", Numeric(36, 18), nullable=False),
+    Column("limit_price", Numeric(36, 18), nullable=False),
+    Column("maximum_buy_contracts", Numeric(36, 18), nullable=False),
     Column("max_notional", Numeric(36, 18), nullable=False),
     Column("strategy_max_leverage", Numeric(36, 18), nullable=False),
     Column("exchange_max_leverage", Numeric(36, 18), nullable=False),
@@ -1093,7 +1186,9 @@ EXECUTION_CANARY_RISK_POLICIES_TABLE = _table(
     ),
     CheckConstraint(
         "minimum_contract_size > 0 AND contract_value > 0 "
-        "AND mark_price > 0 AND max_notional > 0",
+        "AND mark_price > 0 AND limit_price > 0 "
+        "AND maximum_buy_contracts >= minimum_contract_size "
+        "AND max_notional > 0",
         name="execution_canary_risk_policies_positive_amounts",
     ),
     CheckConstraint(
@@ -1308,6 +1403,106 @@ ORDERS_TABLE = _table(
     CheckConstraint(
         "demo_only IS TRUE AND allow_real_funds IS FALSE",
         name="orders_demo_only_no_real_funds",
+    ),
+)
+
+ORDER_DISPATCH_RECEIPTS_TABLE = _table(
+    "order_dispatch_receipts",
+    _uuid_id(),
+    _uuid_fk("order_id", "orders", unique=True),
+    _uuid_fk("risk_decision_id", "risk_decisions"),
+    _uuid_fk("canary_risk_policy_id", "execution_canary_risk_policies"),
+    _uuid_fk("probe_receipt_id", "execution_canary_probe_receipts"),
+    _uuid_fk("execution_attestation_id", "execution_attestations"),
+    Column("attempt_ordinal", Integer, nullable=False),
+    _digest("request_digest"),
+    Column("holder_identity", String(200), nullable=False),
+    _digest("holder_token_digest"),
+    Column("lease_generation", Integer, nullable=False),
+    _digest("lease_digest"),
+    _created_at("lease_acquired_at"),
+    Column("lease_expires_at", DateTime(timezone=True), nullable=False),
+    _digest("account_fingerprint_digest"),
+    _digest("credential_generation_digest"),
+    Column("limit_price", Numeric(36, 18), nullable=False),
+    Column("effective_leverage", Numeric(36, 18), nullable=False),
+    Column("minimum_size", Numeric(36, 18), nullable=False),
+    Column("maximum_buy_contracts", Numeric(36, 18), nullable=False),
+    Column("long_contracts", Numeric(36, 18), nullable=False),
+    Column("short_contracts", Numeric(36, 18), nullable=False),
+    Column("active_position_count", Integer, nullable=False),
+    Column("pending_order_count", Integer, nullable=False),
+    _digest("positions_digest"),
+    _created_at("positions_observed_at"),
+    Column("positions_expires_at", DateTime(timezone=True), nullable=False),
+    _digest("pending_orders_digest"),
+    _created_at("pending_orders_observed_at"),
+    Column("pending_orders_expires_at", DateTime(timezone=True), nullable=False),
+    _digest("maximum_order_quantity_digest"),
+    _created_at("maximum_order_quantity_observed_at"),
+    Column("maximum_order_quantity_expires_at", DateTime(timezone=True), nullable=False),
+    _digest("guard_leverage_digest"),
+    _created_at("guard_leverage_observed_at"),
+    Column("guard_leverage_expires_at", DateTime(timezone=True), nullable=False),
+    _created_at("guard_observed_at"),
+    Column("guard_expires_at", DateTime(timezone=True), nullable=False),
+    Column("guard_json", JSON, nullable=False),
+    _digest("guard_digest"),
+    _digest("claim_digest"),
+    _created_at("claimed_at"),
+    CheckConstraint(
+        "attempt_ordinal = 1",
+        name="order_dispatch_receipts_single_attempt",
+    ),
+    CheckConstraint(
+        "lease_generation > 0",
+        name="order_dispatch_receipts_generation_positive",
+    ),
+    CheckConstraint(
+        "lease_acquired_at <= claimed_at AND claimed_at < lease_expires_at",
+        name="order_dispatch_receipts_lease_fresh_at_claim",
+    ),
+    CheckConstraint(
+        "long_contracts = 0 AND short_contracts = 0 "
+        "AND active_position_count = 0 AND pending_order_count = 0 "
+        "AND maximum_buy_contracts >= minimum_size "
+        "AND limit_price > 0 AND effective_leverage > 0",
+        name="order_dispatch_receipts_flat_capacity",
+    ),
+    CheckConstraint(
+        "positions_expires_at > positions_observed_at "
+        "AND pending_orders_expires_at > pending_orders_observed_at "
+        "AND maximum_order_quantity_expires_at > maximum_order_quantity_observed_at "
+        "AND guard_leverage_expires_at > guard_leverage_observed_at "
+        "AND guard_expires_at > guard_observed_at",
+        name="order_dispatch_receipts_guard_freshness",
+    ),
+    UniqueConstraint(
+        "claim_digest",
+        name="order_dispatch_receipts_claim_digest_unique",
+    ),
+)
+
+ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE = _table(
+    "order_dispatch_outcome_receipts",
+    _uuid_id(),
+    _uuid_fk("order_id", "orders", unique=True),
+    _uuid_fk("dispatch_claim_id", "order_dispatch_receipts", unique=True),
+    _digest("claim_digest"),
+    Column("client_order_id", String(200), nullable=False, unique=True),
+    Column("exchange_order_id", String(200), nullable=False, unique=True),
+    Column("safe_response_json", JSON, nullable=False),
+    _digest("safe_response_digest"),
+    Column("outcome_mode", String(24), nullable=False),
+    _digest("receipt_digest"),
+    _created_at("recorded_at"),
+    CheckConstraint(
+        "outcome_mode IN ('POST', 'GET_RECOVERY')",
+        name="order_dispatch_outcome_receipts_mode",
+    ),
+    UniqueConstraint(
+        "receipt_digest",
+        name="order_dispatch_outcome_receipts_receipt_digest_unique",
     ),
 )
 

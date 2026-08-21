@@ -21,6 +21,7 @@ from app.canonical_v13.bootstrap import (
     LOCAL_DATABASE_NAME,
     LOCAL_RESEARCH_SERVICE_PRINCIPALS,
     LOCAL_PHASE9_SERVICE_PRINCIPALS,
+    LOCAL_RUNTIME_SERVICE_PRINCIPALS,
     LOCAL_ROLE_PREFIX,
     LOCAL_SERVICE_PRINCIPALS,
     expected_postgresql_owner_table_grants,
@@ -133,6 +134,7 @@ def verify(
     if require_phase9_principals:
         service_principals.update(LOCAL_RESEARCH_SERVICE_PRINCIPALS)
         service_principals.update(LOCAL_PHASE9_SERVICE_PRINCIPALS)
+        service_principals.update(LOCAL_RUNTIME_SERVICE_PRINCIPALS)
     engine = create_engine(_database_url(), pool_pre_ping=True)
     try:
         with engine.connect() as connection:

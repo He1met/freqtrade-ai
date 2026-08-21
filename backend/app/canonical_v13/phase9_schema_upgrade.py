@@ -24,11 +24,14 @@ from app.canonical_v13.models import (
     AUDIT_EVENTS_TABLE,
     DEPLOYMENTS_TABLE,
     DEPLOYMENT_APPROVALS_TABLE,
+    EXECUTION_CANARY_PROBE_RECEIPTS_TABLE,
     EXECUTION_CANARY_RISK_POLICIES_TABLE,
     EXECUTION_ATTESTATIONS_TABLE,
     EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE,
     EXECUTION_RISK_RESERVATIONS_TABLE,
     ORDER_WRITER_LEASES_TABLE,
+    ORDER_DISPATCH_RECEIPTS_TABLE,
+    ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE,
     RUNTIME_INSTANCES_TABLE,
     RUNTIME_RECEIPTS_TABLE,
     SCHEMA_METADATA_TABLE,
@@ -37,16 +40,19 @@ from app.canonical_v13.models import (
 from app.canonical_v13.role_mapping import CanonicalRoleMapping
 
 
-UPGRADE_CONTRACT: Final = "canonical-v13-phase9-execution-schema-upgrade-v2"
+UPGRADE_CONTRACT: Final = "canonical-v13-phase9-execution-schema-upgrade-v3"
 PREVIOUS_CANONICAL_MANIFEST_DIGEST: Final = (
     "5f39082802ad9a284f6889702ddee4458d881c53009e77c24726466dcda2aec4"
 )
 PHASE9_EXTENSION_TABLES = (
     EXECUTION_ATTESTATIONS_TABLE,
+    EXECUTION_CANARY_PROBE_RECEIPTS_TABLE,
     EXECUTION_CANARY_RISK_POLICIES_TABLE,
     EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE,
     EXECUTION_RISK_RESERVATIONS_TABLE,
     ORDER_WRITER_LEASES_TABLE,
+    ORDER_DISPATCH_RECEIPTS_TABLE,
+    ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE,
 )
 PHASE9_EXTENSION_TABLE_NAMES: Final[tuple[str, ...]] = tuple(
     table.name for table in PHASE9_EXTENSION_TABLES
@@ -260,13 +266,22 @@ def verify_phase9_schema_upgrade(connection: Connection) -> Phase9SchemaUpgradeR
 
 
 def _lock_upgrade_boundary(connection: Connection) -> None:
-    names = (
+    names = [
         "schema_metadata",
         "deployment_approvals",
         "deployments",
         "runtime_instances",
         "runtime_receipts",
         "signals",
+    ]
+    # During rollback the extension tables already exist.  Lock them before the
+    # zero-row check so a concurrent writer cannot insert after verification and
+    # have its durable evidence dropped by the following DDL.
+    inspector = inspect(connection)
+    names.extend(
+        name
+        for name in PHASE9_EXTENSION_TABLE_NAMES
+        if inspector.has_table(name, schema=CANONICAL_BUSINESS_SCHEMA)
     )
     connection.execute(
         text(

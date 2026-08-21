@@ -1,4 +1,6 @@
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -77,6 +79,39 @@ class FakeRead:
                 ],
                 authenticated=True,
             ),
+            "exchange_max_leverage": self._snapshot(
+                "exchange_max_leverage",
+                [
+                    {
+                        "inst_id": "BTC-USDT-SWAP",
+                        "inst_type": "SWAP",
+                        "margin_mode": "isolated",
+                        "position_side": "long",
+                        "requested_leverage": "14",
+                        "max_leverage": "20",
+                        "min_leverage": "0.01",
+                        "has_pending_orders": False,
+                    }
+                ],
+                authenticated=True,
+            ),
+            "positions": self._snapshot("positions", [], authenticated=True),
+            "pending_orders": self._snapshot(
+                "pending_orders", [], authenticated=True
+            ),
+            "maximum_order_quantity": self._snapshot(
+                "maximum_order_quantity",
+                [
+                    {
+                        "inst_id": "BTC-USDT-SWAP",
+                        "margin_mode": "isolated",
+                        "price": "10000.1",
+                        "leverage": "14",
+                        "max_buy": "2",
+                    }
+                ],
+                authenticated=True,
+            ),
         }
 
     @staticmethod
@@ -111,6 +146,33 @@ class FakeRead:
     def leverage(self, instrument):
         self.calls.append(("leverage", instrument))
         return self.snapshots["leverage"]
+
+    def exchange_max_leverage(self, instrument):
+        self.calls.append(("exchange_max_leverage", instrument))
+        return self.snapshots["exchange_max_leverage"]
+
+    def positions(self, instrument):
+        self.calls.append(("positions", instrument))
+        return self.snapshots["positions"]
+
+    def pending_orders(self, instrument, *, limit):
+        assert limit == 100
+        self.calls.append(("pending_orders", instrument))
+        return self.snapshots["pending_orders"]
+
+    def maximum_order_quantity(
+        self, instrument, *, td_mode, price, leverage
+    ):
+        self.calls.append(
+            (
+                "maximum_order_quantity",
+                instrument,
+                td_mode,
+                format(price, "f"),
+                format(leverage, "f"),
+            )
+        )
+        return self.snapshots["maximum_order_quantity"]
 
     def order(self, instrument, *, client_order_id):
         return SimpleNamespace(
@@ -174,6 +236,11 @@ def test_redacted_probe_and_transport_have_no_credential_surface() -> None:
     assert probe.tick_size == "0.1"
     assert probe.mark_price == "10000.1"
     assert probe.current_long_leverage == "14"
+    assert probe.current_short_leverage == "14"
+    assert probe.exchange_max_leverage == "20"
+    assert probe.limit_price == "10000.1"
+    assert probe.maximum_buy_contracts == "2"
+    assert probe.active_position_count == probe.pending_order_count == 0
     assert probe.observed_at == NOW - timedelta(seconds=1)
     assert probe.expires_at == NOW + timedelta(seconds=30)
     assert all(
@@ -183,6 +250,10 @@ def test_redacted_probe_and_transport_have_no_credential_surface() -> None:
             probe.mark_price_digest,
             probe.account_config_digest,
             probe.leverage_digest,
+            probe.exchange_max_leverage_digest,
+            probe.positions_digest,
+            probe.pending_orders_digest,
+            probe.maximum_order_quantity_digest,
         )
     )
     assert read.calls == [
@@ -190,7 +261,62 @@ def test_redacted_probe_and_transport_have_no_credential_surface() -> None:
         ("mark_price", "BTC-USDT-SWAP"),
         ("account_config", None),
         ("leverage", "BTC-USDT-SWAP"),
+        ("exchange_max_leverage", "BTC-USDT-SWAP"),
+        ("positions", "BTC-USDT-SWAP"),
+        ("pending_orders", "BTC-USDT-SWAP"),
+        (
+            "maximum_order_quantity",
+            "BTC-USDT-SWAP",
+            "isolated",
+            "10000.1",
+            "14",
+        ),
     ]
+    expected_max_digest = sha256(
+        json.dumps(
+            {
+                "execution_target": "OKX_DEMO",
+                "resource": "exchange_max_leverage",
+                "source": "okx_demo_rest",
+                "authenticated": True,
+                "observed_at": (NOW - timedelta(seconds=2)).isoformat(),
+                "expires_at": (NOW + timedelta(seconds=30)).isoformat(),
+                "facts": {
+                    "instrument": "BTC-USDT-SWAP",
+                    "exchange_max_leverage": "20",
+                    "has_pending_orders": False,
+                },
+            },
+            allow_nan=False,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    assert probe.exchange_max_leverage_digest == expected_max_digest
+    expected_current_digest = sha256(
+        json.dumps(
+            {
+                "execution_target": "OKX_DEMO",
+                "resource": "leverage",
+                "source": "okx_demo_rest",
+                "authenticated": True,
+                "observed_at": (NOW - timedelta(seconds=2)).isoformat(),
+                "expires_at": (NOW + timedelta(seconds=30)).isoformat(),
+                "facts": {
+                    "instrument": "BTC-USDT-SWAP",
+                    "account_fingerprint_digest": HEX_A,
+                    "long": probe.current_long_leverage,
+                    "short": probe.current_short_leverage,
+                },
+            },
+            allow_nan=False,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    assert probe.leverage_digest == expected_current_digest
     assert not hasattr(session, "credentials")
     placed = session.place(
         {
@@ -233,6 +359,51 @@ def test_closed_session_fails_before_transport() -> None:
     with pytest.raises(CanonicalExecutionChainBlocked) as blocked:
         session.probe(instrument="BTC-USDT-SWAP")
     assert blocked.value.code == "BLOCKED_OKX_DEMO_SESSION_CLOSED"
+
+
+def test_dispatch_guard_is_typed_flat_current_capacity_evidence() -> None:
+    session, read, write, _closed = _session()
+    guard = session.dispatch_guard(
+        instrument="BTC-USDT-SWAP",
+        limit_price="10000.1",
+        effective_leverage="14",
+        minimum_size="1",
+    )
+    assert guard.maximum_buy_contracts == "2"
+    assert guard.long_contracts == guard.short_contracts == "0"
+    assert guard.active_position_count == guard.pending_order_count == 0
+    assert guard.credential_generation_digest == HEX_B
+    assert len(guard.guard_digest) == 64
+    assert write.calls == []
+    assert read.calls == [
+        ("positions", "BTC-USDT-SWAP"),
+        ("pending_orders", "BTC-USDT-SWAP"),
+        ("leverage", "BTC-USDT-SWAP"),
+        (
+            "maximum_order_quantity",
+            "BTC-USDT-SWAP",
+            "isolated",
+            "10000.1",
+            "14",
+        ),
+    ]
+
+
+def test_dispatch_guard_zero_capacity_blocks_without_post() -> None:
+    read = FakeRead()
+    read.snapshots["maximum_order_quantity"].items[0]["max_buy"] = "0"
+    session, _read, write, _closed = _session(read)
+    with pytest.raises(
+        CanonicalExecutionChainBlocked,
+        match="BLOCKED_OKX_DEMO_DISPATCH_CAPACITY_SHORTFALL",
+    ):
+        session.dispatch_guard(
+            instrument="BTC-USDT-SWAP",
+            limit_price="10000.1",
+            effective_leverage="14",
+            minimum_size="1",
+        )
+    assert write.calls == []
 
 
 def test_probe_rejects_caller_supplied_observation_time() -> None:
@@ -301,6 +472,79 @@ def test_probe_rejects_caller_supplied_observation_time() -> None:
         (
             lambda read: read.snapshots["leverage"].items[0].update(leverage="0"),
             "BLOCKED_OKX_DEMO_LEVERAGE_VALUE",
+        ),
+        (
+            lambda read: read.snapshots["exchange_max_leverage"].items.clear(),
+            "BLOCKED_OKX_DEMO_EXCHANGE_MAX_LEVERAGE_IDENTITY",
+        ),
+        (
+            lambda read: read.snapshots["exchange_max_leverage"].items[0].update(
+                inst_id="ETH-USDT-SWAP"
+            ),
+            "BLOCKED_OKX_DEMO_EXCHANGE_MAX_LEVERAGE_IDENTITY",
+        ),
+        (
+            lambda read: read.snapshots["exchange_max_leverage"].items[0].update(
+                max_leverage="0"
+            ),
+            "BLOCKED_OKX_DEMO_EXCHANGE_MAX_LEVERAGE_VALUE",
+        ),
+        (
+            lambda read: setattr(
+                read.snapshots["exchange_max_leverage"].metadata,
+                "authenticated",
+                False,
+            ),
+            "BLOCKED_OKX_DEMO_SNAPSHOT_FRESHNESS",
+        ),
+        (
+            lambda read: read.snapshots["positions"].items.append(
+                {
+                    "inst_id": "BTC-USDT-SWAP",
+                    "margin_mode": "isolated",
+                    "position_side": "long",
+                    "contracts": "1",
+                }
+            ),
+            "BLOCKED_OKX_DEMO_POSITION_NOT_FLAT",
+        ),
+        (
+            lambda read: read.snapshots["pending_orders"].items.append(
+                {"inst_id": "BTC-USDT-SWAP"}
+            ),
+            "BLOCKED_OKX_DEMO_PENDING_ORDERS",
+        ),
+        (
+            lambda read: read.snapshots["exchange_max_leverage"].items[0].update(
+                has_pending_orders=True
+            ),
+            "BLOCKED_OKX_DEMO_PENDING_ORDERS",
+        ),
+        (
+            lambda read: read.snapshots["maximum_order_quantity"].items[0].update(
+                max_buy="0"
+            ),
+            "BLOCKED_OKX_DEMO_CAPACITY_SHORTFALL",
+        ),
+        (
+            lambda read: read.snapshots["maximum_order_quantity"].items[0].update(
+                max_buy="NaN"
+            ),
+            "BLOCKED_OKX_DEMO_MAXIMUM_ORDER_QUANTITY_VALUE",
+        ),
+        (
+            lambda read: read.snapshots["maximum_order_quantity"].items[0].update(
+                inst_id="ETH-USDT-SWAP"
+            ),
+            "BLOCKED_OKX_DEMO_MAXIMUM_ORDER_QUANTITY_IDENTITY",
+        ),
+        (
+            lambda read: setattr(
+                read.snapshots["maximum_order_quantity"].metadata,
+                "expires_at",
+                NOW,
+            ),
+            "BLOCKED_OKX_DEMO_SNAPSHOT_FRESHNESS",
         ),
     ),
 )

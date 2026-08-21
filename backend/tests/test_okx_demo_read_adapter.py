@@ -1133,6 +1133,227 @@ def test_private_read_is_blocked_until_credential_provider_is_available() -> Non
     assert transport.calls == []
 
 
+def test_exchange_max_leverage_uses_exact_authenticated_account_request() -> None:
+    credentials = RecordedCredentialProvider()
+    instance, transport = adapter(
+        [
+            envelope(
+                [
+                    {
+                        "estAvailQuoteTrans": "",
+                        "estAvailTrans": "",
+                        "estLiqPx": "",
+                        "estMaxAmt": "1",
+                        "estMgn": "",
+                        "estQuoteMaxAmt": "",
+                        "estQuoteMgn": "",
+                        "existOrd": False,
+                        "maxLever": "20",
+                        "minLever": "0.01",
+                    }
+                ]
+            )
+        ],
+        credentials=credentials,
+    )
+
+    snapshot = instance.exchange_max_leverage("BTC-USDT-SWAP")
+
+    assert snapshot.status == "READY"
+    assert snapshot.metadata.resource == "exchange_max_leverage"
+    assert snapshot.metadata.authenticated is True
+    assert snapshot.items == [
+        {
+            "inst_id": "BTC-USDT-SWAP",
+            "inst_type": "SWAP",
+            "margin_mode": "isolated",
+            "position_side": "long",
+            "requested_leverage": "14",
+            "max_leverage": "20",
+            "min_leverage": "0.01",
+            "has_pending_orders": False,
+        }
+    ]
+    assert transport.calls[0]["path"] == "/api/v5/account/adjust-leverage-info"
+    assert transport.calls[0]["query"] == {
+        "instType": "SWAP",
+        "mgnMode": "isolated",
+        "lever": "14",
+        "posSide": "long",
+        "instId": "BTC-USDT-SWAP",
+    }
+    assert transport.calls[0]["headers"]["x-simulated-trading"] == "1"
+    assert credentials.calls == [
+        {
+            "method": "GET",
+            "request_path": (
+                "/api/v5/account/adjust-leverage-info?"
+                "instId=BTC-USDT-SWAP&instType=SWAP&lever=14&"
+                "mgnMode=isolated&posSide=long"
+            ),
+            "body": "",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "rows",
+    (
+        [],
+        [
+            {"existOrd": False, "maxLever": "20", "minLever": "0.01"},
+            {"existOrd": False, "maxLever": "20", "minLever": "0.01"},
+        ],
+        [{"existOrd": "false", "maxLever": "20", "minLever": "0.01"}],
+        [{"existOrd": False, "maxLever": "0", "minLever": "0.01"}],
+        [{"existOrd": False, "maxLever": "10", "minLever": "20"}],
+        [
+            {
+                "instId": "ETH-USDT-SWAP",
+                "existOrd": False,
+                "maxLever": "20",
+                "minLever": "0.01",
+            }
+        ],
+    ),
+)
+def test_exchange_max_leverage_rejects_non_singular_invalid_or_drifted_rows(
+    rows,
+) -> None:
+    instance, _transport = adapter(
+        [envelope(rows)], credentials=RecordedCredentialProvider()
+    )
+    with pytest.raises(OkxReadAdapterError) as blocked:
+        instance.exchange_max_leverage("BTC-USDT-SWAP")
+    assert blocked.value.status in {"FAILED", "BLOCKED"}
+
+
+def test_exchange_max_leverage_rejects_stale_authenticated_snapshot() -> None:
+    payload = envelope(
+        [{"existOrd": False, "maxLever": "20", "minLever": "0.01"}]
+    )
+    instance = OkxDemoReadAdapter(
+        execution_target="OKX_DEMO",
+        recorded_responses=[
+            OkxReadHttpResponse(
+                status_code=200,
+                payload=payload,
+                received_at=NOW - timedelta(seconds=61),
+            )
+        ],
+        credential_provider=RecordedCredentialProvider(),
+        now_provider=lambda: NOW,
+    )
+    with pytest.raises(OkxReadAdapterError) as blocked:
+        instance.exchange_max_leverage("BTC-USDT-SWAP")
+    assert blocked.value.kind == "STALE_DATA"
+    assert blocked.value.status == "BLOCKED"
+
+
+def test_maximum_order_quantity_uses_exact_authenticated_request() -> None:
+    credentials = RecordedCredentialProvider()
+    instance, transport = adapter(
+        [envelope([{"instId": "BTC-USDT-SWAP", "maxBuy": "2", "maxSell": "0"}])],
+        credentials=credentials,
+    )
+
+    snapshot = instance.maximum_order_quantity(
+        "BTC-USDT-SWAP",
+        td_mode="isolated",
+        price=Decimal("10000.1"),
+        leverage=Decimal("2"),
+    )
+
+    assert snapshot.items == [
+        {
+            "inst_id": "BTC-USDT-SWAP",
+            "margin_mode": "isolated",
+            "price": "10000.1",
+            "leverage": "2",
+            "max_buy": "2",
+        }
+    ]
+    assert transport.calls[0]["path"] == "/api/v5/account/max-size"
+    assert transport.calls[0]["query"] == {
+        "instId": "BTC-USDT-SWAP",
+        "tdMode": "isolated",
+        "px": "10000.1",
+        "leverage": "2",
+    }
+    assert transport.calls[0]["headers"]["x-simulated-trading"] == "1"
+
+
+def test_maximum_order_quantity_allows_zero_for_explicit_capacity_shortfall() -> None:
+    instance, _transport = adapter(
+        [envelope([{"instId": "BTC-USDT-SWAP", "maxBuy": "0"}])],
+        credentials=RecordedCredentialProvider(),
+    )
+    snapshot = instance.maximum_order_quantity(
+        "BTC-USDT-SWAP",
+        td_mode="isolated",
+        price=Decimal("10000"),
+        leverage=Decimal("2"),
+    )
+    assert snapshot.items[0]["max_buy"] == "0"
+
+
+@pytest.mark.parametrize(
+    "rows",
+    (
+        [],
+        [
+            {"instId": "BTC-USDT-SWAP", "maxBuy": "1"},
+            {"instId": "BTC-USDT-SWAP", "maxBuy": "1"},
+        ],
+        [{"instId": "ETH-USDT-SWAP", "maxBuy": "1"}],
+        [{"instId": "BTC-USDT-SWAP", "maxBuy": "-1"}],
+        [{"instId": "BTC-USDT-SWAP", "maxBuy": "NaN"}],
+    ),
+)
+def test_maximum_order_quantity_rejects_non_singular_identity_and_invalid_values(
+    rows,
+) -> None:
+    instance, _transport = adapter(
+        [envelope(rows)], credentials=RecordedCredentialProvider()
+    )
+    with pytest.raises(OkxReadAdapterError):
+        instance.maximum_order_quantity(
+            "BTC-USDT-SWAP",
+            td_mode="isolated",
+            price=Decimal("10000"),
+            leverage=Decimal("2"),
+        )
+
+
+def test_pending_orders_rejects_exchange_instrument_identity_drift() -> None:
+    instance, _transport = adapter(
+        [
+            envelope(
+                [
+                    {
+                        "instId": "ETH-USDT-SWAP",
+                        "ordId": "1",
+                        "clOrdId": "canonical1",
+                        "state": "live",
+                        "side": "buy",
+                        "posSide": "long",
+                        "tdMode": "isolated",
+                        "ordType": "limit",
+                        "px": "10000",
+                        "sz": "1",
+                        "accFillSz": "0",
+                        "cTime": FRESH_TS,
+                        "uTime": FRESH_TS,
+                    }
+                ]
+            )
+        ],
+        credentials=RecordedCredentialProvider(),
+    )
+    with pytest.raises(OkxReadAdapterError):
+        instance.pending_orders("BTC-USDT-SWAP")
+
+
 @pytest.mark.parametrize(
     "headers",
     [

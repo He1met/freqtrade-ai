@@ -6,7 +6,6 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
-from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -24,9 +23,14 @@ from app.canonical_v13.fill_service import (
     record_simulated_fill,
 )
 from app.canonical_v13.models import (
+    AUDIT_EVENTS_TABLE,
     DEPLOYMENTS_TABLE,
+    EXECUTION_CANARY_RISK_POLICIES_TABLE,
+    EXECUTION_CANARY_PROBE_RECEIPTS_TABLE,
     ORDERS_TABLE,
     QUALIFICATION_DECISIONS_TABLE,
+    RECONCILIATION_RUNS_TABLE,
+    RISK_DECISIONS_TABLE,
     RUNTIME_INSTANCES_TABLE,
     RUNTIME_RECEIPTS_TABLE,
     SIGNALS_TABLE,
@@ -35,9 +39,12 @@ from app.canonical_v13.order_service import record_simulated_order
 from app.canonical_v13.phase9_execution_authority import (
     authorize_demo_risk_budget,
     decide_central_demo_risk,
+    decide_signal_risk_shadow,
     record_redacted_demo_attestation,
 )
 from app.canonical_v13.phase9_order_writer import (
+    _claim_dispatch,
+    _persist_exchange_receipt,
     prepare_demo_order,
     release_demo_order_writer_lease,
 )
@@ -51,6 +58,7 @@ from app.canonical_v13.phase9_readiness import (
     Phase9QualificationHandoff,
     inspect_phase9_readiness,
 )
+from app.canonical_v13.phase9_canary_policy import terminate_canary_risk_policy
 from app.canonical_v13.phase9_schema_upgrade import (
     PHASE9_UNIQUE_CONSTRAINTS,
     CanonicalPhase9SchemaUpgradeBlocked,
@@ -221,85 +229,62 @@ def _seed_stage_a(connection, handoff: Phase9QualificationHandoff):
     return deployment.deployment_id, runtime["id"]
 
 
-def _seed_stage_b(connection, handoff, deployment_id, runtime_id):
-    approval_id = connection.execute(
-        select(DEPLOYMENTS_TABLE.c.deployment_approval_id).where(
-            DEPLOYMENTS_TABLE.c.id == deployment_id
-        )
-    ).scalar_one()
-    from tests.test_canonical_v13_phase9_execution_authority import (
-        _risk_policy_source,
-    )
-
-    source_receipt = _risk_policy_source(
+def _seed_stage_b(
+    connection,
+    handoff,
+    deployment_id,
+    runtime_id,
+    *,
+    base_time=datetime(2026, 8, 21, tzinfo=timezone.utc),
+):
+    signal_id = record_production_demo_signal(
         connection,
-        SimpleNamespace(deployment_approval_id=approval_id),
-        policy_digest="a" * 64,
-        accepted_at=datetime(2026, 8, 21, tzinfo=timezone.utc),
-    )
-    budget = authorize_demo_risk_budget(
-        connection,
-        deployment_approval_id=approval_id,
-        actor_identity="phase9-human-approver",
-        reason="exact Phase 9 test risk budget",
-        policy_source_receipt_digest=source_receipt,
-        evaluated_at=datetime(2026, 8, 21, tzinfo=timezone.utc),
-    )
-    risk_ids = []
-    for index, size in enumerate(("1", "2"), start=1):
-        signal_id = record_production_demo_signal(
-            connection,
-            deployment_id=deployment_id,
-            runtime_instance_id=runtime_id,
-            research_target_id=handoff.research_target_id,
-            signal_json={
-                "evidence_class": "PRODUCTION_OKX_DEMO",
-                "natural_signal": True,
-                "allow_real_funds": False,
-                "configuration_bundle_digest": handoff.configuration_bundle_digest,
-                "market_snapshot_digest": handoff.market_snapshot_digest,
-                "side": "buy",
-                "shadow_case": index,
-            },
-            evaluated_at=datetime(2026, 8, 21, tzinfo=timezone.utc)
-            + timedelta(seconds=index),
-        )
-        exchange_body = {
-            "instId": "BTC-USDT-SWAP",
-            "tdMode": "isolated",
-            "clOrdId": f"v13readiness{index:018d}",
+        deployment_id=deployment_id,
+        runtime_instance_id=runtime_id,
+        research_target_id=handoff.research_target_id,
+        signal_json={
+            "evidence_class": "PRODUCTION_OKX_DEMO",
+            "natural_signal": True,
+            "allow_real_funds": False,
+            "configuration_bundle_digest": handoff.configuration_bundle_digest,
+            "market_snapshot_digest": handoff.market_snapshot_digest,
             "side": "buy",
-            "posSide": "long",
-            "ordType": "post_only",
-            "sz": size,
-            "px": "10000",
-        }
-        signal_digest = connection.execute(
-            select(SIGNALS_TABLE.c.signal_digest).where(SIGNALS_TABLE.c.id == signal_id)
-        ).scalar_one()
-        intent_id = create_production_demo_intent(
-            connection,
-            signal_id=signal_id,
-            intent_json={
-                "contract": "canonical-v13-demo-trade-intent-v1",
-                "execution_target": "OKX_DEMO",
-                "allow_real_funds": False,
-                "signal_digest": signal_digest,
-                "instrument": "BTC-USDT-SWAP",
-                "notional": str(Decimal(size) * Decimal(10)),
-                "exchange_body": exchange_body,
-            },
-        )
-        risk_ids.append(
-            decide_central_demo_risk(
-                connection,
-                trade_intent_id=intent_id,
-                risk_budget_authorization_id=budget.authorization_id,
-                evaluated_at=datetime(2026, 8, 21, tzinfo=timezone.utc)
-                + timedelta(seconds=index + 2),
-            ).risk_decision_id
-        )
-    return risk_ids
+            "shadow_case": 1,
+        },
+        evaluated_at=base_time + timedelta(seconds=1),
+    )
+    exchange_body = {
+        "instId": "BTC-USDT-SWAP",
+        "tdMode": "isolated",
+        "clOrdId": "v13readiness000000000000000001",
+        "side": "buy",
+        "posSide": "long",
+        "ordType": "post_only",
+        "sz": "1",
+        "px": "10000",
+    }
+    signal_digest = connection.execute(
+        select(SIGNALS_TABLE.c.signal_digest).where(SIGNALS_TABLE.c.id == signal_id)
+    ).scalar_one()
+    intent_id = create_production_demo_intent(
+        connection,
+        signal_id=signal_id,
+        intent_json={
+            "contract": "canonical-v13-demo-trade-intent-v1",
+            "execution_target": "OKX_DEMO",
+            "allow_real_funds": False,
+            "signal_digest": signal_digest,
+            "instrument": "BTC-USDT-SWAP",
+            "notional": "10",
+            "exchange_body": exchange_body,
+        },
+    )
+    risk_id = decide_signal_risk_shadow(
+        connection,
+        trade_intent_id=intent_id,
+        evaluated_at=base_time + timedelta(seconds=3),
+    ).risk_decision_id
+    return [risk_id]
 
 
 def test_phase9_topology_is_exact_and_digest_stable() -> None:
@@ -533,7 +518,7 @@ def test_no_order_soak_rejects_a_stale_runtime_heartbeat(canonical_connection) -
     assert "EXACT_PRODUCTION_RUNTIME_RECEIPT_EVIDENCE_UNSET" in receipt.reason_codes
 
 
-def test_shadow_requires_exact_accepted_and_rejected_risk_with_zero_orders(
+def test_shadow_requires_one_receipt_with_accepted_and_rejected_checks(
     canonical_connection,
 ) -> None:
     with canonical_connection.begin():
@@ -551,12 +536,42 @@ def test_shadow_requires_exact_accepted_and_rejected_risk_with_zero_orders(
 
     assert receipt.status == "READY"
     assert receipt.reason_codes == ()
-    assert receipt.lineage_evidence_counts["signals"] == 2
-    assert receipt.lineage_evidence_counts["risk_decisions"] == 2
+    assert receipt.lineage_evidence_counts["signals"] == 1
+    assert receipt.lineage_evidence_counts["trade_intents"] == 1
+    assert receipt.lineage_evidence_counts["risk_decisions"] == 1
+    assert receipt.execution_domain_counts["execution_canary_probe_receipts"] == 0
+    assert receipt.execution_domain_counts["execution_canary_risk_policies"] == 0
+    assert receipt.execution_domain_counts["execution_risk_budget_authorizations"] == 0
+    assert receipt.execution_domain_counts["execution_risk_reservations"] == 0
     assert receipt.execution_domain_counts["orders"] == 0
 
 
-def test_canary_and_recovery_prove_exact_single_writer_and_lifecycle_chain(
+def test_shadow_digest_drift_blocks_readiness(canonical_connection) -> None:
+    with canonical_connection.begin():
+        qualification = _qualified(canonical_connection)
+        handoff = _handoff(canonical_connection, qualification)
+        deployment_id, runtime_id = _seed_stage_a(canonical_connection, handoff)
+        risk_ids = _seed_stage_b(
+            canonical_connection, handoff, deployment_id, runtime_id
+        )
+        canonical_connection.execute(
+            RISK_DECISIONS_TABLE.update()
+            .where(RISK_DECISIONS_TABLE.c.id == risk_ids[0])
+            .values(decision_digest="0" * 64)
+        )
+        receipt = inspect_phase9_readiness(
+            canonical_connection,
+            qualification_handoff=handoff,
+            stage="SIGNAL_RISK_SHADOW",
+            evaluated_at=datetime(2026, 8, 21, tzinfo=timezone.utc)
+            + timedelta(seconds=20),
+        )
+
+    assert receipt.status == "BLOCKED"
+    assert "EXACT_SINGLE_SHADOW_DECISION_RECEIPT_REQUIRED" in receipt.reason_codes
+
+
+def _historical_fixture_canary_and_recovery_chain(
     canonical_connection,
 ) -> None:
     with canonical_connection.begin():
@@ -722,6 +737,360 @@ def test_canary_and_recovery_prove_exact_single_writer_and_lifecycle_chain(
     assert recovery.status == "READY", recovery.reason_codes
     assert recovery.reason_codes == ()
     assert recovery.lineage_evidence_counts["recovery_acceptance_receipts"] == 1
+
+
+def test_shadow_acceptance_cannot_satisfy_canary_execution_authority(
+    canonical_connection,
+) -> None:
+    with canonical_connection.begin():
+        qualification = _qualified(canonical_connection)
+        handoff = _handoff(canonical_connection, qualification)
+        deployment_id, runtime_id = _seed_stage_a(canonical_connection, handoff)
+        _seed_stage_b(canonical_connection, handoff, deployment_id, runtime_id)
+        canary = inspect_phase9_readiness(
+            canonical_connection,
+            qualification_handoff=handoff,
+            stage="OKX_DEMO_CANARY",
+            evaluated_at=datetime(2026, 8, 21, tzinfo=timezone.utc)
+            + timedelta(seconds=20),
+        )
+
+    assert canary.status == "BLOCKED"
+    assert "EXACT_RISK_ACCEPTED_EVIDENCE_UNSET" in canary.reason_codes
+    assert "EXACT_SINGLE_EXECUTION_RISK_RESERVATION_REQUIRED" in canary.reason_codes
+    assert canary.execution_domain_counts["execution_canary_probe_receipts"] == 0
+    assert canary.execution_domain_counts["orders"] == 0
+
+
+def test_canary_readiness_recomputes_sealed_policy_and_execution_reservation(
+    canonical_connection,
+) -> None:
+    from tests.test_canonical_v13_phase9_canary_policy import _authorize, _fixture
+
+    with canonical_connection.begin():
+        decision, approval, probe, probe_receipt = _fixture(canonical_connection)
+        handoff = Phase9QualificationHandoff(
+            qualification_decision_id=decision["id"],
+            qualification_decision_digest=decision["decision_digest"],
+            strategy_version_id=decision["strategy_version_id"],
+            research_target_id=decision["research_target_id"],
+            configuration_bundle_id=decision["configuration_bundle_id"],
+            configuration_bundle_digest=decision["configuration_bundle_digest"],
+            market_snapshot_id=decision["market_snapshot_id"],
+            market_snapshot_digest=decision["market_snapshot_digest"],
+            validation_plan_id=decision["validation_plan_id"],
+            validation_plan_digest=decision["validation_plan_digest"],
+        )
+        deployment = canonical_connection.execute(
+            select(DEPLOYMENTS_TABLE)
+        ).mappings().one()
+        runtime_id = canonical_connection.execute(
+            select(RUNTIME_INSTANCES_TABLE.c.id)
+        ).scalar_one()
+        _seed_stage_b(
+            canonical_connection,
+            handoff,
+            deployment["id"],
+            runtime_id,
+            base_time=probe.observed_at,
+        )
+        policy = _authorize(
+            canonical_connection, decision, approval, probe_receipt
+        )
+        persisted_policy = canonical_connection.execute(
+            select(EXECUTION_CANARY_RISK_POLICIES_TABLE).where(
+                EXECUTION_CANARY_RISK_POLICIES_TABLE.c.id == policy.policy_id
+            )
+        ).mappings().one()
+        budget = authorize_demo_risk_budget(
+            canonical_connection,
+            deployment_approval_id=approval.deployment_approval_id,
+            actor_identity="phase9-human-policy-owner",
+            reason="freeze exact one-shot canary policy",
+            policy_source_receipt_digest=policy.receipt_digest,
+            evaluated_at=probe.observed_at,
+        )
+        signal_id = record_production_demo_signal(
+            canonical_connection,
+            deployment_id=deployment["id"],
+            runtime_instance_id=runtime_id,
+            research_target_id=handoff.research_target_id,
+            signal_json={
+                "evidence_class": "PRODUCTION_OKX_DEMO",
+                "natural_signal": True,
+                "allow_real_funds": False,
+                "configuration_bundle_digest": handoff.configuration_bundle_digest,
+                "market_snapshot_digest": handoff.market_snapshot_digest,
+                "side": "buy",
+                "execution_case": 1,
+            },
+            evaluated_at=probe.observed_at + timedelta(seconds=3),
+        )
+        signal_digest = canonical_connection.execute(
+            select(SIGNALS_TABLE.c.signal_digest).where(SIGNALS_TABLE.c.id == signal_id)
+        ).scalar_one()
+        execution_body = {
+            "instId": "BTC-USDT-SWAP",
+            "tdMode": "isolated",
+            "clOrdId": "v13readinessexecution000000001",
+            "side": "buy",
+            "posSide": "long",
+            "ordType": "limit",
+            "sz": str(persisted_policy["minimum_contract_size"]),
+            "px": str(persisted_policy["limit_price"]),
+        }
+        intent_id = create_production_demo_intent(
+            canonical_connection,
+            signal_id=signal_id,
+            intent_json={
+                "contract": "canonical-v13-demo-trade-intent-v1",
+                "execution_target": "OKX_DEMO",
+                "allow_real_funds": False,
+                "signal_digest": signal_digest,
+                "instrument": "BTC-USDT-SWAP",
+                "notional": str(
+                    Decimal(str(persisted_policy["minimum_contract_size"]))
+                    * Decimal(str(persisted_policy["contract_value"]))
+                    * Decimal(str(persisted_policy["mark_price"]))
+                ),
+                "exchange_body": execution_body,
+            },
+        )
+        execution = decide_central_demo_risk(
+            canonical_connection,
+            trade_intent_id=intent_id,
+            risk_budget_authorization_id=budget.authorization_id,
+            evaluated_at=probe.observed_at + timedelta(seconds=4),
+        )
+        receipt = inspect_phase9_readiness(
+            canonical_connection,
+            qualification_handoff=handoff,
+            stage="OKX_DEMO_CANARY",
+            evaluated_at=probe.observed_at + timedelta(seconds=20),
+        )
+        from tests.test_canonical_v13_phase9_order_writer import FakeTransport
+
+        prepared = prepare_demo_order(
+            canonical_connection,
+            risk_decision_id=execution.risk_decision_id,
+            attestation_id=persisted_policy["execution_attestation_id"],
+            writer_identity="canonical_order_writer",
+            holder_identity="canonical-v13-order-writer-v1",
+            holder_token_digest="f" * 64,
+            idempotency_key="phase9-readiness-exact-post",
+            order_request=execution_body,
+            evaluated_at=probe.observed_at + timedelta(seconds=5),
+        )
+        transport = FakeTransport()
+        guard = transport.dispatch_guard(
+            instrument=execution_body["instId"],
+            limit_price=execution_body["px"],
+            effective_leverage=str(persisted_policy["effective_leverage"]),
+            minimum_size=execution_body["sz"],
+        )
+        guard = replace(
+            guard,
+            account_fingerprint_digest=probe.account_fingerprint_digest,
+            credential_generation_digest=probe.credential_generation_digest,
+            leverage_digest=_json_digest(
+                {
+                    "execution_target": "OKX_DEMO",
+                    "resource": "leverage",
+                    "source": "okx_demo_rest",
+                    "authenticated": True,
+                    "observed_at": guard.leverage_observed_at.isoformat(),
+                    "expires_at": guard.leverage_expires_at.isoformat(),
+                    "facts": {
+                        "instrument": "BTC-USDT-SWAP",
+                        "account_fingerprint_digest": probe.account_fingerprint_digest,
+                        "long": guard.effective_leverage,
+                        "short": guard.current_short_leverage,
+                    },
+                }
+            ),
+        )
+        _claim_dispatch(
+            canonical_connection,
+            order_id=prepared.order_id,
+            holder_identity="canonical-v13-order-writer-v1",
+            holder_token_digest="f" * 64,
+            lease_generation=prepared.lease_generation,
+            guard=guard,
+            evaluated_at=probe.observed_at + timedelta(seconds=6),
+        )
+        order = _persist_exchange_receipt(
+            canonical_connection,
+            order_id=prepared.order_id,
+            exchange_order_id="readiness-demo-order",
+            safe_response={
+                "ordId": "readiness-demo-order",
+                "clOrdId": execution_body["clOrdId"],
+                "sCode": "0",
+            },
+            outcome_mode="POST",
+        )
+        fill_id = record_production_demo_fill(
+            canonical_connection,
+            order_id=prepared.order_id,
+            exchange_fill_id="readiness-demo-fill",
+            fill_json={
+                "contract": "canonical-v13-okx-demo-fill-evidence-v1",
+                "evidence_class": "PRODUCTION_OKX_DEMO",
+                "allow_real_funds": False,
+                "instrument": "BTC-USDT-SWAP",
+                "exchange_order_id": order.exchange_order_id,
+                "exchange_fill_id": "readiness-demo-fill",
+                "bill_id": "readiness-demo-bill",
+                "price": execution_body["px"],
+                "size": "1",
+                "fee": "-0.01",
+                "timestamp": "1787292000000",
+                "side": "buy",
+                "position_side": "long",
+                "requested_size": execution_body["sz"],
+            },
+        )
+        ledger_id = post_production_demo_ledger_entry(
+            canonical_connection,
+            fill_id=fill_id,
+            entry_key="okx-demo-fill:readiness-demo-fill:long-contracts",
+            asset="BTC-USDT-SWAP",
+            amount=Decimal("1"),
+            entry_type="OKX_DEMO_LONG_FILL_CONTRACTS",
+        )
+        run_id = reconcile_production_demo_chain(
+            canonical_connection,
+            order_id=prepared.order_id,
+            fill_id=fill_id,
+            ledger_entry_id=ledger_id,
+        )
+        completed = inspect_phase9_readiness(
+            canonical_connection,
+            qualification_handoff=handoff,
+            stage="OKX_DEMO_CANARY",
+            # The sealed probe and attestation are expired here; the claim-time
+            # windows, not current time, remain the acceptance authority.
+            evaluated_at=probe.observed_at + timedelta(minutes=2),
+        )
+        terminated = terminate_canary_risk_policy(
+            canonical_connection,
+            policy_id=policy.policy_id,
+            reconciliation_run_id=run_id,
+            actor_identity="phase9-human-policy-owner",
+            evaluated_at=probe.observed_at + timedelta(minutes=2, seconds=1),
+        )
+        release_demo_order_writer_lease(
+            canonical_connection,
+            holder_identity="canonical-v13-order-writer-v1",
+            holder_token_digest="f" * 64,
+            evaluated_at=probe.observed_at + timedelta(minutes=2, seconds=2),
+        )
+        runtime_receipt_digest = canonical_connection.execute(
+            select(RUNTIME_RECEIPTS_TABLE.c.receipt_digest)
+            .order_by(RUNTIME_RECEIPTS_TABLE.c.observed_at.desc())
+            .limit(1)
+        ).scalar_one()
+        recovery_at = probe.observed_at + timedelta(minutes=2, seconds=3)
+        recovery_evidence = Phase9RecoveryAcceptance(
+            qualification_decision_id=handoff.qualification_decision_id,
+            runtime_restart=build_lifecycle_receipt(
+                service_key="long_lived_runtime",
+                action="RESTART",
+                status="CONFIRMED",
+                generation=2,
+                observed_at=recovery_at,
+                plan_digest="a" * 64,
+            ),
+            runtime_recovery=build_lifecycle_receipt(
+                service_key="long_lived_runtime",
+                action="RECOVER",
+                status="NO_OP",
+                generation=2,
+                observed_at=recovery_at,
+                plan_digest="a" * 64,
+            ),
+            writer_stop=build_lifecycle_receipt(
+                service_key="order_writer",
+                action="STOP",
+                status="STOPPED",
+                generation=1,
+                observed_at=recovery_at,
+                plan_digest="b" * 64,
+            ),
+            order_replay_receipt_digest=order.receipt_digest,
+            observability_receipt_digest=runtime_receipt_digest,
+            policy_termination_receipt_digest=terminated.termination_digest,
+            active_supervisor_lease_count=0,
+            zombie_process_count=0,
+            observed_at=recovery_at,
+        )
+        record_phase9_recovery_acceptance(
+            canonical_connection,
+            evidence=recovery_evidence,
+            actor_identity="canonical-phase9-recovery-operator",
+        )
+        recovery = inspect_phase9_readiness(
+            canonical_connection,
+            qualification_handoff=handoff,
+            stage="RECOVERY_SOAK",
+            evaluated_at=recovery_at + timedelta(seconds=1),
+        )
+        stray_run_id = uuid4()
+        stray_scope_digest = "1" * 64
+        canonical_connection.execute(
+            RECONCILIATION_RUNS_TABLE.insert().values(
+                id=stray_run_id,
+                status="SUCCEEDED",
+                scope_digest=stray_scope_digest,
+                receipt_digest=_json_digest(
+                    {
+                        "run_id": str(stray_run_id),
+                        "scope_digest": stray_scope_digest,
+                    }
+                ),
+                created_at=recovery_at,
+                completed_at=recovery_at,
+            )
+        )
+        stray = inspect_phase9_readiness(
+            canonical_connection,
+            qualification_handoff=handoff,
+            stage="RECOVERY_SOAK",
+            evaluated_at=recovery_at + timedelta(seconds=1),
+        )
+        canonical_connection.execute(
+            EXECUTION_CANARY_PROBE_RECEIPTS_TABLE.update()
+            .where(
+                EXECUTION_CANARY_PROBE_RECEIPTS_TABLE.c.id
+                == probe_receipt.probe_receipt_id
+            )
+            .values(instrument_digest="0" * 64)
+        )
+        drifted = inspect_phase9_readiness(
+            canonical_connection,
+            qualification_handoff=handoff,
+            stage="OKX_DEMO_CANARY",
+            evaluated_at=probe.observed_at + timedelta(seconds=20),
+        )
+
+    assert execution.status == "RISK_ACCEPTED", execution.reason_code
+    assert receipt.lineage_evidence_counts["execution_canary_probe_receipts"] == 1
+    assert receipt.lineage_evidence_counts["execution_canary_risk_policies"] == 1
+    assert receipt.lineage_evidence_counts["execution_risk_reservations"] == 1
+    assert "CANONICAL_RISK_POLICY_LINEAGE_UNSET" not in receipt.reason_codes
+    assert receipt.status == "BLOCKED"
+    assert "EXACT_SINGLE_OKX_DEMO_ORDER_EVIDENCE_UNSET" in receipt.reason_codes
+    assert completed.status == "READY", completed.reason_codes
+    assert "CANONICAL_RISK_POLICY_PROBE_VALIDATION_BLOCKED" not in (
+        completed.reason_codes
+    )
+    assert "EXACT_OKX_DEMO_ATTESTATION_EVIDENCE_UNSET" not in completed.reason_codes
+    assert recovery.status == "READY", recovery.reason_codes
+    assert recovery.lineage_evidence_counts["reconciliation_runs"] == 1
+    assert recovery.lineage_evidence_counts["recovery_acceptance_receipts"] == 1
+    assert stray.status == "BLOCKED"
+    assert "UNRELATED_RECONCILIATION_RUNS_EVIDENCE_PRESENT" in stray.reason_codes
+    assert "CANONICAL_RISK_POLICY_PROBE_VALIDATION_BLOCKED" in drifted.reason_codes
 
 
 def test_unknown_phase9_stage_fails_closed(canonical_connection) -> None:

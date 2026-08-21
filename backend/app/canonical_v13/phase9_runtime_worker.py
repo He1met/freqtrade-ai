@@ -49,6 +49,12 @@ class ActiveRuntimeLineage:
     demo_only: bool
     allow_real_funds: bool
     runtime_order_writer_capability: bool
+    strategy_artifact_digest: str | None = None
+    strategy_artifact_source: str | None = None
+    target_instrument: str | None = None
+    target_pair: str | None = None
+    target_timeframe: str | None = None
+    target_data_kind: str | None = None
 
 
 @dataclass(frozen=True)

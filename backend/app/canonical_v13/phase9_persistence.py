@@ -28,6 +28,12 @@ PHASE9_PERSISTENCE_ENV_BY_CAPABILITY: Final[Mapping[str, str]] = MappingProxyTyp
     }
 )
 
+API_PHASE9_CAPABILITIES: Final[tuple[str, ...]] = (
+    "canonical_approval_writer",
+    "canonical_deployment_writer",
+    "canonical_risk_writer",
+)
+
 
 class CanonicalPhase9PersistenceBlocked(RuntimeError):
     pass
@@ -65,10 +71,30 @@ def phase9_service_principal(
 
 
 def resolve_phase9_persistence_urls(
-    environment: Mapping[str, str], *, role_mapping: CanonicalRoleMapping
+    environment: Mapping[str, str],
+    *,
+    role_mapping: CanonicalRoleMapping,
+    capabilities: tuple[str, ...] | None = None,
 ) -> Phase9PersistenceURLs:
+    resolved_capabilities = (
+        tuple(PHASE9_PERSISTENCE_ENV_BY_CAPABILITY)
+        if capabilities is None
+        else capabilities
+    )
+    if (
+        not resolved_capabilities
+        or len(set(resolved_capabilities)) != len(resolved_capabilities)
+        or any(
+            capability not in PHASE9_PERSISTENCE_ENV_BY_CAPABILITY
+            for capability in resolved_capabilities
+        )
+    ):
+        raise CanonicalPhase9PersistenceBlocked(
+            "BLOCKED_PHASE9_PERSISTENCE_CAPABILITY_SET"
+        )
     urls: dict[str, URL] = {}
-    for capability, environment_name in PHASE9_PERSISTENCE_ENV_BY_CAPABILITY.items():
+    for capability in resolved_capabilities:
+        environment_name = PHASE9_PERSISTENCE_ENV_BY_CAPABILITY[capability]
         raw = environment.get(environment_name)
         if not raw:
             raise CanonicalPhase9PersistenceBlocked(
@@ -100,6 +126,7 @@ def resolve_phase9_persistence_urls(
 
 
 __all__ = [
+    "API_PHASE9_CAPABILITIES",
     "PHASE9_PERSISTENCE_ENV_BY_CAPABILITY",
     "CanonicalPhase9PersistenceBlocked",
     "Phase9PersistenceURLs",

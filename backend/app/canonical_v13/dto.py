@@ -107,11 +107,10 @@ class Phase9RiskBudgetReceiptDTO(CanonicalProjectionDTO):
 class Phase9CanaryRiskPolicyCommandDTO(CanonicalCommandDTO):
     qualification_decision_id: UUID
     deployment_approval_id: UUID
-    execution_attestation_id: UUID
+    probe_receipt_id: UUID
     actor_identity: str = Field(min_length=1, max_length=160)
     idempotency_key: str = Field(min_length=1, max_length=200)
     reason: str = Field(min_length=1, max_length=2000)
-    redacted_evidence: dict[str, Any]
 
 
 class Phase9CanaryRiskPolicyReceiptDTO(CanonicalProjectionDTO):
@@ -167,6 +166,18 @@ class Phase9RiskDecisionReceiptDTO(CanonicalProjectionDTO):
     risk_decision_id: UUID
     reservation_id: UUID
     status: Literal["RISK_ACCEPTED", "REJECTED", "BLOCKED"]
+    reason_code: str
+    decision_digest: str = Field(pattern=SHA256_PATTERN)
+    repeat_noop: bool
+
+
+class Phase9ShadowRiskDecisionCommandDTO(CanonicalCommandDTO):
+    trade_intent_id: UUID
+
+
+class Phase9ShadowRiskDecisionReceiptDTO(CanonicalProjectionDTO):
+    risk_decision_id: UUID
+    status: Literal["RISK_ACCEPTED"]
     reason_code: str
     decision_digest: str = Field(pattern=SHA256_PATTERN)
     repeat_noop: bool

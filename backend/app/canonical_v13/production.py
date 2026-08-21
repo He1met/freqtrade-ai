@@ -32,6 +32,7 @@ from app.canonical_v13.research_persistence import (
     resolve_research_persistence_urls,
 )
 from app.canonical_v13.phase9_persistence import (
+    API_PHASE9_CAPABILITIES,
     PHASE9_PERSISTENCE_ENV_BY_CAPABILITY,
     CanonicalPhase9PersistenceBlocked,
     resolve_phase9_persistence_urls,
@@ -131,7 +132,9 @@ def create_app(
         )
     try:
         phase9_urls = resolve_phase9_persistence_urls(
-            resolved_environment, role_mapping=local_role_mapping()
+            resolved_environment,
+            role_mapping=local_role_mapping(),
+            capabilities=API_PHASE9_CAPABILITIES,
         )
     except CanonicalPhase9PersistenceBlocked as exc:
         raise CanonicalProductionConfigurationBlocked(str(exc)) from exc
@@ -146,9 +149,10 @@ def create_app(
         *(url.username for url in research_urls.urls.values()),
         *(url.username for url in phase9_urls.urls.values()),
     }
-    if len(usernames) != 14:
+    if len(usernames) != 9:
         raise CanonicalProductionConfigurationBlocked(
-            "BLOCKED_CANONICAL_ROLE_SEPARATION: API and research roles must differ"
+            "BLOCKED_CANONICAL_ROLE_SEPARATION: API, research, and API-routed "
+            "Phase 9 roles must differ"
         )
 
     reader_engine = create_engine(reader_url, pool_pre_ping=True)
@@ -179,9 +183,7 @@ def create_app(
         deployment_connection_factory=_connection_factory(
             phase9_engines["canonical_deployment_writer"]
         ),
-        signal_connection_factory=_connection_factory(
-            phase9_engines["canonical_signal_writer"]
-        ),
+        signal_connection_factory=None,
         risk_connection_factory=_connection_factory(
             phase9_engines["canonical_risk_writer"]
         ),
