@@ -282,6 +282,81 @@ def test_supervisor_observation_confirms_runtime_without_launching_inside_db_tra
     assert status == "ACTIVE"
 
 
+def test_supervisor_observation_rolls_stable_runtime_to_new_accepted_plan(
+    canonical_connection,
+) -> None:
+    with canonical_connection.begin():
+        _plan_id, decision = _qualified(canonical_connection)
+        approval = approve_demo_deployment(
+            canonical_connection,
+            qualification_decision_id=decision.qualification_decision_id,
+            actor_identity="phase9-human-approver",
+            reason="reviewed production Demo runtime rollover",
+        )
+        deployment = create_demo_deployment(
+            canonical_connection,
+            deployment_approval_id=approval.deployment_approval_id,
+        )
+        persisted = canonical_connection.execute(
+            select(DEPLOYMENTS_TABLE).where(
+                DEPLOYMENTS_TABLE.c.id == deployment.deployment_id
+            )
+        ).mappings().one()
+        runtime_id = uuid4()
+
+        def observe(image_digest: str, observed_at):
+            spec = FrozenRuntimeLaunchSpec(
+                deployment_id=deployment.deployment_id,
+                approval_id=approval.deployment_approval_id,
+                qualification_decision_id=decision.qualification_decision_id,
+                strategy_version_id=persisted["strategy_version_id"],
+                configuration_bundle_id=persisted["configuration_bundle_id"],
+                configuration_bundle_digest=persisted["configuration_bundle_digest"],
+                market_snapshot_id=persisted["market_snapshot_id"],
+                market_snapshot_digest=persisted["market_snapshot_digest"],
+                deployment_capability_digest=deployment.capability_digest,
+                runtime_identity="canonical-v13-long-lived-runtime-v1",
+                image_digest=image_digest,
+                service_account="canonical_runtime_reader",
+                network_policy="DEMO_EXCHANGE_ONLY",
+                credential_reference="none:public-okx-market-only",
+            )
+            receipt = build_runtime_observation_receipt(
+                runtime_instance_id=runtime_id,
+                launch_spec=spec,
+                status="HEALTHY",
+                observed_at=observed_at,
+                evidence_class="PRODUCTION_DEMO_RUNTIME",
+            )
+            return confirm_production_demo_runtime_observation(
+                canonical_connection,
+                deployment_id=deployment.deployment_id,
+                runtime_identity=spec.runtime_identity,
+                image_digest=image_digest,
+                credential_reference=spec.credential_reference or "",
+                receipt=receipt,
+                evaluated_at=observed_at + timedelta(seconds=1),
+            )
+
+        assert observe("f" * 64, NOW) == runtime_id
+        assert observe("e" * 64, NOW + timedelta(seconds=2)) == runtime_id
+        assert observe("e" * 64, NOW + timedelta(seconds=2)) == runtime_id
+        current = canonical_connection.execute(
+            select(RUNTIME_INSTANCES_TABLE).where(
+                RUNTIME_INSTANCES_TABLE.c.id == runtime_id
+            )
+        ).mappings().one()
+        receipts = canonical_connection.execute(
+            select(RUNTIME_RECEIPTS_TABLE.c.launch_spec_digest).where(
+                RUNTIME_RECEIPTS_TABLE.c.runtime_instance_id == runtime_id
+            )
+        ).scalars().all()
+
+    assert current["image_digest"] == "e" * 64
+    assert len(receipts) == 2
+    assert len(set(receipts)) == 2
+
+
 def test_writer_separated_simulated_chain_and_reconciliation(canonical_connection):
     with canonical_connection.begin():
         plan, _decision, deployment, runtime_id = _runtime_fixture(canonical_connection)
