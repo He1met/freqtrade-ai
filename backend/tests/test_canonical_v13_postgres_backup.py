@@ -1,20 +1,18 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import importlib.util
 import json
-from pathlib import Path
 import subprocess
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
-
 from app.canonical_v13.manifest import (
     CANONICAL_BUSINESS_SCHEMA,
     CANONICAL_MANIFEST_DIGEST,
     CANONICAL_TABLE_NAMES,
 )
-
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPOSITORY_ROOT / "scripts/canonical_v13_postgres_backup.py"
@@ -44,7 +42,7 @@ def test_plan_is_offline_exact_and_never_executes() -> None:
     result = backup.plan()
     assert result == {
         "status": "READY",
-        "contract": "canonical-v13-postgres-data-backup-v1",
+        "contract": "canonical-v13-postgres-data-backup-v2",
         "source_database": "freqtrade_ai_v13",
         "restore_database_pattern": (
             "freqtrade_ai_v13_restore_[a-z0-9][a-z0-9_]*"
@@ -199,7 +197,9 @@ def test_create_backup_uses_fake_runner_and_writes_atomic_manifest(
         pg_dump_binary=sys.executable,
         runner=runner,
         release_guard=lambda: "b" * 40,
-        database_inspector=lambda _url, require_zero: _counts(),
+        database_inspector=(
+            lambda _url, require_zero, require_superuser=False: _counts()
+        ),
     )
     assert result["status"] == "BACKED_UP"
     assert result["table_count"] == 56
@@ -225,8 +225,8 @@ def test_restore_requires_empty_preflight_and_exact_post_counts(
     )
     inspections: list[bool] = []
 
-    def inspector(_url, *, require_zero):
-        inspections.append(require_zero)
+    def inspector(_url, *, require_zero, require_superuser=False):
+        inspections.append((require_zero, require_superuser))
         return _counts() if require_zero else counts
 
     commands: list[tuple[str, ...]] = []
@@ -248,9 +248,10 @@ def test_restore_requires_empty_preflight_and_exact_post_counts(
         database_inspector=inspector,
     )
     assert result["status"] == "RESTORED_AND_VERIFIED"
-    assert inspections == [True, False]
+    assert inspections == [(True, True), (False, True)]
     assert len(commands) == 1
     assert "--single-transaction" in commands[0]
+    assert "--disable-triggers" in commands[0]
     assert "--exit-on-error" in commands[0]
     assert "--data-only" in commands[0]
 
@@ -277,5 +278,78 @@ def test_restore_fails_closed_on_post_restore_count_drift(tmp_path: Path) -> Non
             pg_restore_binary=sys.executable,
             runner=lambda command: subprocess.CompletedProcess(command, 0, b"", b""),
             release_guard=lambda: "a" * 40,
-            database_inspector=lambda _url, require_zero: next(observations),
+            database_inspector=(
+                lambda _url, require_zero, require_superuser=False: next(
+                    observations
+                )
+            ),
+        )
+
+
+def test_failed_restore_rechecks_empty_trigger_boundary(tmp_path: Path) -> None:
+    archive = tmp_path / "backup.dump"
+    archive.write_bytes(b"fake-pg-custom-archive")
+    manifest_path = tmp_path / "backup.manifest.json"
+    manifest_path.write_text(
+        json.dumps(_manifest(archive=archive, counts=_counts())), encoding="utf-8"
+    )
+    inspections: list[tuple[bool, bool]] = []
+
+    def inspector(_url, *, require_zero, require_superuser=False):
+        inspections.append((require_zero, require_superuser))
+        return _counts()
+
+    with pytest.raises(
+        backup.CanonicalBackupBlocked, match="BLOCKED_CANONICAL_RESTORE:"
+    ):
+        backup.restore_backup(
+            restore_database_url=(
+                "postgresql+psycopg:///freqtrade_ai_v13_restore_phase9_004"
+            ),
+            restore_database_name="freqtrade_ai_v13_restore_phase9_004",
+            archive_path=archive,
+            manifest_path=manifest_path,
+            pg_restore_binary=sys.executable,
+            runner=lambda command: subprocess.CompletedProcess(command, 1, b"", b""),
+            release_guard=lambda: "a" * 40,
+            database_inspector=inspector,
+        )
+    assert inspections == [(True, True), (True, True)]
+
+
+def test_failed_restore_blocks_if_trigger_boundary_did_not_recover(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "backup.dump"
+    archive.write_bytes(b"fake-pg-custom-archive")
+    manifest_path = tmp_path / "backup.manifest.json"
+    manifest_path.write_text(
+        json.dumps(_manifest(archive=archive, counts=_counts())), encoding="utf-8"
+    )
+    calls = 0
+
+    def inspector(_url, *, require_zero, require_superuser=False):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise backup.CanonicalBackupBlocked(
+                "BLOCKED_CANONICAL_RESTORE_TRIGGER_STATE", "disabled"
+            )
+        return _counts()
+
+    with pytest.raises(
+        backup.CanonicalBackupBlocked,
+        match="BLOCKED_CANONICAL_RESTORE_TRIGGER_RECOVERY",
+    ):
+        backup.restore_backup(
+            restore_database_url=(
+                "postgresql+psycopg:///freqtrade_ai_v13_restore_phase9_005"
+            ),
+            restore_database_name="freqtrade_ai_v13_restore_phase9_005",
+            archive_path=archive,
+            manifest_path=manifest_path,
+            pg_restore_binary=sys.executable,
+            runner=lambda command: subprocess.CompletedProcess(command, 1, b"", b""),
+            release_guard=lambda: "a" * 40,
+            database_inspector=inspector,
         )

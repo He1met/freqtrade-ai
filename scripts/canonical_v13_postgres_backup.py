@@ -11,21 +11,20 @@ Keychain material are outside the archive boundary.
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
-from hashlib import sha256
 import json
 import os
-from pathlib import Path
 import re
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timezone
+from hashlib import sha256
+from pathlib import Path
 from typing import Callable, Final, Mapping, Sequence
 from uuid import uuid4
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import Connection, create_engine, text
 from sqlalchemy.engine import URL, make_url
-
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "backend"))
@@ -39,6 +38,10 @@ from app.canonical_v13.bootstrap import (  # noqa: E402
     local_role_mapping,
     verify_postgresql_bootstrap,
 )
+from app.canonical_v13.gate_receipt_upgrade import (  # noqa: E402
+    CanonicalGateReceiptUpgradeBlocked,
+    verify_gate_receipt_upgrade,
+)
 from app.canonical_v13.manifest import (  # noqa: E402
     CANONICAL_BUSINESS_SCHEMA,
     CANONICAL_MANIFEST_DIGEST,
@@ -46,8 +49,7 @@ from app.canonical_v13.manifest import (  # noqa: E402
 )
 from app.canonical_v13.models import CANONICAL_TABLES  # noqa: E402
 
-
-BACKUP_CONTRACT: Final = "canonical-v13-postgres-data-backup-v1"
+BACKUP_CONTRACT: Final = "canonical-v13-postgres-data-backup-v2"
 EXPECTED_TABLE_COUNT: Final = 56
 IDENTITY_TABLE: Final = "schema_metadata"
 RESTORE_NAME_PATTERN: Final = re.compile(
@@ -65,6 +67,11 @@ SAFE_SENSITIVE_METADATA_COLUMNS: Final[tuple[str, ...]] = (
     "order_writer_leases.holder_token_digest",
     "research_gate_attempts.lease_token_digest",
     "runtime_instances.credential_reference",
+)
+EXPECTED_LIFECYCLE_TRIGGERS: Final[tuple[tuple[str, str, str], ...]] = (
+    ("research_gate_attempts", "research_gate_attempts_lifecycle", "O"),
+    ("research_gate_receipts", "research_gate_receipts_append_only", "O"),
+    ("validation_plans", "validation_plans_gate_receipts", "O"),
 )
 Runner = Callable[[Sequence[str]], subprocess.CompletedProcess[object]]
 
@@ -255,6 +262,7 @@ def restore_command(
     return (
         binary,
         "--single-transaction",
+        "--disable-triggers",
         "--exit-on-error",
         "--data-only",
         "--no-owner",
@@ -324,6 +332,10 @@ def build_manifest(
             "explicit_new_isolated_database_required": True,
             "exact_empty_genesis_manifest_acl_required": True,
             "single_transaction": True,
+            "superuser_restore_required": True,
+            "triggers_disabled_only_inside_restore_transaction": True,
+            "exact_enabled_trigger_state_verified_before_and_after": True,
+            "gate_trigger_contract_verified_before_and_after": True,
             "exact_post_restore_row_counts_required": True,
         },
     }
@@ -366,6 +378,10 @@ def validate_manifest(
         "explicit_new_isolated_database_required": True,
         "exact_empty_genesis_manifest_acl_required": True,
         "single_transaction": True,
+        "superuser_restore_required": True,
+        "triggers_disabled_only_inside_restore_transaction": True,
+        "exact_enabled_trigger_state_verified_before_and_after": True,
+        "gate_trigger_contract_verified_before_and_after": True,
         "exact_post_restore_row_counts_required": True,
     }:
         raise CanonicalBackupBlocked(
@@ -424,7 +440,67 @@ def _service_principals() -> dict[str, str]:
     }
 
 
-def inspect_database(database_url: URL, *, require_zero: bool) -> dict[str, int]:
+def _verify_restore_trigger_boundary(
+    connection: Connection, *, require_superuser: bool
+) -> None:
+    if connection.dialect.name != "postgresql":
+        raise CanonicalBackupBlocked(
+            "BLOCKED_CANONICAL_RESTORE_POSTGRESQL_REQUIRED",
+            "trigger-safe restore requires PostgreSQL",
+        )
+    if require_superuser:
+        is_superuser = bool(
+            connection.execute(
+                text(
+                    "SELECT roles.rolsuper FROM pg_catalog.pg_roles roles "
+                    "WHERE roles.rolname=current_user"
+                )
+            ).scalar_one()
+        )
+        if not is_superuser:
+            raise CanonicalBackupBlocked(
+                "BLOCKED_CANONICAL_RESTORE_SUPERUSER_REQUIRED",
+                "pg_restore --disable-triggers requires a local restore superuser",
+            )
+    observed_triggers = tuple(
+        connection.execute(
+            text(
+                """
+                SELECT relation.relname, trigger.tgname, trigger.tgenabled
+                FROM pg_catalog.pg_trigger trigger
+                JOIN pg_catalog.pg_class relation ON relation.oid=trigger.tgrelid
+                JOIN pg_catalog.pg_namespace namespace
+                  ON namespace.oid=relation.relnamespace
+                WHERE namespace.nspname=:schema AND NOT trigger.tgisinternal
+                ORDER BY relation.relname, trigger.tgname
+                """
+            ),
+            {"schema": CANONICAL_BUSINESS_SCHEMA},
+        )
+    )
+    if observed_triggers != EXPECTED_LIFECYCLE_TRIGGERS:
+        raise CanonicalBackupBlocked(
+            "BLOCKED_CANONICAL_RESTORE_TRIGGER_STATE",
+            "canonical non-internal lifecycle triggers differ from the exact "
+            f"normally-enabled contract count={len(observed_triggers)}",
+        )
+    try:
+        gate = verify_gate_receipt_upgrade(connection)
+    except CanonicalGateReceiptUpgradeBlocked as exc:
+        raise CanonicalBackupBlocked(
+            "BLOCKED_CANONICAL_RESTORE_GATE_TRIGGER_CONTRACT",
+            f"gate trigger contract is not accepted: {exc.code}",
+        ) from exc
+    if gate.status != "ACCEPTED":
+        raise CanonicalBackupBlocked(
+            "BLOCKED_CANONICAL_RESTORE_GATE_TRIGGER_CONTRACT",
+            "gate trigger verifier did not return ACCEPTED",
+        )
+
+
+def inspect_database(
+    database_url: URL, *, require_zero: bool, require_superuser: bool = False
+) -> dict[str, int]:
     engine = create_engine(database_url, pool_pre_ping=True)
     try:
         with engine.connect() as connection:
@@ -447,6 +523,9 @@ def inspect_database(database_url: URL, *, require_zero: bool) -> dict[str, int]
                         "BLOCKED_CANONICAL_BACKUP_DATABASE_VERIFICATION",
                         "; ".join(verification.problems) or "table count drifted",
                     )
+                _verify_restore_trigger_boundary(
+                    connection, require_superuser=require_superuser
+                )
                 counts = {
                     name: int(
                         connection.execute(
@@ -621,7 +700,7 @@ def restore_backup(
             "BLOCKED_CANONICAL_RESTORE_RELEASE_DRIFT",
             "backup release does not match the accepted restore release",
         )
-    database_inspector(parsed, require_zero=True)
+    database_inspector(parsed, require_zero=True, require_superuser=True)
     completed = runner(
         restore_command(
             binary=_binary("pg_restore", pg_restore_binary),
@@ -630,10 +709,20 @@ def restore_backup(
         )
     )
     if completed.returncode != 0:
+        try:
+            database_inspector(parsed, require_zero=True, require_superuser=True)
+        except CanonicalBackupBlocked as exc:
+            raise CanonicalBackupBlocked(
+                "BLOCKED_CANONICAL_RESTORE_TRIGGER_RECOVERY",
+                "failed restore did not preserve the exact enabled trigger boundary: "
+                f"{exc.code}",
+            ) from exc
         raise CanonicalBackupBlocked(
             "BLOCKED_CANONICAL_RESTORE", "pg_restore failed atomically"
         )
-    observed = database_inspector(parsed, require_zero=False)
+    observed = database_inspector(
+        parsed, require_zero=False, require_superuser=True
+    )
     expected_counts = manifest["row_counts"]
     if observed != expected_counts:
         raise CanonicalBackupBlocked(

@@ -26,7 +26,6 @@ import psycopg
 from psycopg import sql
 from sqlalchemy.engine import URL
 
-
 LABEL = "com.he1met.freqtrade-ai.v13-canonical-api"
 DATABASE_NAME = "freqtrade_ai_v13"
 DATABASE_HOST = "127.0.0.1"
@@ -84,6 +83,11 @@ RUNTIME_READER_PRINCIPAL_SPEC = (
 )
 RUNTIME_SIGNAL_SIGNER_KEYCHAIN_SERVICE = (
     "freqtrade-ai/v13/runtime-signal-receipt-hmac-v1"
+)
+PHASE9_CLEANUP_LAUNCH_AGENT_LABELS = (
+    LABEL,
+    "ai.freqtrade.canonical-v13.runtime",
+    "ai.freqtrade.canonical-v13.order-writer",
 )
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BACKEND_PYTHON = REPO_ROOT / "backend" / ".venv" / "bin" / "python"
@@ -222,6 +226,31 @@ def _delete_new_keychain(service: str) -> None:
     )
 
 
+def _delete_keychain_strict(service: str) -> bool:
+    """Delete one fixed item and prove absence without reading its value."""
+
+    if not _keychain_item_exists(service):
+        return False
+    completed = subprocess.run(
+        [
+            str(_security_command()),
+            "delete-generic-password",
+            "-a",
+            _keychain_account(),
+            "-s",
+            service,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        stdin=subprocess.DEVNULL,
+    )
+    if completed.returncode != 0 or _keychain_item_exists(service):
+        raise CanonicalServiceBlocked("BLOCKED_PHASE9_CLEANUP_KEYCHAIN_DELETE")
+    return True
+
+
 def _admin_connection() -> psycopg.Connection[Any]:
     connection = psycopg.connect(f"dbname={DATABASE_NAME}")
     row = connection.execute(
@@ -304,8 +333,6 @@ def provision_principals() -> dict[str, object]:
 
 def _require_research_authority_preprovisioned() -> None:
     sys.path.insert(0, str(REPO_ROOT / "backend"))
-    from sqlalchemy import create_engine  # noqa: PLC0415
-
     from app.canonical_v13.authority_upgrade import (  # noqa: PLC0415
         verify_authority_upgrade_state,
     )
@@ -313,6 +340,7 @@ def _require_research_authority_preprovisioned() -> None:
         local_legacy_research_writer_role,
         local_role_mapping,
     )
+    from sqlalchemy import create_engine  # noqa: PLC0415
 
     engine = create_engine(
         URL.create("postgresql+psycopg", database=DATABASE_NAME),
@@ -418,11 +446,10 @@ def provision_research_principals() -> dict[str, object]:
 
 def _require_phase9_schema_preprovisioned() -> None:
     sys.path.insert(0, str(REPO_ROOT / "backend"))
-    from sqlalchemy import create_engine  # noqa: PLC0415
-
     from app.canonical_v13.phase9_schema_upgrade import (  # noqa: PLC0415
         verify_phase9_schema_upgrade,
     )
+    from sqlalchemy import create_engine  # noqa: PLC0415
 
     engine = create_engine(
         URL.create("postgresql+psycopg", database=DATABASE_NAME),
@@ -586,16 +613,173 @@ def provision_runtime_reader() -> dict[str, object]:
     }
 
 
-def _verify_research_provisioned_state():
+def _phase9_cleanup_specs() -> tuple[tuple[str, str, str], ...]:
+    return (*PHASE9_PRINCIPAL_SPECS, RUNTIME_READER_PRINCIPAL_SPEC)
+
+
+def _phase9_cleanup_keychain_services() -> tuple[str, ...]:
+    return (
+        *(spec[2] for spec in _phase9_cleanup_specs()),
+        RUNTIME_SIGNAL_SIGNER_KEYCHAIN_SERVICE,
+    )
+
+
+def _require_phase9_cleanup_schema_ready() -> None:
     sys.path.insert(0, str(REPO_ROOT / "backend"))
+    from app.canonical_v13.phase9_schema_upgrade import (  # noqa: PLC0415
+        verify_phase9_schema_upgrade,
+    )
     from sqlalchemy import create_engine  # noqa: PLC0415
 
+    engine = create_engine(
+        URL.create("postgresql+psycopg", database=DATABASE_NAME),
+        pool_pre_ping=True,
+    )
+    try:
+        with engine.connect() as connection:
+            verification = verify_phase9_schema_upgrade(connection)
+    except Exception as exc:
+        raise CanonicalServiceBlocked(
+            "BLOCKED_PHASE9_CLEANUP_SCHEMA_PREFLIGHT"
+        ) from exc
+    finally:
+        engine.dispose()
+    if verification.status != "PREVIOUS_READY" or any(
+        verification.affected_row_counts.values()
+    ):
+        raise CanonicalServiceBlocked("BLOCKED_PHASE9_CLEANUP_SCHEMA_PREFLIGHT")
+
+
+def _require_phase9_cleanup_services_stopped() -> None:
+    domain = f"gui/{os.getuid()}"
+    for label in PHASE9_CLEANUP_LAUNCH_AGENT_LABELS:
+        completed = _run(["launchctl", "print", f"{domain}/{label}"])
+        if completed.returncode == 0:
+            raise CanonicalServiceBlocked("BLOCKED_PHASE9_CLEANUP_SERVICE_RUNNING")
+        if completed.returncode not in {3, 113}:
+            raise CanonicalServiceBlocked("BLOCKED_PHASE9_CLEANUP_SERVICE_STATE")
+
+
+def _phase9_cleanup_role_state(
+    connection: psycopg.Connection[Any],
+) -> dict[str, tuple[object, ...]]:
+    principals = [spec[0] for spec in _phase9_cleanup_specs()]
+    rows = connection.execute(
+        """
+        SELECT rolname, rolcanlogin, rolsuper, rolcreatedb, rolcreaterole,
+               rolinherit, rolreplication, rolbypassrls, rolconnlimit
+        FROM pg_catalog.pg_roles
+        WHERE rolname = ANY(%s)
+        """,
+        (principals,),
+    ).fetchall()
+    return {str(row[0]): tuple(row[1:]) for row in rows}
+
+
+def _require_exact_phase9_cleanup_roles(
+    connection: psycopg.Connection[Any],
+    observed: dict[str, tuple[object, ...]],
+) -> None:
+    specs = _phase9_cleanup_specs()
+    principals = {spec[0] for spec in specs}
+    if set(observed) != principals:
+        raise CanonicalServiceBlocked("BLOCKED_PHASE9_CLEANUP_ROLE_PARTIAL")
+    expected_attributes = (True, False, False, False, True, False, False, 2)
+    if any(attributes != expected_attributes for attributes in observed.values()):
+        raise CanonicalServiceBlocked("BLOCKED_PHASE9_CLEANUP_ROLE_ATTRIBUTES")
+    memberships = connection.execute(
+        """
+        SELECT member.rolname, granted.rolname
+        FROM pg_catalog.pg_auth_members membership
+        JOIN pg_catalog.pg_roles member ON member.oid = membership.member
+        JOIN pg_catalog.pg_roles granted ON granted.oid = membership.roleid
+        WHERE member.rolname = ANY(%s)
+        """,
+        (list(principals),),
+    ).fetchall()
+    if {(str(row[0]), str(row[1])) for row in memberships} != {
+        (principal, capability) for principal, capability, _service in specs
+    }:
+        raise CanonicalServiceBlocked("BLOCKED_PHASE9_CLEANUP_ROLE_MEMBERSHIP")
+    active = int(
+        connection.execute(
+            """
+            SELECT count(*)
+            FROM pg_catalog.pg_stat_activity
+            WHERE usename = ANY(%s) AND pid <> pg_backend_pid()
+            """,
+            (list(principals),),
+        ).fetchone()[0]
+    )
+    if active:
+        raise CanonicalServiceBlocked("BLOCKED_PHASE9_CLEANUP_ACTIVE_SESSION")
+
+
+def cleanup_phase9_provisioning() -> dict[str, object]:
+    """Remove only exact, stopped, empty Phase 9 service provisioning."""
+
+    _require_phase9_cleanup_schema_ready()
+    _require_phase9_cleanup_services_stopped()
+    specs = _phase9_cleanup_specs()
+    services = _phase9_cleanup_keychain_services()
+    keychain_present = {
+        service for service in services if _keychain_item_exists(service)
+    }
+    try:
+        with _admin_connection() as connection:
+            observed = _phase9_cleanup_role_state(connection)
+            if observed:
+                _require_exact_phase9_cleanup_roles(connection, observed)
+                if keychain_present != set(services):
+                    raise CanonicalServiceBlocked(
+                        "BLOCKED_PHASE9_CLEANUP_KEYCHAIN_PARTIAL"
+                    )
+                with connection.transaction():
+                    for principal, capability, _service in specs:
+                        connection.execute(
+                            sql.SQL("REVOKE {} FROM {}").format(
+                                sql.Identifier(capability), sql.Identifier(principal)
+                            )
+                        )
+                    for principal, _capability, _service in specs:
+                        connection.execute(
+                            sql.SQL("DROP ROLE {}").format(sql.Identifier(principal))
+                        )
+                roles_dropped = len(specs)
+            else:
+                roles_dropped = 0
+        with _admin_connection() as connection:
+            if _phase9_cleanup_role_state(connection):
+                raise CanonicalServiceBlocked(
+                    "BLOCKED_PHASE9_CLEANUP_DATABASE_POSTVERIFY"
+                )
+    except CanonicalServiceBlocked:
+        raise
+    except Exception as exc:
+        raise CanonicalServiceBlocked(
+            "BLOCKED_PHASE9_CLEANUP_DATABASE_WRITE"
+        ) from exc
+    deleted = sum(_delete_keychain_strict(service) for service in services)
+    if any(_keychain_item_exists(service) for service in services):
+        raise CanonicalServiceBlocked("BLOCKED_PHASE9_CLEANUP_KEYCHAIN_REMAINS")
+    return {
+        "status": "CLEANED_UP",
+        "database": DATABASE_NAME,
+        "principals_removed": roles_dropped,
+        "keychain_items_removed": deleted,
+        "repeat_noop": roles_dropped == 0 and deleted == 0,
+    }
+
+
+def _verify_research_provisioned_state():
+    sys.path.insert(0, str(REPO_ROOT / "backend"))
     from app.canonical_v13.bootstrap import (  # noqa: PLC0415
         LOCAL_RESEARCH_SERVICE_PRINCIPALS,
         LOCAL_SERVICE_PRINCIPALS,
         local_role_mapping,
         verify_postgresql_bootstrap,
     )
+    from sqlalchemy import create_engine  # noqa: PLC0415
 
     service_principals = dict(LOCAL_SERVICE_PRINCIPALS)
     service_principals.update(LOCAL_RESEARCH_SERVICE_PRINCIPALS)
@@ -682,6 +866,9 @@ def _production_database_environment(
     *, phase9_capabilities: tuple[str, ...] | None = None
 ) -> dict[str, str]:
     sys.path.insert(0, str(REPO_ROOT / "backend"))
+    from app.canonical_v13.phase9_persistence import (  # noqa: PLC0415
+        PHASE9_PERSISTENCE_ENV_BY_CAPABILITY,
+    )
     from app.canonical_v13.production import (  # noqa: PLC0415
         CONTROL_DATABASE_URL_ENV,
         READER_DATABASE_URL_ENV,
@@ -691,9 +878,6 @@ def _production_database_environment(
         QUALIFICATION_DATABASE_URL_ENV,
         SCORING_DATABASE_URL_ENV,
         VALIDATION_DATABASE_URL_ENV,
-    )
-    from app.canonical_v13.phase9_persistence import (  # noqa: PLC0415
-        PHASE9_PERSISTENCE_ENV_BY_CAPABILITY,
     )
 
     research_environment_names = (
@@ -754,13 +938,13 @@ def serve(port: int) -> None:
     if not 1024 <= port <= 65535:
         raise CanonicalServiceBlocked("BLOCKED_INVALID_LOOPBACK_PORT")
     sys.path.insert(0, str(REPO_ROOT / "backend"))
-    from app.canonical_v13.production import (  # noqa: PLC0415
-        create_app,
-    )
+    import uvicorn  # noqa: PLC0415
     from app.canonical_v13.phase9_persistence import (  # noqa: PLC0415
         API_PHASE9_CAPABILITIES,
     )
-    import uvicorn  # noqa: PLC0415
+    from app.canonical_v13.production import (  # noqa: PLC0415
+        create_app,
+    )
 
     app = create_app(
         _production_database_environment(
@@ -920,6 +1104,7 @@ def main(argv: list[str] | None = None) -> int:
             "provision-research",
             "provision-phase9",
             "provision-runtime-reader",
+            "cleanup-phase9-provisioning",
             "repair-research-connect",
             "serve",
             "install",
@@ -938,6 +1123,8 @@ def main(argv: list[str] | None = None) -> int:
             payload = provision_phase9_principals()
         elif args.command == "provision-runtime-reader":
             payload = provision_runtime_reader()
+        elif args.command == "cleanup-phase9-provisioning":
+            payload = cleanup_phase9_provisioning()
         elif args.command == "repair-research-connect":
             payload = repair_research_database_connect()
         elif args.command == "serve":
@@ -955,7 +1142,14 @@ def main(argv: list[str] | None = None) -> int:
     return (
         0
         if payload["status"]
-        in {"PROVISIONED", "REPAIRED", "INSTALLED", "READY", "RESTARTED"}
+        in {
+            "PROVISIONED",
+            "REPAIRED",
+            "CLEANED_UP",
+            "INSTALLED",
+            "READY",
+            "RESTARTED",
+        }
         else 2
     )
 

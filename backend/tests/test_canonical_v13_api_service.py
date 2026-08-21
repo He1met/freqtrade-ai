@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
-from pathlib import Path
 import re
+from pathlib import Path
 
 import pytest
-
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 SERVICE_PATH = REPOSITORY_ROOT / "scripts/canonical_v13_api_service.py"
@@ -103,6 +102,36 @@ def test_keychain_add_argv_contains_security_binary_exactly_once(monkeypatch) ->
     assert command.count("/usr/bin/security") == 1
     assert command[1] == "add-generic-password"
     assert kwargs["input"] == material + "\n" + material + "\n"
+
+
+def test_strict_keychain_delete_uses_fixed_identity_and_verifies_absence(
+    monkeypatch,
+) -> None:
+    service = _load_service("canonical_v13_api_service_keychain_strict_delete")
+    item = service.RUNTIME_SIGNAL_SIGNER_KEYCHAIN_SERVICE
+    presence = iter((True, False))
+    observed = []
+    monkeypatch.setattr(service, "_keychain_item_exists", lambda _item: next(presence))
+    monkeypatch.setattr(service, "_security_command", lambda: Path("/usr/bin/security"))
+    monkeypatch.setattr(service, "_keychain_account", lambda: "ci-operator")
+
+    def run(command, **kwargs):
+        observed.append((tuple(command), kwargs))
+        return type("Result", (), {"returncode": 0})()
+
+    monkeypatch.setattr(service.subprocess, "run", run)
+    assert service._delete_keychain_strict(item) is True
+    command, kwargs = observed[0]
+    assert command == (
+        "/usr/bin/security",
+        "delete-generic-password",
+        "-a",
+        "ci-operator",
+        "-s",
+        item,
+    )
+    assert "-w" not in command
+    assert kwargs["stdin"] is service.subprocess.DEVNULL
 
 
 def test_production_environment_uses_fourteen_fixed_keychain_backed_principals(
@@ -338,7 +367,322 @@ def test_service_manager_has_no_delete_or_uninstall_command() -> None:
     source = SERVICE_PATH.read_text(encoding="utf-8")
     assert '"provision-research",' in source
     assert '"repair-research-connect",' in source
+    assert '"cleanup-phase9-provisioning",' in source
     assert '"uninstall"' not in source
+
+
+class _CleanupResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def fetchall(self):
+        return list(self._rows)
+
+    def fetchone(self):
+        return self._rows[0]
+
+
+class _CleanupTransaction:
+    def __init__(self, connection) -> None:
+        self.connection = connection
+
+    def __enter__(self):
+        self.connection.events.append("db-transaction-begin")
+        return self
+
+    def __exit__(self, exc_type, *_args) -> None:
+        self.connection.events.append(
+            "db-transaction-commit" if exc_type is None else "db-transaction-rollback"
+        )
+        if exc_type is None:
+            self.connection.roles.clear()
+
+
+class _CleanupConnection:
+    def __init__(
+        self, service, *, principals=None, active_sessions=0, fail_write_ordinal=None
+    ) -> None:
+        self.service = service
+        self.roles = set(
+            principals
+            if principals is not None
+            else (spec[0] for spec in service._phase9_cleanup_specs())
+        )
+        self.active_sessions = active_sessions
+        self.fail_write_ordinal = fail_write_ordinal
+        self.write_count = 0
+        self.events: list[str] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args) -> None:
+        return None
+
+    def transaction(self):
+        return _CleanupTransaction(self)
+
+    def execute(self, statement, _parameters=None):
+        if isinstance(statement, str) and "rolcanlogin" in statement:
+            return _CleanupResult(
+                [
+                    (principal, True, False, False, False, True, False, False, 2)
+                    for principal in sorted(self.roles)
+                ]
+            )
+        if isinstance(statement, str) and "pg_auth_members" in statement:
+            capabilities = {
+                principal: capability
+                for principal, capability, _service in (
+                    self.service._phase9_cleanup_specs()
+                )
+            }
+            return _CleanupResult(
+                [
+                    (principal, capabilities[principal])
+                    for principal in sorted(self.roles)
+                ]
+            )
+        if isinstance(statement, str) and "pg_stat_activity" in statement:
+            return _CleanupResult([(self.active_sessions,)])
+        self.write_count += 1
+        if self.write_count == self.fail_write_ordinal:
+            raise RuntimeError("injected database write failure")
+        self.events.append("db-write")
+        return _CleanupResult([])
+
+
+def _configure_cleanup_preflight(service, monkeypatch) -> None:
+    monkeypatch.setattr(service, "_require_phase9_cleanup_schema_ready", lambda: None)
+    monkeypatch.setattr(
+        service, "_require_phase9_cleanup_services_stopped", lambda: None
+    )
+
+
+def test_phase9_cleanup_drops_exact_roles_before_deleting_fixed_keychain_items(
+    monkeypatch,
+) -> None:
+    service = _load_service("canonical_v13_api_service_phase9_cleanup")
+    _configure_cleanup_preflight(service, monkeypatch)
+    connection = _CleanupConnection(service)
+    present = set(service._phase9_cleanup_keychain_services())
+    events = connection.events
+    monkeypatch.setattr(service, "_admin_connection", lambda: connection)
+    monkeypatch.setattr(
+        service, "_keychain_item_exists", lambda item: item in present
+    )
+
+    def delete(item):
+        assert connection.roles == set()
+        events.append(f"keychain-delete:{item}")
+        present.remove(item)
+        return True
+
+    monkeypatch.setattr(service, "_delete_keychain_strict", delete)
+    result = service.cleanup_phase9_provisioning()
+    assert result == {
+        "status": "CLEANED_UP",
+        "database": service.DATABASE_NAME,
+        "principals_removed": 9,
+        "keychain_items_removed": 10,
+        "repeat_noop": False,
+    }
+    assert events.count("db-write") == 18
+    assert events.index("db-transaction-commit") < next(
+        index
+        for index, value in enumerate(events)
+        if value.startswith("keychain-delete:")
+    )
+    assert set(service._phase9_cleanup_specs()).isdisjoint(
+        set(service.RESEARCH_PRINCIPAL_SPECS)
+    )
+
+
+def test_phase9_cleanup_replays_absent_database_and_residual_keychain(
+    monkeypatch,
+) -> None:
+    service = _load_service("canonical_v13_api_service_phase9_cleanup_replay")
+    _configure_cleanup_preflight(service, monkeypatch)
+    connection = _CleanupConnection(service, principals=())
+    residual = {service.RUNTIME_SIGNAL_SIGNER_KEYCHAIN_SERVICE}
+    monkeypatch.setattr(service, "_admin_connection", lambda: connection)
+    monkeypatch.setattr(
+        service, "_keychain_item_exists", lambda item: item in residual
+    )
+    monkeypatch.setattr(
+        service,
+        "_delete_keychain_strict",
+        lambda item: (residual.remove(item) or True) if item in residual else False,
+    )
+    recovered = service.cleanup_phase9_provisioning()
+    assert recovered["principals_removed"] == 0
+    assert recovered["keychain_items_removed"] == 1
+    assert recovered["repeat_noop"] is False
+    repeated = service.cleanup_phase9_provisioning()
+    assert repeated["principals_removed"] == 0
+    assert repeated["keychain_items_removed"] == 0
+    assert repeated["repeat_noop"] is True
+    assert connection.events == []
+
+
+@pytest.mark.parametrize("drift", ["role-partial", "keychain-partial", "active"])
+def test_phase9_cleanup_fails_closed_on_provisioning_drift(
+    monkeypatch, drift
+) -> None:
+    service = _load_service(f"canonical_v13_api_service_phase9_cleanup_{drift}")
+    _configure_cleanup_preflight(service, monkeypatch)
+    specs = service._phase9_cleanup_specs()
+    connection = _CleanupConnection(
+        service,
+        principals=(
+            (spec[0] for spec in specs[:-1]) if drift == "role-partial" else None
+        ),
+        active_sessions=1 if drift == "active" else 0,
+    )
+    present = set(service._phase9_cleanup_keychain_services())
+    if drift == "keychain-partial":
+        present.remove(service.RUNTIME_SIGNAL_SIGNER_KEYCHAIN_SERVICE)
+    monkeypatch.setattr(service, "_admin_connection", lambda: connection)
+    monkeypatch.setattr(
+        service, "_keychain_item_exists", lambda item: item in present
+    )
+    monkeypatch.setattr(
+        service,
+        "_delete_keychain_strict",
+        lambda _item: pytest.fail("Keychain must not change after drift"),
+    )
+    reason = {
+        "role-partial": "BLOCKED_PHASE9_CLEANUP_ROLE_PARTIAL",
+        "keychain-partial": "BLOCKED_PHASE9_CLEANUP_KEYCHAIN_PARTIAL",
+        "active": "BLOCKED_PHASE9_CLEANUP_ACTIVE_SESSION",
+    }[drift]
+    with pytest.raises(service.CanonicalServiceBlocked, match=reason):
+        service.cleanup_phase9_provisioning()
+    assert "db-transaction-begin" not in connection.events
+
+
+def test_phase9_cleanup_rejects_attribute_or_membership_drift(monkeypatch) -> None:
+    service = _load_service("canonical_v13_api_service_phase9_cleanup_role_drift")
+    connection = _CleanupConnection(service)
+    observed = service._phase9_cleanup_role_state(connection)
+    principal = next(iter(observed))
+    observed[principal] = (True, True, False, False, True, False, False, 2)
+    with pytest.raises(
+        service.CanonicalServiceBlocked,
+        match="BLOCKED_PHASE9_CLEANUP_ROLE_ATTRIBUTES",
+    ):
+        service._require_exact_phase9_cleanup_roles(connection, observed)
+
+    observed[principal] = (True, False, False, False, True, False, False, 2)
+    original_execute = connection.execute
+
+    def membership_drift(statement, parameters=None):
+        if isinstance(statement, str) and "pg_auth_members" in statement:
+            return _CleanupResult([])
+        return original_execute(statement, parameters)
+
+    monkeypatch.setattr(connection, "execute", membership_drift)
+    with pytest.raises(
+        service.CanonicalServiceBlocked,
+        match="BLOCKED_PHASE9_CLEANUP_ROLE_MEMBERSHIP",
+    ):
+        service._require_exact_phase9_cleanup_roles(connection, observed)
+
+
+def test_phase9_cleanup_recovers_after_keychain_partial_failure(monkeypatch) -> None:
+    service = _load_service("canonical_v13_api_service_phase9_cleanup_crash_replay")
+    _configure_cleanup_preflight(service, monkeypatch)
+    connection = _CleanupConnection(service)
+    present = set(service._phase9_cleanup_keychain_services())
+    monkeypatch.setattr(service, "_admin_connection", lambda: connection)
+    monkeypatch.setattr(
+        service, "_keychain_item_exists", lambda item: item in present
+    )
+    calls = 0
+
+    def flaky_delete(item):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise service.CanonicalServiceBlocked(
+                "BLOCKED_PHASE9_CLEANUP_KEYCHAIN_DELETE"
+            )
+        if item not in present:
+            return False
+        present.remove(item)
+        return True
+
+    monkeypatch.setattr(service, "_delete_keychain_strict", flaky_delete)
+    with pytest.raises(
+        service.CanonicalServiceBlocked,
+        match="BLOCKED_PHASE9_CLEANUP_KEYCHAIN_DELETE",
+    ):
+        service.cleanup_phase9_provisioning()
+    assert connection.roles == set()
+    result = service.cleanup_phase9_provisioning()
+    assert result["principals_removed"] == 0
+    assert result["keychain_items_removed"] == 9
+    assert present == set()
+
+
+def test_phase9_cleanup_database_failure_rolls_back_before_keychain(
+    monkeypatch,
+) -> None:
+    service = _load_service("canonical_v13_api_service_phase9_cleanup_db_failure")
+    _configure_cleanup_preflight(service, monkeypatch)
+    connection = _CleanupConnection(service, fail_write_ordinal=5)
+    present = set(service._phase9_cleanup_keychain_services())
+    monkeypatch.setattr(service, "_admin_connection", lambda: connection)
+    monkeypatch.setattr(
+        service, "_keychain_item_exists", lambda item: item in present
+    )
+    monkeypatch.setattr(
+        service,
+        "_delete_keychain_strict",
+        lambda _item: pytest.fail("Keychain must follow committed DB cleanup"),
+    )
+    with pytest.raises(
+        service.CanonicalServiceBlocked,
+        match="BLOCKED_PHASE9_CLEANUP_DATABASE_WRITE",
+    ):
+        service.cleanup_phase9_provisioning()
+    assert connection.roles == {spec[0] for spec in service._phase9_cleanup_specs()}
+    assert connection.events[-1] == "db-transaction-rollback"
+    assert present == set(service._phase9_cleanup_keychain_services())
+
+
+def test_phase9_cleanup_requires_all_fixed_services_unloaded(monkeypatch) -> None:
+    service = _load_service("canonical_v13_api_service_phase9_cleanup_services")
+    calls = []
+
+    def run(command):
+        calls.append(tuple(command))
+        return type("Result", (), {"returncode": 0 if len(calls) == 2 else 113})()
+
+    monkeypatch.setattr(service, "_run", run)
+    with pytest.raises(
+        service.CanonicalServiceBlocked,
+        match="BLOCKED_PHASE9_CLEANUP_SERVICE_RUNNING",
+    ):
+        service._require_phase9_cleanup_services_stopped()
+    assert service.PHASE9_CLEANUP_LAUNCH_AGENT_LABELS[0] == service.LABEL
+    assert len(calls) == 2
+
+
+def test_phase9_cleanup_cli_dispatches_only_narrow_cleanup(monkeypatch, capsys) -> None:
+    service = _load_service("canonical_v13_api_service_phase9_cleanup_cli")
+    monkeypatch.setattr(
+        service,
+        "cleanup_phase9_provisioning",
+        lambda: {
+            "status": "CLEANED_UP",
+            "principals_removed": 0,
+            "keychain_items_removed": 0,
+            "repeat_noop": True,
+        },
+    )
+    assert service.main(["cleanup-phase9-provisioning"]) == 0
+    assert json.loads(capsys.readouterr().out)["repeat_noop"] is True
 
 
 def test_release_checkout_requires_clean_exact_origin_main(monkeypatch) -> None:

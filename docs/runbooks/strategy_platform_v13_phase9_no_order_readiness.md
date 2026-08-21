@@ -88,13 +88,34 @@ backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py verify-phase
 Phase 9 的 8 个 writer LOGIN（approval/deployment/signal/risk/order/fill/ledger/reconciliation）必须
 distinct、同一 canonical database、只继承一个 capability；另有 1 个独立 runtime reader LOGIN。
 全 manifest 共 15 个 distinct service LOGIN（2 API + 4 research + 8 Phase 9 writers +
-1 runtime reader），其中 14 个是 writer LOGIN。
+1 runtime reader），其中 13 个是 writer LOGIN（control 1 + research 4 + Phase 9 8），另有 API reader
+与 runtime reader 2 个只读 LOGIN。
 `canonical_approval_writer` 是 sealed probe receipt、one-shot policy 与 budget authorization 的唯一
 writer，`canonical_risk_writer` 只能写 intent、shadow/execution decision 与 execution reservation。
 不得把
 `SELECT ... FOR UPDATE` 需求转换为额外 ACL。`phase9-schema-rollback` 只允许所有 Phase 9 表仍为空
 时使用；产生 A 阶段记录后，恢复方案必须是 stop services + forward recovery 或已验 backup restore，
 不能删除证据行。
+
+schema rollback 在同一 PostgreSQL transaction 内只撤销 #781 对 surviving tables 的冻结 ACL 增量、
+8 个 Phase 9 writer capability 与 runtime-reader capability 的数据库 `CONNECT`、唯一约束、扩展表及
+manifest；predecessor 的既有 ACL 不得被改动。`PREVIOUS_READY` 必须重算完整 predecessor
+surviving-table ACL，且上述 capability 仍有额外 table grant 或 `CONNECT` 时 fail closed。随后如需完整
+退回旧 release，操作顺序固定为：先验证 ACL rollback receipt → 再撤销/删除 Phase 9 与 runtime LOGIN
+及 membership → 最后删除对应 Keychain password/signer items；任一步失败都停止，禁止先删 Keychain
+造成不可恢复的半完成状态。apply、rollback、reapply 与 replay 都必须返回可重算 receipt。
+
+完成 schema/ACL rollback 且 API、canonical runtime 与 order writer LaunchAgent 均已 unload 后，只能用
+以下窄入口清理 9 个固定 LOGIN 与 10 个固定 Keychain item；它不读取或删除 OKX credential：
+
+```bash
+python scripts/canonical_v13_api_service.py cleanup-phase9-provisioning
+```
+
+入口必须先证明 `PREVIOUS_READY`、Phase 9 affected rows 全零、无相关 PostgreSQL session、LOGIN 属性与
+唯一 membership 精确匹配。数据库角色在一个 transaction 内先撤 membership 再删除，commit 并复核全缺失
+后才逐项删除 Keychain。全缺失 replay 必须 `repeat_noop=true`；DB 已清理但 Keychain 删除中断时只允许继续
+删除残留固定 item；角色或 Keychain 的其他 partial/drift 状态一律 `BLOCKED`。
 
 ## 3. Release acceptance
 
@@ -173,8 +194,9 @@ backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py phase9-readi
   leverage 调用 `GET /api/v5/account/max-size`；exact singular `maxBuy` 必须不小于 `minSz`；
 - 最小交易所 size 对应 notional 不超过由 sealed evidence 生成且未耗尽的 one-shot budget。
 
-server-side probe 必须先生成 typed `RedactedOkxDemoProbe`，创建同一 deployment 的 redacted attestation，
-再由非公开 `persist_canary_probe_receipt(...)` 写入 immutable
+server-side probe 必须先生成 typed `RedactedOkxDemoProbe`，由独立
+`canonical_deployment_writer` transaction 创建并提交同一 deployment 的 redacted attestation，再由
+独立 `canonical_approval_writer` transaction 调用非公开 `persist_canary_probe_receipt(...)` 写入 immutable
 `execution_canary_probe_receipts`。HTTP 不接受 raw facts；policy command 只接受 `probe_receipt_id`，并
 重算八类资源 digest、各 observed/expires、combined digest、attestation/deployment lineage。八类为
 instrument、mark、account config、leverage、exchange maximum leverage、positions、pending orders 与
@@ -189,12 +211,11 @@ python scripts/canonical_v13_phase9_service.py probe-canary \
   --service order_writer --deployment-id <exact-active-demo-deployment-id>
 ```
 
-但当前实现只打开 `canonical_approval_writer` connection，随后先调用需要写
-`execution_attestations` 的 `record_redacted_demo_attestation(...)`；该表只属于
-`canonical_deployment_writer` capability，因此 PostgreSQL ACL 下该命令不可达。必须先由 composition
-按现有双 capability 边界安全串接 deployment-writer attestation 与 approval-writer sealed receipt，并
-补 production-role 端到端测试；在此之前禁止执行该命令，C 保持 `BLOCKED`。修复后只把脱敏输出的
-exact `probe_receipt_id` 交给 canary policy API。禁止用 SQL、fixture 或 raw JSON 手工补行。若缺
+该命令按上述双 capability saga 串接两个 committed transaction。两步之间的 sealed safe probe 只保存
+脱敏、可校验且有期限的 facts；若 attestation 已提交而 receipt 尚未提交即 crash，重放必须先确认尚无
+linked receipt，再以同一 sealed probe/attestation exact idempotent completion，不能再次访问 authenticated
+exchange，也不能生成第二条 attestation/receipt。只把脱敏输出的 exact `probe_receipt_id` 交给 canary
+policy API。禁止用 SQL、fixture 或 raw JSON 手工补行。若缺
 receipt/policy/budget、预算已耗尽、市场/allowlist/credential 未知或 attestation 过期，立即 `BLOCKED`，
 不得创建 order。禁止为了通过门禁创建或重置金额。
 
