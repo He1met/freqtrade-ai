@@ -1097,6 +1097,15 @@ def restart(
             raise CanonicalPhase9SupervisorBlocked(
                 "BLOCKED_PHASE9_RESTART_CONTAINER_HELD", service_key
             )
+        label_deadline = time.monotonic() + 10
+        label = _run(["launchctl", "print", _launchctl_target(service_key)])
+        while label.returncode == 0 and time.monotonic() < label_deadline:
+            time.sleep(0.1)
+            label = _run(["launchctl", "print", _launchctl_target(service_key)])
+        if label.returncode == 0:
+            raise CanonicalPhase9SupervisorBlocked(
+                "BLOCKED_PHASE9_RESTART_LABEL_HELD", service_key
+            )
         kicked = _run(
             [
                 "launchctl",
