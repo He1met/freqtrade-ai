@@ -35,7 +35,12 @@ def test_phase9_persistence_requires_eight_distinct_exact_logins_on_one_database
     assert {url.database for url in resolved.urls.values()} == {"freqtrade_ai_v13"}
 
 
-def test_api_phase9_persistence_resolves_only_four_routed_capabilities() -> None:
+def test_api_phase9_persistence_resolves_only_three_routed_capabilities() -> None:
+    assert API_PHASE9_CAPABILITIES == (
+        "canonical_approval_writer",
+        "canonical_deployment_writer",
+        "canonical_risk_writer",
+    )
     environment = _environment()
     for capability in set(PHASE9_PERSISTENCE_ENV_BY_CAPABILITY) - set(
         API_PHASE9_CAPABILITIES
