@@ -20,7 +20,10 @@ from app.canonical_v13.phase9_production_runtime import (
     PublicOkxRuntimeMarketEvidence,
     ReleaseBoundReceiptSeal,
 )
-from app.canonical_v13.phase9_runtime_supervisor import build_launch_plan
+from app.canonical_v13.phase9_runtime_supervisor import (
+    RuntimeImagePlanAuthority,
+    build_launch_plan,
+)
 from app.canonical_v13.phase9_runtime_worker import natural_market_evidence_digest
 
 
@@ -181,7 +184,13 @@ def test_runtime_reader_requires_exact_active_qualified_artifact_bundle_target()
         release_digest="1" * 64,
         deployment_id=_uuid(1),
         deployment_capability_digest="2" * 64,
-        image_digest="3" * 64,
+        runtime_image_authority=RuntimeImagePlanAuthority(
+            acceptance_id=_uuid(99),
+            image_manifest_digest="3" * 64,
+            image_config_digest="5" * 64,
+            acceptance_receipt_digest="4" * 64,
+            release_digest="1" * 64,
+        ),
     )
     rows = [
         {

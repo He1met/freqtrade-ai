@@ -16,6 +16,7 @@ from app.canonical_v13.phase9_runtime_supervisor import (
     CanonicalPhase9SupervisorBlocked,
     OrderWriterCanaryAuthority,
     Phase9Lease,
+    RuntimeImagePlanAuthority,
     build_launch_plan,
     build_order_writer_canary_authority,
     claim_lease,
@@ -31,6 +32,9 @@ DEPLOYMENT_ID = UUID("30000000-0000-4000-8000-000000000003")
 RELEASE_DIGEST = "a" * 64
 CAPABILITY_DIGEST = "b" * 64
 IMAGE_DIGEST = "c" * 64
+IMAGE_CONFIG_DIGEST = "8" * 64
+IMAGE_ACCEPTANCE_ID = UUID("70000000-0000-4000-8000-000000000007")
+IMAGE_ACCEPTANCE_RECEIPT = "2" * 64
 RISK_POLICY_ID = UUID("50000000-0000-4000-8000-000000000005")
 ATTESTATION_ID = UUID("60000000-0000-4000-8000-000000000006")
 RISK_POLICY_DIGEST = "d" * 64
@@ -123,8 +127,20 @@ def _runtime_plan(*, generation: int = 1):
         release_digest=RELEASE_DIGEST,
         deployment_id=DEPLOYMENT_ID,
         deployment_capability_digest=CAPABILITY_DIGEST,
-        image_digest=IMAGE_DIGEST,
+        runtime_image_authority=_runtime_image_authority(),
         plan_id=PLAN_ID,
+    )
+
+
+def _runtime_image_authority(
+    *, image_digest: str = IMAGE_DIGEST, release_digest: str = RELEASE_DIGEST
+) -> RuntimeImagePlanAuthority:
+    return RuntimeImagePlanAuthority(
+        acceptance_id=IMAGE_ACCEPTANCE_ID,
+        image_manifest_digest=image_digest,
+        image_config_digest=IMAGE_CONFIG_DIGEST,
+        acceptance_receipt_digest=IMAGE_ACCEPTANCE_RECEIPT,
+        release_digest=release_digest,
     )
 
 
@@ -143,6 +159,9 @@ def _configure_roots(module, tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(module, "BACKEND_PYTHON", tmp_path / "venv" / "python")
     monkeypatch.setattr(module, "_require_release_checkout", lambda: RELEASE_DIGEST)
     monkeypatch.setattr(module, "_now", lambda: NOW)
+    monkeypatch.setattr(
+        module, "_load_runtime_image_authority", lambda _id: _runtime_image_authority()
+    )
 
 
 def _redacted_probe(*, observed_at: datetime, expires_at: datetime):
@@ -207,7 +226,7 @@ def _prepare_runtime(service, stage: str = "NO_ORDER_SOAK"):
         release_digest=RELEASE_DIGEST,
         deployment_id=DEPLOYMENT_ID,
         deployment_capability_digest=CAPABILITY_DIGEST,
-        image_digest=IMAGE_DIGEST,
+        runtime_image_acceptance_id=IMAGE_ACCEPTANCE_ID,
         enable_order_writer=False,
     )
 
@@ -220,7 +239,7 @@ def _prepare_writer(service, *, authority=None):
         release_digest=RELEASE_DIGEST,
         deployment_id=DEPLOYMENT_ID,
         deployment_capability_digest=CAPABILITY_DIGEST,
-        image_digest=None,
+        runtime_image_acceptance_id=None,
         enable_order_writer=True,
         order_writer_canary_authority=resolved,
     )
@@ -239,6 +258,45 @@ def test_launch_plans_keep_runtime_and_writer_identity_and_lifecycle_separate() 
     assert runtime.demo_only is writer.demo_only is True
     assert runtime.allow_real_funds is writer.allow_real_funds is False
     assert writer.order_writer_canary_authority == _writer_authority()
+
+
+def test_runtime_container_port_uses_exact_digest_and_hardened_rootless_flags() -> None:
+    service = _load_script("canonical_phase9_runtime_container_test")
+    plan = _runtime_plan()
+    container_id = "d" * 64
+    calls: list[tuple[str, ...]] = []
+
+    def runner(command):
+        calls.append(tuple(command))
+        if command[1:3] == ["container", "inspect"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                f"true sha256:{plan.runtime_image_config_digest} {plan.plan_digest}\n",
+                "",
+            )
+        if command[1] == "run":
+            return subprocess.CompletedProcess(command, 0, container_id + "\n", "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    port = service.RuntimeContainerPort(runner)
+    observed = port.start(plan)
+    digest = port.verify(plan, observed)
+    port.stop(plan, observed)
+
+    assert observed == container_id
+    assert len(digest) == 64
+    run = calls[0]
+    assert "--network=none" in run
+    assert "--read-only" in run
+    assert "--cap-drop=all" in run
+    assert "--security-opt=no-new-privileges" in run
+    assert "--pids-limit=64" in run
+    assert "--memory=256m" in run
+    assert "--cpus=0.5" in run
+    assert f"sha256:{plan.runtime_image_config_digest}" in run
+    assert IMAGE_ACCEPTANCE_RECEIPT not in " ".join(run)
+    assert calls[-1] == (service.PODMAN_PATH, "stop", "--time=10", container_id)
 
 
 @pytest.mark.parametrize(
@@ -381,10 +439,30 @@ def test_runtime_plan_digest_binds_release_deployment_capability_and_image(
         "release_digest": RELEASE_DIGEST,
         "deployment_id": DEPLOYMENT_ID,
         "deployment_capability_digest": CAPABILITY_DIGEST,
-        "image_digest": IMAGE_DIGEST,
+        "runtime_image_authority": _runtime_image_authority(),
         "plan_id": PLAN_ID,
     }
-    changed = build_launch_plan(**{**arguments, field: value})
+    if field == "image_digest":
+        changed = build_launch_plan(
+            **{
+                **arguments,
+                "runtime_image_authority": _runtime_image_authority(
+                    image_digest=str(value)
+                ),
+            }
+        )
+    elif field == "release_digest":
+        changed = build_launch_plan(
+            **{
+                **arguments,
+                field: value,
+                "runtime_image_authority": _runtime_image_authority(
+                    release_digest=str(value)
+                ),
+            }
+        )
+    else:
+        changed = build_launch_plan(**{**arguments, field: value})
     assert changed.plan_digest != baseline.plan_digest
 
 
@@ -450,7 +528,7 @@ def test_order_writer_requires_explicit_enable_and_runtime_rejects_it() -> None:
             release_digest=RELEASE_DIGEST,
             deployment_id=DEPLOYMENT_ID,
             deployment_capability_digest=CAPABILITY_DIGEST,
-            image_digest=IMAGE_DIGEST,
+            runtime_image_authority=_runtime_image_authority(),
             order_writer_enabled=True,
         )
 
@@ -477,6 +555,9 @@ def test_single_lease_heartbeat_release_and_fencing() -> None:
         "deployment_id": str(DEPLOYMENT_ID),
         "deployment_capability_digest": CAPABILITY_DIGEST,
         "image_digest": IMAGE_DIGEST,
+        "runtime_image_acceptance_id": str(IMAGE_ACCEPTANCE_ID),
+        "runtime_image_acceptance_receipt_digest": IMAGE_ACCEPTANCE_RECEIPT,
+        "runtime_image_config_digest": IMAGE_CONFIG_DIGEST,
     }
     with pytest.raises(
         CanonicalPhase9SupervisorBlocked, match="BLOCKED_PHASE9_LEASE_HELD"
@@ -631,7 +712,7 @@ def test_prepare_writer_fails_closed_without_explicit_canary_enable(
             release_digest=RELEASE_DIGEST,
             deployment_id=None,
             deployment_capability_digest=None,
-            image_digest=None,
+            runtime_image_acceptance_id=None,
             enable_order_writer=False,
         )
     assert not service._plist_path("order_writer").exists()
@@ -1007,7 +1088,7 @@ def test_prepare_confirm_and_stop_exact_replays_are_side_effect_free(
             release_digest=RELEASE_DIGEST,
             deployment_id=DEPLOYMENT_ID,
             deployment_capability_digest=CAPABILITY_DIGEST,
-            image_digest=IMAGE_DIGEST,
+            runtime_image_acceptance_id=IMAGE_ACCEPTANCE_ID,
             enable_order_writer=False,
         )
 
@@ -1050,8 +1131,8 @@ def test_cli_defaults_only_runtime_to_no_order_soak(monkeypatch, capsys) -> None
                 str(DEPLOYMENT_ID),
                 "--deployment-capability-digest",
                 CAPABILITY_DIGEST,
-                "--image-digest",
-                IMAGE_DIGEST,
+                "--runtime-image-acceptance-id",
+                str(IMAGE_ACCEPTANCE_ID),
             ]
         )
         == 0
@@ -1064,7 +1145,7 @@ def test_cli_defaults_only_runtime_to_no_order_soak(monkeypatch, capsys) -> None
                 "release_digest": RELEASE_DIGEST,
                 "deployment_id": DEPLOYMENT_ID,
                 "deployment_capability_digest": CAPABILITY_DIGEST,
-                "image_digest": IMAGE_DIGEST,
+                "runtime_image_acceptance_id": IMAGE_ACCEPTANCE_ID,
                 "enable_order_writer": False,
                 "order_writer_canary_authority": None,
             },

@@ -43,6 +43,9 @@ from app.canonical_v13.models import (
     SIGNALS_TABLE,
 )
 from app.canonical_v13.role_mapping import CanonicalRoleMapping
+from app.canonical_v13.runtime_image_upgrade import (
+    PREVIOUS_RUNTIME_IMAGE_MANIFEST_DIGEST,
+)
 
 UPGRADE_CONTRACT: Final = "canonical-v13-phase9-execution-schema-upgrade-v4"
 PREVIOUS_CANONICAL_MANIFEST_DIGEST: Final = (
@@ -265,7 +268,11 @@ def render_phase9_uniqueness_rollback_sql() -> str:
 
 
 def _current_surviving_table_grants() -> set[tuple[str, str, str]]:
-    surviving = set(CANONICAL_TABLE_NAMES) - set(PHASE9_EXTENSION_TABLE_NAMES)
+    surviving = (
+        set(CANONICAL_TABLE_NAMES)
+        - set(PHASE9_EXTENSION_TABLE_NAMES)
+        - {"runtime_image_acceptances"}
+    )
     grants: dict[tuple[str, str], set[str]] = {}
     for writer, table_names in WRITER_TABLE_ALLOWLIST.items():
         if writer == "canonical_schema_owner":
@@ -294,7 +301,11 @@ def _current_surviving_table_grants() -> set[tuple[str, str, str]]:
 
 def _previous_acl_payload() -> dict[str, object]:
     surviving = tuple(
-        sorted(set(CANONICAL_TABLE_NAMES) - set(PHASE9_EXTENSION_TABLE_NAMES))
+        sorted(
+            set(CANONICAL_TABLE_NAMES)
+            - set(PHASE9_EXTENSION_TABLE_NAMES)
+            - {"runtime_image_acceptances"}
+        )
     )
     previous_grants = tuple(
         sorted(
@@ -465,6 +476,23 @@ def verify_phase9_schema_upgrade(
             counts=counts,
             repeat_noop=True,
         )
+    runtime_image_present = inspect(connection).has_table(
+        "runtime_image_acceptances", schema=CANONICAL_BUSINESS_SCHEMA
+    )
+    if (
+        constraints == expected_constraints
+        and extension_tables == expected_tables
+        and manifest_digest == PREVIOUS_RUNTIME_IMAGE_MANIFEST_DIGEST
+        and not runtime_image_present
+    ):
+        return _result(
+            status="ACCEPTED",
+            constraints=constraints,
+            extension_tables=extension_tables,
+            manifest_digest=manifest_digest,
+            counts=counts,
+            repeat_noop=True,
+        )
     if (
         constraints == ()
         and extension_tables == ()
@@ -599,20 +627,24 @@ def apply_phase9_schema_upgrade(
             )
         )
     for statement in postgresql_acl_statements(resolved):
+        if "runtime_image_acceptances" in statement:
+            continue
         connection.execute(text(statement))
     for statement in postgresql_owner_table_grant_statements(resolved):
+        if "runtime_image_acceptances" in statement:
+            continue
         connection.execute(text(statement))
     connection.execute(
         SCHEMA_METADATA_TABLE.update()
         .where(SCHEMA_METADATA_TABLE.c.metadata_key == "canonical-v13-genesis")
-        .values(manifest_digest=CANONICAL_MANIFEST_DIGEST)
+        .values(manifest_digest=PREVIOUS_RUNTIME_IMAGE_MANIFEST_DIGEST)
     )
     _append_audit(
         connection,
         event_type="PHASE9_SCHEMA_UPGRADED",
         actor_identity=actor_identity,
         before_digest=before.manifest_digest,
-        after_digest=CANONICAL_MANIFEST_DIGEST,
+        after_digest=PREVIOUS_RUNTIME_IMAGE_MANIFEST_DIGEST,
         role_mapping=resolved,
         database_name=str(
             connection.execute(text("SELECT current_database()")).scalar_one()
@@ -635,6 +667,13 @@ def rollback_phase9_schema_upgrade(
     actor_identity: str = "canonical-phase9-schema-operator",
     role_mapping: CanonicalRoleMapping | None = None,
 ) -> Phase9SchemaUpgradeResult:
+    if inspect(connection).has_table(
+        "runtime_image_acceptances", schema=CANONICAL_BUSINESS_SCHEMA
+    ):
+        raise CanonicalPhase9SchemaUpgradeBlocked(
+            "BLOCKED_RUNTIME_IMAGE_ROLLBACK_REQUIRED",
+            "rollback runtime image authority before the Phase 9 schema",
+        )
     _lock_upgrade_boundary(connection)
     resolved = _resolve_role_mapping(connection, role_mapping)
     before = verify_phase9_schema_upgrade(connection, role_mapping=resolved)

@@ -48,9 +48,13 @@ from app.canonical_v13.manifest import (  # noqa: E402
     CANONICAL_TABLE_NAMES,
 )
 from app.canonical_v13.models import CANONICAL_TABLES  # noqa: E402
+from app.canonical_v13.runtime_image_upgrade import (  # noqa: E402
+    CanonicalRuntimeImageUpgradeBlocked,
+    verify_runtime_image_upgrade,
+)
 
 BACKUP_CONTRACT: Final = "canonical-v13-postgres-data-backup-v2"
-EXPECTED_TABLE_COUNT: Final = 56
+EXPECTED_TABLE_COUNT: Final = 57
 IDENTITY_TABLE: Final = "schema_metadata"
 RESTORE_NAME_PATTERN: Final = re.compile(
     rf"{re.escape(LOCAL_DATABASE_NAME)}_restore_[a-z0-9][a-z0-9_]*"
@@ -71,6 +75,11 @@ SAFE_SENSITIVE_METADATA_COLUMNS: Final[tuple[str, ...]] = (
 EXPECTED_LIFECYCLE_TRIGGERS: Final[tuple[tuple[str, str, str], ...]] = (
     ("research_gate_attempts", "research_gate_attempts_lifecycle", "O"),
     ("research_gate_receipts", "research_gate_receipts_append_only", "O"),
+    (
+        "runtime_image_acceptances",
+        "runtime_image_acceptances_append_only",
+        "O",
+    ),
     ("validation_plans", "validation_plans_gate_receipts", "O"),
 )
 Runner = Callable[[Sequence[str]], subprocess.CompletedProcess[object]]
@@ -109,7 +118,7 @@ def _require_exact_manifest() -> None:
     ):
         raise CanonicalBackupBlocked(
             "BLOCKED_CANONICAL_BACKUP_TABLE_MANIFEST",
-            "the reviewed canonical manifest must contain exactly 56 unique tables",
+            "the reviewed canonical manifest must contain exactly 57 unique tables",
         )
     forbidden = tuple(
         name
@@ -495,6 +504,18 @@ def _verify_restore_trigger_boundary(
         raise CanonicalBackupBlocked(
             "BLOCKED_CANONICAL_RESTORE_GATE_TRIGGER_CONTRACT",
             "gate trigger verifier did not return ACCEPTED",
+        )
+    try:
+        runtime_image = verify_runtime_image_upgrade(connection)
+    except CanonicalRuntimeImageUpgradeBlocked as exc:
+        raise CanonicalBackupBlocked(
+            "BLOCKED_CANONICAL_RESTORE_RUNTIME_IMAGE_TRIGGER_CONTRACT",
+            "runtime image authority trigger contract is not accepted",
+        ) from exc
+    if runtime_image.status != "ACCEPTED":
+        raise CanonicalBackupBlocked(
+            "BLOCKED_CANONICAL_RESTORE_RUNTIME_IMAGE_TRIGGER_CONTRACT",
+            "runtime image authority verifier did not return ACCEPTED",
         )
 
 

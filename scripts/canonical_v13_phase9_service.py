@@ -44,8 +44,13 @@ from app.canonical_v13.phase9_runtime_supervisor import (  # noqa: E402
     heartbeat_lease,
     release_lease,
     require_current_order_writer_canary_authority,
+    runtime_image_plan_authority,
     validate_supervised_worker_receipt,
     verify_launch_plan,
+)
+from app.canonical_v13.runtime_image_authority import (  # noqa: E402
+    CanonicalRuntimeImageBlocked,
+    load_accepted_runtime_image,
 )
 from app.canonical_v13.phase9_production_composition import (  # noqa: E402
     CanonicalFillWriterOperator,
@@ -83,6 +88,111 @@ RUNTIME_CREDENTIAL_REFERENCE = "none:public-okx-market-only"
 RUNTIME_SIGNAL_SIGNER_KEYCHAIN_SERVICE = (
     "freqtrade-ai/v13/runtime-signal-receipt-hmac-v1"
 )
+PODMAN_PATH = "/opt/homebrew/bin/podman"
+
+
+class RuntimeContainerPort:
+    """Rootless Podman boundary for the accepted long-lived runtime artifact."""
+
+    def __init__(self, runner=None) -> None:
+        self._runner = runner
+
+    def _execute(self, command: list[str]):
+        runner = self._runner or _run
+        return runner(command)
+
+    @staticmethod
+    def name(plan: Phase9LaunchPlan) -> str:
+        return f"canonical-v13-runtime-{plan.generation}-{plan.plan_digest[:12]}"
+
+    def start(self, plan: Phase9LaunchPlan) -> str:
+        if (
+            plan.service_key != "long_lived_runtime"
+            or plan.image_digest is None
+            or plan.runtime_image_config_digest is None
+            or plan.runtime_image_acceptance_id is None
+        ):
+            raise CanonicalPhase9SupervisorBlocked(
+                "BLOCKED_RUNTIME_CONTAINER_AUTHORITY", "accepted runtime image is required"
+            )
+        command = [
+            PODMAN_PATH,
+            "run",
+            "--detach",
+            "--rm",
+            "--name",
+            self.name(plan),
+            "--network=none",
+            "--read-only",
+            "--cap-drop=all",
+            "--security-opt=no-new-privileges",
+            "--pids-limit=64",
+            "--memory=256m",
+            "--cpus=0.5",
+            "--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=32m",
+            "--tmpfs=/run/canonical-v13-runtime:rw,noexec,nosuid,nodev,size=4m",
+            "--label",
+            f"io.freqtrade-ai.plan-digest={plan.plan_digest}",
+            f"sha256:{plan.runtime_image_config_digest}",
+            "serve",
+        ]
+        result = self._execute(command)
+        container_id = result.stdout.strip() if result.returncode == 0 else ""
+        if (
+            result.returncode != 0
+            or len(container_id) < 12
+            or any(character not in "0123456789abcdef" for character in container_id)
+        ):
+            raise CanonicalPhase9SupervisorBlocked(
+                "BLOCKED_RUNTIME_CONTAINER_START", "rootless accepted image did not start"
+            )
+        return container_id
+
+    def verify(self, plan: Phase9LaunchPlan, container_id: str) -> str:
+        result = self._execute(
+            [
+                PODMAN_PATH,
+                "container",
+                "inspect",
+                "--format",
+                "{{.State.Running}} {{.Image}} {{index .Config.Labels \"io.freqtrade-ai.plan-digest\"}}",
+                container_id,
+            ]
+        )
+        fields = result.stdout.strip().split()
+        observed_image = fields[1].removeprefix("sha256:") if len(fields) == 3 else ""
+        if (
+            result.returncode != 0
+            or fields[:1] != ["true"]
+            or observed_image != plan.runtime_image_config_digest
+            or fields[2:] != [plan.plan_digest]
+        ):
+            raise CanonicalPhase9SupervisorBlocked(
+                "BLOCKED_RUNTIME_CONTAINER_OBSERVATION",
+                "running container does not match accepted plan",
+            )
+        return sha256(
+            json.dumps(
+                {
+                    "container_id": container_id,
+                    "image_config_digest": observed_image,
+                    "image_manifest_digest": plan.image_digest,
+                    "plan_digest": plan.plan_digest,
+                    "security_profile": "rootless-readonly-capdrop-network-none-v1",
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+
+    def stop(self, plan: Phase9LaunchPlan, container_id: str) -> None:
+        result = self._execute(
+            [PODMAN_PATH, "stop", "--time=10", container_id]
+        )
+        if result.returncode != 0:
+            raise CanonicalPhase9SupervisorBlocked(
+                "BLOCKED_RUNTIME_CONTAINER_STOP", self.name(plan)
+            )
 
 
 def _authority_from_payload(payload: object) -> OrderWriterCanaryAuthority | None:
@@ -149,6 +259,21 @@ class FileLeasePort:
                 image_digest=(
                     str(payload["image_digest"])
                     if payload.get("image_digest")
+                    else None
+                ),
+                runtime_image_acceptance_id=(
+                    UUID(str(payload["runtime_image_acceptance_id"]))
+                    if payload.get("runtime_image_acceptance_id")
+                    else None
+                ),
+                runtime_image_acceptance_receipt_digest=(
+                    str(payload["runtime_image_acceptance_receipt_digest"])
+                    if payload.get("runtime_image_acceptance_receipt_digest")
+                    else None
+                ),
+                runtime_image_config_digest=(
+                    str(payload["runtime_image_config_digest"])
+                    if payload.get("runtime_image_config_digest")
                     else None
                 ),
                 order_writer_canary_authority=_authority_from_payload(
@@ -327,6 +452,19 @@ def _production_runtime_worker_factory():
     )
 
 
+def _load_runtime_image_authority(acceptance_id: UUID):
+    try:
+        factory = _connection_factory(
+            _phase9_database_url("canonical_deployment_writer")
+        )
+        with factory() as connection:
+            return runtime_image_plan_authority(
+                load_accepted_runtime_image(connection, acceptance_id)
+            )
+    except CanonicalRuntimeImageBlocked as exc:
+        raise CanonicalPhase9SupervisorBlocked(exc.code, exc.detail) from None
+
+
 def _require_release_checkout() -> str:
     if ".codex/worktrees" in str(REPO_ROOT):
         raise CanonicalPhase9SupervisorBlocked(
@@ -462,6 +600,21 @@ def _load_plan(service_key: str) -> tuple[Phase9LaunchPlan, dict[str, object]]:
             ),
             image_digest=(
                 str(payload["image_digest"]) if payload.get("image_digest") else None
+            ),
+            runtime_image_acceptance_id=(
+                UUID(str(payload["runtime_image_acceptance_id"]))
+                if payload.get("runtime_image_acceptance_id")
+                else None
+            ),
+            runtime_image_acceptance_receipt_digest=(
+                str(payload["runtime_image_acceptance_receipt_digest"])
+                if payload.get("runtime_image_acceptance_receipt_digest")
+                else None
+            ),
+            runtime_image_config_digest=(
+                str(payload["runtime_image_config_digest"])
+                if payload.get("runtime_image_config_digest")
+                else None
             ),
             release_digest=str(payload["release_digest"]),
             generation=int(payload["generation"]),
@@ -641,7 +794,7 @@ def prepare(
     release_digest: str,
     deployment_id: UUID | None,
     deployment_capability_digest: str | None,
-    image_digest: str | None,
+    runtime_image_acceptance_id: UUID | None,
     enable_order_writer: bool,
     order_writer_canary_authority: OrderWriterCanaryAuthority | None = None,
 ) -> dict[str, object]:
@@ -650,6 +803,16 @@ def prepare(
         raise CanonicalPhase9SupervisorBlocked(
             "BLOCKED_PHASE9_RELEASE_DRIFT",
             "prepared release digest does not match clean exact-main HEAD",
+        )
+    runtime_authority = None
+    if service_key == "long_lived_runtime":
+        if runtime_image_acceptance_id is None:
+            raise CanonicalPhase9SupervisorBlocked(
+                "BLOCKED_RUNTIME_PLAN_LINEAGE_UNSET",
+                "--runtime-image-acceptance-id is required",
+            )
+        runtime_authority = _load_runtime_image_authority(
+            runtime_image_acceptance_id
         )
     prior = _load_state(service_key)
     generation = 1
@@ -662,7 +825,8 @@ def prepare(
                 or existing_plan.deployment_id != deployment_id
                 or existing_plan.deployment_capability_digest
                 != deployment_capability_digest
-                or existing_plan.image_digest != image_digest
+                or existing_plan.runtime_image_acceptance_id
+                != runtime_image_acceptance_id
                 or existing_plan.order_writer_enabled != enable_order_writer
                 or existing_plan.order_writer_canary_authority
                 != order_writer_canary_authority
@@ -694,7 +858,7 @@ def prepare(
         release_digest=release_digest,
         deployment_id=deployment_id,
         deployment_capability_digest=deployment_capability_digest,
-        image_digest=image_digest,
+        runtime_image_authority=runtime_authority,
         order_writer_enabled=enable_order_writer,
         order_writer_canary_authority=order_writer_canary_authority,
     )
@@ -1423,6 +1587,7 @@ def supervise(
     authority_port: OrderWriterCanaryAuthorityPort | None = None,
     lease_holder_token: str | None = None,
     production_compose: bool = False,
+    runtime_container_port: RuntimeContainerPort | None = None,
 ) -> None:
     plan, state = _load_plan(service_key)
     if (
@@ -1437,6 +1602,7 @@ def supervise(
         lease_holder_token = lease_holder_token or _read_order_holder_token()
     if production_compose and service_key == "long_lived_runtime":
         worker_port = worker_port or _production_runtime_worker_factory().build(plan)
+        runtime_container_port = runtime_container_port or RuntimeContainerPort()
     require_current_order_writer_canary_authority(
         plan=plan, observed_at=_now(), port=authority_port
     )
@@ -1475,7 +1641,37 @@ def supervise(
         authority_port=authority_port,
     )
     _append_receipt(receipt)
+    container_id: str | None = None
     try:
+        if runtime_container_port is not None:
+            container_id = runtime_container_port.start(plan)
+            container_observation_digest = runtime_container_port.verify(
+                plan, container_id
+            )
+            _append_receipt(
+                build_lifecycle_receipt(
+                    service_key=service_key,
+                    action="RUNTIME_CONTAINER_START",
+                    status="RUNNING",
+                    generation=plan.generation,
+                    observed_at=_now(),
+                    plan_digest=plan.plan_digest,
+                    holder_token_digest=lease.holder_token_digest,
+                    details={
+                        "runtime_image_acceptance_id": str(
+                            plan.runtime_image_acceptance_id
+                        ),
+                        "runtime_image_acceptance_receipt_digest": (
+                            plan.runtime_image_acceptance_receipt_digest
+                        ),
+                        "container_observation_digest": container_observation_digest,
+                        "network": "NONE",
+                        "read_only": True,
+                        "cap_drop": "ALL",
+                        "no_new_privileges": True,
+                    },
+                )
+            )
         if worker_port is not None:
             _record_worker_heartbeat(
                 plan=plan,
@@ -1508,6 +1704,12 @@ def supervise(
                     observed_at=_now(),
                 )
     finally:
+        container_error: Exception | None = None
+        if runtime_container_port is not None and container_id is not None:
+            try:
+                runtime_container_port.stop(plan, container_id)
+            except Exception as exc:
+                container_error = exc
         if lease_port.read(service_key) == lease:
             _append_receipt(
                 release_lease(
@@ -1517,6 +1719,8 @@ def supervise(
                     now=_now(),
                 )
             )
+        if container_error is not None:
+            raise container_error
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1560,7 +1764,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--release-digest")
     parser.add_argument("--deployment-id", type=UUID)
     parser.add_argument("--deployment-capability-digest")
-    parser.add_argument("--image-digest")
+    parser.add_argument("--runtime-image-acceptance-id", type=UUID)
     parser.add_argument("--enable-order-writer", action="store_true")
     parser.add_argument("--execution-canary-risk-policy-id", type=UUID)
     parser.add_argument("--execution-canary-risk-policy-digest")
@@ -1624,7 +1828,7 @@ def main(argv: list[str] | None = None) -> int:
                 release_digest=args.release_digest,
                 deployment_id=args.deployment_id,
                 deployment_capability_digest=args.deployment_capability_digest,
-                image_digest=args.image_digest,
+                runtime_image_acceptance_id=args.runtime_image_acceptance_id,
                 enable_order_writer=args.enable_order_writer,
                 order_writer_canary_authority=writer_authority,
             )

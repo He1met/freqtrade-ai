@@ -969,6 +969,46 @@ DEPLOYMENTS_TABLE = _table(
     ),
 )
 
+RUNTIME_IMAGE_ACCEPTANCES_TABLE = _table(
+    "runtime_image_acceptances",
+    _uuid_id(),
+    Column("source_commit", String(40), nullable=False),
+    _digest("release_digest"),
+    _digest("source_tree_digest"),
+    _digest("build_recipe_digest"),
+    _digest("base_image_digest"),
+    Column("platform", String(32), nullable=False),
+    Column("architecture", String(32), nullable=False),
+    _digest("image_manifest_digest"),
+    _digest("image_config_digest"),
+    _digest("entrypoint_digest"),
+    _digest("security_profile_digest"),
+    _digest("sbom_digest"),
+    _digest("provenance_digest"),
+    Column("builder_identity", String(200), nullable=False),
+    Column("provenance_json", JSON, nullable=False),
+    _digest("request_digest"),
+    _digest("receipt_digest"),
+    Column("accepted_by", String(200), nullable=False),
+    _created_at("accepted_at"),
+    Column("demo_only", Boolean, nullable=False),
+    Column("allow_real_funds", Boolean, nullable=False),
+    CheckConstraint(
+        "demo_only IS TRUE AND allow_real_funds IS FALSE",
+        name="runtime_image_acceptances_demo_only_no_real_funds",
+    ),
+    UniqueConstraint(
+        "request_digest", name="runtime_image_acceptances_request_digest_unique"
+    ),
+    UniqueConstraint(
+        "image_manifest_digest",
+        name="runtime_image_acceptances_manifest_digest_unique",
+    ),
+    UniqueConstraint(
+        "receipt_digest", name="runtime_image_acceptances_receipt_digest_unique"
+    ),
+)
+
 RUNTIME_INSTANCES_TABLE = _table(
     "runtime_instances",
     _uuid_id(),
