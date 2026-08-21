@@ -75,6 +75,58 @@ def _terminal_attempt(attempt_id):
     }
 
 
+@pytest.mark.parametrize(
+    ("overrides", "unsafe"),
+    (
+        ({}, False),
+        ({"credential_reference": "keychain:opaque-runtime-ref"}, False),
+        ({"credential_reference": "none:other"}, True),
+        ({"service_account": "canonical_order_writer"}, True),
+        ({"network_policy": "UNRESTRICTED"}, True),
+        ({"runtime_class": "EPHEMERAL_RESEARCH_WORKER"}, True),
+        ({"filesystem_mode": "READ_WRITE"}, True),
+        ({"research_executor_capability": True}, True),
+        ({"order_writer_capability": True}, True),
+    ),
+)
+def test_public_market_runtime_reference_is_only_safe_for_exact_capability_boundary(
+    overrides: dict[str, object], unsafe: bool
+) -> None:
+    assert DATABASE_URL is not None
+    values = {
+        "credential_reference": "none:public-okx-market-only",
+        "service_account": "canonical_runtime_reader",
+        "network_policy": "DEMO_EXCHANGE_ONLY",
+        "runtime_class": "LONG_LIVED_TRADING_RUNTIME",
+        "filesystem_mode": "READ_ONLY",
+        "research_executor_capability": False,
+        "order_writer_capability": False,
+        **overrides,
+    }
+    engine = create_engine(DATABASE_URL)
+    try:
+        with engine.connect() as connection:
+            observed = connection.execute(
+                text(
+                    "SELECT count(*) FROM (VALUES ("
+                    ":credential_reference, :service_account, :network_policy, "
+                    ":runtime_class, :filesystem_mode, "
+                    ":research_executor_capability, :order_writer_capability"
+                    ")) AS candidate(credential_reference, service_account, "
+                    "network_policy, runtime_class, filesystem_mode, "
+                    "research_executor_capability, order_writer_capability) "
+                    "WHERE "
+                    + backup._unsafe_runtime_credential_reference_predicate(
+                        "candidate"
+                    )
+                ),
+                values,
+            ).scalar_one()
+    finally:
+        engine.dispose()
+    assert bool(observed) is unsafe
+
+
 def test_restore_terminal_historical_gate_row_with_triggers_transactional(
     tmp_path: Path,
 ) -> None:

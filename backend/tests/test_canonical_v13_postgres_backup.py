@@ -69,6 +69,18 @@ def test_dispatch_credential_generation_is_exact_digest_only_allowlist() -> None
     )
 
 
+def test_public_market_runtime_reference_predicate_is_structurally_bound() -> None:
+    predicate = backup._unsafe_runtime_credential_reference_predicate("candidate")
+    assert "none:public-okx-market-only" in predicate
+    assert "candidate.service_account = 'canonical_runtime_reader'" in predicate
+    assert "candidate.network_policy = 'DEMO_EXCHANGE_ONLY'" in predicate
+    assert "candidate.runtime_class = 'LONG_LIVED_TRADING_RUNTIME'" in predicate
+    assert "candidate.filesystem_mode = 'READ_ONLY'" in predicate
+    assert "candidate.research_executor_capability IS FALSE" in predicate
+    assert "candidate.order_writer_capability IS FALSE" in predicate
+    assert "none:%" not in predicate
+
+
 def test_database_targets_are_explicit_local_passwordless_and_isolated() -> None:
     source = backup._database_url(
         "postgresql+psycopg:///freqtrade_ai_v13",

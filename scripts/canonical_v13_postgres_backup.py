@@ -72,6 +72,9 @@ SAFE_SENSITIVE_METADATA_COLUMNS: Final[tuple[str, ...]] = (
     "research_gate_attempts.lease_token_digest",
     "runtime_instances.credential_reference",
 )
+PUBLIC_MARKET_RUNTIME_CREDENTIAL_REFERENCE: Final = (
+    "none:public-okx-market-only"
+)
 EXPECTED_LIFECYCLE_TRIGGERS: Final[tuple[tuple[str, str, str], ...]] = (
     ("research_gate_attempts", "research_gate_attempts_lifecycle", "O"),
     ("research_gate_receipts", "research_gate_receipts_append_only", "O"),
@@ -90,6 +93,27 @@ class CanonicalBackupBlocked(RuntimeError):
         self.code = code
         self.detail = detail
         super().__init__(f"{code}: {detail}")
+
+
+def _unsafe_runtime_credential_reference_predicate(
+    table_reference: str = '"strategy_platform_v13"."runtime_instances"',
+) -> str:
+    """Return the exact fail-closed predicate for runtime credential metadata."""
+
+    def column(name: str) -> str:
+        return f"{table_reference}.{name}"
+
+    return (
+        f"NOT ({column('credential_reference')} LIKE 'keychain:%' OR ("
+        f"{column('credential_reference')} = "
+        f"'{PUBLIC_MARKET_RUNTIME_CREDENTIAL_REFERENCE}' AND "
+        f"{column('service_account')} = 'canonical_runtime_reader' AND "
+        f"{column('network_policy')} = 'DEMO_EXCHANGE_ONLY' AND "
+        f"{column('runtime_class')} = 'LONG_LIVED_TRADING_RUNTIME' AND "
+        f"{column('filesystem_mode')} = 'READ_ONLY' AND "
+        f"{column('research_executor_capability')} IS FALSE AND "
+        f"{column('order_writer_capability')} IS FALSE))"
+    )
 
 
 def _canonical(value: object) -> str:
@@ -562,16 +586,16 @@ def inspect_database(
                     connection.execute(
                         text(
                             'SELECT count(*) FROM "strategy_platform_v13".'
-                            '"runtime_instances" '
-                            "WHERE credential_reference NOT LIKE 'keychain:%'"
+                            '"runtime_instances" WHERE '
+                            + _unsafe_runtime_credential_reference_predicate()
                         )
                     ).scalar_one()
                 )
                 if unsafe_credential_references:
                     raise CanonicalBackupBlocked(
                         "BLOCKED_CANONICAL_BACKUP_CREDENTIAL_REFERENCE",
-                        "runtime credential references must remain opaque "
-                        "Keychain refs",
+                        "runtime credential metadata must be an opaque Keychain "
+                        "ref or the exact capability-free public market sentinel",
                     )
             finally:
                 transaction.rollback()
