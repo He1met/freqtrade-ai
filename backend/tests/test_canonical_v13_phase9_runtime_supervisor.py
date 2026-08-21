@@ -12,8 +12,10 @@ import pytest
 
 from app.canonical_v13.phase9_runtime_supervisor import (
     CanonicalPhase9SupervisorBlocked,
+    OrderWriterCanaryAuthority,
     Phase9Lease,
     build_launch_plan,
+    build_order_writer_canary_authority,
     claim_lease,
     heartbeat_lease,
     release_lease,
@@ -26,6 +28,12 @@ DEPLOYMENT_ID = UUID("30000000-0000-4000-8000-000000000003")
 RELEASE_DIGEST = "a" * 64
 CAPABILITY_DIGEST = "b" * 64
 IMAGE_DIGEST = "c" * 64
+RISK_POLICY_ID = UUID("50000000-0000-4000-8000-000000000005")
+ATTESTATION_ID = UUID("60000000-0000-4000-8000-000000000006")
+RISK_POLICY_DIGEST = "d" * 64
+ATTESTATION_DIGEST = "e" * 64
+METADATA_DIGEST = "f" * 64
+MARK_DIGEST = "1" * 64
 SCRIPT_PATH = (
     Path(__file__).resolve().parents[2] / "scripts" / "canonical_v13_phase9_service.py"
 )
@@ -57,6 +65,50 @@ class ProcessProbe:
 
     def is_alive(self, _pid: int) -> bool:
         return self.alive
+
+
+class AuthorityPort:
+    def __init__(self, expected: OrderWriterCanaryAuthority, *, valid=True) -> None:
+        self.expected = expected
+        self.valid = valid
+        self.calls: list[tuple[OrderWriterCanaryAuthority, datetime]] = []
+
+    def verify(self, authority, *, observed_at):
+        self.calls.append((authority, observed_at))
+        return self.valid and authority == self.expected
+
+
+def _writer_authority(*, expires_at=NOW + timedelta(seconds=60), **changes):
+    values = {
+        "deployment_id": DEPLOYMENT_ID,
+        "deployment_capability_digest": CAPABILITY_DIGEST,
+        "execution_canary_risk_policy_id": RISK_POLICY_ID,
+        "execution_canary_risk_policy_digest": RISK_POLICY_DIGEST,
+        "attestation_id": ATTESTATION_ID,
+        "attestation_digest": ATTESTATION_DIGEST,
+        "attestation_expires_at": expires_at,
+        "instrument_metadata_digest": METADATA_DIGEST,
+        "mark_price_snapshot_digest": MARK_DIGEST,
+        "effective_leverage": "14",
+        "position_policy": "LONG_ONLY",
+    }
+    return build_order_writer_canary_authority(**{**values, **changes})
+
+
+def _writer_plan(*, authority=None):
+    resolved = authority or _writer_authority()
+    return build_launch_plan(
+        service_key="order_writer",
+        stage="OKX_DEMO_CANARY",
+        generation=1,
+        prepared_at=NOW,
+        release_digest=RELEASE_DIGEST,
+        deployment_id=DEPLOYMENT_ID,
+        deployment_capability_digest=CAPABILITY_DIGEST,
+        order_writer_enabled=True,
+        order_writer_canary_authority=resolved,
+        plan_id=UUID("20000000-0000-4000-8000-000000000002"),
+    )
 
 
 def _runtime_plan(*, generation: int = 1):
@@ -102,17 +154,23 @@ def _prepare_runtime(service, stage: str = "NO_ORDER_SOAK"):
     )
 
 
+def _prepare_writer(service, *, authority=None):
+    resolved = authority or _writer_authority()
+    return service.prepare(
+        "order_writer",
+        "OKX_DEMO_CANARY",
+        release_digest=RELEASE_DIGEST,
+        deployment_id=DEPLOYMENT_ID,
+        deployment_capability_digest=CAPABILITY_DIGEST,
+        image_digest=None,
+        enable_order_writer=True,
+        order_writer_canary_authority=resolved,
+    )
+
+
 def test_launch_plans_keep_runtime_and_writer_identity_and_lifecycle_separate() -> None:
     runtime = _runtime_plan()
-    writer = build_launch_plan(
-        service_key="order_writer",
-        stage="OKX_DEMO_CANARY",
-        generation=1,
-        prepared_at=NOW,
-        release_digest=RELEASE_DIGEST,
-        order_writer_enabled=True,
-        plan_id=UUID("20000000-0000-4000-8000-000000000002"),
-    )
+    writer = _writer_plan()
 
     assert runtime.launch_agent_label != writer.launch_agent_label
     assert runtime.process_identity != writer.process_identity
@@ -122,6 +180,126 @@ def test_launch_plans_keep_runtime_and_writer_identity_and_lifecycle_separate() 
     assert writer.order_writer_enabled is True
     assert runtime.demo_only is writer.demo_only is True
     assert runtime.allow_real_funds is writer.allow_real_funds is False
+    assert writer.order_writer_canary_authority == _writer_authority()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("execution_canary_risk_policy_id", UUID(int=10)),
+        ("execution_canary_risk_policy_digest", "2" * 64),
+        ("attestation_id", UUID(int=11)),
+        ("attestation_digest", "3" * 64),
+        ("attestation_expires_at", NOW + timedelta(seconds=30)),
+        ("instrument_metadata_digest", "4" * 64),
+        ("mark_price_snapshot_digest", "5" * 64),
+        ("effective_leverage", "10"),
+    ),
+)
+def test_writer_plan_digest_binds_every_canary_authority_fact(field, value) -> None:
+    baseline = _writer_plan()
+    changed_authority = _writer_authority(**{field: value})
+    changed = _writer_plan(authority=changed_authority)
+    assert changed.plan_digest != baseline.plan_digest
+
+
+def test_writer_plan_requires_exact_long_only_current_authority() -> None:
+    with pytest.raises(
+        CanonicalPhase9SupervisorBlocked,
+        match="BLOCKED_ORDER_WRITER_CANARY_AUTHORITY",
+    ):
+        build_launch_plan(
+            service_key="order_writer",
+            stage="OKX_DEMO_CANARY",
+            generation=1,
+            prepared_at=NOW,
+            release_digest=RELEASE_DIGEST,
+            deployment_id=DEPLOYMENT_ID,
+            deployment_capability_digest=CAPABILITY_DIGEST,
+            order_writer_enabled=True,
+        )
+    with pytest.raises(
+        CanonicalPhase9SupervisorBlocked,
+        match="BLOCKED_ORDER_WRITER_POSITION_POLICY",
+    ):
+        _writer_authority(position_policy="LONG_SHORT")
+    with pytest.raises(
+        CanonicalPhase9SupervisorBlocked,
+        match="BLOCKED_ORDER_WRITER_EFFECTIVE_LEVERAGE",
+    ):
+        _writer_authority(effective_leverage="14.1")
+    with pytest.raises(
+        CanonicalPhase9SupervisorBlocked,
+        match="BLOCKED_ORDER_WRITER_CANARY_AUTHORITY",
+    ):
+        _writer_plan(authority=_writer_authority(expires_at=NOW))
+    with pytest.raises(
+        CanonicalPhase9SupervisorBlocked,
+        match="BLOCKED_ORDER_WRITER_CANARY_AUTHORITY",
+    ):
+        build_launch_plan(
+            service_key="order_writer",
+            stage="OKX_DEMO_CANARY",
+            generation=1,
+            prepared_at=NOW,
+            release_digest=RELEASE_DIGEST,
+            deployment_id=UUID(int=12),
+            deployment_capability_digest=CAPABILITY_DIGEST,
+            order_writer_enabled=True,
+            order_writer_canary_authority=_writer_authority(),
+        )
+
+
+def test_writer_lease_binds_and_revalidates_authority_on_claim_and_heartbeat() -> None:
+    authority = _writer_authority()
+    plan = _writer_plan(authority=authority)
+    port = MemoryLeasePort()
+    verifier = AuthorityPort(authority)
+    with pytest.raises(
+        CanonicalPhase9SupervisorBlocked,
+        match="BLOCKED_ORDER_WRITER_CANARY_AUTHORITY",
+    ):
+        claim_lease(
+            port,
+            plan=plan,
+            holder_token="w" * 48,
+            pid=4321,
+            now=NOW,
+            ttl=timedelta(seconds=35),
+            process_probe=ProcessProbe(False),
+        )
+    lease, _receipt = claim_lease(
+        port,
+        plan=plan,
+        holder_token="w" * 48,
+        pid=4321,
+        now=NOW,
+        ttl=timedelta(seconds=35),
+        process_probe=ProcessProbe(False),
+        authority_port=verifier,
+    )
+    assert lease.order_writer_canary_authority == authority
+    with pytest.raises(
+        CanonicalPhase9SupervisorBlocked,
+        match="BLOCKED_ORDER_WRITER_CANARY_AUTHORITY",
+    ):
+        heartbeat_lease(
+            port,
+            lease=lease,
+            holder_token="w" * 48,
+            now=NOW + timedelta(seconds=10),
+            ttl=timedelta(seconds=35),
+            authority_port=AuthorityPort(authority, valid=False),
+        )
+    renewed, _receipt = heartbeat_lease(
+        port,
+        lease=lease,
+        holder_token="w" * 48,
+        now=NOW + timedelta(seconds=10),
+        ttl=timedelta(seconds=35),
+        authority_port=verifier,
+    )
+    assert renewed.order_writer_canary_authority == authority
 
 
 @pytest.mark.parametrize(
@@ -447,6 +625,92 @@ def test_confirmation_requires_exact_prepared_digest_before_bootstrap(
     ]
 
 
+def test_writer_confirm_restart_and_recover_revalidate_exact_current_authority(
+    monkeypatch, tmp_path
+) -> None:
+    service = _load_script("canonical_phase9_writer_authority_test")
+    _configure_roots(service, tmp_path, monkeypatch)
+    monkeypatch.setattr(service.shutil, "which", lambda _name: "/bin/launchctl")
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(command):
+        calls.append(tuple(command))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(service, "_run", fake_run)
+    authority = _writer_authority()
+    verifier = AuthorityPort(authority)
+    prepared = _prepare_writer(service, authority=authority)
+
+    with pytest.raises(
+        CanonicalPhase9SupervisorBlocked,
+        match="BLOCKED_ORDER_WRITER_CANARY_AUTHORITY",
+    ):
+        service.confirm("order_writer", prepared["plan_digest"])
+    assert calls == []
+
+    service.confirm(
+        "order_writer", prepared["plan_digest"], authority_port=verifier
+    )
+    calls_after_confirm = len(calls)
+    with pytest.raises(
+        CanonicalPhase9SupervisorBlocked,
+        match="BLOCKED_ORDER_WRITER_CANARY_AUTHORITY",
+    ):
+        service.restart(
+            "order_writer",
+            prepared["plan_digest"],
+            authority_port=AuthorityPort(authority, valid=False),
+        )
+    assert len(calls) == calls_after_confirm
+    service.restart(
+        "order_writer", prepared["plan_digest"], authority_port=verifier
+    )
+
+    calls_before_recover = len(calls)
+    with pytest.raises(
+        CanonicalPhase9SupervisorBlocked,
+        match="BLOCKED_ORDER_WRITER_CANARY_AUTHORITY",
+    ):
+        service.recover(
+            "order_writer", authority_port=AuthorityPort(authority, valid=False)
+        )
+    assert len(calls) == calls_before_recover
+    recovered = service.recover("order_writer", authority_port=verifier)
+    assert recovered["status"] == "NO_OP"
+    assert [call[1] for call in verifier.calls] == [NOW, NOW, NOW]
+
+
+def test_writer_confirmation_blocks_expired_frozen_attestation_before_launchctl(
+    monkeypatch, tmp_path
+) -> None:
+    service = _load_script("canonical_phase9_writer_expiry_test")
+    _configure_roots(service, tmp_path, monkeypatch)
+    authority = _writer_authority(expires_at=NOW + timedelta(seconds=5))
+    prepared = _prepare_writer(service, authority=authority)
+    monkeypatch.setattr(service, "_now", lambda: NOW + timedelta(seconds=5))
+    calls = []
+    monkeypatch.setattr(
+        service,
+        "_run",
+        lambda command: (
+            calls.append(tuple(command))
+            or subprocess.CompletedProcess(command, 0, "", "")
+        ),
+    )
+    monkeypatch.setattr(service.shutil, "which", lambda _name: "/bin/launchctl")
+    with pytest.raises(
+        CanonicalPhase9SupervisorBlocked,
+        match="BLOCKED_ORDER_WRITER_CANARY_AUTHORITY",
+    ):
+        service.confirm(
+            "order_writer",
+            prepared["plan_digest"],
+            authority_port=AuthorityPort(authority),
+        )
+    assert calls == []
+
+
 def test_file_lease_port_never_persists_raw_holder_token(monkeypatch, tmp_path) -> None:
     service = _load_script("canonical_phase9_file_lease_test")
     _configure_roots(service, tmp_path, monkeypatch)
@@ -464,6 +728,34 @@ def test_file_lease_port_never_persists_raw_holder_token(monkeypatch, tmp_path) 
     content = port._path("long_lived_runtime").read_text()
     assert token not in content
     assert lease.holder_token_digest in content
+
+
+def test_file_lease_round_trip_preserves_exact_writer_canary_authority(
+    monkeypatch, tmp_path
+) -> None:
+    service = _load_script("canonical_phase9_writer_file_lease_test")
+    _configure_roots(service, tmp_path, monkeypatch)
+    authority = _writer_authority()
+    plan = _writer_plan(authority=authority)
+    port = service.FileLeasePort(service.SUPPORT_ROOT)
+    lease, _receipt = claim_lease(
+        port,
+        plan=plan,
+        holder_token="writer-holder-token-material" * 2,
+        pid=4321,
+        now=NOW,
+        ttl=timedelta(seconds=35),
+        process_probe=ProcessProbe(False),
+        authority_port=AuthorityPort(authority),
+    )
+    assert port.read("order_writer") == lease
+    payload = json.loads(port._path("order_writer").read_text())
+    persisted = payload["order_writer_canary_authority"]
+    assert persisted["deployment_id"] == str(DEPLOYMENT_ID)
+    assert persisted["execution_canary_risk_policy_id"] == str(RISK_POLICY_ID)
+    assert persisted["attestation_id"] == str(ATTESTATION_ID)
+    assert persisted["effective_leverage"] == "14"
+    assert persisted["position_policy"] == "LONG_ONLY"
 
 
 def test_failed_bootstrap_restores_prepared_state(monkeypatch, tmp_path) -> None:
@@ -716,6 +1008,7 @@ def test_cli_defaults_only_runtime_to_no_order_soak(monkeypatch, capsys) -> None
                 "deployment_capability_digest": CAPABILITY_DIGEST,
                 "image_digest": IMAGE_DIGEST,
                 "enable_order_writer": False,
+                "order_writer_canary_authority": None,
             },
         )
     ]
@@ -728,3 +1021,63 @@ def test_cli_defaults_only_runtime_to_no_order_soak(monkeypatch, capsys) -> None
         "status": "BLOCKED",
     }
     assert len(observed) == 1
+
+
+def test_cli_prepare_writer_requires_and_binds_all_canary_authority_fields(
+    monkeypatch, capsys
+) -> None:
+    service = _load_script("canonical_phase9_writer_cli_test")
+    observed = []
+    monkeypatch.setattr(
+        service,
+        "prepare",
+        lambda service_key, stage, **kwargs: (
+            observed.append((service_key, stage, kwargs)) or {"status": "PREPARED"}
+        ),
+    )
+    base = [
+        "prepare",
+        "--service",
+        "order_writer",
+        "--stage",
+        "OKX_DEMO_CANARY",
+        "--release-digest",
+        RELEASE_DIGEST,
+        "--deployment-id",
+        str(DEPLOYMENT_ID),
+        "--deployment-capability-digest",
+        CAPABILITY_DIGEST,
+        "--enable-order-writer",
+    ]
+    assert service.main(base) == 2
+    assert json.loads(capsys.readouterr().out)["reason"] == (
+        "BLOCKED_ORDER_WRITER_CANARY_AUTHORITY"
+    )
+    assert observed == []
+
+    args = [
+        *base,
+        "--execution-canary-risk-policy-id",
+        str(RISK_POLICY_ID),
+        "--execution-canary-risk-policy-digest",
+        RISK_POLICY_DIGEST,
+        "--attestation-id",
+        str(ATTESTATION_ID),
+        "--attestation-digest",
+        ATTESTATION_DIGEST,
+        "--attestation-expires-at",
+        (NOW + timedelta(seconds=60)).isoformat(),
+        "--instrument-metadata-digest",
+        METADATA_DIGEST,
+        "--mark-price-snapshot-digest",
+        MARK_DIGEST,
+        "--effective-leverage",
+        "14.0",
+        "--position-policy",
+        "LONG_ONLY",
+    ]
+    assert service.main(args) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "PREPARED"
+    authority = observed[0][2]["order_writer_canary_authority"]
+    assert authority == _writer_authority()
+    assert authority.effective_leverage == "14"

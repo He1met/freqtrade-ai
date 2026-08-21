@@ -89,7 +89,7 @@ def test_mapped_owner_and_acl_are_exact_and_contain_no_logical_role_targets() ->
     ddl = render_postgresql_genesis_ddl(mapping)
     assert_postgresql_acl_sql(acl, mapping)
     owner_grants = postgresql_owner_table_grant_statements(mapping)
-    assert len(owner_grants) == 52
+    assert len(owner_grants) == 53
     assert (
         "GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER "
         "ON TABLE "
@@ -131,7 +131,7 @@ def test_bootstrap_render_cli_is_offline_and_never_requires_a_database_url() -> 
     assert payload["database_name"] == LOCAL_DATABASE_NAME
     assert payload["role_prefix"] == LOCAL_ROLE_PREFIX
     assert payload["capability_role_count"] == 18
-    assert payload["acl_statement_count"] == 1350
+    assert payload["acl_statement_count"] == 1388
     assert "DATABASE_URL" not in completed.stdout
 
 
@@ -155,8 +155,8 @@ def test_owner_table_acl_plan_is_offline_exact_and_non_destructive() -> None:
     payload = json.loads(completed.stdout)
     assert payload["status"] == "READY"
     assert payload["contract"] == "canonical-v13-owner-table-acl-v1"
-    assert payload["table_statement_count"] == 52
-    assert payload["target_privilege_fact_count"] == 364
+    assert payload["table_statement_count"] == 53
+    assert payload["target_privilege_fact_count"] == 371
     assert payload["legacy_privilege_fact_count"] == 2
     assert len(payload["owner_acl_digest"]) == 64
     assert payload["destructive_table_operations"] == []

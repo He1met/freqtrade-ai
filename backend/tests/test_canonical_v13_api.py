@@ -465,6 +465,11 @@ def test_factory_is_standalone_and_exact_routes_are_frozen() -> None:
             (f"{API_PREFIX}/phase9/readiness", "GET"),
             (f"{API_PREFIX}/phase9/approvals", "POST"),
             (f"{API_PREFIX}/phase9/deployments", "POST"),
+            (f"{API_PREFIX}/phase9/canary-risk-policies", "POST"),
+            (
+                f"{API_PREFIX}/phase9/canary-risk-policies/{{policy_id}}/terminate",
+                "POST",
+            ),
             (f"{API_PREFIX}/phase9/risk-budgets", "POST"),
             (f"{API_PREFIX}/phase9/signals", "POST"),
             (f"{API_PREFIX}/phase9/intents", "POST"),
@@ -483,7 +488,7 @@ def test_factory_is_standalone_and_exact_routes_are_frozen() -> None:
             for method, operation in path.items()
             if method in {"get", "post", "put", "patch", "delete"}
         ]
-        assert len(operation_ids) == 39
+        assert len(operation_ids) == 41
         assert len(set(operation_ids)) == len(operation_ids)
     finally:
         client.close()

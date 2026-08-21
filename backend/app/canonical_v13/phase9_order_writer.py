@@ -12,6 +12,7 @@ from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any, Protocol
 from uuid import UUID, uuid4
 
@@ -28,6 +29,7 @@ from app.canonical_v13.execution_common import (
 from app.canonical_v13.models import (
     DEPLOYMENTS_TABLE,
     EXECUTION_ATTESTATIONS_TABLE,
+    EXECUTION_CANARY_RISK_POLICIES_TABLE,
     EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE,
     EXECUTION_RISK_RESERVATIONS_TABLE,
     ORDERS_TABLE,
@@ -99,8 +101,8 @@ def _exchange_body(order_request: Mapping[str, str]) -> dict[str, str]:
         )
     if (
         observed["tdMode"] != "isolated"
-        or observed["side"] not in {"buy", "sell"}
-        or observed["posSide"] not in {"long", "short"}
+        or observed["side"] != "buy"
+        or observed["posSide"] != "long"
         or observed["ordType"] not in {"post_only", "limit"}
         or not all(isinstance(value, str) and value for value in observed.values())
     ):
@@ -270,6 +272,18 @@ def prepare_demo_order(
         if reservation is not None
         else None
     )
+    policy = (
+        effective.execute(
+            select(EXECUTION_CANARY_RISK_POLICIES_TABLE).where(
+                EXECUTION_CANARY_RISK_POLICIES_TABLE.c.id
+                == budget["execution_canary_risk_policy_id"]
+            )
+        )
+        .mappings()
+        .one_or_none()
+        if budget is not None
+        else None
+    )
     attestation = (
         effective.execute(
             select(EXECUTION_ATTESTATIONS_TABLE).where(
@@ -298,6 +312,7 @@ def prepare_demo_order(
         or decision["decision_json"].get("reservation_digest")
         != reservation["reservation_digest"]
         or budget is None
+        or policy is None
         or attestation is None
         or attestation["status"] != "READY"
         or deployment is None
@@ -309,6 +324,11 @@ def prepare_demo_order(
         or attestation["permissions_json"]
         != {"read": True, "trade": True, "withdraw": False}
         or attestation["instrument"] != body["instId"]
+        or policy["execution_attestation_id"] != attestation["id"]
+        or policy["attestation_digest"] != attestation["attestation_digest"]
+        or policy["receipt_digest"] != budget["source_receipt_digest"]
+        or policy["status"] != "ACTIVE"
+        or policy["position_policy"] != "LONG_ONLY"
         or budget["instrument"] != body["instId"]
         or intent["intent_json"].get("instrument") != body["instId"]
         or intent["intent_json"].get("exchange_body") != body
@@ -316,6 +336,21 @@ def prepare_demo_order(
         raise CanonicalExecutionChainBlocked(
             "BLOCKED_ORDER_AUTHORITY_LINEAGE",
             "risk, budget, attestation, deployment, and request must match exactly",
+        )
+    try:
+        requested_size = Decimal(body["sz"])
+    except InvalidOperation:
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_ORDER_SIZE", "order size must be a canonical decimal"
+        ) from None
+    if (
+        not requested_size.is_finite()
+        or requested_size != Decimal(str(policy["minimum_contract_size"]))
+        or _persisted_utc(policy["expires_at"]) <= now
+    ):
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_ORDER_POLICY_DRIFT",
+            "order size and active policy must match the frozen minimum canary",
         )
     if not (
         _persisted_utc(attestation["observed_at"])
@@ -331,6 +366,8 @@ def prepare_demo_order(
         "risk_decision_digest": decision["decision_digest"],
         "reservation_digest": reservation["reservation_digest"],
         "authorization_digest": budget["authorization_digest"],
+        "canary_risk_policy_id": str(policy["id"]),
+        "canary_risk_policy_receipt_digest": policy["receipt_digest"],
         "attestation_id": str(attestation_id),
         "attestation_digest": attestation["attestation_digest"],
         "writer_identity": writer_identity,
@@ -485,6 +522,70 @@ def _claim_dispatch(
     order, body = _load_dispatch(effective, order_id)
     if order["receipt_digest"] is not None and order["exchange_order_id"]:
         return order, body
+    decision = (
+        effective.execute(
+            select(RISK_DECISIONS_TABLE).where(
+                RISK_DECISIONS_TABLE.c.id == order["risk_decision_id"]
+            )
+        )
+        .mappings()
+        .one()
+    )
+    reservation = (
+        effective.execute(
+            select(EXECUTION_RISK_RESERVATIONS_TABLE).where(
+                EXECUTION_RISK_RESERVATIONS_TABLE.c.trade_intent_id
+                == decision["trade_intent_id"]
+            )
+        )
+        .mappings()
+        .one()
+    )
+    budget = (
+        effective.execute(
+            select(EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE).where(
+                EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE.c.id
+                == reservation["risk_budget_authorization_id"]
+            )
+        )
+        .mappings()
+        .one()
+    )
+    policy = (
+        effective.execute(
+            select(EXECUTION_CANARY_RISK_POLICIES_TABLE).where(
+                EXECUTION_CANARY_RISK_POLICIES_TABLE.c.id
+                == budget["execution_canary_risk_policy_id"]
+            )
+        )
+        .mappings()
+        .one()
+    )
+    attestation = (
+        effective.execute(
+            select(EXECUTION_ATTESTATIONS_TABLE).where(
+                EXECUTION_ATTESTATIONS_TABLE.c.id == policy["execution_attestation_id"]
+            )
+        )
+        .mappings()
+        .one()
+    )
+    if (
+        policy["status"] != "ACTIVE"
+        or policy["receipt_digest"] != budget["source_receipt_digest"]
+        or attestation["status"] != "READY"
+        or policy["attestation_digest"] != attestation["attestation_digest"]
+        or not (
+            _persisted_utc(attestation["observed_at"])
+            <= now
+            < _persisted_utc(attestation["expires_at"])
+        )
+        or _persisted_utc(policy["expires_at"]) <= now
+    ):
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_ORDER_DISPATCH_AUTHORITY_STALE",
+            "fresh exact policy and execution attestation are required before POST",
+        )
     if order["status"] != "SUBMITTED":
         raise CanonicalOrderRecoveryRequired(
             "BLOCKED_ORDER_GET_ONLY_RECOVERY_REQUIRED",

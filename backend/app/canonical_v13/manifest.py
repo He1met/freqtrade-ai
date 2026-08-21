@@ -22,7 +22,7 @@ CANONICAL_MANIFEST_KEY: Final = "canonical-v13-table-manifest-v1"
 CANONICAL_LEGACY_IMPORT_MODE: Final = "EXTERNAL_LATEST_ONLY"
 CANONICAL_TRADING_CAPABILITY: Final = "TRADING_DISABLED"
 CANONICAL_PRODUCTION_DEFAULT: Final = "UNSET"
-CANONICAL_AUTHORITY_REVISION: Final = "20260821_phase9_execution_v1_acl4"
+CANONICAL_AUTHORITY_REVISION: Final = "20260821_phase9_canary_v2_acl5"
 
 P0_CONFIGURATION_KINDS: Final[tuple[str, ...]] = (
     "TARGET",
@@ -132,6 +132,7 @@ _TABLES_BY_DOMAIN = {
         "runtime_receipts",
     ),
     "execution": (
+        "execution_canary_risk_policies",
         "execution_risk_budget_authorizations",
         "execution_risk_reservations",
         "execution_attestations",
@@ -178,6 +179,7 @@ _WRITER_TABLE_ALLOWLIST = {
     "canonical_optimization_writer": _TABLES_BY_DOMAIN["optimization"],
     "canonical_approval_writer": (
         "deployment_approvals",
+        "execution_canary_risk_policies",
         "execution_risk_budget_authorizations",
     ),
     "canonical_deployment_writer": (
@@ -338,6 +340,16 @@ _WRITER_READ_ALLOWLIST = {
         "schema_metadata",
         "audit_events",
         "qualification_decisions",
+        "strategy_versions",
+        "strategy_artifacts",
+        "research_targets",
+        "execution_attestations",
+        "deployments",
+        "execution_risk_reservations",
+        "risk_decisions",
+        "orders",
+        "reconciliation_runs",
+        "reconciliation_items",
     ),
     "canonical_deployment_writer": (
         "schema_metadata",
@@ -356,6 +368,7 @@ _WRITER_READ_ALLOWLIST = {
         "signals",
         "deployments",
         "execution_risk_budget_authorizations",
+        "execution_canary_risk_policies",
     ),
     "canonical_order_writer": (
         "schema_metadata",
@@ -363,6 +376,7 @@ _WRITER_READ_ALLOWLIST = {
         "trade_intents",
         "risk_decisions",
         "execution_risk_budget_authorizations",
+        "execution_canary_risk_policies",
         "execution_risk_reservations",
         "execution_attestations",
     ),
@@ -396,6 +410,7 @@ _MUTABLE_TABLES = frozenset(
         "research_gate_attempts",
         "optimization_runs",
         "deployment_approvals",
+        "execution_canary_risk_policies",
         "deployments",
         "runtime_instances",
         "order_writer_leases",

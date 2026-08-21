@@ -83,6 +83,25 @@ def test_phase9_control_api_preserves_qualified_approval_and_demo_deployment() -
         assert replay.status_code == 201
         assert replay.json() == deployment_payload
 
+        missing_live_evidence = client.post(
+            f"{API_PREFIX}/phase9/canary-risk-policies",
+            json={
+                "qualification_decision_id": str(
+                    qualification.qualification_decision_id
+                ),
+                "deployment_approval_id": approval_payload["deployment_approval_id"],
+                "execution_attestation_id": ("00000000-0000-0000-0000-000000000001"),
+                "actor_identity": "phase9-human-approver",
+                "idempotency_key": "phase9-canary-api-missing-live-evidence",
+                "reason": "must fail closed without current exchange evidence",
+                "redacted_evidence": {},
+            },
+        )
+        assert missing_live_evidence.status_code == 409
+        assert missing_live_evidence.json()["error"]["code"] == (
+            "BLOCKED_CANARY_POLICY_EVIDENCE_FIELDS"
+        )
+
         missing_budget_source = client.post(
             f"{API_PREFIX}/phase9/risk-budgets",
             json={

@@ -235,7 +235,7 @@ def _seed_stage_b(connection, handoff, deployment_id, runtime_id):
         connection,
         SimpleNamespace(deployment_approval_id=approval_id),
         policy_digest="a" * 64,
-        expires_at=datetime(2026, 8, 21, 1, tzinfo=timezone.utc),
+        accepted_at=datetime(2026, 8, 21, tzinfo=timezone.utc),
     )
     budget = authorize_demo_risk_budget(
         connection,
@@ -246,7 +246,7 @@ def _seed_stage_b(connection, handoff, deployment_id, runtime_id):
         evaluated_at=datetime(2026, 8, 21, tzinfo=timezone.utc),
     )
     risk_ids = []
-    for index, side in enumerate(("buy", "sell"), start=1):
+    for index, size in enumerate(("1", "2"), start=1):
         signal_id = record_production_demo_signal(
             connection,
             deployment_id=deployment_id,
@@ -258,7 +258,8 @@ def _seed_stage_b(connection, handoff, deployment_id, runtime_id):
                 "allow_real_funds": False,
                 "configuration_bundle_digest": handoff.configuration_bundle_digest,
                 "market_snapshot_digest": handoff.market_snapshot_digest,
-                "side": side,
+                "side": "buy",
+                "shadow_case": index,
             },
             evaluated_at=datetime(2026, 8, 21, tzinfo=timezone.utc)
             + timedelta(seconds=index),
@@ -267,10 +268,10 @@ def _seed_stage_b(connection, handoff, deployment_id, runtime_id):
             "instId": "BTC-USDT-SWAP",
             "tdMode": "isolated",
             "clOrdId": f"v13readiness{index:018d}",
-            "side": side,
-            "posSide": "long" if side == "buy" else "short",
+            "side": "buy",
+            "posSide": "long",
             "ordType": "post_only",
-            "sz": "1",
+            "sz": size,
             "px": "10000",
         }
         signal_digest = connection.execute(
@@ -285,7 +286,7 @@ def _seed_stage_b(connection, handoff, deployment_id, runtime_id):
                 "allow_real_funds": False,
                 "signal_digest": signal_digest,
                 "instrument": "BTC-USDT-SWAP",
-                "notional": "10",
+                "notional": str(Decimal(size) * Decimal(10)),
                 "exchange_body": exchange_body,
             },
         )

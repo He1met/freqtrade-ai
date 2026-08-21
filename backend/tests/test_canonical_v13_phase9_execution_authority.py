@@ -14,12 +14,15 @@ from app.canonical_v13.deployment_control import (
 )
 from app.canonical_v13.execution_common import CanonicalExecutionChainBlocked
 from app.canonical_v13.models import (
-    AUDIT_EVENTS_TABLE,
     DEPLOYMENT_APPROVALS_TABLE,
+    DEPLOYMENTS_TABLE,
+    EXECUTION_CANARY_RISK_POLICIES_TABLE,
     EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE,
     EXECUTION_RISK_RESERVATIONS_TABLE,
     QUALIFICATION_DECISIONS_TABLE,
+    RESEARCH_TARGETS_TABLE,
     RISK_DECISIONS_TABLE,
+    STRATEGY_VERSIONS_TABLE,
 )
 from app.canonical_v13.phase9_execution_authority import (
     authorize_demo_risk_budget,
@@ -169,7 +172,7 @@ def _risk_policy_source(
     max_notional="10",
     max_order_count=1,
     policy_digest="b" * 64,
-    expires_at=None,
+    accepted_at=NOW,
 ):
     persisted_approval = (
         connection.execute(
@@ -190,33 +193,96 @@ def _risk_policy_source(
         .mappings()
         .one()
     )
-    evidence = {
-        "contract": "canonical-v13-phase9-risk-policy-source-v1",
-        "qualification_decision_id": str(decision["id"]),
-        "qualification_decision_digest": decision["decision_digest"],
-        "configuration_bundle_id": str(decision["configuration_bundle_id"]),
-        "configuration_bundle_digest": decision["configuration_bundle_digest"],
-        "execution_target": "OKX_DEMO",
-        "instrument": "BTC-USDT-SWAP",
-        "max_notional": max_notional,
-        "max_order_count": max_order_count,
-        "policy_digest": policy_digest,
-        "expires_at": (expires_at or NOW + timedelta(hours=1)).isoformat(),
-        "allow_real_funds": False,
-        "status": "ACCEPTED",
-    }
-    receipt_digest = canonical_execution_digest(evidence)
+    deployment = (
+        connection.execute(
+            select(DEPLOYMENTS_TABLE).where(
+                DEPLOYMENTS_TABLE.c.deployment_approval_id
+                == approval.deployment_approval_id
+            )
+        )
+        .mappings()
+        .one()
+    )
+    version = (
+        connection.execute(
+            select(STRATEGY_VERSIONS_TABLE).where(
+                STRATEGY_VERSIONS_TABLE.c.id == decision["strategy_version_id"]
+            )
+        )
+        .mappings()
+        .one()
+    )
+    target = (
+        connection.execute(
+            select(RESEARCH_TARGETS_TABLE).where(
+                RESEARCH_TARGETS_TABLE.c.id == decision["research_target_id"]
+            )
+        )
+        .mappings()
+        .one()
+    )
+    attestation = record_redacted_demo_attestation(
+        connection,
+        deployment_id=deployment["id"],
+        instrument="BTC-USDT-SWAP",
+        account_fingerprint_digest="c" * 64,
+        credential_generation_digest="d" * 64,
+        permissions={"read": True, "trade": True, "withdraw": False},
+        observed_at=accepted_at,
+        expires_at=accepted_at + timedelta(seconds=60),
+        evaluated_at=accepted_at,
+    )
+    receipt_digest = canonical_execution_digest(
+        {
+            "qualification_decision_id": str(decision["id"]),
+            "deployment_approval_id": str(approval.deployment_approval_id),
+            "policy_digest": policy_digest,
+            "accepted_at": accepted_at.isoformat(),
+        }
+    )
     connection.execute(
-        AUDIT_EVENTS_TABLE.insert().values(
+        EXECUTION_CANARY_RISK_POLICIES_TABLE.insert().values(
             id=uuid4(),
-            event_type="PHASE9_RISK_POLICY_ACCEPTED",
-            aggregate_type="canonical_phase9_risk_policy",
-            aggregate_id=str(decision["id"]),
+            qualification_decision_id=decision["id"],
+            deployment_approval_id=approval.deployment_approval_id,
+            execution_attestation_id=attestation.attestation_id,
+            strategy_version_id=decision["strategy_version_id"],
+            strategy_artifact_id=version["artifact_id"],
+            strategy_artifact_digest="a" * 64,
+            research_target_id=target["id"],
+            research_target_digest=target["target_digest"],
+            configuration_bundle_id=decision["configuration_bundle_id"],
+            configuration_bundle_digest=decision["configuration_bundle_digest"],
+            market_snapshot_id=decision["market_snapshot_id"],
+            market_snapshot_digest=decision["market_snapshot_digest"],
+            execution_target="OKX_DEMO",
+            instrument="BTC-USDT-SWAP",
+            position_policy="LONG_ONLY",
+            max_order_count=max_order_count,
+            minimum_contract_size=Decimal("1"),
+            contract_value=Decimal("0.001"),
+            contract_value_ccy="BTC",
+            mark_price=Decimal("10000"),
+            max_notional=Decimal(max_notional),
+            strategy_max_leverage=Decimal("14"),
+            exchange_max_leverage=Decimal("100"),
+            effective_leverage=Decimal("14"),
+            metadata_receipt_digest="e" * 64,
+            mark_price_receipt_digest="f" * 64,
+            attestation_digest=attestation.attestation_digest,
             actor_identity="isolated-policy-owner",
+            idempotency_key=f"fixture-{policy_digest}",
+            reason="isolated exact policy fixture",
+            allow_real_funds=False,
+            status="ACTIVE",
+            observed_at=accepted_at,
+            accepted_at=accepted_at,
+            expires_at=accepted_at + timedelta(minutes=30),
+            terminated_at=None,
             request_digest=policy_digest,
+            policy_digest=policy_digest,
             receipt_digest=receipt_digest,
-            evidence_json=evidence,
-            created_at=NOW,
+            termination_digest=None,
         )
     )
     return receipt_digest
@@ -293,21 +359,16 @@ def test_budget_cannot_be_invented_or_replayed_with_drift(canonical_connection):
             policy_source_receipt_digest=first_source,
             evaluated_at=NOW,
         )
-        drifted_source = _risk_policy_source(
-            canonical_connection,
-            approval,
-            max_notional="11",
-            policy_digest="d" * 64,
-        )
         with pytest.raises(
-            CanonicalExecutionChainBlocked, match="BLOCKED_RISK_BUDGET_REPLAY_DRIFT"
+            CanonicalExecutionChainBlocked,
+            match="CANONICAL_PHASE9_RISK_BUDGET_SOURCE_UNSET",
         ):
             authorize_demo_risk_budget(
                 canonical_connection,
                 deployment_approval_id=approval.deployment_approval_id,
                 actor_identity="isolated-human-owner",
                 reason="formal fixture",
-                policy_source_receipt_digest=drifted_source,
+                policy_source_receipt_digest="d" * 64,
                 evaluated_at=NOW,
             )
         assert canonical_connection.execute(

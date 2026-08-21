@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select
@@ -10,11 +11,15 @@ from sqlalchemy import select
 from app.canonical_v13.accounting import post_production_demo_ledger_entry
 from app.canonical_v13.execution_common import CanonicalExecutionChainBlocked
 from app.canonical_v13.fill_service import record_production_demo_fill
-from app.canonical_v13.models import ORDERS_TABLE, ORDER_WRITER_LEASES_TABLE
+from app.canonical_v13.models import (
+    EXECUTION_CANARY_RISK_POLICIES_TABLE,
+    ORDER_WRITER_LEASES_TABLE,
+    ORDERS_TABLE,
+)
+from app.canonical_v13.phase9_canary_policy import terminate_canary_risk_policy
 from app.canonical_v13.phase9_execution_authority import (
     authorize_demo_risk_budget,
     decide_central_demo_risk,
-    record_redacted_demo_attestation,
 )
 from app.canonical_v13.phase9_order_writer import (
     CanonicalOrderRecoveryRequired,
@@ -27,7 +32,7 @@ from app.canonical_v13.reconciliation import reconcile_production_demo_chain
 from tests.test_canonical_v13_phase9_execution_authority import (
     _production_chain,
     _risk_policy_source,
-    canonical_connection,  # noqa: F401,F811 - registers the shared fixture
+    canonical_connection,  # noqa: F401 - registers the shared fixture
 )
 from tests.test_canonical_v13_research_evaluation import NOW
 
@@ -79,7 +84,9 @@ class FakeTransport:
 
 
 def _prepare_authority(connection):
-    approval, deployment, _runtime, intent_id, _launcher = _production_chain(connection)
+    approval, _deployment, _runtime, intent_id, _launcher = _production_chain(
+        connection
+    )
     source_receipt = _risk_policy_source(connection, approval)
     budget = authorize_demo_risk_budget(
         connection,
@@ -95,16 +102,10 @@ def _prepare_authority(connection):
         risk_budget_authorization_id=budget.authorization_id,
         evaluated_at=NOW + timedelta(seconds=1),
     )
-    attestation = record_redacted_demo_attestation(
-        connection,
-        deployment_id=deployment.deployment_id,
-        instrument="BTC-USDT-SWAP",
-        account_fingerprint_digest="c" * 64,
-        credential_generation_digest="d" * 64,
-        permissions={"read": True, "trade": True, "withdraw": False},
-        observed_at=NOW,
-        expires_at=NOW + timedelta(seconds=60),
-        evaluated_at=NOW,
+    attestation = SimpleNamespace(
+        attestation_id=connection.execute(
+            select(EXECUTION_CANARY_RISK_POLICIES_TABLE.c.execution_attestation_id)
+        ).scalar_one()
     )
     return risk, attestation
 
@@ -340,3 +341,23 @@ def test_exchange_fill_ledger_reconciliation_exact_replay(canonical_connection):
             )
             == run_id
         )
+        policy_id = canonical_connection.execute(
+            select(EXECUTION_CANARY_RISK_POLICIES_TABLE.c.id)
+        ).scalar_one()
+        terminated = terminate_canary_risk_policy(
+            canonical_connection,
+            policy_id=policy_id,
+            reconciliation_run_id=run_id,
+            actor_identity="isolated-human-owner",
+            evaluated_at=NOW + timedelta(seconds=4),
+        )
+        repeated = terminate_canary_risk_policy(
+            canonical_connection,
+            policy_id=policy_id,
+            reconciliation_run_id=run_id,
+            actor_identity="isolated-human-owner",
+            evaluated_at=NOW + timedelta(seconds=5),
+        )
+        assert terminated.repeat_noop is False
+        assert repeated.repeat_noop is True
+        assert repeated.termination_digest == terminated.termination_digest

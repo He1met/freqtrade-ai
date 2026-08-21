@@ -105,6 +105,7 @@ EXPECTED_TABLES_BY_DOMAIN = {
         "runtime_receipts",
     ),
     "execution": (
+        "execution_canary_risk_policies",
         "execution_risk_budget_authorizations",
         "execution_risk_reservations",
         "execution_attestations",
@@ -122,7 +123,7 @@ EXPECTED_TABLES_BY_DOMAIN = {
 
 
 def test_exact_identity_and_table_manifest_matches_frozen_design() -> None:
-    assert CANONICAL_AUTHORITY_REVISION == "20260821_phase9_execution_v1_acl4"
+    assert CANONICAL_AUTHORITY_REVISION == "20260821_phase9_canary_v2_acl5"
     assert CANONICAL_DATABASE_PURPOSE == "FREQTRADE_AI_V13_CANONICAL"
     assert CANONICAL_BUSINESS_SCHEMA == "strategy_platform_v13"
     assert CANONICAL_GENESIS_VERSION == "20260814_01"
@@ -133,7 +134,7 @@ def test_exact_identity_and_table_manifest_matches_frozen_design() -> None:
     assert CANONICAL_TABLE_NAMES == tuple(
         table for tables in EXPECTED_TABLES_BY_DOMAIN.values() for table in tables
     )
-    assert len(CANONICAL_TABLE_NAMES) == 52
+    assert len(CANONICAL_TABLE_NAMES) == 53
     assert manifest_problems() == ()
 
 
@@ -324,6 +325,7 @@ def test_postgresql_ddl_and_acl_are_offline_exact_allowlists() -> None:
         "trade_intents",
         "risk_decisions",
         "execution_risk_budget_authorizations",
+        "execution_canary_risk_policies",
         "execution_risk_reservations",
         "execution_attestations",
     )
@@ -373,12 +375,12 @@ def test_postgresql_types_constraints_and_locking_compile_offline() -> None:
         if isinstance(column.type, JSON)
     )
 
-    assert len(tables) == 52
-    assert len(foreign_keys) == 100
-    assert len(checks) == 59
-    assert len(uniques) == 57
-    assert len(indexes) == 92
-    assert len(datetimes) == 59
+    assert len(tables) == 53
+    assert len(foreign_keys) == 109
+    assert len(checks) == 65
+    assert len(uniques) == 63
+    assert len(indexes) == 98
+    assert len(datetimes) == 63
     assert len(json_columns) == 22
     assert all(key.deferrable is not True for key in foreign_keys)
     assert all(column.type.timezone is True for column in datetimes)

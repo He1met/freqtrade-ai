@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Mapping
 from uuid import UUID, uuid4
 
@@ -91,6 +92,11 @@ def create_production_demo_intent(
             "BLOCKED_PRODUCTION_SIGNAL_REQUIRED", str(signal_id)
         )
     payload = dict(intent_json)
+    exchange_body = payload.get("exchange_body")
+    try:
+        notional = Decimal(str(payload.get("notional")))
+    except InvalidOperation:
+        notional = Decimal("0")
     if (
         payload.get("contract") != "canonical-v13-demo-trade-intent-v1"
         or payload.get("execution_target") != "OKX_DEMO"
@@ -98,10 +104,17 @@ def create_production_demo_intent(
         or payload.get("signal_digest") != signal["signal_digest"]
         or not isinstance(payload.get("instrument"), str)
         or not isinstance(payload.get("notional"), str)
+        or not notional.is_finite()
+        or notional <= 0
+        or not isinstance(exchange_body, Mapping)
+        or exchange_body.get("instId") != payload.get("instrument")
+        or exchange_body.get("tdMode") != "isolated"
+        or exchange_body.get("side") != "buy"
+        or exchange_body.get("posSide") != "long"
     ):
         raise CanonicalExecutionChainBlocked(
             "BLOCKED_PRODUCTION_INTENT_CONTRACT",
-            "Demo intent must bind its source signal and explicit notional",
+            "Demo intent must bind its signal, positive notional, and long-only order",
         )
     intent_digest = canonical_execution_digest(payload)
     lock_execution_boundary(effective, key=f"production-intent:{signal_id}")

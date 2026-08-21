@@ -25,10 +25,10 @@ from app.canonical_v13.execution_common import (
     require_identity,
 )
 from app.canonical_v13.models import (
-    AUDIT_EVENTS_TABLE,
     DEPLOYMENT_APPROVALS_TABLE,
     DEPLOYMENTS_TABLE,
     EXECUTION_ATTESTATIONS_TABLE,
+    EXECUTION_CANARY_RISK_POLICIES_TABLE,
     EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE,
     EXECUTION_RISK_RESERVATIONS_TABLE,
     QUALIFICATION_DECISIONS_TABLE,
@@ -142,11 +142,13 @@ def authorize_demo_risk_budget(
         )
     source = (
         effective.execute(
-            select(AUDIT_EVENTS_TABLE).where(
-                AUDIT_EVENTS_TABLE.c.event_type == "PHASE9_RISK_POLICY_ACCEPTED",
-                AUDIT_EVENTS_TABLE.c.aggregate_type == "canonical_phase9_risk_policy",
-                AUDIT_EVENTS_TABLE.c.aggregate_id == str(decision["id"]),
-                AUDIT_EVENTS_TABLE.c.receipt_digest == policy_source_receipt_digest,
+            select(EXECUTION_CANARY_RISK_POLICIES_TABLE).where(
+                EXECUTION_CANARY_RISK_POLICIES_TABLE.c.qualification_decision_id
+                == decision["id"],
+                EXECUTION_CANARY_RISK_POLICIES_TABLE.c.deployment_approval_id
+                == deployment_approval_id,
+                EXECUTION_CANARY_RISK_POLICIES_TABLE.c.receipt_digest
+                == policy_source_receipt_digest,
             )
         )
         .mappings()
@@ -157,44 +159,36 @@ def authorize_demo_risk_budget(
             "CANONICAL_PHASE9_RISK_BUDGET_SOURCE_UNSET",
             "an accepted exact-lineage canonical risk-policy receipt is required",
         )
-    evidence = source["evidence_json"]
-    if not isinstance(evidence, Mapping):
-        raise CanonicalExecutionChainBlocked(
-            "BLOCKED_RISK_POLICY_SOURCE_DRIFT", "risk-policy evidence is not an object"
-        )
-    try:
-        instrument = require_identity(
-            evidence["instrument"], field="instrument", maximum=80
-        )
-        max_notional = _positive_decimal(
-            Decimal(str(evidence["max_notional"])), field="max_notional"
-        )
-        max_order_count = evidence["max_order_count"]
-        policy_digest = evidence["policy_digest"]
-        expiry = _utc(
-            datetime.fromisoformat(evidence["expires_at"]), field="expires_at"
-        )
-    except (KeyError, TypeError, ValueError):
-        raise CanonicalExecutionChainBlocked(
-            "BLOCKED_RISK_POLICY_SOURCE_DRIFT", "risk-policy evidence is incomplete"
-        ) from None
+    instrument = require_identity(source["instrument"], field="instrument", maximum=80)
+    max_notional = _positive_decimal(
+        Decimal(str(source["max_notional"])), field="max_notional"
+    )
+    max_order_count = source["max_order_count"]
+    policy_digest = source["policy_digest"]
+    expiry = _persisted_utc(source["expires_at"], field="expires_at")
+    accepted_at = _persisted_utc(source["accepted_at"], field="accepted_at")
     require_digest(policy_digest, field="policy_digest")
     if (
-        evidence.get("contract") != "canonical-v13-phase9-risk-policy-source-v1"
-        or evidence.get("qualification_decision_id") != str(decision["id"])
-        or evidence.get("qualification_decision_digest") != decision["decision_digest"]
-        or evidence.get("configuration_bundle_id")
-        != str(decision["configuration_bundle_id"])
-        or evidence.get("configuration_bundle_digest")
+        source["qualification_decision_id"] != decision["id"]
+        or source["strategy_version_id"] != decision["strategy_version_id"]
+        or source["research_target_id"] != decision["research_target_id"]
+        or source["configuration_bundle_id"] != decision["configuration_bundle_id"]
+        or source["configuration_bundle_digest"]
         != decision["configuration_bundle_digest"]
-        or evidence.get("execution_target") != EXECUTION_TARGET
-        or evidence.get("allow_real_funds") is not False
-        or evidence.get("status") != "ACCEPTED"
-        or source["request_digest"] != policy_digest
-        or canonical_execution_digest(dict(evidence)) != policy_source_receipt_digest
+        or source["market_snapshot_id"] != decision["market_snapshot_id"]
+        or source["market_snapshot_digest"] != decision["market_snapshot_digest"]
+        or source["execution_target"] != EXECUTION_TARGET
+        or source["allow_real_funds"] is not False
+        or source["position_policy"] != "LONG_ONLY"
+        or source["status"] != "ACTIVE"
+        or source["receipt_digest"] != policy_source_receipt_digest
+        or source["strategy_max_leverage"] != Decimal("14")
+        or source["effective_leverage"]
+        > min(source["strategy_max_leverage"], source["exchange_max_leverage"])
+        or expiry - accepted_at != timedelta(minutes=30)
         or not isinstance(max_order_count, int)
         or isinstance(max_order_count, bool)
-        or max_order_count <= 0
+        or max_order_count != 1
     ):
         raise CanonicalExecutionChainBlocked(
             "BLOCKED_RISK_POLICY_SOURCE_DRIFT",
@@ -206,6 +200,7 @@ def authorize_demo_risk_budget(
         )
     payload = {
         "contract": "canonical-v13-demo-risk-budget-authorization-v1",
+        "execution_canary_risk_policy_id": str(source["id"]),
         "deployment_approval_id": str(deployment_approval_id),
         "approval_digest": approval["approval_digest"],
         "qualification_decision_id": str(decision["id"]),
@@ -214,6 +209,8 @@ def authorize_demo_risk_budget(
         "instrument": instrument,
         "max_notional": str(max_notional),
         "max_order_count": max_order_count,
+        "position_policy": source["position_policy"],
+        "effective_leverage": str(source["effective_leverage"]),
         "actor_identity": actor_identity,
         "reason": reason,
         "policy_digest": policy_digest,
@@ -246,6 +243,7 @@ def authorize_demo_risk_budget(
     effective.execute(
         EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE.insert().values(
             id=authorization_id,
+            execution_canary_risk_policy_id=source["id"],
             deployment_approval_id=deployment_approval_id,
             execution_target=EXECUTION_TARGET,
             instrument=instrument,
@@ -447,6 +445,18 @@ def decide_central_demo_risk(
         .mappings()
         .one_or_none()
     )
+    policy = (
+        effective.execute(
+            select(EXECUTION_CANARY_RISK_POLICIES_TABLE).where(
+                EXECUTION_CANARY_RISK_POLICIES_TABLE.c.id
+                == budget["execution_canary_risk_policy_id"]
+            )
+        )
+        .mappings()
+        .one_or_none()
+        if budget is not None
+        else None
+    )
     deployment = (
         effective.execute(
             select(DEPLOYMENTS_TABLE).where(
@@ -458,7 +468,13 @@ def decide_central_demo_risk(
         if signal is not None
         else None
     )
-    if intent is None or signal is None or budget is None or deployment is None:
+    if (
+        intent is None
+        or signal is None
+        or budget is None
+        or policy is None
+        or deployment is None
+    ):
         raise CanonicalExecutionChainBlocked(
             "BLOCKED_RISK_LINEAGE_INCOMPLETE",
             "intent/signal/budget/deployment is missing",
@@ -469,19 +485,36 @@ def decide_central_demo_risk(
         or deployment["demo_only"] is not True
         or deployment["allow_real_funds"] is not False
         or budget["execution_target"] != EXECUTION_TARGET
+        or policy["status"] != "ACTIVE"
+        or policy["deployment_approval_id"] != budget["deployment_approval_id"]
+        or policy["receipt_digest"] != budget["source_receipt_digest"]
+        or policy["position_policy"] != "LONG_ONLY"
+        or policy["max_order_count"] != 1
     ):
         raise CanonicalExecutionChainBlocked(
             "BLOCKED_RISK_LINEAGE_DRIFT",
             "budget is not bound to active Demo deployment",
         )
     requested_instrument = intent["intent_json"].get("instrument")
+    exchange_body = intent["intent_json"].get("exchange_body")
+    if not isinstance(exchange_body, Mapping):
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_INTENT_EXCHANGE_BODY", "intent exchange_body is missing or invalid"
+        )
     try:
-        requested_notional = Decimal(str(intent["intent_json"].get("notional")))
+        declared_notional = Decimal(str(intent["intent_json"].get("notional")))
+        requested_size = Decimal(str(exchange_body.get("sz")))
     except Exception:
         raise CanonicalExecutionChainBlocked(
-            "BLOCKED_INTENT_NOTIONAL", "intent notional is missing or invalid"
+            "BLOCKED_INTENT_NOTIONAL", "intent notional or exchange size is invalid"
         ) from None
-    _positive_decimal(requested_notional, field="intent.notional")
+    _positive_decimal(declared_notional, field="intent.notional")
+    _positive_decimal(requested_size, field="exchange_body.sz")
+    requested_notional = (
+        requested_size
+        * Decimal(str(policy["contract_value"]))
+        * Decimal(str(policy["mark_price"]))
+    )
     if effective.dialect.name == "postgresql":
         effective.execute(
             text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
@@ -505,8 +538,18 @@ def decide_central_demo_risk(
     remaining_count = int(budget["max_order_count"]) - int(used_count)
     if _persisted_utc(budget["expires_at"], field="budget.expires_at") <= now:
         status, reason_code = "BLOCKED", "RISK_BUDGET_EXPIRED"
+    elif (
+        exchange_body.get("instId") != requested_instrument
+        or exchange_body.get("side") != "buy"
+        or exchange_body.get("posSide") != "long"
+    ):
+        status, reason_code = "REJECTED", "RISK_LONG_ONLY_POLICY"
     elif requested_instrument != budget["instrument"]:
         status, reason_code = "REJECTED", "RISK_INSTRUMENT_NOT_AUTHORIZED"
+    elif declared_notional != requested_notional:
+        status, reason_code = "REJECTED", "RISK_NOTIONAL_DECLARATION_DRIFT"
+    elif requested_size != Decimal(str(policy["minimum_contract_size"])):
+        status, reason_code = "REJECTED", "RISK_MINIMUM_CONTRACT_SIZE_REQUIRED"
     elif requested_notional > remaining_notional:
         status, reason_code = "REJECTED", "RISK_NOTIONAL_BUDGET_EXHAUSTED"
     elif remaining_count <= 0:

@@ -104,6 +104,40 @@ class Phase9RiskBudgetReceiptDTO(CanonicalProjectionDTO):
     repeat_noop: bool
 
 
+class Phase9CanaryRiskPolicyCommandDTO(CanonicalCommandDTO):
+    qualification_decision_id: UUID
+    deployment_approval_id: UUID
+    execution_attestation_id: UUID
+    actor_identity: str = Field(min_length=1, max_length=160)
+    idempotency_key: str = Field(min_length=1, max_length=200)
+    reason: str = Field(min_length=1, max_length=2000)
+    redacted_evidence: dict[str, Any]
+
+
+class Phase9CanaryRiskPolicyReceiptDTO(CanonicalProjectionDTO):
+    policy_id: UUID
+    request_digest: str = Field(pattern=SHA256_PATTERN)
+    policy_digest: str = Field(pattern=SHA256_PATTERN)
+    receipt_digest: str = Field(pattern=SHA256_PATTERN)
+    max_notional: str
+    effective_leverage: str
+    accepted_at: datetime
+    expires_at: datetime
+    repeat_noop: bool
+
+
+class Phase9CanaryRiskPolicyTerminationCommandDTO(CanonicalCommandDTO):
+    reconciliation_run_id: UUID
+    actor_identity: str = Field(min_length=1, max_length=160)
+
+
+class Phase9CanaryRiskPolicyTerminationReceiptDTO(CanonicalProjectionDTO):
+    policy_id: UUID
+    termination_digest: str = Field(pattern=SHA256_PATTERN)
+    terminated_at: datetime
+    repeat_noop: bool
+
+
 class Phase9SignalCommandDTO(CanonicalCommandDTO):
     deployment_id: UUID
     runtime_instance_id: UUID

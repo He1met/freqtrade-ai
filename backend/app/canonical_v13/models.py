@@ -1035,9 +1035,99 @@ RUNTIME_RECEIPTS_TABLE = _table(
 # A human approval writer freezes the exact budget; the risk writer may only append
 # reservations derived from it. Credential attestations contain digests and safe
 # capability facts only, never raw Keychain material or authorization headers.
+EXECUTION_CANARY_RISK_POLICIES_TABLE = _table(
+    "execution_canary_risk_policies",
+    _uuid_id(),
+    _uuid_fk("qualification_decision_id", "qualification_decisions", unique=True),
+    _uuid_fk("deployment_approval_id", "deployment_approvals", unique=True),
+    _uuid_fk("execution_attestation_id", "execution_attestations", unique=True),
+    _uuid_fk("strategy_version_id", "strategy_versions"),
+    _uuid_fk("strategy_artifact_id", "strategy_artifacts"),
+    _digest("strategy_artifact_digest"),
+    _uuid_fk("research_target_id", "research_targets"),
+    _digest("research_target_digest"),
+    _uuid_fk("configuration_bundle_id", "configuration_bundles"),
+    _digest("configuration_bundle_digest"),
+    _uuid_fk("market_snapshot_id", "market_snapshots"),
+    _digest("market_snapshot_digest"),
+    Column("execution_target", String(24), nullable=False),
+    Column("instrument", String(80), nullable=False),
+    Column("position_policy", String(24), nullable=False),
+    Column("max_order_count", Integer, nullable=False),
+    Column("minimum_contract_size", Numeric(36, 18), nullable=False),
+    Column("contract_value", Numeric(36, 18), nullable=False),
+    Column("contract_value_ccy", String(24), nullable=False),
+    Column("mark_price", Numeric(36, 18), nullable=False),
+    Column("max_notional", Numeric(36, 18), nullable=False),
+    Column("strategy_max_leverage", Numeric(36, 18), nullable=False),
+    Column("exchange_max_leverage", Numeric(36, 18), nullable=False),
+    Column("effective_leverage", Numeric(36, 18), nullable=False),
+    _digest("metadata_receipt_digest"),
+    _digest("mark_price_receipt_digest"),
+    _digest("attestation_digest"),
+    Column("actor_identity", String(160), nullable=False),
+    Column("idempotency_key", String(200), nullable=False, unique=True),
+    Column("reason", Text, nullable=False),
+    Column("allow_real_funds", Boolean, nullable=False),
+    Column("status", String(16), nullable=False),
+    _created_at("observed_at"),
+    _created_at("accepted_at"),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("terminated_at", DateTime(timezone=True), nullable=True),
+    _digest("request_digest"),
+    _digest("policy_digest"),
+    _digest("receipt_digest"),
+    _digest("termination_digest", nullable=True),
+    _status_check(
+        "execution_canary_risk_policies",
+        "status",
+        ("ACTIVE", "TERMINATED", "EXPIRED"),
+    ),
+    CheckConstraint(
+        "execution_target = 'OKX_DEMO' AND allow_real_funds IS FALSE",
+        name="execution_canary_risk_policies_demo_only",
+    ),
+    CheckConstraint(
+        "position_policy = 'LONG_ONLY' AND max_order_count = 1",
+        name="execution_canary_risk_policies_single_long_order",
+    ),
+    CheckConstraint(
+        "minimum_contract_size > 0 AND contract_value > 0 "
+        "AND mark_price > 0 AND max_notional > 0",
+        name="execution_canary_risk_policies_positive_amounts",
+    ),
+    CheckConstraint(
+        "strategy_max_leverage > 0 AND exchange_max_leverage > 0 "
+        "AND effective_leverage > 0 "
+        "AND effective_leverage <= strategy_max_leverage "
+        "AND effective_leverage <= exchange_max_leverage",
+        name="execution_canary_risk_policies_leverage_cap",
+    ),
+    CheckConstraint(
+        "(status = 'ACTIVE' AND terminated_at IS NULL AND termination_digest IS NULL) "
+        "OR (status IN ('TERMINATED', 'EXPIRED') "
+        "AND terminated_at IS NOT NULL AND termination_digest IS NOT NULL)",
+        name="execution_canary_risk_policies_terminal_evidence",
+    ),
+    UniqueConstraint(
+        "receipt_digest",
+        name="execution_canary_risk_policies_receipt_digest_unique",
+    ),
+)
+
+
 EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE = _table(
     "execution_risk_budget_authorizations",
     _uuid_id(),
+    Column(
+        "execution_canary_risk_policy_id",
+        Uuid(as_uuid=True),
+        ForeignKey(
+            f"{CANONICAL_BUSINESS_SCHEMA}.execution_canary_risk_policies.id",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    ),
     _uuid_fk("deployment_approval_id", "deployment_approvals", unique=True),
     Column("execution_target", String(24), nullable=False),
     Column("instrument", String(80), nullable=False),
@@ -1050,6 +1140,14 @@ EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE = _table(
     _digest("authorization_digest"),
     Column("expires_at", DateTime(timezone=True), nullable=False),
     _created_at(),
+    UniqueConstraint(
+        "execution_canary_risk_policy_id",
+        name="execution_risk_budget_policy_unique",
+    ),
+    Index(
+        "ix_execution_risk_budget_policy",
+        "execution_canary_risk_policy_id",
+    ),
     CheckConstraint(
         "execution_target = 'OKX_DEMO'",
         name="execution_risk_budget_demo_only",

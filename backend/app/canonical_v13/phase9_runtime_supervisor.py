@@ -7,8 +7,9 @@ injected here so tests can remain network-none and side-effect free.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, is_dataclass, replace
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 import json
 from typing import Final, Mapping, Protocol
@@ -31,6 +32,21 @@ class CanonicalPhase9SupervisorBlocked(RuntimeError):
 
 
 @dataclass(frozen=True)
+class OrderWriterCanaryAuthority:
+    deployment_id: UUID
+    deployment_capability_digest: str
+    execution_canary_risk_policy_id: UUID
+    execution_canary_risk_policy_digest: str
+    attestation_id: UUID
+    attestation_digest: str
+    attestation_expires_at: datetime
+    instrument_metadata_digest: str
+    mark_price_snapshot_digest: str
+    effective_leverage: str
+    position_policy: str
+
+
+@dataclass(frozen=True)
 class Phase9LaunchPlan:
     plan_id: UUID
     service_key: str
@@ -48,6 +64,7 @@ class Phase9LaunchPlan:
     allow_real_funds: bool
     order_writer_enabled: bool
     plan_digest: str
+    order_writer_canary_authority: OrderWriterCanaryAuthority | None = None
 
 
 @dataclass(frozen=True)
@@ -79,6 +96,7 @@ class Phase9Lease:
     acquired_at: datetime
     heartbeat_at: datetime
     expires_at: datetime
+    order_writer_canary_authority: OrderWriterCanaryAuthority | None = None
 
 
 class Phase9LeasePort(Protocol):
@@ -105,6 +123,14 @@ class RuntimeWorkerSupervisorPort(Protocol):
     def verify(self, receipt: RuntimeWorkerReceipt) -> bool: ...
 
 
+class OrderWriterCanaryAuthorityPort(Protocol):
+    """Revalidates the frozen authority against its current canonical sources."""
+
+    def verify(
+        self, authority: OrderWriterCanaryAuthority, *, observed_at: datetime
+    ) -> bool: ...
+
+
 _ALLOWED_STAGES: Final[Mapping[str, tuple[str, ...]]] = {
     "long_lived_runtime": ("NO_ORDER_SOAK", "SIGNAL_RISK_SHADOW", "OKX_DEMO_CANARY"),
     "order_writer": ("OKX_DEMO_CANARY",),
@@ -124,6 +150,8 @@ def _jsonable(value: object) -> object:
         return _utc(value).isoformat()
     if isinstance(value, UUID):
         return str(value)
+    if is_dataclass(value) and not isinstance(value, type):
+        return _jsonable(asdict(value))
     if isinstance(value, Mapping):
         return {str(key): _jsonable(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
@@ -143,6 +171,126 @@ def _digest(value: object) -> str:
     ).hexdigest()
 
 
+def _require_digest(value: object, *, field: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise CanonicalPhase9SupervisorBlocked(
+            "BLOCKED_PHASE9_PLAN_DIGEST", f"{field} is not lowercase sha256"
+        )
+    return value
+
+
+def build_order_writer_canary_authority(
+    *,
+    deployment_id: UUID,
+    deployment_capability_digest: str,
+    execution_canary_risk_policy_id: UUID,
+    execution_canary_risk_policy_digest: str,
+    attestation_id: UUID,
+    attestation_digest: str,
+    attestation_expires_at: datetime,
+    instrument_metadata_digest: str,
+    mark_price_snapshot_digest: str,
+    effective_leverage: str,
+    position_policy: str = "LONG_ONLY",
+) -> OrderWriterCanaryAuthority:
+    """Build a secret-free, exact authority binding for one Demo canary writer."""
+
+    for field, value in (
+        ("deployment_id", deployment_id),
+        ("execution_canary_risk_policy_id", execution_canary_risk_policy_id),
+        ("attestation_id", attestation_id),
+    ):
+        if not isinstance(value, UUID):
+            raise CanonicalPhase9SupervisorBlocked(
+                "BLOCKED_ORDER_WRITER_CANARY_AUTHORITY", f"{field} must be a UUID"
+            )
+    for field, value in (
+        ("deployment_capability_digest", deployment_capability_digest),
+        ("execution_canary_risk_policy_digest", execution_canary_risk_policy_digest),
+        ("attestation_digest", attestation_digest),
+        ("instrument_metadata_digest", instrument_metadata_digest),
+        ("mark_price_snapshot_digest", mark_price_snapshot_digest),
+    ):
+        _require_digest(value, field=field)
+    try:
+        leverage = Decimal(str(effective_leverage))
+    except (InvalidOperation, TypeError, ValueError):
+        leverage = Decimal(0)
+    if not leverage.is_finite() or leverage <= 0 or leverage > Decimal("14"):
+        raise CanonicalPhase9SupervisorBlocked(
+            "BLOCKED_ORDER_WRITER_EFFECTIVE_LEVERAGE",
+            "effective leverage must be finite, positive, and no greater than 14",
+        )
+    if position_policy != "LONG_ONLY":
+        raise CanonicalPhase9SupervisorBlocked(
+            "BLOCKED_ORDER_WRITER_POSITION_POLICY", "position policy must be LONG_ONLY"
+        )
+    return OrderWriterCanaryAuthority(
+        deployment_id=deployment_id,
+        deployment_capability_digest=deployment_capability_digest,
+        execution_canary_risk_policy_id=execution_canary_risk_policy_id,
+        execution_canary_risk_policy_digest=execution_canary_risk_policy_digest,
+        attestation_id=attestation_id,
+        attestation_digest=attestation_digest,
+        attestation_expires_at=_utc(attestation_expires_at),
+        instrument_metadata_digest=instrument_metadata_digest,
+        mark_price_snapshot_digest=mark_price_snapshot_digest,
+        effective_leverage=format(leverage.normalize(), "f"),
+        position_policy="LONG_ONLY",
+    )
+
+
+def require_current_order_writer_canary_authority(
+    *,
+    plan: Phase9LaunchPlan,
+    observed_at: datetime,
+    port: OrderWriterCanaryAuthorityPort | None,
+) -> None:
+    """Fail closed unless the exact frozen writer authority is still current."""
+
+    if plan.service_key != "order_writer":
+        return
+    _require_current_order_writer_canary_authority(
+        authority=plan.order_writer_canary_authority,
+        observed_at=observed_at,
+        port=port,
+    )
+
+
+def _require_current_order_writer_canary_authority(
+    *,
+    authority: OrderWriterCanaryAuthority | None,
+    observed_at: datetime,
+    port: OrderWriterCanaryAuthorityPort | None,
+) -> None:
+    observed = _utc(observed_at)
+    if (
+        authority is None
+        or authority.attestation_expires_at <= observed
+        or port is None
+    ):
+        raise CanonicalPhase9SupervisorBlocked(
+            "BLOCKED_ORDER_WRITER_CANARY_AUTHORITY",
+            "fresh exact canary authority verifier is required",
+        )
+    try:
+        verified = port.verify(authority, observed_at=observed)
+    except Exception as exc:
+        raise CanonicalPhase9SupervisorBlocked(
+            "BLOCKED_ORDER_WRITER_CANARY_AUTHORITY",
+            f"authority verification failed: {type(exc).__name__}",
+        ) from exc
+    if verified is not True:
+        raise CanonicalPhase9SupervisorBlocked(
+            "BLOCKED_ORDER_WRITER_CANARY_AUTHORITY",
+            "current canonical authority does not match the frozen plan",
+        )
+
+
 def build_launch_plan(
     *,
     service_key: str,
@@ -154,6 +302,7 @@ def build_launch_plan(
     deployment_capability_digest: str | None = None,
     image_digest: str | None = None,
     order_writer_enabled: bool = False,
+    order_writer_canary_authority: OrderWriterCanaryAuthority | None = None,
     plan_id: UUID | None = None,
 ) -> Phase9LaunchPlan:
     """Prepare a frozen launch plan without starting or contacting anything."""
@@ -192,16 +341,42 @@ def build_launch_plan(
             "BLOCKED_RUNTIME_PLAN_LINEAGE_UNSET",
             "runtime plan requires deployment, capability, and image digests",
         )
-    if service_key == "order_writer" and (
-        deployment_capability_digest is not None or image_digest is not None
-    ):
+    if service_key == "order_writer" and image_digest is not None:
         raise CanonicalPhase9SupervisorBlocked(
             "BLOCKED_ORDER_WRITER_PLAN_LINEAGE",
-            "writer plan may bind deployment id but not runtime capability/image",
+            "writer plan cannot receive the runtime image capability",
         )
     if service_key == "order_writer" and not order_writer_enabled:
         raise CanonicalPhase9SupervisorBlocked(
             "BLOCKED_ORDER_WRITER_DISABLED", "writer requires an explicit canary enable"
+        )
+    if service_key == "order_writer":
+        authority = order_writer_canary_authority
+        if (
+            not isinstance(authority, OrderWriterCanaryAuthority)
+            or deployment_id is None
+            or deployment_capability_digest is None
+            or authority.deployment_id != deployment_id
+            or authority.deployment_capability_digest
+            != deployment_capability_digest
+            or authority.attestation_expires_at <= _utc(prepared_at)
+        ):
+            raise CanonicalPhase9SupervisorBlocked(
+                "BLOCKED_ORDER_WRITER_CANARY_AUTHORITY",
+                "writer plan requires exact current deployment and canary authority",
+            )
+        rebuilt_authority = build_order_writer_canary_authority(
+            **asdict(authority)
+        )
+        if rebuilt_authority != authority:
+            raise CanonicalPhase9SupervisorBlocked(
+                "BLOCKED_ORDER_WRITER_CANARY_AUTHORITY",
+                "writer canary authority is not canonical",
+            )
+    elif order_writer_canary_authority is not None:
+        raise CanonicalPhase9SupervisorBlocked(
+            "BLOCKED_RUNTIME_ORDER_WRITER_FORBIDDEN",
+            "runtime identity cannot bind order writer authority",
         )
     if service_key == "long_lived_runtime" and order_writer_enabled:
         raise CanonicalPhase9SupervisorBlocked(
@@ -228,6 +403,7 @@ def build_launch_plan(
         "demo_only": True,
         "allow_real_funds": False,
         "order_writer_enabled": order_writer_enabled,
+        "order_writer_canary_authority": order_writer_canary_authority,
     }
     return Phase9LaunchPlan(
         plan_id=resolved_id,
@@ -245,6 +421,7 @@ def build_launch_plan(
         demo_only=True,
         allow_real_funds=False,
         order_writer_enabled=order_writer_enabled,
+        order_writer_canary_authority=order_writer_canary_authority,
         plan_digest=_digest(payload),
     )
 
@@ -260,6 +437,7 @@ def verify_launch_plan(plan: Phase9LaunchPlan) -> None:
         deployment_capability_digest=plan.deployment_capability_digest,
         image_digest=plan.image_digest,
         order_writer_enabled=plan.order_writer_enabled,
+        order_writer_canary_authority=plan.order_writer_canary_authority,
         plan_id=plan.plan_id,
     )
     if rebuilt != plan or not plan.demo_only or plan.allow_real_funds:
@@ -353,11 +531,15 @@ def claim_lease(
     now: datetime,
     ttl: timedelta,
     process_probe: ProcessProbePort,
+    authority_port: OrderWriterCanaryAuthorityPort | None = None,
 ) -> tuple[Phase9Lease, Phase9LifecycleReceipt]:
     """Claim the one service lease, fencing a dead and expired former owner."""
 
     verify_launch_plan(plan)
     resolved_now = _utc(now)
+    require_current_order_writer_canary_authority(
+        plan=plan, observed_at=resolved_now, port=authority_port
+    )
     if pid <= 1 or ttl <= timedelta(0) or len(holder_token) < 32:
         raise CanonicalPhase9SupervisorBlocked(
             "BLOCKED_PHASE9_LEASE_INPUT", "pid, TTL, or holder token is invalid"
@@ -380,6 +562,7 @@ def claim_lease(
         deployment_id=plan.deployment_id,
         deployment_capability_digest=plan.deployment_capability_digest,
         image_digest=plan.image_digest,
+        order_writer_canary_authority=plan.order_writer_canary_authority,
         holder_token_digest=_digest({"holder_token": holder_token}),
         pid=pid,
         acquired_at=resolved_now,
@@ -413,6 +596,7 @@ def heartbeat_lease(
     holder_token: str,
     now: datetime,
     ttl: timedelta,
+    authority_port: OrderWriterCanaryAuthorityPort | None = None,
 ) -> tuple[Phase9Lease, Phase9LifecycleReceipt]:
     resolved_now = _utc(now)
     token_digest = _digest({"holder_token": holder_token})
@@ -420,6 +604,12 @@ def heartbeat_lease(
     if current != lease or token_digest != lease.holder_token_digest:
         raise CanonicalPhase9SupervisorBlocked(
             "BLOCKED_PHASE9_LEASE_FENCED", "lease owner or generation changed"
+        )
+    if lease.service_key == "order_writer":
+        _require_current_order_writer_canary_authority(
+            authority=lease.order_writer_canary_authority,
+            observed_at=resolved_now,
+            port=authority_port,
         )
     if (
         resolved_now < lease.heartbeat_at
@@ -429,12 +619,10 @@ def heartbeat_lease(
         raise CanonicalPhase9SupervisorBlocked(
             "BLOCKED_PHASE9_LEASE_EXPIRED", "heartbeat is late or non-monotonic"
         )
-    renewed = Phase9Lease(
-        **{
-            **asdict(lease),
-            "heartbeat_at": resolved_now,
-            "expires_at": resolved_now + ttl,
-        }
+    renewed = replace(
+        lease,
+        heartbeat_at=resolved_now,
+        expires_at=resolved_now + ttl,
     )
     port.replace(lease, renewed)
     return renewed, build_lifecycle_receipt(
@@ -591,6 +779,8 @@ def build_production_runtime_observation(
 
 __all__ = [
     "CanonicalPhase9SupervisorBlocked",
+    "OrderWriterCanaryAuthority",
+    "OrderWriterCanaryAuthorityPort",
     "Phase9LaunchPlan",
     "Phase9Lease",
     "Phase9LeasePort",
@@ -599,10 +789,12 @@ __all__ = [
     "RuntimeWorkerSupervisorPort",
     "build_launch_plan",
     "build_lifecycle_receipt",
+    "build_order_writer_canary_authority",
     "build_production_runtime_observation",
     "claim_lease",
     "heartbeat_lease",
     "release_lease",
+    "require_current_order_writer_canary_authority",
     "validate_supervised_worker_receipt",
     "verify_launch_plan",
     "verify_lifecycle_receipt",

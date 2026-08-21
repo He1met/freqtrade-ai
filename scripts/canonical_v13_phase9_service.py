@@ -30,14 +30,18 @@ sys.path.insert(0, str(REPO_ROOT / "backend"))
 
 from app.canonical_v13.phase9_runtime_supervisor import (  # noqa: E402
     CanonicalPhase9SupervisorBlocked,
+    OrderWriterCanaryAuthority,
+    OrderWriterCanaryAuthorityPort,
     Phase9LaunchPlan,
     Phase9Lease,
     RuntimeWorkerSupervisorPort,
     build_launch_plan,
     build_lifecycle_receipt,
+    build_order_writer_canary_authority,
     claim_lease,
     heartbeat_lease,
     release_lease,
+    require_current_order_writer_canary_authority,
     validate_supervised_worker_receipt,
     verify_launch_plan,
 )
@@ -54,6 +58,32 @@ LOG_ROOT = Path.home() / "Library" / "Logs" / "FreqtradeAiV13"
 HEARTBEAT_SECONDS = 10
 LEASE_TTL_SECONDS = 35
 _STOP = False
+
+
+def _authority_from_payload(payload: object) -> OrderWriterCanaryAuthority | None:
+    if payload is None:
+        return None
+    if not isinstance(payload, dict):
+        raise ValueError("order writer canary authority must be an object")
+    return OrderWriterCanaryAuthority(
+        deployment_id=UUID(str(payload["deployment_id"])),
+        deployment_capability_digest=str(payload["deployment_capability_digest"]),
+        execution_canary_risk_policy_id=UUID(
+            str(payload["execution_canary_risk_policy_id"])
+        ),
+        execution_canary_risk_policy_digest=str(
+            payload["execution_canary_risk_policy_digest"]
+        ),
+        attestation_id=UUID(str(payload["attestation_id"])),
+        attestation_digest=str(payload["attestation_digest"]),
+        attestation_expires_at=datetime.fromisoformat(
+            str(payload["attestation_expires_at"])
+        ),
+        instrument_metadata_digest=str(payload["instrument_metadata_digest"]),
+        mark_price_snapshot_digest=str(payload["mark_price_snapshot_digest"]),
+        effective_leverage=str(payload["effective_leverage"]),
+        position_policy=str(payload["position_policy"]),
+    )
 
 
 class FileLeasePort:
@@ -95,6 +125,9 @@ class FileLeasePort:
                     str(payload["image_digest"])
                     if payload.get("image_digest")
                     else None
+                ),
+                order_writer_canary_authority=_authority_from_payload(
+                    payload.get("order_writer_canary_authority")
                 ),
                 holder_token_digest=str(payload["holder_token_digest"]),
                 pid=int(payload["pid"]),
@@ -236,22 +269,15 @@ def _atomic_json(path: Path, payload: dict[str, object], *, mode: int = 0o600) -
 
 
 def _lease_payload(lease: Phase9Lease) -> dict[str, object]:
-    return {
-        **asdict(lease),
-        "deployment_id": str(lease.deployment_id) if lease.deployment_id else None,
-        "acquired_at": lease.acquired_at.isoformat(),
-        "heartbeat_at": lease.heartbeat_at.isoformat(),
-        "expires_at": lease.expires_at.isoformat(),
-    }
+    payload = _json_safe(asdict(lease))
+    assert isinstance(payload, dict)
+    return payload
 
 
 def _plan_payload(plan: Phase9LaunchPlan) -> dict[str, object]:
-    return {
-        **asdict(plan),
-        "plan_id": str(plan.plan_id),
-        "deployment_id": str(plan.deployment_id) if plan.deployment_id else None,
-        "prepared_at": plan.prepared_at.isoformat(),
-    }
+    payload = _json_safe(asdict(plan))
+    assert isinstance(payload, dict)
+    return payload
 
 
 def _json_safe(value: object) -> object:
@@ -315,6 +341,9 @@ def _load_plan(service_key: str) -> tuple[Phase9LaunchPlan, dict[str, object]]:
             allow_real_funds=payload["allow_real_funds"] is True,
             order_writer_enabled=payload["order_writer_enabled"] is True,
             plan_digest=str(payload["plan_digest"]),
+            order_writer_canary_authority=_authority_from_payload(
+                payload.get("order_writer_canary_authority")
+            ),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise CanonicalPhase9SupervisorBlocked(
@@ -382,6 +411,7 @@ def prepare(
     deployment_capability_digest: str | None,
     image_digest: str | None,
     enable_order_writer: bool,
+    order_writer_canary_authority: OrderWriterCanaryAuthority | None = None,
 ) -> dict[str, object]:
     observed_release_digest = _require_release_checkout()
     if observed_release_digest != release_digest:
@@ -402,6 +432,8 @@ def prepare(
                 != deployment_capability_digest
                 or existing_plan.image_digest != image_digest
                 or existing_plan.order_writer_enabled != enable_order_writer
+                or existing_plan.order_writer_canary_authority
+                != order_writer_canary_authority
             ):
                 raise CanonicalPhase9SupervisorBlocked(
                     "BLOCKED_PHASE9_PREPARED_PLAN_EXISTS",
@@ -432,6 +464,7 @@ def prepare(
         deployment_capability_digest=deployment_capability_digest,
         image_digest=image_digest,
         order_writer_enabled=enable_order_writer,
+        order_writer_canary_authority=order_writer_canary_authority,
     )
     if FileLeasePort(SUPPORT_ROOT).read(service_key) is not None:
         raise CanonicalPhase9SupervisorBlocked(
@@ -475,7 +508,12 @@ def prepare(
     }
 
 
-def confirm(service_key: str, plan_digest: str) -> dict[str, object]:
+def confirm(
+    service_key: str,
+    plan_digest: str,
+    *,
+    authority_port: OrderWriterCanaryAuthorityPort | None = None,
+) -> dict[str, object]:
     _require_release_checkout()
     if shutil.which("launchctl") is None:
         raise CanonicalPhase9SupervisorBlocked(
@@ -486,6 +524,9 @@ def confirm(service_key: str, plan_digest: str) -> dict[str, object]:
         raise CanonicalPhase9SupervisorBlocked(
             "BLOCKED_PHASE9_CONFIRMATION_DRIFT", "prepared plan digest/status mismatch"
         )
+    require_current_order_writer_canary_authority(
+        plan=plan, observed_at=_now(), port=authority_port
+    )
     if state.get("status") in {"CONFIRMED", "RUNNING"}:
         return {
             "status": "CONFIRMED",
@@ -615,7 +656,12 @@ def stop(service_key: str) -> dict[str, object]:
     }
 
 
-def restart(service_key: str, plan_digest: str) -> dict[str, object]:
+def restart(
+    service_key: str,
+    plan_digest: str,
+    *,
+    authority_port: OrderWriterCanaryAuthorityPort | None = None,
+) -> dict[str, object]:
     _require_release_checkout()
     plan, state = _load_plan(service_key)
     if (
@@ -625,6 +671,9 @@ def restart(service_key: str, plan_digest: str) -> dict[str, object]:
         raise CanonicalPhase9SupervisorBlocked(
             "BLOCKED_PHASE9_RESTART_UNCONFIRMED", service_key
         )
+    require_current_order_writer_canary_authority(
+        plan=plan, observed_at=_now(), port=authority_port
+    )
     kicked = _run(["launchctl", "kickstart", "-k", _launchctl_target(service_key)])
     if kicked.returncode != 0:
         raise CanonicalPhase9SupervisorBlocked(
@@ -647,9 +696,16 @@ def restart(service_key: str, plan_digest: str) -> dict[str, object]:
     }
 
 
-def recover(service_key: str) -> dict[str, object]:
+def recover(
+    service_key: str,
+    *,
+    authority_port: OrderWriterCanaryAuthorityPort | None = None,
+) -> dict[str, object]:
     _require_release_checkout()
     plan, state = _load_plan(service_key)
+    require_current_order_writer_canary_authority(
+        plan=plan, observed_at=_now(), port=authority_port
+    )
     lease_port = FileLeasePort(SUPPORT_ROOT)
     lease = lease_port.read(service_key)
     orphan_cleaned = False
@@ -751,6 +807,7 @@ def supervise(
     plan_digest: str,
     *,
     worker_port: RuntimeWorkerSupervisorPort | None = None,
+    authority_port: OrderWriterCanaryAuthorityPort | None = None,
 ) -> None:
     plan, state = _load_plan(service_key)
     if (
@@ -760,6 +817,9 @@ def supervise(
         raise CanonicalPhase9SupervisorBlocked(
             "BLOCKED_PHASE9_SUPERVISE_UNCONFIRMED", service_key
         )
+    require_current_order_writer_canary_authority(
+        plan=plan, observed_at=_now(), port=authority_port
+    )
     if (
         service_key == "long_lived_runtime"
         and plan.stage != "NO_ORDER_SOAK"
@@ -792,6 +852,7 @@ def supervise(
         now=_now(),
         ttl=timedelta(seconds=LEASE_TTL_SECONDS),
         process_probe=UnixProcessProbe(),
+        authority_port=authority_port,
     )
     _append_receipt(receipt)
     try:
@@ -817,6 +878,7 @@ def supervise(
                 holder_token=lease_holder_nonce,
                 now=_now(),
                 ttl=timedelta(seconds=LEASE_TTL_SECONDS),
+                authority_port=authority_port,
             )
             _append_receipt(heartbeat)
             if worker_port is not None:
@@ -863,6 +925,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--deployment-capability-digest")
     parser.add_argument("--image-digest")
     parser.add_argument("--enable-order-writer", action="store_true")
+    parser.add_argument("--execution-canary-risk-policy-id", type=UUID)
+    parser.add_argument("--execution-canary-risk-policy-digest")
+    parser.add_argument("--attestation-id", type=UUID)
+    parser.add_argument("--attestation-digest")
+    parser.add_argument("--attestation-expires-at")
+    parser.add_argument("--instrument-metadata-digest")
+    parser.add_argument("--mark-price-snapshot-digest")
+    parser.add_argument("--effective-leverage")
+    parser.add_argument("--position-policy", default="LONG_ONLY")
     args = parser.parse_args(argv)
     try:
         if args.command == "prepare":
@@ -878,6 +949,34 @@ def main(argv: list[str] | None = None) -> int:
                     "BLOCKED_PHASE9_RELEASE_DIGEST",
                     "--release-digest is required",
                 )
+            writer_authority = None
+            if args.service == "order_writer":
+                try:
+                    attestation_expires_at = datetime.fromisoformat(
+                        str(args.attestation_expires_at).replace("Z", "+00:00")
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise CanonicalPhase9SupervisorBlocked(
+                        "BLOCKED_ORDER_WRITER_CANARY_AUTHORITY",
+                        "--attestation-expires-at must be timezone-aware ISO8601",
+                    ) from exc
+                writer_authority = build_order_writer_canary_authority(
+                    deployment_id=args.deployment_id,
+                    deployment_capability_digest=args.deployment_capability_digest,
+                    execution_canary_risk_policy_id=(
+                        args.execution_canary_risk_policy_id
+                    ),
+                    execution_canary_risk_policy_digest=(
+                        args.execution_canary_risk_policy_digest
+                    ),
+                    attestation_id=args.attestation_id,
+                    attestation_digest=args.attestation_digest,
+                    attestation_expires_at=attestation_expires_at,
+                    instrument_metadata_digest=args.instrument_metadata_digest,
+                    mark_price_snapshot_digest=args.mark_price_snapshot_digest,
+                    effective_leverage=args.effective_leverage,
+                    position_policy=args.position_policy,
+                )
             payload = prepare(
                 args.service,
                 resolved_stage,
@@ -886,6 +985,7 @@ def main(argv: list[str] | None = None) -> int:
                 deployment_capability_digest=args.deployment_capability_digest,
                 image_digest=args.image_digest,
                 enable_order_writer=args.enable_order_writer,
+                order_writer_canary_authority=writer_authority,
             )
         elif args.command == "confirm":
             if not args.plan_digest:

@@ -6,6 +6,7 @@ import json
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from hashlib import sha256
 from typing import Final
 from uuid import UUID
@@ -19,6 +20,7 @@ from app.canonical_v13.models import (
     DEPLOYMENT_APPROVALS_TABLE,
     DEPLOYMENTS_TABLE,
     EXECUTION_ATTESTATIONS_TABLE,
+    EXECUTION_CANARY_RISK_POLICIES_TABLE,
     EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE,
     EXECUTION_RISK_RESERVATIONS_TABLE,
     FILLS_TABLE,
@@ -80,6 +82,7 @@ _EXECUTION_TABLES = {
     "runtime_instances": RUNTIME_INSTANCES_TABLE,
     "runtime_receipts": RUNTIME_RECEIPTS_TABLE,
     "execution_risk_budget_authorizations": EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE,
+    "execution_canary_risk_policies": EXECUTION_CANARY_RISK_POLICIES_TABLE,
     "execution_risk_reservations": EXECUTION_RISK_RESERVATIONS_TABLE,
     "execution_attestations": EXECUTION_ATTESTATIONS_TABLE,
     "order_writer_leases": ORDER_WRITER_LEASES_TABLE,
@@ -99,6 +102,8 @@ _ZERO_REQUIRED_BY_STAGE = {
     "NO_ORDER_SOAK": frozenset(
         {
             "execution_risk_reservations",
+            "execution_risk_budget_authorizations",
+            "execution_canary_risk_policies",
             "execution_attestations",
             "order_writer_leases",
             "signals",
@@ -113,7 +118,6 @@ _ZERO_REQUIRED_BY_STAGE = {
     ),
     "SIGNAL_RISK_SHADOW": frozenset(
         {
-            "execution_attestations",
             "order_writer_leases",
             "orders",
             "fills",
@@ -134,6 +138,14 @@ def _effective(connection: Connection) -> Connection:
             schema_translate_map={CANONICAL_BUSINESS_SCHEMA: None}
         )
     return connection
+
+
+def _persisted_utc(value: datetime) -> datetime:
+    return (
+        value.replace(tzinfo=timezone.utc)
+        if value.tzinfo is None
+        else value.astimezone(timezone.utc)
+    )
 
 
 def _digest(value: object) -> str:
@@ -381,11 +393,9 @@ def _inspect_lineage(
     counts["execution_risk_budget_authorizations"] = len(budgets)
     risk_policy_sources = (
         connection.execute(
-            select(AUDIT_EVENTS_TABLE).where(
-                AUDIT_EVENTS_TABLE.c.event_type == "PHASE9_RISK_POLICY_ACCEPTED",
-                AUDIT_EVENTS_TABLE.c.aggregate_type == "canonical_phase9_risk_policy",
-                AUDIT_EVENTS_TABLE.c.aggregate_id
-                == str(handoff.qualification_decision_id),
+            select(EXECUTION_CANARY_RISK_POLICIES_TABLE).where(
+                EXECUTION_CANARY_RISK_POLICIES_TABLE.c.qualification_decision_id
+                == handoff.qualification_decision_id,
             )
         )
         .mappings()
@@ -415,23 +425,34 @@ def _inspect_lineage(
         reasons.append("EXACT_RISK_BUDGET_AUTHORIZATION_EVIDENCE_UNSET")
     exact_policy_source = []
     for source in risk_policy_sources:
-        evidence = source["evidence_json"]
         if (
-            isinstance(evidence, Mapping)
-            and evidence.get("contract") == "canonical-v13-phase9-risk-policy-source-v1"
-            and evidence.get("qualification_decision_id")
-            == str(handoff.qualification_decision_id)
-            and evidence.get("qualification_decision_digest")
-            == handoff.qualification_decision_digest
-            and evidence.get("configuration_bundle_id")
-            == str(handoff.configuration_bundle_id)
-            and evidence.get("configuration_bundle_digest")
+            source["strategy_version_id"] == handoff.strategy_version_id
+            and source["research_target_id"] == handoff.research_target_id
+            and source["configuration_bundle_id"] == handoff.configuration_bundle_id
+            and source["configuration_bundle_digest"]
             == handoff.configuration_bundle_digest
-            and evidence.get("execution_target") == "OKX_DEMO"
-            and evidence.get("allow_real_funds") is False
-            and _digest(dict(evidence)) == source["receipt_digest"]
+            and source["market_snapshot_id"] == handoff.market_snapshot_id
+            and source["market_snapshot_digest"] == handoff.market_snapshot_digest
+            and source["execution_target"] == "OKX_DEMO"
+            and source["allow_real_funds"] is False
+            and source["position_policy"] == "LONG_ONLY"
+            and source["max_order_count"] == 1
+            and Decimal(str(source["strategy_max_leverage"])) == Decimal("14")
+            and Decimal(str(source["effective_leverage"]))
+            <= min(
+                Decimal(str(source["strategy_max_leverage"])),
+                Decimal(str(source["exchange_max_leverage"])),
+            )
+            and Decimal(str(source["max_notional"]))
+            == Decimal(str(source["minimum_contract_size"]))
+            * Decimal(str(source["contract_value"]))
+            * Decimal(str(source["mark_price"]))
+            and _persisted_utc(source["expires_at"])
+            - _persisted_utc(source["accepted_at"])
+            == timedelta(minutes=30)
             and any(
                 budget["source_receipt_digest"] == source["receipt_digest"]
+                and budget["execution_canary_risk_policy_id"] == source["id"]
                 for budget in budgets
             )
         ):

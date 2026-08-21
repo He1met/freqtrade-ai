@@ -71,6 +71,10 @@ from app.canonical_v13.dto import (
     Phase9ReadinessProjectionDTO,
     Phase9ApprovalCommandDTO,
     Phase9ApprovalReceiptDTO,
+    Phase9CanaryRiskPolicyCommandDTO,
+    Phase9CanaryRiskPolicyReceiptDTO,
+    Phase9CanaryRiskPolicyTerminationCommandDTO,
+    Phase9CanaryRiskPolicyTerminationReceiptDTO,
     Phase9DeploymentCommandDTO,
     Phase9DeploymentReceiptDTO,
     Phase9IntentCommandDTO,
@@ -131,6 +135,10 @@ from app.canonical_v13.execution_common import CanonicalExecutionChainBlocked
 from app.canonical_v13.phase9_execution_authority import (
     authorize_demo_risk_budget,
     decide_central_demo_risk,
+)
+from app.canonical_v13.phase9_canary_policy import (
+    authorize_canary_risk_policy,
+    terminate_canary_risk_policy,
 )
 from app.canonical_v13.risk_service import create_production_demo_intent
 from app.canonical_v13.signal_service import record_production_demo_signal
@@ -2411,6 +2419,67 @@ def create_canonical_v13_app(
 
         return run_phase9(
             deployment_connection_factory, "canonical_deployment_writer", execute
+        )
+
+    @app.post(
+        f"{API_PREFIX}/phase9/canary-risk-policies",
+        response_model=Phase9CanaryRiskPolicyReceiptDTO,
+        status_code=201,
+    )
+    def phase9_canary_risk_policy(
+        command: Phase9CanaryRiskPolicyCommandDTO,
+    ) -> Phase9CanaryRiskPolicyReceiptDTO:
+        def execute(connection: Connection) -> Phase9CanaryRiskPolicyReceiptDTO:
+            result = authorize_canary_risk_policy(
+                connection,
+                qualification_decision_id=command.qualification_decision_id,
+                deployment_approval_id=command.deployment_approval_id,
+                execution_attestation_id=command.execution_attestation_id,
+                actor_identity=command.actor_identity,
+                idempotency_key=command.idempotency_key,
+                reason=command.reason,
+                redacted_evidence=command.redacted_evidence,
+            )
+            return Phase9CanaryRiskPolicyReceiptDTO(
+                policy_id=result.policy_id,
+                request_digest=result.request_digest,
+                policy_digest=result.policy_digest,
+                receipt_digest=result.receipt_digest,
+                max_notional=format(result.max_notional, "f"),
+                effective_leverage=format(result.effective_leverage, "f"),
+                accepted_at=result.accepted_at,
+                expires_at=result.expires_at,
+                repeat_noop=result.repeat_noop,
+            )
+
+        return run_phase9(
+            approval_connection_factory, "canonical_approval_writer", execute
+        )
+
+    @app.post(
+        f"{API_PREFIX}/phase9/canary-risk-policies/{{policy_id}}/terminate",
+        response_model=Phase9CanaryRiskPolicyTerminationReceiptDTO,
+    )
+    def phase9_terminate_canary_risk_policy(
+        policy_id: UUID,
+        command: Phase9CanaryRiskPolicyTerminationCommandDTO,
+    ) -> Phase9CanaryRiskPolicyTerminationReceiptDTO:
+        def execute(
+            connection: Connection,
+        ) -> Phase9CanaryRiskPolicyTerminationReceiptDTO:
+            return Phase9CanaryRiskPolicyTerminationReceiptDTO(
+                **asdict(
+                    terminate_canary_risk_policy(
+                        connection,
+                        policy_id=policy_id,
+                        reconciliation_run_id=command.reconciliation_run_id,
+                        actor_identity=command.actor_identity,
+                    )
+                )
+            )
+
+        return run_phase9(
+            approval_connection_factory, "canonical_approval_writer", execute
         )
 
     @app.post(
