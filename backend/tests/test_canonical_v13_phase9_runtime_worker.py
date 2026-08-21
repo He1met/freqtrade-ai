@@ -6,6 +6,7 @@ from hashlib import sha256
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -605,6 +606,85 @@ def test_no_order_soak_supervisor_needs_no_market_worker(monkeypatch, tmp_path) 
         "CLAIM_LEASE",
         "RELEASE_LEASE",
     ]
+    assert (
+        service.FileLeasePort(service.SUPPORT_ROOT).read("long_lived_runtime") is None
+    )
+
+
+def test_production_no_order_soak_starts_container_before_runtime_activation(
+    monkeypatch, tmp_path
+) -> None:
+    service = _load_script("canonical_phase9_production_no_order_bootstrap_test")
+    monkeypatch.setattr(service, "SUPPORT_ROOT", tmp_path / "support")
+    monkeypatch.setattr(service, "LAUNCH_AGENT_ROOT", tmp_path / "agents")
+    monkeypatch.setattr(service, "LOG_ROOT", tmp_path / "logs")
+    monkeypatch.setattr(service, "_require_release_checkout", lambda: RELEASE_DIGEST)
+    monkeypatch.setattr(service, "_now", lambda: NOW)
+    monkeypatch.setattr(
+        service,
+        "_load_runtime_image_authority",
+        lambda _id: _runtime_image_authority(),
+    )
+    monkeypatch.setattr(service.signal, "signal", lambda *_args: None)
+    monkeypatch.setattr(
+        service,
+        "_production_runtime_worker_factory",
+        lambda: pytest.fail("NO_ORDER_SOAK must not compose the ACTIVE-lineage worker"),
+    )
+    service._STOP = False
+
+    prepared = service.prepare(
+        "long_lived_runtime",
+        "NO_ORDER_SOAK",
+        release_digest=RELEASE_DIGEST,
+        deployment_id=_lineage().deployment_id,
+        deployment_capability_digest=_lineage().deployment_capability_digest,
+        runtime_image_acceptance_id=IMAGE_ACCEPTANCE_ID,
+        enable_order_writer=False,
+    )
+    plan, state = service._load_plan("long_lived_runtime")
+    service._atomic_json(
+        service._state_path("long_lived_runtime"),
+        {**state, "status": "CONFIRMED", "confirmed_at": NOW.isoformat()},
+    )
+    container_calls = []
+    container_port = SimpleNamespace(
+        start=lambda observed_plan: container_calls.append(("start", observed_plan))
+        or "container-id",
+        verify=lambda observed_plan, container_id: container_calls.append(
+            ("verify", observed_plan, container_id)
+        )
+        or "9" * 64,
+        stop=lambda observed_plan, container_id: container_calls.append(
+            ("stop", observed_plan, container_id)
+        ),
+    )
+    monkeypatch.setattr(
+        service.time, "sleep", lambda _seconds: setattr(service, "_STOP", True)
+    )
+
+    service.supervise(
+        "long_lived_runtime",
+        prepared["plan_digest"],
+        production_compose=True,
+        runtime_container_port=container_port,
+    )
+
+    assert [call[0] for call in container_calls] == ["start", "verify", "stop"]
+    receipts = [
+        json.loads(line)
+        for line in service._receipt_path("long_lived_runtime").read_text().splitlines()
+    ]
+    assert [receipt["action"] for receipt in receipts] == [
+        "PREPARE",
+        "CLAIM_LEASE",
+        "RUNTIME_CONTAINER_START",
+        "RELEASE_LEASE",
+    ]
+    assert receipts[2]["details"]["network"] == "NONE"
+    assert receipts[2]["details"]["runtime_image_acceptance_id"] == str(
+        IMAGE_ACCEPTANCE_ID
+    )
     assert (
         service.FileLeasePort(service.SUPPORT_ROOT).read("long_lived_runtime") is None
     )
