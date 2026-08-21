@@ -1070,7 +1070,45 @@ def restart(
     require_current_order_writer_canary_authority(
         plan=plan, observed_at=_now(), port=authority_port
     )
-    kicked = _run(["launchctl", "kickstart", "-k", _launchctl_target(service_key)])
+    restart_mode = "KICKSTART"
+    if service_key == "long_lived_runtime":
+        restart_mode = "GRACEFUL_BOOTOUT_BOOTSTRAP"
+        retired = _run(["launchctl", "bootout", _launchctl_target(service_key)])
+        if retired.returncode != 0:
+            raise CanonicalPhase9SupervisorBlocked(
+                "BLOCKED_PHASE9_RESTART_FAILED", "runtime bootout failed"
+            )
+        lease_port = FileLeasePort(SUPPORT_ROOT)
+        deadline = time.monotonic() + 10
+        while lease_port.read(service_key) is not None and time.monotonic() < deadline:
+            time.sleep(0.1)
+        if lease_port.read(service_key) is not None:
+            raise CanonicalPhase9SupervisorBlocked(
+                "BLOCKED_PHASE9_RESTART_LEASE_HELD", service_key
+            )
+        container = _run(
+            [PODMAN_PATH, "container", "exists", RuntimeContainerPort.name(plan)]
+        )
+        if container.returncode not in {0, 1}:
+            raise CanonicalPhase9SupervisorBlocked(
+                "BLOCKED_PHASE9_RESTART_CONTAINER_OBSERVATION", service_key
+            )
+        if container.returncode == 0:
+            raise CanonicalPhase9SupervisorBlocked(
+                "BLOCKED_PHASE9_RESTART_CONTAINER_HELD", service_key
+            )
+        kicked = _run(
+            [
+                "launchctl",
+                "bootstrap",
+                _launchctl_domain(),
+                str(_plist_path(service_key)),
+            ]
+        )
+    else:
+        kicked = _run(
+            ["launchctl", "kickstart", "-k", _launchctl_target(service_key)]
+        )
     if kicked.returncode != 0:
         raise CanonicalPhase9SupervisorBlocked(
             "BLOCKED_PHASE9_RESTART_FAILED", service_key
@@ -1082,7 +1120,7 @@ def restart(
         generation=plan.generation,
         observed_at=_now(),
         plan_digest=plan.plan_digest,
-        details={"label": plan.launch_agent_label},
+        details={"label": plan.launch_agent_label, "restart_mode": restart_mode},
     )
     _append_receipt(receipt)
     return {

@@ -931,6 +931,8 @@ def test_restart_stop_and_recovery_write_independent_receipts(
         nonlocal loaded
         resolved = tuple(command)
         calls.append(resolved)
+        if resolved[:3] == (service.PODMAN_PATH, "container", "exists"):
+            return subprocess.CompletedProcess(command, 1, "", "")
         if resolved[:2] == ("launchctl", "print"):
             return subprocess.CompletedProcess(command, 0 if loaded else 3, "", "")
         if "bootstrap" in resolved:
@@ -959,6 +961,9 @@ def test_restart_stop_and_recovery_write_independent_receipts(
         "STOP",
     ]
     assert len({receipt["receipt_digest"] for receipt in receipts}) == 5
+    assert receipts[2]["details"]["restart_mode"] == (
+        "GRACEFUL_BOOTOUT_BOOTSTRAP"
+    )
     assert receipts[3]["details"] == {
         "bootstrap_required": False,
         "orphan_cleaned": False,
@@ -968,6 +973,47 @@ def test_restart_stop_and_recovery_write_independent_receipts(
         "bootout",
         service._launchctl_target("long_lived_runtime"),
     )
+
+
+def test_runtime_restart_blocks_before_bootstrap_if_container_survives_bootout(
+    monkeypatch, tmp_path
+) -> None:
+    service = _load_script("canonical_phase9_runtime_restart_orphan_test")
+    _configure_roots(service, tmp_path, monkeypatch)
+    monkeypatch.setattr(service.shutil, "which", lambda _name: "/bin/launchctl")
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(command):
+        resolved = tuple(command)
+        calls.append(resolved)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(service, "_run", fake_run)
+    prepared = _prepare_runtime(service)
+    service.confirm("long_lived_runtime", prepared["plan_digest"])
+    calls.clear()
+
+    with pytest.raises(
+        CanonicalPhase9SupervisorBlocked,
+        match="BLOCKED_PHASE9_RESTART_CONTAINER_HELD",
+    ):
+        service.restart("long_lived_runtime", prepared["plan_digest"])
+
+    assert calls == [
+        (
+            "launchctl",
+            "bootout",
+            service._launchctl_target("long_lived_runtime"),
+        ),
+        (
+            service.PODMAN_PATH,
+            "container",
+            "exists",
+            service.RuntimeContainerPort.name(
+                service._load_plan("long_lived_runtime")[0]
+            ),
+        ),
+    ]
 
 
 def test_recovery_cleans_only_expired_dead_orphan_before_bootstrap(
