@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
-import json
 from typing import Final
 from uuid import uuid4
 
@@ -19,19 +19,24 @@ from app.canonical_v13.genesis import (
 from app.canonical_v13.manifest import (
     CANONICAL_BUSINESS_SCHEMA,
     CANONICAL_MANIFEST_DIGEST,
+    CANONICAL_TABLE_NAMES,
+    READER_TABLE_ALLOWLIST,
+    TABLE_MANIFEST_BY_NAME,
+    WRITER_READ_ALLOWLIST,
+    WRITER_TABLE_ALLOWLIST,
 )
 from app.canonical_v13.models import (
     AUDIT_EVENTS_TABLE,
-    DEPLOYMENTS_TABLE,
     DEPLOYMENT_APPROVALS_TABLE,
+    DEPLOYMENTS_TABLE,
+    EXECUTION_ATTESTATIONS_TABLE,
     EXECUTION_CANARY_PROBE_RECEIPTS_TABLE,
     EXECUTION_CANARY_RISK_POLICIES_TABLE,
-    EXECUTION_ATTESTATIONS_TABLE,
     EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE,
     EXECUTION_RISK_RESERVATIONS_TABLE,
-    ORDER_WRITER_LEASES_TABLE,
-    ORDER_DISPATCH_RECEIPTS_TABLE,
     ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE,
+    ORDER_DISPATCH_RECEIPTS_TABLE,
+    ORDER_WRITER_LEASES_TABLE,
     RUNTIME_INSTANCES_TABLE,
     RUNTIME_RECEIPTS_TABLE,
     SCHEMA_METADATA_TABLE,
@@ -39,8 +44,7 @@ from app.canonical_v13.models import (
 )
 from app.canonical_v13.role_mapping import CanonicalRoleMapping
 
-
-UPGRADE_CONTRACT: Final = "canonical-v13-phase9-execution-schema-upgrade-v3"
+UPGRADE_CONTRACT: Final = "canonical-v13-phase9-execution-schema-upgrade-v4"
 PREVIOUS_CANONICAL_MANIFEST_DIGEST: Final = (
     "5f39082802ad9a284f6889702ddee4458d881c53009e77c24726466dcda2aec4"
 )
@@ -56,6 +60,51 @@ PHASE9_EXTENSION_TABLES = (
 )
 PHASE9_EXTENSION_TABLE_NAMES: Final[tuple[str, ...]] = tuple(
     table.name for table in PHASE9_EXTENSION_TABLES
+)
+PREVIOUS_ACL_CONTRACT_DIGEST: Final = (
+    "af302c492883a901798b7c86f4f0c9d457bd942037498571e0f8b962e1948263"
+)
+# Frozen #781 delta on tables which survive a Phase 9 rollback.  Extension-table
+# grants disappear with their tables and therefore are deliberately absent.
+PHASE9_SURVIVING_TABLE_GRANT_DELTA: Final[tuple[tuple[str, str, str], ...]] = (
+    ("canonical_approval_writer", "audit_events", "SELECT"),
+    ("canonical_approval_writer", "deployments", "SELECT"),
+    ("canonical_approval_writer", "orders", "SELECT"),
+    ("canonical_approval_writer", "reconciliation_items", "SELECT"),
+    ("canonical_approval_writer", "reconciliation_runs", "SELECT"),
+    ("canonical_approval_writer", "research_targets", "SELECT"),
+    ("canonical_approval_writer", "risk_decisions", "SELECT"),
+    ("canonical_approval_writer", "strategy_artifacts", "SELECT"),
+    ("canonical_approval_writer", "strategy_versions", "SELECT"),
+    ("canonical_control_writer", "deployment_approvals", "SELECT"),
+    ("canonical_control_writer", "deployments", "SELECT"),
+    ("canonical_control_writer", "fills", "SELECT"),
+    ("canonical_control_writer", "ledger_entries", "SELECT"),
+    ("canonical_control_writer", "orders", "SELECT"),
+    ("canonical_control_writer", "reconciliation_items", "SELECT"),
+    ("canonical_control_writer", "reconciliation_runs", "SELECT"),
+    ("canonical_control_writer", "risk_decisions", "SELECT"),
+    ("canonical_control_writer", "runtime_instances", "SELECT"),
+    ("canonical_control_writer", "runtime_receipts", "SELECT"),
+    ("canonical_control_writer", "signals", "SELECT"),
+    ("canonical_control_writer", "trade_intents", "SELECT"),
+    ("canonical_fill_writer", "risk_decisions", "SELECT"),
+    ("canonical_fill_writer", "trade_intents", "SELECT"),
+    ("canonical_order_writer", "deployments", "SELECT"),
+    ("canonical_order_writer", "trade_intents", "SELECT"),
+    ("canonical_risk_writer", "deployments", "SELECT"),
+    ("canonical_signal_writer", "runtime_receipts", "SELECT"),
+)
+PHASE9_DATABASE_CONNECT_DELTA: Final[tuple[str, ...]] = (
+    "canonical_approval_writer",
+    "canonical_deployment_writer",
+    "canonical_signal_writer",
+    "canonical_risk_writer",
+    "canonical_order_writer",
+    "canonical_fill_writer",
+    "canonical_ledger_writer",
+    "canonical_reconciliation_writer",
+    "canonical_runtime_reader",
 )
 PHASE9_UNIQUE_CONSTRAINTS: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
     "deployment_approvals_qualification_unique": (
@@ -215,7 +264,178 @@ def render_phase9_uniqueness_rollback_sql() -> str:
     return ";\n".join(statements) + ";\n"
 
 
-def verify_phase9_schema_upgrade(connection: Connection) -> Phase9SchemaUpgradeResult:
+def _current_surviving_table_grants() -> set[tuple[str, str, str]]:
+    surviving = set(CANONICAL_TABLE_NAMES) - set(PHASE9_EXTENSION_TABLE_NAMES)
+    grants: dict[tuple[str, str], set[str]] = {}
+    for writer, table_names in WRITER_TABLE_ALLOWLIST.items():
+        if writer == "canonical_schema_owner":
+            continue
+        for table_name in table_names:
+            if table_name in surviving:
+                grants.setdefault((writer, table_name), set()).update(
+                    TABLE_MANIFEST_BY_NAME[table_name].writer_privileges
+                )
+    for writer, table_names in WRITER_READ_ALLOWLIST.items():
+        if writer == "canonical_schema_owner":
+            continue
+        for table_name in table_names:
+            if table_name in surviving:
+                grants.setdefault((writer, table_name), set()).add("SELECT")
+    for reader, table_names in READER_TABLE_ALLOWLIST.items():
+        for table_name in table_names:
+            if table_name in surviving:
+                grants.setdefault((reader, table_name), set()).add("SELECT")
+    return {
+        (role, table_name, privilege)
+        for (role, table_name), privileges in grants.items()
+        for privilege in privileges
+    }
+
+
+def _previous_acl_payload() -> dict[str, object]:
+    surviving = tuple(
+        sorted(set(CANONICAL_TABLE_NAMES) - set(PHASE9_EXTENSION_TABLE_NAMES))
+    )
+    previous_grants = tuple(
+        sorted(
+            _current_surviving_table_grants()
+            - set(PHASE9_SURVIVING_TABLE_GRANT_DELTA)
+        )
+    )
+    return {
+        "surviving_tables": surviving,
+        "table_grants": previous_grants,
+        "forbidden_connect_roles": tuple(sorted(PHASE9_DATABASE_CONNECT_DELTA)),
+    }
+
+
+def _resolve_role_mapping(
+    connection: Connection, role_mapping: CanonicalRoleMapping | None
+) -> CanonicalRoleMapping:
+    if role_mapping is not None:
+        return role_mapping
+    owner = connection.execute(
+        text(
+            "SELECT pg_get_userbyid(nspowner) FROM pg_catalog.pg_namespace "
+            "WHERE nspname=:schema"
+        ),
+        {"schema": CANONICAL_BUSINESS_SCHEMA},
+    ).scalar_one_or_none()
+    suffix = "schema_owner"
+    if not isinstance(owner, str) or not owner.endswith(suffix):
+        raise CanonicalPhase9SchemaUpgradeBlocked(
+            "BLOCKED_PHASE9_ROLE_MAPPING",
+            "explicit role mapping is required for a non-prefix schema owner",
+        )
+    return CanonicalRoleMapping.from_prefix(owner[: -len(suffix)])
+
+
+def _verify_previous_acl(
+    connection: Connection, *, role_mapping: CanonicalRoleMapping | None
+) -> None:
+    payload = _previous_acl_payload()
+    if _digest(payload) != PREVIOUS_ACL_CONTRACT_DIGEST:
+        raise CanonicalPhase9SchemaUpgradeBlocked(
+            "BLOCKED_PREVIOUS_ACL_CONTRACT_DRIFT",
+            "frozen predecessor ACL no longer matches the current Phase 9 delta",
+        )
+    resolved = _resolve_role_mapping(connection, role_mapping)
+    owner = resolved.physical("canonical_schema_owner")
+    actual = {
+        (
+            "PUBLIC" if row[0] is None else str(row[0]),
+            str(row[1]),
+            str(row[2]),
+        )
+        for row in connection.execute(
+            text(
+                """
+                SELECT grantee.rolname, relation.relname, acl.privilege_type
+                FROM pg_catalog.pg_class relation
+                JOIN pg_catalog.pg_namespace namespace
+                  ON namespace.oid=relation.relnamespace
+                CROSS JOIN LATERAL aclexplode(
+                    COALESCE(relation.relacl, acldefault('r', relation.relowner))
+                ) acl
+                LEFT JOIN pg_catalog.pg_roles grantee ON grantee.oid=acl.grantee
+                WHERE namespace.nspname=:schema
+                  AND relation.relkind IN ('r','p')
+                  AND (grantee.rolname IS NULL OR grantee.rolname <> :owner)
+                """
+            ),
+            {
+                "schema": CANONICAL_BUSINESS_SCHEMA,
+                "owner": owner,
+            },
+        )
+    }
+    expected = {
+        (resolved.physical(role), table_name, privilege)
+        for role, table_name, privilege in payload["table_grants"]
+    }
+    missing = expected - actual
+    extra = actual - expected
+    if missing or extra:
+        raise CanonicalPhase9SchemaUpgradeBlocked(
+            "BLOCKED_PREVIOUS_ACL_DRIFT",
+            f"missing_table_grants={len(missing)} extra_table_grants={len(extra)}",
+        )
+    forbidden_connect = {
+        resolved.physical(role) for role in PHASE9_DATABASE_CONNECT_DELTA
+    }
+    observed_connect = {
+        str(value)
+        for value in connection.execute(
+            text(
+                """
+                SELECT grantee.rolname
+                FROM pg_catalog.pg_database database
+                CROSS JOIN LATERAL aclexplode(
+                    COALESCE(database.datacl, acldefault('d', database.datdba))
+                ) database_acl
+                JOIN pg_catalog.pg_roles grantee ON grantee.oid=database_acl.grantee
+                WHERE database.datname=current_database()
+                  AND grantee.rolname = ANY(:roles)
+                  AND database_acl.privilege_type='CONNECT'
+                """
+            ),
+            {"roles": list(forbidden_connect)},
+        ).scalars()
+    }
+    if observed_connect:
+        raise CanonicalPhase9SchemaUpgradeBlocked(
+            "BLOCKED_PREVIOUS_DATABASE_CONNECT_DRIFT",
+            f"extra_phase9_connect={len(observed_connect)}",
+        )
+
+
+def render_phase9_acl_rollback_sql(
+    role_mapping: CanonicalRoleMapping,
+    *,
+    database_name: str,
+) -> str:
+    if not database_name or '"' in database_name:
+        raise CanonicalPhase9SchemaUpgradeBlocked(
+            "BLOCKED_PHASE9_DATABASE_IDENTITY", "database name is not SQL-safe"
+        )
+    statements = [
+        f"REVOKE {privilege} ON TABLE {CANONICAL_BUSINESS_SCHEMA}.{table_name} "
+        f"FROM {role_mapping.physical(role)}"
+        for role, table_name, privilege in PHASE9_SURVIVING_TABLE_GRANT_DELTA
+    ]
+    statements.extend(
+        f'REVOKE CONNECT ON DATABASE "{database_name}" FROM '
+        f"{role_mapping.physical(role)}"
+        for role in PHASE9_DATABASE_CONNECT_DELTA
+    )
+    return ";\n".join(statements) + ";\n"
+
+
+def verify_phase9_schema_upgrade(
+    connection: Connection,
+    *,
+    role_mapping: CanonicalRoleMapping | None = None,
+) -> Phase9SchemaUpgradeResult:
     if connection.dialect.name != "postgresql":
         raise CanonicalPhase9SchemaUpgradeBlocked(
             "BLOCKED_POSTGRESQL_REQUIRED",
@@ -250,6 +470,7 @@ def verify_phase9_schema_upgrade(connection: Connection) -> Phase9SchemaUpgradeR
         and extension_tables == ()
         and manifest_digest == PREVIOUS_CANONICAL_MANIFEST_DIGEST
     ):
+        _verify_previous_acl(connection, role_mapping=role_mapping)
         return _result(
             status="PREVIOUS_READY",
             constraints=constraints,
@@ -314,6 +535,8 @@ def _append_audit(
     actor_identity: str,
     before_digest: str,
     after_digest: str,
+    role_mapping: CanonicalRoleMapping,
+    database_name: str,
 ) -> None:
     evidence = {
         "contract": UPGRADE_CONTRACT,
@@ -327,6 +550,9 @@ def _append_audit(
             {
                 "upgrade": render_phase9_uniqueness_upgrade_sql(),
                 "rollback": render_phase9_uniqueness_rollback_sql(),
+                "acl_rollback": render_phase9_acl_rollback_sql(
+                    role_mapping, database_name=database_name
+                ),
             }
         ),
         "destructive_row_operations": 0,
@@ -357,7 +583,7 @@ def apply_phase9_schema_upgrade(
     role_mapping: CanonicalRoleMapping | None = None,
 ) -> Phase9SchemaUpgradeResult:
     _lock_upgrade_boundary(connection)
-    before = verify_phase9_schema_upgrade(connection)
+    before = verify_phase9_schema_upgrade(connection, role_mapping=role_mapping)
     if before.status == "ACCEPTED":
         return before
     _require_zero_rows(before.affected_row_counts)
@@ -387,8 +613,12 @@ def apply_phase9_schema_upgrade(
         actor_identity=actor_identity,
         before_digest=before.manifest_digest,
         after_digest=CANONICAL_MANIFEST_DIGEST,
+        role_mapping=resolved,
+        database_name=str(
+            connection.execute(text("SELECT current_database()")).scalar_one()
+        ),
     )
-    after = verify_phase9_schema_upgrade(connection)
+    after = verify_phase9_schema_upgrade(connection, role_mapping=resolved)
     return _result(
         status="UPGRADED",
         constraints=after.present_constraints,
@@ -403,12 +633,22 @@ def rollback_phase9_schema_upgrade(
     connection: Connection,
     *,
     actor_identity: str = "canonical-phase9-schema-operator",
+    role_mapping: CanonicalRoleMapping | None = None,
 ) -> Phase9SchemaUpgradeResult:
     _lock_upgrade_boundary(connection)
-    before = verify_phase9_schema_upgrade(connection)
+    resolved = _resolve_role_mapping(connection, role_mapping)
+    before = verify_phase9_schema_upgrade(connection, role_mapping=resolved)
     if before.status == "PREVIOUS_READY":
         return before
     _require_zero_rows(before.affected_row_counts)
+    database_name = connection.execute(text("SELECT current_database()")).scalar_one()
+    _execute_statements(
+        connection,
+        render_phase9_acl_rollback_sql(
+            resolved,
+            database_name=str(database_name),
+        ),
+    )
     _execute_statements(connection, render_phase9_uniqueness_rollback_sql())
     for table in reversed(PHASE9_EXTENSION_TABLES):
         table.drop(bind=connection, checkfirst=False)
@@ -423,8 +663,10 @@ def rollback_phase9_schema_upgrade(
         actor_identity=actor_identity,
         before_digest=before.manifest_digest,
         after_digest=PREVIOUS_CANONICAL_MANIFEST_DIGEST,
+        role_mapping=resolved,
+        database_name=str(database_name),
     )
-    after = verify_phase9_schema_upgrade(connection)
+    after = verify_phase9_schema_upgrade(connection, role_mapping=resolved)
     return _result(
         status="ROLLED_BACK",
         constraints=after.present_constraints,
@@ -436,13 +678,17 @@ def rollback_phase9_schema_upgrade(
 
 
 __all__ = [
+    "PHASE9_DATABASE_CONNECT_DELTA",
     "PHASE9_EXTENSION_TABLE_NAMES",
+    "PHASE9_SURVIVING_TABLE_GRANT_DELTA",
     "PHASE9_UNIQUE_CONSTRAINTS",
+    "PREVIOUS_ACL_CONTRACT_DIGEST",
     "PREVIOUS_CANONICAL_MANIFEST_DIGEST",
     "UPGRADE_CONTRACT",
     "CanonicalPhase9SchemaUpgradeBlocked",
     "Phase9SchemaUpgradeResult",
     "apply_phase9_schema_upgrade",
+    "render_phase9_acl_rollback_sql",
     "render_phase9_uniqueness_rollback_sql",
     "render_phase9_uniqueness_upgrade_sql",
     "rollback_phase9_schema_upgrade",
