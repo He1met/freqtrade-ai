@@ -39,6 +39,10 @@ from app.canonical_v13.gate_receipt_upgrade import GATE_GUARD_FUNCTION_NAMES
 
 
 GENESIS_METADATA_KEY: Final = "canonical-v13-genesis"
+CANONICAL_GUARD_FUNCTION_NAMES: Final = (
+    *GATE_GUARD_FUNCTION_NAMES,
+    "guard_runtime_image_acceptances_append_only",
+)
 
 
 @dataclass(frozen=True)
@@ -190,7 +194,7 @@ def _postgresql_user_objects(connection: Connection) -> tuple[str, ...]:
     canonical_tables_complete = set(_existing_tables(connection)) == set(
         CANONICAL_TABLE_NAMES
     )
-    expected_guard_functions = set(GATE_GUARD_FUNCTION_NAMES)
+    expected_guard_functions = set(CANONICAL_GUARD_FUNCTION_NAMES)
     problems: list[str] = []
     for row in rows:
         kind = str(row["object_kind"])
@@ -384,8 +388,12 @@ def install_canonical_genesis(
         from app.canonical_v13.gate_receipt_upgrade import (  # noqa: PLC0415
             install_gate_receipt_triggers,
         )
+        from app.canonical_v13.runtime_image_upgrade import (  # noqa: PLC0415
+            install_runtime_image_trigger,
+        )
 
         install_gate_receipt_triggers(effective)
+        install_runtime_image_trigger(effective)
     effective.execute(
         SCHEMA_METADATA_TABLE.insert().values(
             metadata_key=GENESIS_METADATA_KEY,
@@ -435,6 +443,11 @@ def render_postgresql_genesis_ddl(
     )
 
     statements.extend(gate_receipt_trigger_statements())
+    from app.canonical_v13.runtime_image_upgrade import (  # noqa: PLC0415
+        runtime_image_trigger_statements,
+    )
+
+    statements.extend(runtime_image_trigger_statements())
     statements.extend(
         render_postgresql_owner_sql(role_mapping).rstrip(";\n").split(";\n")
     )
@@ -455,7 +468,7 @@ def render_postgresql_owner_sql(
     ]
     statements.extend(
         f"ALTER FUNCTION {CANONICAL_BUSINESS_SCHEMA}.{function_name}() OWNER TO {owner}"
-        for function_name in GATE_GUARD_FUNCTION_NAMES
+        for function_name in CANONICAL_GUARD_FUNCTION_NAMES
     )
     statements.append(
         f"ALTER SCHEMA {CANONICAL_BUSINESS_SCHEMA} OWNER TO {owner}"
@@ -490,7 +503,7 @@ def postgresql_acl_statements(
         )
     statements.extend(postgresql_owner_table_grant_statements(resolved))
     owner = resolved.physical("canonical_schema_owner")
-    for function_name in GATE_GUARD_FUNCTION_NAMES:
+    for function_name in CANONICAL_GUARD_FUNCTION_NAMES:
         qualified = f"{CANONICAL_BUSINESS_SCHEMA}.{function_name}()"
         statements.append(f"REVOKE ALL PRIVILEGES ON FUNCTION {qualified} FROM PUBLIC")
         statements.extend(

@@ -21,6 +21,7 @@ from app.canonical_v13.phase9_execution_authority import (
 )
 from app.canonical_v13.phase9_runtime_supervisor import (
     Phase9Lease,
+    RuntimeImagePlanAuthority,
     build_launch_plan,
     build_lifecycle_receipt,
     build_order_writer_canary_authority,
@@ -28,10 +29,22 @@ from app.canonical_v13.phase9_runtime_supervisor import (
 
 
 NOW = datetime(2026, 8, 21, 6, 0, tzinfo=timezone.utc)
+IMAGE_ACCEPTANCE_ID = UUID("00000000-0000-4000-8000-000000000099")
+IMAGE_ACCEPTANCE_RECEIPT = "9" * 64
 
 
 def _uuid(value: int) -> UUID:
     return UUID(f"00000000-0000-4000-8000-{value:012d}")
+
+
+def _runtime_image_authority() -> RuntimeImagePlanAuthority:
+    return RuntimeImagePlanAuthority(
+        acceptance_id=IMAGE_ACCEPTANCE_ID,
+        image_manifest_digest="7" * 64,
+        image_config_digest="8" * 64,
+        acceptance_receipt_digest=IMAGE_ACCEPTANCE_RECEIPT,
+        release_digest="6" * 64,
+    )
 
 
 class _Result:
@@ -107,7 +120,7 @@ def test_runtime_composition_fails_closed_without_sealed_factory() -> None:
         release_digest="6" * 64,
         deployment_id=_uuid(1),
         deployment_capability_digest="1" * 64,
-        image_digest="7" * 64,
+        runtime_image_authority=_runtime_image_authority(),
     )
     with pytest.raises(
         CanonicalPhase9CompositionBlocked,
@@ -199,7 +212,7 @@ def test_runtime_confirmation_derives_receipt_from_exact_live_supervisor(
         release_digest="6" * 64,
         deployment_id=_uuid(1),
         deployment_capability_digest="1" * 64,
-        image_digest="7" * 64,
+        runtime_image_authority=_runtime_image_authority(),
     )
     heartbeat_at = NOW - timedelta(seconds=1)
     lease = Phase9Lease(
@@ -210,6 +223,9 @@ def test_runtime_confirmation_derives_receipt_from_exact_live_supervisor(
         deployment_id=plan.deployment_id,
         deployment_capability_digest=plan.deployment_capability_digest,
         image_digest=plan.image_digest,
+        runtime_image_acceptance_id=plan.runtime_image_acceptance_id,
+        runtime_image_acceptance_receipt_digest=plan.runtime_image_acceptance_receipt_digest,
+        runtime_image_config_digest=plan.runtime_image_config_digest,
         holder_token_digest="8" * 64,
         pid=321,
         acquired_at=NOW - timedelta(seconds=5),
@@ -231,6 +247,9 @@ def test_runtime_confirmation_derives_receipt_from_exact_live_supervisor(
             "deployment_id": str(plan.deployment_id),
             "deployment_capability_digest": plan.deployment_capability_digest,
             "image_digest": plan.image_digest,
+            "runtime_image_acceptance_id": str(plan.runtime_image_acceptance_id),
+            "runtime_image_acceptance_receipt_digest": plan.runtime_image_acceptance_receipt_digest,
+            "runtime_image_config_digest": plan.runtime_image_config_digest,
         },
     )
     connection = _Connection(
@@ -291,7 +310,7 @@ def test_runtime_confirmation_keeps_identity_across_no_order_to_shadow_plan(
             release_digest="6" * 64,
             deployment_id=_uuid(1),
             deployment_capability_digest="1" * 64,
-            image_digest="7" * 64,
+            runtime_image_authority=_runtime_image_authority(),
         )
         for stage, generation in (
             ("NO_ORDER_SOAK", 1),
@@ -319,6 +338,9 @@ def test_runtime_confirmation_keeps_identity_across_no_order_to_shadow_plan(
             deployment_id=plan.deployment_id,
             deployment_capability_digest=plan.deployment_capability_digest,
             image_digest=plan.image_digest,
+            runtime_image_acceptance_id=plan.runtime_image_acceptance_id,
+            runtime_image_acceptance_receipt_digest=plan.runtime_image_acceptance_receipt_digest,
+            runtime_image_config_digest=plan.runtime_image_config_digest,
             holder_token_digest="8" * 64,
             pid=321,
             acquired_at=NOW - timedelta(seconds=5),
@@ -340,6 +362,9 @@ def test_runtime_confirmation_keeps_identity_across_no_order_to_shadow_plan(
                 "deployment_id": str(plan.deployment_id),
                 "deployment_capability_digest": plan.deployment_capability_digest,
                 "image_digest": plan.image_digest,
+                "runtime_image_acceptance_id": str(plan.runtime_image_acceptance_id),
+                "runtime_image_acceptance_receipt_digest": plan.runtime_image_acceptance_receipt_digest,
+                "runtime_image_config_digest": plan.runtime_image_config_digest,
             },
         )
         connection = _Connection(

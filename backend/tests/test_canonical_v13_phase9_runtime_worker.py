@@ -13,6 +13,7 @@ import pytest
 from app.canonical_v13.phase9_runtime_supervisor import (
     CanonicalPhase9SupervisorBlocked,
     Phase9Lease,
+    RuntimeImagePlanAuthority,
     build_launch_plan,
     build_lifecycle_receipt,
     build_production_runtime_observation,
@@ -37,6 +38,8 @@ NOW = datetime(2026, 8, 21, 2, 3, 4, tzinfo=timezone.utc)
 PLAN_DIGEST = "a" * 64
 RELEASE_DIGEST = "8" * 64
 IMAGE_DIGEST = "9" * 64
+IMAGE_ACCEPTANCE_ID = UUID("00000000-0000-4000-8000-000000000099")
+IMAGE_ACCEPTANCE_RECEIPT = "7" * 64
 SCRIPT_PATH = (
     Path(__file__).resolve().parents[2] / "scripts" / "canonical_v13_phase9_service.py"
 )
@@ -44,6 +47,16 @@ SCRIPT_PATH = (
 
 def _uuid(value: int) -> UUID:
     return UUID(f"00000000-0000-4000-8000-{value:012d}")
+
+
+def _runtime_image_authority() -> RuntimeImagePlanAuthority:
+    return RuntimeImagePlanAuthority(
+        acceptance_id=IMAGE_ACCEPTANCE_ID,
+        image_manifest_digest=IMAGE_DIGEST,
+        image_config_digest="8" * 64,
+        acceptance_receipt_digest=IMAGE_ACCEPTANCE_RECEIPT,
+        release_digest=RELEASE_DIGEST,
+    )
 
 
 def _lineage() -> ActiveRuntimeLineage:
@@ -361,7 +374,7 @@ def test_supervisor_accepts_only_exact_verified_worker_receipt() -> None:
         release_digest=RELEASE_DIGEST,
         deployment_id=_lineage().deployment_id,
         deployment_capability_digest=_lineage().deployment_capability_digest,
-        image_digest=IMAGE_DIGEST,
+        runtime_image_authority=_runtime_image_authority(),
         plan_id=_uuid(10),
     )
     worker, _reader, _evidence, _evaluator, signer = _worker()
@@ -390,7 +403,7 @@ def _release_bound_plan():
         release_digest=RELEASE_DIGEST,
         deployment_id=_lineage().deployment_id,
         deployment_capability_digest=_lineage().deployment_capability_digest,
-        image_digest=IMAGE_DIGEST,
+        runtime_image_authority=_runtime_image_authority(),
         plan_id=_uuid(20),
     )
 
@@ -425,6 +438,9 @@ def _running_evidence(plan):
         deployment_id=plan.deployment_id,
         deployment_capability_digest=plan.deployment_capability_digest,
         image_digest=plan.image_digest,
+        runtime_image_acceptance_id=plan.runtime_image_acceptance_id,
+        runtime_image_acceptance_receipt_digest=plan.runtime_image_acceptance_receipt_digest,
+        runtime_image_config_digest=plan.runtime_image_config_digest,
         holder_token_digest=holder_digest,
         pid=4321,
         acquired_at=NOW - timedelta(seconds=10),
@@ -446,6 +462,9 @@ def _running_evidence(plan):
             "deployment_id": str(plan.deployment_id),
             "deployment_capability_digest": plan.deployment_capability_digest,
             "image_digest": plan.image_digest,
+            "runtime_image_acceptance_id": str(plan.runtime_image_acceptance_id),
+            "runtime_image_acceptance_receipt_digest": plan.runtime_image_acceptance_receipt_digest,
+            "runtime_image_config_digest": plan.runtime_image_config_digest,
         },
     )
     return lease, receipt
@@ -514,13 +533,14 @@ def test_supervisor_runtime_defaults_fail_closed_without_composed_worker(
     monkeypatch.setattr(service, "LOG_ROOT", tmp_path / "logs")
     monkeypatch.setattr(service, "_require_release_checkout", lambda: RELEASE_DIGEST)
     monkeypatch.setattr(service, "_now", lambda: NOW)
+    monkeypatch.setattr(service, "_load_runtime_image_authority", lambda _id: _runtime_image_authority())
     prepared = service.prepare(
         "long_lived_runtime",
         "SIGNAL_RISK_SHADOW",
         release_digest=RELEASE_DIGEST,
         deployment_id=_lineage().deployment_id,
         deployment_capability_digest=_lineage().deployment_capability_digest,
-        image_digest=IMAGE_DIGEST,
+        runtime_image_acceptance_id=IMAGE_ACCEPTANCE_ID,
         enable_order_writer=False,
     )
     plan, state = service._load_plan("long_lived_runtime")
@@ -555,6 +575,7 @@ def test_no_order_soak_supervisor_needs_no_market_worker(monkeypatch, tmp_path) 
     monkeypatch.setattr(service, "LOG_ROOT", tmp_path / "logs")
     monkeypatch.setattr(service, "_require_release_checkout", lambda: RELEASE_DIGEST)
     monkeypatch.setattr(service, "_now", lambda: NOW)
+    monkeypatch.setattr(service, "_load_runtime_image_authority", lambda _id: _runtime_image_authority())
     monkeypatch.setattr(service.signal, "signal", lambda *_args: None)
     service._STOP = False
     prepared = service.prepare(
@@ -563,7 +584,7 @@ def test_no_order_soak_supervisor_needs_no_market_worker(monkeypatch, tmp_path) 
         release_digest=RELEASE_DIGEST,
         deployment_id=_lineage().deployment_id,
         deployment_capability_digest=_lineage().deployment_capability_digest,
-        image_digest=IMAGE_DIGEST,
+        runtime_image_acceptance_id=IMAGE_ACCEPTANCE_ID,
         enable_order_writer=False,
     )
     _plan, state = service._load_plan("long_lived_runtime")
@@ -598,6 +619,7 @@ def test_supervisor_loop_accepts_injected_worker_receipt_and_releases_lease(
     monkeypatch.setattr(service, "LOG_ROOT", tmp_path / "logs")
     monkeypatch.setattr(service, "_require_release_checkout", lambda: RELEASE_DIGEST)
     monkeypatch.setattr(service, "_now", lambda: NOW)
+    monkeypatch.setattr(service, "_load_runtime_image_authority", lambda _id: _runtime_image_authority())
     monkeypatch.setattr(service.signal, "signal", lambda *_args: None)
     service._STOP = False
 
@@ -607,7 +629,7 @@ def test_supervisor_loop_accepts_injected_worker_receipt_and_releases_lease(
         release_digest=RELEASE_DIGEST,
         deployment_id=_lineage().deployment_id,
         deployment_capability_digest=_lineage().deployment_capability_digest,
-        image_digest=IMAGE_DIGEST,
+        runtime_image_acceptance_id=IMAGE_ACCEPTANCE_ID,
         enable_order_writer=False,
     )
     plan, state = service._load_plan("long_lived_runtime")

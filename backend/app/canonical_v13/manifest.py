@@ -22,7 +22,7 @@ CANONICAL_MANIFEST_KEY: Final = "canonical-v13-table-manifest-v1"
 CANONICAL_LEGACY_IMPORT_MODE: Final = "EXTERNAL_LATEST_ONLY"
 CANONICAL_TRADING_CAPABILITY: Final = "TRADING_DISABLED"
 CANONICAL_PRODUCTION_DEFAULT: Final = "UNSET"
-CANONICAL_AUTHORITY_REVISION: Final = "20260821_phase9_dispatch_outcome_v1_acl9"
+CANONICAL_AUTHORITY_REVISION: Final = "20260821_phase9_runtime_image_authority_v1_acl10"
 
 P0_CONFIGURATION_KINDS: Final[tuple[str, ...]] = (
     "TARGET",
@@ -128,6 +128,7 @@ _TABLES_BY_DOMAIN = {
     "approval_deployment": (
         "deployment_approvals",
         "deployments",
+        "runtime_image_acceptances",
         "runtime_instances",
         "runtime_receipts",
     ),
@@ -169,6 +170,7 @@ _WRITER_TABLE_ALLOWLIST = {
     "canonical_control_writer": (
         "audit_events",
         "idempotency_receipts",
+        "runtime_image_acceptances",
         *_TABLES_BY_DOMAIN["intake_catalog"],
         *_TABLES_BY_DOMAIN["control_plane"],
         *_TABLES_BY_DOMAIN["market"],
@@ -255,6 +257,7 @@ _RUNTIME_READER_TABLES = (
     "market_snapshot_members",
     "deployment_approvals",
     "deployments",
+    "runtime_image_acceptances",
     "runtime_instances",
     "runtime_receipts",
 )
@@ -383,6 +386,7 @@ _WRITER_READ_ALLOWLIST = {
         "deployment_approvals",
         "qualification_decisions",
         "configuration_bundles",
+        "runtime_image_acceptances",
     ),
     "canonical_signal_writer": (
         "schema_metadata",

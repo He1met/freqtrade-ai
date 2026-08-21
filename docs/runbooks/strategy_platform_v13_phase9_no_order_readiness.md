@@ -134,6 +134,12 @@ python scripts/canonical_v13_api_service.py cleanup-phase9-provisioning
 
 ## 4. A — NO_ORDER_SOAK
 
+0. 由 provisioner 执行 `scripts/canonical_v13_runtime_image.py schema-apply`，再从 clean exact
+   accepted release 运行 `build`。构建必须使用 pinned base digest、`--pull=never --network=none`，并
+   记录 immutable reference、source-tree/recipe/SBOM/config/manifest digest。人工核对后仅以
+   `accept --immutable-reference sha256:<digest> --actor <human-operator>` 登记；mutable tag、research
+   executor、source/release/platform/entrypoint/security/provenance 漂移均为 `BLOCKED`。`show
+   --acceptance-id <uuid>` 返回的 receipt 是 runtime plan 唯一 image authority，裸 digest 不可替代。
 1. 由明确的人类 actor 为 exact qualification 创建 approval；重放必须返回同一 digest。
 2. 以 approval 创建 Demo-only deployment；此时仍 `PENDING`。
 3. 准备 runtime 的 secret-free plist：
@@ -144,7 +150,7 @@ python scripts/canonical_v13_api_service.py cleanup-phase9-provisioning
      --release-digest <sha256-of-canonical-v13-release-colon-main-sha> \
      --deployment-id <exact-deployment-id> \
      --deployment-capability-digest <exact-capability-digest> \
-     --image-digest <accepted-runtime-image-digest>
+     --runtime-image-acceptance-id <accepted-runtime-image-uuid>
    ```
 
 4. 人工比对返回的 plan digest 后执行 `confirm --plan-digest <exact>`。只有 launchd loaded、fresh
@@ -229,7 +235,6 @@ python scripts/canonical_v13_phase9_service.py prepare \
   --release-digest <sha256-of-canonical-v13-release-colon-main-sha> \
   --deployment-id <exact-deployment-id> \
   --deployment-capability-digest <exact-deployment-capability-digest> \
-  --image-digest <accepted-order-writer-image-digest> \
   --execution-canary-risk-policy-id <exact-policy-id> \
   --execution-canary-risk-policy-digest <exact-policy-digest> \
   --attestation-id <exact-attestation-id> \

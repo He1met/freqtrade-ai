@@ -22,6 +22,10 @@ from app.canonical_v13.runtime_contract import (
     RuntimeObservationReceipt,
     build_runtime_observation_receipt,
 )
+from app.canonical_v13.runtime_image_authority import (
+    AcceptedRuntimeImage,
+    verify_accepted_runtime_image,
+)
 
 
 class CanonicalPhase9SupervisorBlocked(RuntimeError):
@@ -47,6 +51,15 @@ class OrderWriterCanaryAuthority:
 
 
 @dataclass(frozen=True)
+class RuntimeImagePlanAuthority:
+    acceptance_id: UUID
+    image_manifest_digest: str
+    image_config_digest: str
+    acceptance_receipt_digest: str
+    release_digest: str
+
+
+@dataclass(frozen=True)
 class Phase9LaunchPlan:
     plan_id: UUID
     service_key: str
@@ -64,6 +77,9 @@ class Phase9LaunchPlan:
     allow_real_funds: bool
     order_writer_enabled: bool
     plan_digest: str
+    runtime_image_acceptance_id: UUID | None = None
+    runtime_image_acceptance_receipt_digest: str | None = None
+    runtime_image_config_digest: str | None = None
     order_writer_canary_authority: OrderWriterCanaryAuthority | None = None
 
 
@@ -96,6 +112,9 @@ class Phase9Lease:
     acquired_at: datetime
     heartbeat_at: datetime
     expires_at: datetime
+    runtime_image_acceptance_id: UUID | None = None
+    runtime_image_acceptance_receipt_digest: str | None = None
+    runtime_image_config_digest: str | None = None
     order_writer_canary_authority: OrderWriterCanaryAuthority | None = None
 
 
@@ -181,6 +200,19 @@ def _require_digest(value: object, *, field: str) -> str:
             "BLOCKED_PHASE9_PLAN_DIGEST", f"{field} is not lowercase sha256"
         )
     return value
+
+
+def runtime_image_plan_authority(
+    accepted: AcceptedRuntimeImage,
+) -> RuntimeImagePlanAuthority:
+    accepted = verify_accepted_runtime_image(accepted)
+    return RuntimeImagePlanAuthority(
+        acceptance_id=accepted.acceptance_id,
+        image_manifest_digest=accepted.image_manifest_digest,
+        image_config_digest=accepted.image_config_digest,
+        acceptance_receipt_digest=accepted.receipt_digest,
+        release_digest=accepted.release_digest,
+    )
 
 
 def build_order_writer_canary_authority(
@@ -300,7 +332,7 @@ def build_launch_plan(
     release_digest: str,
     deployment_id: UUID | None = None,
     deployment_capability_digest: str | None = None,
-    image_digest: str | None = None,
+    runtime_image_authority: RuntimeImagePlanAuthority | None = None,
     order_writer_enabled: bool = False,
     order_writer_canary_authority: OrderWriterCanaryAuthority | None = None,
     plan_id: UUID | None = None,
@@ -322,7 +354,24 @@ def build_launch_plan(
     for field, value in (
         ("release_digest", release_digest),
         ("deployment_capability_digest", deployment_capability_digest),
-        ("image_digest", image_digest),
+        (
+            "image_digest",
+            runtime_image_authority.image_manifest_digest
+            if runtime_image_authority is not None
+            else None,
+        ),
+        (
+            "runtime_image_acceptance_receipt_digest",
+            runtime_image_authority.acceptance_receipt_digest
+            if runtime_image_authority is not None
+            else None,
+        ),
+        (
+            "runtime_image_config_digest",
+            runtime_image_authority.image_config_digest
+            if runtime_image_authority is not None
+            else None,
+        ),
     ):
         if (field == "release_digest" or value is not None) and (
             not isinstance(value, str)
@@ -335,13 +384,13 @@ def build_launch_plan(
     if service_key == "long_lived_runtime" and (
         deployment_id is None
         or deployment_capability_digest is None
-        or image_digest is None
+        or runtime_image_authority is None
     ):
         raise CanonicalPhase9SupervisorBlocked(
             "BLOCKED_RUNTIME_PLAN_LINEAGE_UNSET",
             "runtime plan requires deployment, capability, and image digests",
         )
-    if service_key == "order_writer" and image_digest is not None:
+    if service_key == "order_writer" and runtime_image_authority is not None:
         raise CanonicalPhase9SupervisorBlocked(
             "BLOCKED_ORDER_WRITER_PLAN_LINEAGE",
             "writer plan cannot receive the runtime image capability",
@@ -386,6 +435,28 @@ def build_launch_plan(
     spec = PHASE9_SERVICE_SPECS[service_key]
     resolved_id = plan_id or uuid4()
     resolved_at = _utc(prepared_at)
+    if runtime_image_authority is not None:
+        if not isinstance(runtime_image_authority.acceptance_id, UUID):
+            raise CanonicalPhase9SupervisorBlocked(
+                "BLOCKED_RUNTIME_IMAGE_ACCEPTANCE_ID",
+                "accepted runtime image UUID is required",
+            )
+        if runtime_image_authority.release_digest != release_digest:
+            raise CanonicalPhase9SupervisorBlocked(
+                "BLOCKED_RUNTIME_IMAGE_RELEASE_DRIFT",
+                "accepted runtime image release differs from launch release",
+            )
+        image_digest = runtime_image_authority.image_manifest_digest
+        runtime_image_config_digest = runtime_image_authority.image_config_digest
+        runtime_image_acceptance_id = runtime_image_authority.acceptance_id
+        runtime_image_acceptance_receipt_digest = (
+            runtime_image_authority.acceptance_receipt_digest
+        )
+    else:
+        image_digest = None
+        runtime_image_config_digest = None
+        runtime_image_acceptance_id = None
+        runtime_image_acceptance_receipt_digest = None
     payload = {
         "contract": "canonical-v13-phase9-launch-plan-v1",
         "plan_id": resolved_id,
@@ -397,6 +468,9 @@ def build_launch_plan(
         "deployment_id": deployment_id,
         "deployment_capability_digest": deployment_capability_digest,
         "image_digest": image_digest,
+        "runtime_image_acceptance_id": runtime_image_acceptance_id,
+        "runtime_image_acceptance_receipt_digest": runtime_image_acceptance_receipt_digest,
+        "runtime_image_config_digest": runtime_image_config_digest,
         "release_digest": release_digest,
         "generation": generation,
         "prepared_at": resolved_at,
@@ -415,6 +489,9 @@ def build_launch_plan(
         deployment_id=deployment_id,
         deployment_capability_digest=deployment_capability_digest,
         image_digest=image_digest,
+        runtime_image_acceptance_id=runtime_image_acceptance_id,
+        runtime_image_acceptance_receipt_digest=runtime_image_acceptance_receipt_digest,
+        runtime_image_config_digest=runtime_image_config_digest,
         release_digest=release_digest,
         generation=generation,
         prepared_at=resolved_at,
@@ -427,6 +504,20 @@ def build_launch_plan(
 
 
 def verify_launch_plan(plan: Phase9LaunchPlan) -> None:
+    authority = (
+        RuntimeImagePlanAuthority(
+            acceptance_id=plan.runtime_image_acceptance_id,
+            image_manifest_digest=plan.image_digest,
+            image_config_digest=plan.runtime_image_config_digest,
+            acceptance_receipt_digest=plan.runtime_image_acceptance_receipt_digest,
+            release_digest=plan.release_digest,
+        )
+        if plan.runtime_image_acceptance_id is not None
+        and plan.image_digest is not None
+        and plan.runtime_image_acceptance_receipt_digest is not None
+        and plan.runtime_image_config_digest is not None
+        else None
+    )
     rebuilt = build_launch_plan(
         service_key=plan.service_key,
         stage=plan.stage,
@@ -435,7 +526,7 @@ def verify_launch_plan(plan: Phase9LaunchPlan) -> None:
         release_digest=plan.release_digest,
         deployment_id=plan.deployment_id,
         deployment_capability_digest=plan.deployment_capability_digest,
-        image_digest=plan.image_digest,
+        runtime_image_authority=authority,
         order_writer_enabled=plan.order_writer_enabled,
         order_writer_canary_authority=plan.order_writer_canary_authority,
         plan_id=plan.plan_id,
@@ -562,6 +653,9 @@ def claim_lease(
         deployment_id=plan.deployment_id,
         deployment_capability_digest=plan.deployment_capability_digest,
         image_digest=plan.image_digest,
+        runtime_image_acceptance_id=plan.runtime_image_acceptance_id,
+        runtime_image_acceptance_receipt_digest=plan.runtime_image_acceptance_receipt_digest,
+        runtime_image_config_digest=plan.runtime_image_config_digest,
         order_writer_canary_authority=plan.order_writer_canary_authority,
         holder_token_digest=_digest({"holder_token": holder_token}),
         pid=pid,
@@ -585,6 +679,9 @@ def claim_lease(
             "deployment_id": str(plan.deployment_id) if plan.deployment_id else None,
             "deployment_capability_digest": plan.deployment_capability_digest,
             "image_digest": plan.image_digest,
+            "runtime_image_acceptance_id": str(plan.runtime_image_acceptance_id),
+            "runtime_image_acceptance_receipt_digest": plan.runtime_image_acceptance_receipt_digest,
+            "runtime_image_config_digest": plan.runtime_image_config_digest,
         },
     )
 
@@ -640,6 +737,9 @@ def heartbeat_lease(
             "deployment_id": str(lease.deployment_id) if lease.deployment_id else None,
             "deployment_capability_digest": lease.deployment_capability_digest,
             "image_digest": lease.image_digest,
+            "runtime_image_acceptance_id": str(lease.runtime_image_acceptance_id),
+            "runtime_image_acceptance_receipt_digest": lease.runtime_image_acceptance_receipt_digest,
+            "runtime_image_config_digest": lease.runtime_image_config_digest,
         },
     )
 
@@ -746,6 +846,10 @@ def build_production_runtime_observation(
         or lease.deployment_id != plan.deployment_id
         or lease.deployment_capability_digest != plan.deployment_capability_digest
         or lease.image_digest != plan.image_digest
+        or lease.runtime_image_acceptance_id != plan.runtime_image_acceptance_id
+        or lease.runtime_image_acceptance_receipt_digest
+        != plan.runtime_image_acceptance_receipt_digest
+        or lease.runtime_image_config_digest != plan.runtime_image_config_digest
         or lease.holder_token_digest != running_receipt.holder_token_digest
         or lease.pid <= 1
         or lease.heartbeat_at > observed
@@ -763,6 +867,12 @@ def build_production_runtime_observation(
         or running_receipt.details.get("deployment_capability_digest")
         != plan.deployment_capability_digest
         or running_receipt.details.get("image_digest") != plan.image_digest
+        or running_receipt.details.get("runtime_image_acceptance_id")
+        != str(plan.runtime_image_acceptance_id)
+        or running_receipt.details.get("runtime_image_acceptance_receipt_digest")
+        != plan.runtime_image_acceptance_receipt_digest
+        or running_receipt.details.get("runtime_image_config_digest")
+        != plan.runtime_image_config_digest
     ):
         raise CanonicalPhase9SupervisorBlocked(
             "BLOCKED_PRODUCTION_RUNTIME_OBSERVATION",
@@ -787,6 +897,7 @@ __all__ = [
     "Phase9LifecycleReceipt",
     "ProcessProbePort",
     "RuntimeWorkerSupervisorPort",
+    "RuntimeImagePlanAuthority",
     "build_launch_plan",
     "build_lifecycle_receipt",
     "build_order_writer_canary_authority",
@@ -795,6 +906,7 @@ __all__ = [
     "heartbeat_lease",
     "release_lease",
     "require_current_order_writer_canary_authority",
+    "runtime_image_plan_authority",
     "validate_supervised_worker_receipt",
     "verify_launch_plan",
     "verify_lifecycle_receipt",

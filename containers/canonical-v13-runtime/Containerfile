@@ -1,0 +1,24 @@
+FROM docker.io/freqtradeorg/freqtrade@sha256:c730f60992863baafc8f13469291731e4b5e0ada82d8a9b449dcf5db24d00f76
+
+ARG SOURCE_COMMIT
+ARG SOURCE_TREE_DIGEST
+ARG BUILD_RECIPE_DIGEST
+ARG SBOM_DIGEST
+
+USER root
+COPY --chmod=0555 canonical_v13_runtime.py /opt/freqtrade-ai/bin/canonical-v13-runtime
+
+LABEL org.opencontainers.image.title="Freqtrade Ai canonical V1.3 long-lived Demo runtime" \
+      org.opencontainers.image.revision="${SOURCE_COMMIT}" \
+      org.opencontainers.image.base.digest="sha256:c730f60992863baafc8f13469291731e4b5e0ada82d8a9b449dcf5db24d00f76" \
+      io.freqtrade-ai.source-tree-digest="${SOURCE_TREE_DIGEST}" \
+      io.freqtrade-ai.build-recipe-digest="${BUILD_RECIPE_DIGEST}" \
+      io.freqtrade-ai.sbom-digest="${SBOM_DIGEST}" \
+      io.freqtrade-ai.demo-only="true" \
+      io.freqtrade-ai.allow-real-funds="false"
+
+USER 65532:65532
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["/opt/freqtrade-ai/bin/canonical-v13-runtime"]
+CMD ["preflight"]
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD ["/opt/freqtrade-ai/bin/canonical-v13-runtime", "health"]

@@ -101,6 +101,7 @@ EXPECTED_TABLES_BY_DOMAIN = {
     "approval_deployment": (
         "deployment_approvals",
         "deployments",
+        "runtime_image_acceptances",
         "runtime_instances",
         "runtime_receipts",
     ),
@@ -128,7 +129,7 @@ EXPECTED_TABLES_BY_DOMAIN = {
 def test_exact_identity_and_table_manifest_matches_frozen_design() -> None:
     assert (
         CANONICAL_AUTHORITY_REVISION
-        == "20260821_phase9_dispatch_outcome_v1_acl9"
+        == "20260821_phase9_runtime_image_authority_v1_acl10"
     )
     assert CANONICAL_DATABASE_PURPOSE == "FREQTRADE_AI_V13_CANONICAL"
     assert CANONICAL_BUSINESS_SCHEMA == "strategy_platform_v13"
@@ -140,7 +141,7 @@ def test_exact_identity_and_table_manifest_matches_frozen_design() -> None:
     assert CANONICAL_TABLE_NAMES == tuple(
         table for tables in EXPECTED_TABLES_BY_DOMAIN.values() for table in tables
     )
-    assert len(CANONICAL_TABLE_NAMES) == 56
+    assert len(CANONICAL_TABLE_NAMES) == 57
     assert manifest_problems() == ()
 
 
@@ -403,13 +404,13 @@ def test_postgresql_types_constraints_and_locking_compile_offline() -> None:
         if isinstance(column.type, JSON)
     )
 
-    assert len(tables) == 56
+    assert len(tables) == 57
     assert len(foreign_keys) == 119
-    assert len(checks) == 74
-    assert len(uniques) == 73
+    assert len(checks) == 75
+    assert len(uniques) == 76
     assert len(indexes) == 103
-    assert len(datetimes) == 96
-    assert len(json_columns) == 26
+    assert len(datetimes) == 97
+    assert len(json_columns) == 27
     assert all(key.deferrable is not True for key in foreign_keys)
     assert all(column.type.timezone is True for column in datetimes)
     assert all(
