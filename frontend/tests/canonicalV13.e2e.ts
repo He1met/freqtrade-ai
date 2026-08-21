@@ -426,6 +426,71 @@ test("research selectors preserve API IDs while showing names and exact lineage"
   await expect(page.getByLabel("策略", { exact: true })).toHaveValue(ID_A);
 });
 
+test("qualified exact results expose read-only Phase 9 A-D receipts without execution controls", async ({ page }) => {
+  const alpha = canonicalStrategy({ qualification_status: "QUALIFIED" });
+  const plan = canonicalResearchChain({ qualification_status: "QUALIFIED", qualification_reason_code: "QUALIFIED" });
+  const results = canonicalResearchResults({
+    qualification: {
+      qualification_decision_id: ID_D,
+      target_score_id: ID_C,
+      quality_snapshot_id: ID_A,
+      status: "QUALIFIED",
+      reason_code: "QUALIFIED",
+      decision_digest: DIGEST,
+      qualifier_identity: "canonical-qualifier",
+      evidence_count: 1,
+      created_at: "2026-08-21T00:00:00Z",
+    },
+  });
+  const calls = await installCanonicalMocks(page, {
+    "/api/canonical-v13/strategies": { status: "AVAILABLE", items: [alpha] },
+    [`/api/canonical-v13/strategies/${ID_A}`]: alpha,
+    "/api/canonical-v13/research/validation-plans": { status: "AVAILABLE", items: [plan] },
+    [`/api/canonical-v13/research/validation-plans/${ID_C}`]: plan,
+    [`/api/canonical-v13/research/validation-plans/${ID_C}/results`]: results,
+    "/api/canonical-v13/phase9/readiness": async (route) => {
+      const stage = new URL(route.request().url()).searchParams.get("stage");
+      await route.fulfill({
+        contentType: "application/json",
+        status: 200,
+        body: JSON.stringify({
+          contract: "canonical-v13-phase9-readiness-receipt-v2",
+          stage,
+          status: stage === "QUALIFICATION_HANDOFF" ? "READY" : "BLOCKED",
+          reason_codes: stage === "QUALIFICATION_HANDOFF" ? [] : ["EXACT_STAGE_EVIDENCE_UNSET"],
+          qualification_status_counts: { QUALIFIED: 1 },
+          execution_domain_counts: { orders: 0, fills: 0, ledger_entries: 0, reconciliation_runs: 0 },
+          lineage_evidence_counts: {},
+          handoff: {
+            qualification_decision_id: ID_D,
+            qualification_decision_digest: DIGEST,
+            strategy_version_id: ID_B,
+            research_target_id: ID_D,
+            configuration_bundle_id: ID_A,
+            configuration_bundle_digest: DIGEST,
+            market_snapshot_id: ID_B,
+            market_snapshot_digest: DIGEST,
+            validation_plan_id: ID_C,
+            validation_plan_digest: DIGEST,
+          },
+          topology_digest: DIGEST,
+          receipt_digest: DIGEST,
+        }),
+      });
+    },
+  });
+  await page.goto(`/v13/research?strategy=${ID_A}&target=${ID_D}&plan=${ID_C}`);
+  await expect(page.getByRole("heading", { level: 2, name: "Phase 9 分段验收" })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 3, name: "A · 无订单运行" })).toBeVisible();
+  await expect(page.getByText("本页面不提供 deployment、runtime 或 order 写入控制。")).toBeVisible();
+  await expect(page.getByRole("button", { name: /order|deployment|runtime/i })).toHaveCount(0);
+  const phase9Calls = calls.filter((call) => call.includes("/phase9/readiness?"));
+  // React StrictMode intentionally replays effects in the development E2E server.
+  // The contract is five distinct stage requests, with no hidden sixth stage.
+  expect(new Set(phase9Calls).size).toBe(5);
+  expect(phase9Calls.length).toBeGreaterThanOrEqual(5);
+});
+
 test("stale and failed selector projections remain explicit and never choose the first option", async ({ page }) => {
   const configuration = {
     status: "AVAILABLE",

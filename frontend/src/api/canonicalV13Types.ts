@@ -384,6 +384,39 @@ export type ResearchResultsProjection = {
   qualification: ResearchQualificationProjection | null;
 };
 
+export type Phase9AcceptanceStage =
+  | "QUALIFICATION_HANDOFF"
+  | "NO_ORDER_SOAK"
+  | "SIGNAL_RISK_SHADOW"
+  | "OKX_DEMO_CANARY"
+  | "RECOVERY_SOAK";
+
+export type Phase9QualificationHandoffProjection = {
+  qualification_decision_id: CanonicalId;
+  qualification_decision_digest: Sha256Digest;
+  strategy_version_id: CanonicalId;
+  research_target_id: CanonicalId;
+  configuration_bundle_id: CanonicalId;
+  configuration_bundle_digest: Sha256Digest;
+  market_snapshot_id: CanonicalId;
+  market_snapshot_digest: Sha256Digest;
+  validation_plan_id: CanonicalId;
+  validation_plan_digest: Sha256Digest;
+};
+
+export type Phase9ReadinessProjection = {
+  contract: "canonical-v13-phase9-readiness-receipt-v2";
+  stage: Phase9AcceptanceStage;
+  status: "READY" | "BLOCKED";
+  reason_codes: string[];
+  qualification_status_counts: Record<string, number>;
+  execution_domain_counts: Record<string, number>;
+  lineage_evidence_counts: Record<string, number>;
+  handoff: Phase9QualificationHandoffProjection | null;
+  topology_digest: Sha256Digest;
+  receipt_digest: Sha256Digest;
+};
+
 export type ResearchPlanCatalogProjection = {
   status: "EMPTY" | "AVAILABLE";
   items: ResearchChainProjection[];

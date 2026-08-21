@@ -20,7 +20,9 @@ def _load_service(name: str):
     return module
 
 
-def test_launch_agent_payload_is_loopback_only_and_contains_no_database_secret() -> None:
+def test_launch_agent_payload_is_loopback_only_and_contains_no_database_secret() -> (
+    None
+):
     service = _load_service("canonical_v13_api_service_plist")
     payload = service._plist_payload(8011)
     serialized = json.dumps(payload)
@@ -33,6 +35,9 @@ def test_launch_agent_payload_is_loopback_only_and_contains_no_database_secret()
     assert service.READER_KEYCHAIN_SERVICE not in serialized
     assert service.CONTROL_KEYCHAIN_SERVICE not in serialized
     assert all(spec[2] not in serialized for spec in service.RESEARCH_PRINCIPAL_SPECS)
+    assert all(spec[2] not in serialized for spec in service.PHASE9_PRINCIPAL_SPECS)
+    assert service.RUNTIME_READER_PRINCIPAL_SPEC[2] not in serialized
+    assert service.RUNTIME_SIGNAL_SIGNER_KEYCHAIN_SERVICE not in serialized
 
 
 def test_database_urls_are_built_only_from_fixed_principal_and_keychain_reference(
@@ -51,9 +56,7 @@ def test_scram_verifier_is_deterministic_and_never_contains_input_material() -> 
     service = _load_service("canonical_v13_api_service_scram")
     material = "x" * 64
     verifier = service._scram_verifier(material, salt=b"0123456789abcdef")
-    assert verifier == service._scram_verifier(
-        material, salt=b"0123456789abcdef"
-    )
+    assert verifier == service._scram_verifier(material, salt=b"0123456789abcdef")
     assert material not in verifier
     assert re.fullmatch(
         r"SCRAM-SHA-256\$4096:[A-Za-z0-9+/=]+\$"
@@ -81,20 +84,89 @@ def test_keychain_presence_probe_never_reads_secret_value(monkeypatch) -> None:
     assert "-w" not in observed
 
 
-def test_production_environment_uses_six_fixed_keychain_backed_principals(
+def test_keychain_add_argv_contains_security_binary_exactly_once(monkeypatch) -> None:
+    service = _load_service("canonical_v13_api_service_keychain_add_argv")
+    material = "m" * 64
+    reads = iter((None, material))
+    observed = []
+    monkeypatch.setattr(service, "_read_keychain", lambda _service: next(reads))
+    monkeypatch.setattr(service, "_security_command", lambda: Path("/usr/bin/security"))
+    monkeypatch.setattr(service, "_keychain_account", lambda: "ci-operator")
+
+    def run(command, **kwargs):
+        observed.append((tuple(command), kwargs))
+        return type("Result", (), {"returncode": 0})()
+
+    monkeypatch.setattr(service.subprocess, "run", run)
+    service._add_keychain("freqtrade-ai/v13/test-service", material)
+    command, kwargs = observed[0]
+    assert command.count("/usr/bin/security") == 1
+    assert command[1] == "add-generic-password"
+    assert kwargs["input"] == material + "\n" + material + "\n"
+
+
+def test_production_environment_uses_fourteen_fixed_keychain_backed_principals(
     monkeypatch,
 ) -> None:
-    service = _load_service("canonical_v13_api_service_six_identities")
+    service = _load_service("canonical_v13_api_service_fourteen_identities")
     monkeypatch.setattr(service, "_read_keychain", lambda _service: "x" * 64)
     environment = service._production_database_environment()
-    assert len(environment) == 6
+    assert len(environment) == 14
     assert {
-        value.split("://", 1)[1].split(":", 1)[0]
-        for value in environment.values()
+        value.split("://", 1)[1].split(":", 1)[0] for value in environment.values()
     } == {
         service.READER_PRINCIPAL,
         service.CONTROL_PRINCIPAL,
         *(spec[0] for spec in service.RESEARCH_PRINCIPAL_SPECS),
+        *(spec[0] for spec in service.PHASE9_PRINCIPAL_SPECS),
+    }
+
+
+def test_api_runtime_reads_only_three_api_routed_phase9_keychain_items(
+    monkeypatch,
+) -> None:
+    service = _load_service("canonical_v13_api_service_runtime_identities")
+    observed = []
+    monkeypatch.setattr(
+        service,
+        "_read_keychain",
+        lambda key: observed.append(key) or "x" * 64,
+    )
+    from app.canonical_v13.phase9_persistence import API_PHASE9_CAPABILITIES
+
+    environment = service._production_database_environment(
+        phase9_capabilities=API_PHASE9_CAPABILITIES
+    )
+    assert len(environment) == 9
+    assert not {
+        "freqtrade-ai/v13/phase9-order-password",
+        "freqtrade-ai/v13/phase9-signal-password",
+        "freqtrade-ai/v13/phase9-fill-password",
+        "freqtrade-ai/v13/phase9-ledger-password",
+        "freqtrade-ai/v13/phase9-reconciliation-password",
+        service.RUNTIME_READER_PRINCIPAL_SPEC[2],
+        service.RUNTIME_SIGNAL_SIGNER_KEYCHAIN_SERVICE,
+    }.intersection(observed)
+
+
+def test_runtime_reader_is_fifteenth_distinct_non_api_service_identity() -> None:
+    from app.canonical_v13.bootstrap import (
+        LOCAL_PHASE9_SERVICE_PRINCIPALS,
+        LOCAL_RESEARCH_SERVICE_PRINCIPALS,
+        LOCAL_RUNTIME_SERVICE_PRINCIPALS,
+        LOCAL_SERVICE_PRINCIPALS,
+    )
+
+    identities = {
+        **LOCAL_SERVICE_PRINCIPALS,
+        **LOCAL_RESEARCH_SERVICE_PRINCIPALS,
+        **LOCAL_PHASE9_SERVICE_PRINCIPALS,
+        **LOCAL_RUNTIME_SERVICE_PRINCIPALS,
+    }
+    assert len(LOCAL_PHASE9_SERVICE_PRINCIPALS) == 8
+    assert len(identities) == 15
+    assert LOCAL_RUNTIME_SERVICE_PRINCIPALS == {
+        "freqtrade_ai_v13_runtime_login": "canonical_runtime_reader"
     }
 
 
@@ -118,6 +190,16 @@ def test_provision_fails_closed_before_database_write_on_existing_keychain(
         match="BLOCKED_KEYCHAIN_ITEM_ALREADY_EXISTS",
     ):
         service.provision_research_principals()
+    with pytest.raises(
+        service.CanonicalServiceBlocked,
+        match="BLOCKED_KEYCHAIN_ITEM_ALREADY_EXISTS",
+    ):
+        service.provision_phase9_principals()
+    with pytest.raises(
+        service.CanonicalServiceBlocked,
+        match="BLOCKED_KEYCHAIN_ITEM_ALREADY_EXISTS",
+    ):
+        service.provision_runtime_reader()
 
 
 def test_research_provision_requires_empty_current_authority_before_writes(
@@ -127,9 +209,7 @@ def test_research_provision_requires_empty_current_authority_before_writes(
     monkeypatch.setattr(service, "_read_keychain", lambda _service: None)
 
     def blocked_preflight() -> None:
-        raise service.CanonicalServiceBlocked(
-            "BLOCKED_RESEARCH_AUTHORITY_PREFLIGHT"
-        )
+        raise service.CanonicalServiceBlocked("BLOCKED_RESEARCH_AUTHORITY_PREFLIGHT")
 
     monkeypatch.setattr(
         service,

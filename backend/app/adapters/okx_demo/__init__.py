@@ -9,6 +9,8 @@ from app.adapters.okx_demo.models import (
     ContractConversion,
     ExecutionAttestationBundle,
     InstrumentSpec,
+    LeverageAdjustmentInfo,
+    MaximumOrderQuantity,
     OkxReadSnapshot,
     SnapshotMetadata,
 )
@@ -31,6 +33,8 @@ __all__ = [
     "ContractConversion",
     "ExecutionAttestationBundle",
     "InstrumentSpec",
+    "LeverageAdjustmentInfo",
+    "MaximumOrderQuantity",
     "OkxDemoCredentialProvider",
     "OkxDemoCredentialsUnavailable",
     "OkxDemoReadAdapter",

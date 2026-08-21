@@ -60,6 +60,31 @@ RESEARCH_PRINCIPAL_SPECS = (
         "freqtrade-ai/v13/research-optimization-password",
     ),
 )
+PHASE9_PRINCIPAL_SPECS = tuple(
+    (
+        f"freqtrade_ai_v13_{name}_login",
+        f"freqtrade_ai_v13_{name}_writer",
+        f"freqtrade-ai/v13/phase9-{name}-password",
+    )
+    for name in (
+        "approval",
+        "deployment",
+        "signal",
+        "risk",
+        "order",
+        "fill",
+        "ledger",
+        "reconciliation",
+    )
+)
+RUNTIME_READER_PRINCIPAL_SPEC = (
+    "freqtrade_ai_v13_runtime_login",
+    "freqtrade_ai_v13_runtime_reader",
+    "freqtrade-ai/v13/runtime-reader-password",
+)
+RUNTIME_SIGNAL_SIGNER_KEYCHAIN_SERVICE = (
+    "freqtrade-ai/v13/runtime-signal-receipt-hmac-v1"
+)
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BACKEND_PYTHON = REPO_ROOT / "backend" / ".venv" / "bin" / "python"
 SCRIPT_PATH = Path(__file__).resolve()
@@ -90,8 +115,7 @@ def _scram_verifier(material: str, *, salt: bytes | None = None) -> str:
     encoded_stored = base64.b64encode(stored_key).decode("ascii")
     encoded_server = base64.b64encode(server_key).decode("ascii")
     return (
-        f"SCRAM-SHA-256${iterations}:{encoded_salt}$"
-        f"{encoded_stored}:{encoded_server}"
+        f"SCRAM-SHA-256${iterations}:{encoded_salt}${encoded_stored}:{encoded_server}"
     )
 
 
@@ -303,9 +327,7 @@ def _require_research_authority_preprovisioned() -> None:
                 require_no_research_rows=True,
             )
     except Exception as exc:
-        raise CanonicalServiceBlocked(
-            "BLOCKED_RESEARCH_AUTHORITY_PREFLIGHT"
-        ) from exc
+        raise CanonicalServiceBlocked("BLOCKED_RESEARCH_AUTHORITY_PREFLIGHT") from exc
     finally:
         engine.dispose()
     if not verification.accepted or verification.state != "CURRENT":
@@ -394,6 +416,176 @@ def provision_research_principals() -> dict[str, object]:
     }
 
 
+def _require_phase9_schema_preprovisioned() -> None:
+    sys.path.insert(0, str(REPO_ROOT / "backend"))
+    from sqlalchemy import create_engine  # noqa: PLC0415
+
+    from app.canonical_v13.phase9_schema_upgrade import (  # noqa: PLC0415
+        verify_phase9_schema_upgrade,
+    )
+
+    engine = create_engine(
+        URL.create("postgresql+psycopg", database=DATABASE_NAME),
+        pool_pre_ping=True,
+    )
+    try:
+        with engine.connect() as connection:
+            verification = verify_phase9_schema_upgrade(connection)
+    except Exception as exc:
+        raise CanonicalServiceBlocked("BLOCKED_PHASE9_SCHEMA_PREFLIGHT") from exc
+    finally:
+        engine.dispose()
+    if verification.status != "ACCEPTED":
+        raise CanonicalServiceBlocked("BLOCKED_PHASE9_SCHEMA_PREFLIGHT")
+
+
+def _grant_phase9_database_connect(connection: psycopg.Connection[Any]) -> None:
+    for _principal, capability, _service in PHASE9_PRINCIPAL_SPECS:
+        connection.execute(
+            sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(
+                sql.Identifier(DATABASE_NAME), sql.Identifier(capability)
+            )
+        )
+
+
+def provision_phase9_principals() -> dict[str, object]:
+    """Add eight exact execution LOGINs only after the Phase 9 schema is current."""
+
+    services = tuple(spec[2] for spec in PHASE9_PRINCIPAL_SPECS)
+    if any(_read_keychain(service) is not None for service in services):
+        raise CanonicalServiceBlocked("BLOCKED_KEYCHAIN_ITEM_ALREADY_EXISTS")
+    _require_phase9_schema_preprovisioned()
+    principals = tuple(spec[0] for spec in PHASE9_PRINCIPAL_SPECS)
+    capabilities = tuple(spec[1] for spec in PHASE9_PRINCIPAL_SPECS)
+    with _admin_connection() as connection:
+        existing = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT rolname FROM pg_roles WHERE rolname = ANY(%s)",
+                (list(principals),),
+            )
+        }
+        observed_capabilities = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT rolname FROM pg_roles WHERE rolname = ANY(%s)",
+                (list(capabilities),),
+            )
+        }
+    if existing:
+        raise CanonicalServiceBlocked("BLOCKED_LOGIN_PRINCIPAL_ALREADY_EXISTS")
+    if observed_capabilities != set(capabilities):
+        raise CanonicalServiceBlocked("BLOCKED_CAPABILITY_ROLE_MISSING")
+
+    materials = {principal: secrets.token_urlsafe(48) for principal in principals}
+    added: list[str] = []
+    provisioned = False
+    try:
+        for principal, _capability, service in PHASE9_PRINCIPAL_SPECS:
+            _add_keychain(service, materials[principal])
+            added.append(service)
+        with _admin_connection() as connection:
+            with connection.transaction():
+                for principal, capability, _service in PHASE9_PRINCIPAL_SPECS:
+                    connection.execute(
+                        sql.SQL(
+                            "CREATE ROLE {} LOGIN NOSUPERUSER NOCREATEDB "
+                            "NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS "
+                            "CONNECTION LIMIT 2 PASSWORD {}"
+                        ).format(
+                            sql.Identifier(principal),
+                            sql.Literal(_scram_verifier(materials[principal])),
+                        )
+                    )
+                    connection.execute(
+                        sql.SQL("GRANT {} TO {}").format(
+                            sql.Identifier(capability), sql.Identifier(principal)
+                        )
+                    )
+                _grant_phase9_database_connect(connection)
+        provisioned = True
+    finally:
+        if not provisioned:
+            for service in reversed(added):
+                _delete_new_keychain(service)
+    return {
+        "status": "PROVISIONED",
+        "database": DATABASE_NAME,
+        "principals": list(principals),
+        "capabilities": list(capabilities),
+        "keychain_items": len(added),
+    }
+
+
+def provision_runtime_reader() -> dict[str, object]:
+    """Provision one non-API runtime reader LOGIN plus its receipt HMAC key."""
+
+    principal, capability, password_service = RUNTIME_READER_PRINCIPAL_SPEC
+    services = (password_service, RUNTIME_SIGNAL_SIGNER_KEYCHAIN_SERVICE)
+    if any(_read_keychain(service) is not None for service in services):
+        raise CanonicalServiceBlocked("BLOCKED_KEYCHAIN_ITEM_ALREADY_EXISTS")
+    _require_phase9_schema_preprovisioned()
+    with _admin_connection() as connection:
+        existing = connection.execute(
+            "SELECT rolname FROM pg_roles WHERE rolname = ANY(%s)",
+            ([principal],),
+        ).fetchall()
+        capability_exists = connection.execute(
+            "SELECT rolname FROM pg_roles WHERE rolname = ANY(%s)",
+            ([capability],),
+        ).fetchall()
+    if existing:
+        raise CanonicalServiceBlocked("BLOCKED_LOGIN_PRINCIPAL_ALREADY_EXISTS")
+    if {str(row[0]) for row in capability_exists} != {capability}:
+        raise CanonicalServiceBlocked("BLOCKED_CAPABILITY_ROLE_MISSING")
+    database_login_material = secrets.token_urlsafe(48)
+    signer_key = secrets.token_urlsafe(64)
+    added: list[str] = []
+    provisioned = False
+    try:
+        for service, value in (
+            (password_service, database_login_material),
+            (RUNTIME_SIGNAL_SIGNER_KEYCHAIN_SERVICE, signer_key),
+        ):
+            _add_keychain(service, value)
+            added.append(service)
+        with _admin_connection() as connection:
+            with connection.transaction():
+                connection.execute(
+                    sql.SQL(
+                        "CREATE ROLE {} LOGIN NOSUPERUSER NOCREATEDB "
+                        "NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS "
+                        "CONNECTION LIMIT 2 PASSWORD {}"
+                    ).format(
+                        sql.Identifier(principal),
+                        sql.Literal(_scram_verifier(database_login_material)),
+                    )
+                )
+                connection.execute(
+                    sql.SQL("GRANT {} TO {}").format(
+                        sql.Identifier(capability), sql.Identifier(principal)
+                    )
+                )
+                connection.execute(
+                    sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(
+                        sql.Identifier(DATABASE_NAME), sql.Identifier(capability)
+                    )
+                )
+        provisioned = True
+    finally:
+        if not provisioned:
+            for service in reversed(added):
+                _delete_new_keychain(service)
+    return {
+        "status": "PROVISIONED",
+        "database": DATABASE_NAME,
+        "principals": [principal],
+        "capabilities": [capability],
+        "keychain_items": 2,
+        "api_reads_runtime_identity": False,
+    }
+
+
 def _verify_research_provisioned_state():
     sys.path.insert(0, str(REPO_ROOT / "backend"))
     from sqlalchemy import create_engine  # noqa: PLC0415
@@ -449,12 +641,8 @@ def repair_research_database_connect() -> dict[str, object]:
                 (list(capabilities),),
             )
         }
-        if set(connect_states) != set(capabilities) or any(
-            connect_states.values()
-        ):
-            raise CanonicalServiceBlocked(
-                "BLOCKED_RESEARCH_CONNECT_REPAIR_PARTIAL"
-            )
+        if set(connect_states) != set(capabilities) or any(connect_states.values()):
+            raise CanonicalServiceBlocked("BLOCKED_RESEARCH_CONNECT_REPAIR_PARTIAL")
         with connection.transaction():
             _grant_research_database_connect(connection)
 
@@ -490,7 +678,9 @@ def canonical_control_database_url() -> str:
     return _database_url(CONTROL_PRINCIPAL, CONTROL_KEYCHAIN_SERVICE)
 
 
-def _production_database_environment() -> dict[str, str]:
+def _production_database_environment(
+    *, phase9_capabilities: tuple[str, ...] | None = None
+) -> dict[str, str]:
     sys.path.insert(0, str(REPO_ROOT / "backend"))
     from app.canonical_v13.production import (  # noqa: PLC0415
         CONTROL_DATABASE_URL_ENV,
@@ -502,6 +692,9 @@ def _production_database_environment() -> dict[str, str]:
         SCORING_DATABASE_URL_ENV,
         VALIDATION_DATABASE_URL_ENV,
     )
+    from app.canonical_v13.phase9_persistence import (  # noqa: PLC0415
+        PHASE9_PERSISTENCE_ENV_BY_CAPABILITY,
+    )
 
     research_environment_names = (
         VALIDATION_DATABASE_URL_ENV,
@@ -509,6 +702,24 @@ def _production_database_environment() -> dict[str, str]:
         QUALIFICATION_DATABASE_URL_ENV,
         OPTIMIZATION_DATABASE_URL_ENV,
     )
+    resolved_phase9_capabilities = (
+        tuple(PHASE9_PERSISTENCE_ENV_BY_CAPABILITY)
+        if phase9_capabilities is None
+        else phase9_capabilities
+    )
+    if any(
+        capability not in PHASE9_PERSISTENCE_ENV_BY_CAPABILITY
+        for capability in resolved_phase9_capabilities
+    ):
+        raise CanonicalServiceBlocked("BLOCKED_PHASE9_PERSISTENCE_CAPABILITY_SET")
+    phase9_specs = {
+        logical_capability: (principal, service)
+        for logical_capability, (principal, _physical_capability, service) in zip(
+            PHASE9_PERSISTENCE_ENV_BY_CAPABILITY,
+            PHASE9_PRINCIPAL_SPECS,
+            strict=True,
+        )
+    }
     return {
         READER_DATABASE_URL_ENV: _database_url(
             READER_PRINCIPAL, READER_KEYCHAIN_SERVICE
@@ -523,6 +734,12 @@ def _production_database_environment() -> dict[str, str]:
                 RESEARCH_PRINCIPAL_SPECS,
                 strict=True,
             )
+        },
+        **{
+            PHASE9_PERSISTENCE_ENV_BY_CAPABILITY[capability]: _database_url(
+                *phase9_specs[capability]
+            )
+            for capability in resolved_phase9_capabilities
         },
     }
 
@@ -540,10 +757,15 @@ def serve(port: int) -> None:
     from app.canonical_v13.production import (  # noqa: PLC0415
         create_app,
     )
+    from app.canonical_v13.phase9_persistence import (  # noqa: PLC0415
+        API_PHASE9_CAPABILITIES,
+    )
     import uvicorn  # noqa: PLC0415
 
     app = create_app(
-        _production_database_environment(),
+        _production_database_environment(
+            phase9_capabilities=API_PHASE9_CAPABILITIES
+        ),
         market_artifact_root=REPO_ROOT / "user_data" / "data",
     )
     uvicorn.run(app, host="127.0.0.1", port=port, access_log=False)
@@ -629,6 +851,7 @@ def install(port: int) -> dict[str, object]:
         READER_KEYCHAIN_SERVICE,
         CONTROL_KEYCHAIN_SERVICE,
         *(spec[2] for spec in RESEARCH_PRINCIPAL_SPECS),
+        *(spec[2] for spec in PHASE9_PRINCIPAL_SPECS),
     )
     if any(_read_keychain(service) is None for service in required_services):
         raise CanonicalServiceBlocked("BLOCKED_KEYCHAIN_ITEM_MISSING")
@@ -639,9 +862,7 @@ def install(port: int) -> dict[str, object]:
         plistlib.dump(_plist_payload(port), handle, sort_keys=True)
     temporary.replace(PLIST_PATH)
     _run(["launchctl", "bootout", _launchctl_target()])
-    completed = _run(
-        ["launchctl", "bootstrap", _launchctl_domain(), str(PLIST_PATH)]
-    )
+    completed = _run(["launchctl", "bootstrap", _launchctl_domain(), str(PLIST_PATH)])
     if completed.returncode != 0:
         raise CanonicalServiceBlocked("BLOCKED_LAUNCHCTL_BOOTSTRAP_FAILED")
     return {"status": "INSTALLED", "label": LABEL, "port": port}
@@ -655,9 +876,7 @@ def status(port: int) -> dict[str, object]:
     if loaded:
         for path, target in (("healthz", "health"), ("readyz", "ready")):
             try:
-                with urlopen(
-                    f"http://127.0.0.1:{port}/{path}", timeout=2
-                ) as response:
+                with urlopen(f"http://127.0.0.1:{port}/{path}", timeout=2) as response:
                     payload = json.loads(response.read())
                 value = str(payload.get("status", "UNKNOWN"))
             except (OSError, URLError, ValueError, json.JSONDecodeError):
@@ -699,6 +918,8 @@ def main(argv: list[str] | None = None) -> int:
         choices=(
             "provision",
             "provision-research",
+            "provision-phase9",
+            "provision-runtime-reader",
             "repair-research-connect",
             "serve",
             "install",
@@ -713,6 +934,10 @@ def main(argv: list[str] | None = None) -> int:
             payload = provision_principals()
         elif args.command == "provision-research":
             payload = provision_research_principals()
+        elif args.command == "provision-phase9":
+            payload = provision_phase9_principals()
+        elif args.command == "provision-runtime-reader":
+            payload = provision_runtime_reader()
         elif args.command == "repair-research-connect":
             payload = repair_research_database_connect()
         elif args.command == "serve":
@@ -727,7 +952,12 @@ def main(argv: list[str] | None = None) -> int:
     except CanonicalServiceBlocked as exc:
         payload = {"status": "BLOCKED", "reason": str(exc)}
     print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
-    return 0 if payload["status"] in {"PROVISIONED", "REPAIRED", "INSTALLED", "READY", "RESTARTED"} else 2
+    return (
+        0
+        if payload["status"]
+        in {"PROVISIONED", "REPAIRED", "INSTALLED", "READY", "RESTARTED"}
+        else 2
+    )
 
 
 if __name__ == "__main__":

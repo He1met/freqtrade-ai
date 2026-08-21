@@ -41,7 +41,9 @@ from app.adapters.okx_demo.models import (
     ExecutionAttestationBundle,
     FundingRate,
     InstrumentSpec,
+    LeverageAdjustmentInfo,
     LeverageInfo,
+    MaximumOrderQuantity,
     OkxReadSnapshot,
     OpenInterest,
     OrderBook,
@@ -82,6 +84,8 @@ DEFAULT_TTLS = {
     "balance": 30,
     "positions": 15,
     "leverage": 60,
+    "exchange_max_leverage": 60,
+    "maximum_order_quantity": 15,
     "fees": 3600,
     "order": 15,
     "pending_orders": 15,
@@ -160,6 +164,15 @@ class OkxDemoReadClient(Protocol):
     def balance(self, currency: Optional[str] = None) -> OkxReadSnapshot: ...
     def positions(self, inst_id: Optional[str] = None) -> OkxReadSnapshot: ...
     def leverage(self, inst_id: str) -> OkxReadSnapshot: ...
+    def exchange_max_leverage(self, inst_id: str) -> OkxReadSnapshot: ...
+    def maximum_order_quantity(
+        self,
+        inst_id: str,
+        *,
+        td_mode: str,
+        price: Decimal,
+        leverage: Decimal,
+    ) -> OkxReadSnapshot: ...
     def fees(self, inst_id: str) -> OkxReadSnapshot: ...
     def order(
         self,
@@ -434,6 +447,65 @@ class OkxDemoReadAdapter:
             ],
         )
 
+    def exchange_max_leverage(self, inst_id: str) -> OkxReadSnapshot:
+        """Read the account-authoritative long-side maximum for a 14x request."""
+
+        inst_id = self._swap_id(inst_id)
+        return self._request(
+            resource="exchange_max_leverage",
+            path="/api/v5/account/adjust-leverage-info",
+            query={
+                "instType": "SWAP",
+                "mgnMode": "isolated",
+                "lever": "14",
+                "posSide": "long",
+                "instId": inst_id,
+            },
+            authenticated=True,
+            parser=lambda data: self._exchange_max_leverage(data, inst_id=inst_id),
+        )
+
+    def maximum_order_quantity(
+        self,
+        inst_id: str,
+        *,
+        td_mode: str,
+        price: Decimal,
+        leverage: Decimal,
+    ) -> OkxReadSnapshot:
+        """Read the exact isolated long-side maximum size for the frozen limit."""
+
+        inst_id = self._swap_id(inst_id)
+        if td_mode != "isolated":
+            self._invalid_request("td_mode must be isolated")
+        for field, value in (("price", price), ("leverage", leverage)):
+            if (
+                not isinstance(value, Decimal)
+                or not value.is_finite()
+                or value <= 0
+            ):
+                self._invalid_request(f"{field} must be a positive Decimal")
+        price_text = format(price, "f")
+        leverage_text = format(leverage, "f")
+        return self._request(
+            resource="maximum_order_quantity",
+            path="/api/v5/account/max-size",
+            query={
+                "instId": inst_id,
+                "tdMode": td_mode,
+                "px": price_text,
+                "leverage": leverage_text,
+            },
+            authenticated=True,
+            parser=lambda data: self._maximum_order_quantity(
+                data,
+                inst_id=inst_id,
+                td_mode=td_mode,
+                price=price,
+                leverage=leverage,
+            ),
+        )
+
     def fees(self, inst_id: Optional[str] = None) -> OkxReadSnapshot:
         query = {"instType": "SWAP"}
         if inst_id is not None:
@@ -503,12 +575,18 @@ class OkxDemoReadAdapter:
             before=before,
             limit=limit,
         )
+        expected_inst_id = query.get("instId")
         return self._request(
             resource="pending_orders",
             path="/api/v5/trade/orders-pending",
             query=query,
             authenticated=True,
-            parser=lambda data: [self._order(item) for item in data],
+            parser=lambda data: [
+                self._order(
+                    self._require_identity(item, "instId", expected_inst_id)
+                )
+                for item in data
+            ],
             allow_empty=True,
         )
 
@@ -1023,6 +1101,65 @@ class OkxDemoReadAdapter:
             position_side=position_side,
             leverage=Decimal(item["lever"]),
         )
+
+    @staticmethod
+    def _exchange_max_leverage(
+        data: list[Any], *, inst_id: str
+    ) -> list[LeverageAdjustmentInfo]:
+        if len(data) != 1 or not isinstance(data[0], Mapping):
+            raise ValueError("adjust-leverage-info response must be singular")
+        item = data[0]
+        expected_identity = {
+            "instId": inst_id,
+            "instType": "SWAP",
+            "mgnMode": "isolated",
+            "lever": "14",
+            "posSide": "long",
+        }
+        for field, expected in expected_identity.items():
+            if field in item and item[field] != expected:
+                raise ValueError(f"adjust-leverage-info {field} identity drifted")
+        if not isinstance(item.get("existOrd"), bool):
+            raise ValueError("adjust-leverage-info existOrd must be boolean")
+        return [
+            LeverageAdjustmentInfo(
+                inst_id=inst_id,
+                inst_type="SWAP",
+                margin_mode="isolated",
+                position_side="long",
+                requested_leverage=Decimal("14"),
+                max_leverage=Decimal(item["maxLever"]),
+                min_leverage=Decimal(item["minLever"]),
+                has_pending_orders=item["existOrd"],
+            )
+        ]
+
+    @staticmethod
+    def _maximum_order_quantity(
+        data: list[Any],
+        *,
+        inst_id: str,
+        td_mode: str,
+        price: Decimal,
+        leverage: Decimal,
+    ) -> list[MaximumOrderQuantity]:
+        if len(data) != 1 or not isinstance(data[0], Mapping):
+            raise ValueError("max-size response must be singular")
+        item = data[0]
+        if item.get("instId") != inst_id:
+            raise ValueError("max-size instId identity drifted")
+        max_buy = Decimal(str(item.get("maxBuy")))
+        if not max_buy.is_finite() or max_buy < 0:
+            raise ValueError("max-size maxBuy must be finite and nonnegative")
+        return [
+            MaximumOrderQuantity(
+                inst_id=inst_id,
+                margin_mode=td_mode,
+                price=price,
+                leverage=leverage,
+                max_buy=max_buy,
+            )
+        ]
 
     @staticmethod
     def _long_short_position_side(item: Mapping[str, Any]) -> str:
@@ -2327,6 +2464,19 @@ def create_attested_okx_demo_read_adapter(
 
             def leverage(self, inst_id):
                 return self._engine.leverage(inst_id)
+
+            def exchange_max_leverage(self, inst_id):
+                return self._engine.exchange_max_leverage(inst_id)
+
+            def maximum_order_quantity(
+                self, inst_id, *, td_mode, price, leverage
+            ):
+                return self._engine.maximum_order_quantity(
+                    inst_id,
+                    td_mode=td_mode,
+                    price=price,
+                    leverage=leverage,
+                )
 
             def fees(self, inst_id):
                 return self._engine.fees(inst_id)

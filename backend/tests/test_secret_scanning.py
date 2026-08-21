@@ -13,7 +13,9 @@ def write_file(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def test_secret_scan_blocks_secret_shaped_values_without_rendering_values(tmp_path) -> None:
+def test_secret_scan_blocks_secret_shaped_values_without_rendering_values(
+    tmp_path,
+) -> None:
     write_file(
         tmp_path / "config" / "local.yaml",
         """
@@ -142,8 +144,12 @@ def test_secret_scan_allows_non_secret_authorization_references_but_not_headers(
         tmp_path / "config" / "authorization.py",
         """
 authorization_id = uuid4()
+authorization_digest = receipt.digest
 authorization_receipt_digest = receipt.digest
 authorization_consumption: ResearchAuthorizationConsumption | None
+EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE = table("execution_risk_budget_authorizations")
+plist_secret_count = 0
+risk_budget_authorization_id = budget.authorization_id
 _SECRET_PATTERNS: Final[tuple[object, ...]] = ()
 authorization = sk-live-header-secret
 """.strip(),
@@ -203,13 +209,11 @@ secret_id: sk-live-secret-record
             ["secret_id", "api_secret"],
         ),
         (
-            "api_secret: Mapped[str] = "
-            "mapped_column(default='sk-live-hidden')",
+            "api_secret: Mapped[str] = mapped_column(default='sk-live-hidden')",
             ["api_secret"],
         ),
         (
-            "secret_id: Mapped[str] = "
-            "mapped_column(default='sk-live-hidden')",
+            "secret_id: Mapped[str] = mapped_column(default='sk-live-hidden')",
             ["secret_id"],
         ),
         (

@@ -12,6 +12,7 @@ from sqlalchemy import create_engine
 from app.canonical_v13.api import API_PREFIX
 from app.canonical_v13 import production
 from app.canonical_v13.research_persistence import research_service_principal
+from app.canonical_v13.phase9_persistence import phase9_service_principal
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -108,10 +109,8 @@ def test_production_composition_requires_two_roles_on_one_postgresql_database(
     assert "BLOCKED_CANONICAL_DATABASE_URL_UNSET" in str(missing.value)
 
     base = {
-        production.READER_DATABASE_URL_ENV:
-            "postgresql+psycopg://freqtrade_ai_v13_api_login@127.0.0.1/canonical_v13",
-        production.CONTROL_DATABASE_URL_ENV:
-            "postgresql+psycopg://freqtrade_ai_v13_control_login@127.0.0.1/canonical_v13",
+        production.READER_DATABASE_URL_ENV: "postgresql+psycopg://freqtrade_ai_v13_api_login@127.0.0.1/canonical_v13",
+        production.CONTROL_DATABASE_URL_ENV: "postgresql+psycopg://freqtrade_ai_v13_control_login@127.0.0.1/canonical_v13",
         **{
             environment_name: (
                 "postgresql+psycopg://"
@@ -122,14 +121,24 @@ def test_production_composition_requires_two_roles_on_one_postgresql_database(
                 production.RESEARCH_PERSISTENCE_ENV_BY_CAPABILITY.items()
             )
         },
+        **{
+            environment_name: (
+                "postgresql+psycopg://"
+                f"{phase9_service_principal(production.local_role_mapping(), logical_role)}"
+                "@127.0.0.1/canonical_v13"
+            )
+            for logical_role, environment_name in (
+                production.PHASE9_PERSISTENCE_ENV_BY_CAPABILITY.items()
+            )
+        },
     }
     without_validation = dict(base)
     without_validation.pop(
-        production.RESEARCH_PERSISTENCE_ENV_BY_CAPABILITY[
-            "canonical_validation_writer"
-        ]
+        production.RESEARCH_PERSISTENCE_ENV_BY_CAPABILITY["canonical_validation_writer"]
     )
-    with pytest.raises(production.CanonicalProductionConfigurationBlocked) as missing_research:
+    with pytest.raises(
+        production.CanonicalProductionConfigurationBlocked
+    ) as missing_research:
         production.create_app(without_validation)
     assert "BLOCKED_RESEARCH_DATABASE_URL_UNSET" in str(missing_research.value)
 
@@ -146,13 +155,12 @@ def test_production_composition_requires_two_roles_on_one_postgresql_database(
         production.create_app(
             {
                 **base,
-                production.CONTROL_DATABASE_URL_ENV:
-                    "postgresql+psycopg://freqtrade_ai_v13_control_login@127.0.0.1/other_database",
+                production.CONTROL_DATABASE_URL_ENV: "postgresql+psycopg://freqtrade_ai_v13_control_login@127.0.0.1/other_database",
             }
         )
     assert "BLOCKED_CANONICAL_DATABASE_SPLIT" in str(split.value)
 
-    engines = [create_engine("sqlite+pysqlite:///:memory:") for _ in range(6)]
+    engines = [create_engine("sqlite+pysqlite:///:memory:") for _ in range(10)]
     calls = []
 
     def fake_create_engine(url, **kwargs):
@@ -162,13 +170,16 @@ def test_production_composition_requires_two_roles_on_one_postgresql_database(
     monkeypatch.setattr(production, "create_engine", fake_create_engine)
     app = production.create_app(base)
     try:
-        assert len(calls) == 6
+        assert len(calls) == 9
         assert all(call[1] == {"pool_pre_ping": True} for call in calls)
         assert {route.path for route in app.routes if route.path.startswith(API_PREFIX)}
         assert app.state.canonical_reader_engine is engines[0]
         assert app.state.canonical_control_engine is engines[1]
         assert set(app.state.canonical_research_engines) == set(
             production.RESEARCH_PERSISTENCE_ENV_BY_CAPABILITY
+        )
+        assert set(app.state.canonical_phase9_engines) == set(
+            production.API_PHASE9_CAPABILITIES
         )
         routes = {route.path for route in app.routes}
         assert "/healthz" in routes

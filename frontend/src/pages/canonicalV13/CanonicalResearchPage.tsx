@@ -2,6 +2,7 @@ import { useSearchParams } from "react-router-dom";
 
 import {
   fetchCanonicalConfigurations,
+  fetchCanonicalPhase9Readiness,
   fetchCanonicalResearchChain,
   fetchCanonicalResearchGates,
   fetchCanonicalResearchPlans,
@@ -11,7 +12,7 @@ import {
   fetchCanonicalStrategies,
   fetchCanonicalStrategy,
 } from "../../api/canonicalV13Client";
-import type { GateListProjection, ReadinessProjection, ResearchChainProjection } from "../../api/canonicalV13Types";
+import type { GateListProjection, Phase9AcceptanceStage, Phase9ReadinessProjection, ReadinessProjection, ResearchChainProjection, ResearchResultsProjection } from "../../api/canonicalV13Types";
 import { CopyableValue, PageHeader } from "../../components/DisplayPrimitives";
 import { CanonicalResearchStepper } from "./CanonicalResearchStepper";
 import { CanonicalResearchResults } from "./CanonicalResearchResults";
@@ -85,6 +86,68 @@ function ResearchChainCard({ chain }: { chain: ResearchChainProjection }) {
       </dl></details>
     </section>
   );
+}
+
+const PHASE9_STAGES: readonly Phase9AcceptanceStage[] = [
+  "QUALIFICATION_HANDOFF", "NO_ORDER_SOAK", "SIGNAL_RISK_SHADOW", "OKX_DEMO_CANARY", "RECOVERY_SOAK",
+];
+
+const PHASE9_STAGE_LABELS: Record<Phase9AcceptanceStage, string> = {
+  QUALIFICATION_HANDOFF: "资格交接",
+  NO_ORDER_SOAK: "A · 无订单运行",
+  SIGNAL_RISK_SHADOW: "B · 信号与风险影子",
+  OKX_DEMO_CANARY: "C · OKX Demo Canary",
+  RECOVERY_SOAK: "D · 恢复与重放",
+};
+
+function Phase9StageCard({ projection, stage }: { projection: ResearchResultsProjection; stage: Phase9AcceptanceStage }) {
+  const qualificationId = projection.qualification?.qualification_decision_id ?? "";
+  const query = useCanonicalQuery(
+    (signal) => fetchCanonicalPhase9Readiness({
+      qualification_decision_id: qualificationId,
+      strategy_version_id: projection.strategy_version_id,
+      configuration_bundle_id: projection.configuration_bundle_id,
+      market_snapshot_id: projection.market_snapshot_id,
+    }, stage, signal),
+    [qualificationId, projection.strategy_version_id, projection.configuration_bundle_id, projection.market_snapshot_id, stage],
+    Boolean(qualificationId && projection.qualification?.status === "QUALIFIED"),
+  );
+  const title = PHASE9_STAGE_LABELS[stage];
+  if (query.loading) return <CanonicalStatePanel description={`正在读取 ${title} 的持久化证据。`} kind="loading" title={`加载${title}`} />;
+  if (query.error) return <CanonicalQueryError error={query.error} title={`${title}状态未知`} />;
+  if (!query.data) return null;
+  const readiness = query.data as Phase9ReadinessProjection;
+  if (!canonicalStatusesKnown(readiness.status) || readiness.stage !== stage) {
+    return <CanonicalStatePanel description="Phase 9 projection 含未知状态或 stage 漂移；UI 不进行推断。" kind="unknown" reasonCodes={["UNKNOWN_CONTRACT_VALUE"]} title={`${title}合同漂移`} />;
+  }
+  return <section className="canonical-v13-panel" data-phase9-stage={stage}>
+    <div className="canonical-v13-heading-row"><h3>{title}</h3><CanonicalStatus status={readiness.status} /></div>
+    {readiness.status === "BLOCKED" ? <CanonicalStatePanel description="此阶段保持 fail closed；原因码与计数均来自 canonical API。" kind="blocked" reasonCodes={readiness.reason_codes} title={`${title}未获准`} /> : null}
+    <dl className="canonical-v13-definition-list">
+      <div><dt>订单</dt><dd>{readiness.execution_domain_counts.orders ?? "未知"}</dd></div>
+      <div><dt>Fill</dt><dd>{readiness.execution_domain_counts.fills ?? "未知"}</dd></div>
+      <div><dt>Ledger</dt><dd>{readiness.execution_domain_counts.ledger_entries ?? "未知"}</dd></div>
+      <div><dt>Reconciliation</dt><dd>{readiness.execution_domain_counts.reconciliation_runs ?? "未知"}</dd></div>
+    </dl>
+    <details className="canonical-v13-advanced-evidence"><summary>高级 Phase 9 回执</summary><dl className="canonical-v13-definition-list">
+      <div><dt>Qualification</dt><dd>{readiness.handoff ? <CopyableValue value={readiness.handoff.qualification_decision_id} /> : "未提供"}</dd></div>
+      <div><dt>Topology digest</dt><dd><CopyableValue value={readiness.topology_digest} /></dd></div>
+      <div><dt>Readiness receipt</dt><dd><CopyableValue value={readiness.receipt_digest} /></dd></div>
+    </dl></details>
+  </section>;
+}
+
+function Phase9ReadinessBoard({ projection }: { projection: ResearchResultsProjection }) {
+  if (projection.qualification?.status !== "QUALIFIED") {
+    return <CanonicalStatePanel description="仅 API 明确返回 QUALIFIED 的 exact research result 才会读取 Phase 9 readiness。" kind="blocked" reasonCodes={["EXACT_QUALIFICATION_HANDOFF_REQUIRED"]} title="Phase 9 未获得资格交接" />;
+  }
+  return <section className="canonical-v13-panel" aria-label="Phase 9 分段验收">
+    <div className="canonical-v13-heading-row"><h2>Phase 9 分段验收</h2><CanonicalStatus status="QUALIFIED" /></div>
+    <p>只读投影 A–D 的持久化证据；本页面不提供 deployment、runtime 或 order 写入控制。</p>
+    <div className="canonical-v13-readiness-grid">
+      {PHASE9_STAGES.map((stage) => <Phase9StageCard key={stage} projection={projection} stage={stage} />)}
+    </div>
+  </section>;
 }
 
 function GateReceiptsCard() {
@@ -229,6 +292,7 @@ export function CanonicalResearchPage() {
       </div> : null}
       {url.valid && selectedChain.data && !planStale ? <ResearchChainCard chain={selectedChain.data} /> : null}
       {url.valid && selectedResults.data && resultsKnown && !resultsLineageConflict && !strategyStale && !targetStale && !planStale ? <CanonicalResearchResults projection={selectedResults.data} /> : null}
+      {url.valid && selectedResults.data && resultsKnown && !resultsLineageConflict && !strategyStale && !targetStale && !planStale ? <Phase9ReadinessBoard projection={selectedResults.data} /> : null}
       {url.valid ? <GateReceiptsCard /> : null}
       {(url.values.target || url.values.strategy) ? <CanonicalStatePanel description="Target/strategy 仅保存 committed URL selection；当前 readiness DTO 未提供按这两项过滤的事实，UI 不据此重算 readiness。" kind="pending" title="选择上下文" /> : null}
     </div>

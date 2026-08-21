@@ -5,7 +5,7 @@ from __future__ import annotations
 from hashlib import sha256
 import json
 
-from sqlalchemy import Connection
+from sqlalchemy import Connection, text
 
 from app.canonical_v13.genesis import verify_canonical_genesis
 from app.canonical_v13.manifest import CANONICAL_BUSINESS_SCHEMA
@@ -58,11 +58,24 @@ def require_identity(value: str, *, field: str, maximum: int = 200) -> str:
 
 
 def require_digest(value: str, *, field: str) -> str:
-    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+    if len(value) != 64 or any(
+        character not in "0123456789abcdef" for character in value
+    ):
         raise CanonicalExecutionChainBlocked(
             "BLOCKED_EXECUTION_DIGEST", f"{field} is not lowercase SHA-256"
         )
     return value
+
+
+def lock_execution_boundary(connection: Connection, *, key: str) -> None:
+    """Serialize one logical append/replay boundary in PostgreSQL transactions."""
+
+    require_identity(key, field="lock_key", maximum=500)
+    if connection.dialect.name == "postgresql":
+        connection.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": f"canonical-v13-execution:{key}"},
+        )
 
 
 __all__ = [
@@ -71,4 +84,5 @@ __all__ = [
     "require_canonical_execution",
     "require_digest",
     "require_identity",
+    "lock_execution_boundary",
 ]

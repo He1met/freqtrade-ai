@@ -250,9 +250,9 @@ BEGIN
        AND acl.grantee = runtime_role.oid
        AND acl.privilege_type = 'SELECT'
        AND acl.is_grantable IS FALSE;
-    IF observed_count IS DISTINCT FROM 55::bigint THEN
+    IF observed_count IS DISTINCT FROM 56::bigint THEN
         RAISE EXCEPTION
-            'BLOCKED_PRE_REPAIR_SELECT_CARDINALITY: expected 55, observed %',
+            'BLOCKED_PRE_REPAIR_SELECT_CARDINALITY: expected 56, observed %',
             observed_count;
     END IF;
     SELECT count(*) INTO observed_count

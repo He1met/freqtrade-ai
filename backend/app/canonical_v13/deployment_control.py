@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
 from typing import Mapping, Protocol
@@ -12,6 +12,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import Connection, select
 
 from app.canonical_v13.genesis import verify_canonical_genesis
+from app.canonical_v13.execution_common import lock_execution_boundary
 from app.canonical_v13.manifest import CANONICAL_BUSINESS_SCHEMA
 from app.canonical_v13.models import (
     CONFIGURATION_BUNDLES_TABLE,
@@ -25,6 +26,7 @@ from app.canonical_v13.runtime_contract import (
     FrozenRuntimeLaunchSpec,
     RuntimeObservationReceipt,
     frozen_runtime_launch_spec_digest,
+    verify_runtime_observation_receipt,
 )
 
 
@@ -38,8 +40,7 @@ class CanonicalDeploymentBlocked(RuntimeError):
 class RuntimeLauncherPort(Protocol):
     evidence_class: str
 
-    def launch(self, spec: FrozenRuntimeLaunchSpec) -> RuntimeObservationReceipt:
-        ...
+    def launch(self, spec: FrozenRuntimeLaunchSpec) -> RuntimeObservationReceipt: ...
 
 
 @dataclass(frozen=True)
@@ -110,18 +111,25 @@ def create_demo_deployment(
     deployment_approval_id: UUID,
 ) -> DeploymentResult:
     effective = _require_canonical(connection)
-    approval = effective.execute(
-        select(DEPLOYMENT_APPROVALS_TABLE).where(
-            DEPLOYMENT_APPROVALS_TABLE.c.id == deployment_approval_id
+    lock_execution_boundary(effective, key=f"demo-deployment:{deployment_approval_id}")
+    approval = (
+        effective.execute(
+            select(DEPLOYMENT_APPROVALS_TABLE).where(
+                DEPLOYMENT_APPROVALS_TABLE.c.id == deployment_approval_id
+            )
         )
-    ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+    )
     decision = (
         effective.execute(
             select(QUALIFICATION_DECISIONS_TABLE).where(
                 QUALIFICATION_DECISIONS_TABLE.c.id
                 == approval["qualification_decision_id"]
             )
-        ).mappings().one_or_none()
+        )
+        .mappings()
+        .one_or_none()
         if approval is not None
         else None
     )
@@ -134,11 +142,15 @@ def create_demo_deployment(
         raise CanonicalDeploymentBlocked(
             "BLOCKED_ACTIVE_APPROVAL_REQUIRED", "approval/qualification gate failed"
         )
-    bundle = effective.execute(
-        select(CONFIGURATION_BUNDLES_TABLE).where(
-            CONFIGURATION_BUNDLES_TABLE.c.id == decision["configuration_bundle_id"]
+    bundle = (
+        effective.execute(
+            select(CONFIGURATION_BUNDLES_TABLE).where(
+                CONFIGURATION_BUNDLES_TABLE.c.id == decision["configuration_bundle_id"]
+            )
         )
-    ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+    )
     if (
         bundle is None
         or bundle["bundle_digest"] != decision["configuration_bundle_digest"]
@@ -154,6 +166,35 @@ def create_demo_deployment(
         decision=decision,
         bundle=bundle,
     )
+    existing = (
+        effective.execute(
+            select(DEPLOYMENTS_TABLE).where(
+                DEPLOYMENTS_TABLE.c.deployment_approval_id == deployment_approval_id
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if existing is not None:
+        if (
+            existing["strategy_version_id"] != decision["strategy_version_id"]
+            or existing["configuration_bundle_id"] != bundle["id"]
+            or existing["configuration_bundle_digest"] != bundle["bundle_digest"]
+            or existing["market_snapshot_id"] != bundle["market_snapshot_id"]
+            or existing["market_snapshot_digest"] != bundle["market_snapshot_digest"]
+            or existing["demo_only"] is not True
+            or existing["allow_real_funds"] is not False
+            or existing["capability_digest"] != capability_digest
+        ):
+            raise CanonicalDeploymentBlocked(
+                "BLOCKED_DEPLOYMENT_REPLAY_DRIFT",
+                "approval already has a different deployment receipt",
+            )
+        return DeploymentResult(
+            deployment_id=existing["id"],
+            capability_digest=capability_digest,
+            status=existing["status"],
+        )
     deployment_id = uuid4()
     effective.execute(
         DEPLOYMENTS_TABLE.insert().values(
@@ -191,25 +232,36 @@ def launch_demo_runtime(
     """Launch only through an injected port; simulator evidence never activates."""
 
     effective = _require_canonical(connection)
-    deployment = effective.execute(
-        select(DEPLOYMENTS_TABLE).where(DEPLOYMENTS_TABLE.c.id == deployment_id)
-    ).mappings().one_or_none()
-    if deployment is None or deployment["status"] != "PENDING":
+    deployment = (
+        effective.execute(
+            select(DEPLOYMENTS_TABLE).where(DEPLOYMENTS_TABLE.c.id == deployment_id)
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if deployment is None or deployment["status"] not in {"PENDING", "ACTIVE"}:
         raise CanonicalDeploymentBlocked(
             "BLOCKED_DEPLOYMENT_NOT_PENDING", str(deployment_id)
         )
-    approval = effective.execute(
-        select(DEPLOYMENT_APPROVALS_TABLE).where(
-            DEPLOYMENT_APPROVALS_TABLE.c.id
-            == deployment["deployment_approval_id"]
+    approval = (
+        effective.execute(
+            select(DEPLOYMENT_APPROVALS_TABLE).where(
+                DEPLOYMENT_APPROVALS_TABLE.c.id == deployment["deployment_approval_id"]
+            )
         )
-    ).mappings().one()
-    decision = effective.execute(
-        select(QUALIFICATION_DECISIONS_TABLE).where(
-            QUALIFICATION_DECISIONS_TABLE.c.id
-            == approval["qualification_decision_id"]
+        .mappings()
+        .one()
+    )
+    decision = (
+        effective.execute(
+            select(QUALIFICATION_DECISIONS_TABLE).where(
+                QUALIFICATION_DECISIONS_TABLE.c.id
+                == approval["qualification_decision_id"]
+            )
         )
-    ).mappings().one()
+        .mappings()
+        .one()
+    )
     spec = FrozenRuntimeLaunchSpec(
         deployment_id=deployment_id,
         approval_id=approval["id"],
@@ -227,6 +279,38 @@ def launch_demo_runtime(
         credential_reference=credential_reference,
     )
     launch_digest = frozen_runtime_launch_spec_digest(spec)
+    existing_runtime = (
+        effective.execute(
+            select(RUNTIME_INSTANCES_TABLE).where(
+                RUNTIME_INSTANCES_TABLE.c.deployment_id == deployment_id
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if existing_runtime is not None:
+        if (
+            existing_runtime["runtime_identity"] != runtime_identity
+            or existing_runtime["image_digest"] != image_digest
+            or existing_runtime["launch_spec_digest"] != launch_digest
+            or existing_runtime["service_account"] != service_account
+            or existing_runtime["network_policy"] != spec.network_policy
+            or existing_runtime["credential_reference"] != credential_reference
+            or existing_runtime["runtime_class"] != spec.runtime_class
+            or existing_runtime["filesystem_mode"] != spec.filesystem_mode
+            or existing_runtime["research_executor_capability"] is not False
+            or existing_runtime["order_writer_capability"] is not False
+        ):
+            raise CanonicalDeploymentBlocked(
+                "BLOCKED_RUNTIME_REPLAY_DRIFT",
+                "deployment already has a different runtime launch receipt",
+            )
+        return existing_runtime["id"]
+    if deployment["status"] != "PENDING":
+        raise CanonicalDeploymentBlocked(
+            "BLOCKED_DEPLOYMENT_NOT_PENDING",
+            "an ACTIVE deployment cannot create a replacement runtime identity",
+        )
     if launcher.evidence_class != "TEST_SIMULATED":
         raise CanonicalDeploymentBlocked(
             "BLOCKED_RUNTIME_LAUNCH_OUT_OF_SCOPE",
@@ -292,11 +376,189 @@ def launch_demo_runtime(
     return runtime_id
 
 
+def confirm_production_demo_runtime_observation(
+    connection: Connection,
+    *,
+    deployment_id: UUID,
+    runtime_identity: str,
+    image_digest: str,
+    credential_reference: str,
+    receipt: RuntimeObservationReceipt,
+    evaluated_at: datetime | None = None,
+) -> UUID:
+    """Persist a separately supervised runtime receipt without launching a process."""
+
+    effective = _require_canonical(connection)
+    now = evaluated_at or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        raise CanonicalDeploymentBlocked(
+            "BLOCKED_RUNTIME_TIMEZONE", "evaluated_at must be timezone-aware"
+        )
+    now = now.astimezone(timezone.utc)
+    deployment = (
+        effective.execute(
+            select(DEPLOYMENTS_TABLE).where(DEPLOYMENTS_TABLE.c.id == deployment_id)
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if deployment is None or deployment["status"] not in {"PENDING", "ACTIVE"}:
+        raise CanonicalDeploymentBlocked(
+            "BLOCKED_DEPLOYMENT_NOT_PENDING", str(deployment_id)
+        )
+    approval = (
+        effective.execute(
+            select(DEPLOYMENT_APPROVALS_TABLE).where(
+                DEPLOYMENT_APPROVALS_TABLE.c.id == deployment["deployment_approval_id"]
+            )
+        )
+        .mappings()
+        .one()
+    )
+    decision = (
+        effective.execute(
+            select(QUALIFICATION_DECISIONS_TABLE).where(
+                QUALIFICATION_DECISIONS_TABLE.c.id
+                == approval["qualification_decision_id"]
+            )
+        )
+        .mappings()
+        .one()
+    )
+    if approval["status"] != "APPROVED" or decision["status"] != "QUALIFIED":
+        raise CanonicalDeploymentBlocked(
+            "BLOCKED_ACTIVE_APPROVAL_REQUIRED", "approval/qualification was revoked"
+        )
+    spec = FrozenRuntimeLaunchSpec(
+        deployment_id=deployment_id,
+        approval_id=approval["id"],
+        qualification_decision_id=decision["id"],
+        strategy_version_id=deployment["strategy_version_id"],
+        configuration_bundle_id=deployment["configuration_bundle_id"],
+        configuration_bundle_digest=deployment["configuration_bundle_digest"],
+        market_snapshot_id=deployment["market_snapshot_id"],
+        market_snapshot_digest=deployment["market_snapshot_digest"],
+        deployment_capability_digest=deployment["capability_digest"],
+        runtime_identity=runtime_identity,
+        image_digest=image_digest,
+        service_account="canonical_runtime_reader",
+        network_policy="DEMO_EXCHANGE_ONLY",
+        credential_reference=credential_reference,
+    )
+    launch_digest = frozen_runtime_launch_spec_digest(spec)
+    if receipt.observed_at.tzinfo is None:
+        raise CanonicalDeploymentBlocked(
+            "BLOCKED_RUNTIME_TIMEZONE", "receipt timestamp must be timezone-aware"
+        )
+    receipt_age = now - receipt.observed_at.astimezone(timezone.utc)
+    if (
+        not verify_runtime_observation_receipt(receipt)
+        or receipt.launch_spec_digest != launch_digest
+        or receipt.capability_digest != deployment["capability_digest"]
+        or receipt.status != "HEALTHY"
+        or receipt.evidence_class != "PRODUCTION_DEMO_RUNTIME"
+        or receipt.order_writer_capability
+        or receipt.network_policy != "DEMO_EXCHANGE_ONLY"
+        or receipt.service_account != "canonical_runtime_reader"
+        or not -timedelta(seconds=5) <= receipt_age <= timedelta(minutes=1)
+    ):
+        raise CanonicalDeploymentBlocked(
+            "BLOCKED_RUNTIME_LAUNCH_RECEIPT_DRIFT",
+            "supervisor observation is not a fresh exact safe capability",
+        )
+    existing = (
+        effective.execute(
+            select(RUNTIME_INSTANCES_TABLE).where(
+                RUNTIME_INSTANCES_TABLE.c.deployment_id == deployment_id
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if existing is None:
+        if deployment["status"] != "PENDING":
+            raise CanonicalDeploymentBlocked(
+                "BLOCKED_RUNTIME_REPLAY_DRIFT", "ACTIVE deployment has no runtime row"
+            )
+        effective.execute(
+            RUNTIME_INSTANCES_TABLE.insert().values(
+                id=receipt.runtime_instance_id,
+                deployment_id=deployment_id,
+                runtime_identity=runtime_identity,
+                image_digest=image_digest,
+                launch_spec_digest=launch_digest,
+                service_account=spec.service_account,
+                network_policy=spec.network_policy,
+                credential_reference=credential_reference,
+                runtime_class=spec.runtime_class,
+                filesystem_mode=spec.filesystem_mode,
+                research_executor_capability=False,
+                status="HEALTHY",
+                order_writer_capability=False,
+                created_at=now,
+            )
+        )
+        runtime_id = receipt.runtime_instance_id
+    else:
+        if (
+            existing["id"] != receipt.runtime_instance_id
+            or existing["runtime_identity"] != runtime_identity
+            or existing["image_digest"] != image_digest
+            or existing["launch_spec_digest"] != launch_digest
+            or existing["service_account"] != "canonical_runtime_reader"
+            or existing["order_writer_capability"] is not False
+        ):
+            raise CanonicalDeploymentBlocked(
+                "BLOCKED_RUNTIME_REPLAY_DRIFT", "runtime observation identity drifted"
+            )
+        runtime_id = existing["id"]
+    existing_receipt = effective.execute(
+        select(RUNTIME_RECEIPTS_TABLE.c.id).where(
+            RUNTIME_RECEIPTS_TABLE.c.receipt_digest == receipt.receipt_digest
+        )
+    ).scalar_one_or_none()
+    if existing_receipt is None:
+        effective.execute(
+            RUNTIME_RECEIPTS_TABLE.insert().values(
+                id=uuid4(),
+                runtime_instance_id=runtime_id,
+                status=receipt.status,
+                launch_spec_digest=receipt.launch_spec_digest,
+                capability_digest=receipt.capability_digest,
+                network_policy=receipt.network_policy,
+                service_account=receipt.service_account,
+                order_writer_capability=False,
+                evidence_class=receipt.evidence_class,
+                observation_json={
+                    "runtime_instance_id": str(runtime_id),
+                    "launch_spec_digest": receipt.launch_spec_digest,
+                    "capability_digest": receipt.capability_digest,
+                    "status": receipt.status,
+                    "observed_at": receipt.observed_at.isoformat(),
+                    "network_policy": receipt.network_policy,
+                    "service_account": receipt.service_account,
+                    "order_writer_capability": False,
+                    "evidence_class": receipt.evidence_class,
+                },
+                observation_digest=receipt.observation_digest,
+                receipt_digest=receipt.receipt_digest,
+                observed_at=receipt.observed_at,
+            )
+        )
+    effective.execute(
+        DEPLOYMENTS_TABLE.update()
+        .where(DEPLOYMENTS_TABLE.c.id == deployment_id)
+        .values(status="ACTIVE")
+    )
+    return runtime_id
+
+
 __all__ = [
     "CanonicalDeploymentBlocked",
     "DeploymentResult",
     "RuntimeLauncherPort",
     "create_demo_deployment",
+    "confirm_production_demo_runtime_observation",
     "deployment_capability_digest",
     "launch_demo_runtime",
 ]

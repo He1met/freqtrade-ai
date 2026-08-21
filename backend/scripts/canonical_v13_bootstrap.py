@@ -11,7 +11,7 @@ import json
 import os
 import re
 import sys
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.engine import make_url
@@ -20,6 +20,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.canonical_v13.bootstrap import (
     LOCAL_DATABASE_NAME,
     LOCAL_RESEARCH_SERVICE_PRINCIPALS,
+    LOCAL_PHASE9_SERVICE_PRINCIPALS,
+    LOCAL_RUNTIME_SERVICE_PRINCIPALS,
     LOCAL_ROLE_PREFIX,
     LOCAL_SERVICE_PRINCIPALS,
     expected_postgresql_owner_table_grants,
@@ -41,6 +43,18 @@ from app.canonical_v13.gate_receipt_upgrade import (
     apply_gate_receipt_upgrade,
     verify_gate_receipt_upgrade,
 )
+from app.canonical_v13.phase9_readiness import (
+    PHASE9_ACCEPTANCE_STAGES,
+    CanonicalPhase9ReadinessBlocked,
+    Phase9QualificationHandoff,
+    inspect_phase9_readiness,
+)
+from app.canonical_v13.phase9_schema_upgrade import (
+    CanonicalPhase9SchemaUpgradeBlocked,
+    apply_phase9_schema_upgrade,
+    rollback_phase9_schema_upgrade,
+    verify_phase9_schema_upgrade,
+)
 from app.canonical_v13.genesis import (
     assert_postgresql_acl_sql,
     postgresql_owner_table_grant_statements,
@@ -51,7 +65,11 @@ from app.canonical_v13.manifest import (
     CANONICAL_MANIFEST_DIGEST,
     TABLE_MANIFEST_BY_NAME,
 )
-from app.canonical_v13.models import AUDIT_EVENTS_TABLE, CANONICAL_TABLES
+from app.canonical_v13.models import (
+    AUDIT_EVENTS_TABLE,
+    CANONICAL_TABLES,
+    QUALIFICATION_DECISIONS_TABLE,
+)
 from app.canonical_v13.role_mapping import CanonicalRoleMapping
 
 
@@ -107,11 +125,16 @@ def verify(
     *,
     require_zero_business_rows: bool = True,
     require_research_principals: bool = False,
+    require_phase9_principals: bool = False,
 ) -> dict[str, object]:
     mapping = local_role_mapping()
     service_principals = dict(LOCAL_SERVICE_PRINCIPALS)
     if require_research_principals:
         service_principals.update(LOCAL_RESEARCH_SERVICE_PRINCIPALS)
+    if require_phase9_principals:
+        service_principals.update(LOCAL_RESEARCH_SERVICE_PRINCIPALS)
+        service_principals.update(LOCAL_PHASE9_SERVICE_PRINCIPALS)
+        service_principals.update(LOCAL_RUNTIME_SERVICE_PRINCIPALS)
     engine = create_engine(_database_url(), pool_pre_ping=True)
     try:
         with engine.connect() as connection:
@@ -132,6 +155,7 @@ def verify(
         "business_row_count": result.business_row_count,
         "require_zero_business_rows": require_zero_business_rows,
         "require_research_principals": require_research_principals,
+        "require_phase9_principals": require_phase9_principals,
         "capability_role_count": result.capability_role_count,
         "explicit_acl_count": result.explicit_acl_count,
     }
@@ -158,15 +182,23 @@ def _digest(value: object) -> str:
     return sha256(_canonical(value).encode("utf-8")).hexdigest()
 
 
+def _json_safe(value: object) -> object:
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, UUID):
+        return str(value)
+    return value
+
+
 def _legacy_owner_table_grants(
     mapping: CanonicalRoleMapping,
 ) -> frozenset[tuple[str, str, str]]:
     owner = mapping.physical("canonical_schema_owner")
     return frozenset(
         (owner, "schema_metadata", privilege)
-        for privilege in TABLE_MANIFEST_BY_NAME[
-            "schema_metadata"
-        ].writer_privileges
+        for privilege in TABLE_MANIFEST_BY_NAME["schema_metadata"].writer_privileges
     )
 
 
@@ -184,9 +216,7 @@ def owner_table_acl_plan() -> dict[str, object]:
         "target_privilege_fact_count": len(
             expected_postgresql_owner_table_grants(mapping)
         ),
-        "legacy_privilege_fact_count": len(
-            _legacy_owner_table_grants(mapping)
-        ),
+        "legacy_privilege_fact_count": len(_legacy_owner_table_grants(mapping)),
         "owner_acl_digest": sha256(
             (";\n".join(statements) + ";\n").encode("utf-8")
         ).hexdigest(),
@@ -232,8 +262,7 @@ def owner_table_acl_repair() -> dict[str, object]:
             if not authority.accepted or authority.state != "CURRENT":
                 raise BootstrapBlocked(
                     "BLOCKED_OWNER_TABLE_ACL_REPAIR_AUTHORITY: "
-                    f"state={authority.state}; "
-                    + "; ".join(authority.problems)
+                    f"state={authority.state}; " + "; ".join(authority.problems)
                 )
             actual = postgresql_owner_table_grants(
                 connection,
@@ -255,9 +284,7 @@ def owner_table_acl_repair() -> dict[str, object]:
                 for table in RESEARCH_AUTHORITY_TABLES
             )
             if research_row_count:
-                raise BootstrapBlocked(
-                    "BLOCKED_OWNER_TABLE_ACL_REPAIR_RESEARCH_ROWS"
-                )
+                raise BootstrapBlocked("BLOCKED_OWNER_TABLE_ACL_REPAIR_RESEARCH_ROWS")
             for statement in statements:
                 connection.exec_driver_sql(statement)
 
@@ -268,9 +295,7 @@ def owner_table_acl_repair() -> dict[str, object]:
                 "role_mapping_digest": plan["role_mapping_digest"],
                 "owner_role": plan["owner_role"],
                 "table_statement_count": plan["table_statement_count"],
-                "target_privilege_fact_count": plan[
-                    "target_privilege_fact_count"
-                ],
+                "target_privilege_fact_count": plan["target_privilege_fact_count"],
                 "owner_acl_digest": plan["owner_acl_digest"],
                 "verified_research_row_count": research_row_count,
                 "actor_identity": _upgrade_actor(),
@@ -335,9 +360,7 @@ def owner_table_acl_repair() -> dict[str, object]:
     }
 
 
-def authority_verify(
-    *, restore_database_name: str | None = None
-) -> dict[str, object]:
+def authority_verify(*, restore_database_name: str | None = None) -> dict[str, object]:
     expected_database_name = restore_database_name or LOCAL_DATABASE_NAME
     engine = create_engine(
         _database_url(expected_database_name=expected_database_name),
@@ -407,6 +430,93 @@ def gate_receipt_upgrade(*, apply: bool) -> dict[str, object]:
     return {**asdict(result), "status": result.status}
 
 
+def phase9_readiness(
+    *,
+    stage: str,
+    qualification_decision_id: UUID,
+    strategy_version_id: UUID,
+    configuration_bundle_id: UUID,
+    market_snapshot_id: UUID,
+) -> dict[str, object]:
+    engine = create_engine(_database_url(), pool_pre_ping=True)
+    try:
+        with engine.connect() as connection:
+            with connection.begin():
+                connection.exec_driver_sql("SET TRANSACTION READ ONLY")
+                decision = (
+                    connection.execute(
+                        select(QUALIFICATION_DECISIONS_TABLE).where(
+                            QUALIFICATION_DECISIONS_TABLE.c.id
+                            == qualification_decision_id
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+                if decision is None:
+                    raise CanonicalPhase9ReadinessBlocked(
+                        "EXACT_QUALIFICATION_DECISION_NOT_FOUND",
+                        str(qualification_decision_id),
+                    )
+                if (
+                    decision["strategy_version_id"] != strategy_version_id
+                    or decision["configuration_bundle_id"] != configuration_bundle_id
+                    or decision["market_snapshot_id"] != market_snapshot_id
+                ):
+                    raise CanonicalPhase9ReadinessBlocked(
+                        "EXACT_QUALIFICATION_HANDOFF_ID_MISMATCH",
+                        "explicit Phase 9 handoff IDs differ from the decision",
+                    )
+                handoff = Phase9QualificationHandoff(
+                    qualification_decision_id=decision["id"],
+                    qualification_decision_digest=decision["decision_digest"],
+                    strategy_version_id=decision["strategy_version_id"],
+                    research_target_id=decision["research_target_id"],
+                    configuration_bundle_id=decision["configuration_bundle_id"],
+                    configuration_bundle_digest=decision["configuration_bundle_digest"],
+                    market_snapshot_id=decision["market_snapshot_id"],
+                    market_snapshot_digest=decision["market_snapshot_digest"],
+                    validation_plan_id=decision["validation_plan_id"],
+                    validation_plan_digest=decision["validation_plan_digest"],
+                )
+                result = inspect_phase9_readiness(
+                    connection, qualification_handoff=handoff, stage=stage
+                )
+    finally:
+        engine.dispose()
+    return _json_safe(asdict(result))
+
+
+def phase9_schema(*, operation: str) -> dict[str, object]:
+    engine = create_engine(_database_url(), pool_pre_ping=True)
+    try:
+        if operation == "verify":
+            with engine.connect() as connection:
+                with connection.begin():
+                    connection.exec_driver_sql("SET TRANSACTION READ ONLY")
+                    result = verify_phase9_schema_upgrade(connection)
+        else:
+            actor_identity = _upgrade_actor()
+            with engine.begin() as connection:
+                result = (
+                    apply_phase9_schema_upgrade(
+                        connection,
+                        actor_identity=actor_identity,
+                        role_mapping=local_role_mapping(),
+                    )
+                    if operation == "apply"
+                    else rollback_phase9_schema_upgrade(
+                        connection, actor_identity=actor_identity
+                    )
+                )
+    finally:
+        engine.dispose()
+    payload = asdict(result)
+    if operation != "verify":
+        payload["actor_identity"] = actor_identity
+    return payload
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -416,6 +526,7 @@ def main(argv: list[str] | None = None) -> int:
             "verify",
             "verify-current",
             "verify-research-provisioned",
+            "verify-phase9-provisioned",
             "authority-plan",
             "owner-table-acl-plan",
             "owner-table-acl-repair",
@@ -425,8 +536,21 @@ def main(argv: list[str] | None = None) -> int:
             "authority-rollback",
             "gate-receipts-verify",
             "gate-receipts-apply",
+            "phase9-readiness",
+            "phase9-schema-verify",
+            "phase9-schema-apply",
+            "phase9-schema-rollback",
         ),
     )
+    parser.add_argument(
+        "--stage",
+        choices=PHASE9_ACCEPTANCE_STAGES,
+        default="QUALIFICATION_HANDOFF",
+    )
+    parser.add_argument("--qualification-decision-id", type=UUID)
+    parser.add_argument("--strategy-version-id", type=UUID)
+    parser.add_argument("--configuration-bundle-id", type=UUID)
+    parser.add_argument("--market-snapshot-id", type=UUID)
     args = parser.parse_args(argv)
     try:
         if args.command == "render":
@@ -435,12 +559,18 @@ def main(argv: list[str] | None = None) -> int:
             "verify",
             "verify-current",
             "verify-research-provisioned",
+            "verify-phase9-provisioned",
         }:
             payload = verify(
                 require_zero_business_rows=args.command == "verify",
                 require_research_principals=(
-                    args.command == "verify-research-provisioned"
+                    args.command
+                    in {
+                        "verify-research-provisioned",
+                        "verify-phase9-provisioned",
+                    }
                 ),
+                require_phase9_principals=(args.command == "verify-phase9-provisioned"),
             )
         elif args.command == "authority-plan":
             payload = authority_plan()
@@ -458,6 +588,26 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.command in {"gate-receipts-verify", "gate-receipts-apply"}:
             payload = gate_receipt_upgrade(apply=args.command == "gate-receipts-apply")
+        elif args.command == "phase9-readiness":
+            handoff_ids = (
+                args.qualification_decision_id,
+                args.strategy_version_id,
+                args.configuration_bundle_id,
+                args.market_snapshot_id,
+            )
+            if any(value is None for value in handoff_ids):
+                raise BootstrapBlocked("BLOCKED_EXACT_PHASE9_HANDOFF_IDS_REQUIRED")
+            payload = phase9_readiness(
+                stage=args.stage,
+                qualification_decision_id=args.qualification_decision_id,
+                strategy_version_id=args.strategy_version_id,
+                configuration_bundle_id=args.configuration_bundle_id,
+                market_snapshot_id=args.market_snapshot_id,
+            )
+        elif args.command.startswith("phase9-schema-"):
+            payload = phase9_schema(
+                operation=args.command.removeprefix("phase9-schema-")
+            )
         else:
             payload = authority_apply(rollback=args.command == "authority-rollback")
     except BootstrapBlocked as exc:
@@ -465,6 +615,10 @@ def main(argv: list[str] | None = None) -> int:
     except CanonicalAuthorityUpgradeBlocked as exc:
         payload = {"status": "BLOCKED", "reason": str(exc)}
     except CanonicalGateReceiptUpgradeBlocked as exc:
+        payload = {"status": "BLOCKED", "reason": str(exc)}
+    except CanonicalPhase9ReadinessBlocked as exc:
+        payload = {"status": "BLOCKED", "reason": str(exc)}
+    except CanonicalPhase9SchemaUpgradeBlocked as exc:
         payload = {"status": "BLOCKED", "reason": str(exc)}
     except (SQLAlchemyError, ValueError):
         payload = {"status": "BLOCKED", "reason": "bootstrap verification failed"}

@@ -98,7 +98,9 @@ def _digest(name: str, *, nullable: bool = False) -> Column[str]:
     )
 
 
-def _created_at(name: str = "created_at", *, nullable: bool = False) -> Column[datetime]:
+def _created_at(
+    name: str = "created_at", *, nullable: bool = False
+) -> Column[datetime]:
     return Column(name, DateTime(timezone=True), nullable=nullable)
 
 
@@ -172,9 +174,7 @@ AUDIT_EVENTS_TABLE = _table(
         "aggregate_id",
         "event_type",
         unique=True,
-        postgresql_where=text(
-            "aggregate_type = 'research_execution_authorization'"
-        ),
+        postgresql_where=text("aggregate_type = 'research_execution_authorization'"),
         sqlite_where=text("aggregate_type = 'research_execution_authorization'"),
     ),
 )
@@ -206,9 +206,7 @@ STRATEGY_ARTIFACTS_TABLE = _table(
     Column("size_bytes", Integer, nullable=False),
     Column("normalized_content", Text, nullable=False),
     _created_at(),
-    UniqueConstraint(
-        "content_digest", name="strategy_artifacts_content_digest_unique"
-    ),
+    UniqueConstraint("content_digest", name="strategy_artifacts_content_digest_unique"),
     CheckConstraint(
         "length(content_digest) = 64",
         name="strategy_artifacts_content_digest_length",
@@ -273,9 +271,7 @@ STRATEGIES_TABLE = _table(
     Column("catalog_status", String(16), nullable=False),
     Column("display_name", String(240), nullable=False),
     _created_at(),
-    _status_check(
-        "strategies", "catalog_status", ("DRAFT", "ACTIVE", "ARCHIVED")
-    ),
+    _status_check("strategies", "catalog_status", ("DRAFT", "ACTIVE", "ARCHIVED")),
 )
 
 STRATEGY_VERSIONS_TABLE = _table(
@@ -387,9 +383,7 @@ CONFIGURATION_SNAPSHOTS_TABLE = _table(
     _digest("snapshot_digest"),
     Column("snapshot_json", JSON, nullable=False),
     _created_at(),
-    UniqueConstraint(
-        "snapshot_digest", name="configuration_snapshots_digest_unique"
-    ),
+    UniqueConstraint("snapshot_digest", name="configuration_snapshots_digest_unique"),
 )
 
 CONFIGURATION_SNAPSHOT_MEMBERS_TABLE = _table(
@@ -535,9 +529,7 @@ MARKET_ARTIFACTS_TABLE = _table(
     Column("media_type", String(120), nullable=False),
     _created_at(),
     UniqueConstraint("content_digest", name="market_artifacts_digest_unique"),
-    CheckConstraint(
-        "size_bytes >= 0", name="market_artifacts_size_bytes_nonnegative"
-    ),
+    CheckConstraint("size_bytes >= 0", name="market_artifacts_size_bytes_nonnegative"),
 )
 
 MARKET_INSPECTIONS_TABLE = _table(
@@ -566,9 +558,7 @@ MARKET_RECEIPTS_TABLE = _table(
     _digest("inspection_digest"),
     _digest("receipt_digest"),
     _created_at(),
-    _status_check(
-        "market_receipts", "status", ("ACCEPTED", "REJECTED", "BLOCKED")
-    ),
+    _status_check("market_receipts", "status", ("ACCEPTED", "REJECTED", "BLOCKED")),
 )
 
 MARKET_SNAPSHOTS_TABLE = _table(
@@ -636,9 +626,20 @@ RESEARCH_GATE_ATTEMPTS_TABLE = _table(
     _created_at("started_at", nullable=True),
     _created_at("completed_at", nullable=True),
     UniqueConstraint("request_digest", name="research_gate_attempts_request_unique"),
-    UniqueConstraint("writer_identity", "idempotency_key", name="research_gate_attempts_writer_key_unique"),
-    CheckConstraint("length(release_commit) = 40", name="research_gate_attempts_release_commit_length"),
-    _status_check("research_gate_attempts", "status", ("PENDING", "RUNNING", "PASSED", "FAILED", "BLOCKED")),
+    UniqueConstraint(
+        "writer_identity",
+        "idempotency_key",
+        name="research_gate_attempts_writer_key_unique",
+    ),
+    CheckConstraint(
+        "length(release_commit) = 40",
+        name="research_gate_attempts_release_commit_length",
+    ),
+    _status_check(
+        "research_gate_attempts",
+        "status",
+        ("PENDING", "RUNNING", "PASSED", "FAILED", "BLOCKED"),
+    ),
 )
 
 RESEARCH_GATE_RECEIPTS_TABLE = _table(
@@ -677,14 +678,32 @@ RESEARCH_GATE_RECEIPTS_TABLE = _table(
     Column("required_trade_count", Integer, nullable=True),
     _digest("receipt_digest"),
     _created_at(),
-    UniqueConstraint("gate_attempt_id", "gate_type", name="research_gate_receipts_attempt_type_unique"),
+    UniqueConstraint(
+        "gate_attempt_id",
+        "gate_type",
+        name="research_gate_receipts_attempt_type_unique",
+    ),
     UniqueConstraint("receipt_digest", name="research_gate_receipts_digest_unique"),
-    CheckConstraint("length(release_commit) = 40", name="research_gate_receipts_release_commit_length"),
-    CheckConstraint("observed_signal_count IS NULL OR observed_signal_count >= 0", name="research_gate_receipts_signal_count_nonnegative"),
-    CheckConstraint("observed_trade_count IS NULL OR observed_trade_count >= 0", name="research_gate_receipts_trade_count_nonnegative"),
-    CheckConstraint("required_trade_count IS NULL OR required_trade_count > 0", name="research_gate_receipts_required_trade_positive"),
+    CheckConstraint(
+        "length(release_commit) = 40",
+        name="research_gate_receipts_release_commit_length",
+    ),
+    CheckConstraint(
+        "observed_signal_count IS NULL OR observed_signal_count >= 0",
+        name="research_gate_receipts_signal_count_nonnegative",
+    ),
+    CheckConstraint(
+        "observed_trade_count IS NULL OR observed_trade_count >= 0",
+        name="research_gate_receipts_trade_count_nonnegative",
+    ),
+    CheckConstraint(
+        "required_trade_count IS NULL OR required_trade_count > 0",
+        name="research_gate_receipts_required_trade_positive",
+    ),
     _status_check("research_gate_receipts", "gate_type", ("STATIC", "LOOKAHEAD")),
-    _status_check("research_gate_receipts", "terminal_status", ("PASSED", "FAILED", "BLOCKED")),
+    _status_check(
+        "research_gate_receipts", "terminal_status", ("PASSED", "FAILED", "BLOCKED")
+    ),
 )
 
 
@@ -756,9 +775,7 @@ VALIDATION_ATTEMPTS_TABLE = _table(
         "attempt_number",
         name="validation_attempts_plan_number_unique",
     ),
-    CheckConstraint(
-        "attempt_number > 0", name="validation_attempts_number_positive"
-    ),
+    CheckConstraint("attempt_number > 0", name="validation_attempts_number_positive"),
     _status_check(
         "validation_attempts",
         "status",
@@ -862,7 +879,14 @@ OPTIMIZATION_RUNS_TABLE = _table(
     _status_check(
         "optimization_runs",
         "status",
-        ("NOT_STARTED", "PENDING_BASELINE", "RUNNING", "SUCCEEDED", "FAILED", "BLOCKED"),
+        (
+            "NOT_STARTED",
+            "PENDING_BASELINE",
+            "RUNNING",
+            "SUCCEEDED",
+            "FAILED",
+            "BLOCKED",
+        ),
     ),
     UniqueConstraint(
         "baseline_qualification_decision_id",
@@ -890,9 +914,7 @@ OPTIMIZATION_TRIALS_TABLE = _table(
         "trial_number",
         name="optimization_trials_run_number_unique",
     ),
-    CheckConstraint(
-        "trial_number > 0", name="optimization_trials_number_positive"
-    ),
+    CheckConstraint("trial_number > 0", name="optimization_trials_number_positive"),
 )
 
 
@@ -911,6 +933,10 @@ DEPLOYMENT_APPROVALS_TABLE = _table(
         "deployment_approvals",
         "status",
         ("NOT_REQUESTED", "PENDING", "APPROVED", "REJECTED", "REVOKED"),
+    ),
+    UniqueConstraint(
+        "qualification_decision_id",
+        name="deployment_approvals_qualification_unique",
     ),
 )
 
@@ -936,6 +962,10 @@ DEPLOYMENTS_TABLE = _table(
     CheckConstraint(
         "demo_only IS TRUE AND allow_real_funds IS FALSE",
         name="deployments_demo_only_no_real_funds",
+    ),
+    UniqueConstraint(
+        "deployment_approval_id",
+        name="deployments_approval_unique",
     ),
 )
 
@@ -964,6 +994,10 @@ RUNTIME_INSTANCES_TABLE = _table(
         "order_writer_capability IS FALSE",
         name="runtime_instances_no_order_writer_capability",
     ),
+    UniqueConstraint(
+        "deployment_id",
+        name="runtime_instances_deployment_unique",
+    ),
 )
 
 RUNTIME_RECEIPTS_TABLE = _table(
@@ -990,6 +1024,304 @@ RUNTIME_RECEIPTS_TABLE = _table(
         "order_writer_capability IS FALSE",
         name="runtime_receipts_no_order_writer_capability",
     ),
+    UniqueConstraint(
+        "receipt_digest",
+        name="runtime_receipts_receipt_digest_unique",
+    ),
+)
+
+
+# Phase 9 execution authority remains independent from research qualification.
+# A human approval writer freezes the exact budget; the risk writer may only append
+# reservations derived from it. Credential attestations contain digests and safe
+# capability facts only, never raw Keychain material or authorization headers.
+EXECUTION_CANARY_PROBE_RECEIPTS_TABLE = _table(
+    "execution_canary_probe_receipts",
+    _uuid_id(),
+    _uuid_fk("deployment_id", "deployments"),
+    _uuid_fk("execution_attestation_id", "execution_attestations", unique=True),
+    Column("execution_target", String(24), nullable=False),
+    Column("instrument", String(80), nullable=False),
+    _digest("account_fingerprint_digest"),
+    _digest("credential_generation_digest"),
+    Column("permissions_json", JSON, nullable=False),
+    Column("simulated_trading", Boolean, nullable=False),
+    Column("allow_real_funds", Boolean, nullable=False),
+    Column("contract_value", String(80), nullable=False),
+    Column("contract_value_ccy", String(24), nullable=False),
+    Column("lot_size", String(80), nullable=False),
+    Column("minimum_size", String(80), nullable=False),
+    Column("tick_size", String(80), nullable=False),
+    Column("mark_price", String(80), nullable=False),
+    Column("current_long_leverage", String(80), nullable=False),
+    Column("current_short_leverage", String(80), nullable=False),
+    Column("exchange_max_leverage", String(80), nullable=False),
+    Column("limit_price", String(80), nullable=False),
+    Column("maximum_buy_contracts", String(80), nullable=False),
+    Column("long_contracts", String(80), nullable=False),
+    Column("short_contracts", String(80), nullable=False),
+    Column("active_position_count", Integer, nullable=False),
+    Column("pending_order_count", Integer, nullable=False),
+    _digest("instrument_digest"),
+    _created_at("instrument_observed_at"),
+    Column("instrument_expires_at", DateTime(timezone=True), nullable=False),
+    _digest("mark_price_digest"),
+    _created_at("mark_price_observed_at"),
+    Column("mark_price_expires_at", DateTime(timezone=True), nullable=False),
+    _digest("account_config_digest"),
+    _created_at("account_config_observed_at"),
+    Column("account_config_expires_at", DateTime(timezone=True), nullable=False),
+    _digest("leverage_digest"),
+    _created_at("leverage_observed_at"),
+    Column("leverage_expires_at", DateTime(timezone=True), nullable=False),
+    _digest("exchange_max_leverage_digest"),
+    _created_at("exchange_max_leverage_observed_at"),
+    Column("exchange_max_leverage_expires_at", DateTime(timezone=True), nullable=False),
+    _digest("positions_digest"),
+    _created_at("positions_observed_at"),
+    Column("positions_expires_at", DateTime(timezone=True), nullable=False),
+    _digest("pending_orders_digest"),
+    _created_at("pending_orders_observed_at"),
+    Column("pending_orders_expires_at", DateTime(timezone=True), nullable=False),
+    _digest("maximum_order_quantity_digest"),
+    _created_at("maximum_order_quantity_observed_at"),
+    Column("maximum_order_quantity_expires_at", DateTime(timezone=True), nullable=False),
+    _created_at("observed_at"),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("safe_facts_json", JSON, nullable=False),
+    _digest("safe_facts_digest"),
+    _digest("receipt_digest"),
+    _created_at("created_at"),
+    CheckConstraint(
+        "execution_target = 'OKX_DEMO' AND simulated_trading IS TRUE "
+        "AND allow_real_funds IS FALSE",
+        name="execution_canary_probe_receipts_demo_only",
+    ),
+    CheckConstraint(
+        "instrument_expires_at > instrument_observed_at "
+        "AND mark_price_expires_at > mark_price_observed_at "
+        "AND account_config_expires_at > account_config_observed_at "
+        "AND leverage_expires_at > leverage_observed_at "
+        "AND exchange_max_leverage_expires_at > exchange_max_leverage_observed_at "
+        "AND positions_expires_at > positions_observed_at "
+        "AND pending_orders_expires_at > pending_orders_observed_at "
+        "AND maximum_order_quantity_expires_at > maximum_order_quantity_observed_at "
+        "AND expires_at > observed_at",
+        name="execution_canary_probe_receipts_freshness_windows",
+    ),
+    CheckConstraint(
+        "CAST(long_contracts AS NUMERIC) = 0 "
+        "AND CAST(short_contracts AS NUMERIC) = 0 "
+        "AND active_position_count = 0 AND pending_order_count = 0 "
+        "AND CAST(maximum_buy_contracts AS NUMERIC) "
+        ">= CAST(minimum_size AS NUMERIC) "
+        "AND CAST(limit_price AS NUMERIC) > 0",
+        name="execution_canary_probe_receipts_flat_capacity",
+    ),
+    UniqueConstraint(
+        "receipt_digest",
+        name="execution_canary_probe_receipts_receipt_digest_unique",
+    ),
+)
+
+
+EXECUTION_CANARY_RISK_POLICIES_TABLE = _table(
+    "execution_canary_risk_policies",
+    _uuid_id(),
+    _uuid_fk("qualification_decision_id", "qualification_decisions", unique=True),
+    _uuid_fk("deployment_approval_id", "deployment_approvals", unique=True),
+    _uuid_fk("execution_attestation_id", "execution_attestations", unique=True),
+    _uuid_fk("probe_receipt_id", "execution_canary_probe_receipts", unique=True),
+    _uuid_fk("strategy_version_id", "strategy_versions"),
+    _uuid_fk("strategy_artifact_id", "strategy_artifacts"),
+    _digest("strategy_artifact_digest"),
+    _uuid_fk("research_target_id", "research_targets"),
+    _digest("research_target_digest"),
+    _uuid_fk("configuration_bundle_id", "configuration_bundles"),
+    _digest("configuration_bundle_digest"),
+    _uuid_fk("market_snapshot_id", "market_snapshots"),
+    _digest("market_snapshot_digest"),
+    Column("execution_target", String(24), nullable=False),
+    Column("instrument", String(80), nullable=False),
+    Column("position_policy", String(24), nullable=False),
+    Column("max_order_count", Integer, nullable=False),
+    Column("minimum_contract_size", Numeric(36, 18), nullable=False),
+    Column("contract_value", Numeric(36, 18), nullable=False),
+    Column("contract_value_ccy", String(24), nullable=False),
+    Column("mark_price", Numeric(36, 18), nullable=False),
+    Column("limit_price", Numeric(36, 18), nullable=False),
+    Column("maximum_buy_contracts", Numeric(36, 18), nullable=False),
+    Column("max_notional", Numeric(36, 18), nullable=False),
+    Column("strategy_max_leverage", Numeric(36, 18), nullable=False),
+    Column("exchange_max_leverage", Numeric(36, 18), nullable=False),
+    Column("effective_leverage", Numeric(36, 18), nullable=False),
+    _digest("metadata_receipt_digest"),
+    _digest("mark_price_receipt_digest"),
+    _digest("attestation_digest"),
+    Column("actor_identity", String(160), nullable=False),
+    Column("idempotency_key", String(200), nullable=False, unique=True),
+    Column("reason", Text, nullable=False),
+    Column("allow_real_funds", Boolean, nullable=False),
+    Column("status", String(16), nullable=False),
+    _created_at("observed_at"),
+    _created_at("accepted_at"),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("terminated_at", DateTime(timezone=True), nullable=True),
+    _digest("request_digest"),
+    _digest("policy_digest"),
+    _digest("receipt_digest"),
+    _digest("termination_digest", nullable=True),
+    _status_check(
+        "execution_canary_risk_policies",
+        "status",
+        ("ACTIVE", "TERMINATED", "EXPIRED"),
+    ),
+    CheckConstraint(
+        "execution_target = 'OKX_DEMO' AND allow_real_funds IS FALSE",
+        name="execution_canary_risk_policies_demo_only",
+    ),
+    CheckConstraint(
+        "position_policy = 'LONG_ONLY' AND max_order_count = 1",
+        name="execution_canary_risk_policies_single_long_order",
+    ),
+    CheckConstraint(
+        "minimum_contract_size > 0 AND contract_value > 0 "
+        "AND mark_price > 0 AND limit_price > 0 "
+        "AND maximum_buy_contracts >= minimum_contract_size "
+        "AND max_notional > 0",
+        name="execution_canary_risk_policies_positive_amounts",
+    ),
+    CheckConstraint(
+        "strategy_max_leverage > 0 AND exchange_max_leverage > 0 "
+        "AND effective_leverage > 0 "
+        "AND effective_leverage <= strategy_max_leverage "
+        "AND effective_leverage <= exchange_max_leverage",
+        name="execution_canary_risk_policies_leverage_cap",
+    ),
+    CheckConstraint(
+        "(status = 'ACTIVE' AND terminated_at IS NULL AND termination_digest IS NULL) "
+        "OR (status IN ('TERMINATED', 'EXPIRED') "
+        "AND terminated_at IS NOT NULL AND termination_digest IS NOT NULL)",
+        name="execution_canary_risk_policies_terminal_evidence",
+    ),
+    UniqueConstraint(
+        "receipt_digest",
+        name="execution_canary_risk_policies_receipt_digest_unique",
+    ),
+)
+
+
+EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE = _table(
+    "execution_risk_budget_authorizations",
+    _uuid_id(),
+    Column(
+        "execution_canary_risk_policy_id",
+        Uuid(as_uuid=True),
+        ForeignKey(
+            f"{CANONICAL_BUSINESS_SCHEMA}.execution_canary_risk_policies.id",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    ),
+    _uuid_fk("deployment_approval_id", "deployment_approvals", unique=True),
+    Column("execution_target", String(24), nullable=False),
+    Column("instrument", String(80), nullable=False),
+    Column("max_notional", Numeric(36, 18), nullable=False),
+    Column("max_order_count", Integer, nullable=False),
+    Column("actor_identity", String(160), nullable=False),
+    Column("reason", Text, nullable=False),
+    _digest("policy_digest"),
+    _digest("source_receipt_digest"),
+    _digest("authorization_digest"),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    _created_at(),
+    UniqueConstraint(
+        "execution_canary_risk_policy_id",
+        name="execution_risk_budget_policy_unique",
+    ),
+    Index(
+        "ix_execution_risk_budget_policy",
+        "execution_canary_risk_policy_id",
+    ),
+    CheckConstraint(
+        "execution_target = 'OKX_DEMO'",
+        name="execution_risk_budget_demo_only",
+    ),
+    CheckConstraint(
+        "max_notional > 0 AND max_order_count > 0",
+        name="execution_risk_budget_positive",
+    ),
+    UniqueConstraint(
+        "authorization_digest",
+        name="execution_risk_budget_authorization_digest_unique",
+    ),
+)
+
+EXECUTION_RISK_RESERVATIONS_TABLE = _table(
+    "execution_risk_reservations",
+    _uuid_id(),
+    _uuid_fk("risk_budget_authorization_id", "execution_risk_budget_authorizations"),
+    _uuid_fk("trade_intent_id", "trade_intents", unique=True),
+    Column("status", String(24), nullable=False),
+    Column("requested_notional", Numeric(36, 18), nullable=False),
+    Column("reason_code", String(120), nullable=False),
+    _digest("reservation_digest"),
+    _created_at(),
+    _status_check(
+        "execution_risk_reservations",
+        "status",
+        ("RISK_ACCEPTED", "REJECTED", "BLOCKED"),
+    ),
+    CheckConstraint(
+        "requested_notional > 0",
+        name="execution_risk_reservations_notional_positive",
+    ),
+    UniqueConstraint(
+        "reservation_digest",
+        name="execution_risk_reservation_digest_unique",
+    ),
+)
+
+EXECUTION_ATTESTATIONS_TABLE = _table(
+    "execution_attestations",
+    _uuid_id(),
+    _uuid_fk("deployment_id", "deployments"),
+    Column("execution_target", String(24), nullable=False),
+    Column("instrument", String(80), nullable=False),
+    Column("status", String(16), nullable=False),
+    _digest("account_fingerprint_digest"),
+    _digest("credential_generation_digest"),
+    Column("permissions_json", JSON, nullable=False),
+    _digest("attestation_digest"),
+    Column("observed_at", DateTime(timezone=True), nullable=False),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    _status_check("execution_attestations", "status", ("READY", "BLOCKED", "EXPIRED")),
+    CheckConstraint(
+        "execution_target = 'OKX_DEMO'",
+        name="execution_attestations_demo_only",
+    ),
+    UniqueConstraint(
+        "attestation_digest",
+        name="execution_attestations_digest_unique",
+    ),
+)
+
+ORDER_WRITER_LEASES_TABLE = _table(
+    "order_writer_leases",
+    Column("execution_target", String(24), primary_key=True),
+    Column("holder_identity", String(200), nullable=False),
+    _digest("holder_token_digest"),
+    Column("generation", Integer, nullable=False),
+    Column("status", String(16), nullable=False),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    _digest("lease_digest"),
+    _created_at(),
+    _status_check("order_writer_leases", "status", ("ACTIVE", "RELEASED", "EXPIRED")),
+    CheckConstraint(
+        "execution_target = 'OKX_DEMO'",
+        name="order_writer_leases_demo_only",
+    ),
+    CheckConstraint("generation > 0", name="order_writer_leases_generation_positive"),
 )
 
 
@@ -1008,6 +1340,12 @@ SIGNALS_TABLE = _table(
     Column("signal_json", JSON, nullable=False),
     _digest("signal_digest"),
     _created_at(),
+    UniqueConstraint(
+        "runtime_instance_id",
+        "research_target_id",
+        "signal_digest",
+        name="signals_runtime_target_digest_unique",
+    ),
 )
 
 TRADE_INTENTS_TABLE = _table(
@@ -1031,9 +1369,7 @@ RISK_DECISIONS_TABLE = _table(
     Column("decision_json", JSON, nullable=False),
     _digest("decision_digest"),
     _created_at(),
-    _status_check(
-        "risk_decisions", "status", ("RISK_ACCEPTED", "BLOCKED", "REJECTED")
-    ),
+    _status_check("risk_decisions", "status", ("RISK_ACCEPTED", "BLOCKED", "REJECTED")),
 )
 
 ORDERS_TABLE = _table(
@@ -1056,6 +1392,7 @@ ORDERS_TABLE = _table(
             "INTENT_ACCEPTED",
             "RISK_ACCEPTED",
             "SUBMITTED",
+            "DISPATCHING",
             "ACCEPTED",
             "PARTIAL",
             "FILLED",
@@ -1066,6 +1403,106 @@ ORDERS_TABLE = _table(
     CheckConstraint(
         "demo_only IS TRUE AND allow_real_funds IS FALSE",
         name="orders_demo_only_no_real_funds",
+    ),
+)
+
+ORDER_DISPATCH_RECEIPTS_TABLE = _table(
+    "order_dispatch_receipts",
+    _uuid_id(),
+    _uuid_fk("order_id", "orders", unique=True),
+    _uuid_fk("risk_decision_id", "risk_decisions"),
+    _uuid_fk("canary_risk_policy_id", "execution_canary_risk_policies"),
+    _uuid_fk("probe_receipt_id", "execution_canary_probe_receipts"),
+    _uuid_fk("execution_attestation_id", "execution_attestations"),
+    Column("attempt_ordinal", Integer, nullable=False),
+    _digest("request_digest"),
+    Column("holder_identity", String(200), nullable=False),
+    _digest("holder_token_digest"),
+    Column("lease_generation", Integer, nullable=False),
+    _digest("lease_digest"),
+    _created_at("lease_acquired_at"),
+    Column("lease_expires_at", DateTime(timezone=True), nullable=False),
+    _digest("account_fingerprint_digest"),
+    _digest("credential_generation_digest"),
+    Column("limit_price", Numeric(36, 18), nullable=False),
+    Column("effective_leverage", Numeric(36, 18), nullable=False),
+    Column("minimum_size", Numeric(36, 18), nullable=False),
+    Column("maximum_buy_contracts", Numeric(36, 18), nullable=False),
+    Column("long_contracts", Numeric(36, 18), nullable=False),
+    Column("short_contracts", Numeric(36, 18), nullable=False),
+    Column("active_position_count", Integer, nullable=False),
+    Column("pending_order_count", Integer, nullable=False),
+    _digest("positions_digest"),
+    _created_at("positions_observed_at"),
+    Column("positions_expires_at", DateTime(timezone=True), nullable=False),
+    _digest("pending_orders_digest"),
+    _created_at("pending_orders_observed_at"),
+    Column("pending_orders_expires_at", DateTime(timezone=True), nullable=False),
+    _digest("maximum_order_quantity_digest"),
+    _created_at("maximum_order_quantity_observed_at"),
+    Column("maximum_order_quantity_expires_at", DateTime(timezone=True), nullable=False),
+    _digest("guard_leverage_digest"),
+    _created_at("guard_leverage_observed_at"),
+    Column("guard_leverage_expires_at", DateTime(timezone=True), nullable=False),
+    _created_at("guard_observed_at"),
+    Column("guard_expires_at", DateTime(timezone=True), nullable=False),
+    Column("guard_json", JSON, nullable=False),
+    _digest("guard_digest"),
+    _digest("claim_digest"),
+    _created_at("claimed_at"),
+    CheckConstraint(
+        "attempt_ordinal = 1",
+        name="order_dispatch_receipts_single_attempt",
+    ),
+    CheckConstraint(
+        "lease_generation > 0",
+        name="order_dispatch_receipts_generation_positive",
+    ),
+    CheckConstraint(
+        "lease_acquired_at <= claimed_at AND claimed_at < lease_expires_at",
+        name="order_dispatch_receipts_lease_fresh_at_claim",
+    ),
+    CheckConstraint(
+        "long_contracts = 0 AND short_contracts = 0 "
+        "AND active_position_count = 0 AND pending_order_count = 0 "
+        "AND maximum_buy_contracts >= minimum_size "
+        "AND limit_price > 0 AND effective_leverage > 0",
+        name="order_dispatch_receipts_flat_capacity",
+    ),
+    CheckConstraint(
+        "positions_expires_at > positions_observed_at "
+        "AND pending_orders_expires_at > pending_orders_observed_at "
+        "AND maximum_order_quantity_expires_at > maximum_order_quantity_observed_at "
+        "AND guard_leverage_expires_at > guard_leverage_observed_at "
+        "AND guard_expires_at > guard_observed_at",
+        name="order_dispatch_receipts_guard_freshness",
+    ),
+    UniqueConstraint(
+        "claim_digest",
+        name="order_dispatch_receipts_claim_digest_unique",
+    ),
+)
+
+ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE = _table(
+    "order_dispatch_outcome_receipts",
+    _uuid_id(),
+    _uuid_fk("order_id", "orders", unique=True),
+    _uuid_fk("dispatch_claim_id", "order_dispatch_receipts", unique=True),
+    _digest("claim_digest"),
+    Column("client_order_id", String(200), nullable=False, unique=True),
+    Column("exchange_order_id", String(200), nullable=False, unique=True),
+    Column("safe_response_json", JSON, nullable=False),
+    _digest("safe_response_digest"),
+    Column("outcome_mode", String(24), nullable=False),
+    _digest("receipt_digest"),
+    _created_at("recorded_at"),
+    CheckConstraint(
+        "outcome_mode IN ('POST', 'GET_RECOVERY')",
+        name="order_dispatch_outcome_receipts_mode",
+    ),
+    UniqueConstraint(
+        "receipt_digest",
+        name="order_dispatch_outcome_receipts_receipt_digest_unique",
     ),
 )
 
@@ -1132,9 +1569,7 @@ RECONCILIATION_ITEMS_TABLE = _table(
         "order_id IS NOT NULL OR fill_id IS NOT NULL OR ledger_entry_id IS NOT NULL",
         name="reconciliation_items_source_required",
     ),
-    _status_check(
-        "reconciliation_items", "status", ("MATCHED", "GAP", "BLOCKED")
-    ),
+    _status_check("reconciliation_items", "status", ("MATCHED", "GAP", "BLOCKED")),
 )
 
 

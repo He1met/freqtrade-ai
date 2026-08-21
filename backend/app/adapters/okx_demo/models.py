@@ -198,6 +198,39 @@ class LeverageInfo(StableModel):
     leverage: Decimal
 
 
+class LeverageAdjustmentInfo(ImmutableStableModel):
+    inst_id: str
+    inst_type: Literal["SWAP"]
+    margin_mode: Literal["isolated"]
+    position_side: Literal["long"]
+    requested_leverage: Decimal = Field(gt=0)
+    max_leverage: Decimal = Field(gt=0)
+    min_leverage: Decimal = Field(gt=0)
+    has_pending_orders: bool
+
+    @model_validator(mode="after")
+    def validate_leverage_range(self) -> "LeverageAdjustmentInfo":
+        if self.min_leverage > self.max_leverage:
+            raise ValueError("minimum leverage exceeds maximum leverage")
+        return self
+
+    @field_serializer("requested_leverage", "max_leverage", "min_leverage")
+    def serialize_decimal(self, value: Decimal) -> str:
+        return format(value, "f")
+
+
+class MaximumOrderQuantity(ImmutableStableModel):
+    inst_id: str
+    margin_mode: Literal["isolated"]
+    price: Decimal = Field(gt=0)
+    leverage: Decimal = Field(gt=0)
+    max_buy: Decimal = Field(ge=0)
+
+    @field_serializer("price", "leverage", "max_buy")
+    def serialize_decimal(self, value: Decimal) -> str:
+        return format(value, "f")
+
+
 class TradingFee(StableModel):
     inst_type: Literal["SWAP"]
     inst_id: Optional[str] = None
