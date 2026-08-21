@@ -1,9 +1,10 @@
 """Explicit production composition root for the standalone canonical V1.3 API.
 
 This module is never imported by the legacy application.  Creating the app requires
-fourteen distinct PostgreSQL LOGIN principals aimed at the same dedicated canonical
-database.  It does not install genesis, apply ACLs, activate a bundle, or connect
-during import.
+nine distinct PostgreSQL LOGIN principals aimed at the same dedicated canonical
+database: reader, control, four research writers, and the three Phase 9 writers
+actually routed by the API.  It does not install genesis, apply ACLs, activate a
+bundle, or connect during import.
 """
 
 from __future__ import annotations
@@ -249,7 +250,7 @@ def create_app(
             },
             "phase9_identities": {
                 capability: identities[capability]
-                for capability in PHASE9_PERSISTENCE_ENV_BY_CAPABILITY
+                for capability in API_PHASE9_CAPABILITIES
             },
             "trading_capability": "TRADING_DISABLED",
         }

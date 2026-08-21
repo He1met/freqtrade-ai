@@ -123,6 +123,8 @@ python scripts/canonical_v13_api_service.py cleanup-phase9-provisioning
 固定到新 main。按既有安全流程先迁移/配置 principals，再 restart API/UI。restart 后必须证明：
 
 - `/healthz` 为 `HEALTHY / TRADING_DISABLED`；`/readyz` 为 `READY`；
+- `/readyz.phase9_identities` 只投影 API 实际持有的 approval、deployment、risk 三个 writer
+  identity；signal/order/fill/ledger/reconciliation identity 必须保持在各自独立进程，API 不读取也不投影；
 - API/UI 各一个 loopback process，无 legacy fallback；
 - 15 个 service LOGIN identity 均 distinct；
 - runtime readiness 仍 `TRADING_DISABLED / ACTIVE_DEPLOYMENT_UNSET`；

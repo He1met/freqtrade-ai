@@ -5,8 +5,10 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 
 from app.canonical_v13.api import API_PREFIX
@@ -17,6 +19,76 @@ from app.canonical_v13.phase9_persistence import phase9_service_principal
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_ROOT = REPOSITORY_ROOT / "backend"
+
+
+class _ReadyResult:
+    def __init__(self, value: str) -> None:
+        self._value = value
+
+    def scalar_one(self) -> str:
+        return self._value
+
+
+class _ReadyConnection:
+    def __init__(self, identity: str) -> None:
+        self.identity = identity
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args) -> None:
+        return None
+
+    def execute(self, statement):
+        assert "current_user" in str(statement).lower()
+        return _ReadyResult(self.identity)
+
+
+class _ReadyEngine:
+    def __init__(self, identity: str) -> None:
+        self.identity = identity
+
+    def connect(self) -> _ReadyConnection:
+        return _ReadyConnection(self.identity)
+
+    def dispose(self) -> None:
+        return None
+
+
+def _minimal_production_environment() -> dict[str, str]:
+    environment = {
+        production.READER_DATABASE_URL_ENV: (
+            "postgresql+psycopg://freqtrade_ai_v13_api_login@"
+            "127.0.0.1/canonical_v13"
+        ),
+        production.CONTROL_DATABASE_URL_ENV: (
+            "postgresql+psycopg://freqtrade_ai_v13_control_login@"
+            "127.0.0.1/canonical_v13"
+        ),
+    }
+    environment.update(
+        {
+            environment_name: (
+                "postgresql+psycopg://"
+                f"{research_service_principal(production.local_role_mapping(), logical_role)}"
+                "@127.0.0.1/canonical_v13"
+            )
+            for logical_role, environment_name in (
+                production.RESEARCH_PERSISTENCE_ENV_BY_CAPABILITY.items()
+            )
+        }
+    )
+    environment.update(
+        {
+            production.PHASE9_PERSISTENCE_ENV_BY_CAPABILITY[logical_role]: (
+                "postgresql+psycopg://"
+                f"{phase9_service_principal(production.local_role_mapping(), logical_role)}"
+                "@127.0.0.1/canonical_v13"
+            )
+            for logical_role in production.API_PHASE9_CAPABILITIES
+        }
+    )
+    return environment
 
 
 def test_source_layout_imports_from_an_unrelated_working_directory(tmp_path) -> None:
@@ -108,30 +180,7 @@ def test_production_composition_requires_two_roles_on_one_postgresql_database(
         production.create_app({"DATABASE_URL": "sqlite:///legacy.db"})
     assert "BLOCKED_CANONICAL_DATABASE_URL_UNSET" in str(missing.value)
 
-    base = {
-        production.READER_DATABASE_URL_ENV: "postgresql+psycopg://freqtrade_ai_v13_api_login@127.0.0.1/canonical_v13",
-        production.CONTROL_DATABASE_URL_ENV: "postgresql+psycopg://freqtrade_ai_v13_control_login@127.0.0.1/canonical_v13",
-        **{
-            environment_name: (
-                "postgresql+psycopg://"
-                f"{research_service_principal(production.local_role_mapping(), logical_role)}"
-                "@127.0.0.1/canonical_v13"
-            )
-            for logical_role, environment_name in (
-                production.RESEARCH_PERSISTENCE_ENV_BY_CAPABILITY.items()
-            )
-        },
-        **{
-            environment_name: (
-                "postgresql+psycopg://"
-                f"{phase9_service_principal(production.local_role_mapping(), logical_role)}"
-                "@127.0.0.1/canonical_v13"
-            )
-            for logical_role, environment_name in (
-                production.PHASE9_PERSISTENCE_ENV_BY_CAPABILITY.items()
-            )
-        },
-    }
+    base = _minimal_production_environment()
     without_validation = dict(base)
     without_validation.pop(
         production.RESEARCH_PERSISTENCE_ENV_BY_CAPABILITY["canonical_validation_writer"]
@@ -160,6 +209,16 @@ def test_production_composition_requires_two_roles_on_one_postgresql_database(
         )
     assert "BLOCKED_CANONICAL_DATABASE_SPLIT" in str(split.value)
 
+    missing_risk = dict(base)
+    missing_risk.pop(
+        production.PHASE9_PERSISTENCE_ENV_BY_CAPABILITY["canonical_risk_writer"]
+    )
+    with pytest.raises(
+        production.CanonicalProductionConfigurationBlocked
+    ) as missing_phase9:
+        production.create_app(missing_risk)
+    assert "BLOCKED_PHASE9_DATABASE_URL_UNSET" in str(missing_phase9.value)
+
     engines = [create_engine("sqlite+pysqlite:///:memory:") for _ in range(10)]
     calls = []
 
@@ -187,3 +246,43 @@ def test_production_composition_requires_two_roles_on_one_postgresql_database(
     finally:
         for engine in engines:
             engine.dispose()
+
+
+def test_readyz_projects_only_api_routed_phase9_identities(monkeypatch) -> None:
+    environment = _minimal_production_environment()
+    assert all(
+        production.PHASE9_PERSISTENCE_ENV_BY_CAPABILITY[capability] not in environment
+        for capability in set(production.PHASE9_PERSISTENCE_ENV_BY_CAPABILITY)
+        - set(production.API_PHASE9_CAPABILITIES)
+    )
+    engines: list[_ReadyEngine] = []
+
+    def fake_create_engine(url, **kwargs):
+        assert kwargs == {"pool_pre_ping": True}
+        engine = _ReadyEngine(url.username)
+        engines.append(engine)
+        return engine
+
+    monkeypatch.setattr(production, "create_engine", fake_create_engine)
+    monkeypatch.setattr(
+        production,
+        "verify_canonical_genesis",
+        lambda _connection: SimpleNamespace(accepted=True),
+    )
+    app = production.create_app(environment)
+    response = TestClient(app).get("/readyz")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "READY"
+    assert payload["trading_capability"] == "TRADING_DISABLED"
+    assert tuple(payload["phase9_identities"]) == production.API_PHASE9_CAPABILITIES
+    assert payload["phase9_identities"] == {
+        capability: phase9_service_principal(
+            production.local_role_mapping(), capability
+        )
+        for capability in production.API_PHASE9_CAPABILITIES
+    }
+    assert "canonical_signal_writer" not in payload["phase9_identities"]
+    assert "canonical_order_writer" not in payload["phase9_identities"]
+    assert len(engines) == 9

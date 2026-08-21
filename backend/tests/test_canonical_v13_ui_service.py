@@ -53,6 +53,26 @@ class _CanonicalAPI(BaseHTTPRequestHandler):
     do_POST = _respond
 
 
+class _CanonicalReadinessAPI(BaseHTTPRequestHandler):
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+    def do_GET(self) -> None:
+        assert self.path == "/api/canonical-v13/readiness/runtime"
+        payload = {
+            "status": "BLOCKED",
+            "reason_codes": ["TRADING_DISABLED", "ACTIVE_DEPLOYMENT_UNSET"],
+            "deployment_id": None,
+            "runtime_instance_id": None,
+        }
+        body = json.dumps(payload, separators=(",", ":")).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
 def test_gateway_serves_spa_and_only_proxies_canonical_api(tmp_path: Path) -> None:
     service = _load_service()
     (tmp_path / "index.html").write_text("<main>canonical-v13</main>", encoding="utf-8")
@@ -95,3 +115,27 @@ def test_launch_agent_contract_contains_no_database_or_secret_material() -> None
     assert "password" not in serialized
     assert "keychain" not in serialized
     assert "8000" not in serialized
+
+
+def test_gateway_preserves_direct_phase9_readiness_contract(tmp_path: Path) -> None:
+    service = _load_service()
+    (tmp_path / "index.html").write_text("<main>canonical-v13</main>", encoding="utf-8")
+    with _server(_CanonicalReadinessAPI) as api_port:
+        handler = service._handler(tmp_path, api_port=api_port)
+        with _server(handler) as ui_port:
+            with urlopen(
+                f"http://127.0.0.1:{ui_port}"
+                "/api/canonical-v13/readiness/runtime"
+            ) as response:
+                payload = json.loads(response.read())
+
+    assert payload == {
+        "status": "BLOCKED",
+        "reason_codes": ["TRADING_DISABLED", "ACTIVE_DEPLOYMENT_UNSET"],
+        "deployment_id": None,
+        "runtime_instance_id": None,
+    }
+    serialized = json.dumps(payload, sort_keys=True).lower()
+    assert "password" not in serialized
+    assert "database_url" not in serialized
+    assert "credential" not in serialized
