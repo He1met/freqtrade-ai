@@ -1016,6 +1016,42 @@ def test_runtime_restart_blocks_before_bootstrap_if_container_survives_bootout(
     ]
 
 
+def test_runtime_restart_waits_for_launchd_label_retirement_before_bootstrap(
+    monkeypatch, tmp_path
+) -> None:
+    service = _load_script("canonical_phase9_runtime_restart_label_test")
+    _configure_roots(service, tmp_path, monkeypatch)
+    monkeypatch.setattr(service.shutil, "which", lambda _name: "/bin/launchctl")
+    calls: list[tuple[str, ...]] = []
+    print_results = iter((0, 0, 3))
+
+    def fake_run(command):
+        resolved = tuple(command)
+        calls.append(resolved)
+        if resolved[:3] == (service.PODMAN_PATH, "container", "exists"):
+            return subprocess.CompletedProcess(command, 1, "", "")
+        if resolved[:2] == ("launchctl", "print"):
+            return subprocess.CompletedProcess(command, next(print_results), "", "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(service, "_run", fake_run)
+    prepared = _prepare_runtime(service)
+    service.confirm("long_lived_runtime", prepared["plan_digest"])
+    calls.clear()
+
+    result = service.restart("long_lived_runtime", prepared["plan_digest"])
+
+    assert result["status"] == "RESTARTED"
+    print_calls = [call for call in calls if call[:2] == ("launchctl", "print")]
+    assert len(print_calls) == 3
+    assert calls[-1] == (
+        "launchctl",
+        "bootstrap",
+        service._launchctl_domain(),
+        str(service._plist_path("long_lived_runtime")),
+    )
+
+
 def test_recovery_cleans_only_expired_dead_orphan_before_bootstrap(
     monkeypatch, tmp_path
 ) -> None:
