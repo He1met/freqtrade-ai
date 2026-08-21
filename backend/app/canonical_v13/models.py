@@ -98,7 +98,9 @@ def _digest(name: str, *, nullable: bool = False) -> Column[str]:
     )
 
 
-def _created_at(name: str = "created_at", *, nullable: bool = False) -> Column[datetime]:
+def _created_at(
+    name: str = "created_at", *, nullable: bool = False
+) -> Column[datetime]:
     return Column(name, DateTime(timezone=True), nullable=nullable)
 
 
@@ -172,9 +174,7 @@ AUDIT_EVENTS_TABLE = _table(
         "aggregate_id",
         "event_type",
         unique=True,
-        postgresql_where=text(
-            "aggregate_type = 'research_execution_authorization'"
-        ),
+        postgresql_where=text("aggregate_type = 'research_execution_authorization'"),
         sqlite_where=text("aggregate_type = 'research_execution_authorization'"),
     ),
 )
@@ -206,9 +206,7 @@ STRATEGY_ARTIFACTS_TABLE = _table(
     Column("size_bytes", Integer, nullable=False),
     Column("normalized_content", Text, nullable=False),
     _created_at(),
-    UniqueConstraint(
-        "content_digest", name="strategy_artifacts_content_digest_unique"
-    ),
+    UniqueConstraint("content_digest", name="strategy_artifacts_content_digest_unique"),
     CheckConstraint(
         "length(content_digest) = 64",
         name="strategy_artifacts_content_digest_length",
@@ -273,9 +271,7 @@ STRATEGIES_TABLE = _table(
     Column("catalog_status", String(16), nullable=False),
     Column("display_name", String(240), nullable=False),
     _created_at(),
-    _status_check(
-        "strategies", "catalog_status", ("DRAFT", "ACTIVE", "ARCHIVED")
-    ),
+    _status_check("strategies", "catalog_status", ("DRAFT", "ACTIVE", "ARCHIVED")),
 )
 
 STRATEGY_VERSIONS_TABLE = _table(
@@ -387,9 +383,7 @@ CONFIGURATION_SNAPSHOTS_TABLE = _table(
     _digest("snapshot_digest"),
     Column("snapshot_json", JSON, nullable=False),
     _created_at(),
-    UniqueConstraint(
-        "snapshot_digest", name="configuration_snapshots_digest_unique"
-    ),
+    UniqueConstraint("snapshot_digest", name="configuration_snapshots_digest_unique"),
 )
 
 CONFIGURATION_SNAPSHOT_MEMBERS_TABLE = _table(
@@ -535,9 +529,7 @@ MARKET_ARTIFACTS_TABLE = _table(
     Column("media_type", String(120), nullable=False),
     _created_at(),
     UniqueConstraint("content_digest", name="market_artifacts_digest_unique"),
-    CheckConstraint(
-        "size_bytes >= 0", name="market_artifacts_size_bytes_nonnegative"
-    ),
+    CheckConstraint("size_bytes >= 0", name="market_artifacts_size_bytes_nonnegative"),
 )
 
 MARKET_INSPECTIONS_TABLE = _table(
@@ -566,9 +558,7 @@ MARKET_RECEIPTS_TABLE = _table(
     _digest("inspection_digest"),
     _digest("receipt_digest"),
     _created_at(),
-    _status_check(
-        "market_receipts", "status", ("ACCEPTED", "REJECTED", "BLOCKED")
-    ),
+    _status_check("market_receipts", "status", ("ACCEPTED", "REJECTED", "BLOCKED")),
 )
 
 MARKET_SNAPSHOTS_TABLE = _table(
@@ -636,9 +626,20 @@ RESEARCH_GATE_ATTEMPTS_TABLE = _table(
     _created_at("started_at", nullable=True),
     _created_at("completed_at", nullable=True),
     UniqueConstraint("request_digest", name="research_gate_attempts_request_unique"),
-    UniqueConstraint("writer_identity", "idempotency_key", name="research_gate_attempts_writer_key_unique"),
-    CheckConstraint("length(release_commit) = 40", name="research_gate_attempts_release_commit_length"),
-    _status_check("research_gate_attempts", "status", ("PENDING", "RUNNING", "PASSED", "FAILED", "BLOCKED")),
+    UniqueConstraint(
+        "writer_identity",
+        "idempotency_key",
+        name="research_gate_attempts_writer_key_unique",
+    ),
+    CheckConstraint(
+        "length(release_commit) = 40",
+        name="research_gate_attempts_release_commit_length",
+    ),
+    _status_check(
+        "research_gate_attempts",
+        "status",
+        ("PENDING", "RUNNING", "PASSED", "FAILED", "BLOCKED"),
+    ),
 )
 
 RESEARCH_GATE_RECEIPTS_TABLE = _table(
@@ -677,14 +678,32 @@ RESEARCH_GATE_RECEIPTS_TABLE = _table(
     Column("required_trade_count", Integer, nullable=True),
     _digest("receipt_digest"),
     _created_at(),
-    UniqueConstraint("gate_attempt_id", "gate_type", name="research_gate_receipts_attempt_type_unique"),
+    UniqueConstraint(
+        "gate_attempt_id",
+        "gate_type",
+        name="research_gate_receipts_attempt_type_unique",
+    ),
     UniqueConstraint("receipt_digest", name="research_gate_receipts_digest_unique"),
-    CheckConstraint("length(release_commit) = 40", name="research_gate_receipts_release_commit_length"),
-    CheckConstraint("observed_signal_count IS NULL OR observed_signal_count >= 0", name="research_gate_receipts_signal_count_nonnegative"),
-    CheckConstraint("observed_trade_count IS NULL OR observed_trade_count >= 0", name="research_gate_receipts_trade_count_nonnegative"),
-    CheckConstraint("required_trade_count IS NULL OR required_trade_count > 0", name="research_gate_receipts_required_trade_positive"),
+    CheckConstraint(
+        "length(release_commit) = 40",
+        name="research_gate_receipts_release_commit_length",
+    ),
+    CheckConstraint(
+        "observed_signal_count IS NULL OR observed_signal_count >= 0",
+        name="research_gate_receipts_signal_count_nonnegative",
+    ),
+    CheckConstraint(
+        "observed_trade_count IS NULL OR observed_trade_count >= 0",
+        name="research_gate_receipts_trade_count_nonnegative",
+    ),
+    CheckConstraint(
+        "required_trade_count IS NULL OR required_trade_count > 0",
+        name="research_gate_receipts_required_trade_positive",
+    ),
     _status_check("research_gate_receipts", "gate_type", ("STATIC", "LOOKAHEAD")),
-    _status_check("research_gate_receipts", "terminal_status", ("PASSED", "FAILED", "BLOCKED")),
+    _status_check(
+        "research_gate_receipts", "terminal_status", ("PASSED", "FAILED", "BLOCKED")
+    ),
 )
 
 
@@ -756,9 +775,7 @@ VALIDATION_ATTEMPTS_TABLE = _table(
         "attempt_number",
         name="validation_attempts_plan_number_unique",
     ),
-    CheckConstraint(
-        "attempt_number > 0", name="validation_attempts_number_positive"
-    ),
+    CheckConstraint("attempt_number > 0", name="validation_attempts_number_positive"),
     _status_check(
         "validation_attempts",
         "status",
@@ -862,7 +879,14 @@ OPTIMIZATION_RUNS_TABLE = _table(
     _status_check(
         "optimization_runs",
         "status",
-        ("NOT_STARTED", "PENDING_BASELINE", "RUNNING", "SUCCEEDED", "FAILED", "BLOCKED"),
+        (
+            "NOT_STARTED",
+            "PENDING_BASELINE",
+            "RUNNING",
+            "SUCCEEDED",
+            "FAILED",
+            "BLOCKED",
+        ),
     ),
     UniqueConstraint(
         "baseline_qualification_decision_id",
@@ -890,9 +914,7 @@ OPTIMIZATION_TRIALS_TABLE = _table(
         "trial_number",
         name="optimization_trials_run_number_unique",
     ),
-    CheckConstraint(
-        "trial_number > 0", name="optimization_trials_number_positive"
-    ),
+    CheckConstraint("trial_number > 0", name="optimization_trials_number_positive"),
 )
 
 
@@ -1009,6 +1031,107 @@ RUNTIME_RECEIPTS_TABLE = _table(
 )
 
 
+# Phase 9 execution authority remains independent from research qualification.
+# A human approval writer freezes the exact budget; the risk writer may only append
+# reservations derived from it. Credential attestations contain digests and safe
+# capability facts only, never raw Keychain material or authorization headers.
+EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE = _table(
+    "execution_risk_budget_authorizations",
+    _uuid_id(),
+    _uuid_fk("deployment_approval_id", "deployment_approvals", unique=True),
+    Column("execution_target", String(24), nullable=False),
+    Column("instrument", String(80), nullable=False),
+    Column("max_notional", Numeric(36, 18), nullable=False),
+    Column("max_order_count", Integer, nullable=False),
+    Column("actor_identity", String(160), nullable=False),
+    Column("reason", Text, nullable=False),
+    _digest("policy_digest"),
+    _digest("source_receipt_digest"),
+    _digest("authorization_digest"),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    _created_at(),
+    CheckConstraint(
+        "execution_target = 'OKX_DEMO'",
+        name="execution_risk_budget_demo_only",
+    ),
+    CheckConstraint(
+        "max_notional > 0 AND max_order_count > 0",
+        name="execution_risk_budget_positive",
+    ),
+    UniqueConstraint(
+        "authorization_digest",
+        name="execution_risk_budget_authorization_digest_unique",
+    ),
+)
+
+EXECUTION_RISK_RESERVATIONS_TABLE = _table(
+    "execution_risk_reservations",
+    _uuid_id(),
+    _uuid_fk("risk_budget_authorization_id", "execution_risk_budget_authorizations"),
+    _uuid_fk("trade_intent_id", "trade_intents", unique=True),
+    Column("status", String(24), nullable=False),
+    Column("requested_notional", Numeric(36, 18), nullable=False),
+    Column("reason_code", String(120), nullable=False),
+    _digest("reservation_digest"),
+    _created_at(),
+    _status_check(
+        "execution_risk_reservations",
+        "status",
+        ("RISK_ACCEPTED", "REJECTED", "BLOCKED"),
+    ),
+    CheckConstraint(
+        "requested_notional > 0",
+        name="execution_risk_reservations_notional_positive",
+    ),
+    UniqueConstraint(
+        "reservation_digest",
+        name="execution_risk_reservation_digest_unique",
+    ),
+)
+
+EXECUTION_ATTESTATIONS_TABLE = _table(
+    "execution_attestations",
+    _uuid_id(),
+    _uuid_fk("deployment_id", "deployments"),
+    Column("execution_target", String(24), nullable=False),
+    Column("instrument", String(80), nullable=False),
+    Column("status", String(16), nullable=False),
+    _digest("account_fingerprint_digest"),
+    _digest("credential_generation_digest"),
+    Column("permissions_json", JSON, nullable=False),
+    _digest("attestation_digest"),
+    Column("observed_at", DateTime(timezone=True), nullable=False),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    _status_check("execution_attestations", "status", ("READY", "BLOCKED", "EXPIRED")),
+    CheckConstraint(
+        "execution_target = 'OKX_DEMO'",
+        name="execution_attestations_demo_only",
+    ),
+    UniqueConstraint(
+        "attestation_digest",
+        name="execution_attestations_digest_unique",
+    ),
+)
+
+ORDER_WRITER_LEASES_TABLE = _table(
+    "order_writer_leases",
+    Column("execution_target", String(24), primary_key=True),
+    Column("holder_identity", String(200), nullable=False),
+    _digest("holder_token_digest"),
+    Column("generation", Integer, nullable=False),
+    Column("status", String(16), nullable=False),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    _digest("lease_digest"),
+    _created_at(),
+    _status_check("order_writer_leases", "status", ("ACTIVE", "RELEASED", "EXPIRED")),
+    CheckConstraint(
+        "execution_target = 'OKX_DEMO'",
+        name="order_writer_leases_demo_only",
+    ),
+    CheckConstraint("generation > 0", name="order_writer_leases_generation_positive"),
+)
+
+
 # Explicitly separated signal, risk, central order, fill, ledger, reconciliation.
 SIGNALS_TABLE = _table(
     "signals",
@@ -1053,9 +1176,7 @@ RISK_DECISIONS_TABLE = _table(
     Column("decision_json", JSON, nullable=False),
     _digest("decision_digest"),
     _created_at(),
-    _status_check(
-        "risk_decisions", "status", ("RISK_ACCEPTED", "BLOCKED", "REJECTED")
-    ),
+    _status_check("risk_decisions", "status", ("RISK_ACCEPTED", "BLOCKED", "REJECTED")),
 )
 
 ORDERS_TABLE = _table(
@@ -1078,6 +1199,7 @@ ORDERS_TABLE = _table(
             "INTENT_ACCEPTED",
             "RISK_ACCEPTED",
             "SUBMITTED",
+            "DISPATCHING",
             "ACCEPTED",
             "PARTIAL",
             "FILLED",
@@ -1154,9 +1276,7 @@ RECONCILIATION_ITEMS_TABLE = _table(
         "order_id IS NOT NULL OR fill_id IS NOT NULL OR ledger_entry_id IS NOT NULL",
         name="reconciliation_items_source_required",
     ),
-    _status_check(
-        "reconciliation_items", "status", ("MATCHED", "GAP", "BLOCKED")
-    ),
+    _status_check("reconciliation_items", "status", ("MATCHED", "GAP", "BLOCKED")),
 )
 
 

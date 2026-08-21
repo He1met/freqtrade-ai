@@ -11,6 +11,7 @@ import base64
 import binascii
 from collections.abc import Callable
 from contextlib import AbstractContextManager
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional, Protocol, TypeVar
@@ -67,6 +68,19 @@ from app.canonical_v13.dto import (
     MarketSnapshotSummaryDTO,
     OptimizationListProjectionDTO,
     OptimizationProjectionDTO,
+    Phase9ReadinessProjectionDTO,
+    Phase9ApprovalCommandDTO,
+    Phase9ApprovalReceiptDTO,
+    Phase9DeploymentCommandDTO,
+    Phase9DeploymentReceiptDTO,
+    Phase9IntentCommandDTO,
+    Phase9IntentReceiptDTO,
+    Phase9RiskBudgetCommandDTO,
+    Phase9RiskBudgetReceiptDTO,
+    Phase9RiskDecisionCommandDTO,
+    Phase9RiskDecisionReceiptDTO,
+    Phase9SignalCommandDTO,
+    Phase9SignalReceiptDTO,
     ReadinessProjectionDTO,
     ResearchAttemptStartCommandDTO,
     ResearchAttemptStartReceiptDTO,
@@ -103,8 +117,23 @@ from app.canonical_v13.dto import (
     SubmissionReceiptDTO,
     StaticGateReceiptCommandDTO,
 )
-from app.canonical_v13.deployment_approval import deployment_approval_digest
-from app.canonical_v13.deployment_control import deployment_capability_digest
+from app.canonical_v13.deployment_approval import (
+    CanonicalDeploymentApprovalBlocked,
+    approve_demo_deployment,
+    deployment_approval_digest,
+)
+from app.canonical_v13.deployment_control import (
+    CanonicalDeploymentBlocked,
+    create_demo_deployment,
+    deployment_capability_digest,
+)
+from app.canonical_v13.execution_common import CanonicalExecutionChainBlocked
+from app.canonical_v13.phase9_execution_authority import (
+    authorize_demo_risk_budget,
+    decide_central_demo_risk,
+)
+from app.canonical_v13.risk_service import create_production_demo_intent
+from app.canonical_v13.signal_service import record_production_demo_signal
 from app.canonical_v13.genesis import (
     CanonicalGenesisBlocked,
     verify_canonical_genesis,
@@ -141,6 +170,12 @@ from app.canonical_v13.offline_exchange_metadata import (
 from app.canonical_v13.research_evaluation import (
     CanonicalEvaluationBlocked,
     gate_optimization,
+)
+from app.canonical_v13.phase9_readiness import (
+    PHASE9_ACCEPTANCE_STAGES,
+    CanonicalPhase9ReadinessBlocked,
+    Phase9QualificationHandoff,
+    inspect_phase9_readiness,
 )
 from app.canonical_v13.research_authorization import (
     CanonicalResearchAuthorizationBlocked,
@@ -254,6 +289,10 @@ _CANONICAL_DOMAIN_ERRORS = (
     CanonicalGateBlocked,
     CanonicalResearchValidationBlocked,
     CanonicalEvaluationBlocked,
+    CanonicalPhase9ReadinessBlocked,
+    CanonicalDeploymentApprovalBlocked,
+    CanonicalDeploymentBlocked,
+    CanonicalExecutionChainBlocked,
 )
 
 
@@ -271,7 +310,9 @@ def _error_response(code: str, detail: str, *, status_code: int) -> JSONResponse
     payload = CanonicalErrorResponseDTO(
         error=CanonicalErrorDetailDTO(code=code, detail=detail)
     )
-    return JSONResponse(status_code=status_code, content=payload.model_dump(mode="json"))
+    return JSONResponse(
+        status_code=status_code, content=payload.model_dump(mode="json")
+    )
 
 
 def _effective_connection(connection: Connection) -> Connection:
@@ -312,11 +353,15 @@ def _require_exact_ready_validation_plan(
     validation_plan_id: UUID,
     validation_plan_digest: str,
 ) -> None:
-    plan = connection.execute(
-        select(VALIDATION_PLANS_TABLE).where(
-            VALIDATION_PLANS_TABLE.c.id == validation_plan_id
+    plan = (
+        connection.execute(
+            select(VALIDATION_PLANS_TABLE).where(
+                VALIDATION_PLANS_TABLE.c.id == validation_plan_id
+            )
         )
-    ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+    )
     if (
         plan is None
         or plan["status"] != "READY"
@@ -324,8 +369,7 @@ def _require_exact_ready_validation_plan(
         or plan["strategy_version_id"] != lineage.strategy_version_id
         or plan["research_target_id"] != lineage.research_target_id
         or plan["configuration_bundle_id"] != lineage.configuration_bundle_id
-        or plan["configuration_bundle_digest"]
-        != lineage.configuration_bundle_digest
+        or plan["configuration_bundle_digest"] != lineage.configuration_bundle_digest
         or plan["market_snapshot_id"] != lineage.market_snapshot_id
         or plan["market_snapshot_digest"] != lineage.market_snapshot_digest
     ):
@@ -339,8 +383,7 @@ def _qualification_status(connection: Connection, strategy_version_id: UUID) -> 
     status = connection.execute(
         select(QUALIFICATION_DECISIONS_TABLE.c.status)
         .where(
-            QUALIFICATION_DECISIONS_TABLE.c.strategy_version_id
-            == strategy_version_id
+            QUALIFICATION_DECISIONS_TABLE.c.strategy_version_id == strategy_version_id
         )
         .order_by(QUALIFICATION_DECISIONS_TABLE.c.created_at.desc())
         .limit(1)
@@ -351,27 +394,39 @@ def _qualification_status(connection: Connection, strategy_version_id: UUID) -> 
 def _strategy_projection(
     connection: Connection, strategy: dict[str, Any]
 ) -> StrategyProjectionDTO:
-    submission = connection.execute(
-        select(STRATEGY_SUBMISSIONS_TABLE).where(
-            STRATEGY_SUBMISSIONS_TABLE.c.id == strategy["source_submission_id"]
+    submission = (
+        connection.execute(
+            select(STRATEGY_SUBMISSIONS_TABLE).where(
+                STRATEGY_SUBMISSIONS_TABLE.c.id == strategy["source_submission_id"]
+            )
         )
-    ).mappings().one()
-    version = connection.execute(
-        select(STRATEGY_VERSIONS_TABLE)
-        .where(STRATEGY_VERSIONS_TABLE.c.strategy_id == strategy["id"])
-        .order_by(STRATEGY_VERSIONS_TABLE.c.version_number.desc())
-        .limit(1)
-    ).mappings().one_or_none()
+        .mappings()
+        .one()
+    )
+    version = (
+        connection.execute(
+            select(STRATEGY_VERSIONS_TABLE)
+            .where(STRATEGY_VERSIONS_TABLE.c.strategy_id == strategy["id"])
+            .order_by(STRATEGY_VERSIONS_TABLE.c.version_number.desc())
+            .limit(1)
+        )
+        .mappings()
+        .one_or_none()
+    )
     if version is None:
         raise CanonicalAPIBlocked(
             "BLOCKED_STRATEGY_VERSION_MISSING",
             "canonical strategy has no current version",
         )
-    artifact = connection.execute(
-        select(STRATEGY_ARTIFACTS_TABLE).where(
-            STRATEGY_ARTIFACTS_TABLE.c.id == version["artifact_id"]
+    artifact = (
+        connection.execute(
+            select(STRATEGY_ARTIFACTS_TABLE).where(
+                STRATEGY_ARTIFACTS_TABLE.c.id == version["artifact_id"]
+            )
         )
-    ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+    )
     if artifact is None:
         raise CanonicalAPIBlocked(
             "BLOCKED_STRATEGY_ARTIFACT_MISSING",
@@ -394,27 +449,39 @@ def _strategy_projection(
 
 
 def _configuration_catalog(connection: Connection) -> ConfigurationCatalogProjectionDTO:
-    profiles = connection.execute(
-        select(CONFIGURATION_PROFILES_TABLE).order_by(
-            CONFIGURATION_PROFILES_TABLE.c.configuration_kind,
-            CONFIGURATION_PROFILES_TABLE.c.profile_key,
+    profiles = (
+        connection.execute(
+            select(CONFIGURATION_PROFILES_TABLE).order_by(
+                CONFIGURATION_PROFILES_TABLE.c.configuration_kind,
+                CONFIGURATION_PROFILES_TABLE.c.profile_key,
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
     items: list[ConfigurationProfileProjectionDTO] = []
     for profile in profiles:
-        version_rows = connection.execute(
-            select(CONFIGURATION_VERSIONS_TABLE)
-            .where(CONFIGURATION_VERSIONS_TABLE.c.profile_id == profile["id"])
-            .order_by(CONFIGURATION_VERSIONS_TABLE.c.version_number)
-        ).mappings().all()
+        version_rows = (
+            connection.execute(
+                select(CONFIGURATION_VERSIONS_TABLE)
+                .where(CONFIGURATION_VERSIONS_TABLE.c.profile_id == profile["id"])
+                .order_by(CONFIGURATION_VERSIONS_TABLE.c.version_number)
+            )
+            .mappings()
+            .all()
+        )
         versions: list[ConfigurationVersionProjectionDTO] = []
         for version in version_rows:
-            snapshot = connection.execute(
-                select(CONFIGURATION_SNAPSHOTS_TABLE).where(
-                    CONFIGURATION_SNAPSHOTS_TABLE.c.configuration_version_id
-                    == version["id"]
+            snapshot = (
+                connection.execute(
+                    select(CONFIGURATION_SNAPSHOTS_TABLE).where(
+                        CONFIGURATION_SNAPSHOTS_TABLE.c.configuration_version_id
+                        == version["id"]
+                    )
                 )
-            ).mappings().one_or_none()
+                .mappings()
+                .one_or_none()
+            )
             versions.append(
                 ConfigurationVersionProjectionDTO(
                     version_id=version["id"],
@@ -477,30 +544,42 @@ def _market_inventory(connection: Connection) -> MarketInventoryProjectionDTO:
             .where(MARKET_RECEIPTS_TABLE.c.status == "ACCEPTED")
         ).scalar_one()
     )
-    rows = connection.execute(
-        select(MARKET_SNAPSHOTS_TABLE).order_by(
-            MARKET_SNAPSHOTS_TABLE.c.created_at,
-            MARKET_SNAPSHOTS_TABLE.c.id,
+    rows = (
+        connection.execute(
+            select(MARKET_SNAPSHOTS_TABLE).order_by(
+                MARKET_SNAPSHOTS_TABLE.c.created_at,
+                MARKET_SNAPSHOTS_TABLE.c.id,
+            )
         )
-    ).mappings().all()
-    profile_rows = connection.execute(
-        select(MARKET_PROFILES_TABLE).order_by(
-            MARKET_PROFILES_TABLE.c.profile_key,
-            MARKET_PROFILES_TABLE.c.id,
+        .mappings()
+        .all()
+    )
+    profile_rows = (
+        connection.execute(
+            select(MARKET_PROFILES_TABLE).order_by(
+                MARKET_PROFILES_TABLE.c.profile_key,
+                MARKET_PROFILES_TABLE.c.id,
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
     profiles: list[MarketProfileVersionProjectionDTO] = []
     for profile in profile_rows:
-        version_rows = connection.execute(
-            select(MARKET_PROFILE_VERSIONS_TABLE)
-            .where(
-                MARKET_PROFILE_VERSIONS_TABLE.c.market_profile_id == profile["id"]
+        version_rows = (
+            connection.execute(
+                select(MARKET_PROFILE_VERSIONS_TABLE)
+                .where(
+                    MARKET_PROFILE_VERSIONS_TABLE.c.market_profile_id == profile["id"]
+                )
+                .order_by(
+                    MARKET_PROFILE_VERSIONS_TABLE.c.version_number,
+                    MARKET_PROFILE_VERSIONS_TABLE.c.id,
+                )
             )
-            .order_by(
-                MARKET_PROFILE_VERSIONS_TABLE.c.version_number,
-                MARKET_PROFILE_VERSIONS_TABLE.c.id,
-            )
-        ).mappings().all()
+            .mappings()
+            .all()
+        )
         profiles.extend(
             MarketProfileVersionProjectionDTO(
                 market_profile_id=profile["id"],
@@ -525,8 +604,7 @@ def _market_inventory(connection: Connection) -> MarketInventoryProjectionDTO:
                     select(func.count())
                     .select_from(MARKET_SNAPSHOT_MEMBERS_TABLE)
                     .where(
-                        MARKET_SNAPSHOT_MEMBERS_TABLE.c.market_snapshot_id
-                        == row["id"]
+                        MARKET_SNAPSHOT_MEMBERS_TABLE.c.market_snapshot_id == row["id"]
                     )
                 ).scalar_one()
             ),
@@ -548,12 +626,16 @@ def _market_inventory(connection: Connection) -> MarketInventoryProjectionDTO:
 def _research_plan_catalog(
     connection: Connection,
 ) -> ResearchPlanCatalogProjectionDTO:
-    plan_ids = connection.execute(
-        select(VALIDATION_PLANS_TABLE.c.id).order_by(
-            VALIDATION_PLANS_TABLE.c.created_at,
-            VALIDATION_PLANS_TABLE.c.id,
+    plan_ids = (
+        connection.execute(
+            select(VALIDATION_PLANS_TABLE.c.id).order_by(
+                VALIDATION_PLANS_TABLE.c.created_at,
+                VALIDATION_PLANS_TABLE.c.id,
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     items = [
         ResearchChainProjectionDTO(
             **read_research_chain_projection(
@@ -571,11 +653,15 @@ def _research_plan_catalog(
 def _research_results_projection(
     connection: Connection, validation_plan_id: UUID
 ) -> ResearchResultsProjectionDTO:
-    plan = connection.execute(
-        select(VALIDATION_PLANS_TABLE).where(
-            VALIDATION_PLANS_TABLE.c.id == validation_plan_id
+    plan = (
+        connection.execute(
+            select(VALIDATION_PLANS_TABLE).where(
+                VALIDATION_PLANS_TABLE.c.id == validation_plan_id
+            )
         )
-    ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+    )
     if plan is None:
         raise CanonicalAPIBlocked(
             "BLOCKED_VALIDATION_PLAN_NOT_FOUND",
@@ -586,52 +672,75 @@ def _research_results_projection(
             RESEARCH_TARGETS_TABLE.c.id == plan["research_target_id"]
         )
     ).scalar_one()
-    attempt = connection.execute(
-        select(VALIDATION_ATTEMPTS_TABLE)
-        .where(VALIDATION_ATTEMPTS_TABLE.c.validation_plan_id == validation_plan_id)
-        .order_by(
-            VALIDATION_ATTEMPTS_TABLE.c.attempt_number.desc(),
-            VALIDATION_ATTEMPTS_TABLE.c.id.desc(),
+    attempt = (
+        connection.execute(
+            select(VALIDATION_ATTEMPTS_TABLE)
+            .where(VALIDATION_ATTEMPTS_TABLE.c.validation_plan_id == validation_plan_id)
+            .order_by(
+                VALIDATION_ATTEMPTS_TABLE.c.attempt_number.desc(),
+                VALIDATION_ATTEMPTS_TABLE.c.id.desc(),
+            )
+            .limit(1)
         )
-        .limit(1)
-    ).mappings().one_or_none()
-    plan_windows = connection.execute(
-        select(VALIDATION_PLAN_WINDOWS_TABLE)
-        .where(VALIDATION_PLAN_WINDOWS_TABLE.c.validation_plan_id == validation_plan_id)
-        .order_by(
-            VALIDATION_PLAN_WINDOWS_TABLE.c.window_start,
-            VALIDATION_PLAN_WINDOWS_TABLE.c.window_key,
-            VALIDATION_PLAN_WINDOWS_TABLE.c.id,
+        .mappings()
+        .one_or_none()
+    )
+    plan_windows = (
+        connection.execute(
+            select(VALIDATION_PLAN_WINDOWS_TABLE)
+            .where(
+                VALIDATION_PLAN_WINDOWS_TABLE.c.validation_plan_id == validation_plan_id
+            )
+            .order_by(
+                VALIDATION_PLAN_WINDOWS_TABLE.c.window_start,
+                VALIDATION_PLAN_WINDOWS_TABLE.c.window_key,
+                VALIDATION_PLAN_WINDOWS_TABLE.c.id,
+            )
         )
-    ).mappings().all()
-    result_rows = [] if attempt is None else connection.execute(
-        select(VALIDATION_WINDOW_RESULTS_TABLE).where(
-            VALIDATION_WINDOW_RESULTS_TABLE.c.validation_attempt_id == attempt["id"]
+        .mappings()
+        .all()
+    )
+    result_rows = (
+        []
+        if attempt is None
+        else connection.execute(
+            select(VALIDATION_WINDOW_RESULTS_TABLE).where(
+                VALIDATION_WINDOW_RESULTS_TABLE.c.validation_attempt_id == attempt["id"]
+            )
         )
-    ).mappings().all()
-    results_by_window = {
-        row["validation_plan_window_id"]: row for row in result_rows
-    }
+        .mappings()
+        .all()
+    )
+    results_by_window = {row["validation_plan_window_id"]: row for row in result_rows}
     plan_window_ids = {window["id"] for window in plan_windows}
     if not set(results_by_window).issubset(plan_window_ids):
         raise CanonicalAPIBlocked(
             "BLOCKED_RESEARCH_RESULT_LINEAGE",
             "validation attempt contains a result from another plan",
         )
-    score = connection.execute(
-        select(TARGET_SCORES_TABLE).where(
-            TARGET_SCORES_TABLE.c.validation_plan_id == validation_plan_id,
-            TARGET_SCORES_TABLE.c.validation_plan_digest
-            == plan["validation_plan_digest"],
+    score = (
+        connection.execute(
+            select(TARGET_SCORES_TABLE).where(
+                TARGET_SCORES_TABLE.c.validation_plan_id == validation_plan_id,
+                TARGET_SCORES_TABLE.c.validation_plan_digest
+                == plan["validation_plan_digest"],
+            )
         )
-    ).mappings().one_or_none()
-    qualification = connection.execute(
-        select(QUALIFICATION_DECISIONS_TABLE).where(
-            QUALIFICATION_DECISIONS_TABLE.c.validation_plan_id == validation_plan_id,
-            QUALIFICATION_DECISIONS_TABLE.c.validation_plan_digest
-            == plan["validation_plan_digest"],
+        .mappings()
+        .one_or_none()
+    )
+    qualification = (
+        connection.execute(
+            select(QUALIFICATION_DECISIONS_TABLE).where(
+                QUALIFICATION_DECISIONS_TABLE.c.validation_plan_id
+                == validation_plan_id,
+                QUALIFICATION_DECISIONS_TABLE.c.validation_plan_digest
+                == plan["validation_plan_digest"],
+            )
         )
-    ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+    )
     if (score is not None or qualification is not None) and attempt is None:
         raise CanonicalAPIBlocked(
             "BLOCKED_RESEARCH_RESULT_LINEAGE",
@@ -644,12 +753,18 @@ def _research_results_projection(
             "BLOCKED_RESEARCH_RESULT_LINEAGE",
             "qualification does not reference the exact target score",
         )
-    evidence_rows = [] if qualification is None else connection.execute(
-        select(QUALIFICATION_WINDOW_EVIDENCE_TABLE).where(
-            QUALIFICATION_WINDOW_EVIDENCE_TABLE.c.qualification_decision_id
-            == qualification["id"]
+    evidence_rows = (
+        []
+        if qualification is None
+        else connection.execute(
+            select(QUALIFICATION_WINDOW_EVIDENCE_TABLE).where(
+                QUALIFICATION_WINDOW_EVIDENCE_TABLE.c.qualification_decision_id
+                == qualification["id"]
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
     evidence_by_window = {
         row["validation_plan_window_id"]: row for row in evidence_rows
     }
@@ -660,10 +775,7 @@ def _research_results_projection(
         )
     for window_id, evidence in evidence_by_window.items():
         result = results_by_window.get(window_id)
-        if (
-            result is None
-            or evidence["validation_window_result_id"] != result["id"]
-        ):
+        if result is None or evidence["validation_window_result_id"] != result["id"]:
             raise CanonicalAPIBlocked(
                 "BLOCKED_RESEARCH_RESULT_LINEAGE",
                 "qualification evidence does not reference the displayed window result",
@@ -697,7 +809,9 @@ def _research_results_projection(
                 window_start=window["window_start"],
                 window_end=window["window_end"],
                 window_member_digest=window["window_member_digest"],
-                result=None if result is None else ResearchWindowResultProjectionDTO(
+                result=None
+                if result is None
+                else ResearchWindowResultProjectionDTO(
                     validation_window_result_id=result["id"],
                     metrics_json=result["metrics_json"],
                     metrics_digest=result["metrics_digest"],
@@ -718,7 +832,9 @@ def _research_results_projection(
         market_snapshot_id=plan["market_snapshot_id"],
         market_snapshot_digest=plan["market_snapshot_digest"],
         plan_status=plan["status"],
-        attempt=None if attempt is None else ResearchAttemptProjectionDTO(
+        attempt=None
+        if attempt is None
+        else ResearchAttemptProjectionDTO(
             validation_attempt_id=attempt["id"],
             attempt_number=attempt["attempt_number"],
             status=attempt["status"],
@@ -729,7 +845,9 @@ def _research_results_projection(
             completed_at=attempt["completed_at"],
         ),
         windows=windows,
-        score=None if score is None else ResearchScoreProjectionDTO(
+        score=None
+        if score is None
+        else ResearchScoreProjectionDTO(
             target_score_id=score["id"],
             scoring_snapshot_id=score["scoring_snapshot_id"],
             overall_score=str(score["overall_score"]),
@@ -740,7 +858,9 @@ def _research_results_projection(
             scorer_identity=score["scorer_identity"],
             created_at=score["created_at"],
         ),
-        qualification=None if qualification is None else ResearchQualificationProjectionDTO(
+        qualification=None
+        if qualification is None
+        else ResearchQualificationProjectionDTO(
             qualification_decision_id=qualification["id"],
             target_score_id=qualification["target_score_id"],
             quality_snapshot_id=qualification["quality_snapshot_id"],
@@ -757,40 +877,60 @@ def _research_results_projection(
 def _market_snapshot(
     connection: Connection, snapshot_id: UUID
 ) -> MarketSnapshotProjectionDTO:
-    snapshot = connection.execute(
-        select(MARKET_SNAPSHOTS_TABLE).where(
-            MARKET_SNAPSHOTS_TABLE.c.id == snapshot_id
+    snapshot = (
+        connection.execute(
+            select(MARKET_SNAPSHOTS_TABLE).where(
+                MARKET_SNAPSHOTS_TABLE.c.id == snapshot_id
+            )
         )
-    ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+    )
     if snapshot is None:
         raise CanonicalAPIBlocked(
             "BLOCKED_MARKET_SNAPSHOT_NOT_FOUND", "canonical market snapshot is absent"
         )
-    member_rows = connection.execute(
-        select(MARKET_SNAPSHOT_MEMBERS_TABLE)
-        .where(MARKET_SNAPSHOT_MEMBERS_TABLE.c.market_snapshot_id == snapshot_id)
-        .order_by(MARKET_SNAPSHOT_MEMBERS_TABLE.c.research_target_id)
-    ).mappings().all()
+    member_rows = (
+        connection.execute(
+            select(MARKET_SNAPSHOT_MEMBERS_TABLE)
+            .where(MARKET_SNAPSHOT_MEMBERS_TABLE.c.market_snapshot_id == snapshot_id)
+            .order_by(MARKET_SNAPSHOT_MEMBERS_TABLE.c.research_target_id)
+        )
+        .mappings()
+        .all()
+    )
     reasons: list[str] = []
     members: list[MarketSnapshotMemberProjectionDTO] = []
     if not member_rows:
         reasons.append("MARKET_SNAPSHOT_EMPTY")
     for member in member_rows:
-        artifact = connection.execute(
-            select(MARKET_ARTIFACTS_TABLE).where(
-                MARKET_ARTIFACTS_TABLE.c.id == member["market_artifact_id"]
+        artifact = (
+            connection.execute(
+                select(MARKET_ARTIFACTS_TABLE).where(
+                    MARKET_ARTIFACTS_TABLE.c.id == member["market_artifact_id"]
+                )
             )
-        ).mappings().one_or_none()
-        receipt = connection.execute(
-            select(MARKET_RECEIPTS_TABLE).where(
-                MARKET_RECEIPTS_TABLE.c.id == member["market_receipt_id"]
+            .mappings()
+            .one_or_none()
+        )
+        receipt = (
+            connection.execute(
+                select(MARKET_RECEIPTS_TABLE).where(
+                    MARKET_RECEIPTS_TABLE.c.id == member["market_receipt_id"]
+                )
             )
-        ).mappings().one_or_none()
-        target = connection.execute(
-            select(RESEARCH_TARGETS_TABLE).where(
-                RESEARCH_TARGETS_TABLE.c.id == member["research_target_id"]
+            .mappings()
+            .one_or_none()
+        )
+        target = (
+            connection.execute(
+                select(RESEARCH_TARGETS_TABLE).where(
+                    RESEARCH_TARGETS_TABLE.c.id == member["research_target_id"]
+                )
             )
-        ).mappings().one_or_none()
+            .mappings()
+            .one_or_none()
+        )
         if artifact is None or receipt is None or target is None:
             raise CanonicalAPIBlocked(
                 "BLOCKED_MARKET_SNAPSHOT_LINEAGE_MISSING",
@@ -860,12 +1000,16 @@ def _research_readiness(
             workflow_key=workflow_key,
         )
     activation = activations[0]
-    bundle = connection.execute(
-        select(CONFIGURATION_BUNDLES_TABLE).where(
-            CONFIGURATION_BUNDLES_TABLE.c.id
-            == activation["configuration_bundle_id"]
+    bundle = (
+        connection.execute(
+            select(CONFIGURATION_BUNDLES_TABLE).where(
+                CONFIGURATION_BUNDLES_TABLE.c.id
+                == activation["configuration_bundle_id"]
+            )
         )
-    ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+    )
     if bundle is None or bundle["bundle_digest"] != activation["bundle_digest"]:
         return ReadinessProjectionDTO(
             status="BLOCKED",
@@ -873,12 +1017,16 @@ def _research_readiness(
             scope_key=activation["scope_key"],
             workflow_key=activation["workflow_key"],
         )
-    member_rows = connection.execute(
-        select(CONFIGURATION_BUNDLE_MEMBERS_TABLE).where(
-            CONFIGURATION_BUNDLE_MEMBERS_TABLE.c.configuration_bundle_id
-            == bundle["id"]
+    member_rows = (
+        connection.execute(
+            select(CONFIGURATION_BUNDLE_MEMBERS_TABLE).where(
+                CONFIGURATION_BUNDLE_MEMBERS_TABLE.c.configuration_bundle_id
+                == bundle["id"]
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
     snapshot_ids = {
         row["configuration_kind"]: row["configuration_snapshot_id"]
         for row in member_rows
@@ -904,16 +1052,14 @@ def _research_readiness(
             select(func.count())
             .select_from(QUALIFICATION_DECISIONS_TABLE)
             .where(
-                QUALIFICATION_DECISIONS_TABLE.c.configuration_bundle_id
-                == bundle["id"],
+                QUALIFICATION_DECISIONS_TABLE.c.configuration_bundle_id == bundle["id"],
                 QUALIFICATION_DECISIONS_TABLE.c.configuration_bundle_digest
                 == bundle["bundle_digest"],
                 QUALIFICATION_DECISIONS_TABLE.c.market_snapshot_id
                 == bundle["market_snapshot_id"],
                 QUALIFICATION_DECISIONS_TABLE.c.market_snapshot_digest
                 == bundle["market_snapshot_digest"],
-                QUALIFICATION_DECISIONS_TABLE.c.status
-                != "PENDING",
+                QUALIFICATION_DECISIONS_TABLE.c.status != "PENDING",
             )
         ).scalar_one()
     )
@@ -940,11 +1086,15 @@ def _research_readiness(
 
 
 def _runtime_readiness(connection: Connection) -> ReadinessProjectionDTO:
-    deployments = connection.execute(
-        select(DEPLOYMENTS_TABLE)
-        .where(DEPLOYMENTS_TABLE.c.status == "ACTIVE")
-        .order_by(DEPLOYMENTS_TABLE.c.created_at.desc())
-    ).mappings().all()
+    deployments = (
+        connection.execute(
+            select(DEPLOYMENTS_TABLE)
+            .where(DEPLOYMENTS_TABLE.c.status == "ACTIVE")
+            .order_by(DEPLOYMENTS_TABLE.c.created_at.desc())
+        )
+        .mappings()
+        .all()
+    )
     if not deployments:
         return ReadinessProjectionDTO(
             status="BLOCKED",
@@ -960,19 +1110,24 @@ def _runtime_readiness(connection: Connection) -> ReadinessProjectionDTO:
         reasons.append("DEMO_ONLY_INVARIANT_FAILED")
     if deployment["allow_real_funds"] is not False:
         reasons.append("REAL_FUNDS_INVARIANT_FAILED")
-    approval = connection.execute(
-        select(DEPLOYMENT_APPROVALS_TABLE).where(
-            DEPLOYMENT_APPROVALS_TABLE.c.id
-            == deployment["deployment_approval_id"]
+    approval = (
+        connection.execute(
+            select(DEPLOYMENT_APPROVALS_TABLE).where(
+                DEPLOYMENT_APPROVALS_TABLE.c.id == deployment["deployment_approval_id"]
+            )
         )
-    ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+    )
     qualification = (
         connection.execute(
             select(QUALIFICATION_DECISIONS_TABLE).where(
                 QUALIFICATION_DECISIONS_TABLE.c.id
                 == approval["qualification_decision_id"]
             )
-        ).mappings().one_or_none()
+        )
+        .mappings()
+        .one_or_none()
         if approval is not None
         else None
     )
@@ -1002,12 +1157,16 @@ def _runtime_readiness(connection: Connection) -> ReadinessProjectionDTO:
         else:
             if qualification_gate.status != "READY":
                 reasons.append("QUALIFICATION_RECEIPT_DIGEST_DRIFT")
-    bundle = connection.execute(
-        select(CONFIGURATION_BUNDLES_TABLE).where(
-            CONFIGURATION_BUNDLES_TABLE.c.id
-            == deployment["configuration_bundle_id"]
+    bundle = (
+        connection.execute(
+            select(CONFIGURATION_BUNDLES_TABLE).where(
+                CONFIGURATION_BUNDLES_TABLE.c.id
+                == deployment["configuration_bundle_id"]
+            )
         )
-    ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+    )
     if approval is not None and qualification is not None:
         expected_approval_digest = deployment_approval_digest(
             approval_id=approval["id"],
@@ -1029,12 +1188,16 @@ def _runtime_readiness(connection: Connection) -> ReadinessProjectionDTO:
         )
         if expected_capability_digest != deployment["capability_digest"]:
             reasons.append("DEPLOYMENT_CAPABILITY_DIGEST_DRIFT")
-    runtimes = connection.execute(
-        select(RUNTIME_INSTANCES_TABLE).where(
-            RUNTIME_INSTANCES_TABLE.c.deployment_id == deployment["id"],
-            RUNTIME_INSTANCES_TABLE.c.status == "HEALTHY",
+    runtimes = (
+        connection.execute(
+            select(RUNTIME_INSTANCES_TABLE).where(
+                RUNTIME_INSTANCES_TABLE.c.deployment_id == deployment["id"],
+                RUNTIME_INSTANCES_TABLE.c.status == "HEALTHY",
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
     if len(runtimes) != 1:
         reasons.append(
             "RUNTIME_NOT_HEALTHY" if not runtimes else "HEALTHY_RUNTIME_AMBIGUOUS"
@@ -1048,13 +1211,17 @@ def _runtime_readiness(connection: Connection) -> ReadinessProjectionDTO:
             expected_launch_digest = frozen_runtime_launch_spec_digest(
                 FrozenRuntimeLaunchSpec(
                     deployment_id=deployment["id"],
-                    approval_id=approval["id"] if approval else deployment["deployment_approval_id"],
+                    approval_id=approval["id"]
+                    if approval
+                    else deployment["deployment_approval_id"],
                     qualification_decision_id=(
                         qualification["id"] if qualification else UUID(int=0)
                     ),
                     strategy_version_id=deployment["strategy_version_id"],
                     configuration_bundle_id=deployment["configuration_bundle_id"],
-                    configuration_bundle_digest=deployment["configuration_bundle_digest"],
+                    configuration_bundle_digest=deployment[
+                        "configuration_bundle_digest"
+                    ],
                     market_snapshot_id=deployment["market_snapshot_id"],
                     market_snapshot_digest=deployment["market_snapshot_digest"],
                     deployment_capability_digest=deployment["capability_digest"],
@@ -1065,7 +1232,9 @@ def _runtime_readiness(connection: Connection) -> ReadinessProjectionDTO:
                     credential_reference=runtime["credential_reference"],
                     runtime_class=runtime["runtime_class"],
                     filesystem_mode=runtime["filesystem_mode"],
-                    research_executor_capability=runtime["research_executor_capability"],
+                    research_executor_capability=runtime[
+                        "research_executor_capability"
+                    ],
                     order_writer_capability=runtime["order_writer_capability"],
                 )
             )
@@ -1074,12 +1243,16 @@ def _runtime_readiness(connection: Connection) -> ReadinessProjectionDTO:
             expected_launch_digest = None
         if expected_launch_digest != runtime["launch_spec_digest"]:
             reasons.append("RUNTIME_LAUNCH_SPEC_DIGEST_DRIFT")
-        receipt = connection.execute(
-            select(RUNTIME_RECEIPTS_TABLE)
-            .where(RUNTIME_RECEIPTS_TABLE.c.runtime_instance_id == runtime["id"])
-            .order_by(RUNTIME_RECEIPTS_TABLE.c.observed_at.desc())
-            .limit(1)
-        ).mappings().one_or_none()
+        receipt = (
+            connection.execute(
+                select(RUNTIME_RECEIPTS_TABLE)
+                .where(RUNTIME_RECEIPTS_TABLE.c.runtime_instance_id == runtime["id"])
+                .order_by(RUNTIME_RECEIPTS_TABLE.c.observed_at.desc())
+                .limit(1)
+            )
+            .mappings()
+            .one_or_none()
+        )
         if receipt is None or receipt["status"] != "HEALTHY":
             reasons.append("RUNTIME_HEALTH_RECEIPT_MISSING")
         elif (
@@ -1134,11 +1307,16 @@ def create_canonical_v13_app(
     validation_connection_factory: CanonicalConnectionFactory | None = None,
     scoring_connection_factory: CanonicalConnectionFactory | None = None,
     qualification_connection_factory: CanonicalConnectionFactory | None = None,
+    approval_connection_factory: CanonicalConnectionFactory | None = None,
+    deployment_connection_factory: CanonicalConnectionFactory | None = None,
+    signal_connection_factory: CanonicalConnectionFactory | None = None,
+    risk_connection_factory: CanonicalConnectionFactory | None = None,
     market_artifact_root: Path | None = None,
     market_downloader_factory: Callable[[], MarketDownloaderPort] | None = None,
     exchange_metadata_downloader_factory: Callable[
         [], OkxPublicOfflineExchangeMetadataDownloader
-    ] | None = None,
+    ]
+    | None = None,
 ) -> FastAPI:
     """Create a standalone app with capability-separated database identities."""
 
@@ -1201,6 +1379,18 @@ def create_canonical_v13_app(
             )
         return run(factory, handler)
 
+    def run_phase9(
+        factory: CanonicalConnectionFactory | None,
+        capability: str,
+        handler: Callable[[Connection], _T],
+    ) -> _T:
+        if factory is None:
+            raise CanonicalAPIBlocked(
+                "BLOCKED_PHASE9_CAPABILITY_UNPROVISIONED",
+                f"{capability} connection factory is not provisioned",
+            )
+        return run(factory, handler)
+
     async def domain_error_handler(_request: Request, exc: Exception) -> JSONResponse:
         code = getattr(exc, "code", "BLOCKED_CANONICAL_API_FAILURE")
         detail = getattr(exc, "detail", "canonical operation failed closed")
@@ -1215,7 +1405,9 @@ def create_canonical_v13_app(
             status_code=422,
         )
 
-    async def unexpected_error_handler(_request: Request, _exc: Exception) -> JSONResponse:
+    async def unexpected_error_handler(
+        _request: Request, _exc: Exception
+    ) -> JSONResponse:
         return _error_response(
             "BLOCKED_CANONICAL_API_FAILURE",
             "canonical operation failed closed",
@@ -1298,18 +1490,20 @@ def create_canonical_v13_app(
 
         return run_control(execute)
 
-    @app.get(
-        f"{API_PREFIX}/strategies", response_model=StrategyCatalogProjectionDTO
-    )
+    @app.get(f"{API_PREFIX}/strategies", response_model=StrategyCatalogProjectionDTO)
     def list_strategies(
         limit: int = Query(default=100, ge=1, le=200),
     ) -> StrategyCatalogProjectionDTO:
         def execute(connection: Connection) -> StrategyCatalogProjectionDTO:
-            rows = connection.execute(
-                select(STRATEGIES_TABLE)
-                .order_by(STRATEGIES_TABLE.c.created_at, STRATEGIES_TABLE.c.id)
-                .limit(limit)
-            ).mappings().all()
+            rows = (
+                connection.execute(
+                    select(STRATEGIES_TABLE)
+                    .order_by(STRATEGIES_TABLE.c.created_at, STRATEGIES_TABLE.c.id)
+                    .limit(limit)
+                )
+                .mappings()
+                .all()
+            )
             items = [_strategy_projection(connection, dict(row)) for row in rows]
             return StrategyCatalogProjectionDTO(
                 status="AVAILABLE" if items else "EMPTY", items=items
@@ -1323,9 +1517,13 @@ def create_canonical_v13_app(
     )
     def get_strategy(strategy_id: UUID) -> StrategyProjectionDTO:
         def execute(connection: Connection) -> StrategyProjectionDTO:
-            row = connection.execute(
-                select(STRATEGIES_TABLE).where(STRATEGIES_TABLE.c.id == strategy_id)
-            ).mappings().one_or_none()
+            row = (
+                connection.execute(
+                    select(STRATEGIES_TABLE).where(STRATEGIES_TABLE.c.id == strategy_id)
+                )
+                .mappings()
+                .one_or_none()
+            )
             if row is None:
                 raise CanonicalAPIBlocked(
                     "BLOCKED_STRATEGY_NOT_FOUND", "canonical strategy is absent"
@@ -1455,7 +1653,9 @@ def create_canonical_v13_app(
         response_model=GateAttemptReceiptDTO,
         status_code=201,
     )
-    def create_planless_gate_attempt(command: GateAttemptCommandDTO) -> GateAttemptReceiptDTO:
+    def create_planless_gate_attempt(
+        command: GateAttemptCommandDTO,
+    ) -> GateAttemptReceiptDTO:
         result = run_research(
             validation_connection_factory,
             "validation",
@@ -1480,12 +1680,16 @@ def create_canonical_v13_app(
         f"{API_PREFIX}/research/gates/attempts/{{gate_attempt_id}}/claim",
         response_model=GateLeaseReceiptDTO,
     )
-    def claim_planless_gate_attempt(gate_attempt_id: UUID, command: GateLeaseCommandDTO) -> GateLeaseReceiptDTO:
+    def claim_planless_gate_attempt(
+        gate_attempt_id: UUID, command: GateLeaseCommandDTO
+    ) -> GateLeaseReceiptDTO:
         del command
         result = run_research(
             validation_connection_factory,
             "validation",
-            lambda connection: claim_gate_attempt(connection, gate_attempt_id=gate_attempt_id),
+            lambda connection: claim_gate_attempt(
+                connection, gate_attempt_id=gate_attempt_id
+            ),
         )
         return GateLeaseReceiptDTO(**result.__dict__)
 
@@ -1511,14 +1715,18 @@ def create_canonical_v13_app(
         response_model=GatePersistedReceiptDTO,
         status_code=201,
     )
-    def persist_planless_static_receipt(gate_attempt_id: UUID, command: StaticGateReceiptCommandDTO) -> GatePersistedReceiptDTO:
+    def persist_planless_static_receipt(
+        gate_attempt_id: UUID, command: StaticGateReceiptCommandDTO
+    ) -> GatePersistedReceiptDTO:
         receipt = StaticValidationReceipt(
             strategy_version_id=command.strategy_version_id,
             artifact_digest=command.artifact_digest,
             validator_identity=command.validator_identity,
             validator_digest=command.validator_digest,
             status=command.status,
-            findings=tuple(StaticFinding(**item.model_dump()) for item in command.findings),
+            findings=tuple(
+                StaticFinding(**item.model_dump()) for item in command.findings
+            ),
             request_digest=command.request_digest,
             receipt_digest=command.receipt_digest,
         )
@@ -1526,18 +1734,29 @@ def create_canonical_v13_app(
             validation_connection_factory,
             "validation",
             lambda connection: persist_static_gate_receipt(
-                connection, gate_attempt_id=gate_attempt_id, lease_token=command.lease_token, receipt=receipt
+                connection,
+                gate_attempt_id=gate_attempt_id,
+                lease_token=command.lease_token,
+                receipt=receipt,
             ),
         )
-        return GatePersistedReceiptDTO(gate_attempt_id=gate_attempt_id, gate_type="STATIC", receipt_digest=digest)
+        return GatePersistedReceiptDTO(
+            gate_attempt_id=gate_attempt_id, gate_type="STATIC", receipt_digest=digest
+        )
 
     @app.post(
         f"{API_PREFIX}/research/gates/attempts/{{gate_attempt_id}}/lookahead-receipts",
         response_model=GatePersistedReceiptDTO,
         status_code=201,
     )
-    def persist_planless_lookahead_receipt(gate_attempt_id: UUID, command: LookaheadGateReceiptCommandDTO) -> GatePersistedReceiptDTO:
-        projection = run_read(lambda connection: read_gate_projection(connection, gate_attempt_id=gate_attempt_id))
+    def persist_planless_lookahead_receipt(
+        gate_attempt_id: UUID, command: LookaheadGateReceiptCommandDTO
+    ) -> GatePersistedReceiptDTO:
+        projection = run_read(
+            lambda connection: read_gate_projection(
+                connection, gate_attempt_id=gate_attempt_id
+            )
+        )
         lineage = ResearchLineage(
             strategy_version_id=projection.strategy_version_id,
             research_target_id=projection.research_target_id,
@@ -1564,25 +1783,52 @@ def create_canonical_v13_app(
             blocked_observed_trade_count=command.blocked_observed_trade_count,
             blocked_required_trade_count=command.blocked_required_trade_count,
         )
-        if receipt.request_digest != command.request_digest or receipt.receipt_digest != command.receipt_digest:
-            raise CanonicalGateBlocked("BLOCKED_GATE_RECEIPT_DIGEST_DRIFT", "lookahead receipt does not recompute")
+        if (
+            receipt.request_digest != command.request_digest
+            or receipt.receipt_digest != command.receipt_digest
+        ):
+            raise CanonicalGateBlocked(
+                "BLOCKED_GATE_RECEIPT_DIGEST_DRIFT",
+                "lookahead receipt does not recompute",
+            )
         digest = run_research(
             validation_connection_factory,
             "validation",
             lambda connection: persist_lookahead_gate_receipt(
-                connection, gate_attempt_id=gate_attempt_id, lease_token=command.lease_token, receipt=receipt
+                connection,
+                gate_attempt_id=gate_attempt_id,
+                lease_token=command.lease_token,
+                receipt=receipt,
             ),
         )
-        return GatePersistedReceiptDTO(gate_attempt_id=gate_attempt_id, gate_type="LOOKAHEAD", receipt_digest=digest)
+        return GatePersistedReceiptDTO(
+            gate_attempt_id=gate_attempt_id,
+            gate_type="LOOKAHEAD",
+            receipt_digest=digest,
+        )
 
     @app.get(f"{API_PREFIX}/research/gates", response_model=GateListProjectionDTO)
-    def planless_gate_list(limit: int = Query(default=200, ge=1, le=200)) -> GateListProjectionDTO:
-        items = run_read(lambda connection: list_gate_projections(connection, limit=limit))
-        return GateListProjectionDTO(status="AVAILABLE" if items else "EMPTY", items=[GateProjectionDTO(**item.__dict__) for item in items])
+    def planless_gate_list(
+        limit: int = Query(default=200, ge=1, le=200),
+    ) -> GateListProjectionDTO:
+        items = run_read(
+            lambda connection: list_gate_projections(connection, limit=limit)
+        )
+        return GateListProjectionDTO(
+            status="AVAILABLE" if items else "EMPTY",
+            items=[GateProjectionDTO(**item.__dict__) for item in items],
+        )
 
-    @app.get(f"{API_PREFIX}/research/gates/{{gate_attempt_id}}", response_model=GateProjectionDTO)
+    @app.get(
+        f"{API_PREFIX}/research/gates/{{gate_attempt_id}}",
+        response_model=GateProjectionDTO,
+    )
     def planless_gate_status(gate_attempt_id: UUID) -> GateProjectionDTO:
-        item = run_read(lambda connection: read_gate_projection(connection, gate_attempt_id=gate_attempt_id))
+        item = run_read(
+            lambda connection: read_gate_projection(
+                connection, gate_attempt_id=gate_attempt_id
+            )
+        )
         return GateProjectionDTO(**item.__dict__)
 
     @app.post(
@@ -1595,29 +1841,40 @@ def create_canonical_v13_app(
     ) -> ValidationPlanReceiptDTO:
         def execute(connection: Connection) -> ValidationPlanReceiptDTO:
             lineage = _research_lineage(command.lineage)
-            artifact = connection.execute(
-                select(STRATEGY_ARTIFACTS_TABLE)
-                .select_from(
-                    STRATEGY_VERSIONS_TABLE.join(
-                        STRATEGY_ARTIFACTS_TABLE,
-                        STRATEGY_ARTIFACTS_TABLE.c.id
-                        == STRATEGY_VERSIONS_TABLE.c.artifact_id,
+            artifact = (
+                connection.execute(
+                    select(STRATEGY_ARTIFACTS_TABLE)
+                    .select_from(
+                        STRATEGY_VERSIONS_TABLE.join(
+                            STRATEGY_ARTIFACTS_TABLE,
+                            STRATEGY_ARTIFACTS_TABLE.c.id
+                            == STRATEGY_VERSIONS_TABLE.c.artifact_id,
+                        )
                     )
+                    .where(STRATEGY_VERSIONS_TABLE.c.id == lineage.strategy_version_id)
                 )
-                .where(STRATEGY_VERSIONS_TABLE.c.id == lineage.strategy_version_id)
-            ).mappings().one_or_none()
+                .mappings()
+                .one_or_none()
+            )
             if artifact is None:
                 raise CanonicalAPIBlocked(
                     "BLOCKED_STRATEGY_ARTIFACT_MISSING",
                     "validation plan requires one canonical strategy artifact",
                 )
-            rows = connection.execute(
-                select(RESEARCH_GATE_RECEIPTS_TABLE).where(
-                    RESEARCH_GATE_RECEIPTS_TABLE.c.id.in_(
-                        (command.static_gate_receipt_id, command.lookahead_gate_receipt_id)
+            rows = (
+                connection.execute(
+                    select(RESEARCH_GATE_RECEIPTS_TABLE).where(
+                        RESEARCH_GATE_RECEIPTS_TABLE.c.id.in_(
+                            (
+                                command.static_gate_receipt_id,
+                                command.lookahead_gate_receipt_id,
+                            )
+                        )
                     )
                 )
-            ).mappings().all()
+                .mappings()
+                .all()
+            )
             by_id = {row["id"]: row for row in rows}
             static_row = by_id.get(command.static_gate_receipt_id)
             lookahead_row = by_id.get(command.lookahead_gate_receipt_id)
@@ -1628,7 +1885,9 @@ def create_canonical_v13_app(
                 )
             static_evidence = static_row["evidence_json"]
             lookahead_evidence = lookahead_row["evidence_json"]
-            if not isinstance(static_evidence, dict) or not isinstance(lookahead_evidence, dict):
+            if not isinstance(static_evidence, dict) or not isinstance(
+                lookahead_evidence, dict
+            ):
                 raise CanonicalResearchValidationBlocked(
                     "BLOCKED_GATE_RECEIPT_DIGEST_DRIFT", "gate evidence shape drifted"
                 )
@@ -1649,7 +1908,9 @@ def create_canonical_v13_app(
                 has_bias=lookahead_evidence.get("has_bias"),
                 observed_signal_count=int(lookahead_row["observed_signal_count"] or 0),
                 failure_stage=lookahead_row["failure_stage"],
-                failure_code=lookahead_row["reason_code"] if lookahead_row["terminal_status"] == "BLOCKED" else None,
+                failure_code=lookahead_row["reason_code"]
+                if lookahead_row["terminal_status"] == "BLOCKED"
+                else None,
                 tool_return_code=lookahead_row["tool_return_code"],
                 stdout_digest=lookahead_row["stdout_digest"],
                 stderr_digest=lookahead_row["stderr_digest"],
@@ -1689,9 +1950,7 @@ def create_canonical_v13_app(
                 repeat_noop=declared.repeat_noop and ready.repeat_noop,
             )
 
-        return run_research(
-            validation_connection_factory, "validation", execute
-        )
+        return run_research(validation_connection_factory, "validation", execute)
 
     @app.post(
         f"{API_PREFIX}/research/authorizations",
@@ -1816,9 +2075,7 @@ def create_canonical_v13_app(
     def start_research_attempt(
         command: ResearchAttemptStartCommandDTO,
     ) -> ResearchAttemptStartReceiptDTO:
-        consumption = _authorization_consumption(
-            command.authorization_consumption
-        )
+        consumption = _authorization_consumption(command.authorization_consumption)
         run_read(
             lambda connection: verify_persisted_research_authorization_consumption(
                 connection, consumption=consumption
@@ -1846,9 +2103,7 @@ def create_canonical_v13_app(
                 request_digest=running.request_digest,
             )
 
-        return run_research(
-            validation_connection_factory, "validation", execute
-        )
+        return run_research(validation_connection_factory, "validation", execute)
 
     @app.post(
         f"{API_PREFIX}/research/scores",
@@ -1891,9 +2146,7 @@ def create_canonical_v13_app(
             )
             return ResearchQualificationReceiptDTO(**receipt.__dict__)
 
-        return run_research(
-            qualification_connection_factory, "qualification", execute
-        )
+        return run_research(qualification_connection_factory, "qualification", execute)
 
     @app.get(
         f"{API_PREFIX}/research/validation-plans",
@@ -1929,9 +2182,7 @@ def create_canonical_v13_app(
             )
         )
 
-    @app.get(
-        f"{API_PREFIX}/market-data", response_model=MarketInventoryProjectionDTO
-    )
+    @app.get(f"{API_PREFIX}/market-data", response_model=MarketInventoryProjectionDTO)
     def market_inventory() -> MarketInventoryProjectionDTO:
         return run_read(_market_inventory)
 
@@ -2044,14 +2295,10 @@ def create_canonical_v13_app(
     def market_snapshot(snapshot_id: UUID) -> MarketSnapshotProjectionDTO:
         return run_read(lambda connection: _market_snapshot(connection, snapshot_id))
 
-    @app.get(
-        f"{API_PREFIX}/readiness/research", response_model=ReadinessProjectionDTO
-    )
+    @app.get(f"{API_PREFIX}/readiness/research", response_model=ReadinessProjectionDTO)
     def research_readiness(
         scope_key: Optional[str] = Query(default=None, min_length=1, max_length=200),
-        workflow_key: Optional[str] = Query(
-            default=None, min_length=1, max_length=160
-        ),
+        workflow_key: Optional[str] = Query(default=None, min_length=1, max_length=160),
     ) -> ReadinessProjectionDTO:
         return run_read(
             lambda connection: _research_readiness(
@@ -2059,23 +2306,208 @@ def create_canonical_v13_app(
             )
         )
 
-    @app.get(
-        f"{API_PREFIX}/readiness/runtime", response_model=ReadinessProjectionDTO
-    )
+    @app.get(f"{API_PREFIX}/readiness/runtime", response_model=ReadinessProjectionDTO)
     def runtime_readiness() -> ReadinessProjectionDTO:
         return run_read(_runtime_readiness)
+
+    @app.get(
+        f"{API_PREFIX}/phase9/readiness",
+        response_model=Phase9ReadinessProjectionDTO,
+    )
+    def phase9_readiness(
+        qualification_decision_id: UUID,
+        strategy_version_id: UUID,
+        configuration_bundle_id: UUID,
+        market_snapshot_id: UUID,
+        stage: str = Query(default="QUALIFICATION_HANDOFF"),
+    ) -> Phase9ReadinessProjectionDTO:
+        if stage not in PHASE9_ACCEPTANCE_STAGES:
+            raise CanonicalPhase9ReadinessBlocked(
+                "BLOCKED_PHASE9_STAGE", f"unsupported stage {stage!r}"
+            )
+
+        def execute(connection: Connection) -> Phase9ReadinessProjectionDTO:
+            decision = (
+                connection.execute(
+                    select(QUALIFICATION_DECISIONS_TABLE).where(
+                        QUALIFICATION_DECISIONS_TABLE.c.id == qualification_decision_id
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if decision is None:
+                raise CanonicalPhase9ReadinessBlocked(
+                    "EXACT_QUALIFICATION_DECISION_NOT_FOUND",
+                    str(qualification_decision_id),
+                )
+            if (
+                decision["strategy_version_id"] != strategy_version_id
+                or decision["configuration_bundle_id"] != configuration_bundle_id
+                or decision["market_snapshot_id"] != market_snapshot_id
+            ):
+                raise CanonicalPhase9ReadinessBlocked(
+                    "EXACT_QUALIFICATION_HANDOFF_ID_MISMATCH",
+                    "explicit Phase 9 handoff IDs differ from the decision",
+                )
+            handoff = Phase9QualificationHandoff(
+                qualification_decision_id=decision["id"],
+                qualification_decision_digest=decision["decision_digest"],
+                strategy_version_id=decision["strategy_version_id"],
+                research_target_id=decision["research_target_id"],
+                configuration_bundle_id=decision["configuration_bundle_id"],
+                configuration_bundle_digest=decision["configuration_bundle_digest"],
+                market_snapshot_id=decision["market_snapshot_id"],
+                market_snapshot_digest=decision["market_snapshot_digest"],
+                validation_plan_id=decision["validation_plan_id"],
+                validation_plan_digest=decision["validation_plan_digest"],
+            )
+            receipt = inspect_phase9_readiness(
+                connection, qualification_handoff=handoff, stage=stage
+            )
+            return Phase9ReadinessProjectionDTO(**asdict(receipt))
+
+        return run_read(execute)
+
+    @app.post(
+        f"{API_PREFIX}/phase9/approvals",
+        response_model=Phase9ApprovalReceiptDTO,
+        status_code=201,
+    )
+    def phase9_approval(command: Phase9ApprovalCommandDTO) -> Phase9ApprovalReceiptDTO:
+        def execute(connection: Connection) -> Phase9ApprovalReceiptDTO:
+            return Phase9ApprovalReceiptDTO(
+                **asdict(
+                    approve_demo_deployment(
+                        connection,
+                        qualification_decision_id=command.qualification_decision_id,
+                        actor_identity=command.actor_identity,
+                        reason=command.reason,
+                    )
+                )
+            )
+
+        return run_phase9(
+            approval_connection_factory, "canonical_approval_writer", execute
+        )
+
+    @app.post(
+        f"{API_PREFIX}/phase9/deployments",
+        response_model=Phase9DeploymentReceiptDTO,
+        status_code=201,
+    )
+    def phase9_deployment(
+        command: Phase9DeploymentCommandDTO,
+    ) -> Phase9DeploymentReceiptDTO:
+        def execute(connection: Connection) -> Phase9DeploymentReceiptDTO:
+            return Phase9DeploymentReceiptDTO(
+                **asdict(
+                    create_demo_deployment(
+                        connection,
+                        deployment_approval_id=command.deployment_approval_id,
+                    )
+                )
+            )
+
+        return run_phase9(
+            deployment_connection_factory, "canonical_deployment_writer", execute
+        )
+
+    @app.post(
+        f"{API_PREFIX}/phase9/risk-budgets",
+        response_model=Phase9RiskBudgetReceiptDTO,
+        status_code=201,
+    )
+    def phase9_risk_budget(
+        command: Phase9RiskBudgetCommandDTO,
+    ) -> Phase9RiskBudgetReceiptDTO:
+        def execute(connection: Connection) -> Phase9RiskBudgetReceiptDTO:
+            return Phase9RiskBudgetReceiptDTO(
+                **asdict(
+                    authorize_demo_risk_budget(
+                        connection,
+                        deployment_approval_id=command.deployment_approval_id,
+                        actor_identity=command.actor_identity,
+                        reason=command.reason,
+                        policy_source_receipt_digest=(
+                            command.policy_source_receipt_digest
+                        ),
+                    )
+                )
+            )
+
+        return run_phase9(
+            approval_connection_factory, "canonical_approval_writer", execute
+        )
+
+    @app.post(
+        f"{API_PREFIX}/phase9/signals",
+        response_model=Phase9SignalReceiptDTO,
+        status_code=201,
+    )
+    def phase9_signal(command: Phase9SignalCommandDTO) -> Phase9SignalReceiptDTO:
+        def execute(connection: Connection) -> Phase9SignalReceiptDTO:
+            signal_id = record_production_demo_signal(
+                connection,
+                deployment_id=command.deployment_id,
+                runtime_instance_id=command.runtime_instance_id,
+                research_target_id=command.research_target_id,
+                signal_json=command.signal_json,
+            )
+            return Phase9SignalReceiptDTO(signal_id=signal_id)
+
+        return run_phase9(signal_connection_factory, "canonical_signal_writer", execute)
+
+    @app.post(
+        f"{API_PREFIX}/phase9/intents",
+        response_model=Phase9IntentReceiptDTO,
+        status_code=201,
+    )
+    def phase9_intent(command: Phase9IntentCommandDTO) -> Phase9IntentReceiptDTO:
+        def execute(connection: Connection) -> Phase9IntentReceiptDTO:
+            intent_id = create_production_demo_intent(
+                connection, signal_id=command.signal_id, intent_json=command.intent_json
+            )
+            return Phase9IntentReceiptDTO(trade_intent_id=intent_id)
+
+        return run_phase9(risk_connection_factory, "canonical_risk_writer", execute)
+
+    @app.post(
+        f"{API_PREFIX}/phase9/risk-decisions",
+        response_model=Phase9RiskDecisionReceiptDTO,
+        status_code=201,
+    )
+    def phase9_risk_decision(
+        command: Phase9RiskDecisionCommandDTO,
+    ) -> Phase9RiskDecisionReceiptDTO:
+        def execute(connection: Connection) -> Phase9RiskDecisionReceiptDTO:
+            return Phase9RiskDecisionReceiptDTO(
+                **asdict(
+                    decide_central_demo_risk(
+                        connection,
+                        trade_intent_id=command.trade_intent_id,
+                        risk_budget_authorization_id=command.risk_budget_authorization_id,
+                    )
+                )
+            )
+
+        return run_phase9(risk_connection_factory, "canonical_risk_writer", execute)
 
     @app.get(
         f"{API_PREFIX}/optimizations", response_model=OptimizationListProjectionDTO
     )
     def optimizations() -> OptimizationListProjectionDTO:
         def execute(connection: Connection) -> OptimizationListProjectionDTO:
-            rows = connection.execute(
-                select(OPTIMIZATION_RUNS_TABLE).order_by(
-                    OPTIMIZATION_RUNS_TABLE.c.created_at,
-                    OPTIMIZATION_RUNS_TABLE.c.id,
+            rows = (
+                connection.execute(
+                    select(OPTIMIZATION_RUNS_TABLE).order_by(
+                        OPTIMIZATION_RUNS_TABLE.c.created_at,
+                        OPTIMIZATION_RUNS_TABLE.c.id,
+                    )
                 )
-            ).mappings().all()
+                .mappings()
+                .all()
+            )
             items = [
                 OptimizationProjectionDTO(
                     optimization_run_id=row["id"],

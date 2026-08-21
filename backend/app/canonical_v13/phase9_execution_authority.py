@@ -1,0 +1,580 @@
+"""Canonical Phase 9 budget, attestation, and central-risk authorities.
+
+The module has no exchange transport and never reads credential material.  It stores
+only an operator-authorized Demo budget and redacted attestation digests, then makes
+one atomic risk decision from the remaining budget.  Order submission is a separate
+service and capability.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+from typing import Mapping
+from uuid import UUID, uuid4
+
+from sqlalchemy import Connection, func, select, text
+
+from app.canonical_v13.execution_common import (
+    CanonicalExecutionChainBlocked,
+    canonical_execution_digest,
+    lock_execution_boundary,
+    require_canonical_execution,
+    require_digest,
+    require_identity,
+)
+from app.canonical_v13.models import (
+    AUDIT_EVENTS_TABLE,
+    DEPLOYMENT_APPROVALS_TABLE,
+    DEPLOYMENTS_TABLE,
+    EXECUTION_ATTESTATIONS_TABLE,
+    EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE,
+    EXECUTION_RISK_RESERVATIONS_TABLE,
+    QUALIFICATION_DECISIONS_TABLE,
+    RISK_DECISIONS_TABLE,
+    SIGNALS_TABLE,
+    TRADE_INTENTS_TABLE,
+)
+
+
+EXECUTION_TARGET = "OKX_DEMO"
+ATTESTATION_MAXIMUM_TTL = timedelta(seconds=60)
+
+
+@dataclass(frozen=True)
+class RiskBudgetAuthorizationResult:
+    authorization_id: UUID
+    authorization_digest: str
+    repeat_noop: bool
+
+
+@dataclass(frozen=True)
+class RedactedExecutionAttestationResult:
+    attestation_id: UUID
+    attestation_digest: str
+    expires_at: datetime
+    repeat_noop: bool
+
+
+@dataclass(frozen=True)
+class CentralRiskDecisionResult:
+    risk_decision_id: UUID
+    reservation_id: UUID
+    status: str
+    reason_code: str
+    decision_digest: str
+    repeat_noop: bool
+
+
+def _utc(value: datetime, *, field: str) -> datetime:
+    if value.tzinfo is None:
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_EXECUTION_TIMEZONE", f"{field} must be timezone-aware"
+        )
+    return value.astimezone(timezone.utc)
+
+
+def _persisted_utc(value: datetime, *, field: str) -> datetime:
+    """Normalize a DB timestamp; SQLite fixtures discard timezone metadata."""
+
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _positive_decimal(value: Decimal, *, field: str) -> Decimal:
+    if not isinstance(value, Decimal) or not value.is_finite() or value <= 0:
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_EXECUTION_AMOUNT", f"{field} must be finite and positive"
+        )
+    return value
+
+
+def authorize_demo_risk_budget(
+    connection: Connection,
+    *,
+    deployment_approval_id: UUID,
+    actor_identity: str,
+    reason: str,
+    policy_source_receipt_digest: str,
+    evaluated_at: datetime | None = None,
+) -> RiskBudgetAuthorizationResult:
+    """Freeze only an existing exact-lineage canonical risk-policy receipt."""
+
+    effective = require_canonical_execution(connection)
+    actor_identity = require_identity(
+        actor_identity, field="actor_identity", maximum=160
+    )
+    reason = require_identity(reason, field="reason", maximum=2000)
+    require_digest(policy_source_receipt_digest, field="policy_source_receipt_digest")
+    now = _utc(evaluated_at or datetime.now(timezone.utc), field="evaluated_at")
+    approval = (
+        effective.execute(
+            select(DEPLOYMENT_APPROVALS_TABLE).where(
+                DEPLOYMENT_APPROVALS_TABLE.c.id == deployment_approval_id
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    decision = (
+        effective.execute(
+            select(QUALIFICATION_DECISIONS_TABLE).where(
+                QUALIFICATION_DECISIONS_TABLE.c.id
+                == approval["qualification_decision_id"]
+            )
+        )
+        .mappings()
+        .one_or_none()
+        if approval is not None
+        else None
+    )
+    if (
+        approval is None
+        or approval["status"] != "APPROVED"
+        or decision is None
+        or decision["status"] != "QUALIFIED"
+    ):
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_APPROVED_QUALIFICATION_REQUIRED",
+            "risk budget requires one exact approved QUALIFIED lineage",
+        )
+    source = (
+        effective.execute(
+            select(AUDIT_EVENTS_TABLE).where(
+                AUDIT_EVENTS_TABLE.c.event_type == "PHASE9_RISK_POLICY_ACCEPTED",
+                AUDIT_EVENTS_TABLE.c.aggregate_type == "canonical_phase9_risk_policy",
+                AUDIT_EVENTS_TABLE.c.aggregate_id == str(decision["id"]),
+                AUDIT_EVENTS_TABLE.c.receipt_digest == policy_source_receipt_digest,
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if source is None:
+        raise CanonicalExecutionChainBlocked(
+            "CANONICAL_PHASE9_RISK_BUDGET_SOURCE_UNSET",
+            "an accepted exact-lineage canonical risk-policy receipt is required",
+        )
+    evidence = source["evidence_json"]
+    if not isinstance(evidence, Mapping):
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_RISK_POLICY_SOURCE_DRIFT", "risk-policy evidence is not an object"
+        )
+    try:
+        instrument = require_identity(
+            evidence["instrument"], field="instrument", maximum=80
+        )
+        max_notional = _positive_decimal(
+            Decimal(str(evidence["max_notional"])), field="max_notional"
+        )
+        max_order_count = evidence["max_order_count"]
+        policy_digest = evidence["policy_digest"]
+        expiry = _utc(
+            datetime.fromisoformat(evidence["expires_at"]), field="expires_at"
+        )
+    except (KeyError, TypeError, ValueError):
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_RISK_POLICY_SOURCE_DRIFT", "risk-policy evidence is incomplete"
+        ) from None
+    require_digest(policy_digest, field="policy_digest")
+    if (
+        evidence.get("contract") != "canonical-v13-phase9-risk-policy-source-v1"
+        or evidence.get("qualification_decision_id") != str(decision["id"])
+        or evidence.get("qualification_decision_digest") != decision["decision_digest"]
+        or evidence.get("configuration_bundle_id")
+        != str(decision["configuration_bundle_id"])
+        or evidence.get("configuration_bundle_digest")
+        != decision["configuration_bundle_digest"]
+        or evidence.get("execution_target") != EXECUTION_TARGET
+        or evidence.get("allow_real_funds") is not False
+        or evidence.get("status") != "ACCEPTED"
+        or source["request_digest"] != policy_digest
+        or canonical_execution_digest(dict(evidence)) != policy_source_receipt_digest
+        or not isinstance(max_order_count, int)
+        or isinstance(max_order_count, bool)
+        or max_order_count <= 0
+    ):
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_RISK_POLICY_SOURCE_DRIFT",
+            "risk-policy receipt does not bind the exact safe lineage",
+        )
+    if expiry <= now:
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_RISK_BUDGET_EXPIRED", "risk-policy source has expired"
+        )
+    payload = {
+        "contract": "canonical-v13-demo-risk-budget-authorization-v1",
+        "deployment_approval_id": str(deployment_approval_id),
+        "approval_digest": approval["approval_digest"],
+        "qualification_decision_id": str(decision["id"]),
+        "qualification_decision_digest": decision["decision_digest"],
+        "execution_target": EXECUTION_TARGET,
+        "instrument": instrument,
+        "max_notional": str(max_notional),
+        "max_order_count": max_order_count,
+        "actor_identity": actor_identity,
+        "reason": reason,
+        "policy_digest": policy_digest,
+        "source_receipt_digest": policy_source_receipt_digest,
+        "expires_at": expiry.isoformat(),
+        "allow_real_funds": False,
+    }
+    digest = canonical_execution_digest(payload)
+    lock_execution_boundary(
+        effective, key=f"risk-budget-authorization:{deployment_approval_id}"
+    )
+    existing = (
+        effective.execute(
+            select(EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE).where(
+                EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE.c.deployment_approval_id
+                == deployment_approval_id
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if existing is not None:
+        if existing["authorization_digest"] != digest:
+            raise CanonicalExecutionChainBlocked(
+                "BLOCKED_RISK_BUDGET_REPLAY_DRIFT",
+                "deployment approval already has a different frozen risk budget",
+            )
+        return RiskBudgetAuthorizationResult(existing["id"], digest, True)
+    authorization_id = uuid4()
+    effective.execute(
+        EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE.insert().values(
+            id=authorization_id,
+            deployment_approval_id=deployment_approval_id,
+            execution_target=EXECUTION_TARGET,
+            instrument=instrument,
+            max_notional=max_notional,
+            max_order_count=max_order_count,
+            actor_identity=actor_identity,
+            reason=reason,
+            policy_digest=policy_digest,
+            source_receipt_digest=policy_source_receipt_digest,
+            authorization_digest=digest,
+            expires_at=expiry,
+            created_at=now,
+        )
+    )
+    return RiskBudgetAuthorizationResult(authorization_id, digest, False)
+
+
+def record_redacted_demo_attestation(
+    connection: Connection,
+    *,
+    deployment_id: UUID,
+    instrument: str,
+    account_fingerprint_digest: str,
+    credential_generation_digest: str,
+    permissions: Mapping[str, bool],
+    observed_at: datetime,
+    expires_at: datetime,
+    evaluated_at: datetime | None = None,
+) -> RedactedExecutionAttestationResult:
+    """Persist safe attestation facts; raw credentials are not accepted as input."""
+
+    effective = require_canonical_execution(connection)
+    instrument = require_identity(instrument, field="instrument", maximum=80)
+    require_digest(account_fingerprint_digest, field="account_fingerprint_digest")
+    require_digest(credential_generation_digest, field="credential_generation_digest")
+    observed = _utc(observed_at, field="observed_at")
+    expiry = _utc(expires_at, field="expires_at")
+    now = _utc(evaluated_at or datetime.now(timezone.utc), field="evaluated_at")
+    observation_age = now - observed
+    if (
+        expiry <= observed
+        or expiry - observed > ATTESTATION_MAXIMUM_TTL
+        or not -timedelta(seconds=5) <= observation_age <= timedelta(seconds=15)
+        or expiry <= now
+    ):
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_ATTESTATION_FRESHNESS",
+            "attestation must be current and expire within 60 seconds",
+        )
+    safe_permissions = dict(permissions)
+    if safe_permissions != {"read": True, "trade": True, "withdraw": False}:
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_ATTESTATION_PERMISSIONS",
+            "permissions must be exactly read=true, trade=true, withdraw=false",
+        )
+    deployment = (
+        effective.execute(
+            select(DEPLOYMENTS_TABLE).where(DEPLOYMENTS_TABLE.c.id == deployment_id)
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if (
+        deployment is None
+        or deployment["status"] != "ACTIVE"
+        or deployment["demo_only"] is not True
+        or deployment["allow_real_funds"] is not False
+    ):
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_ACTIVE_DEMO_DEPLOYMENT_REQUIRED", str(deployment_id)
+        )
+    payload = {
+        "contract": "canonical-v13-redacted-okx-demo-attestation-v1",
+        "deployment_id": str(deployment_id),
+        "deployment_capability_digest": deployment["capability_digest"],
+        "execution_target": EXECUTION_TARGET,
+        "instrument": instrument,
+        "account_fingerprint_digest": account_fingerprint_digest,
+        "credential_generation_digest": credential_generation_digest,
+        "permissions": safe_permissions,
+        "simulated_trading": True,
+        "allow_real_funds": False,
+        "observed_at": observed.isoformat(),
+        "expires_at": expiry.isoformat(),
+    }
+    digest = canonical_execution_digest(payload)
+    lock_execution_boundary(effective, key=f"execution-attestation:{digest}")
+    existing = (
+        effective.execute(
+            select(EXECUTION_ATTESTATIONS_TABLE).where(
+                EXECUTION_ATTESTATIONS_TABLE.c.attestation_digest == digest
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if existing is not None:
+        return RedactedExecutionAttestationResult(
+            existing["id"],
+            digest,
+            _persisted_utc(existing["expires_at"], field="expires_at"),
+            True,
+        )
+    attestation_id = uuid4()
+    effective.execute(
+        EXECUTION_ATTESTATIONS_TABLE.insert().values(
+            id=attestation_id,
+            deployment_id=deployment_id,
+            execution_target=EXECUTION_TARGET,
+            instrument=instrument,
+            status="READY",
+            account_fingerprint_digest=account_fingerprint_digest,
+            credential_generation_digest=credential_generation_digest,
+            permissions_json=safe_permissions,
+            attestation_digest=digest,
+            observed_at=observed,
+            expires_at=expiry,
+        )
+    )
+    return RedactedExecutionAttestationResult(attestation_id, digest, expiry, False)
+
+
+def decide_central_demo_risk(
+    connection: Connection,
+    *,
+    trade_intent_id: UUID,
+    risk_budget_authorization_id: UUID,
+    evaluated_at: datetime | None = None,
+) -> CentralRiskDecisionResult:
+    """Atomically derive ACCEPTED/REJECTED from the remaining frozen budget."""
+
+    effective = require_canonical_execution(connection)
+    now = _utc(evaluated_at or datetime.now(timezone.utc), field="evaluated_at")
+    existing = (
+        effective.execute(
+            select(RISK_DECISIONS_TABLE).where(
+                RISK_DECISIONS_TABLE.c.trade_intent_id == trade_intent_id
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    existing_reservation = (
+        effective.execute(
+            select(EXECUTION_RISK_RESERVATIONS_TABLE).where(
+                EXECUTION_RISK_RESERVATIONS_TABLE.c.trade_intent_id == trade_intent_id
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if existing is not None or existing_reservation is not None:
+        if existing is None or existing_reservation is None:
+            raise CanonicalExecutionChainBlocked(
+                "BLOCKED_RISK_REPLAY_INCOMPLETE",
+                "decision/reservation pair is incomplete",
+            )
+        if (
+            existing["decision_json"].get("reservation_digest")
+            != existing_reservation["reservation_digest"]
+        ):
+            raise CanonicalExecutionChainBlocked(
+                "BLOCKED_RISK_REPLAY_DRIFT", "decision/reservation digest differs"
+            )
+        return CentralRiskDecisionResult(
+            existing["id"],
+            existing_reservation["id"],
+            existing["status"],
+            existing_reservation["reason_code"],
+            existing["decision_digest"],
+            True,
+        )
+    intent = (
+        effective.execute(
+            select(TRADE_INTENTS_TABLE).where(
+                TRADE_INTENTS_TABLE.c.id == trade_intent_id,
+                TRADE_INTENTS_TABLE.c.status == "INTENT_ACCEPTED",
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    signal = (
+        effective.execute(
+            select(SIGNALS_TABLE).where(SIGNALS_TABLE.c.id == intent["signal_id"])
+        )
+        .mappings()
+        .one_or_none()
+        if intent is not None
+        else None
+    )
+    budget = (
+        effective.execute(
+            select(EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE).where(
+                EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE.c.id
+                == risk_budget_authorization_id
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    deployment = (
+        effective.execute(
+            select(DEPLOYMENTS_TABLE).where(
+                DEPLOYMENTS_TABLE.c.id == signal["deployment_id"]
+            )
+        )
+        .mappings()
+        .one_or_none()
+        if signal is not None
+        else None
+    )
+    if intent is None or signal is None or budget is None or deployment is None:
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_RISK_LINEAGE_INCOMPLETE",
+            "intent/signal/budget/deployment is missing",
+        )
+    if (
+        deployment["status"] != "ACTIVE"
+        or deployment["deployment_approval_id"] != budget["deployment_approval_id"]
+        or deployment["demo_only"] is not True
+        or deployment["allow_real_funds"] is not False
+        or budget["execution_target"] != EXECUTION_TARGET
+    ):
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_RISK_LINEAGE_DRIFT",
+            "budget is not bound to active Demo deployment",
+        )
+    requested_instrument = intent["intent_json"].get("instrument")
+    try:
+        requested_notional = Decimal(str(intent["intent_json"].get("notional")))
+    except Exception:
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_INTENT_NOTIONAL", "intent notional is missing or invalid"
+        ) from None
+    _positive_decimal(requested_notional, field="intent.notional")
+    if effective.dialect.name == "postgresql":
+        effective.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": f"canonical-v13-risk-budget:{risk_budget_authorization_id}"},
+        )
+    used_notional, used_count = effective.execute(
+        select(
+            func.coalesce(
+                func.sum(EXECUTION_RISK_RESERVATIONS_TABLE.c.requested_notional), 0
+            ),
+            func.count(),
+        ).where(
+            EXECUTION_RISK_RESERVATIONS_TABLE.c.risk_budget_authorization_id
+            == risk_budget_authorization_id,
+            EXECUTION_RISK_RESERVATIONS_TABLE.c.status == "RISK_ACCEPTED",
+        )
+    ).one()
+    remaining_notional = Decimal(str(budget["max_notional"])) - Decimal(
+        str(used_notional)
+    )
+    remaining_count = int(budget["max_order_count"]) - int(used_count)
+    if _persisted_utc(budget["expires_at"], field="budget.expires_at") <= now:
+        status, reason_code = "BLOCKED", "RISK_BUDGET_EXPIRED"
+    elif requested_instrument != budget["instrument"]:
+        status, reason_code = "REJECTED", "RISK_INSTRUMENT_NOT_AUTHORIZED"
+    elif requested_notional > remaining_notional:
+        status, reason_code = "REJECTED", "RISK_NOTIONAL_BUDGET_EXHAUSTED"
+    elif remaining_count <= 0:
+        status, reason_code = "REJECTED", "RISK_ORDER_COUNT_BUDGET_EXHAUSTED"
+    else:
+        status, reason_code = "RISK_ACCEPTED", "RISK_BUDGET_RESERVED"
+    reservation_payload = {
+        "contract": "canonical-v13-demo-risk-reservation-v1",
+        "risk_budget_authorization_id": str(risk_budget_authorization_id),
+        "authorization_digest": budget["authorization_digest"],
+        "trade_intent_id": str(trade_intent_id),
+        "intent_digest": intent["intent_digest"],
+        "requested_notional": str(requested_notional),
+        "status": status,
+        "reason_code": reason_code,
+    }
+    reservation_digest = canonical_execution_digest(reservation_payload)
+    reservation_id = uuid4()
+    effective.execute(
+        EXECUTION_RISK_RESERVATIONS_TABLE.insert().values(
+            id=reservation_id,
+            risk_budget_authorization_id=risk_budget_authorization_id,
+            trade_intent_id=trade_intent_id,
+            status=status,
+            requested_notional=requested_notional,
+            reason_code=reason_code,
+            reservation_digest=reservation_digest,
+            created_at=now,
+        )
+    )
+    decision_payload = {
+        "contract": "canonical-v13-central-demo-risk-v1",
+        "reservation_id": str(reservation_id),
+        "reservation_digest": reservation_digest,
+        "risk_budget_authorization_id": str(risk_budget_authorization_id),
+        "policy_digest": budget["policy_digest"],
+        "status": status,
+        "reason_code": reason_code,
+        "allow_real_funds": False,
+    }
+    decision_digest = canonical_execution_digest(decision_payload)
+    risk_decision_id = uuid4()
+    effective.execute(
+        RISK_DECISIONS_TABLE.insert().values(
+            id=risk_decision_id,
+            trade_intent_id=trade_intent_id,
+            status=status,
+            decision_json=decision_payload,
+            decision_digest=decision_digest,
+            created_at=now,
+        )
+    )
+    return CentralRiskDecisionResult(
+        risk_decision_id,
+        reservation_id,
+        status,
+        reason_code,
+        decision_digest,
+        False,
+    )
+
+
+__all__ = [
+    "ATTESTATION_MAXIMUM_TTL",
+    "CentralRiskDecisionResult",
+    "RedactedExecutionAttestationResult",
+    "RiskBudgetAuthorizationResult",
+    "authorize_demo_risk_budget",
+    "decide_central_demo_risk",
+    "record_redacted_demo_attestation",
+]

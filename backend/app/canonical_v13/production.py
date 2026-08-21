@@ -1,7 +1,7 @@
 """Explicit production composition root for the standalone canonical V1.3 API.
 
 This module is never imported by the legacy application.  Creating the app requires
-six distinct PostgreSQL LOGIN principals aimed at the same dedicated canonical
+fourteen distinct PostgreSQL LOGIN principals aimed at the same dedicated canonical
 database.  It does not install genesis, apply ACLs, activate a bundle, or connect
 during import.
 """
@@ -30,6 +30,11 @@ from app.canonical_v13.research_persistence import (
     RESEARCH_PERSISTENCE_ENV_BY_CAPABILITY,
     CanonicalResearchPersistenceBlocked,
     resolve_research_persistence_urls,
+)
+from app.canonical_v13.phase9_persistence import (
+    PHASE9_PERSISTENCE_ENV_BY_CAPABILITY,
+    CanonicalPhase9PersistenceBlocked,
+    resolve_phase9_persistence_urls,
 )
 
 
@@ -67,7 +72,9 @@ def _database_locator(url: URL) -> tuple[object, ...]:
         url.host,
         url.port,
         url.database,
-        tuple(sorted((key, tuple(value)) for key, value in url.normalized_query.items())),
+        tuple(
+            sorted((key, tuple(value)) for key, value in url.normalized_query.items())
+        ),
     )
 
 
@@ -88,9 +95,7 @@ def create_app(
     """Build the standalone app; database connections remain request-scoped."""
 
     resolved_environment = os.environ if environment is None else environment
-    reader_url = _required_postgresql_url(
-        resolved_environment, READER_DATABASE_URL_ENV
-    )
+    reader_url = _required_postgresql_url(resolved_environment, READER_DATABASE_URL_ENV)
     control_url = _required_postgresql_url(
         resolved_environment, CONTROL_DATABASE_URL_ENV
     )
@@ -99,8 +104,7 @@ def create_app(
         for principal, capability in LOCAL_SERVICE_PRINCIPALS.items()
     }
     if (
-        reader_url.username
-        != service_principal_by_capability["canonical_api_reader"]
+        reader_url.username != service_principal_by_capability["canonical_api_reader"]
         or control_url.username
         != service_principal_by_capability["canonical_control_writer"]
     ):
@@ -125,12 +129,24 @@ def create_app(
             "BLOCKED_CANONICAL_DATABASE_SPLIT: API and research roles must target "
             "the same canonical database"
         )
+    try:
+        phase9_urls = resolve_phase9_persistence_urls(
+            resolved_environment, role_mapping=local_role_mapping()
+        )
+    except CanonicalPhase9PersistenceBlocked as exc:
+        raise CanonicalProductionConfigurationBlocked(str(exc)) from exc
+    if phase9_urls.database_locator != _database_locator(reader_url):
+        raise CanonicalProductionConfigurationBlocked(
+            "BLOCKED_CANONICAL_DATABASE_SPLIT: API and Phase 9 roles must target "
+            "the same canonical database"
+        )
     usernames = {
         reader_url.username,
         control_url.username,
         *(url.username for url in research_urls.urls.values()),
+        *(url.username for url in phase9_urls.urls.values()),
     }
-    if len(usernames) != 6:
+    if len(usernames) != 14:
         raise CanonicalProductionConfigurationBlocked(
             "BLOCKED_CANONICAL_ROLE_SEPARATION: API and research roles must differ"
         )
@@ -140,6 +156,10 @@ def create_app(
     research_engines = {
         capability: create_engine(url, pool_pre_ping=True)
         for capability, url in research_urls.urls.items()
+    }
+    phase9_engines = {
+        capability: create_engine(url, pool_pre_ping=True)
+        for capability, url in phase9_urls.urls.items()
     }
     app = create_canonical_v13_app(
         reader_connection_factory=_connection_factory(reader_engine),
@@ -152,6 +172,18 @@ def create_app(
         ),
         qualification_connection_factory=_connection_factory(
             research_engines["canonical_qualification_writer"]
+        ),
+        approval_connection_factory=_connection_factory(
+            phase9_engines["canonical_approval_writer"]
+        ),
+        deployment_connection_factory=_connection_factory(
+            phase9_engines["canonical_deployment_writer"]
+        ),
+        signal_connection_factory=_connection_factory(
+            phase9_engines["canonical_signal_writer"]
+        ),
+        risk_connection_factory=_connection_factory(
+            phase9_engines["canonical_risk_writer"]
         ),
         market_artifact_root=market_artifact_root,
         market_downloader_factory=(
@@ -182,6 +214,7 @@ def create_app(
                 ("reader", reader_engine),
                 ("control", control_engine),
                 *tuple(research_engines.items()),
+                *tuple(phase9_engines.items()),
             ):
                 with engine.connect() as connection:
                     verification = verify_canonical_genesis(connection)
@@ -212,10 +245,16 @@ def create_app(
                 capability: identities[capability]
                 for capability in RESEARCH_PERSISTENCE_ENV_BY_CAPABILITY
             },
+            "phase9_identities": {
+                capability: identities[capability]
+                for capability in PHASE9_PERSISTENCE_ENV_BY_CAPABILITY
+            },
             "trading_capability": "TRADING_DISABLED",
         }
 
     def dispose_engines() -> None:
+        for engine in phase9_engines.values():
+            engine.dispose()
         for engine in research_engines.values():
             engine.dispose()
         control_engine.dispose()
@@ -225,6 +264,7 @@ def create_app(
     app.state.canonical_reader_engine = reader_engine
     app.state.canonical_control_engine = control_engine
     app.state.canonical_research_engines = research_engines
+    app.state.canonical_phase9_engines = phase9_engines
     return app
 
 

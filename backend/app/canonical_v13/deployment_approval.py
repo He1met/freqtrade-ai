@@ -12,8 +12,12 @@ from uuid import UUID, uuid4
 from sqlalchemy import Connection, select
 
 from app.canonical_v13.genesis import verify_canonical_genesis
+from app.canonical_v13.execution_common import lock_execution_boundary
 from app.canonical_v13.manifest import CANONICAL_BUSINESS_SCHEMA
-from app.canonical_v13.models import DEPLOYMENT_APPROVALS_TABLE, QUALIFICATION_DECISIONS_TABLE
+from app.canonical_v13.models import (
+    DEPLOYMENT_APPROVALS_TABLE,
+    QUALIFICATION_DECISIONS_TABLE,
+)
 
 
 class CanonicalDeploymentApprovalBlocked(RuntimeError):
@@ -100,11 +104,18 @@ def approve_demo_deployment(
         raise CanonicalDeploymentApprovalBlocked(
             "BLOCKED_WRONG_CANONICAL_DATABASE", "; ".join(verification.problems)
         )
-    decision = effective.execute(
-        select(QUALIFICATION_DECISIONS_TABLE).where(
-            QUALIFICATION_DECISIONS_TABLE.c.id == qualification_decision_id
+    lock_execution_boundary(
+        effective, key=f"deployment-approval:{qualification_decision_id}"
+    )
+    decision = (
+        effective.execute(
+            select(QUALIFICATION_DECISIONS_TABLE).where(
+                QUALIFICATION_DECISIONS_TABLE.c.id == qualification_decision_id
+            )
         )
-    ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+    )
     if decision is None or decision["status"] != "QUALIFIED":
         raise CanonicalDeploymentApprovalBlocked(
             "BLOCKED_QUALIFIED_DECISION_REQUIRED",
@@ -119,12 +130,16 @@ def approve_demo_deployment(
         raise CanonicalDeploymentApprovalBlocked(
             "BLOCKED_APPROVAL_AUTHORITY_UNSET", "actor and reason are required"
         )
-    existing = effective.execute(
-        select(DEPLOYMENT_APPROVALS_TABLE).where(
-            DEPLOYMENT_APPROVALS_TABLE.c.qualification_decision_id
-            == qualification_decision_id
+    existing = (
+        effective.execute(
+            select(DEPLOYMENT_APPROVALS_TABLE).where(
+                DEPLOYMENT_APPROVALS_TABLE.c.qualification_decision_id
+                == qualification_decision_id
+            )
         )
-    ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+    )
     approval_id = existing["id"] if existing is not None else uuid4()
     approval_digest = deployment_approval_digest(
         approval_id=approval_id,

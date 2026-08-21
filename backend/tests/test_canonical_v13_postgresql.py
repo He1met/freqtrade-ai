@@ -64,9 +64,7 @@ from tests.test_canonical_v13_research_validation import (
 
 
 DATABASE_URL = os.environ.get("CANONICAL_V13_POSTGRES_URL")
-ROLE_PREFIX = os.environ.get(
-    "CANONICAL_V13_ROLE_PREFIX", "freqtrade_ai_v13_ci_"
-)
+ROLE_PREFIX = os.environ.get("CANONICAL_V13_ROLE_PREFIX", "freqtrade_ai_v13_ci_")
 
 pytestmark = pytest.mark.skipif(
     not DATABASE_URL,
@@ -103,7 +101,7 @@ def test_empty_postgresql_genesis_mapping_acl_and_repeat_noop() -> None:
         assert first.created is True or first.repeat_noop is True
         assert accepted.accepted is True
         assert accepted.problems == ()
-        assert accepted.table_count == 48
+        assert accepted.table_count == 52
         assert accepted.business_row_count == 0
         assert gate_upgrade.status == "ACCEPTED"
 
@@ -122,8 +120,7 @@ def test_empty_postgresql_genesis_mapping_acl_and_repeat_noop() -> None:
             savepoint = connection.begin_nested()
             with pytest.raises(DBAPIError) as denied:
                 connection.exec_driver_sql(
-                    "INSERT INTO strategy_platform_v13.audit_events "
-                    "DEFAULT VALUES"
+                    "INSERT INTO strategy_platform_v13.audit_events DEFAULT VALUES"
                 )
             assert denied.value.orig.sqlstate == "42501"
             savepoint.rollback()
@@ -192,9 +189,7 @@ def test_empty_postgresql_genesis_mapping_acl_and_repeat_noop() -> None:
                 connection,
                 role_mapping=mapping,
                 legacy_research_writer_role=legacy_role,
-                allowed_isolated_memberships=frozenset(
-                    research_memberships.items()
-                ),
+                allowed_isolated_memberships=frozenset(research_memberships.items()),
             )
             assert provisioned_membership_gate.accepted is True
             assert provisioned_membership_gate.state == "CURRENT"
@@ -213,8 +208,7 @@ def test_empty_postgresql_genesis_mapping_acl_and_repeat_noop() -> None:
             connection.execute(
                 SCHEMA_METADATA_TABLE.update()
                 .where(
-                    SCHEMA_METADATA_TABLE.c.metadata_key
-                    == "canonical-v13-genesis",
+                    SCHEMA_METADATA_TABLE.c.metadata_key == "canonical-v13-genesis",
                     SCHEMA_METADATA_TABLE.c.manifest_digest
                     == CANONICAL_MANIFEST_DIGEST,
                 )
@@ -238,12 +232,16 @@ def test_empty_postgresql_genesis_mapping_acl_and_repeat_noop() -> None:
             assert upgraded.generation == 1
             assert upgraded.research_row_count == 0
 
-            event = connection.execute(
-                AUDIT_EVENTS_TABLE.select().where(
-                    AUDIT_EVENTS_TABLE.c.event_type
-                    == "CANONICAL_RESEARCH_AUTHORITY_UPGRADED"
+            event = (
+                connection.execute(
+                    AUDIT_EVENTS_TABLE.select().where(
+                        AUDIT_EVENTS_TABLE.c.event_type
+                        == "CANONICAL_RESEARCH_AUTHORITY_UPGRADED"
+                    )
                 )
-            ).mappings().one()
+                .mappings()
+                .one()
+            )
             connection.execute(
                 AUDIT_EVENTS_TABLE.update()
                 .where(AUDIT_EVENTS_TABLE.c.id == event["id"])
@@ -336,11 +334,14 @@ def test_postgresql_gate_receipt_upgrade_from_exact_predecessor() -> None:
             assert upgraded.destructive_operation_count == 0
             assert upgraded.receipt_digest is not None
             assert verified.status == "ACCEPTED"
-            assert verify_postgresql_bootstrap(
-                connection,
-                role_mapping=mapping,
-                require_zero_business_rows=False,
-            ).accepted is True
+            assert (
+                verify_postgresql_bootstrap(
+                    connection,
+                    role_mapping=mapping,
+                    require_zero_business_rows=False,
+                ).accepted
+                is True
+            )
 
             connection.execute(
                 SCHEMA_METADATA_TABLE.update().values(
@@ -360,13 +361,19 @@ def test_postgresql_gate_receipt_upgrade_from_exact_predecessor() -> None:
                 observed_at=datetime(2026, 8, 15, 0, 0, 30, tzinfo=timezone.utc),
             )
             assert revised.status == "ACCEPTED"
-            assert revised.previous_manifest_digest == PREVIOUS_PLANLESS_GATE_MANIFEST_DIGEST
+            assert (
+                revised.previous_manifest_digest
+                == PREVIOUS_PLANLESS_GATE_MANIFEST_DIGEST
+            )
             assert revised.receipt_digest is not None
-            assert verify_postgresql_bootstrap(
-                connection,
-                role_mapping=mapping,
-                require_zero_business_rows=False,
-            ).accepted is True
+            assert (
+                verify_postgresql_bootstrap(
+                    connection,
+                    role_mapping=mapping,
+                    require_zero_business_rows=False,
+                ).accepted
+                is True
+            )
 
             connection.execute(
                 SCHEMA_METADATA_TABLE.update().values(
@@ -390,11 +397,14 @@ def test_postgresql_gate_receipt_upgrade_from_exact_predecessor() -> None:
                 == PREVIOUS_GATE_API_MANIFEST_DIGEST
             )
             assert market_revised.receipt_digest is not None
-            assert verify_postgresql_bootstrap(
-                connection,
-                role_mapping=mapping,
-                require_zero_business_rows=False,
-            ).accepted is True
+            assert (
+                verify_postgresql_bootstrap(
+                    connection,
+                    role_mapping=mapping,
+                    require_zero_business_rows=False,
+                ).accepted
+                is True
+            )
 
             connection.exec_driver_sql(
                 f"REVOKE SELECT ON {schema}.market_profiles FROM "
@@ -410,11 +420,14 @@ def test_postgresql_gate_receipt_upgrade_from_exact_predecessor() -> None:
             assert repaired.created_table_count == 0
             assert repaired.added_column_count == 0
             assert repaired.receipt_digest is not None
-            assert verify_postgresql_bootstrap(
-                connection,
-                role_mapping=mapping,
-                require_zero_business_rows=False,
-            ).accepted is True
+            assert (
+                verify_postgresql_bootstrap(
+                    connection,
+                    role_mapping=mapping,
+                    require_zero_business_rows=False,
+                ).accepted
+                is True
+            )
             transaction.rollback()
     finally:
         engine.dispose()
@@ -501,7 +514,9 @@ def test_postgresql_control_role_serializes_consume_against_revoke() -> None:
                 .where(
                     AUDIT_EVENTS_TABLE.c.aggregate_id
                     == str(authorization.authorization_id),
-                    AUDIT_EVENTS_TABLE.c.event_type.in_((CONSUMED_EVENT, REVOKED_EVENT)),
+                    AUDIT_EVENTS_TABLE.c.event_type.in_(
+                        (CONSUMED_EVENT, REVOKED_EVENT)
+                    ),
                 )
             ).scalar_one()
         assert terminal_count == 1
@@ -515,9 +530,7 @@ def test_postgresql_research_roles_enforce_independent_receipt_writers() -> None
     owner_engine = create_engine(DATABASE_URL)
     base_url = make_url(DATABASE_URL)
     service_engines = {
-        capability: create_engine(
-            base_url.set(username=ROLE_PREFIX + principal_suffix)
-        )
+        capability: create_engine(base_url.set(username=ROLE_PREFIX + principal_suffix))
         for capability, principal_suffix in {
             "reader": "api_login",
             "control": "control_login",

@@ -22,7 +22,7 @@ CANONICAL_MANIFEST_KEY: Final = "canonical-v13-table-manifest-v1"
 CANONICAL_LEGACY_IMPORT_MODE: Final = "EXTERNAL_LATEST_ONLY"
 CANONICAL_TRADING_CAPABILITY: Final = "TRADING_DISABLED"
 CANONICAL_PRODUCTION_DEFAULT: Final = "UNSET"
-CANONICAL_AUTHORITY_REVISION: Final = "20260815_planless_gate_receipts_v3_acl3"
+CANONICAL_AUTHORITY_REVISION: Final = "20260821_phase9_execution_v1_acl4"
 
 P0_CONFIGURATION_KINDS: Final[tuple[str, ...]] = (
     "TARGET",
@@ -132,6 +132,10 @@ _TABLES_BY_DOMAIN = {
         "runtime_receipts",
     ),
     "execution": (
+        "execution_risk_budget_authorizations",
+        "execution_risk_reservations",
+        "execution_attestations",
+        "order_writer_leases",
         "signals",
         "trade_intents",
         "risk_decisions",
@@ -151,7 +155,9 @@ CANONICAL_TABLE_NAMES: Final[tuple[str, ...]] = tuple(
     for table_name in table_names
 )
 CANONICAL_BUSINESS_TABLE_NAMES: Final[tuple[str, ...]] = tuple(
-    table_name for table_name in CANONICAL_TABLE_NAMES if table_name != "schema_metadata"
+    table_name
+    for table_name in CANONICAL_TABLE_NAMES
+    if table_name != "schema_metadata"
 )
 
 _WRITER_TABLE_ALLOWLIST = {
@@ -170,15 +176,23 @@ _WRITER_TABLE_ALLOWLIST = {
         "qualification_window_evidence",
     ),
     "canonical_optimization_writer": _TABLES_BY_DOMAIN["optimization"],
-    "canonical_approval_writer": ("deployment_approvals",),
+    "canonical_approval_writer": (
+        "deployment_approvals",
+        "execution_risk_budget_authorizations",
+    ),
     "canonical_deployment_writer": (
         "deployments",
         "runtime_instances",
         "runtime_receipts",
+        "execution_attestations",
     ),
     "canonical_signal_writer": ("signals",),
-    "canonical_risk_writer": ("trade_intents", "risk_decisions"),
-    "canonical_order_writer": ("orders",),
+    "canonical_risk_writer": (
+        "trade_intents",
+        "risk_decisions",
+        "execution_risk_reservations",
+    ),
+    "canonical_order_writer": ("orders", "order_writer_leases"),
     "canonical_fill_writer": ("fills",),
     "canonical_ledger_writer": ("ledger_entries",),
     "canonical_reconciliation_writer": (
@@ -322,6 +336,7 @@ _WRITER_READ_ALLOWLIST = {
     ),
     "canonical_approval_writer": (
         "schema_metadata",
+        "audit_events",
         "qualification_decisions",
     ),
     "canonical_deployment_writer": (
@@ -334,9 +349,23 @@ _WRITER_READ_ALLOWLIST = {
         "schema_metadata",
         "deployments",
         "runtime_instances",
+        "runtime_receipts",
     ),
-    "canonical_risk_writer": ("schema_metadata", "signals"),
-    "canonical_order_writer": ("schema_metadata", "risk_decisions"),
+    "canonical_risk_writer": (
+        "schema_metadata",
+        "signals",
+        "deployments",
+        "execution_risk_budget_authorizations",
+    ),
+    "canonical_order_writer": (
+        "schema_metadata",
+        "deployments",
+        "trade_intents",
+        "risk_decisions",
+        "execution_risk_budget_authorizations",
+        "execution_risk_reservations",
+        "execution_attestations",
+    ),
     "canonical_fill_writer": ("schema_metadata", "orders"),
     "canonical_ledger_writer": ("schema_metadata", "fills"),
     "canonical_reconciliation_writer": (
@@ -369,6 +398,7 @@ _MUTABLE_TABLES = frozenset(
         "deployment_approvals",
         "deployments",
         "runtime_instances",
+        "order_writer_leases",
         "orders",
         "reconciliation_runs",
     }
@@ -557,7 +587,9 @@ def manifest_problems() -> tuple[str, ...]:
             problems.append(f"reader {reader} contains duplicate table grants")
         unknown = set(table_names_for_reader) - set(CANONICAL_TABLE_NAMES)
         if unknown:
-            problems.append(f"reader {reader} references unknown tables {sorted(unknown)}")
+            problems.append(
+                f"reader {reader} references unknown tables {sorted(unknown)}"
+            )
 
     for writer, table_names_for_writer in WRITER_READ_ALLOWLIST.items():
         if len(table_names_for_writer) != len(set(table_names_for_writer)):
@@ -567,9 +599,7 @@ def manifest_problems() -> tuple[str, ...]:
             problems.append(
                 f"writer reader {writer} references unknown tables {sorted(unknown)}"
             )
-        overlap = set(table_names_for_writer) & set(
-            WRITER_TABLE_ALLOWLIST[writer]
-        )
+        overlap = set(table_names_for_writer) & set(WRITER_TABLE_ALLOWLIST[writer])
         if overlap:
             problems.append(
                 f"writer reader {writer} duplicates owned tables {sorted(overlap)}"
@@ -577,14 +607,18 @@ def manifest_problems() -> tuple[str, ...]:
 
     forbidden = set(CANONICAL_TABLE_NAMES) & FORBIDDEN_CANONICAL_TABLE_NAMES
     if forbidden:
-        problems.append(f"canonical manifest contains forbidden tables {sorted(forbidden)}")
+        problems.append(
+            f"canonical manifest contains forbidden tables {sorted(forbidden)}"
+        )
     prefixed = sorted(
         table_name
         for table_name in CANONICAL_TABLE_NAMES
         if table_name.startswith(FORBIDDEN_CANONICAL_TABLE_PREFIXES)
     )
     if prefixed:
-        problems.append(f"canonical manifest contains forbidden table prefixes {prefixed}")
+        problems.append(
+            f"canonical manifest contains forbidden table prefixes {prefixed}"
+        )
 
     expected_initial = {
         "target_set": "UNSET",
@@ -597,7 +631,9 @@ def manifest_problems() -> tuple[str, ...]:
         "trading": "TRADING_DISABLED",
     }
     if dict(INITIAL_PRODUCTION_STATES) != expected_initial:
-        problems.append("initial production state contains a hidden/default business value")
+        problems.append(
+            "initial production state contains a hidden/default business value"
+        )
     if len(CANONICAL_MANIFEST_DIGEST) != 64:
         problems.append("manifest digest is not SHA-256 shaped")
     return tuple(problems)

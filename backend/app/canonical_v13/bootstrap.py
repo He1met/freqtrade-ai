@@ -42,6 +42,18 @@ LOCAL_RESEARCH_SERVICE_PRINCIPALS: Final[Mapping[str, str]] = MappingProxyType(
         "freqtrade_ai_v13_optimization_login": "canonical_optimization_writer",
     }
 )
+LOCAL_PHASE9_SERVICE_PRINCIPALS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "freqtrade_ai_v13_approval_login": "canonical_approval_writer",
+        "freqtrade_ai_v13_deployment_login": "canonical_deployment_writer",
+        "freqtrade_ai_v13_signal_login": "canonical_signal_writer",
+        "freqtrade_ai_v13_risk_login": "canonical_risk_writer",
+        "freqtrade_ai_v13_order_login": "canonical_order_writer",
+        "freqtrade_ai_v13_fill_login": "canonical_fill_writer",
+        "freqtrade_ai_v13_ledger_login": "canonical_ledger_writer",
+        "freqtrade_ai_v13_reconciliation_login": "canonical_reconciliation_writer",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -158,9 +170,7 @@ def verify_postgresql_bootstrap(
     missing_memberships = expected_memberships - membership_rows
     extra_memberships = membership_rows - expected_memberships
     if missing_memberships:
-        problems.append(
-            f"missing service memberships count={len(missing_memberships)}"
-        )
+        problems.append(f"missing service memberships count={len(missing_memberships)}")
     if extra_memberships:
         problems.append(f"extra role memberships count={len(extra_memberships)}")
 
@@ -181,19 +191,18 @@ def verify_postgresql_bootstrap(
         if missing_services:
             problems.append(f"missing service principals: {missing_services!r}")
         for row in service_rows:
-            if not bool(row[1]) or not bool(row[5]) or any(
-                bool(value) for value in (row[2], row[3], row[4], row[6], row[7])
-            ):
-                problems.append(
-                    f"service principal privilege drift: {row[0]}"
+            if (
+                not bool(row[1])
+                or not bool(row[5])
+                or any(
+                    bool(value) for value in (row[2], row[3], row[4], row[6], row[7])
                 )
+            ):
+                problems.append(f"service principal privilege drift: {row[0]}")
         expected_connect_roles = {
-            role_mapping.physical(logical)
-            for logical in service_principals.values()
+            role_mapping.physical(logical) for logical in service_principals.values()
         }
-        relevant_database_roles = (
-            set(service_principals) | expected_connect_roles
-        )
+        relevant_database_roles = set(service_principals) | expected_connect_roles
         connect_roles = {
             str(value)
             for value in connection.execute(
@@ -221,13 +230,11 @@ def verify_postgresql_bootstrap(
         extra_connect = connect_roles - expected_connect_roles
         if missing_connect:
             problems.append(
-                "missing service database CONNECT "
-                f"count={len(missing_connect)}"
+                f"missing service database CONNECT count={len(missing_connect)}"
             )
         if extra_connect:
             problems.append(
-                "unexpected service database CONNECT "
-                f"count={len(extra_connect)}"
+                f"unexpected service database CONNECT count={len(extra_connect)}"
             )
 
     owner = role_mapping.physical("canonical_schema_owner")
@@ -285,8 +292,7 @@ def verify_postgresql_bootstrap(
         )
     }
     expected_function_grants = {
-        (function_name, owner, "EXECUTE")
-        for function_name in GATE_GUARD_FUNCTION_NAMES
+        (function_name, owner, "EXECUTE") for function_name in GATE_GUARD_FUNCTION_NAMES
     }
     if function_grants != expected_function_grants:
         problems.append("guard function ACL drift")
@@ -298,9 +304,7 @@ def verify_postgresql_bootstrap(
         {"schema": CANONICAL_BUSINESS_SCHEMA},
     ).scalar_one_or_none()
     if schema_owner != owner:
-        problems.append(
-            f"schema owner expected={owner!r} observed={schema_owner!r}"
-        )
+        problems.append(f"schema owner expected={owner!r} observed={schema_owner!r}")
     if require_owner_table_grants:
         problems.extend(
             postgresql_owner_table_grant_problems(
@@ -408,6 +412,7 @@ def postgresql_owner_table_grants(
 
 __all__ = [
     "LOCAL_DATABASE_NAME",
+    "LOCAL_PHASE9_SERVICE_PRINCIPALS",
     "LOCAL_ROLE_PREFIX",
     "LOCAL_RESEARCH_SERVICE_PRINCIPALS",
     "LOCAL_SERVICE_PRINCIPALS",

@@ -11,6 +11,7 @@ import {
   fetchCanonicalMarketInventory,
   fetchCanonicalMarketSnapshot,
   fetchCanonicalOptimizations,
+  fetchCanonicalPhase9Readiness,
   fetchCanonicalResearchReadiness,
   fetchCanonicalResearchGates,
   fetchCanonicalResearchChain,
@@ -94,6 +95,13 @@ test("the client exposes the canonical projection routes with one fetch each", a
       score: null,
       qualification: null,
       version_id: ID,
+      contract: "canonical-v13-phase9-readiness-receipt-v2",
+      stage: "QUALIFICATION_HANDOFF",
+      qualification_status_counts: {},
+      execution_domain_counts: {},
+      lineage_evidence_counts: {},
+      handoff: null,
+      topology_digest: DIGEST,
     });
   };
   const draft = {
@@ -134,13 +142,14 @@ test("the client exposes the canonical projection routes with one fetch each", a
   await fetchCanonicalMarketSnapshot(ID);
   await fetchCanonicalResearchReadiness("scope", "workflow");
   await fetchCanonicalRuntimeReadiness();
+  await fetchCanonicalPhase9Readiness({ qualification_decision_id: ID, strategy_version_id: ID, configuration_bundle_id: ID, market_snapshot_id: ID }, "QUALIFICATION_HANDOFF");
   await fetchCanonicalOptimizations();
   await fetchCanonicalResearchChain(ID);
   await fetchCanonicalResearchPlans();
   await fetchCanonicalResearchResults(ID);
   await fetchCanonicalResearchGates();
 
-  assert.equal(calls.length, 17);
+  assert.equal(calls.length, 18);
   assert.deepEqual(calls, [
     { input: `${CANONICAL_V13_API_ROOT}/submissions`, method: "POST" },
     { input: `${CANONICAL_V13_API_ROOT}/strategies`, method: "GET" },
@@ -154,6 +163,7 @@ test("the client exposes the canonical projection routes with one fetch each", a
     { input: `${CANONICAL_V13_API_ROOT}/market-data/snapshots/${ID}`, method: "GET" },
     { input: `${CANONICAL_V13_API_ROOT}/readiness/research?scope_key=scope&workflow_key=workflow`, method: "GET" },
     { input: `${CANONICAL_V13_API_ROOT}/readiness/runtime`, method: "GET" },
+    { input: `${CANONICAL_V13_API_ROOT}/phase9/readiness?qualification_decision_id=${ID}&strategy_version_id=${ID}&configuration_bundle_id=${ID}&market_snapshot_id=${ID}&stage=QUALIFICATION_HANDOFF`, method: "GET" },
     { input: `${CANONICAL_V13_API_ROOT}/optimizations`, method: "GET" },
     { input: `${CANONICAL_V13_API_ROOT}/research/validation-plans/${ID}`, method: "GET" },
     { input: `${CANONICAL_V13_API_ROOT}/research/validation-plans`, method: "GET" },

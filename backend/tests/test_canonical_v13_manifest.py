@@ -105,6 +105,10 @@ EXPECTED_TABLES_BY_DOMAIN = {
         "runtime_receipts",
     ),
     "execution": (
+        "execution_risk_budget_authorizations",
+        "execution_risk_reservations",
+        "execution_attestations",
+        "order_writer_leases",
         "signals",
         "trade_intents",
         "risk_decisions",
@@ -118,7 +122,7 @@ EXPECTED_TABLES_BY_DOMAIN = {
 
 
 def test_exact_identity_and_table_manifest_matches_frozen_design() -> None:
-    assert CANONICAL_AUTHORITY_REVISION == "20260815_planless_gate_receipts_v3_acl3"
+    assert CANONICAL_AUTHORITY_REVISION == "20260821_phase9_execution_v1_acl4"
     assert CANONICAL_DATABASE_PURPOSE == "FREQTRADE_AI_V13_CANONICAL"
     assert CANONICAL_BUSINESS_SCHEMA == "strategy_platform_v13"
     assert CANONICAL_GENESIS_VERSION == "20260814_01"
@@ -127,19 +131,17 @@ def test_exact_identity_and_table_manifest_matches_frozen_design() -> None:
     assert CANONICAL_TRADING_CAPABILITY == "TRADING_DISABLED"
     assert dict(CANONICAL_TABLES_BY_DOMAIN) == EXPECTED_TABLES_BY_DOMAIN
     assert CANONICAL_TABLE_NAMES == tuple(
-        table
-        for tables in EXPECTED_TABLES_BY_DOMAIN.values()
-        for table in tables
+        table for tables in EXPECTED_TABLES_BY_DOMAIN.values() for table in tables
     )
-    assert len(CANONICAL_TABLE_NAMES) == 48
+    assert len(CANONICAL_TABLE_NAMES) == 52
     assert manifest_problems() == ()
 
 
 def test_manifest_digest_is_canonical_sha256() -> None:
     manifest_json = canonical_manifest_json()
-    assert CANONICAL_MANIFEST_DIGEST == sha256(
-        manifest_json.encode("utf-8")
-    ).hexdigest()
+    assert (
+        CANONICAL_MANIFEST_DIGEST == sha256(manifest_json.encode("utf-8")).hexdigest()
+    )
     assert len(CANONICAL_MANIFEST_DIGEST) == 64
     assert "20260813_47" not in manifest_json
     assert "freqtrade_ai_design_lab" not in manifest_json
@@ -288,8 +290,7 @@ def test_postgresql_ddl_and_acl_are_offline_exact_allowlists() -> None:
     )
     assert 0 < last_create_index < first_table_owner < schema_owner
     assert ddl.rstrip().endswith(
-        f"ALTER SCHEMA {CANONICAL_BUSINESS_SCHEMA} "
-        "OWNER TO canonical_schema_owner;"
+        f"ALTER SCHEMA {CANONICAL_BUSINESS_SCHEMA} OWNER TO canonical_schema_owner;"
     )
 
     acl = render_postgresql_acl_sql()
@@ -301,8 +302,7 @@ def test_postgresql_ddl_and_acl_are_offline_exact_allowlists() -> None:
     for writer, table_names in WRITER_TABLE_ALLOWLIST.items():
         for table_name in table_names:
             assert (
-                f"ON TABLE {CANONICAL_BUSINESS_SCHEMA}.{table_name} TO {writer}"
-                in acl
+                f"ON TABLE {CANONICAL_BUSINESS_SCHEMA}.{table_name} TO {writer}" in acl
             )
     for reader, table_names in READER_TABLE_ALLOWLIST.items():
         for table_name in table_names:
@@ -320,9 +320,17 @@ def test_postgresql_ddl_and_acl_are_offline_exact_allowlists() -> None:
 
     assert WRITER_READ_ALLOWLIST["canonical_order_writer"] == (
         "schema_metadata",
+        "deployments",
+        "trade_intents",
         "risk_decisions",
+        "execution_risk_budget_authorizations",
+        "execution_risk_reservations",
+        "execution_attestations",
     )
-    assert WRITER_TABLE_ALLOWLIST["canonical_order_writer"] == ("orders",)
+    assert WRITER_TABLE_ALLOWLIST["canonical_order_writer"] == (
+        "orders",
+        "order_writer_leases",
+    )
 
     reconciliation_items = CanonicalBase.metadata.tables[
         f"{CANONICAL_BUSINESS_SCHEMA}.reconciliation_items"
@@ -365,16 +373,18 @@ def test_postgresql_types_constraints_and_locking_compile_offline() -> None:
         if isinstance(column.type, JSON)
     )
 
-    assert len(tables) == 48
-    assert len(foreign_keys) == 96
-    assert len(checks) == 50
-    assert len(uniques) == 52
-    assert len(indexes) == 90
-    assert len(datetimes) == 52
-    assert len(json_columns) == 21
+    assert len(tables) == 52
+    assert len(foreign_keys) == 100
+    assert len(checks) == 59
+    assert len(uniques) == 57
+    assert len(indexes) == 92
+    assert len(datetimes) == 59
+    assert len(json_columns) == 22
     assert all(key.deferrable is not True for key in foreign_keys)
     assert all(column.type.timezone is True for column in datetimes)
-    assert all(column.server_default is None for table in tables for column in table.columns)
+    assert all(
+        column.server_default is None for table in tables for column in table.columns
+    )
 
     dialect = postgresql.dialect()
     compiled_tables = "\n".join(

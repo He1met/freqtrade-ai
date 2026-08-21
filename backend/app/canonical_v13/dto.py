@@ -8,6 +8,7 @@ inference.
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Any, Literal, Optional
 from uuid import UUID
 
@@ -34,6 +35,107 @@ class CanonicalErrorDetailDTO(CanonicalProjectionDTO):
 class CanonicalErrorResponseDTO(CanonicalProjectionDTO):
     status: Literal["BLOCKED"] = "BLOCKED"
     error: CanonicalErrorDetailDTO
+
+
+class Phase9QualificationHandoffDTO(CanonicalProjectionDTO):
+    qualification_decision_id: UUID
+    qualification_decision_digest: str = Field(pattern=SHA256_PATTERN)
+    strategy_version_id: UUID
+    research_target_id: UUID
+    configuration_bundle_id: UUID
+    configuration_bundle_digest: str = Field(pattern=SHA256_PATTERN)
+    market_snapshot_id: UUID
+    market_snapshot_digest: str = Field(pattern=SHA256_PATTERN)
+    validation_plan_id: UUID
+    validation_plan_digest: str = Field(pattern=SHA256_PATTERN)
+
+
+class Phase9ReadinessProjectionDTO(CanonicalProjectionDTO):
+    contract: Literal["canonical-v13-phase9-readiness-receipt-v2"]
+    stage: Literal[
+        "QUALIFICATION_HANDOFF",
+        "NO_ORDER_SOAK",
+        "SIGNAL_RISK_SHADOW",
+        "OKX_DEMO_CANARY",
+        "RECOVERY_SOAK",
+    ]
+    status: Literal["READY", "BLOCKED"]
+    reason_codes: list[str]
+    qualification_status_counts: dict[str, int]
+    execution_domain_counts: dict[str, int]
+    lineage_evidence_counts: dict[str, int]
+    handoff: Optional[Phase9QualificationHandoffDTO]
+    topology_digest: str = Field(pattern=SHA256_PATTERN)
+    receipt_digest: str = Field(pattern=SHA256_PATTERN)
+
+
+class Phase9ApprovalCommandDTO(CanonicalCommandDTO):
+    qualification_decision_id: UUID
+    actor_identity: str = Field(min_length=1, max_length=160)
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class Phase9ApprovalReceiptDTO(CanonicalProjectionDTO):
+    deployment_approval_id: UUID
+    approval_digest: str = Field(pattern=SHA256_PATTERN)
+    status: Literal["APPROVED"]
+
+
+class Phase9DeploymentCommandDTO(CanonicalCommandDTO):
+    deployment_approval_id: UUID
+
+
+class Phase9DeploymentReceiptDTO(CanonicalProjectionDTO):
+    deployment_id: UUID
+    capability_digest: str = Field(pattern=SHA256_PATTERN)
+    status: Literal["PENDING", "ACTIVE", "STOPPED", "FAILED"]
+
+
+class Phase9RiskBudgetCommandDTO(CanonicalCommandDTO):
+    deployment_approval_id: UUID
+    actor_identity: str = Field(min_length=1, max_length=160)
+    reason: str = Field(min_length=1, max_length=2000)
+    policy_source_receipt_digest: str = Field(pattern=SHA256_PATTERN)
+
+
+class Phase9RiskBudgetReceiptDTO(CanonicalProjectionDTO):
+    authorization_id: UUID
+    authorization_digest: str = Field(pattern=SHA256_PATTERN)
+    repeat_noop: bool
+
+
+class Phase9SignalCommandDTO(CanonicalCommandDTO):
+    deployment_id: UUID
+    runtime_instance_id: UUID
+    research_target_id: UUID
+    signal_json: dict[str, Any]
+
+
+class Phase9SignalReceiptDTO(CanonicalProjectionDTO):
+    signal_id: UUID
+
+
+class Phase9IntentCommandDTO(CanonicalCommandDTO):
+    signal_id: UUID
+    intent_json: dict[str, Any]
+
+
+class Phase9IntentReceiptDTO(CanonicalProjectionDTO):
+    trade_intent_id: UUID
+
+
+class Phase9RiskDecisionCommandDTO(CanonicalCommandDTO):
+    trade_intent_id: UUID
+    risk_budget_authorization_id: UUID
+
+
+class Phase9RiskDecisionReceiptDTO(CanonicalProjectionDTO):
+    risk_decision_id: UUID
+    reservation_id: UUID
+    status: Literal["RISK_ACCEPTED", "REJECTED", "BLOCKED"]
+    reason_code: str
+    decision_digest: str = Field(pattern=SHA256_PATTERN)
+    repeat_noop: bool
 
 
 class SubmissionVersionCommandDTO(CanonicalCommandDTO):
@@ -516,7 +618,9 @@ class GateProjectionDTO(CanonicalProjectionDTO):
     lookahead_status: Optional[Literal["PASSED", "FAILED", "BLOCKED"]]
     lookahead_reason_code: Optional[str]
     lookahead_receipt_id: Optional[UUID]
-    lookahead_receipt_digest: Optional[str] = Field(default=None, pattern=SHA256_PATTERN)
+    lookahead_receipt_digest: Optional[str] = Field(
+        default=None, pattern=SHA256_PATTERN
+    )
     observed_signal_count: Optional[int]
     observed_trade_count: Optional[int]
     required_trade_count: Optional[int]
@@ -651,15 +755,21 @@ class ResearchChainProjectionDTO(CanonicalProjectionDTO):
     strategy_version_id: UUID
     research_target_id: UUID
     target_key: str
-    plan_status: Literal["DECLARED", "READY", "RUNNING", "COMPLETE", "FAILED", "BLOCKED"]
+    plan_status: Literal[
+        "DECLARED", "READY", "RUNNING", "COMPLETE", "FAILED", "BLOCKED"
+    ]
     validation_attempt_id: Optional[UUID]
-    attempt_status: Optional[Literal["PENDING", "RUNNING", "SUCCEEDED", "FAILED", "BLOCKED"]]
+    attempt_status: Optional[
+        Literal["PENDING", "RUNNING", "SUCCEEDED", "FAILED", "BLOCKED"]
+    ]
     attempt_receipt_digest: Optional[str] = Field(default=None, pattern=SHA256_PATTERN)
     target_score_id: Optional[UUID]
     overall_score: Optional[str]
     score_digest: Optional[str] = Field(default=None, pattern=SHA256_PATTERN)
     qualification_decision_id: Optional[UUID]
-    qualification_status: Optional[Literal["QUALIFIED", "REJECTED", "BLOCKED", "FAILED"]]
+    qualification_status: Optional[
+        Literal["QUALIFIED", "REJECTED", "BLOCKED", "FAILED"]
+    ]
     qualification_reason_code: Optional[str]
     qualification_decision_digest: Optional[str] = Field(
         default=None, pattern=SHA256_PATTERN
@@ -744,7 +854,9 @@ class ResearchResultsProjectionDTO(CanonicalProjectionDTO):
     configuration_bundle_digest: str = Field(pattern=SHA256_PATTERN)
     market_snapshot_id: UUID
     market_snapshot_digest: str = Field(pattern=SHA256_PATTERN)
-    plan_status: Literal["DECLARED", "READY", "RUNNING", "COMPLETE", "FAILED", "BLOCKED"]
+    plan_status: Literal[
+        "DECLARED", "READY", "RUNNING", "COMPLETE", "FAILED", "BLOCKED"
+    ]
     attempt: Optional[ResearchAttemptProjectionDTO]
     windows: list[ResearchWindowProjectionDTO]
     score: Optional[ResearchScoreProjectionDTO]

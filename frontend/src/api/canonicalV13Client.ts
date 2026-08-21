@@ -9,6 +9,8 @@ import type {
   MarketInventoryProjection,
   MarketSnapshotProjection,
   OptimizationListProjection,
+  Phase9AcceptanceStage,
+  Phase9ReadinessProjection,
   ReadinessProjection,
   ResearchPlanCatalogProjection,
   ResearchResultsProjection,
@@ -102,6 +104,7 @@ function validateSuccessDto(contract: string, value: unknown): void {
     researchPlans: { status: "string", items: "array" },
     researchResults: { validation_plan_id: "string", validation_plan_digest: "string", strategy_version_id: "string", research_target_id: "string", target_key: "string", configuration_bundle_id: "string", configuration_bundle_digest: "string", market_snapshot_id: "string", market_snapshot_digest: "string", plan_status: "string", attempt: "nullable-object", windows: "array", score: "nullable-object", qualification: "nullable-object" },
     gates: { status: "string", items: "array" },
+    phase9Readiness: { contract: "string", stage: "string", status: "string", reason_codes: "array", qualification_status_counts: "object", execution_domain_counts: "object", lineage_evidence_counts: "object", handoff: "nullable-object", topology_digest: "string", receipt_digest: "string" },
   };
   const shape = shapes[contract];
   if (!shape) throw new CanonicalV13ClientContractError("UNKNOWN_SUCCESS_DTO", contract);
@@ -318,6 +321,23 @@ export function fetchCanonicalResearchReadiness(
 
 export function fetchCanonicalRuntimeReadiness(signal?: AbortSignal) {
   return request<ReadinessProjection>("/readiness/runtime", "readiness", { signal });
+}
+
+export function fetchCanonicalPhase9Readiness(
+  handoff: Pick<ResearchResultsProjection, "strategy_version_id" | "configuration_bundle_id" | "market_snapshot_id"> & {
+    qualification_decision_id: string;
+  },
+  stage: Phase9AcceptanceStage,
+  signal?: AbortSignal,
+) {
+  const query = new URLSearchParams({
+    qualification_decision_id: handoff.qualification_decision_id,
+    strategy_version_id: handoff.strategy_version_id,
+    configuration_bundle_id: handoff.configuration_bundle_id,
+    market_snapshot_id: handoff.market_snapshot_id,
+    stage,
+  });
+  return request<Phase9ReadinessProjection>(`/phase9/readiness?${query.toString()}`, "phase9Readiness", { signal });
 }
 
 export function fetchCanonicalOptimizations(signal?: AbortSignal) {

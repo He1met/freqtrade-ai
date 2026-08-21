@@ -8,13 +8,20 @@ import pytest
 from sqlalchemy import func, select
 
 from app.canonical_v13.deployment_approval import approve_demo_deployment
-from app.canonical_v13.deployment_control import create_demo_deployment, launch_demo_runtime
+from app.canonical_v13.deployment_control import (
+    confirm_production_demo_runtime_observation,
+    create_demo_deployment,
+    launch_demo_runtime,
+)
 from app.canonical_v13.accounting import post_simulated_ledger_entry
 from app.canonical_v13.execution_common import CanonicalExecutionChainBlocked
 from app.canonical_v13.fill_service import record_simulated_fill
 from app.canonical_v13.order_service import record_simulated_order
 from app.canonical_v13.reconciliation import reconcile_simulated_chain
-from app.canonical_v13.risk_service import create_simulated_intent, decide_simulated_risk
+from app.canonical_v13.risk_service import (
+    create_simulated_intent,
+    decide_simulated_risk,
+)
 from app.canonical_v13.signal_service import record_simulated_signal
 from app.canonical_v13.models import (
     DEPLOYMENTS_TABLE,
@@ -111,9 +118,13 @@ def _runtime_fixture(connection):
         credential_reference="test-reference-never-resolved",
         launcher=TestLauncher(),
     )
-    plan = connection.execute(
-        select(VALIDATION_PLANS_TABLE).where(VALIDATION_PLANS_TABLE.c.id == plan_id)
-    ).mappings().one()
+    plan = (
+        connection.execute(
+            select(VALIDATION_PLANS_TABLE).where(VALIDATION_PLANS_TABLE.c.id == plan_id)
+        )
+        .mappings()
+        .one()
+    )
     return plan, decision, deployment, runtime_id
 
 
@@ -121,19 +132,21 @@ def test_simulator_runtime_never_activates_deployment_or_becomes_production_read
     canonical_connection,
 ):
     with canonical_connection.begin():
-        _plan, decision, deployment, runtime_id = _runtime_fixture(
-            canonical_connection
-        )
+        _plan, decision, deployment, runtime_id = _runtime_fixture(canonical_connection)
         deployment_status = canonical_connection.execute(
             select(DEPLOYMENTS_TABLE.c.status).where(
                 DEPLOYMENTS_TABLE.c.id == deployment.deployment_id
             )
         ).scalar_one()
-        runtime = canonical_connection.execute(
-            select(RUNTIME_INSTANCES_TABLE).where(
-                RUNTIME_INSTANCES_TABLE.c.id == runtime_id
+        runtime = (
+            canonical_connection.execute(
+                select(RUNTIME_INSTANCES_TABLE).where(
+                    RUNTIME_INSTANCES_TABLE.c.id == runtime_id
+                )
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
     assert decision.status == "QUALIFIED"
     assert deployment_status == "PENDING"
     assert runtime["status"] == "HEALTHY"
@@ -191,11 +204,87 @@ def test_simulator_runtime_never_activates_deployment_or_becomes_production_read
         )
 
 
+def test_supervisor_observation_confirms_runtime_without_launching_inside_db_transaction(
+    canonical_connection,
+) -> None:
+    with canonical_connection.begin():
+        _plan_id, decision = _qualified(canonical_connection)
+        approval = approve_demo_deployment(
+            canonical_connection,
+            qualification_decision_id=decision.qualification_decision_id,
+            actor_identity="phase9-human-approver",
+            reason="reviewed production Demo runtime",
+        )
+        deployment = create_demo_deployment(
+            canonical_connection,
+            deployment_approval_id=approval.deployment_approval_id,
+        )
+        persisted_deployment = (
+            canonical_connection.execute(
+                select(DEPLOYMENTS_TABLE).where(
+                    DEPLOYMENTS_TABLE.c.id == deployment.deployment_id
+                )
+            )
+            .mappings()
+            .one()
+        )
+        runtime_id = uuid4()
+        spec = FrozenRuntimeLaunchSpec(
+            deployment_id=deployment.deployment_id,
+            approval_id=approval.deployment_approval_id,
+            qualification_decision_id=decision.qualification_decision_id,
+            strategy_version_id=persisted_deployment["strategy_version_id"],
+            configuration_bundle_id=persisted_deployment["configuration_bundle_id"],
+            configuration_bundle_digest=persisted_deployment[
+                "configuration_bundle_digest"
+            ],
+            market_snapshot_id=persisted_deployment["market_snapshot_id"],
+            market_snapshot_digest=persisted_deployment["market_snapshot_digest"],
+            deployment_capability_digest=deployment.capability_digest,
+            runtime_identity="canonical-v13-long-lived-runtime-v1",
+            image_digest="f" * 64,
+            service_account="canonical_runtime_reader",
+            network_policy="DEMO_EXCHANGE_ONLY",
+            credential_reference="keychain:freqtrade-ai/v13/okx-demo",
+        )
+        receipt = build_runtime_observation_receipt(
+            runtime_instance_id=runtime_id,
+            launch_spec=spec,
+            status="HEALTHY",
+            observed_at=NOW,
+            evidence_class="PRODUCTION_DEMO_RUNTIME",
+        )
+        confirmed = confirm_production_demo_runtime_observation(
+            canonical_connection,
+            deployment_id=deployment.deployment_id,
+            runtime_identity=spec.runtime_identity,
+            image_digest=spec.image_digest,
+            credential_reference=spec.credential_reference or "",
+            receipt=receipt,
+            evaluated_at=NOW + timedelta(seconds=1),
+        )
+        replayed = confirm_production_demo_runtime_observation(
+            canonical_connection,
+            deployment_id=deployment.deployment_id,
+            runtime_identity=spec.runtime_identity,
+            image_digest=spec.image_digest,
+            credential_reference=spec.credential_reference or "",
+            receipt=receipt,
+            evaluated_at=NOW + timedelta(seconds=1),
+        )
+        status = canonical_connection.execute(
+            select(DEPLOYMENTS_TABLE.c.status).where(
+                DEPLOYMENTS_TABLE.c.id == deployment.deployment_id
+            )
+        ).scalar_one()
+
+    assert confirmed == replayed == runtime_id
+    assert status == "ACTIVE"
+
+
 def test_writer_separated_simulated_chain_and_reconciliation(canonical_connection):
     with canonical_connection.begin():
-        plan, _decision, deployment, runtime_id = _runtime_fixture(
-            canonical_connection
-        )
+        plan, _decision, deployment, runtime_id = _runtime_fixture(canonical_connection)
         signal_id = record_simulated_signal(
             canonical_connection,
             deployment_id=deployment.deployment_id,
@@ -203,13 +292,16 @@ def test_writer_separated_simulated_chain_and_reconciliation(canonical_connectio
             research_target_id=plan["research_target_id"],
             signal_json={"evidence_class": "TEST_SIMULATED", "side": "buy"},
         )
-        assert record_simulated_signal(
-            canonical_connection,
-            deployment_id=deployment.deployment_id,
-            runtime_instance_id=runtime_id,
-            research_target_id=plan["research_target_id"],
-            signal_json={"evidence_class": "TEST_SIMULATED", "side": "buy"},
-        ) == signal_id
+        assert (
+            record_simulated_signal(
+                canonical_connection,
+                deployment_id=deployment.deployment_id,
+                runtime_instance_id=runtime_id,
+                research_target_id=plan["research_target_id"],
+                signal_json={"evidence_class": "TEST_SIMULATED", "side": "buy"},
+            )
+            == signal_id
+        )
         intent_id = create_simulated_intent(
             canonical_connection,
             signal_id=signal_id,
@@ -218,26 +310,32 @@ def test_writer_separated_simulated_chain_and_reconciliation(canonical_connectio
                 "quantity": "0.001",
             },
         )
-        assert create_simulated_intent(
-            canonical_connection,
-            signal_id=signal_id,
-            intent_json={
-                "evidence_class": "TEST_SIMULATED",
-                "quantity": "0.001",
-            },
-        ) == intent_id
+        assert (
+            create_simulated_intent(
+                canonical_connection,
+                signal_id=signal_id,
+                intent_json={
+                    "evidence_class": "TEST_SIMULATED",
+                    "quantity": "0.001",
+                },
+            )
+            == intent_id
+        )
         risk_id = decide_simulated_risk(
             canonical_connection,
             trade_intent_id=intent_id,
             accepted=True,
             policy_snapshot_digest="3" * 64,
         )
-        assert decide_simulated_risk(
-            canonical_connection,
-            trade_intent_id=intent_id,
-            accepted=True,
-            policy_snapshot_digest="3" * 64,
-        ) == risk_id
+        assert (
+            decide_simulated_risk(
+                canonical_connection,
+                trade_intent_id=intent_id,
+                accepted=True,
+                policy_snapshot_digest="3" * 64,
+            )
+            == risk_id
+        )
         order_id = record_simulated_order(
             canonical_connection,
             risk_decision_id=risk_id,
@@ -265,26 +363,35 @@ def test_writer_separated_simulated_chain_and_reconciliation(canonical_connectio
             fill_id=fill_id,
             ledger_entry_id=ledger_id,
         )
-        assert record_simulated_fill(
-            canonical_connection,
-            order_id=order_id,
-            exchange_fill_id="isolated-fill-one",
-            fill_json={"evidence_class": "TEST_SIMULATED", "amount": "0.001"},
-        ) == fill_id
-        assert post_simulated_ledger_entry(
-            canonical_connection,
-            fill_id=fill_id,
-            entry_key="isolated-ledger-one",
-            asset="BTC",
-            amount=Decimal("0.001"),
-            entry_type="DEMO_FILL",
-        ) == ledger_id
-        assert reconcile_simulated_chain(
-            canonical_connection,
-            order_id=order_id,
-            fill_id=fill_id,
-            ledger_entry_id=ledger_id,
-        ) == reconciliation_id
+        assert (
+            record_simulated_fill(
+                canonical_connection,
+                order_id=order_id,
+                exchange_fill_id="isolated-fill-one",
+                fill_json={"evidence_class": "TEST_SIMULATED", "amount": "0.001"},
+            )
+            == fill_id
+        )
+        assert (
+            post_simulated_ledger_entry(
+                canonical_connection,
+                fill_id=fill_id,
+                entry_key="isolated-ledger-one",
+                asset="BTC",
+                amount=Decimal("0.001"),
+                entry_type="DEMO_FILL",
+            )
+            == ledger_id
+        )
+        assert (
+            reconcile_simulated_chain(
+                canonical_connection,
+                order_id=order_id,
+                fill_id=fill_id,
+                ledger_entry_id=ledger_id,
+            )
+            == reconciliation_id
+        )
     assert reconciliation_id
     for table in (
         SIGNALS_TABLE,
@@ -302,9 +409,7 @@ def test_uncertain_order_is_terminally_blocked_from_fill_and_retry_is_idempotent
     canonical_connection,
 ):
     with canonical_connection.begin():
-        plan, _decision, deployment, runtime_id = _runtime_fixture(
-            canonical_connection
-        )
+        plan, _decision, deployment, runtime_id = _runtime_fixture(canonical_connection)
         signal_id = record_simulated_signal(
             canonical_connection,
             deployment_id=deployment.deployment_id,
@@ -413,9 +518,7 @@ def test_approval_deployment_and_runtime_exact_replay_are_noops(
 
 def test_noncanonical_order_writer_identity_is_blocked(canonical_connection):
     with canonical_connection.begin():
-        plan, _decision, deployment, runtime_id = _runtime_fixture(
-            canonical_connection
-        )
+        plan, _decision, deployment, runtime_id = _runtime_fixture(canonical_connection)
         signal_id = record_simulated_signal(
             canonical_connection,
             deployment_id=deployment.deployment_id,
@@ -472,28 +575,44 @@ def test_future_production_shaped_heartbeat_remains_blocked(canonical_connection
         _plan, _decision, deployment_result, runtime_id = _runtime_fixture(
             canonical_connection
         )
-        deployment = canonical_connection.execute(
-            select(DEPLOYMENTS_TABLE).where(
-                DEPLOYMENTS_TABLE.c.id == deployment_result.deployment_id
+        deployment = (
+            canonical_connection.execute(
+                select(DEPLOYMENTS_TABLE).where(
+                    DEPLOYMENTS_TABLE.c.id == deployment_result.deployment_id
+                )
             )
-        ).mappings().one()
-        approval = canonical_connection.execute(
-            select(DEPLOYMENT_APPROVALS_TABLE).where(
-                DEPLOYMENT_APPROVALS_TABLE.c.id
-                == deployment["deployment_approval_id"]
+            .mappings()
+            .one()
+        )
+        approval = (
+            canonical_connection.execute(
+                select(DEPLOYMENT_APPROVALS_TABLE).where(
+                    DEPLOYMENT_APPROVALS_TABLE.c.id
+                    == deployment["deployment_approval_id"]
+                )
             )
-        ).mappings().one()
-        qualification = canonical_connection.execute(
-            select(QUALIFICATION_DECISIONS_TABLE).where(
-                QUALIFICATION_DECISIONS_TABLE.c.id
-                == approval["qualification_decision_id"]
+            .mappings()
+            .one()
+        )
+        qualification = (
+            canonical_connection.execute(
+                select(QUALIFICATION_DECISIONS_TABLE).where(
+                    QUALIFICATION_DECISIONS_TABLE.c.id
+                    == approval["qualification_decision_id"]
+                )
             )
-        ).mappings().one()
-        runtime = canonical_connection.execute(
-            select(RUNTIME_INSTANCES_TABLE).where(
-                RUNTIME_INSTANCES_TABLE.c.id == runtime_id
+            .mappings()
+            .one()
+        )
+        runtime = (
+            canonical_connection.execute(
+                select(RUNTIME_INSTANCES_TABLE).where(
+                    RUNTIME_INSTANCES_TABLE.c.id == runtime_id
+                )
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
         spec = FrozenRuntimeLaunchSpec(
             deployment_id=deployment["id"],
             approval_id=approval["id"],

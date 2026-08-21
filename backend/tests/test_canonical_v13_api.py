@@ -111,6 +111,10 @@ def _client():
         validation_connection_factory=connection_factory,
         scoring_connection_factory=connection_factory,
         qualification_connection_factory=connection_factory,
+        approval_connection_factory=connection_factory,
+        deployment_connection_factory=connection_factory,
+        signal_connection_factory=connection_factory,
+        risk_connection_factory=connection_factory,
     )
     return engine, TestClient(app, raise_server_exceptions=False)
 
@@ -180,7 +184,7 @@ def _draft_payload(kind: str) -> dict[str, object]:
                     "minimum": -1,
                     "maximum": 1,
                 }
-            ]
+            ],
         },
         "RESEARCH_AGGREGATE": {"assembly_key": "production-research-v13"},
     }
@@ -262,7 +266,10 @@ def _seed_ready_bundle(engine) -> dict[str, object]:
                         "required": True,
                         "start_at": _NOW.isoformat(),
                         "end_at": (_NOW + timedelta(hours=6)).isoformat(),
-                        "coverage": {"minimum_closed_candles": 72, "freshness_max_age_seconds": 3600},
+                        "coverage": {
+                            "minimum_closed_candles": 72,
+                            "freshness_max_age_seconds": 3600,
+                        },
                     }
                 ]
             },
@@ -305,9 +312,7 @@ def _seed_ready_bundle(engine) -> dict[str, object]:
         aggregate = draft(
             "RESEARCH_AGGREGATE",
             _draft_payload("RESEARCH_AGGREGATE")["payload_json"],
-            dependencies=tuple(
-                dependency(inputs[kind], kind) for kind in inputs
-            ),
+            dependencies=tuple(dependency(inputs[kind], kind) for kind in inputs),
         )
         snapshots["RESEARCH_AGGREGATE"] = validate_configuration_version(
             connection,
@@ -419,8 +424,14 @@ def test_factory_is_standalone_and_exact_routes_are_frozen() -> None:
             (f"{API_PREFIX}/research/gates/attempts", "POST"),
             (f"{API_PREFIX}/research/gates/attempts/{{gate_attempt_id}}/claim", "POST"),
             (f"{API_PREFIX}/research/gates/recover-expired", "POST"),
-            (f"{API_PREFIX}/research/gates/attempts/{{gate_attempt_id}}/static-receipts", "POST"),
-            (f"{API_PREFIX}/research/gates/attempts/{{gate_attempt_id}}/lookahead-receipts", "POST"),
+            (
+                f"{API_PREFIX}/research/gates/attempts/{{gate_attempt_id}}/static-receipts",
+                "POST",
+            ),
+            (
+                f"{API_PREFIX}/research/gates/attempts/{{gate_attempt_id}}/lookahead-receipts",
+                "POST",
+            ),
             (f"{API_PREFIX}/research/gates", "GET"),
             (f"{API_PREFIX}/research/gates/{{gate_attempt_id}}", "GET"),
             (f"{API_PREFIX}/research/validation-plans", "POST"),
@@ -451,6 +462,13 @@ def test_factory_is_standalone_and_exact_routes_are_frozen() -> None:
             (f"{API_PREFIX}/market-data/snapshots/{{snapshot_id}}", "GET"),
             (f"{API_PREFIX}/readiness/research", "GET"),
             (f"{API_PREFIX}/readiness/runtime", "GET"),
+            (f"{API_PREFIX}/phase9/readiness", "GET"),
+            (f"{API_PREFIX}/phase9/approvals", "POST"),
+            (f"{API_PREFIX}/phase9/deployments", "POST"),
+            (f"{API_PREFIX}/phase9/risk-budgets", "POST"),
+            (f"{API_PREFIX}/phase9/signals", "POST"),
+            (f"{API_PREFIX}/phase9/intents", "POST"),
+            (f"{API_PREFIX}/phase9/risk-decisions", "POST"),
             (f"{API_PREFIX}/optimizations", "GET"),
         }
         canonical_routes = {
@@ -465,7 +483,7 @@ def test_factory_is_standalone_and_exact_routes_are_frozen() -> None:
             for method, operation in path.items()
             if method in {"get", "post", "put", "patch", "delete"}
         ]
-        assert len(operation_ids) == 32
+        assert len(operation_ids) == 39
         assert len(set(operation_ids)) == len(operation_ids)
     finally:
         client.close()
@@ -496,7 +514,9 @@ def test_gate_recovery_api_uses_validation_writer_and_returns_only_count(
         engine.dispose()
 
 
-def test_production_research_control_surface_binds_exact_attempt_and_projects_status() -> None:
+def test_production_research_control_surface_binds_exact_attempt_and_projects_status() -> (
+    None
+):
     engine, client = _client()
     try:
         submission = client.post(
@@ -578,7 +598,9 @@ def test_production_research_control_surface_binds_exact_attempt_and_projects_st
         assert lease_response.status_code == 200, lease_response.json()
         lease = lease_response.json()
         static_payload = asdict(static_receipt)
-        static_payload["strategy_version_id"] = str(static_payload["strategy_version_id"])
+        static_payload["strategy_version_id"] = str(
+            static_payload["strategy_version_id"]
+        )
         static_payload["lease_token"] = lease["lease_token"]
         static_response = client.post(
             f"{API_PREFIX}/research/gates/attempts/{gate['gate_attempt_id']}/static-receipts",
@@ -701,7 +723,10 @@ def test_production_research_control_surface_binds_exact_attempt_and_projects_st
         assert results.status_code == 200, results.json()
         result_projection = results.json()
         assert result_projection["validation_plan_id"] == plan["validation_plan_id"]
-        assert result_projection["strategy_version_id"] == submission["strategy_version_id"]
+        assert (
+            result_projection["strategy_version_id"]
+            == submission["strategy_version_id"]
+        )
         assert result_projection["target_key"] == "api-btc-5m"
         assert result_projection["attempt"]["validation_attempt_id"] == str(attempt_id)
         assert result_projection["attempt"]["status"] == "RUNNING"
@@ -766,21 +791,31 @@ def test_production_research_control_surface_binds_exact_attempt_and_projects_st
             connection = raw.execution_options(
                 schema_translate_map={CANONICAL_BUSINESS_SCHEMA: None}
             )
-            plan_row = connection.execute(
-                select(VALIDATION_PLANS_TABLE).where(
-                    VALIDATION_PLANS_TABLE.c.id == UUID(plan["validation_plan_id"])
+            plan_row = (
+                connection.execute(
+                    select(VALIDATION_PLANS_TABLE).where(
+                        VALIDATION_PLANS_TABLE.c.id == UUID(plan["validation_plan_id"])
+                    )
                 )
-            ).mappings().one()
-            window_row = connection.execute(
-                select(VALIDATION_PLAN_WINDOWS_TABLE).where(
-                    VALIDATION_PLAN_WINDOWS_TABLE.c.validation_plan_id
-                    == plan_row["id"]
+                .mappings()
+                .one()
+            )
+            window_row = (
+                connection.execute(
+                    select(VALIDATION_PLAN_WINDOWS_TABLE).where(
+                        VALIDATION_PLAN_WINDOWS_TABLE.c.validation_plan_id
+                        == plan_row["id"]
+                    )
                 )
-            ).mappings().one()
+                .mappings()
+                .one()
+            )
             connection.execute(
                 VALIDATION_ATTEMPTS_TABLE.update()
                 .where(VALIDATION_ATTEMPTS_TABLE.c.id == attempt_id)
-                .values(status="SUCCEEDED", receipt_digest="9" * 64, completed_at=_GATE_NOW)
+                .values(
+                    status="SUCCEEDED", receipt_digest="9" * 64, completed_at=_GATE_NOW
+                )
             )
             connection.execute(
                 VALIDATION_PLANS_TABLE.update()
@@ -922,9 +957,12 @@ def test_reader_and_control_factories_are_never_crossed() -> None:
     try:
         assert client.get(f"{API_PREFIX}/strategies").status_code == 200
         assert opens == {"reader": 1, "control": 0}
-        assert client.post(
-            f"{API_PREFIX}/submissions", json=_submission_payload()
-        ).status_code == 201
+        assert (
+            client.post(
+                f"{API_PREFIX}/submissions", json=_submission_payload()
+            ).status_code
+            == 201
+        )
         assert opens == {"reader": 1, "control": 1}
     finally:
         client.close()
@@ -1007,9 +1045,7 @@ def test_submission_write_and_read_projection_distinguish_all_status_layers() ->
         assert item["qualification_status"] == "NOT_EVALUATED"
         assert item["execution_authorized"] is False
 
-        detail = client.get(
-            f"{API_PREFIX}/strategies/{receipt['strategy_id']}"
-        ).json()
+        detail = client.get(f"{API_PREFIX}/strategies/{receipt['strategy_id']}").json()
         assert detail == item
         assert _count(engine, STRATEGIES_TABLE) == 1
         assert _count(engine, VALIDATION_ATTEMPTS_TABLE) == 0
@@ -1174,9 +1210,7 @@ def test_arbitrary_generic_payload_cannot_validate_or_fake_readiness() -> None:
     try:
         payload = _draft_payload("SCORING")
         payload["payload_json"] = {"members": [{"anything": "goes"}]}
-        draft = client.post(
-            f"{API_PREFIX}/configurations/SCORING/drafts", json=payload
-        )
+        draft = client.post(f"{API_PREFIX}/configurations/SCORING/drafts", json=payload)
         assert draft.status_code == 201
         validate = client.post(
             f"{API_PREFIX}/configurations/SCORING/{draft.json()['version_id']}/validate",
@@ -1205,9 +1239,7 @@ def test_bundle_preview_blocked_and_path_identity_drift_is_noop() -> None:
             "snapshot_ids": {},
             "market_snapshot_id": None,
         }
-        preview = client.post(
-            f"{API_PREFIX}/research-bundles/preview", json=command
-        )
+        preview = client.post(f"{API_PREFIX}/research-bundles/preview", json=command)
         assert preview.status_code == 200
         body = preview.json()
         assert body["status"] == "BLOCKED"
@@ -1240,9 +1272,7 @@ def test_ready_bundle_path_id_drift_rolls_back_then_exact_id_activates() -> None
     engine, client = _client()
     try:
         command = _seed_ready_bundle(engine)
-        preview = client.post(
-            f"{API_PREFIX}/research-bundles/preview", json=command
-        )
+        preview = client.post(f"{API_PREFIX}/research-bundles/preview", json=command)
         assert preview.status_code == 200, preview.text
         body = preview.json()
         assert body["status"] == "READY"
@@ -1297,9 +1327,7 @@ def test_wrong_database_identity_and_missing_resources_fail_closed() -> None:
         missing = client.get(f"{API_PREFIX}/strategies/{uuid4()}")
         assert missing.status_code == 404
         assert missing.json()["error"]["code"] == "BLOCKED_STRATEGY_NOT_FOUND"
-        missing_market = client.get(
-            f"{API_PREFIX}/market-data/snapshots/{uuid4()}"
-        )
+        missing_market = client.get(f"{API_PREFIX}/market-data/snapshots/{uuid4()}")
         assert missing_market.status_code == 404
         assert missing_market.json()["error"]["code"] == (
             "BLOCKED_MARKET_SNAPSHOT_NOT_FOUND"
@@ -1336,9 +1364,7 @@ def test_wrong_database_identity_and_missing_resources_fail_closed() -> None:
     try:
         response = wrong_client.get(f"{API_PREFIX}/strategies")
         assert response.status_code == 503
-        assert response.json()["error"]["code"] == (
-            "BLOCKED_WRONG_CANONICAL_DATABASE"
-        )
+        assert response.json()["error"]["code"] == ("BLOCKED_WRONG_CANONICAL_DATABASE")
     finally:
         wrong_client.close()
         wrong_engine.dispose()

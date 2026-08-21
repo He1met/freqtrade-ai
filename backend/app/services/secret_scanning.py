@@ -109,8 +109,12 @@ AUTHORIZATION_METADATA_SAFE_VALUES = {
 
 NON_SECRET_REFERENCE_KEYS = {
     "authorization_consumption",
+    "authorization_digest",
     "authorization_id",
     "authorization_receipt_digest",
+    "execution_risk_budget_authorizations_table",
+    "plist_secret_count",
+    "risk_budget_authorization_id",
     "secret_patterns",
 }
 
@@ -159,7 +163,9 @@ def scan_repo_for_secrets(
     tracked_only: bool = True,
 ) -> SecretScanReport:
     root = repo_root.resolve()
-    candidates = list(_iter_candidate_files(root, scan_paths or DEFAULT_SCAN_PATHS, tracked_only))
+    candidates = list(
+        _iter_candidate_files(root, scan_paths or DEFAULT_SCAN_PATHS, tracked_only)
+    )
     findings: list[SecretScanFinding] = []
 
     for path in candidates:
@@ -241,7 +247,10 @@ def _should_scan_path(path: Path) -> bool:
         return False
     if path.name in {"package-lock.json"}:
         return False
-    if path.suffix.lower() not in TEXT_SUFFIXES and path.name not in {"Makefile", "Dockerfile"}:
+    if path.suffix.lower() not in TEXT_SUFFIXES and path.name not in {
+        "Makefile",
+        "Dockerfile",
+    }:
         return False
     try:
         return path.stat().st_size <= 1_000_000
@@ -321,7 +330,11 @@ def _is_allowed_secret_reference(key: str, raw_value: str, line: str) -> bool:
             value,
             line,
         )
-    if key_normalized.endswith("_env") or "api_key_env" in key_normalized or "api_secret_env" in key_normalized:
+    if (
+        key_normalized.endswith("_env")
+        or "api_key_env" in key_normalized
+        or "api_secret_env" in key_normalized
+    ):
         return _is_env_reference(value)
     if _is_env_reference(value):
         return True
@@ -329,7 +342,11 @@ def _is_allowed_secret_reference(key: str, raw_value: str, line: str) -> bool:
         return True
     if "fixture" in value_normalized or "fake" in value_normalized:
         return True
-    if "test" in value_normalized or "mock" in value_normalized or "dummy" in value_normalized:
+    if (
+        "test" in value_normalized
+        or "mock" in value_normalized
+        or "dummy" in value_normalized
+    ):
         return True
     if "must_not" in value_normalized or "should_not" in value_normalized:
         return True
@@ -355,10 +372,7 @@ def _is_safe_authorization_metadata_value(
         r"""=+\s*['\"`]?(?P<value>[A-Z][A-Z0-9_]*)['\"`]?\s*[:;),]?""",
         raw_value.strip(),
     )
-    if (
-        strict_literal is not None
-        and strict_literal.group("value") in safe_values
-    ):
+    if strict_literal is not None and strict_literal.group("value") in safe_values:
         return True
     if (
         comparison_literal is not None
@@ -371,9 +385,7 @@ def _is_safe_authorization_metadata_value(
         and value == "intent.authorization_schema_version"
     ):
         return True
-    if key_normalized == "authorization_mode" and value.endswith(
-        ".authorization_mode"
-    ):
+    if key_normalized == "authorization_mode" and value.endswith(".authorization_mode"):
         return True
     return False
 
@@ -397,7 +409,9 @@ def _is_secret_key(key: str) -> bool:
         return False
     if normalized.startswith(("hide_", "redact_", "masked_")):
         return False
-    if normalized.endswith(("_finding", "_findings", "_line", "_lines", "_path", "_paths")):
+    if normalized.endswith(
+        ("_finding", "_findings", "_line", "_lines", "_path", "_paths")
+    ):
         return False
     if "api_key" in normalized or "apikey" in normalized:
         return True
@@ -421,7 +435,13 @@ def _is_secret_key(key: str) -> bool:
         "raw_token",
     }
     return normalized in token_keys or normalized.endswith(
-        ("_api_token", "_auth_token", "_access_token", "_refresh_token", "_bearer_token")
+        (
+            "_api_token",
+            "_auth_token",
+            "_access_token",
+            "_refresh_token",
+            "_bearer_token",
+        )
     )
 
 
@@ -497,7 +517,7 @@ def _looks_like_code_expression(value: str) -> bool:
         return True
     if "{" in value or "}" in value:
         return True
-    if "+" in value and ("\"" in value or "'" in value):
+    if "+" in value and ('"' in value or "'" in value):
         return True
     return False
 
@@ -536,7 +556,9 @@ def _is_placeholder_value(normalized_value: str) -> bool:
     }
     if normalized_value in placeholders:
         return True
-    return normalized_value.startswith(("replace_", "example_", "placeholder_", "your_"))
+    return normalized_value.startswith(
+        ("replace_", "example_", "placeholder_", "your_")
+    )
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:
