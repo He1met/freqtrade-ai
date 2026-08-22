@@ -1008,10 +1008,36 @@ def status(service_key: str) -> dict[str, object]:
     }
 
 
+def _stop_exact_runtime_container(plan: Phase9LaunchPlan) -> None:
+    if plan.service_key != "long_lived_runtime":
+        return
+    container_name = RuntimeContainerPort.name(plan)
+    observed = _run([PODMAN_PATH, "container", "exists", container_name])
+    if observed.returncode not in {0, 1}:
+        raise CanonicalPhase9SupervisorBlocked(
+            "BLOCKED_PHASE9_STOP_CONTAINER_OBSERVATION", plan.service_key
+        )
+    if observed.returncode == 0:
+        _run(
+            [
+                PODMAN_PATH,
+                "stop",
+                f"--time={RUNTIME_CONTAINER_STOP_GRACE_SECONDS}",
+                container_name,
+            ]
+        )
+        observed = _run([PODMAN_PATH, "container", "exists", container_name])
+    if observed.returncode != 1:
+        raise CanonicalPhase9SupervisorBlocked(
+            "BLOCKED_PHASE9_STOP_CONTAINER_HELD", plan.service_key
+        )
+
+
 def stop(service_key: str) -> dict[str, object]:
     _require_release_checkout()
     plan, state = _load_plan(service_key)
     if state.get("status") == "STOPPED":
+        _stop_exact_runtime_container(plan)
         return {
             "status": "STOPPED",
             "service": service_key,
@@ -1031,6 +1057,7 @@ def stop(service_key: str) -> dict[str, object]:
         raise CanonicalPhase9SupervisorBlocked(
             "BLOCKED_PHASE9_STOP_LEASE_HELD", service_key
         )
+    _stop_exact_runtime_container(plan)
     if completed.returncode not in {0, 3, 113}:
         raise CanonicalPhase9SupervisorBlocked(
             "BLOCKED_PHASE9_BOOTOUT_FAILED", service_key
