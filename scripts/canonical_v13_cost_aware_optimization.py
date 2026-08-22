@@ -94,6 +94,10 @@ def objective(
         "fixed_strategy_contract",
         "safety",
         "supersession",
+        "target_set",
+        "portfolio_allocation",
+        "portfolio_selection",
+        "market_inputs",
     ):
         if key in plan:
             value[key] = plan[key]
@@ -122,7 +126,10 @@ def create(args: argparse.Namespace) -> dict[str, object]:
 def persist(args: argparse.Namespace) -> dict[str, object]:
     run = read_json(args.run_receipt)
     result = read_json(args.worker_result)
-    if result.get("contract") != "canonical-v13-cost-aware-oos-optimization-result-v1":
+    if result.get("contract") not in {
+        "canonical-v13-cost-aware-oos-optimization-result-v1",
+        "canonical-v13-multi-asset-cost-aware-oos-optimization-result-v1",
+    }:
         raise Blocked("BLOCKED_OPTIMIZATION_RESULT_CONTRACT")
     trials = result.get("trials")
     selected = result.get("selected_trial_numbers")

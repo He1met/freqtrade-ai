@@ -43,3 +43,31 @@ def test_objective_digest_binds_sizing_and_supersession_provenance() -> None:
     assert observed["position_sizing"] == plan["position_sizing"]
     assert observed["supersession"] == plan["supersession"]
     assert observed["holdout_results_observed"] is False
+
+
+def test_objective_binds_multi_asset_target_allocation_and_market_inputs() -> None:
+    plan = {
+        "data_isolation": {"train": {}, "validation": {}, "holdout": {}},
+        "execution": {"trial_budget": 96},
+        "costs": {"qualification_fee_rate": 0.0005},
+        "hard_gates": {"trade_count": {"threshold": 30}},
+        "objective": {"name": "portfolio"},
+        "families": [{"family_key": "frozen-family"}],
+        "target_set": [{"instrument": "BTC-USDT-SWAP"}],
+        "portfolio_allocation": {"wallet_quote": 10_000},
+        "portfolio_selection": {"minimum_nonnegative_validation_assets": 2},
+        "market_inputs": {"BTC-USDT-SWAP": {"snapshot_digest": "a" * 64}},
+    }
+
+    observed = control.objective(
+        plan,
+        market_snapshot_id="aggregate-snapshot",
+        market_snapshot_digest="b" * 64,
+        market_artifact_digest="c" * 64,
+        executor_image_digest="sha256:" + "d" * 64,
+    )
+
+    assert observed["target_set"] == plan["target_set"]
+    assert observed["portfolio_allocation"] == plan["portfolio_allocation"]
+    assert observed["portfolio_selection"] == plan["portfolio_selection"]
+    assert observed["market_inputs"] == plan["market_inputs"]

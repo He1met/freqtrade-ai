@@ -278,6 +278,7 @@ def test_backtest_command_enables_protections_and_replay_is_exact() -> None:
         end=datetime(2026, 1, 2, tzinfo=timezone.utc),
         metadata=Path("/work/metadata.json"),
         fee=FEE,
+        pair="BTC/USDT:USDT",
     )
     assert command.count("--enable-protections") == 1
 
