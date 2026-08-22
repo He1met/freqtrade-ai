@@ -17,6 +17,7 @@ from app.canonical_v13.phase9_production_composition import (
 from app.canonical_v13.phase9_production_runtime import (
     DatabaseRuntimeLineageReader,
     FrozenIntradayLeverageEvaluator,
+    PersistingRuntimeWorker,
     PublicOkxRuntimeMarketEvidence,
     ReleaseBoundReceiptSeal,
 )
@@ -337,3 +338,37 @@ def test_runtime_receipt_seal_requires_dedicated_hmac_key() -> None:
         digest="2" * 64,
         signature=signature,
     )
+
+
+def test_persisting_worker_exposes_the_same_verifier_used_for_persistence() -> None:
+    receipt = SimpleNamespace(receipt_digest="1" * 64)
+
+    class Worker:
+        def heartbeat(self, **_kwargs):
+            return receipt
+
+    class Writer:
+        def __init__(self) -> None:
+            self.persisted = []
+            self.verified = []
+
+        def persist(self, candidate) -> None:
+            self.persisted.append(candidate)
+
+        def verify(self, candidate) -> bool:
+            self.verified.append(candidate)
+            return candidate is receipt
+
+    writer = Writer()
+    worker = PersistingRuntimeWorker(Worker(), writer)
+
+    observed = worker.heartbeat(
+        stage="SIGNAL_RISK_SHADOW", plan_digest="a" * 64, observed_at=NOW
+    )
+
+    assert observed is receipt
+    assert writer.persisted == [receipt]
+    assert worker.verify(receipt) is True
+    tampered = SimpleNamespace(receipt_digest="2" * 64)
+    assert worker.verify(tampered) is False
+    assert writer.verified == [receipt, tampered]
