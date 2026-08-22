@@ -67,7 +67,14 @@ from app.canonical_v13.dto import (
     MarketSnapshotProjectionDTO,
     MarketSnapshotSummaryDTO,
     OptimizationListProjectionDTO,
+    OptimizationCompleteCommandDTO,
+    OptimizationCompletionReceiptDTO,
     OptimizationProjectionDTO,
+    OptimizationRunCommandDTO,
+    OptimizationRunReceiptDTO,
+    OptimizationSubmissionLinkReceiptDTO,
+    OptimizationTrialCommandDTO,
+    OptimizationTrialReceiptDTO,
     Phase9ReadinessProjectionDTO,
     Phase9ApprovalCommandDTO,
     Phase9ApprovalReceiptDTO,
@@ -177,6 +184,13 @@ from app.canonical_v13.market_planning import (
 )
 from app.canonical_v13.offline_exchange_metadata import (
     OkxPublicOfflineExchangeMetadataDownloader,
+)
+from app.canonical_v13.optimization import (
+    CanonicalOptimizationBlocked,
+    complete_optimization_run,
+    create_optimization_run,
+    link_controlled_submission_version,
+    record_isolated_optimization_trial,
 )
 from app.canonical_v13.research_evaluation import (
     CanonicalEvaluationBlocked,
@@ -294,6 +308,7 @@ _CANONICAL_DOMAIN_ERRORS = (
     CanonicalFreshMarketRolloutBlocked,
     CanonicalMarketAcquisitionBlocked,
     CanonicalMarketPlanningBlocked,
+    CanonicalOptimizationBlocked,
     CanonicalResearchAuthorizationBlocked,
     CanonicalResearchExecutionBlocked,
     CanonicalResearchOrchestrationBlocked,
@@ -1318,6 +1333,7 @@ def create_canonical_v13_app(
     validation_connection_factory: CanonicalConnectionFactory | None = None,
     scoring_connection_factory: CanonicalConnectionFactory | None = None,
     qualification_connection_factory: CanonicalConnectionFactory | None = None,
+    optimization_connection_factory: CanonicalConnectionFactory | None = None,
     approval_connection_factory: CanonicalConnectionFactory | None = None,
     deployment_connection_factory: CanonicalConnectionFactory | None = None,
     signal_connection_factory: CanonicalConnectionFactory | None = None,
@@ -2628,6 +2644,89 @@ def create_canonical_v13_app(
             )
 
         return run_read(execute)
+
+    @app.post(
+        f"{API_PREFIX}/optimizations",
+        response_model=OptimizationRunReceiptDTO,
+        status_code=201,
+    )
+    def create_optimization(command: OptimizationRunCommandDTO) -> OptimizationRunReceiptDTO:
+        result = run_research(
+            optimization_connection_factory,
+            "canonical_optimization_writer",
+            lambda connection: create_optimization_run(
+                connection,
+                baseline_qualification_decision_id=(
+                    command.baseline_qualification_decision_id
+                ),
+                actor_identity=command.actor_identity,
+                objective_json=command.objective_json,
+            ),
+        )
+        return OptimizationRunReceiptDTO(**asdict(result))
+
+    @app.post(
+        f"{API_PREFIX}/optimizations/{{optimization_run_id}}/trials",
+        response_model=OptimizationTrialReceiptDTO,
+        status_code=201,
+    )
+    def record_optimization_trial(
+        optimization_run_id: UUID, command: OptimizationTrialCommandDTO
+    ) -> OptimizationTrialReceiptDTO:
+        result = run_research(
+            optimization_connection_factory,
+            "canonical_optimization_writer",
+            lambda connection: record_isolated_optimization_trial(
+                connection,
+                optimization_run_id=optimization_run_id,
+                trial_number=command.trial_number,
+                actor_identity=command.actor_identity,
+                parameters_json=command.parameters_json,
+                metrics_json=command.metrics_json,
+            ),
+        )
+        return OptimizationTrialReceiptDTO(**asdict(result))
+
+    @app.post(
+        f"{API_PREFIX}/optimizations/{{optimization_run_id}}/complete",
+        response_model=OptimizationCompletionReceiptDTO,
+    )
+    def complete_optimization(
+        optimization_run_id: UUID, command: OptimizationCompleteCommandDTO
+    ) -> OptimizationCompletionReceiptDTO:
+        result = run_research(
+            optimization_connection_factory,
+            "canonical_optimization_writer",
+            lambda connection: complete_optimization_run(
+                connection,
+                optimization_run_id=optimization_run_id,
+                actor_identity=command.actor_identity,
+                selected_trial_numbers=command.selected_trial_numbers,
+                terminal_status=command.terminal_status,
+            ),
+        )
+        payload = asdict(result)
+        payload["selected_trial_numbers"] = list(result.selected_trial_numbers)
+        return OptimizationCompletionReceiptDTO(**payload)
+
+    @app.post(
+        f"{API_PREFIX}/optimizations/trials/{{optimization_trial_id}}/submissions/"
+        "{submitted_strategy_version_id}",
+        response_model=OptimizationSubmissionLinkReceiptDTO,
+    )
+    def link_optimization_submission(
+        optimization_trial_id: UUID, submitted_strategy_version_id: UUID
+    ) -> OptimizationSubmissionLinkReceiptDTO:
+        result = run_research(
+            optimization_connection_factory,
+            "canonical_optimization_writer",
+            lambda connection: link_controlled_submission_version(
+                connection,
+                optimization_trial_id=optimization_trial_id,
+                submitted_strategy_version_id=submitted_strategy_version_id,
+            ),
+        )
+        return OptimizationSubmissionLinkReceiptDTO(**asdict(result))
 
     return app
 

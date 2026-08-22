@@ -178,6 +178,9 @@ def create_app(
         qualification_connection_factory=_connection_factory(
             research_engines["canonical_qualification_writer"]
         ),
+        optimization_connection_factory=_connection_factory(
+            research_engines["canonical_optimization_writer"]
+        ),
         approval_connection_factory=_connection_factory(
             phase9_engines["canonical_approval_writer"]
         ),

@@ -538,6 +538,59 @@ class OptimizationListProjectionDTO(CanonicalProjectionDTO):
     items: list[OptimizationProjectionDTO]
 
 
+class OptimizationRunCommandDTO(CanonicalCommandDTO):
+    baseline_qualification_decision_id: UUID
+    actor_identity: str = Field(min_length=1, max_length=160)
+    objective_json: dict[str, Any]
+
+
+class OptimizationRunReceiptDTO(CanonicalProjectionDTO):
+    optimization_run_id: UUID
+    baseline_qualification_decision_id: UUID
+    status: Literal["NOT_STARTED", "RUNNING", "SUCCEEDED", "BLOCKED"]
+    request_digest: str = Field(pattern=SHA256_PATTERN)
+    receipt_digest: str = Field(pattern=SHA256_PATTERN)
+    repeat_noop: bool
+
+
+class OptimizationTrialCommandDTO(CanonicalCommandDTO):
+    trial_number: int = Field(gt=0, le=96)
+    actor_identity: str = Field(min_length=1, max_length=160)
+    parameters_json: dict[str, Any]
+    metrics_json: dict[str, Any]
+
+
+class OptimizationTrialReceiptDTO(CanonicalProjectionDTO):
+    optimization_trial_id: UUID
+    optimization_run_id: UUID
+    trial_number: int = Field(gt=0, le=96)
+    request_digest: str = Field(pattern=SHA256_PATTERN)
+    result_digest: str = Field(pattern=SHA256_PATTERN)
+    repeat_noop: bool
+
+
+class OptimizationCompleteCommandDTO(CanonicalCommandDTO):
+    actor_identity: str = Field(min_length=1, max_length=160)
+    terminal_status: Literal["SUCCEEDED", "BLOCKED"] = "SUCCEEDED"
+    selected_trial_numbers: list[int] = Field(max_length=3)
+
+
+class OptimizationCompletionReceiptDTO(CanonicalProjectionDTO):
+    optimization_run_id: UUID
+    status: Literal["SUCCEEDED", "BLOCKED"]
+    trial_count: int = Field(gt=0, le=96)
+    selected_trial_numbers: list[int] = Field(max_length=3)
+    result_digest: str = Field(pattern=SHA256_PATTERN)
+    repeat_noop: bool
+
+
+class OptimizationSubmissionLinkReceiptDTO(CanonicalProjectionDTO):
+    optimization_trial_id: UUID
+    submitted_strategy_version_id: UUID
+    submission_link_digest: str = Field(pattern=SHA256_PATTERN)
+    repeat_noop: bool
+
+
 class ResearchLineageDTO(CanonicalProjectionDTO):
     strategy_version_id: UUID
     research_target_id: UUID
