@@ -1,0 +1,59 @@
+{
+  "batch_id": "condition-driven-15m-r2-20260822",
+  "candidate_limit": 3,
+  "target": {
+    "instrument": "BTC-USDT-SWAP",
+    "pair": "BTC/USDT:USDT",
+    "timeframe": "15m",
+    "side": "LONG_ONLY",
+    "leverage": 2.0
+  },
+  "parameter_selection": {
+    "status": "FROZEN_BEFORE_REQUIRED_WINDOW_EVALUATION",
+    "method": "single economically motivated configuration per predeclared structure; no parameter search",
+    "development_window": {
+      "start": "2026-07-19T09:00:00Z",
+      "end_exclusive": "2026-07-23T15:00:00Z",
+      "relationship_to_required_window": "DISJOINT_AND_BEFORE_REQUIRED_WINDOW"
+    },
+    "required_window_excluded_from_selection": true,
+    "selection_basis": [
+      "slow regime uses only rolling 15m closed-candle EMA slopes equivalent to multi-hour context",
+      "relative ATR and rolling volume baselines adapt to volatility without future data",
+      "gross ROI floors remain materially above round-trip fee and slippage assumptions",
+      "cooldown and market-condition exits reduce churn while preserving at least daily-scale opportunity"
+    ]
+  },
+  "formal_gates": {
+    "fee_rate": 0.0005,
+    "slippage_rate": 0.0002,
+    "minimum_trade_count": 30,
+    "minimum_net_return_after_cost_exclusive": 0.0,
+    "maximum_drawdown": 0.15,
+    "maximum_lookahead_failures": 0,
+    "minimum_overall_score": 50
+  },
+  "candidates": [
+    {
+      "order": 1,
+      "family": "MULTICYCLE_TREND_PULLBACK",
+      "strategy_class": "CanonicalR2MulticyclePullbackLong",
+      "artifact": "canonical_r2_multicycle_pullback_run_1_1.py"
+    },
+    {
+      "order": 2,
+      "family": "VOLATILITY_ADJUSTED_BREAKOUT",
+      "strategy_class": "CanonicalR2VolatilityAdjustedBreakoutLong",
+      "artifact": "canonical_r2_volatility_breakout_run_1_1.py"
+    },
+    {
+      "order": 3,
+      "family": "REGIME_SWITCH_MOMENTUM",
+      "strategy_class": "CanonicalR2RegimeSwitchMomentumLong",
+      "artifact": "canonical_r2_regime_momentum_run_1_1.py"
+    }
+  ],
+  "mutation_policy": "Only contract-equivalent mechanical corrections before formal evaluation; no economic parameter changes after any required-window result",
+  "trading_capability": "TRADING_DISABLED",
+  "allow_real_funds": false
+}
