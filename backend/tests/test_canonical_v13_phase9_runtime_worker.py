@@ -115,15 +115,18 @@ class EvidencePort:
 
 
 class Evaluator:
-    def __init__(self, outcome: str = "SIGNAL") -> None:
+    def __init__(
+        self, outcome: str = "SIGNAL", *, evaluated_at: datetime = NOW
+    ) -> None:
         self.outcome = outcome
+        self.evaluated_at = evaluated_at
         self.calls = 0
 
     def evaluate_natural_signal(self, **_kwargs) -> NaturalSignalEvaluation:
         self.calls += 1
         return NaturalSignalEvaluation(
             outcome=self.outcome,
-            evaluated_at=NOW,
+            evaluated_at=self.evaluated_at,
             evaluator_identity="canonical-natural-signal-evaluator-v1",
             evaluation_payload={"direction": "LONG", "rule": "closed-candle-cross"},
         )
@@ -328,6 +331,109 @@ def test_stale_or_future_runtime_heartbeat_fails_before_market_read() -> None:
                 observed_at=NOW,
             )
         assert evidence.calls == evaluator.calls == 0
+
+
+def test_long_lived_worker_pins_successfully_accepted_runtime_receipt() -> None:
+    worker, reader, evidence, evaluator, _signer = _worker(outcome="NO_ACTION")
+    first = worker.heartbeat(
+        stage="SIGNAL_RISK_SHADOW", plan_digest=PLAN_DIGEST, observed_at=NOW
+    )
+    later = NOW + timedelta(minutes=6)
+    evidence.evidence = _evidence(
+        evidence_id="market-evidence-2",
+        observed_at=later - timedelta(seconds=10),
+        payload={"close": "64001.0", "closed_candle": True, "source": "injected"},
+    )
+    evaluator.evaluated_at = later
+
+    repeated = worker.heartbeat(
+        stage="SIGNAL_RISK_SHADOW", plan_digest=PLAN_DIGEST, observed_at=later
+    )
+
+    assert first.runtime_receipt_digest == repeated.runtime_receipt_digest
+    assert repeated.reason_code == "NATURAL_SIGNAL_NO_ACTION"
+    assert reader.calls == evidence.calls == evaluator.calls == 2
+
+
+def test_long_lived_worker_rejects_stale_replacement_runtime_receipt() -> None:
+    worker, reader, evidence, evaluator, _signer = _worker(outcome="NO_ACTION")
+    worker.heartbeat(
+        stage="SIGNAL_RISK_SHADOW", plan_digest=PLAN_DIGEST, observed_at=NOW
+    )
+    later = NOW + timedelta(minutes=6)
+    reader.lineage = replace(
+        reader.lineage,
+        runtime_receipt_digest="6" * 64,
+        runtime_receipt_observed_at=NOW,
+    )
+
+    with pytest.raises(
+        CanonicalPhase9RuntimeWorkerBlocked,
+        match="BLOCKED_RUNTIME_WORKER_HEARTBEAT",
+    ):
+        worker.heartbeat(
+            stage="SIGNAL_RISK_SHADOW", plan_digest=PLAN_DIGEST, observed_at=later
+        )
+
+    assert reader.calls == 2
+    assert evidence.calls == evaluator.calls == 1
+
+
+def test_long_lived_worker_rejects_future_pinned_runtime_receipt() -> None:
+    worker, reader, evidence, evaluator, _signer = _worker(outcome="NO_ACTION")
+    worker.heartbeat(
+        stage="SIGNAL_RISK_SHADOW", plan_digest=PLAN_DIGEST, observed_at=NOW
+    )
+    reader.lineage = replace(
+        reader.lineage,
+        runtime_receipt_observed_at=NOW + timedelta(minutes=2),
+    )
+
+    with pytest.raises(
+        CanonicalPhase9RuntimeWorkerBlocked,
+        match="BLOCKED_RUNTIME_WORKER_HEARTBEAT",
+    ):
+        worker.heartbeat(
+            stage="SIGNAL_RISK_SHADOW",
+            plan_digest=PLAN_DIGEST,
+            observed_at=NOW + timedelta(minutes=1),
+        )
+
+    assert reader.calls == 2
+    assert evidence.calls == evaluator.calls == 1
+
+
+def test_failed_heartbeat_does_not_pin_runtime_receipt() -> None:
+    stale_evidence = _evidence(
+        evidence_id="market-evidence-stale",
+        observed_at=NOW - timedelta(minutes=3),
+        payload={"close": "64000.0", "closed_candle": True, "source": "injected"},
+    )
+    worker, _reader, evidence, evaluator, _signer = _worker(
+        evidence=stale_evidence, outcome="NO_ACTION"
+    )
+    with pytest.raises(
+        CanonicalPhase9RuntimeWorkerBlocked,
+        match="BLOCKED_RUNTIME_WORKER_MARKET_EVIDENCE",
+    ):
+        worker.heartbeat(
+            stage="SIGNAL_RISK_SHADOW", plan_digest=PLAN_DIGEST, observed_at=NOW
+        )
+
+    later = NOW + timedelta(minutes=6)
+    evidence.evidence = _evidence(
+        evidence_id="market-evidence-fresh",
+        observed_at=later - timedelta(seconds=10),
+        payload={"close": "64001.0", "closed_candle": True, "source": "injected"},
+    )
+    evaluator.evaluated_at = later
+    with pytest.raises(
+        CanonicalPhase9RuntimeWorkerBlocked,
+        match="BLOCKED_RUNTIME_WORKER_HEARTBEAT",
+    ):
+        worker.heartbeat(
+            stage="SIGNAL_RISK_SHADOW", plan_digest=PLAN_DIGEST, observed_at=later
+        )
 
 
 def test_signature_or_candidate_tamper_is_rejected() -> None:

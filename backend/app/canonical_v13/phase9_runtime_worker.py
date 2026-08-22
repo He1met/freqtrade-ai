@@ -472,6 +472,7 @@ class CanonicalPhase9RuntimeWorker:
         self._signer = signer
         self._maximum_evidence_age = maximum_evidence_age
         self._maximum_runtime_heartbeat_age = maximum_runtime_heartbeat_age
+        self._accepted_runtime_receipt_digest: str | None = None
 
     def heartbeat(
         self, *, stage: str, plan_digest: str, observed_at: datetime
@@ -487,16 +488,16 @@ class CanonicalPhase9RuntimeWorker:
             lineage.runtime_receipt_observed_at,
             field="runtime_receipt_observed_at",
         )
-        if (
-            runtime_heartbeat_at > now
-            or now - runtime_heartbeat_at > self._maximum_runtime_heartbeat_age
+        if runtime_heartbeat_at > now or (
+            lineage.runtime_receipt_digest != self._accepted_runtime_receipt_digest
+            and now - runtime_heartbeat_at > self._maximum_runtime_heartbeat_age
         ):
             raise CanonicalPhase9RuntimeWorkerBlocked(
                 "BLOCKED_RUNTIME_WORKER_HEARTBEAT",
                 "production runtime observation is stale or in the future",
             )
         if stage == "NO_ORDER_SOAK":
-            return _build_receipt(
+            receipt = _build_receipt(
                 stage=stage,
                 plan_digest=plan_digest,
                 lineage=lineage,
@@ -506,6 +507,8 @@ class CanonicalPhase9RuntimeWorker:
                 candidate=None,
                 signer=self._signer,
             )
+            self._accepted_runtime_receipt_digest = lineage.runtime_receipt_digest
+            return receipt
 
         evidence = self._market_evidence.read_market_evidence(
             lineage=lineage, observed_at=now
@@ -548,7 +551,7 @@ class CanonicalPhase9RuntimeWorker:
             if evaluation.outcome == "SIGNAL"
             else None
         )
-        return _build_receipt(
+        receipt = _build_receipt(
             stage=stage,
             plan_digest=plan_digest,
             lineage=lineage,
@@ -562,6 +565,16 @@ class CanonicalPhase9RuntimeWorker:
             candidate=candidate,
             signer=self._signer,
         )
+        # The immutable runtime observation is an activation authority, not the
+        # live heartbeat transport.  A new worker process (or a replacement DB
+        # receipt) must still present it inside the strict freshness window.
+        # Once a complete signed heartbeat succeeds, the supervisor's fenced,
+        # renewing lease proves liveness while this process pins the exact
+        # accepted receipt digest.  This keeps a long-lived runtime from aging
+        # out its own immutable activation evidence without weakening restart
+        # or lineage-drift checks.
+        self._accepted_runtime_receipt_digest = lineage.runtime_receipt_digest
+        return receipt
 
 
 __all__ = [
