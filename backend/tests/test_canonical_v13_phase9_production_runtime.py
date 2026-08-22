@@ -252,7 +252,8 @@ def _runtime_lineage_rows() -> list[dict[str, object]]:
         },
         {
             "id": _uuid(9),
-            "encoding": "utf-8",
+            # PostgreSQL preserves the canonical production artifact spelling.
+            "encoding": "UTF-8",
             "normalized_content": SOURCE,
             "content_digest": sha256(SOURCE.encode()).hexdigest(),
         },
@@ -280,6 +281,18 @@ def test_runtime_reader_accepts_exact_immutable_qualification_lineage() -> None:
     assert lineage.strategy_artifact_digest == sha256(SOURCE.encode()).hexdigest()
     assert lineage.target_instrument == "BTC-USDT-SWAP"
     assert lineage.runtime_order_writer_capability is False
+
+
+def test_runtime_reader_rejects_non_utf8_artifact_encoding() -> None:
+    rows = _runtime_lineage_rows()
+    rows[6]["encoding"] = "UTF-16"
+    with pytest.raises(
+        CanonicalPhase9CompositionBlocked,
+        match="BLOCKED_PHASE9_RUNTIME_EXACT_LINEAGE",
+    ):
+        DatabaseRuntimeLineageReader(
+            _factory(_Connection(rows)), _runtime_lineage_plan()
+        ).read_active_runtime_lineage()
 
 
 def test_runtime_reader_rejects_non_qualified_decision() -> None:

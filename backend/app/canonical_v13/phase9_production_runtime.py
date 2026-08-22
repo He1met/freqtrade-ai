@@ -184,7 +184,8 @@ class DatabaseRuntimeLineageReader:
             == deployment["market_snapshot_digest"]
             and version is not None
             and artifact is not None
-            and artifact["encoding"] == "utf-8"
+            and isinstance(artifact["encoding"], str)
+            and artifact["encoding"].casefold() == "utf-8"
             and artifact["content_digest"] == source_digest
             and target is not None
             and target["instrument"] == "BTC-USDT-SWAP"
