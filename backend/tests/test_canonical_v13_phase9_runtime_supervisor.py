@@ -684,6 +684,7 @@ def test_prepare_writes_secret_free_runtime_plist_without_launchctl(
     assert payload["Label"] == "ai.freqtrade.canonical-v13.runtime"
     assert payload["RunAtLoad"] is True
     assert payload["KeepAlive"] is True
+    assert payload["ExitTimeOut"] > service.RUNTIME_CONTAINER_STOP_GRACE_SECONDS
     assert "PASSWORD" not in environment_encoded.upper()
     assert "KEYCHAIN" not in environment_encoded.upper()
     assert "DATABASE_URL" not in environment_encoded.upper()
@@ -1012,9 +1013,15 @@ def test_runtime_stop_waits_beyond_container_grace_for_lease_release(
             pass
 
         def read(self, _service_key):
-            return object() if elapsed[0] < lease_release_at else None
+            return (
+                SimpleNamespace(expires_at=NOW + timedelta(minutes=1), pid=4321)
+                if elapsed[0] < lease_release_at
+                else None
+            )
 
     monkeypatch.setattr(service, "FileLeasePort", DelayedLeasePort)
+    monkeypatch.setattr(service, "_now", lambda: NOW)
+    monkeypatch.setattr(service.UnixProcessProbe, "is_alive", lambda _self, _pid: True)
     monkeypatch.setattr(service.time, "monotonic", lambda: elapsed[0])
     monkeypatch.setattr(
         service.time,
@@ -1068,6 +1075,59 @@ def test_runtime_stop_recovers_exact_residual_container(monkeypatch, tmp_path) -
         f"--time={service.RUNTIME_CONTAINER_STOP_GRACE_SECONDS}",
         container_name,
     ) in calls
+
+
+def test_runtime_stop_releases_only_expired_dead_lease(monkeypatch, tmp_path) -> None:
+    service = _load_script("canonical_phase9_runtime_stop_orphan_lease_test")
+    _configure_roots(service, tmp_path, monkeypatch)
+    prepared = _prepare_runtime(service)
+    plan, state = service._load_plan("long_lived_runtime")
+    service._atomic_json(
+        service._state_path("long_lived_runtime"),
+        {**state, "status": "RUNNING"},
+    )
+    stale = Phase9Lease(
+        service_key="long_lived_runtime",
+        generation=plan.generation,
+        plan_digest=plan.plan_digest,
+        release_digest=plan.release_digest,
+        deployment_id=plan.deployment_id,
+        deployment_capability_digest=plan.deployment_capability_digest,
+        image_digest=plan.image_digest,
+        holder_token_digest="a" * 64,
+        pid=999_999,
+        acquired_at=NOW - timedelta(minutes=2),
+        heartbeat_at=NOW - timedelta(minutes=2),
+        expires_at=NOW - timedelta(seconds=1),
+    )
+    service.FileLeasePort(service.SUPPORT_ROOT).claim(stale)
+    monkeypatch.setattr(service, "_now", lambda: NOW)
+    monkeypatch.setattr(service.UnixProcessProbe, "is_alive", lambda _self, _pid: False)
+
+    def fake_run(command):
+        return subprocess.CompletedProcess(
+            command,
+            1
+            if tuple(command[:3])
+            == (service.PODMAN_PATH, "container", "exists")
+            else 0,
+            "",
+            "",
+        )
+
+    monkeypatch.setattr(service, "_run", fake_run)
+
+    stopped = service.stop("long_lived_runtime")
+
+    assert stopped["status"] == "STOPPED"
+    assert service.FileLeasePort(service.SUPPORT_ROOT).read("long_lived_runtime") is None
+    receipts = [
+        json.loads(line)
+        for line in service._receipt_path("long_lived_runtime").read_text().splitlines()
+    ]
+    assert receipts[-2]["action"] == "STOP_ORPHAN_LEASE_RELEASE"
+    assert receipts[-2]["details"]["reason_code"] == "EXPIRED_DEAD_LEASE"
+    assert receipts[-1]["action"] == "STOP"
 
 
 def test_runtime_restart_blocks_before_bootstrap_if_container_survives_bootout(

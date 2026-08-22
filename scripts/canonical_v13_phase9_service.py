@@ -84,6 +84,7 @@ HEARTBEAT_SECONDS = 10
 LEASE_TTL_SECONDS = 35
 RUNTIME_CONTAINER_STOP_GRACE_SECONDS = 10
 SUPERVISOR_TEARDOWN_TIMEOUT_SECONDS = RUNTIME_CONTAINER_STOP_GRACE_SECONDS + 5
+RUNTIME_LAUNCHD_EXIT_TIMEOUT_SECONDS = SUPERVISOR_TEARDOWN_TIMEOUT_SECONDS + 5
 _STOP = False
 ORDER_HOLDER_KEYCHAIN_SERVICE = "freqtrade-ai/v13/phase9-order-holder-token"
 RUNTIME_CREDENTIAL_REFERENCE = "none:public-okx-market-only"
@@ -767,7 +768,7 @@ def plist_payload(plan: Phase9LaunchPlan) -> dict[str, object]:
     """Return a LaunchAgent definition containing no credential or DSN material."""
 
     verify_launch_plan(plan)
-    return {
+    payload: dict[str, object] = {
         "Label": plan.launch_agent_label,
         "ProgramArguments": [
             str(BACKEND_PYTHON),
@@ -792,6 +793,9 @@ def plist_payload(plan: Phase9LaunchPlan) -> dict[str, object]:
             "FREQTRADE_AI_CANONICAL_PHASE9_STAGE": plan.stage,
         },
     }
+    if plan.service_key == "long_lived_runtime":
+        payload["ExitTimeOut"] = RUNTIME_LAUNCHD_EXIT_TIMEOUT_SECONDS
+    return payload
 
 
 def prepare(
@@ -1051,9 +1055,39 @@ def stop(service_key: str) -> dict[str, object]:
     # strictly larger than the container grace period so normal teardown cannot
     # be misclassified as an orphaned live lease.
     deadline = time.monotonic() + SUPERVISOR_TEARDOWN_TIMEOUT_SECONDS
-    while lease_port.read(service_key) is not None and time.monotonic() < deadline:
+    while time.monotonic() < deadline:
+        observed_lease = lease_port.read(service_key)
+        if observed_lease is None or (
+            observed_lease.expires_at <= _now()
+            and not UnixProcessProbe().is_alive(observed_lease.pid)
+        ):
+            break
         time.sleep(0.1)
-    if lease_port.read(service_key) is not None:
+    remaining_lease = lease_port.read(service_key)
+    if (
+        remaining_lease is not None
+        and remaining_lease.expires_at <= _now()
+        and not UnixProcessProbe().is_alive(remaining_lease.pid)
+    ):
+        lease_port.release(remaining_lease)
+        _append_receipt(
+            build_lifecycle_receipt(
+                service_key=service_key,
+                action="STOP_ORPHAN_LEASE_RELEASE",
+                status="RECOVERED",
+                generation=plan.generation,
+                observed_at=_now(),
+                plan_digest=plan.plan_digest,
+                holder_token_digest=remaining_lease.holder_token_digest,
+                details={
+                    "pid": remaining_lease.pid,
+                    "expires_at": remaining_lease.expires_at.isoformat(),
+                    "reason_code": "EXPIRED_DEAD_LEASE",
+                },
+            )
+        )
+        remaining_lease = None
+    if remaining_lease is not None:
         raise CanonicalPhase9SupervisorBlocked(
             "BLOCKED_PHASE9_STOP_LEASE_HELD", service_key
         )
