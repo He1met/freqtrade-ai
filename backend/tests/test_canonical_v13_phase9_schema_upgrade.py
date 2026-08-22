@@ -35,6 +35,10 @@ def test_phase9_acl_rollback_is_the_frozen_predecessor_delta_only() -> None:
         "FROM phase9_test_control_writer"
     ) in statements
     assert (
+        "REVOKE SELECT ON TABLE strategy_platform_v13.qualification_decisions "
+        "FROM phase9_test_runtime_reader"
+    ) in statements
+    assert (
         'REVOKE CONNECT ON DATABASE "phase9_predecessor_test" '
         "FROM phase9_test_runtime_reader"
     ) in statements
@@ -53,6 +57,7 @@ def test_phase9_runbook_matches_current_probe_and_cleanup_contract() -> None:
     assert "canonical_deployment_writer` transaction" in runbook
     assert "canonical_approval_writer` transaction" in runbook
     assert "cleanup-phase9-provisioning" in runbook
+    assert "runtime-reader-acl-apply" in runbook
     assert "repeat_noop=true" in runbook
     assert "该表只属于" not in runbook
     assert "PostgreSQL ACL 下该命令不可达" not in runbook

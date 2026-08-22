@@ -96,6 +96,7 @@ PHASE9_SURVIVING_TABLE_GRANT_DELTA: Final[tuple[tuple[str, str, str], ...]] = (
     ("canonical_order_writer", "deployments", "SELECT"),
     ("canonical_order_writer", "trade_intents", "SELECT"),
     ("canonical_risk_writer", "deployments", "SELECT"),
+    ("canonical_runtime_reader", "qualification_decisions", "SELECT"),
     ("canonical_signal_writer", "runtime_receipts", "SELECT"),
 )
 PHASE9_DATABASE_CONNECT_DELTA: Final[tuple[str, ...]] = (
