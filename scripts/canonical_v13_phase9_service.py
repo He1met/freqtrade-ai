@@ -48,6 +48,9 @@ from app.canonical_v13.phase9_runtime_supervisor import (  # noqa: E402
     validate_supervised_worker_receipt,
     verify_launch_plan,
 )
+from app.canonical_v13.market_acquisition import (  # noqa: E402
+    CanonicalMarketAcquisitionBlocked,
+)
 from app.canonical_v13.runtime_image_authority import (  # noqa: E402
     CanonicalRuntimeImageBlocked,
     load_accepted_runtime_image,
@@ -1317,6 +1320,70 @@ def _record_worker_heartbeat(
     )
 
 
+_RETRYABLE_PUBLIC_MARKET_BLOCKERS = frozenset(
+    {
+        "BLOCKED_OKX_PUBLIC_HTTP",
+        "BLOCKED_OKX_PUBLIC_UNAVAILABLE",
+        "BLOCKED_OKX_CANDLE_GAP",
+        "BLOCKED_OKX_CANDLE_UNCONFIRMED_OR_INVALID",
+    }
+)
+
+
+def _retryable_public_market_blocker(exc: BaseException) -> str | None:
+    """Return only reviewed credential-free market transients from a cause chain."""
+
+    observed: BaseException | None = exc
+    seen: set[int] = set()
+    while observed is not None and id(observed) not in seen:
+        seen.add(id(observed))
+        if isinstance(observed, CanonicalMarketAcquisitionBlocked):
+            return (
+                observed.code
+                if observed.code in _RETRYABLE_PUBLIC_MARKET_BLOCKERS
+                else None
+            )
+        observed = observed.__cause__ or observed.__context__
+    return None
+
+
+def _record_resilient_worker_heartbeat(
+    *,
+    plan: Phase9LaunchPlan,
+    worker_port: RuntimeWorkerSupervisorPort,
+    observed_at: datetime,
+) -> None:
+    """Keep the fenced runtime alive only for reviewed no-signal market transients."""
+
+    try:
+        _record_worker_heartbeat(
+            plan=plan,
+            worker_port=worker_port,
+            observed_at=observed_at,
+        )
+    except CanonicalPhase9SupervisorBlocked as exc:
+        reason_code = _retryable_public_market_blocker(exc)
+        if reason_code is None:
+            raise
+        _append_receipt(
+            build_lifecycle_receipt(
+                service_key=plan.service_key,
+                action="WORKER_HEARTBEAT",
+                status="BLOCKED",
+                generation=plan.generation,
+                observed_at=observed_at,
+                plan_digest=plan.plan_digest,
+                details={
+                    "reason_code": reason_code,
+                    "retryable_public_market_transient": True,
+                    "signal_candidate_digest": None,
+                    "persistence_target": "canonical_signal_writer",
+                    "order_submission_enabled": False,
+                },
+            )
+        )
+
+
 def confirm_runtime_observation(plan_digest: str) -> dict[str, object]:
     """Promote PENDING to ACTIVE only from the current live supervisor evidence."""
 
@@ -1793,7 +1860,7 @@ def supervise(
                 )
             )
         if worker_port is not None:
-            _record_worker_heartbeat(
+            _record_resilient_worker_heartbeat(
                 plan=plan,
                 worker_port=worker_port,
                 observed_at=_now(),
@@ -1818,7 +1885,7 @@ def supervise(
             )
             _append_receipt(heartbeat)
             if worker_port is not None:
-                _record_worker_heartbeat(
+                _record_resilient_worker_heartbeat(
                     plan=plan,
                     worker_port=worker_port,
                     observed_at=_now(),
