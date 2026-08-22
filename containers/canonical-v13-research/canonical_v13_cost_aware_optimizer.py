@@ -134,14 +134,21 @@ def window_frame(frame: pd.DataFrame, *, start: datetime, end: datetime) -> pd.D
     return visible
 
 
-def store_window_data(frame: pd.DataFrame, *, start: datetime, end: datetime, key: str) -> Path:
+def store_window_data(
+    frame: pd.DataFrame,
+    *,
+    start: datetime,
+    end: datetime,
+    key: str,
+    pair: str,
+) -> Path:
     if FeatherDataHandler is None or CandleType is None:
         raise Blocked("Freqtrade data handler is unavailable")
     visible = window_frame(frame, start=start, end=end)
     data_root = Path("/work/window-data") / key
     (data_root / "futures").mkdir(parents=True, exist_ok=True)
     handler = FeatherDataHandler(data_root)
-    handler.ohlcv_store("BTC/USDT:USDT", "15m", visible, CandleType.FUTURES)
+    handler.ohlcv_store(pair, "15m", visible, CandleType.FUTURES)
     return data_root
 
 
@@ -527,13 +534,14 @@ def backtest_command(
     end: datetime,
     metadata: Path,
     fee: float,
+    pair: str,
 ) -> tuple[str, ...]:
     return (
         "/opt/freqtrade-ai/bin/canonical-v13-research-worker", "freqtrade-offline",
         "--metadata", str(metadata), "backtesting", "--config", "/work/config.json",
         "--datadir", str(data_root), "--strategy-path", str(strategy_path.parent),
         "--strategy", strategy_class, "--userdir", "/work/user_data",
-        "--pairs", "BTC/USDT:USDT", "--timeframe", "15m", "--timerange", timerange(start, end),
+        "--pairs", pair, "--timeframe", "15m", "--timerange", timerange(start, end),
         "--fee", str(fee), "--cache", "none", "--export", "trades",
         "--enable-protections",
         "--backtest-directory", str(result_dir), "--no-color",
@@ -551,6 +559,7 @@ def run_window(
     *,
     data_root: Path,
     wallet: float,
+    pair: str,
 ) -> dict[str, object]:
     result_dir = Path("/work/results") / f"{strategy_class}-{key}"
     result_dir.mkdir(parents=True, exist_ok=False)
@@ -563,6 +572,7 @@ def run_window(
         end=end,
         metadata=metadata,
         fee=fee,
+        pair=pair,
     )
     command_evidence = {
         "command_digest": canonical_digest(list(command)),
@@ -829,6 +839,8 @@ def metrics(
         "modeled_fee_cost": modeled_fee_cost,
         "modeled_slippage_cost": modeled_slippage_cost,
         "net_return_after_cost": net,
+        "positive_profit_account": sum(positive),
+        "largest_winning_trade_account": max(positive) if positive else 0.0,
         "sensitivity_net_after_cost": sensitivity,
         "maximum_drawdown": float(result.get("max_drawdown_account", result.get("max_drawdown", 0.0))),
         "top_trade_profit_share": concentration,
@@ -858,6 +870,8 @@ def metrics(
         "wallet",
         "stake_limit",
         "leverage_limit",
+        "positive_profit_account",
+        "largest_winning_trade_account",
     }
     if not all(math.isfinite(float(values[key])) for key in numeric_metric_keys):
         raise Blocked("non-finite metrics")
@@ -927,6 +941,11 @@ def evaluate(plan: dict[str, object], market: Path, metadata: Path) -> dict[str,
     if not isinstance(target, dict):
         raise Blocked("target contract is invalid")
     leverage_limit = finite_positive(target.get("leverage"), field="target leverage")
+    pair = str(target.get("pair", ""))
+    instrument = str(target.get("instrument", ""))
+    if not pair or not instrument:
+        raise Blocked("target pair or instrument is invalid")
+    namespace = instrument.replace("-", "_")
     wallet = declared_wallet
     stake_limit = declared_stake
     sizing_contract = {
@@ -946,7 +965,7 @@ def evaluate(plan: dict[str, object], market: Path, metadata: Path) -> dict[str,
         "max_open_trades": int(position_sizing["maximum_open_trades"]),
         "timeframe": "15m",
         "trading_mode": "futures", "margin_mode": "isolated",
-        "exchange": {"name": "okx", "pair_whitelist": ["BTC/USDT:USDT"], "enable_ws": False},
+        "exchange": {"name": "okx", "pair_whitelist": [pair], "enable_ws": False},
         "pairlists": [{"method": "StaticPairList"}],
     }
     Path("/work/config.json").write_text(json.dumps(config, sort_keys=True, separators=(",", ":")), encoding="utf-8")
@@ -973,7 +992,13 @@ def evaluate(plan: dict[str, object], market: Path, metadata: Path) -> dict[str,
     ):
         raise Blocked("market artifact must contain only the frozen warmup, TRAIN, and VALIDATION prefix")
     window_data_roots = {
-        key: store_window_data(frame, start=start, end=end, key=key)
+        key: store_window_data(
+            frame,
+            start=start,
+            end=end,
+            key=f"{namespace}-{key}",
+            pair=pair,
+        )
         for key, (start, end) in windows.items()
     }
     fee = float(costs["qualification_fee_rate"])
@@ -1016,13 +1041,14 @@ def evaluate(plan: dict[str, object], market: Path, metadata: Path) -> dict[str,
                 run_window(
                     cls,
                     source_path,
-                    key,
+                    f"{namespace}-{key}",
                     start,
                     end,
                     metadata,
                     fee,
                     data_root=window_data_roots[key],
                     wallet=wallet,
+                    pair=pair,
                 ),
                 fee,
                 slippage,

@@ -274,6 +274,19 @@ TRAIN 与 VALIDATION 各自生成 end-exclusive 的隔离 data root；边界后�
 digest、旧 optimization run ID 与 accepted defect-fix release digest。旧 run、trial 与 receipt 保持
 immutable terminal evidence，不允许覆盖或合并 lineage。
 
+BTC/ETH/SOL 15m 组合 optimization 必须使用同一个 long-only strategy source、同一组参数 identity
+与同一 seed。portfolio wallet 固定分为三个 `1/3` allocation；总 stake 也按相同比例拆分，三个资产
+同时持仓时的总名义敞口不得超过 plan 中的单一 portfolio cap。每个资产先独立按其 allocation wallet
+完成 `profit_abs`、fee、slippage 与 notional 对账，再以固定权重聚合账户收益；禁止把三个子回测都
+除以完整 portfolio wallet 或各自占用完整 stake。
+
+在读取 TRAIN/VALIDATION 前，plan 必须冻结：aggregate 30-day trades `>=30`、portfolio TRAIN 与
+VALIDATION net-after-cost `>0`、portfolio drawdown `<=0.15`、VALIDATION 至少两个资产 net `>=0`、
+最差资产 net `>=-0.0025`、单一资产正收益贡献 `<=0.70`、最大单笔正收益贡献 `<=0.35`。组合
+drawdown 使用三个 allocation drawdown 的等权保守和；同 timestamp 信号仍受每资产一个仓位和组合
+总 stake cap 约束。任一 target/source/parameter/window identity 漂移、HOLDOUT 出现在 optimizer 输入、
+或组合无 finalist 时均 terminal `BLOCKED`。
+
 ## 7. 首回测前的独立门
 
 以下全部有 exact evidence 才能执行第一个 production attempt：
