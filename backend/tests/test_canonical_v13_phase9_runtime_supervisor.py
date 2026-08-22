@@ -1077,6 +1077,76 @@ def test_runtime_stop_recovers_exact_residual_container(monkeypatch, tmp_path) -
     ) in calls
 
 
+def test_runtime_stop_observation_composes_only_after_all_holders_are_absent(
+    monkeypatch, tmp_path
+) -> None:
+    service = _load_script("canonical_phase9_runtime_stop_observation_test")
+    _configure_roots(service, tmp_path, monkeypatch)
+    monkeypatch.setattr(service.shutil, "which", lambda _name: "/bin/launchctl")
+    prepared = _prepare_runtime(service)
+    observing = [False]
+
+    def fake_run(command):
+        resolved = tuple(command)
+        absent = (
+            resolved[:3] == (service.PODMAN_PATH, "container", "exists")
+            or (observing[0] and resolved[:2] == ("launchctl", "print"))
+        )
+        return subprocess.CompletedProcess(
+            command,
+            113
+            if observing[0] and resolved[:2] == ("launchctl", "print")
+            else (1 if absent else 0),
+            "",
+            "",
+        )
+
+    monkeypatch.setattr(service, "_run", fake_run)
+    service.confirm("long_lived_runtime", prepared["plan_digest"])
+    service.stop("long_lived_runtime")
+    observing[0] = True
+    observed = {}
+
+    @contextmanager
+    def connection_factory():
+        yield object()
+
+    monkeypatch.setattr(service, "_phase9_database_url", lambda _name: "redacted")
+    monkeypatch.setattr(
+        service, "_connection_factory", lambda _url: connection_factory
+    )
+    monkeypatch.setattr(
+        service,
+        "_latest_running_heartbeat",
+        lambda _service, _plan: SimpleNamespace(details={"pid": 4321}),
+    )
+    monkeypatch.setattr(
+        service.UnixProcessProbe, "is_alive", lambda _self, _pid: False
+    )
+
+    def confirm_stopped(connection, **kwargs):
+        observed.update(kwargs)
+        assert connection is not None
+        return SimpleNamespace(
+            runtime_instance_id=UUID("00000000-0000-4000-8000-000000000123"),
+            receipt_digest="f" * 64,
+            status="STOPPED",
+            repeat_noop=False,
+        )
+
+    monkeypatch.setattr(
+        service, "confirm_stopped_runtime_from_supervisor", confirm_stopped
+    )
+    result = service.confirm_runtime_stop_observation(prepared["plan_digest"])
+
+    assert result["status"] == "STOPPED"
+    assert observed["launch_agent_loaded"] is False
+    assert observed["holder_pid_alive"] is False
+    assert observed["lease"] is None
+    assert observed["container_present"] is False
+    assert observed["stop_receipt"].action == "STOP"
+
+
 def test_runtime_stop_releases_only_expired_dead_lease(monkeypatch, tmp_path) -> None:
     service = _load_script("canonical_phase9_runtime_stop_orphan_lease_test")
     _configure_roots(service, tmp_path, monkeypatch)

@@ -19,6 +19,7 @@ from app.canonical_v13.phase9_runtime_supervisor import (
     build_launch_plan,
     build_lifecycle_receipt,
     build_production_runtime_observation,
+    build_production_runtime_stop_observation,
     validate_supervised_worker_receipt,
 )
 from app.canonical_v13.phase9_runtime_worker import (
@@ -596,6 +597,63 @@ def test_verified_running_release_bound_plan_builds_production_runtime_observati
     assert observation.capability_digest == plan.deployment_capability_digest
     assert observation.order_writer_capability is False
     assert verify_runtime_observation_receipt(observation)
+
+
+def test_verified_stopped_runtime_requires_no_live_supervisor_holder() -> None:
+    plan = _release_bound_plan()
+    stopped = build_lifecycle_receipt(
+        service_key=plan.service_key,
+        action="STOP",
+        status="STOPPED",
+        generation=plan.generation,
+        observed_at=NOW - timedelta(seconds=1),
+        plan_digest=plan.plan_digest,
+        details={"label": plan.launch_agent_label},
+    )
+    observation = build_production_runtime_stop_observation(
+        plan=plan,
+        launch_spec=_launch_spec(plan),
+        runtime_instance_id=_lineage().runtime_instance_id,
+        stop_receipt=stopped,
+        observed_at=NOW,
+        launch_agent_loaded=False,
+        holder_pid_alive=False,
+        lease=None,
+        container_present=False,
+    )
+    assert observation.status == "STOPPED"
+    assert observation.evidence_class == "PRODUCTION_DEMO_RUNTIME_STOP"
+    assert verify_runtime_observation_receipt(observation)
+
+
+@pytest.mark.parametrize("holder", ["launchd", "pid", "lease", "container"])
+def test_stopped_runtime_observation_rejects_any_live_holder(holder: str) -> None:
+    plan = _release_bound_plan()
+    lease, _running = _running_evidence(plan)
+    stopped = build_lifecycle_receipt(
+        service_key=plan.service_key,
+        action="STOP",
+        status="STOPPED",
+        generation=plan.generation,
+        observed_at=NOW - timedelta(seconds=1),
+        plan_digest=plan.plan_digest,
+        details={"label": plan.launch_agent_label},
+    )
+    with pytest.raises(
+        CanonicalPhase9SupervisorBlocked,
+        match="BLOCKED_PRODUCTION_RUNTIME_STOP_OBSERVATION",
+    ):
+        build_production_runtime_stop_observation(
+            plan=plan,
+            launch_spec=_launch_spec(plan),
+            runtime_instance_id=_lineage().runtime_instance_id,
+            stop_receipt=stopped,
+            observed_at=NOW,
+            launch_agent_loaded=holder == "launchd",
+            holder_pid_alive=holder == "pid",
+            lease=lease if holder == "lease" else None,
+            container_present=holder == "container",
+        )
 
 
 @pytest.mark.parametrize("drift", ["image", "capability", "lease", "release"])

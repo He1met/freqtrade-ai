@@ -22,6 +22,7 @@ from sqlalchemy import Connection, select
 
 from app.canonical_v13.deployment_control import (
     confirm_production_demo_runtime_observation,
+    confirm_production_demo_runtime_stop_observation,
 )
 from app.canonical_v13.manifest import CANONICAL_BUSINESS_SCHEMA
 from app.canonical_v13.phase9_canary_policy import (
@@ -49,6 +50,7 @@ from app.canonical_v13.models import (
     LEDGER_ENTRIES_TABLE,
     ORDERS_TABLE,
     RISK_DECISIONS_TABLE,
+    RUNTIME_INSTANCES_TABLE,
     TRADE_INTENTS_TABLE,
 )
 from app.canonical_v13.accounting import post_production_demo_ledger_entry
@@ -69,6 +71,7 @@ from app.canonical_v13.phase9_runtime_supervisor import (
     Phase9LifecycleReceipt,
     RuntimeWorkerSupervisorPort,
     build_production_runtime_observation,
+    build_production_runtime_stop_observation,
     require_current_order_writer_canary_authority,
 )
 from app.canonical_v13.runtime_contract import FrozenRuntimeLaunchSpec
@@ -824,6 +827,118 @@ def confirm_running_runtime_from_supervisor(
     )
 
 
+def confirm_stopped_runtime_from_supervisor(
+    connection: Connection,
+    *,
+    plan: Phase9LaunchPlan,
+    stop_receipt: Phase9LifecycleReceipt,
+    observed_at: datetime,
+    launch_agent_loaded: bool,
+    holder_pid_alive: bool,
+    lease: Phase9Lease | None,
+    container_present: bool,
+    credential_reference: str,
+):
+    """Persist STOPPED only from exact current supervisor and database lineage."""
+
+    if (
+        plan.service_key != "long_lived_runtime"
+        or plan.deployment_id is None
+        or plan.deployment_capability_digest is None
+        or plan.image_digest is None
+        or credential_reference != "none:public-okx-market-only"
+    ):
+        raise CanonicalPhase9CompositionBlocked(
+            "BLOCKED_PHASE9_RUNTIME_STOP_PLAN",
+            "exact runtime plan and public-only credential boundary are required",
+        )
+    deployment = connection.execute(
+        select(DEPLOYMENTS_TABLE).where(DEPLOYMENTS_TABLE.c.id == plan.deployment_id)
+    ).mappings().one_or_none()
+    runtime = connection.execute(
+        select(RUNTIME_INSTANCES_TABLE).where(
+            RUNTIME_INSTANCES_TABLE.c.deployment_id == plan.deployment_id
+        )
+    ).mappings().one_or_none()
+    approval = (
+        connection.execute(
+            select(DEPLOYMENT_APPROVALS_TABLE).where(
+                DEPLOYMENT_APPROVALS_TABLE.c.id
+                == deployment["deployment_approval_id"]
+            )
+        ).mappings().one_or_none()
+        if deployment is not None
+        else None
+    )
+    qualification = (
+        connection.execute(
+            select(QUALIFICATION_DECISIONS_TABLE).where(
+                QUALIFICATION_DECISIONS_TABLE.c.id
+                == approval["qualification_decision_id"]
+            )
+        ).mappings().one_or_none()
+        if approval is not None
+        else None
+    )
+    if (
+        deployment is None
+        or deployment["status"] not in {"ACTIVE", "DISABLED"}
+        or deployment["capability_digest"] != plan.deployment_capability_digest
+        or deployment["demo_only"] is not True
+        or deployment["allow_real_funds"] is not False
+        or runtime is None
+        or (
+            deployment["status"] == "DISABLED"
+            and runtime["status"] != "STOPPED"
+        )
+        or runtime["runtime_identity"] != plan.process_identity
+        or runtime["image_digest"] != plan.image_digest
+        or runtime["service_account"] != "canonical_runtime_reader"
+        or runtime["order_writer_capability"] is not False
+        or approval is None
+        or approval["status"] != "APPROVED"
+        or qualification is None
+        or qualification["status"] != "QUALIFIED"
+    ):
+        raise CanonicalPhase9CompositionBlocked(
+            "BLOCKED_PHASE9_RUNTIME_STOP_LINEAGE",
+            "exact ACTIVE Demo runtime lineage is required",
+        )
+    launch_spec = FrozenRuntimeLaunchSpec(
+        deployment_id=plan.deployment_id,
+        approval_id=approval["id"],
+        qualification_decision_id=qualification["id"],
+        strategy_version_id=deployment["strategy_version_id"],
+        configuration_bundle_id=deployment["configuration_bundle_id"],
+        configuration_bundle_digest=deployment["configuration_bundle_digest"],
+        market_snapshot_id=deployment["market_snapshot_id"],
+        market_snapshot_digest=deployment["market_snapshot_digest"],
+        deployment_capability_digest=deployment["capability_digest"],
+        runtime_identity=plan.process_identity,
+        image_digest=plan.image_digest,
+        service_account="canonical_runtime_reader",
+        network_policy="DEMO_EXCHANGE_ONLY",
+        credential_reference=credential_reference,
+    )
+    receipt = build_production_runtime_stop_observation(
+        plan=plan,
+        launch_spec=launch_spec,
+        runtime_instance_id=runtime["id"],
+        stop_receipt=stop_receipt,
+        observed_at=observed_at,
+        launch_agent_loaded=launch_agent_loaded,
+        holder_pid_alive=holder_pid_alive,
+        lease=lease,
+        container_present=container_present,
+    )
+    return confirm_production_demo_runtime_stop_observation(
+        connection,
+        deployment_id=plan.deployment_id,
+        receipt=receipt,
+        evaluated_at=observed_at,
+    )
+
+
 __all__ = [
     "CanonicalPhase9CompositionBlocked",
     "CanonicalOrderWriterOperator",
@@ -836,6 +951,7 @@ __all__ = [
     "SupervisePorts",
     "compose_supervise_ports",
     "confirm_running_runtime_from_supervisor",
+    "confirm_stopped_runtime_from_supervisor",
     "record_current_canary_attestation",
     "record_current_canary_probe_receipt",
 ]

@@ -12,6 +12,7 @@ from app.canonical_v13.phase9_production_composition import (
     DatabaseOrderWriterAuthorityVerifier,
     compose_supervise_ports,
     confirm_running_runtime_from_supervisor,
+    confirm_stopped_runtime_from_supervisor,
     record_current_canary_attestation,
     record_current_canary_probe_receipt,
 )
@@ -402,6 +403,91 @@ def test_runtime_confirmation_keeps_identity_across_no_order_to_shadow_plan(
     assert captured[0].runtime_instance_id == captured[1].runtime_instance_id
     assert captured[0].receipt_digest != captured[1].receipt_digest
     assert captured[0].observation_digest != captured[1].observation_digest
+
+
+def test_runtime_stop_confirmation_uses_exact_database_and_supervisor_lineage(
+    monkeypatch,
+) -> None:
+    plan = build_launch_plan(
+        service_key="long_lived_runtime",
+        stage="NO_ORDER_SOAK",
+        generation=1,
+        prepared_at=NOW - timedelta(seconds=10),
+        release_digest="6" * 64,
+        deployment_id=_uuid(1),
+        deployment_capability_digest="1" * 64,
+        runtime_image_authority=_runtime_image_authority(),
+    )
+    stop_receipt = build_lifecycle_receipt(
+        service_key=plan.service_key,
+        action="STOP",
+        status="STOPPED",
+        generation=plan.generation,
+        observed_at=NOW - timedelta(seconds=1),
+        plan_digest=plan.plan_digest,
+        details={"label": plan.launch_agent_label},
+    )
+    connection = _Connection(
+        [
+            {
+                "id": _uuid(1),
+                "deployment_approval_id": _uuid(2),
+                "strategy_version_id": _uuid(3),
+                "configuration_bundle_id": _uuid(4),
+                "configuration_bundle_digest": "9" * 64,
+                "market_snapshot_id": _uuid(5),
+                "market_snapshot_digest": "a" * 64,
+                "capability_digest": "1" * 64,
+                "status": "ACTIVE",
+                "demo_only": True,
+                "allow_real_funds": False,
+            },
+            {
+                "id": _uuid(7),
+                "runtime_identity": plan.process_identity,
+                "image_digest": plan.image_digest,
+                "service_account": "canonical_runtime_reader",
+                "order_writer_capability": False,
+            },
+            {
+                "id": _uuid(2),
+                "qualification_decision_id": _uuid(6),
+                "status": "APPROVED",
+            },
+            {"id": _uuid(6), "status": "QUALIFIED"},
+        ]
+    )
+    captured = {}
+
+    def persist(_connection, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            runtime_instance_id=_uuid(7),
+            receipt_digest=kwargs["receipt"].receipt_digest,
+            status="STOPPED",
+            repeat_noop=False,
+        )
+
+    monkeypatch.setattr(
+        "app.canonical_v13.phase9_production_composition.confirm_production_demo_runtime_stop_observation",
+        persist,
+    )
+    result = confirm_stopped_runtime_from_supervisor(
+        connection,
+        plan=plan,
+        stop_receipt=stop_receipt,
+        observed_at=NOW,
+        launch_agent_loaded=False,
+        holder_pid_alive=False,
+        lease=None,
+        container_present=False,
+        credential_reference="none:public-okx-market-only",
+    )
+
+    assert result.status == "STOPPED"
+    assert captured["deployment_id"] == plan.deployment_id
+    assert captured["receipt"].runtime_instance_id == _uuid(7)
+    assert captured["receipt"].status == "STOPPED"
 
 
 def test_probe_orchestration_uses_only_sealed_current_session_result(
