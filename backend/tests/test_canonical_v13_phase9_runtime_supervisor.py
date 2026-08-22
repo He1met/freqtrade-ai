@@ -968,10 +968,18 @@ def test_restart_stop_and_recovery_write_independent_receipts(
         "bootstrap_required": False,
         "orphan_cleaned": False,
     }
-    assert calls[-1] == (
+    assert (
         "launchctl",
         "bootout",
         service._launchctl_target("long_lived_runtime"),
+    ) in calls
+    assert calls[-1] == (
+        service.PODMAN_PATH,
+        "container",
+        "exists",
+        service.RuntimeContainerPort.name(
+            service._load_plan("long_lived_runtime")[0]
+        ),
     )
 
 
@@ -981,11 +989,18 @@ def test_runtime_stop_waits_beyond_container_grace_for_lease_release(
     service = _load_script("canonical_phase9_runtime_stop_budget_test")
     _configure_roots(service, tmp_path, monkeypatch)
     monkeypatch.setattr(service.shutil, "which", lambda _name: "/bin/launchctl")
-    monkeypatch.setattr(
-        service,
-        "_run",
-        lambda command: subprocess.CompletedProcess(command, 0, "", ""),
-    )
+    def fake_run(command):
+        return subprocess.CompletedProcess(
+            command,
+            1
+            if tuple(command[:3])
+            == (service.PODMAN_PATH, "container", "exists")
+            else 0,
+            "",
+            "",
+        )
+
+    monkeypatch.setattr(service, "_run", fake_run)
     prepared = _prepare_runtime(service)
     service.confirm("long_lived_runtime", prepared["plan_digest"])
 
@@ -1012,6 +1027,47 @@ def test_runtime_stop_waits_beyond_container_grace_for_lease_release(
     assert stopped["status"] == "STOPPED"
     assert elapsed[0] >= lease_release_at
     assert elapsed[0] < service.SUPERVISOR_TEARDOWN_TIMEOUT_SECONDS
+
+
+def test_runtime_stop_recovers_exact_residual_container(monkeypatch, tmp_path) -> None:
+    service = _load_script("canonical_phase9_runtime_stop_container_test")
+    _configure_roots(service, tmp_path, monkeypatch)
+    monkeypatch.setattr(service.shutil, "which", lambda _name: "/bin/launchctl")
+    prepared = _prepare_runtime(service)
+    container_name = service.RuntimeContainerPort.name(
+        service._load_plan("long_lived_runtime")[0]
+    )
+    container_present = True
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(command):
+        nonlocal container_present
+        resolved = tuple(command)
+        calls.append(resolved)
+        if resolved[:3] == (service.PODMAN_PATH, "container", "exists"):
+            return subprocess.CompletedProcess(
+                command, 0 if container_present else 1, "", ""
+            )
+        if resolved[:2] == (service.PODMAN_PATH, "stop"):
+            assert resolved[-1] == container_name
+            container_present = False
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(service, "_run", fake_run)
+    service.confirm("long_lived_runtime", prepared["plan_digest"])
+
+    stopped = service.stop("long_lived_runtime")
+    repeated = service.stop("long_lived_runtime")
+
+    assert stopped["status"] == "STOPPED"
+    assert repeated["repeat_noop"] is True
+    assert container_present is False
+    assert (
+        service.PODMAN_PATH,
+        "stop",
+        f"--time={service.RUNTIME_CONTAINER_STOP_GRACE_SECONDS}",
+        container_name,
+    ) in calls
 
 
 def test_runtime_restart_blocks_before_bootstrap_if_container_survives_bootout(
@@ -1192,7 +1248,15 @@ def test_prepare_confirm_and_stop_exact_replays_are_side_effect_free(
 
     def fake_run(command):
         calls.append(tuple(command))
-        return subprocess.CompletedProcess(command, 0, "", "")
+        return subprocess.CompletedProcess(
+            command,
+            1
+            if tuple(command[:3])
+            == (service.PODMAN_PATH, "container", "exists")
+            else 0,
+            "",
+            "",
+        )
 
     monkeypatch.setattr(service, "_run", fake_run)
     first_prepare = _prepare_runtime(service)
@@ -1225,7 +1289,8 @@ def test_prepare_confirm_and_stop_exact_replays_are_side_effect_free(
     stop_call_count = len(calls)
     repeated_stop = service.stop("long_lived_runtime")
     assert repeated_stop == {**first_stop, "repeat_noop": True}
-    assert len(calls) == stop_call_count
+    assert len(calls) == stop_call_count + 1
+    assert calls[-1][:3] == (service.PODMAN_PATH, "container", "exists")
     receipts = service._receipt_path("long_lived_runtime").read_text().splitlines()
     assert len(receipts) == 3
 
