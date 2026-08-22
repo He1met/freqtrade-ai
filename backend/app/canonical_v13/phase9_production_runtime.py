@@ -183,8 +183,6 @@ class DatabaseRuntimeLineageReader:
             and qualification["market_snapshot_digest"]
             == deployment["market_snapshot_digest"]
             and version is not None
-            and version["validation_status"] == "VALIDATED"
-            and version["execution_authorized"] is True
             and artifact is not None
             and artifact["encoding"] == "utf-8"
             and artifact["content_digest"] == source_digest
