@@ -1,12 +1,23 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import importlib.util
 import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
 
-from scripts import canonical_v13_research_service as service
+
+SERVICE_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "scripts/canonical_v13_research_service.py"
+)
+SPEC = importlib.util.spec_from_file_location(
+    "canonical_v13_research_service_test", SERVICE_PATH
+)
+assert SPEC is not None and SPEC.loader is not None
+service = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(service)
 
 
 def _write_private(path: Path, payload: dict[str, object]) -> None:
