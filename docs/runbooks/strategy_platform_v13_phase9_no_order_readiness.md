@@ -80,6 +80,8 @@ Phase 9 表为空；upgrade actor、DDL、ACL 和 manifest 以 immutable audit r
 ```bash
 export FREQTRADE_AI_CANONICAL_V13_UPGRADE_ACTOR='operator:<explicit-identity>'
 backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py phase9-schema-apply
+backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py runtime-reader-acl-apply
+backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py runtime-reader-acl-verify
 python scripts/canonical_v13_api_service.py provision-phase9
 python scripts/canonical_v13_api_service.py provision-runtime-reader
 backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py verify-phase9-provisioned
@@ -104,6 +106,9 @@ surviving-table ACL，且上述 capability 仍有额外 table grant 或 `CONNECT
 退回旧 release，操作顺序固定为：先验证 ACL rollback receipt → 再撤销/删除 Phase 9 与 runtime LOGIN
 及 membership → 最后删除对应 Keychain password/signer items；任一步失败都停止，禁止先删 Keychain
 造成不可恢复的半完成状态。apply、rollback、reapply 与 replay 都必须返回可重算 receipt。
+runtime-reader ACL rollover 的 rollback 入口为
+`canonical_v13_bootstrap.py runtime-reader-acl-rollback`；它只撤销
+`qualification_decisions` 的 runtime-reader `SELECT` 并恢复 predecessor manifest，不删除历史行。
 
 完成 schema/ACL rollback 且 API、canonical runtime 与 order writer LaunchAgent 均已 unload 后，只能用
 以下窄入口清理 9 个固定 LOGIN 与 10 个固定 Keychain item；它不读取或删除 OKX credential：

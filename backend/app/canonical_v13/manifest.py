@@ -22,7 +22,7 @@ CANONICAL_MANIFEST_KEY: Final = "canonical-v13-table-manifest-v1"
 CANONICAL_LEGACY_IMPORT_MODE: Final = "EXTERNAL_LATEST_ONLY"
 CANONICAL_TRADING_CAPABILITY: Final = "TRADING_DISABLED"
 CANONICAL_PRODUCTION_DEFAULT: Final = "UNSET"
-CANONICAL_AUTHORITY_REVISION: Final = "20260821_phase9_runtime_image_authority_v1_acl10"
+CANONICAL_AUTHORITY_REVISION: Final = "20260822_phase9_runtime_reader_qualification_acl11"
 
 P0_CONFIGURATION_KINDS: Final[tuple[str, ...]] = (
     "TARGET",
@@ -255,6 +255,7 @@ _RUNTIME_READER_TABLES = (
     "market_receipts",
     "market_snapshots",
     "market_snapshot_members",
+    "qualification_decisions",
     "deployment_approvals",
     "deployments",
     "runtime_image_acceptances",

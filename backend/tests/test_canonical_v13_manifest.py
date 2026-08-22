@@ -129,7 +129,7 @@ EXPECTED_TABLES_BY_DOMAIN = {
 def test_exact_identity_and_table_manifest_matches_frozen_design() -> None:
     assert (
         CANONICAL_AUTHORITY_REVISION
-        == "20260821_phase9_runtime_image_authority_v1_acl10"
+        == "20260822_phase9_runtime_reader_qualification_acl11"
     )
     assert CANONICAL_DATABASE_PURPOSE == "FREQTRADE_AI_V13_CANONICAL"
     assert CANONICAL_BUSINESS_SCHEMA == "strategy_platform_v13"
@@ -236,6 +236,12 @@ def test_each_table_has_one_writer_and_reader_maps_are_explicit() -> None:
     }.issubset(READER_TABLE_ALLOWLIST["canonical_research_reader"])
     assert set(READER_TABLE_ALLOWLIST["canonical_runtime_reader"]).isdisjoint(
         {"validation_attempts", "validation_window_results", "target_scores"}
+    )
+    assert "qualification_decisions" in READER_TABLE_ALLOWLIST[
+        "canonical_runtime_reader"
+    ]
+    assert set(READER_TABLE_ALLOWLIST["canonical_runtime_reader"]).isdisjoint(
+        {"signals", "trade_intents", "risk_decisions", "orders", "fills"}
     )
 
 

@@ -71,6 +71,12 @@ from app.canonical_v13.models import (
     QUALIFICATION_DECISIONS_TABLE,
 )
 from app.canonical_v13.role_mapping import CanonicalRoleMapping
+from app.canonical_v13.runtime_reader_acl_upgrade import (
+    CanonicalRuntimeReaderAclUpgradeBlocked,
+    apply_runtime_reader_acl_upgrade,
+    rollback_runtime_reader_acl_upgrade,
+    verify_runtime_reader_acl_upgrade,
+)
 
 
 DATABASE_URL_ENV = "FREQTRADE_AI_CANONICAL_V13_PROVISIONER_DATABASE_URL"
@@ -517,6 +523,41 @@ def phase9_schema(*, operation: str) -> dict[str, object]:
     return payload
 
 
+def runtime_reader_acl(*, operation: str) -> dict[str, object]:
+    mapping = local_role_mapping()
+    engine = create_engine(_database_url(), pool_pre_ping=True)
+    try:
+        if operation == "verify":
+            with engine.connect() as connection:
+                with connection.begin():
+                    connection.exec_driver_sql("SET TRANSACTION READ ONLY")
+                    result = verify_runtime_reader_acl_upgrade(
+                        connection, role_mapping=mapping
+                    )
+        else:
+            actor_identity = _upgrade_actor()
+            with engine.begin() as connection:
+                result = (
+                    apply_runtime_reader_acl_upgrade(
+                        connection,
+                        role_mapping=mapping,
+                        actor_identity=actor_identity,
+                    )
+                    if operation == "apply"
+                    else rollback_runtime_reader_acl_upgrade(
+                        connection,
+                        role_mapping=mapping,
+                        actor_identity=actor_identity,
+                    )
+                )
+    finally:
+        engine.dispose()
+    payload = asdict(result)
+    if operation != "verify":
+        payload["actor_identity"] = actor_identity
+    return payload
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -540,6 +581,9 @@ def main(argv: list[str] | None = None) -> int:
             "phase9-schema-verify",
             "phase9-schema-apply",
             "phase9-schema-rollback",
+            "runtime-reader-acl-verify",
+            "runtime-reader-acl-apply",
+            "runtime-reader-acl-rollback",
         ),
     )
     parser.add_argument(
@@ -608,6 +652,10 @@ def main(argv: list[str] | None = None) -> int:
             payload = phase9_schema(
                 operation=args.command.removeprefix("phase9-schema-")
             )
+        elif args.command.startswith("runtime-reader-acl-"):
+            payload = runtime_reader_acl(
+                operation=args.command.removeprefix("runtime-reader-acl-")
+            )
         else:
             payload = authority_apply(rollback=args.command == "authority-rollback")
     except BootstrapBlocked as exc:
@@ -619,6 +667,8 @@ def main(argv: list[str] | None = None) -> int:
     except CanonicalPhase9ReadinessBlocked as exc:
         payload = {"status": "BLOCKED", "reason": str(exc)}
     except CanonicalPhase9SchemaUpgradeBlocked as exc:
+        payload = {"status": "BLOCKED", "reason": str(exc)}
+    except CanonicalRuntimeReaderAclUpgradeBlocked as exc:
         payload = {"status": "BLOCKED", "reason": str(exc)}
     except (SQLAlchemyError, ValueError):
         payload = {"status": "BLOCKED", "reason": "bootstrap verification failed"}

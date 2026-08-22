@@ -26,7 +26,17 @@ from app.canonical_v13.runtime_image_authority import (
     RuntimeImageInspection,
     accept_runtime_image,
 )
-from app.canonical_v13.models import RUNTIME_IMAGE_ACCEPTANCES_TABLE
+from app.canonical_v13.models import (
+    RUNTIME_IMAGE_ACCEPTANCES_TABLE,
+    SCHEMA_METADATA_TABLE,
+)
+from app.canonical_v13.runtime_reader_acl_upgrade import (
+    PREVIOUS_RUNTIME_READER_ACL_MANIFEST_DIGEST,
+    CanonicalRuntimeReaderAclUpgradeBlocked,
+    apply_runtime_reader_acl_upgrade,
+    rollback_runtime_reader_acl_upgrade,
+    verify_runtime_reader_acl_upgrade,
+)
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import DBAPIError
 
@@ -182,6 +192,136 @@ def test_phase9_previous_acl_and_connect_drift_fail_closed_atomically() -> None:
                 apply_runtime_image_upgrade(connection, role_mapping=mapping).status
                 == "UPGRADED"
             )
+    finally:
+        engine.dispose()
+
+
+def test_runtime_reader_qualification_acl_rollover_is_exact_and_replayable() -> None:
+    assert DATABASE_URL is not None
+    mapping = CanonicalRoleMapping.from_prefix(
+        os.environ.get("CANONICAL_V13_ROLE_PREFIX", "freqtrade_ai_v13_ci_")
+    )
+    engine = create_engine(DATABASE_URL)
+    reader = mapping.physical("canonical_runtime_reader")
+    table_name = "strategy_platform_v13.qualification_decisions"
+    actor = "isolated-postgresql-runtime-reader-acl-test"
+    try:
+        with engine.begin() as connection:
+            qualification_count = connection.execute(
+                text(f"SELECT count(*) FROM {table_name}")
+            ).scalar_one()
+            connection.exec_driver_sql(
+                f"REVOKE SELECT ON TABLE {table_name} FROM {reader}"
+            )
+            connection.execute(
+                SCHEMA_METADATA_TABLE.update()
+                .where(
+                    SCHEMA_METADATA_TABLE.c.metadata_key
+                    == "canonical-v13-genesis"
+                )
+                .values(
+                    manifest_digest=PREVIOUS_RUNTIME_READER_ACL_MANIFEST_DIGEST
+                )
+            )
+            previous = verify_runtime_reader_acl_upgrade(
+                connection, role_mapping=mapping
+            )
+            assert previous.status == "PREVIOUS_READY"
+            assert previous.qualification_decision_count == qualification_count
+
+            upgraded = apply_runtime_reader_acl_upgrade(
+                connection, role_mapping=mapping, actor_identity=actor
+            )
+            assert upgraded.status == "UPGRADED"
+            assert upgraded.qualification_decision_count == qualification_count
+            assert upgraded.privileges == {
+                "SELECT": True,
+                "INSERT": False,
+                "UPDATE": False,
+                "DELETE": False,
+                "TRUNCATE": False,
+                "REFERENCES": False,
+                "TRIGGER": False,
+            }
+            replay = apply_runtime_reader_acl_upgrade(
+                connection, role_mapping=mapping, actor_identity=actor
+            )
+            assert replay.status == "ACCEPTED"
+            assert replay.repeat_noop is True
+            assert replay.receipt_digest == upgraded.receipt_digest
+
+            connection.exec_driver_sql(
+                f"GRANT INSERT ON TABLE {table_name} TO {reader}"
+            )
+            with pytest.raises(
+                CanonicalRuntimeReaderAclUpgradeBlocked,
+                match="BLOCKED_PARTIAL_RUNTIME_READER_ACL_UPGRADE",
+            ):
+                verify_runtime_reader_acl_upgrade(connection, role_mapping=mapping)
+            connection.exec_driver_sql(
+                f"REVOKE INSERT ON TABLE {table_name} FROM {reader}"
+            )
+
+            rolled_back = rollback_runtime_reader_acl_upgrade(
+                connection, role_mapping=mapping, actor_identity=actor
+            )
+            assert rolled_back.status == "ROLLED_BACK"
+            assert rolled_back.qualification_decision_count == qualification_count
+            assert rollback_runtime_reader_acl_upgrade(
+                connection, role_mapping=mapping, actor_identity=actor
+            ).status == "PREVIOUS_READY"
+            reapplied = apply_runtime_reader_acl_upgrade(
+                connection, role_mapping=mapping, actor_identity=actor
+            )
+            assert reapplied.status == "UPGRADED"
+            assert apply_runtime_reader_acl_upgrade(
+                connection, role_mapping=mapping, actor_identity=actor
+            ).receipt_digest == reapplied.receipt_digest
+    finally:
+        engine.dispose()
+
+
+def test_runtime_reader_acl_failed_transaction_restores_predecessor_state() -> None:
+    assert DATABASE_URL is not None
+    mapping = CanonicalRoleMapping.from_prefix(
+        os.environ.get("CANONICAL_V13_ROLE_PREFIX", "freqtrade_ai_v13_ci_")
+    )
+    engine = create_engine(DATABASE_URL)
+    reader = mapping.physical("canonical_runtime_reader")
+    table_name = "strategy_platform_v13.qualification_decisions"
+    actor = "isolated-postgresql-runtime-reader-acl-failure-test"
+    try:
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                f"REVOKE SELECT ON TABLE {table_name} FROM {reader}"
+            )
+            connection.execute(
+                SCHEMA_METADATA_TABLE.update()
+                .where(
+                    SCHEMA_METADATA_TABLE.c.metadata_key
+                    == "canonical-v13-genesis"
+                )
+                .values(
+                    manifest_digest=PREVIOUS_RUNTIME_READER_ACL_MANIFEST_DIGEST
+                )
+            )
+
+        with pytest.raises(RuntimeError, match="injected failure"):
+            with engine.begin() as connection:
+                apply_runtime_reader_acl_upgrade(
+                    connection, role_mapping=mapping, actor_identity=actor
+                )
+                raise RuntimeError("injected failure")
+
+        with engine.begin() as connection:
+            restored = verify_runtime_reader_acl_upgrade(
+                connection, role_mapping=mapping
+            )
+            assert restored.status == "PREVIOUS_READY"
+            assert not any(restored.privileges.values())
+            assert apply_runtime_reader_acl_upgrade(
+                connection, role_mapping=mapping, actor_identity=actor
+            ).status == "UPGRADED"
     finally:
         engine.dispose()
 
