@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal
 from uuid import uuid4
@@ -9,7 +10,9 @@ from sqlalchemy import func, select
 
 from app.canonical_v13.deployment_approval import approve_demo_deployment
 from app.canonical_v13.deployment_control import (
+    CanonicalDeploymentBlocked,
     confirm_production_demo_runtime_observation,
+    confirm_production_demo_runtime_stop_observation,
     create_demo_deployment,
     launch_demo_runtime,
 )
@@ -280,6 +283,101 @@ def test_supervisor_observation_confirms_runtime_without_launching_inside_db_tra
 
     assert confirmed == replayed == runtime_id
     assert status == "ACTIVE"
+
+
+def test_supervisor_stop_observation_is_immutable_and_replay_safe(
+    canonical_connection,
+) -> None:
+    with canonical_connection.begin():
+        _plan_id, decision = _qualified(canonical_connection)
+        approval = approve_demo_deployment(
+            canonical_connection,
+            qualification_decision_id=decision.qualification_decision_id,
+            actor_identity="phase9-human-approver",
+            reason="reviewed production Demo runtime",
+        )
+        deployment = create_demo_deployment(
+            canonical_connection,
+            deployment_approval_id=approval.deployment_approval_id,
+        )
+        row = canonical_connection.execute(
+            select(DEPLOYMENTS_TABLE).where(
+                DEPLOYMENTS_TABLE.c.id == deployment.deployment_id
+            )
+        ).mappings().one()
+        runtime_id = uuid4()
+        spec = FrozenRuntimeLaunchSpec(
+            deployment_id=deployment.deployment_id,
+            approval_id=approval.deployment_approval_id,
+            qualification_decision_id=decision.qualification_decision_id,
+            strategy_version_id=row["strategy_version_id"],
+            configuration_bundle_id=row["configuration_bundle_id"],
+            configuration_bundle_digest=row["configuration_bundle_digest"],
+            market_snapshot_id=row["market_snapshot_id"],
+            market_snapshot_digest=row["market_snapshot_digest"],
+            deployment_capability_digest=deployment.capability_digest,
+            runtime_identity="canonical-v13-long-lived-runtime-v1",
+            image_digest="f" * 64,
+            service_account="canonical_runtime_reader",
+            network_policy="DEMO_EXCHANGE_ONLY",
+            credential_reference="none:public-okx-market-only",
+        )
+        running = build_runtime_observation_receipt(
+            runtime_instance_id=runtime_id,
+            launch_spec=spec,
+            status="HEALTHY",
+            observed_at=NOW,
+            evidence_class="PRODUCTION_DEMO_RUNTIME",
+        )
+        confirm_production_demo_runtime_observation(
+            canonical_connection,
+            deployment_id=deployment.deployment_id,
+            runtime_identity=spec.runtime_identity,
+            image_digest=spec.image_digest,
+            credential_reference=spec.credential_reference or "",
+            receipt=running,
+            evaluated_at=NOW + timedelta(seconds=1),
+        )
+        stopped = build_runtime_observation_receipt(
+            runtime_instance_id=runtime_id,
+            launch_spec=spec,
+            status="STOPPED",
+            observed_at=NOW + timedelta(seconds=2),
+            evidence_class="PRODUCTION_DEMO_RUNTIME_STOP",
+        )
+        with pytest.raises(
+            CanonicalDeploymentBlocked, match="BLOCKED_RUNTIME_STOP_RECEIPT_DRIFT"
+        ):
+            confirm_production_demo_runtime_stop_observation(
+                canonical_connection,
+                deployment_id=deployment.deployment_id,
+                receipt=replace(stopped, receipt_digest="0" * 64),
+                evaluated_at=NOW + timedelta(seconds=3),
+            )
+        first = confirm_production_demo_runtime_stop_observation(
+            canonical_connection,
+            deployment_id=deployment.deployment_id,
+            receipt=stopped,
+            evaluated_at=NOW + timedelta(seconds=3),
+        )
+        replay = confirm_production_demo_runtime_stop_observation(
+            canonical_connection,
+            deployment_id=deployment.deployment_id,
+            receipt=stopped,
+            evaluated_at=NOW + timedelta(seconds=4),
+        )
+        runtime_status = canonical_connection.execute(
+            select(RUNTIME_INSTANCES_TABLE.c.status).where(
+                RUNTIME_INSTANCES_TABLE.c.id == runtime_id
+            )
+        ).scalar_one()
+        receipt_count = _count(canonical_connection, RUNTIME_RECEIPTS_TABLE)
+
+    assert first.status == replay.status == runtime_status == "STOPPED"
+    assert first.repeat_noop is False
+    assert replay.repeat_noop is True
+    assert replay.receipt_digest == first.receipt_digest
+    assert receipt_count == 2
 
 
 def test_supervisor_observation_rolls_stable_runtime_to_new_accepted_plan(

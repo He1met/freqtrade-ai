@@ -887,6 +887,58 @@ def build_production_runtime_observation(
     )
 
 
+def build_production_runtime_stop_observation(
+    *,
+    plan: Phase9LaunchPlan,
+    launch_spec: FrozenRuntimeLaunchSpec,
+    runtime_instance_id: UUID,
+    stop_receipt: Phase9LifecycleReceipt,
+    observed_at: datetime,
+    launch_agent_loaded: bool,
+    holder_pid_alive: bool,
+    lease: Phase9Lease | None,
+    container_present: bool,
+) -> RuntimeObservationReceipt:
+    """Build STOPPED evidence only after every runtime holder is absent."""
+
+    verify_launch_plan(plan)
+    verify_lifecycle_receipt(stop_receipt)
+    observed = _utc(observed_at)
+    if (
+        plan.service_key != "long_lived_runtime"
+        or plan.deployment_id != launch_spec.deployment_id
+        or plan.deployment_capability_digest != launch_spec.deployment_capability_digest
+        or plan.image_digest != launch_spec.image_digest
+        or plan.process_identity != launch_spec.runtime_identity
+        or launch_spec.service_account != "canonical_runtime_reader"
+        or launch_spec.order_writer_capability
+        or not launch_spec.demo_only
+        or launch_spec.allow_real_funds
+        or stop_receipt.service_key != plan.service_key
+        or stop_receipt.generation != plan.generation
+        or stop_receipt.plan_digest != plan.plan_digest
+        or stop_receipt.status != "STOPPED"
+        or stop_receipt.action != "STOP"
+        or stop_receipt.observed_at > observed
+        or stop_receipt.details.get("label") != plan.launch_agent_label
+        or launch_agent_loaded
+        or holder_pid_alive
+        or lease is not None
+        or container_present
+    ):
+        raise CanonicalPhase9SupervisorBlocked(
+            "BLOCKED_PRODUCTION_RUNTIME_STOP_OBSERVATION",
+            "exact STOP receipt and absent launchd, lease, and container are required",
+        )
+    return build_runtime_observation_receipt(
+        runtime_instance_id=runtime_instance_id,
+        launch_spec=launch_spec,
+        status="STOPPED",
+        observed_at=observed,
+        evidence_class="PRODUCTION_DEMO_RUNTIME_STOP",
+    )
+
+
 __all__ = [
     "CanonicalPhase9SupervisorBlocked",
     "OrderWriterCanaryAuthority",
@@ -902,6 +954,7 @@ __all__ = [
     "build_lifecycle_receipt",
     "build_order_writer_canary_authority",
     "build_production_runtime_observation",
+    "build_production_runtime_stop_observation",
     "claim_lease",
     "heartbeat_lease",
     "release_lease",

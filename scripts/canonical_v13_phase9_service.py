@@ -64,6 +64,7 @@ from app.canonical_v13.phase9_production_composition import (  # noqa: E402
     DatabaseOrderWriterAuthorityVerifier,
     RecordedCanaryProbe,
     confirm_running_runtime_from_supervisor,
+    confirm_stopped_runtime_from_supervisor,
     record_current_canary_attestation,
     record_current_canary_probe_receipt,
 )
@@ -698,6 +699,20 @@ def _latest_running_heartbeat(service_key: str, plan: Phase9LaunchPlan):
             continue
     raise CanonicalPhase9SupervisorBlocked(
         "BLOCKED_PHASE9_RUNTIME_HEARTBEAT_UNSET", service_key
+    )
+
+
+def _latest_stop_receipt(service_key: str, plan: Phase9LaunchPlan):
+    for receipt in reversed(_verified_lifecycle_receipts(service_key)):
+        if (
+            receipt.action == "STOP"
+            and receipt.status == "STOPPED"
+            and receipt.plan_digest == plan.plan_digest
+            and receipt.generation == plan.generation
+        ):
+            return receipt
+    raise CanonicalPhase9SupervisorBlocked(
+        "BLOCKED_PHASE9_RUNTIME_STOP_RECEIPT_UNSET", service_key
     )
 
 
@@ -1425,6 +1440,66 @@ def confirm_runtime_observation(plan_digest: str) -> dict[str, object]:
     }
 
 
+def confirm_runtime_stop_observation(plan_digest: str) -> dict[str, object]:
+    """Persist STOPPED only after launchd, lease, process, and container are absent."""
+
+    _require_release_checkout()
+    plan, state = _load_plan("long_lived_runtime")
+    if state.get("status") != "STOPPED" or plan.plan_digest != plan_digest:
+        raise CanonicalPhase9SupervisorBlocked(
+            "BLOCKED_PHASE9_RUNTIME_STOP_OBSERVATION",
+            "exact STOPPED state and plan digest are required",
+        )
+    launch_agent = _run(
+        ["launchctl", "print", _launchctl_target("long_lived_runtime")]
+    )
+    if launch_agent.returncode not in {0, 3, 113}:
+        raise CanonicalPhase9SupervisorBlocked(
+            "BLOCKED_PHASE9_STOP_LAUNCHD_OBSERVATION", plan.service_key
+        )
+    launch_agent_loaded = launch_agent.returncode == 0
+    lease = FileLeasePort(SUPPORT_ROOT).read("long_lived_runtime")
+    heartbeat = _latest_running_heartbeat("long_lived_runtime", plan)
+    heartbeat_pid = heartbeat.details.get("pid")
+    if isinstance(heartbeat_pid, bool) or not isinstance(heartbeat_pid, int):
+        raise CanonicalPhase9SupervisorBlocked(
+            "BLOCKED_PHASE9_RUNTIME_STOP_RECEIPT_UNSET", plan.service_key
+        )
+    holder_pid_alive = UnixProcessProbe().is_alive(heartbeat_pid)
+    container = _run(
+        [PODMAN_PATH, "container", "exists", RuntimeContainerPort.name(plan)]
+    )
+    if container.returncode not in {0, 1}:
+        raise CanonicalPhase9SupervisorBlocked(
+            "BLOCKED_PHASE9_STOP_CONTAINER_OBSERVATION", plan.service_key
+        )
+    observed_at = _now()
+    factory = _connection_factory(
+        _phase9_database_url("canonical_deployment_writer")
+    )
+    with factory() as connection:
+        result = confirm_stopped_runtime_from_supervisor(
+            connection,
+            plan=plan,
+            stop_receipt=_latest_stop_receipt("long_lived_runtime", plan),
+            observed_at=observed_at,
+            launch_agent_loaded=launch_agent_loaded,
+            holder_pid_alive=holder_pid_alive,
+            lease=lease,
+            container_present=container.returncode == 0,
+            credential_reference=RUNTIME_CREDENTIAL_REFERENCE,
+        )
+    return {
+        "status": result.status,
+        "service": plan.service_key,
+        "deployment_id": str(plan.deployment_id),
+        "runtime_instance_id": str(result.runtime_instance_id),
+        "plan_digest": plan.plan_digest,
+        "runtime_stop_receipt_digest": result.receipt_digest,
+        "repeat_noop": result.repeat_noop,
+    }
+
+
 def _production_okx_session_factory():
     from app.canonical_v13.phase9_keychain import (  # noqa: PLC0415
         CanonicalPhase9KeychainBlocked,
@@ -1923,6 +1998,7 @@ def main(argv: list[str] | None = None) -> int:
             "recover",
             "supervise",
             "confirm-runtime-observation",
+            "confirm-runtime-stop-observation",
             "probe-canary",
             "dispatch-canary",
             "recover-canary",
@@ -2067,6 +2143,13 @@ def main(argv: list[str] | None = None) -> int:
                     "long_lived_runtime and --plan-digest are required",
                 )
             payload = confirm_runtime_observation(args.plan_digest)
+        elif args.command == "confirm-runtime-stop-observation":
+            if args.service != "long_lived_runtime" or not args.plan_digest:
+                raise CanonicalPhase9SupervisorBlocked(
+                    "BLOCKED_PHASE9_RUNTIME_STOP_OBSERVATION",
+                    "long_lived_runtime and --plan-digest are required",
+                )
+            payload = confirm_runtime_stop_observation(args.plan_digest)
         elif args.command == "probe-canary":
             if args.service != "order_writer" or args.deployment_id is None:
                 raise CanonicalPhase9SupervisorBlocked(

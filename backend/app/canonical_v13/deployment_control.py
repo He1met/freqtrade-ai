@@ -62,6 +62,14 @@ class DeploymentDisableResult:
     repeat_noop: bool
 
 
+@dataclass(frozen=True)
+class RuntimeStopResult:
+    runtime_instance_id: UUID
+    receipt_digest: str
+    status: str
+    repeat_noop: bool
+
+
 def _digest(value: object) -> str:
     return sha256(
         json.dumps(
@@ -787,12 +795,201 @@ def confirm_production_demo_runtime_observation(
     return runtime_id
 
 
+def confirm_production_demo_runtime_stop_observation(
+    connection: Connection,
+    *,
+    deployment_id: UUID,
+    receipt: RuntimeObservationReceipt,
+    evaluated_at: datetime | None = None,
+) -> RuntimeStopResult:
+    """Persist a supervisor-proven STOPPED transition without deleting history."""
+
+    effective = _require_canonical(connection)
+    now = evaluated_at or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        raise CanonicalDeploymentBlocked(
+            "BLOCKED_RUNTIME_TIMEZONE", "evaluated_at must be timezone-aware"
+        )
+    now = now.astimezone(timezone.utc)
+    lock_execution_boundary(effective, key=f"runtime-stop:{deployment_id}")
+    lock_execution_boundary(effective, key="demo-order-writer-lease")
+    deployment = (
+        effective.execute(
+            select(DEPLOYMENTS_TABLE)
+            .where(DEPLOYMENTS_TABLE.c.id == deployment_id)
+            .with_for_update()
+        )
+        .mappings()
+        .one_or_none()
+    )
+    runtime = (
+        effective.execute(
+            select(RUNTIME_INSTANCES_TABLE)
+            .where(RUNTIME_INSTANCES_TABLE.c.deployment_id == deployment_id)
+            .with_for_update()
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if (
+        deployment is None
+        or deployment["status"] not in {"ACTIVE", "DISABLED"}
+        or deployment["demo_only"] is not True
+        or deployment["allow_real_funds"] is not False
+        or runtime is None
+    ):
+        raise CanonicalDeploymentBlocked(
+            "BLOCKED_RUNTIME_STOP_LINEAGE", "exact ACTIVE Demo runtime is required"
+        )
+    existing_stop = (
+        effective.execute(
+            select(RUNTIME_RECEIPTS_TABLE)
+            .where(
+                RUNTIME_RECEIPTS_TABLE.c.runtime_instance_id == runtime["id"],
+                RUNTIME_RECEIPTS_TABLE.c.status == "STOPPED",
+                RUNTIME_RECEIPTS_TABLE.c.evidence_class
+                == "PRODUCTION_DEMO_RUNTIME_STOP",
+            )
+            .order_by(RUNTIME_RECEIPTS_TABLE.c.observed_at.desc())
+            .limit(1)
+        )
+        .mappings()
+        .one_or_none()
+    )
+    active_writer_lease_count = int(
+        effective.execute(
+            select(func.count())
+            .select_from(ORDER_WRITER_LEASES_TABLE)
+            .where(ORDER_WRITER_LEASES_TABLE.c.status == "ACTIVE")
+        ).scalar_one()
+    )
+    if active_writer_lease_count:
+        raise CanonicalDeploymentBlocked(
+            "BLOCKED_RUNTIME_STOP_WRITER_ACTIVE", str(active_writer_lease_count)
+        )
+    if runtime["status"] == "STOPPED":
+        if existing_stop is None:
+            raise CanonicalDeploymentBlocked(
+                "BLOCKED_RUNTIME_STOP_REPLAY_DRIFT",
+                "STOPPED runtime has no production stop receipt",
+            )
+        existing_observation = existing_stop["observation_json"]
+        try:
+            persisted_receipt = RuntimeObservationReceipt(
+                runtime_instance_id=UUID(str(existing_observation["runtime_instance_id"])),
+                launch_spec_digest=str(existing_observation["launch_spec_digest"]),
+                capability_digest=str(existing_observation["capability_digest"]),
+                status=str(existing_observation["status"]),
+                observed_at=_persisted_utc(existing_stop["observed_at"]),
+                network_policy=str(existing_observation["network_policy"]),
+                service_account=str(existing_observation["service_account"]),
+                order_writer_capability=existing_observation["order_writer_capability"]
+                is True,
+                evidence_class=str(existing_observation["evidence_class"]),
+                observation_digest=existing_stop["observation_digest"],
+                receipt_digest=existing_stop["receipt_digest"],
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CanonicalDeploymentBlocked(
+                "BLOCKED_RUNTIME_STOP_REPLAY_DRIFT",
+                "persisted stop receipt is malformed",
+            ) from exc
+        if (
+            not verify_runtime_observation_receipt(persisted_receipt)
+            or persisted_receipt.runtime_instance_id != runtime["id"]
+            or persisted_receipt.launch_spec_digest != runtime["launch_spec_digest"]
+            or persisted_receipt.capability_digest != deployment["capability_digest"]
+            or persisted_receipt.status != "STOPPED"
+            or persisted_receipt.evidence_class != "PRODUCTION_DEMO_RUNTIME_STOP"
+            or persisted_receipt.order_writer_capability
+        ):
+            raise CanonicalDeploymentBlocked(
+                "BLOCKED_RUNTIME_STOP_REPLAY_DRIFT",
+                "persisted stop receipt no longer matches runtime lineage",
+            )
+        return RuntimeStopResult(
+            runtime_instance_id=runtime["id"],
+            receipt_digest=existing_stop["receipt_digest"],
+            status="STOPPED",
+            repeat_noop=True,
+        )
+    if deployment["status"] != "ACTIVE":
+        raise CanonicalDeploymentBlocked(
+            "BLOCKED_RUNTIME_STOP_LINEAGE",
+            "only an exact replay may observe a terminal deployment",
+        )
+    if receipt.observed_at.tzinfo is None:
+        raise CanonicalDeploymentBlocked(
+            "BLOCKED_RUNTIME_STOP_RECEIPT_DRIFT",
+            "stop receipt timestamp must be timezone-aware",
+        )
+    receipt_age = now - receipt.observed_at.astimezone(timezone.utc)
+    if (
+        runtime["status"] not in {"STARTING", "HEALTHY", "DEGRADED", "FAILED"}
+        or active_writer_lease_count
+        or receipt.runtime_instance_id != runtime["id"]
+        or receipt.launch_spec_digest != runtime["launch_spec_digest"]
+        or receipt.capability_digest != deployment["capability_digest"]
+        or receipt.status != "STOPPED"
+        or receipt.evidence_class != "PRODUCTION_DEMO_RUNTIME_STOP"
+        or receipt.network_policy != "DEMO_EXCHANGE_ONLY"
+        or receipt.service_account != "canonical_runtime_reader"
+        or receipt.order_writer_capability
+        or not verify_runtime_observation_receipt(receipt)
+        or not -timedelta(seconds=5) <= receipt_age <= timedelta(minutes=1)
+    ):
+        raise CanonicalDeploymentBlocked(
+            "BLOCKED_RUNTIME_STOP_RECEIPT_DRIFT",
+            "fresh exact stopped supervisor evidence and zero writer lease are required",
+        )
+    effective.execute(
+        RUNTIME_RECEIPTS_TABLE.insert().values(
+            id=uuid4(),
+            runtime_instance_id=runtime["id"],
+            status=receipt.status,
+            launch_spec_digest=receipt.launch_spec_digest,
+            capability_digest=receipt.capability_digest,
+            network_policy=receipt.network_policy,
+            service_account=receipt.service_account,
+            order_writer_capability=False,
+            evidence_class=receipt.evidence_class,
+            observation_json={
+                "runtime_instance_id": str(receipt.runtime_instance_id),
+                "launch_spec_digest": receipt.launch_spec_digest,
+                "capability_digest": receipt.capability_digest,
+                "status": receipt.status,
+                "observed_at": receipt.observed_at.isoformat(),
+                "network_policy": receipt.network_policy,
+                "service_account": receipt.service_account,
+                "order_writer_capability": False,
+                "evidence_class": receipt.evidence_class,
+            },
+            observation_digest=receipt.observation_digest,
+            receipt_digest=receipt.receipt_digest,
+            observed_at=receipt.observed_at,
+        )
+    )
+    effective.execute(
+        RUNTIME_INSTANCES_TABLE.update()
+        .where(RUNTIME_INSTANCES_TABLE.c.id == runtime["id"])
+        .values(status="STOPPED")
+    )
+    return RuntimeStopResult(
+        runtime_instance_id=runtime["id"],
+        receipt_digest=receipt.receipt_digest,
+        status="STOPPED",
+        repeat_noop=False,
+    )
+
+
 __all__ = [
     "CanonicalDeploymentBlocked",
     "DeploymentResult",
+    "RuntimeStopResult",
     "RuntimeLauncherPort",
     "create_demo_deployment",
     "confirm_production_demo_runtime_observation",
+    "confirm_production_demo_runtime_stop_observation",
     "deployment_capability_digest",
     "launch_demo_runtime",
 ]

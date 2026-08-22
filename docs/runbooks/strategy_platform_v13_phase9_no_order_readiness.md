@@ -156,6 +156,17 @@ python scripts/canonical_v13_api_service.py cleanup-phase9-provisioning
    --acceptance-id <uuid>` 返回的 receipt 是 runtime plan 唯一 image authority，裸 digest 不可替代。
 1. 由明确的人类 actor 为 exact qualification 创建 approval；重放必须返回同一 digest。
 2. 若存在旧 `ACTIVE` deployment，先证明其 runtime 已 `STOPPED` 且全局 ACTIVE order-writer lease 为 0，
+   并从 accepted release 将 supervisor 的 exact STOP receipt、unloaded LaunchAgent、空 lease 与无 container
+   组合为唯一 production stop observation：
+
+   ```bash
+   python scripts/canonical_v13_phase9_service.py confirm-runtime-stop-observation \
+     --service long_lived_runtime --plan-digest <exact-stopped-plan-digest>
+   ```
+
+   该入口仅由 `canonical_deployment_writer` 把既有 runtime 行推进到 `STOPPED`，写入不可变 receipt；
+   exact replay 必须 `repeat_noop=true`。任何仍 loaded 的 LaunchAgent、lease、container、writer lease、
+   plan/lineage/digest 漂移都 fail closed。随后
    再由 `canonical_deployment_writer` 调用
    `POST /api/canonical-v13/phase9/deployments/{old_id}/disable`，命令只含新 exact
    `superseded_by_qualification_decision_id`、人工 actor 与 reason。该事务必须原子写入 `DISABLED`、
