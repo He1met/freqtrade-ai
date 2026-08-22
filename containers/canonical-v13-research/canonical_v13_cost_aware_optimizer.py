@@ -14,11 +14,18 @@ import subprocess
 import zipfile
 
 import pandas as pd
-from freqtrade.data.history.datahandlers.featherdatahandler import FeatherDataHandler
-from freqtrade.enums import CandleType
+
+try:
+    from freqtrade.data.history.datahandlers.featherdatahandler import FeatherDataHandler
+    from freqtrade.enums import CandleType
+except ModuleNotFoundError:  # Pure accounting/integrity tests do not install Freqtrade.
+    FeatherDataHandler = None  # type: ignore[assignment,misc]
+    CandleType = None  # type: ignore[assignment,misc]
 
 
 CONTRACT = "canonical-v13-cost-aware-oos-optimization-result-v1"
+TIMEFRAME_SECONDS = 15 * 60
+RECONCILIATION_TOLERANCE = 1e-10
 SUBPROCESS_ENV = {
     "HOME": "/work/home",
     "LANG": "C.UTF-8",
@@ -59,31 +66,97 @@ def timerange(start: datetime, end: datetime) -> str:
     return f"{int(start.timestamp())}-{int(end.timestamp())}"
 
 
-def prepare_data(market: Path) -> pd.DataFrame:
+def load_market_frame(market: Path) -> pd.DataFrame:
     rows = []
     with market.open("r", encoding="utf-8") as stream:
         for line in stream:
-            row = json.loads(line)
-            if not isinstance(row, dict):
-                raise Blocked("market row is invalid")
+            try:
+                row = json.loads(line)
+                if not isinstance(row, dict):
+                    raise Blocked("market row is invalid")
+                opened_at = datetime.fromisoformat(
+                    str(row["opened_at"]).replace("Z", "+00:00")
+                )
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+                raise Blocked("market timestamp is invalid") from exc
+            if (
+                opened_at.tzinfo is None
+                or opened_at.utcoffset() != timezone.utc.utcoffset(opened_at)
+            ):
+                raise Blocked("market timestamp must be UTC")
+            if int(opened_at.timestamp()) % TIMEFRAME_SECONDS != 0:
+                raise Blocked("market timestamp must align to a 900-second boundary")
             rows.append(row)
-    frame = pd.DataFrame(
-        {
-            "date": pd.to_datetime([row["opened_at"] for row in rows], utc=True),
-            "open": [float(row["open"]) for row in rows],
-            "high": [float(row["high"]) for row in rows],
-            "low": [float(row["low"]) for row in rows],
-            "close": [float(row["close"]) for row in rows],
-            "volume": [float(row["volume"]) for row in rows],
-        }
-    ).sort_values("date")
+    try:
+        frame = pd.DataFrame(
+            {
+                "date": pd.to_datetime([row["opened_at"] for row in rows], utc=True),
+                "open": [float(row["open"]) for row in rows],
+                "high": [float(row["high"]) for row in rows],
+                "low": [float(row["low"]) for row in rows],
+                "close": [float(row["close"]) for row in rows],
+                "volume": [float(row["volume"]) for row in rows],
+            }
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise Blocked("market numeric fields are invalid") from exc
     if frame.empty or frame["date"].duplicated().any() or not frame["date"].is_monotonic_increasing:
         raise Blocked("market continuity is invalid")
-    data_root = Path("/work/data")
+    numeric = frame[["open", "high", "low", "close", "volume"]]
+    if not numeric.map(math.isfinite).all().all():
+        raise Blocked("market contains non-finite values")
+    if not (frame[["open", "high", "low", "close"]] > 0).all().all():
+        raise Blocked("market prices must be positive")
+    if not (frame["volume"] >= 0).all():
+        raise Blocked("market volume must be nonnegative")
+    if not (
+        (frame["low"] <= frame[["open", "close"]].min(axis=1))
+        & (frame["high"] >= frame[["open", "close"]].max(axis=1))
+        & (frame["low"] <= frame["high"])
+    ).all():
+        raise Blocked("market OHLC relationship is invalid")
+    deltas = frame["date"].diff().dropna().dt.total_seconds()
+    if not (deltas == TIMEFRAME_SECONDS).all():
+        raise Blocked("market must be strictly continuous at 900 seconds")
+    return frame
+
+
+def window_frame(frame: pd.DataFrame, *, start: datetime, end: datetime) -> pd.DataFrame:
+    if end <= start:
+        raise Blocked("window interval is invalid")
+    visible = frame.loc[frame["date"] < end].copy()
+    if visible.empty or visible["date"].max().to_pydatetime() != end - pd.Timedelta(
+        seconds=TIMEFRAME_SECONDS
+    ):
+        raise Blocked("window end-exclusive boundary is not closed-candle complete")
+    if visible["date"].min().to_pydatetime() > start:
+        raise Blocked("window warmup coverage is insufficient")
+    return visible
+
+
+def store_window_data(frame: pd.DataFrame, *, start: datetime, end: datetime, key: str) -> Path:
+    if FeatherDataHandler is None or CandleType is None:
+        raise Blocked("Freqtrade data handler is unavailable")
+    visible = window_frame(frame, start=start, end=end)
+    data_root = Path("/work/window-data") / key
     (data_root / "futures").mkdir(parents=True, exist_ok=True)
     handler = FeatherDataHandler(data_root)
-    handler.ohlcv_store("BTC/USDT:USDT", "15m", frame, CandleType.FUTURES)
-    return frame
+    handler.ohlcv_store("BTC/USDT:USDT", "15m", visible, CandleType.FUTURES)
+    return data_root
+
+
+def directory_digest(root: Path) -> str:
+    evidence = [
+        {
+            "path": str(path.relative_to(root)),
+            "digest": sha256(path.read_bytes()).hexdigest(),
+        }
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    ]
+    if not evidence:
+        raise Blocked("window data artifact is empty")
+    return canonical_digest(evidence)
 
 
 def sample_trials(plan: dict[str, object]) -> list[dict[str, object]]:
@@ -444,18 +517,64 @@ def read_result(result_dir: Path, strategy_class: str) -> dict[str, object]:
     return result
 
 
-def run_window(strategy_class: str, strategy_path: Path, key: str, start: datetime, end: datetime, metadata: Path, fee: float) -> dict[str, object]:
-    result_dir = Path("/work/results") / f"{strategy_class}-{key}"
-    result_dir.mkdir(parents=True, exist_ok=False)
-    command = (
+def backtest_command(
+    *,
+    strategy_class: str,
+    strategy_path: Path,
+    data_root: Path,
+    result_dir: Path,
+    start: datetime,
+    end: datetime,
+    metadata: Path,
+    fee: float,
+) -> tuple[str, ...]:
+    return (
         "/opt/freqtrade-ai/bin/canonical-v13-research-worker", "freqtrade-offline",
         "--metadata", str(metadata), "backtesting", "--config", "/work/config.json",
-        "--datadir", "/work/data", "--strategy-path", str(strategy_path.parent),
+        "--datadir", str(data_root), "--strategy-path", str(strategy_path.parent),
         "--strategy", strategy_class, "--userdir", "/work/user_data",
         "--pairs", "BTC/USDT:USDT", "--timeframe", "15m", "--timerange", timerange(start, end),
         "--fee", str(fee), "--cache", "none", "--export", "trades",
+        "--enable-protections",
         "--backtest-directory", str(result_dir), "--no-color",
     )
+
+
+def run_window(
+    strategy_class: str,
+    strategy_path: Path,
+    key: str,
+    start: datetime,
+    end: datetime,
+    metadata: Path,
+    fee: float,
+    *,
+    data_root: Path,
+    wallet: float,
+) -> dict[str, object]:
+    result_dir = Path("/work/results") / f"{strategy_class}-{key}"
+    result_dir.mkdir(parents=True, exist_ok=False)
+    command = backtest_command(
+        strategy_class=strategy_class,
+        strategy_path=strategy_path,
+        data_root=data_root,
+        result_dir=result_dir,
+        start=start,
+        end=end,
+        metadata=metadata,
+        fee=fee,
+    )
+    command_evidence = {
+        "command_digest": canonical_digest(list(command)),
+        "protections_enabled": "--enable-protections" in command,
+        "window_end_exclusive": end.isoformat(),
+        "window_data_digest": directory_digest(data_root),
+        "last_visible_candle": (
+            end - pd.Timedelta(seconds=TIMEFRAME_SECONDS)
+        ).isoformat(),
+    }
+    if command_evidence["protections_enabled"] is not True:
+        raise Blocked("backtest protections are not enabled")
     log_path = result_dir / "freqtrade.stderr"
     with log_path.open("wb") as log:
         completed = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, env=SUBPROCESS_ENV, close_fds=True, timeout=840, check=False)
@@ -468,11 +587,15 @@ def run_window(strategy_class: str, strategy_path: Path, key: str, start: dateti
             return {
                 "total_trades": 0,
                 "profit_total": 0.0,
+                "starting_balance": wallet,
                 "max_drawdown_account": 0.0,
                 "trades": [],
+                "canonical_execution_evidence": command_evidence,
             }
         raise Blocked(f"backtest produced no archive for {strategy_class}:{key}:{detail}")
-    return read_result(result_dir, strategy_class)
+    result = read_result(result_dir, strategy_class)
+    result["canonical_execution_evidence"] = command_evidence
+    return result
 
 
 def directional_drawdown(profits: list[float]) -> float:
@@ -486,18 +609,103 @@ def directional_drawdown(profits: list[float]) -> float:
     return drawdown
 
 
+def finite_positive(value: object, *, field: str) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise Blocked(f"{field} must be numeric") from exc
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise Blocked(f"{field} must be finite and positive")
+    return parsed
+
+
+def finite_nonnegative(value: object, *, field: str) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise Blocked(f"{field} must be numeric") from exc
+    if not math.isfinite(parsed) or parsed < 0:
+        raise Blocked(f"{field} must be finite and nonnegative")
+    return parsed
+
+
+def trade_accounting(
+    trade: dict[str, object],
+    *,
+    wallet: float,
+    fee: float,
+    slippage: float,
+    stake_limit: float,
+    leverage_limit: float,
+) -> dict[str, float | bool]:
+    amount = finite_positive(trade.get("amount"), field="trade amount")
+    open_rate = finite_positive(trade.get("open_rate"), field="trade open_rate")
+    close_rate = finite_positive(trade.get("close_rate"), field="trade close_rate")
+    stake_amount = finite_positive(trade.get("stake_amount"), field="trade stake_amount")
+    leverage = finite_positive(trade.get("leverage"), field="trade leverage")
+    if stake_amount > stake_limit * (1.0 + 1e-6):
+        raise Blocked("trade stake exceeds the digest-bound sizing contract")
+    if leverage > leverage_limit * (1.0 + 1e-9):
+        raise Blocked("trade leverage exceeds the digest-bound target")
+    entry_notional = amount * open_rate
+    declared_notional = stake_amount * leverage
+    if not math.isclose(
+        entry_notional,
+        declared_notional,
+        rel_tol=1e-6,
+        abs_tol=1e-6,
+    ):
+        raise Blocked("trade amount does not reconcile with stake and leverage")
+    for key in ("fee_open", "fee_close"):
+        observed_fee = finite_nonnegative(
+            trade.get(key), field=f"trade {key}"
+        )
+        if not math.isfinite(observed_fee) or not math.isclose(
+            observed_fee, fee, rel_tol=0.0, abs_tol=1e-12
+        ):
+            raise Blocked("trade fee does not match the frozen fee contract")
+    profit_abs = float(trade.get("profit_abs", math.nan))
+    funding_abs = float(trade.get("funding_fees", 0.0) or 0.0)
+    if not math.isfinite(profit_abs) or not math.isfinite(funding_abs):
+        raise Blocked("trade PnL fields must be finite")
+    turnover_abs = amount * (open_rate + close_rate)
+    modeled_fee_abs = fee * turnover_abs
+    modeled_slippage_abs = slippage * turnover_abs
+    if not isinstance(trade.get("is_short"), bool):
+        raise Blocked("trade direction must be an explicit boolean")
+    is_short = bool(trade["is_short"])
+    price_pnl_abs = amount * (
+        open_rate - close_rate if is_short else close_rate - open_rate
+    )
+    expected_profit_abs = price_pnl_abs - modeled_fee_abs + funding_abs
+    if not math.isclose(
+        profit_abs,
+        expected_profit_abs,
+        rel_tol=0.0,
+        abs_tol=max(RECONCILIATION_TOLERANCE * wallet, 1e-7),
+    ):
+        raise Blocked("trade profit_abs does not reconcile with price, fee, and funding")
+    return {
+        "is_short": is_short,
+        "profit_account": profit_abs / wallet,
+        "price_pnl_account": price_pnl_abs / wallet,
+        "modeled_fee_account": modeled_fee_abs / wallet,
+        "modeled_slippage_account": modeled_slippage_abs / wallet,
+        "turnover_account": turnover_abs / wallet,
+    }
+
+
 def direction_metrics(
-    trades: list[dict[str, object]], *, is_short: bool, fee: float, slippage: float
+    accounted_trades: list[dict[str, float | bool]], *, is_short: bool
 ) -> dict[str, object]:
-    profits = [
-        float(row.get("profit_ratio", 0.0))
-        for row in trades
-        if bool(row.get("is_short", False)) is is_short
-    ]
+    selected = [row for row in accounted_trades if bool(row["is_short"]) is is_short]
+    profits = [float(row["profit_account"]) for row in selected]
     trade_count = len(profits)
     fee_inclusive_return = sum(profits)
-    modeled_fee_cost = 2.0 * fee * trade_count
-    modeled_slippage_cost = 2.0 * slippage * trade_count
+    modeled_fee_cost = sum(float(row["modeled_fee_account"]) for row in selected)
+    modeled_slippage_cost = sum(
+        float(row["modeled_slippage_account"]) for row in selected
+    )
     positive = [value for value in profits if value > 0]
     negative = [value for value in profits if value < 0]
     values = {
@@ -509,6 +717,16 @@ def direction_metrics(
         "net_return_after_cost": fee_inclusive_return - modeled_slippage_cost,
         "win_count": len(positive),
         "loss_count": len(negative),
+        "win_rate": len(positive) / trade_count if trade_count else 0.0,
+        "average_profit_account": (
+            fee_inclusive_return / trade_count if trade_count else 0.0
+        ),
+        "median_profit_account": (
+            float(pd.Series(profits).median()) if trade_count else 0.0
+        ),
+        "turnover_account": sum(
+            float(row["turnover_account"]) for row in selected
+        ),
         "top_winning_trade_profit_share": (
             max(positive) / sum(positive)
             if positive and sum(positive) > 0
@@ -533,15 +751,72 @@ def metrics(
     sensitivity_fee: float,
     sensitivity_slippage: float,
     *,
+    wallet: float,
+    stake_limit: float,
+    leverage_limit: float,
+    sizing_digest: str,
     include_directional: bool = False,
 ) -> dict[str, object]:
+    wallet = finite_positive(wallet, field="wallet")
+    stake_limit = finite_positive(stake_limit, field="stake limit")
+    leverage_limit = finite_positive(leverage_limit, field="leverage limit")
+    fee = finite_nonnegative(fee, field="fee")
+    slippage = finite_nonnegative(slippage, field="slippage")
+    sensitivity_fee = finite_nonnegative(
+        sensitivity_fee, field="sensitivity fee"
+    )
+    sensitivity_slippage = finite_nonnegative(
+        sensitivity_slippage, field="sensitivity slippage"
+    )
+    if sensitivity_fee < fee or sensitivity_slippage < slippage:
+        raise Blocked("sensitivity costs must not be lower than qualification costs")
+    execution_evidence = result.get("canonical_execution_evidence")
+    if (
+        not isinstance(execution_evidence, dict)
+        or execution_evidence.get("protections_enabled") is not True
+        or not execution_evidence.get("command_digest")
+        or not execution_evidence.get("window_data_digest")
+    ):
+        raise Blocked("backtest protections and window evidence are required")
     trades = result.get("trades") if isinstance(result.get("trades"), list) else []
     typed_trades = [row for row in trades if isinstance(row, dict)]
-    profits = [float(row.get("profit_ratio", 0.0)) for row in typed_trades]
-    trade_count = int(result.get("total_trades", len(profits)))
-    raw = float(result.get("profit_total", float(result.get("profit_total_pct", 0.0)) / 100.0))
-    net = raw - 2.0 * slippage * trade_count
-    sensitivity = net - 2.0 * ((sensitivity_fee - fee) + (sensitivity_slippage - slippage)) * trade_count
+    trade_count = int(result.get("total_trades", len(typed_trades)))
+    if trade_count != len(typed_trades):
+        raise Blocked("trade count does not match exported trades")
+    starting_balance = finite_positive(
+        result.get("starting_balance"), field="backtest starting_balance"
+    )
+    if not math.isclose(starting_balance, wallet, rel_tol=0.0, abs_tol=1e-9):
+        raise Blocked("backtest wallet does not match the digest-bound sizing contract")
+    accounted = [
+        trade_accounting(
+            row,
+            wallet=wallet,
+            fee=fee,
+            slippage=slippage,
+            stake_limit=stake_limit,
+            leverage_limit=leverage_limit,
+        )
+        for row in typed_trades
+    ]
+    profits = [float(row["profit_account"]) for row in accounted]
+    raw = sum(profits)
+    engine_raw = float(
+        result.get("profit_total", float(result.get("profit_total_pct", 0.0)) / 100.0)
+    )
+    if not math.isclose(
+        raw, engine_raw, rel_tol=0.0, abs_tol=RECONCILIATION_TOLERANCE
+    ):
+        raise Blocked("profit_abs account return does not reconcile with profit_total")
+    turnover = sum(float(row["turnover_account"]) for row in accounted)
+    modeled_fee_cost = sum(float(row["modeled_fee_account"]) for row in accounted)
+    modeled_slippage_cost = sum(
+        float(row["modeled_slippage_account"]) for row in accounted
+    )
+    net = raw - modeled_slippage_cost
+    sensitivity = net - (
+        (sensitivity_fee - fee) + (sensitivity_slippage - slippage)
+    ) * turnover
     positive = [value for value in profits if value > 0]
     concentration = max(positive) / sum(positive) if positive and sum(positive) > 0 else 1.0
     mean = sum(profits) / len(profits) if profits else 0.0
@@ -549,6 +824,10 @@ def metrics(
     values = {
         "trade_count": trade_count,
         "raw_return": raw,
+        "fee_inclusive_return": raw,
+        "turnover_account": turnover,
+        "modeled_fee_cost": modeled_fee_cost,
+        "modeled_slippage_cost": modeled_slippage_cost,
         "net_return_after_cost": net,
         "sensitivity_net_after_cost": sensitivity,
         "maximum_drawdown": float(result.get("max_drawdown_account", result.get("max_drawdown", 0.0))),
@@ -556,16 +835,39 @@ def metrics(
         "return_stability": 1.0 / (1.0 + math.sqrt(variance)),
         "fee_rate": fee,
         "slippage_rate": slippage,
+        "wallet": wallet,
+        "stake_limit": stake_limit,
+        "leverage_limit": leverage_limit,
+        "sizing_digest": sizing_digest,
+        "execution_evidence": execution_evidence,
     }
-    if not all(math.isfinite(float(value)) for value in values.values()):
+    numeric_metric_keys = {
+        "trade_count",
+        "raw_return",
+        "fee_inclusive_return",
+        "turnover_account",
+        "modeled_fee_cost",
+        "modeled_slippage_cost",
+        "net_return_after_cost",
+        "sensitivity_net_after_cost",
+        "maximum_drawdown",
+        "top_trade_profit_share",
+        "return_stability",
+        "fee_rate",
+        "slippage_rate",
+        "wallet",
+        "stake_limit",
+        "leverage_limit",
+    }
+    if not all(math.isfinite(float(values[key])) for key in numeric_metric_keys):
         raise Blocked("non-finite metrics")
     if include_directional:
         directions = {
             "long": direction_metrics(
-                typed_trades, is_short=False, fee=fee, slippage=slippage
+                accounted, is_short=False
             ),
             "short": direction_metrics(
-                typed_trades, is_short=True, fee=fee, slippage=slippage
+                accounted, is_short=True
             ),
         }
         directional_net = sum(
@@ -573,6 +875,8 @@ def metrics(
         )
         values["direction_attribution"] = directions
         values["directional_net_reconciliation_error"] = abs(net - directional_net)
+        if values["directional_net_reconciliation_error"] > RECONCILIATION_TOLERANCE:
+            raise Blocked("directional account returns do not reconcile with total")
     return values
 
 
@@ -585,33 +889,61 @@ def evaluate(plan: dict[str, object], market: Path, metadata: Path) -> dict[str,
     Path("/work/user_data").mkdir(parents=True, exist_ok=True)
     Path("/work/strategies").mkdir(parents=True, exist_ok=True)
     Path("/work/results").mkdir(parents=True, exist_ok=True)
-    frame = prepare_data(market)
+    frame = load_market_frame(market)
     directionality = plan.get("directionality", {})
     bidirectional = (
         isinstance(directionality, dict)
         and directionality.get("can_short") is True
     )
-    position_sizing = plan.get("position_sizing", {}) if bidirectional else {}
+    position_sizing = plan.get("position_sizing")
     fixed_contract = plan.get("fixed_strategy_contract") if bidirectional else None
-    if bidirectional and (
-        not isinstance(position_sizing, dict)
-        or float(position_sizing.get("stake_amount_quote", 0)) <= 0
-        or float(position_sizing.get("dry_run_wallet_quote", 0)) <= 0
-        or int(position_sizing.get("maximum_open_trades", 0)) != 1
+    if not isinstance(position_sizing, dict):
+        raise Blocked("position sizing contract is invalid")
+    try:
+        declared_wallet = finite_positive(
+            position_sizing.get("dry_run_wallet_quote"),
+            field="position sizing wallet",
+        )
+        declared_stake = finite_positive(
+            position_sizing.get("stake_amount_quote"),
+            field="position sizing stake",
+        )
+        maximum_fraction = finite_positive(
+            position_sizing.get("maximum_nominal_wallet_fraction"),
+            field="position sizing maximum fraction",
+        )
+        maximum_open_trades = int(position_sizing.get("maximum_open_trades", 0))
+    except (TypeError, ValueError) as exc:
+        raise Blocked("position sizing contract is invalid") from exc
+    if (
+        maximum_open_trades != 1
         or position_sizing.get("position_adjustment") is not False
-        or float(position_sizing.get("stake_amount_quote", 0))
-        / float(position_sizing.get("dry_run_wallet_quote", 1))
-        > float(position_sizing.get("maximum_nominal_wallet_fraction", 0))
+        or declared_stake / declared_wallet > maximum_fraction
     ):
-        raise Blocked("bidirectional position sizing contract is invalid")
+        raise Blocked("position sizing contract is invalid")
     if bidirectional and not isinstance(fixed_contract, dict):
         raise Blocked("bidirectional fixed strategy contract is invalid")
+    target = plan.get("target")
+    if not isinstance(target, dict):
+        raise Blocked("target contract is invalid")
+    leverage_limit = finite_positive(target.get("leverage"), field="target leverage")
+    wallet = declared_wallet
+    stake_limit = declared_stake
+    sizing_contract = {
+        "dry_run_wallet_quote": wallet,
+        "stake_amount_quote": stake_limit,
+        "maximum_nominal_wallet_fraction": maximum_fraction,
+        "maximum_open_trades": maximum_open_trades,
+        "position_adjustment": position_sizing["position_adjustment"],
+        "leverage_limit": leverage_limit,
+    }
+    sizing_digest = canonical_digest(sizing_contract)
     config = {
         "dry_run": True,
-        "dry_run_wallet": float(position_sizing.get("dry_run_wallet_quote", 10000)),
+        "dry_run_wallet": wallet,
         "stake_currency": "USDT",
-        "stake_amount": float(position_sizing.get("stake_amount_quote", 100)),
-        "max_open_trades": int(position_sizing.get("maximum_open_trades", 1)),
+        "stake_amount": stake_limit,
+        "max_open_trades": int(position_sizing["maximum_open_trades"]),
         "timeframe": "15m",
         "trading_mode": "futures", "margin_mode": "isolated",
         "exchange": {"name": "okx", "pair_whitelist": ["BTC/USDT:USDT"], "enable_ws": False},
@@ -623,8 +955,27 @@ def evaluate(plan: dict[str, object], market: Path, metadata: Path) -> dict[str,
     if not isinstance(isolation, dict) or not isinstance(costs, dict):
         raise Blocked("plan costs/windows are invalid")
     windows = {key: (iso(isolation[key]["start_at"]), iso(isolation[key]["end_at"])) for key in ("train", "validation")}
-    if not (frame["date"].min().to_pydatetime() <= windows["train"][0] and frame["date"].max().to_pydatetime() >= windows["validation"][1]):
-        raise Blocked("market coverage is insufficient")
+    if windows["train"][1] != windows["validation"][0]:
+        raise Blocked("TRAIN and VALIDATION boundaries must be contiguous and non-overlapping")
+    expected_market_start = windows["train"][0] - pd.Timedelta(
+        seconds=(
+            int(isolation["warmup_closed_candles"])
+            + int(isolation["integrity_margin_closed_candles"])
+        )
+        * TIMEFRAME_SECONDS
+    )
+    expected_market_end = windows["validation"][1] - pd.Timedelta(
+        seconds=TIMEFRAME_SECONDS
+    )
+    if (
+        frame["date"].min().to_pydatetime() != expected_market_start
+        or frame["date"].max().to_pydatetime() != expected_market_end
+    ):
+        raise Blocked("market artifact must contain only the frozen warmup, TRAIN, and VALIDATION prefix")
+    window_data_roots = {
+        key: store_window_data(frame, start=start, end=end, key=key)
+        for key, (start, end) in windows.items()
+    }
     fee = float(costs["qualification_fee_rate"])
     slippage = float(costs["qualification_slippage_rate"])
     sensitivity_fee = float(costs["sensitivity_fee_rate"])
@@ -662,11 +1013,25 @@ def evaluate(plan: dict[str, object], market: Path, metadata: Path) -> dict[str,
         observed = {}
         for key, (start, end) in windows.items():
             observed[key] = metrics(
-                run_window(cls, source_path, key, start, end, metadata, fee),
+                run_window(
+                    cls,
+                    source_path,
+                    key,
+                    start,
+                    end,
+                    metadata,
+                    fee,
+                    data_root=window_data_roots[key],
+                    wallet=wallet,
+                ),
                 fee,
                 slippage,
                 sensitivity_fee,
                 sensitivity_slippage,
+                wallet=wallet,
+                stake_limit=stake_limit,
+                leverage_limit=leverage_limit,
+                sizing_digest=sizing_digest,
                 include_directional=bidirectional,
             )
         train = observed["train"]
@@ -727,9 +1092,10 @@ def evaluate(plan: dict[str, object], market: Path, metadata: Path) -> dict[str,
         penalties = plan["objective"]["penalties"]
         turnover_penalty = (
             float(penalties["turnover"])
-            * 2.0
-            * (fee + slippage)
-            * int(validation["trade_count"])
+            * (
+                float(validation["modeled_fee_cost"])
+                + float(validation["modeled_slippage_cost"])
+            )
         )
         low_trade_penalty = (
             float(penalties["low_trade_count"])
@@ -766,7 +1132,33 @@ def evaluate(plan: dict[str, object], market: Path, metadata: Path) -> dict[str,
         if len(finalists) == int(plan["execution"]["finalist_limit"]):
             break
     evidence_rows = [{"trial_number": row["trial_number"], "parameters_json": row["parameters_json"], "metrics_json": row["metrics_json"]} for row in rows]
-    return {"contract": CONTRACT, "plan_digest": canonical_digest(plan), "market_digest": sha256(market.read_bytes()).hexdigest(), "trial_count": len(rows), "selected_trial_numbers": finalists, "trial_evidence_digest": canonical_digest(evidence_rows), "trials": rows, "execution_side_effects": 0, "credential_access": "NONE", "trading_capability": "TRADING_DISABLED"}
+    return {
+        "contract": CONTRACT,
+        "plan_digest": canonical_digest(plan),
+        "market_digest": sha256(market.read_bytes()).hexdigest(),
+        "accounting_contract": {
+            "contract": "canonical-v13-account-notional-cost-v1",
+            "fee_inclusive_source": "sum(profit_abs)/wallet",
+            "fee_already_included": True,
+            "slippage_source": "slippage_rate*sum(amount*(open_rate+close_rate))/wallet",
+            "sizing_contract": sizing_contract,
+            "sizing_digest": sizing_digest,
+        },
+        "window_contract": {
+            "end_exclusive": True,
+            "timeframe_seconds": TIMEFRAME_SECONDS,
+            "window_data_digests": {
+                key: directory_digest(root) for key, root in window_data_roots.items()
+            },
+        },
+        "trial_count": len(rows),
+        "selected_trial_numbers": finalists,
+        "trial_evidence_digest": canonical_digest(evidence_rows),
+        "trials": rows,
+        "execution_side_effects": 0,
+        "credential_access": "NONE",
+        "trading_capability": "TRADING_DISABLED",
+    }
 
 
 def main() -> int:

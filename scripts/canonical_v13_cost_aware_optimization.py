@@ -70,7 +70,7 @@ def objective(
     market_artifact_digest: str,
     executor_image_digest: str,
 ) -> dict[str, object]:
-    return {
+    value = {
         "contract": "canonical-v13-cost-aware-oos-optimization-objective-v1",
         "plan_digest": canonical_digest(plan),
         "market_snapshot_id": market_snapshot_id,
@@ -87,6 +87,17 @@ def objective(
         "trading_capability": "TRADING_DISABLED",
         "execution_side_effects": 0,
     }
+    for key in (
+        "target",
+        "directionality",
+        "position_sizing",
+        "fixed_strategy_contract",
+        "safety",
+        "supersession",
+    ):
+        if key in plan:
+            value[key] = plan[key]
+    return value
 
 
 def create(args: argparse.Namespace) -> dict[str, object]:

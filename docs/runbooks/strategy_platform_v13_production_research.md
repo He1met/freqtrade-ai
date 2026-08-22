@@ -257,6 +257,23 @@ host environment、input 内容或底层异常文本。
 `execution_authorized=false`。新 version 必须从 static、lookahead、exact plan、one-shot backtest、
 score、qualification 全链重新执行；不得复制 baseline score/qualification 或直接 promotion。
 
+成本感知 OOS worker 的收益与成本统一采用账户量纲。Freqtrade 导出的 `profit_abs` 已包含进出场
+fee，因此 `fee_inclusive_return = sum(profit_abs) / dry_run_wallet`，额外模型化的滑点为
+`slippage_rate * sum(amount * (open_rate + close_rate)) / dry_run_wallet`；不得再次扣 fee，也不得以
+`profit_ratio` 或固定的每笔成本替代账户级对账。wallet、stake、leverage 与 nominal fraction 必须由
+plan 显式声明并进入 digest；任一缺失、非正或与逐笔导出不一致都 fail closed。long、short 与 total
+使用同一量纲并在严格容差内对账。
+
+TRAIN 与 VALIDATION 各自生成 end-exclusive 的隔离 data root；边界后一根 candle 不能参与策略计算
+或 force-exit。输入只允许 frozen warmup + TRAIN + VALIDATION prefix，HOLDOUT 不得进入 optimizer
+可见文件。15m public candle 必须严格按 UTC 900 秒边界连续，且通过 duplicate/order、finite、正价格、
+非负 volume 与 OHLC 关系检查；禁止插值或静默排序修补。每个 Freqtrade backtest 命令必须显式包含
+`--enable-protections`，并把 command digest、window-data digest 和最后可见 candle 写入 evidence。
+
+若修复 optimizer defect 后重放旧研究假设，必须创建新的 plan/run；`supersession` 同时引用旧 plan
+digest、旧 optimization run ID 与 accepted defect-fix release digest。旧 run、trial 与 receipt 保持
+immutable terminal evidence，不允许覆盖或合并 lineage。
+
 ## 7. 首回测前的独立门
 
 以下全部有 exact evidence 才能执行第一个 production attempt：

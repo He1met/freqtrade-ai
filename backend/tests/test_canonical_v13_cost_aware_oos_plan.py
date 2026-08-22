@@ -71,6 +71,13 @@ def test_worker_is_syntactically_valid_and_has_no_clock_entry_escape() -> None:
     assert "min(2.0, max_leverage)" in source
     assert "can_short = False" in source
     assert "position_adjustment_enable = False" in source
+    assert '"--enable-protections"' in source
+    assert "2.0 * slippage * trade_count" not in source
+    assert 'float(row.get("profit_ratio", 0.0))' not in source
+    assert "sum(profits) / wallet" not in source
+    assert 'float(row["profit_account"])' in source
+    assert "market must be strictly continuous at 900 seconds" in source
+    assert "market OHLC relationship is invalid" in source
 
 
 def test_oos_window_rollout_plan_is_three_way_and_holdout_only_required() -> None:

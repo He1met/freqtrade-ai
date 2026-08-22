@@ -116,6 +116,8 @@ def test_worker_has_symmetric_closed_candle_short_and_attribution_contracts() ->
         '"min(1.0, max_leverage)"',
         "max_entry_position_adjustment = 0",
         'exit_position_semantics = "POSITION_CLOSING_REDUCE_ONLY"',
+        '"--enable-protections"',
+        'float(row["profit_account"])',
         '"turnover_penalty"',
         '"low_trade_count_penalty"',
     ):
@@ -131,3 +133,5 @@ def test_worker_has_symmetric_closed_candle_short_and_attribution_contracts() ->
     assert all(token not in source for token in banned)
     assert "position_adjustment_enable = False" in source
     assert 'Path("/sys/class/net")' in source
+    assert "2.0 * slippage * trade_count" not in source
+    assert 'float(row.get("profit_ratio", 0.0))' not in source
