@@ -392,8 +392,11 @@ class DatabaseSignalReceiptWriter:
         self._factory = factory
         self._verifier = verifier
 
+    def verify(self, receipt: RuntimeWorkerReceipt) -> bool:
+        return verify_runtime_worker_receipt(receipt, verifier=self._verifier)
+
     def persist(self, receipt: RuntimeWorkerReceipt) -> None:
-        if not verify_runtime_worker_receipt(receipt, verifier=self._verifier):
+        if not self.verify(receipt):
             raise CanonicalPhase9CompositionBlocked(
                 "BLOCKED_PHASE9_SIGNAL_RECEIPT", "runtime receipt verification failed"
             )
@@ -422,6 +425,11 @@ class PersistingRuntimeWorker:
         )
         self._writer.persist(receipt)
         return receipt
+
+    def verify(self, receipt: RuntimeWorkerReceipt) -> bool:
+        """Expose the same release-bound verifier used before persistence."""
+
+        return self._writer.verify(receipt)
 
 
 class ProductionRuntimeWorkerFactory:
