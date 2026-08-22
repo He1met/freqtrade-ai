@@ -42,6 +42,10 @@ from app.canonical_v13.gate_receipt_upgrade import (  # noqa: E402
     CanonicalGateReceiptUpgradeBlocked,
     verify_gate_receipt_upgrade,
 )
+from app.canonical_v13.deployment_rollover_upgrade import (  # noqa: E402
+    CanonicalDeploymentRolloverUpgradeBlocked,
+    verify_deployment_rollover_upgrade,
+)
 from app.canonical_v13.manifest import (  # noqa: E402
     CANONICAL_BUSINESS_SCHEMA,
     CANONICAL_MANIFEST_DIGEST,
@@ -72,10 +76,9 @@ SAFE_SENSITIVE_METADATA_COLUMNS: Final[tuple[str, ...]] = (
     "research_gate_attempts.lease_token_digest",
     "runtime_instances.credential_reference",
 )
-PUBLIC_MARKET_RUNTIME_CREDENTIAL_REFERENCE: Final = (
-    "none:public-okx-market-only"
-)
+PUBLIC_MARKET_RUNTIME_CREDENTIAL_REFERENCE: Final = "none:public-okx-market-only"
 EXPECTED_LIFECYCLE_TRIGGERS: Final[tuple[tuple[str, str, str], ...]] = (
+    ("deployments", "deployments_disable_evidence_guard", "O"),
     ("research_gate_attempts", "research_gate_attempts_lifecycle", "O"),
     ("research_gate_receipts", "research_gate_receipts_append_only", "O"),
     (
@@ -179,9 +182,7 @@ def _require_exact_manifest() -> None:
         )
 
 
-def _database_url(
-    raw: str, *, expected_database: str, restore_target: bool
-) -> URL:
+def _database_url(raw: str, *, expected_database: str, restore_target: bool) -> URL:
     try:
         parsed = make_url(raw)
     except Exception as exc:
@@ -282,8 +283,7 @@ def dump_command(
         f"--file={output_path}",
     ]
     command.extend(
-        f"--table={CANONICAL_BUSINESS_SCHEMA}.{name}"
-        for name in CANONICAL_TABLE_NAMES
+        f"--table={CANONICAL_BUSINESS_SCHEMA}.{name}" for name in CANONICAL_TABLE_NAMES
     )
     command.append(_libpq_url(database_url))
     return tuple(command)
@@ -354,9 +354,7 @@ def build_manifest(
         "secret_exclusion_policy": {
             "included_schemas": [CANONICAL_BUSINESS_SCHEMA],
             "excluded_external_tables": list(KNOWN_EXTERNAL_EXCLUDED_TABLES),
-            "safe_digest_or_reference_columns": list(
-                SAFE_SENSITIVE_METADATA_COLUMNS
-            ),
+            "safe_digest_or_reference_columns": list(SAFE_SENSITIVE_METADATA_COLUMNS),
             "credential_values_recorded": False,
             "keychain_accessed": False,
             "database_password_in_process_arguments": False,
@@ -434,9 +432,10 @@ def validate_manifest(
             "BLOCKED_CANONICAL_BACKUP_ROW_COUNTS", "manifest row counts are invalid"
         )
     archive_digest = payload.get("archive_sha256")
-    if not isinstance(archive_digest, str) or re.fullmatch(
-        r"[0-9a-f]{64}", archive_digest
-    ) is None:
+    if (
+        not isinstance(archive_digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", archive_digest) is None
+    ):
         raise CanonicalBackupBlocked(
             "BLOCKED_CANONICAL_BACKUP_DIGEST", "archive digest is invalid"
         )
@@ -541,6 +540,18 @@ def _verify_restore_trigger_boundary(
             "BLOCKED_CANONICAL_RESTORE_RUNTIME_IMAGE_TRIGGER_CONTRACT",
             "runtime image authority verifier did not return ACCEPTED",
         )
+    try:
+        rollover = verify_deployment_rollover_upgrade(connection)
+    except CanonicalDeploymentRolloverUpgradeBlocked as exc:
+        raise CanonicalBackupBlocked(
+            "BLOCKED_CANONICAL_RESTORE_DEPLOYMENT_ROLLOVER_TRIGGER_CONTRACT",
+            "deployment rollover trigger contract is not accepted",
+        ) from exc
+    if rollover.status != "ACCEPTED":
+        raise CanonicalBackupBlocked(
+            "BLOCKED_CANONICAL_RESTORE_DEPLOYMENT_ROLLOVER_TRIGGER_CONTRACT",
+            "deployment rollover verifier did not return ACCEPTED",
+        )
 
 
 def inspect_database(
@@ -575,7 +586,7 @@ def inspect_database(
                     name: int(
                         connection.execute(
                             text(
-                                'SELECT count(*) FROM '
+                                "SELECT count(*) FROM "
                                 f'"{CANONICAL_BUSINESS_SCHEMA}"."{name}"'
                             )
                         ).scalar_one()
@@ -617,9 +628,7 @@ def inspect_database(
 
 
 def _default_runner(command: Sequence[str]) -> subprocess.CompletedProcess[object]:
-    return subprocess.run(
-        list(command), check=False, capture_output=True, text=False
-    )
+    return subprocess.run(list(command), check=False, capture_output=True, text=False)
 
 
 def _binary(name: str, explicit: str | None) -> str:
@@ -690,9 +699,7 @@ def create_backup(
             row_counts=counts,
             created_at=datetime.now(timezone.utc),
         )
-        descriptor = os.open(
-            manifest_tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
-        )
+        descriptor = os.open(manifest_tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as target:
             json.dump(manifest, target, ensure_ascii=True, indent=2, sort_keys=True)
             target.write("\n")
@@ -765,9 +772,7 @@ def restore_backup(
         raise CanonicalBackupBlocked(
             "BLOCKED_CANONICAL_RESTORE", "pg_restore failed atomically"
         )
-    observed = database_inspector(
-        parsed, require_zero=False, require_superuser=True
-    )
+    observed = database_inspector(parsed, require_zero=False, require_superuser=True)
     expected_counts = manifest["row_counts"]
     if observed != expected_counts:
         raise CanonicalBackupBlocked(

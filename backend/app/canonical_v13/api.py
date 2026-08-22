@@ -76,6 +76,8 @@ from app.canonical_v13.dto import (
     Phase9CanaryRiskPolicyTerminationCommandDTO,
     Phase9CanaryRiskPolicyTerminationReceiptDTO,
     Phase9DeploymentCommandDTO,
+    Phase9DeploymentDisableCommandDTO,
+    Phase9DeploymentDisableReceiptDTO,
     Phase9DeploymentReceiptDTO,
     Phase9IntentCommandDTO,
     Phase9IntentReceiptDTO,
@@ -129,6 +131,7 @@ from app.canonical_v13.deployment_approval import (
 from app.canonical_v13.deployment_control import (
     CanonicalDeploymentBlocked,
     create_demo_deployment,
+    disable_demo_deployment,
     deployment_capability_digest,
 )
 from app.canonical_v13.execution_common import CanonicalExecutionChainBlocked
@@ -2413,6 +2416,33 @@ def create_canonical_v13_app(
                     create_demo_deployment(
                         connection,
                         deployment_approval_id=command.deployment_approval_id,
+                    )
+                )
+            )
+
+        return run_phase9(
+            deployment_connection_factory, "canonical_deployment_writer", execute
+        )
+
+    @app.post(
+        f"{API_PREFIX}/phase9/deployments/{{deployment_id}}/disable",
+        response_model=Phase9DeploymentDisableReceiptDTO,
+    )
+    def phase9_disable_deployment(
+        deployment_id: UUID,
+        command: Phase9DeploymentDisableCommandDTO,
+    ) -> Phase9DeploymentDisableReceiptDTO:
+        def execute(connection: Connection) -> Phase9DeploymentDisableReceiptDTO:
+            return Phase9DeploymentDisableReceiptDTO(
+                **asdict(
+                    disable_demo_deployment(
+                        connection,
+                        deployment_id=deployment_id,
+                        superseded_by_qualification_decision_id=(
+                            command.superseded_by_qualification_decision_id
+                        ),
+                        actor_identity=command.actor_identity,
+                        reason=command.reason,
                     )
                 )
             )

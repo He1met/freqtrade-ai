@@ -43,6 +43,12 @@ from app.canonical_v13.gate_receipt_upgrade import (
     apply_gate_receipt_upgrade,
     verify_gate_receipt_upgrade,
 )
+from app.canonical_v13.deployment_rollover_upgrade import (
+    CanonicalDeploymentRolloverUpgradeBlocked,
+    apply_deployment_rollover_upgrade,
+    rollback_deployment_rollover_upgrade,
+    verify_deployment_rollover_upgrade,
+)
 from app.canonical_v13.phase9_readiness import (
     PHASE9_ACCEPTANCE_STAGES,
     CanonicalPhase9ReadinessBlocked,
@@ -558,6 +564,33 @@ def runtime_reader_acl(*, operation: str) -> dict[str, object]:
     return payload
 
 
+def deployment_rollover_schema(*, operation: str) -> dict[str, object]:
+    mapping = local_role_mapping()
+    engine = create_engine(_database_url(), pool_pre_ping=True)
+    try:
+        if operation == "verify":
+            with engine.connect() as connection:
+                with connection.begin():
+                    connection.exec_driver_sql("SET TRANSACTION READ ONLY")
+                    result = verify_deployment_rollover_upgrade(connection)
+        else:
+            actor_identity = _upgrade_actor()
+            with engine.begin() as connection:
+                result = (
+                    apply_deployment_rollover_upgrade(connection, role_mapping=mapping)
+                    if operation == "apply"
+                    else rollback_deployment_rollover_upgrade(
+                        connection, role_mapping=mapping
+                    )
+                )
+    finally:
+        engine.dispose()
+    payload = asdict(result)
+    if operation != "verify":
+        payload["actor_identity"] = actor_identity
+    return payload
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -584,6 +617,9 @@ def main(argv: list[str] | None = None) -> int:
             "runtime-reader-acl-verify",
             "runtime-reader-acl-apply",
             "runtime-reader-acl-rollback",
+            "deployment-rollover-verify",
+            "deployment-rollover-apply",
+            "deployment-rollover-rollback",
         ),
     )
     parser.add_argument(
@@ -656,6 +692,10 @@ def main(argv: list[str] | None = None) -> int:
             payload = runtime_reader_acl(
                 operation=args.command.removeprefix("runtime-reader-acl-")
             )
+        elif args.command.startswith("deployment-rollover-"):
+            payload = deployment_rollover_schema(
+                operation=args.command.removeprefix("deployment-rollover-")
+            )
         else:
             payload = authority_apply(rollback=args.command == "authority-rollback")
     except BootstrapBlocked as exc:
@@ -669,6 +709,8 @@ def main(argv: list[str] | None = None) -> int:
     except CanonicalPhase9SchemaUpgradeBlocked as exc:
         payload = {"status": "BLOCKED", "reason": str(exc)}
     except CanonicalRuntimeReaderAclUpgradeBlocked as exc:
+        payload = {"status": "BLOCKED", "reason": str(exc)}
+    except CanonicalDeploymentRolloverUpgradeBlocked as exc:
         payload = {"status": "BLOCKED", "reason": str(exc)}
     except (SQLAlchemyError, ValueError):
         payload = {"status": "BLOCKED", "reason": "bootstrap verification failed"}

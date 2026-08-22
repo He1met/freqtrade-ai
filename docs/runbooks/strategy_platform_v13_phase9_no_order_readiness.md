@@ -43,10 +43,10 @@ worktree 启动服务。然后用 API、UI、只读数据库事务核对 `HEALTH
 
 ```bash
 PHASE9_IDS=(
-  --qualification-decision-id a47ee71b-b757-4512-9e88-7522098b7e9d
-  --strategy-version-id 67169d28-ac80-432e-acd5-ffd2202b6cf7
-  --configuration-bundle-id c837818a-af53-57c0-b5d0-22a7cafacf1f
-  --market-snapshot-id be151746-ca10-4f01-962e-739552ee772f
+  --qualification-decision-id ee55ba5c-1f9a-4647-8425-35ba58079048
+  --strategy-version-id 11db1710-ddba-4d04-8f7a-b2214191366f
+  --configuration-bundle-id b56c2263-ad33-5565-8875-7914a0e4b455
+  --market-snapshot-id 09f630f9-9c6c-4375-9e7e-4a665e4cbc60
 )
 backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py verify-research-provisioned
 backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py phase9-readiness \
@@ -55,7 +55,9 @@ backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py phase9-schem
 ```
 
 `QUALIFICATION_HANDOFF` 只接受上表 exact IDs/digests；仓库中存在其他 QUALIFIED 行不会被误选，
-但任何 handoff drift、越界 ACTIVE deployment/runtime 或 execution side effect 均阻塞。
+但任何 handoff drift、`PENDING`/`ACTIVE` deployment 或 execution side effect 均阻塞。历史
+approval/runtime receipt 与带完整 disable receipt 的 `DISABLED` deployment 保留且不阻塞新的 exact
+handoff；不得删除历史行来制造全零。
 
 ## 2. Backup、migration、ACL 与 restore
 
@@ -80,12 +82,19 @@ Phase 9 表为空；upgrade actor、DDL、ACL 和 manifest 以 immutable audit r
 ```bash
 export FREQTRADE_AI_CANONICAL_V13_UPGRADE_ACTOR='operator:<explicit-identity>'
 backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py phase9-schema-apply
+backend/.venv/bin/python scripts/canonical_v13_runtime_image.py schema-apply
 backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py runtime-reader-acl-apply
 backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py runtime-reader-acl-verify
+backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py deployment-rollover-apply
+backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py deployment-rollover-verify
 python scripts/canonical_v13_api_service.py provision-phase9
 python scripts/canonical_v13_api_service.py provision-runtime-reader
 backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py verify-phase9-provisioned
 ```
+
+升级顺序固定为 Phase 9 schema → runtime image → runtime-reader ACL → deployment rollover；rollback
+必须严格反向执行。后层尚存在时，前层 rollback 必须返回明确 `BLOCKED_*_ROLLBACK_REQUIRED`，不得只改
+manifest digest 留下 partial columns、trigger 或 ACL。
 
 Phase 9 的 8 个 writer LOGIN（approval/deployment/signal/risk/order/fill/ledger/reconciliation）必须
 distinct、同一 canonical database、只继承一个 capability；另有 1 个独立 runtime reader LOGIN。
@@ -139,15 +148,21 @@ python scripts/canonical_v13_api_service.py cleanup-phase9-provisioning
 
 ## 4. A — NO_ORDER_SOAK
 
-0. 由 provisioner 执行 `scripts/canonical_v13_runtime_image.py schema-apply`，再从 clean exact
+0. 由 provisioner 复核 `scripts/canonical_v13_runtime_image.py schema-verify`，再从 clean exact
    accepted release 运行 `build`。构建必须使用 pinned base digest、`--pull=never --network=none`，并
    记录 immutable reference、source-tree/recipe/SBOM/config/manifest digest。人工核对后仅以
    `accept --immutable-reference sha256:<digest> --actor <human-operator>` 登记；mutable tag、research
    executor、source/release/platform/entrypoint/security/provenance 漂移均为 `BLOCKED`。`show
    --acceptance-id <uuid>` 返回的 receipt 是 runtime plan 唯一 image authority，裸 digest 不可替代。
 1. 由明确的人类 actor 为 exact qualification 创建 approval；重放必须返回同一 digest。
-2. 以 approval 创建 Demo-only deployment；此时仍 `PENDING`。
-3. 准备 runtime 的 secret-free plist：
+2. 若存在旧 `ACTIVE` deployment，先证明其 runtime 已 `STOPPED` 且全局 ACTIVE order-writer lease 为 0，
+   再由 `canonical_deployment_writer` 调用
+   `POST /api/canonical-v13/phase9/deployments/{old_id}/disable`，命令只含新 exact
+   `superseded_by_qualification_decision_id`、人工 actor 与 reason。该事务必须原子写入 `DISABLED`、
+   target qualification、request/receipt digest 与时间；相同命令重放 `repeat_noop=true`，任何字段漂移、
+   非 ACTIVE source、未停止 runtime 或 active writer lease 均 fail closed。禁止直接 SQL 改状态。
+3. 以新 approval 创建 Demo-only deployment；此时仍 `PENDING`，全局最多一个 nonterminal deployment。
+4. 准备 runtime 的 secret-free plist：
 
    ```bash
    python scripts/canonical_v13_phase9_service.py prepare \
@@ -158,12 +173,12 @@ python scripts/canonical_v13_api_service.py cleanup-phase9-provisioning
      --runtime-image-acceptance-id <accepted-runtime-image-uuid>
    ```
 
-4. 人工比对返回的 plan digest 后执行 `confirm --plan-digest <exact>`。只有 launchd loaded、fresh
+5. 人工比对返回的 plan digest 后执行 `confirm --plan-digest <exact>`。只有 launchd loaded、fresh
    lease、holder PID alive 三者同时成立才可将 supervisor observation 写入 canonical DB，并把
    deployment 转为 `ACTIVE`。
-5. 运行 no-order soak；runtime 无 order capability，signal/intent/risk/order/fill/ledger/reconciliation
+6. 运行 no-order soak；runtime 无 order capability，signal/intent/risk/order/fill/ledger/reconciliation
    全部保持 0。执行 restart/recover，证明单 runtime、generation fencing、无 expired orphan。
-6. `phase9-readiness --phase9-stage NO_ORDER_SOAK` 必须 `READY`。
+7. `phase9-readiness --phase9-stage NO_ORDER_SOAK` 必须 `READY`。
 
 LaunchAgent plist 不含 DSN 或交易凭据。runtime 与 API/control/research/order writer label 不得复用。
 

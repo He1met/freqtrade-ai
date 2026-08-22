@@ -109,7 +109,18 @@ _EXECUTION_TABLES = {
 EXECUTION_DOMAIN_TABLE_NAMES: Final[tuple[str, ...]] = tuple(_EXECUTION_TABLES)
 
 _ZERO_REQUIRED_BY_STAGE = {
-    "QUALIFICATION_HANDOFF": frozenset(EXECUTION_DOMAIN_TABLE_NAMES),
+    # Approval/deployment/runtime lifecycle evidence is append-preserved across
+    # qualified lineage rollovers.  A handoff instead proves there is no
+    # nonterminal deployment below, while all order-domain evidence stays zero.
+    "QUALIFICATION_HANDOFF": frozenset(
+        set(EXECUTION_DOMAIN_TABLE_NAMES)
+        - {
+            "deployment_approvals",
+            "deployments",
+            "runtime_instances",
+            "runtime_receipts",
+        }
+    ),
     "NO_ORDER_SOAK": frozenset(
         {
             "execution_risk_reservations",
@@ -275,8 +286,7 @@ def _dispatch_claim_is_exact(
         observed_at != max(value[0] for value in resource_times.values())
         or expires_at > min(value[1] for value in resource_times.values())
         or any(
-            not (start <= claimed_at < end)
-            for start, end in resource_times.values()
+            not (start <= claimed_at < end) for start, end in resource_times.values()
         )
         or not (observed_at <= claimed_at < expires_at)
     ):
@@ -393,12 +403,12 @@ def _dispatch_claim_is_exact(
         "pending_orders_observed_at": resource_times["pending_orders"][0].isoformat(),
         "pending_orders_expires_at": resource_times["pending_orders"][1].isoformat(),
         "maximum_order_quantity_digest": claim["maximum_order_quantity_digest"],
-        "maximum_order_quantity_observed_at": resource_times[
-            "maximum_order_quantity"
-        ][0].isoformat(),
-        "maximum_order_quantity_expires_at": resource_times[
-            "maximum_order_quantity"
-        ][1].isoformat(),
+        "maximum_order_quantity_observed_at": resource_times["maximum_order_quantity"][
+            0
+        ].isoformat(),
+        "maximum_order_quantity_expires_at": resource_times["maximum_order_quantity"][
+            1
+        ].isoformat(),
         "leverage_digest": claim["guard_leverage_digest"],
         "leverage_observed_at": resource_times["leverage"][0].isoformat(),
         "leverage_expires_at": resource_times["leverage"][1].isoformat(),
@@ -687,11 +697,15 @@ def _inspect_lineage(
     )
     counts["risk_decisions"] = len(risks)
     if stage == "SIGNAL_RISK_SHADOW":
-        target = connection.execute(
-            select(RESEARCH_TARGETS_TABLE).where(
-                RESEARCH_TARGETS_TABLE.c.id == handoff.research_target_id
+        target = (
+            connection.execute(
+                select(RESEARCH_TARGETS_TABLE).where(
+                    RESEARCH_TARGETS_TABLE.c.id == handoff.research_target_id
+                )
             )
-        ).mappings().one_or_none()
+            .mappings()
+            .one_or_none()
+        )
         intent_by_id = {row["id"]: row for row in intents}
         signal_by_id = {row["id"]: row for row in signals}
         exact_shadow = []
@@ -730,8 +744,7 @@ def _inspect_lineage(
                 target is not None
                 and signal is not None
                 and _digest(dict(signal["signal_json"])) == signal["signal_digest"]
-                and signal["signal_json"].get("evidence_class")
-                == "PRODUCTION_OKX_DEMO"
+                and signal["signal_json"].get("evidence_class") == "PRODUCTION_OKX_DEMO"
                 and signal["signal_json"].get("natural_signal") is True
                 and signal["signal_json"].get("allow_real_funds") is False
                 and _digest(dict(intent["intent_json"])) == intent["intent_digest"]
@@ -856,8 +869,7 @@ def _inspect_lineage(
                     and probe["execution_attestation_id"]
                     == source["execution_attestation_id"]
                     and probe["instrument"] == source["instrument"]
-                    and probe["instrument_digest"]
-                    == source["metadata_receipt_digest"]
+                    and probe["instrument_digest"] == source["metadata_receipt_digest"]
                     and probe["mark_price_digest"]
                     == source["mark_price_receipt_digest"]
                     and _persisted_decimal_equal(
@@ -868,8 +880,7 @@ def _inspect_lineage(
                     and _persisted_decimal_equal(
                         connection, probe["contract_value"], source["contract_value"]
                     )
-                    and probe["contract_value_ccy"]
-                    == source["contract_value_ccy"]
+                    and probe["contract_value_ccy"] == source["contract_value_ccy"]
                     and _persisted_decimal_equal(
                         connection, probe["mark_price"], source["mark_price"]
                     )
@@ -932,9 +943,7 @@ def _inspect_lineage(
             "contract_value_ccy": source["contract_value_ccy"],
             "mark_price": _decimal_text(probe["mark_price"]),
             "limit_price": _decimal_text(probe["limit_price"]),
-            "maximum_buy_contracts": _decimal_text(
-                probe["maximum_buy_contracts"]
-            ),
+            "maximum_buy_contracts": _decimal_text(probe["maximum_buy_contracts"]),
             "max_notional": _decimal_text(
                 Decimal(probe["minimum_size"])
                 * Decimal(probe["contract_value"])
@@ -1011,8 +1020,7 @@ def _inspect_lineage(
             and request_is_exact
             and policy_is_exact
             and receipt_is_exact
-            and source["qualification_decision_id"]
-            == handoff.qualification_decision_id
+            and source["qualification_decision_id"] == handoff.qualification_decision_id
             and source["deployment_approval_id"] == approval["id"]
             and source["strategy_version_id"] == handoff.strategy_version_id
             and source["research_target_id"] == handoff.research_target_id
@@ -1031,8 +1039,7 @@ def _inspect_lineage(
                 or (stage == "RECOVERY_SOAK" and source["status"] == "TERMINATED")
             )
             and (
-                source["terminated_at"] is None
-                and source["termination_digest"] is None
+                source["terminated_at"] is None and source["termination_digest"] is None
                 if source["status"] == "ACTIVE"
                 else source["terminated_at"] is not None
                 and source["termination_digest"] is not None
@@ -1250,8 +1257,7 @@ def _inspect_lineage(
     )
     exchange_body = (
         order_intent["intent_json"].get("exchange_body")
-        if order_intent is not None
-        and isinstance(order_intent["intent_json"], Mapping)
+        if order_intent is not None and isinstance(order_intent["intent_json"], Mapping)
         else None
     )
     if not isinstance(exchange_body, Mapping):
@@ -1477,9 +1483,7 @@ def _inspect_lineage(
             matching_ledger = [
                 row for row in exact_ledgers if row["fill_id"] == fill["id"]
             ]
-            matching_item = [
-                row for row in exact_items if row["fill_id"] == fill["id"]
-            ]
+            matching_item = [row for row in exact_items if row["fill_id"] == fill["id"]]
             if len(matching_ledger) != 1 or len(matching_item) != 1:
                 continue
             ledger = matching_ledger[0]
@@ -1528,10 +1532,9 @@ def _inspect_lineage(
                 "actor_identity": policy["actor_identity"],
                 "terminated_at": _persisted_utc(policy["terminated_at"]).isoformat(),
             }
-            terminal_is_exact = (
-                policy["termination_digest"] == _digest(terminal_payload)
-                and all(row["completed_at"] is not None for row in exact_runs)
-            )
+            terminal_is_exact = policy["termination_digest"] == _digest(
+                terminal_payload
+            ) and all(row["completed_at"] is not None for row in exact_runs)
         if not terminal_is_exact:
             reasons.append("EXACT_CANARY_POLICY_TERMINATION_V2_UNPROVEN")
     return counts
@@ -1618,8 +1621,7 @@ def _recovery_acceptance_is_exact(
         and evidence.get("policy_termination_receipt_digest")
         == policy["termination_digest"]
         and exact_order is not None
-        and evidence.get("order_replay_receipt_digest")
-        == exact_order["receipt_digest"]
+        and evidence.get("order_replay_receipt_digest") == exact_order["receipt_digest"]
         and evidence.get("observability_receipt_digest") == latest_runtime_receipt
         and restart.get("service_key") == "long_lived_runtime"
         and restart.get("action") == "RESTART"
@@ -1721,6 +1723,16 @@ def inspect_phase9_readiness(
                 verified_handoff = persisted
 
     lineage_counts = {name: 0 for name in EXECUTION_DOMAIN_TABLE_NAMES}
+    if stage == "QUALIFICATION_HANDOFF":
+        nonterminal_deployments = int(
+            effective.execute(
+                select(func.count())
+                .select_from(DEPLOYMENTS_TABLE)
+                .where(DEPLOYMENTS_TABLE.c.status.in_(("PENDING", "ACTIVE")))
+            ).scalar_one()
+        )
+        if nonterminal_deployments:
+            reasons.append(f"NONTERMINAL_DEPLOYMENT_PRESENT={nonterminal_deployments}")
     if verified_handoff is not None and stage != "QUALIFICATION_HANDOFF":
         lineage_counts = _inspect_lineage(
             effective,

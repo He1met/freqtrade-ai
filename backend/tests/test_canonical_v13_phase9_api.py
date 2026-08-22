@@ -3,19 +3,25 @@ from __future__ import annotations
 from app.canonical_v13.api import API_PREFIX
 from app.canonical_v13.manifest import CANONICAL_BUSINESS_SCHEMA
 from app.canonical_v13.models import (
+    DEPLOYMENTS_TABLE,
     EXECUTION_CANARY_PROBE_RECEIPTS_TABLE,
     EXECUTION_CANARY_RISK_POLICIES_TABLE,
     EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE,
     EXECUTION_RISK_RESERVATIONS_TABLE,
     ORDERS_TABLE,
     RISK_DECISIONS_TABLE,
+    RUNTIME_INSTANCES_TABLE,
     SIGNALS_TABLE,
     TRADE_INTENTS_TABLE,
 )
 from sqlalchemy import func, select
 from tests.test_canonical_v13_api import _client
 from tests.test_canonical_v13_phase9_execution_authority import _production_chain
-from tests.test_canonical_v13_phase9_readiness import _handoff, _qualified
+from tests.test_canonical_v13_phase9_readiness import (
+    _handoff,
+    _qualified,
+    _seed_stage_a,
+)
 
 
 def test_phase9_api_requires_and_projects_exact_handoff() -> None:
@@ -172,6 +178,71 @@ def test_phase9_control_api_preserves_qualified_approval_and_demo_deployment() -
         engine.dispose()
 
 
+def test_phase9_api_disables_stopped_historical_deployment_exactly_once() -> None:
+    engine, client = _client()
+    try:
+        with engine.begin() as connection:
+            historical = _qualified(connection)
+            successor = _qualified(connection)
+            deployment_id, runtime_id = _seed_stage_a(
+                connection, _handoff(connection, historical)
+            )
+            connection.execute(
+                RUNTIME_INSTANCES_TABLE.update()
+                .where(RUNTIME_INSTANCES_TABLE.c.id == runtime_id)
+                .values(status="STOPPED")
+            )
+        command = {
+            "superseded_by_qualification_decision_id": str(
+                successor.qualification_decision_id
+            ),
+            "actor_identity": "operator:phase9-api-test",
+            "reason": "supersede exact stopped Demo lineage",
+        }
+        first = client.post(
+            f"{API_PREFIX}/phase9/deployments/{deployment_id}/disable",
+            json=command,
+        )
+        assert first.status_code == 200, first.text
+        assert first.json()["status"] == "DISABLED"
+        assert first.json()["repeat_noop"] is False
+        repeated = client.post(
+            f"{API_PREFIX}/phase9/deployments/{deployment_id}/disable",
+            json=command,
+        )
+        assert repeated.status_code == 200, repeated.text
+        assert repeated.json()["receipt_digest"] == first.json()["receipt_digest"]
+        assert repeated.json()["disabled_at"] == first.json()["disabled_at"]
+        assert repeated.json()["repeat_noop"] is True
+        drifted = client.post(
+            f"{API_PREFIX}/phase9/deployments/{deployment_id}/disable",
+            json={**command, "reason": "different reason must fail closed"},
+        )
+        assert drifted.status_code == 409
+        assert drifted.json()["error"]["code"] == (
+            "BLOCKED_DEPLOYMENT_DISABLE_REPLAY_DRIFT"
+        )
+        with engine.begin() as connection:
+            effective = connection.execution_options(
+                schema_translate_map={CANONICAL_BUSINESS_SCHEMA: None}
+            )
+            row = (
+                effective.execute(
+                    select(DEPLOYMENTS_TABLE).where(
+                        DEPLOYMENTS_TABLE.c.id == deployment_id
+                    )
+                )
+                .mappings()
+                .one()
+            )
+        assert row["disabled_by"] == command["actor_identity"]
+        assert row["disable_reason"] == command["reason"]
+        assert row["disable_receipt_digest"] == first.json()["receipt_digest"]
+    finally:
+        client.close()
+        engine.dispose()
+
+
 def test_shadow_api_persists_one_non_executable_dual_check_receipt() -> None:
     engine, client = _client()
     try:
@@ -195,9 +266,7 @@ def test_shadow_api_persists_one_non_executable_dual_check_receipt() -> None:
             effective = connection.execution_options(
                 schema_translate_map={CANONICAL_BUSINESS_SCHEMA: None}
             )
-            decision = effective.execute(
-                select(RISK_DECISIONS_TABLE)
-            ).mappings().one()
+            decision = effective.execute(select(RISK_DECISIONS_TABLE)).mappings().one()
             counts = {
                 table.name: effective.execute(
                     select(func.count()).select_from(table)

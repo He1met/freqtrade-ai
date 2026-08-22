@@ -127,10 +127,7 @@ EXPECTED_TABLES_BY_DOMAIN = {
 
 
 def test_exact_identity_and_table_manifest_matches_frozen_design() -> None:
-    assert (
-        CANONICAL_AUTHORITY_REVISION
-        == "20260822_phase9_runtime_reader_qualification_acl11"
-    )
+    assert CANONICAL_AUTHORITY_REVISION == "20260822_phase9_deployment_rollover12"
     assert CANONICAL_DATABASE_PURPOSE == "FREQTRADE_AI_V13_CANONICAL"
     assert CANONICAL_BUSINESS_SCHEMA == "strategy_platform_v13"
     assert CANONICAL_GENESIS_VERSION == "20260814_01"
@@ -237,9 +234,9 @@ def test_each_table_has_one_writer_and_reader_maps_are_explicit() -> None:
     assert set(READER_TABLE_ALLOWLIST["canonical_runtime_reader"]).isdisjoint(
         {"validation_attempts", "validation_window_results", "target_scores"}
     )
-    assert "qualification_decisions" in READER_TABLE_ALLOWLIST[
-        "canonical_runtime_reader"
-    ]
+    assert (
+        "qualification_decisions" in READER_TABLE_ALLOWLIST["canonical_runtime_reader"]
+    )
     assert set(READER_TABLE_ALLOWLIST["canonical_runtime_reader"]).isdisjoint(
         {"signals", "trade_intents", "risk_decisions", "orders", "fills"}
     )
@@ -411,11 +408,11 @@ def test_postgresql_types_constraints_and_locking_compile_offline() -> None:
     )
 
     assert len(tables) == 57
-    assert len(foreign_keys) == 119
-    assert len(checks) == 75
-    assert len(uniques) == 76
-    assert len(indexes) == 103
-    assert len(datetimes) == 97
+    assert len(foreign_keys) == 120
+    assert len(checks) == 76
+    assert len(uniques) == 77
+    assert len(indexes) == 104
+    assert len(datetimes) == 98
     assert len(json_columns) == 27
     assert all(key.deferrable is not True for key in foreign_keys)
     assert all(column.type.timezone is True for column in datetimes)

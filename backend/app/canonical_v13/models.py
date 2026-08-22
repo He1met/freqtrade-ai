@@ -953,6 +953,22 @@ DEPLOYMENTS_TABLE = _table(
     Column("demo_only", Boolean, nullable=False),
     Column("allow_real_funds", Boolean, nullable=False),
     _digest("capability_digest"),
+    Column("disabled_at", DateTime(timezone=True), nullable=True),
+    Column("disabled_by", String(160), nullable=True),
+    Column("disable_reason", Text, nullable=True),
+    Column(
+        "superseded_by_qualification_decision_id",
+        Uuid(as_uuid=True),
+        ForeignKey(
+            f"{CANONICAL_BUSINESS_SCHEMA}.qualification_decisions.id",
+            name="deployments_superseding_qualification_fk",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+        index=True,
+    ),
+    _digest("disable_request_digest", nullable=True),
+    _digest("disable_receipt_digest", nullable=True),
     _created_at(),
     _status_check(
         "deployments",
@@ -963,9 +979,26 @@ DEPLOYMENTS_TABLE = _table(
         "demo_only IS TRUE AND allow_real_funds IS FALSE",
         name="deployments_demo_only_no_real_funds",
     ),
+    CheckConstraint(
+        "(status = 'DISABLED' AND disabled_at IS NOT NULL "
+        "AND disabled_by IS NOT NULL AND disable_reason IS NOT NULL "
+        "AND superseded_by_qualification_decision_id IS NOT NULL "
+        "AND disable_request_digest IS NOT NULL "
+        "AND disable_receipt_digest IS NOT NULL) OR "
+        "(status <> 'DISABLED' AND disabled_at IS NULL "
+        "AND disabled_by IS NULL AND disable_reason IS NULL "
+        "AND superseded_by_qualification_decision_id IS NULL "
+        "AND disable_request_digest IS NULL "
+        "AND disable_receipt_digest IS NULL)",
+        name="deployments_disabled_evidence_complete",
+    ),
     UniqueConstraint(
         "deployment_approval_id",
         name="deployments_approval_unique",
+    ),
+    UniqueConstraint(
+        "disable_receipt_digest",
+        name="deployments_disable_receipt_digest_unique",
     ),
 )
 
@@ -1125,7 +1158,9 @@ EXECUTION_CANARY_PROBE_RECEIPTS_TABLE = _table(
     Column("pending_orders_expires_at", DateTime(timezone=True), nullable=False),
     _digest("maximum_order_quantity_digest"),
     _created_at("maximum_order_quantity_observed_at"),
-    Column("maximum_order_quantity_expires_at", DateTime(timezone=True), nullable=False),
+    Column(
+        "maximum_order_quantity_expires_at", DateTime(timezone=True), nullable=False
+    ),
     _created_at("observed_at"),
     Column("expires_at", DateTime(timezone=True), nullable=False),
     Column("safe_facts_json", JSON, nullable=False),
@@ -1480,7 +1515,9 @@ ORDER_DISPATCH_RECEIPTS_TABLE = _table(
     Column("pending_orders_expires_at", DateTime(timezone=True), nullable=False),
     _digest("maximum_order_quantity_digest"),
     _created_at("maximum_order_quantity_observed_at"),
-    Column("maximum_order_quantity_expires_at", DateTime(timezone=True), nullable=False),
+    Column(
+        "maximum_order_quantity_expires_at", DateTime(timezone=True), nullable=False
+    ),
     _digest("guard_leverage_digest"),
     _created_at("guard_leverage_observed_at"),
     Column("guard_leverage_expires_at", DateTime(timezone=True), nullable=False),

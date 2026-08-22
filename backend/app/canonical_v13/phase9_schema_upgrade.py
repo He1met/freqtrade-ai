@@ -45,7 +45,10 @@ from app.canonical_v13.models import (
 from app.canonical_v13.role_mapping import CanonicalRoleMapping
 from app.canonical_v13.runtime_image_upgrade import (
     PREVIOUS_RUNTIME_IMAGE_MANIFEST_DIGEST,
+    RUNTIME_IMAGE_ACCEPTED_MANIFEST_DIGEST,
+    RUNTIME_READER_ACL_ACCEPTED_MANIFEST_DIGEST,
 )
+from app.canonical_v13.gate_receipt_upgrade import GATE_GUARD_FUNCTION_NAMES
 
 UPGRADE_CONTRACT: Final = "canonical-v13-phase9-execution-schema-upgrade-v4"
 PREVIOUS_CANONICAL_MANIFEST_DIGEST: Final = (
@@ -310,8 +313,7 @@ def _previous_acl_payload() -> dict[str, object]:
     )
     previous_grants = tuple(
         sorted(
-            _current_surviving_table_grants()
-            - set(PHASE9_SURVIVING_TABLE_GRANT_DELTA)
+            _current_surviving_table_grants() - set(PHASE9_SURVIVING_TABLE_GRANT_DELTA)
         )
     )
     return {
@@ -462,9 +464,17 @@ def verify_phase9_schema_upgrade(
     if (
         constraints == expected_constraints
         and extension_tables == expected_tables
-        and manifest_digest == CANONICAL_MANIFEST_DIGEST
+        and manifest_digest
+        in {
+            RUNTIME_IMAGE_ACCEPTED_MANIFEST_DIGEST,
+            RUNTIME_READER_ACL_ACCEPTED_MANIFEST_DIGEST,
+            CANONICAL_MANIFEST_DIGEST,
+        }
     ):
-        verification = verify_canonical_genesis(connection)
+        verification = verify_canonical_genesis(
+            connection,
+            accepted_manifest_digests=(manifest_digest,),
+        )
         if not verification.accepted:
             raise CanonicalPhase9SchemaUpgradeBlocked(
                 "BLOCKED_WRONG_CANONICAL_DATABASE", "; ".join(verification.problems)
@@ -627,8 +637,17 @@ def apply_phase9_schema_upgrade(
                 f"ALTER TABLE {CANONICAL_BUSINESS_SCHEMA}.{table_name} OWNER TO {owner}"
             )
         )
-    for statement in postgresql_acl_statements(resolved):
-        if "runtime_image_acceptances" in statement:
+    deferred_acl_fragments = (
+        f"qualification_decisions TO {resolved.physical('canonical_runtime_reader')}",
+        f"order_writer_leases TO {resolved.physical('canonical_deployment_writer')}",
+    )
+    for statement in postgresql_acl_statements(
+        resolved,
+        guard_function_names=GATE_GUARD_FUNCTION_NAMES,
+    ):
+        if "runtime_image_acceptances" in statement or any(
+            fragment in statement for fragment in deferred_acl_fragments
+        ):
             continue
         connection.execute(text(statement))
     for statement in postgresql_owner_table_grant_statements(resolved):
