@@ -79,6 +79,41 @@ FREQTRADE_AI_CANONICAL_V13_API_BASE_URL=http://127.0.0.1:8011 \
 `worker-execute` 是另一个显式动作，只消费已启动 RUNNING attempt 的 exact consumption receipt；
 它不会解析 active pointer、选择 latest plan、重用授权或启动 service。
 
+生产操作不得把 reader/validation/scoring/qualification DSN 交给研究任务。macOS API supervisor
+owner 必须从 clean/exact release 使用 `scripts/canonical_v13_research_service.py execute`；该入口只在
+内存中读取本次动作所需的 canonical PostgreSQL service credential：`gate` 只读取 reader，
+`worker-execute` 只读取 reader + validation + scoring + qualification。它不读取 control、optimization、
+Phase 9 或 OKX credential，不修改进程环境，不输出 DSN，并在读取 credential 前取得 0700 workspace
+中的单执行器锁。调用方只提供 mode 0600 的 absolute supervisor/research JSON 文件；所有 OCI path、
+image digest、artifact/workspace root 与资源上限必须显式写入 supervisor JSON，不存在隐藏默认。
+
+```bash
+backend/.venv/bin/python scripts/canonical_v13_research_service.py execute \
+  --command-file /absolute/private/supervisor-command.json
+```
+
+supervisor command 只允许 `gate` 或 `worker-execute`，形状固定为：
+
+```json
+{
+  "command": "gate",
+  "research_command_file": "/absolute/private/gate-command.json",
+  "execution": {
+    "api_base_url": "http://127.0.0.1:8011",
+    "oci_runtime": "/absolute/non-symlink/podman-remote",
+    "image_reference": "canonical-v13-research@sha256:<64 lowercase hex>",
+    "market_artifact_root": "/absolute/immutable/market/root",
+    "workspace_root": "/absolute/private/0700/workspace",
+    "cpu_limit": "1.0",
+    "memory_mb": 1024,
+    "timeout_seconds": 900,
+    "output_bytes": 1048576,
+    "pids_limit": 64,
+    "tmpfs_mb": 128
+  }
+}
+```
+
 `gate` 是与 `worker-execute` 分离的前置动作。它只通过 canonical reader 读取调用方给出的 exact
 strategy/target/bundle/market lineage，先执行不加载策略代码的 static AST validation；static PASS 后，
 才在同一类 network-none、read-only、nonroot OCI sandbox 中对 frozen required-window set 执行
