@@ -21,6 +21,7 @@ from app.canonical_v13.phase9_production_runtime import (
     ReleaseBoundReceiptSeal,
 )
 from app.canonical_v13.phase9_runtime_supervisor import (
+    Phase9LaunchPlan,
     RuntimeImagePlanAuthority,
     build_launch_plan,
 )
@@ -175,8 +176,8 @@ def test_public_market_port_is_credential_free_and_digest_sealed() -> None:
     assert evidence.evidence_digest == natural_market_evidence_digest(evidence)
 
 
-def test_runtime_reader_requires_exact_active_qualified_artifact_bundle_target() -> None:
-    plan = build_launch_plan(
+def _runtime_lineage_plan() -> Phase9LaunchPlan:
+    return build_launch_plan(
         service_key="long_lived_runtime",
         stage="SIGNAL_RISK_SHADOW",
         generation=1,
@@ -192,7 +193,10 @@ def test_runtime_reader_requires_exact_active_qualified_artifact_bundle_target()
             release_digest="1" * 64,
         ),
     )
-    rows = [
+
+
+def _runtime_lineage_rows() -> list[dict[str, object]]:
+    return [
         {
             "id": _uuid(1),
             "deployment_approval_id": _uuid(2),
@@ -243,8 +247,8 @@ def test_runtime_reader_requires_exact_active_qualified_artifact_bundle_target()
         {
             "id": _uuid(3),
             "artifact_id": _uuid(9),
-            "validation_status": "VALIDATED",
-            "execution_authorized": True,
+            "validation_status": "UNVALIDATED",
+            "execution_authorized": False,
         },
         {
             "id": _uuid(9),
@@ -266,13 +270,40 @@ def test_runtime_reader_requires_exact_active_qualified_artifact_bundle_target()
             "market_snapshot_digest": "5" * 64,
         },
     ]
+
+
+def test_runtime_reader_accepts_exact_immutable_qualification_lineage() -> None:
     lineage = DatabaseRuntimeLineageReader(
-        _factory(_Connection(rows)), plan
+        _factory(_Connection(_runtime_lineage_rows())), _runtime_lineage_plan()
     ).read_active_runtime_lineage()
     assert lineage.qualification_decision_id == _uuid(7)
     assert lineage.strategy_artifact_digest == sha256(SOURCE.encode()).hexdigest()
     assert lineage.target_instrument == "BTC-USDT-SWAP"
     assert lineage.runtime_order_writer_capability is False
+
+
+def test_runtime_reader_rejects_non_qualified_decision() -> None:
+    rows = _runtime_lineage_rows()
+    rows[4]["status"] = "REJECTED"
+    with pytest.raises(
+        CanonicalPhase9CompositionBlocked,
+        match="BLOCKED_PHASE9_RUNTIME_EXACT_LINEAGE",
+    ):
+        DatabaseRuntimeLineageReader(
+            _factory(_Connection(rows)), _runtime_lineage_plan()
+        ).read_active_runtime_lineage()
+
+
+def test_runtime_reader_rejects_qualification_bundle_lineage_drift() -> None:
+    rows = _runtime_lineage_rows()
+    rows[4]["configuration_bundle_digest"] = "a" * 64
+    with pytest.raises(
+        CanonicalPhase9CompositionBlocked,
+        match="BLOCKED_PHASE9_RUNTIME_EXACT_LINEAGE",
+    ):
+        DatabaseRuntimeLineageReader(
+            _factory(_Connection(rows)), _runtime_lineage_plan()
+        ).read_active_runtime_lineage()
 
 
 def test_runtime_receipt_seal_requires_dedicated_hmac_key() -> None:
