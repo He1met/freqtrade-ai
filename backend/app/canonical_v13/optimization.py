@@ -253,7 +253,7 @@ def record_isolated_optimization_trial(
             OPTIMIZATION_RUNS_TABLE.c.id == optimization_run_id
         )
     ).mappings().one_or_none()
-    if run is None or run["status"] not in {"NOT_STARTED", "RUNNING"}:
+    if run is None:
         raise CanonicalOptimizationBlocked(
             "BLOCKED_OPTIMIZATION_RUN_NOT_WRITABLE", str(optimization_run_id)
         )
@@ -298,6 +298,10 @@ def record_isolated_optimization_trial(
             request_digest=request_digest,
             result_digest=result_digest,
             repeat_noop=True,
+        )
+    if run["status"] not in {"NOT_STARTED", "RUNNING"}:
+        raise CanonicalOptimizationBlocked(
+            "BLOCKED_OPTIMIZATION_RUN_NOT_WRITABLE", str(optimization_run_id)
         )
     trial_id = uuid4()
     effective.execute(

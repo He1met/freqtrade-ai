@@ -374,6 +374,18 @@ def test_empty_finalist_selection_blocks_terminally_and_replays(canonical_connec
             actor_identity="isolated-optimizer-v1",
             objective_json={"trial_budget": 1, "selection_limit": 0},
         )
+        trial_replay = record_isolated_optimization_trial(
+            canonical_connection,
+            optimization_run_id=run.optimization_run_id,
+            trial_number=1,
+            actor_identity="isolated-optimizer-v1",
+            parameters_json=trial_rows[0]["parameters_json"],
+            metrics_json={
+                **trial_rows[0]["metrics_json"],
+                "selected_finalist": False,
+                "selection_digest": selection_digest,
+            },
+        )
     assert completed.status == "BLOCKED"
     assert completed.result_digest == selection_digest
     assert completed.repeat_noop is False
@@ -381,3 +393,4 @@ def test_empty_finalist_selection_blocks_terminally_and_replays(canonical_connec
     assert replay.repeat_noop is True
     assert run_replay.status == "BLOCKED"
     assert run_replay.repeat_noop is True
+    assert trial_replay.repeat_noop is True
