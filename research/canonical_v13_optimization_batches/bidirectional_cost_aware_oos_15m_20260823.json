@@ -1,0 +1,209 @@
+{
+  "contract": "canonical-v13-cost-aware-oos-optimization-plan-v1",
+  "batch_key": "bidirectional-cost-aware-oos-15m-20260823",
+  "target": {
+    "target_key": "btc-usdt-swap-15m",
+    "instrument": "BTC-USDT-SWAP",
+    "pair": "BTC/USDT:USDT",
+    "timeframe": "15m",
+    "data_kind": "futures",
+    "candle_policy": "CLOSED_15M_ONLY",
+    "entry_policy": "MARKET_CONDITION_ONLY_NO_CLOCK_FIELDS",
+    "direction": "BIDIRECTIONAL_SINGLE_NET_POSITION",
+    "leverage": 1.0,
+    "maximum_open_trades": 1,
+    "position_adjustment": false
+  },
+  "directionality": {
+    "can_short": true,
+    "hedging": false,
+    "simultaneous_long_short": false,
+    "neutral_regime_action": "NO_ACTION",
+    "exit_semantics": "POSITION_CLOSING_REDUCE_ONLY",
+    "minimum_directional_trades_30d": 6,
+    "minimum_directional_net_after_cost": 0.0,
+    "maximum_directional_top_trade_share": 0.5
+  },
+  "position_sizing": {
+    "dry_run_wallet_quote": 10000,
+    "stake_amount_quote": 100,
+    "maximum_nominal_wallet_fraction": 0.01,
+    "maximum_open_trades": 1,
+    "position_adjustment": false
+  },
+  "fixed_strategy_contract": {
+    "startup_extra_closed_candles": 48,
+    "rsi_period": 14,
+    "adx_period": 14,
+    "atr_period": 14,
+    "atr_median_window": 96,
+    "volume_mean_window": 32,
+    "band_window": 32,
+    "band_deviation": 2.0,
+    "band_median_window": 96,
+    "atr_kill_multiplier": 2.5,
+    "momentum_kill_adx": 14.0,
+    "momentum_kill_rsi_band": 6.0,
+    "minimal_roi": {"0": 0.02, "1440": 0.01, "2880": 0.005}
+  },
+  "data_isolation": {
+    "train": {
+      "start_at": "2026-02-23T19:30:00Z",
+      "end_at": "2026-06-23T19:30:00Z",
+      "days": 120,
+      "required_for_selection": true,
+      "visible_during_search": true
+    },
+    "validation": {
+      "start_at": "2026-06-23T19:30:00Z",
+      "end_at": "2026-07-23T19:30:00Z",
+      "days": 30,
+      "required_for_selection": true,
+      "visible_during_search": true
+    },
+    "holdout": {
+      "start_at": "2026-07-23T19:30:00Z",
+      "end_at": "2026-08-22T19:30:00Z",
+      "days": 30,
+      "required_for_qualification": true,
+      "visible_during_search": false,
+      "single_evaluation_per_finalist": true
+    },
+    "warmup_closed_candles": 400,
+    "integrity_margin_closed_candles": 8,
+    "source": "OKX_PUBLIC_MARKET_DATA_ONLY",
+    "credential_access": "NONE"
+  },
+  "execution": {
+    "trial_budget": 96,
+    "family_trial_budget": 32,
+    "seed": 2026082301,
+    "single_writer": true,
+    "serial_trials": true,
+    "network": "none",
+    "finalist_limit": 3,
+    "holdout_feedback_to_search": false
+  },
+  "costs": {
+    "qualification_fee_rate": 0.0005,
+    "qualification_slippage_rate": 0.0002,
+    "sensitivity_fee_rate": 0.00075,
+    "sensitivity_slippage_rate": 0.0003,
+    "lower_cost_ranking_forbidden": true
+  },
+  "hard_gates": {
+    "trade_count": {"operator": ">=", "threshold": 30},
+    "net_return_after_cost": {"operator": ">", "threshold": 0},
+    "maximum_drawdown": {"operator": "<=", "threshold": 0.15},
+    "lookahead_failure_count": {"operator": "==", "threshold": 0},
+    "overall_score": {"operator": ">=", "threshold": 50}
+  },
+  "objective": {
+    "name": "bidirectional-cost-aware-stable-oos-v1",
+    "eligibility": [
+      "train_and_validation_total_net_after_cost_positive",
+      "train_trade_count_scaled_to_30d_at_least_30",
+      "validation_trade_count_at_least_30",
+      "train_and_validation_drawdown_at_most_0.15",
+      "validation_total_top_trade_profit_share_at_most_0.35",
+      "long_and_short_train_scaled_trade_count_each_at_least_6",
+      "long_and_short_validation_trade_count_each_at_least_6",
+      "long_and_short_train_and_validation_net_after_cost_each_nonnegative",
+      "long_and_short_validation_top_trade_profit_share_each_at_most_0.50"
+    ],
+    "ranking": [
+      "validation_net_after_cost_desc",
+      "validation_worst_direction_net_after_cost_desc",
+      "sensitivity_net_after_cost_desc",
+      "train_validation_drift_asc",
+      "directional_net_imbalance_asc",
+      "validation_drawdown_asc",
+      "rule_complexity_asc",
+      "trial_number_asc"
+    ],
+    "selection_thresholds": {
+      "minimum_total_trades_30d": 30,
+      "maximum_total_top_trade_profit_share": 0.35,
+      "maximum_train_validation_drawdown": 0.15
+    },
+    "penalties": {
+      "turnover": 1.0,
+      "low_trade_count": 4.0,
+      "profit_concentration": 3.0,
+      "train_validation_drift": 2.0,
+      "directional_net_imbalance": 1.0,
+      "maximum_drawdown": 2.0
+    }
+  },
+  "families": [
+    {
+      "family_key": "bidirectional-regime-trend",
+      "trial_count": 32,
+      "parameters": {
+        "fast_window": [12, 16, 20, 24],
+        "slow_window": [48, 64, 80, 96],
+        "regime_window": [160, 192, 240],
+        "slope_bars": [8, 16, 24],
+        "rsi_recovery": [48, 50, 52],
+        "rsi_band": [12, 16, 20],
+        "atr_low_multiplier": [0.5, 0.65, 0.8],
+        "atr_high_multiplier": [1.6, 1.8, 2.1],
+        "volume_multiplier": [0.6, 0.75, 0.9],
+        "cooldown_bars": [4, 8, 12],
+        "max_holding_bars": [64, 96, 144],
+        "stoploss": [-0.008, -0.012, -0.016]
+      }
+    },
+    {
+      "family_key": "bidirectional-volatility-breakout",
+      "trial_count": 32,
+      "parameters": {
+        "fast_window": [16, 24, 32],
+        "slow_window": [64, 96, 128],
+        "regime_window": [160, 192, 256],
+        "slope_bars": [8, 16, 24],
+        "breakout_lookback": [16, 24, 32, 48],
+        "atr_low_multiplier": [0.55, 0.7, 0.85],
+        "atr_high_multiplier": [1.5, 1.75, 2.0],
+        "volume_multiplier": [0.75, 0.9, 1.05],
+        "cooldown_bars": [4, 8, 12],
+        "max_holding_bars": [48, 64, 96],
+        "stoploss": [-0.008, -0.012, -0.016]
+      }
+    },
+    {
+      "family_key": "bidirectional-momentum-continuation",
+      "trial_count": 32,
+      "parameters": {
+        "fast_window": [12, 16, 24],
+        "slow_window": [48, 64, 96],
+        "regime_window": [160, 192, 256],
+        "slope_bars": [8, 16, 24],
+        "adx_floor": [16, 20, 24],
+        "rsi_recovery": [48, 50, 52],
+        "rsi_band": [12, 16, 20],
+        "bandwidth_multiplier": [0.8, 1.0, 1.2],
+        "atr_low_multiplier": [0.5, 0.65, 0.8],
+        "atr_high_multiplier": [1.6, 1.8, 2.1],
+        "volume_multiplier": [0.6, 0.75, 0.9],
+        "cooldown_bars": [4, 8, 12],
+        "max_holding_bars": [48, 64, 96],
+        "stoploss": [-0.008, -0.012, -0.016]
+      }
+    }
+  ],
+  "safety": {
+    "demo_only": true,
+    "allow_real_funds": false,
+    "private_exchange_access": false,
+    "order_submission": false,
+    "deployment_creation": false,
+    "runtime_start": false,
+    "short": true,
+    "hedge": false,
+    "martingale": false,
+    "grid": false,
+    "dca": false,
+    "future_or_unclosed_higher_timeframe_data": false
+  }
+}
