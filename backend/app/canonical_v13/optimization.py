@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
-from typing import Mapping
+from typing import Mapping, Sequence
 from uuid import UUID, uuid4
 
 from sqlalchemy import Connection, select
@@ -46,6 +46,25 @@ class OptimizationTrialResult:
     trial_number: int
     request_digest: str
     result_digest: str
+    repeat_noop: bool
+
+
+@dataclass(frozen=True)
+class OptimizationCompletionResult:
+    optimization_run_id: UUID
+    status: str
+    trial_count: int
+    selected_trial_numbers: tuple[int, ...]
+    result_digest: str
+    repeat_noop: bool
+
+
+@dataclass(frozen=True)
+class OptimizationSubmissionLinkResult:
+    optimization_trial_id: UUID
+    submitted_strategy_version_id: UUID
+    submission_link_digest: str
+    repeat_noop: bool
 
 
 def _digest(value: object) -> str:
@@ -71,6 +90,42 @@ def _effective(connection: Connection) -> Connection:
             schema_translate_map={CANONICAL_BUSINESS_SCHEMA: None}
         )
     return connection
+
+
+def optimization_selection_digest(
+    *,
+    optimization_run_id: UUID,
+    run_request_digest: str,
+    actor_identity: str,
+    selected_trial_numbers: Sequence[int],
+    trials: Sequence[Mapping[str, object]],
+) -> str:
+    """Digest selection from result evidence without creating a circular hash."""
+
+    trial_evidence_digests = []
+    for row in sorted(trials, key=lambda item: int(item["trial_number"])):
+        metrics = dict(row["metrics_json"])  # type: ignore[arg-type]
+        metrics.pop("selection_digest", None)
+        metrics.pop("selected_finalist", None)
+        trial_evidence_digests.append(
+            _digest(
+                {
+                    "trial_number": int(row["trial_number"]),
+                    "parameters_json": dict(row["parameters_json"]),  # type: ignore[arg-type]
+                    "metrics_json": metrics,
+                }
+            )
+        )
+    return _digest(
+        {
+            "contract": "canonical-v13-optimization-selection-v1",
+            "optimization_run_id": str(optimization_run_id),
+            "run_request_digest": run_request_digest,
+            "actor_identity": actor_identity,
+            "selected_trial_numbers": sorted(set(selected_trial_numbers)),
+            "trial_evidence_digests": trial_evidence_digests,
+        }
+    )
 
 
 def _require_canonical(connection: Connection) -> Connection:
@@ -212,16 +267,12 @@ def record_isolated_optimization_trial(
         raise CanonicalOptimizationBlocked(
             "BLOCKED_OPTIMIZATION_TRIAL_UNSET", "trial inputs must be explicit"
         )
-    if effective.execute(
-        select(OPTIMIZATION_TRIALS_TABLE.c.id).where(
+    existing = effective.execute(
+        select(OPTIMIZATION_TRIALS_TABLE).where(
             OPTIMIZATION_TRIALS_TABLE.c.optimization_run_id == optimization_run_id,
             OPTIMIZATION_TRIALS_TABLE.c.trial_number == trial_number,
         )
-    ).scalar_one_or_none() is not None:
-        raise CanonicalOptimizationBlocked(
-            "BLOCKED_OPTIMIZATION_TRIAL_REWRITE", "trial is immutable"
-        )
-    trial_id = uuid4()
+    ).mappings().one_or_none()
     request = {
         "optimization_run_id": str(optimization_run_id),
         "run_request_digest": run["request_digest"],
@@ -232,6 +283,23 @@ def record_isolated_optimization_trial(
     }
     request_digest = _digest(request)
     result_digest = _digest({**request, "metrics_json": dict(metrics_json)})
+    if existing is not None:
+        if (
+            existing["request_digest"] != request_digest
+            or existing["result_digest"] != result_digest
+        ):
+            raise CanonicalOptimizationBlocked(
+                "BLOCKED_OPTIMIZATION_TRIAL_REWRITE", "trial is immutable"
+            )
+        return OptimizationTrialResult(
+            optimization_trial_id=existing["id"],
+            optimization_run_id=optimization_run_id,
+            trial_number=trial_number,
+            request_digest=request_digest,
+            result_digest=result_digest,
+            repeat_noop=True,
+        )
+    trial_id = uuid4()
     effective.execute(
         OPTIMIZATION_TRIALS_TABLE.insert().values(
             id=trial_id,
@@ -259,6 +327,116 @@ def record_isolated_optimization_trial(
         trial_number=trial_number,
         request_digest=request_digest,
         result_digest=result_digest,
+        repeat_noop=False,
+    )
+
+
+def complete_optimization_run(
+    connection: Connection,
+    *,
+    optimization_run_id: UUID,
+    actor_identity: str,
+    selected_trial_numbers: Sequence[int],
+    terminal_status: str = "SUCCEEDED",
+) -> OptimizationCompletionResult:
+    """Terminally seal one bounded run from its immutable trial evidence."""
+
+    effective = _require_canonical(connection)
+    run = effective.execute(
+        select(OPTIMIZATION_RUNS_TABLE).where(
+            OPTIMIZATION_RUNS_TABLE.c.id == optimization_run_id
+        )
+    ).mappings().one_or_none()
+    if run is None:
+        raise CanonicalOptimizationBlocked(
+            "BLOCKED_OPTIMIZATION_RUN_NOT_FOUND", str(optimization_run_id)
+        )
+    if not actor_identity or actor_identity != actor_identity.strip():
+        raise CanonicalOptimizationBlocked(
+            "BLOCKED_OPTIMIZATION_REQUEST_UNSET", "actor is required"
+        )
+    normalized = tuple(sorted(set(selected_trial_numbers)))
+    if terminal_status not in {"SUCCEEDED", "BLOCKED"}:
+        raise CanonicalOptimizationBlocked(
+            "BLOCKED_OPTIMIZATION_TERMINAL_STATUS", terminal_status
+        )
+    if (
+        len(normalized) > 3
+        or any(number <= 0 for number in normalized)
+        or (terminal_status == "SUCCEEDED" and not normalized)
+        or (terminal_status == "BLOCKED" and normalized)
+    ):
+        raise CanonicalOptimizationBlocked(
+            "BLOCKED_OPTIMIZATION_SELECTION_INVALID",
+            "one to three positive finalist trial numbers are required",
+        )
+    trials = effective.execute(
+        select(OPTIMIZATION_TRIALS_TABLE)
+        .where(OPTIMIZATION_TRIALS_TABLE.c.optimization_run_id == optimization_run_id)
+        .order_by(OPTIMIZATION_TRIALS_TABLE.c.trial_number)
+    ).mappings().all()
+    recorded_trial_numbers = {row["trial_number"] for row in trials}
+    if not trials or not recorded_trial_numbers.issuperset(normalized):
+        raise CanonicalOptimizationBlocked(
+            "BLOCKED_OPTIMIZATION_SELECTION_INVALID", "selected trial is absent"
+        )
+    selection_digest = optimization_selection_digest(
+        optimization_run_id=optimization_run_id,
+        run_request_digest=run["request_digest"],
+        actor_identity=actor_identity,
+        selected_trial_numbers=normalized,
+        trials=trials,
+    )
+    selected_rows = {row["trial_number"]: row for row in trials if row["trial_number"] in normalized}
+    for number in normalized:
+        metrics = selected_rows[number]["metrics_json"]
+        if (
+            not isinstance(metrics, dict)
+            or metrics.get("selected_finalist") is not True
+            or metrics.get("selection_digest") != selection_digest
+        ):
+            raise CanonicalOptimizationBlocked(
+                "BLOCKED_OPTIMIZATION_SELECTION_EVIDENCE",
+                "selected trials must carry the exact frozen selection digest",
+            )
+    if terminal_status == "BLOCKED" and any(
+        not isinstance(row["metrics_json"], dict)
+        or row["metrics_json"].get("selected_finalist") is not False
+        or row["metrics_json"].get("selection_digest") != selection_digest
+        for row in trials
+    ):
+        raise CanonicalOptimizationBlocked(
+            "BLOCKED_OPTIMIZATION_SELECTION_EVIDENCE",
+            "all terminal trials must carry the exact empty-selection digest",
+        )
+    if run["status"] == terminal_status:
+        return OptimizationCompletionResult(
+            optimization_run_id=optimization_run_id,
+            status=terminal_status,
+            trial_count=len(trials),
+            selected_trial_numbers=normalized,
+            result_digest=selection_digest,
+            repeat_noop=True,
+        )
+    if run["status"] not in {"RUNNING", "NOT_STARTED"}:
+        raise CanonicalOptimizationBlocked(
+            "BLOCKED_OPTIMIZATION_RUN_NOT_WRITABLE", str(optimization_run_id)
+        )
+    effective.execute(
+        OPTIMIZATION_RUNS_TABLE.update()
+        .where(
+            OPTIMIZATION_RUNS_TABLE.c.id == optimization_run_id,
+            OPTIMIZATION_RUNS_TABLE.c.status.in_(("RUNNING", "NOT_STARTED")),
+        )
+        .values(status=terminal_status, completed_at=datetime.now(timezone.utc))
+    )
+    return OptimizationCompletionResult(
+        optimization_run_id=optimization_run_id,
+        status=terminal_status,
+        trial_count=len(trials),
+        selected_trial_numbers=normalized,
+        result_digest=selection_digest,
+        repeat_noop=False,
     )
 
 
@@ -267,7 +445,7 @@ def link_controlled_submission_version(
     *,
     optimization_trial_id: UUID,
     submitted_strategy_version_id: UUID,
-) -> None:
+) -> OptimizationSubmissionLinkResult:
     """Link only a fresh controlled-submission UNVALIDATED version; never promote it."""
 
     effective = _require_canonical(connection)
@@ -300,9 +478,20 @@ def link_controlled_submission_version(
         if run is not None
         else None
     )
-    if trial is None or trial["submitted_strategy_version_id"] is not None:
+    if trial is None:
         raise CanonicalOptimizationBlocked(
             "BLOCKED_OPTIMIZATION_TRIAL_NOT_LINKABLE", str(optimization_trial_id)
+        )
+    if trial["submitted_strategy_version_id"] is not None:
+        if trial["submitted_strategy_version_id"] != submitted_strategy_version_id:
+            raise CanonicalOptimizationBlocked(
+                "BLOCKED_OPTIMIZATION_TRIAL_NOT_LINKABLE", str(optimization_trial_id)
+            )
+        return OptimizationSubmissionLinkResult(
+            optimization_trial_id=optimization_trial_id,
+            submitted_strategy_version_id=submitted_strategy_version_id,
+            submission_link_digest=trial["submission_link_digest"],
+            repeat_noop=True,
         )
     if (
         version is None
@@ -340,13 +529,23 @@ def link_controlled_submission_version(
         raise CanonicalOptimizationBlocked(
             "BLOCKED_OPTIMIZATION_TRIAL_NOT_LINKABLE", str(optimization_trial_id)
         )
+    return OptimizationSubmissionLinkResult(
+        optimization_trial_id=optimization_trial_id,
+        submitted_strategy_version_id=submitted_strategy_version_id,
+        submission_link_digest=link_digest,
+        repeat_noop=False,
+    )
 
 
 __all__ = [
     "CanonicalOptimizationBlocked",
+    "OptimizationCompletionResult",
     "OptimizationRunResult",
+    "OptimizationSubmissionLinkResult",
     "OptimizationTrialResult",
+    "complete_optimization_run",
     "create_optimization_run",
     "link_controlled_submission_version",
+    "optimization_selection_digest",
     "record_isolated_optimization_trial",
 ]

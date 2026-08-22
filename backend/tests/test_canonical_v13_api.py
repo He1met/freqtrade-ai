@@ -111,6 +111,7 @@ def _client():
         validation_connection_factory=connection_factory,
         scoring_connection_factory=connection_factory,
         qualification_connection_factory=connection_factory,
+        optimization_connection_factory=connection_factory,
         approval_connection_factory=connection_factory,
         deployment_connection_factory=connection_factory,
         signal_connection_factory=connection_factory,
@@ -479,6 +480,20 @@ def test_factory_is_standalone_and_exact_routes_are_frozen() -> None:
             (f"{API_PREFIX}/phase9/shadow-risk-decisions", "POST"),
             (f"{API_PREFIX}/phase9/risk-decisions", "POST"),
             (f"{API_PREFIX}/optimizations", "GET"),
+            (f"{API_PREFIX}/optimizations", "POST"),
+            (
+                f"{API_PREFIX}/optimizations/{{optimization_run_id}}/trials",
+                "POST",
+            ),
+            (
+                f"{API_PREFIX}/optimizations/{{optimization_run_id}}/complete",
+                "POST",
+            ),
+            (
+                f"{API_PREFIX}/optimizations/trials/{{optimization_trial_id}}/submissions/"
+                "{submitted_strategy_version_id}",
+                "POST",
+            ),
         }
         canonical_routes = {
             item for item in route_contract if item[0].startswith(API_PREFIX)
@@ -492,7 +507,7 @@ def test_factory_is_standalone_and_exact_routes_are_frozen() -> None:
             for method, operation in path.items()
             if method in {"get", "post", "put", "patch", "delete"}
         ]
-        assert len(operation_ids) == 42
+        assert len(operation_ids) == 46
         assert len(set(operation_ids)) == len(operation_ids)
     finally:
         client.close()

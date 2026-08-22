@@ -13,8 +13,10 @@ from app.canonical_v13.models import (
 )
 from app.canonical_v13.optimization import (
     CanonicalOptimizationBlocked,
+    complete_optimization_run,
     create_optimization_run,
     link_controlled_submission_version,
+    optimization_selection_digest,
     record_isolated_optimization_trial,
 )
 from app.canonical_v13.intake import controlled_submit_latest
@@ -93,7 +95,7 @@ def test_qualified_baseline_allows_only_isolated_trial_records(canonical_connect
     assert _count(canonical_connection, ORDERS_TABLE) == 0
 
 
-def test_trial_is_immutable_and_cannot_create_or_promote_strategy(canonical_connection):
+def test_trial_exact_replay_is_noop_but_drift_cannot_rewrite(canonical_connection):
     with canonical_connection.begin():
         plan_id, attempt_id = _validated_attempt(
             canonical_connection, metrics_by_window=_passing_metrics()
@@ -116,7 +118,15 @@ def test_trial_is_immutable_and_cannot_create_or_promote_strategy(canonical_conn
             actor_identity="isolated-optimizer-v1",
             objective_json={"metric": "overall_score"},
         )
-        record_isolated_optimization_trial(
+        original = record_isolated_optimization_trial(
+            canonical_connection,
+            optimization_run_id=run.optimization_run_id,
+            trial_number=1,
+            actor_identity="isolated-optimizer-v1",
+            parameters_json={"ema_period": 12},
+            metrics_json={"overall_score": 82.5},
+        )
+        replay = record_isolated_optimization_trial(
             canonical_connection,
             optimization_run_id=run.optimization_run_id,
             trial_number=1,
@@ -134,6 +144,87 @@ def test_trial_is_immutable_and_cannot_create_or_promote_strategy(canonical_conn
                 metrics_json={"overall_score": 99},
             )
     assert rewrite.value.code == "BLOCKED_OPTIMIZATION_TRIAL_REWRITE"
+    assert replay.optimization_trial_id == original.optimization_trial_id
+    assert replay.result_digest == original.result_digest
+    assert replay.repeat_noop is True
+
+
+def test_bounded_selection_and_completion_are_terminal_and_replayable(
+    canonical_connection,
+):
+    with canonical_connection.begin():
+        plan_id, attempt_id = _validated_attempt(
+            canonical_connection, metrics_by_window=_passing_metrics()
+        )
+        score_target(
+            canonical_connection,
+            validation_plan_id=plan_id,
+            validation_attempt_id=attempt_id,
+            scorer_identity="isolated-scorer-v1",
+        )
+        decision = qualify_target(
+            canonical_connection,
+            validation_plan_id=plan_id,
+            validation_attempt_id=attempt_id,
+            qualifier_identity="isolated-qualifier-v1",
+        )
+        objective = {"trial_budget": 2, "selection_limit": 1}
+        run = create_optimization_run(
+            canonical_connection,
+            baseline_qualification_decision_id=decision.qualification_decision_id,
+            actor_identity="isolated-optimizer-v1",
+            objective_json=objective,
+        )
+        trial_rows = [
+            {
+                "trial_number": 1,
+                "parameters_json": {"ema_period": 12},
+                "metrics_json": {"objective": 1.0},
+            },
+            {
+                "trial_number": 2,
+                "parameters_json": {"ema_period": 24},
+                "metrics_json": {"objective": 0.5},
+            },
+        ]
+        selection_digest = optimization_selection_digest(
+            optimization_run_id=run.optimization_run_id,
+            run_request_digest=run.request_digest,
+            actor_identity="isolated-optimizer-v1",
+            selected_trial_numbers=[1],
+            trials=trial_rows,
+        )
+        for row in trial_rows:
+            record_isolated_optimization_trial(
+                canonical_connection,
+                optimization_run_id=run.optimization_run_id,
+                trial_number=row["trial_number"],
+                actor_identity="isolated-optimizer-v1",
+                parameters_json=row["parameters_json"],
+                metrics_json={
+                    **row["metrics_json"],
+                    "selected_finalist": row["trial_number"] == 1,
+                    "selection_digest": selection_digest,
+                },
+            )
+        completed = complete_optimization_run(
+            canonical_connection,
+            optimization_run_id=run.optimization_run_id,
+            actor_identity="isolated-optimizer-v1",
+            selected_trial_numbers=[1],
+        )
+        replay = complete_optimization_run(
+            canonical_connection,
+            optimization_run_id=run.optimization_run_id,
+            actor_identity="isolated-optimizer-v1",
+            selected_trial_numbers=[1],
+        )
+    assert completed.status == "SUCCEEDED"
+    assert completed.trial_count == 2
+    assert completed.result_digest == selection_digest
+    assert completed.repeat_noop is False
+    assert replay.result_digest == selection_digest
+    assert replay.repeat_noop is True
 
 
 def test_trial_metrics_and_controlled_resubmission_lineage_are_durable(
@@ -212,3 +303,81 @@ def test_trial_metrics_and_controlled_resubmission_lineage_are_durable(
     assert row["request_digest"] == trial.request_digest
     assert row["submitted_strategy_version_id"] == submission.strategy_version_id
     assert len(row["submission_link_digest"]) == 64
+
+
+def test_empty_finalist_selection_blocks_terminally_and_replays(canonical_connection):
+    with canonical_connection.begin():
+        plan_id, attempt_id = _validated_attempt(
+            canonical_connection, metrics_by_window=_passing_metrics()
+        )
+        score_target(
+            canonical_connection,
+            validation_plan_id=plan_id,
+            validation_attempt_id=attempt_id,
+            scorer_identity="isolated-scorer-v1",
+        )
+        decision = qualify_target(
+            canonical_connection,
+            validation_plan_id=plan_id,
+            validation_attempt_id=attempt_id,
+            qualifier_identity="isolated-qualifier-v1",
+        )
+        run = create_optimization_run(
+            canonical_connection,
+            baseline_qualification_decision_id=decision.qualification_decision_id,
+            actor_identity="isolated-optimizer-v1",
+            objective_json={"trial_budget": 1, "selection_limit": 0},
+        )
+        trial_rows = [
+            {
+                "trial_number": 1,
+                "parameters_json": {"ema_period": 12},
+                "metrics_json": {"objective": -1.0},
+            }
+        ]
+        selection_digest = optimization_selection_digest(
+            optimization_run_id=run.optimization_run_id,
+            run_request_digest=run.request_digest,
+            actor_identity="isolated-optimizer-v1",
+            selected_trial_numbers=[],
+            trials=trial_rows,
+        )
+        record_isolated_optimization_trial(
+            canonical_connection,
+            optimization_run_id=run.optimization_run_id,
+            trial_number=1,
+            actor_identity="isolated-optimizer-v1",
+            parameters_json=trial_rows[0]["parameters_json"],
+            metrics_json={
+                **trial_rows[0]["metrics_json"],
+                "selected_finalist": False,
+                "selection_digest": selection_digest,
+            },
+        )
+        completed = complete_optimization_run(
+            canonical_connection,
+            optimization_run_id=run.optimization_run_id,
+            actor_identity="isolated-optimizer-v1",
+            selected_trial_numbers=[],
+            terminal_status="BLOCKED",
+        )
+        replay = complete_optimization_run(
+            canonical_connection,
+            optimization_run_id=run.optimization_run_id,
+            actor_identity="isolated-optimizer-v1",
+            selected_trial_numbers=[],
+            terminal_status="BLOCKED",
+        )
+        run_replay = create_optimization_run(
+            canonical_connection,
+            baseline_qualification_decision_id=decision.qualification_decision_id,
+            actor_identity="isolated-optimizer-v1",
+            objective_json={"trial_budget": 1, "selection_limit": 0},
+        )
+    assert completed.status == "BLOCKED"
+    assert completed.result_digest == selection_digest
+    assert completed.repeat_noop is False
+    assert replay.result_digest == selection_digest
+    assert replay.repeat_noop is True
+    assert run_replay.status == "BLOCKED"
+    assert run_replay.repeat_noop is True
