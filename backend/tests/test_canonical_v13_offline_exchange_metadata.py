@@ -18,11 +18,14 @@ from app.canonical_v13.offline_exchange_metadata import (
 NOW = datetime(2026, 8, 15, 5, tzinfo=timezone.utc)
 
 
-def _request() -> OfflineExchangeMetadataRequest:
+def _request(
+    instrument: str = "BTC-USDT-SWAP",
+    pair: str = "BTC/USDT:USDT",
+) -> OfflineExchangeMetadataRequest:
     return OfflineExchangeMetadataRequest(
-        target_key="btc-usdt-swap-15m",
-        instrument="BTC-USDT-SWAP",
-        pair="BTC/USDT:USDT",
+        target_key=instrument.lower() + "-15m",
+        instrument=instrument,
+        pair=pair,
         timeframe="15m",
         data_kind="futures",
         target_snapshot_id="11111111-1111-1111-1111-111111111111",
@@ -33,12 +36,15 @@ def _request() -> OfflineExchangeMetadataRequest:
     )
 
 
-def _instrument() -> dict[str, str]:
+def _instrument(
+    instrument: str = "BTC-USDT-SWAP",
+    underlying: str = "BTC-USDT",
+) -> dict[str, str]:
     return {
-        "instId": "BTC-USDT-SWAP",
+        "instId": instrument,
         "instType": "SWAP",
         "state": "live",
-        "uly": "BTC-USDT",
+        "uly": underlying,
         "baseCcy": "",
         "quoteCcy": "",
         "settleCcy": "USDT",
@@ -50,10 +56,15 @@ def _instrument() -> dict[str, str]:
     }
 
 
-def _tier(number: int, minimum: str, maximum: str) -> dict[str, str]:
+def _tier(
+    number: int,
+    minimum: str,
+    maximum: str,
+    underlying: str = "BTC-USDT",
+) -> dict[str, str]:
     return {
         "tier": str(number),
-        "uly": "BTC-USDT",
+        "uly": underlying,
         "instId": "",
         "minSz": minimum,
         "maxSz": maximum,
@@ -95,6 +106,58 @@ def test_public_metadata_is_allowlisted_digest_bound_and_replayable() -> None:
     assert payload["network_access"] == "PUBLIC_MARKET_DATA_ONLY"
     assert list(payload["markets"]) == ["BTC/USDT:USDT"]
     assert len(payload["leverage_tiers"]["BTC/USDT:USDT"]) == 2
+
+
+@pytest.mark.parametrize(
+    ("instrument", "pair", "base", "underlying"),
+    (
+        ("BTC-USDT-SWAP", "BTC/USDT:USDT", "BTC", "BTC-USDT"),
+        ("ETH-USDT-SWAP", "ETH/USDT:USDT", "ETH", "ETH-USDT"),
+        ("SOL-USDT-SWAP", "SOL/USDT:USDT", "SOL", "SOL-USDT"),
+    ),
+)
+def test_public_metadata_supports_exact_frozen_multi_asset_targets(
+    instrument: str,
+    pair: str,
+    base: str,
+    underlying: str,
+) -> None:
+    urls: list[str] = []
+
+    def fetch(url: str, _timeout: float) -> bytes:
+        urls.append(url)
+        rows = (
+            [_instrument(instrument, underlying)]
+            if url.startswith(INSTRUMENTS_URL + "?")
+            else [_tier(1, "0", "1000", underlying)]
+        )
+        return json.dumps({"code": "0", "msg": "", "data": rows}).encode()
+
+    payload = OkxPublicOfflineExchangeMetadataDownloader(
+        fetch=fetch,
+        sleep=lambda _: None,
+    ).acquire(_request(instrument, pair), observed_at=NOW)
+    observed = json.loads(payload.content)
+
+    assert observed["markets"][pair]["base"] == base
+    assert observed["markets"][pair]["baseId"] == base
+    assert observed["markets"][pair]["id"] == instrument
+    assert observed["leverage_tiers"][pair][0]["info"]["uly"] == underlying
+    assert all(underlying.replace("-", "%2D") in url or underlying in url for url in urls)
+
+
+def test_public_metadata_rejects_pair_instrument_mismatch() -> None:
+    downloader = OkxPublicOfflineExchangeMetadataDownloader(
+        fetch=lambda _url, _timeout: b"{}",
+        sleep=lambda _: None,
+    )
+
+    with pytest.raises(OfflineExchangeMetadataBlocked) as raised:
+        downloader.acquire(
+            _request("ETH-USDT-SWAP", "BTC/USDT:USDT"),
+            observed_at=NOW,
+        )
+    assert raised.value.code == "BLOCKED_OKX_METADATA_TARGET"
 
 
 def test_metadata_freshness_and_tier_gaps_fail_closed() -> None:

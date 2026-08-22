@@ -22,6 +22,23 @@ ADAPTER_IDENTITY = "freqtrade-2026.6-ccxt-4.5.61-okx-offline-v1"
 MEDIA_TYPE = f"application/json; schema={CONTRACT}"
 MAXIMUM_RESPONSE_BYTES = 2_000_000
 MAXIMUM_TIER_ROWS = 256
+SUPPORTED_TARGETS = {
+    "BTC-USDT-SWAP": {
+        "pair": "BTC/USDT:USDT",
+        "base": "BTC",
+        "underlying": "BTC-USDT",
+    },
+    "ETH-USDT-SWAP": {
+        "pair": "ETH/USDT:USDT",
+        "base": "ETH",
+        "underlying": "ETH-USDT",
+    },
+    "SOL-USDT-SWAP": {
+        "pair": "SOL/USDT:USDT",
+        "base": "SOL",
+        "underlying": "SOL-USDT",
+    },
+}
 
 
 class OfflineExchangeMetadataBlocked(RuntimeError):
@@ -192,9 +209,10 @@ class OkxPublicOfflineExchangeMetadataDownloader:
             raise OfflineExchangeMetadataBlocked(
                 "BLOCKED_OFFLINE_METADATA_FRESHNESS", "explicit UTC freshness is required"
             )
+        target = SUPPORTED_TARGETS.get(request.instrument)
         if (
-            request.instrument != "BTC-USDT-SWAP"
-            or request.pair != "BTC/USDT:USDT"
+            target is None
+            or request.pair != target["pair"]
             or request.timeframe != "15m"
             or request.data_kind != "futures"
         ):
@@ -205,7 +223,11 @@ class OkxPublicOfflineExchangeMetadataDownloader:
             {"instType": "SWAP", "instId": request.instrument}
         )
         tier_url = POSITION_TIERS_URL + "?" + urlencode(
-            {"instType": "SWAP", "tdMode": "isolated", "uly": "BTC-USDT"}
+            {
+                "instType": "SWAP",
+                "tdMode": "isolated",
+                "uly": target["underlying"],
+            }
         )
         instruments = _envelope(self._get(instrument_url), maximum_rows=1)
         self._sleep(self._interval)
@@ -215,13 +237,15 @@ class OkxPublicOfflineExchangeMetadataDownloader:
             instrument.get("instId") != request.instrument
             or instrument.get("instType") != "SWAP"
             or instrument.get("state") != "live"
-            or instrument.get("uly") != "BTC-USDT"
+            or instrument.get("uly") != target["underlying"]
             or instrument.get("settleCcy") != "USDT"
         ):
             raise OfflineExchangeMetadataBlocked(
                 "BLOCKED_OKX_METADATA_INSTRUMENT", "instrument identity/state drifted"
             )
-        selected_tiers = [row for row in tiers if row.get("uly") == "BTC-USDT"]
+        selected_tiers = [
+            row for row in tiers if row.get("uly") == target["underlying"]
+        ]
         if not selected_tiers or len(selected_tiers) != len(tiers):
             raise OfflineExchangeMetadataBlocked(
                 "BLOCKED_OKX_METADATA_TIERS", "position tiers are incomplete or mixed"
@@ -264,10 +288,10 @@ class OkxPublicOfflineExchangeMetadataDownloader:
         market = {
             "id": request.instrument,
             "symbol": request.pair,
-            "base": "BTC",
+            "base": target["base"],
             "quote": "USDT",
             "settle": "USDT",
-            "baseId": "BTC",
+            "baseId": target["base"],
             "quoteId": "USDT",
             "settleId": "USDT",
             "type": "swap",
