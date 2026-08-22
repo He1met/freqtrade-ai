@@ -88,7 +88,23 @@ class Phase9DeploymentCommandDTO(CanonicalCommandDTO):
 class Phase9DeploymentReceiptDTO(CanonicalProjectionDTO):
     deployment_id: UUID
     capability_digest: str = Field(pattern=SHA256_PATTERN)
-    status: Literal["PENDING", "ACTIVE", "STOPPED", "FAILED"]
+    status: Literal["PENDING", "ACTIVE", "STOPPED", "FAILED", "DISABLED"]
+
+
+class Phase9DeploymentDisableCommandDTO(CanonicalCommandDTO):
+    superseded_by_qualification_decision_id: UUID
+    actor_identity: str = Field(min_length=1, max_length=160)
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class Phase9DeploymentDisableReceiptDTO(CanonicalProjectionDTO):
+    deployment_id: UUID
+    superseded_by_qualification_decision_id: UUID
+    request_digest: str = Field(pattern=SHA256_PATTERN)
+    receipt_digest: str = Field(pattern=SHA256_PATTERN)
+    disabled_at: datetime
+    status: Literal["DISABLED"]
+    repeat_noop: bool
 
 
 class Phase9RiskBudgetCommandDTO(CanonicalCommandDTO):

@@ -42,6 +42,7 @@ GENESIS_METADATA_KEY: Final = "canonical-v13-genesis"
 CANONICAL_GUARD_FUNCTION_NAMES: Final = (
     *GATE_GUARD_FUNCTION_NAMES,
     "guard_runtime_image_acceptances_append_only",
+    "guard_deployments_disable_evidence",
 )
 
 
@@ -129,7 +130,9 @@ def _inspection_schema(connection: Connection) -> str | None:
 
 def _existing_tables(connection: Connection) -> tuple[str, ...]:
     return tuple(
-        sorted(inspect(connection).get_table_names(schema=_inspection_schema(connection)))
+        sorted(
+            inspect(connection).get_table_names(schema=_inspection_schema(connection))
+        )
     )
 
 
@@ -183,7 +186,8 @@ def _postgresql_user_objects(connection: Connection) -> tuple[str, ...]:
         for table in CanonicalBase.metadata.tables.values()
         for constraint in table.constraints
         if constraint.name is not None
-        and constraint.__class__.__name__ in {"PrimaryKeyConstraint", "UniqueConstraint"}
+        and constraint.__class__.__name__
+        in {"PrimaryKeyConstraint", "UniqueConstraint"}
     }
     expected_indexes.update(
         index.name
@@ -391,9 +395,13 @@ def install_canonical_genesis(
         from app.canonical_v13.runtime_image_upgrade import (  # noqa: PLC0415
             install_runtime_image_trigger,
         )
+        from app.canonical_v13.deployment_rollover_upgrade import (  # noqa: PLC0415
+            install_deployment_rollover_trigger,
+        )
 
         install_gate_receipt_triggers(effective)
         install_runtime_image_trigger(effective)
+        install_deployment_rollover_trigger(effective)
     effective.execute(
         SCHEMA_METADATA_TABLE.insert().values(
             metadata_key=GENESIS_METADATA_KEY,
@@ -402,9 +410,7 @@ def install_canonical_genesis(
             installer_identity=installer_identity,
         )
     )
-    verification = verify_canonical_genesis(
-        effective, require_zero_business_rows=True
-    )
+    verification = verify_canonical_genesis(effective, require_zero_business_rows=True)
     if not verification.accepted:
         raise CanonicalGenesisBlocked(
             "BLOCKED_GENESIS_VERIFICATION",
@@ -448,6 +454,11 @@ def render_postgresql_genesis_ddl(
     )
 
     statements.extend(runtime_image_trigger_statements())
+    from app.canonical_v13.deployment_rollover_upgrade import (  # noqa: PLC0415
+        deployment_rollover_trigger_statements,
+    )
+
+    statements.extend(deployment_rollover_trigger_statements())
     statements.extend(
         render_postgresql_owner_sql(role_mapping).rstrip(";\n").split(";\n")
     )
@@ -462,48 +473,44 @@ def render_postgresql_owner_sql(
     resolved = role_mapping or CanonicalRoleMapping.identity()
     owner = resolved.physical("canonical_schema_owner")
     statements = [
-        f"ALTER TABLE {CANONICAL_BUSINESS_SCHEMA}.{table.name} "
-        f"OWNER TO {owner}"
+        f"ALTER TABLE {CANONICAL_BUSINESS_SCHEMA}.{table.name} " f"OWNER TO {owner}"
         for table in CanonicalBase.metadata.sorted_tables
     ]
     statements.extend(
         f"ALTER FUNCTION {CANONICAL_BUSINESS_SCHEMA}.{function_name}() OWNER TO {owner}"
         for function_name in CANONICAL_GUARD_FUNCTION_NAMES
     )
-    statements.append(
-        f"ALTER SCHEMA {CANONICAL_BUSINESS_SCHEMA} OWNER TO {owner}"
-    )
+    statements.append(f"ALTER SCHEMA {CANONICAL_BUSINESS_SCHEMA} OWNER TO {owner}")
     return ";\n".join(statements) + ";\n"
 
 
 def postgresql_acl_statements(
     role_mapping: CanonicalRoleMapping | None = None,
+    *,
+    guard_function_names: tuple[str, ...] = CANONICAL_GUARD_FUNCTION_NAMES,
 ) -> tuple[str, ...]:
     """Return an exact per-table ACL plan; wildcard table grants are forbidden."""
 
     assert_canonical_manifest()
     resolved = role_mapping or CanonicalRoleMapping.identity()
     roles = tuple(
-        resolved.physical(role)
-        for role in (*WRITER_IDENTITIES, *READER_IDENTITIES)
+        resolved.physical(role) for role in (*WRITER_IDENTITIES, *READER_IDENTITIES)
     )
     statements: list[str] = [
         f"REVOKE ALL PRIVILEGES ON SCHEMA {CANONICAL_BUSINESS_SCHEMA} FROM PUBLIC"
     ]
     statements.extend(
-        f"GRANT USAGE ON SCHEMA {CANONICAL_BUSINESS_SCHEMA} TO {role}"
-        for role in roles
+        f"GRANT USAGE ON SCHEMA {CANONICAL_BUSINESS_SCHEMA} TO {role}" for role in roles
     )
     for table_name in CANONICAL_TABLE_NAMES:
         qualified = f"{CANONICAL_BUSINESS_SCHEMA}.{table_name}"
         statements.append(f"REVOKE ALL PRIVILEGES ON TABLE {qualified} FROM PUBLIC")
         statements.extend(
-            f"REVOKE ALL PRIVILEGES ON TABLE {qualified} FROM {role}"
-            for role in roles
+            f"REVOKE ALL PRIVILEGES ON TABLE {qualified} FROM {role}" for role in roles
         )
     statements.extend(postgresql_owner_table_grant_statements(resolved))
     owner = resolved.physical("canonical_schema_owner")
-    for function_name in CANONICAL_GUARD_FUNCTION_NAMES:
+    for function_name in guard_function_names:
         qualified = f"{CANONICAL_BUSINESS_SCHEMA}.{function_name}()"
         statements.append(f"REVOKE ALL PRIVILEGES ON FUNCTION {qualified} FROM PUBLIC")
         statements.extend(
@@ -596,9 +603,7 @@ def assert_postgresql_acl_sql(
 ) -> None:
     problems = postgresql_acl_problems(sql, role_mapping)
     if problems:
-        raise CanonicalGenesisBlocked(
-            "BLOCKED_ACL_DESIGN_DRIFT", "; ".join(problems)
-        )
+        raise CanonicalGenesisBlocked("BLOCKED_ACL_DESIGN_DRIFT", "; ".join(problems))
 
 
 __all__ = [

@@ -10,6 +10,27 @@ from app.canonical_v13.phase9_schema_upgrade import (
     render_phase9_acl_rollback_sql,
 )
 from app.canonical_v13.role_mapping import CanonicalRoleMapping
+from app.canonical_v13.deployment_rollover_upgrade import (
+    DEPLOYMENT_ROLLOVER_COLUMNS,
+    deployment_rollover_trigger_statements,
+)
+
+
+def test_deployment_rollover_guard_is_exact_and_fail_closed() -> None:
+    sql = ";\n".join(deployment_rollover_trigger_statements())
+    assert DEPLOYMENT_ROLLOVER_COLUMNS == (
+        "disable_reason",
+        "disable_receipt_digest",
+        "disable_request_digest",
+        "disabled_at",
+        "disabled_by",
+        "superseded_by_qualification_decision_id",
+    )
+    assert "OLD.status = 'DISABLED'" in sql
+    assert "OLD.status <> 'ACTIVE'" in sql
+    assert "disable evidence is incomplete" in sql
+    assert "deployment lineage is immutable" in sql
+    assert "BEFORE UPDATE" in sql
 
 
 def test_phase9_acl_rollback_is_the_frozen_predecessor_delta_only() -> None:
@@ -27,9 +48,7 @@ def test_phase9_acl_rollback_is_the_frozen_predecessor_delta_only() -> None:
     )
     assert all("REVOKE" in statement for statement in statements)
     assert not any("GRANT" in statement for statement in statements)
-    assert not any(
-        table_name in sql for table_name in PHASE9_EXTENSION_TABLE_NAMES
-    )
+    assert not any(table_name in sql for table_name in PHASE9_EXTENSION_TABLE_NAMES)
     assert (
         "REVOKE SELECT ON TABLE strategy_platform_v13.deployment_approvals "
         "FROM phase9_test_control_writer"
@@ -58,6 +77,15 @@ def test_phase9_runbook_matches_current_probe_and_cleanup_contract() -> None:
     assert "canonical_approval_writer` transaction" in runbook
     assert "cleanup-phase9-provisioning" in runbook
     assert "runtime-reader-acl-apply" in runbook
+    assert "deployment-rollover-apply" in runbook
+    assert (
+        runbook.index("canonical_v13_runtime_image.py schema-apply")
+        < runbook.index("runtime-reader-acl-apply")
+        < runbook.index("deployment-rollover-apply")
+    )
+    assert "必须严格反向执行" in runbook
+    assert "/phase9/deployments/{old_id}/disable" in runbook
+    assert "禁止直接 SQL 改状态" in runbook
     assert "repeat_noop=true" in runbook
     assert "该表只属于" not in runbook
     assert "PostgreSQL ACL 下该命令不可达" not in runbook

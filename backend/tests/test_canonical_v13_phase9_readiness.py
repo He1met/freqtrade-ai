@@ -15,7 +15,9 @@ from app.canonical_v13.accounting import (
 )
 from app.canonical_v13.deployment_approval import approve_demo_deployment
 from app.canonical_v13.deployment_control import (
+    CanonicalDeploymentBlocked,
     create_demo_deployment,
+    disable_demo_deployment,
     launch_demo_runtime,
 )
 from app.canonical_v13.fill_service import (
@@ -395,6 +397,89 @@ def test_multiple_qualified_rows_do_not_make_explicit_handoff_ambiguous(
     )
 
 
+def test_qualification_handoff_allows_only_terminal_historical_deployment_lineage(
+    canonical_connection,
+) -> None:
+    with canonical_connection.begin():
+        historical = _qualified(canonical_connection)
+        successor = _qualified(canonical_connection)
+        historical_handoff = _handoff(canonical_connection, historical)
+        deployment_id, runtime_id = _seed_stage_a(
+            canonical_connection, historical_handoff
+        )
+        blocked = inspect_phase9_readiness(
+            canonical_connection,
+            qualification_handoff=_handoff(canonical_connection, successor),
+        )
+        successor_approval = approve_demo_deployment(
+            canonical_connection,
+            qualification_decision_id=successor.qualification_decision_id,
+            actor_identity="operator:phase9-test",
+            reason="approved successor remains blocked until old disable",
+        )
+        with pytest.raises(
+            CanonicalDeploymentBlocked,
+            match="BLOCKED_NONTERMINAL_DEPLOYMENT_PRESENT",
+        ):
+            create_demo_deployment(
+                canonical_connection,
+                deployment_approval_id=successor_approval.deployment_approval_id,
+            )
+        with pytest.raises(
+            CanonicalDeploymentBlocked,
+            match="BLOCKED_DEPLOYMENT_RUNTIME_NOT_STOPPED",
+        ):
+            disable_demo_deployment(
+                canonical_connection,
+                deployment_id=deployment_id,
+                superseded_by_qualification_decision_id=(
+                    successor.qualification_decision_id
+                ),
+                actor_identity="operator:phase9-test",
+                reason="supersede stopped historical lineage",
+            )
+        canonical_connection.execute(
+            RUNTIME_INSTANCES_TABLE.update()
+            .where(RUNTIME_INSTANCES_TABLE.c.id == runtime_id)
+            .values(status="STOPPED")
+        )
+        disabled = disable_demo_deployment(
+            canonical_connection,
+            deployment_id=deployment_id,
+            superseded_by_qualification_decision_id=(
+                successor.qualification_decision_id
+            ),
+            actor_identity="operator:phase9-test",
+            reason="supersede stopped historical lineage",
+        )
+        repeated = disable_demo_deployment(
+            canonical_connection,
+            deployment_id=deployment_id,
+            superseded_by_qualification_decision_id=(
+                successor.qualification_decision_id
+            ),
+            actor_identity="operator:phase9-test",
+            reason="supersede stopped historical lineage",
+        )
+        ready = inspect_phase9_readiness(
+            canonical_connection,
+            qualification_handoff=_handoff(canonical_connection, successor),
+        )
+
+    assert blocked.status == "BLOCKED"
+    assert blocked.reason_codes == ("NONTERMINAL_DEPLOYMENT_PRESENT=1",)
+    assert disabled.status == "DISABLED"
+    assert disabled.repeat_noop is False
+    assert repeated.receipt_digest == disabled.receipt_digest
+    assert repeated.repeat_noop is True
+    assert ready.status == "READY"
+    assert ready.reason_codes == ()
+    assert ready.execution_domain_counts["deployment_approvals"] == 2
+    assert ready.execution_domain_counts["deployments"] == 1
+    assert ready.execution_domain_counts["runtime_instances"] == 1
+    assert ready.execution_domain_counts["runtime_receipts"] == 1
+
+
 def test_wrong_exact_lineage_digest_is_blocked_and_never_echoed_as_verified(
     canonical_connection,
 ) -> None:
@@ -473,7 +558,7 @@ def test_no_order_soak_requires_exact_production_runtime_and_replays(
     assert first == repeated
 
 
-def test_no_order_soak_blocks_an_unrelated_second_active_runtime(
+def test_no_order_soak_prevents_an_unrelated_second_active_runtime(
     canonical_connection,
 ) -> None:
     with canonical_connection.begin():
@@ -481,7 +566,11 @@ def test_no_order_soak_blocks_an_unrelated_second_active_runtime(
         selected_handoff = _handoff(canonical_connection, selected)
         _seed_stage_a(canonical_connection, selected_handoff)
         unrelated = _qualified(canonical_connection)
-        _seed_stage_a(canonical_connection, _handoff(canonical_connection, unrelated))
+        with pytest.raises(
+            CanonicalDeploymentBlocked,
+            match="BLOCKED_NONTERMINAL_DEPLOYMENT_PRESENT",
+        ):
+            _seed_stage_a(canonical_connection, _handoff(canonical_connection, unrelated))
         receipt = inspect_phase9_readiness(
             canonical_connection,
             qualification_handoff=selected_handoff,
@@ -490,11 +579,8 @@ def test_no_order_soak_blocks_an_unrelated_second_active_runtime(
             + timedelta(seconds=20),
         )
 
-    assert receipt.status == "BLOCKED"
-    assert receipt.reason_codes == (
-        "EXACT_ACTIVE_DEPLOYMENT_NOT_GLOBALLY_UNIQUE",
-        "EXACT_HEALTHY_RUNTIME_NOT_GLOBALLY_UNIQUE",
-    )
+    assert receipt.status == "READY"
+    assert receipt.reason_codes == ()
 
 
 def test_no_order_soak_rejects_a_stale_runtime_heartbeat(canonical_connection) -> None:
@@ -781,9 +867,9 @@ def test_canary_readiness_recomputes_sealed_policy_and_execution_reservation(
             validation_plan_id=decision["validation_plan_id"],
             validation_plan_digest=decision["validation_plan_digest"],
         )
-        deployment = canonical_connection.execute(
-            select(DEPLOYMENTS_TABLE)
-        ).mappings().one()
+        deployment = (
+            canonical_connection.execute(select(DEPLOYMENTS_TABLE)).mappings().one()
+        )
         runtime_id = canonical_connection.execute(
             select(RUNTIME_INSTANCES_TABLE.c.id)
         ).scalar_one()
@@ -794,14 +880,16 @@ def test_canary_readiness_recomputes_sealed_policy_and_execution_reservation(
             runtime_id,
             base_time=probe.observed_at,
         )
-        policy = _authorize(
-            canonical_connection, decision, approval, probe_receipt
-        )
-        persisted_policy = canonical_connection.execute(
-            select(EXECUTION_CANARY_RISK_POLICIES_TABLE).where(
-                EXECUTION_CANARY_RISK_POLICIES_TABLE.c.id == policy.policy_id
+        policy = _authorize(canonical_connection, decision, approval, probe_receipt)
+        persisted_policy = (
+            canonical_connection.execute(
+                select(EXECUTION_CANARY_RISK_POLICIES_TABLE).where(
+                    EXECUTION_CANARY_RISK_POLICIES_TABLE.c.id == policy.policy_id
+                )
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
         budget = authorize_demo_risk_budget(
             canonical_connection,
             deployment_approval_id=approval.deployment_approval_id,

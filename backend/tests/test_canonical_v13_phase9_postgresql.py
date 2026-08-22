@@ -20,6 +20,14 @@ from app.canonical_v13.runtime_image_upgrade import (
     apply_runtime_image_upgrade,
     rollback_runtime_image_upgrade,
 )
+from app.canonical_v13.deployment_rollover_upgrade import (
+    CanonicalDeploymentRolloverUpgradeBlocked,
+    apply_deployment_rollover_upgrade,
+    rollback_deployment_rollover_upgrade,
+    verify_deployment_rollover_upgrade,
+)
+from app.canonical_v13.deployment_approval import approve_demo_deployment
+from app.canonical_v13.deployment_control import create_demo_deployment
 from app.canonical_v13.runtime_image_authority import (
     RUNTIME_IMAGE_BASE_DIGEST,
     RUNTIME_IMAGE_TITLE,
@@ -27,6 +35,8 @@ from app.canonical_v13.runtime_image_authority import (
     accept_runtime_image,
 )
 from app.canonical_v13.models import (
+    DEPLOYMENTS_TABLE,
+    QUALIFICATION_DECISIONS_TABLE,
     RUNTIME_IMAGE_ACCEPTANCES_TABLE,
     SCHEMA_METADATA_TABLE,
 )
@@ -37,7 +47,7 @@ from app.canonical_v13.runtime_reader_acl_upgrade import (
     rollback_runtime_reader_acl_upgrade,
     verify_runtime_reader_acl_upgrade,
 )
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, select, text
 from sqlalchemy.exc import DBAPIError
 
 DATABASE_URL = os.environ.get("CANONICAL_V13_POSTGRES_URL")
@@ -46,6 +56,109 @@ pytestmark = pytest.mark.skipif(
     not DATABASE_URL,
     reason="CANONICAL_V13_POSTGRES_URL is required for the isolated contract",
 )
+
+
+def test_deployment_rollover_upgrade_trigger_replay_and_rollback_guard() -> None:
+    assert DATABASE_URL is not None
+    mapping = CanonicalRoleMapping.from_prefix(
+        os.environ.get("CANONICAL_V13_ROLE_PREFIX", "freqtrade_ai_v13_ci_")
+    )
+    engine = create_engine(DATABASE_URL)
+    try:
+        with engine.connect() as connection:
+            transaction = connection.begin()
+            try:
+                assert (
+                    verify_deployment_rollover_upgrade(connection).status == "ACCEPTED"
+                )
+                rolled_back = rollback_deployment_rollover_upgrade(
+                    connection, role_mapping=mapping
+                )
+                assert rolled_back.status == "ROLLED_BACK"
+                assert (
+                    rollback_deployment_rollover_upgrade(
+                        connection, role_mapping=mapping
+                    ).status
+                    == "PREVIOUS_READY"
+                )
+                upgraded = apply_deployment_rollover_upgrade(
+                    connection, role_mapping=mapping
+                )
+                assert upgraded.status == "UPGRADED"
+                assert (
+                    apply_deployment_rollover_upgrade(
+                        connection, role_mapping=mapping
+                    ).status
+                    == "ACCEPTED"
+                )
+
+            finally:
+                transaction.rollback()
+    finally:
+        engine.dispose()
+
+
+def test_deployment_rollover_postgresql_preserves_disabled_evidence() -> None:
+    assert DATABASE_URL is not None
+    mapping = CanonicalRoleMapping.from_prefix(
+        os.environ.get("CANONICAL_V13_ROLE_PREFIX", "freqtrade_ai_v13_ci_")
+    )
+    engine = create_engine(DATABASE_URL)
+    try:
+        with engine.connect() as connection:
+            transaction = connection.begin()
+            try:
+                qualification_id = connection.execute(
+                    select(QUALIFICATION_DECISIONS_TABLE.c.id).where(
+                        QUALIFICATION_DECISIONS_TABLE.c.status == "QUALIFIED"
+                    )
+                ).scalar_one()
+                approval = approve_demo_deployment(
+                    connection,
+                    qualification_decision_id=qualification_id,
+                    actor_identity="operator:isolated-postgresql-rollover",
+                    reason="exercise database rollover guard",
+                )
+                deployment_id = create_demo_deployment(
+                    connection,
+                    deployment_approval_id=approval.deployment_approval_id,
+                ).deployment_id
+                connection.execute(
+                    DEPLOYMENTS_TABLE.update()
+                    .where(DEPLOYMENTS_TABLE.c.id == deployment_id)
+                    .values(status="ACTIVE")
+                )
+                connection.execute(
+                    DEPLOYMENTS_TABLE.update()
+                    .where(DEPLOYMENTS_TABLE.c.id == deployment_id)
+                    .values(
+                        status="DISABLED",
+                        disabled_at=datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc),
+                        disabled_by="operator:isolated-postgresql-rollover",
+                        disable_reason="preserve exact disabled deployment evidence",
+                        superseded_by_qualification_decision_id=qualification_id,
+                        disable_request_digest="1" * 64,
+                        disable_receipt_digest="2" * 64,
+                    )
+                )
+                with pytest.raises(DBAPIError, match="immutable"):
+                    with connection.begin_nested():
+                        connection.execute(
+                            DEPLOYMENTS_TABLE.update()
+                            .where(DEPLOYMENTS_TABLE.c.id == deployment_id)
+                            .values(capability_digest="0" * 64)
+                        )
+                with pytest.raises(
+                    CanonicalDeploymentRolloverUpgradeBlocked,
+                    match="BLOCKED_DISABLED_DEPLOYMENT_EVIDENCE_NONZERO",
+                ):
+                    rollback_deployment_rollover_upgrade(
+                        connection, role_mapping=mapping
+                    )
+            finally:
+                transaction.rollback()
+    finally:
+        engine.dispose()
 
 
 def test_phase9_postgresql_upgrade_rollback_and_exact_replay() -> None:
@@ -75,13 +188,24 @@ def test_phase9_postgresql_upgrade_rollback_and_exact_replay() -> None:
                     f"TO {mapping.physical(role)}"
                 )
 
+            rollover_rolled_back = rollback_deployment_rollover_upgrade(
+                connection, role_mapping=mapping
+            )
+            assert rollover_rolled_back.status == "ROLLED_BACK"
+            reader_rolled_back = rollback_runtime_reader_acl_upgrade(
+                connection,
+                role_mapping=mapping,
+                actor_identity="isolated-postgresql-upgrade-chain",
+            )
+            assert reader_rolled_back.status == "ROLLED_BACK"
             image_rolled_back = rollback_runtime_image_upgrade(
                 connection, role_mapping=mapping
             )
             assert image_rolled_back.status == "ROLLED_BACK"
-            assert rollback_runtime_image_upgrade(
-                connection, role_mapping=mapping
-            ).status == "PREVIOUS_READY"
+            assert (
+                rollback_runtime_image_upgrade(connection, role_mapping=mapping).status
+                == "PREVIOUS_READY"
+            )
 
             rolled_back = rollback_phase9_schema_upgrade(
                 connection, role_mapping=mapping
@@ -124,9 +248,26 @@ def test_phase9_postgresql_upgrade_rollback_and_exact_replay() -> None:
                 connection, role_mapping=mapping
             )
             assert image_upgraded.status == "UPGRADED"
-            assert apply_runtime_image_upgrade(
+            assert (
+                apply_runtime_image_upgrade(connection, role_mapping=mapping).status
+                == "ACCEPTED"
+            )
+            reader_upgraded = apply_runtime_reader_acl_upgrade(
+                connection,
+                role_mapping=mapping,
+                actor_identity="isolated-postgresql-upgrade-chain",
+            )
+            assert reader_upgraded.status == "UPGRADED"
+            rollover_upgraded = apply_deployment_rollover_upgrade(
                 connection, role_mapping=mapping
-            ).status == "ACCEPTED"
+            )
+            assert rollover_upgraded.status == "UPGRADED"
+            assert (
+                apply_deployment_rollover_upgrade(
+                    connection, role_mapping=mapping
+                ).status
+                == "ACCEPTED"
+            )
     finally:
         engine.dispose()
 
@@ -140,6 +281,20 @@ def test_phase9_previous_acl_and_connect_drift_fail_closed_atomically() -> None:
     extra_role = mapping.physical("canonical_approval_writer")
     try:
         with engine.begin() as connection:
+            assert (
+                rollback_deployment_rollover_upgrade(
+                    connection, role_mapping=mapping
+                ).status
+                == "ROLLED_BACK"
+            )
+            assert (
+                rollback_runtime_reader_acl_upgrade(
+                    connection,
+                    role_mapping=mapping,
+                    actor_identity="isolated-postgresql-acl-drift-chain",
+                ).status
+                == "ROLLED_BACK"
+            )
             rollback_runtime_image_upgrade(connection, role_mapping=mapping)
             connection.exec_driver_sql(
                 "GRANT DELETE ON TABLE strategy_platform_v13.signals "
@@ -162,9 +317,7 @@ def test_phase9_previous_acl_and_connect_drift_fail_closed_atomically() -> None:
                 "REVOKE DELETE ON TABLE strategy_platform_v13.signals "
                 f"FROM {extra_role}"
             )
-            previous = rollback_phase9_schema_upgrade(
-                connection, role_mapping=mapping
-            )
+            previous = rollback_phase9_schema_upgrade(connection, role_mapping=mapping)
             assert previous.status == "ROLLED_BACK"
             database_name = str(
                 connection.execute(text("SELECT current_database()")).scalar_one()
@@ -192,6 +345,20 @@ def test_phase9_previous_acl_and_connect_drift_fail_closed_atomically() -> None:
                 apply_runtime_image_upgrade(connection, role_mapping=mapping).status
                 == "UPGRADED"
             )
+            assert (
+                apply_runtime_reader_acl_upgrade(
+                    connection,
+                    role_mapping=mapping,
+                    actor_identity="isolated-postgresql-acl-drift-chain",
+                ).status
+                == "UPGRADED"
+            )
+            assert (
+                apply_deployment_rollover_upgrade(
+                    connection, role_mapping=mapping
+                ).status
+                == "UPGRADED"
+            )
     finally:
         engine.dispose()
 
@@ -207,6 +374,19 @@ def test_runtime_reader_qualification_acl_rollover_is_exact_and_replayable() -> 
     actor = "isolated-postgresql-runtime-reader-acl-test"
     try:
         with engine.begin() as connection:
+            with pytest.raises(
+                CanonicalRuntimeReaderAclUpgradeBlocked,
+                match="BLOCKED_DEPLOYMENT_ROLLOVER_ROLLBACK_REQUIRED",
+            ):
+                rollback_runtime_reader_acl_upgrade(
+                    connection, role_mapping=mapping, actor_identity=actor
+                )
+            assert (
+                rollback_deployment_rollover_upgrade(
+                    connection, role_mapping=mapping
+                ).status
+                == "ROLLED_BACK"
+            )
             qualification_count = connection.execute(
                 text(f"SELECT count(*) FROM {table_name}")
             ).scalar_one()
@@ -215,13 +395,8 @@ def test_runtime_reader_qualification_acl_rollover_is_exact_and_replayable() -> 
             )
             connection.execute(
                 SCHEMA_METADATA_TABLE.update()
-                .where(
-                    SCHEMA_METADATA_TABLE.c.metadata_key
-                    == "canonical-v13-genesis"
-                )
-                .values(
-                    manifest_digest=PREVIOUS_RUNTIME_READER_ACL_MANIFEST_DIGEST
-                )
+                .where(SCHEMA_METADATA_TABLE.c.metadata_key == "canonical-v13-genesis")
+                .values(manifest_digest=PREVIOUS_RUNTIME_READER_ACL_MANIFEST_DIGEST)
             )
             previous = verify_runtime_reader_acl_upgrade(
                 connection, role_mapping=mapping
@@ -267,16 +442,28 @@ def test_runtime_reader_qualification_acl_rollover_is_exact_and_replayable() -> 
             )
             assert rolled_back.status == "ROLLED_BACK"
             assert rolled_back.qualification_decision_count == qualification_count
-            assert rollback_runtime_reader_acl_upgrade(
-                connection, role_mapping=mapping, actor_identity=actor
-            ).status == "PREVIOUS_READY"
+            assert (
+                rollback_runtime_reader_acl_upgrade(
+                    connection, role_mapping=mapping, actor_identity=actor
+                ).status
+                == "PREVIOUS_READY"
+            )
             reapplied = apply_runtime_reader_acl_upgrade(
                 connection, role_mapping=mapping, actor_identity=actor
             )
             assert reapplied.status == "UPGRADED"
-            assert apply_runtime_reader_acl_upgrade(
-                connection, role_mapping=mapping, actor_identity=actor
-            ).receipt_digest == reapplied.receipt_digest
+            assert (
+                apply_runtime_reader_acl_upgrade(
+                    connection, role_mapping=mapping, actor_identity=actor
+                ).receipt_digest
+                == reapplied.receipt_digest
+            )
+            assert (
+                apply_deployment_rollover_upgrade(
+                    connection, role_mapping=mapping
+                ).status
+                == "UPGRADED"
+            )
     finally:
         engine.dispose()
 
@@ -292,18 +479,19 @@ def test_runtime_reader_acl_failed_transaction_restores_predecessor_state() -> N
     actor = "isolated-postgresql-runtime-reader-acl-failure-test"
     try:
         with engine.begin() as connection:
+            assert (
+                rollback_deployment_rollover_upgrade(
+                    connection, role_mapping=mapping
+                ).status
+                == "ROLLED_BACK"
+            )
             connection.exec_driver_sql(
                 f"REVOKE SELECT ON TABLE {table_name} FROM {reader}"
             )
             connection.execute(
                 SCHEMA_METADATA_TABLE.update()
-                .where(
-                    SCHEMA_METADATA_TABLE.c.metadata_key
-                    == "canonical-v13-genesis"
-                )
-                .values(
-                    manifest_digest=PREVIOUS_RUNTIME_READER_ACL_MANIFEST_DIGEST
-                )
+                .where(SCHEMA_METADATA_TABLE.c.metadata_key == "canonical-v13-genesis")
+                .values(manifest_digest=PREVIOUS_RUNTIME_READER_ACL_MANIFEST_DIGEST)
             )
 
         with pytest.raises(RuntimeError, match="injected failure"):
@@ -319,14 +507,25 @@ def test_runtime_reader_acl_failed_transaction_restores_predecessor_state() -> N
             )
             assert restored.status == "PREVIOUS_READY"
             assert not any(restored.privileges.values())
-            assert apply_runtime_reader_acl_upgrade(
-                connection, role_mapping=mapping, actor_identity=actor
-            ).status == "UPGRADED"
+            assert (
+                apply_runtime_reader_acl_upgrade(
+                    connection, role_mapping=mapping, actor_identity=actor
+                ).status
+                == "UPGRADED"
+            )
+            assert (
+                apply_deployment_rollover_upgrade(
+                    connection, role_mapping=mapping
+                ).status
+                == "UPGRADED"
+            )
     finally:
         engine.dispose()
 
 
-def test_runtime_image_acceptance_concurrency_append_only_and_rollback_cleanup() -> None:
+def test_runtime_image_acceptance_concurrency_append_only_and_rollback_cleanup() -> (
+    None
+):
     assert DATABASE_URL is not None
     mapping = CanonicalRoleMapping.from_prefix(
         os.environ.get("CANONICAL_V13_ROLE_PREFIX", "freqtrade_ai_v13_ci_")
@@ -377,6 +576,21 @@ def test_runtime_image_acceptance_concurrency_append_only_and_rollback_cleanup()
             )
 
     try:
+        with engine.begin() as connection:
+            assert (
+                rollback_deployment_rollover_upgrade(
+                    connection, role_mapping=mapping
+                ).status
+                == "ROLLED_BACK"
+            )
+            assert (
+                rollback_runtime_reader_acl_upgrade(
+                    connection,
+                    role_mapping=mapping,
+                    actor_identity="isolated-postgresql-runtime-image-chain",
+                ).status
+                == "ROLLED_BACK"
+            )
         with ThreadPoolExecutor(max_workers=2) as executor:
             accepted = tuple(executor.map(lambda _index: accept_once(), range(2)))
         assert accepted[0] == accepted[1]
@@ -404,10 +618,26 @@ def test_runtime_image_acceptance_concurrency_append_only_and_rollback_cleanup()
                 "ALTER TABLE strategy_platform_v13.runtime_image_acceptances "
                 "ENABLE TRIGGER runtime_image_acceptances_append_only"
             )
-            assert rollback_runtime_image_upgrade(
-                connection, role_mapping=mapping
-            ).status == "ROLLED_BACK"
-            assert apply_runtime_image_upgrade(
-                connection, role_mapping=mapping
-            ).status == "UPGRADED"
+            assert (
+                rollback_runtime_image_upgrade(connection, role_mapping=mapping).status
+                == "ROLLED_BACK"
+            )
+            assert (
+                apply_runtime_image_upgrade(connection, role_mapping=mapping).status
+                == "UPGRADED"
+            )
+            assert (
+                apply_runtime_reader_acl_upgrade(
+                    connection,
+                    role_mapping=mapping,
+                    actor_identity="isolated-postgresql-runtime-image-chain",
+                ).status
+                == "UPGRADED"
+            )
+            assert (
+                apply_deployment_rollover_upgrade(
+                    connection, role_mapping=mapping
+                ).status
+                == "UPGRADED"
+            )
         engine.dispose()

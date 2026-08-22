@@ -9,7 +9,7 @@ import json
 from typing import Final
 from uuid import uuid4
 
-from sqlalchemy import Connection, func, select, text
+from sqlalchemy import Connection, func, inspect, select, text
 
 from app.canonical_v13.genesis import verify_canonical_genesis
 from app.canonical_v13.manifest import (
@@ -26,6 +26,9 @@ from app.canonical_v13.role_mapping import CanonicalRoleMapping
 
 PREVIOUS_RUNTIME_READER_ACL_MANIFEST_DIGEST: Final = (
     "44c990ebddc1f04c10aefa26695a33c89147209a61aa00be7c16d13fe59e4ed6"
+)
+RUNTIME_READER_ACL_ACCEPTED_MANIFEST_DIGEST: Final = (
+    "8a66b6fec8b93cec236b2d9a36bfa84171bc7905be588275beeea25a09bc5eba"
 )
 RUNTIME_READER_ACL_UPGRADE_CONTRACT: Final = (
     "canonical-v13-runtime-reader-qualification-acl-upgrade-v1"
@@ -130,6 +133,7 @@ def verify_runtime_reader_acl_upgrade(
     manifest_digest = _manifest_digest(connection)
     if manifest_digest not in {
         PREVIOUS_RUNTIME_READER_ACL_MANIFEST_DIGEST,
+        RUNTIME_READER_ACL_ACCEPTED_MANIFEST_DIGEST,
         CANONICAL_MANIFEST_DIGEST,
     }:
         raise CanonicalRuntimeReaderAclUpgradeBlocked(
@@ -139,6 +143,7 @@ def verify_runtime_reader_acl_upgrade(
         connection,
         accepted_manifest_digests=(
             PREVIOUS_RUNTIME_READER_ACL_MANIFEST_DIGEST,
+            RUNTIME_READER_ACL_ACCEPTED_MANIFEST_DIGEST,
             CANONICAL_MANIFEST_DIGEST,
         ),
     )
@@ -148,16 +153,19 @@ def verify_runtime_reader_acl_upgrade(
         )
     privileges = _privileges(connection, role_mapping=role_mapping)
     expected = {privilege: privilege == "SELECT" for privilege in _PRIVILEGES}
-    if manifest_digest == CANONICAL_MANIFEST_DIGEST and privileges == expected:
+    if (
+        manifest_digest
+        in {RUNTIME_READER_ACL_ACCEPTED_MANIFEST_DIGEST, CANONICAL_MANIFEST_DIGEST}
+        and privileges == expected
+    ):
         return _result(
             connection,
             role_mapping=role_mapping,
             status="ACCEPTED",
             repeat_noop=True,
         )
-    if (
-        manifest_digest == PREVIOUS_RUNTIME_READER_ACL_MANIFEST_DIGEST
-        and not any(privileges.values())
+    if manifest_digest == PREVIOUS_RUNTIME_READER_ACL_MANIFEST_DIGEST and not any(
+        privileges.values()
     ):
         return _result(
             connection,
@@ -229,14 +237,14 @@ def apply_runtime_reader_acl_upgrade(
     connection.execute(
         SCHEMA_METADATA_TABLE.update()
         .where(SCHEMA_METADATA_TABLE.c.metadata_key == "canonical-v13-genesis")
-        .values(manifest_digest=CANONICAL_MANIFEST_DIGEST)
+        .values(manifest_digest=RUNTIME_READER_ACL_ACCEPTED_MANIFEST_DIGEST)
     )
     _append_audit(
         connection,
         actor_identity=actor_identity,
         event_type="RUNTIME_READER_QUALIFICATION_ACL_UPGRADED",
         before_digest=before.manifest_digest,
-        after_digest=CANONICAL_MANIFEST_DIGEST,
+        after_digest=RUNTIME_READER_ACL_ACCEPTED_MANIFEST_DIGEST,
     )
     verify_runtime_reader_acl_upgrade(connection, role_mapping=role_mapping)
     return _result(
@@ -253,6 +261,16 @@ def rollback_runtime_reader_acl_upgrade(
     role_mapping: CanonicalRoleMapping,
     actor_identity: str,
 ) -> RuntimeReaderAclUpgradeResult:
+    deployment_columns = {
+        str(column["name"])
+        for column in inspect(connection).get_columns(
+            "deployments", schema=CANONICAL_BUSINESS_SCHEMA
+        )
+    }
+    if "disable_receipt_digest" in deployment_columns:
+        raise CanonicalRuntimeReaderAclUpgradeBlocked(
+            "BLOCKED_DEPLOYMENT_ROLLOVER_ROLLBACK_REQUIRED"
+        )
     connection.execute(
         text("SELECT pg_advisory_xact_lock(:key)"), {"key": _ADVISORY_LOCK_KEY}
     )
@@ -290,6 +308,7 @@ def rollback_runtime_reader_acl_upgrade(
 __all__ = [
     "CanonicalRuntimeReaderAclUpgradeBlocked",
     "PREVIOUS_RUNTIME_READER_ACL_MANIFEST_DIGEST",
+    "RUNTIME_READER_ACL_ACCEPTED_MANIFEST_DIGEST",
     "RUNTIME_READER_ACL_UPGRADE_CONTRACT",
     "RuntimeReaderAclUpgradeResult",
     "apply_runtime_reader_acl_upgrade",

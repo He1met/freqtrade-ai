@@ -14,15 +14,30 @@ from app.canonical_v13.genesis import (
     postgresql_owner_table_grant_statements,
     verify_canonical_genesis,
 )
-from app.canonical_v13.manifest import CANONICAL_BUSINESS_SCHEMA, CANONICAL_MANIFEST_DIGEST
-from app.canonical_v13.models import RUNTIME_IMAGE_ACCEPTANCES_TABLE, SCHEMA_METADATA_TABLE
+from app.canonical_v13.gate_receipt_upgrade import GATE_GUARD_FUNCTION_NAMES
+from app.canonical_v13.manifest import (
+    CANONICAL_BUSINESS_SCHEMA,
+    CANONICAL_MANIFEST_DIGEST,
+)
+from app.canonical_v13.models import (
+    RUNTIME_IMAGE_ACCEPTANCES_TABLE,
+    SCHEMA_METADATA_TABLE,
+)
 from app.canonical_v13.role_mapping import CanonicalRoleMapping
 
 
 PREVIOUS_RUNTIME_IMAGE_MANIFEST_DIGEST: Final = (
     "f05b11c94158289c9a89271488e34a4cbcb8c1d66e6f50ba332abf879af541e3"
 )
-RUNTIME_IMAGE_UPGRADE_CONTRACT: Final = "canonical-v13-runtime-image-authority-upgrade-v1"
+RUNTIME_IMAGE_ACCEPTED_MANIFEST_DIGEST: Final = (
+    "44c990ebddc1f04c10aefa26695a33c89147209a61aa00be7c16d13fe59e4ed6"
+)
+RUNTIME_READER_ACL_ACCEPTED_MANIFEST_DIGEST: Final = (
+    "8a66b6fec8b93cec236b2d9a36bfa84171bc7905be588275beeea25a09bc5eba"
+)
+RUNTIME_IMAGE_UPGRADE_CONTRACT: Final = (
+    "canonical-v13-runtime-image-authority-upgrade-v1"
+)
 RUNTIME_IMAGE_GUARD_FUNCTION: Final = "guard_runtime_image_acceptances_append_only"
 RUNTIME_IMAGE_GUARD_TRIGGER: Final = "runtime_image_acceptances_append_only"
 
@@ -44,7 +59,9 @@ class RuntimeImageUpgradeResult:
 
 
 def _digest(value: object) -> str:
-    return sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 def runtime_image_trigger_statements() -> tuple[str, ...]:
@@ -76,7 +93,9 @@ def _manifest(connection: Connection) -> str:
         )
     ).scalar_one_or_none()
     if not isinstance(value, str):
-        raise CanonicalRuntimeImageUpgradeBlocked("BLOCKED_RUNTIME_IMAGE_SCHEMA_METADATA")
+        raise CanonicalRuntimeImageUpgradeBlocked(
+            "BLOCKED_RUNTIME_IMAGE_SCHEMA_METADATA"
+        )
     return value
 
 
@@ -92,16 +111,29 @@ def _trigger_present(connection: Connection) -> bool:
                 "WHERE namespace.nspname=:schema AND relation.relname='runtime_image_acceptances' "
                 "AND trigger.tgname=:trigger AND NOT trigger.tgisinternal)"
             ),
-            {"schema": CANONICAL_BUSINESS_SCHEMA, "trigger": RUNTIME_IMAGE_GUARD_TRIGGER},
+            {
+                "schema": CANONICAL_BUSINESS_SCHEMA,
+                "trigger": RUNTIME_IMAGE_GUARD_TRIGGER,
+            },
         ).scalar_one()
     )
 
 
-def _result(connection: Connection, *, status: str, repeat_noop: bool) -> RuntimeImageUpgradeResult:
+def _result(
+    connection: Connection, *, status: str, repeat_noop: bool
+) -> RuntimeImageUpgradeResult:
     present = inspect(connection).has_table(
         RUNTIME_IMAGE_ACCEPTANCES_TABLE.name, schema=CANONICAL_BUSINESS_SCHEMA
     )
-    count = int(connection.execute(select(func.count()).select_from(RUNTIME_IMAGE_ACCEPTANCES_TABLE)).scalar_one()) if present else 0
+    count = (
+        int(
+            connection.execute(
+                select(func.count()).select_from(RUNTIME_IMAGE_ACCEPTANCES_TABLE)
+            ).scalar_one()
+        )
+        if present
+        else 0
+    )
     payload = {
         "contract": RUNTIME_IMAGE_UPGRADE_CONTRACT,
         "status": status,
@@ -123,8 +155,20 @@ def verify_runtime_image_upgrade(connection: Connection) -> RuntimeImageUpgradeR
     manifest = _manifest(connection)
     if not present and manifest == PREVIOUS_RUNTIME_IMAGE_MANIFEST_DIGEST:
         return _result(connection, status="PREVIOUS_READY", repeat_noop=True)
-    if present and manifest == CANONICAL_MANIFEST_DIGEST and _trigger_present(connection):
-        verification = verify_canonical_genesis(connection)
+    if (
+        present
+        and manifest
+        in {
+            RUNTIME_IMAGE_ACCEPTED_MANIFEST_DIGEST,
+            RUNTIME_READER_ACL_ACCEPTED_MANIFEST_DIGEST,
+            CANONICAL_MANIFEST_DIGEST,
+        }
+        and _trigger_present(connection)
+    ):
+        verification = verify_canonical_genesis(
+            connection,
+            accepted_manifest_digests=(manifest,),
+        )
         if verification.accepted:
             return _result(connection, status="ACCEPTED", repeat_noop=True)
     raise CanonicalRuntimeImageUpgradeBlocked("BLOCKED_PARTIAL_RUNTIME_IMAGE_UPGRADE")
@@ -133,7 +177,9 @@ def verify_runtime_image_upgrade(connection: Connection) -> RuntimeImageUpgradeR
 def apply_runtime_image_upgrade(
     connection: Connection, *, role_mapping: CanonicalRoleMapping
 ) -> RuntimeImageUpgradeResult:
-    connection.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": 1_308_202_608_210_724})
+    connection.execute(
+        text("SELECT pg_advisory_xact_lock(:key)"), {"key": 1_308_202_608_210_724}
+    )
     before = verify_runtime_image_upgrade(connection)
     if before.status == "ACCEPTED":
         return before
@@ -148,14 +194,25 @@ def apply_runtime_image_upgrade(
             f"OWNER TO {owner}"
         )
     )
-    for statement in postgresql_acl_statements(role_mapping):
-        connection.execute(text(statement))
+    for statement in postgresql_acl_statements(
+        role_mapping,
+        guard_function_names=(
+            *GATE_GUARD_FUNCTION_NAMES,
+            RUNTIME_IMAGE_GUARD_FUNCTION,
+        ),
+    ):
+        if (
+            "runtime_image_acceptances" in statement
+            or RUNTIME_IMAGE_GUARD_FUNCTION in statement
+        ):
+            connection.execute(text(statement))
     for statement in postgresql_owner_table_grant_statements(role_mapping):
-        connection.execute(text(statement))
+        if "runtime_image_acceptances" in statement:
+            connection.execute(text(statement))
     connection.execute(
         SCHEMA_METADATA_TABLE.update()
         .where(SCHEMA_METADATA_TABLE.c.metadata_key == "canonical-v13-genesis")
-        .values(manifest_digest=CANONICAL_MANIFEST_DIGEST)
+        .values(manifest_digest=RUNTIME_IMAGE_ACCEPTED_MANIFEST_DIGEST)
     )
     verify_runtime_image_upgrade(connection)
     return _result(connection, status="UPGRADED", repeat_noop=False)
@@ -164,14 +221,39 @@ def apply_runtime_image_upgrade(
 def rollback_runtime_image_upgrade(
     connection: Connection, *, role_mapping: CanonicalRoleMapping
 ) -> RuntimeImageUpgradeResult:
-    connection.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": 1_308_202_608_210_724})
+    deployment_columns = {
+        str(column["name"])
+        for column in inspect(connection).get_columns(
+            "deployments", schema=CANONICAL_BUSINESS_SCHEMA
+        )
+    }
+    if "disable_receipt_digest" in deployment_columns:
+        raise CanonicalRuntimeImageUpgradeBlocked(
+            "BLOCKED_DEPLOYMENT_ROLLOVER_ROLLBACK_REQUIRED"
+        )
+    if _manifest(connection) in {
+        RUNTIME_READER_ACL_ACCEPTED_MANIFEST_DIGEST,
+        CANONICAL_MANIFEST_DIGEST,
+    }:
+        raise CanonicalRuntimeImageUpgradeBlocked(
+            "BLOCKED_RUNTIME_READER_ACL_ROLLBACK_REQUIRED"
+        )
+    connection.execute(
+        text("SELECT pg_advisory_xact_lock(:key)"), {"key": 1_308_202_608_210_724}
+    )
     before = verify_runtime_image_upgrade(connection)
     if before.status == "PREVIOUS_READY":
         return before
     if before.row_count:
-        raise CanonicalRuntimeImageUpgradeBlocked("BLOCKED_RUNTIME_IMAGE_ACCEPTANCES_NONZERO")
+        raise CanonicalRuntimeImageUpgradeBlocked(
+            "BLOCKED_RUNTIME_IMAGE_ACCEPTANCES_NONZERO"
+        )
     schema = CANONICAL_BUSINESS_SCHEMA
-    connection.execute(text(f"DROP TRIGGER {RUNTIME_IMAGE_GUARD_TRIGGER} ON {schema}.runtime_image_acceptances"))
+    connection.execute(
+        text(
+            f"DROP TRIGGER {RUNTIME_IMAGE_GUARD_TRIGGER} ON {schema}.runtime_image_acceptances"
+        )
+    )
     RUNTIME_IMAGE_ACCEPTANCES_TABLE.drop(bind=connection, checkfirst=False)
     connection.execute(text(f"DROP FUNCTION {schema}.{RUNTIME_IMAGE_GUARD_FUNCTION}()"))
     connection.execute(
@@ -185,6 +267,8 @@ def rollback_runtime_image_upgrade(
 __all__ = [
     "CanonicalRuntimeImageUpgradeBlocked",
     "PREVIOUS_RUNTIME_IMAGE_MANIFEST_DIGEST",
+    "RUNTIME_IMAGE_ACCEPTED_MANIFEST_DIGEST",
+    "RUNTIME_READER_ACL_ACCEPTED_MANIFEST_DIGEST",
     "RUNTIME_IMAGE_GUARD_FUNCTION",
     "RUNTIME_IMAGE_GUARD_TRIGGER",
     "RuntimeImageUpgradeResult",

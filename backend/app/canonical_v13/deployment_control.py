@@ -9,7 +9,7 @@ import json
 from typing import Mapping, Protocol
 from uuid import UUID, uuid4
 
-from sqlalchemy import Connection, select
+from sqlalchemy import Connection, func, select
 
 from app.canonical_v13.genesis import verify_canonical_genesis
 from app.canonical_v13.execution_common import lock_execution_boundary
@@ -19,6 +19,7 @@ from app.canonical_v13.models import (
     DEPLOYMENTS_TABLE,
     DEPLOYMENT_APPROVALS_TABLE,
     QUALIFICATION_DECISIONS_TABLE,
+    ORDER_WRITER_LEASES_TABLE,
     RUNTIME_INSTANCES_TABLE,
     RUNTIME_RECEIPTS_TABLE,
 )
@@ -50,6 +51,17 @@ class DeploymentResult:
     status: str
 
 
+@dataclass(frozen=True)
+class DeploymentDisableResult:
+    deployment_id: UUID
+    superseded_by_qualification_decision_id: UUID
+    request_digest: str
+    receipt_digest: str
+    disabled_at: datetime
+    status: str
+    repeat_noop: bool
+
+
 def _digest(value: object) -> str:
     return sha256(
         json.dumps(
@@ -68,6 +80,14 @@ def _effective(connection: Connection) -> Connection:
             schema_translate_map={CANONICAL_BUSINESS_SCHEMA: None}
         )
     return connection
+
+
+def _persisted_utc(value: datetime) -> datetime:
+    return (
+        value.replace(tzinfo=timezone.utc)
+        if value.tzinfo is None
+        else value.astimezone(timezone.utc)
+    )
 
 
 def _require_canonical(connection: Connection) -> Connection:
@@ -111,6 +131,7 @@ def create_demo_deployment(
     deployment_approval_id: UUID,
 ) -> DeploymentResult:
     effective = _require_canonical(connection)
+    lock_execution_boundary(effective, key="demo-deployment-global")
     lock_execution_boundary(effective, key=f"demo-deployment:{deployment_approval_id}")
     approval = (
         effective.execute(
@@ -195,6 +216,18 @@ def create_demo_deployment(
             capability_digest=capability_digest,
             status=existing["status"],
         )
+    nonterminal_deployment_count = int(
+        effective.execute(
+            select(func.count())
+            .select_from(DEPLOYMENTS_TABLE)
+            .where(DEPLOYMENTS_TABLE.c.status.in_(("PENDING", "ACTIVE")))
+        ).scalar_one()
+    )
+    if nonterminal_deployment_count:
+        raise CanonicalDeploymentBlocked(
+            "BLOCKED_NONTERMINAL_DEPLOYMENT_PRESENT",
+            str(nonterminal_deployment_count),
+        )
     deployment_id = uuid4()
     effective.execute(
         DEPLOYMENTS_TABLE.insert().values(
@@ -216,6 +249,194 @@ def create_demo_deployment(
         deployment_id=deployment_id,
         capability_digest=capability_digest,
         status="PENDING",
+    )
+
+
+def disable_demo_deployment(
+    connection: Connection,
+    *,
+    deployment_id: UUID,
+    superseded_by_qualification_decision_id: UUID,
+    actor_identity: str,
+    reason: str,
+) -> DeploymentDisableResult:
+    """Disable one ACTIVE Demo deployment with immutable rollover evidence.
+
+    This transition is intentionally separate from creation of the successor.
+    A stopped runtime and an unloaded order writer are mandatory preconditions.
+    """
+
+    if not actor_identity or actor_identity.strip() != actor_identity:
+        raise CanonicalDeploymentBlocked(
+            "BLOCKED_DEPLOYMENT_DISABLE_ACTOR", "actor_identity must be trimmed"
+        )
+    if not reason or reason.strip() != reason:
+        raise CanonicalDeploymentBlocked(
+            "BLOCKED_DEPLOYMENT_DISABLE_REASON", "reason must be trimmed"
+        )
+    effective = _require_canonical(connection)
+    lock_execution_boundary(effective, key="demo-deployment-global")
+    lock_execution_boundary(effective, key=f"deployment-disable:{deployment_id}")
+    lock_execution_boundary(effective, key="demo-order-writer-lease")
+    deployment = (
+        effective.execute(
+            select(DEPLOYMENTS_TABLE)
+            .where(DEPLOYMENTS_TABLE.c.id == deployment_id)
+            .with_for_update()
+        )
+        .mappings()
+        .one_or_none()
+    )
+    decision = (
+        effective.execute(
+            select(QUALIFICATION_DECISIONS_TABLE).where(
+                QUALIFICATION_DECISIONS_TABLE.c.id
+                == superseded_by_qualification_decision_id
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if deployment is None:
+        raise CanonicalDeploymentBlocked(
+            "BLOCKED_DEPLOYMENT_NOT_FOUND", str(deployment_id)
+        )
+    if decision is None or decision["status"] != "QUALIFIED":
+        raise CanonicalDeploymentBlocked(
+            "BLOCKED_SUPERSEDING_QUALIFICATION_REQUIRED",
+            str(superseded_by_qualification_decision_id),
+        )
+    source_approval = (
+        effective.execute(
+            select(DEPLOYMENT_APPROVALS_TABLE).where(
+                DEPLOYMENT_APPROVALS_TABLE.c.id
+                == deployment["deployment_approval_id"]
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if source_approval is None:
+        raise CanonicalDeploymentBlocked(
+            "BLOCKED_DEPLOYMENT_SOURCE_APPROVAL_MISSING",
+            str(deployment["deployment_approval_id"]),
+        )
+    if source_approval["qualification_decision_id"] == decision["id"]:
+        raise CanonicalDeploymentBlocked(
+            "BLOCKED_SUPERSEDING_QUALIFICATION_NOT_DISTINCT",
+            str(decision["id"]),
+        )
+    request_payload = {
+        "contract": "canonical-v13-demo-deployment-disable-v1",
+        "deployment_id": str(deployment_id),
+        "deployment_capability_digest": deployment["capability_digest"],
+        "source_qualification_decision_id": str(
+            source_approval["qualification_decision_id"]
+        ),
+        "superseded_by_qualification_decision_id": str(decision["id"]),
+        "superseding_qualification_decision_digest": decision["decision_digest"],
+        "superseding_strategy_version_id": str(decision["strategy_version_id"]),
+        "actor_identity": actor_identity,
+        "reason": reason,
+        "demo_only": True,
+        "allow_real_funds": False,
+    }
+    request_digest = _digest(request_payload)
+    if deployment["status"] == "DISABLED":
+        disabled_at = _persisted_utc(deployment["disabled_at"])
+        receipt_digest = _digest(
+            {
+                "contract": "canonical-v13-demo-deployment-disable-receipt-v1",
+                "request_digest": request_digest,
+                "prior_status": "ACTIVE",
+                "status": "DISABLED",
+                "disabled_at": disabled_at.isoformat(),
+            }
+        )
+        if (
+            deployment["superseded_by_qualification_decision_id"]
+            != superseded_by_qualification_decision_id
+            or deployment["disabled_by"] != actor_identity
+            or deployment["disable_reason"] != reason
+            or deployment["disable_request_digest"] != request_digest
+            or deployment["disable_receipt_digest"] != receipt_digest
+        ):
+            raise CanonicalDeploymentBlocked(
+                "BLOCKED_DEPLOYMENT_DISABLE_REPLAY_DRIFT",
+                "deployment already carries different disable evidence",
+            )
+        return DeploymentDisableResult(
+            deployment_id=deployment_id,
+            superseded_by_qualification_decision_id=superseded_by_qualification_decision_id,
+            request_digest=request_digest,
+            receipt_digest=receipt_digest,
+            disabled_at=disabled_at,
+            status="DISABLED",
+            repeat_noop=True,
+        )
+    if deployment["status"] != "ACTIVE":
+        raise CanonicalDeploymentBlocked(
+            "BLOCKED_DEPLOYMENT_NOT_ACTIVE", str(deployment["status"])
+        )
+    nonterminal_runtime_count = int(
+        effective.execute(
+            select(func.count())
+            .select_from(RUNTIME_INSTANCES_TABLE)
+            .where(
+                RUNTIME_INSTANCES_TABLE.c.deployment_id == deployment_id,
+                RUNTIME_INSTANCES_TABLE.c.status != "STOPPED",
+            )
+        ).scalar_one()
+    )
+    active_writer_lease_count = int(
+        effective.execute(
+            select(func.count())
+            .select_from(ORDER_WRITER_LEASES_TABLE)
+            .where(ORDER_WRITER_LEASES_TABLE.c.status == "ACTIVE")
+        ).scalar_one()
+    )
+    if nonterminal_runtime_count:
+        raise CanonicalDeploymentBlocked(
+            "BLOCKED_DEPLOYMENT_RUNTIME_NOT_STOPPED", str(nonterminal_runtime_count)
+        )
+    if active_writer_lease_count:
+        raise CanonicalDeploymentBlocked(
+            "BLOCKED_DEPLOYMENT_ORDER_WRITER_ACTIVE", str(active_writer_lease_count)
+        )
+    disabled_at = datetime.now(timezone.utc)
+    receipt_digest = _digest(
+        {
+            "contract": "canonical-v13-demo-deployment-disable-receipt-v1",
+            "request_digest": request_digest,
+            "prior_status": "ACTIVE",
+            "status": "DISABLED",
+            "disabled_at": disabled_at.isoformat(),
+        }
+    )
+    effective.execute(
+        DEPLOYMENTS_TABLE.update()
+        .where(
+            DEPLOYMENTS_TABLE.c.id == deployment_id,
+            DEPLOYMENTS_TABLE.c.status == "ACTIVE",
+        )
+        .values(
+            status="DISABLED",
+            disabled_at=disabled_at,
+            disabled_by=actor_identity,
+            disable_reason=reason,
+            superseded_by_qualification_decision_id=decision["id"],
+            disable_request_digest=request_digest,
+            disable_receipt_digest=receipt_digest,
+        )
+    )
+    return DeploymentDisableResult(
+        deployment_id=deployment_id,
+        superseded_by_qualification_decision_id=superseded_by_qualification_decision_id,
+        request_digest=request_digest,
+        receipt_digest=receipt_digest,
+        disabled_at=disabled_at,
+        status="DISABLED",
+        repeat_noop=False,
     )
 
 

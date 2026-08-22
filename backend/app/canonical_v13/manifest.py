@@ -22,7 +22,7 @@ CANONICAL_MANIFEST_KEY: Final = "canonical-v13-table-manifest-v1"
 CANONICAL_LEGACY_IMPORT_MODE: Final = "EXTERNAL_LATEST_ONLY"
 CANONICAL_TRADING_CAPABILITY: Final = "TRADING_DISABLED"
 CANONICAL_PRODUCTION_DEFAULT: Final = "UNSET"
-CANONICAL_AUTHORITY_REVISION: Final = "20260822_phase9_runtime_reader_qualification_acl11"
+CANONICAL_AUTHORITY_REVISION: Final = "20260822_phase9_deployment_rollover12"
 
 P0_CONFIGURATION_KINDS: Final[tuple[str, ...]] = (
     "TARGET",
@@ -388,6 +388,7 @@ _WRITER_READ_ALLOWLIST = {
         "qualification_decisions",
         "configuration_bundles",
         "runtime_image_acceptances",
+        "order_writer_leases",
     ),
     "canonical_signal_writer": (
         "schema_metadata",
