@@ -9,6 +9,9 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from app.canonical_v13.acceptance_signal_trigger_upgrade import (
+    apply_acceptance_signal_trigger_upgrade,
+)
 from app.canonical_v13.gate_receipt_upgrade import verify_gate_receipt_upgrade
 from app.canonical_v13.genesis import (
     install_canonical_genesis,
@@ -197,6 +200,10 @@ def test_restore_terminal_historical_gate_row_with_triggers_transactional(
                     connection.exec_driver_sql(statement)
                 for statement in postgresql_acl_statements(role_mapping):
                     connection.exec_driver_sql(statement)
+                upgraded = apply_acceptance_signal_trigger_upgrade(
+                    connection, role_mapping=role_mapping
+                )
+                assert upgraded.status == "UPGRADED"
 
         attempt_id = uuid4()
         with source.begin() as connection:
