@@ -73,6 +73,85 @@ def test_worker_preserves_freqtrade_main_return_code(monkeypatch) -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "pair",
+    ("BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT"),
+)
+def test_worker_hydrates_each_supported_single_market_offline_metadata(
+    monkeypatch, tmp_path: Path, pair: str
+) -> None:
+    worker = _load_worker()
+    metadata = tmp_path / "exchange-metadata.json"
+    metadata.write_bytes(
+        worker._canonical_bytes(
+            {
+                "contract": "canonical-v13-okx-offline-exchange-metadata-v1",
+                "freqtrade_version": "2026.6",
+                "ccxt_version": "4.5.61",
+                "credential_access": "NONE",
+                "network_access": "PUBLIC_MARKET_DATA_ONLY",
+                "markets": {pair: {"symbol": pair}},
+                "leverage_tiers": {pair: [{"tier": 1}]},
+            }
+        )
+    )
+
+    class Api:
+        def __init__(self) -> None:
+            self.markets: dict[str, object] = {}
+
+        def set_markets(self, rows) -> None:
+            self.markets = {str(row["symbol"]): row for row in rows}
+
+    exchange = SimpleNamespace(
+        _api=Api(),
+        _api_async=Api(),
+        _markets={},
+        _leverage_tiers={},
+        parse_leverage_tier=lambda row: row,
+    )
+    resolver_module = ModuleType("freqtrade.resolvers.exchange_resolver")
+
+    class ExchangeResolver:
+        @staticmethod
+        def load_exchange(*_args, **_kwargs):
+            return exchange
+
+    resolver_module.ExchangeResolver = ExchangeResolver
+    monkeypatch.setitem(sys.modules, "freqtrade", ModuleType("freqtrade"))
+    monkeypatch.setitem(sys.modules, "freqtrade.resolvers", ModuleType("freqtrade.resolvers"))
+    monkeypatch.setitem(
+        sys.modules, "freqtrade.resolvers.exchange_resolver", resolver_module
+    )
+
+    worker._install_offline_exchange_patch(metadata)
+    hydrated = ExchangeResolver.load_exchange({})
+
+    assert set(hydrated._markets) == {pair}
+    assert set(hydrated._leverage_tiers) == {pair}
+
+
+def test_worker_rejects_unknown_offline_market(tmp_path: Path) -> None:
+    worker = _load_worker()
+    metadata = tmp_path / "exchange-metadata.json"
+    metadata.write_bytes(
+        worker._canonical_bytes(
+            {
+                "contract": "canonical-v13-okx-offline-exchange-metadata-v1",
+                "freqtrade_version": "2026.6",
+                "ccxt_version": "4.5.61",
+                "credential_access": "NONE",
+                "network_access": "PUBLIC_MARKET_DATA_ONLY",
+                "markets": {"DOGE/USDT:USDT": {"symbol": "DOGE/USDT:USDT"}},
+                "leverage_tiers": {"DOGE/USDT:USDT": [{"tier": 1}]},
+            }
+        )
+    )
+
+    with pytest.raises(worker.Blocked, match="metadata set is invalid"):
+        worker._install_offline_exchange_patch(metadata)
+
+
 def test_worker_creates_freqtrade_futures_data_directory() -> None:
     source = WORKER.read_text()
     assert '(data_root / "futures").mkdir(parents=True, exist_ok=True)' in source
