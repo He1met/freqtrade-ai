@@ -40,6 +40,7 @@ from app.canonical_v13.deployment_rollover_upgrade import (
 )
 from app.canonical_v13.deployment_approval import approve_demo_deployment
 from app.canonical_v13.deployment_control import create_demo_deployment
+from app.canonical_v13.gate_receipt_upgrade import apply_gate_receipt_upgrade
 from app.canonical_v13.runtime_image_authority import (
     RUNTIME_IMAGE_BASE_DIGEST,
     RUNTIME_IMAGE_TITLE,
@@ -80,7 +81,14 @@ from app.canonical_v13.shadow_risk_acl_upgrade import (
     verify_shadow_risk_acl_upgrade,
 )
 from app.canonical_v13.phase9_execution_authority import decide_signal_risk_shadow
+from app.canonical_v13.research_evaluation import qualify_target, score_target
+from app.canonical_v13.research_validation import (
+    record_terminal_attempt,
+    simulate_ephemeral_attempt,
+)
+import tests.test_canonical_v13_phase9_execution_authority as phase9_fixture
 from tests.test_canonical_v13_phase9_execution_authority import _production_chain
+from tests.test_canonical_v13_research_validation import _prepare_ready_plan, _start
 from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.exc import DBAPIError
 
@@ -346,7 +354,45 @@ def test_acceptance_signal_trigger_is_database_immutable() -> None:
         engine.dispose()
 
 
-def test_shadow_risk_acl_upgrade_is_exact_and_enables_lineage_replay() -> None:
+def _qualified_with_persisted_v3_gate_receipts(connection):
+    prepared = _prepare_ready_plan(connection)
+    running = _start(connection, prepared)
+    terminal = record_terminal_attempt(
+        connection,
+        receipt=simulate_ephemeral_attempt(
+            running,
+            metrics_by_window_key={
+                "required-a": {
+                    "net_return": 0.8,
+                    "drawdown": 0.1,
+                    "trade_count": 20,
+                },
+                "required-b": {
+                    "net_return": 0.4,
+                    "drawdown": 0.2,
+                    "trade_count": 12,
+                },
+            },
+        ),
+    )
+    score_target(
+        connection,
+        validation_plan_id=prepared.plan_id,
+        validation_attempt_id=terminal.validation_attempt_id,
+        scorer_identity="isolated-scorer-v1",
+    )
+    decision = qualify_target(
+        connection,
+        validation_plan_id=prepared.plan_id,
+        validation_attempt_id=terminal.validation_attempt_id,
+        qualifier_identity="isolated-qualifier-v1",
+    )
+    return prepared.plan_id, decision
+
+
+def test_shadow_risk_acl_upgrade_is_exact_and_enables_lineage_replay(
+    monkeypatch,
+) -> None:
     assert DATABASE_URL is not None
     mapping = CanonicalRoleMapping.from_prefix(
         os.environ.get("CANONICAL_V13_ROLE_PREFIX", "freqtrade_ai_v13_ci_")
@@ -357,6 +403,17 @@ def test_shadow_risk_acl_upgrade_is_exact_and_enables_lineage_replay() -> None:
         with engine.connect() as connection:
             transaction = connection.begin()
             try:
+                gate_receipts = apply_gate_receipt_upgrade(
+                    connection,
+                    role_mapping=mapping,
+                    actor_identity="canonical-v13-phase9-shadow-risk-acl-ci",
+                )
+                assert gate_receipts.status == "ACCEPTED"
+                monkeypatch.setattr(
+                    phase9_fixture,
+                    "_qualified",
+                    _qualified_with_persisted_v3_gate_receipts,
+                )
                 acceptance = apply_acceptance_signal_trigger_upgrade(
                     connection, role_mapping=mapping
                 )
