@@ -9,6 +9,11 @@ from typing import Final, Mapping
 
 from sqlalchemy import Connection, text
 
+from app.canonical_v13.acceptance_signal_trigger_upgrade import (
+    ACCEPTANCE_CONTROL_WRITER_READ_DELTA,
+    CanonicalAcceptanceSignalTriggerUpgradeBlocked,
+    verify_acceptance_signal_trigger_upgrade,
+)
 from app.canonical_v13.genesis import (
     GATE_GUARD_FUNCTION_NAMES,
     verify_canonical_genesis,
@@ -104,6 +109,26 @@ def _expected_table_grants(
         (role, table_name, privilege)
         for (role, table_name), privileges in grants.items()
         for privilege in privileges
+    }
+
+
+def _accepted_additive_table_grants(
+    connection: Connection, *, role_mapping: CanonicalRoleMapping
+) -> set[tuple[str, str, str]]:
+    """Compose only independently verified additive ACL receipts."""
+
+    try:
+        acceptance_trigger = verify_acceptance_signal_trigger_upgrade(
+            connection, role_mapping=role_mapping
+        )
+    except CanonicalAcceptanceSignalTriggerUpgradeBlocked:
+        return set()
+    if acceptance_trigger.status != "ACCEPTED":
+        return set()
+    control_writer = role_mapping.physical("canonical_control_writer")
+    return {
+        (control_writer, table_name, "SELECT")
+        for table_name in ACCEPTANCE_CONTROL_WRITER_READ_DELTA
     }
 
 
@@ -337,6 +362,12 @@ def verify_postgresql_bootstrap(
         )
     }
     expected_grants = _expected_table_grants(role_mapping)
+    expected_grants.update(
+        _accepted_additive_table_grants(
+            connection,
+            role_mapping=role_mapping,
+        )
+    )
     missing_grants = expected_grants - actual_grants
     extra_grants = actual_grants - expected_grants
     if missing_grants:
