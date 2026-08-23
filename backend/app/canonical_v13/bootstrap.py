@@ -385,6 +385,69 @@ def verify_postgresql_bootstrap(
     )
 
 
+def verify_postgresql_bootstrap_with_optional_service_principals(
+    connection: Connection,
+    *,
+    role_mapping: CanonicalRoleMapping,
+    required_service_principals: Mapping[str, str],
+    optional_service_principal_groups: Mapping[str, Mapping[str, str]],
+    require_zero_business_rows: bool = True,
+    require_owner_table_grants: bool = True,
+) -> BootstrapVerification:
+    """Compose only complete later-lifecycle LOGIN groups into verification."""
+
+    optional_names = {
+        principal
+        for group in optional_service_principal_groups.values()
+        for principal in group
+    }
+    observed_names = (
+        {
+            str(value)
+            for value in connection.execute(
+                text(
+                    "SELECT rolname FROM pg_catalog.pg_roles "
+                    "WHERE rolname = ANY(:roles)"
+                ),
+                {"roles": sorted(optional_names)},
+            ).scalars()
+        }
+        if optional_names
+        else set()
+    )
+    composed = dict(required_service_principals)
+    composition_problems: list[str] = []
+    for group_name, group in optional_service_principal_groups.items():
+        group_names = set(group)
+        observed_group = group_names & observed_names
+        if observed_group == group_names:
+            composed.update(group)
+        elif observed_group:
+            composition_problems.append(
+                "partial optional service principal group "
+                f"{group_name}: observed={len(observed_group)} "
+                f"expected={len(group_names)}"
+            )
+
+    result = verify_postgresql_bootstrap(
+        connection,
+        role_mapping=role_mapping,
+        require_zero_business_rows=require_zero_business_rows,
+        service_principals=composed,
+        require_owner_table_grants=require_owner_table_grants,
+    )
+    if not composition_problems:
+        return result
+    return BootstrapVerification(
+        accepted=False,
+        problems=(*result.problems, *composition_problems),
+        table_count=result.table_count,
+        business_row_count=result.business_row_count,
+        capability_role_count=result.capability_role_count,
+        explicit_acl_count=result.explicit_acl_count,
+    )
+
+
 def postgresql_owner_table_grant_problems(
     connection: Connection,
     *,
@@ -460,4 +523,5 @@ __all__ = [
     "postgresql_owner_table_grant_problems",
     "postgresql_owner_table_grants",
     "verify_postgresql_bootstrap",
+    "verify_postgresql_bootstrap_with_optional_service_principals",
 ]

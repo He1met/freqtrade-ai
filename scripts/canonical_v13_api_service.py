@@ -810,10 +810,12 @@ def cleanup_phase9_provisioning() -> dict[str, object]:
 def _verify_research_provisioned_state():
     sys.path.insert(0, str(REPO_ROOT / "backend"))
     from app.canonical_v13.bootstrap import (  # noqa: PLC0415
+        LOCAL_PHASE9_SERVICE_PRINCIPALS,
         LOCAL_RESEARCH_SERVICE_PRINCIPALS,
+        LOCAL_RUNTIME_SERVICE_PRINCIPALS,
         LOCAL_SERVICE_PRINCIPALS,
         local_role_mapping,
-        verify_postgresql_bootstrap,
+        verify_postgresql_bootstrap_with_optional_service_principals,
     )
     from sqlalchemy import create_engine  # noqa: PLC0415
 
@@ -825,11 +827,15 @@ def _verify_research_provisioned_state():
     )
     try:
         with engine.connect() as connection:
-            return verify_postgresql_bootstrap(
+            return verify_postgresql_bootstrap_with_optional_service_principals(
                 connection,
                 role_mapping=local_role_mapping(),
                 require_zero_business_rows=False,
-                service_principals=service_principals,
+                required_service_principals=service_principals,
+                optional_service_principal_groups={
+                    "phase9": LOCAL_PHASE9_SERVICE_PRINCIPALS,
+                    "runtime": LOCAL_RUNTIME_SERVICE_PRINCIPALS,
+                },
             )
     finally:
         engine.dispose()

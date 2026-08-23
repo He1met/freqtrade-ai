@@ -29,6 +29,7 @@ from app.canonical_v13.bootstrap import (
     local_role_mapping,
     postgresql_owner_table_grants,
     verify_postgresql_bootstrap,
+    verify_postgresql_bootstrap_with_optional_service_principals,
 )
 from app.canonical_v13.authority_upgrade import (
     CanonicalAuthorityUpgradeBlocked,
@@ -157,12 +158,24 @@ def verify(
     acceptance_trigger_status: str | None = None
     try:
         with engine.connect() as connection:
-            result = verify_postgresql_bootstrap(
-                connection,
-                role_mapping=mapping,
-                require_zero_business_rows=require_zero_business_rows,
-                service_principals=service_principals,
-            )
+            if require_research_principals and not require_phase9_principals:
+                result = verify_postgresql_bootstrap_with_optional_service_principals(
+                    connection,
+                    role_mapping=mapping,
+                    require_zero_business_rows=require_zero_business_rows,
+                    required_service_principals=service_principals,
+                    optional_service_principal_groups={
+                        "phase9": LOCAL_PHASE9_SERVICE_PRINCIPALS,
+                        "runtime": LOCAL_RUNTIME_SERVICE_PRINCIPALS,
+                    },
+                )
+            else:
+                result = verify_postgresql_bootstrap(
+                    connection,
+                    role_mapping=mapping,
+                    require_zero_business_rows=require_zero_business_rows,
+                    service_principals=service_principals,
+                )
             if require_phase9_principals:
                 try:
                     acceptance_trigger_status = (
