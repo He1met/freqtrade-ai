@@ -37,6 +37,10 @@ from app.canonical_v13.models import (
     SIGNALS_TABLE,
     TRADE_INTENTS_TABLE,
 )
+from app.canonical_v13.risk_service import (
+    INTENT_MODE_EXECUTION,
+    INTENT_MODE_SIGNAL_RISK_SHADOW,
+)
 
 
 EXECUTION_TARGET = "OKX_DEMO"
@@ -224,7 +228,7 @@ def authorize_demo_risk_budget(
         or source["position_policy"] != "LONG_ONLY"
         or source["status"] != "ACTIVE"
         or source["receipt_digest"] != policy_source_receipt_digest
-        or source["strategy_max_leverage"] != Decimal("14")
+        or Decimal(str(source["strategy_max_leverage"])) <= 0
         or source["effective_leverage"]
         > min(source["strategy_max_leverage"], source["exchange_max_leverage"])
         or expiry - accepted_at != timedelta(minutes=30)
@@ -252,6 +256,7 @@ def authorize_demo_risk_budget(
         "max_notional": str(max_notional),
         "max_order_count": max_order_count,
         "position_policy": source["position_policy"],
+        "strategy_max_leverage": str(source["strategy_max_leverage"]),
         "effective_leverage": str(source["effective_leverage"]),
         "actor_identity": actor_identity,
         "reason": reason,
@@ -423,7 +428,8 @@ def decide_central_demo_risk(
     existing = (
         effective.execute(
             select(RISK_DECISIONS_TABLE).where(
-                RISK_DECISIONS_TABLE.c.trade_intent_id == trade_intent_id
+                RISK_DECISIONS_TABLE.c.trade_intent_id == trade_intent_id,
+                RISK_DECISIONS_TABLE.c.decision_mode == INTENT_MODE_EXECUTION,
             )
         )
         .mappings()
@@ -464,6 +470,7 @@ def decide_central_demo_risk(
             select(TRADE_INTENTS_TABLE).where(
                 TRADE_INTENTS_TABLE.c.id == trade_intent_id,
                 TRADE_INTENTS_TABLE.c.status == "INTENT_ACCEPTED",
+                TRADE_INTENTS_TABLE.c.intent_mode == INTENT_MODE_EXECUTION,
             )
         )
         .mappings()
@@ -648,6 +655,7 @@ def decide_central_demo_risk(
         RISK_DECISIONS_TABLE.insert().values(
             id=risk_decision_id,
             trade_intent_id=trade_intent_id,
+            decision_mode=INTENT_MODE_EXECUTION,
             status=status,
             decision_json=decision_payload,
             decision_digest=decision_digest,
@@ -684,7 +692,9 @@ def decide_signal_risk_shadow(
     existing = (
         effective.execute(
             select(RISK_DECISIONS_TABLE).where(
-                RISK_DECISIONS_TABLE.c.trade_intent_id == trade_intent_id
+                RISK_DECISIONS_TABLE.c.trade_intent_id == trade_intent_id,
+                RISK_DECISIONS_TABLE.c.decision_mode
+                == INTENT_MODE_SIGNAL_RISK_SHADOW,
             )
         )
         .mappings()
@@ -695,6 +705,8 @@ def decide_signal_risk_shadow(
             select(TRADE_INTENTS_TABLE).where(
                 TRADE_INTENTS_TABLE.c.id == trade_intent_id,
                 TRADE_INTENTS_TABLE.c.status == "INTENT_ACCEPTED",
+                TRADE_INTENTS_TABLE.c.intent_mode
+                == INTENT_MODE_SIGNAL_RISK_SHADOW,
             )
         )
         .mappings()
@@ -867,6 +879,7 @@ def decide_signal_risk_shadow(
         RISK_DECISIONS_TABLE.insert().values(
             id=decision_id,
             trade_intent_id=trade_intent_id,
+            decision_mode=INTENT_MODE_SIGNAL_RISK_SHADOW,
             status=status,
             decision_json=payload,
             decision_digest=decision_digest,

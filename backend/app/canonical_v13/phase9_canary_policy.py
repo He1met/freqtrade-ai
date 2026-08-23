@@ -44,7 +44,6 @@ from app.canonical_v13.phase9_okx_demo import RedactedOkxDemoProbe
 
 POLICY_TTL = timedelta(minutes=30)
 MARK_MAXIMUM_AGE = timedelta(seconds=60)
-STRATEGY_LEVERAGE_CAP = Decimal(14)
 EXECUTION_TARGET = "OKX_DEMO"
 INSTRUMENT = "BTC-USDT-SWAP"
 PAIR = "BTC/USDT:USDT"
@@ -134,7 +133,8 @@ def _decimal_text(value: Decimal) -> str:
     return format(value.normalize(), "f")
 
 
-def _require_exact_strategy(source: str) -> None:
+def extract_strategy_leverage_cap(source: str) -> Decimal:
+    """Extract the exact long-only leverage literal from the accepted artifact."""
     try:
         tree = ast.parse(source, filename="<canonical-canary-policy>", mode="exec")
     except (SyntaxError, ValueError) as exc:
@@ -200,14 +200,20 @@ def _require_exact_strategy(source: str) -> None:
         or not isinstance(call.args[0], ast.Constant)
         or not isinstance(call.args[0].value, (int, float))
         or isinstance(call.args[0].value, bool)
-        or Decimal(str(call.args[0].value)) != STRATEGY_LEVERAGE_CAP
         or not isinstance(call.args[1], ast.Name)
         or call.args[1].id != "max_leverage"
     ):
         raise CanonicalExecutionChainBlocked(
             "BLOCKED_CANARY_STRATEGY_LEVERAGE_AST",
-            "strategy must return min(14.0, max_leverage) exactly",
+            "strategy must return min(<positive literal>, max_leverage) exactly",
         )
+    leverage_cap = Decimal(str(call.args[0].value))
+    if not leverage_cap.is_finite() or leverage_cap <= 0:
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_CANARY_STRATEGY_LEVERAGE_AST",
+            "strategy leverage literal must be finite and positive",
+        )
+    return leverage_cap
 
 
 def _resource_digest(
@@ -635,6 +641,7 @@ def _validated_probe_receipt(
     attestation: Mapping[str, object] | None,
     deployment: Mapping[str, object] | None,
     now: datetime,
+    strategy_max_leverage: Decimal | None = None,
 ) -> dict[str, object]:
     decimals = {
         name: _positive_decimal(row[name], field=name)
@@ -829,7 +836,14 @@ def _validated_probe_receipt(
         decimals["minimum_size"] * decimals["contract_value"] * decimals["mark_price"]
     )
     exchange_max = decimals["exchange_max_leverage"]
-    leverage_cap = min(STRATEGY_LEVERAGE_CAP, exchange_max)
+    leverage_cap = exchange_max
+    if strategy_max_leverage is not None:
+        if not strategy_max_leverage.is_finite() or strategy_max_leverage <= 0:
+            raise CanonicalExecutionChainBlocked(
+                "BLOCKED_CANARY_STRATEGY_LEVERAGE_AST",
+                "strategy leverage cap must be finite and positive",
+            )
+        leverage_cap = min(strategy_max_leverage, exchange_max)
     effective_leverage = decimals["current_long_leverage"]
     if effective_leverage > leverage_cap:
         raise CanonicalExecutionChainBlocked(
@@ -1095,12 +1109,13 @@ def authorize_canary_risk_policy(
         raise CanonicalExecutionChainBlocked(
             "BLOCKED_CANARY_ARTIFACT_DIGEST", "strategy artifact content digest drifted"
         )
-    _require_exact_strategy(source)
+    strategy_leverage_cap = extract_strategy_leverage_cap(source)
     facts = _validated_probe_receipt(
         probe_receipt,
         attestation=attestation,
         deployment=deployment,
         now=now,
+        strategy_max_leverage=strategy_leverage_cap,
     )
     if (
         probe_receipt["deployment_id"] != deployment["id"]
@@ -1138,7 +1153,7 @@ def authorize_canary_risk_policy(
         "limit_price": _decimal_text(facts["limit_price"]),
         "maximum_buy_contracts": _decimal_text(facts["maximum_buy_contracts"]),
         "max_notional": _decimal_text(facts["minimum_notional"]),
-        "strategy_max_leverage": _decimal_text(STRATEGY_LEVERAGE_CAP),
+        "strategy_max_leverage": _decimal_text(strategy_leverage_cap),
         "exchange_max_leverage": _decimal_text(facts["exchange_max_leverage"]),
         "effective_leverage": _decimal_text(facts["effective_leverage"]),
         "metadata_receipt_digest": facts["metadata_receipt_digest"],
@@ -1186,7 +1201,7 @@ def authorize_canary_risk_policy(
             limit_price=facts["limit_price"],
             maximum_buy_contracts=facts["maximum_buy_contracts"],
             max_notional=facts["minimum_notional"],
-            strategy_max_leverage=STRATEGY_LEVERAGE_CAP,
+            strategy_max_leverage=strategy_leverage_cap,
             exchange_max_leverage=facts["exchange_max_leverage"],
             effective_leverage=facts["effective_leverage"],
             metadata_receipt_digest=facts["metadata_receipt_digest"],
@@ -1615,7 +1630,7 @@ __all__ = [
     "INSTRUMENT",
     "MARK_MAXIMUM_AGE",
     "POLICY_TTL",
-    "STRATEGY_LEVERAGE_CAP",
+    "extract_strategy_leverage_cap",
     "CanaryProbeReceiptResult",
     "CanaryRiskPolicyResult",
     "CanaryRiskPolicyTerminationResult",

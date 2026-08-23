@@ -24,6 +24,7 @@ from app.canonical_v13.models import (
     RESEARCH_TARGETS_TABLE,
     RISK_DECISIONS_TABLE,
     STRATEGY_VERSIONS_TABLE,
+    TRADE_INTENTS_TABLE,
 )
 from app.canonical_v13.phase9_execution_authority import (
     authorize_demo_risk_budget,
@@ -87,6 +88,8 @@ def _runtime_spec(connection, approval, deployment) -> FrozenRuntimeLaunchSpec:
 def _production_chain(
     connection,
     *,
+    intent_mode="EXECUTION",
+    create_intent=True,
     runtime_observed_at=NOW,
     signal_runtime_receipt_digest=None,
 ):
@@ -151,10 +154,12 @@ def _production_chain(
     signal_digest = connection.execute(
         select(SIGNALS_TABLE.c.signal_digest).where(SIGNALS_TABLE.c.id == signal_id)
     ).scalar_one()
-    intent_id = create_production_demo_intent(
-        connection,
-        signal_id=signal_id,
-        intent_json={
+    intent_id = (
+        create_production_demo_intent(
+            connection,
+            signal_id=signal_id,
+            intent_mode=intent_mode,
+            intent_json={
             "contract": "canonical-v13-demo-trade-intent-v1",
             "execution_target": "OKX_DEMO",
             "allow_real_funds": False,
@@ -171,7 +176,10 @@ def _production_chain(
                 "sz": "1",
                 "px": "10000",
             },
-        },
+            },
+        )
+        if create_intent
+        else None
     )
     return approval, deployment, runtime_id, intent_id, None
 
@@ -270,8 +278,8 @@ def _risk_policy_source(
             minimum_size="1",
             tick_size="0.1",
             mark_price="10000",
-            current_long_leverage="14",
-            current_short_leverage="14",
+            current_long_leverage="12",
+            current_short_leverage="12",
             exchange_max_leverage="100",
             limit_price="10000",
             maximum_buy_contracts="2",
@@ -338,9 +346,9 @@ def _risk_policy_source(
             limit_price=Decimal("10000"),
             maximum_buy_contracts=Decimal("2"),
             max_notional=Decimal(max_notional),
-            strategy_max_leverage=Decimal("14"),
+            strategy_max_leverage=Decimal("12"),
             exchange_max_leverage=Decimal("100"),
-            effective_leverage=Decimal("14"),
+            effective_leverage=Decimal("12"),
             metadata_receipt_digest="e" * 64,
             mark_price_receipt_digest="f" * 64,
             attestation_digest=attestation.attestation_digest,
@@ -470,7 +478,7 @@ def test_shadow_acceptance_is_replay_safe_and_creates_no_execution_authority(
 ):
     with canonical_connection.begin():
         _approval, _deployment, _runtime, intent_id, _launcher = _production_chain(
-            canonical_connection
+            canonical_connection, intent_mode="SIGNAL_RISK_SHADOW"
         )
         import app.canonical_v13.phase9_execution_authority as authority_module
 
@@ -559,10 +567,141 @@ def test_shadow_acceptance_is_replay_safe_and_creates_no_execution_authority(
     ).first() is None
 
 
+def test_same_signal_has_distinct_shadow_and_execution_authority_with_exact_replay(
+    canonical_connection,
+):
+    with canonical_connection.begin():
+        approval, _deployment, _runtime, shadow_intent_id, _launcher = (
+            _production_chain(
+                canonical_connection,
+                intent_mode="SIGNAL_RISK_SHADOW",
+            )
+        )
+        shadow_intent = (
+            canonical_connection.execute(
+                select(TRADE_INTENTS_TABLE).where(
+                    TRADE_INTENTS_TABLE.c.id == shadow_intent_id
+                )
+            )
+            .mappings()
+            .one()
+        )
+        shadow = decide_signal_risk_shadow(
+            canonical_connection,
+            trade_intent_id=shadow_intent_id,
+            evaluated_at=NOW + timedelta(seconds=2),
+        )
+        execution_payload = dict(shadow_intent["intent_json"])
+        execution_payload.pop("intent_mode")
+        execution_intent_id = create_production_demo_intent(
+            canonical_connection,
+            signal_id=shadow_intent["signal_id"],
+            intent_mode="EXECUTION",
+            intent_json=execution_payload,
+        )
+        execution_intent_replay = create_production_demo_intent(
+            canonical_connection,
+            signal_id=shadow_intent["signal_id"],
+            intent_mode="EXECUTION",
+            intent_json=execution_payload,
+        )
+        source_receipt = _risk_policy_source(canonical_connection, approval)
+        budget = authorize_demo_risk_budget(
+            canonical_connection,
+            deployment_approval_id=approval.deployment_approval_id,
+            actor_identity="isolated-human-owner",
+            reason="one frozen execution transition",
+            policy_source_receipt_digest=source_receipt,
+            evaluated_at=NOW,
+        )
+        execution = decide_central_demo_risk(
+            canonical_connection,
+            trade_intent_id=execution_intent_id,
+            risk_budget_authorization_id=budget.authorization_id,
+            evaluated_at=NOW + timedelta(seconds=3),
+        )
+        execution_replay = decide_central_demo_risk(
+            canonical_connection,
+            trade_intent_id=execution_intent_id,
+            risk_budget_authorization_id=budget.authorization_id,
+            evaluated_at=NOW + timedelta(seconds=4),
+        )
+        intent_modes = canonical_connection.execute(
+            select(TRADE_INTENTS_TABLE.c.intent_mode).order_by(
+                TRADE_INTENTS_TABLE.c.intent_mode
+            )
+        ).scalars().all()
+        decision_modes = canonical_connection.execute(
+            select(RISK_DECISIONS_TABLE.c.decision_mode).order_by(
+                RISK_DECISIONS_TABLE.c.decision_mode
+            )
+        ).scalars().all()
+
+    assert execution_intent_id != shadow_intent_id
+    assert execution_intent_replay == execution_intent_id
+    assert intent_modes == ["EXECUTION", "SIGNAL_RISK_SHADOW"]
+    assert decision_modes == ["EXECUTION", "SIGNAL_RISK_SHADOW"]
+    assert shadow.status == "RISK_ACCEPTED"
+    assert execution.status == "RISK_ACCEPTED"
+    assert execution_replay.repeat_noop is True
+    assert execution_replay.risk_decision_id == execution.risk_decision_id
+    assert execution_replay.reservation_id == execution.reservation_id
+
+
+def test_backfilled_historical_shadow_intent_replays_without_digest_rewrite(
+    canonical_connection,
+):
+    with canonical_connection.begin():
+        _approval, _deployment, _runtime, intent_id, _launcher = _production_chain(
+            canonical_connection,
+            intent_mode="SIGNAL_RISK_SHADOW",
+        )
+        persisted = (
+            canonical_connection.execute(
+                select(TRADE_INTENTS_TABLE).where(
+                    TRADE_INTENTS_TABLE.c.id == intent_id
+                )
+            )
+            .mappings()
+            .one()
+        )
+        historical_payload = dict(persisted["intent_json"])
+        historical_payload.pop("intent_mode")
+        historical_digest = canonical_execution_digest(historical_payload)
+        canonical_connection.execute(
+            TRADE_INTENTS_TABLE.update()
+            .where(TRADE_INTENTS_TABLE.c.id == intent_id)
+            .values(
+                intent_json=historical_payload,
+                intent_digest=historical_digest,
+            )
+        )
+        replayed = create_production_demo_intent(
+            canonical_connection,
+            signal_id=persisted["signal_id"],
+            intent_mode="SIGNAL_RISK_SHADOW",
+            intent_json=historical_payload,
+        )
+        after = (
+            canonical_connection.execute(
+                select(TRADE_INTENTS_TABLE).where(
+                    TRADE_INTENTS_TABLE.c.id == intent_id
+                )
+            )
+            .mappings()
+            .one()
+        )
+
+    assert replayed == intent_id
+    assert after["intent_mode"] == "SIGNAL_RISK_SHADOW"
+    assert after["intent_json"] == historical_payload
+    assert after["intent_digest"] == historical_digest
+
+
 def test_shadow_receipt_tamper_and_source_drift_block_replay(canonical_connection):
     with canonical_connection.begin():
         _approval, _deployment, _runtime, intent_id, _launcher = _production_chain(
-            canonical_connection
+            canonical_connection, intent_mode="SIGNAL_RISK_SHADOW"
         )
         first = decide_signal_risk_shadow(
             canonical_connection,
@@ -596,7 +735,7 @@ def test_shadow_source_digest_drift_blocks_before_replay(canonical_connection):
 
     with canonical_connection.begin():
         _approval, _deployment, _runtime, intent_id, _launcher = _production_chain(
-            canonical_connection
+            canonical_connection, intent_mode="SIGNAL_RISK_SHADOW"
         )
         decide_signal_risk_shadow(
             canonical_connection,

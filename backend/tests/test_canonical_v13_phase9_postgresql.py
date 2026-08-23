@@ -56,6 +56,7 @@ from app.canonical_v13.models import (
     RUNTIME_IMAGE_ACCEPTANCES_TABLE,
     SCHEMA_METADATA_TABLE,
     SIGNALS_TABLE,
+    TRADE_INTENTS_TABLE,
 )
 from app.canonical_v13.optimization import optimization_selection_digest
 from app.canonical_v13.optimization_observability_upgrade import (
@@ -81,6 +82,17 @@ from app.canonical_v13.shadow_risk_acl_upgrade import (
     verify_shadow_risk_acl_upgrade,
 )
 from app.canonical_v13.phase9_execution_authority import decide_signal_risk_shadow
+from app.canonical_v13.phase9_execution_authority import (
+    authorize_demo_risk_budget,
+    decide_central_demo_risk,
+)
+from app.canonical_v13.phase9_transition_upgrade import (
+    CanonicalPhase9TransitionUpgradeBlocked,
+    apply_phase9_transition_upgrade,
+    rollback_phase9_transition_upgrade,
+    verify_phase9_transition_upgrade,
+)
+from app.canonical_v13.risk_service import create_production_demo_intent
 from app.canonical_v13.research_evaluation import qualify_target, score_target
 from app.canonical_v13.research_validation import (
     record_terminal_attempt,
@@ -429,7 +441,9 @@ def test_shadow_risk_acl_upgrade_is_exact_and_enables_lineage_replay(
                     ).scalar_one()
                 )
                 _approval, _deployment, _runtime, intent_id, _launcher = (
-                    _production_chain(connection)
+                    _production_chain(
+                        connection, intent_mode="SIGNAL_RISK_SHADOW"
+                    )
                 )
 
                 first_denial = connection.begin_nested()
@@ -578,6 +592,225 @@ def test_shadow_risk_acl_upgrade_is_exact_and_enables_lineage_replay(
                     problem.startswith("extra table grants count=")
                     for problem in tampered.problems
                 )
+            finally:
+                transaction.rollback()
+    finally:
+        engine.dispose()
+
+
+def test_phase9_transition_upgrade_backfills_and_separates_shadow_execution(
+    monkeypatch,
+) -> None:
+    assert DATABASE_URL is not None
+    mapping = CanonicalRoleMapping.from_prefix(
+        os.environ.get("CANONICAL_V13_ROLE_PREFIX", "freqtrade_ai_v13_ci_")
+    )
+    service_principals = _service_principals(
+        os.environ.get("CANONICAL_V13_ROLE_PREFIX", "freqtrade_ai_v13_ci_")
+    )
+    engine = create_engine(DATABASE_URL)
+    try:
+        with engine.connect() as connection:
+            transaction = connection.begin()
+            try:
+                apply_gate_receipt_upgrade(
+                    connection,
+                    role_mapping=mapping,
+                    actor_identity="canonical-v13-phase9-transition-ci",
+                )
+                apply_acceptance_signal_trigger_upgrade(
+                    connection, role_mapping=mapping
+                )
+                apply_shadow_risk_acl_upgrade(connection, role_mapping=mapping)
+                monkeypatch.setattr(
+                    phase9_fixture,
+                    "_qualified",
+                    _qualified_with_persisted_v3_gate_receipts,
+                )
+
+                initial = apply_phase9_transition_upgrade(connection)
+                assert initial.status == "UPGRADED"
+                assert initial.repeat_noop is False
+                acl_before = verify_postgresql_bootstrap(
+                    connection,
+                    role_mapping=mapping,
+                    require_zero_business_rows=False,
+                    service_principals=service_principals,
+                )
+                assert acl_before.accepted is True
+
+                approval, _deployment, _runtime, shadow_intent_id, _launcher = (
+                    _production_chain(
+                        connection, intent_mode="SIGNAL_RISK_SHADOW"
+                    )
+                )
+                shadow_intent = (
+                    connection.execute(
+                        text(
+                            "SELECT signal_id, intent_json, intent_digest "
+                            "FROM strategy_platform_v13.trade_intents WHERE id=:id"
+                        ),
+                        {"id": shadow_intent_id},
+                    )
+                    .mappings()
+                    .one()
+                )
+                historical_intent_json = dict(shadow_intent["intent_json"])
+                historical_intent_json.pop("intent_mode")
+                historical_intent_digest = (
+                    phase9_fixture.canonical_execution_digest(
+                        historical_intent_json
+                    )
+                )
+                connection.execute(
+                    TRADE_INTENTS_TABLE.update()
+                    .where(TRADE_INTENTS_TABLE.c.id == shadow_intent_id)
+                    .values(
+                        intent_json=historical_intent_json,
+                        intent_digest=historical_intent_digest,
+                    )
+                )
+                shadow = decide_signal_risk_shadow(
+                    connection,
+                    trade_intent_id=shadow_intent_id,
+                    evaluated_at=datetime(2026, 8, 24, tzinfo=timezone.utc),
+                )
+                shadow_intent = {
+                    **shadow_intent,
+                    "intent_json": historical_intent_json,
+                    "intent_digest": historical_intent_digest,
+                }
+                shadow_decision_digest = connection.execute(
+                    text(
+                        "SELECT decision_digest FROM "
+                        "strategy_platform_v13.risk_decisions WHERE id=:id"
+                    ),
+                    {"id": shadow.risk_decision_id},
+                ).scalar_one()
+
+                rolled_back = rollback_phase9_transition_upgrade(connection)
+                assert rolled_back.status == "ROLLED_BACK"
+                assert verify_phase9_transition_upgrade(connection).status == (
+                    "PREVIOUS_READY"
+                )
+                assert rollback_phase9_transition_upgrade(connection).status == (
+                    "PREVIOUS_READY"
+                )
+
+                reapplied = apply_phase9_transition_upgrade(connection)
+                assert reapplied.status == "UPGRADED"
+                assert reapplied.intent_mode_counts == {"SIGNAL_RISK_SHADOW": 1}
+                assert reapplied.decision_mode_counts == {"SIGNAL_RISK_SHADOW": 1}
+                replay = apply_phase9_transition_upgrade(connection)
+                assert replay.status == "ACCEPTED"
+                assert replay.repeat_noop is True
+                assert replay.intent_lineage_digest == reapplied.intent_lineage_digest
+                assert replay.decision_lineage_digest == (
+                    reapplied.decision_lineage_digest
+                )
+                assert connection.execute(
+                    text(
+                        "SELECT intent_digest FROM strategy_platform_v13.trade_intents "
+                        "WHERE id=:id"
+                    ),
+                    {"id": shadow_intent_id},
+                ).scalar_one() == shadow_intent["intent_digest"]
+                assert connection.execute(
+                    text(
+                        "SELECT decision_digest FROM strategy_platform_v13.risk_decisions "
+                        "WHERE id=:id"
+                    ),
+                    {"id": shadow.risk_decision_id},
+                ).scalar_one() == shadow_decision_digest
+
+                for statement, row_id in (
+                    (
+                        text(
+                            "UPDATE strategy_platform_v13.trade_intents "
+                            "SET intent_mode='EXECUTION' WHERE id=:id"
+                        ),
+                        shadow_intent_id,
+                    ),
+                    (
+                        text(
+                            "UPDATE strategy_platform_v13.risk_decisions "
+                            "SET decision_mode='EXECUTION' WHERE id=:id"
+                        ),
+                        shadow.risk_decision_id,
+                    ),
+                ):
+                    savepoint = connection.begin_nested()
+                    with pytest.raises(DBAPIError, match="immutable"):
+                        connection.execute(statement, {"id": row_id})
+                    savepoint.rollback()
+
+                execution_payload = dict(shadow_intent["intent_json"])
+                execution_payload.pop("intent_mode", None)
+                execution_intent_id = create_production_demo_intent(
+                    connection,
+                    signal_id=shadow_intent["signal_id"],
+                    intent_mode="EXECUTION",
+                    intent_json=execution_payload,
+                )
+                assert (
+                    create_production_demo_intent(
+                        connection,
+                        signal_id=shadow_intent["signal_id"],
+                        intent_mode="EXECUTION",
+                        intent_json=execution_payload,
+                    )
+                    == execution_intent_id
+                )
+                source_receipt = phase9_fixture._risk_policy_source(
+                    connection, approval
+                )
+                budget = authorize_demo_risk_budget(
+                    connection,
+                    deployment_approval_id=approval.deployment_approval_id,
+                    actor_identity="canonical-v13-phase9-transition-ci",
+                    reason="one exact transition reservation",
+                    policy_source_receipt_digest=source_receipt,
+                    evaluated_at=datetime(2026, 8, 24, tzinfo=timezone.utc),
+                )
+                execution = decide_central_demo_risk(
+                    connection,
+                    trade_intent_id=execution_intent_id,
+                    risk_budget_authorization_id=budget.authorization_id,
+                    evaluated_at=datetime(2026, 8, 24, 0, 0, 1, tzinfo=timezone.utc),
+                )
+                execution_replay = decide_central_demo_risk(
+                    connection,
+                    trade_intent_id=execution_intent_id,
+                    risk_budget_authorization_id=budget.authorization_id,
+                    evaluated_at=datetime(2026, 8, 24, 0, 0, 2, tzinfo=timezone.utc),
+                )
+                assert execution.status == "RISK_ACCEPTED"
+                assert execution_replay.repeat_noop is True
+                assert execution_replay.risk_decision_id == (
+                    execution.risk_decision_id
+                )
+                assert connection.execute(
+                    text(
+                        "SELECT count(DISTINCT intent_mode) "
+                        "FROM strategy_platform_v13.trade_intents "
+                        "WHERE signal_id=:signal_id"
+                    ),
+                    {"signal_id": shadow_intent["signal_id"]},
+                ).scalar_one() == 2
+                with pytest.raises(
+                    CanonicalPhase9TransitionUpgradeBlocked,
+                    match="BLOCKED_PHASE9_TRANSITION_ROLLBACK_MULTI_MODE_EVIDENCE",
+                ):
+                    rollback_phase9_transition_upgrade(connection)
+
+                acl_after = verify_postgresql_bootstrap(
+                    connection,
+                    role_mapping=mapping,
+                    require_zero_business_rows=False,
+                    service_principals=service_principals,
+                )
+                assert acl_after.accepted is True
+                assert acl_after.explicit_acl_count == acl_before.explicit_acl_count
             finally:
                 transaction.rollback()
     finally:

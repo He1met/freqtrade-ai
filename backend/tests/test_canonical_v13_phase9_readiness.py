@@ -1046,6 +1046,7 @@ def test_canary_readiness_recomputes_sealed_policy_and_execution_reservation(
         intent_id = create_production_demo_intent(
             canonical_connection,
             signal_id=signal_id,
+            intent_mode="EXECUTION",
             intent_json={
                 "contract": "canonical-v13-demo-trade-intent-v1",
                 "execution_target": "OKX_DEMO",

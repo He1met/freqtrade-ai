@@ -22,6 +22,10 @@ from app.canonical_v13.models import (
     TRADE_INTENTS_TABLE,
 )
 
+INTENT_MODE_TEST_SIMULATED = "TEST_SIMULATED"
+INTENT_MODE_SIGNAL_RISK_SHADOW = "SIGNAL_RISK_SHADOW"
+INTENT_MODE_EXECUTION = "EXECUTION"
+
 
 def create_simulated_intent(
     connection: Connection, *, signal_id: UUID, intent_json: Mapping[str, object]
@@ -34,7 +38,17 @@ def create_simulated_intent(
         is None
     ):
         raise CanonicalExecutionChainBlocked("BLOCKED_SIGNAL_UNSET", str(signal_id))
-    payload = dict(intent_json)
+    submitted_payload = dict(intent_json)
+    if submitted_payload.get("intent_mode") not in (
+        None,
+        INTENT_MODE_TEST_SIMULATED,
+    ):
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_PRODUCTION_INTENT_MODE",
+            "intent payload mode must match the immutable intent mode",
+        )
+    payload = dict(submitted_payload)
+    payload["intent_mode"] = INTENT_MODE_TEST_SIMULATED
     if payload.get("evidence_class") != "TEST_SIMULATED":
         raise CanonicalExecutionChainBlocked(
             "BLOCKED_REAL_INTENT_OUT_OF_SCOPE", "only isolated intents are allowed"
@@ -43,17 +57,23 @@ def create_simulated_intent(
     existing = (
         effective.execute(
             select(TRADE_INTENTS_TABLE).where(
-                TRADE_INTENTS_TABLE.c.signal_id == signal_id
+                TRADE_INTENTS_TABLE.c.signal_id == signal_id,
+                TRADE_INTENTS_TABLE.c.intent_mode == INTENT_MODE_TEST_SIMULATED,
             )
         )
         .mappings()
         .one_or_none()
     )
     if existing is not None:
+        replay_payload = (
+            submitted_payload
+            if "intent_mode" not in existing["intent_json"]
+            else payload
+        )
         if (
             existing["status"] != "INTENT_ACCEPTED"
-            or existing["intent_json"] != payload
-            or existing["intent_digest"] != intent_digest
+            or existing["intent_json"] != replay_payload
+            or existing["intent_digest"] != canonical_execution_digest(replay_payload)
         ):
             raise CanonicalExecutionChainBlocked(
                 "BLOCKED_INTENT_REPLAY_DRIFT", "persisted intent differs"
@@ -64,6 +84,7 @@ def create_simulated_intent(
         TRADE_INTENTS_TABLE.insert().values(
             id=intent_id,
             signal_id=signal_id,
+            intent_mode=INTENT_MODE_TEST_SIMULATED,
             status="INTENT_ACCEPTED",
             intent_json=payload,
             intent_digest=intent_digest,
@@ -74,7 +95,11 @@ def create_simulated_intent(
 
 
 def create_production_demo_intent(
-    connection: Connection, *, signal_id: UUID, intent_json: Mapping[str, object]
+    connection: Connection,
+    *,
+    signal_id: UUID,
+    intent_json: Mapping[str, object],
+    intent_mode: str = INTENT_MODE_SIGNAL_RISK_SHADOW,
 ) -> UUID:
     """Create the exact Demo intent consumed by the central budget authority."""
 
@@ -104,7 +129,22 @@ def create_production_demo_intent(
         raise CanonicalExecutionChainBlocked(
             "BLOCKED_PRODUCTION_SIGNAL_REQUIRED", str(signal_id)
         )
-    payload = dict(intent_json)
+    submitted_payload = dict(intent_json)
+    if intent_mode not in {
+        INTENT_MODE_SIGNAL_RISK_SHADOW,
+        INTENT_MODE_EXECUTION,
+    }:
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_PRODUCTION_INTENT_MODE",
+            "production intent_mode must be SIGNAL_RISK_SHADOW or EXECUTION",
+        )
+    if submitted_payload.get("intent_mode") not in (None, intent_mode):
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_PRODUCTION_INTENT_MODE",
+            "intent payload mode must match the immutable intent mode",
+        )
+    payload = dict(submitted_payload)
+    payload["intent_mode"] = intent_mode
     exchange_body = payload.get("exchange_body")
     try:
         notional = Decimal(str(payload.get("notional")))
@@ -137,21 +177,29 @@ def create_production_demo_intent(
             "Demo intent must bind its signal, positive notional, and long-only order",
         )
     intent_digest = canonical_execution_digest(payload)
-    lock_execution_boundary(effective, key=f"production-intent:{signal_id}")
+    lock_execution_boundary(
+        effective, key=f"production-intent:{signal_id}:{intent_mode}"
+    )
     existing = (
         effective.execute(
             select(TRADE_INTENTS_TABLE).where(
-                TRADE_INTENTS_TABLE.c.signal_id == signal_id
+                TRADE_INTENTS_TABLE.c.signal_id == signal_id,
+                TRADE_INTENTS_TABLE.c.intent_mode == intent_mode,
             )
         )
         .mappings()
         .one_or_none()
     )
     if existing is not None:
+        replay_payload = (
+            submitted_payload
+            if "intent_mode" not in existing["intent_json"]
+            else payload
+        )
         if (
             existing["status"] != "INTENT_ACCEPTED"
-            or existing["intent_json"] != payload
-            or existing["intent_digest"] != intent_digest
+            or existing["intent_json"] != replay_payload
+            or existing["intent_digest"] != canonical_execution_digest(replay_payload)
         ):
             raise CanonicalExecutionChainBlocked(
                 "BLOCKED_INTENT_REPLAY_DRIFT", "persisted production intent differs"
@@ -162,6 +210,7 @@ def create_production_demo_intent(
         TRADE_INTENTS_TABLE.insert().values(
             id=intent_id,
             signal_id=signal_id,
+            intent_mode=intent_mode,
             status="INTENT_ACCEPTED",
             intent_json=payload,
             intent_digest=intent_digest,
@@ -185,6 +234,7 @@ def decide_simulated_risk(
             select(TRADE_INTENTS_TABLE.c.id).where(
                 TRADE_INTENTS_TABLE.c.id == trade_intent_id,
                 TRADE_INTENTS_TABLE.c.status == "INTENT_ACCEPTED",
+                TRADE_INTENTS_TABLE.c.intent_mode == INTENT_MODE_TEST_SIMULATED,
             )
         ).scalar_one_or_none()
         is None
@@ -195,6 +245,7 @@ def decide_simulated_risk(
     payload = {
         "contract": "canonical-v13-simulated-risk-v1",
         "evidence_class": "TEST_SIMULATED",
+        "decision_mode": INTENT_MODE_TEST_SIMULATED,
         "policy_snapshot_digest": policy_snapshot_digest,
         "accepted": accepted,
     }
@@ -202,7 +253,8 @@ def decide_simulated_risk(
     existing = (
         effective.execute(
             select(RISK_DECISIONS_TABLE).where(
-                RISK_DECISIONS_TABLE.c.trade_intent_id == trade_intent_id
+                RISK_DECISIONS_TABLE.c.trade_intent_id == trade_intent_id,
+                RISK_DECISIONS_TABLE.c.decision_mode == INTENT_MODE_TEST_SIMULATED,
             )
         )
         .mappings()
@@ -210,10 +262,16 @@ def decide_simulated_risk(
     )
     if existing is not None:
         expected_status = "RISK_ACCEPTED" if accepted else "REJECTED"
+        replay_payload = (
+            {key: value for key, value in payload.items() if key != "decision_mode"}
+            if "decision_mode" not in existing["decision_json"]
+            else payload
+        )
         if (
             existing["status"] != expected_status
-            or existing["decision_json"] != payload
-            or existing["decision_digest"] != decision_digest
+            or existing["decision_json"] != replay_payload
+            or existing["decision_digest"]
+            != canonical_execution_digest(replay_payload)
         ):
             raise CanonicalExecutionChainBlocked(
                 "BLOCKED_RISK_REPLAY_DRIFT", "persisted risk decision differs"
@@ -224,6 +282,7 @@ def decide_simulated_risk(
         RISK_DECISIONS_TABLE.insert().values(
             id=decision_id,
             trade_intent_id=trade_intent_id,
+            decision_mode=INTENT_MODE_TEST_SIMULATED,
             status="RISK_ACCEPTED" if accepted else "REJECTED",
             decision_json=payload,
             decision_digest=decision_digest,
@@ -234,6 +293,9 @@ def decide_simulated_risk(
 
 
 __all__ = [
+    "INTENT_MODE_EXECUTION",
+    "INTENT_MODE_SIGNAL_RISK_SHADOW",
+    "INTENT_MODE_TEST_SIMULATED",
     "create_production_demo_intent",
     "create_simulated_intent",
     "decide_simulated_risk",

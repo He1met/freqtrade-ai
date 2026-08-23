@@ -46,6 +46,7 @@ class OrderWriterCanaryAuthority:
     attestation_expires_at: datetime
     instrument_metadata_digest: str
     mark_price_snapshot_digest: str
+    strategy_max_leverage: str
     effective_leverage: str
     position_policy: str
 
@@ -226,6 +227,7 @@ def build_order_writer_canary_authority(
     attestation_expires_at: datetime,
     instrument_metadata_digest: str,
     mark_price_snapshot_digest: str,
+    strategy_max_leverage: str,
     effective_leverage: str,
     position_policy: str = "LONG_ONLY",
 ) -> OrderWriterCanaryAuthority:
@@ -249,13 +251,21 @@ def build_order_writer_canary_authority(
     ):
         _require_digest(value, field=field)
     try:
+        strategy_cap = Decimal(str(strategy_max_leverage))
         leverage = Decimal(str(effective_leverage))
     except (InvalidOperation, TypeError, ValueError):
+        strategy_cap = Decimal(0)
         leverage = Decimal(0)
-    if not leverage.is_finite() or leverage <= 0 or leverage > Decimal("14"):
+    if (
+        not strategy_cap.is_finite()
+        or strategy_cap <= 0
+        or not leverage.is_finite()
+        or leverage <= 0
+        or leverage > strategy_cap
+    ):
         raise CanonicalPhase9SupervisorBlocked(
             "BLOCKED_ORDER_WRITER_EFFECTIVE_LEVERAGE",
-            "effective leverage must be finite, positive, and no greater than 14",
+            "effective leverage must be positive and no greater than the artifact cap",
         )
     if position_policy != "LONG_ONLY":
         raise CanonicalPhase9SupervisorBlocked(
@@ -271,6 +281,7 @@ def build_order_writer_canary_authority(
         attestation_expires_at=_utc(attestation_expires_at),
         instrument_metadata_digest=instrument_metadata_digest,
         mark_price_snapshot_digest=mark_price_snapshot_digest,
+        strategy_max_leverage=format(strategy_cap.normalize(), "f"),
         effective_leverage=format(leverage.normalize(), "f"),
         position_policy="LONG_ONLY",
     )

@@ -28,6 +28,10 @@ from app.canonical_v13.shadow_risk_acl_upgrade import (
     apply_shadow_risk_acl_upgrade,
     verify_shadow_risk_acl_upgrade,
 )
+from app.canonical_v13.phase9_transition_upgrade import (
+    apply_phase9_transition_upgrade,
+    verify_phase9_transition_upgrade,
+)
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
@@ -217,6 +221,8 @@ def test_restore_terminal_historical_gate_row_with_triggers_transactional(
                     connection, role_mapping=role_mapping
                 )
                 assert shadow_acl.status == "UPGRADED"
+                transition = apply_phase9_transition_upgrade(connection)
+                assert transition.status == "UPGRADED"
 
         attempt_id = uuid4()
         optimization_run_id = uuid4()
@@ -360,6 +366,7 @@ def test_restore_terminal_historical_gate_row_with_triggers_transactional(
             assert verify_shadow_risk_acl_upgrade(
                 connection, role_mapping=role_mapping
             ).status == "ACCEPTED"
+            assert verify_phase9_transition_upgrade(connection).status == "ACCEPTED"
             savepoint = connection.begin_nested()
             with pytest.raises(DBAPIError):
                 connection.execute(

@@ -2725,7 +2725,10 @@ def create_canonical_v13_app(
     def phase9_intent(command: Phase9IntentCommandDTO) -> Phase9IntentReceiptDTO:
         def execute(connection: Connection) -> Phase9IntentReceiptDTO:
             intent_id = create_production_demo_intent(
-                connection, signal_id=command.signal_id, intent_json=command.intent_json
+                connection,
+                signal_id=command.signal_id,
+                intent_json=command.intent_json,
+                intent_mode=command.intent_mode,
             )
             return Phase9IntentReceiptDTO(trade_intent_id=intent_id)
 
