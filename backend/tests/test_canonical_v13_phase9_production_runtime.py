@@ -15,6 +15,7 @@ from app.canonical_v13.phase9_production_composition import (
     CanonicalPhase9CompositionBlocked,
 )
 from app.canonical_v13.phase9_production_runtime import (
+    DatabaseSignalReceiptWriter,
     DatabaseRuntimeLineageReader,
     FrozenIntradayLeverageEvaluator,
     PersistingRuntimeWorker,
@@ -423,3 +424,73 @@ def test_persisting_worker_exposes_the_same_verifier_used_for_persistence() -> N
     tampered = SimpleNamespace(receipt_digest="2" * 64)
     assert worker.verify(tampered) is False
     assert writer.verified == [receipt, tampered]
+
+
+def _signed_signal_receipt(*, observed_at: datetime, evaluated_at: datetime):
+    return SimpleNamespace(
+        observed_at=observed_at,
+        signal_candidate=SimpleNamespace(
+            deployment_id=_uuid(1),
+            runtime_instance_id=_uuid(2),
+            research_target_id=_uuid(3),
+            signal_json={"runtime_receipt_digest": "4" * 64},
+            evaluated_at=evaluated_at,
+        ),
+    )
+
+
+def test_signal_writer_uses_fresh_signed_worker_receipt_as_liveness(
+    monkeypatch,
+) -> None:
+    captured = {}
+    receipt = _signed_signal_receipt(observed_at=NOW, evaluated_at=NOW)
+    monkeypatch.setattr(
+        "app.canonical_v13.phase9_production_runtime.verify_runtime_worker_receipt",
+        lambda observed, *, verifier: observed is receipt and verifier == "seal",
+    )
+
+    def record(_connection, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(
+        "app.canonical_v13.phase9_production_runtime.record_production_demo_signal",
+        record,
+    )
+    DatabaseSignalReceiptWriter(
+        _factory(object()),
+        "seal",
+        clock=lambda: NOW + timedelta(seconds=30),
+    ).persist(receipt)
+
+    assert captured["runtime_liveness_observed_at"] == NOW
+    assert captured["evaluated_at"] == NOW
+    assert captured["signal_json"]["runtime_receipt_digest"] == "4" * 64
+
+
+@pytest.mark.parametrize(
+    ("observed_at", "evaluated_at", "clock"),
+    (
+        (NOW, NOW, NOW + timedelta(minutes=3)),
+        (NOW + timedelta(seconds=1), NOW + timedelta(seconds=1), NOW),
+        (NOW, NOW + timedelta(seconds=1), NOW + timedelta(seconds=30)),
+    ),
+)
+def test_signal_writer_rejects_stale_future_or_time_drifted_worker_receipt(
+    monkeypatch, observed_at, evaluated_at, clock
+) -> None:
+    receipt = _signed_signal_receipt(
+        observed_at=observed_at, evaluated_at=evaluated_at
+    )
+    monkeypatch.setattr(
+        "app.canonical_v13.phase9_production_runtime.verify_runtime_worker_receipt",
+        lambda _receipt, *, verifier: verifier == "seal",
+    )
+    writer = DatabaseSignalReceiptWriter(
+        _factory(object()), "seal", clock=lambda: clock
+    )
+
+    with pytest.raises(
+        CanonicalPhase9CompositionBlocked,
+        match="BLOCKED_PHASE9_SIGNAL_RECEIPT_FRESHNESS",
+    ):
+        writer.persist(receipt)
