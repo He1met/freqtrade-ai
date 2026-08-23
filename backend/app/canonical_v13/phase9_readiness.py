@@ -726,7 +726,14 @@ def _inspect_lineage(
         )
     ]
     counts["signals"] = len(signals)
-    signal_ids = [row["id"] for row in signals]
+    natural_signals = [
+        row for row in signals if row["source_kind"] == "NATURAL_STRATEGY_SIGNAL"
+    ]
+    acceptance_signals = [
+        row for row in signals if row["source_kind"] == "ACCEPTANCE_SCHEDULED_TEST"
+    ]
+    selected_shadow_signals = acceptance_signals if triggers else natural_signals
+    signal_ids = [row["id"] for row in selected_shadow_signals]
     intents = (
         connection.execute(
             select(TRADE_INTENTS_TABLE).where(
@@ -763,7 +770,7 @@ def _inspect_lineage(
             .one_or_none()
         )
         intent_by_id = {row["id"]: row for row in intents}
-        signal_by_id = {row["id"]: row for row in signals}
+        signal_by_id = {row["id"]: row for row in selected_shadow_signals}
         exact_shadow = []
         for row in risks:
             intent = intent_by_id.get(row["trade_intent_id"])
@@ -830,13 +837,15 @@ def _inspect_lineage(
                 and _digest(dict(payload)) == row["decision_digest"]
             ):
                 exact_shadow.append(row)
-        if len(signals) != 1:
+        if len(selected_shadow_signals) != 1:
             reasons.append("EXACT_SINGLE_SHADOW_SIGNAL_REQUIRED")
-        if signals and signals[0]["source_kind"] == "ACCEPTANCE_SCHEDULED_TEST":
+        if triggers:
             if (
                 len(triggers) != 1
-                or signals[0]["acceptance_trigger_id"] != triggers[0]["id"]
-                or signals[0]["signal_json"].get(
+                or len(acceptance_signals) != 1
+                or acceptance_signals[0]["acceptance_trigger_id"]
+                != triggers[0]["id"]
+                or acceptance_signals[0]["signal_json"].get(
                     "acceptance_trigger_receipt_digest"
                 )
                 != triggers[0]["receipt_digest"]

@@ -557,6 +557,7 @@ def build_lifecycle_receipt(
         "PREPARED",
         "CONFIRMED",
         "RUNNING",
+        "ACCEPTED",
         "STOPPED",
         "RECOVERED",
         "NO_OP",
