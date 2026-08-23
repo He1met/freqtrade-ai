@@ -29,6 +29,23 @@ WALLET = 10_000.0
 STAKE = 100.0
 
 
+def _long_only_parameters() -> dict[str, object]:
+    return {
+        "atr_high_multiplier": 2.1,
+        "atr_low_multiplier": 0.65,
+        "cooldown_bars": 4,
+        "fast_window": 20,
+        "max_holding_bars": 96,
+        "regime_window": 192,
+        "rsi_high": 70,
+        "rsi_low": 50,
+        "slope_bars": 24,
+        "slow_window": 80,
+        "stoploss": -0.016,
+        "volume_multiplier": 0.6,
+    }
+
+
 def _trade(
     *,
     is_short: bool,
@@ -123,6 +140,32 @@ def test_account_cost_golden_long_short_and_leverage() -> None:
     assert observed["directional_net_reconciliation_error"] <= 1e-15
     assert observed["direction_attribution"]["long"]["trade_count"] == 1
     assert observed["direction_attribution"]["short"]["trade_count"] == 1
+
+
+@pytest.mark.parametrize("leverage_limit", (1.0, 2.0))
+def test_rendered_long_only_strategy_binds_declared_target_leverage(
+    leverage_limit: float,
+) -> None:
+    _strategy_class, source = optimizer.render_strategy(
+        "trend-pullback",
+        1,
+        _long_only_parameters(),
+        leverage_limit,
+    )
+
+    assert f"return min({leverage_limit}, max_leverage)" in source
+    other_limit = 2.0 if leverage_limit == 1.0 else 1.0
+    assert f"return min({other_limit}, max_leverage)" not in source
+
+
+def test_rendered_strategy_rejects_nonpositive_leverage_contract() -> None:
+    with pytest.raises(optimizer.Blocked, match="strategy leverage limit"):
+        optimizer.render_strategy(
+            "trend-pullback",
+            1,
+            _long_only_parameters(),
+            0.0,
+        )
 
 
 def test_fee_is_already_in_profit_abs_and_old_flat_formula_is_rejected() -> None:
