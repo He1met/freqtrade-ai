@@ -1015,7 +1015,7 @@ def rotate_api_reader(
             with connection.transaction():
                 connection.execute(
                     "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
-                    (f"{READER_ROTATION_AGGREGATE_TYPE}:{idempotency_key}",),
+                    (f"{READER_ROTATION_AGGREGATE_TYPE}:{READER_PRINCIPAL}",),
                 )
                 replay = connection.execute(
                     """

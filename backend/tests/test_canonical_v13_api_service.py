@@ -427,6 +427,7 @@ class _RotationConnection:
         self.replay = tuple(replay)
         self.insert_parameters = None
         self.alter_count = 0
+        self.advisory_parameters = None
 
     def __enter__(self):
         return self
@@ -444,6 +445,7 @@ class _RotationConnection:
     def execute(self, statement, parameters=None):
         rendered = str(statement)
         if "pg_advisory_xact_lock" in rendered:
+            self.advisory_parameters = parameters
             return _RotationResult([(None,)])
         if "SELECT id, request_digest, receipt_digest" in rendered:
             return _RotationResult(self.replay)
@@ -540,6 +542,9 @@ def test_api_reader_rotation_is_redacted_read_only_and_restarts_once(
     assert rejected == ["o" * 64]
     assert state["material"] == "n" * 64
     assert connection.alter_count == 1
+    assert connection.advisory_parameters == (
+        f"{service.READER_ROTATION_AGGREGATE_TYPE}:{service.READER_PRINCIPAL}",
+    )
     assert connection.insert_parameters is not None
     audit_payload = connection.insert_parameters[7]
     assert "o" * 64 not in serialized + audit_payload
