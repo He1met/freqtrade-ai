@@ -87,12 +87,15 @@ backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py runtime-read
 backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py runtime-reader-acl-verify
 backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py deployment-rollover-apply
 backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py deployment-rollover-verify
+backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py acceptance-trigger-apply
+backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py acceptance-trigger-verify
 python scripts/canonical_v13_api_service.py provision-phase9
 python scripts/canonical_v13_api_service.py provision-runtime-reader
 backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py verify-phase9-provisioned
 ```
 
-升级顺序固定为 Phase 9 schema → runtime image → runtime-reader ACL → deployment rollover；rollback
+升级顺序固定为 Phase 9 schema → runtime image → runtime-reader ACL → deployment rollover → acceptance
+trigger；rollback
 必须严格反向执行。后层尚存在时，前层 rollback 必须返回明确 `BLOCKED_*_ROLLBACK_REQUIRED`，不得只改
 manifest digest 留下 partial columns、trigger 或 ACL。
 
@@ -118,6 +121,11 @@ surviving-table ACL，且上述 capability 仍有额外 table grant 或 `CONNECT
 runtime-reader ACL rollover 的 rollback 入口为
 `canonical_v13_bootstrap.py runtime-reader-acl-rollback`；它只撤销
 `qualification_decisions` 的 runtime-reader `SELECT` 并恢复 predecessor manifest，不删除历史行。
+acceptance trigger rollback 必须最先执行
+`canonical_v13_bootstrap.py acceptance-trigger-rollback`：仅当 trigger/signal 证据均为 0 时才删除本层
+table/columns/functions，精确撤销 `canonical_signal_writer` 的四项后生 lineage `SELECT`；随后才允许
+deployment rollover、runtime-reader、runtime image 与 Phase 9 schema 依次反向 rollback。任一证据非零或
+ACL/trigger partial drift 都必须阻塞，禁止 `CASCADE`。
 
 完成 schema/ACL rollback 且 API、canonical runtime 与 order writer LaunchAgent 均已 unload 后，只能用
 以下窄入口清理 9 个固定 LOGIN 与 10 个固定 Keychain item；它不读取或删除 OKX credential：
@@ -217,6 +225,41 @@ backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py phase9-readi
 ```
 
 此阶段 orders/fills/ledger/reconciliation 必须始终为 0。
+
+### B.1 一次性 deterministic acceptance trigger
+
+若 natural evaluator 已以 fresh signed receipts 证明长期存活、连续返回
+`NATURAL_SIGNAL_NO_ACTION`，但等待自然入场会无限阻塞技术验收，可在独立人工授权后使用
+control-plane 的 `ACCEPTANCE_SCHEDULED_TEST`。它只验证 signal 后半链，不是策略信号、盈利证明、fixture
+或 qualification 输入：不得进入 research/backtest/score/qualification 指标，UI 必须显示“验收测试信号”。
+
+先确认 runtime/order writer 均已正式停止且 execution-domain 计数可核算，再完成本层 schema apply/verify、
+release/image acceptance，重建 `SIGNAL_RISK_SHADOW` runtime。POST 只接受 exact canonical IDs、人工 actor
+与 idempotency key，不接受浏览器提供的时间；server 固定下一闭合 15m UTC boundary，TTL 2 分钟：
+
+```text
+POST /api/canonical-v13/phase9/acceptance-signal-triggers
+GET  /api/canonical-v13/phase9/acceptance-signal-triggers?qualification_decision_id=<exact>
+```
+
+数据库 trigger 行为 append-only：同一 deployment 最多一条，idempotency exact replay 返回原 receipt，
+第二 key、更新、删除、reset、renew、早到、过期、lineage drift 均 fail closed。receipt 必须绑定 exact
+qualification/approval/deployment/runtime image/bundle/snapshot，并固定 `OKX_DEMO`、
+`allow_real_funds=false`、`acceptance_only=true`、`LONG_ONLY`、`max_order_count=1`。只有 live runtime holder、
+fresh runtime observation、order writer disabled 且 plan digest 精确时，supervisor 才可消费一次：
+
+```bash
+python scripts/canonical_v13_phase9_service.py execute-acceptance-trigger \
+  --service long_lived_runtime \
+  --plan-digest <exact-signal-risk-shadow-plan-digest> \
+  --acceptance-trigger-id <server-issued-trigger-id>
+```
+
+该命令从 runtime HMAC Keychain signer 生成 signed worker receipt，经独立 `canonical_signal_writer`
+持久化 source_kind=`ACCEPTANCE_SCHEDULED_TEST` signal；exact replay 返回同一 signal 且不再次消费。随后仍由
+正式 API/identity 创建唯一 long intent 与唯一 `SIGNAL_RISK_SHADOW` decision。readiness 必须同时证明
+trigger→signal exact lineage、`natural_signal=false`、shadow 两项 check、orders 及后续表全 0；不得把该行
+改写或展示为 `NATURAL_STRATEGY_SIGNAL`。
 
 ## 6. C — OKX_DEMO_CANARY
 

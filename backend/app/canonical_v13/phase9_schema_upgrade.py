@@ -101,6 +101,9 @@ PHASE9_SURVIVING_TABLE_GRANT_DELTA: Final[tuple[tuple[str, str, str], ...]] = (
     ("canonical_order_writer", "trade_intents", "SELECT"),
     ("canonical_risk_writer", "deployments", "SELECT"),
     ("canonical_runtime_reader", "qualification_decisions", "SELECT"),
+    ("canonical_signal_writer", "deployment_approvals", "SELECT"),
+    ("canonical_signal_writer", "qualification_decisions", "SELECT"),
+    ("canonical_signal_writer", "research_targets", "SELECT"),
     ("canonical_signal_writer", "runtime_receipts", "SELECT"),
 )
 PHASE9_DATABASE_CONNECT_DELTA: Final[tuple[str, ...]] = (
@@ -276,7 +279,7 @@ def _current_surviving_table_grants() -> set[tuple[str, str, str]]:
     surviving = (
         set(CANONICAL_TABLE_NAMES)
         - set(PHASE9_EXTENSION_TABLE_NAMES)
-        - {"runtime_image_acceptances"}
+        - {"runtime_image_acceptances", "acceptance_signal_triggers"}
     )
     grants: dict[tuple[str, str], set[str]] = {}
     for writer, table_names in WRITER_TABLE_ALLOWLIST.items():
@@ -309,7 +312,7 @@ def _previous_acl_payload() -> dict[str, object]:
         sorted(
             set(CANONICAL_TABLE_NAMES)
             - set(PHASE9_EXTENSION_TABLE_NAMES)
-            - {"runtime_image_acceptances"}
+            - {"runtime_image_acceptances", "acceptance_signal_triggers"}
         )
     )
     previous_grants = tuple(
@@ -646,18 +649,28 @@ def apply_phase9_schema_upgrade(
     deferred_acl_fragments = (
         f"qualification_decisions TO {resolved.physical('canonical_runtime_reader')}",
         f"order_writer_leases TO {resolved.physical('canonical_deployment_writer')}",
+        f"deployment_approvals TO {resolved.physical('canonical_signal_writer')}",
+        f"qualification_decisions TO {resolved.physical('canonical_signal_writer')}",
+        f"research_targets TO {resolved.physical('canonical_signal_writer')}",
     )
     for statement in postgresql_acl_statements(
         resolved,
         guard_function_names=GATE_GUARD_FUNCTION_NAMES,
     ):
-        if "runtime_image_acceptances" in statement or any(
-            fragment in statement for fragment in deferred_acl_fragments
+        if (
+            "runtime_image_acceptances" in statement
+            or "acceptance_signal_triggers" in statement
+            or any(
+                fragment in statement for fragment in deferred_acl_fragments
+            )
         ):
             continue
         connection.execute(text(statement))
     for statement in postgresql_owner_table_grant_statements(resolved):
-        if "runtime_image_acceptances" in statement:
+        if (
+            "runtime_image_acceptances" in statement
+            or "acceptance_signal_triggers" in statement
+        ):
             continue
         connection.execute(text(statement))
     connection.execute(

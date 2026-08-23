@@ -43,6 +43,8 @@ CANONICAL_GUARD_FUNCTION_NAMES: Final = (
     *GATE_GUARD_FUNCTION_NAMES,
     "guard_runtime_image_acceptances_append_only",
     "guard_deployments_disable_evidence",
+    "guard_acceptance_signal_triggers_immutable",
+    "guard_acceptance_signals_immutable",
 )
 
 
@@ -137,14 +139,17 @@ def _existing_tables(connection: Connection) -> tuple[str, ...]:
 
 
 def _postgresql_user_objects(
-    connection: Connection, *, allowed_predecessor_indexes: tuple[str, ...] = ()
+    connection: Connection,
+    *,
+    allowed_predecessor_indexes: tuple[str, ...] = (),
+    allowed_missing_tables: tuple[str, ...] = (),
 ) -> tuple[str, ...]:
     """List user-created objects that would make the database non-canonical.
 
     PostgreSQL's ``public`` schema exists in a fresh database, so the namespace
     itself is allowed.  Objects in it are not.  The canonical schema may contain
-    only the exact table/index objects emitted by this metadata and the three
-    fail-closed gate guard functions; views, sequences, other functions, and
+    only the exact table/index objects emitted by this metadata and the exact
+    fail-closed guard functions; views, sequences, other functions, and
     standalone user types remain forbidden.
     """
 
@@ -198,8 +203,8 @@ def _postgresql_user_objects(
         if index.name is not None
     )
     expected_indexes.update(allowed_predecessor_indexes)
-    canonical_tables_complete = set(_existing_tables(connection)) == set(
-        CANONICAL_TABLE_NAMES
+    canonical_tables_complete = set(_existing_tables(connection)) == (
+        set(CANONICAL_TABLE_NAMES) - set(allowed_missing_tables)
     )
     expected_guard_functions = set(CANONICAL_GUARD_FUNCTION_NAMES)
     problems: list[str] = []
@@ -222,13 +227,17 @@ def _postgresql_user_objects(
 
 
 def _database_isolation_problems(
-    connection: Connection, *, allowed_predecessor_indexes: tuple[str, ...] = ()
+    connection: Connection,
+    *,
+    allowed_predecessor_indexes: tuple[str, ...] = (),
+    allowed_missing_tables: tuple[str, ...] = (),
 ) -> tuple[str, ...]:
     return tuple(
         f"unexpected user object in canonical database: {value}"
         for value in _postgresql_user_objects(
             connection,
             allowed_predecessor_indexes=allowed_predecessor_indexes,
+            allowed_missing_tables=allowed_missing_tables,
         )
     )
 
@@ -299,6 +308,7 @@ def verify_canonical_genesis(
     include_business_row_count: bool = False,
     accepted_manifest_digests: tuple[str, ...] | None = None,
     allowed_predecessor_indexes: tuple[str, ...] = (),
+    allowed_missing_tables: tuple[str, ...] = (),
 ) -> GenesisVerification:
     """Verify exact tables and genesis identity; never repairs observed drift."""
 
@@ -312,10 +322,17 @@ def verify_canonical_genesis(
         _database_isolation_problems(
             effective,
             allowed_predecessor_indexes=allowed_predecessor_indexes,
+            allowed_missing_tables=allowed_missing_tables,
         )
     )
     extras = sorted(observed - expected)
-    missing = sorted(expected - observed)
+    allowed_missing = set(allowed_missing_tables)
+    invalid_allowed_missing = sorted(allowed_missing - expected)
+    if invalid_allowed_missing:
+        problems.append(
+            f"invalid allowed missing canonical tables: {invalid_allowed_missing}"
+        )
+    missing = sorted((expected - observed) - allowed_missing)
     if extras:
         problems.append(f"unexpected canonical-schema tables: {extras}")
     if missing:
@@ -412,10 +429,14 @@ def install_canonical_genesis(
         from app.canonical_v13.deployment_rollover_upgrade import (  # noqa: PLC0415
             install_deployment_rollover_trigger,
         )
+        from app.canonical_v13.acceptance_signal_trigger_upgrade import (  # noqa: PLC0415
+            install_acceptance_signal_trigger_guard,
+        )
 
         install_gate_receipt_triggers(effective)
         install_runtime_image_trigger(effective)
         install_deployment_rollover_trigger(effective)
+        install_acceptance_signal_trigger_guard(effective)
     effective.execute(
         SCHEMA_METADATA_TABLE.insert().values(
             metadata_key=GENESIS_METADATA_KEY,
@@ -473,6 +494,11 @@ def render_postgresql_genesis_ddl(
     )
 
     statements.extend(deployment_rollover_trigger_statements())
+    from app.canonical_v13.acceptance_signal_trigger_upgrade import (  # noqa: PLC0415
+        acceptance_signal_trigger_guard_statements,
+    )
+
+    statements.extend(acceptance_signal_trigger_guard_statements())
     statements.extend(
         render_postgresql_owner_sql(role_mapping).rstrip(";\n").split(";\n")
     )

@@ -117,14 +117,17 @@ function Phase9StageCard({ projection, stage }: { projection: ResearchResultsPro
   if (query.error) return <CanonicalQueryError error={query.error} title={`${title}状态未知`} />;
   if (!query.data) return null;
   const readiness = query.data as Phase9ReadinessProjection;
+  const acceptanceTriggerCount = readiness.execution_domain_counts.acceptance_signal_triggers ?? 0;
   if (!canonicalStatusesKnown(readiness.status) || readiness.stage !== stage) {
     return <CanonicalStatePanel description="Phase 9 projection 含未知状态或 stage 漂移；UI 不进行推断。" kind="unknown" reasonCodes={["UNKNOWN_CONTRACT_VALUE"]} title={`${title}合同漂移`} />;
   }
   return <section className="canonical-v13-panel" data-phase9-stage={stage}>
     <div className="canonical-v13-heading-row"><h3>{title}</h3><CanonicalStatus status={readiness.status} /></div>
+    {acceptanceTriggerCount > 0 ? <CanonicalStatePanel description="这是 control-plane 隔离的一次性验收测试信号，只验证 signal 后半链；不代表策略自然盈利，也不进入研究、评分或资格指标。" kind="pending" reasonCodes={["ACCEPTANCE_SCHEDULED_TEST"]} title={`验收测试信号 · ${acceptanceTriggerCount} 条`} /> : null}
     {readiness.status === "BLOCKED" ? <CanonicalStatePanel description="此阶段保持 fail closed；原因码与计数均来自 canonical API。" kind="blocked" reasonCodes={readiness.reason_codes} title={`${title}未获准`} /> : null}
     <dl className="canonical-v13-definition-list">
       <div><dt>订单</dt><dd>{readiness.execution_domain_counts.orders ?? "未知"}</dd></div>
+      <div><dt>验收测试触发器</dt><dd>{readiness.execution_domain_counts.acceptance_signal_triggers ?? 0}</dd></div>
       <div><dt>Fill</dt><dd>{readiness.execution_domain_counts.fills ?? "未知"}</dd></div>
       <div><dt>Ledger</dt><dd>{readiness.execution_domain_counts.ledger_entries ?? "未知"}</dd></div>
       <div><dt>Reconciliation</dt><dd>{readiness.execution_domain_counts.reconciliation_runs ?? "未知"}</dd></div>

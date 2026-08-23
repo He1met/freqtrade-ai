@@ -38,6 +38,12 @@ from app.canonical_v13.authority_upgrade import (
     rollback_authority_upgrade,
     verify_authority_upgrade_state,
 )
+from app.canonical_v13.acceptance_signal_trigger_upgrade import (
+    CanonicalAcceptanceSignalTriggerUpgradeBlocked,
+    apply_acceptance_signal_trigger_upgrade,
+    rollback_acceptance_signal_trigger_upgrade,
+    verify_acceptance_signal_trigger_upgrade,
+)
 from app.canonical_v13.gate_receipt_upgrade import (
     CanonicalGateReceiptUpgradeBlocked,
     apply_gate_receipt_upgrade,
@@ -591,6 +597,35 @@ def deployment_rollover_schema(*, operation: str) -> dict[str, object]:
     return payload
 
 
+def acceptance_trigger_schema(*, operation: str) -> dict[str, object]:
+    mapping = local_role_mapping()
+    engine = create_engine(_database_url(), pool_pre_ping=True)
+    try:
+        if operation == "verify":
+            with engine.connect() as connection:
+                with connection.begin():
+                    connection.exec_driver_sql("SET TRANSACTION READ ONLY")
+                    result = verify_acceptance_signal_trigger_upgrade(connection)
+        else:
+            actor_identity = _upgrade_actor()
+            with engine.begin() as connection:
+                result = (
+                    apply_acceptance_signal_trigger_upgrade(
+                        connection, role_mapping=mapping
+                    )
+                    if operation == "apply"
+                    else rollback_acceptance_signal_trigger_upgrade(
+                        connection, role_mapping=mapping
+                    )
+                )
+    finally:
+        engine.dispose()
+    payload = asdict(result)
+    if operation != "verify":
+        payload["actor_identity"] = actor_identity
+    return payload
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -620,6 +655,9 @@ def main(argv: list[str] | None = None) -> int:
             "deployment-rollover-verify",
             "deployment-rollover-apply",
             "deployment-rollover-rollback",
+            "acceptance-trigger-verify",
+            "acceptance-trigger-apply",
+            "acceptance-trigger-rollback",
         ),
     )
     parser.add_argument(
@@ -696,6 +734,10 @@ def main(argv: list[str] | None = None) -> int:
             payload = deployment_rollover_schema(
                 operation=args.command.removeprefix("deployment-rollover-")
             )
+        elif args.command.startswith("acceptance-trigger-"):
+            payload = acceptance_trigger_schema(
+                operation=args.command.removeprefix("acceptance-trigger-")
+            )
         else:
             payload = authority_apply(rollback=args.command == "authority-rollback")
     except BootstrapBlocked as exc:
@@ -711,6 +753,8 @@ def main(argv: list[str] | None = None) -> int:
     except CanonicalRuntimeReaderAclUpgradeBlocked as exc:
         payload = {"status": "BLOCKED", "reason": str(exc)}
     except CanonicalDeploymentRolloverUpgradeBlocked as exc:
+        payload = {"status": "BLOCKED", "reason": str(exc)}
+    except CanonicalAcceptanceSignalTriggerUpgradeBlocked as exc:
         payload = {"status": "BLOCKED", "reason": str(exc)}
     except (SQLAlchemyError, ValueError):
         payload = {"status": "BLOCKED", "reason": "bootstrap verification failed"}

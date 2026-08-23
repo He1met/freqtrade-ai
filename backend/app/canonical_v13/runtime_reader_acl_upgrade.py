@@ -152,6 +152,11 @@ def verify_runtime_reader_acl_upgrade(
             if manifest_digest != CANONICAL_MANIFEST_DIGEST
             else ()
         ),
+        allowed_missing_tables=(
+            ("acceptance_signal_triggers",)
+            if manifest_digest != CANONICAL_MANIFEST_DIGEST
+            else ()
+        ),
     )
     if not genesis.accepted:
         raise CanonicalRuntimeReaderAclUpgradeBlocked(

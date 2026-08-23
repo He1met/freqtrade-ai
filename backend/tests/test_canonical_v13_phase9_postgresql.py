@@ -2,9 +2,18 @@ from __future__ import annotations
 
 import os
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from threading import Barrier
+from uuid import uuid4
 
 import pytest
+from app.canonical_v13.acceptance_signal_trigger_upgrade import (
+    ACCEPTANCE_SIGNAL_GUARD_TRIGGER,
+    ACCEPTANCE_TRIGGER_GUARD_TRIGGER,
+    apply_acceptance_signal_trigger_upgrade,
+    rollback_acceptance_signal_trigger_upgrade,
+    verify_acceptance_signal_trigger_upgrade,
+)
 from app.canonical_v13.phase9_schema_upgrade import (
     PHASE9_DATABASE_CONNECT_DELTA,
     PHASE9_EXTENSION_TABLE_NAMES,
@@ -35,10 +44,12 @@ from app.canonical_v13.runtime_image_authority import (
     accept_runtime_image,
 )
 from app.canonical_v13.models import (
+    ACCEPTANCE_SIGNAL_TRIGGERS_TABLE,
     DEPLOYMENTS_TABLE,
     QUALIFICATION_DECISIONS_TABLE,
     RUNTIME_IMAGE_ACCEPTANCES_TABLE,
     SCHEMA_METADATA_TABLE,
+    SIGNALS_TABLE,
 )
 from app.canonical_v13.runtime_reader_acl_upgrade import (
     PREVIOUS_RUNTIME_READER_ACL_MANIFEST_DIGEST,
@@ -47,7 +58,7 @@ from app.canonical_v13.runtime_reader_acl_upgrade import (
     rollback_runtime_reader_acl_upgrade,
     verify_runtime_reader_acl_upgrade,
 )
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.exc import DBAPIError
 
 DATABASE_URL = os.environ.get("CANONICAL_V13_POSTGRES_URL")
@@ -56,6 +67,239 @@ pytestmark = pytest.mark.skipif(
     not DATABASE_URL,
     reason="CANONICAL_V13_POSTGRES_URL is required for the isolated contract",
 )
+
+
+def test_acceptance_signal_trigger_is_database_immutable() -> None:
+    assert DATABASE_URL is not None
+    engine = create_engine(DATABASE_URL)
+    try:
+        with engine.connect() as connection:
+            transaction = connection.begin()
+            try:
+                mapping = CanonicalRoleMapping.from_prefix(
+                    os.environ.get(
+                        "CANONICAL_V13_ROLE_PREFIX", "freqtrade_ai_v13_ci_"
+                    )
+                )
+                verified = verify_acceptance_signal_trigger_upgrade(connection)
+                assert verified.status == "ACCEPTED"
+                assert verified.immutability_trigger_present is True
+                rolled_back = rollback_acceptance_signal_trigger_upgrade(
+                    connection, role_mapping=mapping
+                )
+                assert rolled_back.status == "ROLLED_BACK"
+                assert rolled_back.immutability_trigger_present is False
+                signal_writer = mapping.physical("canonical_signal_writer")
+                for table_name in (
+                    "deployment_approvals",
+                    "qualification_decisions",
+                    "research_targets",
+                    "runtime_image_acceptances",
+                ):
+                    assert connection.execute(
+                        text(
+                            "SELECT has_table_privilege(:role, :table, 'SELECT')"
+                        ),
+                        {
+                            "role": signal_writer,
+                            "table": f"strategy_platform_v13.{table_name}",
+                        },
+                    ).scalar_one() is False
+                assert (
+                    rollback_acceptance_signal_trigger_upgrade(
+                        connection, role_mapping=mapping
+                    ).status
+                    == "PREVIOUS_READY"
+                )
+                upgraded = apply_acceptance_signal_trigger_upgrade(
+                    connection, role_mapping=mapping
+                )
+                assert upgraded.status == "UPGRADED"
+                assert upgraded.immutability_trigger_present is True
+                for table_name in (
+                    "deployment_approvals",
+                    "qualification_decisions",
+                    "research_targets",
+                    "runtime_image_acceptances",
+                ):
+                    assert connection.execute(
+                        text(
+                            "SELECT has_table_privilege(:role, :table, 'SELECT')"
+                        ),
+                        {
+                            "role": signal_writer,
+                            "table": f"strategy_platform_v13.{table_name}",
+                        },
+                    ).scalar_one() is True
+                assert (
+                    apply_acceptance_signal_trigger_upgrade(
+                        connection, role_mapping=mapping
+                    ).status
+                    == "ACCEPTED"
+                )
+                trigger_id = uuid4()
+                scheduled_at = datetime(2026, 8, 23, 14, 0, tzinfo=timezone.utc)
+                connection.exec_driver_sql(
+                    "SET LOCAL session_replication_role = replica"
+                )
+                connection.execute(
+                    ACCEPTANCE_SIGNAL_TRIGGERS_TABLE.insert().values(
+                        id=trigger_id,
+                        qualification_decision_id=uuid4(),
+                        deployment_approval_id=uuid4(),
+                        deployment_id=uuid4(),
+                        runtime_instance_id=uuid4(),
+                        runtime_image_acceptance_id=uuid4(),
+                        strategy_version_id=uuid4(),
+                        research_target_id=uuid4(),
+                        configuration_bundle_id=uuid4(),
+                        configuration_bundle_digest="1" * 64,
+                        market_snapshot_id=uuid4(),
+                        market_snapshot_digest="2" * 64,
+                        source_kind="ACCEPTANCE_SCHEDULED_TEST",
+                        execution_target="OKX_DEMO",
+                        allow_real_funds=False,
+                        acceptance_only=True,
+                        position_policy="LONG_ONLY",
+                        max_order_count=1,
+                        scheduled_at=scheduled_at,
+                        expires_at=scheduled_at + timedelta(minutes=2),
+                        idempotency_key="postgresql-immutable-trigger",
+                        request_digest="3" * 64,
+                        receipt_digest="4" * 64,
+                        created_at=scheduled_at - timedelta(minutes=1),
+                    )
+                )
+                signal_id = uuid4()
+                connection.execute(
+                    SIGNALS_TABLE.insert().values(
+                        id=signal_id,
+                        deployment_id=uuid4(),
+                        runtime_instance_id=uuid4(),
+                        strategy_version_id=uuid4(),
+                        research_target_id=uuid4(),
+                        configuration_bundle_id=uuid4(),
+                        configuration_bundle_digest="1" * 64,
+                        market_snapshot_id=uuid4(),
+                        market_snapshot_digest="2" * 64,
+                        source_kind="ACCEPTANCE_SCHEDULED_TEST",
+                        acceptance_trigger_id=trigger_id,
+                        worker_receipt_digest="5" * 64,
+                        worker_signer_key_id="isolated-signer",
+                        worker_signature_algorithm="HMAC_SHA256_V1",
+                        worker_signature="6" * 64,
+                        signal_json={
+                            "source_kind": "ACCEPTANCE_SCHEDULED_TEST",
+                            "natural_signal": False,
+                        },
+                        signal_digest="7" * 64,
+                        created_at=scheduled_at,
+                    )
+                )
+                connection.exec_driver_sql(
+                    "SET LOCAL session_replication_role = origin"
+                )
+                for statement in (
+                    ACCEPTANCE_SIGNAL_TRIGGERS_TABLE.update()
+                    .where(ACCEPTANCE_SIGNAL_TRIGGERS_TABLE.c.id == trigger_id)
+                    .values(expires_at=scheduled_at + timedelta(minutes=3)),
+                    ACCEPTANCE_SIGNAL_TRIGGERS_TABLE.delete().where(
+                        ACCEPTANCE_SIGNAL_TRIGGERS_TABLE.c.id == trigger_id
+                    ),
+                    SIGNALS_TABLE.update()
+                    .where(SIGNALS_TABLE.c.id == signal_id)
+                    .values(worker_signature="8" * 64),
+                    SIGNALS_TABLE.delete().where(SIGNALS_TABLE.c.id == signal_id),
+                ):
+                    with pytest.raises(DBAPIError, match="immutable"):
+                        with connection.begin_nested():
+                            connection.execute(statement)
+                trigger_names = connection.execute(
+                    text(
+                        "SELECT tgname FROM pg_catalog.pg_trigger trigger "
+                        "JOIN pg_catalog.pg_class relation ON relation.oid=trigger.tgrelid "
+                        "JOIN pg_catalog.pg_namespace namespace ON namespace.oid=relation.relnamespace "
+                        "WHERE namespace.nspname='strategy_platform_v13' "
+                        "AND relation.relname IN ('acceptance_signal_triggers', 'signals') "
+                        "AND NOT trigger.tgisinternal"
+                    )
+                ).scalars()
+                assert {
+                    ACCEPTANCE_TRIGGER_GUARD_TRIGGER,
+                    ACCEPTANCE_SIGNAL_GUARD_TRIGGER,
+                }.issubset(set(trigger_names))
+            finally:
+                transaction.rollback()
+    finally:
+        engine.dispose()
+
+
+def test_acceptance_signal_trigger_postgresql_concurrent_single_winner() -> None:
+    assert DATABASE_URL is not None
+    engine = create_engine(DATABASE_URL)
+    deployment_id = uuid4()
+    scheduled_at = datetime(2026, 8, 23, 14, 0, tzinfo=timezone.utc)
+    barrier = Barrier(2)
+
+    def insert_once(index: int) -> str:
+        try:
+            with engine.begin() as connection:
+                connection.exec_driver_sql(
+                    "SET LOCAL session_replication_role = replica"
+                )
+                barrier.wait(timeout=5)
+                connection.execute(
+                    ACCEPTANCE_SIGNAL_TRIGGERS_TABLE.insert().values(
+                        id=uuid4(),
+                        qualification_decision_id=uuid4(),
+                        deployment_approval_id=uuid4(),
+                        deployment_id=deployment_id,
+                        runtime_instance_id=uuid4(),
+                        runtime_image_acceptance_id=uuid4(),
+                        strategy_version_id=uuid4(),
+                        research_target_id=uuid4(),
+                        configuration_bundle_id=uuid4(),
+                        configuration_bundle_digest="1" * 64,
+                        market_snapshot_id=uuid4(),
+                        market_snapshot_digest="2" * 64,
+                        source_kind="ACCEPTANCE_SCHEDULED_TEST",
+                        execution_target="OKX_DEMO",
+                        allow_real_funds=False,
+                        acceptance_only=True,
+                        position_policy="LONG_ONLY",
+                        max_order_count=1,
+                        scheduled_at=scheduled_at,
+                        expires_at=scheduled_at + timedelta(minutes=2),
+                        idempotency_key=f"postgresql-concurrent-trigger-{index}",
+                        request_digest=str(index + 3) * 64,
+                        receipt_digest=str(index + 5) * 64,
+                        created_at=scheduled_at - timedelta(minutes=1),
+                    )
+                )
+            return "INSERTED"
+        except DBAPIError as exc:
+            assert exc.orig.sqlstate == "23505"
+            return "REJECTED_UNIQUE"
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            outcomes = tuple(executor.map(insert_once, range(2)))
+        assert sorted(outcomes) == ["INSERTED", "REJECTED_UNIQUE"]
+        with engine.begin() as connection:
+            assert connection.execute(
+                select(func.count())
+                .select_from(ACCEPTANCE_SIGNAL_TRIGGERS_TABLE)
+                .where(ACCEPTANCE_SIGNAL_TRIGGERS_TABLE.c.deployment_id == deployment_id)
+            ).scalar_one() == 1
+    finally:
+        with engine.begin() as connection:
+            connection.exec_driver_sql("SET LOCAL session_replication_role = replica")
+            connection.execute(
+                ACCEPTANCE_SIGNAL_TRIGGERS_TABLE.delete().where(
+                    ACCEPTANCE_SIGNAL_TRIGGERS_TABLE.c.deployment_id == deployment_id
+                )
+            )
+        engine.dispose()
 
 
 def test_deployment_rollover_upgrade_trigger_replay_and_rollback_guard() -> None:
@@ -74,6 +318,12 @@ def test_deployment_rollover_upgrade_trigger_replay_and_rollback_guard() -> None
                 accepted = verify_deployment_rollover_upgrade(connection)
                 assert accepted.runtime_identity_global_constraint_present is False
                 assert accepted.runtime_identity_active_index_present is True
+                assert (
+                    rollback_acceptance_signal_trigger_upgrade(
+                        connection, role_mapping=mapping
+                    ).status
+                    == "ROLLED_BACK"
+                )
                 connection.exec_driver_sql(
                     "ALTER TABLE strategy_platform_v13.runtime_instances "
                     "ADD CONSTRAINT uq_runtime_instances_runtime_identity "
@@ -111,6 +361,12 @@ def test_deployment_rollover_upgrade_trigger_replay_and_rollback_guard() -> None
                         connection, role_mapping=mapping
                     ).status
                     == "ACCEPTED"
+                )
+                assert (
+                    apply_acceptance_signal_trigger_upgrade(
+                        connection, role_mapping=mapping
+                    ).status
+                    == "UPGRADED"
                 )
 
             finally:
@@ -209,6 +465,10 @@ def test_phase9_postgresql_upgrade_rollback_and_exact_replay() -> None:
                     f"TO {mapping.physical(role)}"
                 )
 
+            acceptance_rolled_back = rollback_acceptance_signal_trigger_upgrade(
+                connection, role_mapping=mapping
+            )
+            assert acceptance_rolled_back.status == "ROLLED_BACK"
             rollover_rolled_back = rollback_deployment_rollover_upgrade(
                 connection, role_mapping=mapping
             )
@@ -289,6 +549,12 @@ def test_phase9_postgresql_upgrade_rollback_and_exact_replay() -> None:
                 ).status
                 == "ACCEPTED"
             )
+            assert (
+                apply_acceptance_signal_trigger_upgrade(
+                    connection, role_mapping=mapping
+                ).status
+                == "UPGRADED"
+            )
     finally:
         engine.dispose()
 
@@ -302,6 +568,12 @@ def test_phase9_previous_acl_and_connect_drift_fail_closed_atomically() -> None:
     extra_role = mapping.physical("canonical_approval_writer")
     try:
         with engine.begin() as connection:
+            assert (
+                rollback_acceptance_signal_trigger_upgrade(
+                    connection, role_mapping=mapping
+                ).status
+                == "ROLLED_BACK"
+            )
             assert (
                 rollback_deployment_rollover_upgrade(
                     connection, role_mapping=mapping
@@ -380,6 +652,12 @@ def test_phase9_previous_acl_and_connect_drift_fail_closed_atomically() -> None:
                 ).status
                 == "UPGRADED"
             )
+            assert (
+                apply_acceptance_signal_trigger_upgrade(
+                    connection, role_mapping=mapping
+                ).status
+                == "UPGRADED"
+            )
     finally:
         engine.dispose()
 
@@ -402,6 +680,12 @@ def test_runtime_reader_qualification_acl_rollover_is_exact_and_replayable() -> 
                 rollback_runtime_reader_acl_upgrade(
                     connection, role_mapping=mapping, actor_identity=actor
                 )
+            assert (
+                rollback_acceptance_signal_trigger_upgrade(
+                    connection, role_mapping=mapping
+                ).status
+                == "ROLLED_BACK"
+            )
             assert (
                 rollback_deployment_rollover_upgrade(
                     connection, role_mapping=mapping
@@ -485,6 +769,12 @@ def test_runtime_reader_qualification_acl_rollover_is_exact_and_replayable() -> 
                 ).status
                 == "UPGRADED"
             )
+            assert (
+                apply_acceptance_signal_trigger_upgrade(
+                    connection, role_mapping=mapping
+                ).status
+                == "UPGRADED"
+            )
     finally:
         engine.dispose()
 
@@ -500,6 +790,12 @@ def test_runtime_reader_acl_failed_transaction_restores_predecessor_state() -> N
     actor = "isolated-postgresql-runtime-reader-acl-failure-test"
     try:
         with engine.begin() as connection:
+            assert (
+                rollback_acceptance_signal_trigger_upgrade(
+                    connection, role_mapping=mapping
+                ).status
+                == "ROLLED_BACK"
+            )
             assert (
                 rollback_deployment_rollover_upgrade(
                     connection, role_mapping=mapping
@@ -536,6 +832,12 @@ def test_runtime_reader_acl_failed_transaction_restores_predecessor_state() -> N
             )
             assert (
                 apply_deployment_rollover_upgrade(
+                    connection, role_mapping=mapping
+                ).status
+                == "UPGRADED"
+            )
+            assert (
+                apply_acceptance_signal_trigger_upgrade(
                     connection, role_mapping=mapping
                 ).status
                 == "UPGRADED"
@@ -599,6 +901,12 @@ def test_runtime_image_acceptance_concurrency_append_only_and_rollback_cleanup()
     try:
         with engine.begin() as connection:
             assert (
+                rollback_acceptance_signal_trigger_upgrade(
+                    connection, role_mapping=mapping
+                ).status
+                == "ROLLED_BACK"
+            )
+            assert (
                 rollback_deployment_rollover_upgrade(
                     connection, role_mapping=mapping
                 ).status
@@ -657,6 +965,12 @@ def test_runtime_image_acceptance_concurrency_append_only_and_rollback_cleanup()
             )
             assert (
                 apply_deployment_rollover_upgrade(
+                    connection, role_mapping=mapping
+                ).status
+                == "UPGRADED"
+            )
+            assert (
+                apply_acceptance_signal_trigger_upgrade(
                     connection, role_mapping=mapping
                 ).status
                 == "UPGRADED"

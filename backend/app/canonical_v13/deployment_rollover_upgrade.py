@@ -31,6 +31,9 @@ DEPLOYMENT_ROLLOVER_UPGRADE_CONTRACT: Final = (
 PREVIOUS_RUNTIME_IDENTITY_ROLLOVER_MANIFEST_DIGEST: Final = (
     "186fc7c8b3fa4b5d30518ee8bbc6f75ccb63bff0bbf8e231c454c0f99b42a3f3"
 )
+DEPLOYMENT_ROLLOVER_ACCEPTED_MANIFEST_DIGEST: Final = (
+    "1363b302a9e52ea20543d041d1e7ada9ac4637f777862ffb5c70270637ae806e"
+)
 RUNTIME_IDENTITY_GLOBAL_CONSTRAINT: Final = (
     CANONICAL_PREDECESSOR_RUNTIME_IDENTITY_INDEX
 )
@@ -335,12 +338,21 @@ def verify_deployment_rollover_upgrade(
         columns == tuple(sorted(DEPLOYMENT_ROLLOVER_COLUMNS))
         and _constraints(connection) == DEPLOYMENT_ROLLOVER_CONSTRAINTS
         and _index_present(connection)
-        and manifest == CANONICAL_MANIFEST_DIGEST
+        and manifest
+        in {DEPLOYMENT_ROLLOVER_ACCEPTED_MANIFEST_DIGEST, CANONICAL_MANIFEST_DIGEST}
         and _trigger_present(connection)
         and not global_identity_constraint
         and active_identity_index
     ):
-        verification = verify_canonical_genesis(connection)
+        verification = verify_canonical_genesis(
+            connection,
+            accepted_manifest_digests=(manifest,),
+            allowed_missing_tables=(
+                ("acceptance_signal_triggers",)
+                if manifest == DEPLOYMENT_ROLLOVER_ACCEPTED_MANIFEST_DIGEST
+                else ()
+            ),
+        )
         if verification.accepted:
             return _result(connection, status="ACCEPTED", repeat_noop=True)
     raise CanonicalDeploymentRolloverUpgradeBlocked(
@@ -424,7 +436,7 @@ def apply_deployment_rollover_upgrade(
     connection.execute(
         SCHEMA_METADATA_TABLE.update()
         .where(SCHEMA_METADATA_TABLE.c.metadata_key == "canonical-v13-genesis")
-        .values(manifest_digest=CANONICAL_MANIFEST_DIGEST)
+        .values(manifest_digest=DEPLOYMENT_ROLLOVER_ACCEPTED_MANIFEST_DIGEST)
     )
     verify_deployment_rollover_upgrade(connection)
     return _result(connection, status="UPGRADED", repeat_noop=False)
@@ -497,6 +509,7 @@ __all__ = [
     "DEPLOYMENT_ROLLOVER_GUARD_FUNCTION",
     "DEPLOYMENT_ROLLOVER_GUARD_TRIGGER",
     "PREVIOUS_RUNTIME_IDENTITY_ROLLOVER_MANIFEST_DIGEST",
+    "DEPLOYMENT_ROLLOVER_ACCEPTED_MANIFEST_DIGEST",
     "RUNTIME_IDENTITY_ACTIVE_INDEX",
     "RUNTIME_IDENTITY_GLOBAL_CONSTRAINT",
     "DeploymentRolloverUpgradeResult",

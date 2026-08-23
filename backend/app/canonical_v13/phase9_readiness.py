@@ -16,6 +16,7 @@ from sqlalchemy import Connection, func, select
 from app.canonical_v13.genesis import verify_canonical_genesis
 from app.canonical_v13.manifest import CANONICAL_BUSINESS_SCHEMA
 from app.canonical_v13.models import (
+    ACCEPTANCE_SIGNAL_TRIGGERS_TABLE,
     AUDIT_EVENTS_TABLE,
     DEPLOYMENT_APPROVALS_TABLE,
     DEPLOYMENTS_TABLE,
@@ -43,6 +44,9 @@ from app.canonical_v13.models import (
 from app.canonical_v13.execution_common import CanonicalExecutionChainBlocked
 from app.canonical_v13.phase9_canary_policy import (
     validate_persisted_canary_probe_receipt,
+)
+from app.canonical_v13.phase9_execution_authority import (
+    shadow_signal_source_accepted,
 )
 from app.canonical_v13.order_service import CANONICAL_ORDER_WRITER_IDENTITY
 from app.canonical_v13.phase9_topology import phase9_topology_digest
@@ -85,6 +89,7 @@ class Phase9ReadinessReceipt:
 
 
 _EXECUTION_TABLES = {
+    "acceptance_signal_triggers": ACCEPTANCE_SIGNAL_TRIGGERS_TABLE,
     "deployment_approvals": DEPLOYMENT_APPROVALS_TABLE,
     "deployments": DEPLOYMENTS_TABLE,
     "runtime_instances": RUNTIME_INSTANCES_TABLE,
@@ -123,6 +128,7 @@ _ZERO_REQUIRED_BY_STAGE = {
     ),
     "NO_ORDER_SOAK": frozenset(
         {
+            "acceptance_signal_triggers",
             "execution_risk_reservations",
             "execution_risk_budget_authorizations",
             "execution_canary_risk_policies",
@@ -163,6 +169,7 @@ _ZERO_REQUIRED_BY_STAGE = {
 PHASE9_ACCEPTANCE_STAGES: Final[tuple[str, ...]] = tuple(_ZERO_REQUIRED_BY_STAGE)
 
 _STRICT_CANARY_GLOBAL_TABLES: Final[tuple[str, ...]] = (
+    "acceptance_signal_triggers",
     "execution_risk_budget_authorizations",
     "execution_canary_risk_policies",
     "execution_canary_probe_receipts",
@@ -650,6 +657,34 @@ def _inspect_lineage(
     if stage == "NO_ORDER_SOAK":
         return counts
 
+    triggers = (
+        connection.execute(
+            select(ACCEPTANCE_SIGNAL_TRIGGERS_TABLE).where(
+                ACCEPTANCE_SIGNAL_TRIGGERS_TABLE.c.deployment_id == deployment["id"],
+                ACCEPTANCE_SIGNAL_TRIGGERS_TABLE.c.qualification_decision_id
+                == handoff.qualification_decision_id,
+                ACCEPTANCE_SIGNAL_TRIGGERS_TABLE.c.deployment_approval_id
+                == approval["id"],
+                ACCEPTANCE_SIGNAL_TRIGGERS_TABLE.c.runtime_instance_id == runtime["id"],
+                ACCEPTANCE_SIGNAL_TRIGGERS_TABLE.c.strategy_version_id
+                == handoff.strategy_version_id,
+                ACCEPTANCE_SIGNAL_TRIGGERS_TABLE.c.research_target_id
+                == handoff.research_target_id,
+                ACCEPTANCE_SIGNAL_TRIGGERS_TABLE.c.configuration_bundle_id
+                == handoff.configuration_bundle_id,
+                ACCEPTANCE_SIGNAL_TRIGGERS_TABLE.c.configuration_bundle_digest
+                == handoff.configuration_bundle_digest,
+                ACCEPTANCE_SIGNAL_TRIGGERS_TABLE.c.market_snapshot_id
+                == handoff.market_snapshot_id,
+                ACCEPTANCE_SIGNAL_TRIGGERS_TABLE.c.market_snapshot_digest
+                == handoff.market_snapshot_digest,
+            )
+        )
+        .mappings()
+        .all()
+    )
+    counts["acceptance_signal_triggers"] = len(triggers)
+
     signals = (
         connection.execute(
             select(SIGNALS_TABLE).where(
@@ -669,6 +704,27 @@ def _inspect_lineage(
         .mappings()
         .all()
     )
+    signals = [
+        row
+        for row in signals
+        if (
+            row["source_kind"] == "NATURAL_STRATEGY_SIGNAL"
+            and row["acceptance_trigger_id"] is None
+            and row["signal_json"].get("natural_signal") is True
+        )
+        or (
+            row["source_kind"] == "ACCEPTANCE_SCHEDULED_TEST"
+            and row["acceptance_trigger_id"] is not None
+            and row["signal_json"].get("source_kind")
+            == "ACCEPTANCE_SCHEDULED_TEST"
+            and row["signal_json"].get("natural_signal") is False
+            and row["signal_json"].get("acceptance_only") is True
+            and isinstance(row["worker_receipt_digest"], str)
+            and isinstance(row["worker_signer_key_id"], str)
+            and row["worker_signature_algorithm"] == "HMAC_SHA256_V1"
+            and isinstance(row["worker_signature"], str)
+        )
+    ]
     counts["signals"] = len(signals)
     signal_ids = [row["id"] for row in signals]
     intents = (
@@ -744,8 +800,7 @@ def _inspect_lineage(
                 target is not None
                 and signal is not None
                 and _digest(dict(signal["signal_json"])) == signal["signal_digest"]
-                and signal["signal_json"].get("evidence_class") == "PRODUCTION_OKX_DEMO"
-                and signal["signal_json"].get("natural_signal") is True
+                and shadow_signal_source_accepted(signal)
                 and signal["signal_json"].get("allow_real_funds") is False
                 and _digest(dict(intent["intent_json"])) == intent["intent_digest"]
                 and intent["intent_json"].get("execution_target") == "OKX_DEMO"
@@ -777,6 +832,16 @@ def _inspect_lineage(
                 exact_shadow.append(row)
         if len(signals) != 1:
             reasons.append("EXACT_SINGLE_SHADOW_SIGNAL_REQUIRED")
+        if signals and signals[0]["source_kind"] == "ACCEPTANCE_SCHEDULED_TEST":
+            if (
+                len(triggers) != 1
+                or signals[0]["acceptance_trigger_id"] != triggers[0]["id"]
+                or signals[0]["signal_json"].get(
+                    "acceptance_trigger_receipt_digest"
+                )
+                != triggers[0]["receipt_digest"]
+            ):
+                reasons.append("EXACT_ACCEPTANCE_TRIGGER_SIGNAL_LINEAGE_REQUIRED")
         if len(intents) != 1:
             reasons.append("EXACT_SINGLE_SHADOW_INTENT_REQUIRED")
         if len(risks) != 1 or len(exact_shadow) != 1:

@@ -174,6 +174,11 @@ def verify_runtime_image_upgrade(connection: Connection) -> RuntimeImageUpgradeR
                 if manifest != CANONICAL_MANIFEST_DIGEST
                 else ()
             ),
+            allowed_missing_tables=(
+                ("acceptance_signal_triggers",)
+                if manifest != CANONICAL_MANIFEST_DIGEST
+                else ()
+            ),
         )
         if verification.accepted:
             return _result(connection, status="ACCEPTED", repeat_noop=True)

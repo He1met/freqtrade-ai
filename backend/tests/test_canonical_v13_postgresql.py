@@ -101,7 +101,7 @@ def test_empty_postgresql_genesis_mapping_acl_and_repeat_noop() -> None:
         assert first.created is True or first.repeat_noop is True
         assert accepted.accepted is True
         assert accepted.problems == ()
-        assert accepted.table_count == 57
+        assert accepted.table_count == 58
         assert accepted.business_row_count == 0
         assert gate_upgrade.status == "ACCEPTED"
 
