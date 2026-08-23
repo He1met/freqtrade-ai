@@ -182,12 +182,15 @@ def _row(opened_at_ms: int) -> list[str]:
     ]
 
 
-def _request() -> MarketAcquisitionRequest:
+def _request(
+    instrument: str = "BTC-USDT-SWAP",
+    pair: str = "BTC/USDT:USDT",
+) -> MarketAcquisitionRequest:
     return MarketAcquisitionRequest(
         source_identity="okx-public-history-candles-v1",
-        target_key="btc-usdt-swap-15m",
-        instrument="BTC-USDT-SWAP",
-        pair="BTC/USDT:USDT",
+        target_key=instrument.lower() + "-15m",
+        instrument=instrument,
+        pair=pair,
         timeframe="15m",
         data_kind="futures",
         requested_start=datetime(2026, 8, 14, tzinfo=timezone.utc),
@@ -232,6 +235,56 @@ def test_public_adapter_is_paged_deterministic_and_receipted() -> None:
         "2026-08-14T00:30:00+00:00",
         "2026-08-14T00:45:00+00:00",
     ]
+
+
+@pytest.mark.parametrize(
+    ("instrument", "pair"),
+    (
+        ("BTC-USDT-SWAP", "BTC/USDT:USDT"),
+        ("ETH-USDT-SWAP", "ETH/USDT:USDT"),
+        ("SOL-USDT-SWAP", "SOL/USDT:USDT"),
+    ),
+)
+def test_public_adapter_supports_exact_frozen_multi_asset_targets(
+    instrument: str,
+    pair: str,
+) -> None:
+    observed_urls: list[str] = []
+
+    def fetch(url: str, _timeout: float) -> bytes:
+        observed_urls.append(url)
+        return json.dumps(
+            {
+                "code": "0",
+                "msg": "",
+                "data": [
+                    _row(1786668300000),
+                    _row(1786667400000),
+                    _row(1786666500000),
+                    _row(1786665600000),
+                ],
+            }
+        ).encode()
+
+    payload = OkxPublicHistoryCandleDownloader(
+        fetch=fetch,
+        sleep=lambda _: None,
+    ).acquire(_request(instrument, pair))
+
+    assert payload.observed_closed_candles == 4
+    assert f"/{instrument}/15m/" in payload.locator
+    assert all(f"instId={instrument}" in url for url in observed_urls)
+
+
+def test_public_adapter_rejects_pair_instrument_mismatch() -> None:
+    downloader = OkxPublicHistoryCandleDownloader(
+        fetch=lambda _url, _timeout: b"{}",
+        sleep=lambda _: None,
+    )
+
+    with pytest.raises(CanonicalMarketAcquisitionBlocked) as raised:
+        downloader.acquire(_request("ETH-USDT-SWAP", "BTC/USDT:USDT"))
+    assert raised.value.code == "BLOCKED_OKX_PUBLIC_TARGET"
 
 
 def test_finite_retry_and_gap_fail_closed() -> None:
