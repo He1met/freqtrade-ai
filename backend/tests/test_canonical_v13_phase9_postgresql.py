@@ -88,6 +88,7 @@ from app.canonical_v13.research_validation import (
 )
 import tests.test_canonical_v13_phase9_execution_authority as phase9_fixture
 from tests.test_canonical_v13_phase9_execution_authority import _production_chain
+from tests.test_canonical_v13_postgresql import _service_principals
 from tests.test_canonical_v13_production_research import _accepted_result_metrics
 from tests.test_canonical_v13_research_validation import (
     _prepare_ready_plan,
@@ -391,6 +392,9 @@ def test_shadow_risk_acl_upgrade_is_exact_and_enables_lineage_replay(
     mapping = CanonicalRoleMapping.from_prefix(
         os.environ.get("CANONICAL_V13_ROLE_PREFIX", "freqtrade_ai_v13_ci_")
     )
+    service_principals = _service_principals(
+        os.environ.get("CANONICAL_V13_ROLE_PREFIX", "freqtrade_ai_v13_ci_")
+    )
     risk_writer = mapping.physical("canonical_risk_writer")
     engine = create_engine(DATABASE_URL)
     try:
@@ -549,6 +553,7 @@ def test_shadow_risk_acl_upgrade_is_exact_and_enables_lineage_replay(
                     connection,
                     role_mapping=mapping,
                     require_zero_business_rows=False,
+                    service_principals=service_principals,
                 )
                 assert composed.accepted is True
                 assert composed.explicit_acl_count == 365
@@ -566,6 +571,7 @@ def test_shadow_risk_acl_upgrade_is_exact_and_enables_lineage_replay(
                     connection,
                     role_mapping=mapping,
                     require_zero_business_rows=False,
+                    service_principals=service_principals,
                 )
                 assert tampered.accepted is False
                 assert any(
