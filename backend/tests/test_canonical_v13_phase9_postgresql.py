@@ -88,8 +88,8 @@ from app.canonical_v13.research_validation import (
 )
 import tests.test_canonical_v13_phase9_execution_authority as phase9_fixture
 from tests.test_canonical_v13_phase9_execution_authority import _production_chain
+from tests.test_canonical_v13_production_research import _accepted_result_metrics
 from tests.test_canonical_v13_research_validation import (
-    _metrics,
     _prepare_ready_plan,
     _start,
 )
@@ -365,7 +365,7 @@ def _qualified_with_persisted_v3_gate_receipts(connection):
         connection,
         receipt=simulate_ephemeral_attempt(
             running,
-            metrics_by_window_key=_metrics(),
+            metrics_by_window_key=_accepted_result_metrics(),
         ),
     )
     score_target(
@@ -380,6 +380,7 @@ def _qualified_with_persisted_v3_gate_receipts(connection):
         validation_attempt_id=terminal.validation_attempt_id,
         qualifier_identity="isolated-qualifier-v1",
     )
+    assert decision.status == "QUALIFIED"
     return prepared.plan_id, decision
 
 
