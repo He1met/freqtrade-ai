@@ -151,7 +151,7 @@ class DatabaseRuntimeLineageReader:
             if isinstance(source, str)
             else None
         )
-        shared_exact = bool(
+        stable_lineage_exact = bool(
             deployment is not None
             and deployment["status"] == "ACTIVE"
             and deployment["demo_only"] is True
@@ -160,7 +160,6 @@ class DatabaseRuntimeLineageReader:
             == self._plan.deployment_capability_digest
             and runtime is not None
             and runtime["runtime_identity"] == self._plan.process_identity
-            and runtime["image_digest"] == self._plan.image_digest
             and runtime["service_account"] == "canonical_runtime_reader"
             and runtime["order_writer_capability"] is False
             and receipt is not None
@@ -196,13 +195,14 @@ class DatabaseRuntimeLineageReader:
             and bundle["market_snapshot_digest"] == deployment["market_snapshot_digest"]
         )
         exact = bool(
-            shared_exact
+            stable_lineage_exact
+            and runtime["image_digest"] == self._plan.image_digest
             and runtime["status"] == "HEALTHY"
             and receipt["status"] == "HEALTHY"
             and receipt["evidence_class"] == "PRODUCTION_DEMO_RUNTIME"
         )
         observation_pending = bool(
-            shared_exact
+            stable_lineage_exact
             and runtime["status"] == "STOPPED"
             and receipt["status"] == "STOPPED"
             and receipt["evidence_class"] == "PRODUCTION_DEMO_RUNTIME_STOP"

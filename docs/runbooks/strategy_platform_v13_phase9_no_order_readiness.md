@@ -236,6 +236,12 @@ backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py phase9-readi
 
 此阶段 orders/fills/ledger/reconciliation 必须始终为 0。
 
+若 accepted release 重建了新的 immutable runtime image，旧 runtime 行与最新 `STOPPED` receipt 仍保留
+旧 image/launch digest 作为历史证据。stopped-observation bridge 只可将这种“stable lineage 与 exact STOP
+receipt 均匹配、仅新 plan image 不同”的状态归类为 pending；`confirm-runtime-observation` 必须从当前 live
+supervisor/container receipt 原子更新 runtime image/launch digest。STOP receipt、identity、capability、bundle
+或 qualification 的任何其他漂移仍必须 `BLOCKED_PHASE9_RUNTIME_EXACT_LINEAGE`。
+
 ### B.1 一次性 deterministic acceptance trigger
 
 若 natural evaluator 已以 fresh signed receipts 证明长期存活、连续返回
