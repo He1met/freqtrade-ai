@@ -37,6 +37,13 @@ SOURCE = (
     / "batch_20260821_06"
     / "canonical_intraday_leverage_run_1_1.py"
 ).read_text(encoding="utf-8")
+FOUR_HOUR_SOURCE = (
+    Path(__file__).resolve().parents[2]
+    / "research"
+    / "canonical_v13_qualified_baselines"
+    / "batch_20260822_07"
+    / "canonical_four_hour_natural_long_run_2_1.py"
+).read_text(encoding="utf-8")
 
 
 def _uuid(value: int) -> UUID:
@@ -130,6 +137,50 @@ def test_frozen_evaluator_uses_exact_artifact_and_closed_candles() -> None:
             lineage=SimpleNamespace(
                 strategy_artifact_source=trend_source,
                 strategy_artifact_digest=sha256(trend_source.encode()).hexdigest(),
+            ),
+            evidence=evidence,
+        )
+
+
+def test_frozen_evaluator_accepts_exact_four_hour_qualified_artifact() -> None:
+    digest = sha256(FOUR_HOUR_SOURCE.encode()).hexdigest()
+    assert digest == (
+        "d8f0ed49773f061e43730bd328ef919602a18499bfb5c12377358f5906cbb7bd"
+    )
+    lineage = SimpleNamespace(
+        strategy_artifact_source=FOUR_HOUR_SOURCE,
+        strategy_artifact_digest=digest,
+    )
+    candles = _candles()
+    candles[0]["opened_at"] = NOW.replace(hour=6, minute=0).isoformat()
+    evidence = SimpleNamespace(
+        payload={"closed_candles": candles}, observed_at=NOW
+    )
+
+    evaluation = FrozenIntradayLeverageEvaluator().evaluate_natural_signal(
+        lineage=lineage, evidence=evidence
+    )
+
+    assert evaluation.outcome == "SIGNAL"
+    assert evaluation.evaluator_identity == (
+        "canonical-four-hour-natural-long-baseline-v1"
+    )
+    assert evaluation.evaluation_payload["effective_strategy_leverage"] == "12"
+    assert evaluation.evaluation_payload["artifact_digest"] == digest
+
+    candles[0]["opened_at"] = NOW.replace(hour=3, minute=0).isoformat()
+    no_action = FrozenIntradayLeverageEvaluator().evaluate_natural_signal(
+        lineage=lineage, evidence=evidence
+    )
+    assert no_action.outcome == "NO_ACTION"
+
+    with pytest.raises(
+        CanonicalPhase9CompositionBlocked, match="BLOCKED_PHASE9_EVALUATOR_ARTIFACT"
+    ):
+        FrozenIntradayLeverageEvaluator().evaluate_natural_signal(
+            lineage=SimpleNamespace(
+                strategy_artifact_source=FOUR_HOUR_SOURCE + "\n# drift",
+                strategy_artifact_digest=digest,
             ),
             evidence=evidence,
         )

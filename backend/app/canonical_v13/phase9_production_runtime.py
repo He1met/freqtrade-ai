@@ -296,13 +296,19 @@ class PublicOkxRuntimeMarketEvidence:
 
 
 class FrozenIntradayLeverageEvaluator:
-    """Evaluate only the exact qualified 03:00 UTC long-entry artifact."""
+    """Evaluate only explicitly accepted, exact qualified long-only artifacts."""
 
-    ARTIFACT_DIGEST = "d5682ed00a4755afabd612ef86404c0663152104525010fcc2268c08d4659ac7"
+    INTRADAY_ARTIFACT_DIGEST = (
+        "d5682ed00a4755afabd612ef86404c0663152104525010fcc2268c08d4659ac7"
+    )
+    FOUR_HOUR_ARTIFACT_DIGEST = (
+        "d8f0ed49773f061e43730bd328ef919602a18499bfb5c12377358f5906cbb7bd"
+    )
 
-    _REQUIRED_SOURCE = (
+    _INTRADAY_REQUIRED_SOURCE = (
         "class CanonicalIntradayLeverageBaseline",
         'timeframe = "15m"',
+        "can_short = False",
         "startup_candle_count = 1",
         "return min(14.0, max_leverage)",
         '(dataframe["date"].dt.hour == 3)',
@@ -310,15 +316,44 @@ class FrozenIntradayLeverageEvaluator:
         '(dataframe["volume"] > 0)',
         'dataframe.loc[daily_entry, "enter_long"] = 1',
     )
+    _FOUR_HOUR_REQUIRED_SOURCE = (
+        "class CanonicalFourHourNaturalLongBaseline",
+        'timeframe = "15m"',
+        "can_short = False",
+        "startup_candle_count = 1",
+        "return min(12.0, max_leverage)",
+        '(dataframe["date"].dt.hour % 4 == 2)',
+        '(dataframe["date"].dt.minute == 0)',
+        '(dataframe["volume"] > 0)',
+        'dataframe.loc[four_hour_opportunity, "enter_long"] = 1',
+        "exposure_seconds >= 20 * 60 * 60",
+    )
 
     def evaluate_natural_signal(self, *, lineage, evidence):
         source = lineage.strategy_artifact_source
+        artifact_digest = lineage.strategy_artifact_digest
+        if artifact_digest == self.INTRADAY_ARTIFACT_DIGEST:
+            required_source = self._INTRADAY_REQUIRED_SOURCE
+            signal_hours = frozenset({3})
+            effective_leverage = "14"
+            evaluator_identity = "canonical-intraday-leverage-baseline-v1"
+        elif artifact_digest == self.FOUR_HOUR_ARTIFACT_DIGEST:
+            required_source = self._FOUR_HOUR_REQUIRED_SOURCE
+            signal_hours = frozenset({2, 6, 10, 14, 18, 22})
+            effective_leverage = "12"
+            evaluator_identity = "canonical-four-hour-natural-long-baseline-v1"
+        else:
+            required_source = ()
+            signal_hours = frozenset()
+            effective_leverage = ""
+            evaluator_identity = ""
         if (
             not isinstance(source, str)
             or sha256(source.encode("utf-8")).hexdigest()
-            != lineage.strategy_artifact_digest
-            or lineage.strategy_artifact_digest != self.ARTIFACT_DIGEST
-            or any(token not in source for token in self._REQUIRED_SOURCE)
+            != artifact_digest
+            or artifact_digest
+            not in {self.INTRADAY_ARTIFACT_DIGEST, self.FOUR_HOUR_ARTIFACT_DIGEST}
+            or any(token not in source for token in required_source)
             or "populate_entry_trend" not in source
             or "enter_short" in source
         ):
@@ -341,18 +376,22 @@ class FrozenIntradayLeverageEvaluator:
             raise CanonicalPhase9CompositionBlocked(
                 "BLOCKED_PHASE9_EVALUATOR_CANDLE", "candle shape is invalid"
             ) from exc
-        signal = bool(opened_at.hour == 3 and opened_at.minute == 0 and volume > 0)
+        signal = bool(
+            opened_at.hour in signal_hours
+            and opened_at.minute == 0
+            and volume > 0
+        )
         return NaturalSignalEvaluation(
             outcome="SIGNAL" if signal else "NO_ACTION",
             evaluated_at=evidence.observed_at,
-            evaluator_identity="canonical-intraday-leverage-baseline-v1",
+            evaluator_identity=evaluator_identity,
             evaluation_payload={
                 "direction": "LONG",
                 "closed_candle": True,
                 "candle_opened_at": opened_at.isoformat(),
                 "volume": str(volume),
-                "effective_strategy_leverage": "14",
-                "artifact_digest": lineage.strategy_artifact_digest,
+                "effective_strategy_leverage": effective_leverage,
+                "artifact_digest": artifact_digest,
             },
         )
 
