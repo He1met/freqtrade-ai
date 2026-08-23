@@ -12,6 +12,9 @@ from uuid import UUID
 import pytest
 
 from app.canonical_v13.market_acquisition import CanonicalMarketAcquisitionBlocked
+from app.canonical_v13.phase9_production_composition import (
+    CanonicalPhase9CompositionBlocked,
+)
 from app.canonical_v13.phase9_runtime_supervisor import (
     CanonicalPhase9SupervisorBlocked,
     Phase9Lease,
@@ -997,6 +1000,83 @@ def test_supervisor_retries_reviewed_public_market_transient_without_releasing_l
     }
     assert receipts[4]["status"] == "RUNNING"
     assert receipts[1]["holder_token_digest"] == receipts[3]["holder_token_digest"]
+    assert port.calls == 2
+
+
+def test_supervisor_keeps_exact_stopped_runtime_alive_until_observed(
+    monkeypatch, tmp_path
+) -> None:
+    service = _load_script("canonical_phase9_runtime_observation_pending")
+    monkeypatch.setattr(service, "SUPPORT_ROOT", tmp_path / "support")
+    monkeypatch.setattr(service, "LAUNCH_AGENT_ROOT", tmp_path / "agents")
+    monkeypatch.setattr(service, "LOG_ROOT", tmp_path / "logs")
+    monkeypatch.setattr(service, "_require_release_checkout", lambda: RELEASE_DIGEST)
+    monkeypatch.setattr(service, "_now", lambda: NOW)
+    monkeypatch.setattr(
+        service, "_load_runtime_image_authority", lambda _id: _runtime_image_authority()
+    )
+    monkeypatch.setattr(service.signal, "signal", lambda *_args: None)
+    service._STOP = False
+    prepared = service.prepare(
+        "long_lived_runtime",
+        "SIGNAL_RISK_SHADOW",
+        release_digest=RELEASE_DIGEST,
+        deployment_id=_lineage().deployment_id,
+        deployment_capability_digest=_lineage().deployment_capability_digest,
+        runtime_image_acceptance_id=IMAGE_ACCEPTANCE_ID,
+        enable_order_writer=False,
+    )
+    _plan, state = service._load_plan("long_lived_runtime")
+    service._atomic_json(
+        service._state_path("long_lived_runtime"),
+        {**state, "status": "CONFIRMED", "confirmed_at": NOW.isoformat()},
+    )
+    worker, _reader, _evidence, _evaluator, signer = _worker(outcome="NO_ACTION")
+    healthy = WorkerSupervisorAdapter(worker, signer)
+
+    class PendingThenHealthy:
+        calls = 0
+
+        def heartbeat(self, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise CanonicalPhase9CompositionBlocked(
+                    "BLOCKED_PHASE9_RUNTIME_OBSERVATION_PENDING",
+                    "exact stopped runtime awaits observation",
+                )
+            return healthy.heartbeat(**kwargs)
+
+        def verify(self, receipt):
+            return healthy.verify(receipt)
+
+    port = PendingThenHealthy()
+    sleeps = 0
+
+    def stop_after_retry(_seconds: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps == 2:
+            service._STOP = True
+
+    monkeypatch.setattr(service.time, "sleep", stop_after_retry)
+    service.supervise(
+        "long_lived_runtime", prepared["plan_digest"], worker_port=port
+    )
+
+    receipts = [
+        json.loads(line)
+        for line in service._receipt_path("long_lived_runtime").read_text().splitlines()
+    ]
+    assert receipts[2]["status"] == "BLOCKED"
+    assert receipts[2]["details"] == {
+        "order_submission_enabled": False,
+        "persistence_target": "canonical_signal_writer",
+        "reason_code": "BLOCKED_PHASE9_RUNTIME_OBSERVATION_PENDING",
+        "retryable_public_market_transient": False,
+        "runtime_observation_pending": True,
+        "signal_candidate_digest": None,
+    }
+    assert receipts[4]["status"] == "RUNNING"
     assert port.calls == 2
 
 

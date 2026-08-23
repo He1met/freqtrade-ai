@@ -1362,6 +1362,22 @@ def _retryable_public_market_blocker(exc: BaseException) -> str | None:
     return None
 
 
+def _runtime_observation_pending(exc: BaseException) -> bool:
+    """Recognize only the exact A-to-B stopped-runtime bootstrap boundary."""
+
+    observed: BaseException | None = exc
+    seen: set[int] = set()
+    while observed is not None and id(observed) not in seen:
+        seen.add(id(observed))
+        if (
+            isinstance(observed, CanonicalPhase9CompositionBlocked)
+            and observed.code == "BLOCKED_PHASE9_RUNTIME_OBSERVATION_PENDING"
+        ):
+            return True
+        observed = observed.__cause__ or observed.__context__
+    return False
+
+
 def _record_resilient_worker_heartbeat(
     *,
     plan: Phase9LaunchPlan,
@@ -1378,8 +1394,10 @@ def _record_resilient_worker_heartbeat(
         )
     except CanonicalPhase9SupervisorBlocked as exc:
         reason_code = _retryable_public_market_blocker(exc)
-        if reason_code is None:
+        observation_pending = _runtime_observation_pending(exc)
+        if reason_code is None and not observation_pending:
             raise
+        reason_code = reason_code or "BLOCKED_PHASE9_RUNTIME_OBSERVATION_PENDING"
         _append_receipt(
             build_lifecycle_receipt(
                 service_key=plan.service_key,
@@ -1390,7 +1408,12 @@ def _record_resilient_worker_heartbeat(
                 plan_digest=plan.plan_digest,
                 details={
                     "reason_code": reason_code,
-                    "retryable_public_market_transient": True,
+                    "retryable_public_market_transient": not observation_pending,
+                    **(
+                        {"runtime_observation_pending": True}
+                        if observation_pending
+                        else {}
+                    ),
                     "signal_candidate_digest": None,
                     "persistence_target": "canonical_signal_writer",
                     "order_submission_enabled": False,
