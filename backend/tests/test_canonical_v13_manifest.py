@@ -347,6 +347,14 @@ def test_postgresql_ddl_and_acl_are_offline_exact_allowlists() -> None:
         "order_dispatch_outcome_receipts",
         "order_writer_leases",
     )
+    assert WRITER_READ_ALLOWLIST["canonical_risk_writer"] == (
+        "schema_metadata",
+        "signals",
+        "deployments",
+        "research_targets",
+        "execution_risk_budget_authorizations",
+        "execution_canary_risk_policies",
+    )
     assert WRITER_READ_ALLOWLIST["canonical_control_writer"] == (
         "schema_metadata",
         "deployment_approvals",

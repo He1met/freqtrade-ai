@@ -410,6 +410,7 @@ _WRITER_READ_ALLOWLIST = {
         "schema_metadata",
         "signals",
         "deployments",
+        "research_targets",
         "execution_risk_budget_authorizations",
         "execution_canary_risk_policies",
     ),

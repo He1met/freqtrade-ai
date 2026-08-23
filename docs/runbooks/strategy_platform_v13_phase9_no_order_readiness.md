@@ -106,6 +106,8 @@ distinct、同一 canonical database、只继承一个 capability；另有 1 个
 与 runtime reader 2 个只读 LOGIN。
 `canonical_approval_writer` 是 sealed probe receipt、one-shot policy 与 budget authorization 的唯一
 writer，`canonical_risk_writer` 只能写 intent、shadow/execution decision 与 execution reservation。
+为校验 exact qualified target，`canonical_risk_writer` 只额外读取 `research_targets`；它不获得该表
+写权限，也不获得 signal/order/fill/ledger/reconciliation writer capability。
 Phase 9 provision 完成后，`verify-research-provisioned` 与 API research repair preflight 仅在 8 个
 Phase 9 LOGIN 组或单独 runtime LOGIN 组完整存在时组合该组并复核 exact membership/CONNECT；整组
 不存在保持早期 research 合同，部分存在或权限漂移必须 fail closed。

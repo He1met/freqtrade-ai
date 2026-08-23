@@ -91,6 +91,10 @@ def test_phase9_acl_rollback_is_the_frozen_predecessor_delta_only() -> None:
         "FROM phase9_test_runtime_reader"
     ) in statements
     assert (
+        "REVOKE SELECT ON TABLE strategy_platform_v13.research_targets "
+        "FROM phase9_test_risk_writer"
+    ) in statements
+    assert (
         'REVOKE CONNECT ON DATABASE "phase9_predecessor_test" '
         "FROM phase9_test_runtime_reader"
     ) in statements
