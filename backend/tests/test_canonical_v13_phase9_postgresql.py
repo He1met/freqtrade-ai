@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from threading import Barrier
 from uuid import uuid4
 
 import pytest
@@ -57,7 +58,7 @@ from app.canonical_v13.runtime_reader_acl_upgrade import (
     rollback_runtime_reader_acl_upgrade,
     verify_runtime_reader_acl_upgrade,
 )
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.exc import DBAPIError
 
 DATABASE_URL = os.environ.get("CANONICAL_V13_POSTGRES_URL")
@@ -230,6 +231,74 @@ def test_acceptance_signal_trigger_is_database_immutable() -> None:
             finally:
                 transaction.rollback()
     finally:
+        engine.dispose()
+
+
+def test_acceptance_signal_trigger_postgresql_concurrent_single_winner() -> None:
+    assert DATABASE_URL is not None
+    engine = create_engine(DATABASE_URL)
+    deployment_id = uuid4()
+    scheduled_at = datetime(2026, 8, 23, 14, 0, tzinfo=timezone.utc)
+    barrier = Barrier(2)
+
+    def insert_once(index: int) -> str:
+        try:
+            with engine.begin() as connection:
+                connection.exec_driver_sql(
+                    "SET LOCAL session_replication_role = replica"
+                )
+                barrier.wait(timeout=5)
+                connection.execute(
+                    ACCEPTANCE_SIGNAL_TRIGGERS_TABLE.insert().values(
+                        id=uuid4(),
+                        qualification_decision_id=uuid4(),
+                        deployment_approval_id=uuid4(),
+                        deployment_id=deployment_id,
+                        runtime_instance_id=uuid4(),
+                        runtime_image_acceptance_id=uuid4(),
+                        strategy_version_id=uuid4(),
+                        research_target_id=uuid4(),
+                        configuration_bundle_id=uuid4(),
+                        configuration_bundle_digest="1" * 64,
+                        market_snapshot_id=uuid4(),
+                        market_snapshot_digest="2" * 64,
+                        source_kind="ACCEPTANCE_SCHEDULED_TEST",
+                        execution_target="OKX_DEMO",
+                        allow_real_funds=False,
+                        acceptance_only=True,
+                        position_policy="LONG_ONLY",
+                        max_order_count=1,
+                        scheduled_at=scheduled_at,
+                        expires_at=scheduled_at + timedelta(minutes=2),
+                        idempotency_key=f"postgresql-concurrent-trigger-{index}",
+                        request_digest=str(index + 3) * 64,
+                        receipt_digest=str(index + 5) * 64,
+                        created_at=scheduled_at - timedelta(minutes=1),
+                    )
+                )
+            return "INSERTED"
+        except DBAPIError as exc:
+            assert exc.orig.sqlstate == "23505"
+            return "REJECTED_UNIQUE"
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            outcomes = tuple(executor.map(insert_once, range(2)))
+        assert sorted(outcomes) == ["INSERTED", "REJECTED_UNIQUE"]
+        with engine.begin() as connection:
+            assert connection.execute(
+                select(func.count())
+                .select_from(ACCEPTANCE_SIGNAL_TRIGGERS_TABLE)
+                .where(ACCEPTANCE_SIGNAL_TRIGGERS_TABLE.c.deployment_id == deployment_id)
+            ).scalar_one() == 1
+    finally:
+        with engine.begin() as connection:
+            connection.exec_driver_sql("SET LOCAL session_replication_role = replica")
+            connection.execute(
+                ACCEPTANCE_SIGNAL_TRIGGERS_TABLE.delete().where(
+                    ACCEPTANCE_SIGNAL_TRIGGERS_TABLE.c.deployment_id == deployment_id
+                )
+            )
         engine.dispose()
 
 
