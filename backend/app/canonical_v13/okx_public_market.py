@@ -22,6 +22,11 @@ from app.canonical_v13.market_acquisition import (
 
 OKX_HISTORY_CANDLES_URL = "https://www.okx.com/api/v5/market/history-candles"
 MAXIMUM_RESPONSE_BYTES = 2_000_000
+SUPPORTED_TARGETS = {
+    "BTC-USDT-SWAP": "BTC/USDT:USDT",
+    "ETH-USDT-SWAP": "ETH/USDT:USDT",
+    "SOL-USDT-SWAP": "SOL/USDT:USDT",
+}
 
 
 @dataclass(frozen=True)
@@ -173,8 +178,7 @@ class OkxPublicHistoryCandleDownloader:
         if request.source_identity != "okx-public-history-candles-v1":
             raise _blocked("BLOCKED_OKX_SOURCE_IDENTITY", request.source_identity)
         if (
-            request.instrument != "BTC-USDT-SWAP"
-            or request.pair != "BTC/USDT:USDT"
+            SUPPORTED_TARGETS.get(request.instrument) != request.pair
             or request.timeframe != "15m"
             or request.data_kind != "futures"
         ):
