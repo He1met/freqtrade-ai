@@ -351,12 +351,28 @@ def test_runtime_reader_reports_only_exact_stopped_observation_as_pending() -> N
         ).read_active_runtime_lineage()
 
 
-def test_runtime_reader_does_not_mask_stopped_lineage_drift_as_pending() -> None:
+def test_runtime_reader_allows_exact_stopped_image_rollover_as_pending() -> None:
     rows = _runtime_lineage_rows()
     rows[1]["status"] = "STOPPED"
     rows[1]["image_digest"] = "a" * 64
     rows[2]["status"] = "STOPPED"
     rows[2]["evidence_class"] = "PRODUCTION_DEMO_RUNTIME_STOP"
+    with pytest.raises(
+        CanonicalPhase9CompositionBlocked,
+        match="BLOCKED_PHASE9_RUNTIME_OBSERVATION_PENDING",
+    ):
+        DatabaseRuntimeLineageReader(
+            _factory(_Connection(rows)), _runtime_lineage_plan()
+        ).read_active_runtime_lineage()
+
+
+def test_runtime_reader_does_not_mask_stopped_receipt_drift_as_pending() -> None:
+    rows = _runtime_lineage_rows()
+    rows[1]["status"] = "STOPPED"
+    rows[1]["image_digest"] = "a" * 64
+    rows[2]["status"] = "STOPPED"
+    rows[2]["evidence_class"] = "PRODUCTION_DEMO_RUNTIME_STOP"
+    rows[2]["launch_spec_digest"] = "b" * 64
     with pytest.raises(
         CanonicalPhase9CompositionBlocked,
         match="BLOCKED_PHASE9_RUNTIME_EXACT_LINEAGE",
