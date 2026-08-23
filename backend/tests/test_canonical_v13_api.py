@@ -1329,6 +1329,20 @@ def test_ready_bundle_path_id_drift_rolls_back_then_exact_id_activates() -> None
         assert exact.json()["created_bundle"] is True
         assert _count(engine, CONFIGURATION_BUNDLES_TABLE) == 1
         assert _count(engine, CONFIGURATION_ACTIVATIONS_TABLE) == 1
+        catalog = client.get(f"{API_PREFIX}/configurations").json()
+        active_versions = [
+            version
+            for profile in catalog["items"]
+            for version in profile["versions"]
+            if version["active_in_bundle"]
+        ]
+        assert len(active_versions) == 7
+        assert {
+            version["active_bundle_id"] for version in active_versions
+        } == {prospective_bundle_id}
+        assert {
+            version["active_bundle_digest"] for version in active_versions
+        } == {body["bundle_digest"]}
         assert _count(engine, VALIDATION_ATTEMPTS_TABLE) == 0
         assert _count(engine, SIGNALS_TABLE) == 0
         assert _count(engine, ORDERS_TABLE) == 0

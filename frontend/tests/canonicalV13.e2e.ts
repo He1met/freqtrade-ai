@@ -382,6 +382,9 @@ test("configuration context profile and version use API selectors across history
         adapter_digest: DIGEST,
         snapshot_id: ID_C,
         snapshot_digest: DIGEST,
+        active_in_bundle: true,
+        active_bundle_id: ID_D,
+        active_bundle_digest: DIGEST,
         created_at: "2026-08-14T00:00:00Z",
         validated_at: "2026-08-14T01:00:00Z",
       }],
@@ -390,18 +393,21 @@ test("configuration context profile and version use API selectors across history
   await installCanonicalMocks(page, { "/api/canonical-v13/configurations": configuration });
   await page.goto("/v13/configuration");
 
-  await page.getByLabel("Scope / Workflow 上下文", { exact: true }).selectOption(JSON.stringify(["research", "canonical"]));
   await expect(page).toHaveURL(/scope=research&workflow=canonical/);
-  await page.getByLabel("配置 Profile", { exact: true }).selectOption(ID_A);
-  await page.getByLabel("配置版本", { exact: true }).selectOption(ID_B);
+  await expect(page.getByRole("heading", { level: 2, name: "当前默认配置" })).toBeVisible();
+  await expect(page.getByText("版本 2 · 当前生效", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "查看完整配置" }).click();
   await expect(page.getByRole("heading", { level: 2, name: "primary-targets · 版本 2" })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 3, name: "具体配置" })).toBeVisible();
+  await expect(page.getByText("source", { exact: true })).toBeVisible();
+  await expect(page.getByText("api", { exact: true })).toBeVisible();
   await expect(page).toHaveURL(new RegExp(`profile=${ID_A}.*version=${ID_B}`));
 
   await page.reload();
   await expect(page.getByRole("heading", { level: 2, name: "primary-targets · 版本 2" })).toBeVisible();
   await page.goBack();
   await expect(page).not.toHaveURL(/version=/);
-  await expect(page.getByText("尚未选择配置版本", { exact: true })).toBeVisible();
+  await expect(page.getByText("尚未选择具体配置", { exact: true })).toBeVisible();
 });
 
 test("research selectors preserve API IDs while showing names and exact lineage", async ({ page }) => {

@@ -361,6 +361,9 @@ class ConfigurationVersionProjectionDTO(CanonicalProjectionDTO):
     adapter_digest: str = Field(pattern=SHA256_PATTERN)
     snapshot_id: Optional[UUID]
     snapshot_digest: Optional[str] = Field(default=None, pattern=SHA256_PATTERN)
+    active_in_bundle: bool = False
+    active_bundle_id: Optional[UUID] = None
+    active_bundle_digest: Optional[str] = Field(default=None, pattern=SHA256_PATTERN)
     created_at: datetime
     validated_at: Optional[datetime]
 

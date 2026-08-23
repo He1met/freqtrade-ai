@@ -1,7 +1,12 @@
+import { useEffect } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { fetchCanonicalConfigurations } from "../../api/canonicalV13Client";
-import { CANONICAL_CONFIGURATION_KINDS } from "../../api/canonicalV13Types";
+import {
+  CANONICAL_CONFIGURATION_KINDS,
+  type ConfigurationProfileProjection,
+  type ConfigurationVersionProjection,
+} from "../../api/canonicalV13Types";
 import { CopyableValue, PageHeader } from "../../components/DisplayPrimitives";
 import { CanonicalSearchSelect, type CanonicalSelectorAvailability } from "./CanonicalSearchSelect";
 import { CanonicalQueryError, CanonicalStatePanel, CanonicalStatus, useCanonicalQuery } from "./CanonicalStatePanel";
@@ -12,6 +17,38 @@ import {
   configurationProfileSelectorOptions,
   configurationVersionSelectorOptions,
 } from "./canonicalV13Selectors";
+
+type PayloadEntry = { path: string; value: string };
+
+function payloadEntries(value: unknown, prefix = ""): PayloadEntry[] {
+  if (Array.isArray(value)) {
+    if (!value.length) return [{ path: prefix || "配置", value: "[]" }];
+    return value.flatMap((item, index) => payloadEntries(item, `${prefix}[${index}]`));
+  }
+  if (value !== null && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>);
+    if (!entries.length) return [{ path: prefix || "配置", value: "{}" }];
+    return entries.flatMap(([key, item]) => payloadEntries(item, prefix ? `${prefix}.${key}` : key));
+  }
+  return [{
+    path: prefix || "配置",
+    value: value === null ? "null" : typeof value === "string" ? value : JSON.stringify(value),
+  }];
+}
+
+function ConfigurationPayload({ payload }: { payload: Record<string, unknown> }) {
+  return (
+    <dl className="canonical-v13-definition-list canonical-v13-configuration-values">
+      {payloadEntries(payload).map((entry) => (
+        <div key={entry.path}><dt>{entry.path}</dt><dd><code>{entry.value}</code></dd></div>
+      ))}
+    </dl>
+  );
+}
+
+function activeVersion(profile: ConfigurationProfileProjection): ConfigurationVersionProjection | null {
+  return profile.versions.find((version) => version.active_in_bundle) ?? null;
+}
 
 export function CanonicalConfigurationPage() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -36,6 +73,32 @@ export function CanonicalConfigurationPage() {
   )) ?? null;
   const versions = configurationVersionSelectorOptions(selectedProfile);
   const selectedVersion = selectedProfile?.versions.find((version) => version.version_id === url.values.version) ?? null;
+  const contextProfiles = catalog.data?.items.filter((profile) => (
+    profile.scope_key === url.values.scope && profile.workflow_key === url.values.workflow
+  )) ?? [];
+  const activeProfiles = contextProfiles.flatMap((profile) => {
+    const version = activeVersion(profile);
+    return version ? [{ profile, version }] : [];
+  });
+
+  useEffect(() => {
+    if (!url.valid || url.values.scope || url.values.workflow || availability !== "ready") return;
+    const activeContextValues = contexts.filter((context) => catalog.data?.items.some((profile) => (
+      profile.scope_key === context.scopeKey
+      && profile.workflow_key === context.workflowKey
+      && Boolean(activeVersion(profile))
+    )));
+    const initial = activeContextValues.length === 1 ? activeContextValues[0]
+      : contexts.length === 1 ? contexts[0]
+        : null;
+    if (!initial) return;
+    setSearchParams(serializeCanonicalUrlState("configuration", {
+      profile: null,
+      scope: initial.scopeKey,
+      version: null,
+      workflow: initial.workflowKey,
+    }), { replace: true });
+  }, [availability, catalog.data, contexts, setSearchParams, url.valid, url.values.scope, url.values.workflow]);
 
   function selectContext(value: string | null) {
     const selected = contexts.find((option) => option.value === value) ?? null;
@@ -48,10 +111,15 @@ export function CanonicalConfigurationPage() {
   }
 
   function selectProfile(value: string | null) {
+    const profile = catalog.data?.items.find((item) => item.profile_id === value) ?? null;
+    const defaultVersion = profile ? activeVersion(profile)
+      ?? [...profile.versions].filter((version) => version.lifecycle_status === "VALIDATED").sort((left, right) => right.version_number - left.version_number)[0]
+      ?? null
+      : null;
     setSearchParams(serializeCanonicalUrlState("configuration", {
       ...url.values,
       profile: value,
-      version: null,
+      version: defaultVersion?.version_id ?? null,
     }));
   }
 
@@ -61,7 +129,7 @@ export function CanonicalConfigurationPage() {
 
   return (
     <div className="canonical-v13-page">
-      <PageHeader description="七类 P0 配置只有 API projection 是事实；Scope 与 Workflow 以同一 API 上下文成对选择。" eyebrow="V1.3 canonical-only" title="配置中心" />
+      <PageHeader description="默认展示已激活 Bundle 绑定的七类 P0 配置；选择 Profile 和版本后可查看完整字段。所有内容均来自 canonical API。" eyebrow="V1.3 canonical-only" title="配置中心" />
       <section className="canonical-v13-selector-panel" aria-label="配置上下文选择器">
         <CanonicalSearchSelect availability={availability} label="Scope / Workflow 上下文" onChange={selectContext} options={contexts} value={contextValue} />
         <CanonicalSearchSelect availability={availability} disabled={!url.values.scope || !url.values.workflow} label="配置 Profile" onChange={selectProfile} options={profiles} value={url.values.profile ?? ""} />
@@ -83,20 +151,50 @@ export function CanonicalConfigurationPage() {
           ) : null}
         </section>
       ) : null}
+      {contextValue && activeProfiles.length ? (
+        <section className="canonical-v13-panel" aria-label="当前生效配置">
+          <div className="canonical-v13-heading-row">
+            <div><h2>当前默认配置</h2><p className="canonical-v13-panel-copy">以下版本由当前已激活 Bundle 精确绑定，不是 UI 推断的“最新版本”。</p></div>
+            <CanonicalStatus status="VALIDATED" />
+          </div>
+          <div className="canonical-v13-card-list">
+            {activeProfiles.map(({ profile, version }) => (
+              <article className="canonical-v13-data-card canonical-v13-configuration-card" key={version.version_id}>
+                <span>{profile.configuration_kind}</span>
+                <strong>{profile.profile_key}</strong>
+                <span>版本 {version.version_number} · 当前生效</span>
+                <button className="canonical-v13-text-button" onClick={() => {
+                  setSearchParams(serializeCanonicalUrlState("configuration", {
+                    profile: profile.profile_id,
+                    scope: profile.scope_key,
+                    version: version.version_id,
+                    workflow: profile.workflow_key,
+                  }));
+                }} type="button">查看完整配置</button>
+              </article>
+            ))}
+          </div>
+        </section>
+      ) : contextValue && availability === "ready" ? (
+        <CanonicalStatePanel description="该上下文没有可验证的 active Bundle 成员；请选择 Profile 查看历史 VALIDATED 版本，页面不会把最新版本伪装成默认配置。" kind="blocked" reasonCodes={["RESEARCH_BUNDLE_UNSET"]} title="当前默认配置未建立" />
+      ) : null}
       {selectedVersion && catalogContractKnown ? (
         <section className="canonical-v13-panel">
-          <div className="canonical-v13-heading-row"><h2>{selectedProfile?.profile_key} · 版本 {selectedVersion.version_number}</h2><CanonicalStatus status={selectedVersion.lifecycle_status} /></div>
+          <div className="canonical-v13-heading-row"><div><h2>{selectedProfile?.profile_key} · 版本 {selectedVersion.version_number}</h2><p className="canonical-v13-panel-copy">{selectedVersion.active_in_bundle ? "这是当前 Bundle 正在使用的配置。" : "这是历史或候选配置，当前 Bundle 未使用该版本。"}</p></div><CanonicalStatus status={selectedVersion.lifecycle_status} /></div>
+          <h3>具体配置</h3>
+          <ConfigurationPayload payload={selectedVersion.payload_json} />
           <details className="canonical-v13-advanced-evidence">
             <summary>高级标识与不可变摘要</summary>
             <dl className="canonical-v13-definition-list">
               <div><dt>Version ID</dt><dd><CopyableValue value={selectedVersion.version_id} /></dd></div>
               <div><dt>Payload digest</dt><dd><CopyableValue value={selectedVersion.payload_digest} /></dd></div>
               <div><dt>Snapshot</dt><dd>{selectedVersion.snapshot_id ? <CopyableValue value={selectedVersion.snapshot_id} /> : "未设置"}</dd></div>
+              <div><dt>Active Bundle</dt><dd>{selectedVersion.active_bundle_id ? <CopyableValue value={selectedVersion.active_bundle_id} /> : "未使用"}</dd></div>
             </dl>
           </details>
-          <details><summary>只读 payload</summary><pre>{JSON.stringify(selectedVersion.payload_json, null, 2)}</pre></details>
+          <details><summary>原始 JSON 与 Schema</summary><h3>Payload JSON</h3><pre>{JSON.stringify(selectedVersion.payload_json, null, 2)}</pre><h3>Schema JSON</h3><pre>{JSON.stringify(selectedVersion.schema_json, null, 2)}</pre></details>
         </section>
-      ) : <CanonicalStatePanel description="按 API 选项显式选择上下文、Profile 和版本；UI 不自动选择最新项。" kind="empty" title="尚未选择配置版本" />}
+      ) : <CanonicalStatePanel description={activeProfiles.length ? "上方已展示当前 Bundle 的默认配置；选择任一配置卡片或 Profile，即可查看完整字段和历史版本。" : "请选择 Profile 和版本查看具体配置。"} kind="empty" title="尚未选择具体配置" />}
     </div>
   );
 }

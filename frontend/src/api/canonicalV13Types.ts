@@ -140,6 +140,9 @@ export type ConfigurationVersionProjection = {
   adapter_digest: Sha256Digest;
   snapshot_id: CanonicalId | null;
   snapshot_digest: Sha256Digest | null;
+  active_in_bundle: boolean;
+  active_bundle_id: CanonicalId | null;
+  active_bundle_digest: Sha256Digest | null;
   created_at: IsoDateTime;
   validated_at: IsoDateTime | null;
 };

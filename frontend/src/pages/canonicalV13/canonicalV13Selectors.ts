@@ -88,11 +88,16 @@ export function configurationVersionSelectorOptions(
 ): CanonicalSelectorOption[] {
   if (!profile) return [];
   return profile.versions.map((version) => ({
-    description: version.validated_at ? `验证时间 ${version.validated_at}` : `创建时间 ${version.created_at}`,
-    label: `版本 ${version.version_number}`,
+    description: `${version.active_in_bundle ? "当前生效 · " : ""}${version.validated_at ? `验证时间 ${version.validated_at}` : `创建时间 ${version.created_at}`}`,
+    label: `版本 ${version.version_number}${version.active_in_bundle ? "（当前生效）" : ""}`,
     status: version.lifecycle_status,
     value: version.version_id,
-  })).sort((left, right) => left.label.localeCompare(right.label, "zh-CN", { numeric: true }));
+  })).sort((left, right) => {
+    const leftVersion = profile.versions.find((version) => version.version_id === left.value);
+    const rightVersion = profile.versions.find((version) => version.version_id === right.value);
+    return Number(Boolean(rightVersion?.active_in_bundle)) - Number(Boolean(leftVersion?.active_in_bundle))
+      || Number(rightVersion?.version_number ?? 0) - Number(leftVersion?.version_number ?? 0);
+  });
 }
 
 export function strategySelectorOptions(
