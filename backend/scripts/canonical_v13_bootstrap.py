@@ -605,7 +605,9 @@ def acceptance_trigger_schema(*, operation: str) -> dict[str, object]:
             with engine.connect() as connection:
                 with connection.begin():
                     connection.exec_driver_sql("SET TRANSACTION READ ONLY")
-                    result = verify_acceptance_signal_trigger_upgrade(connection)
+                    result = verify_acceptance_signal_trigger_upgrade(
+                        connection, role_mapping=mapping
+                    )
         else:
             actor_identity = _upgrade_actor()
             with engine.begin() as connection:

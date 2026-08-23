@@ -563,7 +563,9 @@ def _verify_restore_trigger_boundary(
             "deployment rollover verifier did not return ACCEPTED",
         )
     try:
-        acceptance_trigger = verify_acceptance_signal_trigger_upgrade(connection)
+        acceptance_trigger = verify_acceptance_signal_trigger_upgrade(
+            connection, role_mapping=local_role_mapping()
+        )
     except CanonicalAcceptanceSignalTriggerUpgradeBlocked as exc:
         raise CanonicalBackupBlocked(
             "BLOCKED_CANONICAL_RESTORE_ACCEPTANCE_TRIGGER_CONTRACT",

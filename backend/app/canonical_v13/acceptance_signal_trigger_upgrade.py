@@ -23,7 +23,7 @@ PREVIOUS_ACCEPTANCE_TRIGGER_MANIFEST_DIGEST: Final = (
     "1363b302a9e52ea20543d041d1e7ada9ac4637f777862ffb5c70270637ae806e"
 )
 ACCEPTANCE_TRIGGER_UPGRADE_CONTRACT: Final = (
-    "canonical-v13-acceptance-signal-trigger-upgrade-v1"
+    "canonical-v13-acceptance-signal-trigger-upgrade-v2"
 )
 ACCEPTANCE_TRIGGER_GUARD_FUNCTION: Final = "guard_acceptance_signal_triggers_immutable"
 ACCEPTANCE_TRIGGER_GUARD_TRIGGER: Final = "acceptance_signal_triggers_immutable"
@@ -50,6 +50,18 @@ ACCEPTANCE_SIGNAL_WRITER_READ_DELTA: Final[tuple[str, ...]] = (
     "research_targets",
     "runtime_image_acceptances",
 )
+ACCEPTANCE_CONTROL_WRITER_READ_DELTA: Final[tuple[str, ...]] = (
+    "qualification_decisions",
+)
+_CONTROL_WRITER_TARGET_PRIVILEGES: Final[tuple[str, ...]] = (
+    "SELECT",
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "TRUNCATE",
+    "REFERENCES",
+    "TRIGGER",
+)
 
 
 class CanonicalAcceptanceSignalTriggerUpgradeBlocked(RuntimeError):
@@ -67,6 +79,7 @@ class AcceptanceSignalTriggerUpgradeResult:
     signal_constraints_present: tuple[str, ...]
     trigger_count: int
     acceptance_signal_count: int
+    control_writer_qualification_privileges: dict[str, bool]
     repeat_noop: bool
     receipt_digest: str
 
@@ -192,8 +205,28 @@ def _immutability_trigger_present(connection: Connection) -> bool:
     }
 
 
+def _control_writer_qualification_privileges(
+    connection: Connection, *, role_mapping: CanonicalRoleMapping
+) -> dict[str, bool]:
+    role = role_mapping.physical("canonical_control_writer")
+    qualified = f"{CANONICAL_BUSINESS_SCHEMA}.qualification_decisions"
+    return {
+        privilege: bool(
+            connection.execute(
+                text("SELECT has_table_privilege(:role, :table, :privilege)"),
+                {"role": role, "table": qualified, "privilege": privilege},
+            ).scalar_one()
+        )
+        for privilege in _CONTROL_WRITER_TARGET_PRIVILEGES
+    }
+
+
 def _result(
-    connection: Connection, *, status: str, repeat_noop: bool
+    connection: Connection,
+    *,
+    role_mapping: CanonicalRoleMapping,
+    status: str,
+    repeat_noop: bool,
 ) -> AcceptanceSignalTriggerUpgradeResult:
     table_present = _table_present(connection)
     columns = _signal_columns(connection)
@@ -231,6 +264,11 @@ def _result(
         ),
         "trigger_count": trigger_count,
         "acceptance_signal_count": acceptance_count,
+        "control_writer_qualification_privileges": (
+            _control_writer_qualification_privileges(
+                connection, role_mapping=role_mapping
+            )
+        ),
         "repeat_noop": repeat_noop,
     }
     return AcceptanceSignalTriggerUpgradeResult(
@@ -239,7 +277,7 @@ def _result(
 
 
 def verify_acceptance_signal_trigger_upgrade(
-    connection: Connection,
+    connection: Connection, *, role_mapping: CanonicalRoleMapping
 ) -> AcceptanceSignalTriggerUpgradeResult:
     if connection.dialect.name != "postgresql":
         raise CanonicalAcceptanceSignalTriggerUpgradeBlocked(
@@ -253,16 +291,49 @@ def verify_acceptance_signal_trigger_upgrade(
         and not columns
         and manifest == PREVIOUS_ACCEPTANCE_TRIGGER_MANIFEST_DIGEST
     ):
-        return _result(connection, status="PREVIOUS_READY", repeat_noop=True)
-    if (
+        return _result(
+            connection,
+            role_mapping=role_mapping,
+            status="PREVIOUS_READY",
+            repeat_noop=True,
+        )
+    accepted_structure = bool(
         table_present
         and _immutability_trigger_present(connection)
         and columns == tuple(sorted(SIGNAL_COLUMNS))
         and _signal_constraints(connection) == tuple(sorted(SIGNAL_CONSTRAINTS))
+    )
+    privileges = _control_writer_qualification_privileges(
+        connection, role_mapping=role_mapping
+    )
+    expected_privileges = {
+        privilege: privilege == "SELECT"
+        for privilege in _CONTROL_WRITER_TARGET_PRIVILEGES
+    }
+    if (
+        accepted_structure
         and manifest == CANONICAL_MANIFEST_DIGEST
         and verify_canonical_genesis(connection).accepted
+        and not any(privileges.values())
     ):
-        return _result(connection, status="ACCEPTED", repeat_noop=True)
+        return _result(
+            connection,
+            role_mapping=role_mapping,
+            status="PREVIOUS_READY",
+            repeat_noop=True,
+        )
+    if (
+        accepted_structure
+        and manifest == CANONICAL_MANIFEST_DIGEST
+        and verify_canonical_genesis(connection).accepted
+        and privileges == expected_privileges
+    ):
+        return _result(
+            connection,
+            role_mapping=role_mapping,
+            status="ACCEPTED",
+            repeat_noop=True,
+        )
     raise CanonicalAcceptanceSignalTriggerUpgradeBlocked(
         "BLOCKED_PARTIAL_ACCEPTANCE_TRIGGER_UPGRADE"
     )
@@ -274,10 +345,29 @@ def apply_acceptance_signal_trigger_upgrade(
     connection.execute(
         text("SELECT pg_advisory_xact_lock(:key)"), {"key": 1_308_202_608_230_819}
     )
-    before = verify_acceptance_signal_trigger_upgrade(connection)
+    before = verify_acceptance_signal_trigger_upgrade(
+        connection, role_mapping=role_mapping
+    )
     if before.status == "ACCEPTED":
         return before
     schema = CANONICAL_BUSINESS_SCHEMA
+    if before.trigger_table_present:
+        control_writer = role_mapping.physical("canonical_control_writer")
+        for table_name in ACCEPTANCE_CONTROL_WRITER_READ_DELTA:
+            connection.execute(
+                text(
+                    f"GRANT SELECT ON TABLE {schema}.{table_name} TO {control_writer}"
+                )
+            )
+        verify_acceptance_signal_trigger_upgrade(
+            connection, role_mapping=role_mapping
+        )
+        return _result(
+            connection,
+            role_mapping=role_mapping,
+            status="UPGRADED",
+            repeat_noop=False,
+        )
     ACCEPTANCE_SIGNAL_TRIGGERS_TABLE.create(connection, checkfirst=False)
     install_acceptance_signal_trigger_guard(connection)
     connection.execute(
@@ -324,8 +414,20 @@ def apply_acceptance_signal_trigger_upgrade(
     )
     for statement in postgresql_acl_statements(role_mapping):
         connection.execute(text(statement))
-    verify_acceptance_signal_trigger_upgrade(connection)
-    return _result(connection, status="UPGRADED", repeat_noop=False)
+    control_writer = role_mapping.physical("canonical_control_writer")
+    for table_name in ACCEPTANCE_CONTROL_WRITER_READ_DELTA:
+        connection.execute(
+            text(f"GRANT SELECT ON TABLE {schema}.{table_name} TO {control_writer}")
+        )
+    verify_acceptance_signal_trigger_upgrade(
+        connection, role_mapping=role_mapping
+    )
+    return _result(
+        connection,
+        role_mapping=role_mapping,
+        status="UPGRADED",
+        repeat_noop=False,
+    )
 
 
 def rollback_acceptance_signal_trigger_upgrade(
@@ -334,8 +436,10 @@ def rollback_acceptance_signal_trigger_upgrade(
     connection.execute(
         text("SELECT pg_advisory_xact_lock(:key)"), {"key": 1_308_202_608_230_819}
     )
-    before = verify_acceptance_signal_trigger_upgrade(connection)
-    if before.status == "PREVIOUS_READY":
+    before = verify_acceptance_signal_trigger_upgrade(
+        connection, role_mapping=role_mapping
+    )
+    if before.status == "PREVIOUS_READY" and not before.trigger_table_present:
         return before
     if before.trigger_count or before.acceptance_signal_count:
         raise CanonicalAcceptanceSignalTriggerUpgradeBlocked(
@@ -343,6 +447,7 @@ def rollback_acceptance_signal_trigger_upgrade(
         )
     schema = CANONICAL_BUSINESS_SCHEMA
     signal_writer = role_mapping.physical("canonical_signal_writer")
+    control_writer = role_mapping.physical("canonical_control_writer")
     connection.execute(
         text(
             f"DROP TRIGGER {ACCEPTANCE_SIGNAL_GUARD_TRIGGER} ON {schema}.signals"
@@ -368,6 +473,12 @@ def rollback_acceptance_signal_trigger_upgrade(
                 f"REVOKE SELECT ON TABLE {schema}.{table_name} FROM {signal_writer}"
             )
         )
+    for table_name in ACCEPTANCE_CONTROL_WRITER_READ_DELTA:
+        connection.execute(
+            text(
+                f"REVOKE SELECT ON TABLE {schema}.{table_name} FROM {control_writer}"
+            )
+        )
     connection.execute(
         text(
             f"DROP FUNCTION {schema}.{ACCEPTANCE_TRIGGER_GUARD_FUNCTION}()"
@@ -383,10 +494,16 @@ def rollback_acceptance_signal_trigger_upgrade(
         .where(SCHEMA_METADATA_TABLE.c.metadata_key == "canonical-v13-genesis")
         .values(manifest_digest=PREVIOUS_ACCEPTANCE_TRIGGER_MANIFEST_DIGEST)
     )
-    return _result(connection, status="ROLLED_BACK", repeat_noop=False)
+    return _result(
+        connection,
+        role_mapping=role_mapping,
+        status="ROLLED_BACK",
+        repeat_noop=False,
+    )
 
 
 __all__ = [
+    "ACCEPTANCE_CONTROL_WRITER_READ_DELTA",
     "ACCEPTANCE_SIGNAL_WRITER_READ_DELTA",
     "ACCEPTANCE_TRIGGER_UPGRADE_CONTRACT",
     "ACCEPTANCE_TRIGGER_GUARD_FUNCTION",

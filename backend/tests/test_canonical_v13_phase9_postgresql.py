@@ -8,8 +8,10 @@ from uuid import uuid4
 
 import pytest
 from app.canonical_v13.acceptance_signal_trigger_upgrade import (
+    ACCEPTANCE_CONTROL_WRITER_READ_DELTA,
     ACCEPTANCE_SIGNAL_GUARD_TRIGGER,
     ACCEPTANCE_TRIGGER_GUARD_TRIGGER,
+    CanonicalAcceptanceSignalTriggerUpgradeBlocked,
     apply_acceptance_signal_trigger_upgrade,
     rollback_acceptance_signal_trigger_upgrade,
     verify_acceptance_signal_trigger_upgrade,
@@ -81,7 +83,17 @@ def test_acceptance_signal_trigger_is_database_immutable() -> None:
                         "CANONICAL_V13_ROLE_PREFIX", "freqtrade_ai_v13_ci_"
                     )
                 )
-                verified = verify_acceptance_signal_trigger_upgrade(connection)
+                previous = verify_acceptance_signal_trigger_upgrade(
+                    connection, role_mapping=mapping
+                )
+                assert previous.status == "PREVIOUS_READY"
+                upgraded_initial = apply_acceptance_signal_trigger_upgrade(
+                    connection, role_mapping=mapping
+                )
+                assert upgraded_initial.status == "UPGRADED"
+                verified = verify_acceptance_signal_trigger_upgrade(
+                    connection, role_mapping=mapping
+                )
                 assert verified.status == "ACCEPTED"
                 assert verified.immutability_trigger_present is True
                 rolled_back = rollback_acceptance_signal_trigger_upgrade(
@@ -90,6 +102,7 @@ def test_acceptance_signal_trigger_is_database_immutable() -> None:
                 assert rolled_back.status == "ROLLED_BACK"
                 assert rolled_back.immutability_trigger_present is False
                 signal_writer = mapping.physical("canonical_signal_writer")
+                control_writer = mapping.physical("canonical_control_writer")
                 for table_name in (
                     "deployment_approvals",
                     "qualification_decisions",
@@ -102,6 +115,14 @@ def test_acceptance_signal_trigger_is_database_immutable() -> None:
                         ),
                         {
                             "role": signal_writer,
+                            "table": f"strategy_platform_v13.{table_name}",
+                        },
+                    ).scalar_one() is False
+                for table_name in ACCEPTANCE_CONTROL_WRITER_READ_DELTA:
+                    assert connection.execute(
+                        text("SELECT has_table_privilege(:role, :table, 'SELECT')"),
+                        {
+                            "role": control_writer,
                             "table": f"strategy_platform_v13.{table_name}",
                         },
                     ).scalar_one() is False
@@ -128,6 +149,60 @@ def test_acceptance_signal_trigger_is_database_immutable() -> None:
                         ),
                         {
                             "role": signal_writer,
+                            "table": f"strategy_platform_v13.{table_name}",
+                        },
+                    ).scalar_one() is True
+                for table_name in ACCEPTANCE_CONTROL_WRITER_READ_DELTA:
+                    assert connection.execute(
+                        text("SELECT has_table_privilege(:role, :table, 'SELECT')"),
+                        {
+                            "role": control_writer,
+                            "table": f"strategy_platform_v13.{table_name}",
+                        },
+                    ).scalar_one() is True
+                connection.execute(
+                    text(
+                        "REVOKE SELECT ON TABLE "
+                        "strategy_platform_v13.qualification_decisions "
+                        f"FROM {control_writer}"
+                    )
+                )
+                previous = verify_acceptance_signal_trigger_upgrade(
+                    connection, role_mapping=mapping
+                )
+                assert previous.status == "PREVIOUS_READY"
+                connection.execute(
+                    text(
+                        "GRANT INSERT ON TABLE "
+                        "strategy_platform_v13.qualification_decisions "
+                        f"TO {control_writer}"
+                    )
+                )
+                with pytest.raises(CanonicalAcceptanceSignalTriggerUpgradeBlocked):
+                    verify_acceptance_signal_trigger_upgrade(
+                        connection, role_mapping=mapping
+                    )
+                with pytest.raises(CanonicalAcceptanceSignalTriggerUpgradeBlocked):
+                    apply_acceptance_signal_trigger_upgrade(
+                        connection, role_mapping=mapping
+                    )
+                connection.execute(
+                    text(
+                        "REVOKE INSERT ON TABLE "
+                        "strategy_platform_v13.qualification_decisions "
+                        f"FROM {control_writer}"
+                    )
+                )
+                upgraded_acl = apply_acceptance_signal_trigger_upgrade(
+                    connection, role_mapping=mapping
+                )
+                assert upgraded_acl.status == "UPGRADED"
+                assert upgraded_acl.repeat_noop is False
+                for table_name in ACCEPTANCE_CONTROL_WRITER_READ_DELTA:
+                    assert connection.execute(
+                        text("SELECT has_table_privilege(:role, :table, 'SELECT')"),
+                        {
+                            "role": control_writer,
                             "table": f"strategy_platform_v13.{table_name}",
                         },
                     ).scalar_one() is True

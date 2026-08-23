@@ -475,6 +475,7 @@ def provision_research_principals() -> dict[str, object]:
 
 def _require_phase9_schema_preprovisioned() -> None:
     sys.path.insert(0, str(REPO_ROOT / "backend"))
+    from app.canonical_v13.bootstrap import local_role_mapping  # noqa: PLC0415
     from app.canonical_v13.phase9_schema_upgrade import (  # noqa: PLC0415
         verify_phase9_schema_upgrade,
     )
@@ -490,7 +491,9 @@ def _require_phase9_schema_preprovisioned() -> None:
     try:
         with engine.connect() as connection:
             verification = verify_phase9_schema_upgrade(connection)
-            acceptance_trigger = verify_acceptance_signal_trigger_upgrade(connection)
+            acceptance_trigger = verify_acceptance_signal_trigger_upgrade(
+                connection, role_mapping=local_role_mapping()
+            )
     except Exception as exc:
         raise CanonicalServiceBlocked("BLOCKED_PHASE9_SCHEMA_PREFLIGHT") from exc
     finally:

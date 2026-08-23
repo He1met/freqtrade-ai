@@ -254,6 +254,10 @@ GET  /api/canonical-v13/phase9/acceptance-signal-triggers?qualification_decision
 qualification/approval/deployment/runtime image/bundle/snapshot，并固定 `OKX_DEMO`、
 `allow_real_funds=false`、`acceptance_only=true`、`LONG_ONLY`、`max_order_count=1`。只有 live runtime holder、
 fresh runtime observation、order writer disabled 且 plan digest 精确时，supervisor 才可消费一次：
+trigger 表与 runtime image acceptance 继续由既有 `canonical_control_writer` 单独写入；该 capability
+仅增加读取 `qualification_decisions` 的必要上游 lineage 权限，不获得 signal/order writer 能力。升级旧的
+已接受 trigger schema 时，`acceptance-trigger-apply` 只修复这一项 ACL，exact replay 必须返回
+`ACCEPTED`；rollback 精确撤销该增量。
 
 ```bash
 python scripts/canonical_v13_phase9_service.py execute-acceptance-trigger \
