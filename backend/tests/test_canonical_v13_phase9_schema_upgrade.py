@@ -16,6 +16,10 @@ from app.canonical_v13.deployment_rollover_upgrade import (
     deployment_rollover_trigger_statements,
 )
 from app.canonical_v13.genesis import render_postgresql_genesis_ddl
+from app.canonical_v13.optimization_observability_upgrade import (
+    OPTIMIZATION_OBSERVABILITY_COLUMNS,
+    optimization_observability_trigger_statements,
+)
 
 
 def test_deployment_rollover_guard_is_exact_and_fail_closed() -> None:
@@ -44,6 +48,24 @@ def test_runtime_identity_rollover_is_unique_only_for_nonstopped_rows() -> None:
     assert "UNIQUE (runtime_identity)" not in ddl
 
 
+def test_optimization_observability_guard_is_exact_and_fail_closed() -> None:
+    sql = ";\n".join(optimization_observability_trigger_statements())
+    assert OPTIMIZATION_OBSERVABILITY_COLUMNS == (
+        "result_count",
+        "result_digest",
+        "submitted_strategy_count",
+        "terminal_reason_codes",
+        "trial_count",
+    )
+    assert "BEFORE INSERT OR UPDATE" in sql
+    assert "terminal rows require lifecycle completion" in sql
+    assert "canonical optimization terminal evidence is immutable" in sql
+    assert "canonical optimization submission count drift" in sql
+    assert "canonical optimization terminal summary does not match trials" in sql
+    assert "jsonb_array_length(NEW.terminal_reason_codes::jsonb)" in sql
+    assert "guard_optimization_runs_terminal_observability" in render_postgresql_genesis_ddl()
+
+
 def test_phase9_acl_rollback_is_the_frozen_predecessor_delta_only() -> None:
     mapping = CanonicalRoleMapping.from_prefix("phase9_test_")
     sql = render_phase9_acl_rollback_sql(
@@ -67,6 +89,10 @@ def test_phase9_acl_rollback_is_the_frozen_predecessor_delta_only() -> None:
     assert (
         "REVOKE SELECT ON TABLE strategy_platform_v13.qualification_decisions "
         "FROM phase9_test_runtime_reader"
+    ) in statements
+    assert (
+        "REVOKE SELECT ON TABLE strategy_platform_v13.research_targets "
+        "FROM phase9_test_risk_writer"
     ) in statements
     assert (
         'REVOKE CONNECT ON DATABASE "phase9_predecessor_test" '

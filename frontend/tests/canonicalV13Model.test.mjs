@@ -154,6 +154,22 @@ test("unknown status and reason codes fail closed without changing raw diagnosti
   assert.doesNotMatch(`${reason.label}${reason.explanation}`, /已合格|可执行|运行正常/);
 });
 
+test("stable Phase 9 blocker codes have actionable Chinese guidance", () => {
+  for (const code of [
+    "RUNTIME_NOT_HEALTHY",
+    "NONTERMINAL_DEPLOYMENT_PRESENT",
+    "EXACT_HEALTHY_LONG_LIVED_RUNTIME_EVIDENCE_UNSET",
+    "EXACT_SINGLE_CANARY_ORDER_COUNT_REQUIRED",
+    "EXACT_RECOVERY_SOAK_ACCEPTANCE_UNSET",
+  ]) {
+    const result = canonicalReasonGuidance(code);
+    assert.equal(result.known, true);
+    assert.notEqual(result.label, "未知原因码");
+    assert.equal(result.actionTo, "/v13/research");
+    assert.ok(result.explanation.length > 10);
+  }
+});
+
 test("home follows the explicit canonical journey without promoting later readiness", () => {
   assert.deepEqual(canonicalHomeDecision({
     ...HOME_EVIDENCE,

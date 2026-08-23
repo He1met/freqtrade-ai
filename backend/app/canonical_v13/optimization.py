@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
+import re
 from typing import Mapping, Sequence
 from uuid import UUID, uuid4
 
@@ -55,6 +56,9 @@ class OptimizationCompletionResult:
     status: str
     trial_count: int
     selected_trial_numbers: tuple[int, ...]
+    terminal_reason_codes: tuple[str, ...]
+    result_count: int
+    submitted_strategy_count: int
     result_digest: str
     repeat_noop: bool
 
@@ -90,6 +94,44 @@ def _effective(connection: Connection) -> Connection:
             schema_translate_map={CANONICAL_BUSINESS_SCHEMA: None}
         )
     return connection
+
+
+def derive_optimization_terminal_reason_codes(
+    *, terminal_status: str, trials: Sequence[Mapping[str, object]]
+) -> tuple[str, ...]:
+    """Derive terminal reasons only from persisted canonical trial evidence."""
+
+    if terminal_status == "SUCCEEDED":
+        return ()
+    reasons: set[str] = set()
+    for row in trials:
+        metrics = row.get("metrics_json")
+        if not isinstance(metrics, Mapping):
+            raise CanonicalOptimizationBlocked(
+                "BLOCKED_OPTIMIZATION_TERMINAL_EVIDENCE_INVALID",
+                "trial metrics must be canonical mappings",
+            )
+        reason = metrics.get("reason_code")
+        if reason is not None:
+            if not isinstance(reason, str) or re.fullmatch(r"[A-Z0-9_]{1,120}", reason) is None:
+                raise CanonicalOptimizationBlocked(
+                    "BLOCKED_OPTIMIZATION_TERMINAL_EVIDENCE_INVALID",
+                    "trial reason code is not canonical",
+                )
+            reasons.add(reason)
+    if not reasons and trials and all(
+        isinstance(row.get("metrics_json"), Mapping)
+        and row["metrics_json"].get("eligible") is False  # type: ignore[index]
+        and row["metrics_json"].get("selected_finalist") is False  # type: ignore[index]
+        for row in trials
+    ):
+        reasons.add("ZERO_TRAIN_VALIDATION_ELIGIBLE_FINALISTS")
+    if not reasons:
+        raise CanonicalOptimizationBlocked(
+            "BLOCKED_OPTIMIZATION_TERMINAL_REASON_UNPROVABLE",
+            "blocked optimization requires a reason derivable from canonical trials",
+        )
+    return tuple(sorted(reasons))
 
 
 def optimization_selection_digest(
@@ -224,6 +266,10 @@ def create_optimization_run(
             objective_json=dict(objective_json),
             request_digest=request_digest,
             receipt_digest=receipt_digest,
+            trial_count=None,
+            result_count=None,
+            submitted_strategy_count=None,
+            result_digest=None,
             created_at=datetime.now(timezone.utc),
             completed_at=None,
         )
@@ -392,6 +438,14 @@ def complete_optimization_run(
         trials=trials,
     )
     selected_rows = {row["trial_number"]: row for row in trials if row["trial_number"] in normalized}
+    terminal_reason_codes = derive_optimization_terminal_reason_codes(
+        terminal_status=terminal_status,
+        trials=trials,
+    )
+    result_count = sum(1 for row in trials if row["result_digest"] is not None)
+    submitted_strategy_count = sum(
+        1 for row in trials if row["submitted_strategy_version_id"] is not None
+    )
     for number in normalized:
         metrics = selected_rows[number]["metrics_json"]
         if (
@@ -414,11 +468,25 @@ def complete_optimization_run(
             "all terminal trials must carry the exact empty-selection digest",
         )
     if run["status"] == terminal_status:
+        if (
+            run["terminal_reason_codes"] != list(terminal_reason_codes)
+            or run["trial_count"] != len(trials)
+            or run["result_count"] != result_count
+            or run["submitted_strategy_count"] != submitted_strategy_count
+            or run["result_digest"] != selection_digest
+        ):
+            raise CanonicalOptimizationBlocked(
+                "BLOCKED_OPTIMIZATION_TERMINAL_REPLAY_DRIFT",
+                str(optimization_run_id),
+            )
         return OptimizationCompletionResult(
             optimization_run_id=optimization_run_id,
             status=terminal_status,
             trial_count=len(trials),
             selected_trial_numbers=normalized,
+            terminal_reason_codes=terminal_reason_codes,
+            result_count=result_count,
+            submitted_strategy_count=submitted_strategy_count,
             result_digest=selection_digest,
             repeat_noop=True,
         )
@@ -432,13 +500,24 @@ def complete_optimization_run(
             OPTIMIZATION_RUNS_TABLE.c.id == optimization_run_id,
             OPTIMIZATION_RUNS_TABLE.c.status.in_(("RUNNING", "NOT_STARTED")),
         )
-        .values(status=terminal_status, completed_at=datetime.now(timezone.utc))
+        .values(
+            status=terminal_status,
+            terminal_reason_codes=list(terminal_reason_codes),
+            trial_count=len(trials),
+            result_count=result_count,
+            submitted_strategy_count=submitted_strategy_count,
+            result_digest=selection_digest,
+            completed_at=datetime.now(timezone.utc),
+        )
     )
     return OptimizationCompletionResult(
         optimization_run_id=optimization_run_id,
         status=terminal_status,
         trial_count=len(trials),
         selected_trial_numbers=normalized,
+        terminal_reason_codes=terminal_reason_codes,
+        result_count=result_count,
+        submitted_strategy_count=submitted_strategy_count,
         result_digest=selection_digest,
         repeat_noop=False,
     )
@@ -533,6 +612,23 @@ def link_controlled_submission_version(
         raise CanonicalOptimizationBlocked(
             "BLOCKED_OPTIMIZATION_TRIAL_NOT_LINKABLE", str(optimization_trial_id)
         )
+    run_updated = effective.execute(
+        OPTIMIZATION_RUNS_TABLE.update()
+        .where(
+            OPTIMIZATION_RUNS_TABLE.c.id == trial["optimization_run_id"],
+            OPTIMIZATION_RUNS_TABLE.c.status.in_(("SUCCEEDED", "BLOCKED")),
+        )
+        .values(
+            submitted_strategy_count=(
+                OPTIMIZATION_RUNS_TABLE.c.submitted_strategy_count + 1
+            )
+        )
+    )
+    if run["status"] in {"SUCCEEDED", "BLOCKED"} and run_updated.rowcount != 1:
+        raise CanonicalOptimizationBlocked(
+            "BLOCKED_OPTIMIZATION_SUBMISSION_COUNT_DRIFT",
+            str(trial["optimization_run_id"]),
+        )
     return OptimizationSubmissionLinkResult(
         optimization_trial_id=optimization_trial_id,
         submitted_strategy_version_id=submitted_strategy_version_id,
@@ -549,6 +645,7 @@ __all__ = [
     "OptimizationTrialResult",
     "complete_optimization_run",
     "create_optimization_run",
+    "derive_optimization_terminal_reason_codes",
     "link_controlled_submission_version",
     "optimization_selection_digest",
     "record_isolated_optimization_trial",

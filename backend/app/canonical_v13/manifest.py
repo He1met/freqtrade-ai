@@ -22,7 +22,7 @@ CANONICAL_MANIFEST_KEY: Final = "canonical-v13-table-manifest-v1"
 CANONICAL_LEGACY_IMPORT_MODE: Final = "EXTERNAL_LATEST_ONLY"
 CANONICAL_TRADING_CAPABILITY: Final = "TRADING_DISABLED"
 CANONICAL_PRODUCTION_DEFAULT: Final = "UNSET"
-CANONICAL_AUTHORITY_REVISION: Final = "20260823_phase9_acceptance_signal_trigger14"
+CANONICAL_AUTHORITY_REVISION: Final = "20260824_optimization_observability15"
 CANONICAL_PREDECESSOR_RUNTIME_IDENTITY_INDEX: Final = (
     "uq_runtime_instances_runtime_identity"
 )
@@ -410,6 +410,7 @@ _WRITER_READ_ALLOWLIST = {
         "schema_metadata",
         "signals",
         "deployments",
+        "research_targets",
         "execution_risk_budget_authorizations",
         "execution_canary_risk_policies",
     ),

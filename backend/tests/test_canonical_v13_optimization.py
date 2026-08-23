@@ -221,6 +221,9 @@ def test_bounded_selection_and_completion_are_terminal_and_replayable(
         )
     assert completed.status == "SUCCEEDED"
     assert completed.trial_count == 2
+    assert completed.result_count == 2
+    assert completed.submitted_strategy_count == 0
+    assert completed.terminal_reason_codes == ()
     assert completed.result_digest == selection_digest
     assert completed.repeat_noop is False
     assert replay.result_digest == selection_digest
@@ -332,7 +335,7 @@ def test_empty_finalist_selection_blocks_terminally_and_replays(canonical_connec
             {
                 "trial_number": 1,
                 "parameters_json": {"ema_period": 12},
-                "metrics_json": {"objective": -1.0},
+                "metrics_json": {"objective": -1.0, "eligible": False},
             }
         ]
         selection_digest = optimization_selection_digest(
@@ -387,6 +390,12 @@ def test_empty_finalist_selection_blocks_terminally_and_replays(canonical_connec
             },
         )
     assert completed.status == "BLOCKED"
+    assert completed.terminal_reason_codes == (
+        "ZERO_TRAIN_VALIDATION_ELIGIBLE_FINALISTS",
+    )
+    assert completed.trial_count == 1
+    assert completed.result_count == 1
+    assert completed.submitted_strategy_count == 0
     assert completed.result_digest == selection_digest
     assert completed.repeat_noop is False
     assert replay.result_digest == selection_digest

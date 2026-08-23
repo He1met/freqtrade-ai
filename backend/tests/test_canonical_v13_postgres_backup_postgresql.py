@@ -18,7 +18,12 @@ from app.canonical_v13.genesis import (
     postgresql_acl_statements,
     render_postgresql_owner_sql,
 )
-from app.canonical_v13.models import RESEARCH_GATE_ATTEMPTS_TABLE
+from app.canonical_v13.models import (
+    OPTIMIZATION_RUNS_TABLE,
+    OPTIMIZATION_TRIALS_TABLE,
+    RESEARCH_GATE_ATTEMPTS_TABLE,
+)
+from app.canonical_v13.optimization import optimization_selection_digest
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
@@ -206,6 +211,22 @@ def test_restore_terminal_historical_gate_row_with_triggers_transactional(
                 assert upgraded.status == "UPGRADED"
 
         attempt_id = uuid4()
+        optimization_run_id = uuid4()
+        optimization_trial_id = uuid4()
+        optimization_actor = "canonical-backup-restore-test"
+        optimization_request_digest = "7" * 64
+        optimization_trial = {
+            "trial_number": 1,
+            "parameters_json": {"period": 12},
+            "metrics_json": {"eligible": False},
+        }
+        optimization_result_digest = optimization_selection_digest(
+            optimization_run_id=optimization_run_id,
+            run_request_digest=optimization_request_digest,
+            actor_identity=optimization_actor,
+            selected_trial_numbers=(),
+            trials=(optimization_trial,),
+        )
         with source.begin() as connection:
             # The source represents already-accepted historical evidence. Replica
             # mode is confined to this disposable fixture so foreign-key lineage
@@ -214,6 +235,46 @@ def test_restore_terminal_historical_gate_row_with_triggers_transactional(
             connection.execute(
                 RESEARCH_GATE_ATTEMPTS_TABLE.insert().values(
                     **_terminal_attempt(attempt_id)
+                )
+            )
+            connection.execute(
+                OPTIMIZATION_RUNS_TABLE.insert().values(
+                    id=optimization_run_id,
+                    baseline_qualification_decision_id=uuid4(),
+                    status="BLOCKED",
+                    actor_identity=optimization_actor,
+                    objective_json={"trial_budget": 1},
+                    request_digest=optimization_request_digest,
+                    receipt_digest="8" * 64,
+                    terminal_reason_codes=[
+                        "ZERO_TRAIN_VALIDATION_ELIGIBLE_FINALISTS"
+                    ],
+                    trial_count=1,
+                    result_count=1,
+                    submitted_strategy_count=0,
+                    result_digest=optimization_result_digest,
+                    created_at=datetime(2026, 8, 23, tzinfo=timezone.utc),
+                    completed_at=datetime(2026, 8, 23, tzinfo=timezone.utc),
+                )
+            )
+            connection.execute(
+                OPTIMIZATION_TRIALS_TABLE.insert().values(
+                    id=optimization_trial_id,
+                    optimization_run_id=optimization_run_id,
+                    trial_number=1,
+                    actor_identity=optimization_actor,
+                    environment_class="ISOLATED_TEST",
+                    parameters_json=optimization_trial["parameters_json"],
+                    metrics_json={
+                        "eligible": False,
+                        "selected_finalist": False,
+                        "selection_digest": optimization_result_digest,
+                    },
+                    request_digest="9" * 64,
+                    result_digest="a" * 64,
+                    submitted_strategy_version_id=None,
+                    submission_link_digest=None,
+                    created_at=datetime(2026, 8, 23, tzinfo=timezone.utc),
                 )
             )
 
@@ -226,6 +287,8 @@ def test_restore_terminal_historical_gate_row_with_triggers_transactional(
                 "--no-owner",
                 "--no-privileges",
                 "--table=strategy_platform_v13.research_gate_attempts",
+                "--table=strategy_platform_v13.optimization_runs",
+                "--table=strategy_platform_v13.optimization_trials",
                 f"--file={archive}",
                 backup._libpq_url(source_url),
             ],
@@ -264,6 +327,24 @@ def test_restore_terminal_historical_gate_row_with_triggers_transactional(
                 ).where(RESEARCH_GATE_ATTEMPTS_TABLE.c.id == attempt_id)
             ).all()
             assert restored_rows == [(attempt_id, "PASSED")]
+            restored_optimization = connection.execute(
+                select(
+                    OPTIMIZATION_RUNS_TABLE.c.status,
+                    OPTIMIZATION_RUNS_TABLE.c.terminal_reason_codes,
+                    OPTIMIZATION_RUNS_TABLE.c.trial_count,
+                    OPTIMIZATION_RUNS_TABLE.c.result_count,
+                    OPTIMIZATION_RUNS_TABLE.c.submitted_strategy_count,
+                    OPTIMIZATION_RUNS_TABLE.c.result_digest,
+                ).where(OPTIMIZATION_RUNS_TABLE.c.id == optimization_run_id)
+            ).one()
+            assert restored_optimization == (
+                "BLOCKED",
+                ["ZERO_TRAIN_VALIDATION_ELIGIBLE_FINALISTS"],
+                1,
+                1,
+                0,
+                optimization_result_digest,
+            )
             backup._verify_restore_trigger_boundary(
                 connection, require_superuser=True
             )
@@ -276,6 +357,14 @@ def test_restore_terminal_historical_gate_row_with_triggers_transactional(
                     .values(status="BLOCKED", terminal_reason_code="tamper")
                 )
             savepoint.rollback()
+            optimization_savepoint = connection.begin_nested()
+            with pytest.raises(DBAPIError):
+                connection.execute(
+                    OPTIMIZATION_RUNS_TABLE.update()
+                    .where(OPTIMIZATION_RUNS_TABLE.c.id == optimization_run_id)
+                    .values(result_count=0)
+                )
+            optimization_savepoint.rollback()
             transaction.rollback()
     finally:
         if source is not None:

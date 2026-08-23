@@ -45,6 +45,7 @@ CANONICAL_GUARD_FUNCTION_NAMES: Final = (
     "guard_deployments_disable_evidence",
     "guard_acceptance_signal_triggers_immutable",
     "guard_acceptance_signals_immutable",
+    "guard_optimization_runs_terminal_observability",
 )
 
 
@@ -432,11 +433,15 @@ def install_canonical_genesis(
         from app.canonical_v13.acceptance_signal_trigger_upgrade import (  # noqa: PLC0415
             install_acceptance_signal_trigger_guard,
         )
+        from app.canonical_v13.optimization_observability_upgrade import (  # noqa: PLC0415
+            install_optimization_observability_trigger,
+        )
 
         install_gate_receipt_triggers(effective)
         install_runtime_image_trigger(effective)
         install_deployment_rollover_trigger(effective)
         install_acceptance_signal_trigger_guard(effective)
+        install_optimization_observability_trigger(effective)
     effective.execute(
         SCHEMA_METADATA_TABLE.insert().values(
             metadata_key=GENESIS_METADATA_KEY,
@@ -499,6 +504,11 @@ def render_postgresql_genesis_ddl(
     )
 
     statements.extend(acceptance_signal_trigger_guard_statements())
+    from app.canonical_v13.optimization_observability_upgrade import (  # noqa: PLC0415
+        optimization_observability_trigger_statements,
+    )
+
+    statements.extend(optimization_observability_trigger_statements())
     statements.extend(
         render_postgresql_owner_sql(role_mapping).rstrip(";\n").split(";\n")
     )

@@ -82,6 +82,9 @@
 .canonical-v13-panel h2,
 .canonical-v13-state strong { margin: 0; color: var(--formal-ink); }
 
+.canonical-v13-panel h3 { margin: 0; color: var(--formal-ink); font-size: 15px; }
+.canonical-v13-panel-copy { margin: 5px 0 0; color: var(--formal-muted); font-size: 13px; line-height: 1.5; }
+
 .canonical-v13-heading-row {
   display: flex;
   min-width: 0;
@@ -417,10 +420,17 @@
 }
 
 .canonical-v13-select-card { cursor: pointer; font: inherit; }
+.canonical-v13-select-card strong { min-width: 0; overflow-wrap: anywhere; }
 .canonical-v13-select-card:hover,
 .canonical-v13-select-card[aria-pressed="true"] { border-color: var(--formal-brand); background: #f1f8f4; }
 .canonical-v13-select-card span,
 .canonical-v13-data-card > span { overflow: hidden; color: var(--formal-muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+
+.canonical-v13-configuration-card { align-content: start; }
+.canonical-v13-configuration-card strong { overflow-wrap: anywhere; }
+.canonical-v13-configuration-values { grid-template-columns: 1fr; }
+.canonical-v13-configuration-values > div { grid-template-columns: minmax(180px, 0.38fr) minmax(0, 1fr); }
+.canonical-v13-configuration-values code { overflow-wrap: anywhere; white-space: pre-wrap; }
 
 .canonical-v13-text-button {
   width: fit-content;

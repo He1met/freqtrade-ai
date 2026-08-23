@@ -12,7 +12,7 @@ from decimal import Decimal
 from typing import Any, Literal, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 SHA256_PATTERN = r"^[0-9a-f]{64}$"
@@ -283,9 +283,11 @@ class StrategyProjectionDTO(CanonicalProjectionDTO):
     validation_status: Literal[
         "UNVALIDATED", "VALIDATING", "VALIDATED", "REJECTED", "BLOCKED"
     ]
+    validation_status_domain: Literal["INTAKE_CODE"] = "INTAKE_CODE"
     qualification_status: Literal[
         "NOT_EVALUATED", "PENDING", "QUALIFIED", "REJECTED", "BLOCKED", "FAILED"
     ]
+    qualification_status_domain: Literal["OOS_PLAN"] = "OOS_PLAN"
     execution_authorized: bool
     created_at: datetime
 
@@ -361,6 +363,10 @@ class ConfigurationVersionProjectionDTO(CanonicalProjectionDTO):
     adapter_digest: str = Field(pattern=SHA256_PATTERN)
     snapshot_id: Optional[UUID]
     snapshot_digest: Optional[str] = Field(default=None, pattern=SHA256_PATTERN)
+    active_in_bundle: bool = False
+    active_activation_id: Optional[UUID] = None
+    active_bundle_id: Optional[UUID] = None
+    active_bundle_digest: Optional[str] = Field(default=None, pattern=SHA256_PATTERN)
     created_at: datetime
     validated_at: Optional[datetime]
 
@@ -566,8 +572,44 @@ class OptimizationProjectionDTO(CanonicalProjectionDTO):
     ]
     request_digest: str = Field(pattern=SHA256_PATTERN)
     receipt_digest: Optional[str] = Field(default=None, pattern=SHA256_PATTERN)
+    terminal_reason_codes: Optional[list[str]] = None
+    trial_count: Optional[int] = Field(default=None, ge=0)
+    result_count: Optional[int] = Field(default=None, ge=0)
+    submitted_strategy_count: Optional[int] = Field(default=None, ge=0)
+    result_digest: Optional[str] = Field(default=None, pattern=SHA256_PATTERN)
     created_at: datetime
     completed_at: Optional[datetime]
+
+    @model_validator(mode="after")
+    def validate_terminal_observability(self) -> "OptimizationProjectionDTO":
+        terminal = self.status in {"SUCCEEDED", "FAILED", "BLOCKED"}
+        evidence = (
+            self.terminal_reason_codes,
+            self.trial_count,
+            self.result_count,
+            self.submitted_strategy_count,
+            self.result_digest,
+            self.completed_at,
+        )
+        if not terminal and any(value is not None for value in evidence):
+            raise ValueError("nonterminal optimization cannot expose terminal evidence")
+        if terminal and any(value is None for value in evidence):
+            raise ValueError("terminal optimization observability is incomplete")
+        if terminal:
+            assert self.terminal_reason_codes is not None
+            assert self.trial_count is not None
+            assert self.result_count is not None
+            assert self.submitted_strategy_count is not None
+            if self.status == "SUCCEEDED" and self.terminal_reason_codes:
+                raise ValueError("succeeded optimization cannot expose blocker reasons")
+            if self.status in {"FAILED", "BLOCKED"} and not self.terminal_reason_codes:
+                raise ValueError("blocked optimization requires canonical reasons")
+            if (
+                self.result_count > self.trial_count
+                or self.submitted_strategy_count > self.trial_count
+            ):
+                raise ValueError("optimization summary counts exceed trial count")
+        return self
 
 
 class OptimizationListProjectionDTO(CanonicalProjectionDTO):
@@ -617,6 +659,9 @@ class OptimizationCompletionReceiptDTO(CanonicalProjectionDTO):
     status: Literal["SUCCEEDED", "BLOCKED"]
     trial_count: int = Field(gt=0, le=96)
     selected_trial_numbers: list[int] = Field(max_length=3)
+    terminal_reason_codes: list[str]
+    result_count: int = Field(ge=0, le=96)
+    submitted_strategy_count: int = Field(ge=0, le=96)
     result_digest: str = Field(pattern=SHA256_PATTERN)
     repeat_noop: bool
 

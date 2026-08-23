@@ -57,7 +57,7 @@ type RequestOptions = {
   signal?: AbortSignal;
 };
 
-type Shape = Readonly<Record<string, "array" | "boolean" | "number" | "object" | "string" | "nullable-object" | "nullable-string">>;
+type Shape = Readonly<Record<string, "array" | "boolean" | "number" | "object" | "string" | "nullable-array" | "nullable-number" | "nullable-object" | "nullable-string">>;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -71,6 +71,8 @@ function assertShape(contract: string, value: unknown, shape: Shape): asserts va
     const field = value[key];
     const valid = kind === "array" ? Array.isArray(field)
       : kind === "object" ? isRecord(field)
+        : kind === "nullable-array" ? field === null || Array.isArray(field)
+          : kind === "nullable-number" ? field === null || typeof field === "number"
         : kind === "nullable-object" ? field === null || isRecord(field)
         : kind === "nullable-string" ? field === null || typeof field === "string"
           : typeof field === kind;
@@ -89,7 +91,7 @@ function assertRecordArray(contract: string, value: unknown): asserts value is R
 function validateSuccessDto(contract: string, value: unknown): void {
   const shapes: Record<string, Shape> = {
     submission: { submission_id: "string", strategy_id: "string", strategy_version_id: "string", intake_status: "string", catalog_status: "string", validation_status: "string", qualification_status: "string", execution_authorized: "boolean", idempotent_replay: "boolean" },
-    strategy: { strategy_id: "string", display_name: "string", catalog_status: "string", intake_status: "string", validation_status: "string", qualification_status: "string", execution_authorized: "boolean" },
+    strategy: { strategy_id: "string", display_name: "string", catalog_status: "string", intake_status: "string", validation_status: "string", validation_status_domain: "string", qualification_status: "string", qualification_status_domain: "string", execution_authorized: "boolean" },
     strategies: { status: "string", items: "array" },
     configurations: { status: "string", configured_kinds: "array", unset_kinds: "array", items: "array" },
     configurationDraft: { profile_id: "string", version_id: "string", configuration_kind: "string", lifecycle_status: "string", idempotency_receipt_id: "string", receipt_digest: "string", idempotent_replay: "boolean" },
@@ -116,6 +118,45 @@ function validateSuccessDto(contract: string, value: unknown): void {
       for (const [index, profile] of (value.items as Record<string, unknown>[]).entries()) {
         assertShape(`configurations.items[${index}]`, profile, { profile_id: "string", configuration_kind: "string", versions: "array" });
         assertRecordArray(`configurations.items[${index}].versions`, profile.versions);
+        for (const [versionIndex, version] of (profile.versions as Record<string, unknown>[]).entries()) {
+          assertShape(`configurations.items[${index}].versions[${versionIndex}]`, version, {
+            active_activation_id: "nullable-string",
+            active_bundle_digest: "nullable-string",
+            active_bundle_id: "nullable-string",
+            active_in_bundle: "boolean",
+            payload_digest: "string",
+            payload_json: "object",
+            schema_digest: "string",
+            schema_json: "object",
+            snapshot_digest: "nullable-string",
+            snapshot_id: "nullable-string",
+            version_id: "string",
+            version_number: "number",
+          });
+        }
+      }
+    }
+    if (contract === "strategies") {
+      for (const [index, strategy] of (value.items as Record<string, unknown>[]).entries()) {
+        assertShape(`strategies.items[${index}]`, strategy, shapes.strategy);
+      }
+    }
+    if (contract === "optimizations") {
+      for (const [index, run] of (value.items as Record<string, unknown>[]).entries()) {
+        assertShape(`optimizations.items[${index}]`, run, {
+          baseline_qualification_decision_id: "string",
+          completed_at: "nullable-string",
+          created_at: "string",
+          optimization_run_id: "string",
+          receipt_digest: "nullable-string",
+          request_digest: "string",
+          result_count: "nullable-number",
+          result_digest: "nullable-string",
+          status: "string",
+          submitted_strategy_count: "nullable-number",
+          terminal_reason_codes: "nullable-array",
+          trial_count: "nullable-number",
+        });
       }
     }
     if (contract === "marketInventory") {

@@ -88,10 +88,10 @@ export function CanonicalMarketDataPage() {
 
   return (
     <div className="canonical-v13-page">
-      <PageHeader description="选择器来自 canonical profile、snapshot 和 member projection；路径只是稳定 locator。" eyebrow="V1.3 canonical-only" title="行情证据" />
+      <PageHeader description="选择器分别来自 canonical 已验证 Profile 版本、已封存 Profile 快照和 member projection；路径只是稳定 locator。" eyebrow="V1.3 canonical-only" title="行情证据" />
       <section className="canonical-v13-selector-panel" aria-label="行情证据选择器">
-        <CanonicalSearchSelect availability={inventoryAvailability} label="行情 Profile / 版本" onChange={selectProfile} options={profileOptions} value={url.values.profile ?? ""} />
-        <CanonicalSearchSelect availability={inventoryAvailability} label="行情快照" onChange={selectSnapshot} options={snapshotOptions} value={selectedSnapshotId ?? ""} />
+        <CanonicalSearchSelect availability={inventoryAvailability} label="已验证 Profile 版本" onChange={selectProfile} options={profileOptions} value={url.values.profile ?? ""} />
+        <CanonicalSearchSelect availability={inventoryAvailability} label="已封存 Profile 快照" onChange={selectSnapshot} options={snapshotOptions} value={selectedSnapshotId ?? ""} />
         <CanonicalSearchSelect availability={targetAvailability} disabled={!selectedSnapshotId} label="研究目标" onChange={selectTarget} options={targetOptions} value={targetSelectorValue} />
       </section>
       {!url.valid ? <CanonicalStatePanel description="Market URL state 含未知、重复或非法选择；selector 请求未发送。" kind="unknown" reasonCodes={url.problems} title="页面地址无效" /> : null}
@@ -109,10 +109,10 @@ export function CanonicalMarketDataPage() {
         <section className="canonical-v13-panel">
           <div className="canonical-v13-heading-row"><h2>行情证据总览</h2><CanonicalStatus status={inventory.data.status} /></div>
           <div className="canonical-v13-metrics">
-            <div><span>Profiles</span><strong>{inventory.data.profile_count}</strong></div>
-            <div><span>已验证 Profiles</span><strong>{inventory.data.validated_profile_count}</strong></div>
-            <div><span>Artifacts</span><strong>{inventory.data.artifact_count}</strong></div>
-            <div><span>已接受 Receipts</span><strong>{inventory.data.accepted_receipt_count}</strong></div>
+            <div><span>行情 Profiles</span><strong>{inventory.data.profile_count}</strong></div>
+            <div><span>已验证 Profile 版本</span><strong>{inventory.data.validated_profile_count}</strong></div>
+            <div><span>行情 Artifacts</span><strong>{inventory.data.artifact_count}</strong></div>
+            <div><span>已接受行情 Receipts</span><strong>{inventory.data.accepted_receipt_count}</strong></div>
           </div>
           {url.values.profile && !snapshotOptions.length ? <CanonicalStatePanel description="所选 profile 没有 snapshot；未改写全局 inventory 事实。" kind="empty" title="当前 profile 无 snapshot" /> : null}
         </section>

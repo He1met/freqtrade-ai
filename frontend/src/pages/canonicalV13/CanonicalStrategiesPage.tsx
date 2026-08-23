@@ -29,8 +29,8 @@ function StrategyDetail({ strategyId }: { strategyId: string }) {
         <div className="canonical-v13-heading-row"><h2>{strategy.display_name}</h2><CanonicalStatus status={strategy.catalog_status} /></div>
         <div className="canonical-v13-status-grid">
           <div><span>受控入库</span><CanonicalStatus status={strategy.intake_status} /></div>
-          <div><span>验证</span><CanonicalStatus status={strategy.validation_status} /></div>
-          <div><span>资格</span><CanonicalStatus status={strategy.qualification_status} /></div>
+          <div><span>入库代码验证</span><CanonicalStatus status={strategy.validation_status} /></div>
+          <div><span>OOS 研究资格</span><CanonicalStatus status={strategy.qualification_status} /></div>
           <div><span>执行授权</span><strong>{strategy.execution_authorized ? "是" : "否"}</strong></div>
         </div>
         <p>当前版本 {strategy.version_number}</p>
@@ -91,7 +91,7 @@ export function CanonicalStrategiesPage() {
 
   return (
     <div className="canonical-v13-page">
-      <PageHeader description="目录、验证与资格是独立状态；列表不会自动选择第一项。" eyebrow="V1.3 canonical-only" title="策略目录" />
+      <PageHeader description="入库代码验证与 exact OOS 研究资格是两套独立事实；列表不会自动选择第一项。" eyebrow="V1.3 canonical-only" title="策略目录" />
       {!url.valid ? <CanonicalStatePanel description="URL selection 无效；未发送详情请求。" kind="unknown" reasonCodes={url.problems} title="策略选择无效" /> : null}
       {catalog.loading ? <CanonicalStatePanel description="正在读取 canonical catalog。" kind="loading" title="加载策略目录" /> : null}
       {catalog.error ? <CanonicalQueryError error={catalog.error} title="策略目录状态未知" /> : null}

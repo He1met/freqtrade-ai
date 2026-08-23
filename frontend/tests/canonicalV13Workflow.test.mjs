@@ -19,7 +19,9 @@ const STRATEGY = {
   artifact_id: STRATEGY_ID,
   artifact_digest: DIGEST,
   validation_status: "VALIDATED",
+  validation_status_domain: "INTAKE_CODE",
   qualification_status: "NOT_EVALUATED",
+  qualification_status_domain: "OOS_PLAN",
   execution_authorized: false,
   created_at: "2026-08-14T00:00:00Z",
 };
@@ -73,6 +75,31 @@ test("exact API chain projects completed current not-started and blocked stages"
   assert.deepEqual(result.steps.map((step) => step.apiStatus), ["INTAKE_ACCEPTED", "VALIDATED", "COMPLETE", "SUCCEEDED", "REJECTED"]);
   assert.equal(result.currentStepId, "qualification");
   assert.deepEqual(result.nextAction, { label: "查看资格阻断", to: LINKS.researchHref });
+});
+
+test("exact OOS chain remains visible when independent intake code validation is unvalidated", () => {
+  const result = canonicalResearchWorkflow({
+    chain: {
+      ...CHAIN,
+      plan_status: "COMPLETE",
+      validation_attempt_id: PLAN_ID,
+      attempt_status: "SUCCEEDED",
+      attempt_receipt_digest: DIGEST,
+      target_score_id: TARGET_ID,
+      overall_score: "0.81",
+      score_digest: DIGEST,
+      qualification_decision_id: TARGET_ID,
+      qualification_status: "QUALIFIED",
+      qualification_reason_code: "ALL_REQUIRED_WINDOWS_AND_SCORE_PASSED",
+      qualification_decision_digest: DIGEST,
+    },
+    links: LINKS,
+    selection: SELECTION,
+    strategy: { ...STRATEGY, validation_status: "UNVALIDATED", qualification_status: "QUALIFIED" },
+  });
+  assert.deepEqual(result.steps.map((item) => item.state), ["complete", "current", "complete", "complete", "complete"]);
+  assert.equal(result.steps[1].label, "入库代码验证");
+  assert.equal(result.steps[4].label, "OOS 资格决策");
 });
 
 test("missing exact plan context never lights later stages from a strategy summary", () => {
