@@ -364,14 +364,21 @@ def _install_offline_exchange_patch(metadata_path: Path) -> None:
         raise Blocked("offline exchange metadata identity drifted")
     markets = metadata.get("markets")
     tiers = metadata.get("leverage_tiers")
+    supported_pairs = {
+        "BTC/USDT:USDT",
+        "ETH/USDT:USDT",
+        "SOL/USDT:USDT",
+    }
     if (
         not isinstance(markets, dict)
-        or set(markets) != {"BTC/USDT:USDT"}
+        or len(markets) != 1
+        or not set(markets).issubset(supported_pairs)
         or not isinstance(tiers, dict)
         or set(tiers) != set(markets)
-        or not isinstance(tiers["BTC/USDT:USDT"], list)
-        or not tiers["BTC/USDT:USDT"]
     ):
+        raise Blocked("offline exchange metadata set is invalid")
+    pair = next(iter(markets))
+    if not isinstance(tiers[pair], list) or not tiers[pair]:
         raise Blocked("offline exchange metadata set is invalid")
 
     from freqtrade.resolvers.exchange_resolver import ExchangeResolver
