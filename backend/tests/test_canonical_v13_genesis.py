@@ -135,7 +135,7 @@ def test_database_wide_user_object_drift_blocks_install(monkeypatch) -> None:
     monkeypatch.setattr(
         canonical_genesis,
         "_postgresql_user_objects",
-        lambda _connection: ("relation:public.legacy_strategies",),
+        lambda _connection, **_kwargs: ("relation:public.legacy_strategies",),
     )
     try:
         with pytest.raises(CanonicalGenesisBlocked) as raised:

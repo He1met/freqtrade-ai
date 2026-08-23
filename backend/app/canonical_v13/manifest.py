@@ -22,7 +22,10 @@ CANONICAL_MANIFEST_KEY: Final = "canonical-v13-table-manifest-v1"
 CANONICAL_LEGACY_IMPORT_MODE: Final = "EXTERNAL_LATEST_ONLY"
 CANONICAL_TRADING_CAPABILITY: Final = "TRADING_DISABLED"
 CANONICAL_PRODUCTION_DEFAULT: Final = "UNSET"
-CANONICAL_AUTHORITY_REVISION: Final = "20260822_phase9_deployment_rollover12"
+CANONICAL_AUTHORITY_REVISION: Final = "20260823_phase9_runtime_identity_rollover13"
+CANONICAL_PREDECESSOR_RUNTIME_IDENTITY_INDEX: Final = (
+    "uq_runtime_instances_runtime_identity"
+)
 
 P0_CONFIGURATION_KINDS: Final[tuple[str, ...]] = (
     "TARGET",

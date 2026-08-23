@@ -16,6 +16,7 @@ from app.canonical_v13.genesis import (
 from app.canonical_v13.manifest import (
     CANONICAL_BUSINESS_SCHEMA,
     CANONICAL_MANIFEST_DIGEST,
+    CANONICAL_PREDECESSOR_RUNTIME_IDENTITY_INDEX,
 )
 from app.canonical_v13.models import DEPLOYMENTS_TABLE, SCHEMA_METADATA_TABLE
 from app.canonical_v13.role_mapping import CanonicalRoleMapping
@@ -25,7 +26,16 @@ PREVIOUS_DEPLOYMENT_ROLLOVER_MANIFEST_DIGEST: Final = (
     "8a66b6fec8b93cec236b2d9a36bfa84171bc7905be588275beeea25a09bc5eba"
 )
 DEPLOYMENT_ROLLOVER_UPGRADE_CONTRACT: Final = (
-    "canonical-v13-deployment-rollover-upgrade-v1"
+    "canonical-v13-deployment-rollover-upgrade-v2"
+)
+PREVIOUS_RUNTIME_IDENTITY_ROLLOVER_MANIFEST_DIGEST: Final = (
+    "186fc7c8b3fa4b5d30518ee8bbc6f75ccb63bff0bbf8e231c454c0f99b42a3f3"
+)
+RUNTIME_IDENTITY_GLOBAL_CONSTRAINT: Final = (
+    CANONICAL_PREDECESSOR_RUNTIME_IDENTITY_INDEX
+)
+RUNTIME_IDENTITY_ACTIVE_INDEX: Final = (
+    "uq_runtime_instances_nonstopped_runtime_identity"
 )
 DEPLOYMENT_ROLLOVER_GUARD_FUNCTION: Final = "guard_deployments_disable_evidence"
 DEPLOYMENT_ROLLOVER_GUARD_TRIGGER: Final = "deployments_disable_evidence_guard"
@@ -63,6 +73,9 @@ class DeploymentRolloverUpgradeResult:
     index_present: bool
     trigger_present: bool
     disabled_deployment_count: int
+    runtime_identity_global_constraint_present: bool
+    runtime_identity_active_index_present: bool
+    duplicate_runtime_identity_count: int
     repeat_noop: bool
     receipt_digest: str
 
@@ -202,6 +215,56 @@ def _index_present(connection: Connection) -> bool:
     )
 
 
+def _runtime_identity_global_constraint_present(connection: Connection) -> bool:
+    return bool(
+        connection.execute(
+            text(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.table_constraints "
+                "WHERE table_schema=:schema AND table_name='runtime_instances' "
+                "AND constraint_name=:constraint_name AND constraint_type='UNIQUE')"
+            ),
+            {
+                "schema": CANONICAL_BUSINESS_SCHEMA,
+                "constraint_name": RUNTIME_IDENTITY_GLOBAL_CONSTRAINT,
+            },
+        ).scalar_one()
+    )
+
+
+def _runtime_identity_active_index_present(connection: Connection) -> bool:
+    definition = connection.execute(
+        text(
+            "SELECT indexdef FROM pg_catalog.pg_indexes "
+            "WHERE schemaname=:schema AND tablename='runtime_instances' "
+            "AND indexname=:index_name"
+        ),
+        {
+            "schema": CANONICAL_BUSINESS_SCHEMA,
+            "index_name": RUNTIME_IDENTITY_ACTIVE_INDEX,
+        },
+    ).scalar_one_or_none()
+    return bool(
+        isinstance(definition, str)
+        and "CREATE UNIQUE INDEX" in definition
+        and "(runtime_identity)" in definition
+        and "WHERE" in definition
+        and "status" in definition
+        and "STOPPED" in definition
+    )
+
+
+def _duplicate_runtime_identity_count(connection: Connection) -> int:
+    return int(
+        connection.execute(
+            text(
+                f"SELECT count(*) FROM (SELECT runtime_identity FROM "
+                f"{CANONICAL_BUSINESS_SCHEMA}.runtime_instances "
+                "GROUP BY runtime_identity HAVING count(*) > 1) duplicates"
+            )
+        ).scalar_one()
+    )
+
+
 def _result(
     connection: Connection, *, status: str, repeat_noop: bool
 ) -> DeploymentRolloverUpgradeResult:
@@ -226,6 +289,15 @@ def _result(
         "index_present": _index_present(connection) if columns else False,
         "trigger_present": _trigger_present(connection) if columns else False,
         "disabled_deployment_count": disabled_count,
+        "runtime_identity_global_constraint_present": (
+            _runtime_identity_global_constraint_present(connection)
+        ),
+        "runtime_identity_active_index_present": (
+            _runtime_identity_active_index_present(connection)
+        ),
+        "duplicate_runtime_identity_count": _duplicate_runtime_identity_count(
+            connection
+        ),
         "repeat_noop": repeat_noop,
     }
     return DeploymentRolloverUpgradeResult(**payload, receipt_digest=_digest(payload))
@@ -238,7 +310,26 @@ def verify_deployment_rollover_upgrade(
         raise CanonicalDeploymentRolloverUpgradeBlocked("BLOCKED_POSTGRESQL_REQUIRED")
     columns = _columns(connection)
     manifest = _manifest(connection)
-    if not columns and manifest == PREVIOUS_DEPLOYMENT_ROLLOVER_MANIFEST_DIGEST:
+    global_identity_constraint = _runtime_identity_global_constraint_present(
+        connection
+    )
+    active_identity_index = _runtime_identity_active_index_present(connection)
+    if (
+        not columns
+        and manifest == PREVIOUS_DEPLOYMENT_ROLLOVER_MANIFEST_DIGEST
+        and global_identity_constraint
+        and not active_identity_index
+    ):
+        return _result(connection, status="PREVIOUS_READY", repeat_noop=True)
+    if (
+        columns == tuple(sorted(DEPLOYMENT_ROLLOVER_COLUMNS))
+        and _constraints(connection) == DEPLOYMENT_ROLLOVER_CONSTRAINTS
+        and _index_present(connection)
+        and manifest == PREVIOUS_RUNTIME_IDENTITY_ROLLOVER_MANIFEST_DIGEST
+        and _trigger_present(connection)
+        and global_identity_constraint
+        and not active_identity_index
+    ):
         return _result(connection, status="PREVIOUS_READY", repeat_noop=True)
     if (
         columns == tuple(sorted(DEPLOYMENT_ROLLOVER_COLUMNS))
@@ -246,6 +337,8 @@ def verify_deployment_rollover_upgrade(
         and _index_present(connection)
         and manifest == CANONICAL_MANIFEST_DIGEST
         and _trigger_present(connection)
+        and not global_identity_constraint
+        and active_identity_index
     ):
         verification = verify_canonical_genesis(connection)
         if verification.accepted:
@@ -265,9 +358,11 @@ def apply_deployment_rollover_upgrade(
     if before.status == "ACCEPTED":
         return before
     schema = CANONICAL_BUSINESS_SCHEMA
-    connection.execute(
-        text(
-            f"ALTER TABLE {schema}.deployments "
+    columns = _columns(connection)
+    if not columns:
+        connection.execute(
+            text(
+                f"ALTER TABLE {schema}.deployments "
             "ADD COLUMN disabled_at TIMESTAMP WITH TIME ZONE, "
             "ADD COLUMN disabled_by VARCHAR(160), "
             "ADD COLUMN disable_reason TEXT, "
@@ -288,14 +383,29 @@ def apply_deployment_rollover_upgrade(
             "ADD CONSTRAINT ck_deployments_disable_receipt_digest_digest_length "
             "CHECK (length(disable_receipt_digest) = 64), "
             "ADD CONSTRAINT deployments_disable_receipt_digest_unique UNIQUE (disable_receipt_digest)"
+            )
         )
-    )
-    connection.execute(
-        text(
-            f"CREATE INDEX {DEPLOYMENT_ROLLOVER_INDEX} "
-            f"ON {schema}.deployments (superseded_by_qualification_decision_id)"
+        connection.execute(
+            text(
+                f"CREATE INDEX {DEPLOYMENT_ROLLOVER_INDEX} "
+                f"ON {schema}.deployments (superseded_by_qualification_decision_id)"
+            )
         )
-    )
+    if _runtime_identity_global_constraint_present(connection):
+        connection.execute(
+            text(
+                f"ALTER TABLE {schema}.runtime_instances DROP CONSTRAINT "
+                f"{RUNTIME_IDENTITY_GLOBAL_CONSTRAINT}"
+            )
+        )
+    if not _runtime_identity_active_index_present(connection):
+        connection.execute(
+            text(
+                f"CREATE UNIQUE INDEX {RUNTIME_IDENTITY_ACTIVE_INDEX} ON "
+                f"{schema}.runtime_instances (runtime_identity) "
+                "WHERE status <> 'STOPPED'"
+            )
+        )
     install_deployment_rollover_trigger(connection)
     owner = role_mapping.physical("canonical_schema_owner")
     connection.execute(
@@ -333,7 +443,18 @@ def rollback_deployment_rollover_upgrade(
         raise CanonicalDeploymentRolloverUpgradeBlocked(
             "BLOCKED_DISABLED_DEPLOYMENT_EVIDENCE_NONZERO"
         )
+    if before.duplicate_runtime_identity_count:
+        raise CanonicalDeploymentRolloverUpgradeBlocked(
+            "BLOCKED_RUNTIME_IDENTITY_ROLLBACK_DUPLICATES"
+        )
     schema = CANONICAL_BUSINESS_SCHEMA
+    connection.execute(text(f"DROP INDEX {schema}.{RUNTIME_IDENTITY_ACTIVE_INDEX}"))
+    connection.execute(
+        text(
+            f"ALTER TABLE {schema}.runtime_instances ADD CONSTRAINT "
+            f"{RUNTIME_IDENTITY_GLOBAL_CONSTRAINT} UNIQUE (runtime_identity)"
+        )
+    )
     connection.execute(
         text(
             f"DROP TRIGGER {DEPLOYMENT_ROLLOVER_GUARD_TRIGGER} ON {schema}.deployments"
@@ -375,6 +496,9 @@ __all__ = [
     "DEPLOYMENT_ROLLOVER_CONSTRAINTS",
     "DEPLOYMENT_ROLLOVER_GUARD_FUNCTION",
     "DEPLOYMENT_ROLLOVER_GUARD_TRIGGER",
+    "PREVIOUS_RUNTIME_IDENTITY_ROLLOVER_MANIFEST_DIGEST",
+    "RUNTIME_IDENTITY_ACTIVE_INDEX",
+    "RUNTIME_IDENTITY_GLOBAL_CONSTRAINT",
     "DeploymentRolloverUpgradeResult",
     "PREVIOUS_DEPLOYMENT_ROLLOVER_MANIFEST_DIGEST",
     "apply_deployment_rollover_upgrade",

@@ -19,6 +19,7 @@ from app.canonical_v13.genesis import (
 from app.canonical_v13.manifest import (
     CANONICAL_BUSINESS_SCHEMA,
     CANONICAL_MANIFEST_DIGEST,
+    CANONICAL_PREDECESSOR_RUNTIME_IDENTITY_INDEX,
     CANONICAL_TABLE_NAMES,
     READER_TABLE_ALLOWLIST,
     TABLE_MANIFEST_BY_NAME,
@@ -474,6 +475,11 @@ def verify_phase9_schema_upgrade(
         verification = verify_canonical_genesis(
             connection,
             accepted_manifest_digests=(manifest_digest,),
+            allowed_predecessor_indexes=(
+                (CANONICAL_PREDECESSOR_RUNTIME_IDENTITY_INDEX,)
+                if manifest_digest != CANONICAL_MANIFEST_DIGEST
+                else ()
+            ),
         )
         if not verification.accepted:
             raise CanonicalPhase9SchemaUpgradeBlocked(

@@ -71,10 +71,29 @@ def test_deployment_rollover_upgrade_trigger_replay_and_rollback_guard() -> None
                 assert (
                     verify_deployment_rollover_upgrade(connection).status == "ACCEPTED"
                 )
+                accepted = verify_deployment_rollover_upgrade(connection)
+                assert accepted.runtime_identity_global_constraint_present is False
+                assert accepted.runtime_identity_active_index_present is True
+                connection.exec_driver_sql(
+                    "ALTER TABLE strategy_platform_v13.runtime_instances "
+                    "ADD CONSTRAINT uq_runtime_instances_runtime_identity "
+                    "UNIQUE (runtime_identity)"
+                )
+                with pytest.raises(
+                    CanonicalDeploymentRolloverUpgradeBlocked,
+                    match="BLOCKED_PARTIAL_DEPLOYMENT_ROLLOVER_UPGRADE",
+                ):
+                    verify_deployment_rollover_upgrade(connection)
+                connection.exec_driver_sql(
+                    "ALTER TABLE strategy_platform_v13.runtime_instances "
+                    "DROP CONSTRAINT uq_runtime_instances_runtime_identity"
+                )
                 rolled_back = rollback_deployment_rollover_upgrade(
                     connection, role_mapping=mapping
                 )
                 assert rolled_back.status == "ROLLED_BACK"
+                assert rolled_back.runtime_identity_global_constraint_present is True
+                assert rolled_back.runtime_identity_active_index_present is False
                 assert (
                     rollback_deployment_rollover_upgrade(
                         connection, role_mapping=mapping
@@ -85,6 +104,8 @@ def test_deployment_rollover_upgrade_trigger_replay_and_rollback_guard() -> None
                     connection, role_mapping=mapping
                 )
                 assert upgraded.status == "UPGRADED"
+                assert upgraded.runtime_identity_global_constraint_present is False
+                assert upgraded.runtime_identity_active_index_present is True
                 assert (
                     apply_deployment_rollover_upgrade(
                         connection, role_mapping=mapping

@@ -15,6 +15,7 @@ from app.canonical_v13.genesis import verify_canonical_genesis
 from app.canonical_v13.manifest import (
     CANONICAL_BUSINESS_SCHEMA,
     CANONICAL_MANIFEST_DIGEST,
+    CANONICAL_PREDECESSOR_RUNTIME_IDENTITY_INDEX,
 )
 from app.canonical_v13.models import (
     AUDIT_EVENTS_TABLE,
@@ -145,6 +146,11 @@ def verify_runtime_reader_acl_upgrade(
             PREVIOUS_RUNTIME_READER_ACL_MANIFEST_DIGEST,
             RUNTIME_READER_ACL_ACCEPTED_MANIFEST_DIGEST,
             CANONICAL_MANIFEST_DIGEST,
+        ),
+        allowed_predecessor_indexes=(
+            (CANONICAL_PREDECESSOR_RUNTIME_IDENTITY_INDEX,)
+            if manifest_digest != CANONICAL_MANIFEST_DIGEST
+            else ()
         ),
     )
     if not genesis.accepted:
