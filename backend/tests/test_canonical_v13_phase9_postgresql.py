@@ -49,10 +49,21 @@ from app.canonical_v13.runtime_image_authority import (
 from app.canonical_v13.models import (
     ACCEPTANCE_SIGNAL_TRIGGERS_TABLE,
     DEPLOYMENTS_TABLE,
+    OPTIMIZATION_RUNS_TABLE,
+    OPTIMIZATION_TRIALS_TABLE,
     QUALIFICATION_DECISIONS_TABLE,
     RUNTIME_IMAGE_ACCEPTANCES_TABLE,
     SCHEMA_METADATA_TABLE,
     SIGNALS_TABLE,
+)
+from app.canonical_v13.optimization import optimization_selection_digest
+from app.canonical_v13.optimization_observability_upgrade import (
+    OPTIMIZATION_OBSERVABILITY_COLUMNS,
+    OPTIMIZATION_OBSERVABILITY_GUARD_FUNCTION,
+    OPTIMIZATION_OBSERVABILITY_GUARD_TRIGGER,
+    PREVIOUS_OPTIMIZATION_OBSERVABILITY_MANIFEST_DIGEST,
+    apply_optimization_observability_upgrade,
+    verify_optimization_observability_upgrade,
 )
 from app.canonical_v13.runtime_reader_acl_upgrade import (
     PREVIOUS_RUNTIME_READER_ACL_MANIFEST_DIGEST,
@@ -391,6 +402,155 @@ def test_acceptance_signal_trigger_postgresql_concurrent_single_winner() -> None
                     ACCEPTANCE_SIGNAL_TRIGGERS_TABLE.c.deployment_id == deployment_id
                 )
             )
+        engine.dispose()
+
+
+def test_optimization_observability_upgrade_backfills_only_canonical_trials() -> None:
+    assert DATABASE_URL is not None
+    mapping = CanonicalRoleMapping.from_prefix(
+        os.environ.get("CANONICAL_V13_ROLE_PREFIX", "freqtrade_ai_v13_ci_")
+    )
+    engine = create_engine(DATABASE_URL)
+    try:
+        with engine.connect() as connection:
+            transaction = connection.begin()
+            try:
+                is_superuser = bool(
+                    connection.execute(
+                        text(
+                            "SELECT rolsuper FROM pg_catalog.pg_roles "
+                            "WHERE rolname=current_user"
+                        )
+                    ).scalar_one()
+                )
+                if not is_superuser:
+                    pytest.skip(
+                        "isolated optimization upgrade regression requires superuser"
+                    )
+                run_id = uuid4()
+                request_digest = "1" * 64
+                actor = "canonical-upgrade-regression"
+                base_trial = {
+                    "trial_number": 1,
+                    "parameters_json": {"period": 12},
+                    "metrics_json": {"eligible": False},
+                }
+                selection_digest = optimization_selection_digest(
+                    optimization_run_id=run_id,
+                    run_request_digest=request_digest,
+                    actor_identity=actor,
+                    selected_trial_numbers=(),
+                    trials=(base_trial,),
+                )
+                connection.exec_driver_sql(
+                    "SET LOCAL session_replication_role=replica"
+                )
+                now = datetime(2026, 8, 24, tzinfo=timezone.utc)
+                connection.execute(
+                    OPTIMIZATION_RUNS_TABLE.insert().values(
+                        id=run_id,
+                        baseline_qualification_decision_id=uuid4(),
+                        status="BLOCKED",
+                        actor_identity=actor,
+                        objective_json={"trial_budget": 1},
+                        request_digest=request_digest,
+                        receipt_digest="2" * 64,
+                        terminal_reason_codes=[
+                            "ZERO_TRAIN_VALIDATION_ELIGIBLE_FINALISTS"
+                        ],
+                        trial_count=1,
+                        result_count=1,
+                        submitted_strategy_count=0,
+                        result_digest=selection_digest,
+                        created_at=now,
+                        completed_at=now,
+                    )
+                )
+                connection.execute(
+                    OPTIMIZATION_TRIALS_TABLE.insert().values(
+                        id=uuid4(),
+                        optimization_run_id=run_id,
+                        trial_number=1,
+                        actor_identity=actor,
+                        environment_class="ISOLATED_TEST",
+                        parameters_json=base_trial["parameters_json"],
+                        metrics_json={
+                            "eligible": False,
+                            "selected_finalist": False,
+                            "selection_digest": selection_digest,
+                        },
+                        request_digest="3" * 64,
+                        result_digest="4" * 64,
+                        submitted_strategy_version_id=None,
+                        submission_link_digest=None,
+                        created_at=now,
+                    )
+                )
+                connection.exec_driver_sql(
+                    f"DROP TRIGGER {OPTIMIZATION_OBSERVABILITY_GUARD_TRIGGER} "
+                    "ON strategy_platform_v13.optimization_runs"
+                )
+                connection.exec_driver_sql(
+                    "DROP FUNCTION strategy_platform_v13."
+                    f"{OPTIMIZATION_OBSERVABILITY_GUARD_FUNCTION}()"
+                )
+                for column in OPTIMIZATION_OBSERVABILITY_COLUMNS:
+                    connection.exec_driver_sql(
+                        "ALTER TABLE strategy_platform_v13.optimization_runs "
+                        f"DROP COLUMN {column} CASCADE"
+                    )
+                connection.execute(
+                    SCHEMA_METADATA_TABLE.update()
+                    .where(
+                        SCHEMA_METADATA_TABLE.c.metadata_key
+                        == "canonical-v13-genesis"
+                    )
+                    .values(
+                        manifest_digest=(
+                            PREVIOUS_OPTIMIZATION_OBSERVABILITY_MANIFEST_DIGEST
+                        )
+                    )
+                )
+                assert (
+                    verify_optimization_observability_upgrade(connection).status
+                    == "PREVIOUS_READY"
+                )
+                upgraded = apply_optimization_observability_upgrade(
+                    connection, role_mapping=mapping
+                )
+                connection.exec_driver_sql(
+                    "SET LOCAL session_replication_role=origin"
+                )
+                assert upgraded.status == "UPGRADED"
+                assert upgraded.terminal_run_count >= 1
+                assert upgraded.trial_count >= 1
+                assert upgraded.result_count >= 1
+                assert upgraded.submitted_strategy_count == 0
+                replay = apply_optimization_observability_upgrade(
+                    connection, role_mapping=mapping
+                )
+                assert replay.status == "ACCEPTED"
+                assert replay.repeat_noop is True
+                row = connection.execute(
+                    select(OPTIMIZATION_RUNS_TABLE).where(
+                        OPTIMIZATION_RUNS_TABLE.c.id == run_id
+                    )
+                ).mappings().one()
+                assert row["terminal_reason_codes"] == [
+                    "ZERO_TRAIN_VALIDATION_ELIGIBLE_FINALISTS"
+                ]
+                assert row["trial_count"] == row["result_count"] == 1
+                savepoint = connection.begin_nested()
+                with pytest.raises(DBAPIError):
+                    connection.execute(
+                        OPTIMIZATION_RUNS_TABLE.update()
+                        .where(OPTIMIZATION_RUNS_TABLE.c.id == run_id)
+                        .values(terminal_reason_codes=["TAMPER"])
+                    )
+                savepoint.rollback()
+            finally:
+                transaction.rollback()
+    finally:
         engine.dispose()
 
 

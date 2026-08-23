@@ -17,7 +17,9 @@ function canonicalStrategy(overrides: Record<string, unknown> = {}) {
     artifact_id: ID_C,
     artifact_digest: DIGEST,
     validation_status: "VALIDATED",
+    validation_status_domain: "INTAKE_CODE",
     qualification_status: "NOT_EVALUATED",
+    qualification_status_domain: "OOS_PLAN",
     execution_authorized: false,
     created_at: "2026-08-14T00:00:00Z",
     ...overrides,
@@ -263,8 +265,8 @@ test("default V1.3 pages expose selectors instead of manual internal identity in
   await expect(page.getByLabel("策略", { exact: true })).toHaveJSProperty("tagName", "SELECT");
 
   await page.goto("/v13/market-data");
-  await expect(page.getByLabel("行情 Profile / 版本", { exact: true })).toHaveJSProperty("tagName", "SELECT");
-  await expect(page.getByLabel("行情快照", { exact: true })).toHaveJSProperty("tagName", "SELECT");
+  await expect(page.getByLabel("已验证 Profile 版本", { exact: true })).toHaveJSProperty("tagName", "SELECT");
+  await expect(page.getByLabel("已封存 Profile 快照", { exact: true })).toHaveJSProperty("tagName", "SELECT");
 });
 
 test("invalid URL state on every canonical page performs zero API requests", async ({ page }) => {
@@ -334,7 +336,9 @@ test("strategy selection is explicit, deep-linkable, refreshable, and restorable
     artifact_id: id,
     artifact_digest: DIGEST,
     validation_status: "UNVALIDATED",
+    validation_status_domain: "INTAKE_CODE",
     qualification_status: "NOT_EVALUATED",
+    qualification_status_domain: "OOS_PLAN",
     execution_authorized: false,
     created_at: "2026-08-14T00:00:00Z",
   });
@@ -357,6 +361,18 @@ test("strategy selection is explicit, deep-linkable, refreshable, and restorable
   await page.goBack();
   await expect(page).not.toHaveURL(/strategy=/);
   await expect(page.getByText("尚未选择策略")).toBeVisible();
+});
+
+test("390px strategy catalog preserves a complete copyable long name without document overflow", async ({ page }) => {
+  const longName = "OkxDemoFirstRealCandidateMeanReversionV2ExactCanonicalName";
+  const strategy = canonicalStrategy({ display_name: longName });
+  await installCanonicalMocks(page, {
+    "/api/canonical-v13/strategies": { status: "AVAILABLE", items: [strategy] },
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/v13/strategies");
+  await expect(page.getByText(longName, { exact: true })).toHaveText(longName);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
 test("configuration context profile and version use API selectors across history and refresh", async ({ page }) => {
@@ -383,6 +399,7 @@ test("configuration context profile and version use API selectors across history
         snapshot_id: ID_C,
         snapshot_digest: DIGEST,
         active_in_bundle: true,
+        active_activation_id: ID_C,
         active_bundle_id: ID_D,
         active_bundle_digest: DIGEST,
         created_at: "2026-08-14T00:00:00Z",
@@ -401,6 +418,10 @@ test("configuration context profile and version use API selectors across history
   await expect(page.getByRole("heading", { level: 3, name: "具体配置" })).toBeVisible();
   await expect(page.getByText("source", { exact: true })).toBeVisible();
   await expect(page.getByText("api", { exact: true })).toBeVisible();
+  await page.getByText("高级标识与不可变摘要", { exact: true }).click();
+  await expect(page.getByText("Schema digest", { exact: true })).toBeVisible();
+  await expect(page.getByText("Activation", { exact: true })).toBeVisible();
+  await expect(page.getByText("Active Bundle digest", { exact: true })).toBeVisible();
   await expect(page).toHaveURL(new RegExp(`profile=${ID_A}.*version=${ID_B}`));
 
   await page.reload();
@@ -408,6 +429,117 @@ test("configuration context profile and version use API selectors across history
   await page.goBack();
   await expect(page).not.toHaveURL(/version=/);
   await expect(page.getByText("尚未选择具体配置", { exact: true })).toBeVisible();
+});
+
+test("configuration defaults show seven exact active members while latest stays historical", async ({ page }) => {
+  const kinds = ["TARGET", "WINDOW", "GENERATION", "DIVERSITY", "QUALITY_QUALIFICATION", "SCORING", "RESEARCH_AGGREGATE"];
+  const activationId = "1dab142c-2c8d-440d-8308-f9cc53d12afd";
+  const bundleId = "ac3b556b-3bbe-5892-bf37-ab84949e7139";
+  const bundleDigest = "359a8baed8e1e4780b6ee15bd9ae021cbb286c9ddb5caf749049746fa7657682";
+  const stableId = (value: number) => `123e4567-e89b-42d3-a456-${String(value).padStart(12, "0")}`;
+  const version = (profileIndex: number, number: number, active: boolean) => ({
+    version_id: stableId(100 + profileIndex * 10 + number),
+    version_number: number,
+    lifecycle_status: "VALIDATED",
+    schema_json: { type: "object", additionalProperties: false },
+    payload_json: { canonical_value: `${profileIndex}:${number}` },
+    schema_digest: DIGEST,
+    payload_digest: DIGEST,
+    adapter_identity: "canonical-config-adapter",
+    adapter_digest: DIGEST,
+    snapshot_id: stableId(300 + profileIndex * 10 + number),
+    snapshot_digest: DIGEST,
+    active_in_bundle: active,
+    active_activation_id: active ? activationId : null,
+    active_bundle_id: active ? bundleId : null,
+    active_bundle_digest: active ? bundleDigest : null,
+    created_at: `2026-08-${String(10 + number).padStart(2, "0")}T00:00:00Z`,
+    validated_at: `2026-08-${String(10 + number).padStart(2, "0")}T01:00:00Z`,
+  });
+  const items = kinds.map((kind, index) => ({
+    profile_id: stableId(index + 1),
+    profile_key: `profile-${kind.toLowerCase()}`,
+    configuration_kind: kind,
+    scope_key: "research",
+    workflow_key: "canonical",
+    versions: index === 0 ? [version(index, 1, true), version(index, 2, false)] : [version(index, 1, true)],
+  }));
+  await installCanonicalMocks(page, {
+    "/api/canonical-v13/configurations": { status: "AVAILABLE", configured_kinds: kinds, unset_kinds: [], items },
+  });
+  await page.goto("/v13/configuration");
+
+  await expect(page.locator('section[aria-label="当前生效配置"] article')).toHaveCount(7);
+  await expect(page.getByText("版本 1 · 当前生效", { exact: true })).toHaveCount(7);
+  await page.locator('section[aria-label="当前生效配置"] article').first().getByRole("button", { name: "查看完整配置" }).click();
+  await expect(page.getByText("这是当前 Bundle 正在使用的配置。", { exact: true })).toBeVisible();
+  await page.getByLabel("配置版本", { exact: true }).selectOption(version(0, 2, false).version_id);
+  await expect(page.getByText("这是该 Profile 的最新历史版本，但当前 Bundle 未使用该版本。", { exact: true })).toBeVisible();
+  await page.getByText("原始 JSON 与 Schema", { exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Payload JSON" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Schema JSON" })).toBeVisible();
+});
+
+test("market inventory distinguishes versions snapshots and uses numeric version ordering", async ({ page }) => {
+  const marketVersion = (number: number, id: string) => ({
+    market_profile_id: ID_A,
+    profile_key: "canonical-market",
+    scope_key: "research",
+    version_id: id,
+    version_number: number,
+    lifecycle_status: "VALIDATED",
+    payload_digest: DIGEST,
+    created_at: "2026-08-14T00:00:00Z",
+    validated_at: "2026-08-14T01:00:00Z",
+  });
+  await installCanonicalMocks(page, {
+    "/api/canonical-v13/market-data": {
+      status: "AVAILABLE",
+      profile_count: 1,
+      validated_profile_count: 3,
+      artifact_count: 12,
+      accepted_receipt_count: 12,
+      profiles: [marketVersion(10, ID_C), marketVersion(2, ID_B), marketVersion(1, ID_A)],
+      snapshots: [],
+    },
+  });
+  await page.goto("/v13/market-data");
+  await expect(page.getByText("行情 Profiles", { exact: true })).toBeVisible();
+  await expect(page.getByText("已验证 Profile 版本", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("已封存 Profile 快照", { exact: true })).toBeVisible();
+  const labels = await page.getByLabel("已验证 Profile 版本", { exact: true }).locator("option").allTextContents();
+  expect(labels.filter((label) => label.includes("canonical-market"))).toEqual([
+    "canonical-market · 版本 1 · 已验证 · Scope research",
+    "canonical-market · 版本 2 · 已验证 · Scope research",
+    "canonical-market · 版本 10 · 已验证 · Scope research",
+  ]);
+});
+
+test("blocked optimization renders canonical reasons and persisted summary counts", async ({ page }) => {
+  await installCanonicalMocks(page, {
+    "/api/canonical-v13/optimizations": {
+      status: "AVAILABLE",
+      items: [{
+        optimization_run_id: ID_A,
+        baseline_qualification_decision_id: ID_B,
+        status: "BLOCKED",
+        request_digest: DIGEST,
+        receipt_digest: DIGEST,
+        terminal_reason_codes: ["ZERO_TRAIN_VALIDATION_ELIGIBLE_FINALISTS"],
+        trial_count: 96,
+        result_count: 96,
+        submitted_strategy_count: 0,
+        result_digest: DIGEST,
+        created_at: "2026-08-14T00:00:00Z",
+        completed_at: "2026-08-14T01:00:00Z",
+      }],
+    },
+  });
+  await page.goto("/v13/optimization");
+  await expect(page.getByText("Trials 96 · Results 96 · 已提交策略 0", { exact: true })).toBeVisible();
+  await expect(page.getByText("优化未产生可提交结果", { exact: true })).toBeVisible();
+  await page.getByText("高级优化标识", { exact: true }).click();
+  await expect(page.getByRole("button", { name: "复制Terminal result digest" })).toBeVisible();
 });
 
 test("research selectors preserve API IDs while showing names and exact lineage", async ({ page }) => {
@@ -433,7 +565,7 @@ test("research selectors preserve API IDs while showing names and exact lineage"
 });
 
 test("qualified exact results expose read-only Phase 9 A-D receipts without execution controls", async ({ page }) => {
-  const alpha = canonicalStrategy({ qualification_status: "QUALIFIED" });
+  const alpha = canonicalStrategy({ validation_status: "UNVALIDATED", qualification_status: "QUALIFIED" });
   const plan = canonicalResearchChain({ qualification_status: "QUALIFIED", qualification_reason_code: "QUALIFIED" });
   const results = canonicalResearchResults({
     qualification: {
@@ -463,7 +595,12 @@ test("qualified exact results expose read-only Phase 9 A-D receipts without exec
           contract: "canonical-v13-phase9-readiness-receipt-v2",
           stage,
           status: stage === "QUALIFICATION_HANDOFF" ? "READY" : "BLOCKED",
-          reason_codes: stage === "QUALIFICATION_HANDOFF" ? [] : ["EXACT_STAGE_EVIDENCE_UNSET"],
+          reason_codes: stage === "QUALIFICATION_HANDOFF" ? [] : [
+            stage === "NO_ORDER_SOAK" ? "RUNTIME_NOT_HEALTHY"
+              : stage === "SIGNAL_RISK_SHADOW" ? "EXACT_HEALTHY_LONG_LIVED_RUNTIME_EVIDENCE_UNSET"
+                : stage === "OKX_DEMO_CANARY" ? "EXACT_SINGLE_CANARY_ORDER_COUNT_REQUIRED"
+                  : "EXACT_RECOVERY_SOAK_ACCEPTANCE_UNSET",
+          ],
           qualification_status_counts: { QUALIFIED: 1 },
           execution_domain_counts: { orders: 0, fills: 0, ledger_entries: 0, reconciliation_runs: 0 },
           lineage_evidence_counts: {},
@@ -488,6 +625,12 @@ test("qualified exact results expose read-only Phase 9 A-D receipts without exec
   await page.goto(`/v13/research?strategy=${ID_A}&target=${ID_D}&plan=${ID_C}`);
   await expect(page.getByRole("heading", { level: 2, name: "Phase 9 分段验收" })).toBeVisible();
   await expect(page.getByRole("heading", { level: 3, name: "A · 无订单运行" })).toBeVisible();
+  await expect(page.getByText("入库代码验证", { exact: true })).toBeVisible();
+  await expect(page.getByText("OOS 资格决策", { exact: true })).toBeVisible();
+  await expect(page.getByText("Runtime 未处于健康运行状态", { exact: true })).toBeVisible();
+  await expect(page.getByText("缺少精确的长期 Runtime 健康证据", { exact: true })).toBeVisible();
+  await expect(page.getByText("尚未满足唯一 Canary 订单计数", { exact: true })).toBeVisible();
+  await expect(page.getByText("恢复 Soak 尚未验收", { exact: true })).toBeVisible();
   await expect(page.getByText("本页面不提供 deployment、runtime 或 order 写入控制。")).toBeVisible();
   await expect(page.getByRole("button", { name: /order|deployment|runtime/i })).toHaveCount(0);
   const phase9Calls = calls.filter((call) => call.includes("/phase9/readiness?"));

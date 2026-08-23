@@ -3,7 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import { fetchCanonicalOptimizations, fetchCanonicalResearchPlans, fetchCanonicalStrategies } from "../../api/canonicalV13Client";
 import { CopyableValue, PageHeader } from "../../components/DisplayPrimitives";
 import { CanonicalSearchSelect, type CanonicalSelectorAvailability } from "./CanonicalSearchSelect";
-import { CanonicalQueryError, CanonicalStatePanel, CanonicalStatus, useCanonicalQuery } from "./CanonicalStatePanel";
+import { CanonicalQueryError, CanonicalReasonList, CanonicalStatePanel, CanonicalStatus, useCanonicalQuery } from "./CanonicalStatePanel";
 import { canonicalStatusesKnown, parseCanonicalUrlState, serializeCanonicalUrlState } from "./canonicalV13Model";
 import { canonicalSelectionState, researchTargetSelectorOptions, strategySelectorOptions } from "./canonicalV13Selectors";
 
@@ -13,7 +13,17 @@ export function CanonicalOptimizationPage() {
   const query = useCanonicalQuery(fetchCanonicalOptimizations, [], url.valid);
   const strategies = useCanonicalQuery((signal) => fetchCanonicalStrategies(signal, 200), [], url.valid);
   const plans = useCanonicalQuery(fetchCanonicalResearchPlans, [], url.valid);
-  const contractKnown = query.data ? canonicalStatusesKnown(query.data.status, ...query.data.items.map((item) => item.status)) : true;
+  const contractKnown = query.data ? canonicalStatusesKnown(query.data.status, ...query.data.items.map((item) => item.status))
+    && query.data.items.every((item) => {
+      const terminal = ["SUCCEEDED", "FAILED", "BLOCKED"].includes(item.status);
+      if (!terminal) return item.terminal_reason_codes === null && item.trial_count === null && item.result_count === null && item.submitted_strategy_count === null && item.result_digest === null;
+      return Array.isArray(item.terminal_reason_codes)
+        && (item.status !== "BLOCKED" || item.terminal_reason_codes.length > 0)
+        && item.trial_count !== null
+        && item.result_count !== null
+        && item.submitted_strategy_count !== null
+        && item.result_digest !== null;
+    }) : true;
   const strategiesKnown = strategies.data
     ? canonicalStatusesKnown(strategies.data.status, ...strategies.data.items.flatMap((strategy) => [strategy.catalog_status, strategy.intake_status, strategy.validation_status, strategy.qualification_status]))
     : true;
@@ -60,10 +70,14 @@ export function CanonicalOptimizationPage() {
               <article className="canonical-v13-data-card" key={run.optimization_run_id}>
                 <div className="canonical-v13-heading-row"><strong>创建于 {run.created_at}</strong><CanonicalStatus status={run.status} /></div>
                 <span>完成时间：{run.completed_at ?? "尚未完成"}</span>
+                {run.trial_count !== null ? <span>Trials {run.trial_count} · Results {run.result_count} · 已提交策略 {run.submitted_strategy_count}</span> : null}
+                {run.terminal_reason_codes ? <CanonicalReasonList reasonCodes={run.terminal_reason_codes} /> : null}
                 <details className="canonical-v13-advanced-evidence"><summary>高级优化标识</summary>
                   <CopyableValue label="Optimization run" value={run.optimization_run_id} />
                   <CopyableValue label="基线资格决策" value={run.baseline_qualification_decision_id} />
                   <CopyableValue label="Request digest" value={run.request_digest} />
+                  {run.receipt_digest ? <CopyableValue label="Run receipt digest" value={run.receipt_digest} /> : null}
+                  {run.result_digest ? <CopyableValue label="Terminal result digest" value={run.result_digest} /> : null}
                 </details>
               </article>
             ))}

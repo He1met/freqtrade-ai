@@ -86,10 +86,11 @@ export function configurationProfileSelectorOptions(
 export function configurationVersionSelectorOptions(
   profile: ConfigurationProfileProjection | null,
 ): CanonicalSelectorOption[] {
-  if (!profile) return [];
+  if (!profile?.versions.length) return [];
+  const latestVersionNumber = Math.max(...profile.versions.map((version) => version.version_number));
   return profile.versions.map((version) => ({
-    description: `${version.active_in_bundle ? "当前生效 · " : ""}${version.validated_at ? `验证时间 ${version.validated_at}` : `创建时间 ${version.created_at}`}`,
-    label: `版本 ${version.version_number}${version.active_in_bundle ? "（当前生效）" : ""}`,
+    description: `${version.active_in_bundle ? "当前生效" : version.version_number === latestVersionNumber ? "最新历史版本（未生效）" : "历史版本（未生效）"} · ${version.validated_at ? `验证时间 ${version.validated_at}` : `创建时间 ${version.created_at}`}`,
+    label: `版本 ${version.version_number}${version.active_in_bundle ? "（当前生效）" : version.version_number === latestVersionNumber ? "（最新，未生效）" : "（历史，未生效）"}`,
     status: version.lifecycle_status,
     value: version.version_id,
   })).sort((left, right) => {
@@ -163,12 +164,16 @@ export function marketProfileSelectorOptions(
   inventory: MarketInventoryProjection | null,
 ): CanonicalSelectorOption[] {
   if (!inventory) return [];
-  return inventory.profiles.map((profile) => ({
+  return [...inventory.profiles].sort((left, right) => (
+    left.profile_key.localeCompare(right.profile_key, "zh-CN")
+    || left.version_number - right.version_number
+    || left.version_id.localeCompare(right.version_id)
+  )).map((profile) => ({
     description: `Scope ${profile.scope_key}`,
     label: `${profile.profile_key} · 版本 ${profile.version_number}`,
     status: profile.lifecycle_status,
     value: profile.version_id,
-  })).sort(byLabel);
+  }));
 }
 
 export function marketSnapshotSelectorOptions(

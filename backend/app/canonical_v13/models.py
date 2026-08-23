@@ -874,6 +874,11 @@ OPTIMIZATION_RUNS_TABLE = _table(
     Column("objective_json", JSON, nullable=False),
     _digest("request_digest"),
     _digest("receipt_digest"),
+    Column("terminal_reason_codes", JSON, nullable=True),
+    Column("trial_count", Integer, nullable=True),
+    Column("result_count", Integer, nullable=True),
+    Column("submitted_strategy_count", Integer, nullable=True),
+    _digest("result_digest", nullable=True),
     _created_at(),
     _created_at("completed_at", nullable=True),
     _status_check(
@@ -892,6 +897,29 @@ OPTIMIZATION_RUNS_TABLE = _table(
         "baseline_qualification_decision_id",
         "request_digest",
         name="optimization_runs_baseline_request_unique",
+    ),
+    CheckConstraint(
+        "(status IN ('NOT_STARTED','PENDING_BASELINE','RUNNING') "
+        "AND terminal_reason_codes IS NULL AND trial_count IS NULL "
+        "AND result_count IS NULL AND submitted_strategy_count IS NULL "
+        "AND result_digest IS NULL AND completed_at IS NULL) OR "
+        "(status IN ('SUCCEEDED','FAILED','BLOCKED') "
+        "AND terminal_reason_codes IS NOT NULL AND trial_count IS NOT NULL "
+        "AND result_count IS NOT NULL AND submitted_strategy_count IS NOT NULL "
+        "AND result_digest IS NOT NULL AND completed_at IS NOT NULL)",
+        name="optimization_runs_terminal_observability_complete",
+    ),
+    CheckConstraint(
+        "trial_count IS NULL OR (trial_count >= 0 AND result_count >= 0 "
+        "AND result_count <= trial_count AND submitted_strategy_count >= 0 "
+        "AND submitted_strategy_count <= trial_count)",
+        name="optimization_runs_terminal_counts_valid",
+    ),
+    CheckConstraint(
+        "terminal_reason_codes IS NULL OR "
+        "(status = 'SUCCEEDED' AND json_array_length(terminal_reason_codes) = 0) OR "
+        "(status IN ('FAILED','BLOCKED') AND json_array_length(terminal_reason_codes) > 0)",
+        name="optimization_runs_terminal_reasons_valid",
     ),
 )
 

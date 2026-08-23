@@ -486,6 +486,7 @@ def _configuration_catalog(connection: Connection) -> ConfigurationCatalogProjec
     active_rows = (
         connection.execute(
             select(
+                CONFIGURATION_ACTIVATIONS_TABLE.c.id.label("activation_id"),
                 CONFIGURATION_ACTIVATIONS_TABLE.c.scope_key,
                 CONFIGURATION_ACTIVATIONS_TABLE.c.workflow_key,
                 CONFIGURATION_ACTIVATIONS_TABLE.c.configuration_bundle_id,
@@ -519,7 +520,7 @@ def _configuration_catalog(connection: Connection) -> ConfigurationCatalogProjec
             (row["scope_key"], row["workflow_key"], row["configuration_bundle_id"]),
             [],
         ).append(dict(row))
-    active_snapshots: dict[tuple[str, str, UUID], tuple[UUID, str, str]] = {}
+    active_snapshots: dict[tuple[str, str, UUID], tuple[UUID, UUID, str, str]] = {}
     for (scope_key, workflow_key, bundle_id), rows in active_groups.items():
         if (
             len(rows) != len(P0_CONFIGURATION_KINDS)
@@ -533,6 +534,7 @@ def _configuration_catalog(connection: Connection) -> ConfigurationCatalogProjec
             continue
         for row in rows:
             active_snapshots[(scope_key, workflow_key, row["configuration_snapshot_id"])] = (
+                row["activation_id"],
                 bundle_id,
                 row["persisted_bundle_digest"],
                 row["snapshot_digest"],
@@ -579,7 +581,7 @@ def _configuration_catalog(connection: Connection) -> ConfigurationCatalogProjec
             )
             active_in_bundle = bool(
                 active_reference
-                and active_reference[2] == snapshot["snapshot_digest"]
+                and active_reference[3] == snapshot["snapshot_digest"]
             )
             versions.append(
                 ConfigurationVersionProjectionDTO(
@@ -595,9 +597,12 @@ def _configuration_catalog(connection: Connection) -> ConfigurationCatalogProjec
                     snapshot_id=snapshot["id"] if snapshot else None,
                     snapshot_digest=snapshot["snapshot_digest"] if snapshot else None,
                     active_in_bundle=active_in_bundle,
-                    active_bundle_id=active_reference[0] if active_in_bundle else None,
+                    active_activation_id=(
+                        active_reference[0] if active_in_bundle else None
+                    ),
+                    active_bundle_id=active_reference[1] if active_in_bundle else None,
                     active_bundle_digest=(
-                        active_reference[1] if active_in_bundle else None
+                        active_reference[2] if active_in_bundle else None
                     ),
                     created_at=version["created_at"],
                     validated_at=version["validated_at"],
@@ -2791,6 +2796,11 @@ def create_canonical_v13_app(
                     status=row["status"],
                     request_digest=row["request_digest"],
                     receipt_digest=row["receipt_digest"],
+                    terminal_reason_codes=row["terminal_reason_codes"],
+                    trial_count=row["trial_count"],
+                    result_count=row["result_count"],
+                    submitted_strategy_count=row["submitted_strategy_count"],
+                    result_digest=row["result_digest"],
                     created_at=row["created_at"],
                     completed_at=row["completed_at"],
                 )

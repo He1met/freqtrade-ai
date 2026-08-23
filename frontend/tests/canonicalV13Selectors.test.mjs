@@ -45,7 +45,9 @@ const STRATEGY = {
   artifact_id: ID_D,
   artifact_digest: DIGEST,
   validation_status: "VALIDATED",
+  validation_status_domain: "INTAKE_CODE",
   qualification_status: "NOT_EVALUATED",
+  qualification_status_domain: "OOS_PLAN",
   execution_authorized: false,
   created_at: "2026-08-14T00:00:00Z",
 };
@@ -153,6 +155,34 @@ test("market profile snapshot and target options remain contextual", () => {
   assert.deepEqual(marketSnapshotSelectorOptions(inventory, ID_B).map((item) => item.value), [ID_C]);
   assert.deepEqual(marketTargetSelectorOptions(snapshot).map((item) => item.value), [ID_D]);
   assert.equal(marketProfileSelectorOptions(inventory)[0].label, "okx-btc-5m · 版本 2");
+});
+
+test("market profile versions use numeric ordering within one profile", () => {
+  const versions = [10, 2, 1].map((version) => ({
+    market_profile_id: ID_A,
+    profile_key: "okx-btc-5m",
+    scope_key: "scope-a",
+    version_id: `${String(version).padStart(8, "0")}-e89b-42d3-a456-426614174000`,
+    version_number: version,
+    lifecycle_status: "VALIDATED",
+    payload_digest: DIGEST,
+    created_at: "2026-08-14T00:00:00Z",
+    validated_at: "2026-08-14T01:00:00Z",
+  }));
+  const options = marketProfileSelectorOptions({
+    status: "AVAILABLE",
+    profile_count: 1,
+    validated_profile_count: 3,
+    artifact_count: 0,
+    accepted_receipt_count: 0,
+    profiles: versions,
+    snapshots: [],
+  });
+  assert.deepEqual(options.map((item) => item.label), [
+    "okx-btc-5m · 版本 1",
+    "okx-btc-5m · 版本 2",
+    "okx-btc-5m · 版本 10",
+  ]);
 });
 
 test("search uses display context while stale committed IDs remain explicit", () => {

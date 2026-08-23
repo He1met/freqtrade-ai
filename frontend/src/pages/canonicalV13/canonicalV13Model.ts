@@ -194,6 +194,7 @@ const GATE_BLOCKER = guidance("研究 Gate 未通过", "持久化 gate receipt �
 const SUBMISSION_BLOCKER = guidance("策略提交被阻断", "Canonical intake 拒绝了当前 source envelope 或安全校验未通过；未写入成功事实。", "检查提交内容", "/v13/submission", "danger");
 const CONFIGURATION_API_BLOCKER = guidance("配置操作被阻断", "Canonical 配置写入、验证、依赖或 receipt 合同未满足。", "查看配置诊断", "/v13/configuration", "danger");
 const RESEARCH_API_BLOCKER = guidance("研究操作被阻断", "Canonical bundle、authorization、lineage 或 research capability 合同未满足。", "查看研究诊断", "/v13/research", "danger");
+const OPTIMIZATION_BLOCKER = guidance("优化未产生可提交结果", "Canonical optimization trial 证据明确记录本轮没有可提交 finalist。", "查看优化证据", "/v13/optimization", "warning");
 
 function enumeratedGuidance(
   codes: readonly string[],
@@ -396,6 +397,9 @@ const REASON: Readonly<Record<string, GuidanceDefinition>> = {
   MARKET_SNAPSHOT_UNSET: guidance("行情快照尚未设置", "API 没有返回可用于当前研究 lineage 的 canonical market snapshot。", "查看行情证据", "/v13/market-data", "warning"),
   MARKET_TARGET_COVERAGE_MISMATCH: MARKET_BLOCKER,
   OVERALL_SCORE_BELOW_MINIMUM: guidance("总分低于最低门槛", "Qualification receipt 明确记录总分未达到冻结配置中的最低门槛。", "查看评分证据", "/v13/research", "warning"),
+  ZERO_TRAIN_VALIDATION_ELIGIBLE_FINALISTS: OPTIMIZATION_BLOCKER,
+  TRADE_LEVERAGE_EXCEEDS_DIGEST_BOUND_TARGET: guidance("试验杠杆超过冻结目标", "Canonical trial 记录的杠杆与 digest 绑定的目标约束不一致，本轮优化已阻断。", "核对冻结优化目标", "/v13/optimization", "warning"),
+  OFFLINE_EXCHANGE_METADATA_SET_INVALID: guidance("离线交易所元数据集合无效", "Canonical trial 使用的离线交易所元数据集合未通过冻结合同校验。", "核对离线行情与元数据证据", "/v13/optimization", "warning"),
   PENDING_FIRST_BACKTEST: guidance("等待首次回测事实", "尚无获授权且已持久化的首次真实回测事实。", "查看研究状态", "/v13/research", "warning"),
   PER_TARGET_ALLOCATION_UNSET: CONFIGURATION_BLOCKER,
   PER_TARGET_CAP_UNSET: CONFIGURATION_BLOCKER,
@@ -425,7 +429,11 @@ const REASON: Readonly<Record<string, GuidanceDefinition>> = {
   RUNTIME_HEARTBEAT_UNSET: RUNTIME_BLOCKER,
   RUNTIME_LAUNCH_CAPABILITY_DRIFT: RUNTIME_DRIFT,
   RUNTIME_LAUNCH_SPEC_DIGEST_DRIFT: RUNTIME_DRIFT,
-  RUNTIME_NOT_HEALTHY: RUNTIME_BLOCKER,
+  RUNTIME_NOT_HEALTHY: guidance("Runtime 未处于健康运行状态", "Canonical Runtime 没有可接受的健康实例；Phase 9 后续阶段保持阻断。", "核对 Runtime 停止、启动与健康回执", "/v13/research", "warning"),
+  NONTERMINAL_DEPLOYMENT_PRESENT: guidance("仍有未终结 Deployment", "存在尚未进入终态的 canonical deployment；不能创建或切换另一条执行链。", "核对并安全终结当前 Deployment", "/v13/research", "warning"),
+  EXACT_HEALTHY_LONG_LIVED_RUNTIME_EVIDENCE_UNSET: guidance("缺少精确的长期 Runtime 健康证据", "当前 qualification、deployment 与 runtime lineage 没有匹配的健康长期运行回执。", "完成长期 Runtime 健康观察并提交正式回执", "/v13/research", "warning"),
+  EXACT_SINGLE_CANARY_ORDER_COUNT_REQUIRED: guidance("尚未满足唯一 Canary 订单计数", "验收要求 exact 单订单事实；零单或多单都不能通过该阶段。", "核对唯一 Demo Canary 订单及其回执", "/v13/research", "warning"),
+  EXACT_RECOVERY_SOAK_ACCEPTANCE_UNSET: guidance("恢复 Soak 尚未验收", "故障恢复后的稳定运行与无残留证据尚未获得 canonical acceptance。", "完成恢复 Soak、对账与正式验收", "/v13/research", "warning"),
   RUNTIME_ORDER_WRITER_FORBIDDEN: RUNTIME_DRIFT,
   RUNTIME_RECEIPT_CAPABILITY_DRIFT: RUNTIME_DRIFT,
   RUNTIME_RECEIPT_DIGEST_DRIFT: RUNTIME_DRIFT,

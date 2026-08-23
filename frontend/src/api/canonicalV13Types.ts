@@ -64,7 +64,9 @@ export type StrategyProjection = {
   artifact_id: CanonicalId;
   artifact_digest: Sha256Digest;
   validation_status: "UNVALIDATED" | "VALIDATING" | "VALIDATED" | "REJECTED" | "BLOCKED";
+  validation_status_domain: "INTAKE_CODE";
   qualification_status: "NOT_EVALUATED" | "PENDING" | "QUALIFIED" | "REJECTED" | "BLOCKED" | "FAILED";
+  qualification_status_domain: "OOS_PLAN";
   execution_authorized: boolean;
   created_at: IsoDateTime;
 };
@@ -141,6 +143,7 @@ export type ConfigurationVersionProjection = {
   snapshot_id: CanonicalId | null;
   snapshot_digest: Sha256Digest | null;
   active_in_bundle: boolean;
+  active_activation_id: CanonicalId | null;
   active_bundle_id: CanonicalId | null;
   active_bundle_digest: Sha256Digest | null;
   created_at: IsoDateTime;
@@ -274,6 +277,11 @@ export type OptimizationProjection = {
   status: "NOT_STARTED" | "PENDING_BASELINE" | "RUNNING" | "SUCCEEDED" | "FAILED" | "BLOCKED";
   request_digest: Sha256Digest;
   receipt_digest: Sha256Digest | null;
+  terminal_reason_codes: string[] | null;
+  trial_count: number | null;
+  result_count: number | null;
+  submitted_strategy_count: number | null;
+  result_digest: Sha256Digest | null;
   created_at: IsoDateTime;
   completed_at: IsoDateTime | null;
 };

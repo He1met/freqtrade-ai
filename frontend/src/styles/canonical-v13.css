@@ -420,6 +420,7 @@
 }
 
 .canonical-v13-select-card { cursor: pointer; font: inherit; }
+.canonical-v13-select-card strong { min-width: 0; overflow-wrap: anywhere; }
 .canonical-v13-select-card:hover,
 .canonical-v13-select-card[aria-pressed="true"] { border-color: var(--formal-brand); background: #f1f8f4; }
 .canonical-v13-select-card span,

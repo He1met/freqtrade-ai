@@ -73,6 +73,9 @@ export function CanonicalConfigurationPage() {
   )) ?? null;
   const versions = configurationVersionSelectorOptions(selectedProfile);
   const selectedVersion = selectedProfile?.versions.find((version) => version.version_id === url.values.version) ?? null;
+  const selectedLatestVersionNumber = selectedProfile?.versions.length
+    ? Math.max(...selectedProfile.versions.map((version) => version.version_number))
+    : null;
   const contextProfiles = catalog.data?.items.filter((profile) => (
     profile.scope_key === url.values.scope && profile.workflow_key === url.values.workflow
   )) ?? [];
@@ -180,7 +183,7 @@ export function CanonicalConfigurationPage() {
       ) : null}
       {selectedVersion && catalogContractKnown ? (
         <section className="canonical-v13-panel">
-          <div className="canonical-v13-heading-row"><div><h2>{selectedProfile?.profile_key} · 版本 {selectedVersion.version_number}</h2><p className="canonical-v13-panel-copy">{selectedVersion.active_in_bundle ? "这是当前 Bundle 正在使用的配置。" : "这是历史或候选配置，当前 Bundle 未使用该版本。"}</p></div><CanonicalStatus status={selectedVersion.lifecycle_status} /></div>
+          <div className="canonical-v13-heading-row"><div><h2>{selectedProfile?.profile_key} · 版本 {selectedVersion.version_number}</h2><p className="canonical-v13-panel-copy">{selectedVersion.active_in_bundle ? "这是当前 Bundle 正在使用的配置。" : selectedVersion.version_number === selectedLatestVersionNumber ? "这是该 Profile 的最新历史版本，但当前 Bundle 未使用该版本。" : "这是历史配置，当前 Bundle 未使用该版本。"}</p></div><CanonicalStatus status={selectedVersion.lifecycle_status} /></div>
           <h3>具体配置</h3>
           <ConfigurationPayload payload={selectedVersion.payload_json} />
           <details className="canonical-v13-advanced-evidence">
@@ -188,8 +191,12 @@ export function CanonicalConfigurationPage() {
             <dl className="canonical-v13-definition-list">
               <div><dt>Version ID</dt><dd><CopyableValue value={selectedVersion.version_id} /></dd></div>
               <div><dt>Payload digest</dt><dd><CopyableValue value={selectedVersion.payload_digest} /></dd></div>
+              <div><dt>Schema digest</dt><dd><CopyableValue value={selectedVersion.schema_digest} /></dd></div>
               <div><dt>Snapshot</dt><dd>{selectedVersion.snapshot_id ? <CopyableValue value={selectedVersion.snapshot_id} /> : "未设置"}</dd></div>
+              <div><dt>Snapshot digest</dt><dd>{selectedVersion.snapshot_digest ? <CopyableValue value={selectedVersion.snapshot_digest} /> : "未设置"}</dd></div>
+              <div><dt>Activation</dt><dd>{selectedVersion.active_activation_id ? <CopyableValue value={selectedVersion.active_activation_id} /> : "未使用"}</dd></div>
               <div><dt>Active Bundle</dt><dd>{selectedVersion.active_bundle_id ? <CopyableValue value={selectedVersion.active_bundle_id} /> : "未使用"}</dd></div>
+              <div><dt>Active Bundle digest</dt><dd>{selectedVersion.active_bundle_digest ? <CopyableValue value={selectedVersion.active_bundle_digest} /> : "未使用"}</dd></div>
             </dl>
           </details>
           <details><summary>原始 JSON 与 Schema</summary><h3>Payload JSON</h3><pre>{JSON.stringify(selectedVersion.payload_json, null, 2)}</pre><h3>Schema JSON</h3><pre>{JSON.stringify(selectedVersion.schema_json, null, 2)}</pre></details>

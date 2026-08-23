@@ -8,14 +8,17 @@ from hashlib import sha256
 import inspect as python_inspect
 from uuid import UUID, uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.pool import StaticPool
+from pydantic import ValidationError
 
 from app.canonical_v13 import api as canonical_api
 from app.canonical_v13.api import API_PREFIX, create_canonical_v13_app
 from app.canonical_v13.genesis import install_canonical_genesis
+from app.canonical_v13.dto import OptimizationProjectionDTO
 from app.canonical_v13.control_plane import (
     ConfigurationDependencyInput,
     create_configuration_draft,
@@ -118,6 +121,45 @@ def _client():
         risk_connection_factory=connection_factory,
     )
     return engine, TestClient(app, raise_server_exceptions=False)
+
+
+def test_optimization_projection_contract_requires_exact_terminal_observability() -> None:
+    payload = {
+        "optimization_run_id": uuid4(),
+        "baseline_qualification_decision_id": uuid4(),
+        "status": "BLOCKED",
+        "request_digest": _HEX,
+        "receipt_digest": _HEX,
+        "terminal_reason_codes": ["ZERO_TRAIN_VALIDATION_ELIGIBLE_FINALISTS"],
+        "trial_count": 96,
+        "result_count": 96,
+        "submitted_strategy_count": 0,
+        "result_digest": _HEX,
+        "created_at": _NOW,
+        "completed_at": _GATE_NOW,
+    }
+    projection = OptimizationProjectionDTO(**payload)
+    assert projection.trial_count == projection.result_count == 96
+    assert projection.terminal_reason_codes == [
+        "ZERO_TRAIN_VALIDATION_ELIGIBLE_FINALISTS"
+    ]
+    with pytest.raises(ValidationError):
+        OptimizationProjectionDTO(**{**payload, "terminal_reason_codes": []})
+    with pytest.raises(ValidationError):
+        OptimizationProjectionDTO(**{**payload, "result_count": 97})
+    with pytest.raises(ValidationError):
+        OptimizationProjectionDTO(
+            **{
+                **payload,
+                "status": "RUNNING",
+                "terminal_reason_codes": None,
+                "trial_count": None,
+                "result_count": None,
+                "submitted_strategy_count": None,
+                "result_digest": None,
+                "completed_at": _GATE_NOW,
+            }
+        )
 
 
 def _submission_payload(*, idempotency_key: str = "submit-1") -> dict[str, object]:
@@ -1340,6 +1382,12 @@ def test_ready_bundle_path_id_drift_rolls_back_then_exact_id_activates() -> None
         assert {
             version["active_bundle_id"] for version in active_versions
         } == {prospective_bundle_id}
+        assert len({
+            version["active_activation_id"] for version in active_versions
+        }) == 1
+        assert None not in {
+            version["active_activation_id"] for version in active_versions
+        }
         assert {
             version["active_bundle_digest"] for version in active_versions
         } == {body["bundle_digest"]}

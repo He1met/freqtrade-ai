@@ -61,6 +61,7 @@ test("the client exposes the canonical projection routes with one fetch each", a
       profiles: [],
       prospective_bundle_id: null,
       qualification_status: "NOT_EVALUATED",
+      qualification_status_domain: "OOS_PLAN",
       reason_codes: [],
       receipt_digest: DIGEST,
       repeat_noop: false,
@@ -76,6 +77,7 @@ test("the client exposes the canonical projection routes with one fetch each", a
       submission_id: ID,
       unset_kinds: [],
       validation_status: "UNVALIDATED",
+      validation_status_domain: "INTAKE_CODE",
       validation_plan_id: ID,
       validation_plan_digest: DIGEST,
       research_target_id: ID,
@@ -205,6 +207,39 @@ test("malformed 2xx payload is blocked at the runtime DTO boundary", async (cont
   context.after(() => { globalThis.fetch = originalFetch; });
   globalThis.fetch = async () => Response.json({ status: "AVAILABLE", items: null });
   await assert.rejects(fetchCanonicalStrategies(), /INVALID_SUCCESS_DTO/);
+
+  globalThis.fetch = async () => Response.json({
+    status: "AVAILABLE",
+    items: [{
+      strategy_id: ID,
+      display_name: "Alpha",
+      catalog_status: "DRAFT",
+      intake_status: "INTAKE_ACCEPTED",
+      validation_status: "UNVALIDATED",
+      qualification_status: "QUALIFIED",
+      qualification_status_domain: "OOS_PLAN",
+      execution_authorized: false,
+    }],
+  });
+  await assert.rejects(fetchCanonicalStrategies(), /validation_status_domain has invalid shape/);
+
+  globalThis.fetch = async () => Response.json({
+    status: "AVAILABLE",
+    items: [{
+      optimization_run_id: ID,
+      baseline_qualification_decision_id: ID,
+      status: "BLOCKED",
+      request_digest: DIGEST,
+      receipt_digest: DIGEST,
+      trial_count: 1,
+      result_count: 1,
+      submitted_strategy_count: 0,
+      result_digest: DIGEST,
+      created_at: "2026-08-23T00:00:00Z",
+      completed_at: "2026-08-23T01:00:00Z",
+    }],
+  });
+  await assert.rejects(fetchCanonicalOptimizations(), /terminal_reason_codes has invalid shape/);
 });
 
 test("client source contains no legacy fallback surface", async () => {

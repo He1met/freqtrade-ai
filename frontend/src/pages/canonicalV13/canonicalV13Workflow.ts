@@ -30,10 +30,10 @@ type WorkflowInput = {
 
 const STEP_LABELS: Readonly<Record<CanonicalResearchStepId, string>> = {
   intake: "策略入库",
-  validation: "策略验证",
+  validation: "入库代码验证",
   plan: "研究计划",
   attempt: "回测执行",
-  qualification: "资格决策",
+  qualification: "OOS 资格决策",
 };
 
 function step(
@@ -173,7 +173,7 @@ export function canonicalResearchWorkflow({ chain, links, selection, strategy }:
   }
 
   let researchSteps: CanonicalResearchWorkflowStep[];
-  if (intake.state !== "complete" || validation.state !== "complete") {
+  if (intake.state !== "complete" || validation.state === "unknown") {
     researchSteps = unknownSteps("RESEARCH_UPSTREAM_INCOMPLETE", links.researchHref, strategy.qualification_status);
   } else if (!chain) {
     researchSteps = unknownSteps("RESEARCH_CONTEXT_UNSELECTED", links.researchHref, strategy.qualification_status);

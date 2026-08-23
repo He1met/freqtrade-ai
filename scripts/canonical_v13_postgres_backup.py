@@ -56,6 +56,10 @@ from app.canonical_v13.manifest import (  # noqa: E402
     CANONICAL_TABLE_NAMES,
 )
 from app.canonical_v13.models import CANONICAL_TABLES  # noqa: E402
+from app.canonical_v13.optimization_observability_upgrade import (  # noqa: E402
+    CanonicalOptimizationObservabilityUpgradeBlocked,
+    verify_optimization_observability_upgrade,
+)
 from app.canonical_v13.runtime_image_upgrade import (  # noqa: E402
     CanonicalRuntimeImageUpgradeBlocked,
     verify_runtime_image_upgrade,
@@ -88,6 +92,11 @@ EXPECTED_LIFECYCLE_TRIGGERS: Final[tuple[tuple[str, str, str], ...]] = (
         "O",
     ),
     ("deployments", "deployments_disable_evidence_guard", "O"),
+    (
+        "optimization_runs",
+        "optimization_runs_terminal_observability_guard",
+        "O",
+    ),
     ("research_gate_attempts", "research_gate_attempts_lifecycle", "O"),
     ("research_gate_receipts", "research_gate_receipts_append_only", "O"),
     (
@@ -575,6 +584,18 @@ def _verify_restore_trigger_boundary(
         raise CanonicalBackupBlocked(
             "BLOCKED_CANONICAL_RESTORE_ACCEPTANCE_TRIGGER_CONTRACT",
             "acceptance signal trigger verifier did not return ACCEPTED",
+        )
+    try:
+        optimization = verify_optimization_observability_upgrade(connection)
+    except CanonicalOptimizationObservabilityUpgradeBlocked as exc:
+        raise CanonicalBackupBlocked(
+            "BLOCKED_CANONICAL_RESTORE_OPTIMIZATION_OBSERVABILITY_CONTRACT",
+            "optimization observability trigger contract is not accepted",
+        ) from exc
+    if optimization.status != "ACCEPTED":
+        raise CanonicalBackupBlocked(
+            "BLOCKED_CANONICAL_RESTORE_OPTIMIZATION_OBSERVABILITY_CONTRACT",
+            "optimization observability verifier did not return ACCEPTED",
         )
 
 

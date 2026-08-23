@@ -128,7 +128,7 @@ EXPECTED_TABLES_BY_DOMAIN = {
 
 
 def test_exact_identity_and_table_manifest_matches_frozen_design() -> None:
-    assert CANONICAL_AUTHORITY_REVISION == "20260823_phase9_acceptance_signal_trigger14"
+    assert CANONICAL_AUTHORITY_REVISION == "20260824_optimization_observability15"
     assert CANONICAL_DATABASE_PURPOSE == "FREQTRADE_AI_V13_CANONICAL"
     assert CANONICAL_BUSINESS_SCHEMA == "strategy_platform_v13"
     assert CANONICAL_GENESIS_VERSION == "20260814_01"
@@ -410,11 +410,11 @@ def test_postgresql_types_constraints_and_locking_compile_offline() -> None:
 
     assert len(tables) == 58
     assert len(foreign_keys) == 130
-    assert len(checks) == 81
+    assert len(checks) == 84
     assert len(uniques) == 81
     assert len(indexes) == 113
     assert len(datetimes) == 101
-    assert len(json_columns) == 27
+    assert len(json_columns) == 28
     assert all(key.deferrable is not True for key in foreign_keys)
     assert all(column.type.timezone is True for column in datetimes)
     assert all(
@@ -426,7 +426,9 @@ def test_postgresql_types_constraints_and_locking_compile_offline() -> None:
         str(CreateTable(table).compile(dialect=dialect)) for table in tables
     )
     assert compiled_tables.count("TIMESTAMP WITH TIME ZONE") == len(datetimes)
-    assert compiled_tables.count(" JSON NOT NULL") == len(json_columns)
+    assert compiled_tables.count(" JSON NOT NULL") == sum(
+        not column.nullable for column in json_columns
+    )
     assert "DEFERRABLE" not in compiled_tables
 
     partial = next(
