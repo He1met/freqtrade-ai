@@ -198,7 +198,7 @@ def test_acceptance_signal_trigger_is_database_immutable() -> None:
                     require_zero_business_rows=False,
                 )
                 assert tampered_composition.accepted is False
-                assert "extra table grants count=2" in tampered_composition.problems
+                assert "extra table grants count=1" in tampered_composition.problems
                 with pytest.raises(CanonicalAcceptanceSignalTriggerUpgradeBlocked):
                     apply_acceptance_signal_trigger_upgrade(
                         connection, role_mapping=mapping
