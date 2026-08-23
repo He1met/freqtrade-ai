@@ -88,7 +88,11 @@ from app.canonical_v13.research_validation import (
 )
 import tests.test_canonical_v13_phase9_execution_authority as phase9_fixture
 from tests.test_canonical_v13_phase9_execution_authority import _production_chain
-from tests.test_canonical_v13_research_validation import _prepare_ready_plan, _start
+from tests.test_canonical_v13_research_validation import (
+    _metrics,
+    _prepare_ready_plan,
+    _start,
+)
 from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.exc import DBAPIError
 
@@ -361,18 +365,7 @@ def _qualified_with_persisted_v3_gate_receipts(connection):
         connection,
         receipt=simulate_ephemeral_attempt(
             running,
-            metrics_by_window_key={
-                "required-a": {
-                    "net_return": 0.8,
-                    "drawdown": 0.1,
-                    "trade_count": 20,
-                },
-                "required-b": {
-                    "net_return": 0.4,
-                    "drawdown": 0.2,
-                    "trade_count": 12,
-                },
-            },
+            metrics_by_window_key=_metrics(),
         ),
     )
     score_target(
