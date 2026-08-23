@@ -112,7 +112,7 @@ def test_acceptance_signal_trigger_is_database_immutable() -> None:
                     role_mapping=mapping,
                     require_zero_business_rows=False,
                 )
-                assert composed.explicit_acl_count == 362
+                assert composed.explicit_acl_count == 363
                 assert not any(
                     "table grants" in problem for problem in composed.problems
                 )
