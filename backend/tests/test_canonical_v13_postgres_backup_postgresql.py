@@ -24,6 +24,10 @@ from app.canonical_v13.models import (
     RESEARCH_GATE_ATTEMPTS_TABLE,
 )
 from app.canonical_v13.optimization import optimization_selection_digest
+from app.canonical_v13.shadow_risk_acl_upgrade import (
+    apply_shadow_risk_acl_upgrade,
+    verify_shadow_risk_acl_upgrade,
+)
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
@@ -209,6 +213,10 @@ def test_restore_terminal_historical_gate_row_with_triggers_transactional(
                     connection, role_mapping=role_mapping
                 )
                 assert upgraded.status == "UPGRADED"
+                shadow_acl = apply_shadow_risk_acl_upgrade(
+                    connection, role_mapping=role_mapping
+                )
+                assert shadow_acl.status == "UPGRADED"
 
         attempt_id = uuid4()
         optimization_run_id = uuid4()
@@ -349,6 +357,9 @@ def test_restore_terminal_historical_gate_row_with_triggers_transactional(
                 connection, require_superuser=True
             )
             assert verify_gate_receipt_upgrade(connection).status == "ACCEPTED"
+            assert verify_shadow_risk_acl_upgrade(
+                connection, role_mapping=role_mapping
+            ).status == "ACCEPTED"
             savepoint = connection.begin_nested()
             with pytest.raises(DBAPIError):
                 connection.execute(

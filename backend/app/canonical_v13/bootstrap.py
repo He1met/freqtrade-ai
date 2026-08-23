@@ -29,6 +29,11 @@ from app.canonical_v13.manifest import (
     WRITER_TABLE_ALLOWLIST,
 )
 from app.canonical_v13.role_mapping import CanonicalRoleMapping
+from app.canonical_v13.shadow_risk_acl_upgrade import (
+    SHADOW_RISK_WRITER_READ_DELTA,
+    CanonicalShadowRiskAclUpgradeBlocked,
+    verify_shadow_risk_acl_upgrade,
+)
 
 
 LOCAL_ROLE_PREFIX: Final = "freqtrade_ai_v13_"
@@ -117,19 +122,32 @@ def _accepted_additive_table_grants(
 ) -> set[tuple[str, str, str]]:
     """Compose only independently verified additive ACL receipts."""
 
+    accepted: set[tuple[str, str, str]] = set()
     try:
         acceptance_trigger = verify_acceptance_signal_trigger_upgrade(
             connection, role_mapping=role_mapping
         )
     except CanonicalAcceptanceSignalTriggerUpgradeBlocked:
-        return set()
-    if acceptance_trigger.status != "ACCEPTED":
-        return set()
-    control_writer = role_mapping.physical("canonical_control_writer")
-    return {
-        (control_writer, table_name, "SELECT")
-        for table_name in ACCEPTANCE_CONTROL_WRITER_READ_DELTA
-    }
+        acceptance_trigger = None
+    if acceptance_trigger is not None and acceptance_trigger.status == "ACCEPTED":
+        control_writer = role_mapping.physical("canonical_control_writer")
+        accepted.update(
+            (control_writer, table_name, "SELECT")
+            for table_name in ACCEPTANCE_CONTROL_WRITER_READ_DELTA
+        )
+    try:
+        shadow_risk_acl = verify_shadow_risk_acl_upgrade(
+            connection, role_mapping=role_mapping
+        )
+    except CanonicalShadowRiskAclUpgradeBlocked:
+        shadow_risk_acl = None
+    if shadow_risk_acl is not None and shadow_risk_acl.status == "ACCEPTED":
+        risk_writer = role_mapping.physical("canonical_risk_writer")
+        accepted.update(
+            (risk_writer, table_name, "SELECT")
+            for table_name in SHADOW_RISK_WRITER_READ_DELTA
+        )
+    return accepted
 
 
 def verify_postgresql_bootstrap(

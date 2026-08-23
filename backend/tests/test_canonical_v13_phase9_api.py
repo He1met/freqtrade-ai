@@ -262,6 +262,7 @@ def test_shadow_api_persists_one_non_executable_dual_check_receipt() -> None:
         assert repeated.status_code == 201, repeated.text
         assert repeated.json()["repeat_noop"] is True
         assert repeated.json()["risk_decision_id"] == first.json()["risk_decision_id"]
+        assert repeated.json()["decision_digest"] == first.json()["decision_digest"]
         with engine.begin() as connection:
             effective = connection.execution_options(
                 schema_translate_map={CANONICAL_BUSINESS_SCHEMA: None}
@@ -296,6 +297,7 @@ def test_shadow_api_persists_one_non_executable_dual_check_receipt() -> None:
             "execution_risk_reservations": 0,
             "orders": 0,
         }
+        assert counts["risk_decisions"] == 1
     finally:
         client.close()
         engine.dispose()

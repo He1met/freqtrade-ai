@@ -72,6 +72,15 @@ from app.canonical_v13.runtime_reader_acl_upgrade import (
     rollback_runtime_reader_acl_upgrade,
     verify_runtime_reader_acl_upgrade,
 )
+from app.canonical_v13.shadow_risk_acl_upgrade import (
+    SHADOW_RISK_WRITER_READ_DELTA,
+    CanonicalShadowRiskAclUpgradeBlocked,
+    apply_shadow_risk_acl_upgrade,
+    rollback_shadow_risk_acl_upgrade,
+    verify_shadow_risk_acl_upgrade,
+)
+from app.canonical_v13.phase9_execution_authority import decide_signal_risk_shadow
+from tests.test_canonical_v13_phase9_execution_authority import _production_chain
 from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.exc import DBAPIError
 
@@ -331,6 +340,187 @@ def test_acceptance_signal_trigger_is_database_immutable() -> None:
                     ACCEPTANCE_TRIGGER_GUARD_TRIGGER,
                     ACCEPTANCE_SIGNAL_GUARD_TRIGGER,
                 }.issubset(set(trigger_names))
+            finally:
+                transaction.rollback()
+    finally:
+        engine.dispose()
+
+
+def test_shadow_risk_acl_upgrade_is_exact_and_enables_lineage_replay() -> None:
+    assert DATABASE_URL is not None
+    mapping = CanonicalRoleMapping.from_prefix(
+        os.environ.get("CANONICAL_V13_ROLE_PREFIX", "freqtrade_ai_v13_ci_")
+    )
+    risk_writer = mapping.physical("canonical_risk_writer")
+    engine = create_engine(DATABASE_URL)
+    try:
+        with engine.connect() as connection:
+            transaction = connection.begin()
+            try:
+                acceptance = apply_acceptance_signal_trigger_upgrade(
+                    connection, role_mapping=mapping
+                )
+                assert acceptance.status in {"UPGRADED", "ACCEPTED"}
+                previous = verify_shadow_risk_acl_upgrade(
+                    connection, role_mapping=mapping
+                )
+                assert previous.status == "PREVIOUS_READY"
+                assert previous.manifest_digest == (
+                    connection.execute(
+                        select(SCHEMA_METADATA_TABLE.c.manifest_digest).where(
+                            SCHEMA_METADATA_TABLE.c.metadata_key
+                            == "canonical-v13-genesis"
+                        )
+                    ).scalar_one()
+                )
+                _approval, _deployment, _runtime, intent_id, _launcher = (
+                    _production_chain(connection)
+                )
+
+                first_denial = connection.begin_nested()
+                connection.exec_driver_sql(f"SET LOCAL ROLE {risk_writer}")
+                with pytest.raises(DBAPIError) as denied_approval:
+                    decide_signal_risk_shadow(
+                        connection,
+                        trade_intent_id=intent_id,
+                        evaluated_at=datetime(2026, 8, 24, tzinfo=timezone.utc),
+                    )
+                assert denied_approval.value.orig.sqlstate == "42501"
+                assert "deployment_approvals" in str(denied_approval.value.orig)
+                first_denial.rollback()
+                connection.exec_driver_sql("RESET ROLE")
+
+                connection.exec_driver_sql(
+                    "GRANT SELECT ON TABLE "
+                    "strategy_platform_v13.deployment_approvals "
+                    f"TO {risk_writer}"
+                )
+                next_denial = connection.begin_nested()
+                connection.exec_driver_sql(f"SET LOCAL ROLE {risk_writer}")
+                with pytest.raises(DBAPIError) as denied_qualification:
+                    decide_signal_risk_shadow(
+                        connection,
+                        trade_intent_id=intent_id,
+                        evaluated_at=datetime(2026, 8, 24, tzinfo=timezone.utc),
+                    )
+                assert denied_qualification.value.orig.sqlstate == "42501"
+                assert "qualification_decisions" in str(
+                    denied_qualification.value.orig
+                )
+                next_denial.rollback()
+                connection.exec_driver_sql("RESET ROLE")
+                connection.exec_driver_sql(
+                    "REVOKE SELECT ON TABLE "
+                    "strategy_platform_v13.deployment_approvals "
+                    f"FROM {risk_writer}"
+                )
+
+                upgraded = apply_shadow_risk_acl_upgrade(
+                    connection, role_mapping=mapping
+                )
+                assert upgraded.status == "UPGRADED"
+                assert upgraded.repeat_noop is False
+                assert set(upgraded.risk_writer_privileges) == set(
+                    SHADOW_RISK_WRITER_READ_DELTA
+                )
+                assert all(
+                    privileges
+                    == {
+                        "SELECT": True,
+                        "INSERT": False,
+                        "UPDATE": False,
+                        "DELETE": False,
+                        "TRUNCATE": False,
+                        "REFERENCES": False,
+                        "TRIGGER": False,
+                    }
+                    for privileges in upgraded.risk_writer_privileges.values()
+                )
+                replay = apply_shadow_risk_acl_upgrade(
+                    connection, role_mapping=mapping
+                )
+                assert replay.status == "ACCEPTED"
+                assert replay.repeat_noop is True
+
+                rolled_back = rollback_shadow_risk_acl_upgrade(
+                    connection, role_mapping=mapping
+                )
+                assert rolled_back.status == "ROLLED_BACK"
+                assert rolled_back.repeat_noop is False
+                rollback_replay = rollback_shadow_risk_acl_upgrade(
+                    connection, role_mapping=mapping
+                )
+                assert rollback_replay.status == "PREVIOUS_READY"
+                assert rollback_replay.repeat_noop is True
+                reapplied = apply_shadow_risk_acl_upgrade(
+                    connection, role_mapping=mapping
+                )
+                assert reapplied.status == "UPGRADED"
+
+                for table_name in SHADOW_RISK_WRITER_READ_DELTA:
+                    for privilege in ("INSERT", "UPDATE", "DELETE"):
+                        denied_dml = connection.begin_nested()
+                        connection.exec_driver_sql(f"SET LOCAL ROLE {risk_writer}")
+                        with pytest.raises(DBAPIError) as denied:
+                            connection.exec_driver_sql(
+                                f"{privilege} FROM "
+                                f"strategy_platform_v13.{table_name} WHERE false"
+                                if privilege == "DELETE"
+                                else (
+                                    f"UPDATE strategy_platform_v13.{table_name} "
+                                    "SET id=id WHERE false"
+                                    if privilege == "UPDATE"
+                                    else f"INSERT INTO strategy_platform_v13.{table_name} DEFAULT VALUES"
+                                )
+                            )
+                        assert denied.value.orig.sqlstate == "42501"
+                        denied_dml.rollback()
+                        connection.exec_driver_sql("RESET ROLE")
+
+                connection.exec_driver_sql(f"SET LOCAL ROLE {risk_writer}")
+                first = decide_signal_risk_shadow(
+                    connection,
+                    trade_intent_id=intent_id,
+                    evaluated_at=datetime(2026, 8, 24, tzinfo=timezone.utc),
+                )
+                repeated = decide_signal_risk_shadow(
+                    connection,
+                    trade_intent_id=intent_id,
+                    evaluated_at=datetime(2026, 8, 24, tzinfo=timezone.utc),
+                )
+                connection.exec_driver_sql("RESET ROLE")
+                assert first.repeat_noop is False
+                assert repeated.repeat_noop is True
+                assert repeated.risk_decision_id == first.risk_decision_id
+                assert repeated.decision_digest == first.decision_digest
+
+                composed = verify_postgresql_bootstrap(
+                    connection,
+                    role_mapping=mapping,
+                    require_zero_business_rows=False,
+                )
+                assert composed.accepted is True
+                assert composed.explicit_acl_count == 365
+
+                connection.exec_driver_sql(
+                    "GRANT UPDATE ON TABLE "
+                    "strategy_platform_v13.deployment_approvals "
+                    f"TO {risk_writer}"
+                )
+                with pytest.raises(CanonicalShadowRiskAclUpgradeBlocked):
+                    verify_shadow_risk_acl_upgrade(
+                        connection, role_mapping=mapping
+                    )
+                tampered = verify_postgresql_bootstrap(
+                    connection,
+                    role_mapping=mapping,
+                    require_zero_business_rows=False,
+                )
+                assert tampered.accepted is False
+                assert any(
+                    problem.startswith("extra table grants count=")
+                    for problem in tampered.problems
+                )
             finally:
                 transaction.rollback()
     finally:
