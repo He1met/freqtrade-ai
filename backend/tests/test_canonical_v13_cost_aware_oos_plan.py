@@ -68,7 +68,8 @@ def test_worker_is_syntactically_valid_and_has_no_clock_entry_escape() -> None:
     assert all(token not in source for token in banned)
     assert '"--network"' not in source
     assert 'sorted(path.name for path in Path("/sys/class/net").iterdir()) != ["lo"]' in source
-    assert "min(2.0, max_leverage)" in source
+    assert "rendered_leverage_limit = finite_positive(" in source
+    assert 'f"min({rendered_leverage_limit}, max_leverage)"' in source
     assert "can_short = False" in source
     assert "position_adjustment_enable = False" in source
     assert '"--enable-protections"' in source

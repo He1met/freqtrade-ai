@@ -216,6 +216,7 @@ def render_strategy(
     family: str,
     number: int,
     p: dict[str, object],
+    leverage_limit: float,
     fixed_contract: dict[str, object] | None = None,
 ) -> tuple[str, str]:
     cls = class_name(family, number)
@@ -257,11 +258,10 @@ def render_strategy(
     }
     roi_source = json.dumps(fixed["minimal_roi"], sort_keys=True)
     direction_header = "can_short = True" if bidirectional else "can_short = False"
-    leverage_expression = (
-        "min(1.0, max_leverage)"
-        if bidirectional
-        else "min(2.0, max_leverage)"
+    rendered_leverage_limit = finite_positive(
+        leverage_limit, field="strategy leverage limit"
     )
+    leverage_expression = f"min({rendered_leverage_limit}, max_leverage)"
     bidirectional_position_contract = (
         '    max_entry_position_adjustment = 0\n'
         '    exit_position_semantics = "POSITION_CLOSING_REDUCE_ONLY"\n'
@@ -1031,6 +1031,7 @@ def evaluate(plan: dict[str, object], market: Path, metadata: Path) -> dict[str,
             family,
             number,
             parameters,
+            leverage_limit,
             fixed_contract if isinstance(fixed_contract, dict) else None,
         )
         source_path = Path("/work/strategies") / f"{cls}.py"
