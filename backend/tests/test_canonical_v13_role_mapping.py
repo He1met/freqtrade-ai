@@ -131,7 +131,7 @@ def test_bootstrap_render_cli_is_offline_and_never_requires_a_database_url() -> 
     assert payload["database_name"] == LOCAL_DATABASE_NAME
     assert payload["role_prefix"] == LOCAL_ROLE_PREFIX
     assert payload["capability_role_count"] == 18
-    assert payload["acl_statement_count"] == 1626
+    assert payload["acl_statement_count"] == 1627
     assert "DATABASE_URL" not in completed.stdout
 
 
