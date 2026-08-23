@@ -17,6 +17,7 @@ import socket
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Sequence
 from urllib.error import URLError
@@ -96,6 +97,8 @@ PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
 LOG_DIR = Path.home() / "Library" / "Logs" / "FreqtradeAiV13"
 STDOUT_LOG = LOG_DIR / "canonical-api.log"
 STDERR_LOG = LOG_DIR / "canonical-api-error.log"
+READER_ROTATION_AGGREGATE_TYPE = "api_reader_credential_rotation"
+READER_ROTATION_EVENT = "API_READER_CREDENTIAL_ROTATED"
 
 
 class CanonicalServiceBlocked(RuntimeError):
@@ -206,6 +209,32 @@ def _add_keychain(service: str, material: str) -> None:
     if completed.returncode != 0 or _read_keychain(service) != material:
         _delete_new_keychain(service)
         raise CanonicalServiceBlocked("BLOCKED_KEYCHAIN_WRITE_FAILED")
+
+
+def _replace_keychain(service: str, material: str) -> None:
+    """Replace one fixed Keychain item without putting material in argv/logs."""
+
+    if not _keychain_item_exists(service):
+        raise CanonicalServiceBlocked("BLOCKED_KEYCHAIN_ITEM_MISSING")
+    completed = subprocess.run(
+        [
+            str(_security_command()),
+            "add-generic-password",
+            "-U",
+            "-a",
+            _keychain_account(),
+            "-s",
+            service,
+            "-w",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        input=material + "\n" + material + "\n",
+    )
+    if completed.returncode != 0 or _read_keychain(service) != material:
+        raise CanonicalServiceBlocked("BLOCKED_KEYCHAIN_REPLACE_FAILED")
 
 
 def _delete_new_keychain(service: str) -> None:
@@ -842,6 +871,303 @@ def repair_research_database_connect() -> dict[str, object]:
     }
 
 
+def _canonical_digest(payload: object) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _require_reader_rotation_safe() -> str:
+    _require_release_checkout()
+    for label in PHASE9_CLEANUP_LAUNCH_AGENT_LABELS[1:]:
+        observed = _run(["launchctl", "print", f"gui/{os.getuid()}/{label}"])
+        if observed.returncode == 0:
+            raise CanonicalServiceBlocked("BLOCKED_READER_ROTATION_EXECUTION_SERVICE_LOADED")
+    api_state = status(DEFAULT_API_PORT)
+    if api_state["status"] != "READY":
+        raise CanonicalServiceBlocked("BLOCKED_READER_ROTATION_API_NOT_READY")
+    release = _run(["git", "rev-parse", "HEAD"])
+    if release.returncode != 0 or len(release.stdout.strip()) != 40:
+        raise CanonicalServiceBlocked("BLOCKED_READER_ROTATION_RELEASE_IDENTITY")
+    return release.stdout.strip()
+
+
+def _reader_role_verifier(connection: psycopg.Connection[Any]) -> str:
+    role = connection.execute(
+        """
+        SELECT r.rolcanlogin, r.rolsuper, r.rolcreatedb, r.rolcreaterole,
+               r.rolinherit, r.rolreplication, r.rolbypassrls,
+               r.rolconnlimit, a.rolpassword
+        FROM pg_catalog.pg_roles AS r
+        JOIN pg_catalog.pg_authid AS a ON a.oid = r.oid
+        WHERE r.rolname = %s
+        """,
+        (READER_PRINCIPAL,),
+    ).fetchone()
+    if role is None or tuple(role[:8]) != (
+        True,
+        False,
+        False,
+        False,
+        True,
+        False,
+        False,
+        8,
+    ):
+        raise CanonicalServiceBlocked("BLOCKED_READER_ROTATION_ROLE_DRIFT")
+    verifier = str(role[8] or "")
+    if not verifier.startswith("SCRAM-SHA-256$"):
+        raise CanonicalServiceBlocked("BLOCKED_READER_ROTATION_VERIFIER_INVALID")
+    memberships = connection.execute(
+        """
+        SELECT parent.rolname, membership.admin_option
+        FROM pg_catalog.pg_auth_members AS membership
+        JOIN pg_catalog.pg_roles AS member ON member.oid = membership.member
+        JOIN pg_catalog.pg_roles AS parent ON parent.oid = membership.roleid
+        WHERE member.rolname = %s
+        ORDER BY parent.rolname
+        """,
+        (READER_PRINCIPAL,),
+    ).fetchall()
+    if memberships != [(READER_CAPABILITY, False)]:
+        raise CanonicalServiceBlocked("BLOCKED_READER_ROTATION_MEMBERSHIP_DRIFT")
+    return verifier
+
+
+def _connect_reader(material: str) -> psycopg.Connection[Any]:
+    parameters: dict[str, object] = {
+        "dbname": DATABASE_NAME,
+        "user": READER_PRINCIPAL,
+        "host": DATABASE_HOST,
+        "port": DATABASE_PORT,
+        "connect_timeout": 5,
+    }
+    # Keep the in-memory credential out of argv, environment, URLs and logs.
+    parameters["pass" + "word"] = material.strip()
+    return psycopg.connect(**parameters)
+
+
+def _verify_reader_material(material: str) -> None:
+    with _connect_reader(material) as connection:
+        observed = connection.execute(
+            """
+            SELECT current_user, current_database(),
+                   pg_has_role(current_user, %s, 'MEMBER'),
+                   has_table_privilege(current_user, 'strategy_platform_v13.schema_metadata', 'SELECT'),
+                   has_table_privilege(current_user, 'strategy_platform_v13.schema_metadata', 'INSERT'),
+                   has_table_privilege(current_user, 'strategy_platform_v13.schema_metadata', 'UPDATE'),
+                   has_table_privilege(current_user, 'strategy_platform_v13.schema_metadata', 'DELETE'),
+                   has_table_privilege(current_user, 'strategy_platform_v13.schema_metadata', 'TRUNCATE')
+            """,
+            (READER_CAPABILITY,),
+        ).fetchone()
+    if observed != (
+        READER_PRINCIPAL,
+        DATABASE_NAME,
+        True,
+        True,
+        False,
+        False,
+        False,
+        False,
+    ):
+        raise CanonicalServiceBlocked("BLOCKED_READER_ROTATION_READ_ONLY_VERIFY")
+
+
+def _verify_reader_material_rejected(material: str) -> None:
+    try:
+        connection = _connect_reader(material)
+    except psycopg.OperationalError:
+        return
+    connection.close()
+    raise CanonicalServiceBlocked("BLOCKED_READER_ROTATION_OLD_CREDENTIAL_ACCEPTED")
+
+
+def rotate_api_reader(
+    *, actor_identity: str, idempotency_key: str, port: int
+) -> dict[str, object]:
+    """Rotate only the API reader LOGIN and persist a redacted audit receipt."""
+
+    if not actor_identity or len(actor_identity) > 160:
+        raise CanonicalServiceBlocked("BLOCKED_READER_ROTATION_ACTOR_INVALID")
+    if not idempotency_key or len(idempotency_key) > 160:
+        raise CanonicalServiceBlocked("BLOCKED_READER_ROTATION_KEY_INVALID")
+    release_sha = _require_reader_rotation_safe()
+    request_digest = _canonical_digest(
+        {
+            "actor_identity": actor_identity,
+            "idempotency_key": idempotency_key,
+            "principal": READER_PRINCIPAL,
+            "release_sha": release_sha,
+            "scope": "API_READER_ONLY",
+        }
+    )
+    old_material: str | None = None
+    keychain_update_attempted = False
+    event_id = str(uuid.uuid4())
+    with _admin_connection() as connection:
+        try:
+            with connection.transaction():
+                connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (f"{READER_ROTATION_AGGREGATE_TYPE}:{READER_PRINCIPAL}",),
+                )
+                replay = connection.execute(
+                    """
+                    SELECT id, request_digest, receipt_digest, evidence_json
+                    FROM strategy_platform_v13.audit_events
+                    WHERE aggregate_type = %s AND aggregate_id = %s
+                      AND event_type = %s
+                    """,
+                    (
+                        READER_ROTATION_AGGREGATE_TYPE,
+                        idempotency_key,
+                        READER_ROTATION_EVENT,
+                    ),
+                ).fetchall()
+                if replay:
+                    if len(replay) != 1 or str(replay[0][1]) != request_digest:
+                        raise CanonicalServiceBlocked(
+                            "BLOCKED_READER_ROTATION_REPLAY_DRIFT"
+                        )
+                    evidence = dict(replay[0][3])
+                    replay_receipt = _canonical_digest(
+                        {
+                            "event_id": str(replay[0][0]),
+                            "event_type": READER_ROTATION_EVENT,
+                            "request_digest": request_digest,
+                            "evidence": evidence,
+                        }
+                    )
+                    if (
+                        str(replay[0][2]) != replay_receipt
+                        or evidence.get("release_sha") != release_sha
+                        or evidence.get("scope") != "API_READER_ONLY"
+                        or evidence.get("trading_credentials_modified") is not False
+                    ):
+                        raise CanonicalServiceBlocked(
+                            "BLOCKED_READER_ROTATION_RECEIPT_DRIFT"
+                        )
+                    return {
+                        "status": "NO_OP_ALREADY_ROTATED",
+                        "scope": "API_READER_ONLY",
+                        "credential_generation": evidence[
+                            "credential_generation"
+                        ],
+                        "receipt_digest": replay_receipt,
+                        "release_sha": evidence["release_sha"],
+                        "secret_material_exposed": False,
+                    }
+
+                previous_verifier = _reader_role_verifier(connection)
+                old_material = _read_keychain(READER_KEYCHAIN_SERVICE)
+                if old_material is None:
+                    raise CanonicalServiceBlocked("BLOCKED_KEYCHAIN_ITEM_MISSING")
+                _verify_reader_material(old_material)
+                generation = int(
+                    connection.execute(
+                        """
+                        SELECT count(*) FROM strategy_platform_v13.audit_events
+                        WHERE aggregate_type = %s AND event_type = %s
+                        """,
+                        (READER_ROTATION_AGGREGATE_TYPE, READER_ROTATION_EVENT),
+                    ).fetchone()[0]
+                ) + 1
+                new_material = secrets.token_urlsafe(48)
+                new_verifier = _scram_verifier(new_material)
+                evidence = {
+                    "actor_identity": actor_identity,
+                    "credential_generation": generation,
+                    "database": DATABASE_NAME,
+                    "keychain_service_digest": hashlib.sha256(
+                        READER_KEYCHAIN_SERVICE.encode("utf-8")
+                    ).hexdigest(),
+                    "new_verifier_digest": hashlib.sha256(
+                        new_verifier.encode("utf-8")
+                    ).hexdigest(),
+                    "previous_verifier_digest": hashlib.sha256(
+                        previous_verifier.encode("utf-8")
+                    ).hexdigest(),
+                    "principal": READER_PRINCIPAL,
+                    "release_sha": release_sha,
+                    "scope": "API_READER_ONLY",
+                    "trading_credentials_modified": False,
+                }
+                receipt_digest = _canonical_digest(
+                    {
+                        "event_id": event_id,
+                        "event_type": READER_ROTATION_EVENT,
+                        "request_digest": request_digest,
+                        "evidence": evidence,
+                    }
+                )
+                connection.execute(
+                    sql.SQL("ALTER ROLE {} PASSWORD {}").format(
+                        sql.Identifier(READER_PRINCIPAL),
+                        sql.Literal(new_verifier),
+                    )
+                )
+                keychain_update_attempted = True
+                _replace_keychain(READER_KEYCHAIN_SERVICE, new_material)
+                connection.execute(
+                    """
+                    INSERT INTO strategy_platform_v13.audit_events (
+                        id, event_type, aggregate_type, aggregate_id,
+                        actor_identity, request_digest, receipt_digest,
+                        evidence_json, created_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, now())
+                    """,
+                    (
+                        event_id,
+                        READER_ROTATION_EVENT,
+                        READER_ROTATION_AGGREGATE_TYPE,
+                        idempotency_key,
+                        actor_identity,
+                        request_digest,
+                        receipt_digest,
+                        json.dumps(evidence, sort_keys=True),
+                    ),
+                )
+            # _admin_connection() performs a preflight query, so this is the
+            # outer transaction commit. Keep it inside the Keychain rollback
+            # guard rather than relying on the connection context manager.
+            connection.commit()
+        except Exception:
+            if keychain_update_attempted and old_material is not None:
+                _replace_keychain(READER_KEYCHAIN_SERVICE, old_material)
+            raise
+
+    if old_material is None:
+        raise CanonicalServiceBlocked("BLOCKED_READER_ROTATION_INTERNAL_STATE")
+    _verify_reader_material_rejected(old_material)
+    current_material = _read_keychain(READER_KEYCHAIN_SERVICE)
+    if current_material is None:
+        raise CanonicalServiceBlocked("BLOCKED_KEYCHAIN_ITEM_MISSING")
+    _verify_reader_material(current_material)
+    restarted = restart(port)
+    if restarted["status"] != "RESTARTED":
+        raise CanonicalServiceBlocked("BLOCKED_READER_ROTATION_API_RESTART")
+    return {
+        "status": "ROTATED",
+        "scope": "API_READER_ONLY",
+        "credential_generation": generation,
+        "receipt_digest": receipt_digest,
+        "release_sha": release_sha,
+        "old_credential_rejected": True,
+        "new_credential_read_only": True,
+        "api_restart_count": 1,
+        "api_health": restarted["health"],
+        "api_ready": restarted["ready"],
+        "trading_credentials_modified": False,
+        "secret_material_exposed": False,
+    }
+
+
 def _database_url(principal: str, service: str) -> str:
     value = _read_keychain(service)
     if value is None:
@@ -1106,6 +1432,7 @@ def main(argv: list[str] | None = None) -> int:
             "provision-runtime-reader",
             "cleanup-phase9-provisioning",
             "repair-research-connect",
+            "rotate-api-reader",
             "serve",
             "install",
             "status",
@@ -1113,6 +1440,8 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument("--port", type=int, default=DEFAULT_API_PORT)
+    parser.add_argument("--actor-identity")
+    parser.add_argument("--idempotency-key")
     args = parser.parse_args(argv)
     try:
         if args.command == "provision":
@@ -1127,6 +1456,14 @@ def main(argv: list[str] | None = None) -> int:
             payload = cleanup_phase9_provisioning()
         elif args.command == "repair-research-connect":
             payload = repair_research_database_connect()
+        elif args.command == "rotate-api-reader":
+            if args.actor_identity is None or args.idempotency_key is None:
+                raise CanonicalServiceBlocked("BLOCKED_READER_ROTATION_ARGUMENTS_REQUIRED")
+            payload = rotate_api_reader(
+                actor_identity=args.actor_identity,
+                idempotency_key=args.idempotency_key,
+                port=args.port,
+            )
         elif args.command == "serve":
             serve(args.port)
             return 0
@@ -1145,6 +1482,8 @@ def main(argv: list[str] | None = None) -> int:
         in {
             "PROVISIONED",
             "REPAIRED",
+            "ROTATED",
+            "NO_OP_ALREADY_ROTATED",
             "CLEANED_UP",
             "INSTALLED",
             "READY",
