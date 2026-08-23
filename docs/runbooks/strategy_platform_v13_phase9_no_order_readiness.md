@@ -258,6 +258,8 @@ trigger 表与 runtime image acceptance 继续由既有 `canonical_control_write
 仅增加读取 `qualification_decisions` 的必要上游 lineage 权限，不获得 signal/order writer 能力。升级旧的
 已接受 trigger schema 时，`acceptance-trigger-apply` 只修复这一项 ACL，exact replay 必须返回
 `ACCEPTED`；rollback 精确撤销该增量。
+全局 bootstrap/backup/API verifier 只有在上述专属 verifier 同时返回 `ACCEPTED` 时，才把这一条
+`SELECT` 组合进 expected grants；`PREVIOUS_READY`、partial ACL 或额外 DML 权限仍必须 fail closed。
 
 ```bash
 python scripts/canonical_v13_phase9_service.py execute-acceptance-trigger \

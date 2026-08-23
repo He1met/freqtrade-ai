@@ -154,6 +154,7 @@ def verify(
         service_principals.update(LOCAL_PHASE9_SERVICE_PRINCIPALS)
         service_principals.update(LOCAL_RUNTIME_SERVICE_PRINCIPALS)
     engine = create_engine(_database_url(), pool_pre_ping=True)
+    acceptance_trigger_status: str | None = None
     try:
         with engine.connect() as connection:
             result = verify_postgresql_bootstrap(
@@ -162,11 +163,23 @@ def verify(
                 require_zero_business_rows=require_zero_business_rows,
                 service_principals=service_principals,
             )
+            if require_phase9_principals:
+                try:
+                    acceptance_trigger_status = (
+                        verify_acceptance_signal_trigger_upgrade(
+                            connection, role_mapping=mapping
+                        ).status
+                    )
+                except CanonicalAcceptanceSignalTriggerUpgradeBlocked:
+                    acceptance_trigger_status = "BLOCKED"
     finally:
         engine.dispose()
+    problems = list(result.problems)
+    if require_phase9_principals and acceptance_trigger_status != "ACCEPTED":
+        problems.append("acceptance trigger ACL receipt is not ACCEPTED")
     return {
-        "status": "ACCEPTED" if result.accepted else "BLOCKED",
-        "problems": list(result.problems),
+        "status": "ACCEPTED" if not problems else "BLOCKED",
+        "problems": problems,
         "database_name": LOCAL_DATABASE_NAME,
         "role_mapping_digest": mapping.mapping_digest,
         "table_count": result.table_count,
@@ -174,6 +187,7 @@ def verify(
         "require_zero_business_rows": require_zero_business_rows,
         "require_research_principals": require_research_principals,
         "require_phase9_principals": require_phase9_principals,
+        "acceptance_trigger_status": acceptance_trigger_status,
         "capability_role_count": result.capability_role_count,
         "explicit_acl_count": result.explicit_acl_count,
     }

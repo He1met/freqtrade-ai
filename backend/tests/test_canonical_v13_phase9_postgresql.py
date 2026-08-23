@@ -16,6 +16,7 @@ from app.canonical_v13.acceptance_signal_trigger_upgrade import (
     rollback_acceptance_signal_trigger_upgrade,
     verify_acceptance_signal_trigger_upgrade,
 )
+from app.canonical_v13.bootstrap import verify_postgresql_bootstrap
 from app.canonical_v13.phase9_schema_upgrade import (
     PHASE9_DATABASE_CONNECT_DELTA,
     PHASE9_EXTENSION_TABLE_NAMES,
@@ -95,6 +96,15 @@ def test_acceptance_signal_trigger_is_database_immutable() -> None:
                     connection, role_mapping=mapping
                 )
                 assert verified.status == "ACCEPTED"
+                composed = verify_postgresql_bootstrap(
+                    connection,
+                    role_mapping=mapping,
+                    require_zero_business_rows=False,
+                )
+                assert composed.explicit_acl_count == 362
+                assert not any(
+                    "table grants" in problem for problem in composed.problems
+                )
                 assert verified.immutability_trigger_present is True
                 rolled_back = rollback_acceptance_signal_trigger_upgrade(
                     connection, role_mapping=mapping
@@ -182,6 +192,13 @@ def test_acceptance_signal_trigger_is_database_immutable() -> None:
                     verify_acceptance_signal_trigger_upgrade(
                         connection, role_mapping=mapping
                     )
+                tampered_composition = verify_postgresql_bootstrap(
+                    connection,
+                    role_mapping=mapping,
+                    require_zero_business_rows=False,
+                )
+                assert tampered_composition.accepted is False
+                assert "extra table grants count=2" in tampered_composition.problems
                 with pytest.raises(CanonicalAcceptanceSignalTriggerUpgradeBlocked):
                     apply_acceptance_signal_trigger_upgrade(
                         connection, role_mapping=mapping
