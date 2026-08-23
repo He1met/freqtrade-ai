@@ -104,6 +104,36 @@ def test_keychain_add_argv_contains_security_binary_exactly_once(monkeypatch) ->
     assert kwargs["input"] == material + "\n" + material + "\n"
 
 
+def test_keychain_replace_keeps_material_out_of_argv(monkeypatch) -> None:
+    service = _load_service("canonical_v13_api_service_keychain_replace")
+    material = "r" * 64
+    observed = []
+    monkeypatch.setattr(service, "_keychain_item_exists", lambda _service: True)
+    monkeypatch.setattr(service, "_read_keychain", lambda _service: material)
+    monkeypatch.setattr(service, "_security_command", lambda: Path("/usr/bin/security"))
+    monkeypatch.setattr(service, "_keychain_account", lambda: "ci-operator")
+
+    def run(command, **kwargs):
+        observed.append((tuple(command), kwargs))
+        return type("Result", (), {"returncode": 0})()
+
+    monkeypatch.setattr(service.subprocess, "run", run)
+    service._replace_keychain(service.READER_KEYCHAIN_SERVICE, material)
+    command, kwargs = observed[0]
+    assert command == (
+        "/usr/bin/security",
+        "add-generic-password",
+        "-U",
+        "-a",
+        "ci-operator",
+        "-s",
+        service.READER_KEYCHAIN_SERVICE,
+        "-w",
+    )
+    assert material not in command
+    assert kwargs["input"] == material + "\n" + material + "\n"
+
+
 def test_strict_keychain_delete_uses_fixed_identity_and_verifies_absence(
     monkeypatch,
 ) -> None:
@@ -369,6 +399,226 @@ def test_service_manager_has_no_delete_or_uninstall_command() -> None:
     assert '"repair-research-connect",' in source
     assert '"cleanup-phase9-provisioning",' in source
     assert '"uninstall"' not in source
+
+
+class _RotationResult:
+    def __init__(self, rows):
+        self.rows = list(rows)
+
+    def fetchall(self):
+        return list(self.rows)
+
+    def fetchone(self):
+        return self.rows[0]
+
+
+class _RotationTransaction:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _exc_type, *_args):
+        return None
+
+
+class _RotationConnection:
+    def __init__(self, service, *, fail_commit: bool = False, replay=()) -> None:
+        self.service = service
+        self.fail_commit = fail_commit
+        self.replay = tuple(replay)
+        self.insert_parameters = None
+        self.alter_count = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
+
+    def transaction(self):
+        return _RotationTransaction()
+
+    def commit(self):
+        if self.fail_commit:
+            raise RuntimeError("injected commit failure")
+
+    def execute(self, statement, parameters=None):
+        rendered = str(statement)
+        if "pg_advisory_xact_lock" in rendered:
+            return _RotationResult([(None,)])
+        if "SELECT id, request_digest, receipt_digest" in rendered:
+            return _RotationResult(self.replay)
+        if "pg_catalog.pg_authid" in rendered:
+            return _RotationResult(
+                [
+                    (
+                        True,
+                        False,
+                        False,
+                        False,
+                        True,
+                        False,
+                        False,
+                        8,
+                        self.service._scram_verifier(
+                            "o" * 64, salt=b"0123456789abcdef"
+                        ),
+                    )
+                ]
+            )
+        if "pg_catalog.pg_auth_members" in rendered:
+            return _RotationResult([(self.service.READER_CAPABILITY, False)])
+        if "SELECT count(*)" in rendered:
+            return _RotationResult([(0,)])
+        if "INSERT INTO strategy_platform_v13.audit_events" in rendered:
+            self.insert_parameters = parameters
+            return _RotationResult([])
+        if not isinstance(statement, str):
+            self.alter_count += 1
+        return _RotationResult([])
+
+
+def _configure_rotation(service, monkeypatch, connection):
+    state = {"material": "o" * 64}
+    replacements = []
+    verified = []
+    rejected = []
+    monkeypatch.setattr(service, "_require_reader_rotation_safe", lambda: "a" * 40)
+    monkeypatch.setattr(service, "_admin_connection", lambda: connection)
+    monkeypatch.setattr(
+        service, "_read_keychain", lambda _service: state["material"]
+    )
+    monkeypatch.setattr(service.secrets, "token_urlsafe", lambda _size: "n" * 64)
+
+    def replace(_service, material):
+        replacements.append(material)
+        state["material"] = material
+
+    monkeypatch.setattr(service, "_replace_keychain", replace)
+    monkeypatch.setattr(
+        service, "_verify_reader_material", lambda material: verified.append(material)
+    )
+    monkeypatch.setattr(
+        service,
+        "_verify_reader_material_rejected",
+        lambda material: rejected.append(material),
+    )
+    monkeypatch.setattr(
+        service,
+        "restart",
+        lambda port: {
+            "status": "RESTARTED",
+            "health": "HEALTHY",
+            "ready": "READY",
+            "port": port,
+        },
+    )
+    return state, replacements, verified, rejected
+
+
+def test_api_reader_rotation_is_redacted_read_only_and_restarts_once(
+    monkeypatch,
+) -> None:
+    service = _load_service("canonical_v13_api_service_reader_rotation")
+    connection = _RotationConnection(service)
+    state, replacements, verified, rejected = _configure_rotation(
+        service, monkeypatch, connection
+    )
+    payload = service.rotate_api_reader(
+        actor_identity="operator:test",
+        idempotency_key="incident:test:v1",
+        port=8011,
+    )
+    serialized = json.dumps(payload, sort_keys=True)
+    assert payload["status"] == "ROTATED"
+    assert payload["credential_generation"] == 1
+    assert payload["old_credential_rejected"] is True
+    assert payload["new_credential_read_only"] is True
+    assert payload["api_restart_count"] == 1
+    assert payload["trading_credentials_modified"] is False
+    assert replacements == ["n" * 64]
+    assert verified == ["o" * 64, "n" * 64]
+    assert rejected == ["o" * 64]
+    assert state["material"] == "n" * 64
+    assert connection.alter_count == 1
+    assert connection.insert_parameters is not None
+    audit_payload = connection.insert_parameters[7]
+    assert "o" * 64 not in serialized + audit_payload
+    assert "n" * 64 not in serialized + audit_payload
+    assert service.CONTROL_KEYCHAIN_SERVICE not in serialized + audit_payload
+
+
+def test_api_reader_rotation_restores_keychain_if_database_commit_fails(
+    monkeypatch,
+) -> None:
+    service = _load_service("canonical_v13_api_service_reader_rotation_rollback")
+    connection = _RotationConnection(service, fail_commit=True)
+    state, replacements, _verified, _rejected = _configure_rotation(
+        service, monkeypatch, connection
+    )
+    with pytest.raises(RuntimeError, match="injected commit failure"):
+        service.rotate_api_reader(
+            actor_identity="operator:test",
+            idempotency_key="incident:test:rollback",
+            port=8011,
+        )
+    assert replacements == ["n" * 64, "o" * 64]
+    assert state["material"] == "o" * 64
+
+
+def test_api_reader_rotation_exact_replay_is_noop_without_restart(monkeypatch) -> None:
+    service = _load_service("canonical_v13_api_service_reader_rotation_replay")
+    actor = "operator:test"
+    key = "incident:test:replay"
+    release_sha = "a" * 40
+    event_id = "11111111-1111-4111-8111-111111111111"
+    request_digest = service._canonical_digest(
+        {
+            "actor_identity": actor,
+            "idempotency_key": key,
+            "principal": service.READER_PRINCIPAL,
+            "release_sha": release_sha,
+            "scope": "API_READER_ONLY",
+        }
+    )
+    evidence = {
+        "credential_generation": 3,
+        "release_sha": release_sha,
+        "scope": "API_READER_ONLY",
+        "trading_credentials_modified": False,
+    }
+    receipt_digest = service._canonical_digest(
+        {
+            "event_id": event_id,
+            "event_type": service.READER_ROTATION_EVENT,
+            "request_digest": request_digest,
+            "evidence": evidence,
+        }
+    )
+    connection = _RotationConnection(
+        service,
+        replay=((event_id, request_digest, receipt_digest, evidence),),
+    )
+    monkeypatch.setattr(service, "_require_reader_rotation_safe", lambda: release_sha)
+    monkeypatch.setattr(service, "_admin_connection", lambda: connection)
+    monkeypatch.setattr(
+        service,
+        "restart",
+        lambda _port: pytest.fail("exact replay must not restart the API"),
+    )
+    payload = service.rotate_api_reader(
+        actor_identity=actor,
+        idempotency_key=key,
+        port=8011,
+    )
+    assert payload == {
+        "status": "NO_OP_ALREADY_ROTATED",
+        "scope": "API_READER_ONLY",
+        "credential_generation": 3,
+        "receipt_digest": receipt_digest,
+        "release_sha": release_sha,
+        "secret_material_exposed": False,
+    }
+    assert connection.alter_count == 0
 
 
 class _CleanupResult:

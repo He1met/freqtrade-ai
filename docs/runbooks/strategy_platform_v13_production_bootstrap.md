@@ -77,6 +77,32 @@ python scripts/canonical_v13_api_service.py repair-research-connect
 material；任何部分完成状态、其他 verifier 问题或 Keychain 缺项都 `BLOCKED`。完成后仍必须重新
 运行 `verify-research-provisioned` 和六 identity 实际连接验收。
 
+### 2.1 API reader credential 安全轮换
+
+API reader material 发生疑似暴露时，只允许在 clean/exact-main release、API 已 READY、Phase 9
+runtime 与 order writer LaunchAgent 均停止的安全点执行正式轮换。首次 `provision` 不得被当作覆盖或
+轮换入口。轮换只修改 `freqtrade_ai_v13_api_login` 的 PostgreSQL SCRAM verifier 和固定 API reader
+Keychain item；control/research/Phase 9/runtime/交易凭据都不读取、不修改。
+
+```bash
+backend/.venv/bin/python scripts/canonical_v13_api_service.py rotate-api-reader \
+  --actor-identity 'operator:<owner>' \
+  --idempotency-key '<redacted-incident-key>' \
+  --port 8011
+```
+
+该命令在单个数据库事务内锁定 incident key、验证 LOGIN 属性与唯一 reader membership、写入新的
+SCRAM verifier、原地替换固定 Keychain item，并向 immutable `audit_events` 写入仅含 generation、
+release SHA 和 verifier/keychain locator digest 的脱敏 receipt。事务或 audit 写入失败时自动恢复旧
+Keychain item；成功提交后必须证明旧 credential 不能新建连接、新 credential 只有 reader 权限，
+再对 API 执行恰好一次 `kickstart -k` 并等待 `HEALTHY/READY`。material 不进入 argv、stdout/stderr、
+receipt、repo、plist 或 dotenv。相同 actor/key/release 的 exact replay 返回
+`NO_OP_ALREADY_ROTATED`，不得产生第二次轮换或第二次 restart；key reuse/drift 必须 BLOCKED。
+
+轮换后还必须分别执行 UI status、`verify-research-provisioned`、Phase 9 provision verifier、backup/
+isolated restore verifier、execution-domain zero-count 与 secret scan。旧 credential 被拒绝、新
+credential read-only 和 `trading_credentials_modified=false` 是 release handoff 的必需证据。
+
 ## 3. Backup 与独立 restore acceptance
 
 backup 输出目录必须位于 operator-controlled 非仓库位置，权限 `0700`；文件使用 custom format，
