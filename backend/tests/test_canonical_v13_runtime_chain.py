@@ -367,6 +367,25 @@ def test_supervisor_stop_observation_is_immutable_and_replay_safe(
             receipt=stopped,
             evaluated_at=NOW + timedelta(seconds=4),
         )
+        resumed = build_runtime_observation_receipt(
+            runtime_instance_id=runtime_id,
+            launch_spec=spec,
+            status="HEALTHY",
+            observed_at=NOW + timedelta(seconds=5),
+            evidence_class="PRODUCTION_DEMO_RUNTIME",
+        )
+        assert (
+            confirm_production_demo_runtime_observation(
+                canonical_connection,
+                deployment_id=deployment.deployment_id,
+                runtime_identity=spec.runtime_identity,
+                image_digest=spec.image_digest,
+                credential_reference=spec.credential_reference or "",
+                receipt=resumed,
+                evaluated_at=NOW + timedelta(seconds=6),
+            )
+            == runtime_id
+        )
         runtime_status = canonical_connection.execute(
             select(RUNTIME_INSTANCES_TABLE.c.status).where(
                 RUNTIME_INSTANCES_TABLE.c.id == runtime_id
@@ -374,11 +393,12 @@ def test_supervisor_stop_observation_is_immutable_and_replay_safe(
         ).scalar_one()
         receipt_count = _count(canonical_connection, RUNTIME_RECEIPTS_TABLE)
 
-    assert first.status == replay.status == runtime_status == "STOPPED"
+    assert first.status == replay.status == "STOPPED"
+    assert runtime_status == "HEALTHY"
     assert first.repeat_noop is False
     assert replay.repeat_noop is True
     assert replay.receipt_digest == first.receipt_digest
-    assert receipt_count == 2
+    assert receipt_count == 3
 
 
 def test_supervisor_observation_rolls_stable_runtime_to_new_accepted_plan(

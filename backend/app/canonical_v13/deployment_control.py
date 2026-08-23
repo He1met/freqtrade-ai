@@ -739,21 +739,19 @@ def confirm_production_demo_runtime_observation(
                 "BLOCKED_RUNTIME_REPLAY_DRIFT", "runtime observation identity drifted"
             )
         runtime_id = existing["id"]
-        if (
-            existing["image_digest"] != image_digest
-            or existing["launch_spec_digest"] != launch_digest
-        ):
-            # The row is the current stable process identity. Exact historical
-            # image/launch identities remain append-only in runtime_receipts.
-            effective.execute(
-                RUNTIME_INSTANCES_TABLE.update()
-                .where(RUNTIME_INSTANCES_TABLE.c.id == runtime_id)
-                .values(
-                    image_digest=image_digest,
-                    launch_spec_digest=launch_digest,
-                    status="HEALTHY",
-                )
+        # The row is the current stable process identity. Exact historical
+        # image/launch identities remain append-only in runtime_receipts. A
+        # fresh production observation also reactivates the same accepted plan
+        # after a supervisor-proven STOPPED transition.
+        effective.execute(
+            RUNTIME_INSTANCES_TABLE.update()
+            .where(RUNTIME_INSTANCES_TABLE.c.id == runtime_id)
+            .values(
+                image_digest=image_digest,
+                launch_spec_digest=launch_digest,
+                status="HEALTHY",
             )
+        )
     existing_receipt = effective.execute(
         select(RUNTIME_RECEIPTS_TABLE.c.id).where(
             RUNTIME_RECEIPTS_TABLE.c.receipt_digest == receipt.receipt_digest
