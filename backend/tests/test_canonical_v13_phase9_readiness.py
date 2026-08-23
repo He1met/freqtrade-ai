@@ -6,9 +6,16 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from app.canonical_v13.acceptance_signal_trigger import (
+    SOURCE_KIND as ACCEPTANCE_SOURCE_KIND,
+    build_acceptance_worker_receipt,
+    issue_acceptance_signal_trigger,
+    persist_acceptance_signal,
+)
 from app.canonical_v13.accounting import (
     post_production_demo_ledger_entry,
     post_simulated_ledger_entry,
@@ -50,6 +57,7 @@ from app.canonical_v13.phase9_order_writer import (
     prepare_demo_order,
     release_demo_order_writer_lease,
 )
+from app.canonical_v13.phase9_production_runtime import ReleaseBoundReceiptSeal
 from app.canonical_v13.phase9_recovery_acceptance import (
     Phase9RecoveryAcceptance,
     record_phase9_recovery_acceptance,
@@ -98,6 +106,11 @@ from tests.test_canonical_v13_research_evaluation import (
     _passing_metrics,
     _validated_attempt,
     canonical_connection,
+)
+from tests.test_canonical_v13_acceptance_signal_trigger import (
+    NOW as ACCEPTANCE_NOW,
+    _refresh_runtime as _refresh_acceptance_runtime,
+    _seed_runtime as _seed_acceptance_runtime,
 )
 
 
@@ -629,6 +642,109 @@ def test_shadow_requires_one_receipt_with_accepted_and_rejected_checks(
     assert receipt.execution_domain_counts["execution_canary_risk_policies"] == 0
     assert receipt.execution_domain_counts["execution_risk_budget_authorizations"] == 0
     assert receipt.execution_domain_counts["execution_risk_reservations"] == 0
+    assert receipt.execution_domain_counts["orders"] == 0
+
+
+def test_shadow_selects_acceptance_signal_when_natural_signal_coexists(
+    canonical_connection,
+) -> None:
+    with canonical_connection.begin():
+        approval, deployment, spec, runtime_id, image_id, qualification = (
+            _seed_acceptance_runtime(canonical_connection)
+        )
+        handoff = _handoff(
+            canonical_connection,
+            SimpleNamespace(qualification_decision_id=qualification["id"]),
+        )
+        issued = issue_acceptance_signal_trigger(
+            canonical_connection,
+            qualification_decision_id=qualification["id"],
+            deployment_approval_id=approval.deployment_approval_id,
+            deployment_id=deployment.deployment_id,
+            runtime_instance_id=runtime_id,
+            runtime_image_acceptance_id=image_id,
+            actor_identity="operator:isolated",
+            idempotency_key="readiness-natural-acceptance-coexistence",
+            issued_at=ACCEPTANCE_NOW + timedelta(seconds=30),
+        )
+        _refresh_acceptance_runtime(
+            canonical_connection,
+            deployment=deployment,
+            spec=spec,
+            runtime_id=runtime_id,
+            observed_at=issued.scheduled_at,
+        )
+        record_production_demo_signal(
+            canonical_connection,
+            deployment_id=deployment.deployment_id,
+            runtime_instance_id=runtime_id,
+            research_target_id=handoff.research_target_id,
+            signal_json={
+                "evidence_class": "PRODUCTION_OKX_DEMO",
+                "natural_signal": True,
+                "allow_real_funds": False,
+                "configuration_bundle_digest": handoff.configuration_bundle_digest,
+                "market_snapshot_digest": handoff.market_snapshot_digest,
+                "side": "buy",
+                "coincident_natural_evidence": True,
+            },
+            evaluated_at=issued.scheduled_at,
+        )
+        seal = ReleaseBoundReceiptSeal(
+            "d" * 64, "secret-safe-signing-key-" + "x" * 48
+        )
+        worker = build_acceptance_worker_receipt(
+            canonical_connection,
+            trigger_id=issued.trigger_id,
+            plan_digest="e" * 64,
+            observed_at=issued.scheduled_at,
+            signer=seal,
+        )
+        persisted = persist_acceptance_signal(
+            canonical_connection,
+            trigger_id=issued.trigger_id,
+            worker_receipt=worker,
+            verifier=seal,
+            persisted_at=issued.scheduled_at,
+        )
+        intent_id = create_production_demo_intent(
+            canonical_connection,
+            signal_id=persisted.signal_id,
+            intent_json={
+                "contract": "canonical-v13-demo-trade-intent-v1",
+                "execution_target": "OKX_DEMO",
+                "allow_real_funds": False,
+                "acceptance_only": True,
+                "source_kind": ACCEPTANCE_SOURCE_KIND,
+                "signal_digest": persisted.signal_digest,
+                "instrument": "BTC-USDT-SWAP",
+                "notional": "1",
+                "exchange_body": {
+                    "instId": "BTC-USDT-SWAP",
+                    "tdMode": "isolated",
+                    "side": "buy",
+                    "posSide": "long",
+                },
+            },
+        )
+        decide_signal_risk_shadow(
+            canonical_connection,
+            trade_intent_id=intent_id,
+            evaluated_at=issued.scheduled_at + timedelta(seconds=1),
+        )
+        receipt = inspect_phase9_readiness(
+            canonical_connection,
+            qualification_handoff=handoff,
+            stage="SIGNAL_RISK_SHADOW",
+            evaluated_at=issued.scheduled_at + timedelta(seconds=20),
+        )
+
+    assert receipt.status == "READY"
+    assert receipt.reason_codes == ()
+    assert receipt.lineage_evidence_counts["signals"] == 2
+    assert receipt.lineage_evidence_counts["acceptance_signal_triggers"] == 1
+    assert receipt.lineage_evidence_counts["trade_intents"] == 1
+    assert receipt.lineage_evidence_counts["risk_decisions"] == 1
     assert receipt.execution_domain_counts["orders"] == 0
 
 

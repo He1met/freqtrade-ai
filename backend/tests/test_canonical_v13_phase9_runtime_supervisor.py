@@ -17,11 +17,13 @@ from app.canonical_v13.phase9_runtime_supervisor import (
     OrderWriterCanaryAuthority,
     Phase9Lease,
     RuntimeImagePlanAuthority,
+    build_lifecycle_receipt,
     build_launch_plan,
     build_order_writer_canary_authority,
     claim_lease,
     heartbeat_lease,
     release_lease,
+    verify_lifecycle_receipt,
 )
 from app.canonical_v13.phase9_okx_demo import RedactedOkxDemoProbe
 
@@ -258,6 +260,25 @@ def test_launch_plans_keep_runtime_and_writer_identity_and_lifecycle_separate() 
     assert runtime.demo_only is writer.demo_only is True
     assert runtime.allow_real_funds is writer.allow_real_funds is False
     assert writer.order_writer_canary_authority == _writer_authority()
+
+
+def test_acceptance_trigger_lifecycle_receipt_is_accepted_and_verifiable() -> None:
+    receipt = build_lifecycle_receipt(
+        service_key="long_lived_runtime",
+        action="ACCEPTANCE_SIGNAL_TRIGGER",
+        status="ACCEPTED",
+        generation=37,
+        observed_at=NOW,
+        plan_digest="9" * 64,
+        details={
+            "source_kind": "ACCEPTANCE_SCHEDULED_TEST",
+            "order_submission_enabled": False,
+        },
+    )
+
+    verify_lifecycle_receipt(receipt)
+    assert receipt.status == "ACCEPTED"
+    assert len(receipt.receipt_digest) == 64
 
 
 def test_runtime_container_port_uses_exact_digest_and_hardened_rootless_flags() -> None:
