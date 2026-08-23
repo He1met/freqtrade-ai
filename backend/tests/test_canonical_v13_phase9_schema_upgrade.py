@@ -12,8 +12,10 @@ from app.canonical_v13.phase9_schema_upgrade import (
 from app.canonical_v13.role_mapping import CanonicalRoleMapping
 from app.canonical_v13.deployment_rollover_upgrade import (
     DEPLOYMENT_ROLLOVER_COLUMNS,
+    RUNTIME_IDENTITY_ACTIVE_INDEX,
     deployment_rollover_trigger_statements,
 )
+from app.canonical_v13.genesis import render_postgresql_genesis_ddl
 
 
 def test_deployment_rollover_guard_is_exact_and_fail_closed() -> None:
@@ -31,6 +33,15 @@ def test_deployment_rollover_guard_is_exact_and_fail_closed() -> None:
     assert "disable evidence is incomplete" in sql
     assert "deployment lineage is immutable" in sql
     assert "BEFORE UPDATE" in sql
+
+
+def test_runtime_identity_rollover_is_unique_only_for_nonstopped_rows() -> None:
+    ddl = render_postgresql_genesis_ddl()
+    assert RUNTIME_IDENTITY_ACTIVE_INDEX in ddl
+    assert "CREATE UNIQUE INDEX" in ddl
+    assert "runtime_instances (runtime_identity)" in ddl
+    assert "WHERE status <> 'STOPPED'" in ddl
+    assert "UNIQUE (runtime_identity)" not in ddl
 
 
 def test_phase9_acl_rollback_is_the_frozen_predecessor_delta_only() -> None:

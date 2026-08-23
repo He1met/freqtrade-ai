@@ -1046,7 +1046,7 @@ RUNTIME_INSTANCES_TABLE = _table(
     "runtime_instances",
     _uuid_id(),
     _uuid_fk("deployment_id", "deployments"),
-    Column("runtime_identity", String(200), nullable=False, unique=True),
+    Column("runtime_identity", String(200), nullable=False),
     _digest("image_digest"),
     _digest("launch_spec_digest"),
     Column("service_account", String(160), nullable=False),
@@ -1070,6 +1070,13 @@ RUNTIME_INSTANCES_TABLE = _table(
     UniqueConstraint(
         "deployment_id",
         name="runtime_instances_deployment_unique",
+    ),
+    Index(
+        "uq_runtime_instances_nonstopped_runtime_identity",
+        "runtime_identity",
+        unique=True,
+        postgresql_where=text("status <> 'STOPPED'"),
+        sqlite_where=text("status <> 'STOPPED'"),
     ),
 )
 

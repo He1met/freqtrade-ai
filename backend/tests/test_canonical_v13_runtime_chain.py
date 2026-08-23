@@ -14,6 +14,7 @@ from app.canonical_v13.deployment_control import (
     confirm_production_demo_runtime_observation,
     confirm_production_demo_runtime_stop_observation,
     create_demo_deployment,
+    disable_demo_deployment,
     launch_demo_runtime,
 )
 from app.canonical_v13.accounting import post_simulated_ledger_entry
@@ -453,6 +454,149 @@ def test_supervisor_observation_rolls_stable_runtime_to_new_accepted_plan(
     assert current["image_digest"] == "e" * 64
     assert len(receipts) == 2
     assert len(set(receipts)) == 2
+
+
+def test_stopped_runtime_identity_rolls_to_a_new_deployment_without_rewriting_history(
+    canonical_connection,
+) -> None:
+    runtime_identity = "canonical-v13-long-lived-runtime-v1"
+    with canonical_connection.begin():
+        _first_plan_id, first_decision = _qualified(canonical_connection)
+        first_approval = approve_demo_deployment(
+            canonical_connection,
+            qualification_decision_id=first_decision.qualification_decision_id,
+            actor_identity="phase9-rollover-approver",
+            reason="first acceptance-only runtime",
+        )
+        first_deployment = create_demo_deployment(
+            canonical_connection,
+            deployment_approval_id=first_approval.deployment_approval_id,
+        )
+        first_row = canonical_connection.execute(
+            select(DEPLOYMENTS_TABLE).where(
+                DEPLOYMENTS_TABLE.c.id == first_deployment.deployment_id
+            )
+        ).mappings().one()
+        first_runtime_id = uuid4()
+        first_spec = FrozenRuntimeLaunchSpec(
+            deployment_id=first_deployment.deployment_id,
+            approval_id=first_approval.deployment_approval_id,
+            qualification_decision_id=first_decision.qualification_decision_id,
+            strategy_version_id=first_row["strategy_version_id"],
+            configuration_bundle_id=first_row["configuration_bundle_id"],
+            configuration_bundle_digest=first_row["configuration_bundle_digest"],
+            market_snapshot_id=first_row["market_snapshot_id"],
+            market_snapshot_digest=first_row["market_snapshot_digest"],
+            deployment_capability_digest=first_deployment.capability_digest,
+            runtime_identity=runtime_identity,
+            image_digest="f" * 64,
+            service_account="canonical_runtime_reader",
+            network_policy="DEMO_EXCHANGE_ONLY",
+            credential_reference="none:public-okx-market-only",
+        )
+        first_running = build_runtime_observation_receipt(
+            runtime_instance_id=first_runtime_id,
+            launch_spec=first_spec,
+            status="HEALTHY",
+            observed_at=NOW,
+            evidence_class="PRODUCTION_DEMO_RUNTIME",
+        )
+        confirm_production_demo_runtime_observation(
+            canonical_connection,
+            deployment_id=first_deployment.deployment_id,
+            runtime_identity=runtime_identity,
+            image_digest=first_spec.image_digest,
+            credential_reference=first_spec.credential_reference or "",
+            receipt=first_running,
+            evaluated_at=NOW + timedelta(seconds=1),
+        )
+        first_stopped = build_runtime_observation_receipt(
+            runtime_instance_id=first_runtime_id,
+            launch_spec=first_spec,
+            status="STOPPED",
+            observed_at=NOW + timedelta(seconds=2),
+            evidence_class="PRODUCTION_DEMO_RUNTIME_STOP",
+        )
+        confirm_production_demo_runtime_stop_observation(
+            canonical_connection,
+            deployment_id=first_deployment.deployment_id,
+            receipt=first_stopped,
+            evaluated_at=NOW + timedelta(seconds=3),
+        )
+
+        _second_plan_id, second_decision = _qualified(canonical_connection)
+        second_approval = approve_demo_deployment(
+            canonical_connection,
+            qualification_decision_id=second_decision.qualification_decision_id,
+            actor_identity="phase9-rollover-approver",
+            reason="second acceptance-only runtime",
+        )
+        disable_demo_deployment(
+            canonical_connection,
+            deployment_id=first_deployment.deployment_id,
+            superseded_by_qualification_decision_id=(
+                second_decision.qualification_decision_id
+            ),
+            actor_identity="phase9-rollover-operator",
+            reason="preserve stopped runtime and roll to exact new qualification",
+        )
+        second_deployment = create_demo_deployment(
+            canonical_connection,
+            deployment_approval_id=second_approval.deployment_approval_id,
+        )
+        second_row = canonical_connection.execute(
+            select(DEPLOYMENTS_TABLE).where(
+                DEPLOYMENTS_TABLE.c.id == second_deployment.deployment_id
+            )
+        ).mappings().one()
+        second_runtime_id = uuid4()
+        second_spec = FrozenRuntimeLaunchSpec(
+            deployment_id=second_deployment.deployment_id,
+            approval_id=second_approval.deployment_approval_id,
+            qualification_decision_id=second_decision.qualification_decision_id,
+            strategy_version_id=second_row["strategy_version_id"],
+            configuration_bundle_id=second_row["configuration_bundle_id"],
+            configuration_bundle_digest=second_row["configuration_bundle_digest"],
+            market_snapshot_id=second_row["market_snapshot_id"],
+            market_snapshot_digest=second_row["market_snapshot_digest"],
+            deployment_capability_digest=second_deployment.capability_digest,
+            runtime_identity=runtime_identity,
+            image_digest="e" * 64,
+            service_account="canonical_runtime_reader",
+            network_policy="DEMO_EXCHANGE_ONLY",
+            credential_reference="none:public-okx-market-only",
+        )
+        second_running = build_runtime_observation_receipt(
+            runtime_instance_id=second_runtime_id,
+            launch_spec=second_spec,
+            status="HEALTHY",
+            observed_at=NOW + timedelta(seconds=5),
+            evidence_class="PRODUCTION_DEMO_RUNTIME",
+        )
+        assert (
+            confirm_production_demo_runtime_observation(
+                canonical_connection,
+                deployment_id=second_deployment.deployment_id,
+                runtime_identity=runtime_identity,
+                image_digest=second_spec.image_digest,
+                credential_reference=second_spec.credential_reference or "",
+                receipt=second_running,
+                evaluated_at=NOW + timedelta(seconds=6),
+            )
+            == second_runtime_id
+        )
+        rows = canonical_connection.execute(
+            select(RUNTIME_INSTANCES_TABLE).where(
+                RUNTIME_INSTANCES_TABLE.c.runtime_identity == runtime_identity
+            ).order_by(RUNTIME_INSTANCES_TABLE.c.created_at)
+        ).mappings().all()
+
+    assert [row["id"] for row in rows] == [first_runtime_id, second_runtime_id]
+    assert [row["deployment_id"] for row in rows] == [
+        first_deployment.deployment_id,
+        second_deployment.deployment_id,
+    ]
+    assert [row["status"] for row in rows] == ["STOPPED", "HEALTHY"]
 
 
 def test_writer_separated_simulated_chain_and_reconciliation(canonical_connection):

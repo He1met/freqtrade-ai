@@ -136,7 +136,9 @@ def _existing_tables(connection: Connection) -> tuple[str, ...]:
     )
 
 
-def _postgresql_user_objects(connection: Connection) -> tuple[str, ...]:
+def _postgresql_user_objects(
+    connection: Connection, *, allowed_predecessor_indexes: tuple[str, ...] = ()
+) -> tuple[str, ...]:
     """List user-created objects that would make the database non-canonical.
 
     PostgreSQL's ``public`` schema exists in a fresh database, so the namespace
@@ -195,6 +197,7 @@ def _postgresql_user_objects(connection: Connection) -> tuple[str, ...]:
         for index in table.indexes
         if index.name is not None
     )
+    expected_indexes.update(allowed_predecessor_indexes)
     canonical_tables_complete = set(_existing_tables(connection)) == set(
         CANONICAL_TABLE_NAMES
     )
@@ -218,10 +221,15 @@ def _postgresql_user_objects(connection: Connection) -> tuple[str, ...]:
     return tuple(problems)
 
 
-def _database_isolation_problems(connection: Connection) -> tuple[str, ...]:
+def _database_isolation_problems(
+    connection: Connection, *, allowed_predecessor_indexes: tuple[str, ...] = ()
+) -> tuple[str, ...]:
     return tuple(
         f"unexpected user object in canonical database: {value}"
-        for value in _postgresql_user_objects(connection)
+        for value in _postgresql_user_objects(
+            connection,
+            allowed_predecessor_indexes=allowed_predecessor_indexes,
+        )
     )
 
 
@@ -290,6 +298,7 @@ def verify_canonical_genesis(
     require_zero_business_rows: bool = False,
     include_business_row_count: bool = False,
     accepted_manifest_digests: tuple[str, ...] | None = None,
+    allowed_predecessor_indexes: tuple[str, ...] = (),
 ) -> GenesisVerification:
     """Verify exact tables and genesis identity; never repairs observed drift."""
 
@@ -299,7 +308,12 @@ def verify_canonical_genesis(
     expected = set(CANONICAL_TABLE_NAMES)
     observed = set(table_names)
     problems: list[str] = []
-    problems.extend(_database_isolation_problems(effective))
+    problems.extend(
+        _database_isolation_problems(
+            effective,
+            allowed_predecessor_indexes=allowed_predecessor_indexes,
+        )
+    )
     extras = sorted(observed - expected)
     missing = sorted(expected - observed)
     if extras:

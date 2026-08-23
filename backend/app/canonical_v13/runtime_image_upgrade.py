@@ -18,6 +18,7 @@ from app.canonical_v13.gate_receipt_upgrade import GATE_GUARD_FUNCTION_NAMES
 from app.canonical_v13.manifest import (
     CANONICAL_BUSINESS_SCHEMA,
     CANONICAL_MANIFEST_DIGEST,
+    CANONICAL_PREDECESSOR_RUNTIME_IDENTITY_INDEX,
 )
 from app.canonical_v13.models import (
     RUNTIME_IMAGE_ACCEPTANCES_TABLE,
@@ -168,6 +169,11 @@ def verify_runtime_image_upgrade(connection: Connection) -> RuntimeImageUpgradeR
         verification = verify_canonical_genesis(
             connection,
             accepted_manifest_digests=(manifest,),
+            allowed_predecessor_indexes=(
+                (CANONICAL_PREDECESSOR_RUNTIME_IDENTITY_INDEX,)
+                if manifest != CANONICAL_MANIFEST_DIGEST
+                else ()
+            ),
         )
         if verification.accepted:
             return _result(connection, status="ACCEPTED", repeat_noop=True)

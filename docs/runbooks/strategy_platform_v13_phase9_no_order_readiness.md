@@ -187,6 +187,9 @@ python scripts/canonical_v13_api_service.py cleanup-phase9-provisioning
 5. 人工比对返回的 plan digest 后执行 `confirm --plan-digest <exact>`。只有 launchd loaded、fresh
    lease、holder PID alive 三者同时成立才可将 supervisor observation 写入 canonical DB，并把
    deployment 转为 `ACTIVE`。
+   deployment rollover 允许同一 canonical process identity 在旧 runtime 已 `STOPPED` 后生成新的
+   deployment-scoped runtime row；数据库仅对 `status <> 'STOPPED'` 的 identity 保持唯一，任何两个
+   非停止 runtime 使用同一 identity 都必须 fail closed。禁止复用或改写旧 runtime 历史行。
 6. 运行 no-order soak；runtime 无 order capability，signal/intent/risk/order/fill/ledger/reconciliation
    全部保持 0。执行 restart/recover，证明单 runtime、generation fencing、无 expired orphan。
 7. `phase9-readiness --phase9-stage NO_ORDER_SOAK` 必须 `READY`。
