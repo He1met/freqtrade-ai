@@ -64,6 +64,10 @@ from app.canonical_v13.runtime_image_upgrade import (  # noqa: E402
     CanonicalRuntimeImageUpgradeBlocked,
     verify_runtime_image_upgrade,
 )
+from app.canonical_v13.shadow_risk_acl_upgrade import (  # noqa: E402
+    CanonicalShadowRiskAclUpgradeBlocked,
+    verify_shadow_risk_acl_upgrade,
+)
 
 BACKUP_CONTRACT: Final = "canonical-v13-postgres-data-backup-v2"
 EXPECTED_TABLE_COUNT: Final = 58
@@ -596,6 +600,20 @@ def _verify_restore_trigger_boundary(
         raise CanonicalBackupBlocked(
             "BLOCKED_CANONICAL_RESTORE_OPTIMIZATION_OBSERVABILITY_CONTRACT",
             "optimization observability verifier did not return ACCEPTED",
+        )
+    try:
+        shadow_risk_acl = verify_shadow_risk_acl_upgrade(
+            connection, role_mapping=local_role_mapping()
+        )
+    except CanonicalShadowRiskAclUpgradeBlocked as exc:
+        raise CanonicalBackupBlocked(
+            "BLOCKED_CANONICAL_RESTORE_SHADOW_RISK_ACL_CONTRACT",
+            "shadow risk ACL contract is not accepted",
+        ) from exc
+    if shadow_risk_acl.status != "ACCEPTED":
+        raise CanonicalBackupBlocked(
+            "BLOCKED_CANONICAL_RESTORE_SHADOW_RISK_ACL_CONTRACT",
+            "shadow risk ACL verifier did not return ACCEPTED",
         )
 
 

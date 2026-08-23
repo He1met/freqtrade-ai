@@ -149,11 +149,15 @@ def _running(connection):
     return prepared, start_validation_attempt(connection, launch_spec=spec)
 
 
-def _output(running, metrics=None):
-    values = metrics or {
+def _accepted_result_metrics():
+    return {
         "required-a": {"trade_count": 2, "profit_factor": 2.0},
         "required-b": {"trade_count": 3, "profit_factor": 1.8},
     }
+
+
+def _output(running, metrics=None):
+    values = metrics or _accepted_result_metrics()
     by_key = {
         item.window_key: item for item in running.launch_spec.windows if item.required
     }

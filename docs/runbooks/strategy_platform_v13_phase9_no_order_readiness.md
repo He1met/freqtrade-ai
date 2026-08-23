@@ -89,6 +89,8 @@ backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py deployment-r
 backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py deployment-rollover-verify
 backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py acceptance-trigger-apply
 backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py acceptance-trigger-verify
+backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py shadow-risk-acl-apply
+backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py shadow-risk-acl-verify
 python scripts/canonical_v13_api_service.py provision-phase9
 python scripts/canonical_v13_api_service.py provision-runtime-reader
 backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py verify-phase9-provisioned
@@ -106,8 +108,10 @@ distinct、同一 canonical database、只继承一个 capability；另有 1 个
 与 runtime reader 2 个只读 LOGIN。
 `canonical_approval_writer` 是 sealed probe receipt、one-shot policy 与 budget authorization 的唯一
 writer，`canonical_risk_writer` 只能写 intent、shadow/execution decision 与 execution reservation。
-为校验 exact qualified target，`canonical_risk_writer` 只额外读取 `research_targets`；它不获得该表
-写权限，也不获得 signal/order/fill/ledger/reconciliation writer capability。
+为校验 exact qualified target，`canonical_risk_writer` 读取 `research_targets`、`deployments`，并通过
+独立 scoped ACL receipt 只读 `deployment_approvals` 与 `qualification_decisions`；后两项 upgrade 不改变
+global manifest，且只允许 `SELECT`。它不获得这些表的 DML 权限，也不获得
+signal/order/fill/ledger/reconciliation writer capability。
 Phase 9 provision 完成后，`verify-research-provisioned` 与 API research repair preflight 仅在 8 个
 Phase 9 LOGIN 组或单独 runtime LOGIN 组完整存在时组合该组并复核 exact membership/CONNECT；整组
 不存在保持早期 research 合同，部分存在或权限漂移必须 fail closed。
@@ -126,11 +130,15 @@ surviving-table ACL，且上述 capability 仍有额外 table grant 或 `CONNECT
 runtime-reader ACL rollover 的 rollback 入口为
 `canonical_v13_bootstrap.py runtime-reader-acl-rollback`；它只撤销
 `qualification_decisions` 的 runtime-reader `SELECT` 并恢复 predecessor manifest，不删除历史行。
-acceptance trigger rollback 必须最先执行
+完成 shadow-risk ACL rollback 后，acceptance trigger rollback 必须在其余既有层中最先执行
 `canonical_v13_bootstrap.py acceptance-trigger-rollback`：仅当 trigger/signal 证据均为 0 时才删除本层
 table/columns/functions，精确撤销 `canonical_signal_writer` 的四项后生 lineage `SELECT`；随后才允许
 deployment rollover、runtime-reader、runtime image 与 Phase 9 schema 依次反向 rollback。任一证据非零或
 ACL/trigger partial drift 都必须阻塞，禁止 `CASCADE`。
+shadow-risk ACL rollback 为独立入口
+`canonical_v13_bootstrap.py shadow-risk-acl-rollback`，只撤销上述两项 risk writer `SELECT`；partial ACL、
+额外 DML 或 manifest drift 必须 fail closed。release rollback 时先撤销 shadow-risk ACL，再进入既有
+acceptance-trigger/deployment/runtime/schema 反向顺序。
 
 完成 schema/ACL rollback 且 API、canonical runtime 与 order writer LaunchAgent 均已 unload 后，只能用
 以下窄入口清理 9 个固定 LOGIN 与 10 个固定 Keychain item；它不读取或删除 OKX credential：

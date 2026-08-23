@@ -76,6 +76,17 @@ def _statements(sql: str) -> tuple[str, ...]:
     return tuple(statement for statement in sql.split(";\n") if statement.strip())
 
 
+def _service_principals(role_prefix: str) -> dict[str, str]:
+    return {
+        role_prefix + "api_login": "canonical_api_reader",
+        role_prefix + "control_login": "canonical_control_writer",
+        role_prefix + "validation_login": "canonical_validation_writer",
+        role_prefix + "scoring_login": "canonical_scoring_writer",
+        role_prefix + "qualification_login": "canonical_qualification_writer",
+        role_prefix + "optimization_login": "canonical_optimization_writer",
+    }
+
+
 def test_empty_postgresql_genesis_mapping_acl_and_repeat_noop() -> None:
     assert DATABASE_URL is not None
     mapping = CanonicalRoleMapping.from_prefix(ROLE_PREFIX)
@@ -550,14 +561,7 @@ def test_postgresql_research_roles_enforce_independent_receipt_writers() -> None
                     connection.exec_driver_sql(statement)
                 for statement in _statements(render_postgresql_owner_sql(mapping)):
                     connection.exec_driver_sql(statement)
-            service_principals = {
-                ROLE_PREFIX + "api_login": "canonical_api_reader",
-                ROLE_PREFIX + "control_login": "canonical_control_writer",
-                ROLE_PREFIX + "validation_login": "canonical_validation_writer",
-                ROLE_PREFIX + "scoring_login": "canonical_scoring_writer",
-                ROLE_PREFIX + "qualification_login": "canonical_qualification_writer",
-                ROLE_PREFIX + "optimization_login": "canonical_optimization_writer",
-            }
+            service_principals = _service_principals(ROLE_PREFIX)
             for principal, logical_role in service_principals.items():
                 connection.exec_driver_sql(
                     f"GRANT {mapping.physical(logical_role)} TO {principal}"
