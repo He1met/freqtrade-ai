@@ -421,10 +421,37 @@ class _RotationTransaction:
 
 
 class _RotationConnection:
-    def __init__(self, service, *, fail_commit: bool = False, replay=()) -> None:
+    def __init__(
+        self, service, *, fail_commit: bool = False, replay=(), hba_rows=None
+    ) -> None:
         self.service = service
         self.fail_commit = fail_commit
         self.replay = tuple(replay)
+        self.hba_rows = tuple(
+            hba_rows
+            or (
+                (
+                    120,
+                    "host",
+                    [service.DATABASE_NAME],
+                    [service.READER_PRINCIPAL],
+                    "127.0.0.1",
+                    "255.255.255.255",
+                    "scram-sha-256",
+                    None,
+                ),
+                (
+                    121,
+                    "host",
+                    [service.DATABASE_NAME],
+                    [service.READER_PRINCIPAL],
+                    "::1",
+                    "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+                    "scram-sha-256",
+                    None,
+                ),
+            )
+        )
         self.insert_parameters = None
         self.alter_count = 0
         self.advisory_parameters = None
@@ -447,6 +474,8 @@ class _RotationConnection:
         if "pg_advisory_xact_lock" in rendered:
             self.advisory_parameters = parameters
             return _RotationResult([(None,)])
+        if "pg_hba_file_rules" in rendered:
+            return _RotationResult(self.hba_rows)
         if "SELECT id, request_digest, receipt_digest" in rendered:
             return _RotationResult(self.replay)
         if "pg_catalog.pg_authid" in rendered:
@@ -568,6 +597,55 @@ def test_api_reader_rotation_restores_keychain_if_database_commit_fails(
         )
     assert replacements == ["n" * 64, "o" * 64]
     assert state["material"] == "o" * 64
+
+
+def test_api_reader_rotation_blocks_trust_hba_before_mutation(monkeypatch) -> None:
+    service = _load_service("canonical_v13_api_service_reader_rotation_hba")
+    connection = _RotationConnection(
+        service,
+        hba_rows=(
+            (
+                119,
+                "host",
+                ["all"],
+                ["all"],
+                "127.0.0.1",
+                "255.255.255.255",
+                "trust",
+                None,
+            ),
+            (
+                121,
+                "host",
+                ["all"],
+                ["all"],
+                "::1",
+                "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+                "trust",
+                None,
+            ),
+        ),
+    )
+    state, replacements, verified, rejected = _configure_rotation(
+        service, monkeypatch, connection
+    )
+
+    with pytest.raises(
+        service.CanonicalServiceBlocked,
+        match="BLOCKED_READER_ROTATION_HBA_UNSAFE",
+    ):
+        service.rotate_api_reader(
+            actor_identity="operator:test",
+            idempotency_key="incident:test:trust-hba",
+            port=8011,
+        )
+
+    assert state["material"] == "o" * 64
+    assert replacements == []
+    assert verified == []
+    assert rejected == []
+    assert connection.alter_count == 0
+    assert connection.insert_parameters is None
 
 
 def test_api_reader_rotation_exact_replay_is_noop_without_restart(monkeypatch) -> None:

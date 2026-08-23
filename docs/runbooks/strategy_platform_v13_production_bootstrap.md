@@ -99,6 +99,11 @@ Keychain item；成功提交后必须证明旧 credential 不能新建连接、�
 receipt、repo、plist 或 dotenv。相同 actor/key/release 的 exact replay 返回
 `NO_OP_ALREADY_ROTATED`，不得产生第二次轮换或第二次 restart；key reuse/drift 必须 BLOCKED。
 
+轮换事务开始前还必须从 `pg_hba_file_rules` 证明 IPv4/IPv6 loopback 的前两条 `host` 规则精确绑定
+canonical database 与 API reader LOGIN，且认证方法均为 `scram-sha-256`。任何更早规则、`trust`、
+宽泛 database/user、地址或 netmask 漂移都必须在 `ALTER ROLE`、Keychain 和 audit 写入之前返回
+`BLOCKED_READER_ROTATION_HBA_UNSAFE`；不得把 post-commit 旧 credential 连接测试当作 HBA 配置器。
+
 轮换后还必须分别执行 UI status、`verify-research-provisioned`、Phase 9 provision verifier、backup/
 isolated restore verifier、execution-domain zero-count 与 secret scan。旧 credential 被拒绝、新
 credential read-only 和 `trading_credentials_modified=false` 是 release handoff 的必需证据。

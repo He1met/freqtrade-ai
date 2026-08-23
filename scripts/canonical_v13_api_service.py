@@ -939,6 +939,58 @@ def _reader_role_verifier(connection: psycopg.Connection[Any]) -> str:
     return verifier
 
 
+def _verify_reader_hba_scram(connection: psycopg.Connection[Any]) -> None:
+    """Require exact password-authenticated loopback rules before mutation.
+
+    The managed API always connects over IPv4 loopback, but both loopback
+    families are pinned so a later host change cannot silently fall through to
+    a broader ``trust`` rule.  Requiring these to be the first two host rules is
+    intentionally strict: an earlier host rule is an unreviewed authentication
+    bypass for this credential-rotation contract.
+    """
+
+    rows = connection.execute(
+        """
+        SELECT line_number, type, database, user_name, address, netmask,
+               auth_method, error
+        FROM pg_catalog.pg_hba_file_rules
+        WHERE type = 'host'
+        ORDER BY line_number
+        """
+    ).fetchall()
+    expected = (
+        (
+            (DATABASE_NAME,),
+            (READER_PRINCIPAL,),
+            "127.0.0.1",
+            "255.255.255.255",
+            "scram-sha-256",
+        ),
+        (
+            (DATABASE_NAME,),
+            (READER_PRINCIPAL,),
+            "::1",
+            "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+            "scram-sha-256",
+        ),
+    )
+    if len(rows) < len(expected):
+        raise CanonicalServiceBlocked("BLOCKED_READER_ROTATION_HBA_UNSAFE")
+    observed = tuple(
+        (
+            tuple(row[2] or ()),
+            tuple(row[3] or ()),
+            str(row[4] or ""),
+            str(row[5] or ""),
+            str(row[6] or ""),
+        )
+        for row in rows[: len(expected)]
+        if str(row[1]) == "host" and row[7] is None
+    )
+    if observed != expected:
+        raise CanonicalServiceBlocked("BLOCKED_READER_ROTATION_HBA_UNSAFE")
+
+
 def _connect_reader(material: str) -> psycopg.Connection[Any]:
     parameters: dict[str, object] = {
         "dbname": DATABASE_NAME,
@@ -1017,6 +1069,7 @@ def rotate_api_reader(
                     "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
                     (f"{READER_ROTATION_AGGREGATE_TYPE}:{READER_PRINCIPAL}",),
                 )
+                _verify_reader_hba_scram(connection)
                 replay = connection.execute(
                     """
                     SELECT id, request_digest, receipt_digest, evidence_json
