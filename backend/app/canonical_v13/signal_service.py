@@ -121,6 +121,7 @@ def record_production_demo_signal(
     signal_json: Mapping[str, object],
     evaluated_at: datetime | None = None,
     maximum_heartbeat_age: timedelta = timedelta(minutes=5),
+    runtime_liveness_observed_at: datetime | None = None,
 ) -> UUID:
     """Persist one natural Demo signal from the healthy non-order runtime."""
 
@@ -160,6 +161,14 @@ def record_production_demo_signal(
     observed = receipt["observed_at"] if receipt is not None else None
     if observed is not None and observed.tzinfo is None:
         observed = observed.replace(tzinfo=timezone.utc)
+    liveness_observed = runtime_liveness_observed_at
+    if liveness_observed is not None:
+        if liveness_observed.tzinfo is None:
+            raise CanonicalExecutionChainBlocked(
+                "BLOCKED_SIGNAL_TIME_POLICY", "runtime liveness must be timezone-aware"
+            )
+        liveness_observed = liveness_observed.astimezone(timezone.utc)
+    payload = dict(signal_json)
     if (
         deployment is None
         or deployment["status"] != "ACTIVE"
@@ -174,13 +183,23 @@ def record_production_demo_signal(
         or receipt["evidence_class"] != "PRODUCTION_DEMO_RUNTIME"
         or observed is None
         or observed > now
-        or now - observed > maximum_heartbeat_age
+        or (
+            liveness_observed is None
+            and now - observed > maximum_heartbeat_age
+        )
+        or (
+            liveness_observed is not None
+            and (
+                liveness_observed != now
+                or payload.get("runtime_receipt_digest")
+                != receipt["receipt_digest"]
+            )
+        )
     ):
         raise CanonicalExecutionChainBlocked(
             "BLOCKED_SIGNAL_RUNTIME_LINEAGE",
             "ACTIVE Demo deployment and fresh production runtime receipt are required",
         )
-    payload = dict(signal_json)
     if (
         payload.get("evidence_class") != "PRODUCTION_OKX_DEMO"
         or payload.get("natural_signal") is not True

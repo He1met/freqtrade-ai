@@ -14,7 +14,7 @@ from decimal import Decimal
 from hashlib import sha256
 import hmac
 import json
-from typing import Protocol
+from typing import Callable, Protocol
 
 from sqlalchemy import select
 
@@ -427,9 +427,23 @@ class ReleaseBoundReceiptSeal:
 class DatabaseSignalReceiptWriter:
     """Verify the sealed receipt before invoking the signal-writer-only service."""
 
-    def __init__(self, factory: ConnectionFactory, verifier: ReleaseBoundReceiptSeal):
+    def __init__(
+        self,
+        factory: ConnectionFactory,
+        verifier: ReleaseBoundReceiptSeal,
+        *,
+        clock: Callable[[], datetime] | None = None,
+        maximum_receipt_age: timedelta = timedelta(minutes=2),
+    ):
+        if maximum_receipt_age <= timedelta(0):
+            raise CanonicalPhase9CompositionBlocked(
+                "BLOCKED_PHASE9_SIGNAL_RECEIPT_FRESHNESS",
+                "signed worker receipt TTL must be positive",
+            )
         self._factory = factory
         self._verifier = verifier
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._maximum_receipt_age = maximum_receipt_age
 
     def verify(self, receipt: RuntimeWorkerReceipt) -> bool:
         return verify_runtime_worker_receipt(receipt, verifier=self._verifier)
@@ -442,6 +456,24 @@ class DatabaseSignalReceiptWriter:
         candidate = receipt.signal_candidate
         if candidate is None:
             return
+        now = self._clock()
+        observed_at = receipt.observed_at
+        if now.tzinfo is None or observed_at.tzinfo is None:
+            raise CanonicalPhase9CompositionBlocked(
+                "BLOCKED_PHASE9_SIGNAL_RECEIPT_FRESHNESS",
+                "signed worker receipt timestamps must be timezone-aware",
+            )
+        now = now.astimezone(timezone.utc)
+        observed_at = observed_at.astimezone(timezone.utc)
+        if (
+            observed_at > now
+            or now - observed_at > self._maximum_receipt_age
+            or candidate.evaluated_at != receipt.observed_at
+        ):
+            raise CanonicalPhase9CompositionBlocked(
+                "BLOCKED_PHASE9_SIGNAL_RECEIPT_FRESHNESS",
+                "signed worker receipt is stale, future, or time-drifted",
+            )
         with self._factory() as connection:
             record_production_demo_signal(
                 connection,
@@ -450,6 +482,7 @@ class DatabaseSignalReceiptWriter:
                 research_target_id=candidate.research_target_id,
                 signal_json=candidate.signal_json,
                 evaluated_at=candidate.evaluated_at,
+                runtime_liveness_observed_at=receipt.observed_at,
             )
 
 

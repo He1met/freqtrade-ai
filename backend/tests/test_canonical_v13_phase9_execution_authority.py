@@ -5,7 +5,7 @@ from decimal import Decimal
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import event, select
+from sqlalchemy import event, func, select
 
 from app.canonical_v13.deployment_approval import approve_demo_deployment
 from app.canonical_v13.deployment_control import (
@@ -84,7 +84,12 @@ def _runtime_spec(connection, approval, deployment) -> FrozenRuntimeLaunchSpec:
     )
 
 
-def _production_chain(connection):
+def _production_chain(
+    connection,
+    *,
+    runtime_observed_at=NOW,
+    signal_runtime_receipt_digest=None,
+):
     plan_id, decision = _qualified(connection)
     approval = approve_demo_deployment(
         connection,
@@ -100,7 +105,7 @@ def _production_chain(connection):
         runtime_instance_id=uuid4(),
         launch_spec=spec,
         status="HEALTHY",
-        observed_at=NOW,
+        observed_at=runtime_observed_at,
         evidence_class="PRODUCTION_DEMO_RUNTIME",
     )
     runtime_id = confirm_production_demo_runtime_observation(
@@ -110,7 +115,7 @@ def _production_chain(connection):
         image_digest=spec.image_digest,
         credential_reference=spec.credential_reference,
         receipt=receipt,
-        evaluated_at=NOW,
+        evaluated_at=runtime_observed_at,
     )
     from app.canonical_v13.models import VALIDATION_PLANS_TABLE
 
@@ -127,6 +132,9 @@ def _production_chain(connection):
         "allow_real_funds": False,
         "configuration_bundle_digest": plan["configuration_bundle_digest"],
         "market_snapshot_digest": plan["market_snapshot_digest"],
+        "runtime_receipt_digest": (
+            signal_runtime_receipt_digest or receipt.receipt_digest
+        ),
         "side": "buy",
     }
     signal_id = record_production_demo_signal(
@@ -136,6 +144,7 @@ def _production_chain(connection):
         research_target_id=plan["research_target_id"],
         signal_json=signal_payload,
         evaluated_at=NOW + timedelta(seconds=1),
+        runtime_liveness_observed_at=NOW + timedelta(seconds=1),
     )
     from app.canonical_v13.models import SIGNALS_TABLE
 
@@ -351,6 +360,34 @@ def _risk_policy_source(
         )
     )
     return receipt_digest
+
+
+def test_fresh_signed_liveness_can_use_immutable_activation_receipt(
+    canonical_connection,
+):
+    with canonical_connection.begin():
+        _production_chain(
+            canonical_connection,
+            runtime_observed_at=NOW - timedelta(minutes=10),
+        )
+        from app.canonical_v13.models import SIGNALS_TABLE
+
+        assert canonical_connection.execute(
+            select(func.count()).select_from(SIGNALS_TABLE)
+        ).scalar_one() == 1
+
+
+def test_signed_liveness_rejects_activation_receipt_digest_drift(
+    canonical_connection,
+):
+    with pytest.raises(
+        CanonicalExecutionChainBlocked, match="BLOCKED_SIGNAL_RUNTIME_LINEAGE"
+    ):
+        with canonical_connection.begin():
+            _production_chain(
+                canonical_connection,
+                signal_runtime_receipt_digest="f" * 64,
+            )
 
 
 def test_exact_budget_and_central_risk_are_replay_safe(
