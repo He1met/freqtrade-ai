@@ -1407,6 +1407,67 @@ ORDER_WRITER_LEASES_TABLE = _table(
 )
 
 
+# Control-plane-issued, one-shot acceptance evidence.  It is deliberately not a
+# strategy artifact or research result and therefore cannot participate in
+# scoring or qualification.  Consumption is represented by the unique nullable
+# FK on ``signals``; the trigger row itself is immutable.
+ACCEPTANCE_SIGNAL_TRIGGERS_TABLE = _table(
+    "acceptance_signal_triggers",
+    _uuid_id(),
+    _uuid_fk("qualification_decision_id", "qualification_decisions"),
+    _uuid_fk("deployment_approval_id", "deployment_approvals"),
+    _uuid_fk("deployment_id", "deployments", unique=True),
+    _uuid_fk("runtime_instance_id", "runtime_instances"),
+    _uuid_fk("runtime_image_acceptance_id", "runtime_image_acceptances"),
+    _uuid_fk("strategy_version_id", "strategy_versions"),
+    _uuid_fk("research_target_id", "research_targets"),
+    _uuid_fk("configuration_bundle_id", "configuration_bundles"),
+    _digest("configuration_bundle_digest"),
+    _uuid_fk("market_snapshot_id", "market_snapshots"),
+    _digest("market_snapshot_digest"),
+    Column(
+        "source_kind",
+        String(40),
+        nullable=False,
+        default="ACCEPTANCE_SCHEDULED_TEST",
+    ),
+    Column("execution_target", String(24), nullable=False),
+    Column("allow_real_funds", Boolean, nullable=False),
+    Column("acceptance_only", Boolean, nullable=False),
+    Column("position_policy", String(24), nullable=False),
+    Column("max_order_count", Integer, nullable=False),
+    Column("scheduled_at", DateTime(timezone=True), nullable=False),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("idempotency_key", String(200), nullable=False, unique=True),
+    _digest("request_digest"),
+    _digest("receipt_digest"),
+    _created_at(),
+    CheckConstraint(
+        "source_kind = 'ACCEPTANCE_SCHEDULED_TEST'",
+        name="acceptance_signal_triggers_source_kind",
+    ),
+    CheckConstraint(
+        "execution_target = 'OKX_DEMO' AND allow_real_funds IS FALSE "
+        "AND acceptance_only IS TRUE",
+        name="acceptance_signal_triggers_demo_only",
+    ),
+    CheckConstraint(
+        "position_policy = 'LONG_ONLY' AND max_order_count = 1",
+        name="acceptance_signal_triggers_single_long",
+    ),
+    CheckConstraint(
+        "expires_at > scheduled_at",
+        name="acceptance_signal_triggers_freshness",
+    ),
+    UniqueConstraint(
+        "request_digest", name="acceptance_signal_triggers_request_digest_unique"
+    ),
+    UniqueConstraint(
+        "receipt_digest", name="acceptance_signal_triggers_receipt_digest_unique"
+    ),
+)
+
+
 # Explicitly separated signal, risk, central order, fill, ledger, reconciliation.
 SIGNALS_TABLE = _table(
     "signals",
@@ -1419,6 +1480,26 @@ SIGNALS_TABLE = _table(
     _digest("configuration_bundle_digest"),
     _uuid_fk("market_snapshot_id", "market_snapshots"),
     _digest("market_snapshot_digest"),
+    Column(
+        "source_kind",
+        String(40),
+        nullable=False,
+        default="NATURAL_STRATEGY_SIGNAL",
+    ),
+    Column(
+        "acceptance_trigger_id",
+        Uuid(as_uuid=True),
+        ForeignKey(
+            f"{CANONICAL_BUSINESS_SCHEMA}.acceptance_signal_triggers.id",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+        unique=True,
+    ),
+    _digest("worker_receipt_digest", nullable=True),
+    Column("worker_signer_key_id", String(160), nullable=True),
+    Column("worker_signature_algorithm", String(40), nullable=True),
+    _digest("worker_signature", nullable=True),
     Column("signal_json", JSON, nullable=False),
     _digest("signal_digest"),
     _created_at(),
@@ -1427,6 +1508,17 @@ SIGNALS_TABLE = _table(
         "research_target_id",
         "signal_digest",
         name="signals_runtime_target_digest_unique",
+    ),
+    CheckConstraint(
+        "(source_kind IN ('NATURAL_STRATEGY_SIGNAL', 'TEST_SIMULATED_FIXTURE') "
+        "AND acceptance_trigger_id IS NULL AND worker_receipt_digest IS NULL "
+        "AND worker_signer_key_id IS NULL AND worker_signature_algorithm IS NULL "
+        "AND worker_signature IS NULL) "
+        "OR (source_kind = 'ACCEPTANCE_SCHEDULED_TEST' "
+        "AND acceptance_trigger_id IS NOT NULL AND worker_receipt_digest IS NOT NULL "
+        "AND worker_signer_key_id IS NOT NULL AND worker_signature_algorithm IS NOT NULL "
+        "AND worker_signature IS NOT NULL)",
+        name="signals_source_kind_lineage",
     ),
 )
 

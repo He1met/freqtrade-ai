@@ -84,10 +84,23 @@ def create_production_demo_intent(
         .mappings()
         .one_or_none()
     )
-    if (
-        signal is None
-        or signal["signal_json"].get("evidence_class") != "PRODUCTION_OKX_DEMO"
-    ):
+    production_natural = bool(
+        signal
+        and signal["source_kind"] == "NATURAL_STRATEGY_SIGNAL"
+        and signal["acceptance_trigger_id"] is None
+        and signal["signal_json"].get("evidence_class") == "PRODUCTION_OKX_DEMO"
+        and signal["signal_json"].get("natural_signal") is True
+    )
+    acceptance_test = bool(
+        signal
+        and signal["source_kind"] == "ACCEPTANCE_SCHEDULED_TEST"
+        and signal["acceptance_trigger_id"] is not None
+        and signal["signal_json"].get("evidence_class")
+        == "ACCEPTANCE_SCHEDULED_TEST"
+        and signal["signal_json"].get("acceptance_only") is True
+        and signal["signal_json"].get("natural_signal") is False
+    )
+    if signal is None or not (production_natural or acceptance_test):
         raise CanonicalExecutionChainBlocked(
             "BLOCKED_PRODUCTION_SIGNAL_REQUIRED", str(signal_id)
         )
@@ -102,6 +115,13 @@ def create_production_demo_intent(
         or payload.get("execution_target") != "OKX_DEMO"
         or payload.get("allow_real_funds") is not False
         or payload.get("signal_digest") != signal["signal_digest"]
+        or (
+            acceptance_test
+            and (
+                payload.get("source_kind") != "ACCEPTANCE_SCHEDULED_TEST"
+                or payload.get("acceptance_only") is not True
+            )
+        )
         or not isinstance(payload.get("instrument"), str)
         or not isinstance(payload.get("notional"), str)
         or not notional.is_finite()

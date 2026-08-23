@@ -164,6 +164,43 @@ class Phase9SignalReceiptDTO(CanonicalProjectionDTO):
     signal_id: UUID
 
 
+class Phase9AcceptanceSignalTriggerCommandDTO(CanonicalCommandDTO):
+    qualification_decision_id: UUID
+    deployment_approval_id: UUID
+    deployment_id: UUID
+    runtime_instance_id: UUID
+    runtime_image_acceptance_id: UUID
+    actor_identity: str = Field(min_length=1, max_length=160)
+    idempotency_key: str = Field(min_length=1, max_length=200)
+
+
+class Phase9AcceptanceSignalTriggerReceiptDTO(CanonicalProjectionDTO):
+    trigger_id: UUID
+    source_kind: Literal["ACCEPTANCE_SCHEDULED_TEST"]
+    scheduled_at: datetime
+    expires_at: datetime
+    request_digest: str = Field(pattern=SHA256_PATTERN)
+    receipt_digest: str = Field(pattern=SHA256_PATTERN)
+    repeat_noop: bool
+
+
+class Phase9AcceptanceSignalTriggerProjectionDTO(CanonicalProjectionDTO):
+    trigger_id: UUID
+    source_kind: Literal["ACCEPTANCE_SCHEDULED_TEST"]
+    execution_target: Literal["OKX_DEMO"]
+    acceptance_only: Literal[True]
+    allow_real_funds: Literal[False]
+    position_policy: Literal["LONG_ONLY"]
+    max_order_count: Literal[1]
+    scheduled_at: datetime
+    expires_at: datetime
+    consumed: bool
+    signal_id: UUID | None
+    signal_digest: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    worker_receipt_digest: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    display_label: Literal["验收测试信号"] = "验收测试信号"
+
+
 class Phase9IntentCommandDTO(CanonicalCommandDTO):
     signal_id: UUID
     intent_json: dict[str, Any]

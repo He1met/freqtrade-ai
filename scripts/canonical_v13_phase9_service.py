@@ -1500,6 +1500,92 @@ def confirm_runtime_stop_observation(plan_digest: str) -> dict[str, object]:
     }
 
 
+def execute_acceptance_signal_trigger(
+    *, trigger_id: UUID, plan_digest: str
+) -> dict[str, object]:
+    """Consume one server-issued trigger through the signed signal-writer boundary."""
+
+    _require_release_checkout()
+    plan, state = _load_plan("long_lived_runtime")
+    observed = status("long_lived_runtime")
+    if (
+        state.get("status") != "RUNNING"
+        or observed["status"] != "RUNNING"
+        or plan.plan_digest != plan_digest
+        or plan.stage != "SIGNAL_RISK_SHADOW"
+        or plan.order_writer_enabled is not False
+        or plan.demo_only is not True
+        or plan.allow_real_funds is not False
+    ):
+        raise CanonicalPhase9SupervisorBlocked(
+            "BLOCKED_ACCEPTANCE_TRIGGER_RUNTIME",
+            "exact healthy no-order SIGNAL_RISK_SHADOW plan is required",
+        )
+    # Renew the DB observation from the exact live holder immediately before
+    # the signed one-shot transaction.  This remains the deployment writer's
+    # authority and is never replaced by caller facts.
+    confirm_runtime_observation(plan_digest)
+    from app.canonical_v13.acceptance_signal_trigger import (  # noqa: PLC0415
+        build_acceptance_worker_receipt,
+        persist_acceptance_signal,
+        read_acceptance_signal_execution,
+    )
+    from app.canonical_v13.phase9_keychain import (  # noqa: PLC0415
+        CanonicalPhase9KeychainBlocked,
+        read_canonical_service_secret,
+    )
+    from app.canonical_v13.phase9_production_runtime import (  # noqa: PLC0415
+        ReleaseBoundReceiptSeal,
+    )
+
+    try:
+        signing_key = read_canonical_service_secret(
+            RUNTIME_SIGNAL_SIGNER_KEYCHAIN_SERVICE
+        )
+    except CanonicalPhase9KeychainBlocked as exc:
+        raise CanonicalPhase9SupervisorBlocked(exc.code, exc.detail) from None
+    seal = ReleaseBoundReceiptSeal(plan.release_digest, signing_key)
+    factory = _connection_factory(_phase9_database_url("canonical_signal_writer"))
+    with factory() as connection:
+        existing = read_acceptance_signal_execution(
+            connection, trigger_id=trigger_id
+        )
+        if existing is not None:
+            return {**_json_safe(asdict(existing)), "status": "ACCEPTED"}
+        worker_receipt = build_acceptance_worker_receipt(
+            connection,
+            trigger_id=trigger_id,
+            plan_digest=plan_digest,
+            observed_at=_now(),
+            signer=seal,
+        )
+        result = persist_acceptance_signal(
+            connection,
+            trigger_id=trigger_id,
+            worker_receipt=worker_receipt,
+            verifier=seal,
+            persisted_at=worker_receipt.observed_at,
+        )
+    lifecycle = build_lifecycle_receipt(
+        service_key="long_lived_runtime",
+        action="ACCEPTANCE_SIGNAL_TRIGGER",
+        status="ACCEPTED",
+        generation=plan.generation,
+        observed_at=_now(),
+        plan_digest=plan.plan_digest,
+        details={
+            "trigger_id": str(trigger_id),
+            "source_kind": result.source_kind,
+            "signal_id": str(result.signal_id),
+            "signal_digest": result.signal_digest,
+            "worker_receipt_digest": result.worker_receipt_digest,
+            "order_submission_enabled": False,
+        },
+    )
+    _append_receipt(lifecycle)
+    return {**_json_safe(asdict(result)), "status": "ACCEPTED"}
+
+
 def _production_okx_session_factory():
     from app.canonical_v13.phase9_keychain import (  # noqa: PLC0415
         CanonicalPhase9KeychainBlocked,
@@ -2006,6 +2092,7 @@ def main(argv: list[str] | None = None) -> int:
             "post-canary-ledger",
             "reconcile-canary",
             "accept-recovery-soak",
+            "execute-acceptance-trigger",
         ),
     )
     parser.add_argument(
@@ -2042,6 +2129,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--order-id", type=UUID)
     parser.add_argument("--fill-id", type=UUID)
     parser.add_argument("--qualification-decision-id", type=UUID)
+    parser.add_argument("--acceptance-trigger-id", type=UUID)
     args = parser.parse_args(argv)
     try:
         if args.command == "prepare":
@@ -2150,6 +2238,20 @@ def main(argv: list[str] | None = None) -> int:
                     "long_lived_runtime and --plan-digest are required",
                 )
             payload = confirm_runtime_stop_observation(args.plan_digest)
+        elif args.command == "execute-acceptance-trigger":
+            if (
+                args.service != "long_lived_runtime"
+                or not args.plan_digest
+                or args.acceptance_trigger_id is None
+            ):
+                raise CanonicalPhase9SupervisorBlocked(
+                    "BLOCKED_ACCEPTANCE_TRIGGER_COMMAND",
+                    "long_lived_runtime, --plan-digest and --acceptance-trigger-id are required",
+                )
+            payload = execute_acceptance_signal_trigger(
+                trigger_id=args.acceptance_trigger_id,
+                plan_digest=args.plan_digest,
+            )
         elif args.command == "probe-canary":
             if args.service != "order_writer" or args.deployment_id is None:
                 raise CanonicalPhase9SupervisorBlocked(

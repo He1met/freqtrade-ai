@@ -22,7 +22,7 @@ CANONICAL_MANIFEST_KEY: Final = "canonical-v13-table-manifest-v1"
 CANONICAL_LEGACY_IMPORT_MODE: Final = "EXTERNAL_LATEST_ONLY"
 CANONICAL_TRADING_CAPABILITY: Final = "TRADING_DISABLED"
 CANONICAL_PRODUCTION_DEFAULT: Final = "UNSET"
-CANONICAL_AUTHORITY_REVISION: Final = "20260823_phase9_runtime_identity_rollover13"
+CANONICAL_AUTHORITY_REVISION: Final = "20260823_phase9_acceptance_signal_trigger14"
 CANONICAL_PREDECESSOR_RUNTIME_IDENTITY_INDEX: Final = (
     "uq_runtime_instances_runtime_identity"
 )
@@ -136,6 +136,7 @@ _TABLES_BY_DOMAIN = {
         "runtime_receipts",
     ),
     "execution": (
+        "acceptance_signal_triggers",
         "execution_canary_probe_receipts",
         "execution_canary_risk_policies",
         "execution_risk_budget_authorizations",
@@ -172,6 +173,7 @@ _WRITER_TABLE_ALLOWLIST = {
     "canonical_schema_owner": ("schema_metadata",),
     "canonical_control_writer": (
         "audit_events",
+        "acceptance_signal_triggers",
         "idempotency_receipts",
         "runtime_image_acceptances",
         *_TABLES_BY_DOMAIN["intake_catalog"],
@@ -395,7 +397,12 @@ _WRITER_READ_ALLOWLIST = {
     ),
     "canonical_signal_writer": (
         "schema_metadata",
+        "acceptance_signal_triggers",
+        "deployment_approvals",
         "deployments",
+        "qualification_decisions",
+        "research_targets",
+        "runtime_image_acceptances",
         "runtime_instances",
         "runtime_receipts",
     ),

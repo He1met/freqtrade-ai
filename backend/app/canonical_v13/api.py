@@ -78,6 +78,9 @@ from app.canonical_v13.dto import (
     Phase9ReadinessProjectionDTO,
     Phase9ApprovalCommandDTO,
     Phase9ApprovalReceiptDTO,
+    Phase9AcceptanceSignalTriggerCommandDTO,
+    Phase9AcceptanceSignalTriggerProjectionDTO,
+    Phase9AcceptanceSignalTriggerReceiptDTO,
     Phase9CanaryRiskPolicyCommandDTO,
     Phase9CanaryRiskPolicyReceiptDTO,
     Phase9CanaryRiskPolicyTerminationCommandDTO,
@@ -142,6 +145,9 @@ from app.canonical_v13.deployment_control import (
     deployment_capability_digest,
 )
 from app.canonical_v13.execution_common import CanonicalExecutionChainBlocked
+from app.canonical_v13.acceptance_signal_trigger import (
+    issue_acceptance_signal_trigger,
+)
 from app.canonical_v13.phase9_execution_authority import (
     authorize_demo_risk_budget,
     decide_central_demo_risk,
@@ -249,6 +255,7 @@ from app.canonical_v13.runtime_contract import (
     verify_runtime_observation_receipt,
 )
 from app.canonical_v13.models import (
+    ACCEPTANCE_SIGNAL_TRIGGERS_TABLE,
     CONFIGURATION_ACTIVATIONS_TABLE,
     CONFIGURATION_BUNDLE_MEMBERS_TABLE,
     CONFIGURATION_BUNDLES_TABLE,
@@ -270,6 +277,7 @@ from app.canonical_v13.models import (
     RESEARCH_TARGETS_TABLE,
     RUNTIME_INSTANCES_TABLE,
     RUNTIME_RECEIPTS_TABLE,
+    SIGNALS_TABLE,
     STRATEGIES_TABLE,
     STRATEGY_ARTIFACTS_TABLE,
     STRATEGY_SUBMISSIONS_TABLE,
@@ -2417,6 +2425,86 @@ def create_canonical_v13_app(
         return run_phase9(
             approval_connection_factory, "canonical_approval_writer", execute
         )
+
+    @app.post(
+        f"{API_PREFIX}/phase9/acceptance-signal-triggers",
+        response_model=Phase9AcceptanceSignalTriggerReceiptDTO,
+        status_code=201,
+    )
+    def phase9_acceptance_signal_trigger(
+        command: Phase9AcceptanceSignalTriggerCommandDTO,
+    ) -> Phase9AcceptanceSignalTriggerReceiptDTO:
+        def execute(connection: Connection) -> Phase9AcceptanceSignalTriggerReceiptDTO:
+            return Phase9AcceptanceSignalTriggerReceiptDTO(
+                **asdict(
+                    issue_acceptance_signal_trigger(
+                        connection,
+                        qualification_decision_id=command.qualification_decision_id,
+                        deployment_approval_id=command.deployment_approval_id,
+                        deployment_id=command.deployment_id,
+                        runtime_instance_id=command.runtime_instance_id,
+                        runtime_image_acceptance_id=command.runtime_image_acceptance_id,
+                        actor_identity=command.actor_identity,
+                        idempotency_key=command.idempotency_key,
+                    )
+                )
+            )
+
+        return run_control(execute)
+
+    @app.get(
+        f"{API_PREFIX}/phase9/acceptance-signal-triggers",
+        response_model=list[Phase9AcceptanceSignalTriggerProjectionDTO],
+    )
+    def phase9_acceptance_signal_triggers(
+        qualification_decision_id: UUID,
+    ) -> list[Phase9AcceptanceSignalTriggerProjectionDTO]:
+        def execute(
+            connection: Connection,
+        ) -> list[Phase9AcceptanceSignalTriggerProjectionDTO]:
+            rows = (
+                connection.execute(
+                    select(ACCEPTANCE_SIGNAL_TRIGGERS_TABLE).where(
+                        ACCEPTANCE_SIGNAL_TRIGGERS_TABLE.c.qualification_decision_id
+                        == qualification_decision_id
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            projected: list[Phase9AcceptanceSignalTriggerProjectionDTO] = []
+            for row in rows:
+                signal = (
+                    connection.execute(
+                        select(SIGNALS_TABLE).where(
+                            SIGNALS_TABLE.c.acceptance_trigger_id == row["id"]
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+                projected.append(
+                    Phase9AcceptanceSignalTriggerProjectionDTO(
+                        trigger_id=row["id"],
+                        source_kind=row["source_kind"],
+                        execution_target=row["execution_target"],
+                        acceptance_only=row["acceptance_only"],
+                        allow_real_funds=row["allow_real_funds"],
+                        position_policy=row["position_policy"],
+                        max_order_count=row["max_order_count"],
+                        scheduled_at=row["scheduled_at"],
+                        expires_at=row["expires_at"],
+                        consumed=signal is not None,
+                        signal_id=signal["id"] if signal else None,
+                        signal_digest=signal["signal_digest"] if signal else None,
+                        worker_receipt_digest=(
+                            signal["worker_receipt_digest"] if signal else None
+                        ),
+                    )
+                )
+            return projected
+
+        return run_read(execute)
 
     @app.post(
         f"{API_PREFIX}/phase9/deployments",

@@ -42,6 +42,10 @@ from app.canonical_v13.gate_receipt_upgrade import (  # noqa: E402
     CanonicalGateReceiptUpgradeBlocked,
     verify_gate_receipt_upgrade,
 )
+from app.canonical_v13.acceptance_signal_trigger_upgrade import (  # noqa: E402
+    CanonicalAcceptanceSignalTriggerUpgradeBlocked,
+    verify_acceptance_signal_trigger_upgrade,
+)
 from app.canonical_v13.deployment_rollover_upgrade import (  # noqa: E402
     CanonicalDeploymentRolloverUpgradeBlocked,
     verify_deployment_rollover_upgrade,
@@ -58,7 +62,7 @@ from app.canonical_v13.runtime_image_upgrade import (  # noqa: E402
 )
 
 BACKUP_CONTRACT: Final = "canonical-v13-postgres-data-backup-v2"
-EXPECTED_TABLE_COUNT: Final = 57
+EXPECTED_TABLE_COUNT: Final = 58
 IDENTITY_TABLE: Final = "schema_metadata"
 RESTORE_NAME_PATTERN: Final = re.compile(
     rf"{re.escape(LOCAL_DATABASE_NAME)}_restore_[a-z0-9][a-z0-9_]*"
@@ -78,6 +82,11 @@ SAFE_SENSITIVE_METADATA_COLUMNS: Final[tuple[str, ...]] = (
 )
 PUBLIC_MARKET_RUNTIME_CREDENTIAL_REFERENCE: Final = "none:public-okx-market-only"
 EXPECTED_LIFECYCLE_TRIGGERS: Final[tuple[tuple[str, str, str], ...]] = (
+    (
+        "acceptance_signal_triggers",
+        "acceptance_signal_triggers_immutable",
+        "O",
+    ),
     ("deployments", "deployments_disable_evidence_guard", "O"),
     ("research_gate_attempts", "research_gate_attempts_lifecycle", "O"),
     ("research_gate_receipts", "research_gate_receipts_append_only", "O"),
@@ -86,6 +95,7 @@ EXPECTED_LIFECYCLE_TRIGGERS: Final[tuple[tuple[str, str, str], ...]] = (
         "runtime_image_acceptances_append_only",
         "O",
     ),
+    ("signals", "acceptance_signals_immutable", "O"),
     ("validation_plans", "validation_plans_gate_receipts", "O"),
 )
 Runner = Callable[[Sequence[str]], subprocess.CompletedProcess[object]]
@@ -145,7 +155,7 @@ def _require_exact_manifest() -> None:
     ):
         raise CanonicalBackupBlocked(
             "BLOCKED_CANONICAL_BACKUP_TABLE_MANIFEST",
-            "the reviewed canonical manifest must contain exactly 57 unique tables",
+            "the reviewed canonical manifest must contain exactly 58 unique tables",
         )
     forbidden = tuple(
         name
@@ -551,6 +561,18 @@ def _verify_restore_trigger_boundary(
         raise CanonicalBackupBlocked(
             "BLOCKED_CANONICAL_RESTORE_DEPLOYMENT_ROLLOVER_TRIGGER_CONTRACT",
             "deployment rollover verifier did not return ACCEPTED",
+        )
+    try:
+        acceptance_trigger = verify_acceptance_signal_trigger_upgrade(connection)
+    except CanonicalAcceptanceSignalTriggerUpgradeBlocked as exc:
+        raise CanonicalBackupBlocked(
+            "BLOCKED_CANONICAL_RESTORE_ACCEPTANCE_TRIGGER_CONTRACT",
+            "acceptance signal trigger contract is not accepted",
+        ) from exc
+    if acceptance_trigger.status != "ACCEPTED":
+        raise CanonicalBackupBlocked(
+            "BLOCKED_CANONICAL_RESTORE_ACCEPTANCE_TRIGGER_CONTRACT",
+            "acceptance signal trigger verifier did not return ACCEPTED",
         )
 
 

@@ -479,6 +479,8 @@ def test_factory_is_standalone_and_exact_routes_are_frozen() -> None:
             (f"{API_PREFIX}/phase9/intents", "POST"),
             (f"{API_PREFIX}/phase9/shadow-risk-decisions", "POST"),
             (f"{API_PREFIX}/phase9/risk-decisions", "POST"),
+            (f"{API_PREFIX}/phase9/acceptance-signal-triggers", "POST"),
+            (f"{API_PREFIX}/phase9/acceptance-signal-triggers", "GET"),
             (f"{API_PREFIX}/optimizations", "GET"),
             (f"{API_PREFIX}/optimizations", "POST"),
             (
@@ -507,7 +509,7 @@ def test_factory_is_standalone_and_exact_routes_are_frozen() -> None:
             for method, operation in path.items()
             if method in {"get", "post", "put", "patch", "delete"}
         ]
-        assert len(operation_ids) == 46
+        assert len(operation_ids) == 48
         assert len(set(operation_ids)) == len(operation_ids)
     finally:
         client.close()

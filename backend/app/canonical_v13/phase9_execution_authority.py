@@ -41,6 +41,7 @@ from app.canonical_v13.models import (
 
 EXECUTION_TARGET = "OKX_DEMO"
 ATTESTATION_MAXIMUM_TTL = timedelta(seconds=60)
+ACCEPTANCE_SIGNAL_SOURCE_KIND = "ACCEPTANCE_SCHEDULED_TEST"
 
 
 @dataclass(frozen=True)
@@ -99,6 +100,37 @@ def _positive_decimal(value: Decimal, *, field: str) -> Decimal:
             "BLOCKED_EXECUTION_AMOUNT", f"{field} must be finite and positive"
         )
     return value
+
+
+def shadow_signal_source_accepted(signal: Mapping[str, object]) -> bool:
+    evidence = signal.get("signal_json")
+    if not isinstance(evidence, Mapping):
+        return False
+    if (
+        evidence.get("evidence_class") == "PRODUCTION_OKX_DEMO"
+        and evidence.get("natural_signal") is True
+    ):
+        return True
+    evaluation = evidence.get("evaluation")
+    trigger_id = evidence.get("acceptance_trigger_id")
+    return bool(
+        signal.get("source_kind") == ACCEPTANCE_SIGNAL_SOURCE_KIND
+        and signal.get("acceptance_trigger_id") is not None
+        and str(signal["acceptance_trigger_id"]) == trigger_id
+        and isinstance(signal.get("worker_receipt_digest"), str)
+        and evidence.get("evidence_class") == ACCEPTANCE_SIGNAL_SOURCE_KIND
+        and evidence.get("source_kind") == ACCEPTANCE_SIGNAL_SOURCE_KIND
+        and evidence.get("natural_signal") is False
+        and evidence.get("acceptance_only") is True
+        and evidence.get("execution_target") == EXECUTION_TARGET
+        and evidence.get("allow_real_funds") is False
+        and evidence.get("position_policy") == "LONG_ONLY"
+        and evidence.get("max_order_count") == 1
+        and isinstance(evaluation, Mapping)
+        and evaluation.get("direction") == "LONG"
+        and evaluation.get("closed_candle") is True
+        and evaluation.get("order_submission_enabled") is False
+    )
 
 
 def authorize_demo_risk_budget(
@@ -744,8 +776,7 @@ def decide_signal_risk_shadow(
         or deployment["status"] != "ACTIVE"
         or deployment["demo_only"] is not True
         or deployment["allow_real_funds"] is not False
-        or signal["signal_json"].get("evidence_class") != "PRODUCTION_OKX_DEMO"
-        or signal["signal_json"].get("natural_signal") is not True
+        or not shadow_signal_source_accepted(signal)
         or signal["signal_json"].get("allow_real_funds") is not False
         or canonical_execution_digest(dict(signal["signal_json"]))
         != signal["signal_digest"]
@@ -857,4 +888,5 @@ __all__ = [
     "decide_central_demo_risk",
     "decide_signal_risk_shadow",
     "record_redacted_demo_attestation",
+    "shadow_signal_source_accepted",
 ]

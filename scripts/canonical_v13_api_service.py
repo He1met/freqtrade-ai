@@ -478,6 +478,9 @@ def _require_phase9_schema_preprovisioned() -> None:
     from app.canonical_v13.phase9_schema_upgrade import (  # noqa: PLC0415
         verify_phase9_schema_upgrade,
     )
+    from app.canonical_v13.acceptance_signal_trigger_upgrade import (  # noqa: PLC0415
+        verify_acceptance_signal_trigger_upgrade,
+    )
     from sqlalchemy import create_engine  # noqa: PLC0415
 
     engine = create_engine(
@@ -487,11 +490,12 @@ def _require_phase9_schema_preprovisioned() -> None:
     try:
         with engine.connect() as connection:
             verification = verify_phase9_schema_upgrade(connection)
+            acceptance_trigger = verify_acceptance_signal_trigger_upgrade(connection)
     except Exception as exc:
         raise CanonicalServiceBlocked("BLOCKED_PHASE9_SCHEMA_PREFLIGHT") from exc
     finally:
         engine.dispose()
-    if verification.status != "ACCEPTED":
+    if verification.status != "ACCEPTED" or acceptance_trigger.status != "ACCEPTED":
         raise CanonicalServiceBlocked("BLOCKED_PHASE9_SCHEMA_PREFLIGHT")
 
 
