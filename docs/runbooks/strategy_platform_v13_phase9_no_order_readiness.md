@@ -210,6 +210,13 @@ order writer 保持 stopped/unloaded，DB writer lease 为 0。runtime 从 exact
 新鲜 public market evidence 生成 deterministic natural-signal receipt；独立
 `canonical_signal_writer` 验证 receipt digest、runtime heartbeat、exact deployment 后才持久化。
 
+从 A 的正式 `STOPPED` observation 切换到 B 时，首个 worker heartbeat 只允许把 exact stopped
+runtime 识别为 `BLOCKED_PHASE9_RUNTIME_OBSERVATION_PENDING`。supervisor 保持 fenced lease、容器与
+order-writer-disabled 状态，但不得读取市场或生成 signal；operator 随后调用正式
+`confirm-runtime-observation` 将同一 runtime identity 和新 generation/image observation 推进为
+`HEALTHY`，下一 heartbeat 才能评估市场。只有完整 STOP receipt、exact image/launch/deployment lineage
+匹配时该 pending 状态可重试；其他 lineage drift 必须终止 supervisor，禁止靠竞态抢写 observation。
+
 随后依次创建唯一 intent 和唯一 `SIGNAL_RISK_SHADOW` decision。shadow authority 只依据 exact
 qualified target 与 long-only Demo intent envelope，在同一 immutable receipt 中封存一条真实 accepted
 baseline check，以及 server-derived `side=sell/posSide=short` deterministic rejected counterfactual check；

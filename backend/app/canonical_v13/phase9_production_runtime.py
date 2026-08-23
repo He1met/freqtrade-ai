@@ -151,7 +151,7 @@ class DatabaseRuntimeLineageReader:
             if isinstance(source, str)
             else None
         )
-        exact = bool(
+        shared_exact = bool(
             deployment is not None
             and deployment["status"] == "ACTIVE"
             and deployment["demo_only"] is True
@@ -159,13 +159,11 @@ class DatabaseRuntimeLineageReader:
             and deployment["capability_digest"]
             == self._plan.deployment_capability_digest
             and runtime is not None
-            and runtime["status"] == "HEALTHY"
             and runtime["runtime_identity"] == self._plan.process_identity
+            and runtime["image_digest"] == self._plan.image_digest
             and runtime["service_account"] == "canonical_runtime_reader"
             and runtime["order_writer_capability"] is False
             and receipt is not None
-            and receipt["status"] == "HEALTHY"
-            and receipt["evidence_class"] == "PRODUCTION_DEMO_RUNTIME"
             and receipt["launch_spec_digest"] == runtime["launch_spec_digest"]
             and receipt["capability_digest"] == deployment["capability_digest"]
             and approval is not None
@@ -197,6 +195,23 @@ class DatabaseRuntimeLineageReader:
             and bundle["market_snapshot_id"] == deployment["market_snapshot_id"]
             and bundle["market_snapshot_digest"] == deployment["market_snapshot_digest"]
         )
+        exact = bool(
+            shared_exact
+            and runtime["status"] == "HEALTHY"
+            and receipt["status"] == "HEALTHY"
+            and receipt["evidence_class"] == "PRODUCTION_DEMO_RUNTIME"
+        )
+        observation_pending = bool(
+            shared_exact
+            and runtime["status"] == "STOPPED"
+            and receipt["status"] == "STOPPED"
+            and receipt["evidence_class"] == "PRODUCTION_DEMO_RUNTIME_STOP"
+        )
+        if observation_pending:
+            raise CanonicalPhase9CompositionBlocked(
+                "BLOCKED_PHASE9_RUNTIME_OBSERVATION_PENDING",
+                "exact stopped runtime is awaiting the new supervisor observation",
+            )
         if not exact:
             raise CanonicalPhase9CompositionBlocked(
                 "BLOCKED_PHASE9_RUNTIME_EXACT_LINEAGE",
