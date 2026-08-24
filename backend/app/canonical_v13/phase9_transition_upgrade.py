@@ -226,19 +226,43 @@ def verify_phase9_transition_upgrade(
         sorted((INTENT_MODE_GUARD_TRIGGER, DECISION_MODE_GUARD_TRIGGER))
     )
     result = _result(connection, status="ACCEPTED", repeat_noop=True)
-    if (
-        intent_present
-        and decision_present
-        and result.constraints_present == expected_constraints
-        and result.immutability_triggers_present == expected_triggers
-        and not set(result.intent_mode_counts).difference(INTENT_MODE_VALUES)
-        and not set(result.decision_mode_counts).difference(DECISION_MODE_VALUES)
-        and result.manifest_digest == CANONICAL_MANIFEST_DIGEST
-        and verify_canonical_genesis(connection).accepted
-    ):
+    genesis = verify_canonical_genesis(connection)
+    problems: list[str] = []
+    if not intent_present:
+        problems.append("intent_mode_column_missing")
+    if not decision_present:
+        problems.append("decision_mode_column_missing")
+    missing_constraints = sorted(
+        set(expected_constraints).difference(result.constraints_present)
+    )
+    if missing_constraints:
+        problems.append(f"constraints_missing={missing_constraints}")
+    missing_triggers = sorted(
+        set(expected_triggers).difference(result.immutability_triggers_present)
+    )
+    if missing_triggers:
+        problems.append(f"triggers_missing={missing_triggers}")
+    invalid_intent_modes = sorted(
+        set(result.intent_mode_counts).difference(INTENT_MODE_VALUES)
+    )
+    if invalid_intent_modes:
+        problems.append(f"invalid_intent_modes={invalid_intent_modes}")
+    invalid_decision_modes = sorted(
+        set(result.decision_mode_counts).difference(DECISION_MODE_VALUES)
+    )
+    if invalid_decision_modes:
+        problems.append(f"invalid_decision_modes={invalid_decision_modes}")
+    if result.manifest_digest != CANONICAL_MANIFEST_DIGEST:
+        problems.append(
+            "manifest_digest_mismatch="
+            f"{result.manifest_digest}:{CANONICAL_MANIFEST_DIGEST}"
+        )
+    if not genesis.accepted:
+        problems.append(f"genesis={list(genesis.problems)}")
+    if not problems:
         return result
     raise CanonicalPhase9TransitionUpgradeBlocked(
-        "BLOCKED_PARTIAL_PHASE9_TRANSITION_UPGRADE"
+        "BLOCKED_PARTIAL_PHASE9_TRANSITION_UPGRADE: " + "; ".join(problems)
     )
 
 
