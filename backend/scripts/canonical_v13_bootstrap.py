@@ -80,6 +80,12 @@ from app.canonical_v13.phase9_policy_renewal_upgrade import (
     rollback_phase9_policy_renewal_upgrade,
     verify_phase9_policy_renewal_upgrade,
 )
+from app.canonical_v13.order_dispatch_status_upgrade import (
+    CanonicalOrderDispatchStatusUpgradeBlocked,
+    apply_order_dispatch_status_upgrade,
+    rollback_order_dispatch_status_upgrade,
+    verify_order_dispatch_status_upgrade,
+)
 from app.canonical_v13.genesis import (
     assert_postgresql_acl_sql,
     postgresql_owner_table_grant_statements,
@@ -762,6 +768,30 @@ def phase9_policy_renewal(*, operation: str) -> dict[str, object]:
     return payload
 
 
+def order_dispatch_status(*, operation: str) -> dict[str, object]:
+    engine = create_engine(_database_url(), pool_pre_ping=True)
+    try:
+        if operation == "verify":
+            with engine.connect() as connection:
+                with connection.begin():
+                    connection.exec_driver_sql("SET TRANSACTION READ ONLY")
+                    result = verify_order_dispatch_status_upgrade(connection)
+        else:
+            actor_identity = _upgrade_actor()
+            with engine.begin() as connection:
+                result = (
+                    apply_order_dispatch_status_upgrade(connection)
+                    if operation == "apply"
+                    else rollback_order_dispatch_status_upgrade(connection)
+                )
+    finally:
+        engine.dispose()
+    payload = asdict(result)
+    if operation != "verify":
+        payload["actor_identity"] = actor_identity
+    return payload
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -803,6 +833,9 @@ def main(argv: list[str] | None = None) -> int:
             "phase9-policy-renewal-verify",
             "phase9-policy-renewal-apply",
             "phase9-policy-renewal-rollback",
+            "order-dispatch-status-verify",
+            "order-dispatch-status-apply",
+            "order-dispatch-status-rollback",
         ),
     )
     parser.add_argument(
@@ -843,6 +876,14 @@ def main(argv: list[str] | None = None) -> int:
                     payload["problems"] = [
                         *payload.get("problems", []),
                         "phase9_policy_renewal_upgrade_not_accepted",
+                    ]
+                dispatch_status = order_dispatch_status(operation="verify")
+                payload["order_dispatch_status"] = dispatch_status
+                if dispatch_status["status"] != "ACCEPTED":
+                    payload["status"] = "BLOCKED"
+                    payload["problems"] = [
+                        *payload.get("problems", []),
+                        "order_dispatch_status_upgrade_not_accepted",
                     ]
         elif args.command == "authority-plan":
             payload = authority_plan()
@@ -904,6 +945,10 @@ def main(argv: list[str] | None = None) -> int:
             payload = phase9_policy_renewal(
                 operation=args.command.removeprefix("phase9-policy-renewal-")
             )
+        elif args.command.startswith("order-dispatch-status-"):
+            payload = order_dispatch_status(
+                operation=args.command.removeprefix("order-dispatch-status-")
+            )
         else:
             payload = authority_apply(rollback=args.command == "authority-rollback")
     except BootstrapBlocked as exc:
@@ -927,6 +972,8 @@ def main(argv: list[str] | None = None) -> int:
     except CanonicalPhase9TransitionUpgradeBlocked as exc:
         payload = {"status": "BLOCKED", "reason": str(exc)}
     except CanonicalPhase9PolicyRenewalUpgradeBlocked as exc:
+        payload = {"status": "BLOCKED", "reason": str(exc)}
+    except CanonicalOrderDispatchStatusUpgradeBlocked as exc:
         payload = {"status": "BLOCKED", "reason": str(exc)}
     except (SQLAlchemyError, ValueError):
         payload = {"status": "BLOCKED", "reason": "bootstrap verification failed"}

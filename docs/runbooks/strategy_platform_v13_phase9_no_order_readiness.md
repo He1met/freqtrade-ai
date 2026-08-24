@@ -314,6 +314,20 @@ trigger→signal exact lineage、`natural_signal=false`、shadow 两项 check、
 
 ## 6. C — OKX_DEMO_CANARY
 
+进入 C 前，production PostgreSQL 必须先接受订单 dispatch 状态约束升级；它只把 durable
+`DISPATCHING` 加入既有订单状态机，不创建订单、不加载 writer，也不访问 OKX：
+
+```bash
+backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py order-dispatch-status-verify
+backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py order-dispatch-status-apply
+backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py order-dispatch-status-verify
+backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py order-dispatch-status-apply
+```
+
+要求 `PREVIOUS_READY → UPGRADED(repeat_noop=false) → ACCEPTED →
+ACCEPTED(repeat_noop=true)`。任何 partial constraint、非法 order status 或 in-flight
+`DISPATCHING` rollback 都必须 fail closed，禁止手工 `ALTER TABLE`。
+
 只有 A/B READY 后才可读取既有 Keychain。输出只能包含摘要/布尔值；不得
 打印 environment、headers、raw account payload 或 subprocess command。fresh attestation 必须同时证明：
 

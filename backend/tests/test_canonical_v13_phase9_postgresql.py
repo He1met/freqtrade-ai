@@ -99,6 +99,15 @@ from app.canonical_v13.phase9_policy_renewal_upgrade import (
     rollback_phase9_policy_renewal_upgrade,
     verify_phase9_policy_renewal_upgrade,
 )
+from app.canonical_v13.order_dispatch_status_upgrade import (
+    ACCEPTED_ORDER_STATUSES,
+    CONSTRAINT_NAME as ORDER_STATUS_CONSTRAINT,
+    PREVIOUS_ORDER_STATUSES,
+    CanonicalOrderDispatchStatusUpgradeBlocked,
+    apply_order_dispatch_status_upgrade,
+    rollback_order_dispatch_status_upgrade,
+    verify_order_dispatch_status_upgrade,
+)
 from app.canonical_v13.risk_service import create_production_demo_intent
 from app.canonical_v13.research_evaluation import qualify_target, score_target
 from app.canonical_v13.research_validation import (
@@ -165,6 +174,63 @@ def test_phase9_policy_renewal_upgrade_replaces_global_uniqueness() -> None:
                 )
                 reapplied = apply_phase9_policy_renewal_upgrade(connection)
                 assert reapplied.status == "UPGRADED"
+            finally:
+                transaction.rollback()
+    finally:
+        engine.dispose()
+
+
+def test_order_dispatch_status_upgrade_is_reversible_and_exact() -> None:
+    assert DATABASE_URL is not None
+    engine = create_engine(DATABASE_URL)
+    schema = "strategy_platform_v13"
+
+    def replace(connection, statuses: tuple[str, ...]) -> None:
+        values = ", ".join(f"'{value}'" for value in statuses)
+        connection.execute(
+            text(
+                f"ALTER TABLE {schema}.orders "
+                f"DROP CONSTRAINT {ORDER_STATUS_CONSTRAINT}, "
+                f"ADD CONSTRAINT {ORDER_STATUS_CONSTRAINT} "
+                f"CHECK (status IN ({values}))"
+            )
+        )
+
+    try:
+        with engine.connect() as connection:
+            transaction = connection.begin()
+            try:
+                replace(connection, PREVIOUS_ORDER_STATUSES)
+                previous = verify_order_dispatch_status_upgrade(connection)
+                assert previous.status == "PREVIOUS_READY"
+                assert previous.allowed_statuses == PREVIOUS_ORDER_STATUSES
+
+                upgraded = apply_order_dispatch_status_upgrade(connection)
+                assert upgraded.status == "UPGRADED"
+                assert upgraded.repeat_noop is False
+                assert upgraded.allowed_statuses == ACCEPTED_ORDER_STATUSES
+
+                replay = apply_order_dispatch_status_upgrade(connection)
+                assert replay.status == "ACCEPTED"
+                assert replay.repeat_noop is True
+                assert replay.receipt_digest == (
+                    verify_order_dispatch_status_upgrade(connection).receipt_digest
+                )
+
+                rolled_back = rollback_order_dispatch_status_upgrade(connection)
+                assert rolled_back.status == "ROLLED_BACK"
+                assert verify_order_dispatch_status_upgrade(connection).status == (
+                    "PREVIOUS_READY"
+                )
+
+                reapplied = apply_order_dispatch_status_upgrade(connection)
+                assert reapplied.status == "UPGRADED"
+                replace(connection, (*ACCEPTED_ORDER_STATUSES, "INVALID"))
+                with pytest.raises(
+                    CanonicalOrderDispatchStatusUpgradeBlocked,
+                    match="BLOCKED_PARTIAL_ORDER_DISPATCH_STATUS_UPGRADE",
+                ):
+                    verify_order_dispatch_status_upgrade(connection)
             finally:
                 transaction.rollback()
     finally:
