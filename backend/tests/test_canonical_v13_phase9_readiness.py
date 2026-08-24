@@ -182,19 +182,14 @@ def _json_digest(value: object) -> str:
     ).hexdigest()
 
 
-def _seed_stage_a(connection, handoff: Phase9QualificationHandoff):
-    approval = approve_demo_deployment(
-        connection,
-        qualification_decision_id=handoff.qualification_decision_id,
-        actor_identity="phase9-human-approver",
-        reason="explicit phase9 test approval",
-    )
-    deployment = create_demo_deployment(
-        connection, deployment_approval_id=approval.deployment_approval_id
-    )
+def _seed_runtime_for_deployment(
+    connection,
+    handoff: Phase9QualificationHandoff,
+    deployment_id,
+):
     runtime_id = launch_demo_runtime(
         connection,
-        deployment_id=deployment.deployment_id,
+        deployment_id=deployment_id,
         runtime_identity=f"phase9-runtime-{handoff.qualification_decision_id}",
         image_digest="f" * 64,
         service_account="canonical_runtime_reader",
@@ -203,7 +198,7 @@ def _seed_stage_a(connection, handoff: Phase9QualificationHandoff):
     )
     connection.execute(
         DEPLOYMENTS_TABLE.update()
-        .where(DEPLOYMENTS_TABLE.c.id == deployment.deployment_id)
+        .where(DEPLOYMENTS_TABLE.c.id == deployment_id)
         .values(status="ACTIVE")
     )
     runtime = (
@@ -241,7 +236,25 @@ def _seed_stage_a(connection, handoff: Phase9QualificationHandoff):
             observed_at=datetime(2026, 8, 21, tzinfo=timezone.utc),
         )
     )
-    return deployment.deployment_id, runtime["id"]
+    return runtime["id"]
+
+
+def _seed_stage_a(connection, handoff: Phase9QualificationHandoff):
+    approval = approve_demo_deployment(
+        connection,
+        qualification_decision_id=handoff.qualification_decision_id,
+        actor_identity="phase9-human-approver",
+        reason="explicit phase9 test approval",
+    )
+    deployment = create_demo_deployment(
+        connection, deployment_approval_id=approval.deployment_approval_id
+    )
+    runtime_id = _seed_runtime_for_deployment(
+        connection,
+        handoff,
+        deployment.deployment_id,
+    )
+    return deployment.deployment_id, runtime_id
 
 
 def _seed_stage_b(

@@ -52,7 +52,10 @@ from app.canonical_v13.phase9_order_writer import (
     recover_demo_order_get_only,
     terminal_rejected_canary_order_evidence,
 )
-from app.canonical_v13.phase9_readiness import _dispatch_claim_is_exact
+from app.canonical_v13.phase9_readiness import (
+    _dispatch_claim_is_exact,
+    inspect_phase9_readiness,
+)
 from app.canonical_v13.phase9_okx_demo import (
     RedactedOkxDemoDispatchGuard,
     RedactedOkxDemoOrderAbsence,
@@ -998,6 +1001,50 @@ def test_second_proven_absence_is_terminal_and_never_posts_third_time(
         )
         assert successor.status == "PENDING"
         assert successor.deployment_id != deployment["id"]
+        from tests.test_canonical_v13_phase9_readiness import (
+            _handoff,
+            _seed_runtime_for_deployment,
+            _seed_stage_b,
+        )
+
+        handoff = _handoff(
+            canonical_connection,
+            SimpleNamespace(
+                qualification_decision_id=approval["qualification_decision_id"]
+            ),
+        )
+        successor_runtime_id = _seed_runtime_for_deployment(
+            canonical_connection,
+            handoff,
+            successor.deployment_id,
+        )
+        evaluated_at = datetime(2026, 8, 21, tzinfo=timezone.utc) + timedelta(
+            seconds=20
+        )
+        no_order_soak = inspect_phase9_readiness(
+            canonical_connection,
+            qualification_handoff=handoff,
+            stage="NO_ORDER_SOAK",
+            evaluated_at=evaluated_at,
+        )
+        _seed_stage_b(
+            canonical_connection,
+            handoff,
+            successor.deployment_id,
+            successor_runtime_id,
+        )
+        shadow = inspect_phase9_readiness(
+            canonical_connection,
+            qualification_handoff=handoff,
+            stage="SIGNAL_RISK_SHADOW",
+            evaluated_at=evaluated_at,
+        )
+        assert no_order_soak.status == "READY", no_order_soak.reason_codes
+        assert no_order_soak.lineage_evidence_counts["orders"] == 0
+        assert no_order_soak.execution_domain_counts["orders"] == 1
+        assert shadow.status == "READY", shadow.reason_codes
+        assert shadow.lineage_evidence_counts["orders"] == 0
+        assert shadow.execution_domain_counts["orders"] == 1
 
 
 def test_explicit_post_rejection_is_terminal_and_audited(canonical_connection):
