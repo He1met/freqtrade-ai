@@ -35,6 +35,7 @@ from app.canonical_v13.phase9_execution_authority import (
 )
 from app.canonical_v13.phase9_okx_demo import (
     RedactedOkxDemoDispatchGuard,
+    RedactedOkxDemoOrderAbsence,
     RedactedOkxDemoProbe,
 )
 from app.canonical_v13.models import (
@@ -102,6 +103,10 @@ class DemoSessionPort(Protocol):
     def query(
         self, *, instrument: str, client_order_id: str
     ) -> Mapping[str, object]: ...
+
+    def prove_absent(
+        self, *, instrument: str, client_order_id: str
+    ) -> RedactedOkxDemoOrderAbsence: ...
 
     def fills(
         self, *, instrument: str, order_id: str

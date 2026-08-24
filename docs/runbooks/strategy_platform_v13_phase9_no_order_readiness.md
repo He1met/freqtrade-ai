@@ -328,6 +328,22 @@ backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py order-dispat
 ACCEPTED(repeat_noop=true)`。任何 partial constraint、非法 order status 或 in-flight
 `DISPATCHING` rollback 都必须 fail closed，禁止手工 `ALTER TABLE`。
 
+随后必须接受 bounded recovery 约束升级；它不新增 endpoint、订单或交易权限，只允许在同一
+`order_id`、同一 request/client ID 上持久化最多两次 claim：
+
+```bash
+backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py order-dispatch-recovery-verify
+backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py order-dispatch-recovery-apply
+backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py order-dispatch-recovery-verify
+backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py order-dispatch-recovery-apply
+```
+
+同样要求 `PREVIOUS_READY → UPGRADED(repeat_noop=false) → ACCEPTED →
+ACCEPTED(repeat_noop=true)`。第二次 POST 只有在第一次 claim 已绑定 fresh authenticated
+`GET 51603`、pending orders 零匹配、orders history 零匹配的 immutable `GET_NOT_FOUND`
+outcome 后才允许；第二次仍不存在或任一 POST 返回可归属的明确拒绝时，订单进入 `REJECTED`，
+第三次 POST 永远禁止。未知、超时或相互矛盾的证据保持 `DISPATCHING`，只能继续 GET-only recovery。
+
 只有 A/B READY 后才可读取既有 Keychain。输出只能包含摘要/布尔值；不得
 打印 environment、headers、raw account payload 或 subprocess command。fresh attestation 必须同时证明：
 

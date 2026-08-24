@@ -423,8 +423,8 @@ def test_postgresql_types_constraints_and_locking_compile_offline() -> None:
     assert len(tables) == 58
     assert len(foreign_keys) == 130
     assert len(checks) == 86
-    assert len(uniques) == 79
-    assert len(indexes) == 117
+    assert len(uniques) == 77
+    assert len(indexes) == 119
     assert len(datetimes) == 101
     assert len(json_columns) == 28
     assert all(key.deferrable is not True for key in foreign_keys)
@@ -442,6 +442,10 @@ def test_postgresql_types_constraints_and_locking_compile_offline() -> None:
         not column.nullable for column in json_columns
     )
     assert "DEFERRABLE" not in compiled_tables
+    assert "attempt_ordinal BETWEEN 1 AND 2" in compiled_tables
+    assert "UNIQUE (order_id, attempt_ordinal)" in compiled_tables
+    assert "GET_NOT_FOUND" in compiled_tables
+    assert "POST_REJECTED" in compiled_tables
 
     partial = next(
         index

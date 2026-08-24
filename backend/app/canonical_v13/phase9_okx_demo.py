@@ -19,6 +19,7 @@ from app.adapters.okx_demo.credential_preflight import (
     OKX_DEMO_ACCOUNT_FINGERPRINT_ENV,
     require_pinned_account_fingerprint,
 )
+from app.adapters.okx_demo.errors import OkxReadAdapterError
 from app.adapters.okx_demo.read_adapter import OkxDemoReadClient
 from app.adapters.okx_demo.server_factory import (
     OkxDemoServerSession,
@@ -31,6 +32,46 @@ class _WriterPort(Protocol):
     def post(
         self, *, path: str, body: Mapping[str, Any], timeout_seconds: float = 10.0
     ) -> Any: ...
+
+
+@dataclass(frozen=True)
+class RedactedOkxDemoOrderAbsence:
+    execution_target: str
+    instrument: str
+    client_order_id: str
+    account_fingerprint_digest: str
+    credential_generation_digest: str
+    exact_order_result_code: str
+    pending_order_match_count: int
+    history_order_match_count: int
+    pending_orders_digest: str
+    orders_history_digest: str
+    observed_at: datetime
+    expires_at: datetime
+
+    @property
+    def evidence_digest(self) -> str:
+        return _digest(redacted_order_absence_payload(self))
+
+
+def redacted_order_absence_payload(
+    evidence: RedactedOkxDemoOrderAbsence,
+) -> dict[str, object]:
+    return {
+        "contract": "canonical-v13-okx-demo-order-absence-v1",
+        "execution_target": evidence.execution_target,
+        "instrument": evidence.instrument,
+        "client_order_id": evidence.client_order_id,
+        "account_fingerprint_digest": evidence.account_fingerprint_digest,
+        "credential_generation_digest": evidence.credential_generation_digest,
+        "exact_order_result_code": evidence.exact_order_result_code,
+        "pending_order_match_count": evidence.pending_order_match_count,
+        "history_order_match_count": evidence.history_order_match_count,
+        "pending_orders_digest": evidence.pending_orders_digest,
+        "orders_history_digest": evidence.orders_history_digest,
+        "observed_at": evidence.observed_at.isoformat(),
+        "expires_at": evidence.expires_at.isoformat(),
+    }
 
 
 @dataclass(frozen=True)
@@ -1064,6 +1105,108 @@ class CanonicalOkxDemoSession:
             ],
         }
 
+    def prove_absent(
+        self,
+        *,
+        instrument: str,
+        client_order_id: str,
+        ttl: timedelta = timedelta(seconds=15),
+    ) -> RedactedOkxDemoOrderAbsence:
+        """Prove one exact client order ID absent without authorizing a POST."""
+
+        if self.__closed:
+            raise CanonicalExecutionChainBlocked(
+                "BLOCKED_OKX_DEMO_SESSION_CLOSED", "session is closed"
+            )
+        if not timedelta(0) < ttl <= timedelta(seconds=15):
+            raise CanonicalExecutionChainBlocked(
+                "BLOCKED_OKX_DEMO_ORDER_ABSENCE_FRESHNESS", "invalid absence TTL"
+            )
+        try:
+            self.__read.order(instrument, client_order_id=client_order_id)
+        except OkxReadAdapterError as exc:
+            if (
+                exc.kind != "BUSINESS_ERROR"
+                or exc.okx_code != "51603"
+                or exc.retryable
+            ):
+                raise CanonicalExecutionChainBlocked(
+                    "BLOCKED_OKX_DEMO_ORDER_ABSENCE_UNPROVEN",
+                    "exact order GET did not return the terminal not-found code",
+                ) from None
+        else:
+            raise CanonicalExecutionChainBlocked(
+                "BLOCKED_OKX_DEMO_ORDER_ABSENCE_UNPROVEN",
+                "exact order GET returned an order",
+            )
+        pending_snapshot = self.__read.pending_orders(instrument, limit=100)
+        history_snapshot = self.__read.orders_history(instrument, limit=100)
+        now = _utc(self.__now(), code="BLOCKED_OKX_DEMO_ORDER_ABSENCE_FRESHNESS")
+        pending, pending_observed, pending_expires = _verified_snapshot(
+            pending_snapshot,
+            resource="pending_orders",
+            authenticated=True,
+            now=now,
+        )
+        history, history_observed, history_expires = _verified_snapshot(
+            history_snapshot,
+            resource="orders_history",
+            authenticated=True,
+            now=now,
+        )
+        pending_matches = [
+            item for item in pending if item.get("client_order_id") == client_order_id
+        ]
+        history_matches = [
+            item for item in history if item.get("client_order_id") == client_order_id
+        ]
+        if pending_matches or history_matches:
+            raise CanonicalExecutionChainBlocked(
+                "BLOCKED_OKX_DEMO_ORDER_ABSENCE_CONTRADICTED",
+                "pending or archived order evidence matches the client order ID",
+            )
+        observed_at = max(pending_observed, history_observed)
+        expires_at = min(pending_expires, history_expires, now + ttl)
+        if observed_at > now or expires_at <= now:
+            raise CanonicalExecutionChainBlocked(
+                "BLOCKED_OKX_DEMO_ORDER_ABSENCE_FRESHNESS",
+                "absence evidence is not fresh",
+            )
+        return RedactedOkxDemoOrderAbsence(
+            execution_target="OKX_DEMO",
+            instrument=instrument,
+            client_order_id=client_order_id,
+            account_fingerprint_digest=self.__account_fingerprint_digest,
+            credential_generation_digest=self.__credential_generation_digest,
+            exact_order_result_code="51603",
+            pending_order_match_count=0,
+            history_order_match_count=0,
+            pending_orders_digest=_resource_digest(
+                resource="pending_orders",
+                observed_at=observed_at,
+                expires_at=expires_at,
+                authenticated=True,
+                facts={
+                    "instrument": instrument,
+                    "client_order_id": client_order_id,
+                    "matching_order_count": 0,
+                },
+            ),
+            orders_history_digest=_resource_digest(
+                resource="orders_history",
+                observed_at=observed_at,
+                expires_at=expires_at,
+                authenticated=True,
+                facts={
+                    "instrument": instrument,
+                    "client_order_id": client_order_id,
+                    "matching_order_count": 0,
+                },
+            ),
+            observed_at=observed_at,
+            expires_at=expires_at,
+        )
+
     def fills(self, *, instrument: str, order_id: str) -> tuple[Mapping[str, Any], ...]:
         if self.__closed:
             raise CanonicalExecutionChainBlocked(
@@ -1129,7 +1272,9 @@ def create_canonical_okx_demo_session(
 __all__ = [
     "CanonicalOkxDemoSession",
     "RedactedOkxDemoDispatchGuard",
+    "RedactedOkxDemoOrderAbsence",
     "RedactedOkxDemoProbe",
     "create_canonical_okx_demo_session",
     "redacted_dispatch_guard_payload",
+    "redacted_order_absence_payload",
 ]

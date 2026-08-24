@@ -64,6 +64,10 @@ from app.canonical_v13.order_dispatch_status_upgrade import (  # noqa: E402
     CanonicalOrderDispatchStatusUpgradeBlocked,
     verify_order_dispatch_status_upgrade,
 )
+from app.canonical_v13.order_dispatch_recovery_upgrade import (  # noqa: E402
+    CanonicalOrderDispatchRecoveryUpgradeBlocked,
+    verify_order_dispatch_recovery_upgrade,
+)
 from app.canonical_v13.phase9_transition_upgrade import (  # noqa: E402
     DECISION_MODE_GUARD_TRIGGER,
     INTENT_MODE_GUARD_TRIGGER,
@@ -636,6 +640,18 @@ def _verify_restore_trigger_boundary(
         raise CanonicalBackupBlocked(
             "BLOCKED_CANONICAL_RESTORE_ORDER_DISPATCH_STATUS_CONTRACT",
             "order dispatch status verifier did not return ACCEPTED",
+        )
+    try:
+        dispatch_recovery = verify_order_dispatch_recovery_upgrade(connection)
+    except CanonicalOrderDispatchRecoveryUpgradeBlocked as exc:
+        raise CanonicalBackupBlocked(
+            "BLOCKED_CANONICAL_RESTORE_ORDER_DISPATCH_RECOVERY_CONTRACT",
+            "order dispatch recovery contract is not accepted",
+        ) from exc
+    if dispatch_recovery.status != "ACCEPTED":
+        raise CanonicalBackupBlocked(
+            "BLOCKED_CANONICAL_RESTORE_ORDER_DISPATCH_RECOVERY_CONTRACT",
+            "order dispatch recovery verifier did not return ACCEPTED",
         )
 
 

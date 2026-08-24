@@ -1648,7 +1648,7 @@ ORDERS_TABLE = _table(
 ORDER_DISPATCH_RECEIPTS_TABLE = _table(
     "order_dispatch_receipts",
     _uuid_id(),
-    _uuid_fk("order_id", "orders", unique=True),
+    _uuid_fk("order_id", "orders"),
     _uuid_fk("risk_decision_id", "risk_decisions"),
     _uuid_fk("canary_risk_policy_id", "execution_canary_risk_policies"),
     _uuid_fk("probe_receipt_id", "execution_canary_probe_receipts"),
@@ -1692,8 +1692,8 @@ ORDER_DISPATCH_RECEIPTS_TABLE = _table(
     _digest("claim_digest"),
     _created_at("claimed_at"),
     CheckConstraint(
-        "attempt_ordinal = 1",
-        name="order_dispatch_receipts_single_attempt",
+        "attempt_ordinal BETWEEN 1 AND 2",
+        name="bounded_attempts",
     ),
     CheckConstraint(
         "lease_generation > 0",
@@ -1719,6 +1719,11 @@ ORDER_DISPATCH_RECEIPTS_TABLE = _table(
         name="order_dispatch_receipts_guard_freshness",
     ),
     UniqueConstraint(
+        "order_id",
+        "attempt_ordinal",
+        name="order_dispatch_receipts_order_attempt_unique",
+    ),
+    UniqueConstraint(
         "claim_digest",
         name="order_dispatch_receipts_claim_digest_unique",
     ),
@@ -1727,19 +1732,21 @@ ORDER_DISPATCH_RECEIPTS_TABLE = _table(
 ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE = _table(
     "order_dispatch_outcome_receipts",
     _uuid_id(),
-    _uuid_fk("order_id", "orders", unique=True),
+    _uuid_fk("order_id", "orders"),
     _uuid_fk("dispatch_claim_id", "order_dispatch_receipts", unique=True),
     _digest("claim_digest"),
-    Column("client_order_id", String(200), nullable=False, unique=True),
-    Column("exchange_order_id", String(200), nullable=False, unique=True),
+    Column("client_order_id", String(200), nullable=False),
+    Column("exchange_order_id", String(200), nullable=True, unique=True),
     Column("safe_response_json", JSON, nullable=False),
     _digest("safe_response_digest"),
     Column("outcome_mode", String(24), nullable=False),
     _digest("receipt_digest"),
     _created_at("recorded_at"),
     CheckConstraint(
-        "outcome_mode IN ('POST', 'GET_RECOVERY')",
-        name="order_dispatch_outcome_receipts_mode",
+        "(outcome_mode IN ('POST', 'GET_RECOVERY') AND exchange_order_id IS NOT NULL) "
+        "OR (outcome_mode IN ('GET_NOT_FOUND', 'POST_REJECTED') "
+        "AND exchange_order_id IS NULL)",
+        name="mode_identity",
     ),
     UniqueConstraint(
         "receipt_digest",

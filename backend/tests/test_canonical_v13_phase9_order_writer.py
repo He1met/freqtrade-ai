@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 from uuid import UUID
@@ -38,7 +38,10 @@ from app.canonical_v13.phase9_order_writer import (
     prepare_demo_order,
     recover_demo_order_get_only,
 )
-from app.canonical_v13.phase9_okx_demo import RedactedOkxDemoDispatchGuard
+from app.canonical_v13.phase9_okx_demo import (
+    RedactedOkxDemoDispatchGuard,
+    RedactedOkxDemoOrderAbsence,
+)
 from app.canonical_v13.phase9_production_composition import (
     CanonicalFillWriterOperator,
     CanonicalLedgerWriterOperator,
@@ -91,6 +94,7 @@ class FakeTransport:
         self.last_guard = None
         self.place_calls = 0
         self.query_calls = 0
+        self.absence_calls = 0
 
     @staticmethod
     def _payload():
@@ -197,6 +201,53 @@ class FakeTransport:
         assert instrument == ORDER_BODY["instId"]
         assert client_order_id == ORDER_BODY["clOrdId"]
         return self._payload()
+
+    def prove_absent(self, *, instrument: str, client_order_id: str):
+        self.absence_calls += 1
+        raise AssertionError("absence proof was not expected")
+
+
+class AbsentTransport(FakeTransport):
+    def query(self, *, instrument: str, client_order_id: str):
+        self.query_calls += 1
+        raise RuntimeError("exact order is absent")
+
+    def prove_absent(self, *, instrument: str, client_order_id: str):
+        self.absence_calls += 1
+        observed = datetime.now(timezone.utc)
+        expires = observed + timedelta(seconds=15)
+
+        def digest(resource):
+            return canonical_execution_digest(
+                {
+                    "execution_target": "OKX_DEMO",
+                    "resource": resource,
+                    "source": "okx_demo_rest",
+                    "authenticated": True,
+                    "observed_at": observed.isoformat(),
+                    "expires_at": expires.isoformat(),
+                    "facts": {
+                        "instrument": instrument,
+                        "client_order_id": client_order_id,
+                        "matching_order_count": 0,
+                    },
+                }
+            )
+
+        return RedactedOkxDemoOrderAbsence(
+            execution_target="OKX_DEMO",
+            instrument=instrument,
+            client_order_id=client_order_id,
+            account_fingerprint_digest="c" * 64,
+            credential_generation_digest="d" * 64,
+            exact_order_result_code="51603",
+            pending_order_match_count=0,
+            history_order_match_count=0,
+            pending_orders_digest=digest("pending_orders"),
+            orders_history_digest=digest("orders_history"),
+            observed_at=observed,
+            expires_at=expires,
+        )
 
 
 class FakeFillSession:
@@ -619,6 +670,223 @@ def test_uncertain_post_never_reposts_and_get_only_recovers(canonical_connection
         )
     ).mappings().one()
     assert recovered_outcome["outcome_mode"] == "GET_RECOVERY"
+
+
+def test_proven_absent_first_attempt_allows_one_same_order_retry(
+    canonical_connection,
+):
+    with canonical_connection.begin():
+        risk, attestation = _prepare_authority(canonical_connection)
+        prepared = prepare_demo_order(
+            canonical_connection,
+            risk_decision_id=risk.risk_decision_id,
+            attestation_id=attestation.attestation_id,
+            writer_identity="canonical_order_writer",
+            holder_identity="canonical-v13-order-writer-v1",
+            holder_token_digest="3" * 64,
+            idempotency_key="phase9-bounded-negative-retry",
+            order_request=ORDER_BODY,
+            evaluated_at=NOW + timedelta(seconds=2),
+        )
+    factory = _factory(canonical_connection.engine)
+    first_transport = AbsentTransport(place_error=TimeoutError())
+    with pytest.raises(CanonicalOrderRecoveryRequired):
+        dispatch_demo_order(
+            factory,
+            order_id=prepared.order_id,
+            transport=first_transport,
+            holder_identity="canonical-v13-order-writer-v1",
+            holder_token_digest="3" * 64,
+            lease_generation=prepared.lease_generation,
+            evaluated_at=NOW + timedelta(seconds=3),
+        )
+    recovered = recover_demo_order_get_only(
+        factory, order_id=prepared.order_id, transport=first_transport
+    )
+    assert recovered.status == "RETRY_READY"
+    assert recovered.retry_authorized is True
+    assert recovered.exchange_order_id is None
+    absence_replay = recover_demo_order_get_only(
+        factory, order_id=prepared.order_id, transport=first_transport
+    )
+    assert absence_replay.repeat_noop is True
+    assert absence_replay.receipt_digest == recovered.receipt_digest
+    assert first_transport.query_calls == 1
+    assert first_transport.absence_calls == 1
+    with canonical_connection.begin():
+        retried = prepare_demo_order(
+            canonical_connection,
+            risk_decision_id=risk.risk_decision_id,
+            attestation_id=attestation.attestation_id,
+            writer_identity="canonical_order_writer",
+            holder_identity="canonical-v13-order-writer-v1",
+            holder_token_digest="3" * 64,
+            idempotency_key="phase9-bounded-negative-retry",
+            order_request=ORDER_BODY,
+            evaluated_at=NOW + timedelta(seconds=4),
+        )
+    second_transport = FakeTransport()
+    accepted = dispatch_demo_order(
+        factory,
+        order_id=retried.order_id,
+        transport=second_transport,
+        holder_identity="canonical-v13-order-writer-v1",
+        holder_token_digest="3" * 64,
+        lease_generation=retried.lease_generation,
+        evaluated_at=NOW + timedelta(seconds=5),
+    )
+    assert accepted.status == "ACCEPTED"
+    assert accepted.exchange_order_id == "demo-exchange-order-1"
+    claims = canonical_connection.execute(
+        select(ORDER_DISPATCH_RECEIPTS_TABLE)
+        .where(ORDER_DISPATCH_RECEIPTS_TABLE.c.order_id == prepared.order_id)
+        .order_by(ORDER_DISPATCH_RECEIPTS_TABLE.c.attempt_ordinal)
+    ).mappings().all()
+    outcomes = canonical_connection.execute(
+        select(ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE).where(
+            ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE.c.order_id == prepared.order_id
+        )
+    ).mappings().all()
+    assert [row["attempt_ordinal"] for row in claims] == [1, 2]
+    assert {row["outcome_mode"] for row in outcomes} == {"GET_NOT_FOUND", "POST"}
+    replay = dispatch_demo_order(
+        factory,
+        order_id=prepared.order_id,
+        transport=second_transport,
+        holder_identity="canonical-v13-order-writer-v1",
+        holder_token_digest="3" * 64,
+        lease_generation=retried.lease_generation,
+        evaluated_at=NOW + timedelta(seconds=6),
+    )
+    assert replay.repeat_noop is True
+    assert second_transport.place_calls == 1
+
+
+def test_second_proven_absence_is_terminal_and_never_posts_third_time(
+    canonical_connection,
+):
+    with canonical_connection.begin():
+        risk, attestation = _prepare_authority(canonical_connection)
+        prepared = prepare_demo_order(
+            canonical_connection,
+            risk_decision_id=risk.risk_decision_id,
+            attestation_id=attestation.attestation_id,
+            writer_identity="canonical_order_writer",
+            holder_identity="canonical-v13-order-writer-v1",
+            holder_token_digest="4" * 64,
+            idempotency_key="phase9-bounded-negative-terminal",
+            order_request=ORDER_BODY,
+            evaluated_at=NOW + timedelta(seconds=2),
+        )
+    factory = _factory(canonical_connection.engine)
+    first_transport = AbsentTransport(place_error=TimeoutError())
+    with pytest.raises(CanonicalOrderRecoveryRequired):
+        dispatch_demo_order(
+            factory,
+            order_id=prepared.order_id,
+            transport=first_transport,
+            holder_identity="canonical-v13-order-writer-v1",
+            holder_token_digest="4" * 64,
+            lease_generation=prepared.lease_generation,
+            evaluated_at=NOW + timedelta(seconds=3),
+        )
+    recover_demo_order_get_only(
+        factory, order_id=prepared.order_id, transport=first_transport
+    )
+    with canonical_connection.begin():
+        retried = prepare_demo_order(
+            canonical_connection,
+            risk_decision_id=risk.risk_decision_id,
+            attestation_id=attestation.attestation_id,
+            writer_identity="canonical_order_writer",
+            holder_identity="canonical-v13-order-writer-v1",
+            holder_token_digest="4" * 64,
+            idempotency_key="phase9-bounded-negative-terminal",
+            order_request=ORDER_BODY,
+            evaluated_at=NOW + timedelta(seconds=4),
+        )
+    second_transport = AbsentTransport(place_error=TimeoutError())
+    with pytest.raises(CanonicalOrderRecoveryRequired):
+        dispatch_demo_order(
+            factory,
+            order_id=prepared.order_id,
+            transport=second_transport,
+            holder_identity="canonical-v13-order-writer-v1",
+            holder_token_digest="4" * 64,
+            lease_generation=retried.lease_generation,
+            evaluated_at=NOW + timedelta(seconds=5),
+        )
+    terminal = recover_demo_order_get_only(
+        factory, order_id=prepared.order_id, transport=second_transport
+    )
+    assert terminal.status == "REJECTED"
+    assert terminal.retry_authorized is False
+    with pytest.raises(CanonicalOrderRecoveryRequired):
+        dispatch_demo_order(
+            factory,
+            order_id=prepared.order_id,
+            transport=second_transport,
+            holder_identity="canonical-v13-order-writer-v1",
+            holder_token_digest="4" * 64,
+            lease_generation=retried.lease_generation,
+            evaluated_at=NOW + timedelta(seconds=6),
+        )
+    assert first_transport.place_calls + second_transport.place_calls == 2
+
+
+def test_explicit_post_rejection_is_terminal_and_audited(canonical_connection):
+    with canonical_connection.begin():
+        risk, attestation = _prepare_authority(canonical_connection)
+        prepared = prepare_demo_order(
+            canonical_connection,
+            risk_decision_id=risk.risk_decision_id,
+            attestation_id=attestation.attestation_id,
+            writer_identity="canonical_order_writer",
+            holder_identity="canonical-v13-order-writer-v1",
+            holder_token_digest="5" * 64,
+            idempotency_key="phase9-explicit-rejection",
+            order_request=ORDER_BODY,
+            evaluated_at=NOW + timedelta(seconds=2),
+        )
+
+    class RejectedTransport(FakeTransport):
+        def place(self, body):
+            self.place_calls += 1
+            return {
+                "code": "1",
+                "msg": "redacted",
+                "data": [
+                    {
+                        "ordId": "",
+                        "clOrdId": ORDER_BODY["clOrdId"],
+                        "sCode": "51000",
+                        "sMsg": "redacted",
+                    }
+                ],
+            }
+
+    transport = RejectedTransport()
+    result = dispatch_demo_order(
+        _factory(canonical_connection.engine),
+        order_id=prepared.order_id,
+        transport=transport,
+        holder_identity="canonical-v13-order-writer-v1",
+        holder_token_digest="5" * 64,
+        lease_generation=prepared.lease_generation,
+        evaluated_at=NOW + timedelta(seconds=3),
+    )
+    assert result.status == "REJECTED"
+    assert result.retry_authorized is False
+    outcome = canonical_connection.execute(
+        select(ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE)
+    ).mappings().one()
+    assert outcome["outcome_mode"] == "POST_REJECTED"
+    assert outcome["safe_response_json"] == {
+        "code": "1",
+        "ordId": "",
+        "clOrdId": ORDER_BODY["clOrdId"],
+        "sCode": "51000",
+    }
 
 
 @pytest.mark.parametrize(
