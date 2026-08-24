@@ -45,7 +45,11 @@ MAX_ERROR_RESPONSE_BYTES = 16 * 1024
 SAFE_WRITE_RESPONSE_KEYS = frozenset({"code", "msg", "data", "inTime", "outTime"})
 
 
-def _explicit_http_rejection(exc: HTTPError) -> dict[str, object] | None:
+def _explicit_http_rejection(
+    exc: HTTPError,
+    *,
+    expected_client_order_id: object,
+) -> dict[str, object] | None:
     """Return only a redacted, explicit OKX rejection from an HTTP error.
 
     The response body is never forwarded.  A malformed, oversized, successful,
@@ -75,10 +79,40 @@ def _explicit_http_rejection(exc: HTTPError) -> dict[str, object] | None:
         or not payload["code"].isdigit()
         or payload["code"] == "0"
         or not isinstance(payload.get("data", []), list)
-        or payload.get("data")
     ):
         return None
-    return {"code": payload["code"], "msg": "", "data": []}
+    data = payload.get("data", [])
+    if not data:
+        return {"code": payload["code"], "msg": "", "data": []}
+    if (
+        len(data) != 1
+        or not isinstance(data[0], Mapping)
+        or not isinstance(expected_client_order_id, str)
+        or not expected_client_order_id
+    ):
+        return None
+    item = data[0]
+    order_id = item.get("ordId")
+    result_code = item.get("sCode")
+    if (
+        item.get("clOrdId") != expected_client_order_id
+        or order_id not in (None, "")
+        or not isinstance(result_code, str)
+        or not result_code.isdigit()
+        or result_code == "0"
+    ):
+        return None
+    return {
+        "code": payload["code"],
+        "msg": "",
+        "data": [
+            {
+                "ordId": "",
+                "clOrdId": expected_client_order_id,
+                "sCode": result_code,
+            }
+        ],
+    }
 
 
 class OkxDemoWriteTransport(Protocol):
@@ -173,7 +207,10 @@ class UrllibOkxDemoWriteTransport:
                 status_code = response.status
                 raw_payload = response.read()
         except HTTPError as exc:
-            explicit_rejection = _explicit_http_rejection(exc)
+            explicit_rejection = _explicit_http_rejection(
+                exc,
+                expected_client_order_id=body.get("clOrdId"),
+            )
             if explicit_rejection is not None:
                 return explicit_rejection
             raise OkxDemoTransportError(unknown_write_outcome=True) from None
