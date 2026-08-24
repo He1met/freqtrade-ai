@@ -324,9 +324,10 @@ def _dispatch_claim_is_exact(
         or not (observed_at <= claimed_at < expires_at)
     ):
         return False
-    # C/D are historical acceptance checks.  The short-lived authority must
-    # have been fresh when the irreversible dispatch claim was acquired; it
-    # need not still be fresh when fills and recovery evidence are inspected.
+    # C/D are historical acceptance checks. Attempt 1 freezes the short-lived
+    # authority while it is fresh. A bounded attempt 2 derives authority from
+    # that exact first claim plus its immutable negative outcome and therefore
+    # needs a fresh guard/lease, not a renewed policy or attestation.
     try:
         probe_resource_windows = [
             (
@@ -354,14 +355,20 @@ def _dispatch_claim_is_exact(
         lease_expires_at = _persisted_utc(claim["lease_expires_at"])
     except (CanonicalExecutionChainBlocked, KeyError, TypeError, ValueError):
         return False
-    if (
-        any(
-            not (observed <= claimed_at < expires)
+    attempt_ordinal = claim.get("attempt_ordinal")
+    if attempt_ordinal not in {1, 2}:
+        return False
+    original_authority_fresh = (
+        all(
+            observed <= claimed_at < expires
             for observed, expires in probe_resource_windows
         )
-        or not (probe_observed_at <= claimed_at < probe_expires_at)
-        or not (attestation_observed_at <= claimed_at < attestation_expires_at)
-        or not (policy_accepted_at <= claimed_at < policy_expires_at)
+        and probe_observed_at <= claimed_at < probe_expires_at
+        and attestation_observed_at <= claimed_at < attestation_expires_at
+        and policy_accepted_at <= claimed_at < policy_expires_at
+    )
+    if (
+        (attempt_ordinal == 1 and not original_authority_fresh)
         or not (lease_acquired_at <= claimed_at < lease_expires_at)
     ):
         return False
@@ -1531,10 +1538,19 @@ def _inspect_lineage(
             ):
                 negative_outcomes.append(outcome)
     expected_outcome_count = 1 if len(exact_claims) == 1 else 2
+    retry_sequence_exact = True
+    if len(exact_claims) == 2 and len(negative_outcomes) == 1:
+        second_claim = next(
+            row for row in exact_claims if row["attempt_ordinal"] == 2
+        )
+        retry_sequence_exact = _persisted_utc(
+            negative_outcomes[0]["recorded_at"]
+        ) <= _persisted_utc(second_claim["claimed_at"])
     if (
         len(outcomes) != expected_outcome_count
         or len(accepted_outcomes) != 1
         or len(negative_outcomes) != (1 if len(exact_claims) == 2 else 0)
+        or not retry_sequence_exact
     ):
         reasons.append("EXACT_SINGLE_ORDER_POST_OUTCOME_UNPROVEN")
 
