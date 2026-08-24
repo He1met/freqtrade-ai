@@ -40,11 +40,13 @@ APPROVAL_WRITER_READ_DELTA: Final[tuple[str, ...]] = (
 )
 OLD_UNIQUE: Final = "deployment_approvals_qualification_unique"
 NEW_CONSTRAINTS: Final[tuple[str, ...]] = (
-    "deployment_approvals_generation_bounded",
+    "ck_deployment_approvals_generation_bounded",
+    "ck_deployment_approvals_recovery_evidence_complete",
+    "ck_deployment_approvals_recovery_receipt_digest_digest_length",
+    "ck_deployment_approvals_recovery_request_digest_digest_length",
     "deployment_approvals_qualification_generation_unique",
     "deployment_approvals_recovery_deployment_fk",
     "deployment_approvals_recovery_deployment_unique",
-    "deployment_approvals_recovery_evidence_complete",
     "deployment_approvals_recovery_key_unique",
     "deployment_approvals_recovery_order_fk",
     "deployment_approvals_recovery_order_unique",
@@ -296,15 +298,19 @@ def apply_canary_recovery_approval_upgrade(
                 "ALTER COLUMN approval_generation SET NOT NULL, "
                 "ALTER COLUMN approval_generation DROP DEFAULT, "
                 f"DROP CONSTRAINT {OLD_UNIQUE}, "
-                "ADD CONSTRAINT deployment_approvals_generation_bounded "
+                "ADD CONSTRAINT ck_deployment_approvals_generation_bounded "
                 "CHECK (approval_generation > 0 AND approval_generation <= 2), "
-                "ADD CONSTRAINT deployment_approvals_recovery_evidence_complete CHECK ("
+                "ADD CONSTRAINT ck_deployment_approvals_recovery_evidence_complete CHECK ("
                 "(approval_generation=1 AND recovery_of_deployment_id IS NULL "
                 "AND recovery_order_id IS NULL AND recovery_idempotency_key IS NULL "
                 "AND recovery_request_digest IS NULL AND recovery_receipt_digest IS NULL) OR "
                 "(approval_generation=2 AND recovery_of_deployment_id IS NOT NULL "
                 "AND recovery_order_id IS NOT NULL AND recovery_idempotency_key IS NOT NULL "
                 "AND recovery_request_digest IS NOT NULL AND recovery_receipt_digest IS NOT NULL)), "
+                "ADD CONSTRAINT ck_deployment_approvals_recovery_request_digest_digest_length "
+                "CHECK (length(recovery_request_digest)=64), "
+                "ADD CONSTRAINT ck_deployment_approvals_recovery_receipt_digest_digest_length "
+                "CHECK (length(recovery_receipt_digest)=64), "
                 "ADD CONSTRAINT deployment_approvals_qualification_generation_unique "
                 "UNIQUE (qualification_decision_id, approval_generation), "
                 "ADD CONSTRAINT deployment_approvals_recovery_deployment_unique "

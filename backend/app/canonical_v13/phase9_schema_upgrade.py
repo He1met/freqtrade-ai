@@ -210,6 +210,19 @@ def _present_constraints(connection: Connection) -> tuple[str, ...]:
                     f"{expected_name} has unexpected columns",
                 )
             observed.add(expected_name)
+        if expected_name == "deployment_approvals_qualification_unique":
+            recovery_matches = [
+                constraint
+                for constraint in inspector.get_unique_constraints(
+                    table_name, schema=CANONICAL_BUSINESS_SCHEMA
+                )
+                if constraint.get("name")
+                == "deployment_approvals_qualification_generation_unique"
+                and tuple(constraint.get("column_names") or ())
+                == ("qualification_decision_id", "approval_generation")
+            ]
+            if len(recovery_matches) == 1:
+                observed.add(expected_name)
     return tuple(sorted(observed))
 
 
@@ -707,6 +720,17 @@ def rollback_phase9_schema_upgrade(
     actor_identity: str = "canonical-phase9-schema-operator",
     role_mapping: CanonicalRoleMapping | None = None,
 ) -> Phase9SchemaUpgradeResult:
+    approval_columns = {
+        str(row["name"])
+        for row in inspect(connection).get_columns(
+            "deployment_approvals", schema=CANONICAL_BUSINESS_SCHEMA
+        )
+    }
+    if "approval_generation" in approval_columns:
+        raise CanonicalPhase9SchemaUpgradeBlocked(
+            "BLOCKED_CANARY_RECOVERY_APPROVAL_ROLLBACK_REQUIRED",
+            "rollback canary recovery approval before the Phase 9 schema",
+        )
     if inspect(connection).has_table(
         "runtime_image_acceptances", schema=CANONICAL_BUSINESS_SCHEMA
     ):

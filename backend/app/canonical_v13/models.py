@@ -991,7 +991,7 @@ DEPLOYMENT_APPROVALS_TABLE = _table(
     ),
     CheckConstraint(
         "approval_generation > 0 AND approval_generation <= 2",
-        name="deployment_approvals_generation_bounded",
+        name="generation_bounded",
     ),
     CheckConstraint(
         "(approval_generation = 1 AND recovery_of_deployment_id IS NULL "
@@ -1000,7 +1000,7 @@ DEPLOYMENT_APPROVALS_TABLE = _table(
         "OR (approval_generation = 2 AND recovery_of_deployment_id IS NOT NULL "
         "AND recovery_order_id IS NOT NULL AND recovery_idempotency_key IS NOT NULL "
         "AND recovery_request_digest IS NOT NULL AND recovery_receipt_digest IS NOT NULL)",
-        name="deployment_approvals_recovery_evidence_complete",
+        name="recovery_evidence_complete",
     ),
     UniqueConstraint(
         "qualification_decision_id",

@@ -1439,6 +1439,11 @@ def test_phase9_postgresql_upgrade_rollback_and_exact_replay() -> None:
                     f"TO {mapping.physical(role)}"
                 )
 
+            recovery_rolled_back = rollback_canary_recovery_approval_upgrade(
+                connection, role_mapping=mapping
+            )
+            assert recovery_rolled_back.status == "ROLLED_BACK"
+
             acceptance_rolled_back = rollback_acceptance_signal_trigger_upgrade(
                 connection, role_mapping=mapping
             )
@@ -1529,6 +1534,12 @@ def test_phase9_postgresql_upgrade_rollback_and_exact_replay() -> None:
                 ).status
                 == "UPGRADED"
             )
+            assert (
+                apply_canary_recovery_approval_upgrade(
+                    connection, role_mapping=mapping
+                ).status
+                == "UPGRADED"
+            )
     finally:
         engine.dispose()
 
@@ -1542,6 +1553,12 @@ def test_phase9_previous_acl_and_connect_drift_fail_closed_atomically() -> None:
     extra_role = mapping.physical("canonical_approval_writer")
     try:
         with engine.begin() as connection:
+            assert (
+                rollback_canary_recovery_approval_upgrade(
+                    connection, role_mapping=mapping
+                ).status
+                == "ROLLED_BACK"
+            )
             assert (
                 rollback_acceptance_signal_trigger_upgrade(
                     connection, role_mapping=mapping
@@ -1628,6 +1645,12 @@ def test_phase9_previous_acl_and_connect_drift_fail_closed_atomically() -> None:
             )
             assert (
                 apply_acceptance_signal_trigger_upgrade(
+                    connection, role_mapping=mapping
+                ).status
+                == "UPGRADED"
+            )
+            assert (
+                apply_canary_recovery_approval_upgrade(
                     connection, role_mapping=mapping
                 ).status
                 == "UPGRADED"
