@@ -319,6 +319,9 @@ class FrozenIntradayLeverageEvaluator:
     FOUR_HOUR_ARTIFACT_DIGEST = (
         "d8f0ed49773f061e43730bd328ef919602a18499bfb5c12377358f5906cbb7bd"
     )
+    FOUR_HOUR_REQUALIFICATION_ARTIFACT_DIGEST = (
+        "ff423436d2de18052d9e6a113e71ee7ea2915d30218ed4b8a974354483bc07a2"
+    )
 
     _INTRADAY_REQUIRED_SOURCE = (
         "class CanonicalIntradayLeverageBaseline",
@@ -352,11 +355,18 @@ class FrozenIntradayLeverageEvaluator:
             signal_hours = frozenset({3})
             effective_leverage = "14"
             evaluator_identity = "canonical-intraday-leverage-baseline-v1"
-        elif artifact_digest == self.FOUR_HOUR_ARTIFACT_DIGEST:
+        elif artifact_digest in {
+            self.FOUR_HOUR_ARTIFACT_DIGEST,
+            self.FOUR_HOUR_REQUALIFICATION_ARTIFACT_DIGEST,
+        }:
             required_source = self._FOUR_HOUR_REQUIRED_SOURCE
             signal_hours = frozenset({2, 6, 10, 14, 18, 22})
             effective_leverage = "12"
-            evaluator_identity = "canonical-four-hour-natural-long-baseline-v1"
+            evaluator_identity = (
+                "canonical-four-hour-natural-long-baseline-v2"
+                if artifact_digest == self.FOUR_HOUR_REQUALIFICATION_ARTIFACT_DIGEST
+                else "canonical-four-hour-natural-long-baseline-v1"
+            )
         else:
             required_source = ()
             signal_hours = frozenset()
@@ -367,7 +377,11 @@ class FrozenIntradayLeverageEvaluator:
             or sha256(source.encode("utf-8")).hexdigest()
             != artifact_digest
             or artifact_digest
-            not in {self.INTRADAY_ARTIFACT_DIGEST, self.FOUR_HOUR_ARTIFACT_DIGEST}
+            not in {
+                self.INTRADAY_ARTIFACT_DIGEST,
+                self.FOUR_HOUR_ARTIFACT_DIGEST,
+                self.FOUR_HOUR_REQUALIFICATION_ARTIFACT_DIGEST,
+            }
             or any(token not in source for token in required_source)
             or "populate_entry_trend" not in source
             or "enter_short" in source
