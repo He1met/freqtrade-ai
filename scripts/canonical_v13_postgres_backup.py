@@ -60,6 +60,10 @@ from app.canonical_v13.optimization_observability_upgrade import (  # noqa: E402
     CanonicalOptimizationObservabilityUpgradeBlocked,
     verify_optimization_observability_upgrade,
 )
+from app.canonical_v13.order_dispatch_status_upgrade import (  # noqa: E402
+    CanonicalOrderDispatchStatusUpgradeBlocked,
+    verify_order_dispatch_status_upgrade,
+)
 from app.canonical_v13.phase9_transition_upgrade import (  # noqa: E402
     DECISION_MODE_GUARD_TRIGGER,
     INTENT_MODE_GUARD_TRIGGER,
@@ -620,6 +624,18 @@ def _verify_restore_trigger_boundary(
         raise CanonicalBackupBlocked(
             "BLOCKED_CANONICAL_RESTORE_SHADOW_RISK_ACL_CONTRACT",
             "shadow risk ACL verifier did not return ACCEPTED",
+        )
+    try:
+        dispatch_status = verify_order_dispatch_status_upgrade(connection)
+    except CanonicalOrderDispatchStatusUpgradeBlocked as exc:
+        raise CanonicalBackupBlocked(
+            "BLOCKED_CANONICAL_RESTORE_ORDER_DISPATCH_STATUS_CONTRACT",
+            "order dispatch status contract is not accepted",
+        ) from exc
+    if dispatch_status.status != "ACCEPTED":
+        raise CanonicalBackupBlocked(
+            "BLOCKED_CANONICAL_RESTORE_ORDER_DISPATCH_STATUS_CONTRACT",
+            "order dispatch status verifier did not return ACCEPTED",
         )
 
 
