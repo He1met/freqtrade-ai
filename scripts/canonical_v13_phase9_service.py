@@ -83,6 +83,9 @@ from app.canonical_v13.phase9_recovery_composition import (  # noqa: E402
 from app.canonical_v13.phase9_recovery_acceptance import (  # noqa: E402
     CanonicalPhase9RecoveryAcceptanceBlocked,
 )
+from app.canonical_v13.phase9_runtime_worker import (  # noqa: E402
+    CanonicalPhase9RuntimeWorkerBlocked,
+)
 from app.canonical_v13.phase9_topology import PHASE9_SERVICE_SPECS  # noqa: E402
 
 
@@ -1372,7 +1375,48 @@ def _retryable_public_market_blocker(exc: BaseException) -> str | None:
     return None
 
 
-def _runtime_observation_pending(exc: BaseException) -> bool:
+def _verified_predecessor_stop_allows_runtime_bootstrap(
+    plan: Phase9LaunchPlan,
+) -> bool:
+    """Prove that the immediately preceding local generation stopped cleanly."""
+
+    if (
+        plan.service_key != "long_lived_runtime"
+        or plan.order_writer_enabled
+        or plan.generation <= 1
+    ):
+        return False
+    receipts = _verified_lifecycle_receipts(plan.service_key)
+    current_prepare_index = next(
+        (
+            index
+            for index, receipt in enumerate(receipts)
+            if receipt.action == "PREPARE"
+            and receipt.status == "PREPARED"
+            and receipt.plan_digest == plan.plan_digest
+            and receipt.generation == plan.generation
+        ),
+        None,
+    )
+    if current_prepare_index is None:
+        return False
+    preceding = receipts[:current_prepare_index]
+    if not preceding:
+        return False
+    predecessor_stop = preceding[-1]
+    return bool(
+        predecessor_stop.action == "STOP"
+        and predecessor_stop.status == "STOPPED"
+        and predecessor_stop.generation == plan.generation - 1
+        and predecessor_stop.plan_digest
+        and predecessor_stop.observed_at <= plan.prepared_at
+        and predecessor_stop.details.get("label") == plan.launch_agent_label
+    )
+
+
+def _runtime_observation_pending(
+    exc: BaseException, *, allow_stale_bootstrap: bool = False
+) -> bool:
     """Recognize only the exact A-to-B stopped-runtime bootstrap boundary."""
 
     observed: BaseException | None = exc
@@ -1382,6 +1426,12 @@ def _runtime_observation_pending(exc: BaseException) -> bool:
         if (
             isinstance(observed, CanonicalPhase9CompositionBlocked)
             and observed.code == "BLOCKED_PHASE9_RUNTIME_OBSERVATION_PENDING"
+        ):
+            return True
+        if (
+            allow_stale_bootstrap
+            and isinstance(observed, CanonicalPhase9RuntimeWorkerBlocked)
+            and observed.code == "BLOCKED_RUNTIME_WORKER_HEARTBEAT"
         ):
             return True
         observed = observed.__cause__ or observed.__context__
@@ -1404,7 +1454,12 @@ def _record_resilient_worker_heartbeat(
         )
     except CanonicalPhase9SupervisorBlocked as exc:
         reason_code = _retryable_public_market_blocker(exc)
-        observation_pending = _runtime_observation_pending(exc)
+        observation_pending = _runtime_observation_pending(
+            exc,
+            allow_stale_bootstrap=(
+                _verified_predecessor_stop_allows_runtime_bootstrap(plan)
+            ),
+        )
         if reason_code is None and not observation_pending:
             raise
         reason_code = reason_code or "BLOCKED_PHASE9_RUNTIME_OBSERVATION_PENDING"

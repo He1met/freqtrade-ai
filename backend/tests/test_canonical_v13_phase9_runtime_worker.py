@@ -1195,3 +1195,97 @@ def test_supervisor_does_not_retry_stale_runtime_activation_receipt(
         "CLAIM_LEASE",
         "RELEASE_LEASE",
     ]
+
+
+def test_supervisor_allows_stale_runtime_bootstrap_after_exact_predecessor_stop(
+    monkeypatch, tmp_path
+) -> None:
+    service = _load_script("canonical_phase9_worker_stale_activation_recovery")
+    monkeypatch.setattr(service, "SUPPORT_ROOT", tmp_path / "support")
+    monkeypatch.setattr(service, "LAUNCH_AGENT_ROOT", tmp_path / "agents")
+    monkeypatch.setattr(service, "LOG_ROOT", tmp_path / "logs")
+    monkeypatch.setattr(service, "_require_release_checkout", lambda: RELEASE_DIGEST)
+    monkeypatch.setattr(service, "_now", lambda: NOW)
+    monkeypatch.setattr(
+        service, "_load_runtime_image_authority", lambda _id: _runtime_image_authority()
+    )
+    monkeypatch.setattr(service.signal, "signal", lambda *_args: None)
+    service._STOP = False
+    predecessor = service.prepare(
+        "long_lived_runtime",
+        "SIGNAL_RISK_SHADOW",
+        release_digest=RELEASE_DIGEST,
+        deployment_id=_lineage().deployment_id,
+        deployment_capability_digest=_lineage().deployment_capability_digest,
+        runtime_image_acceptance_id=IMAGE_ACCEPTANCE_ID,
+        enable_order_writer=False,
+    )
+    predecessor_plan, predecessor_state = service._load_plan("long_lived_runtime")
+    service._append_receipt(
+        service.build_lifecycle_receipt(
+            service_key="long_lived_runtime",
+            action="STOP",
+            status="STOPPED",
+            generation=predecessor_plan.generation,
+            observed_at=NOW - timedelta(seconds=1),
+            plan_digest=predecessor["plan_digest"],
+            details={"label": "ai.freqtrade.canonical-v13.runtime"},
+        )
+    )
+    service._atomic_json(
+        service._state_path("long_lived_runtime"),
+        {
+            **predecessor_state,
+            "status": "STOPPED",
+        },
+    )
+    prepared = service.prepare(
+        "long_lived_runtime",
+        "SIGNAL_RISK_SHADOW",
+        release_digest=RELEASE_DIGEST,
+        deployment_id=_lineage().deployment_id,
+        deployment_capability_digest=_lineage().deployment_capability_digest,
+        runtime_image_acceptance_id=IMAGE_ACCEPTANCE_ID,
+        enable_order_writer=False,
+    )
+    _plan, state = service._load_plan("long_lived_runtime")
+    service._atomic_json(
+        service._state_path("long_lived_runtime"),
+        {**state, "status": "CONFIRMED", "confirmed_at": NOW.isoformat()},
+    )
+
+    class StaleActivationWorker:
+        def heartbeat(self, **_kwargs):
+            raise CanonicalPhase9RuntimeWorkerBlocked(
+                "BLOCKED_RUNTIME_WORKER_HEARTBEAT",
+                "production runtime observation is stale",
+            )
+
+        def verify(self, _receipt):
+            return False
+
+    monkeypatch.setattr(
+        service.time, "sleep", lambda _seconds: setattr(service, "_STOP", True)
+    )
+    service.supervise(
+        "long_lived_runtime",
+        prepared["plan_digest"],
+        worker_port=StaleActivationWorker(),
+    )
+    receipts = [
+        json.loads(line)
+        for line in service._receipt_path("long_lived_runtime").read_text().splitlines()
+    ]
+    assert [receipt["action"] for receipt in receipts] == [
+        "PREPARE",
+        "STOP",
+        "PREPARE",
+        "CLAIM_LEASE",
+        "WORKER_HEARTBEAT",
+        "RELEASE_LEASE",
+    ]
+    assert receipts[4]["status"] == "BLOCKED"
+    assert receipts[4]["details"]["reason_code"] == (
+        "BLOCKED_PHASE9_RUNTIME_OBSERVATION_PENDING"
+    )
+    assert receipts[4]["details"]["runtime_observation_pending"] is True
