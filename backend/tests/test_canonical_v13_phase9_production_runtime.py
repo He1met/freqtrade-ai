@@ -45,6 +45,13 @@ FOUR_HOUR_SOURCE = (
     / "batch_20260822_07"
     / "canonical_four_hour_natural_long_run_2_1.py"
 ).read_text(encoding="utf-8")
+FOUR_HOUR_REQUALIFICATION_SOURCE = (
+    Path(__file__).resolve().parents[2]
+    / "research"
+    / "canonical_v13_qualified_baselines"
+    / "batch_20260825_08"
+    / "canonical_four_hour_natural_long_acceptance_run_1_1.py"
+).read_text(encoding="utf-8")
 
 
 def _uuid(value: int) -> UUID:
@@ -143,13 +150,28 @@ def test_frozen_evaluator_uses_exact_artifact_and_closed_candles() -> None:
         )
 
 
-def test_frozen_evaluator_accepts_exact_four_hour_qualified_artifact() -> None:
-    digest = sha256(FOUR_HOUR_SOURCE.encode()).hexdigest()
-    assert digest == (
-        "d8f0ed49773f061e43730bd328ef919602a18499bfb5c12377358f5906cbb7bd"
-    )
+@pytest.mark.parametrize(
+    ("source", "expected_digest", "expected_evaluator_identity"),
+    (
+        (
+            FOUR_HOUR_SOURCE,
+            "d8f0ed49773f061e43730bd328ef919602a18499bfb5c12377358f5906cbb7bd",
+            "canonical-four-hour-natural-long-baseline-v1",
+        ),
+        (
+            FOUR_HOUR_REQUALIFICATION_SOURCE,
+            "ff423436d2de18052d9e6a113e71ee7ea2915d30218ed4b8a974354483bc07a2",
+            "canonical-four-hour-natural-long-baseline-v2",
+        ),
+    ),
+)
+def test_frozen_evaluator_accepts_exact_four_hour_qualified_artifact(
+    source: str, expected_digest: str, expected_evaluator_identity: str
+) -> None:
+    digest = sha256(source.encode()).hexdigest()
+    assert digest == expected_digest
     lineage = SimpleNamespace(
-        strategy_artifact_source=FOUR_HOUR_SOURCE,
+        strategy_artifact_source=source,
         strategy_artifact_digest=digest,
     )
     candles = _candles()
@@ -163,9 +185,7 @@ def test_frozen_evaluator_accepts_exact_four_hour_qualified_artifact() -> None:
     )
 
     assert evaluation.outcome == "SIGNAL"
-    assert evaluation.evaluator_identity == (
-        "canonical-four-hour-natural-long-baseline-v1"
-    )
+    assert evaluation.evaluator_identity == expected_evaluator_identity
     assert evaluation.evaluation_payload["effective_strategy_leverage"] == "12"
     assert evaluation.evaluation_payload["artifact_digest"] == digest
 
@@ -180,7 +200,7 @@ def test_frozen_evaluator_accepts_exact_four_hour_qualified_artifact() -> None:
     ):
         FrozenIntradayLeverageEvaluator().evaluate_natural_signal(
             lineage=SimpleNamespace(
-                strategy_artifact_source=FOUR_HOUR_SOURCE + "\n# drift",
+                strategy_artifact_source=source + "\n# drift",
                 strategy_artifact_digest=digest,
             ),
             evidence=evidence,
