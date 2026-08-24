@@ -231,6 +231,26 @@ def _decimal_text(value: object) -> str:
     return rendered or "0"
 
 
+def _absence_resource_digest(
+    *, resource: str, safe: Mapping[str, object], observed_at: datetime, expires_at: datetime
+) -> str:
+    return _digest(
+        {
+            "execution_target": "OKX_DEMO",
+            "resource": resource,
+            "source": "okx_demo_rest",
+            "authenticated": True,
+            "observed_at": observed_at.isoformat(),
+            "expires_at": expires_at.isoformat(),
+            "facts": {
+                "instrument": safe.get("instrument"),
+                "client_order_id": safe.get("client_order_id"),
+                "matching_order_count": 0,
+            },
+        }
+    )
+
+
 def _persisted_decimal_equal(
     connection: Connection, left: object, right: object
 ) -> bool:
@@ -1370,7 +1390,7 @@ def _inspect_lineage(
     exact_claims = []
     for claim in claims:
         if (
-            claim["attempt_ordinal"] == 1
+            claim["attempt_ordinal"] in {1, 2}
             and len(exact_leases) == 1
             and claim_policy is not None
             and claim_probe is not None
@@ -1387,7 +1407,12 @@ def _inspect_lineage(
             )
         ):
             exact_claims.append(claim)
-    if len(exact_claims) != 1:
+    if (
+        len(claims) not in {1, 2}
+        or len(exact_claims) != len(claims)
+        or sorted(row["attempt_ordinal"] for row in exact_claims)
+        != list(range(1, len(exact_claims) + 1))
+    ):
         reasons.append("EXACT_SINGLE_ORDER_POST_RECEIPT_UNPROVEN")
     order_intent = next(
         (row for row in intents if row["id"] == accepted_risk["trade_intent_id"]),
@@ -1410,27 +1435,40 @@ def _inspect_lineage(
         .all()
     )
     counts["order_dispatch_outcome_receipts"] = len(outcomes)
-    exact_outcomes = []
-    if len(exact_claims) == 1:
-        claim = exact_claims[0]
-        for outcome in outcomes:
-            safe_response = outcome["safe_response_json"]
-            if not isinstance(safe_response, Mapping):
-                continue
-            safe_response_digest = _digest(dict(safe_response))
-            outcome_payload = {
-                "contract": "canonical-v13-order-dispatch-outcome-v1",
-                "outcome_id": str(outcome["id"]),
-                "order_id": str(order["id"]),
-                "dispatch_claim_id": str(claim["id"]),
-                "claim_digest": claim["claim_digest"],
-                "client_order_id": outcome["client_order_id"],
-                "exchange_order_id": outcome["exchange_order_id"],
-                "safe_response_digest": safe_response_digest,
-                "outcome_mode": outcome["outcome_mode"],
-                "recorded_at": _persisted_utc(outcome["recorded_at"]).isoformat(),
-            }
-            outcome_digest = _digest(outcome_payload)
+    claims_by_id = {row["id"]: row for row in exact_claims}
+    accepted_outcomes = []
+    negative_outcomes = []
+    for outcome in outcomes:
+        claim = claims_by_id.get(outcome["dispatch_claim_id"])
+        safe_response = outcome["safe_response_json"]
+        if claim is None or not isinstance(safe_response, Mapping):
+            continue
+        safe_response_digest = _digest(dict(safe_response))
+        outcome_payload = {
+            "contract": "canonical-v13-order-dispatch-outcome-v1",
+            "outcome_id": str(outcome["id"]),
+            "order_id": str(order["id"]),
+            "dispatch_claim_id": str(claim["id"]),
+            "claim_digest": claim["claim_digest"],
+            "client_order_id": outcome["client_order_id"],
+            "exchange_order_id": outcome["exchange_order_id"],
+            "safe_response_digest": safe_response_digest,
+            "outcome_mode": outcome["outcome_mode"],
+            "recorded_at": _persisted_utc(outcome["recorded_at"]).isoformat(),
+        }
+        outcome_digest = _digest(outcome_payload)
+        common = (
+            outcome["order_id"] == order["id"]
+            and outcome["claim_digest"] == claim["claim_digest"]
+            and outcome["client_order_id"] == exchange_body.get("clOrdId")
+            and outcome["safe_response_digest"] == safe_response_digest
+            and outcome["receipt_digest"] == outcome_digest
+            and _persisted_utc(outcome["recorded_at"])
+            >= _persisted_utc(claim["claimed_at"])
+        )
+        if not common:
+            continue
+        if outcome["outcome_mode"] in {"POST", "GET_RECOVERY"}:
             order_digest = _digest(
                 {
                     "contract": "canonical-v13-okx-demo-order-receipt-v2",
@@ -1441,22 +1479,63 @@ def _inspect_lineage(
                 }
             )
             if (
-                outcome["dispatch_claim_id"] == claim["id"]
-                and outcome["claim_digest"] == claim["claim_digest"]
-                and outcome["client_order_id"] == exchange_body.get("clOrdId")
+                claim["attempt_ordinal"] == len(exact_claims)
                 and outcome["exchange_order_id"] == order["exchange_order_id"]
                 and safe_response.get("clOrdId") == outcome["client_order_id"]
                 and safe_response.get("ordId") == outcome["exchange_order_id"]
                 and safe_response.get("sCode") == "0"
-                and outcome["safe_response_digest"] == safe_response_digest
-                and outcome["outcome_mode"] == "POST"
-                and outcome["receipt_digest"] == outcome_digest
                 and order["receipt_digest"] == order_digest
-                and _persisted_utc(outcome["recorded_at"])
-                >= _persisted_utc(claim["claimed_at"])
             ):
-                exact_outcomes.append(outcome)
-    if len(outcomes) != 1 or len(exact_outcomes) != 1:
+                accepted_outcomes.append(outcome)
+        elif outcome["outcome_mode"] == "GET_NOT_FOUND":
+            try:
+                observed_at = _persisted_utc(
+                    datetime.fromisoformat(str(safe_response["observed_at"]))
+                )
+                expires_at = _persisted_utc(
+                    datetime.fromisoformat(str(safe_response["expires_at"]))
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+            if (
+                claim["attempt_ordinal"] == 1
+                and outcome["exchange_order_id"] is None
+                and safe_response.get("contract")
+                == "canonical-v13-okx-demo-order-absence-v1"
+                and safe_response.get("execution_target") == "OKX_DEMO"
+                and safe_response.get("instrument") == exchange_body.get("instId")
+                and safe_response.get("client_order_id")
+                == exchange_body.get("clOrdId")
+                and safe_response.get("account_fingerprint_digest")
+                == claim["account_fingerprint_digest"]
+                and safe_response.get("credential_generation_digest")
+                == claim["credential_generation_digest"]
+                and safe_response.get("exact_order_result_code") == "51603"
+                and safe_response.get("pending_order_match_count") == 0
+                and safe_response.get("history_order_match_count") == 0
+                and observed_at < expires_at
+                and safe_response.get("pending_orders_digest")
+                == _absence_resource_digest(
+                    resource="pending_orders",
+                    safe=safe_response,
+                    observed_at=observed_at,
+                    expires_at=expires_at,
+                )
+                and safe_response.get("orders_history_digest")
+                == _absence_resource_digest(
+                    resource="orders_history",
+                    safe=safe_response,
+                    observed_at=observed_at,
+                    expires_at=expires_at,
+                )
+            ):
+                negative_outcomes.append(outcome)
+    expected_outcome_count = 1 if len(exact_claims) == 1 else 2
+    if (
+        len(outcomes) != expected_outcome_count
+        or len(accepted_outcomes) != 1
+        or len(negative_outcomes) != (1 if len(exact_claims) == 2 else 0)
+    ):
         reasons.append("EXACT_SINGLE_ORDER_POST_OUTCOME_UNPROVEN")
 
     try:

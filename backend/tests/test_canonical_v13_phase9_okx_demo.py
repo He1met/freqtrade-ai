@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.adapters.okx_demo.errors import OkxReadAdapterError
 from app.canonical_v13.execution_common import CanonicalExecutionChainBlocked
 from app.canonical_v13.phase9_okx_demo import CanonicalOkxDemoSession
 
@@ -99,6 +100,9 @@ class FakeRead:
             "pending_orders": self._snapshot(
                 "pending_orders", [], authenticated=True
             ),
+            "orders_history": self._snapshot(
+                "orders_history", [], authenticated=True
+            ),
             "maximum_order_quantity": self._snapshot(
                 "maximum_order_quantity",
                 [
@@ -173,6 +177,11 @@ class FakeRead:
             )
         )
         return self.snapshots["maximum_order_quantity"]
+
+    def orders_history(self, instrument, *, limit):
+        assert limit == 100
+        self.calls.append(("orders_history", instrument))
+        return self.snapshots["orders_history"]
 
     def order(self, instrument, *, client_order_id):
         return SimpleNamespace(
@@ -351,6 +360,58 @@ def test_redacted_probe_and_transport_have_no_credential_surface() -> None:
     session.close()
     session.close()
     assert closed == [True]
+
+
+def test_exact_51603_plus_empty_pending_and_history_proves_absence() -> None:
+    class AbsentRead(FakeRead):
+        def order(self, instrument, *, client_order_id):
+            raise OkxReadAdapterError(
+                kind="BUSINESS_ERROR",
+                status="FAILED",
+                message="redacted",
+                retryable=False,
+                okx_code="51603",
+            )
+
+    session, read, _write, _closed = _session(AbsentRead())
+    evidence = session.prove_absent(
+        instrument="BTC-USDT-SWAP", client_order_id="canonical-1"
+    )
+    assert evidence.exact_order_result_code == "51603"
+    assert evidence.pending_order_match_count == 0
+    assert evidence.history_order_match_count == 0
+    assert len(evidence.evidence_digest) == 64
+    assert read.calls[-2:] == [
+        ("pending_orders", "BTC-USDT-SWAP"),
+        ("orders_history", "BTC-USDT-SWAP"),
+    ]
+
+
+def test_absence_is_blocked_when_pending_or_history_matches() -> None:
+    class ContradictedRead(FakeRead):
+        def __init__(self):
+            super().__init__()
+            self.snapshots["orders_history"].items = [
+                {"client_order_id": "canonical-1"}
+            ]
+
+        def order(self, instrument, *, client_order_id):
+            raise OkxReadAdapterError(
+                kind="BUSINESS_ERROR",
+                status="FAILED",
+                message="redacted",
+                retryable=False,
+                okx_code="51603",
+            )
+
+    session, _read, _write, _closed = _session(ContradictedRead())
+    with pytest.raises(
+        CanonicalExecutionChainBlocked,
+        match="BLOCKED_OKX_DEMO_ORDER_ABSENCE_CONTRADICTED",
+    ):
+        session.prove_absent(
+            instrument="BTC-USDT-SWAP", client_order_id="canonical-1"
+        )
 
 
 def test_probe_verifies_untimestamped_maximum_snapshot_after_request() -> None:

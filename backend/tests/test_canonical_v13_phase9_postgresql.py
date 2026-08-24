@@ -108,6 +108,12 @@ from app.canonical_v13.order_dispatch_status_upgrade import (
     rollback_order_dispatch_status_upgrade,
     verify_order_dispatch_status_upgrade,
 )
+from app.canonical_v13.order_dispatch_recovery_upgrade import (
+    CanonicalOrderDispatchRecoveryUpgradeBlocked,
+    apply_order_dispatch_recovery_upgrade,
+    rollback_order_dispatch_recovery_upgrade,
+    verify_order_dispatch_recovery_upgrade,
+)
 from app.canonical_v13.risk_service import create_production_demo_intent
 from app.canonical_v13.research_evaluation import qualify_target, score_target
 from app.canonical_v13.research_validation import (
@@ -231,6 +237,46 @@ def test_order_dispatch_status_upgrade_is_reversible_and_exact() -> None:
                     match="BLOCKED_PARTIAL_ORDER_DISPATCH_STATUS_UPGRADE",
                 ):
                     verify_order_dispatch_status_upgrade(connection)
+            finally:
+                transaction.rollback()
+    finally:
+        engine.dispose()
+
+
+def test_order_dispatch_recovery_upgrade_is_reversible_and_exact() -> None:
+    assert DATABASE_URL is not None
+    engine = create_engine(DATABASE_URL)
+    schema = "strategy_platform_v13"
+    try:
+        with engine.connect() as connection:
+            transaction = connection.begin()
+            try:
+                accepted = verify_order_dispatch_recovery_upgrade(connection)
+                assert accepted.status == "ACCEPTED"
+                rolled_back = rollback_order_dispatch_recovery_upgrade(connection)
+                assert rolled_back.status == "ROLLED_BACK"
+                previous = verify_order_dispatch_recovery_upgrade(connection)
+                assert previous.status == "PREVIOUS_READY"
+                upgraded = apply_order_dispatch_recovery_upgrade(connection)
+                assert upgraded.status == "UPGRADED"
+                assert upgraded.repeat_noop is False
+                replay = apply_order_dispatch_recovery_upgrade(connection)
+                assert replay.status == "ACCEPTED"
+                assert replay.repeat_noop is True
+                assert replay.receipt_digest == (
+                    verify_order_dispatch_recovery_upgrade(connection).receipt_digest
+                )
+                connection.execute(
+                    text(
+                        f"ALTER TABLE {schema}.order_dispatch_receipts "
+                        "DROP CONSTRAINT order_dispatch_receipts_order_attempt_unique"
+                    )
+                )
+                with pytest.raises(
+                    CanonicalOrderDispatchRecoveryUpgradeBlocked,
+                    match="BLOCKED_PARTIAL_ORDER_DISPATCH_RECOVERY_UPGRADE",
+                ):
+                    verify_order_dispatch_recovery_upgrade(connection)
             finally:
                 transaction.rollback()
     finally:

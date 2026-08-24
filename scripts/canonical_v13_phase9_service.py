@@ -1665,7 +1665,7 @@ def confirm_runtime_stop_observation(plan_digest: str) -> dict[str, object]:
             predecessor_container_present=predecessor_container_present,
         )
     return {
-        "status": result.status,
+        "status": getattr(result, "status", "ACCEPTED"),
         "service": plan.service_key,
         "deployment_id": str(plan.deployment_id),
         "runtime_instance_id": str(result.runtime_instance_id),
@@ -2209,11 +2209,12 @@ def dispatch_canary(plan_digest: str, risk_decision_id: UUID) -> dict[str, objec
         plan=plan, lease=lease, holder_token=_read_order_holder_token()
     ).dispatch_canary(risk_decision_id=risk_decision_id, evaluated_at=now)
     return {
-        "status": "ACCEPTED",
+        "status": result.status,
         "order_id": str(result.order_id),
         "exchange_order_id": result.exchange_order_id,
         "receipt_digest": result.receipt_digest,
         "repeat_noop": result.repeat_noop,
+        "retry_authorized": getattr(result, "retry_authorized", False),
     }
 
 
@@ -2253,11 +2254,12 @@ def recover_canary(plan_digest: str, order_id: UUID) -> dict[str, object]:
     )
     _append_receipt(replay_receipt)
     return {
-        "status": "RECOVERED",
+        "status": getattr(result, "status", "ACCEPTED"),
         "order_id": str(result.order_id),
         "exchange_order_id": result.exchange_order_id,
         "receipt_digest": result.receipt_digest,
         "repeat_noop": result.repeat_noop,
+        "retry_authorized": getattr(result, "retry_authorized", False),
         "replay_evidence_receipt_digest": replay_receipt.receipt_digest,
     }
 

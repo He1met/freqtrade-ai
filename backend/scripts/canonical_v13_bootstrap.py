@@ -86,6 +86,12 @@ from app.canonical_v13.order_dispatch_status_upgrade import (
     rollback_order_dispatch_status_upgrade,
     verify_order_dispatch_status_upgrade,
 )
+from app.canonical_v13.order_dispatch_recovery_upgrade import (
+    CanonicalOrderDispatchRecoveryUpgradeBlocked,
+    apply_order_dispatch_recovery_upgrade,
+    rollback_order_dispatch_recovery_upgrade,
+    verify_order_dispatch_recovery_upgrade,
+)
 from app.canonical_v13.genesis import (
     assert_postgresql_acl_sql,
     postgresql_owner_table_grant_statements,
@@ -792,6 +798,30 @@ def order_dispatch_status(*, operation: str) -> dict[str, object]:
     return payload
 
 
+def order_dispatch_recovery(*, operation: str) -> dict[str, object]:
+    engine = create_engine(_database_url(), pool_pre_ping=True)
+    try:
+        if operation == "verify":
+            with engine.connect() as connection:
+                with connection.begin():
+                    connection.exec_driver_sql("SET TRANSACTION READ ONLY")
+                    result = verify_order_dispatch_recovery_upgrade(connection)
+        else:
+            actor_identity = _upgrade_actor()
+            with engine.begin() as connection:
+                result = (
+                    apply_order_dispatch_recovery_upgrade(connection)
+                    if operation == "apply"
+                    else rollback_order_dispatch_recovery_upgrade(connection)
+                )
+    finally:
+        engine.dispose()
+    payload = asdict(result)
+    if operation != "verify":
+        payload["actor_identity"] = actor_identity
+    return payload
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -836,6 +866,9 @@ def main(argv: list[str] | None = None) -> int:
             "order-dispatch-status-verify",
             "order-dispatch-status-apply",
             "order-dispatch-status-rollback",
+            "order-dispatch-recovery-verify",
+            "order-dispatch-recovery-apply",
+            "order-dispatch-recovery-rollback",
         ),
     )
     parser.add_argument(
@@ -884,6 +917,14 @@ def main(argv: list[str] | None = None) -> int:
                     payload["problems"] = [
                         *payload.get("problems", []),
                         "order_dispatch_status_upgrade_not_accepted",
+                    ]
+                dispatch_recovery = order_dispatch_recovery(operation="verify")
+                payload["order_dispatch_recovery"] = dispatch_recovery
+                if dispatch_recovery["status"] != "ACCEPTED":
+                    payload["status"] = "BLOCKED"
+                    payload["problems"] = [
+                        *payload.get("problems", []),
+                        "order_dispatch_recovery_upgrade_not_accepted",
                     ]
         elif args.command == "authority-plan":
             payload = authority_plan()
@@ -949,6 +990,10 @@ def main(argv: list[str] | None = None) -> int:
             payload = order_dispatch_status(
                 operation=args.command.removeprefix("order-dispatch-status-")
             )
+        elif args.command.startswith("order-dispatch-recovery-"):
+            payload = order_dispatch_recovery(
+                operation=args.command.removeprefix("order-dispatch-recovery-")
+            )
         else:
             payload = authority_apply(rollback=args.command == "authority-rollback")
     except BootstrapBlocked as exc:
@@ -974,6 +1019,8 @@ def main(argv: list[str] | None = None) -> int:
     except CanonicalPhase9PolicyRenewalUpgradeBlocked as exc:
         payload = {"status": "BLOCKED", "reason": str(exc)}
     except CanonicalOrderDispatchStatusUpgradeBlocked as exc:
+        payload = {"status": "BLOCKED", "reason": str(exc)}
+    except CanonicalOrderDispatchRecoveryUpgradeBlocked as exc:
         payload = {"status": "BLOCKED", "reason": str(exc)}
     except (SQLAlchemyError, ValueError):
         payload = {"status": "BLOCKED", "reason": "bootstrap verification failed"}

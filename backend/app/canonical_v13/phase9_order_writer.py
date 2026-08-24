@@ -43,7 +43,9 @@ from app.canonical_v13.models import (
 from app.canonical_v13.order_service import CANONICAL_ORDER_WRITER_IDENTITY
 from app.canonical_v13.phase9_okx_demo import (
     RedactedOkxDemoDispatchGuard,
+    RedactedOkxDemoOrderAbsence,
     redacted_dispatch_guard_payload,
+    redacted_order_absence_payload,
 )
 from app.canonical_v13.phase9_topology import PHASE9_SERVICE_SPECS
 
@@ -67,6 +69,10 @@ class DemoOrderTransport(Protocol):
 
     def query(self, *, instrument: str, client_order_id: str) -> Mapping[str, Any]: ...
 
+    def prove_absent(
+        self, *, instrument: str, client_order_id: str
+    ) -> RedactedOkxDemoOrderAbsence: ...
+
 
 ConnectionFactory = Callable[[], AbstractContextManager[Connection]]
 
@@ -86,9 +92,11 @@ class PreparedDemoOrder:
 @dataclass(frozen=True)
 class DispatchedDemoOrder:
     order_id: UUID
-    exchange_order_id: str
+    exchange_order_id: str | None
     receipt_digest: str
     repeat_noop: bool
+    status: str = "ACCEPTED"
+    retry_authorized: bool = False
 
 
 def _persisted_utc(value: datetime) -> datetime:
@@ -502,6 +510,59 @@ def _safe_exchange_identity(
     return order_id, {"ordId": order_id, "clOrdId": client_order_id, "sCode": "0"}
 
 
+def _safe_post_result(
+    payload: Mapping[str, Any], *, client_order_id: str
+) -> tuple[str, str | None, dict[str, str]]:
+    try:
+        return (
+            "ACCEPTED",
+            *_safe_exchange_identity(payload, client_order_id=client_order_id),
+        )
+    except CanonicalOrderRecoveryRequired:
+        pass
+    if set(payload).difference({"code", "msg", "data", "inTime", "outTime"}):
+        raise CanonicalOrderRecoveryRequired(
+            "BLOCKED_ORDER_RESPONSE_UNKNOWN", "exchange response envelope is unsafe"
+        )
+    code = payload.get("code")
+    data = payload.get("data")
+    if (
+        not isinstance(code, str)
+        or not code.isdigit()
+        or not isinstance(data, list)
+        or len(data) != 1
+        or not isinstance(data[0], Mapping)
+    ):
+        raise CanonicalOrderRecoveryRequired(
+            "BLOCKED_ORDER_RESPONSE_UNKNOWN",
+            "exchange rejection was not explicit and safely attributable",
+        )
+    item = data[0]
+    s_code = item.get("sCode")
+    order_id = item.get("ordId")
+    if (
+        item.get("clOrdId") != client_order_id
+        or not isinstance(s_code, str)
+        or not s_code.isdigit()
+        or s_code == "0"
+        or order_id not in (None, "")
+    ):
+        raise CanonicalOrderRecoveryRequired(
+            "BLOCKED_ORDER_RESPONSE_UNKNOWN",
+            "exchange rejection identity did not match the request",
+        )
+    return (
+        "REJECTED",
+        None,
+        {
+            "code": code,
+            "ordId": "",
+            "clOrdId": client_order_id,
+            "sCode": s_code,
+        },
+    )
+
+
 def _load_dispatch(
     connection: Connection, order_id: UUID
 ) -> tuple[dict[str, Any], dict[str, str]]:
@@ -589,6 +650,97 @@ def _load_dispatch_guard_inputs(
 
 def _guard_payload(guard: RedactedOkxDemoDispatchGuard) -> dict[str, object]:
     return redacted_dispatch_guard_payload(guard)
+
+
+def _outcome_receipt_digest(outcome: Mapping[str, Any]) -> str:
+    return canonical_execution_digest(
+        {
+            "contract": "canonical-v13-order-dispatch-outcome-v1",
+            "outcome_id": str(outcome["id"]),
+            "order_id": str(outcome["order_id"]),
+            "dispatch_claim_id": str(outcome["dispatch_claim_id"]),
+            "claim_digest": outcome["claim_digest"],
+            "client_order_id": outcome["client_order_id"],
+            "exchange_order_id": outcome["exchange_order_id"],
+            "safe_response_digest": outcome["safe_response_digest"],
+            "outcome_mode": outcome["outcome_mode"],
+            "recorded_at": _persisted_utc(outcome["recorded_at"]).isoformat(),
+        }
+    )
+
+
+def _absence_resource_digest(
+    *, resource: str, safe: Mapping[str, Any], observed_at: datetime, expires_at: datetime
+) -> str:
+    return canonical_execution_digest(
+        {
+            "execution_target": "OKX_DEMO",
+            "resource": resource,
+            "source": "okx_demo_rest",
+            "authenticated": True,
+            "observed_at": _persisted_utc(observed_at).isoformat(),
+            "expires_at": _persisted_utc(expires_at).isoformat(),
+            "facts": {
+                "instrument": safe.get("instrument"),
+                "client_order_id": safe.get("client_order_id"),
+                "matching_order_count": 0,
+            },
+        }
+    )
+
+
+def _negative_outcome_is_exact(
+    *,
+    outcome: Mapping[str, Any],
+    claim: Mapping[str, Any],
+    body: Mapping[str, str],
+) -> bool:
+    safe = outcome["safe_response_json"]
+    if not isinstance(safe, Mapping):
+        return False
+    try:
+        observed_at = datetime.fromisoformat(str(safe["observed_at"]))
+        expires_at = datetime.fromisoformat(str(safe["expires_at"]))
+    except (KeyError, TypeError, ValueError):
+        return False
+    return (
+        outcome["outcome_mode"] == "GET_NOT_FOUND"
+        and outcome["dispatch_claim_id"] == claim["id"]
+        and outcome["claim_digest"] == claim["claim_digest"]
+        and outcome["client_order_id"] == body.get("clOrdId")
+        and outcome["exchange_order_id"] is None
+        and safe.get("contract") == "canonical-v13-okx-demo-order-absence-v1"
+        and safe.get("execution_target") == "OKX_DEMO"
+        and safe.get("instrument") == body.get("instId")
+        and safe.get("client_order_id") == body.get("clOrdId")
+        and safe.get("account_fingerprint_digest")
+        == claim["account_fingerprint_digest"]
+        and safe.get("credential_generation_digest")
+        == claim["credential_generation_digest"]
+        and safe.get("exact_order_result_code") == "51603"
+        and safe.get("pending_order_match_count") == 0
+        and safe.get("history_order_match_count") == 0
+        and observed_at.tzinfo is not None
+        and expires_at.tzinfo is not None
+        and observed_at < expires_at
+        and safe.get("pending_orders_digest")
+        == _absence_resource_digest(
+            resource="pending_orders",
+            safe=safe,
+            observed_at=observed_at,
+            expires_at=expires_at,
+        )
+        and safe.get("orders_history_digest")
+        == _absence_resource_digest(
+            resource="orders_history",
+            safe=safe,
+            observed_at=observed_at,
+            expires_at=expires_at,
+        )
+        and outcome["safe_response_digest"]
+        == canonical_execution_digest(dict(safe))
+        and outcome["receipt_digest"] == _outcome_receipt_digest(outcome)
+    )
 
 
 def _claim_dispatch(
@@ -851,6 +1003,40 @@ def _claim_dispatch(
             "BLOCKED_ORDER_GET_ONLY_RECOVERY_REQUIRED",
             "order dispatch was already claimed and must not POST again",
         )
+    claims = (
+        effective.execute(
+            select(ORDER_DISPATCH_RECEIPTS_TABLE)
+            .where(ORDER_DISPATCH_RECEIPTS_TABLE.c.order_id == order_id)
+            .order_by(ORDER_DISPATCH_RECEIPTS_TABLE.c.attempt_ordinal)
+        )
+        .mappings()
+        .all()
+    )
+    outcomes = (
+        effective.execute(
+            select(ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE).where(
+                ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE.c.order_id == order_id
+            )
+        )
+        .mappings()
+        .all()
+    )
+    if not claims and not outcomes:
+        attempt_ordinal = 1
+    elif (
+        len(claims) == 1
+        and claims[0]["attempt_ordinal"] == 1
+        and len(outcomes) == 1
+        and _negative_outcome_is_exact(
+            outcome=outcomes[0], claim=claims[0], body=body
+        )
+    ):
+        attempt_ordinal = 2
+    else:
+        raise CanonicalOrderRecoveryRequired(
+            "BLOCKED_ORDER_RETRY_EVIDENCE",
+            "a second POST requires one exact first-attempt absence receipt",
+        )
     lease = (
         effective.execute(
             select(ORDER_WRITER_LEASES_TABLE).where(
@@ -907,7 +1093,7 @@ def _claim_dispatch(
     claim = {
         "contract": "canonical-v13-okx-demo-order-dispatch-claim-v1",
         "order_id": str(order_id),
-        "attempt_ordinal": 1,
+        "attempt_ordinal": attempt_ordinal,
         "request_digest": order["request_digest"],
         "holder_identity": holder_identity,
         "holder_token_digest": holder_token_digest,
@@ -929,7 +1115,7 @@ def _claim_dispatch(
             canary_risk_policy_id=policy["id"],
             probe_receipt_id=probe["id"],
             execution_attestation_id=attestation["id"],
-            attempt_ordinal=1,
+            attempt_ordinal=attempt_ordinal,
             request_digest=order["request_digest"],
             holder_identity=holder_identity,
             holder_token_digest=holder_token_digest,
@@ -985,28 +1171,39 @@ def _persist_exchange_receipt(
             "BLOCKED_ORDER_OUTCOME_MODE", str(outcome_mode)
         )
     order, body = _load_dispatch(effective, order_id)
-    claim = (
+    claims = (
         effective.execute(
-            select(ORDER_DISPATCH_RECEIPTS_TABLE).where(
-                ORDER_DISPATCH_RECEIPTS_TABLE.c.order_id == order_id
-            )
+            select(ORDER_DISPATCH_RECEIPTS_TABLE)
+            .where(ORDER_DISPATCH_RECEIPTS_TABLE.c.order_id == order_id)
+            .order_by(ORDER_DISPATCH_RECEIPTS_TABLE.c.attempt_ordinal)
         )
         .mappings()
-        .one_or_none()
+        .all()
     )
-    existing = (
+    existing_outcomes = (
         effective.execute(
             select(ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE).where(
                 ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE.c.order_id == order_id
             )
         )
         .mappings()
-        .one_or_none()
+        .all()
     )
-    if claim is None:
+    if not claims:
         raise CanonicalExecutionChainBlocked(
             "BLOCKED_ORDER_DISPATCH_CLAIM_UNSET", str(order_id)
         )
+    accepted = [
+        row
+        for row in existing_outcomes
+        if row["outcome_mode"] in {"POST", "GET_RECOVERY"}
+    ]
+    if len(accepted) > 1:
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_ORDER_DISPATCH_OUTCOME_DRIFT", str(order_id)
+        )
+    claim = claims[-1]
+    existing = accepted[0] if accepted else None
     safe = dict(safe_response)
     if safe != {
         "ordId": exchange_order_id,
@@ -1018,20 +1215,7 @@ def _persist_exchange_receipt(
         )
     safe_response_digest = canonical_execution_digest(safe)
     if existing is not None:
-        expected_outcome = canonical_execution_digest(
-            {
-                "contract": "canonical-v13-order-dispatch-outcome-v1",
-                "outcome_id": str(existing["id"]),
-                "order_id": str(order_id),
-                "dispatch_claim_id": str(claim["id"]),
-                "claim_digest": claim["claim_digest"],
-                "client_order_id": existing["client_order_id"],
-                "exchange_order_id": existing["exchange_order_id"],
-                "safe_response_digest": existing["safe_response_digest"],
-                "outcome_mode": existing["outcome_mode"],
-                "recorded_at": _persisted_utc(existing["recorded_at"]).isoformat(),
-            }
-        )
+        expected_outcome = _outcome_receipt_digest(existing)
         expected_order = canonical_execution_digest(
             {
                 "contract": "canonical-v13-okx-demo-order-receipt-v2",
@@ -1057,7 +1241,11 @@ def _persist_exchange_receipt(
                 "BLOCKED_ORDER_DISPATCH_OUTCOME_DRIFT", str(order_id)
             )
         return DispatchedDemoOrder(order_id, exchange_order_id, expected_order, True)
-    if order["receipt_digest"] is not None or order["status"] != "DISPATCHING":
+    if (
+        order["receipt_digest"] is not None
+        or order["status"] != "DISPATCHING"
+        or any(row["dispatch_claim_id"] == claim["id"] for row in existing_outcomes)
+    ):
         raise CanonicalExecutionChainBlocked(
             "BLOCKED_ORDER_DISPATCH_OUTCOME_DRIFT", str(order_id)
         )
@@ -1106,7 +1294,7 @@ def _persist_exchange_receipt(
             "dispatch_outcome_receipt_digest": outcome_receipt_digest,
         }
     )
-    effective.execute(
+    updated = effective.execute(
         ORDERS_TABLE.update()
         .where(ORDERS_TABLE.c.id == order_id, ORDERS_TABLE.c.receipt_digest.is_(None))
         .values(
@@ -1115,7 +1303,205 @@ def _persist_exchange_receipt(
             receipt_digest=receipt_digest,
         )
     )
+    if updated.rowcount != 1:
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_ORDER_DISPATCH_OUTCOME_DRIFT", str(order_id)
+        )
     return DispatchedDemoOrder(order_id, exchange_order_id, receipt_digest, False)
+
+
+def _persist_nonaccepted_outcome(
+    connection: Connection,
+    *,
+    order_id: UUID,
+    safe_response: Mapping[str, object],
+    outcome_mode: str,
+) -> DispatchedDemoOrder:
+    effective = require_canonical_execution(connection)
+    lock_execution_boundary(effective, key=f"demo-order-receipt:{order_id}")
+    if outcome_mode not in {"GET_NOT_FOUND", "POST_REJECTED"}:
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_ORDER_OUTCOME_MODE", str(outcome_mode)
+        )
+    order, body = _load_dispatch(effective, order_id)
+    claims = (
+        effective.execute(
+            select(ORDER_DISPATCH_RECEIPTS_TABLE)
+            .where(ORDER_DISPATCH_RECEIPTS_TABLE.c.order_id == order_id)
+            .order_by(ORDER_DISPATCH_RECEIPTS_TABLE.c.attempt_ordinal)
+        )
+        .mappings()
+        .all()
+    )
+    if not claims:
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_ORDER_DISPATCH_CLAIM_UNSET", str(order_id)
+        )
+    claim = claims[-1]
+    existing = (
+        effective.execute(
+            select(ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE).where(
+                ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE.c.dispatch_claim_id
+                == claim["id"]
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    safe = dict(safe_response)
+    safe_digest = canonical_execution_digest(safe)
+    if outcome_mode == "GET_NOT_FOUND":
+        try:
+            evidence = RedactedOkxDemoOrderAbsence(
+                execution_target=str(safe["execution_target"]),
+                instrument=str(safe["instrument"]),
+                client_order_id=str(safe["client_order_id"]),
+                account_fingerprint_digest=str(safe["account_fingerprint_digest"]),
+                credential_generation_digest=str(
+                    safe["credential_generation_digest"]
+                ),
+                exact_order_result_code=str(safe["exact_order_result_code"]),
+                pending_order_match_count=int(safe["pending_order_match_count"]),
+                history_order_match_count=int(safe["history_order_match_count"]),
+                pending_orders_digest=str(safe["pending_orders_digest"]),
+                orders_history_digest=str(safe["orders_history_digest"]),
+                observed_at=datetime.fromisoformat(str(safe["observed_at"])),
+                expires_at=datetime.fromisoformat(str(safe["expires_at"])),
+            )
+        except (KeyError, TypeError, ValueError):
+            raise CanonicalExecutionChainBlocked(
+                "BLOCKED_ORDER_ABSENCE_EVIDENCE", "absence evidence is malformed"
+            ) from None
+        if (
+            safe != redacted_order_absence_payload(evidence)
+            or evidence.execution_target != "OKX_DEMO"
+            or evidence.instrument != body.get("instId")
+            or evidence.client_order_id != body.get("clOrdId")
+            or evidence.account_fingerprint_digest
+            != claim["account_fingerprint_digest"]
+            or evidence.credential_generation_digest
+            != claim["credential_generation_digest"]
+            or evidence.exact_order_result_code != "51603"
+            or evidence.pending_order_match_count != 0
+            or evidence.history_order_match_count != 0
+            or evidence.observed_at.tzinfo is None
+            or evidence.expires_at.tzinfo is None
+            or not evidence.observed_at < evidence.expires_at
+            or evidence.pending_orders_digest
+            != _absence_resource_digest(
+                resource="pending_orders",
+                safe=safe,
+                observed_at=evidence.observed_at,
+                expires_at=evidence.expires_at,
+            )
+            or evidence.orders_history_digest
+            != _absence_resource_digest(
+                resource="orders_history",
+                safe=safe,
+                observed_at=evidence.observed_at,
+                expires_at=evidence.expires_at,
+            )
+        ):
+            raise CanonicalExecutionChainBlocked(
+                "BLOCKED_ORDER_ABSENCE_EVIDENCE", "absence evidence drifted"
+            )
+    elif safe != {
+        "code": safe.get("code"),
+        "ordId": "",
+        "clOrdId": body.get("clOrdId"),
+        "sCode": safe.get("sCode"),
+    } or not (
+        isinstance(safe.get("code"), str)
+        and str(safe["code"]).isdigit()
+        and isinstance(safe.get("sCode"), str)
+        and str(safe["sCode"]).isdigit()
+        and str(safe["sCode"]) != "0"
+    ):
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_ORDER_REJECTION_EVIDENCE", "explicit rejection evidence drifted"
+        )
+    if existing is not None:
+        if (
+            existing["order_id"] != order_id
+            or existing["claim_digest"] != claim["claim_digest"]
+            or existing["client_order_id"] != body.get("clOrdId")
+            or existing["exchange_order_id"] is not None
+            or existing["safe_response_json"] != safe
+            or existing["safe_response_digest"] != safe_digest
+            or existing["outcome_mode"] != outcome_mode
+            or existing["receipt_digest"] != _outcome_receipt_digest(existing)
+        ):
+            raise CanonicalExecutionChainBlocked(
+                "BLOCKED_ORDER_DISPATCH_OUTCOME_DRIFT", str(order_id)
+            )
+        status = (
+            "RETRY_READY"
+            if outcome_mode == "GET_NOT_FOUND" and claim["attempt_ordinal"] == 1
+            else "REJECTED"
+        )
+        return DispatchedDemoOrder(
+            order_id,
+            None,
+            existing["receipt_digest"],
+            True,
+            status=status,
+            retry_authorized=status == "RETRY_READY",
+        )
+    if order["status"] != "DISPATCHING" or order["receipt_digest"] is not None:
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_ORDER_DISPATCH_OUTCOME_DRIFT", str(order_id)
+        )
+    recorded_at = datetime.now(timezone.utc)
+    if outcome_mode == "GET_NOT_FOUND" and not (
+        _persisted_utc(evidence.observed_at)
+        <= recorded_at
+        < _persisted_utc(evidence.expires_at)
+    ):
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_ORDER_ABSENCE_EVIDENCE", "absence evidence expired before commit"
+        )
+    outcome_id = uuid4()
+    outcome = {
+        "id": outcome_id,
+        "order_id": order_id,
+        "dispatch_claim_id": claim["id"],
+        "claim_digest": claim["claim_digest"],
+        "client_order_id": body["clOrdId"],
+        "exchange_order_id": None,
+        "safe_response_digest": safe_digest,
+        "outcome_mode": outcome_mode,
+        "recorded_at": recorded_at,
+    }
+    receipt_digest = _outcome_receipt_digest(outcome)
+    effective.execute(
+        ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE.insert().values(
+            **outcome,
+            safe_response_json=safe,
+            receipt_digest=receipt_digest,
+        )
+    )
+    retry_ready = outcome_mode == "GET_NOT_FOUND" and claim["attempt_ordinal"] == 1
+    updated = effective.execute(
+        ORDERS_TABLE.update()
+        .where(
+            ORDERS_TABLE.c.id == order_id,
+            ORDERS_TABLE.c.status == "DISPATCHING",
+            ORDERS_TABLE.c.receipt_digest.is_(None),
+        )
+        .values(status="SUBMITTED" if retry_ready else "REJECTED")
+    )
+    if updated.rowcount != 1:
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_ORDER_DISPATCH_OUTCOME_DRIFT", str(order_id)
+        )
+    return DispatchedDemoOrder(
+        order_id,
+        None,
+        receipt_digest,
+        False,
+        status="RETRY_READY" if retry_ready else "REJECTED",
+        retry_authorized=retry_ready,
+    )
 
 
 def _replay_persisted_exchange_receipt(
@@ -1125,7 +1511,10 @@ def _replay_persisted_exchange_receipt(
     outcome = (
         effective.execute(
             select(ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE).where(
-                ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE.c.order_id == order_id
+                ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE.c.order_id == order_id,
+                ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE.c.outcome_mode.in_(
+                    ("POST", "GET_RECOVERY")
+                ),
             )
         )
         .mappings()
@@ -1181,7 +1570,7 @@ def dispatch_demo_order(
         )
     try:
         payload = transport.place(body)
-        exchange_order_id, safe_response = _safe_exchange_identity(
+        result_status, exchange_order_id, safe_response = _safe_post_result(
             payload, client_order_id=body["clOrdId"]
         )
     except CanonicalOrderRecoveryRequired:
@@ -1192,6 +1581,17 @@ def dispatch_demo_order(
             f"order outcome is unknown: {type(exc).__name__}",
         ) from None
     with connection_factory() as connection:
+        if result_status == "REJECTED":
+            return _persist_nonaccepted_outcome(
+                connection,
+                order_id=order_id,
+                safe_response=safe_response,
+                outcome_mode="POST_REJECTED",
+            )
+        if exchange_order_id is None:
+            raise CanonicalOrderRecoveryRequired(
+                "BLOCKED_ORDER_RESPONSE_UNKNOWN", "exchange order identity is missing"
+            )
         return _persist_exchange_receipt(
             connection,
             order_id=order_id,
@@ -1209,6 +1609,35 @@ def recover_demo_order_get_only(
 ) -> DispatchedDemoOrder:
     with connection_factory() as connection:
         order, body = _load_dispatch(connection, order_id)
+        latest_claim_id = connection.execute(
+            select(ORDER_DISPATCH_RECEIPTS_TABLE.c.id)
+            .where(ORDER_DISPATCH_RECEIPTS_TABLE.c.order_id == order_id)
+            .order_by(ORDER_DISPATCH_RECEIPTS_TABLE.c.attempt_ordinal.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        nonaccepted = (
+            connection.execute(
+                select(ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE)
+                .where(
+                    ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE.c.dispatch_claim_id
+                    == latest_claim_id,
+                    ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE.c.outcome_mode.in_(
+                        ("GET_NOT_FOUND", "POST_REJECTED")
+                    ),
+                )
+                .order_by(ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE.c.recorded_at.desc())
+                .limit(1)
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if nonaccepted is not None:
+            return _persist_nonaccepted_outcome(
+                connection,
+                order_id=order_id,
+                safe_response=dict(nonaccepted["safe_response_json"]),
+                outcome_mode=str(nonaccepted["outcome_mode"]),
+            )
     if order["receipt_digest"] is not None and order["exchange_order_id"]:
         with connection_factory() as connection:
             return _replay_persisted_exchange_receipt(
@@ -1221,11 +1650,23 @@ def recover_demo_order_get_only(
         exchange_order_id, safe_response = _safe_exchange_identity(
             payload, client_order_id=body["clOrdId"]
         )
-    except Exception as exc:
-        raise CanonicalOrderRecoveryRequired(
-            "BLOCKED_ORDER_RECOVERY_INCOMPLETE",
-            f"GET-only recovery did not prove identity: {type(exc).__name__}",
-        ) from None
+    except Exception:
+        try:
+            absence = transport.prove_absent(
+                instrument=body["instId"], client_order_id=body["clOrdId"]
+            )
+        except Exception as exc:
+            raise CanonicalOrderRecoveryRequired(
+                "BLOCKED_ORDER_RECOVERY_INCOMPLETE",
+                f"GET-only recovery did not prove identity or absence: {type(exc).__name__}",
+            ) from None
+        with connection_factory() as connection:
+            return _persist_nonaccepted_outcome(
+                connection,
+                order_id=order_id,
+                safe_response=redacted_order_absence_payload(absence),
+                outcome_mode="GET_NOT_FOUND",
+            )
     with connection_factory() as connection:
         return _persist_exchange_receipt(
             connection,
