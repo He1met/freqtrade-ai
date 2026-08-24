@@ -49,6 +49,7 @@ from app.canonical_v13.runtime_image_authority import (
 )
 from app.canonical_v13.models import (
     ACCEPTANCE_SIGNAL_TRIGGERS_TABLE,
+    DEPLOYMENT_APPROVALS_TABLE,
     DEPLOYMENTS_TABLE,
     OPTIMIZATION_RUNS_TABLE,
     OPTIMIZATION_TRIALS_TABLE,
@@ -116,6 +117,7 @@ from app.canonical_v13.order_dispatch_recovery_upgrade import (
 )
 from app.canonical_v13.canary_recovery_approval_upgrade import (
     APPROVAL_WRITER_READ_DELTA,
+    CanonicalCanaryRecoveryApprovalUpgradeBlocked,
     NEW_CONSTRAINTS as CANARY_RECOVERY_CONSTRAINTS,
     RECOVERY_COLUMNS as CANARY_RECOVERY_COLUMNS,
     apply_canary_recovery_approval_upgrade,
@@ -198,6 +200,102 @@ def test_canary_recovery_approval_upgrade_is_reversible_and_acl_exact() -> None:
                     and sum(privileges.values()) == 1
                     for privileges in replay.approval_writer_privileges.values()
                 )
+                synthetic_approval_ids = []
+                connection.execute(
+                    text("SET LOCAL session_replication_role=replica")
+                )
+                for lineage_number in (1, 2):
+                    qualification_id = uuid4()
+                    strategy_version_id = uuid4()
+                    original_id = uuid4()
+                    recovery_id = uuid4()
+                    synthetic_approval_ids.extend((original_id, recovery_id))
+                    connection.execute(
+                        DEPLOYMENT_APPROVALS_TABLE.insert().values(
+                            id=original_id,
+                            strategy_version_id=strategy_version_id,
+                            qualification_decision_id=qualification_id,
+                            approval_generation=1,
+                            status="APPROVED",
+                            actor_identity="canonical-recovery-upgrade-test",
+                            reason="original bounded Demo approval",
+                            approval_digest=f"{lineage_number}" * 64,
+                            created_at=datetime.now(timezone.utc),
+                        )
+                    )
+                    connection.execute(
+                        DEPLOYMENT_APPROVALS_TABLE.insert().values(
+                            id=recovery_id,
+                            strategy_version_id=strategy_version_id,
+                            qualification_decision_id=qualification_id,
+                            approval_generation=2,
+                            recovery_of_deployment_id=uuid4(),
+                            recovery_order_id=uuid4(),
+                            recovery_idempotency_key=(
+                                f"canonical-recovery-upgrade-test-{lineage_number}"
+                            ),
+                            recovery_request_digest=f"{lineage_number + 2}" * 64,
+                            recovery_receipt_digest=f"{lineage_number + 4}" * 64,
+                            status="APPROVED",
+                            actor_identity="canonical-recovery-upgrade-test",
+                            reason="one bounded zero-side-effect recovery",
+                            approval_digest=f"{lineage_number + 6}" * 64,
+                            created_at=datetime.now(timezone.utc),
+                        )
+                    )
+                connection.execute(text("SET LOCAL session_replication_role=origin"))
+                multiple_recoveries = verify_canary_recovery_approval_upgrade(
+                    connection, role_mapping=mapping
+                )
+                assert multiple_recoveries.status == "ACCEPTED"
+                assert multiple_recoveries.generation_one_count == 2
+                assert multiple_recoveries.generation_two_count == 2
+                orphaned_recovery_id = uuid4()
+                connection.execute(
+                    text("SET LOCAL session_replication_role=replica")
+                )
+                connection.execute(
+                    DEPLOYMENT_APPROVALS_TABLE.insert().values(
+                        id=orphaned_recovery_id,
+                        strategy_version_id=uuid4(),
+                        qualification_decision_id=uuid4(),
+                        approval_generation=2,
+                        recovery_of_deployment_id=uuid4(),
+                        recovery_order_id=uuid4(),
+                        recovery_idempotency_key=(
+                            "canonical-recovery-upgrade-test-orphan"
+                        ),
+                        recovery_request_digest="9" * 64,
+                        recovery_receipt_digest="a" * 64,
+                        status="APPROVED",
+                        actor_identity="canonical-recovery-upgrade-test",
+                        reason="invalid orphan must fail closed",
+                        approval_digest="b" * 64,
+                        created_at=datetime.now(timezone.utc),
+                    )
+                )
+                connection.execute(text("SET LOCAL session_replication_role=origin"))
+                with pytest.raises(
+                    CanonicalCanaryRecoveryApprovalUpgradeBlocked,
+                    match="BLOCKED_CANARY_RECOVERY_GENERATION_COUNTS",
+                ):
+                    verify_canary_recovery_approval_upgrade(
+                        connection, role_mapping=mapping
+                    )
+                connection.execute(
+                    text("SET LOCAL session_replication_role=replica")
+                )
+                connection.execute(
+                    DEPLOYMENT_APPROVALS_TABLE.delete().where(
+                        DEPLOYMENT_APPROVALS_TABLE.c.id == orphaned_recovery_id
+                    )
+                )
+                connection.execute(
+                    DEPLOYMENT_APPROVALS_TABLE.delete().where(
+                        DEPLOYMENT_APPROVALS_TABLE.c.id.in_(synthetic_approval_ids)
+                    )
+                )
+                connection.execute(text("SET LOCAL session_replication_role=origin"))
                 rolled_back = rollback_canary_recovery_approval_upgrade(
                     connection, role_mapping=mapping
                 )

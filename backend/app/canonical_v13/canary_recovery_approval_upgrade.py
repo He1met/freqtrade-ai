@@ -214,6 +214,23 @@ def _counts(connection: Connection, *, state: str) -> tuple[int, int, int]:
     return int(row["total"]), int(row["generation_one"]), int(row["generation_two"])
 
 
+def _orphaned_generation_two_count(connection: Connection, *, state: str) -> int:
+    if state == "PREVIOUS_READY":
+        return 0
+    return int(
+        connection.execute(
+            text(
+                f"SELECT count(*) FROM {CANONICAL_BUSINESS_SCHEMA}.{TABLE} recovery "
+                f"WHERE recovery.approval_generation=2 AND NOT EXISTS ("
+                f"SELECT 1 FROM {CANONICAL_BUSINESS_SCHEMA}.{TABLE} original "
+                "WHERE original.qualification_decision_id="
+                "recovery.qualification_decision_id "
+                "AND original.approval_generation=1)"
+            )
+        ).scalar_one()
+    )
+
+
 def _lineage_digest(connection: Connection, *, state: str) -> str:
     recovery_fields = (
         "NULL::text AS approval_generation, NULL::text AS recovery_of_deployment_id, "
@@ -279,7 +296,10 @@ def verify_canary_recovery_approval_upgrade(
             "BLOCKED_CANARY_RECOVERY_CANONICAL_GENESIS"
         )
     counts = _counts(connection, state=state)
-    if counts[0] != counts[1] + counts[2] or counts[2] > 1:
+    if (
+        counts[0] != counts[1] + counts[2]
+        or _orphaned_generation_two_count(connection, state=state)
+    ):
         raise CanonicalCanaryRecoveryApprovalUpgradeBlocked(
             "BLOCKED_CANARY_RECOVERY_GENERATION_COUNTS"
         )
