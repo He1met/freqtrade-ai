@@ -1793,7 +1793,7 @@ def _production_order_operator(
     return CanonicalOrderWriterOperator(
         plan=plan,
         supervisor_lease=lease,
-        authority_port=_production_authority_port(),
+        authority_port=DatabaseOrderWriterAuthorityVerifier(connection_factory),
         holder_token=holder_token,
         connection_factory=connection_factory,
         session_factory=_production_okx_session_factory(),

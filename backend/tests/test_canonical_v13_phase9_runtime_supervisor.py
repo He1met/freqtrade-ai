@@ -1719,6 +1719,46 @@ def test_cli_supervise_enables_production_composition(monkeypatch) -> None:
     ]
 
 
+def test_production_order_operator_reuses_one_connection_factory(monkeypatch) -> None:
+    service = _load_script("canonical_phase9_shared_order_connection_factory_test")
+    connection_factory = object()
+    observed_urls = []
+    captured = {}
+
+    monkeypatch.setattr(
+        service,
+        "_phase9_database_url",
+        lambda capability: observed_urls.append(capability) or "order-url",
+    )
+    monkeypatch.setattr(
+        service,
+        "_connection_factory",
+        lambda database_url: connection_factory
+        if database_url == "order-url"
+        else pytest.fail("unexpected database URL"),
+    )
+    monkeypatch.setattr(
+        service,
+        "_production_authority_port",
+        lambda: pytest.fail("must not allocate a second connection pool"),
+    )
+    monkeypatch.setattr(service, "_production_okx_session_factory", object)
+    monkeypatch.setattr(
+        service,
+        "CanonicalOrderWriterOperator",
+        lambda **kwargs: captured.update(kwargs) or kwargs,
+    )
+
+    operator = service._production_order_operator(
+        plan=_writer_plan(), lease=object(), holder_token="h" * 64
+    )
+
+    assert operator == captured
+    assert observed_urls == ["canonical_order_writer"]
+    assert captured["connection_factory"] is connection_factory
+    assert captured["authority_port"]._connection_factory is connection_factory
+
+
 def test_get_only_order_replay_appends_server_sealed_noop_receipt(monkeypatch) -> None:
     service = _load_script("canonical_phase9_order_replay_receipt_test")
     plan = _writer_plan()
