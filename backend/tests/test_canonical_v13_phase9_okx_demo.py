@@ -353,6 +353,57 @@ def test_redacted_probe_and_transport_have_no_credential_surface() -> None:
     assert closed == [True]
 
 
+def test_probe_verifies_untimestamped_maximum_snapshot_after_request() -> None:
+    read = FakeRead()
+    maximum = read.snapshots["maximum_order_quantity"]
+    maximum.metadata.fetched_at = NOW + timedelta(seconds=1)
+    maximum.metadata.expires_at = NOW + timedelta(seconds=16)
+    verification_times = iter((NOW, NOW + timedelta(seconds=1)))
+    session = CanonicalOkxDemoSession(
+        read_client=read,
+        write_port=FakeWrite(),
+        account_fingerprint_digest=HEX_A,
+        credential_generation_digest=HEX_B,
+        close_callback=lambda: None,
+        now_provider=lambda: next(verification_times),
+    )
+
+    probe = session.probe(instrument="BTC-USDT-SWAP")
+
+    assert probe.maximum_order_quantity_observed_at == NOW + timedelta(seconds=1)
+    assert probe.maximum_order_quantity_expires_at == NOW + timedelta(seconds=16)
+
+
+@pytest.mark.parametrize(
+    ("fetched_at", "expires_at"),
+    (
+        (NOW + timedelta(seconds=2), NOW + timedelta(seconds=17)),
+        (NOW + timedelta(seconds=1), NOW + timedelta(seconds=1)),
+    ),
+)
+def test_probe_still_rejects_future_or_expired_maximum_snapshot(
+    fetched_at, expires_at
+) -> None:
+    read = FakeRead()
+    maximum = read.snapshots["maximum_order_quantity"]
+    maximum.metadata.fetched_at = fetched_at
+    maximum.metadata.expires_at = expires_at
+    verification_times = iter((NOW, NOW + timedelta(seconds=1)))
+    session = CanonicalOkxDemoSession(
+        read_client=read,
+        write_port=FakeWrite(),
+        account_fingerprint_digest=HEX_A,
+        credential_generation_digest=HEX_B,
+        close_callback=lambda: None,
+        now_provider=lambda: next(verification_times),
+    )
+
+    with pytest.raises(CanonicalExecutionChainBlocked) as blocked:
+        session.probe(instrument="BTC-USDT-SWAP")
+
+    assert blocked.value.code == "BLOCKED_OKX_DEMO_SNAPSHOT_FRESHNESS"
+
+
 def test_closed_session_fails_before_transport() -> None:
     session, _read, _write, _closed = _session()
     session.close()
