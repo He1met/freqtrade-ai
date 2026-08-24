@@ -108,11 +108,12 @@ def _now(value: datetime | None) -> datetime:
     return resolved.astimezone(timezone.utc)
 
 
-def _exchange_body(order_request: Mapping[str, str]) -> dict[str, str]:
-    required = {
+def _exchange_body(
+    order_request: Mapping[str, str], *, risk_decision_id: UUID
+) -> dict[str, str]:
+    persisted = {
         "instId",
         "tdMode",
-        "clOrdId",
         "side",
         "posSide",
         "ordType",
@@ -120,7 +121,9 @@ def _exchange_body(order_request: Mapping[str, str]) -> dict[str, str]:
         "px",
     }
     observed = dict(order_request)
-    if set(observed) != required:
+    if set(observed) == persisted:
+        observed["clOrdId"] = f"v13{risk_decision_id.hex[:29]}"
+    elif set(observed) != persisted | {"clOrdId"}:
         raise CanonicalExecutionChainBlocked(
             "BLOCKED_ORDER_REQUEST_FIELDS", "order request field set is not allowlisted"
         )
@@ -253,7 +256,7 @@ def prepare_demo_order(
         )
     require_digest(holder_token_digest, field="holder_token_digest")
     idempotency_key = require_identity(idempotency_key, field="idempotency_key")
-    body = _exchange_body(order_request)
+    body = _exchange_body(order_request, risk_decision_id=risk_decision_id)
     lock_execution_boundary(effective, key=f"demo-order:{idempotency_key}")
     decision = (
         effective.execute(
@@ -357,7 +360,11 @@ def prepare_demo_order(
         or policy["position_policy"] != "LONG_ONLY"
         or budget["instrument"] != body["instId"]
         or intent["intent_json"].get("instrument") != body["instId"]
-        or intent["intent_json"].get("exchange_body") != body
+        or _exchange_body(
+            intent["intent_json"].get("exchange_body", {}),
+            risk_decision_id=risk_decision_id,
+        )
+        != body
     ):
         raise CanonicalExecutionChainBlocked(
             "BLOCKED_ORDER_AUTHORITY_LINEAGE",
@@ -518,7 +525,9 @@ def _load_dispatch(
             "BLOCKED_ORDER_DISPATCH_BODY_UNSET",
             "intent must persist the exact exchange_body before dispatch",
         )
-    return dict(order), _exchange_body(body)
+    return dict(order), _exchange_body(
+        body, risk_decision_id=UUID(str(decision["id"]))
+    )
 
 
 def _load_dispatch_guard_inputs(

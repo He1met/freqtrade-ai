@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from datetime import timedelta
 from decimal import Decimal
 from types import SimpleNamespace
+from uuid import UUID
 
 import pytest
 from sqlalchemy import select
@@ -31,6 +32,7 @@ from app.canonical_v13.phase9_execution_authority import (
 from app.canonical_v13.phase9_order_writer import (
     CanonicalOrderRecoveryRequired,
     _acquire_writer_lease,
+    _exchange_body,
     _persist_exchange_receipt,
     dispatch_demo_order,
     prepare_demo_order,
@@ -62,6 +64,18 @@ ORDER_BODY = {
     "sz": "1",
     "px": "10000",
 }
+
+
+def test_missing_client_order_id_is_derived_from_exact_risk_identity():
+    risk_decision_id = UUID("7fd4c87f-ac15-4ca4-977c-2be8d140ecca")
+    persisted = {key: value for key, value in ORDER_BODY.items() if key != "clOrdId"}
+
+    first = _exchange_body(persisted, risk_decision_id=risk_decision_id)
+    replay = _exchange_body(persisted, risk_decision_id=risk_decision_id)
+
+    assert first == replay
+    assert first["clOrdId"] == "v137fd4c87fac154ca4977c2be8d140e"
+    assert len(first["clOrdId"]) == 32
 
 
 class FakeTransport:
