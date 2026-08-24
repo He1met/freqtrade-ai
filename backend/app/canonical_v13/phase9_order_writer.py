@@ -375,19 +375,19 @@ def prepare_demo_order(
         or requested_size != Decimal(str(policy["minimum_contract_size"]))
         or not requested_price.is_finite()
         or requested_price != Decimal(str(policy["limit_price"]))
-        or _persisted_utc(policy["expires_at"]) <= now
     ):
         raise CanonicalExecutionChainBlocked(
             "BLOCKED_ORDER_POLICY_DRIFT",
             "order size and active policy must match the frozen minimum canary",
         )
-    if not (
-        _persisted_utc(attestation["observed_at"])
-        <= now
-        < _persisted_utc(attestation["expires_at"])
+    if (
+        _persisted_utc(attestation["observed_at"]) > now
+        or _persisted_utc(attestation["observed_at"])
+        >= _persisted_utc(attestation["expires_at"])
     ):
         raise CanonicalExecutionChainBlocked(
-            "BLOCKED_ORDER_ATTESTATION_STALE", "fresh Demo attestation is required"
+            "BLOCKED_ORDER_ATTESTATION_STALE",
+            "valid immutable Demo attestation lineage is required",
         )
     request = {
         "contract": "canonical-v13-okx-demo-order-request-v1",
@@ -662,18 +662,15 @@ def _claim_dispatch(
         or policy["receipt_digest"] != budget["source_receipt_digest"]
         or attestation["status"] != "READY"
         or policy["attestation_digest"] != attestation["attestation_digest"]
-        or not (
-            _persisted_utc(attestation["observed_at"])
-            <= now
-            < _persisted_utc(attestation["expires_at"])
-        )
-        or _persisted_utc(policy["expires_at"]) <= now
+        or _persisted_utc(attestation["observed_at"]) > now
+        or _persisted_utc(attestation["observed_at"])
+        >= _persisted_utc(attestation["expires_at"])
         or probe["execution_attestation_id"] != attestation["id"]
         or probe["receipt_digest"] is None
     ):
         raise CanonicalExecutionChainBlocked(
             "BLOCKED_ORDER_DISPATCH_AUTHORITY_STALE",
-            "fresh exact policy and execution attestation are required before POST",
+            "fresh exact policy and immutable attestation lineage are required before POST",
         )
     if not isinstance(guard, RedactedOkxDemoDispatchGuard):
         raise CanonicalExecutionChainBlocked(

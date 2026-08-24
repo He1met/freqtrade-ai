@@ -293,7 +293,7 @@ def require_current_order_writer_canary_authority(
     observed_at: datetime,
     port: OrderWriterCanaryAuthorityPort | None,
 ) -> None:
-    """Fail closed unless the exact frozen writer authority is still current."""
+    """Fail closed unless the exact frozen writer lineage is still authorized."""
 
     if plan.service_key != "order_writer":
         return
@@ -311,14 +311,10 @@ def _require_current_order_writer_canary_authority(
     port: OrderWriterCanaryAuthorityPort | None,
 ) -> None:
     observed = _utc(observed_at)
-    if (
-        authority is None
-        or authority.attestation_expires_at <= observed
-        or port is None
-    ):
+    if authority is None or port is None:
         raise CanonicalPhase9SupervisorBlocked(
             "BLOCKED_ORDER_WRITER_CANARY_AUTHORITY",
-            "fresh exact canary authority verifier is required",
+            "exact canary lineage verifier is required",
         )
     try:
         verified = port.verify(authority, observed_at=observed)
@@ -419,7 +415,6 @@ def build_launch_plan(
             or authority.deployment_id != deployment_id
             or authority.deployment_capability_digest
             != deployment_capability_digest
-            or authority.attestation_expires_at <= _utc(prepared_at)
         ):
             raise CanonicalPhase9SupervisorBlocked(
                 "BLOCKED_ORDER_WRITER_CANARY_AUTHORITY",

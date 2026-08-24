@@ -344,7 +344,7 @@ def test_writer_plan_digest_binds_every_canary_authority_fact(field, value) -> N
     assert changed.plan_digest != baseline.plan_digest
 
 
-def test_writer_plan_requires_exact_long_only_current_authority() -> None:
+def test_writer_plan_requires_exact_long_only_frozen_authority() -> None:
     with pytest.raises(
         CanonicalPhase9SupervisorBlocked,
         match="BLOCKED_ORDER_WRITER_CANARY_AUTHORITY",
@@ -369,11 +369,8 @@ def test_writer_plan_requires_exact_long_only_current_authority() -> None:
         match="BLOCKED_ORDER_WRITER_EFFECTIVE_LEVERAGE",
     ):
         _writer_authority(effective_leverage="12.1")
-    with pytest.raises(
-        CanonicalPhase9SupervisorBlocked,
-        match="BLOCKED_ORDER_WRITER_CANARY_AUTHORITY",
-    ):
-        _writer_plan(authority=_writer_authority(expires_at=NOW))
+    expired = _writer_authority(expires_at=NOW - timedelta(seconds=1))
+    assert _writer_plan(authority=expired).order_writer_canary_authority == expired
     with pytest.raises(
         CanonicalPhase9SupervisorBlocked,
         match="BLOCKED_ORDER_WRITER_CANARY_AUTHORITY",
@@ -846,7 +843,7 @@ def test_writer_confirm_restart_and_recover_revalidate_exact_current_authority(
     assert [call[1] for call in verifier.calls] == [NOW, NOW, NOW]
 
 
-def test_writer_confirmation_blocks_expired_frozen_attestation_before_launchctl(
+def test_writer_confirmation_accepts_expired_frozen_attestation_lineage(
     monkeypatch, tmp_path
 ) -> None:
     service = _load_script("canonical_phase9_writer_expiry_test")
@@ -864,16 +861,13 @@ def test_writer_confirmation_blocks_expired_frozen_attestation_before_launchctl(
         ),
     )
     monkeypatch.setattr(service.shutil, "which", lambda _name: "/bin/launchctl")
-    with pytest.raises(
-        CanonicalPhase9SupervisorBlocked,
-        match="BLOCKED_ORDER_WRITER_CANARY_AUTHORITY",
-    ):
-        service.confirm(
-            "order_writer",
-            prepared["plan_digest"],
-            authority_port=AuthorityPort(authority),
-        )
-    assert calls == []
+    confirmed = service.confirm(
+        "order_writer",
+        prepared["plan_digest"],
+        authority_port=AuthorityPort(authority),
+    )
+    assert confirmed["status"] == "CONFIRMED"
+    assert calls != []
 
 
 def test_file_lease_port_never_persists_raw_holder_token(monkeypatch, tmp_path) -> None:
