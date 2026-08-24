@@ -427,6 +427,58 @@ def test_prepare_then_single_post_and_exact_replay(canonical_connection):
     ) == 1
 
 
+def test_replayed_submitted_order_renews_expired_writer_lease(canonical_connection):
+    with canonical_connection.begin():
+        risk, attestation = _prepare_authority(canonical_connection)
+        first = prepare_demo_order(
+            canonical_connection,
+            risk_decision_id=risk.risk_decision_id,
+            attestation_id=attestation.attestation_id,
+            writer_identity="canonical_order_writer",
+            holder_identity="canonical-v13-order-writer-v1",
+            holder_token_digest="9" * 64,
+            idempotency_key="phase9-expired-submitted-lease",
+            order_request=ORDER_BODY,
+            evaluated_at=NOW + timedelta(seconds=2),
+        )
+    with canonical_connection.begin():
+        replay = prepare_demo_order(
+            canonical_connection,
+            risk_decision_id=risk.risk_decision_id,
+            attestation_id=attestation.attestation_id,
+            writer_identity="canonical_order_writer",
+            holder_identity="canonical-v13-order-writer-v1",
+            holder_token_digest="9" * 64,
+            idempotency_key="phase9-expired-submitted-lease",
+            order_request=ORDER_BODY,
+            evaluated_at=NOW + timedelta(seconds=13),
+        )
+    assert replay.order_id == first.order_id
+    assert replay.request_digest == first.request_digest
+    assert replay.lease_generation == first.lease_generation
+    assert replay.repeat_noop is True
+    renewed = canonical_connection.execute(
+        select(ORDER_WRITER_LEASES_TABLE)
+    ).mappings().one()
+    assert renewed["expires_at"].replace(tzinfo=NOW.tzinfo) == NOW + timedelta(
+        seconds=23
+    )
+
+    transport = FakeTransport()
+    dispatched = dispatch_demo_order(
+        _factory(canonical_connection.engine),
+        order_id=replay.order_id,
+        transport=transport,
+        holder_identity="canonical-v13-order-writer-v1",
+        holder_token_digest="9" * 64,
+        lease_generation=replay.lease_generation,
+        evaluated_at=NOW + timedelta(seconds=14),
+    )
+    assert dispatched.repeat_noop is False
+    assert transport.guard_calls == 1
+    assert transport.place_calls == 1
+
+
 def test_dispatch_uses_expired_lineage_with_fresh_private_guard(canonical_connection):
     with canonical_connection.begin():
         risk, attestation = _prepare_authority(canonical_connection)
