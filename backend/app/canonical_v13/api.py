@@ -78,6 +78,8 @@ from app.canonical_v13.dto import (
     Phase9ReadinessProjectionDTO,
     Phase9ApprovalCommandDTO,
     Phase9ApprovalReceiptDTO,
+    Phase9CanaryRecoveryApprovalCommandDTO,
+    Phase9CanaryRecoveryApprovalReceiptDTO,
     Phase9AcceptanceSignalTriggerCommandDTO,
     Phase9AcceptanceSignalTriggerProjectionDTO,
     Phase9AcceptanceSignalTriggerReceiptDTO,
@@ -135,6 +137,7 @@ from app.canonical_v13.dto import (
 )
 from app.canonical_v13.deployment_approval import (
     CanonicalDeploymentApprovalBlocked,
+    approve_demo_canary_recovery,
     approve_demo_deployment,
     deployment_approval_digest,
 )
@@ -2493,6 +2496,33 @@ def create_canonical_v13_app(
                         qualification_decision_id=command.qualification_decision_id,
                         actor_identity=command.actor_identity,
                         reason=command.reason,
+                    )
+                )
+            )
+
+        return run_phase9(
+            approval_connection_factory, "canonical_approval_writer", execute
+        )
+
+    @app.post(
+        f"{API_PREFIX}/phase9/canary-recovery-approvals",
+        response_model=Phase9CanaryRecoveryApprovalReceiptDTO,
+        status_code=201,
+    )
+    def phase9_canary_recovery_approval(
+        command: Phase9CanaryRecoveryApprovalCommandDTO,
+    ) -> Phase9CanaryRecoveryApprovalReceiptDTO:
+        def execute(connection: Connection) -> Phase9CanaryRecoveryApprovalReceiptDTO:
+            return Phase9CanaryRecoveryApprovalReceiptDTO(
+                **asdict(
+                    approve_demo_canary_recovery(
+                        connection,
+                        qualification_decision_id=command.qualification_decision_id,
+                        deployment_id=command.deployment_id,
+                        order_id=command.order_id,
+                        actor_identity=command.actor_identity,
+                        reason=command.reason,
+                        idempotency_key=command.idempotency_key,
                     )
                 )
             )

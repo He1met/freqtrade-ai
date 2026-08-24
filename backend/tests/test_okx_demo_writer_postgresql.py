@@ -8147,6 +8147,7 @@ def test_postgresql_runtime_role_releases_expired_approval_budget(
     postgres_writer_engine,
 ) -> None:
     upgrade_database(postgres_writer_engine)
+    seed_now = datetime.now(timezone.utc).replace(microsecond=0)
     with postgres_writer_engine.connect() as connection:
         assert connection.execute(
             text(
@@ -8177,6 +8178,7 @@ def test_postgresql_runtime_role_releases_expired_approval_budget(
         approval_id, _ = _seed_approved_order(
             session,
             create_order=False,
+            seed_now=seed_now,
         )
         approval = session.get(ApprovedExecution, approval_id)
         intent_id = approval.trade_intent_id
@@ -8193,7 +8195,10 @@ def test_postgresql_runtime_role_releases_expired_approval_budget(
                 "UPDATE approved_executions SET expires_at = :expired "
                 "WHERE id = :approval_id"
             ),
-            {"expired": NOW - timedelta(seconds=1), "approval_id": approval_id},
+            {
+                "expired": datetime.now(timezone.utc) - timedelta(seconds=1),
+                "approval_id": approval_id,
+            },
         )
         session.commit()
 
@@ -8327,7 +8332,10 @@ def test_postgresql_recovery_grant_and_cancel_attempt_commit_together(
     upgrade_database(postgres_writer_engine)
     test_now = datetime.now(timezone.utc).replace(microsecond=0)
     with Session(postgres_writer_engine) as session:
-        _approval_id, order_id = _seed_approved_order(session)
+        _approval_id, order_id = _seed_approved_order(
+            session,
+            seed_now=test_now,
+        )
         order = session.get(ExchangeOrder, order_id)
         order.exchange_order_id = "okx-recovery-order-1"
         order.status = "live"

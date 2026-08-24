@@ -187,7 +187,7 @@ jobs:
   postgresql-contracts:
     name: Isolated PostgreSQL backend contracts
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
     env:
       POSTGRES_WORKER_URL: postgresql+psycopg://postgres@127.0.0.1:5432/freqtrade_ai_worker_test
       CANONICAL_V13_POSTGRES_URL: postgresql+psycopg://postgres@127.0.0.1:5432/freqtrade_ai_v13_ci_test

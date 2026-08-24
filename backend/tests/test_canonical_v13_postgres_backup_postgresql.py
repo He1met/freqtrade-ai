@@ -32,6 +32,10 @@ from app.canonical_v13.phase9_transition_upgrade import (
     apply_phase9_transition_upgrade,
     verify_phase9_transition_upgrade,
 )
+from app.canonical_v13.canary_recovery_approval_upgrade import (
+    apply_canary_recovery_approval_upgrade,
+    verify_canary_recovery_approval_upgrade,
+)
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
@@ -223,6 +227,10 @@ def test_restore_terminal_historical_gate_row_with_triggers_transactional(
                 assert shadow_acl.status == "UPGRADED"
                 transition = apply_phase9_transition_upgrade(connection)
                 assert transition.status == "UPGRADED"
+                canary_recovery = apply_canary_recovery_approval_upgrade(
+                    connection, role_mapping=role_mapping
+                )
+                assert canary_recovery.status == "UPGRADED"
 
         attempt_id = uuid4()
         optimization_run_id = uuid4()
@@ -367,6 +375,9 @@ def test_restore_terminal_historical_gate_row_with_triggers_transactional(
                 connection, role_mapping=role_mapping
             ).status == "ACCEPTED"
             assert verify_phase9_transition_upgrade(connection).status == "ACCEPTED"
+            assert verify_canary_recovery_approval_upgrade(
+                connection, role_mapping=role_mapping
+            ).status == "ACCEPTED"
             savepoint = connection.begin_nested()
             with pytest.raises(DBAPIError):
                 connection.execute(

@@ -9,8 +9,10 @@ from sqlalchemy import event, func, select
 
 from app.canonical_v13.deployment_approval import approve_demo_deployment
 from app.canonical_v13.deployment_control import (
+    CanonicalDeploymentBlocked,
     confirm_production_demo_runtime_observation,
     create_demo_deployment,
+    disable_demo_deployment,
 )
 from app.canonical_v13.execution_common import CanonicalExecutionChainBlocked
 from app.canonical_v13.models import (
@@ -23,6 +25,7 @@ from app.canonical_v13.models import (
     QUALIFICATION_DECISIONS_TABLE,
     RESEARCH_TARGETS_TABLE,
     RISK_DECISIONS_TABLE,
+    RUNTIME_INSTANCES_TABLE,
     STRATEGY_VERSIONS_TABLE,
     TRADE_INTENTS_TABLE,
 )
@@ -182,6 +185,36 @@ def _production_chain(
         else None
     )
     return approval, deployment, runtime_id, intent_id, None
+
+
+def test_same_qualification_rollover_requires_exact_recovery_approval(
+    canonical_connection,
+) -> None:
+    with canonical_connection.begin():
+        approval, deployment, runtime_id, _intent_id, _ = _production_chain(
+            canonical_connection
+        )
+        qualification_id = canonical_connection.execute(
+            select(DEPLOYMENT_APPROVALS_TABLE.c.qualification_decision_id).where(
+                DEPLOYMENT_APPROVALS_TABLE.c.id == approval.deployment_approval_id
+            )
+        ).scalar_one()
+        canonical_connection.execute(
+            RUNTIME_INSTANCES_TABLE.update()
+            .where(RUNTIME_INSTANCES_TABLE.c.id == runtime_id)
+            .values(status="STOPPED")
+        )
+        with pytest.raises(
+            CanonicalDeploymentBlocked,
+            match="BLOCKED_CANARY_RECOVERY_APPROVAL_REQUIRED",
+        ):
+            disable_demo_deployment(
+                canonical_connection,
+                deployment_id=deployment.deployment_id,
+                superseded_by_qualification_decision_id=qualification_id,
+                actor_identity="operator:isolated-negative-test",
+                reason="same qualification must not roll without recovery evidence",
+            )
 
 
 def _risk_policy_source(

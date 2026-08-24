@@ -11,6 +11,9 @@ from uuid import uuid4
 
 from sqlalchemy import Connection, func, inspect, select, text
 
+from app.canonical_v13.canary_recovery_approval_upgrade import (
+    canary_recovery_predecessor_indexes,
+)
 from app.canonical_v13.genesis import (
     postgresql_acl_statements,
     postgresql_owner_table_grant_statements,
@@ -210,6 +213,19 @@ def _present_constraints(connection: Connection) -> tuple[str, ...]:
                     f"{expected_name} has unexpected columns",
                 )
             observed.add(expected_name)
+        if expected_name == "deployment_approvals_qualification_unique":
+            recovery_matches = [
+                constraint
+                for constraint in inspector.get_unique_constraints(
+                    table_name, schema=CANONICAL_BUSINESS_SCHEMA
+                )
+                if constraint.get("name")
+                == "deployment_approvals_qualification_generation_unique"
+                and tuple(constraint.get("column_names") or ())
+                == ("qualification_decision_id", "approval_generation")
+            ]
+            if len(recovery_matches) == 1:
+                observed.add(expected_name)
     return tuple(sorted(observed))
 
 
@@ -480,9 +496,12 @@ def verify_phase9_schema_upgrade(
             connection,
             accepted_manifest_digests=(manifest_digest,),
             allowed_predecessor_indexes=(
-                (CANONICAL_PREDECESSOR_RUNTIME_IDENTITY_INDEX,)
-                if manifest_digest != CANONICAL_MANIFEST_DIGEST
-                else ()
+                (
+                    (CANONICAL_PREDECESSOR_RUNTIME_IDENTITY_INDEX,)
+                    if manifest_digest != CANONICAL_MANIFEST_DIGEST
+                    else ()
+                )
+                + canary_recovery_predecessor_indexes(connection)
             ),
         )
         if not verification.accepted:
@@ -707,6 +726,17 @@ def rollback_phase9_schema_upgrade(
     actor_identity: str = "canonical-phase9-schema-operator",
     role_mapping: CanonicalRoleMapping | None = None,
 ) -> Phase9SchemaUpgradeResult:
+    approval_columns = {
+        str(row["name"])
+        for row in inspect(connection).get_columns(
+            "deployment_approvals", schema=CANONICAL_BUSINESS_SCHEMA
+        )
+    }
+    if "approval_generation" in approval_columns:
+        raise CanonicalPhase9SchemaUpgradeBlocked(
+            "BLOCKED_CANARY_RECOVERY_APPROVAL_ROLLBACK_REQUIRED",
+            "rollback canary recovery approval before the Phase 9 schema",
+        )
     if inspect(connection).has_table(
         "runtime_image_acceptances", schema=CANONICAL_BUSINESS_SCHEMA
     ):

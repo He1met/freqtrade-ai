@@ -953,6 +953,32 @@ DEPLOYMENT_APPROVALS_TABLE = _table(
     _uuid_id(),
     _uuid_fk("strategy_version_id", "strategy_versions"),
     _uuid_fk("qualification_decision_id", "qualification_decisions"),
+    Column("approval_generation", Integer, nullable=False, default=1),
+    Column(
+        "recovery_of_deployment_id",
+        Uuid(as_uuid=True),
+        ForeignKey(
+            f"{CANONICAL_BUSINESS_SCHEMA}.deployments.id",
+            name="deployment_approvals_recovery_deployment_fk",
+            ondelete="RESTRICT",
+            use_alter=True,
+        ),
+        nullable=True,
+    ),
+    Column(
+        "recovery_order_id",
+        Uuid(as_uuid=True),
+        ForeignKey(
+            f"{CANONICAL_BUSINESS_SCHEMA}.orders.id",
+            name="deployment_approvals_recovery_order_fk",
+            ondelete="RESTRICT",
+            use_alter=True,
+        ),
+        nullable=True,
+    ),
+    Column("recovery_idempotency_key", String(200), nullable=True),
+    _digest("recovery_request_digest", nullable=True),
+    _digest("recovery_receipt_digest", nullable=True),
     Column("status", String(16), nullable=False),
     Column("actor_identity", String(160), nullable=False),
     Column("reason", Text, nullable=False),
@@ -963,9 +989,43 @@ DEPLOYMENT_APPROVALS_TABLE = _table(
         "status",
         ("NOT_REQUESTED", "PENDING", "APPROVED", "REJECTED", "REVOKED"),
     ),
+    CheckConstraint(
+        "approval_generation > 0 AND approval_generation <= 2",
+        name="generation_bounded",
+    ),
+    CheckConstraint(
+        "(approval_generation = 1 AND recovery_of_deployment_id IS NULL "
+        "AND recovery_order_id IS NULL AND recovery_idempotency_key IS NULL "
+        "AND recovery_request_digest IS NULL AND recovery_receipt_digest IS NULL) "
+        "OR (approval_generation = 2 AND recovery_of_deployment_id IS NOT NULL "
+        "AND recovery_order_id IS NOT NULL AND recovery_idempotency_key IS NOT NULL "
+        "AND recovery_request_digest IS NOT NULL AND recovery_receipt_digest IS NOT NULL)",
+        name="recovery_evidence_complete",
+    ),
     UniqueConstraint(
         "qualification_decision_id",
-        name="deployment_approvals_qualification_unique",
+        "approval_generation",
+        name="deployment_approvals_qualification_generation_unique",
+    ),
+    UniqueConstraint(
+        "recovery_of_deployment_id",
+        name="deployment_approvals_recovery_deployment_unique",
+    ),
+    UniqueConstraint(
+        "recovery_order_id",
+        name="deployment_approvals_recovery_order_unique",
+    ),
+    UniqueConstraint(
+        "recovery_idempotency_key",
+        name="deployment_approvals_recovery_key_unique",
+    ),
+    UniqueConstraint(
+        "recovery_request_digest",
+        name="deployment_approvals_recovery_request_unique",
+    ),
+    UniqueConstraint(
+        "recovery_receipt_digest",
+        name="deployment_approvals_recovery_receipt_unique",
     ),
 )
 

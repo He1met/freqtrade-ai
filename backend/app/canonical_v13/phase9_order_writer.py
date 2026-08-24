@@ -33,11 +33,15 @@ from app.canonical_v13.models import (
     EXECUTION_CANARY_RISK_POLICIES_TABLE,
     EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE,
     EXECUTION_RISK_RESERVATIONS_TABLE,
+    FILLS_TABLE,
+    LEDGER_ENTRIES_TABLE,
     ORDERS_TABLE,
     ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE,
     ORDER_DISPATCH_RECEIPTS_TABLE,
     ORDER_WRITER_LEASES_TABLE,
+    RECONCILIATION_ITEMS_TABLE,
     RISK_DECISIONS_TABLE,
+    SIGNALS_TABLE,
     TRADE_INTENTS_TABLE,
 )
 from app.canonical_v13.order_service import CANONICAL_ORDER_WRITER_IDENTITY
@@ -741,6 +745,100 @@ def _negative_outcome_is_exact(
         == canonical_execution_digest(dict(safe))
         and outcome["receipt_digest"] == _outcome_receipt_digest(outcome)
     )
+
+
+def terminal_rejected_canary_order_evidence(
+    connection: Connection,
+    *,
+    order_id: UUID,
+    deployment_id: UUID,
+) -> dict[str, object]:
+    """Validate one exhausted two-attempt canary without rewriting its history."""
+
+    effective = require_canonical_execution(connection)
+    lock_execution_boundary(effective, key=f"canary-recovery-order:{order_id}")
+    order, body = _load_dispatch(effective, order_id)
+    decision = effective.execute(
+        select(RISK_DECISIONS_TABLE).where(
+            RISK_DECISIONS_TABLE.c.id == order["risk_decision_id"]
+        )
+    ).mappings().one()
+    intent = effective.execute(
+        select(TRADE_INTENTS_TABLE).where(
+            TRADE_INTENTS_TABLE.c.id == decision["trade_intent_id"]
+        )
+    ).mappings().one()
+    signal = effective.execute(
+        select(SIGNALS_TABLE).where(SIGNALS_TABLE.c.id == intent["signal_id"])
+    ).mappings().one()
+    claims = effective.execute(
+        select(ORDER_DISPATCH_RECEIPTS_TABLE)
+        .where(ORDER_DISPATCH_RECEIPTS_TABLE.c.order_id == order_id)
+        .order_by(ORDER_DISPATCH_RECEIPTS_TABLE.c.attempt_ordinal)
+    ).mappings().all()
+    outcomes = effective.execute(
+        select(ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE)
+        .where(ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE.c.order_id == order_id)
+        .order_by(ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE.c.recorded_at)
+    ).mappings().all()
+    outcomes_by_claim = {row["dispatch_claim_id"]: row for row in outcomes}
+    fills = effective.execute(
+        select(FILLS_TABLE.c.id).where(FILLS_TABLE.c.order_id == order_id)
+    ).scalars().all()
+    ledger_entries = (
+        effective.execute(
+            select(LEDGER_ENTRIES_TABLE.c.id).where(
+                LEDGER_ENTRIES_TABLE.c.fill_id.in_(fills)
+            )
+        ).scalars().all()
+        if fills
+        else []
+    )
+    reconciliation_items = effective.execute(
+        select(RECONCILIATION_ITEMS_TABLE.c.id).where(
+            RECONCILIATION_ITEMS_TABLE.c.order_id == order_id
+        )
+    ).scalars().all()
+    exact_negative = bool(
+        order["status"] == "REJECTED"
+        and order["exchange_order_id"] is None
+        and order["receipt_digest"] is None
+        and signal["deployment_id"] == deployment_id
+        and len(claims) == 2
+        and [row["attempt_ordinal"] for row in claims] == [1, 2]
+        and len(outcomes) == 2
+        and all(
+            claim["id"] in outcomes_by_claim
+            and _negative_outcome_is_exact(
+                outcome=outcomes_by_claim[claim["id"]], claim=claim, body=body
+            )
+            for claim in claims
+        )
+        and not fills
+        and not ledger_entries
+        and not reconciliation_items
+    )
+    if not exact_negative:
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_CANARY_RECOVERY_TERMINAL_EVIDENCE",
+            "exact two-attempt rejected order with zero downstream effects required",
+        )
+    evidence = {
+        "contract": "canonical-v13-terminal-rejected-canary-evidence-v1",
+        "deployment_id": str(deployment_id),
+        "order_id": str(order_id),
+        "risk_decision_id": str(order["risk_decision_id"]),
+        "request_digest": order["request_digest"],
+        "claim_digests": [row["claim_digest"] for row in claims],
+        "outcome_receipt_digests": [
+            outcomes_by_claim[row["id"]]["receipt_digest"] for row in claims
+        ],
+        "status": "REJECTED",
+        "fill_count": 0,
+        "ledger_entry_count": 0,
+        "reconciliation_item_count": 0,
+    }
+    return {**evidence, "evidence_digest": canonical_execution_digest(evidence)}
 
 
 def _claim_dispatch(
@@ -1757,4 +1855,5 @@ __all__ = [
     "prepare_demo_order",
     "release_demo_order_writer_lease",
     "recover_demo_order_get_only",
+    "terminal_rejected_canary_order_evidence",
 ]

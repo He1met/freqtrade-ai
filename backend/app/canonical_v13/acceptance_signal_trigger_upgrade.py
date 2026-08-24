@@ -9,6 +9,9 @@ from typing import Final
 
 from sqlalchemy import Connection, func, inspect, select, text
 
+from app.canonical_v13.canary_recovery_approval_upgrade import (
+    canary_recovery_predecessor_indexes,
+)
 from app.canonical_v13.genesis import postgresql_acl_statements, verify_canonical_genesis
 from app.canonical_v13.manifest import CANONICAL_BUSINESS_SCHEMA, CANONICAL_MANIFEST_DIGEST
 from app.canonical_v13.models import (
@@ -306,6 +309,10 @@ def verify_acceptance_signal_trigger_upgrade(
     privileges = _control_writer_qualification_privileges(
         connection, role_mapping=role_mapping
     )
+    genesis = verify_canonical_genesis(
+        connection,
+        allowed_predecessor_indexes=canary_recovery_predecessor_indexes(connection),
+    )
     expected_privileges = {
         privilege: privilege == "SELECT"
         for privilege in _CONTROL_WRITER_TARGET_PRIVILEGES
@@ -313,7 +320,7 @@ def verify_acceptance_signal_trigger_upgrade(
     if (
         accepted_structure
         and manifest == CANONICAL_MANIFEST_DIGEST
-        and verify_canonical_genesis(connection).accepted
+        and genesis.accepted
         and not any(privileges.values())
     ):
         return _result(
@@ -325,7 +332,7 @@ def verify_acceptance_signal_trigger_upgrade(
     if (
         accepted_structure
         and manifest == CANONICAL_MANIFEST_DIGEST
-        and verify_canonical_genesis(connection).accepted
+        and genesis.accepted
         and privileges == expected_privileges
     ):
         return _result(

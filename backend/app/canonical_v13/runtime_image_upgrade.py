@@ -9,6 +9,9 @@ from typing import Final
 
 from sqlalchemy import Connection, func, inspect, select, text
 
+from app.canonical_v13.canary_recovery_approval_upgrade import (
+    canary_recovery_predecessor_indexes,
+)
 from app.canonical_v13.genesis import (
     postgresql_acl_statements,
     postgresql_owner_table_grant_statements,
@@ -170,9 +173,12 @@ def verify_runtime_image_upgrade(connection: Connection) -> RuntimeImageUpgradeR
             connection,
             accepted_manifest_digests=(manifest,),
             allowed_predecessor_indexes=(
-                (CANONICAL_PREDECESSOR_RUNTIME_IDENTITY_INDEX,)
-                if manifest != CANONICAL_MANIFEST_DIGEST
-                else ()
+                (
+                    (CANONICAL_PREDECESSOR_RUNTIME_IDENTITY_INDEX,)
+                    if manifest != CANONICAL_MANIFEST_DIGEST
+                    else ()
+                )
+                + canary_recovery_predecessor_indexes(connection)
             ),
             allowed_missing_tables=(
                 ("acceptance_signal_triggers",)

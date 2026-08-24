@@ -92,6 +92,12 @@ from app.canonical_v13.order_dispatch_recovery_upgrade import (
     rollback_order_dispatch_recovery_upgrade,
     verify_order_dispatch_recovery_upgrade,
 )
+from app.canonical_v13.canary_recovery_approval_upgrade import (
+    CanonicalCanaryRecoveryApprovalUpgradeBlocked,
+    apply_canary_recovery_approval_upgrade,
+    rollback_canary_recovery_approval_upgrade,
+    verify_canary_recovery_approval_upgrade,
+)
 from app.canonical_v13.genesis import (
     assert_postgresql_acl_sql,
     postgresql_owner_table_grant_statements,
@@ -822,6 +828,37 @@ def order_dispatch_recovery(*, operation: str) -> dict[str, object]:
     return payload
 
 
+def canary_recovery_approval(*, operation: str) -> dict[str, object]:
+    engine = create_engine(_database_url(), pool_pre_ping=True)
+    mapping = local_role_mapping()
+    try:
+        if operation == "verify":
+            with engine.connect() as connection:
+                with connection.begin():
+                    connection.exec_driver_sql("SET TRANSACTION READ ONLY")
+                    result = verify_canary_recovery_approval_upgrade(
+                        connection, role_mapping=mapping
+                    )
+        else:
+            actor_identity = _upgrade_actor()
+            with engine.begin() as connection:
+                result = (
+                    apply_canary_recovery_approval_upgrade(
+                        connection, role_mapping=mapping
+                    )
+                    if operation == "apply"
+                    else rollback_canary_recovery_approval_upgrade(
+                        connection, role_mapping=mapping
+                    )
+                )
+    finally:
+        engine.dispose()
+    payload = asdict(result)
+    if operation != "verify":
+        payload["actor_identity"] = actor_identity
+    return payload
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -869,6 +906,9 @@ def main(argv: list[str] | None = None) -> int:
             "order-dispatch-recovery-verify",
             "order-dispatch-recovery-apply",
             "order-dispatch-recovery-rollback",
+            "canary-recovery-approval-verify",
+            "canary-recovery-approval-apply",
+            "canary-recovery-approval-rollback",
         ),
     )
     parser.add_argument(
@@ -925,6 +965,14 @@ def main(argv: list[str] | None = None) -> int:
                     payload["problems"] = [
                         *payload.get("problems", []),
                         "order_dispatch_recovery_upgrade_not_accepted",
+                    ]
+                canary_recovery = canary_recovery_approval(operation="verify")
+                payload["canary_recovery_approval"] = canary_recovery
+                if canary_recovery["status"] != "ACCEPTED":
+                    payload["status"] = "BLOCKED"
+                    payload["problems"] = [
+                        *payload.get("problems", []),
+                        "canary_recovery_approval_upgrade_not_accepted",
                     ]
         elif args.command == "authority-plan":
             payload = authority_plan()
@@ -994,6 +1042,10 @@ def main(argv: list[str] | None = None) -> int:
             payload = order_dispatch_recovery(
                 operation=args.command.removeprefix("order-dispatch-recovery-")
             )
+        elif args.command.startswith("canary-recovery-approval-"):
+            payload = canary_recovery_approval(
+                operation=args.command.removeprefix("canary-recovery-approval-")
+            )
         else:
             payload = authority_apply(rollback=args.command == "authority-rollback")
     except BootstrapBlocked as exc:
@@ -1021,6 +1073,8 @@ def main(argv: list[str] | None = None) -> int:
     except CanonicalOrderDispatchStatusUpgradeBlocked as exc:
         payload = {"status": "BLOCKED", "reason": str(exc)}
     except CanonicalOrderDispatchRecoveryUpgradeBlocked as exc:
+        payload = {"status": "BLOCKED", "reason": str(exc)}
+    except CanonicalCanaryRecoveryApprovalUpgradeBlocked as exc:
         payload = {"status": "BLOCKED", "reason": str(exc)}
     except (SQLAlchemyError, ValueError):
         payload = {"status": "BLOCKED", "reason": "bootstrap verification failed"}
