@@ -452,9 +452,16 @@ def test_dispatch_uses_expired_lineage_with_fresh_private_guard(canonical_connec
     assert transport.place_calls == 1
 
 
-def test_dispatch_blocks_expired_active_policy_before_post(canonical_connection):
+def test_reserved_canary_dispatches_after_policy_window_with_fresh_guard(
+    canonical_connection,
+):
     with canonical_connection.begin():
         risk, attestation = _prepare_authority(canonical_connection)
+        canonical_connection.execute(
+            EXECUTION_CANARY_RISK_POLICIES_TABLE.update().values(
+                expires_at=NOW + timedelta(seconds=2)
+            )
+        )
         prepared = prepare_demo_order(
             canonical_connection,
             risk_decision_id=risk.risk_decision_id,
@@ -464,29 +471,21 @@ def test_dispatch_blocks_expired_active_policy_before_post(canonical_connection)
             holder_token_digest="2" * 64,
             idempotency_key="phase9-expired-policy-fresh-guard",
             order_request=ORDER_BODY,
-            evaluated_at=NOW + timedelta(seconds=2),
-        )
-        canonical_connection.execute(
-            EXECUTION_CANARY_RISK_POLICIES_TABLE.update().values(
-                expires_at=NOW + timedelta(seconds=2)
-            )
-        )
-    transport = FakeTransport()
-    with pytest.raises(
-        CanonicalExecutionChainBlocked,
-        match="BLOCKED_ORDER_DISPATCH_AUTHORITY_STALE",
-    ):
-        dispatch_demo_order(
-            _factory(canonical_connection.engine),
-            order_id=prepared.order_id,
-            transport=transport,
-            holder_identity="canonical-v13-order-writer-v1",
-            holder_token_digest="2" * 64,
-            lease_generation=prepared.lease_generation,
             evaluated_at=NOW + timedelta(seconds=3),
         )
+    transport = FakeTransport()
+    dispatched = dispatch_demo_order(
+        _factory(canonical_connection.engine),
+        order_id=prepared.order_id,
+        transport=transport,
+        holder_identity="canonical-v13-order-writer-v1",
+        holder_token_digest="2" * 64,
+        lease_generation=prepared.lease_generation,
+        evaluated_at=NOW + timedelta(seconds=4),
+    )
+    assert dispatched.repeat_noop is False
     assert transport.guard_calls == 1
-    assert transport.place_calls == 0
+    assert transport.place_calls == 1
 
 
 def test_uncertain_post_never_reposts_and_get_only_recovers(canonical_connection):

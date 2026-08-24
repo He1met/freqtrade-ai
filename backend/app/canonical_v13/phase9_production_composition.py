@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 import json
@@ -466,6 +466,9 @@ class DatabaseOrderWriterAuthorityVerifier:
         policy_expires_at = policy["expires_at"] if policy is not None else None
         if isinstance(policy_expires_at, datetime) and policy_expires_at.tzinfo is None:
             policy_expires_at = policy_expires_at.replace(tzinfo=timezone.utc)
+        policy_accepted_at = policy["accepted_at"] if policy is not None else None
+        if isinstance(policy_accepted_at, datetime) and policy_accepted_at.tzinfo is None:
+            policy_accepted_at = policy_accepted_at.replace(tzinfo=timezone.utc)
         probe_expires_at = probe["expires_at"] if probe is not None else None
         if isinstance(probe_expires_at, datetime) and probe_expires_at.tzinfo is None:
             probe_expires_at = probe_expires_at.replace(tzinfo=timezone.utc)
@@ -510,7 +513,9 @@ class DatabaseOrderWriterAuthorityVerifier:
             and Decimal(str(policy["effective_leverage"]))
             == Decimal(authority.effective_leverage)
             and policy_expires_at is not None
-            and policy_expires_at > now
+            and policy_accepted_at is not None
+            and policy_accepted_at <= now
+            and policy_expires_at - policy_accepted_at == timedelta(minutes=30)
             and attestation is not None
             and attestation["deployment_id"] == authority.deployment_id
             and attestation["status"] == "READY"

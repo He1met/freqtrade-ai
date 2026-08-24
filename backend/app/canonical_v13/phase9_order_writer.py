@@ -375,7 +375,6 @@ def prepare_demo_order(
         or requested_size != Decimal(str(policy["minimum_contract_size"]))
         or not requested_price.is_finite()
         or requested_price != Decimal(str(policy["limit_price"]))
-        or _persisted_utc(policy["expires_at"]) <= now
     ):
         raise CanonicalExecutionChainBlocked(
             "BLOCKED_ORDER_POLICY_DRIFT",
@@ -666,7 +665,6 @@ def _claim_dispatch(
         or _persisted_utc(attestation["observed_at"]) > now
         or _persisted_utc(attestation["observed_at"])
         >= _persisted_utc(attestation["expires_at"])
-        or _persisted_utc(policy["expires_at"]) <= now
         or probe["execution_attestation_id"] != attestation["id"]
         or probe["receipt_digest"] is None
     ):

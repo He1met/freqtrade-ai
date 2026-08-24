@@ -160,6 +160,7 @@ def test_database_authority_verifier_recomputes_all_frozen_sources() -> None:
                 "instrument": "BTC-USDT-SWAP",
                 "metadata_receipt_digest": "4" * 64,
                 "mark_price_receipt_digest": "5" * 64,
+                "accepted_at": NOW + timedelta(seconds=25) - timedelta(minutes=30),
                 "expires_at": NOW + timedelta(seconds=25),
             },
             {
@@ -244,7 +245,8 @@ def test_database_authority_verifier_accepts_expired_frozen_probe_lineage() -> N
                 "instrument": "BTC-USDT-SWAP",
                 "metadata_receipt_digest": "4" * 64,
                 "mark_price_receipt_digest": "5" * 64,
-                "expires_at": NOW + timedelta(minutes=20),
+                "accepted_at": historical - timedelta(minutes=30),
+                "expires_at": historical,
             },
             {
                 "deployment_id": _uuid(1),
