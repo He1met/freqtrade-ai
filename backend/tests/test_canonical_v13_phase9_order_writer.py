@@ -38,6 +38,7 @@ from app.canonical_v13.phase9_order_writer import (
     prepare_demo_order,
     recover_demo_order_get_only,
 )
+from app.canonical_v13.phase9_readiness import _dispatch_claim_is_exact
 from app.canonical_v13.phase9_okx_demo import (
     RedactedOkxDemoDispatchGuard,
     RedactedOkxDemoOrderAbsence,
@@ -677,6 +678,11 @@ def test_proven_absent_first_attempt_allows_one_same_order_retry(
 ):
     with canonical_connection.begin():
         risk, attestation = _prepare_authority(canonical_connection)
+        canonical_connection.execute(
+            EXECUTION_CANARY_RISK_POLICIES_TABLE.update().values(
+                expires_at=NOW + timedelta(seconds=4)
+            )
+        )
         prepared = prepare_demo_order(
             canonical_connection,
             risk_decision_id=risk.risk_decision_id,
@@ -749,6 +755,55 @@ def test_proven_absent_first_attempt_allows_one_same_order_retry(
     ).mappings().all()
     assert [row["attempt_ordinal"] for row in claims] == [1, 2]
     assert {row["outcome_mode"] for row in outcomes} == {"GET_NOT_FOUND", "POST"}
+    persisted_order = canonical_connection.execute(
+        select(ORDERS_TABLE).where(ORDERS_TABLE.c.id == prepared.order_id)
+    ).mappings().one()
+    persisted_risk = canonical_connection.execute(
+        select(RISK_DECISIONS_TABLE).where(
+            RISK_DECISIONS_TABLE.c.id == persisted_order["risk_decision_id"]
+        )
+    ).mappings().one()
+    policy = canonical_connection.execute(
+        select(EXECUTION_CANARY_RISK_POLICIES_TABLE).where(
+            EXECUTION_CANARY_RISK_POLICIES_TABLE.c.id
+            == claims[1]["canary_risk_policy_id"]
+        )
+    ).mappings().one()
+    probe = canonical_connection.execute(
+        select(EXECUTION_CANARY_PROBE_RECEIPTS_TABLE).where(
+            EXECUTION_CANARY_PROBE_RECEIPTS_TABLE.c.id
+            == claims[1]["probe_receipt_id"]
+        )
+    ).mappings().one()
+    persisted_attestation = canonical_connection.execute(
+        select(EXECUTION_ATTESTATIONS_TABLE).where(
+            EXECUTION_ATTESTATIONS_TABLE.c.id
+            == claims[1]["execution_attestation_id"]
+        )
+    ).mappings().one()
+    lease = canonical_connection.execute(
+        select(ORDER_WRITER_LEASES_TABLE)
+    ).mappings().one()
+    assert _dispatch_claim_is_exact(
+        canonical_connection,
+        claim=claims[0],
+        order=persisted_order,
+        risk=persisted_risk,
+        policy=policy,
+        probe=probe,
+        attestation=persisted_attestation,
+        lease=lease,
+    )
+    assert _dispatch_claim_is_exact(
+        canonical_connection,
+        claim=claims[1],
+        order=persisted_order,
+        risk=persisted_risk,
+        policy=policy,
+        probe=probe,
+        attestation=persisted_attestation,
+        lease=lease,
+    )
     replay = dispatch_demo_order(
         factory,
         order_id=prepared.order_id,
