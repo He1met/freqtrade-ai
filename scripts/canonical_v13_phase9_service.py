@@ -1661,6 +1661,26 @@ def _probe_saga_path(deployment_id: UUID) -> Path:
     return SUPPORT_ROOT / f"canary-probe-{deployment_id}.saga.json"
 
 
+def _sqlalchemy_connection(candidate):
+    """Resolve a SQLAlchemy Connection without unwrapping it to raw DBAPI."""
+
+    def is_sqlalchemy_connection(value: object) -> bool:
+        return (
+            getattr(value, "dialect", None) is not None
+            and callable(getattr(value, "execute", None))
+        )
+
+    if is_sqlalchemy_connection(candidate):
+        return candidate
+    wrapped = getattr(candidate, "connection", None)
+    if is_sqlalchemy_connection(wrapped):
+        return wrapped
+    raise CanonicalPhase9SupervisorBlocked(
+        "BLOCKED_PHASE9_DATABASE_CONNECTION",
+        "canonical capability did not provide a SQLAlchemy Connection",
+    )
+
+
 def _policy_probe_saga_path(deployment_id: UUID, request_digest: str) -> Path:
     return SUPPORT_ROOT / (
         f"canary-policy-probe-{deployment_id}-{request_digest}.saga.json"
@@ -1739,7 +1759,7 @@ def _linked_probe_receipt_exists(approval_factory, deployment_id: UUID) -> bool:
     )
 
     with approval_factory() as approval_connection:
-        effective = getattr(approval_connection, "connection", approval_connection)
+        effective = _sqlalchemy_connection(approval_connection)
         return (
             effective.execute(
                 select(EXECUTION_CANARY_PROBE_RECEIPTS_TABLE.c.id).where(
@@ -1831,7 +1851,7 @@ def _existing_policy_probe_identity(
         EXECUTION_CANARY_RISK_POLICIES_TABLE,
     )
 
-    effective = getattr(approval_connection, "connection", approval_connection)
+    effective = _sqlalchemy_connection(approval_connection)
     row = (
         effective.execute(
             select(
@@ -1953,7 +1973,7 @@ def probe_and_authorize_canary_policy(
         }
     )
     with approval_factory() as approval_connection:
-        effective = getattr(approval_connection, "connection", approval_connection)
+        effective = _sqlalchemy_connection(approval_connection)
         lock_execution_boundary(
             effective, key=f"canary-risk-policy:{qualification_decision_id}"
         )
