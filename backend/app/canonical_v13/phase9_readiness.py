@@ -196,9 +196,9 @@ _STRICT_CANARY_GLOBAL_TABLES: Final[tuple[str, ...]] = (
 
 
 @dataclass(frozen=True)
-class _RecoveryHistoryScope:
-    source_deployment_id: UUID
-    source_approval_id: UUID
+class _ArchivedHistoryScope:
+    source_deployment_ids: frozenset[UUID]
+    source_approval_ids: frozenset[UUID]
     counts: Mapping[str, int]
 
 
@@ -209,18 +209,23 @@ def _row_count(connection: Connection, from_clause, *criteria) -> int:
     return int(connection.execute(statement).scalar_one())
 
 
-def _exact_recovery_history_scope(
+def _exact_archived_history_scope(
     connection: Connection,
     *,
     handoff: Phase9QualificationHandoff,
-) -> _RecoveryHistoryScope | None:
-    """Resolve only the immutable generation-one history behind one active recovery.
+) -> _ArchivedHistoryScope | None:
+    """Resolve immutable zero-side-effect history behind one active deployment.
 
-    Generation two is intentionally the sole exception to the original global-zero
-    Phase 9 gates.  The exception remains fail closed: the active deployment must be
-    backed by the one recovery approval, its source deployment must be disabled, and
-    the source canary must still be the exact terminal two-attempt negative chain with
-    no fill, ledger, or reconciliation side effects.
+    Phase 9 evidence is append-only, so a newly qualified generation-one deployment
+    can coexist with older disabled qualifications.  Only evidence reachable from a
+    formally disabled deployment is archived here, and every historical order must
+    remain a terminal rejected one- or two-attempt chain with no fill, ledger, or
+    reconciliation side effects.  Anything orphaned, nonterminal, or ambiguous stays
+    in the relevant global counts and therefore fails closed.
+
+    Generation-two recovery retains its stricter source approval/order binding.  The
+    generalized archive scope does not authorize a third generation for one
+    qualification and does not weaken the existing recovery approval contract.
     """
 
     active_deployments = (
@@ -243,7 +248,7 @@ def _exact_recovery_history_scope(
     if len(active_deployments) != 1:
         return None
     active = active_deployments[0]
-    recovery_approval = (
+    active_approval = (
         connection.execute(
             select(DEPLOYMENT_APPROVALS_TABLE).where(
                 DEPLOYMENT_APPROVALS_TABLE.c.id
@@ -254,57 +259,82 @@ def _exact_recovery_history_scope(
         .one_or_none()
     )
     if (
-        recovery_approval is None
-        or recovery_approval["status"] != "APPROVED"
-        or recovery_approval["approval_generation"] != 2
-        or recovery_approval["qualification_decision_id"]
-        != handoff.qualification_decision_id
-        or recovery_approval["recovery_of_deployment_id"] is None
-        or recovery_approval["recovery_order_id"] is None
-        or recovery_approval["recovery_request_digest"] is None
-        or recovery_approval["recovery_receipt_digest"] is None
-    ):
-        return None
-    source_deployment = (
-        connection.execute(
-            select(DEPLOYMENTS_TABLE).where(
-                DEPLOYMENTS_TABLE.c.id
-                == recovery_approval["recovery_of_deployment_id"]
-            )
-        )
-        .mappings()
-        .one_or_none()
-    )
-    if (
-        source_deployment is None
-        or source_deployment["status"] != "DISABLED"
-        or source_deployment["superseded_by_qualification_decision_id"]
-        != handoff.qualification_decision_id
-        or source_deployment["disable_request_digest"] is None
-        or source_deployment["disable_receipt_digest"] is None
-    ):
-        return None
-    source_approval = (
-        connection.execute(
-            select(DEPLOYMENT_APPROVALS_TABLE).where(
-                DEPLOYMENT_APPROVALS_TABLE.c.id
-                == source_deployment["deployment_approval_id"]
-            )
-        )
-        .mappings()
-        .one_or_none()
-    )
-    if (
-        source_approval is None
-        or source_approval["status"] != "APPROVED"
-        or source_approval["approval_generation"] != 1
-        or source_approval["qualification_decision_id"]
+        active_approval is None
+        or active_approval["status"] != "APPROVED"
+        or active_approval["approval_generation"] not in {1, 2}
+        or active_approval["qualification_decision_id"]
         != handoff.qualification_decision_id
     ):
         return None
 
-    source_deployment_id = source_deployment["id"]
-    source_approval_id = source_approval["id"]
+    disabled_deployments = (
+        connection.execute(
+            select(DEPLOYMENTS_TABLE).where(
+                DEPLOYMENTS_TABLE.c.status == "DISABLED"
+            )
+        )
+        .mappings()
+        .all()
+    )
+    if not disabled_deployments:
+        return None
+
+    disabled_deployment_ids = frozenset(row["id"] for row in disabled_deployments)
+    disabled_approvals = (
+        connection.execute(
+            select(DEPLOYMENT_APPROVALS_TABLE).where(
+                DEPLOYMENT_APPROVALS_TABLE.c.id.in_(
+                    [row["deployment_approval_id"] for row in disabled_deployments]
+                )
+            )
+        )
+        .mappings()
+        .all()
+    )
+    approval_by_id = {row["id"]: row for row in disabled_approvals}
+    superseding_decisions = (
+        connection.execute(
+            select(QUALIFICATION_DECISIONS_TABLE).where(
+                QUALIFICATION_DECISIONS_TABLE.c.id.in_(
+                    [
+                        row["superseded_by_qualification_decision_id"]
+                        for row in disabled_deployments
+                        if row["superseded_by_qualification_decision_id"] is not None
+                    ]
+                )
+            )
+        )
+        .mappings()
+        .all()
+    )
+    qualified_superseding_ids = {
+        row["id"] for row in superseding_decisions if row["status"] == "QUALIFIED"
+    }
+    if (
+        len(approval_by_id) != len(disabled_deployments)
+        or any(
+            row["disabled_at"] is None
+            or not row["disabled_by"]
+            or not row["disable_reason"]
+            or row["superseded_by_qualification_decision_id"]
+            not in qualified_superseding_ids
+            or row["disable_request_digest"] is None
+            or row["disable_receipt_digest"] is None
+            or approval_by_id[row["deployment_approval_id"]]["status"] != "APPROVED"
+            for row in disabled_deployments
+        )
+        or _row_count(
+            connection,
+            RUNTIME_INSTANCES_TABLE,
+            RUNTIME_INSTANCES_TABLE.c.deployment_id.in_(
+                list(disabled_deployment_ids)
+            ),
+            RUNTIME_INSTANCES_TABLE.c.status != "STOPPED",
+        )
+    ):
+        return None
+
+    disabled_approval_ids = frozenset(approval_by_id)
     signal_intent = SIGNALS_TABLE.join(
         TRADE_INTENTS_TABLE,
         TRADE_INTENTS_TABLE.c.signal_id == SIGNALS_TABLE.c.id,
@@ -317,54 +347,88 @@ def _exact_recovery_history_scope(
         ORDERS_TABLE,
         ORDERS_TABLE.c.risk_decision_id == RISK_DECISIONS_TABLE.c.id,
     )
-    source_order = (
+    archived_orders = (
         connection.execute(
             select(ORDERS_TABLE)
             .select_from(signal_order)
             .where(
-                SIGNALS_TABLE.c.deployment_id == source_deployment_id,
-                ORDERS_TABLE.c.id == recovery_approval["recovery_order_id"],
+                SIGNALS_TABLE.c.deployment_id.in_(list(disabled_deployment_ids))
             )
         )
         .mappings()
-        .one_or_none()
+        .all()
     )
-    if (
-        source_order is None
-        or source_order["status"] != "REJECTED"
-        or source_order["exchange_order_id"] is not None
-        or source_order["receipt_digest"] is not None
-    ):
-        return None
+    archived_order_ids = {row["id"] for row in archived_orders}
+    for order in archived_orders:
+        if (
+            order["status"] != "REJECTED"
+            or order["exchange_order_id"] is not None
+            or order["receipt_digest"] is not None
+        ):
+            return None
+        claims = (
+            connection.execute(
+                select(ORDER_DISPATCH_RECEIPTS_TABLE).where(
+                    ORDER_DISPATCH_RECEIPTS_TABLE.c.order_id == order["id"]
+                )
+            )
+            .mappings()
+            .all()
+        )
+        outcomes = (
+            connection.execute(
+                select(ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE).where(
+                    ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE.c.order_id == order["id"]
+                )
+            )
+            .mappings()
+            .all()
+        )
+        ordinals = sorted(row["attempt_ordinal"] for row in claims)
+        if (
+            ordinals not in ([1], [1, 2])
+            or len(outcomes) != len(claims)
+            or {row["dispatch_claim_id"] for row in outcomes}
+            != {row["id"] for row in claims}
+            or any(
+                row["outcome_mode"] not in {"GET_NOT_FOUND", "POST_REJECTED"}
+                or row["exchange_order_id"] is not None
+                for row in outcomes
+            )
+        ):
+            return None
 
-    source_order_id = source_order["id"]
-    claims = (
-        connection.execute(
-            select(ORDER_DISPATCH_RECEIPTS_TABLE).where(
-                ORDER_DISPATCH_RECEIPTS_TABLE.c.order_id == source_order_id
-            )
+    if active_approval["approval_generation"] == 2:
+        recovery_source_id = active_approval["recovery_of_deployment_id"]
+        recovery_order_id = active_approval["recovery_order_id"]
+        if (
+            recovery_source_id not in disabled_deployment_ids
+            or recovery_order_id not in archived_order_ids
+            or active_approval["recovery_request_digest"] is None
+            or active_approval["recovery_receipt_digest"] is None
+        ):
+            return None
+        recovery_source = next(
+            row for row in disabled_deployments if row["id"] == recovery_source_id
         )
-        .mappings()
-        .all()
-    )
-    outcomes = (
-        connection.execute(
-            select(ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE).where(
-                ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE.c.order_id == source_order_id
-            )
-        )
-        .mappings()
-        .all()
-    )
-    if (
-        sorted(row["attempt_ordinal"] for row in claims) != [1, 2]
-        or len(outcomes) != 2
-        or {row["dispatch_claim_id"] for row in outcomes}
-        != {row["id"] for row in claims}
-        or any(
-            row["outcome_mode"] not in {"GET_NOT_FOUND", "POST_REJECTED"}
-            or row["exchange_order_id"] is not None
-            for row in outcomes
+        recovery_source_approval = approval_by_id[
+            recovery_source["deployment_approval_id"]
+        ]
+        if (
+            recovery_source["superseded_by_qualification_decision_id"]
+            != handoff.qualification_decision_id
+            or recovery_source_approval["approval_generation"] != 1
+            or recovery_source_approval["qualification_decision_id"]
+            != handoff.qualification_decision_id
+        ):
+            return None
+    elif any(
+        active_approval[field] is not None
+        for field in (
+            "recovery_of_deployment_id",
+            "recovery_order_id",
+            "recovery_request_digest",
+            "recovery_receipt_digest",
         )
     ):
         return None
@@ -394,7 +458,7 @@ def _exact_recovery_history_scope(
         RECONCILIATION_RUNS_TABLE.c.id
         == RECONCILIATION_ITEMS_TABLE.c.reconciliation_run_id,
     )
-    source_signal = SIGNALS_TABLE.c.deployment_id == source_deployment_id
+    source_signal = SIGNALS_TABLE.c.deployment_id.in_(list(disabled_deployment_ids))
     counts = {name: 0 for name in _STRICT_CANARY_GLOBAL_TABLES}
     budget_table_name = EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE.name
     counts.update(
@@ -402,26 +466,30 @@ def _exact_recovery_history_scope(
             "acceptance_signal_triggers": _row_count(
                 connection,
                 ACCEPTANCE_SIGNAL_TRIGGERS_TABLE,
-                ACCEPTANCE_SIGNAL_TRIGGERS_TABLE.c.deployment_id
-                == source_deployment_id,
+                ACCEPTANCE_SIGNAL_TRIGGERS_TABLE.c.deployment_id.in_(
+                    list(disabled_deployment_ids)
+                ),
             ),
             budget_table_name: _row_count(
                 connection,
                 EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE,
-                EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE.c.deployment_approval_id
-                == source_approval_id,
+                EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE.c.deployment_approval_id.in_(
+                    list(disabled_approval_ids)
+                ),
             ),
             "execution_canary_risk_policies": _row_count(
                 connection,
                 EXECUTION_CANARY_RISK_POLICIES_TABLE,
-                EXECUTION_CANARY_RISK_POLICIES_TABLE.c.deployment_approval_id
-                == source_approval_id,
+                EXECUTION_CANARY_RISK_POLICIES_TABLE.c.deployment_approval_id.in_(
+                    list(disabled_approval_ids)
+                ),
             ),
             "execution_canary_probe_receipts": _row_count(
                 connection,
                 EXECUTION_CANARY_PROBE_RECEIPTS_TABLE,
-                EXECUTION_CANARY_PROBE_RECEIPTS_TABLE.c.deployment_id
-                == source_deployment_id,
+                EXECUTION_CANARY_PROBE_RECEIPTS_TABLE.c.deployment_id.in_(
+                    list(disabled_deployment_ids)
+                ),
             ),
             "execution_risk_reservations": _row_count(
                 connection,
@@ -438,8 +506,9 @@ def _exact_recovery_history_scope(
             "execution_attestations": _row_count(
                 connection,
                 EXECUTION_ATTESTATIONS_TABLE,
-                EXECUTION_ATTESTATIONS_TABLE.c.deployment_id
-                == source_deployment_id,
+                EXECUTION_ATTESTATIONS_TABLE.c.deployment_id.in_(
+                    list(disabled_deployment_ids)
+                ),
             ),
             "signals": _row_count(connection, SIGNALS_TABLE, source_signal),
             "trade_intents": _row_count(connection, signal_intent, source_signal),
@@ -468,9 +537,7 @@ def _exact_recovery_history_scope(
         }
     )
     if (
-        counts["orders"] != 1
-        or counts["order_dispatch_receipts"] != 2
-        or counts["order_dispatch_outcome_receipts"] != 2
+        counts["orders"] != len(archived_orders)
         or any(
             counts[name]
             for name in (
@@ -482,17 +549,17 @@ def _exact_recovery_history_scope(
         )
     ):
         return None
-    return _RecoveryHistoryScope(
-        source_deployment_id=source_deployment_id,
-        source_approval_id=source_approval_id,
+    return _ArchivedHistoryScope(
+        source_deployment_ids=disabled_deployment_ids,
+        source_approval_ids=disabled_approval_ids,
         counts=counts,
     )
 
 
-def _recovery_relevant_counts(
+def _archived_relevant_counts(
     *,
     execution_counts: Mapping[str, int],
-    scope: _RecoveryHistoryScope | None,
+    scope: _ArchivedHistoryScope | None,
 ) -> dict[str, int]:
     relevant = dict(execution_counts)
     if scope is not None:
@@ -2269,7 +2336,7 @@ def inspect_phase9_readiness(
                 verified_handoff = persisted
 
     lineage_counts = {name: 0 for name in EXECUTION_DOMAIN_TABLE_NAMES}
-    recovery_scope: _RecoveryHistoryScope | None = None
+    archived_scope: _ArchivedHistoryScope | None = None
     if stage == "QUALIFICATION_HANDOFF":
         nonterminal_deployments = int(
             effective.execute(
@@ -2306,19 +2373,26 @@ def inspect_phase9_readiness(
             reasons.append("EXACT_ACTIVE_DEPLOYMENT_NOT_GLOBALLY_UNIQUE")
         if healthy_runtimes != lineage_counts["runtime_instances"]:
             reasons.append("EXACT_HEALTHY_RUNTIME_NOT_GLOBALLY_UNIQUE")
-        recovery_scope = _exact_recovery_history_scope(
+        archived_scope = _exact_archived_history_scope(
             effective,
             handoff=verified_handoff,
         )
-    relevant_execution_counts = _recovery_relevant_counts(
+        disabled_deployment_count = _row_count(
+            effective,
+            DEPLOYMENTS_TABLE,
+            DEPLOYMENTS_TABLE.c.status == "DISABLED",
+        )
+        if disabled_deployment_count and archived_scope is None:
+            reasons.append("CANARY_ARCHIVED_HISTORY_SCOPE_INVALID")
+    relevant_execution_counts = _archived_relevant_counts(
         execution_counts=execution_counts,
-        scope=recovery_scope,
+        scope=archived_scope,
     )
     if any(value < 0 for value in relevant_execution_counts.values()):
         reasons.append("CANARY_RECOVERY_HISTORY_SCOPE_INVALID")
     for table_name in sorted(_ZERO_REQUIRED_BY_STAGE[stage]):
         count = relevant_execution_counts[table_name]
-        if table_name == "order_writer_leases" and recovery_scope is not None:
+        if table_name == "order_writer_leases" and archived_scope is not None:
             # The singleton lease row is renewed rather than appended.  A
             # RELEASED/EXPIRED predecessor is history; only a live holder can
             # violate the new recovery cycle's no-writer stages.
@@ -2340,10 +2414,11 @@ def inspect_phase9_readiness(
         live_policy_criteria = [
             EXECUTION_CANARY_RISK_POLICIES_TABLE.c.status != "EXPIRED"
         ]
-        if recovery_scope is not None:
+        if archived_scope is not None:
             live_policy_criteria.append(
-                EXECUTION_CANARY_RISK_POLICIES_TABLE.c.deployment_approval_id
-                != recovery_scope.source_approval_id
+                EXECUTION_CANARY_RISK_POLICIES_TABLE.c.deployment_approval_id.not_in(
+                    list(archived_scope.source_approval_ids)
+                )
             )
         live_policy_rows = (
             effective.execute(

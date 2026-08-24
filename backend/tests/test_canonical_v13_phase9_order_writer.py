@@ -31,6 +31,7 @@ from app.canonical_v13.models import (
 )
 from app.canonical_v13.deployment_approval import (
     CanonicalDeploymentApprovalBlocked,
+    approve_demo_deployment,
     approve_demo_canary_recovery,
 )
 from app.canonical_v13.deployment_control import (
@@ -1003,6 +1004,7 @@ def test_second_proven_absence_is_terminal_and_never_posts_third_time(
         assert successor.deployment_id != deployment["id"]
         from tests.test_canonical_v13_phase9_readiness import (
             _handoff,
+            _qualified,
             _seed_runtime_for_deployment,
             _seed_stage_b,
         )
@@ -1138,6 +1140,68 @@ def test_second_proven_absence_is_terminal_and_never_posts_third_time(
             policy_rows[-1]["deployment_approval_id"]
             == recovery.deployment_approval_id
         )
+
+        canonical_connection.execute(
+            RUNTIME_INSTANCES_TABLE.update()
+            .where(RUNTIME_INSTANCES_TABLE.c.id == successor_runtime_id)
+            .values(status="STOPPED")
+        )
+        fresh_qualification = _qualified(canonical_connection)
+        fresh_handoff = _handoff(canonical_connection, fresh_qualification)
+        disable_demo_deployment(
+            canonical_connection,
+            deployment_id=successor.deployment_id,
+            superseded_by_qualification_decision_id=(
+                fresh_qualification.qualification_decision_id
+            ),
+            actor_identity="operator:isolated-requalification",
+            reason="archive the exhausted qualification before a fresh generation one",
+        )
+        fresh_approval = approve_demo_deployment(
+            canonical_connection,
+            qualification_decision_id=(
+                fresh_qualification.qualification_decision_id
+            ),
+            actor_identity="operator:isolated-requalification",
+            reason="fresh immutable qualification starts at generation one",
+        )
+        fresh_deployment = create_demo_deployment(
+            canonical_connection,
+            deployment_approval_id=fresh_approval.deployment_approval_id,
+        )
+        _seed_runtime_for_deployment(
+            canonical_connection,
+            fresh_handoff,
+            fresh_deployment.deployment_id,
+        )
+        fresh_no_order_soak = inspect_phase9_readiness(
+            canonical_connection,
+            qualification_handoff=fresh_handoff,
+            stage="NO_ORDER_SOAK",
+            evaluated_at=evaluated_at,
+        )
+        assert fresh_no_order_soak.status == "READY", (
+            fresh_no_order_soak.reason_codes
+        )
+        assert fresh_no_order_soak.lineage_evidence_counts["orders"] == 0
+        assert fresh_no_order_soak.execution_domain_counts["orders"] == 1
+
+        canonical_connection.execute(
+            ORDERS_TABLE.update()
+            .where(ORDERS_TABLE.c.id == prepared.order_id)
+            .values(status="DISPATCHING")
+        )
+        invalid_archive = inspect_phase9_readiness(
+            canonical_connection,
+            qualification_handoff=fresh_handoff,
+            stage="NO_ORDER_SOAK",
+            evaluated_at=evaluated_at,
+        )
+        assert invalid_archive.status == "BLOCKED"
+        assert "CANARY_ARCHIVED_HISTORY_SCOPE_INVALID" in (
+            invalid_archive.reason_codes
+        )
+        assert "NONZERO_ORDERS=1" in invalid_archive.reason_codes
 
 
 def test_explicit_post_rejection_is_terminal_and_audited(canonical_connection):
