@@ -73,9 +73,14 @@ from app.canonical_v13.phase9_canary_policy import (  # noqa: E402
     authorize_canary_risk_policy,
 )
 from app.canonical_v13.execution_common import (  # noqa: E402
+    CanonicalExecutionChainBlocked,
     canonical_execution_digest,
     lock_execution_boundary,
     require_identity,
+)
+from app.canonical_v13.phase9_order_writer import (  # noqa: E402
+    CANONICAL_ORDER_WRITER_PROCESS_IDENTITY,
+    release_demo_order_writer_lease,
 )
 from app.canonical_v13.phase9_recovery_composition import (  # noqa: E402
     accept_phase9_recovery_soak,
@@ -729,6 +734,19 @@ def _latest_stop_receipt(service_key: str, plan: Phase9LaunchPlan):
     )
 
 
+def _predecessor_stop_receipt(service_key: str, plan: Phase9LaunchPlan):
+    for receipt in reversed(_verified_lifecycle_receipts(service_key)):
+        if (
+            receipt.action == "STOP"
+            and receipt.status == "STOPPED"
+            and receipt.generation == plan.generation - 1
+            and receipt.observed_at <= plan.prepared_at
+            and receipt.details.get("label") == plan.launch_agent_label
+        ):
+            return receipt
+    return None
+
+
 def _verified_lifecycle_receipts(service_key: str):
     try:
         lines = _receipt_path(service_key).read_text(encoding="utf-8").splitlines()
@@ -1068,11 +1086,56 @@ def _stop_exact_runtime_container(plan: Phase9LaunchPlan) -> None:
         )
 
 
+def _release_stopped_order_writer_database_lease(plan: Phase9LaunchPlan) -> None:
+    if plan.service_key != "order_writer":
+        return
+    holder_token = _read_order_holder_token()
+    holder_digest = sha256(
+        json.dumps(
+            {"holder_token": holder_token},
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    factory = _connection_factory(_phase9_database_url("canonical_order_writer"))
+    try:
+        with factory() as connection:
+            result = release_demo_order_writer_lease(
+                connection,
+                holder_identity=CANONICAL_ORDER_WRITER_PROCESS_IDENTITY,
+                holder_token_digest=holder_digest,
+                evaluated_at=_now(),
+            )
+    except CanonicalExecutionChainBlocked as exc:
+        if exc.code == "BLOCKED_ORDER_WRITER_LEASE_UNSET":
+            return
+        raise CanonicalPhase9SupervisorBlocked(exc.code, exc.detail) from None
+    if result["repeat_noop"] is True:
+        return
+    _append_receipt(
+        build_lifecycle_receipt(
+            service_key=plan.service_key,
+            action="DATABASE_WRITER_LEASE_RELEASE",
+            status="RELEASED",
+            generation=plan.generation,
+            observed_at=_now(),
+            plan_digest=plan.plan_digest,
+            details={
+                "database_lease_generation": result["generation"],
+                "database_lease_digest": result["lease_digest"],
+                "repeat_noop": result["repeat_noop"],
+            },
+        )
+    )
+
+
 def stop(service_key: str) -> dict[str, object]:
     _require_release_checkout()
     plan, state = _load_plan(service_key)
     if state.get("status") == "STOPPED":
         _stop_exact_runtime_container(plan)
+        _release_stopped_order_writer_database_lease(plan)
         return {
             "status": "STOPPED",
             "service": service_key,
@@ -1127,6 +1190,7 @@ def stop(service_key: str) -> dict[str, object]:
         raise CanonicalPhase9SupervisorBlocked(
             "BLOCKED_PHASE9_BOOTOUT_FAILED", service_key
         )
+    _release_stopped_order_writer_database_lease(plan)
     observed_at = _now()
     receipt = build_lifecycle_receipt(
         service_key=service_key,
@@ -1567,6 +1631,21 @@ def confirm_runtime_stop_observation(plan_digest: str) -> dict[str, object]:
         raise CanonicalPhase9SupervisorBlocked(
             "BLOCKED_PHASE9_STOP_CONTAINER_OBSERVATION", plan.service_key
         )
+    predecessor_stop = _predecessor_stop_receipt("long_lived_runtime", plan)
+    predecessor_container_present = False
+    if predecessor_stop is not None and predecessor_stop.plan_digest is not None:
+        predecessor_name = (
+            f"canonical-v13-runtime-{predecessor_stop.generation}-"
+            f"{predecessor_stop.plan_digest[:12]}"
+        )
+        predecessor_container = _run(
+            [PODMAN_PATH, "container", "exists", predecessor_name]
+        )
+        if predecessor_container.returncode not in {0, 1}:
+            raise CanonicalPhase9SupervisorBlocked(
+                "BLOCKED_PHASE9_STOP_CONTAINER_OBSERVATION", plan.service_key
+            )
+        predecessor_container_present = predecessor_container.returncode == 0
     observed_at = _now()
     factory = _connection_factory(
         _phase9_database_url("canonical_deployment_writer")
@@ -1582,6 +1661,8 @@ def confirm_runtime_stop_observation(plan_digest: str) -> dict[str, object]:
             lease=lease,
             container_present=container.returncode == 0,
             credential_reference=RUNTIME_CREDENTIAL_REFERENCE,
+            predecessor_stop_receipt=predecessor_stop,
+            predecessor_container_present=predecessor_container_present,
         )
     return {
         "status": result.status,

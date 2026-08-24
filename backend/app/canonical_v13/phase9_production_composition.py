@@ -51,6 +51,7 @@ from app.canonical_v13.models import (
     ORDERS_TABLE,
     RISK_DECISIONS_TABLE,
     RUNTIME_INSTANCES_TABLE,
+    RUNTIME_RECEIPTS_TABLE,
     TRADE_INTENTS_TABLE,
 )
 from app.canonical_v13.accounting import post_production_demo_ledger_entry
@@ -74,7 +75,11 @@ from app.canonical_v13.phase9_runtime_supervisor import (
     build_production_runtime_stop_observation,
     require_current_order_writer_canary_authority,
 )
-from app.canonical_v13.runtime_contract import FrozenRuntimeLaunchSpec
+from app.canonical_v13.runtime_contract import (
+    FrozenRuntimeLaunchSpec,
+    build_runtime_observation_receipt,
+    frozen_runtime_launch_spec_digest,
+)
 
 
 ConnectionFactory = Callable[[], AbstractContextManager[Connection]]
@@ -862,6 +867,8 @@ def confirm_stopped_runtime_from_supervisor(
     lease: Phase9Lease | None,
     container_present: bool,
     credential_reference: str,
+    predecessor_stop_receipt: Phase9LifecycleReceipt | None = None,
+    predecessor_container_present: bool = False,
 ):
     """Persist STOPPED only from exact current supervisor and database lineage."""
 
@@ -904,7 +911,7 @@ def confirm_stopped_runtime_from_supervisor(
         if approval is not None
         else None
     )
-    if (
+    stable_lineage = (
         deployment is None
         or deployment["status"] not in {"ACTIVE", "DISABLED"}
         or deployment["capability_digest"] != plan.deployment_capability_digest
@@ -916,18 +923,20 @@ def confirm_stopped_runtime_from_supervisor(
             and runtime["status"] != "STOPPED"
         )
         or runtime["runtime_identity"] != plan.process_identity
-        or runtime["image_digest"] != plan.image_digest
         or runtime["service_account"] != "canonical_runtime_reader"
         or runtime["order_writer_capability"] is not False
         or approval is None
         or approval["status"] != "APPROVED"
         or qualification is None
         or qualification["status"] != "QUALIFIED"
-    ):
+    )
+    if stable_lineage:
         raise CanonicalPhase9CompositionBlocked(
             "BLOCKED_PHASE9_RUNTIME_STOP_LINEAGE",
             "exact ACTIVE Demo runtime lineage is required",
         )
+    observed_image_digest = str(runtime["image_digest"])
+    recovering_predecessor = observed_image_digest != plan.image_digest
     launch_spec = FrozenRuntimeLaunchSpec(
         deployment_id=plan.deployment_id,
         approval_id=approval["id"],
@@ -939,22 +948,75 @@ def confirm_stopped_runtime_from_supervisor(
         market_snapshot_digest=deployment["market_snapshot_digest"],
         deployment_capability_digest=deployment["capability_digest"],
         runtime_identity=plan.process_identity,
-        image_digest=plan.image_digest,
+        image_digest=observed_image_digest,
         service_account="canonical_runtime_reader",
         network_policy="DEMO_EXCHANGE_ONLY",
         credential_reference=credential_reference,
     )
-    receipt = build_production_runtime_stop_observation(
-        plan=plan,
-        launch_spec=launch_spec,
-        runtime_instance_id=runtime["id"],
-        stop_receipt=stop_receipt,
-        observed_at=observed_at,
-        launch_agent_loaded=launch_agent_loaded,
-        holder_pid_alive=holder_pid_alive,
-        lease=lease,
-        container_present=container_present,
-    )
+    if recovering_predecessor:
+        latest_runtime_receipt = connection.execute(
+            select(RUNTIME_RECEIPTS_TABLE)
+            .where(RUNTIME_RECEIPTS_TABLE.c.runtime_instance_id == runtime["id"])
+            .order_by(RUNTIME_RECEIPTS_TABLE.c.observed_at.desc())
+            .limit(1)
+        ).mappings().one_or_none()
+        if (
+            predecessor_stop_receipt is None
+            or stop_receipt.action != "STOP"
+            or stop_receipt.status != "STOPPED"
+            or stop_receipt.generation != plan.generation
+            or stop_receipt.plan_digest != plan.plan_digest
+            or stop_receipt.observed_at > observed_at
+            or predecessor_stop_receipt.action != "STOP"
+            or predecessor_stop_receipt.status != "STOPPED"
+            or predecessor_stop_receipt.generation != plan.generation - 1
+            or predecessor_stop_receipt.observed_at > plan.prepared_at
+            or predecessor_stop_receipt.details.get("label")
+            != plan.launch_agent_label
+            or latest_runtime_receipt is None
+            or latest_runtime_receipt["status"] != "HEALTHY"
+            or latest_runtime_receipt["evidence_class"]
+            != "PRODUCTION_DEMO_RUNTIME"
+            or latest_runtime_receipt["launch_spec_digest"]
+            != runtime["launch_spec_digest"]
+            or latest_runtime_receipt["capability_digest"]
+            != deployment["capability_digest"]
+            or latest_runtime_receipt["network_policy"] != "DEMO_EXCHANGE_ONLY"
+            or latest_runtime_receipt["service_account"]
+            != "canonical_runtime_reader"
+            or latest_runtime_receipt["order_writer_capability"] is not False
+            or runtime["status"] != "HEALTHY"
+            or frozen_runtime_launch_spec_digest(launch_spec)
+            != runtime["launch_spec_digest"]
+            or launch_agent_loaded
+            or holder_pid_alive
+            or lease is not None
+            or container_present
+            or predecessor_container_present
+        ):
+            raise CanonicalPhase9CompositionBlocked(
+                "BLOCKED_PHASE9_RUNTIME_PREDECESSOR_STOP",
+                "verified predecessor stop, persisted runtime lineage, and zero holders are required",
+            )
+        receipt = build_runtime_observation_receipt(
+            runtime_instance_id=runtime["id"],
+            launch_spec=launch_spec,
+            status="STOPPED",
+            observed_at=observed_at,
+            evidence_class="PRODUCTION_DEMO_RUNTIME_STOP",
+        )
+    else:
+        receipt = build_production_runtime_stop_observation(
+            plan=plan,
+            launch_spec=launch_spec,
+            runtime_instance_id=runtime["id"],
+            stop_receipt=stop_receipt,
+            observed_at=observed_at,
+            launch_agent_loaded=launch_agent_loaded,
+            holder_pid_alive=holder_pid_alive,
+            lease=lease,
+            container_present=container_present,
+        )
     return confirm_production_demo_runtime_stop_observation(
         connection,
         deployment_id=plan.deployment_id,

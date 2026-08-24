@@ -27,6 +27,10 @@ from app.canonical_v13.phase9_runtime_supervisor import (
     build_lifecycle_receipt,
     build_order_writer_canary_authority,
 )
+from app.canonical_v13.runtime_contract import (
+    FrozenRuntimeLaunchSpec,
+    frozen_runtime_launch_spec_digest,
+)
 
 
 NOW = datetime(2026, 8, 21, 6, 0, tzinfo=timezone.utc)
@@ -578,6 +582,90 @@ def test_runtime_stop_confirmation_uses_exact_database_and_supervisor_lineage(
     assert captured["deployment_id"] == plan.deployment_id
     assert captured["receipt"].runtime_instance_id == _uuid(7)
     assert captured["receipt"].status == "STOPPED"
+
+
+@pytest.mark.parametrize("predecessor_container_present", (False, True))
+def test_runtime_stop_recovers_only_absent_exact_predecessor(
+    monkeypatch, predecessor_container_present
+) -> None:
+    plan = build_launch_plan(
+        service_key="long_lived_runtime",
+        stage="OKX_DEMO_CANARY",
+        generation=2,
+        prepared_at=NOW - timedelta(seconds=10),
+        release_digest="6" * 64,
+        deployment_id=_uuid(1),
+        deployment_capability_digest="1" * 64,
+        runtime_image_authority=_runtime_image_authority(),
+    )
+    predecessor_stop = build_lifecycle_receipt(
+        service_key=plan.service_key,
+        action="STOP",
+        status="STOPPED",
+        generation=1,
+        observed_at=NOW - timedelta(seconds=11),
+        plan_digest="b" * 64,
+        details={"label": plan.launch_agent_label},
+    )
+    current_stop = build_lifecycle_receipt(
+        service_key=plan.service_key,
+        action="STOP",
+        status="STOPPED",
+        generation=2,
+        observed_at=NOW - timedelta(seconds=1),
+        plan_digest=plan.plan_digest,
+        details={"label": plan.launch_agent_label},
+    )
+    old_spec = FrozenRuntimeLaunchSpec(
+        deployment_id=_uuid(1), approval_id=_uuid(2),
+        qualification_decision_id=_uuid(6), strategy_version_id=_uuid(3),
+        configuration_bundle_id=_uuid(4), configuration_bundle_digest="9" * 64,
+        market_snapshot_id=_uuid(5), market_snapshot_digest="a" * 64,
+        deployment_capability_digest="1" * 64, runtime_identity=plan.process_identity,
+        image_digest="c" * 64, service_account="canonical_runtime_reader",
+        network_policy="DEMO_EXCHANGE_ONLY",
+        credential_reference="none:public-okx-market-only",
+    )
+    launch_digest = frozen_runtime_launch_spec_digest(old_spec)
+    connection = _Connection([
+        {"id": _uuid(1), "deployment_approval_id": _uuid(2),
+         "strategy_version_id": _uuid(3), "configuration_bundle_id": _uuid(4),
+         "configuration_bundle_digest": "9" * 64, "market_snapshot_id": _uuid(5),
+         "market_snapshot_digest": "a" * 64, "capability_digest": "1" * 64,
+         "status": "ACTIVE", "demo_only": True, "allow_real_funds": False},
+        {"id": _uuid(7), "runtime_identity": plan.process_identity,
+         "image_digest": old_spec.image_digest, "launch_spec_digest": launch_digest,
+         "service_account": "canonical_runtime_reader", "order_writer_capability": False,
+         "status": "HEALTHY"},
+        {"id": _uuid(2), "qualification_decision_id": _uuid(6), "status": "APPROVED"},
+        {"id": _uuid(6), "status": "QUALIFIED"},
+        {"status": "HEALTHY", "evidence_class": "PRODUCTION_DEMO_RUNTIME",
+         "launch_spec_digest": launch_digest, "capability_digest": "1" * 64,
+         "network_policy": "DEMO_EXCHANGE_ONLY",
+         "service_account": "canonical_runtime_reader",
+         "order_writer_capability": False},
+    ])
+    monkeypatch.setattr(
+        "app.canonical_v13.phase9_production_composition.confirm_production_demo_runtime_stop_observation",
+        lambda _connection, **kwargs: SimpleNamespace(
+            runtime_instance_id=_uuid(7), receipt_digest=kwargs["receipt"].receipt_digest,
+            status="STOPPED", repeat_noop=False),
+    )
+    kwargs = dict(
+        plan=plan, stop_receipt=current_stop, observed_at=NOW,
+        launch_agent_loaded=False, holder_pid_alive=False, lease=None,
+        container_present=False, credential_reference="none:public-okx-market-only",
+        predecessor_stop_receipt=predecessor_stop,
+        predecessor_container_present=predecessor_container_present,
+    )
+    if predecessor_container_present:
+        with pytest.raises(
+            CanonicalPhase9CompositionBlocked,
+            match="BLOCKED_PHASE9_RUNTIME_PREDECESSOR_STOP",
+        ):
+            confirm_stopped_runtime_from_supervisor(connection, **kwargs)
+    else:
+        assert confirm_stopped_runtime_from_supervisor(connection, **kwargs).status == "STOPPED"
 
 
 def test_probe_orchestration_uses_only_sealed_current_session_result(
