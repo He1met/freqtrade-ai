@@ -39,15 +39,18 @@ class ExactCanaryStrategy(IStrategy):
 
 
 def _sealed_probe(
-    *, exchange_max_leverage: str = "20", current_long_leverage: str = "12"
+    *,
+    exchange_max_leverage: str = "20",
+    current_long_leverage: str = "12",
+    now=NOW,
 ):
     read = FakeRead()
     for snapshot in read.snapshots.values():
-        snapshot.metadata.fetched_at = NOW - timedelta(seconds=2)
-        snapshot.metadata.expires_at = NOW + timedelta(seconds=30)
+        snapshot.metadata.fetched_at = now - timedelta(seconds=2)
+        snapshot.metadata.expires_at = now + timedelta(seconds=30)
         if snapshot.metadata.exchange_timestamp is not None:
-            snapshot.metadata.exchange_timestamp = NOW - timedelta(seconds=1)
-    read.snapshots["mark_price"].items[0]["timestamp"] = NOW - timedelta(seconds=1)
+            snapshot.metadata.exchange_timestamp = now - timedelta(seconds=1)
+    read.snapshots["mark_price"].items[0]["timestamp"] = now - timedelta(seconds=1)
     read.snapshots["exchange_max_leverage"].items[0]["max_leverage"] = (
         exchange_max_leverage
     )
@@ -63,7 +66,7 @@ def _sealed_probe(
         account_fingerprint_digest="d" * 64,
         credential_generation_digest="e" * 64,
         close_callback=lambda: None,
-        now_provider=lambda: NOW,
+        now_provider=lambda: now,
     )
     return session.probe(instrument="BTC-USDT-SWAP")
 
@@ -148,6 +151,7 @@ def _authorize(
     *,
     evaluated_at=NOW,
     probe_receipt_id=None,
+    idempotency_key="exact-canary-policy",
 ):
     return authorize_canary_risk_policy(
         connection,
@@ -155,7 +159,7 @@ def _authorize(
         deployment_approval_id=approval.deployment_approval_id,
         probe_receipt_id=probe_receipt_id or receipt.probe_receipt_id,
         actor_identity="phase9-human-policy-owner",
-        idempotency_key="exact-canary-policy",
+        idempotency_key=idempotency_key,
         reason="one reviewed canonical Demo canary",
         evaluated_at=evaluated_at,
     )
@@ -277,6 +281,84 @@ def test_probe_and_policy_exact_replays_are_noops_and_policy_drift_blocks(
     assert replay.policy_id == first.policy_id
     assert replay.receipt_digest == first.receipt_digest
     assert count == 1
+
+
+def test_expired_policy_without_budget_is_append_only_renewable(
+    canonical_connection,
+):
+    renewed_at = NOW + timedelta(minutes=31)
+    with canonical_connection.begin():
+        decision, approval, probe, receipt = _fixture(canonical_connection)
+        first = _authorize(canonical_connection, decision, approval, receipt)
+        fresh_probe = _sealed_probe(now=renewed_at)
+        attestation = record_redacted_demo_attestation(
+            canonical_connection,
+            deployment_id=(
+                canonical_connection.execute(
+                    select(EXECUTION_CANARY_PROBE_RECEIPTS_TABLE.c.deployment_id).where(
+                        EXECUTION_CANARY_PROBE_RECEIPTS_TABLE.c.id
+                        == receipt.probe_receipt_id
+                    )
+                ).scalar_one()
+            ),
+            instrument=fresh_probe.instrument,
+            account_fingerprint_digest=fresh_probe.account_fingerprint_digest,
+            credential_generation_digest=fresh_probe.credential_generation_digest,
+            permissions=fresh_probe.permissions,
+            observed_at=fresh_probe.observed_at,
+            expires_at=fresh_probe.expires_at,
+            evaluated_at=renewed_at,
+        )
+        fresh_receipt = persist_canary_probe_receipt(
+            canonical_connection,
+            probe=fresh_probe,
+            deployment_id=(
+                canonical_connection.execute(
+                    select(EXECUTION_CANARY_PROBE_RECEIPTS_TABLE.c.deployment_id).where(
+                        EXECUTION_CANARY_PROBE_RECEIPTS_TABLE.c.id
+                        == receipt.probe_receipt_id
+                    )
+                ).scalar_one()
+            ),
+            execution_attestation_id=attestation.attestation_id,
+            evaluated_at=renewed_at,
+        )
+        renewed = _authorize(
+            canonical_connection,
+            decision,
+            approval,
+            fresh_receipt,
+            evaluated_at=renewed_at,
+            idempotency_key="renewed-canary-policy",
+        )
+        rows = (
+            canonical_connection.execute(
+                select(EXECUTION_CANARY_RISK_POLICIES_TABLE).order_by(
+                    EXECUTION_CANARY_RISK_POLICIES_TABLE.c.accepted_at
+                )
+            )
+            .mappings()
+            .all()
+        )
+    assert renewed.policy_id != first.policy_id
+    assert [row["status"] for row in rows] == ["EXPIRED", "ACTIVE"]
+    assert rows[0]["termination_digest"] is not None
+
+
+def test_fresh_active_policy_blocks_different_idempotency_key(canonical_connection):
+    with canonical_connection.begin():
+        decision, approval, _probe, receipt = _fixture(canonical_connection)
+        _authorize(canonical_connection, decision, approval, receipt)
+        with pytest.raises(
+            CanonicalExecutionChainBlocked, match="BLOCKED_CANARY_POLICY_ACTIVE"
+        ):
+            _authorize(
+                canonical_connection,
+                decision,
+                approval,
+                receipt,
+                idempotency_key="different-active-policy",
+            )
 
 
 @pytest.mark.parametrize(

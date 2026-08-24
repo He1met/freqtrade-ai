@@ -92,6 +92,13 @@ from app.canonical_v13.phase9_transition_upgrade import (
     rollback_phase9_transition_upgrade,
     verify_phase9_transition_upgrade,
 )
+from app.canonical_v13.phase9_policy_renewal_upgrade import (
+    ACTIVE_APPROVAL_UNIQUE,
+    ACTIVE_QUALIFICATION_UNIQUE,
+    apply_phase9_policy_renewal_upgrade,
+    rollback_phase9_policy_renewal_upgrade,
+    verify_phase9_policy_renewal_upgrade,
+)
 from app.canonical_v13.risk_service import create_production_demo_intent
 from app.canonical_v13.research_evaluation import qualify_target, score_target
 from app.canonical_v13.research_validation import (
@@ -115,6 +122,53 @@ pytestmark = pytest.mark.skipif(
     not DATABASE_URL,
     reason="CANONICAL_V13_POSTGRES_URL is required for the isolated contract",
 )
+
+
+def test_phase9_policy_renewal_upgrade_replaces_global_uniqueness() -> None:
+    assert DATABASE_URL is not None
+    engine = create_engine(DATABASE_URL)
+    try:
+        with engine.connect() as connection:
+            transaction = connection.begin()
+            try:
+                schema = "strategy_platform_v13"
+                connection.execute(
+                    text(f"DROP INDEX {schema}.{ACTIVE_QUALIFICATION_UNIQUE}")
+                )
+                connection.execute(
+                    text(f"DROP INDEX {schema}.{ACTIVE_APPROVAL_UNIQUE}")
+                )
+                connection.execute(
+                    text(
+                        f"ALTER TABLE {schema}.execution_canary_risk_policies "
+                        "ADD CONSTRAINT "
+                        "uq_execution_canary_risk_policies_qualification_decision_id "
+                        "UNIQUE (qualification_decision_id), "
+                        "ADD CONSTRAINT "
+                        "uq_execution_canary_risk_policies_deployment_approval_id "
+                        "UNIQUE (deployment_approval_id)"
+                    )
+                )
+                assert verify_phase9_policy_renewal_upgrade(connection).status == (
+                    "PREVIOUS_READY"
+                )
+                upgraded = apply_phase9_policy_renewal_upgrade(connection)
+                assert upgraded.status == "UPGRADED"
+                assert upgraded.repeat_noop is False
+                replay = apply_phase9_policy_renewal_upgrade(connection)
+                assert replay.status == "ACCEPTED"
+                assert replay.repeat_noop is True
+                rolled_back = rollback_phase9_policy_renewal_upgrade(connection)
+                assert rolled_back.status == "ROLLED_BACK"
+                assert verify_phase9_policy_renewal_upgrade(connection).status == (
+                    "PREVIOUS_READY"
+                )
+                reapplied = apply_phase9_policy_renewal_upgrade(connection)
+                assert reapplied.status == "UPGRADED"
+            finally:
+                transaction.rollback()
+    finally:
+        engine.dispose()
 
 
 def test_acceptance_signal_trigger_is_database_immutable() -> None:

@@ -94,13 +94,15 @@ backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py shadow-risk-
 backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py shadow-risk-acl-verify
 backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py phase9-transition-apply
 backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py phase9-transition-verify
+backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py phase9-policy-renewal-apply
+backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py phase9-policy-renewal-verify
 python scripts/canonical_v13_api_service.py provision-phase9
 python scripts/canonical_v13_api_service.py provision-runtime-reader
 backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py verify-phase9-provisioned
 ```
 
 升级顺序固定为 Phase 9 schema → runtime image → runtime-reader ACL → deployment rollover → acceptance
-trigger → shadow-risk ACL → Phase B/C transition；rollback
+trigger → shadow-risk ACL → Phase B/C transition → policy renewal；rollback
 必须严格反向执行。后层尚存在时，前层 rollback 必须返回明确 `BLOCKED_*_ROLLBACK_REQUIRED`，不得只改
 manifest digest 留下 partial columns、trigger 或 ACL。
 
@@ -150,6 +152,12 @@ immutability triggers 与未变化的 global manifest；不得改写历史 JSON/
 acceptance signal 必须另建 `intent_mode=EXECUTION` intent，shadow intent/decision 保留不变；execution
 decision 与 reservation 只绑定 execution intent。存在同 signal 多 mode 证据后
 `phase9-transition-rollback` 必须 fail closed，不能为回退而删除或合并历史。
+
+Phase C policy renewal 只允许在旧 policy 已过 TTL 且尚无 risk budget、reservation 或 order 时，将旧行
+追加终态 `EXPIRED` 证据后创建新的 `ACTIVE` policy。数据库以 partial unique index 保证同一 qualification
+和 approval 最多一个 `ACTIVE` policy；旧 policy、probe 与 attestation 不删除、不覆盖。readiness 仅把
+非 `EXPIRED` policy 绑定的 probe/attestation 计入当前严格链。存在第二条 policy 历史后
+`phase9-policy-renewal-rollback` 必须 fail closed。
 
 完成 schema/ACL rollback 且 API、canonical runtime 与 order writer LaunchAgent 均已 unload 后，只能用
 以下窄入口清理 9 个固定 LOGIN 与 10 个固定 Keychain item；它不读取或删除 OKX credential：

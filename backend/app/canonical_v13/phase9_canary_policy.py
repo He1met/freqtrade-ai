@@ -10,7 +10,7 @@ from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 from uuid import UUID, uuid4
 
-from sqlalchemy import Connection, select
+from sqlalchemy import Connection, or_, select
 
 from app.canonical_v13.execution_common import (
     CanonicalExecutionChainBlocked,
@@ -925,7 +925,7 @@ def authorize_canary_risk_policy(
     reason: str,
     evaluated_at: datetime | None = None,
 ) -> CanaryRiskPolicyResult:
-    """Persist one immutable policy; exact POST replay is a no-op forever."""
+    """Persist one active policy; exact replay and expired renewal are deterministic."""
 
     effective = require_canonical_execution(connection)
     now = _utc(evaluated_at or datetime.now(timezone.utc), field="evaluated_at")
@@ -952,18 +952,8 @@ def authorize_canary_risk_policy(
     existing = (
         effective.execute(
             select(EXECUTION_CANARY_RISK_POLICIES_TABLE).where(
-                (
-                    EXECUTION_CANARY_RISK_POLICIES_TABLE.c.qualification_decision_id
-                    == qualification_decision_id
-                )
-                | (
-                    EXECUTION_CANARY_RISK_POLICIES_TABLE.c.deployment_approval_id
-                    == deployment_approval_id
-                )
-                | (
-                    EXECUTION_CANARY_RISK_POLICIES_TABLE.c.idempotency_key
-                    == idempotency_key
-                )
+                EXECUTION_CANARY_RISK_POLICIES_TABLE.c.idempotency_key
+                == idempotency_key
             )
         )
         .mappings()
@@ -983,8 +973,59 @@ def authorize_canary_risk_policy(
             Decimal(str(existing["max_notional"])),
             Decimal(str(existing["effective_leverage"])),
             _persisted_utc(existing["accepted_at"]),
-            _persisted_utc(existing["expires_at"]),
-            True,
+                _persisted_utc(existing["expires_at"]),
+                True,
+            )
+    active = (
+        effective.execute(
+            select(EXECUTION_CANARY_RISK_POLICIES_TABLE).where(
+                EXECUTION_CANARY_RISK_POLICIES_TABLE.c.status == "ACTIVE",
+                or_(
+                    EXECUTION_CANARY_RISK_POLICIES_TABLE.c.qualification_decision_id
+                    == qualification_decision_id,
+                    EXECUTION_CANARY_RISK_POLICIES_TABLE.c.deployment_approval_id
+                    == deployment_approval_id,
+                ),
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if active is not None:
+        if _persisted_utc(active["expires_at"]) > now:
+            raise CanonicalExecutionChainBlocked(
+                "BLOCKED_CANARY_POLICY_ACTIVE",
+                "the exact lineage already has a fresh active policy",
+            )
+        linked_budget = effective.execute(
+            select(EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE.c.id).where(
+                EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE.c.execution_canary_risk_policy_id
+                == active["id"]
+            )
+        ).scalar_one_or_none()
+        if linked_budget is not None:
+            raise CanonicalExecutionChainBlocked(
+                "BLOCKED_CANARY_POLICY_EXPIRED_WITH_BUDGET",
+                "an expired policy with downstream authority cannot be renewed",
+            )
+        expiration_payload = {
+            "contract": "canonical-v13-canary-risk-policy-expiration-v1",
+            "policy_id": str(active["id"]),
+            "policy_receipt_digest": active["receipt_digest"],
+            "reason_code": "POLICY_TTL_EXPIRED_BEFORE_BUDGET",
+            "expired_at": now.isoformat(),
+        }
+        effective.execute(
+            EXECUTION_CANARY_RISK_POLICIES_TABLE.update()
+            .where(
+                EXECUTION_CANARY_RISK_POLICIES_TABLE.c.id == active["id"],
+                EXECUTION_CANARY_RISK_POLICIES_TABLE.c.status == "ACTIVE",
+            )
+            .values(
+                status="EXPIRED",
+                terminated_at=now,
+                termination_digest=canonical_execution_digest(expiration_payload),
+            )
         )
     probe_receipt = (
         effective.execute(
