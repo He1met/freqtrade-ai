@@ -174,6 +174,93 @@ def test_explicit_http_rejection_is_redacted_and_returned_for_classification() -
     assert payload == {"code": "50101", "msg": "", "data": []}
 
 
+def test_explicit_item_http_rejection_is_attributed_and_redacted() -> None:
+    client_order_id = "V13ExactOrder001"
+    error = HTTPError(
+        "https://offline.invalid/api/v5/trade/order",
+        400,
+        "Bad Request",
+        {},
+        BytesIO(
+            json.dumps(
+                {
+                    "code": "1",
+                    "msg": "raw top-level exchange message",
+                    "data": [
+                        {
+                            "ordId": "",
+                            "clOrdId": client_order_id,
+                            "tag": "",
+                            "ts": "1787600000000",
+                            "sCode": "51000",
+                            "sMsg": "raw item-level exchange message",
+                            "subCode": "",
+                        }
+                    ],
+                    "inTime": "1787600000000000",
+                    "outTime": "1787600000001000",
+                }
+            ).encode("utf-8")
+        ),
+    )
+    transport = OfflineOkxDemoWriteTransportHarness(
+        Provider(),
+        opener=Opener(error),
+    )
+
+    payload = transport.post(
+        path="/api/v5/trade/order",
+        body={"clOrdId": client_order_id},
+    )
+
+    assert payload == {
+        "code": "1",
+        "msg": "",
+        "data": [
+            {
+                "ordId": "",
+                "clOrdId": client_order_id,
+                "sCode": "51000",
+            }
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    "item",
+    (
+        {"ordId": "", "clOrdId": "OtherOrder", "sCode": "51000"},
+        {"ordId": "exchange-identity", "clOrdId": "V13ExactOrder001", "sCode": "51000"},
+        {"ordId": "", "clOrdId": "V13ExactOrder001", "sCode": "0"},
+        {"ordId": "", "clOrdId": "V13ExactOrder001"},
+    ),
+)
+def test_unattributable_item_http_rejection_remains_unknown(item) -> None:
+    error = HTTPError(
+        "https://offline.invalid/api/v5/trade/order",
+        400,
+        "Bad Request",
+        {},
+        BytesIO(
+            json.dumps({"code": "1", "msg": "blocked", "data": [item]}).encode(
+                "utf-8"
+            )
+        ),
+    )
+    transport = OfflineOkxDemoWriteTransportHarness(
+        Provider(),
+        opener=Opener(error),
+    )
+
+    with pytest.raises(OkxDemoTransportError) as captured:
+        transport.post(
+            path="/api/v5/trade/order",
+            body={"clOrdId": "V13ExactOrder001"},
+        )
+
+    assert captured.value.unknown_write_outcome is True
+
+
 @pytest.mark.parametrize(
     "payload",
     (
