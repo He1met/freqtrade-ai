@@ -1117,7 +1117,7 @@ def _release_stopped_order_writer_database_lease(plan: Phase9LaunchPlan) -> None
         build_lifecycle_receipt(
             service_key=plan.service_key,
             action="DATABASE_WRITER_LEASE_RELEASE",
-            status="RELEASED",
+            status="STOPPED",
             generation=plan.generation,
             observed_at=_now(),
             plan_digest=plan.plan_digest,

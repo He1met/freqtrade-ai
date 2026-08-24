@@ -157,6 +157,42 @@ def _load_script(name: str):
     return module
 
 
+def test_database_writer_lease_release_uses_valid_stopped_lifecycle_status(
+    monkeypatch,
+) -> None:
+    service = _load_script("canonical_phase9_db_lease_release_receipt")
+    captured = []
+
+    @contextmanager
+    def connection_factory():
+        yield object()
+
+    monkeypatch.setattr(service, "_read_order_holder_token", lambda: "x" * 64)
+    monkeypatch.setattr(service, "_phase9_database_url", lambda _role: "unused")
+    monkeypatch.setattr(
+        service, "_connection_factory", lambda _url: connection_factory
+    )
+    monkeypatch.setattr(service, "_now", lambda: NOW)
+    monkeypatch.setattr(service, "_append_receipt", captured.append)
+    monkeypatch.setattr(
+        service,
+        "release_demo_order_writer_lease",
+        lambda *_args, **_kwargs: {
+            "status": "RELEASED",
+            "generation": 1,
+            "lease_digest": "9" * 64,
+            "repeat_noop": False,
+        },
+    )
+
+    service._release_stopped_order_writer_database_lease(_writer_plan())
+
+    assert len(captured) == 1
+    assert captured[0].action == "DATABASE_WRITER_LEASE_RELEASE"
+    assert captured[0].status == "STOPPED"
+    verify_lifecycle_receipt(captured[0])
+
+
 def _configure_roots(module, tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(module, "SUPPORT_ROOT", tmp_path / "support")
     monkeypatch.setattr(module, "LAUNCH_AGENT_ROOT", tmp_path / "agents")
