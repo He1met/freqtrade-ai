@@ -160,7 +160,6 @@ def test_explicit_http_rejection_is_redacted_and_returned_for_classification() -
                 {
                     "code": "50101",
                     "msg": "raw exchange message must not cross the transport",
-                    "data": [],
                 }
             ).encode("utf-8")
         ),

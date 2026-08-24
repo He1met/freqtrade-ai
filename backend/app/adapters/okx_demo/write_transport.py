@@ -74,8 +74,8 @@ def _explicit_http_rejection(exc: HTTPError) -> dict[str, object] | None:
         or not isinstance(payload.get("code"), str)
         or not payload["code"].isdigit()
         or payload["code"] == "0"
-        or not isinstance(payload.get("data"), list)
-        or payload["data"]
+        or not isinstance(payload.get("data", []), list)
+        or payload.get("data")
     ):
         return None
     return {"code": payload["code"], "msg": "", "data": []}
