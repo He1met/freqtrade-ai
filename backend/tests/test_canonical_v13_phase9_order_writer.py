@@ -1195,6 +1195,56 @@ def test_explicit_post_rejection_is_terminal_and_audited(canonical_connection):
     }
 
 
+def test_explicit_top_level_post_rejection_is_terminal_and_redacted(
+    canonical_connection,
+):
+    with canonical_connection.begin():
+        risk, attestation = _prepare_authority(canonical_connection)
+        prepared = prepare_demo_order(
+            canonical_connection,
+            risk_decision_id=risk.risk_decision_id,
+            attestation_id=attestation.attestation_id,
+            writer_identity="canonical_order_writer",
+            holder_identity="canonical-v13-order-writer-v1",
+            holder_token_digest="5" * 64,
+            idempotency_key="phase9-explicit-top-level-rejection",
+            order_request=ORDER_BODY,
+            evaluated_at=NOW + timedelta(seconds=2),
+        )
+
+    class RejectedTransport(FakeTransport):
+        def place(self, body):
+            self.place_calls += 1
+            return {
+                "code": "50101",
+                "msg": "raw exchange message must not be persisted",
+                "data": [],
+            }
+
+    result = dispatch_demo_order(
+        _factory(canonical_connection.engine),
+        order_id=prepared.order_id,
+        transport=RejectedTransport(),
+        holder_identity="canonical-v13-order-writer-v1",
+        holder_token_digest="5" * 64,
+        lease_generation=prepared.lease_generation,
+        evaluated_at=NOW + timedelta(seconds=3),
+    )
+
+    assert result.status == "REJECTED"
+    assert result.retry_authorized is False
+    outcome = canonical_connection.execute(
+        select(ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE)
+    ).mappings().one()
+    assert outcome["outcome_mode"] == "POST_REJECTED"
+    assert outcome["safe_response_json"] == {
+        "code": "50101",
+        "ordId": "",
+        "clOrdId": ORDER_BODY["clOrdId"],
+        "sCode": "",
+    }
+
+
 @pytest.mark.parametrize(
     "guard_mutation",
     (

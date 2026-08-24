@@ -534,12 +534,26 @@ def _safe_post_result(
         not isinstance(code, str)
         or not code.isdigit()
         or not isinstance(data, list)
-        or len(data) != 1
-        or not isinstance(data[0], Mapping)
     ):
         raise CanonicalOrderRecoveryRequired(
             "BLOCKED_ORDER_RESPONSE_UNKNOWN",
             "exchange rejection was not explicit and safely attributable",
+        )
+    if code != "0" and not data:
+        return (
+            "REJECTED",
+            None,
+            {
+                "code": code,
+                "ordId": "",
+                "clOrdId": client_order_id,
+                "sCode": "",
+            },
+        )
+    if len(data) != 1 or not isinstance(data[0], Mapping):
+        raise CanonicalOrderRecoveryRequired(
+            "BLOCKED_ORDER_RESPONSE_UNKNOWN",
+            "exchange rejection was not explicitly attributable",
         )
     item = data[0]
     s_code = item.get("sCode")
@@ -1512,8 +1526,10 @@ def _persist_nonaccepted_outcome(
         isinstance(safe.get("code"), str)
         and str(safe["code"]).isdigit()
         and isinstance(safe.get("sCode"), str)
-        and str(safe["sCode"]).isdigit()
-        and str(safe["sCode"]) != "0"
+        and (
+            (str(safe["code"]) != "0" and safe["sCode"] == "")
+            or (str(safe["sCode"]).isdigit() and str(safe["sCode"]) != "0")
+        )
     ):
         raise CanonicalExecutionChainBlocked(
             "BLOCKED_ORDER_REJECTION_EVIDENCE", "explicit rejection evidence drifted"

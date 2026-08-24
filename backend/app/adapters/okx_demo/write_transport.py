@@ -41,6 +41,44 @@ REQUIRED_AUTH_HEADERS = frozenset(
 )
 CONTROL_CHARACTER_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
 OFFLINE_TEST_ORIGIN = "https://offline.invalid"
+MAX_ERROR_RESPONSE_BYTES = 16 * 1024
+SAFE_WRITE_RESPONSE_KEYS = frozenset({"code", "msg", "data", "inTime", "outTime"})
+
+
+def _explicit_http_rejection(exc: HTTPError) -> dict[str, object] | None:
+    """Return only a redacted, explicit OKX rejection from an HTTP error.
+
+    The response body is never forwarded.  A malformed, oversized, successful,
+    or ambiguous envelope remains an unknown write outcome and must use the
+    existing GET-only recovery path.
+    """
+
+    if not 400 <= exc.code <= 599:
+        return None
+    try:
+        raw_payload = exc.read(MAX_ERROR_RESPONSE_BYTES + 1)
+    except (OSError, TypeError):
+        return None
+    if (
+        not isinstance(raw_payload, bytes)
+        or len(raw_payload) > MAX_ERROR_RESPONSE_BYTES
+    ):
+        return None
+    try:
+        payload = json.loads(raw_payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if (
+        not isinstance(payload, dict)
+        or set(payload).difference(SAFE_WRITE_RESPONSE_KEYS)
+        or not isinstance(payload.get("code"), str)
+        or not payload["code"].isdigit()
+        or payload["code"] == "0"
+        or not isinstance(payload.get("data"), list)
+        or payload["data"]
+    ):
+        return None
+    return {"code": payload["code"], "msg": "", "data": []}
 
 
 class OkxDemoWriteTransport(Protocol):
@@ -134,7 +172,10 @@ class UrllibOkxDemoWriteTransport:
             with self._opener.open(request, timeout=timeout_seconds) as response:
                 status_code = response.status
                 raw_payload = response.read()
-        except HTTPError:
+        except HTTPError as exc:
+            explicit_rejection = _explicit_http_rejection(exc)
+            if explicit_rejection is not None:
+                return explicit_rejection
             raise OkxDemoTransportError(unknown_write_outcome=True) from None
         except (TimeoutError, URLError, OSError):
             raise OkxDemoTransportError(unknown_write_outcome=True) from None

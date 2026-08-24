@@ -1,4 +1,6 @@
 import json
+from io import BytesIO
+from urllib.error import HTTPError
 
 import pytest
 
@@ -139,6 +141,59 @@ def test_invalid_write_response_is_always_unknown(raw_payload) -> None:
     transport = OfflineOkxDemoWriteTransportHarness(
         Provider(),
         opener=Opener(Response(raw_payload)),
+    )
+
+    with pytest.raises(OkxDemoTransportError) as captured:
+        transport.post(path="/api/v5/trade/order", body={"a": "b"})
+
+    assert captured.value.unknown_write_outcome is True
+
+
+def test_explicit_http_rejection_is_redacted_and_returned_for_classification() -> None:
+    error = HTTPError(
+        "https://offline.invalid/api/v5/trade/order",
+        400,
+        "Bad Request",
+        {},
+        BytesIO(
+            json.dumps(
+                {
+                    "code": "50101",
+                    "msg": "raw exchange message must not cross the transport",
+                    "data": [],
+                }
+            ).encode("utf-8")
+        ),
+    )
+    transport = OfflineOkxDemoWriteTransportHarness(
+        Provider(),
+        opener=Opener(error),
+    )
+
+    payload = transport.post(path="/api/v5/trade/order", body={"a": "b"})
+
+    assert payload == {"code": "50101", "msg": "", "data": []}
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {"code": "0", "msg": "", "data": []},
+        {"code": "50101", "msg": "blocked", "data": [], "unsafe": "field"},
+        {"code": "50101", "msg": "blocked", "data": [{"ordId": "unknown"}]},
+    ),
+)
+def test_ambiguous_http_error_remains_unknown(payload) -> None:
+    error = HTTPError(
+        "https://offline.invalid/api/v5/trade/order",
+        400,
+        "Bad Request",
+        {},
+        BytesIO(json.dumps(payload).encode("utf-8")),
+    )
+    transport = OfflineOkxDemoWriteTransportHarness(
+        Provider(),
+        opener=Opener(error),
     )
 
     with pytest.raises(OkxDemoTransportError) as captured:
