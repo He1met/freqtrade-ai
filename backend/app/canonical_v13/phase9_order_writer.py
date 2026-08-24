@@ -428,12 +428,26 @@ def prepare_demo_order(
             raise CanonicalExecutionChainBlocked(
                 "BLOCKED_ORDER_IDEMPOTENCY_DRIFT", idempotency_key
             )
-        lease = effective.execute(
-            select(ORDER_WRITER_LEASES_TABLE.c.generation).where(
-                ORDER_WRITER_LEASES_TABLE.c.execution_target == "OKX_DEMO"
+        if (
+            existing["status"] == "SUBMITTED"
+            and existing["exchange_order_id"] is None
+            and existing["receipt_digest"] is None
+        ):
+            generation = _acquire_writer_lease(
+                effective,
+                holder_identity=holder_identity,
+                holder_token_digest=holder_token_digest,
+                now=now,
+                lease_ttl=lease_ttl,
             )
-        ).scalar_one_or_none()
-        return PreparedDemoOrder(existing["id"], request_digest, int(lease or 0), True)
+        else:
+            lease = effective.execute(
+                select(ORDER_WRITER_LEASES_TABLE.c.generation).where(
+                    ORDER_WRITER_LEASES_TABLE.c.execution_target == "OKX_DEMO"
+                )
+            ).scalar_one_or_none()
+            generation = int(lease or 0)
+        return PreparedDemoOrder(existing["id"], request_digest, generation, True)
     generation = _acquire_writer_lease(
         effective,
         holder_identity=holder_identity,
