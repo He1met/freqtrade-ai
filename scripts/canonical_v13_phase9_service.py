@@ -68,6 +68,14 @@ from app.canonical_v13.phase9_production_composition import (  # noqa: E402
     record_current_canary_attestation,
     record_current_canary_probe_receipt,
 )
+from app.canonical_v13.phase9_canary_policy import (  # noqa: E402
+    authorize_canary_risk_policy,
+)
+from app.canonical_v13.execution_common import (  # noqa: E402
+    canonical_execution_digest,
+    lock_execution_boundary,
+    require_identity,
+)
 from app.canonical_v13.phase9_recovery_composition import (  # noqa: E402
     accept_phase9_recovery_soak,
 )
@@ -1653,6 +1661,12 @@ def _probe_saga_path(deployment_id: UUID) -> Path:
     return SUPPORT_ROOT / f"canary-probe-{deployment_id}.saga.json"
 
 
+def _policy_probe_saga_path(deployment_id: UUID, request_digest: str) -> Path:
+    return SUPPORT_ROOT / (
+        f"canary-policy-probe-{deployment_id}-{request_digest}.saga.json"
+    )
+
+
 def _sealed_probe_for_saga(
     deployment_id: UUID,
     session_factory,
@@ -1801,6 +1815,224 @@ def probe_canary(deployment_id: UUID) -> dict[str, object]:
         "execution_target": "OKX_DEMO",
         "allow_real_funds": False,
     }
+
+
+def _existing_policy_probe_identity(
+    approval_connection,
+    *,
+    qualification_decision_id: UUID,
+    deployment_approval_id: UUID,
+    idempotency_key: str,
+) -> tuple[UUID, UUID] | None:
+    from sqlalchemy import or_, select  # noqa: PLC0415
+
+    from app.canonical_v13.models import (  # noqa: PLC0415
+        EXECUTION_CANARY_PROBE_RECEIPTS_TABLE,
+        EXECUTION_CANARY_RISK_POLICIES_TABLE,
+    )
+
+    effective = getattr(approval_connection, "connection", approval_connection)
+    row = (
+        effective.execute(
+            select(
+                EXECUTION_CANARY_RISK_POLICIES_TABLE.c.probe_receipt_id,
+                EXECUTION_CANARY_PROBE_RECEIPTS_TABLE.c.execution_attestation_id,
+            )
+            .join(
+                EXECUTION_CANARY_PROBE_RECEIPTS_TABLE,
+                EXECUTION_CANARY_PROBE_RECEIPTS_TABLE.c.id
+                == EXECUTION_CANARY_RISK_POLICIES_TABLE.c.probe_receipt_id,
+            )
+            .where(
+                or_(
+                    EXECUTION_CANARY_RISK_POLICIES_TABLE.c.qualification_decision_id
+                    == qualification_decision_id,
+                    EXECUTION_CANARY_RISK_POLICIES_TABLE.c.deployment_approval_id
+                    == deployment_approval_id,
+                    EXECUTION_CANARY_RISK_POLICIES_TABLE.c.idempotency_key
+                    == idempotency_key,
+                )
+            )
+        )
+        .one_or_none()
+    )
+    return (row[0], row[1]) if row is not None else None
+
+
+def _sealed_policy_probe(
+    deployment_id: UUID,
+    session_factory,
+    *,
+    request_digest: str,
+    evaluated_at: datetime,
+):
+    """Keep one safe probe per policy request; expired orphan generations rotate."""
+
+    from app.canonical_v13.phase9_okx_demo import RedactedOkxDemoProbe  # noqa: PLC0415
+
+    path = _policy_probe_saga_path(deployment_id, request_digest)
+
+    def seal_current_probe():
+        with session_factory() as session:
+            current = session.probe(instrument="BTC-USDT-SWAP")
+        _atomic_json(
+            path,
+            {
+                "contract": "canonical-v13-okx-demo-policy-probe-saga-v1",
+                "deployment_id": str(deployment_id),
+                "request_digest": request_digest,
+                "probe": _json_safe(asdict(current)),
+            },
+        )
+        return current
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return seal_current_probe()
+    except (OSError, ValueError, TypeError) as exc:
+        raise CanonicalPhase9SupervisorBlocked(
+            "BLOCKED_PHASE9_POLICY_PROBE_SAGA", "sealed policy probe is corrupt"
+        ) from exc
+    raw = payload.get("probe") if isinstance(payload, dict) else None
+    expected = {field.name for field in fields(RedactedOkxDemoProbe)}
+    if (
+        payload.get("contract")
+        != "canonical-v13-okx-demo-policy-probe-saga-v1"
+        or payload.get("deployment_id") != str(deployment_id)
+        or payload.get("request_digest") != request_digest
+        or not isinstance(raw, dict)
+        or set(raw) != expected
+    ):
+        raise CanonicalPhase9SupervisorBlocked(
+            "BLOCKED_PHASE9_POLICY_PROBE_SAGA",
+            "sealed policy probe identity drifted",
+        )
+    for name in tuple(expected):
+        if name.endswith("_at") or name.endswith("_expires_at") or name == "expires_at":
+            raw[name] = datetime.fromisoformat(str(raw[name]))
+    raw["permissions"] = dict(raw["permissions"])
+    sealed = RedactedOkxDemoProbe(**raw)
+    return sealed if sealed.expires_at > evaluated_at else seal_current_probe()
+
+
+def probe_and_authorize_canary_policy(
+    *,
+    deployment_id: UUID,
+    qualification_decision_id: UUID,
+    deployment_approval_id: UUID,
+    actor_identity: str,
+    idempotency_key: str,
+    reason: str,
+) -> dict[str, object]:
+    """Atomically bind a fresh probe receipt and policy in one approval transaction."""
+
+    _require_release_checkout()
+    actor_identity = require_identity(
+        actor_identity, field="actor_identity", maximum=160
+    )
+    idempotency_key = require_identity(
+        idempotency_key, field="idempotency_key", maximum=200
+    )
+    reason = require_identity(reason, field="reason", maximum=2000)
+    deployment_factory = _connection_factory(
+        _phase9_database_url("canonical_deployment_writer")
+    )
+    approval_factory = _connection_factory(
+        _phase9_database_url("canonical_approval_writer")
+    )
+    request_digest = canonical_execution_digest(
+        {
+            "contract": "canonical-v13-probe-and-authorize-policy-request-v1",
+            "deployment_id": str(deployment_id),
+            "qualification_decision_id": str(qualification_decision_id),
+            "deployment_approval_id": str(deployment_approval_id),
+            "actor_identity": actor_identity,
+            "idempotency_key": idempotency_key,
+            "reason": reason,
+        }
+    )
+    with approval_factory() as approval_connection:
+        effective = getattr(approval_connection, "connection", approval_connection)
+        lock_execution_boundary(
+            effective, key=f"canary-risk-policy:{qualification_decision_id}"
+        )
+        existing = _existing_policy_probe_identity(
+            approval_connection,
+            qualification_decision_id=qualification_decision_id,
+            deployment_approval_id=deployment_approval_id,
+            idempotency_key=idempotency_key,
+        )
+        if existing is not None:
+            probe_receipt_id, attestation_id = existing
+            policy = authorize_canary_risk_policy(
+                approval_connection,
+                qualification_decision_id=qualification_decision_id,
+                deployment_approval_id=deployment_approval_id,
+                probe_receipt_id=probe_receipt_id,
+                actor_identity=actor_identity,
+                idempotency_key=idempotency_key,
+                reason=reason,
+            )
+            return {
+                "status": "READY",
+                "deployment_id": str(deployment_id),
+                "attestation_id": str(attestation_id),
+                "probe_receipt_id": str(probe_receipt_id),
+                **_json_safe(asdict(policy)),
+                "repeat_noop": True,
+                "execution_target": "OKX_DEMO",
+                "allow_real_funds": False,
+            }
+
+        session_factory = _production_okx_session_factory()
+        probe = _sealed_policy_probe(
+            deployment_id,
+            session_factory,
+            request_digest=request_digest,
+            evaluated_at=_now(),
+        )
+        with deployment_factory() as deployment_connection:
+            sealed_probe, attestation = record_current_canary_attestation(
+                deployment_connection,
+                deployment_id=deployment_id,
+                session=type(
+                    "SealedPolicyProbeSession",
+                    (),
+                    {"probe": lambda self, *, instrument: probe},
+                )(),
+                evaluated_at=_now(),
+            )
+        policy_now = _now()
+        probe_receipt = record_current_canary_probe_receipt(
+            approval_connection,
+            deployment_id=deployment_id,
+            probe=sealed_probe,
+            attestation=attestation,
+            evaluated_at=policy_now,
+        )
+        policy = authorize_canary_risk_policy(
+            approval_connection,
+            qualification_decision_id=qualification_decision_id,
+            deployment_approval_id=deployment_approval_id,
+            probe_receipt_id=probe_receipt.probe_receipt_id,
+            actor_identity=actor_identity,
+            idempotency_key=idempotency_key,
+            reason=reason,
+            evaluated_at=policy_now,
+        )
+        return {
+            "status": "READY",
+            "deployment_id": str(deployment_id),
+            "attestation_id": str(attestation.attestation_id),
+            "attestation_digest": attestation.attestation_digest,
+            "probe_receipt_id": str(probe_receipt.probe_receipt_id),
+            "probe_receipt_digest": probe_receipt.receipt_digest,
+            **_json_safe(asdict(policy)),
+            "repeat_noop": False,
+            "execution_target": "OKX_DEMO",
+            "allow_real_funds": False,
+        }
 
 
 def dispatch_canary(plan_digest: str, risk_decision_id: UUID) -> dict[str, object]:
@@ -2110,6 +2342,7 @@ def main(argv: list[str] | None = None) -> int:
             "confirm-runtime-observation",
             "confirm-runtime-stop-observation",
             "probe-canary",
+            "probe-authorize-canary-policy",
             "dispatch-canary",
             "recover-canary",
             "collect-canary-fills",
@@ -2154,6 +2387,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--order-id", type=UUID)
     parser.add_argument("--fill-id", type=UUID)
     parser.add_argument("--qualification-decision-id", type=UUID)
+    parser.add_argument("--deployment-approval-id", type=UUID)
+    parser.add_argument("--actor-identity")
+    parser.add_argument("--idempotency-key")
+    parser.add_argument("--reason")
     parser.add_argument("--acceptance-trigger-id", type=UUID)
     args = parser.parse_args(argv)
     try:
@@ -2285,6 +2522,28 @@ def main(argv: list[str] | None = None) -> int:
                     "order_writer and --deployment-id are required",
                 )
             payload = probe_canary(args.deployment_id)
+        elif args.command == "probe-authorize-canary-policy":
+            if (
+                args.service != "order_writer"
+                or args.deployment_id is None
+                or args.qualification_decision_id is None
+                or args.deployment_approval_id is None
+                or not args.actor_identity
+                or not args.idempotency_key
+                or not args.reason
+            ):
+                raise CanonicalPhase9SupervisorBlocked(
+                    "BLOCKED_PHASE9_POLICY_PROBE_COMMAND",
+                    "order_writer and exact deployment, qualification, approval, actor, idempotency, and reason are required",
+                )
+            payload = probe_and_authorize_canary_policy(
+                deployment_id=args.deployment_id,
+                qualification_decision_id=args.qualification_decision_id,
+                deployment_approval_id=args.deployment_approval_id,
+                actor_identity=args.actor_identity,
+                idempotency_key=args.idempotency_key,
+                reason=args.reason,
+            )
         elif args.command == "dispatch-canary":
             if (
                 args.service != "order_writer"

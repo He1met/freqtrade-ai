@@ -26,6 +26,7 @@ from app.canonical_v13.phase9_runtime_supervisor import (
     verify_lifecycle_receipt,
 )
 from app.canonical_v13.phase9_okx_demo import RedactedOkxDemoProbe
+from app.canonical_v13.phase9_canary_policy import CanaryRiskPolicyResult
 
 
 NOW = datetime(2026, 8, 21, 1, 2, 3, tzinfo=timezone.utc)
@@ -1958,3 +1959,200 @@ def test_expired_linked_probe_saga_blocks_without_reprobe(monkeypatch, tmp_path)
             linked_probe_receipt_exists=lambda: True,
         )
     assert events == ["authenticated-get"]
+
+
+def test_expired_policy_probe_saga_rotates_without_rewriting_history(
+    monkeypatch, tmp_path
+) -> None:
+    service = _load_script("canonical_phase9_policy_probe_saga_test")
+    monkeypatch.setattr(service, "SUPPORT_ROOT", tmp_path)
+    expired = _redacted_probe(
+        observed_at=NOW - timedelta(seconds=40),
+        expires_at=NOW - timedelta(seconds=10),
+    )
+    fresh = _redacted_probe(
+        observed_at=NOW,
+        expires_at=NOW + timedelta(seconds=30),
+    )
+    probes = iter((expired, fresh))
+    events = []
+
+    @contextmanager
+    def session_factory():
+        probe = next(probes)
+        events.append("authenticated-get")
+        yield SimpleNamespace(probe=lambda **_kwargs: probe)
+
+    request_digest = "7" * 64
+    first = service._sealed_policy_probe(
+        DEPLOYMENT_ID,
+        session_factory,
+        request_digest=request_digest,
+        evaluated_at=NOW - timedelta(seconds=20),
+    )
+    rotated = service._sealed_policy_probe(
+        DEPLOYMENT_ID,
+        session_factory,
+        request_digest=request_digest,
+        evaluated_at=NOW,
+    )
+
+    assert first is expired
+    assert rotated is fresh
+    assert events == ["authenticated-get", "authenticated-get"]
+    persisted = json.loads(
+        service._policy_probe_saga_path(
+            DEPLOYMENT_ID, request_digest
+        ).read_text(encoding="utf-8")
+    )
+    assert persisted["request_digest"] == request_digest
+    assert persisted["probe"]["expires_at"] == fresh.expires_at.isoformat()
+
+
+def test_probe_and_policy_commits_receipt_and_policy_in_one_approval_transaction(
+    monkeypatch,
+) -> None:
+    service = _load_script("canonical_phase9_probe_policy_atomic_test")
+    qualification_id = UUID("00000000-0000-4000-8000-000000000099")
+    approval_id = UUID("00000000-0000-4000-8000-000000000098")
+    probe_id = UUID("00000000-0000-4000-8000-000000000097")
+    attestation_id = UUID("00000000-0000-4000-8000-000000000096")
+    events = []
+    approval_connection = object()
+    deployment_connection = object()
+
+    @contextmanager
+    def connection_factory(name):
+        events.append((name, "open"))
+        yield approval_connection if name == "approval" else deployment_connection
+        events.append((name, "commit"))
+
+    monkeypatch.setattr(service, "_require_release_checkout", lambda: None)
+    monkeypatch.setattr(
+        service,
+        "_phase9_database_url",
+        lambda identity: "approval" if identity == "canonical_approval_writer" else "deployment",
+    )
+    monkeypatch.setattr(service, "_connection_factory", lambda name: lambda: connection_factory(name))
+    monkeypatch.setattr(service, "lock_execution_boundary", lambda *_args, **_kwargs: events.append("lock"))
+    monkeypatch.setattr(service, "_existing_policy_probe_identity", lambda *_args, **_kwargs: None)
+    probe = _redacted_probe(observed_at=NOW, expires_at=NOW + timedelta(seconds=30))
+    monkeypatch.setattr(service, "_sealed_policy_probe", lambda *_args, **_kwargs: probe)
+    monkeypatch.setattr(service, "_production_okx_session_factory", lambda: object())
+    monkeypatch.setattr(service, "_now", lambda: NOW)
+    monkeypatch.setattr(
+        service,
+        "record_current_canary_attestation",
+        lambda *_args, **_kwargs: (
+            events.append("attestation") or probe,
+            SimpleNamespace(
+                attestation_id=attestation_id,
+                attestation_digest="8" * 64,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "record_current_canary_probe_receipt",
+        lambda *_args, **_kwargs: (
+            events.append("probe-receipt")
+            or SimpleNamespace(
+                probe_receipt_id=probe_id,
+                receipt_digest="9" * 64,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "authorize_canary_risk_policy",
+        lambda *_args, **_kwargs: (
+            events.append("policy")
+            or CanaryRiskPolicyResult(
+                UUID("00000000-0000-4000-8000-000000000095"),
+                "a" * 64,
+                "b" * 64,
+                "c" * 64,
+                1,
+                12,
+                NOW,
+                NOW + timedelta(minutes=30),
+                False,
+            )
+        ),
+    )
+
+    result = service.probe_and_authorize_canary_policy(
+        deployment_id=DEPLOYMENT_ID,
+        qualification_decision_id=qualification_id,
+        deployment_approval_id=approval_id,
+        actor_identity="operator:test",
+        idempotency_key="phase9-policy-atomic-test",
+        reason="acceptance only",
+    )
+
+    assert result["status"] == "READY"
+    assert result["probe_receipt_id"] == str(probe_id)
+    assert events == [
+        ("approval", "open"),
+        "lock",
+        ("deployment", "open"),
+        "attestation",
+        ("deployment", "commit"),
+        "probe-receipt",
+        "policy",
+        ("approval", "commit"),
+    ]
+
+
+def test_probe_and_policy_exact_replay_does_not_reprobe_exchange(monkeypatch) -> None:
+    service = _load_script("canonical_phase9_probe_policy_replay_test")
+    qualification_id = UUID("00000000-0000-4000-8000-000000000099")
+    approval_id = UUID("00000000-0000-4000-8000-000000000098")
+    probe_id = UUID("00000000-0000-4000-8000-000000000097")
+    attestation_id = UUID("00000000-0000-4000-8000-000000000096")
+
+    @contextmanager
+    def approval_factory():
+        yield object()
+
+    monkeypatch.setattr(service, "_require_release_checkout", lambda: None)
+    monkeypatch.setattr(service, "_phase9_database_url", lambda identity: identity)
+    monkeypatch.setattr(service, "_connection_factory", lambda _name: approval_factory)
+    monkeypatch.setattr(service, "lock_execution_boundary", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        service,
+        "_existing_policy_probe_identity",
+        lambda *_args, **_kwargs: (probe_id, attestation_id),
+    )
+    monkeypatch.setattr(
+        service,
+        "_production_okx_session_factory",
+        lambda: pytest.fail("exact replay must not construct a private session"),
+    )
+    monkeypatch.setattr(
+        service,
+        "authorize_canary_risk_policy",
+        lambda *_args, **_kwargs: CanaryRiskPolicyResult(
+            UUID("00000000-0000-4000-8000-000000000095"),
+            "a" * 64,
+            "b" * 64,
+            "c" * 64,
+            1,
+            12,
+            NOW,
+            NOW + timedelta(minutes=30),
+            True,
+        ),
+    )
+
+    result = service.probe_and_authorize_canary_policy(
+        deployment_id=DEPLOYMENT_ID,
+        qualification_decision_id=qualification_id,
+        deployment_approval_id=approval_id,
+        actor_identity="operator:test",
+        idempotency_key="phase9-policy-atomic-test",
+        reason="acceptance only",
+    )
+
+    assert result["repeat_noop"] is True
+    assert result["probe_receipt_id"] == str(probe_id)
