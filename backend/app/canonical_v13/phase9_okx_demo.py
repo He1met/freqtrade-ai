@@ -568,11 +568,14 @@ class CanonicalOkxDemoSession:
             price=limit_price_decimal,
             leverage=effective_leverage,
         )
+        maximum_verification_now = _utc(
+            self.__now(), code="BLOCKED_OKX_DEMO_ATTESTATION_FRESHNESS"
+        )
         maximum_items, maximum_observed, maximum_expires = _verified_snapshot(
             maximum_snapshot,
             resource="maximum_order_quantity",
             authenticated=True,
-            now=now,
+            now=maximum_verification_now,
         )
         if len(maximum_items) != 1:
             raise CanonicalExecutionChainBlocked(
@@ -656,7 +659,7 @@ class CanonicalOkxDemoSession:
             maximum_expires,
             resolved + ttl,
         )
-        if expires <= now:
+        if expires <= maximum_verification_now:
             raise CanonicalExecutionChainBlocked(
                 "BLOCKED_OKX_DEMO_ATTESTATION_FRESHNESS",
                 "combined probe freshness window is empty",
