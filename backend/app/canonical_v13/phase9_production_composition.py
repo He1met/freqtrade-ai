@@ -492,6 +492,8 @@ class DatabaseOrderWriterAuthorityVerifier:
             and policy["execution_target"] == "OKX_DEMO"
             and policy["allow_real_funds"] is False
             and policy["position_policy"] == "LONG_ONLY"
+            and Decimal(str(policy["strategy_max_leverage"]))
+            == Decimal(authority.strategy_max_leverage)
             and Decimal(str(policy["effective_leverage"]))
             == Decimal(authority.effective_leverage)
             and policy_expires_at is not None

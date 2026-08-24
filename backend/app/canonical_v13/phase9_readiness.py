@@ -39,10 +39,12 @@ from app.canonical_v13.models import (
     RUNTIME_INSTANCES_TABLE,
     RUNTIME_RECEIPTS_TABLE,
     SIGNALS_TABLE,
+    STRATEGY_ARTIFACTS_TABLE,
     TRADE_INTENTS_TABLE,
 )
 from app.canonical_v13.execution_common import CanonicalExecutionChainBlocked
 from app.canonical_v13.phase9_canary_policy import (
+    extract_strategy_leverage_cap,
     validate_persisted_canary_probe_receipt,
 )
 from app.canonical_v13.phase9_execution_authority import (
@@ -51,6 +53,10 @@ from app.canonical_v13.phase9_execution_authority import (
 from app.canonical_v13.order_service import CANONICAL_ORDER_WRITER_IDENTITY
 from app.canonical_v13.phase9_topology import phase9_topology_digest
 from app.canonical_v13.research_evaluation import gate_optimization
+from app.canonical_v13.risk_service import (
+    INTENT_MODE_EXECUTION,
+    INTENT_MODE_SIGNAL_RISK_SHADOW,
+)
 
 
 class CanonicalPhase9ReadinessBlocked(RuntimeError):
@@ -746,6 +752,14 @@ def _inspect_lineage(
         else []
     )
     counts["trade_intents"] = len(intents)
+    shadow_intents = [
+        row
+        for row in intents
+        if row["intent_mode"] == INTENT_MODE_SIGNAL_RISK_SHADOW
+    ]
+    execution_intents = [
+        row for row in intents if row["intent_mode"] == INTENT_MODE_EXECUTION
+    ]
     intent_ids = [row["id"] for row in intents]
     risks = (
         connection.execute(
@@ -769,10 +783,15 @@ def _inspect_lineage(
             .mappings()
             .one_or_none()
         )
-        intent_by_id = {row["id"]: row for row in intents}
+        intent_by_id = {row["id"]: row for row in shadow_intents}
         signal_by_id = {row["id"]: row for row in selected_shadow_signals}
         exact_shadow = []
-        for row in risks:
+        shadow_risks = [
+            row
+            for row in risks
+            if row["decision_mode"] == INTENT_MODE_SIGNAL_RISK_SHADOW
+        ]
+        for row in shadow_risks:
             intent = intent_by_id.get(row["trade_intent_id"])
             signal = signal_by_id.get(intent["signal_id"]) if intent else None
             payload = row["decision_json"]
@@ -851,9 +870,9 @@ def _inspect_lineage(
                 != triggers[0]["receipt_digest"]
             ):
                 reasons.append("EXACT_ACCEPTANCE_TRIGGER_SIGNAL_LINEAGE_REQUIRED")
-        if len(intents) != 1:
+        if len(shadow_intents) != 1:
             reasons.append("EXACT_SINGLE_SHADOW_INTENT_REQUIRED")
-        if len(risks) != 1 or len(exact_shadow) != 1:
+        if len(shadow_risks) != 1 or len(exact_shadow) != 1:
             reasons.append("EXACT_SINGLE_SHADOW_DECISION_RECEIPT_REQUIRED")
         return counts
 
@@ -879,32 +898,42 @@ def _inspect_lineage(
         .all()
     )
     counts["execution_canary_risk_policies"] = len(risk_policy_sources)
+    execution_intent_ids = [row["id"] for row in execution_intents]
     reservations = (
         connection.execute(
             select(EXECUTION_RISK_RESERVATIONS_TABLE).where(
-                EXECUTION_RISK_RESERVATIONS_TABLE.c.trade_intent_id.in_(intent_ids)
+                EXECUTION_RISK_RESERVATIONS_TABLE.c.trade_intent_id.in_(
+                    execution_intent_ids
+                )
             )
         )
         .mappings()
         .all()
-        if intent_ids
+        if execution_intent_ids
         else []
     )
     counts["execution_risk_reservations"] = len(reservations)
     if not signals:
         reasons.append("EXACT_SIGNAL_EVIDENCE_UNSET")
-    if not intents:
-        reasons.append("EXACT_TRADE_INTENT_EVIDENCE_UNSET")
+    if len(execution_intents) != 1:
+        reasons.append("EXACT_SINGLE_EXECUTION_INTENT_REQUIRED")
     execution_risks = [
         row
         for row in risks
-        if isinstance(row["decision_json"], Mapping)
+        if row["decision_mode"] == INTENT_MODE_EXECUTION
+        and row["trade_intent_id"] in execution_intent_ids
+        and isinstance(row["decision_json"], Mapping)
         and row["decision_json"].get("decision_mode") == "EXECUTION"
         and row["decision_json"].get("execution_authorized")
         == (row["status"] == "RISK_ACCEPTED")
         and row["decision_json"].get("order_submission_enabled")
         == (row["status"] == "RISK_ACCEPTED")
     ]
+    if any(
+        row["intent_json"].get("intent_mode") != INTENT_MODE_EXECUTION
+        for row in execution_intents
+    ):
+        reasons.append("EXACT_EXECUTION_INTENT_MODE_LINEAGE_DRIFT")
     if not any(row["status"] == "RISK_ACCEPTED" for row in execution_risks):
         reasons.append("EXACT_RISK_ACCEPTED_EVIDENCE_UNSET")
     if len([row for row in execution_risks if row["status"] == "RISK_ACCEPTED"]) != 1:
@@ -913,6 +942,29 @@ def _inspect_lineage(
         reasons.append("EXACT_RISK_BUDGET_AUTHORIZATION_EVIDENCE_UNSET")
     exact_policy_source = []
     for source in risk_policy_sources:
+        artifact = (
+            connection.execute(
+                select(STRATEGY_ARTIFACTS_TABLE).where(
+                    STRATEGY_ARTIFACTS_TABLE.c.id
+                    == source["strategy_artifact_id"]
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        artifact_leverage_cap: Decimal | None = None
+        if (
+            artifact is not None
+            and artifact["content_digest"] == source["strategy_artifact_digest"]
+            and sha256(artifact["normalized_content"].encode("utf-8")).hexdigest()
+            == artifact["content_digest"]
+        ):
+            try:
+                artifact_leverage_cap = extract_strategy_leverage_cap(
+                    artifact["normalized_content"]
+                )
+            except CanonicalExecutionChainBlocked:
+                pass
         probe_rows = (
             connection.execute(
                 select(EXECUTION_CANARY_PROBE_RECEIPTS_TABLE).where(
@@ -1023,7 +1075,11 @@ def _inspect_lineage(
                 * Decimal(probe["contract_value"])
                 * Decimal(probe["mark_price"])
             ),
-            "strategy_max_leverage": "14",
+            "strategy_max_leverage": (
+                _decimal_text(artifact_leverage_cap)
+                if artifact_leverage_cap is not None
+                else ""
+            ),
             "exchange_max_leverage": _decimal_text(probe["exchange_max_leverage"]),
             "effective_leverage": _decimal_text(probe["current_long_leverage"]),
             "metadata_receipt_digest": source["metadata_receipt_digest"],
@@ -1068,6 +1124,7 @@ def _inspect_lineage(
                 "max_notional": str(Decimal(str(source["max_notional"]))),
                 "max_order_count": source["max_order_count"],
                 "position_policy": source["position_policy"],
+                "strategy_max_leverage": str(source["strategy_max_leverage"]),
                 "effective_leverage": str(source["effective_leverage"]),
                 "actor_identity": budget["actor_identity"],
                 "reason": budget["reason"],
@@ -1120,7 +1177,9 @@ def _inspect_lineage(
             )
             and source["position_policy"] == "LONG_ONLY"
             and source["max_order_count"] == 1
-            and Decimal(str(source["strategy_max_leverage"])) == Decimal("14")
+            and artifact_leverage_cap is not None
+            and Decimal(str(source["strategy_max_leverage"]))
+            == artifact_leverage_cap
             and _persisted_decimal_equal(
                 connection,
                 source["effective_leverage"],

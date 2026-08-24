@@ -228,6 +228,7 @@ def _authority_from_payload(payload: object) -> OrderWriterCanaryAuthority | Non
         ),
         instrument_metadata_digest=str(payload["instrument_metadata_digest"]),
         mark_price_snapshot_digest=str(payload["mark_price_snapshot_digest"]),
+        strategy_max_leverage=str(payload["strategy_max_leverage"]),
         effective_leverage=str(payload["effective_leverage"]),
         position_policy=str(payload["position_policy"]),
     )
@@ -2146,6 +2147,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--attestation-expires-at")
     parser.add_argument("--instrument-metadata-digest")
     parser.add_argument("--mark-price-snapshot-digest")
+    parser.add_argument("--strategy-max-leverage")
     parser.add_argument("--effective-leverage")
     parser.add_argument("--position-policy", default="LONG_ONLY")
     parser.add_argument("--risk-decision-id", type=UUID)
@@ -2193,6 +2195,7 @@ def main(argv: list[str] | None = None) -> int:
                     attestation_expires_at=attestation_expires_at,
                     instrument_metadata_digest=args.instrument_metadata_digest,
                     mark_price_snapshot_digest=args.mark_price_snapshot_digest,
+                    strategy_max_leverage=args.strategy_max_leverage,
                     effective_leverage=args.effective_leverage,
                     position_policy=args.position_policy,
                 )

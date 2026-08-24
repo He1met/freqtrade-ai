@@ -248,7 +248,7 @@ def test_shadow_api_persists_one_non_executable_dual_check_receipt() -> None:
     try:
         with engine.begin() as connection:
             _approval, _deployment, _runtime, intent_id, _launcher = _production_chain(
-                connection
+                connection, intent_mode="SIGNAL_RISK_SHADOW"
             )
         first = client.post(
             f"{API_PREFIX}/phase9/shadow-risk-decisions",
@@ -298,6 +298,55 @@ def test_shadow_api_persists_one_non_executable_dual_check_receipt() -> None:
             "orders": 0,
         }
         assert counts["risk_decisions"] == 1
+    finally:
+        client.close()
+        engine.dispose()
+
+
+def test_intent_api_separates_execution_from_existing_shadow_on_same_signal() -> None:
+    engine, client = _client()
+    try:
+        with engine.begin() as connection:
+            _approval, _deployment, _runtime, shadow_intent_id, _launcher = (
+                _production_chain(
+                    connection, intent_mode="SIGNAL_RISK_SHADOW"
+                )
+            )
+            effective = connection.execution_options(
+                schema_translate_map={CANONICAL_BUSINESS_SCHEMA: None}
+            )
+            shadow_intent = (
+                effective.execute(
+                    select(TRADE_INTENTS_TABLE).where(
+                        TRADE_INTENTS_TABLE.c.id == shadow_intent_id
+                    )
+                )
+                .mappings()
+                .one()
+            )
+        payload = dict(shadow_intent["intent_json"])
+        payload.pop("intent_mode")
+        command = {
+            "signal_id": str(shadow_intent["signal_id"]),
+            "intent_mode": "EXECUTION",
+            "intent_json": payload,
+        }
+        first = client.post(f"{API_PREFIX}/phase9/intents", json=command)
+        repeated = client.post(f"{API_PREFIX}/phase9/intents", json=command)
+        assert first.status_code == 201, first.text
+        assert repeated.status_code == 201, repeated.text
+        assert repeated.json() == first.json()
+        assert first.json()["trade_intent_id"] != str(shadow_intent_id)
+        with engine.begin() as connection:
+            effective = connection.execution_options(
+                schema_translate_map={CANONICAL_BUSINESS_SCHEMA: None}
+            )
+            modes = effective.execute(
+                select(TRADE_INTENTS_TABLE.c.intent_mode).order_by(
+                    TRADE_INTENTS_TABLE.c.intent_mode
+                )
+            ).scalars().all()
+        assert modes == ["EXECUTION", "SIGNAL_RISK_SHADOW"]
     finally:
         client.close()
         engine.dispose()

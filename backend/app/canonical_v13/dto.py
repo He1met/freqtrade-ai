@@ -203,6 +203,9 @@ class Phase9AcceptanceSignalTriggerProjectionDTO(CanonicalProjectionDTO):
 
 class Phase9IntentCommandDTO(CanonicalCommandDTO):
     signal_id: UUID
+    intent_mode: Literal["SIGNAL_RISK_SHADOW", "EXECUTION"] = (
+        "SIGNAL_RISK_SHADOW"
+    )
     intent_json: dict[str, Any]
 
 

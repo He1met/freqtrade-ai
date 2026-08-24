@@ -34,12 +34,12 @@ STRATEGY_SOURCE = """from freqtrade.strategy import IStrategy
 class ExactCanaryStrategy(IStrategy):
     can_short = False
     def leverage(self, pair, current_time, current_rate, proposed_leverage, max_leverage, entry_tag, side, **kwargs):
-        return min(14.0, max_leverage)
+        return min(12.0, max_leverage)
 """
 
 
 def _sealed_probe(
-    *, exchange_max_leverage: str = "20", current_long_leverage: str = "14"
+    *, exchange_max_leverage: str = "20", current_long_leverage: str = "12"
 ):
     read = FakeRead()
     for snapshot in read.snapshots.values():
@@ -72,9 +72,11 @@ def _fixture(
     connection,
     *,
     exchange_max_leverage: str = "20",
-    current_long_leverage: str = "14",
+    current_long_leverage: str = "12",
 ):
-    approval, deployment, _runtime, _intent, _launcher = _production_chain(connection)
+    approval, deployment, _runtime, _intent, _launcher = _production_chain(
+        connection, create_intent=False
+    )
     approval_row = (
         connection.execute(
             select(DEPLOYMENT_APPROVALS_TABLE).where(
@@ -184,7 +186,7 @@ def test_sealed_probe_persists_then_authorizes_exact_one_shot_policy(
             .one()
         )
     assert str(result.max_notional) == "100.001"
-    assert result.effective_leverage == 14
+    assert result.effective_leverage == 12
     assert result.expires_at - result.accepted_at == timedelta(minutes=30)
     assert policy["probe_receipt_id"] == receipt.probe_receipt_id
     assert policy["metadata_receipt_digest"] == persisted["instrument_digest"]
@@ -208,14 +210,16 @@ def test_exchange_max_below_strategy_cap_is_effective_leverage(canonical_connect
 
 def test_current_long_leverage_above_effective_cap_blocks(canonical_connection):
     with canonical_connection.begin():
+        decision, approval, _probe, receipt = _fixture(
+            canonical_connection,
+            exchange_max_leverage="20",
+            current_long_leverage="13",
+        )
         with pytest.raises(
             CanonicalExecutionChainBlocked,
-            match="BLOCKED_OKX_DEMO_CURRENT_LEVERAGE_EXCEEDS_CAP",
+            match="BLOCKED_CANARY_CURRENT_LEVERAGE_EXCEEDS_POLICY",
         ):
-            _sealed_probe(
-                exchange_max_leverage="20",
-                current_long_leverage="15",
-            )
+            _authorize(canonical_connection, decision, approval, receipt)
 
 
 def test_current_long_leverage_is_frozen_as_effective_leverage(canonical_connection):
@@ -312,7 +316,7 @@ def test_persisted_probe_digest_and_timestamp_drift_fail_closed(
     ("source", "reason"),
     (
         (
-            STRATEGY_SOURCE.replace("14.0", "15.0"),
+                STRATEGY_SOURCE.replace("12.0", "-1.0"),
             "BLOCKED_CANARY_STRATEGY_LEVERAGE_AST",
         ),
         (
@@ -321,7 +325,7 @@ def test_persisted_probe_digest_and_timestamp_drift_fail_closed(
         ),
     ),
 )
-def test_strategy_ast_must_prove_long_only_exact_14_cap(
+def test_strategy_ast_must_prove_long_only_exact_artifact_cap(
     canonical_connection, source, reason
 ):
     with canonical_connection.begin():

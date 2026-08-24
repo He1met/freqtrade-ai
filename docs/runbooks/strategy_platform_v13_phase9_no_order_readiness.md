@@ -23,7 +23,8 @@ withdraw、输出凭据、第二个 order writer、绕过人工 approval、伪�
 执行额度只能由 C 阶段的 sealed probe receipt 推导：固定 exact QUALIFIED target
 `BTC-USDT-SWAP`、`LONG_ONLY`、一单、30 分钟 one-shot policy，金额为交易所最小合约数量乘 linear
 `ctVal` 再乘新鲜 mark。effective leverage 冻结为 authenticated current long leverage，且必须
-`0 < current_long <= min(14, exchange_max_leverage)`；系统不得自动 set leverage。禁止输入金额、重置额度、把 B 的
+`0 < current_long <= min(exact artifact leverage cap, exchange_max_leverage)`；当前 acceptance artifact
+的 exact cap 为 12，系统不得自动 set leverage。禁止输入金额、重置额度、把 B 的
 shadow acceptance 当 execution authority，或回退使用 legacy `freqtrade_ai` policy/budget。
 
 严格链为：
@@ -91,13 +92,15 @@ backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py acceptance-t
 backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py acceptance-trigger-verify
 backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py shadow-risk-acl-apply
 backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py shadow-risk-acl-verify
+backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py phase9-transition-apply
+backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py phase9-transition-verify
 python scripts/canonical_v13_api_service.py provision-phase9
 python scripts/canonical_v13_api_service.py provision-runtime-reader
 backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py verify-phase9-provisioned
 ```
 
 升级顺序固定为 Phase 9 schema → runtime image → runtime-reader ACL → deployment rollover → acceptance
-trigger；rollback
+trigger → shadow-risk ACL → Phase B/C transition；rollback
 必须严格反向执行。后层尚存在时，前层 rollback 必须返回明确 `BLOCKED_*_ROLLBACK_REQUIRED`，不得只改
 manifest digest 留下 partial columns、trigger 或 ACL。
 
@@ -139,6 +142,14 @@ shadow-risk ACL rollback 为独立入口
 `canonical_v13_bootstrap.py shadow-risk-acl-rollback`，只撤销上述两项 risk writer `SELECT`；partial ACL、
 额外 DML 或 manifest drift 必须 fail closed。release rollback 时先撤销 shadow-risk ACL，再进入既有
 acceptance-trigger/deployment/runtime/schema 反向顺序。
+
+Phase B/C transition upgrade 将历史 intent/decision 按 immutable payload backfill 为
+`TEST_SIMULATED` 或 `SIGNAL_RISK_SHADOW`，并以 `(signal_id,intent_mode)` 与
+`(trade_intent_id,decision_mode)` 唯一键替代旧单列唯一键。apply/replay 必须复核行集合 digest、mode counts、
+immutability triggers 与未变化的 global manifest；不得改写历史 JSON/digest。进入 C 后，同一个 exact
+acceptance signal 必须另建 `intent_mode=EXECUTION` intent，shadow intent/decision 保留不变；execution
+decision 与 reservation 只绑定 execution intent。存在同 signal 多 mode 证据后
+`phase9-transition-rollback` 必须 fail closed，不能为回退而删除或合并历史。
 
 完成 schema/ACL rollback 且 API、canonical runtime 与 order writer LaunchAgent 均已 unload 后，只能用
 以下窄入口清理 9 个固定 LOGIN 与 10 个固定 Keychain item；它不读取或删除 OKX credential：
@@ -318,8 +329,12 @@ server-side probe 必须先生成 typed `RedactedOkxDemoProbe`，由独立
 重算八类资源 digest、各 observed/expires、combined digest、attestation/deployment lineage。八类为
 instrument、mark、account config、leverage、exchange maximum leverage、positions、pending orders 与
 maximum order quantity。随后才可
-创建 30 分钟 policy、一次 budget authorization，并为独立于 B 的新 intent 创建唯一
+创建 30 分钟 policy、一次 budget authorization，并为同一 exact acceptance signal 上独立于 B 的新
+`intent_mode=EXECUTION` intent 创建唯一
 `decision_mode=EXECUTION` 的 `RISK_ACCEPTED` reservation。
+policy 必须从 exact accepted strategy artifact 的 `leverage()` AST 提取不可伪造的上限；当前 acceptance
+artifact 为 12x，因此 strategy cap=12，effective leverage 必须小于等于 `min(12, exchange max)`。浏览器、
+CLI 或调用者不得自报/回退到历史 14x。
 
 仓库已声明下列 release-only composition 命令；它在进程内创建 sealed session，且不提供 raw facts 参数：
 
@@ -351,6 +366,7 @@ python scripts/canonical_v13_phase9_service.py prepare \
   --attestation-expires-at <timezone-aware-ISO8601> \
   --instrument-metadata-digest <exact-instrument-resource-digest> \
   --mark-price-snapshot-digest <exact-mark-resource-digest> \
+  --strategy-max-leverage <exact-artifact-derived-cap> \
   --effective-leverage <exact-authenticated-current-long-within-cap> \
   --position-policy LONG_ONLY
 python scripts/canonical_v13_phase9_service.py confirm \

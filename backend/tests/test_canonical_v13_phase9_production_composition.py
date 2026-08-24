@@ -86,7 +86,8 @@ def _writer_plan():
         attestation_expires_at=NOW + timedelta(seconds=30),
         instrument_metadata_digest="4" * 64,
         mark_price_snapshot_digest="5" * 64,
-        effective_leverage="14",
+        strategy_max_leverage="12",
+        effective_leverage="12",
     )
     return build_launch_plan(
         service_key="order_writer",
@@ -154,7 +155,8 @@ def test_database_authority_verifier_recomputes_all_frozen_sources() -> None:
                 "execution_target": "OKX_DEMO",
                 "allow_real_funds": False,
                 "position_policy": "LONG_ONLY",
-                "effective_leverage": "14.000",
+                "strategy_max_leverage": "12.000",
+                "effective_leverage": "12.000",
                 "instrument": "BTC-USDT-SWAP",
                 "metadata_receipt_digest": "4" * 64,
                 "mark_price_receipt_digest": "5" * 64,

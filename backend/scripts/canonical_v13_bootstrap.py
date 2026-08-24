@@ -68,6 +68,12 @@ from app.canonical_v13.phase9_schema_upgrade import (
     rollback_phase9_schema_upgrade,
     verify_phase9_schema_upgrade,
 )
+from app.canonical_v13.phase9_transition_upgrade import (
+    CanonicalPhase9TransitionUpgradeBlocked,
+    apply_phase9_transition_upgrade,
+    rollback_phase9_transition_upgrade,
+    verify_phase9_transition_upgrade,
+)
 from app.canonical_v13.genesis import (
     assert_postgresql_acl_sql,
     postgresql_owner_table_grant_statements,
@@ -702,6 +708,30 @@ def shadow_risk_acl(*, operation: str) -> dict[str, object]:
     return payload
 
 
+def phase9_transition(*, operation: str) -> dict[str, object]:
+    engine = create_engine(_database_url(), pool_pre_ping=True)
+    try:
+        if operation == "verify":
+            with engine.connect() as connection:
+                with connection.begin():
+                    connection.exec_driver_sql("SET TRANSACTION READ ONLY")
+                    result = verify_phase9_transition_upgrade(connection)
+        else:
+            actor_identity = _upgrade_actor()
+            with engine.begin() as connection:
+                result = (
+                    apply_phase9_transition_upgrade(connection)
+                    if operation == "apply"
+                    else rollback_phase9_transition_upgrade(connection)
+                )
+    finally:
+        engine.dispose()
+    payload = asdict(result)
+    if operation != "verify":
+        payload["actor_identity"] = actor_identity
+    return payload
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -737,6 +767,9 @@ def main(argv: list[str] | None = None) -> int:
             "shadow-risk-acl-verify",
             "shadow-risk-acl-apply",
             "shadow-risk-acl-rollback",
+            "phase9-transition-verify",
+            "phase9-transition-apply",
+            "phase9-transition-rollback",
         ),
     )
     parser.add_argument(
@@ -821,6 +854,10 @@ def main(argv: list[str] | None = None) -> int:
             payload = shadow_risk_acl(
                 operation=args.command.removeprefix("shadow-risk-acl-")
             )
+        elif args.command.startswith("phase9-transition-"):
+            payload = phase9_transition(
+                operation=args.command.removeprefix("phase9-transition-")
+            )
         else:
             payload = authority_apply(rollback=args.command == "authority-rollback")
     except BootstrapBlocked as exc:
@@ -840,6 +877,8 @@ def main(argv: list[str] | None = None) -> int:
     except CanonicalAcceptanceSignalTriggerUpgradeBlocked as exc:
         payload = {"status": "BLOCKED", "reason": str(exc)}
     except CanonicalShadowRiskAclUpgradeBlocked as exc:
+        payload = {"status": "BLOCKED", "reason": str(exc)}
+    except CanonicalPhase9TransitionUpgradeBlocked as exc:
         payload = {"status": "BLOCKED", "reason": str(exc)}
     except (SQLAlchemyError, ValueError):
         payload = {"status": "BLOCKED", "reason": "bootstrap verification failed"}

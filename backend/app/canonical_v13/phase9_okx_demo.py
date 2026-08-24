@@ -493,17 +493,16 @@ class CanonicalOkxDemoSession:
             code="BLOCKED_OKX_DEMO_EXCHANGE_MAX_LEVERAGE_VALUE",
             field="exchange_min_leverage",
         )
+        requested_leverage = _positive_decimal(
+            exchange_max.get("requested_leverage"),
+            code="BLOCKED_OKX_DEMO_EXCHANGE_MAX_LEVERAGE_VALUE",
+            field="requested_leverage",
+        )
         if (
             exchange_max.get("inst_id") != instrument
             or exchange_max.get("inst_type") != "SWAP"
             or exchange_max.get("margin_mode") != "isolated"
             or exchange_max.get("position_side") != "long"
-            or _positive_decimal(
-                exchange_max.get("requested_leverage"),
-                code="BLOCKED_OKX_DEMO_EXCHANGE_MAX_LEVERAGE_VALUE",
-                field="requested_leverage",
-            )
-            != "14"
             or Decimal(exchange_min_leverage) > Decimal(exchange_max_leverage)
         ):
             raise CanonicalExecutionChainBlocked(
@@ -556,12 +555,12 @@ class CanonicalOkxDemoSession:
                 "server-derived tick-aligned limit price must be positive",
             )
         limit_price = format(limit_price_decimal, "f")
-        leverage_cap = min(Decimal("14"), Decimal(exchange_max_leverage))
+        leverage_cap = Decimal(exchange_max_leverage)
         effective_leverage = Decimal(leverage_by_side["long"])
         if effective_leverage > leverage_cap:
             raise CanonicalExecutionChainBlocked(
                 "BLOCKED_OKX_DEMO_CURRENT_LEVERAGE_EXCEEDS_CAP",
-                "current long leverage exceeds strategy or exchange authority",
+                "current long leverage exceeds authenticated exchange authority",
             )
         maximum_snapshot = self.__read.maximum_order_quantity(
             instrument,

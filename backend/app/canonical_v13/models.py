@@ -71,6 +71,7 @@ def _uuid_fk(
     *,
     nullable: bool = False,
     unique: bool = False,
+    indexed: bool | None = None,
 ) -> Column[UUID]:
     return Column(
         name,
@@ -85,7 +86,7 @@ def _uuid_fk(
         # Unique FKs already receive a backing unique index; every other FK is
         # indexed explicitly so canonical relationship checks cannot degrade
         # into table scans as evidence grows.
-        index=not unique,
+        index=not unique if indexed is None else indexed,
     )
 
 
@@ -1553,11 +1554,22 @@ SIGNALS_TABLE = _table(
 TRADE_INTENTS_TABLE = _table(
     "trade_intents",
     _uuid_id(),
-    _uuid_fk("signal_id", "signals", unique=True),
+    # The composite unique constraint below is also the FK-prefix index.
+    _uuid_fk("signal_id", "signals", indexed=False),
+    Column("intent_mode", String(32), nullable=False),
     Column("status", String(24), nullable=False),
     Column("intent_json", JSON, nullable=False),
     _digest("intent_digest"),
     _created_at(),
+    UniqueConstraint(
+        "signal_id",
+        "intent_mode",
+        name="trade_intents_signal_mode_unique",
+    ),
+    CheckConstraint(
+        "intent_mode IN ('TEST_SIMULATED', 'SIGNAL_RISK_SHADOW', 'EXECUTION')",
+        name="trade_intents_intent_mode_values",
+    ),
     _status_check(
         "trade_intents", "status", ("INTENT_ACCEPTED", "BLOCKED", "REJECTED")
     ),
@@ -1566,11 +1578,22 @@ TRADE_INTENTS_TABLE = _table(
 RISK_DECISIONS_TABLE = _table(
     "risk_decisions",
     _uuid_id(),
-    _uuid_fk("trade_intent_id", "trade_intents", unique=True),
+    # The composite unique constraint below is also the FK-prefix index.
+    _uuid_fk("trade_intent_id", "trade_intents", indexed=False),
+    Column("decision_mode", String(32), nullable=False),
     Column("status", String(24), nullable=False),
     Column("decision_json", JSON, nullable=False),
     _digest("decision_digest"),
     _created_at(),
+    UniqueConstraint(
+        "trade_intent_id",
+        "decision_mode",
+        name="risk_decisions_intent_mode_unique",
+    ),
+    CheckConstraint(
+        "decision_mode IN ('TEST_SIMULATED', 'SIGNAL_RISK_SHADOW', 'EXECUTION')",
+        name="risk_decisions_decision_mode_values",
+    ),
     _status_check("risk_decisions", "status", ("RISK_ACCEPTED", "BLOCKED", "REJECTED")),
 )
 

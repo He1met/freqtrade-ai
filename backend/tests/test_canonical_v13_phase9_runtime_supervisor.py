@@ -98,7 +98,8 @@ def _writer_authority(*, expires_at=NOW + timedelta(seconds=60), **changes):
         "attestation_expires_at": expires_at,
         "instrument_metadata_digest": METADATA_DIGEST,
         "mark_price_snapshot_digest": MARK_DIGEST,
-        "effective_leverage": "14",
+        "strategy_max_leverage": "12",
+        "effective_leverage": "12",
         "position_policy": "LONG_ONLY",
     }
     return build_order_writer_canary_authority(**{**values, **changes})
@@ -185,8 +186,8 @@ def _redacted_probe(*, observed_at: datetime, expires_at: datetime):
         min_size="1",
         tick_size="0.1",
         mark_price="100000",
-        current_long_leverage="14",
-        current_short_leverage="14",
+        current_long_leverage="12",
+        current_short_leverage="12",
         exchange_max_leverage="20",
         limit_price="100000",
         maximum_buy_contracts="2",
@@ -330,6 +331,7 @@ def test_runtime_container_port_uses_exact_digest_and_hardened_rootless_flags() 
         ("attestation_expires_at", NOW + timedelta(seconds=30)),
         ("instrument_metadata_digest", "4" * 64),
         ("mark_price_snapshot_digest", "5" * 64),
+        ("strategy_max_leverage", "12.5"),
         ("effective_leverage", "10"),
     ),
 )
@@ -364,7 +366,7 @@ def test_writer_plan_requires_exact_long_only_current_authority() -> None:
         CanonicalPhase9SupervisorBlocked,
         match="BLOCKED_ORDER_WRITER_EFFECTIVE_LEVERAGE",
     ):
-        _writer_authority(effective_leverage="14.1")
+        _writer_authority(effective_leverage="12.1")
     with pytest.raises(
         CanonicalPhase9SupervisorBlocked,
         match="BLOCKED_ORDER_WRITER_CANARY_AUTHORITY",
@@ -915,7 +917,8 @@ def test_file_lease_round_trip_preserves_exact_writer_canary_authority(
     assert persisted["deployment_id"] == str(DEPLOYMENT_ID)
     assert persisted["execution_canary_risk_policy_id"] == str(RISK_POLICY_ID)
     assert persisted["attestation_id"] == str(ATTESTATION_ID)
-    assert persisted["effective_leverage"] == "14"
+    assert persisted["strategy_max_leverage"] == "12"
+    assert persisted["effective_leverage"] == "12"
     assert persisted["position_policy"] == "LONG_ONLY"
 
 
@@ -1547,8 +1550,10 @@ def test_cli_prepare_writer_requires_and_binds_all_canary_authority_fields(
         METADATA_DIGEST,
         "--mark-price-snapshot-digest",
         MARK_DIGEST,
+        "--strategy-max-leverage",
+        "12.0",
         "--effective-leverage",
-        "14.0",
+        "12.0",
         "--position-policy",
         "LONG_ONLY",
     ]
@@ -1556,7 +1561,8 @@ def test_cli_prepare_writer_requires_and_binds_all_canary_authority_fields(
     assert json.loads(capsys.readouterr().out)["status"] == "PREPARED"
     authority = observed[0][2]["order_writer_canary_authority"]
     assert authority == _writer_authority()
-    assert authority.effective_leverage == "14"
+    assert authority.strategy_max_leverage == "12"
+    assert authority.effective_leverage == "12"
 
 
 def test_cli_routes_sealed_runtime_and_canary_operator_commands(

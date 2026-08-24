@@ -5,6 +5,7 @@ import pytest
 
 from app.canonical_v13 import genesis as canonical_genesis
 from app.canonical_v13.genesis import (
+    CANONICAL_OPTIONAL_GUARD_FUNCTION_NAMES,
     CANONICAL_GENESIS_IDENTITY,
     GENESIS_METADATA_KEY,
     CanonicalGenesisBlocked,
@@ -241,3 +242,10 @@ def test_installer_identity_must_be_explicit_and_trimmed(
     finally:
         connection.close()
         engine.dispose()
+
+
+def test_optional_guard_function_allowlist_is_exactly_phase9_transition() -> None:
+    assert CANONICAL_OPTIONAL_GUARD_FUNCTION_NAMES == (
+        "guard_trade_intent_mode_immutable",
+        "guard_risk_decision_mode_immutable",
+    )

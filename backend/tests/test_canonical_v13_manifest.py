@@ -260,6 +260,10 @@ def test_metadata_is_independent_exact_and_all_foreign_keys_stay_canonical() -> 
             if not local.unique:
                 assert any(
                     tuple(index.columns) == (local,) for index in table.indexes
+                ) or any(
+                    isinstance(constraint, UniqueConstraint)
+                    and tuple(constraint.columns)[:1] == (local,)
+                    for constraint in table.constraints
                 ), f"non-unique FK lacks index: {table.name}.{local.name}"
         for column in table.columns:
             if column.name.endswith("digest"):
@@ -418,7 +422,7 @@ def test_postgresql_types_constraints_and_locking_compile_offline() -> None:
 
     assert len(tables) == 58
     assert len(foreign_keys) == 130
-    assert len(checks) == 84
+    assert len(checks) == 86
     assert len(uniques) == 81
     assert len(indexes) == 113
     assert len(datetimes) == 101
