@@ -14,6 +14,8 @@ from app.canonical_v13.execution_common import CanonicalExecutionChainBlocked
 from app.canonical_v13.execution_common import canonical_execution_digest
 from app.canonical_v13.fill_service import record_production_demo_fill
 from app.canonical_v13.models import (
+    DEPLOYMENT_APPROVALS_TABLE,
+    DEPLOYMENTS_TABLE,
     EXECUTION_ATTESTATIONS_TABLE,
     EXECUTION_CANARY_PROBE_RECEIPTS_TABLE,
     EXECUTION_CANARY_RISK_POLICIES_TABLE,
@@ -23,6 +25,17 @@ from app.canonical_v13.models import (
     ORDER_DISPATCH_RECEIPTS_TABLE,
     ORDERS_TABLE,
     RISK_DECISIONS_TABLE,
+    RUNTIME_INSTANCES_TABLE,
+    SIGNALS_TABLE,
+    TRADE_INTENTS_TABLE,
+)
+from app.canonical_v13.deployment_approval import (
+    CanonicalDeploymentApprovalBlocked,
+    approve_demo_canary_recovery,
+)
+from app.canonical_v13.deployment_control import (
+    create_demo_deployment,
+    disable_demo_deployment,
 )
 from app.canonical_v13.phase9_canary_policy import terminate_canary_risk_policy
 from app.canonical_v13.phase9_execution_authority import (
@@ -37,6 +50,7 @@ from app.canonical_v13.phase9_order_writer import (
     dispatch_demo_order,
     prepare_demo_order,
     recover_demo_order_get_only,
+    terminal_rejected_canary_order_evidence,
 )
 from app.canonical_v13.phase9_readiness import _dispatch_claim_is_exact
 from app.canonical_v13.phase9_okx_demo import (
@@ -887,6 +901,103 @@ def test_second_proven_absence_is_terminal_and_never_posts_third_time(
             evaluated_at=NOW + timedelta(seconds=6),
         )
     assert first_transport.place_calls + second_transport.place_calls == 2
+
+    with canonical_connection.begin():
+        order = canonical_connection.execute(
+            select(ORDERS_TABLE).where(ORDERS_TABLE.c.id == prepared.order_id)
+        ).mappings().one()
+        risk_row = canonical_connection.execute(
+            select(RISK_DECISIONS_TABLE).where(
+                RISK_DECISIONS_TABLE.c.id == order["risk_decision_id"]
+            )
+        ).mappings().one()
+        intent = canonical_connection.execute(
+            select(TRADE_INTENTS_TABLE).where(
+                TRADE_INTENTS_TABLE.c.id == risk_row["trade_intent_id"]
+            )
+        ).mappings().one()
+        signal = canonical_connection.execute(
+            select(SIGNALS_TABLE).where(SIGNALS_TABLE.c.id == intent["signal_id"])
+        ).mappings().one()
+        deployment = canonical_connection.execute(
+            select(DEPLOYMENTS_TABLE).where(
+                DEPLOYMENTS_TABLE.c.id == signal["deployment_id"]
+            )
+        ).mappings().one()
+        approval = canonical_connection.execute(
+            select(DEPLOYMENT_APPROVALS_TABLE).where(
+                DEPLOYMENT_APPROVALS_TABLE.c.id
+                == deployment["deployment_approval_id"]
+            )
+        ).mappings().one()
+        evidence = terminal_rejected_canary_order_evidence(
+            canonical_connection,
+            order_id=prepared.order_id,
+            deployment_id=deployment["id"],
+        )
+        assert evidence["status"] == "REJECTED"
+        assert len(evidence["claim_digests"]) == 2
+        assert len(evidence["outcome_receipt_digests"]) == 2
+        canonical_connection.execute(
+            RUNTIME_INSTANCES_TABLE.update()
+            .where(RUNTIME_INSTANCES_TABLE.c.deployment_id == deployment["id"])
+            .values(status="STOPPED")
+        )
+        canonical_connection.execute(
+            ORDER_WRITER_LEASES_TABLE.update().values(status="RELEASED")
+        )
+        recovery = approve_demo_canary_recovery(
+            canonical_connection,
+            qualification_decision_id=approval["qualification_decision_id"],
+            deployment_id=deployment["id"],
+            order_id=prepared.order_id,
+            actor_identity="operator:isolated-recovery",
+            reason="one bounded zero-side-effect canary recovery",
+            idempotency_key="isolated-terminal-canary-recovery-v1",
+        )
+        assert recovery.approval_generation == 2
+        assert recovery.repeat_noop is False
+        replay = approve_demo_canary_recovery(
+            canonical_connection,
+            qualification_decision_id=approval["qualification_decision_id"],
+            deployment_id=deployment["id"],
+            order_id=prepared.order_id,
+            actor_identity="operator:isolated-recovery",
+            reason="one bounded zero-side-effect canary recovery",
+            idempotency_key="isolated-terminal-canary-recovery-v1",
+        )
+        assert replay.deployment_approval_id == recovery.deployment_approval_id
+        assert replay.recovery_receipt_digest == recovery.recovery_receipt_digest
+        assert replay.repeat_noop is True
+        with pytest.raises(
+            CanonicalDeploymentApprovalBlocked,
+            match="BLOCKED_CANARY_RECOVERY_ALREADY_AUTHORIZED",
+        ):
+            approve_demo_canary_recovery(
+                canonical_connection,
+                qualification_decision_id=approval["qualification_decision_id"],
+                deployment_id=deployment["id"],
+                order_id=prepared.order_id,
+                actor_identity="operator:isolated-recovery",
+                reason="one bounded zero-side-effect canary recovery",
+                idempotency_key="isolated-terminal-canary-recovery-v2",
+            )
+        disabled = disable_demo_deployment(
+            canonical_connection,
+            deployment_id=deployment["id"],
+            superseded_by_qualification_decision_id=approval[
+                "qualification_decision_id"
+            ],
+            actor_identity="operator:isolated-recovery",
+            reason="replace only the terminal zero-side-effect canary lineage",
+        )
+        assert disabled.status == "DISABLED"
+        successor = create_demo_deployment(
+            canonical_connection,
+            deployment_approval_id=recovery.deployment_approval_id,
+        )
+        assert successor.status == "PENDING"
+        assert successor.deployment_id != deployment["id"]
 
 
 def test_explicit_post_rejection_is_terminal_and_audited(canonical_connection):

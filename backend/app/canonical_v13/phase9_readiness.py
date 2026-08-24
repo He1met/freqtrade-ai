@@ -605,16 +605,15 @@ def _inspect_lineage(
         if row["strategy_version_id"] == handoff.strategy_version_id
         and row["status"] == "APPROVED"
     ]
-    counts["deployment_approvals"] = len(approvals)
-    if len(approvals) != 1:
+    if not approvals:
         reasons.append("EXACT_APPROVED_DEPLOYMENT_APPROVAL_EVIDENCE_UNSET")
         return counts
-    approval = approvals[0]
-
     deployments = (
         connection.execute(
             select(DEPLOYMENTS_TABLE).where(
-                DEPLOYMENTS_TABLE.c.deployment_approval_id == approval["id"]
+                DEPLOYMENTS_TABLE.c.deployment_approval_id.in_(
+                    [row["id"] for row in approvals]
+                )
             )
         )
         .mappings()
@@ -637,6 +636,14 @@ def _inspect_lineage(
         reasons.append("EXACT_ACTIVE_DEMO_DEPLOYMENT_EVIDENCE_UNSET")
         return counts
     deployment = deployments[0]
+    current_approvals = [
+        row for row in approvals if row["id"] == deployment["deployment_approval_id"]
+    ]
+    counts["deployment_approvals"] = len(current_approvals)
+    if len(current_approvals) != 1:
+        reasons.append("EXACT_APPROVED_DEPLOYMENT_APPROVAL_EVIDENCE_UNSET")
+        return counts
+    approval = current_approvals[0]
 
     runtimes = (
         connection.execute(

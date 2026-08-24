@@ -96,13 +96,15 @@ backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py phase9-trans
 backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py phase9-transition-verify
 backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py phase9-policy-renewal-apply
 backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py phase9-policy-renewal-verify
+backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py canary-recovery-approval-apply
+backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py canary-recovery-approval-verify
 python scripts/canonical_v13_api_service.py provision-phase9
 python scripts/canonical_v13_api_service.py provision-runtime-reader
 backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py verify-phase9-provisioned
 ```
 
 升级顺序固定为 Phase 9 schema → runtime image → runtime-reader ACL → deployment rollover → acceptance
-trigger → shadow-risk ACL → Phase B/C transition → policy renewal；rollback
+trigger → shadow-risk ACL → Phase B/C transition → policy renewal → canary recovery approval；rollback
 必须严格反向执行。后层尚存在时，前层 rollback 必须返回明确 `BLOCKED_*_ROLLBACK_REQUIRED`，不得只改
 manifest digest 留下 partial columns、trigger 或 ACL。
 
@@ -344,6 +346,21 @@ ACCEPTED(repeat_noop=true)`。第二次 POST 只有在第一次 claim 已绑定 
 outcome 后才允许；第二次仍不存在或任一 POST 返回可归属的明确拒绝时，订单进入 `REJECTED`，
 第三次 POST 永远禁止。未知、超时或相互矛盾的证据保持 `DISPATCHING`，只能继续 GET-only recovery。
 
+如果唯一 canary 在两次 POST 后均由 authenticated GET/pending/history 精确证明不存在，且 order 已为
+`REJECTED`、fills/ledger/reconciliation 为 0，可接受一次独立的 recovery approval 升级：
+
+```bash
+backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py canary-recovery-approval-verify
+backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py canary-recovery-approval-apply
+backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py canary-recovery-approval-verify
+backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py canary-recovery-approval-apply
+```
+
+该合同只追加 `approval_generation=2`，同一 qualification 最多一次；它必须绑定旧 deployment、旧 order、
+两条 claim 与两条 negative outcome，且 runtime/order writer 已停止。随后才允许同资格禁用旧 deployment
+并创建 successor deployment。旧 approval/deployment/order/claim/outcome 均不可删除或改写；第三次 POST
+仍由数据库约束和 order writer 双重禁止。
+
 只有 A/B READY 后才可读取既有 Keychain。输出只能包含摘要/布尔值；不得
 打印 environment、headers、raw account payload 或 subprocess command。fresh attestation 必须同时证明：
 
@@ -488,4 +505,4 @@ LaunchAgent 均 unloaded、两个 file lease 均不存在、DB active order-writ
 
 任何阶段失败：停止后置 writer/runtime → 只读盘点 exact lineage/计数/leases → 撤销 credential session →
 GET-only 恢复未知 order → reconciliation → 验证 backup restore → 决定 forward retry 或 release rollback。
-不得删除 canonical receipt、改写 qualification/approval、重发 unknown order 或切换到 live funds。
+不得删除 canonical receipt、改写既有 qualification/approval、重发 unknown order 或切换到 live funds。

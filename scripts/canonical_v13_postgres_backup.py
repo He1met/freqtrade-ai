@@ -68,6 +68,10 @@ from app.canonical_v13.order_dispatch_recovery_upgrade import (  # noqa: E402
     CanonicalOrderDispatchRecoveryUpgradeBlocked,
     verify_order_dispatch_recovery_upgrade,
 )
+from app.canonical_v13.canary_recovery_approval_upgrade import (  # noqa: E402
+    CanonicalCanaryRecoveryApprovalUpgradeBlocked,
+    verify_canary_recovery_approval_upgrade,
+)
 from app.canonical_v13.phase9_transition_upgrade import (  # noqa: E402
     DECISION_MODE_GUARD_TRIGGER,
     INTENT_MODE_GUARD_TRIGGER,
@@ -652,6 +656,20 @@ def _verify_restore_trigger_boundary(
         raise CanonicalBackupBlocked(
             "BLOCKED_CANONICAL_RESTORE_ORDER_DISPATCH_RECOVERY_CONTRACT",
             "order dispatch recovery verifier did not return ACCEPTED",
+        )
+    try:
+        canary_recovery = verify_canary_recovery_approval_upgrade(
+            connection, role_mapping=local_role_mapping()
+        )
+    except CanonicalCanaryRecoveryApprovalUpgradeBlocked as exc:
+        raise CanonicalBackupBlocked(
+            "BLOCKED_CANONICAL_RESTORE_CANARY_RECOVERY_APPROVAL_CONTRACT",
+            "canary recovery approval contract is not accepted",
+        ) from exc
+    if canary_recovery.status != "ACCEPTED":
+        raise CanonicalBackupBlocked(
+            "BLOCKED_CANONICAL_RESTORE_CANARY_RECOVERY_APPROVAL_CONTRACT",
+            "canary recovery approval verifier did not return ACCEPTED",
         )
 
 

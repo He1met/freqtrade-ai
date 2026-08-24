@@ -114,6 +114,14 @@ from app.canonical_v13.order_dispatch_recovery_upgrade import (
     rollback_order_dispatch_recovery_upgrade,
     verify_order_dispatch_recovery_upgrade,
 )
+from app.canonical_v13.canary_recovery_approval_upgrade import (
+    APPROVAL_WRITER_READ_DELTA,
+    NEW_CONSTRAINTS as CANARY_RECOVERY_CONSTRAINTS,
+    RECOVERY_COLUMNS as CANARY_RECOVERY_COLUMNS,
+    apply_canary_recovery_approval_upgrade,
+    rollback_canary_recovery_approval_upgrade,
+    verify_canary_recovery_approval_upgrade,
+)
 from app.canonical_v13.risk_service import create_production_demo_intent
 from app.canonical_v13.research_evaluation import qualify_target, score_target
 from app.canonical_v13.research_validation import (
@@ -137,6 +145,73 @@ pytestmark = pytest.mark.skipif(
     not DATABASE_URL,
     reason="CANONICAL_V13_POSTGRES_URL is required for the isolated contract",
 )
+
+
+def test_canary_recovery_approval_upgrade_is_reversible_and_acl_exact() -> None:
+    assert DATABASE_URL is not None
+    engine = create_engine(DATABASE_URL)
+    mapping = CanonicalRoleMapping.from_prefix(
+        os.environ.get("CANONICAL_V13_ROLE_PREFIX", "freqtrade_ai_v13_ci_")
+    )
+    schema = "strategy_platform_v13"
+    role = mapping.physical("canonical_approval_writer")
+    try:
+        with engine.connect() as connection:
+            transaction = connection.begin()
+            try:
+                for table_name in APPROVAL_WRITER_READ_DELTA:
+                    connection.execute(
+                        text(f"REVOKE SELECT ON TABLE {schema}.{table_name} FROM {role}")
+                    )
+                connection.execute(
+                    text(
+                        f"ALTER TABLE {schema}.deployment_approvals "
+                        + ", ".join(
+                            f"DROP CONSTRAINT {name}"
+                            for name in CANARY_RECOVERY_CONSTRAINTS
+                        )
+                        + ", ADD CONSTRAINT deployment_approvals_qualification_unique "
+                        "UNIQUE (qualification_decision_id), "
+                        + ", ".join(
+                            f"DROP COLUMN {name}"
+                            for name in reversed(CANARY_RECOVERY_COLUMNS)
+                        )
+                    )
+                )
+                previous = verify_canary_recovery_approval_upgrade(
+                    connection, role_mapping=mapping
+                )
+                assert previous.status == "PREVIOUS_READY"
+                upgraded = apply_canary_recovery_approval_upgrade(
+                    connection, role_mapping=mapping
+                )
+                assert upgraded.status == "UPGRADED"
+                assert upgraded.repeat_noop is False
+                assert upgraded.generation_two_count == 0
+                replay = apply_canary_recovery_approval_upgrade(
+                    connection, role_mapping=mapping
+                )
+                assert replay.status == "ACCEPTED"
+                assert replay.repeat_noop is True
+                assert all(
+                    privileges["SELECT"]
+                    and sum(privileges.values()) == 1
+                    for privileges in replay.approval_writer_privileges.values()
+                )
+                rolled_back = rollback_canary_recovery_approval_upgrade(
+                    connection, role_mapping=mapping
+                )
+                assert rolled_back.status == "ROLLED_BACK"
+                assert verify_canary_recovery_approval_upgrade(
+                    connection, role_mapping=mapping
+                ).status == "PREVIOUS_READY"
+                assert apply_canary_recovery_approval_upgrade(
+                    connection, role_mapping=mapping
+                ).status == "UPGRADED"
+            finally:
+                transaction.rollback()
+    finally:
+        engine.dispose()
 
 
 def test_phase9_policy_renewal_upgrade_replaces_global_uniqueness() -> None:

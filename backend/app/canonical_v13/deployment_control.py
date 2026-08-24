@@ -329,13 +329,35 @@ def disable_demo_deployment(
             "BLOCKED_DEPLOYMENT_SOURCE_APPROVAL_MISSING",
             str(deployment["deployment_approval_id"]),
         )
-    if source_approval["qualification_decision_id"] == decision["id"]:
-        raise CanonicalDeploymentBlocked(
-            "BLOCKED_SUPERSEDING_QUALIFICATION_NOT_DISTINCT",
-            str(decision["id"]),
+    same_qualification = source_approval["qualification_decision_id"] == decision["id"]
+    recovery_approval = None
+    if same_qualification:
+        recovery_approvals = (
+            effective.execute(
+                select(DEPLOYMENT_APPROVALS_TABLE).where(
+                    DEPLOYMENT_APPROVALS_TABLE.c.qualification_decision_id
+                    == decision["id"],
+                    DEPLOYMENT_APPROVALS_TABLE.c.approval_generation == 2,
+                    DEPLOYMENT_APPROVALS_TABLE.c.recovery_of_deployment_id
+                    == deployment_id,
+                    DEPLOYMENT_APPROVALS_TABLE.c.status == "APPROVED",
+                )
+            )
+            .mappings()
+            .all()
         )
+        if len(recovery_approvals) != 1:
+            raise CanonicalDeploymentBlocked(
+                "BLOCKED_CANARY_RECOVERY_APPROVAL_REQUIRED",
+                f"exact recovery approvals={len(recovery_approvals)}",
+            )
+        recovery_approval = recovery_approvals[0]
     request_payload = {
-        "contract": "canonical-v13-demo-deployment-disable-v1",
+        "contract": (
+            "canonical-v13-demo-deployment-canary-recovery-disable-v1"
+            if same_qualification
+            else "canonical-v13-demo-deployment-disable-v1"
+        ),
         "deployment_id": str(deployment_id),
         "deployment_capability_digest": deployment["capability_digest"],
         "source_qualification_decision_id": str(
@@ -349,12 +371,26 @@ def disable_demo_deployment(
         "demo_only": True,
         "allow_real_funds": False,
     }
+    if recovery_approval is not None:
+        request_payload["canary_recovery"] = {
+            "deployment_approval_id": str(recovery_approval["id"]),
+            "approval_digest": recovery_approval["approval_digest"],
+            "approval_generation": recovery_approval["approval_generation"],
+            "recovery_order_id": str(recovery_approval["recovery_order_id"]),
+            "recovery_request_digest": recovery_approval["recovery_request_digest"],
+            "recovery_receipt_digest": recovery_approval["recovery_receipt_digest"],
+        }
     request_digest = _digest(request_payload)
+    receipt_contract = (
+        "canonical-v13-demo-deployment-canary-recovery-disable-receipt-v1"
+        if same_qualification
+        else "canonical-v13-demo-deployment-disable-receipt-v1"
+    )
     if deployment["status"] == "DISABLED":
         disabled_at = _persisted_utc(deployment["disabled_at"])
         receipt_digest = _digest(
             {
-                "contract": "canonical-v13-demo-deployment-disable-receipt-v1",
+                "contract": receipt_contract,
                 "request_digest": request_digest,
                 "prior_status": "ACTIVE",
                 "status": "DISABLED",
@@ -414,7 +450,7 @@ def disable_demo_deployment(
     disabled_at = datetime.now(timezone.utc)
     receipt_digest = _digest(
         {
-            "contract": "canonical-v13-demo-deployment-disable-receipt-v1",
+            "contract": receipt_contract,
             "request_digest": request_digest,
             "prior_status": "ACTIVE",
             "status": "DISABLED",

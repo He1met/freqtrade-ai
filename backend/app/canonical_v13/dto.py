@@ -81,6 +81,27 @@ class Phase9ApprovalReceiptDTO(CanonicalProjectionDTO):
     status: Literal["APPROVED"]
 
 
+class Phase9CanaryRecoveryApprovalCommandDTO(CanonicalCommandDTO):
+    qualification_decision_id: UUID
+    deployment_id: UUID
+    order_id: UUID
+    actor_identity: str = Field(min_length=1, max_length=160)
+    reason: str = Field(min_length=1, max_length=2000)
+    idempotency_key: str = Field(min_length=1, max_length=200)
+
+
+class Phase9CanaryRecoveryApprovalReceiptDTO(CanonicalProjectionDTO):
+    deployment_approval_id: UUID
+    approval_digest: str = Field(pattern=SHA256_PATTERN)
+    approval_generation: Literal[2]
+    recovery_of_deployment_id: UUID
+    recovery_order_id: UUID
+    recovery_request_digest: str = Field(pattern=SHA256_PATTERN)
+    recovery_receipt_digest: str = Field(pattern=SHA256_PATTERN)
+    status: Literal["APPROVED"]
+    repeat_noop: bool
+
+
 class Phase9DeploymentCommandDTO(CanonicalCommandDTO):
     deployment_approval_id: UUID
 

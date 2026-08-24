@@ -34,6 +34,11 @@ from app.canonical_v13.shadow_risk_acl_upgrade import (
     CanonicalShadowRiskAclUpgradeBlocked,
     verify_shadow_risk_acl_upgrade,
 )
+from app.canonical_v13.canary_recovery_approval_upgrade import (
+    APPROVAL_WRITER_READ_DELTA,
+    CanonicalCanaryRecoveryApprovalUpgradeBlocked,
+    verify_canary_recovery_approval_upgrade,
+)
 
 
 LOCAL_ROLE_PREFIX: Final = "freqtrade_ai_v13_"
@@ -146,6 +151,18 @@ def _accepted_additive_table_grants(
         accepted.update(
             (risk_writer, table_name, "SELECT")
             for table_name in SHADOW_RISK_WRITER_READ_DELTA
+        )
+    try:
+        canary_recovery = verify_canary_recovery_approval_upgrade(
+            connection, role_mapping=role_mapping
+        )
+    except CanonicalCanaryRecoveryApprovalUpgradeBlocked:
+        canary_recovery = None
+    if canary_recovery is not None and canary_recovery.status == "ACCEPTED":
+        approval_writer = role_mapping.physical("canonical_approval_writer")
+        accepted.update(
+            (approval_writer, table_name, "SELECT")
+            for table_name in APPROVAL_WRITER_READ_DELTA
         )
     return accepted
 
