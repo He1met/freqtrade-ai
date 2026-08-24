@@ -453,12 +453,25 @@ class DatabaseOrderWriterAuthorityVerifier:
         expires_at = attestation["expires_at"] if attestation is not None else None
         if isinstance(expires_at, datetime) and expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=timezone.utc)
+        attestation_observed_at = (
+            attestation["observed_at"] if attestation is not None else None
+        )
+        if (
+            isinstance(attestation_observed_at, datetime)
+            and attestation_observed_at.tzinfo is None
+        ):
+            attestation_observed_at = attestation_observed_at.replace(
+                tzinfo=timezone.utc
+            )
         policy_expires_at = policy["expires_at"] if policy is not None else None
         if isinstance(policy_expires_at, datetime) and policy_expires_at.tzinfo is None:
             policy_expires_at = policy_expires_at.replace(tzinfo=timezone.utc)
         probe_expires_at = probe["expires_at"] if probe is not None else None
         if isinstance(probe_expires_at, datetime) and probe_expires_at.tzinfo is None:
             probe_expires_at = probe_expires_at.replace(tzinfo=timezone.utc)
+        probe_observed_at = probe["observed_at"] if probe is not None else None
+        if isinstance(probe_observed_at, datetime) and probe_observed_at.tzinfo is None:
+            probe_observed_at = probe_observed_at.replace(tzinfo=timezone.utc)
         resource_windows: list[tuple[datetime, datetime]] = []
         if probe is not None:
             for prefix in (
@@ -507,7 +520,9 @@ class DatabaseOrderWriterAuthorityVerifier:
             and attestation["attestation_digest"] == authority.attestation_digest
             and expires_at == authority.attestation_expires_at
             and expires_at is not None
-            and expires_at > now
+            and attestation_observed_at is not None
+            and attestation_observed_at <= now
+            and attestation_observed_at < expires_at
             and probe is not None
             and policy["probe_receipt_id"] == probe["id"]
             and probe["execution_attestation_id"] == authority.attestation_id
@@ -525,8 +540,10 @@ class DatabaseOrderWriterAuthorityVerifier:
             and policy["mark_price_receipt_digest"]
             == authority.mark_price_snapshot_digest
             and probe_expires_at is not None
-            and probe_expires_at > now
-            and all(observed <= now < expires for observed, expires in resource_windows)
+            and probe_observed_at is not None
+            and probe_observed_at <= now
+            and probe_observed_at < probe_expires_at
+            and all(observed <= now and observed < expires for observed, expires in resource_windows)
         )
 
 

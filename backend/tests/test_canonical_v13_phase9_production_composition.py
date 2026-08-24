@@ -169,6 +169,7 @@ def test_database_authority_verifier_recomputes_all_frozen_sources() -> None:
                 "allow_real_funds": False,
                 "permissions_json": {"read": True, "trade": True, "withdraw": False},
                 "attestation_digest": "3" * 64,
+                "observed_at": NOW - timedelta(seconds=1),
                 "expires_at": NOW + timedelta(seconds=30),
             },
             {
@@ -181,6 +182,7 @@ def test_database_authority_verifier_recomputes_all_frozen_sources() -> None:
                 "simulated_trading": True,
                 "instrument_digest": "4" * 64,
                 "mark_price_digest": "5" * 64,
+                "observed_at": NOW - timedelta(seconds=1),
                 "expires_at": NOW + timedelta(seconds=20),
                 **{
                     f"{prefix}_{suffix}": value
@@ -194,6 +196,90 @@ def test_database_authority_verifier_recomputes_all_frozen_sources() -> None:
                     for suffix, value in (
                         ("observed_at", NOW - timedelta(seconds=1)),
                         ("expires_at", NOW + timedelta(seconds=20)),
+                    )
+                },
+            },
+        ]
+    )
+    assert DatabaseOrderWriterAuthorityVerifier(_factory(connection)).verify(
+        authority, observed_at=NOW
+    )
+
+
+def test_database_authority_verifier_accepts_expired_frozen_probe_lineage() -> None:
+    historical = NOW - timedelta(minutes=1)
+    authority = build_order_writer_canary_authority(
+        deployment_id=_uuid(1),
+        deployment_capability_digest="1" * 64,
+        execution_canary_risk_policy_id=_uuid(2),
+        execution_canary_risk_policy_digest="2" * 64,
+        attestation_id=_uuid(3),
+        attestation_digest="3" * 64,
+        attestation_expires_at=historical,
+        instrument_metadata_digest="4" * 64,
+        mark_price_snapshot_digest="5" * 64,
+        strategy_max_leverage="12",
+        effective_leverage="12",
+    )
+    connection = _Connection(
+        [
+            {
+                "status": "ACTIVE",
+                "demo_only": True,
+                "allow_real_funds": False,
+                "capability_digest": "1" * 64,
+                "deployment_approval_id": _uuid(4),
+            },
+            {
+                "deployment_approval_id": _uuid(4),
+                "execution_attestation_id": _uuid(3),
+                "probe_receipt_id": _uuid(7),
+                "policy_digest": "2" * 64,
+                "status": "ACTIVE",
+                "execution_target": "OKX_DEMO",
+                "allow_real_funds": False,
+                "position_policy": "LONG_ONLY",
+                "strategy_max_leverage": "12",
+                "effective_leverage": "12",
+                "instrument": "BTC-USDT-SWAP",
+                "metadata_receipt_digest": "4" * 64,
+                "mark_price_receipt_digest": "5" * 64,
+                "expires_at": NOW + timedelta(minutes=20),
+            },
+            {
+                "deployment_id": _uuid(1),
+                "status": "READY",
+                "execution_target": "OKX_DEMO",
+                "allow_real_funds": False,
+                "permissions_json": {"read": True, "trade": True, "withdraw": False},
+                "attestation_digest": "3" * 64,
+                "observed_at": historical - timedelta(seconds=10),
+                "expires_at": historical,
+            },
+            {
+                "id": _uuid(7),
+                "execution_attestation_id": _uuid(3),
+                "deployment_id": _uuid(1),
+                "execution_target": "OKX_DEMO",
+                "instrument": "BTC-USDT-SWAP",
+                "allow_real_funds": False,
+                "simulated_trading": True,
+                "instrument_digest": "4" * 64,
+                "mark_price_digest": "5" * 64,
+                "observed_at": historical - timedelta(seconds=10),
+                "expires_at": historical,
+                **{
+                    f"{prefix}_{suffix}": value
+                    for prefix in (
+                        "instrument",
+                        "mark_price",
+                        "account_config",
+                        "leverage",
+                        "exchange_max_leverage",
+                    )
+                    for suffix, value in (
+                        ("observed_at", historical - timedelta(seconds=10)),
+                        ("expires_at", historical),
                     )
                 },
             },

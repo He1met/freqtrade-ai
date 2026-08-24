@@ -413,6 +413,82 @@ def test_prepare_then_single_post_and_exact_replay(canonical_connection):
     ) == 1
 
 
+def test_dispatch_uses_expired_lineage_with_fresh_private_guard(canonical_connection):
+    with canonical_connection.begin():
+        risk, attestation = _prepare_authority(canonical_connection)
+        canonical_connection.execute(
+            EXECUTION_ATTESTATIONS_TABLE.update().values(
+                expires_at=NOW + timedelta(seconds=2)
+            )
+        )
+        canonical_connection.execute(
+            EXECUTION_CANARY_PROBE_RECEIPTS_TABLE.update().values(
+                expires_at=NOW + timedelta(seconds=2)
+            )
+        )
+        prepared = prepare_demo_order(
+            canonical_connection,
+            risk_decision_id=risk.risk_decision_id,
+            attestation_id=attestation.attestation_id,
+            writer_identity="canonical_order_writer",
+            holder_identity="canonical-v13-order-writer-v1",
+            holder_token_digest="1" * 64,
+            idempotency_key="phase9-expired-lineage-fresh-guard",
+            order_request=ORDER_BODY,
+            evaluated_at=NOW + timedelta(seconds=3),
+        )
+    transport = FakeTransport()
+    dispatched = dispatch_demo_order(
+        _factory(canonical_connection.engine),
+        order_id=prepared.order_id,
+        transport=transport,
+        holder_identity="canonical-v13-order-writer-v1",
+        holder_token_digest="1" * 64,
+        lease_generation=prepared.lease_generation,
+        evaluated_at=NOW + timedelta(seconds=4),
+    )
+    assert dispatched.repeat_noop is False
+    assert transport.guard_calls == 1
+    assert transport.place_calls == 1
+
+
+def test_dispatch_blocks_expired_active_policy_before_post(canonical_connection):
+    with canonical_connection.begin():
+        risk, attestation = _prepare_authority(canonical_connection)
+        prepared = prepare_demo_order(
+            canonical_connection,
+            risk_decision_id=risk.risk_decision_id,
+            attestation_id=attestation.attestation_id,
+            writer_identity="canonical_order_writer",
+            holder_identity="canonical-v13-order-writer-v1",
+            holder_token_digest="2" * 64,
+            idempotency_key="phase9-expired-policy-fresh-guard",
+            order_request=ORDER_BODY,
+            evaluated_at=NOW + timedelta(seconds=2),
+        )
+        canonical_connection.execute(
+            EXECUTION_CANARY_RISK_POLICIES_TABLE.update().values(
+                expires_at=NOW + timedelta(seconds=2)
+            )
+        )
+    transport = FakeTransport()
+    with pytest.raises(
+        CanonicalExecutionChainBlocked,
+        match="BLOCKED_ORDER_DISPATCH_AUTHORITY_STALE",
+    ):
+        dispatch_demo_order(
+            _factory(canonical_connection.engine),
+            order_id=prepared.order_id,
+            transport=transport,
+            holder_identity="canonical-v13-order-writer-v1",
+            holder_token_digest="2" * 64,
+            lease_generation=prepared.lease_generation,
+            evaluated_at=NOW + timedelta(seconds=3),
+        )
+    assert transport.guard_calls == 1
+    assert transport.place_calls == 0
+
+
 def test_uncertain_post_never_reposts_and_get_only_recovers(canonical_connection):
     with canonical_connection.begin():
         risk, attestation = _prepare_authority(canonical_connection)
@@ -666,7 +742,7 @@ def test_fill_worker_rejects_cumulative_overfill_before_any_insert(
     assert canonical_connection.execute(select(FILLS_TABLE.c.id)).all() == []
 
 
-def test_stale_attestation_and_competing_lease_fail_closed(canonical_connection):
+def test_future_attestation_and_competing_lease_fail_closed(canonical_connection):
     with canonical_connection.begin():
         risk, attestation = _prepare_authority(canonical_connection)
         with pytest.raises(
@@ -681,7 +757,7 @@ def test_stale_attestation_and_competing_lease_fail_closed(canonical_connection)
                 holder_token_digest="1" * 64,
                 idempotency_key="phase9-order-fixture-3",
                 order_request=ORDER_BODY,
-                evaluated_at=NOW + timedelta(seconds=61),
+                evaluated_at=NOW - timedelta(seconds=1),
             )
         assert (
             _acquire_writer_lease(
