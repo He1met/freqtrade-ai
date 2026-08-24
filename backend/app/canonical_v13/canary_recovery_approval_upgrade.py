@@ -251,12 +251,17 @@ def verify_canary_recovery_approval_upgrade(
         raise CanonicalCanaryRecoveryApprovalUpgradeBlocked(
             "BLOCKED_POSTGRESQL_REQUIRED"
         )
-    genesis = verify_canonical_genesis(connection)
+    state = _state(connection, role_mapping=role_mapping)
+    genesis = verify_canonical_genesis(
+        connection,
+        allowed_predecessor_indexes=(
+            (OLD_UNIQUE,) if state == "PREVIOUS_READY" else ()
+        ),
+    )
     if not genesis.accepted or genesis.manifest_digest != CANONICAL_MANIFEST_DIGEST:
         raise CanonicalCanaryRecoveryApprovalUpgradeBlocked(
             "BLOCKED_CANARY_RECOVERY_CANONICAL_GENESIS"
         )
-    state = _state(connection, role_mapping=role_mapping)
     counts = _counts(connection, state=state)
     if counts[0] != counts[1] + counts[2] or counts[2] > 1:
         raise CanonicalCanaryRecoveryApprovalUpgradeBlocked(
