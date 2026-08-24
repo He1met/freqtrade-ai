@@ -2037,13 +2037,13 @@ def test_phase9_service_connection_helper_covers_lock_and_probe_lookups() -> Non
     )
     assert service._existing_policy_probe_identity(
         existing_connection,
-        qualification_decision_id=UUID(
-            "00000000-0000-4000-8000-000000000099"
-        ),
-        deployment_approval_id=UUID("00000000-0000-4000-8000-000000000098"),
         idempotency_key="phase9-policy-atomic-test",
     ) == (probe_id, attestation_id)
     assert len(existing_connection.calls) == 1
+    replay_lookup = str(existing_connection.calls[0][0])
+    assert "idempotency_key" in replay_lookup
+    assert "qualification_decision_id =" not in replay_lookup
+    assert "deployment_approval_id =" not in replay_lookup
 
 
 def test_expired_policy_probe_saga_rotates_without_rewriting_history(

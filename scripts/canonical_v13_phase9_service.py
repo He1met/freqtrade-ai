@@ -1841,11 +1841,9 @@ def probe_canary(deployment_id: UUID) -> dict[str, object]:
 def _existing_policy_probe_identity(
     approval_connection,
     *,
-    qualification_decision_id: UUID,
-    deployment_approval_id: UUID,
     idempotency_key: str,
 ) -> tuple[UUID, UUID] | None:
-    from sqlalchemy import or_, select  # noqa: PLC0415
+    from sqlalchemy import select  # noqa: PLC0415
 
     from app.canonical_v13.models import (  # noqa: PLC0415
         EXECUTION_CANARY_PROBE_RECEIPTS_TABLE,
@@ -1865,14 +1863,8 @@ def _existing_policy_probe_identity(
                 == EXECUTION_CANARY_RISK_POLICIES_TABLE.c.probe_receipt_id,
             )
             .where(
-                or_(
-                    EXECUTION_CANARY_RISK_POLICIES_TABLE.c.qualification_decision_id
-                    == qualification_decision_id,
-                    EXECUTION_CANARY_RISK_POLICIES_TABLE.c.deployment_approval_id
-                    == deployment_approval_id,
-                    EXECUTION_CANARY_RISK_POLICIES_TABLE.c.idempotency_key
-                    == idempotency_key,
-                )
+                EXECUTION_CANARY_RISK_POLICIES_TABLE.c.idempotency_key
+                == idempotency_key
             )
         )
         .one_or_none()
@@ -1980,8 +1972,6 @@ def probe_and_authorize_canary_policy(
         )
         existing = _existing_policy_probe_identity(
             approval_connection,
-            qualification_decision_id=qualification_decision_id,
-            deployment_approval_id=deployment_approval_id,
             idempotency_key=idempotency_key,
         )
         if existing is not None:
