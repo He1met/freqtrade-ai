@@ -11,6 +11,7 @@ import argparse
 from contextlib import contextmanager
 from dataclasses import asdict, fields
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from hashlib import sha256
 import json
 import importlib.util
@@ -2347,6 +2348,12 @@ def supervise(
             raise container_error
 
 
+def _json_default(value: object) -> str:
+    if isinstance(value, Decimal):
+        return format(value, "f")
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -2636,7 +2643,14 @@ def main(argv: list[str] | None = None) -> int:
             "reason": "BLOCKED_PHASE9_PRODUCTION_COMMAND",
             "detail": type(exc).__name__,
         }
-    print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    print(
+        json.dumps(
+            payload,
+            default=_json_default,
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
     return (
         0
         if payload["status"]

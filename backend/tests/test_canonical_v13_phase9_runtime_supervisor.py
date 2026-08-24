@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
+from decimal import Decimal
 import importlib.util
 import json
 from pathlib import Path
@@ -1980,6 +1981,16 @@ def test_phase9_service_preserves_real_sqlalchemy_connection_and_rejects_raw_wra
             service._sqlalchemy_connection(
                 SimpleNamespace(connection=connection.connection)
             )
+
+
+def test_phase9_service_json_default_preserves_decimal_exactly() -> None:
+    service = _load_script("canonical_phase9_json_default_test")
+
+    assert service._json_default(Decimal("12.000000000000000000")) == (
+        "12.000000000000000000"
+    )
+    with pytest.raises(TypeError, match="object is not JSON serializable"):
+        service._json_default(object())
 
 
 def test_phase9_service_connection_helper_covers_lock_and_probe_lookups() -> None:
