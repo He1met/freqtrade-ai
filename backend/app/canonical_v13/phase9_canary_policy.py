@@ -41,6 +41,9 @@ from app.canonical_v13.models import (
     TRADE_INTENTS_TABLE,
 )
 from app.canonical_v13.phase9_okx_demo import RedactedOkxDemoProbe
+from app.canonical_v13.phase9_order_writer import (
+    terminal_rejected_canary_order_evidence,
+)
 
 POLICY_TTL = timedelta(minutes=30)
 MARK_MAXIMUM_AGE = timedelta(seconds=60)
@@ -103,6 +106,137 @@ def _persisted_decimal_equal(
     if connection.dialect.name != "sqlite":
         return left_decimal == right_decimal
     return abs(left_decimal - right_decimal) <= Decimal("1e-12")
+
+
+def _approved_recovery_predecessor(
+    connection: Connection,
+    *,
+    active_policy: Mapping[str, object],
+    qualification_decision_id: UUID,
+    deployment_approval_id: UUID,
+) -> Mapping[str, object] | None:
+    """Prove that one spent predecessor belongs to the exact recovery approval.
+
+    A normal policy with downstream budget authority remains non-renewable.  The
+    sole exception is the already-approved generation-two recovery path: its
+    generation-one deployment must be disabled, the successor must be the unique
+    active deployment, and the bound order must still be the exact terminal
+    two-attempt rejection with zero fill/accounting/reconciliation side effects.
+    """
+
+    recovery_approval = (
+        connection.execute(
+            select(DEPLOYMENT_APPROVALS_TABLE).where(
+                DEPLOYMENT_APPROVALS_TABLE.c.id == deployment_approval_id
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if (
+        recovery_approval is None
+        or recovery_approval["status"] != "APPROVED"
+        or recovery_approval["approval_generation"] != 2
+        or recovery_approval["qualification_decision_id"] != qualification_decision_id
+        or recovery_approval["recovery_of_deployment_id"] is None
+        or recovery_approval["recovery_order_id"] is None
+        or recovery_approval["recovery_request_digest"] is None
+        or recovery_approval["recovery_receipt_digest"] is None
+    ):
+        return None
+    source_deployment = (
+        connection.execute(
+            select(DEPLOYMENTS_TABLE).where(
+                DEPLOYMENTS_TABLE.c.id == recovery_approval["recovery_of_deployment_id"]
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    source_probe = (
+        connection.execute(
+            select(EXECUTION_CANARY_PROBE_RECEIPTS_TABLE).where(
+                EXECUTION_CANARY_PROBE_RECEIPTS_TABLE.c.id
+                == active_policy["probe_receipt_id"]
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    source_approval = (
+        connection.execute(
+            select(DEPLOYMENT_APPROVALS_TABLE).where(
+                DEPLOYMENT_APPROVALS_TABLE.c.id
+                == source_deployment["deployment_approval_id"]
+            )
+        )
+        .mappings()
+        .one_or_none()
+        if source_deployment is not None
+        else None
+    )
+    active_successors = (
+        connection.execute(
+            select(DEPLOYMENTS_TABLE).where(
+                DEPLOYMENTS_TABLE.c.deployment_approval_id == deployment_approval_id,
+                DEPLOYMENTS_TABLE.c.status == "ACTIVE",
+            )
+        )
+        .mappings()
+        .all()
+    )
+    if (
+        source_deployment is None
+        or source_deployment["status"] != "DISABLED"
+        or source_deployment["superseded_by_qualification_decision_id"]
+        != qualification_decision_id
+        or source_deployment["disable_request_digest"] is None
+        or source_deployment["disable_receipt_digest"] is None
+        or source_approval is None
+        or source_approval["status"] != "APPROVED"
+        or source_approval["approval_generation"] != 1
+        or source_approval["qualification_decision_id"]
+        != qualification_decision_id
+        or active_policy["deployment_approval_id"]
+        != source_approval["id"]
+        or active_policy["strategy_version_id"]
+        != recovery_approval["strategy_version_id"]
+        or source_deployment["strategy_version_id"]
+        != recovery_approval["strategy_version_id"]
+        or source_probe is None
+        or source_probe["deployment_id"] != source_deployment["id"]
+        or len(active_successors) != 1
+        or active_successors[0]["strategy_version_id"]
+        != source_deployment["strategy_version_id"]
+        or active_successors[0]["configuration_bundle_id"]
+        != source_deployment["configuration_bundle_id"]
+        or active_successors[0]["configuration_bundle_digest"]
+        != source_deployment["configuration_bundle_digest"]
+        or active_successors[0]["market_snapshot_id"]
+        != source_deployment["market_snapshot_id"]
+        or active_successors[0]["market_snapshot_digest"]
+        != source_deployment["market_snapshot_digest"]
+        or active_successors[0]["demo_only"] is not True
+        or active_successors[0]["allow_real_funds"] is not False
+    ):
+        return None
+    try:
+        terminal = terminal_rejected_canary_order_evidence(
+            connection,
+            order_id=recovery_approval["recovery_order_id"],
+            deployment_id=source_deployment["id"],
+        )
+    except CanonicalExecutionChainBlocked:
+        return None
+    return {
+        "recovery_approval_id": str(recovery_approval["id"]),
+        "recovery_approval_digest": recovery_approval["approval_digest"],
+        "recovery_request_digest": recovery_approval["recovery_request_digest"],
+        "recovery_receipt_digest": recovery_approval["recovery_receipt_digest"],
+        "source_deployment_id": str(source_deployment["id"]),
+        "source_policy_id": str(active_policy["id"]),
+        "terminal_evidence_digest": terminal["evidence_digest"],
+    }
 
 
 def _positive_decimal(value: object, *, field: str) -> Decimal:
@@ -1003,18 +1137,34 @@ def authorize_canary_risk_policy(
                 == active["id"]
             )
         ).scalar_one_or_none()
-        if linked_budget is not None:
+        recovery_predecessor = (
+            _approved_recovery_predecessor(
+                effective,
+                active_policy=active,
+                qualification_decision_id=qualification_decision_id,
+                deployment_approval_id=deployment_approval_id,
+            )
+            if linked_budget is not None
+            else None
+        )
+        if linked_budget is not None and recovery_predecessor is None:
             raise CanonicalExecutionChainBlocked(
                 "BLOCKED_CANARY_POLICY_EXPIRED_WITH_BUDGET",
                 "an expired policy with downstream authority cannot be renewed",
             )
-        expiration_payload = {
+        expiration_payload: dict[str, object] = {
             "contract": "canonical-v13-canary-risk-policy-expiration-v1",
             "policy_id": str(active["id"]),
             "policy_receipt_digest": active["receipt_digest"],
-            "reason_code": "POLICY_TTL_EXPIRED_BEFORE_BUDGET",
+            "reason_code": (
+                "POLICY_TTL_EXPIRED_AFTER_APPROVED_RECOVERY"
+                if recovery_predecessor is not None
+                else "POLICY_TTL_EXPIRED_BEFORE_BUDGET"
+            ),
             "expired_at": now.isoformat(),
         }
+        if recovery_predecessor is not None:
+            expiration_payload["approved_recovery"] = recovery_predecessor
         effective.execute(
             EXECUTION_CANARY_RISK_POLICIES_TABLE.update()
             .where(

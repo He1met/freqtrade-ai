@@ -345,6 +345,34 @@ def test_expired_policy_without_budget_is_append_only_renewable(
     assert rows[0]["termination_digest"] is not None
 
 
+def test_expired_policy_with_budget_remains_blocked_without_recovery_approval(
+    canonical_connection,
+):
+    with canonical_connection.begin():
+        decision, approval, _probe, receipt = _fixture(canonical_connection)
+        first = _authorize(canonical_connection, decision, approval, receipt)
+        authorize_demo_risk_budget(
+            canonical_connection,
+            deployment_approval_id=approval.deployment_approval_id,
+            actor_identity="phase9-human-policy-owner",
+            reason="freeze the exact one-shot canary policy",
+            policy_source_receipt_digest=first.receipt_digest,
+            evaluated_at=NOW,
+        )
+        with pytest.raises(
+            CanonicalExecutionChainBlocked,
+            match="BLOCKED_CANARY_POLICY_EXPIRED_WITH_BUDGET",
+        ):
+            _authorize(
+                canonical_connection,
+                decision,
+                approval,
+                receipt,
+                evaluated_at=NOW + timedelta(minutes=31),
+                idempotency_key="forbidden-spent-policy-renewal",
+            )
+
+
 def test_fresh_active_policy_blocks_different_idempotency_key(canonical_connection):
     with canonical_connection.begin():
         decision, approval, _probe, receipt = _fixture(canonical_connection)
