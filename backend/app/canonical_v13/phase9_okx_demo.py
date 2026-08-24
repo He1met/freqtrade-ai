@@ -804,6 +804,7 @@ class CanonicalOkxDemoSession:
                 field="effective_leverage",
             )
         )
+        canonical_leverage = format(leverage.normalize(), "f")
         required_size = Decimal(
             _positive_decimal(
                 minimum_size,
@@ -886,10 +887,15 @@ class CanonicalOkxDemoSession:
                 raise CanonicalExecutionChainBlocked(
                     "BLOCKED_OKX_DEMO_DISPATCH_LEVERAGE_IDENTITY", instrument
                 )
-            leverage_by_side[str(side)] = _positive_decimal(
-                item.get("leverage"),
-                code="BLOCKED_OKX_DEMO_DISPATCH_LEVERAGE_VALUE",
-                field=f"{side}_leverage",
+            leverage_by_side[str(side)] = format(
+                Decimal(
+                    _positive_decimal(
+                        item.get("leverage"),
+                        code="BLOCKED_OKX_DEMO_DISPATCH_LEVERAGE_VALUE",
+                        field=f"{side}_leverage",
+                    )
+                ).normalize(),
+                "f",
             )
         if (
             set(leverage_by_side) != {"long", "short"}
@@ -936,7 +942,7 @@ class CanonicalOkxDemoSession:
             "instrument": instrument,
             "margin_mode": "isolated",
             "limit_price": format(price, "f"),
-            "effective_leverage": format(leverage, "f"),
+            "effective_leverage": canonical_leverage,
             "maximum_buy_contracts": format(maximum_buy, "f"),
         }
         safe_leverage = {
@@ -968,7 +974,7 @@ class CanonicalOkxDemoSession:
             account_fingerprint_digest=self.__account_fingerprint_digest,
             credential_generation_digest=self.__credential_generation_digest,
             limit_price=format(price, "f"),
-            effective_leverage=format(leverage, "f"),
+            effective_leverage=canonical_leverage,
             current_short_leverage=leverage_by_side["short"],
             minimum_size=format(required_size, "f"),
             maximum_buy_contracts=format(maximum_buy, "f"),

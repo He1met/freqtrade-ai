@@ -440,6 +440,48 @@ def test_dispatch_guard_is_typed_flat_current_capacity_evidence() -> None:
     ]
 
 
+def test_dispatch_guard_canonicalizes_equivalent_leverage_scale() -> None:
+    read = FakeRead()
+    for item in read.snapshots["leverage"].items:
+        item["leverage"] = "2.000"
+    read.snapshots["maximum_order_quantity"].items[0]["leverage"] = "2"
+    session, _read, write, _closed = _session(read)
+
+    guard = session.dispatch_guard(
+        instrument="BTC-USDT-SWAP",
+        limit_price="10000.1",
+        effective_leverage="2.000000000000000000",
+        minimum_size="1",
+    )
+
+    assert guard.effective_leverage == "2"
+    assert guard.current_short_leverage == "2"
+    expected = sha256(
+        json.dumps(
+            {
+                "execution_target": "OKX_DEMO",
+                "resource": "leverage",
+                "source": "okx_demo_rest",
+                "authenticated": True,
+                "observed_at": guard.leverage_observed_at.isoformat(),
+                "expires_at": guard.leverage_expires_at.isoformat(),
+                "facts": {
+                    "instrument": "BTC-USDT-SWAP",
+                    "account_fingerprint_digest": HEX_A,
+                    "long": guard.effective_leverage,
+                    "short": guard.current_short_leverage,
+                },
+            },
+            allow_nan=False,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    assert guard.leverage_digest == expected
+    assert write.calls == []
+
+
 def test_dispatch_guard_zero_capacity_blocks_without_post() -> None:
     read = FakeRead()
     read.snapshots["maximum_order_quantity"].items[0]["max_buy"] = "0"
