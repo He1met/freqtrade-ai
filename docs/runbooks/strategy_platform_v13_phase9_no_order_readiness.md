@@ -351,6 +351,29 @@ policy API。禁止用 SQL、fixture 或 raw JSON 手工补行。若缺
 receipt/policy/budget、预算已耗尽、市场/allowlist/credential 未知或 attestation 过期，立即 `BLOCKED`，
 不得创建 order。禁止为了通过门禁创建或重置金额。
 
+由于 mark/max-size evidence 保持交易所原始短 TTL，生产首次创建 policy 必须使用 release-only
+组合命令，避免把已提交 receipt 暴露给另一个人工/API 往返：
+
+```bash
+python scripts/canonical_v13_phase9_service.py probe-authorize-canary-policy \
+  --service order_writer \
+  --deployment-id <exact-active-demo-deployment-id> \
+  --qualification-decision-id <exact-qualified-decision-id> \
+  --deployment-approval-id <exact-human-approval-id> \
+  --actor-identity operator:<owner> \
+  --idempotency-key <one-shot-policy-key> \
+  --reason <acceptance-only-reason>
+```
+
+该命令仍先以 `canonical_deployment_writer` 独立提交 immutable attestation；随后在同一个
+`canonical_approval_writer` transaction 内写入新的 append-only probe receipt 与 policy。policy
+qualification advisory lock 覆盖 probe generation，避免并发双写；同一 request 的 safe saga 文件只含
+脱敏 facts。未提交 policy 前若 generation 过期，只能追加新的 attestation/receipt generation，不能更新或
+删除历史行；policy 已提交后的 exact replay 直接返回同一 policy/receipt，不能再次访问 exchange。旧的
+`probe-canary` 只用于 evidence-only probe 和 crash recovery，不得再将其短 TTL receipt 人工转交给首次
+policy POST。组合命令仍不加载 writer、不调用 order POST，任何 lineage/freshness/flat/maxBuy/minSz
+失败均整体回滚 approval transaction 并保持无订单。
+
 writer 使用独立 `canonical_order_writer` LOGIN 和独立 LaunchAgent：
 
 ```bash
