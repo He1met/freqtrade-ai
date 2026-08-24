@@ -322,6 +322,9 @@ class FrozenIntradayLeverageEvaluator:
     FOUR_HOUR_REQUALIFICATION_ARTIFACT_DIGEST = (
         "ff423436d2de18052d9e6a113e71ee7ea2915d30218ed4b8a974354483bc07a2"
     )
+    FOUR_HOUR_FINAL_REQUALIFICATION_ARTIFACT_DIGEST = (
+        "390ee1a74a7e5dbe125c5b69438791b44f4b4802ab8b6870c10031464cd80c3d"
+    )
 
     _INTRADAY_REQUIRED_SOURCE = (
         "class CanonicalIntradayLeverageBaseline",
@@ -358,14 +361,21 @@ class FrozenIntradayLeverageEvaluator:
         elif artifact_digest in {
             self.FOUR_HOUR_ARTIFACT_DIGEST,
             self.FOUR_HOUR_REQUALIFICATION_ARTIFACT_DIGEST,
+            self.FOUR_HOUR_FINAL_REQUALIFICATION_ARTIFACT_DIGEST,
         }:
             required_source = self._FOUR_HOUR_REQUIRED_SOURCE
             signal_hours = frozenset({2, 6, 10, 14, 18, 22})
             effective_leverage = "12"
             evaluator_identity = (
-                "canonical-four-hour-natural-long-baseline-v2"
-                if artifact_digest == self.FOUR_HOUR_REQUALIFICATION_ARTIFACT_DIGEST
-                else "canonical-four-hour-natural-long-baseline-v1"
+                "canonical-four-hour-natural-long-baseline-v3"
+                if artifact_digest
+                == self.FOUR_HOUR_FINAL_REQUALIFICATION_ARTIFACT_DIGEST
+                else (
+                    "canonical-four-hour-natural-long-baseline-v2"
+                    if artifact_digest
+                    == self.FOUR_HOUR_REQUALIFICATION_ARTIFACT_DIGEST
+                    else "canonical-four-hour-natural-long-baseline-v1"
+                )
             )
         else:
             required_source = ()
@@ -381,6 +391,7 @@ class FrozenIntradayLeverageEvaluator:
                 self.INTRADAY_ARTIFACT_DIGEST,
                 self.FOUR_HOUR_ARTIFACT_DIGEST,
                 self.FOUR_HOUR_REQUALIFICATION_ARTIFACT_DIGEST,
+                self.FOUR_HOUR_FINAL_REQUALIFICATION_ARTIFACT_DIGEST,
             }
             or any(token not in source for token in required_source)
             or "populate_entry_trend" not in source
