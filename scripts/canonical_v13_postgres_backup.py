@@ -60,6 +60,10 @@ from app.canonical_v13.optimization_observability_upgrade import (  # noqa: E402
     CanonicalOptimizationObservabilityUpgradeBlocked,
     verify_optimization_observability_upgrade,
 )
+from app.canonical_v13.phase9_transition_upgrade import (  # noqa: E402
+    DECISION_MODE_GUARD_TRIGGER,
+    INTENT_MODE_GUARD_TRIGGER,
+)
 from app.canonical_v13.runtime_image_upgrade import (  # noqa: E402
     CanonicalRuntimeImageUpgradeBlocked,
     verify_runtime_image_upgrade,
@@ -103,12 +107,14 @@ EXPECTED_LIFECYCLE_TRIGGERS: Final[tuple[tuple[str, str, str], ...]] = (
     ),
     ("research_gate_attempts", "research_gate_attempts_lifecycle", "O"),
     ("research_gate_receipts", "research_gate_receipts_append_only", "O"),
+    ("risk_decisions", DECISION_MODE_GUARD_TRIGGER, "O"),
     (
         "runtime_image_acceptances",
         "runtime_image_acceptances_append_only",
         "O",
     ),
     ("signals", "acceptance_signals_immutable", "O"),
+    ("trade_intents", INTENT_MODE_GUARD_TRIGGER, "O"),
     ("validation_plans", "validation_plans_gate_receipts", "O"),
 )
 Runner = Callable[[Sequence[str]], subprocess.CompletedProcess[object]]

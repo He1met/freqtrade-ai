@@ -761,8 +761,9 @@ def test_phase9_transition_upgrade_backfills_and_separates_shadow_execution(
                     )
                     == execution_intent_id
                 )
+                transition_at = datetime(2026, 8, 24, tzinfo=timezone.utc)
                 source_receipt = phase9_fixture._risk_policy_source(
-                    connection, approval
+                    connection, approval, accepted_at=transition_at
                 )
                 budget = authorize_demo_risk_budget(
                     connection,
@@ -770,19 +771,19 @@ def test_phase9_transition_upgrade_backfills_and_separates_shadow_execution(
                     actor_identity="canonical-v13-phase9-transition-ci",
                     reason="one exact transition reservation",
                     policy_source_receipt_digest=source_receipt,
-                    evaluated_at=datetime(2026, 8, 24, tzinfo=timezone.utc),
+                    evaluated_at=transition_at,
                 )
                 execution = decide_central_demo_risk(
                     connection,
                     trade_intent_id=execution_intent_id,
                     risk_budget_authorization_id=budget.authorization_id,
-                    evaluated_at=datetime(2026, 8, 24, 0, 0, 1, tzinfo=timezone.utc),
+                    evaluated_at=transition_at + timedelta(seconds=1),
                 )
                 execution_replay = decide_central_demo_risk(
                     connection,
                     trade_intent_id=execution_intent_id,
                     risk_budget_authorization_id=budget.authorization_id,
-                    evaluated_at=datetime(2026, 8, 24, 0, 0, 2, tzinfo=timezone.utc),
+                    evaluated_at=transition_at + timedelta(seconds=2),
                 )
                 assert execution.status == "RISK_ACCEPTED"
                 assert execution_replay.repeat_noop is True

@@ -57,6 +57,23 @@ def test_plan_is_offline_exact_and_never_executes() -> None:
     assert len(CANONICAL_TABLE_NAMES) == 58
 
 
+def test_restore_trigger_contract_includes_exact_phase9_transition_guards() -> None:
+    assert len(backup.EXPECTED_LIFECYCLE_TRIGGERS) == 10
+    assert backup.EXPECTED_LIFECYCLE_TRIGGERS == tuple(
+        sorted(backup.EXPECTED_LIFECYCLE_TRIGGERS)
+    )
+    assert (
+        "risk_decisions",
+        "risk_decision_mode_immutable",
+        "O",
+    ) in backup.EXPECTED_LIFECYCLE_TRIGGERS
+    assert (
+        "trade_intents",
+        "trade_intent_mode_immutable",
+        "O",
+    ) in backup.EXPECTED_LIFECYCLE_TRIGGERS
+
+
 def test_dispatch_credential_generation_is_exact_digest_only_allowlist() -> None:
     backup._require_exact_manifest()
     assert (
