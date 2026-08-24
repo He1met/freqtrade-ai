@@ -423,8 +423,8 @@ def test_postgresql_types_constraints_and_locking_compile_offline() -> None:
     assert len(tables) == 58
     assert len(foreign_keys) == 130
     assert len(checks) == 86
-    assert len(uniques) == 81
-    assert len(indexes) == 113
+    assert len(uniques) == 79
+    assert len(indexes) == 117
     assert len(datetimes) == 101
     assert len(json_columns) == 28
     assert all(key.deferrable is not True for key in foreign_keys)
@@ -452,6 +452,17 @@ def test_postgresql_types_constraints_and_locking_compile_offline() -> None:
     assert " WHERE aggregate_type = 'research_execution_authorization'" in (
         compiled_partial
     )
+    policy_partials = {
+        index.name: str(CreateIndex(index).compile(dialect=dialect))
+        for index in indexes
+        if index.name
+        in {
+            "execution_canary_risk_policies_active_qualification_unique",
+            "execution_canary_risk_policies_active_approval_unique",
+        }
+    }
+    assert len(policy_partials) == 2
+    assert all(" WHERE status = 'ACTIVE'" in sql for sql in policy_partials.values())
     locked = str(select(tables[0]).with_for_update().compile(dialect=dialect))
     assert locked.endswith(" FOR UPDATE")
 

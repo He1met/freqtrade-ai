@@ -1239,8 +1239,8 @@ EXECUTION_CANARY_PROBE_RECEIPTS_TABLE = _table(
 EXECUTION_CANARY_RISK_POLICIES_TABLE = _table(
     "execution_canary_risk_policies",
     _uuid_id(),
-    _uuid_fk("qualification_decision_id", "qualification_decisions", unique=True),
-    _uuid_fk("deployment_approval_id", "deployment_approvals", unique=True),
+    _uuid_fk("qualification_decision_id", "qualification_decisions"),
+    _uuid_fk("deployment_approval_id", "deployment_approvals"),
     _uuid_fk("execution_attestation_id", "execution_attestations", unique=True),
     _uuid_fk("probe_receipt_id", "execution_canary_probe_receipts", unique=True),
     _uuid_fk("strategy_version_id", "strategy_versions"),
@@ -1318,6 +1318,20 @@ EXECUTION_CANARY_RISK_POLICIES_TABLE = _table(
     UniqueConstraint(
         "receipt_digest",
         name="execution_canary_risk_policies_receipt_digest_unique",
+    ),
+    Index(
+        "execution_canary_risk_policies_active_qualification_unique",
+        "qualification_decision_id",
+        unique=True,
+        postgresql_where=text("status = 'ACTIVE'"),
+        sqlite_where=text("status = 'ACTIVE'"),
+    ),
+    Index(
+        "execution_canary_risk_policies_active_approval_unique",
+        "deployment_approval_id",
+        unique=True,
+        postgresql_where=text("status = 'ACTIVE'"),
+        sqlite_where=text("status = 'ACTIVE'"),
     ),
 )
 

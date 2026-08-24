@@ -74,6 +74,12 @@ from app.canonical_v13.phase9_transition_upgrade import (
     rollback_phase9_transition_upgrade,
     verify_phase9_transition_upgrade,
 )
+from app.canonical_v13.phase9_policy_renewal_upgrade import (
+    CanonicalPhase9PolicyRenewalUpgradeBlocked,
+    apply_phase9_policy_renewal_upgrade,
+    rollback_phase9_policy_renewal_upgrade,
+    verify_phase9_policy_renewal_upgrade,
+)
 from app.canonical_v13.genesis import (
     assert_postgresql_acl_sql,
     postgresql_owner_table_grant_statements,
@@ -732,6 +738,30 @@ def phase9_transition(*, operation: str) -> dict[str, object]:
     return payload
 
 
+def phase9_policy_renewal(*, operation: str) -> dict[str, object]:
+    engine = create_engine(_database_url(), pool_pre_ping=True)
+    try:
+        if operation == "verify":
+            with engine.connect() as connection:
+                with connection.begin():
+                    connection.exec_driver_sql("SET TRANSACTION READ ONLY")
+                    result = verify_phase9_policy_renewal_upgrade(connection)
+        else:
+            actor_identity = _upgrade_actor()
+            with engine.begin() as connection:
+                result = (
+                    apply_phase9_policy_renewal_upgrade(connection)
+                    if operation == "apply"
+                    else rollback_phase9_policy_renewal_upgrade(connection)
+                )
+    finally:
+        engine.dispose()
+    payload = asdict(result)
+    if operation != "verify":
+        payload["actor_identity"] = actor_identity
+    return payload
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -770,6 +800,9 @@ def main(argv: list[str] | None = None) -> int:
             "phase9-transition-verify",
             "phase9-transition-apply",
             "phase9-transition-rollback",
+            "phase9-policy-renewal-verify",
+            "phase9-policy-renewal-apply",
+            "phase9-policy-renewal-rollback",
         ),
     )
     parser.add_argument(
@@ -802,6 +835,15 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 require_phase9_principals=(args.command == "verify-phase9-provisioned"),
             )
+            if args.command == "verify-phase9-provisioned":
+                renewal = phase9_policy_renewal(operation="verify")
+                payload["phase9_policy_renewal"] = renewal
+                if renewal["status"] != "ACCEPTED":
+                    payload["status"] = "BLOCKED"
+                    payload["problems"] = [
+                        *payload.get("problems", []),
+                        "phase9_policy_renewal_upgrade_not_accepted",
+                    ]
         elif args.command == "authority-plan":
             payload = authority_plan()
         elif args.command == "owner-table-acl-plan":
@@ -858,6 +900,10 @@ def main(argv: list[str] | None = None) -> int:
             payload = phase9_transition(
                 operation=args.command.removeprefix("phase9-transition-")
             )
+        elif args.command.startswith("phase9-policy-renewal-"):
+            payload = phase9_policy_renewal(
+                operation=args.command.removeprefix("phase9-policy-renewal-")
+            )
         else:
             payload = authority_apply(rollback=args.command == "authority-rollback")
     except BootstrapBlocked as exc:
@@ -879,6 +925,8 @@ def main(argv: list[str] | None = None) -> int:
     except CanonicalShadowRiskAclUpgradeBlocked as exc:
         payload = {"status": "BLOCKED", "reason": str(exc)}
     except CanonicalPhase9TransitionUpgradeBlocked as exc:
+        payload = {"status": "BLOCKED", "reason": str(exc)}
+    except CanonicalPhase9PolicyRenewalUpgradeBlocked as exc:
         payload = {"status": "BLOCKED", "reason": str(exc)}
     except (SQLAlchemyError, ValueError):
         payload = {"status": "BLOCKED", "reason": "bootstrap verification failed"}

@@ -892,6 +892,7 @@ def _inspect_lineage(
             select(EXECUTION_CANARY_RISK_POLICIES_TABLE).where(
                 EXECUTION_CANARY_RISK_POLICIES_TABLE.c.qualification_decision_id
                 == handoff.qualification_decision_id,
+                EXECUTION_CANARY_RISK_POLICIES_TABLE.c.status != "EXPIRED",
             )
         )
         .mappings()
@@ -1236,10 +1237,14 @@ def _inspect_lineage(
         for row in risks
     ):
         reasons.append("EXACT_RISK_BUDGET_RESERVATION_EVIDENCE_UNSET")
+    linked_attestation_ids = [
+        source["execution_attestation_id"] for source in risk_policy_sources
+    ]
     attestations = (
         connection.execute(
             select(EXECUTION_ATTESTATIONS_TABLE).where(
-                EXECUTION_ATTESTATIONS_TABLE.c.deployment_id == deployment["id"]
+                EXECUTION_ATTESTATIONS_TABLE.c.deployment_id == deployment["id"],
+                EXECUTION_ATTESTATIONS_TABLE.c.id.in_(linked_attestation_ids),
             )
         )
         .mappings()
@@ -1900,8 +1905,29 @@ def inspect_phase9_readiness(
     if stage in {"OKX_DEMO_CANARY", "RECOVERY_SOAK"}:
         if execution_counts["orders"] != 1 or lineage_counts["orders"] != 1:
             reasons.append("EXACT_SINGLE_CANARY_ORDER_COUNT_REQUIRED")
+        relevant_global_counts = dict(execution_counts)
+        live_policy_rows = (
+            effective.execute(
+                select(
+                    EXECUTION_CANARY_RISK_POLICIES_TABLE.c.id,
+                    EXECUTION_CANARY_RISK_POLICIES_TABLE.c.probe_receipt_id,
+                    EXECUTION_CANARY_RISK_POLICIES_TABLE.c.execution_attestation_id,
+                ).where(EXECUTION_CANARY_RISK_POLICIES_TABLE.c.status != "EXPIRED")
+            )
+            .mappings()
+            .all()
+        )
+        relevant_global_counts["execution_canary_risk_policies"] = len(
+            live_policy_rows
+        )
+        relevant_global_counts["execution_canary_probe_receipts"] = len(
+            {row["probe_receipt_id"] for row in live_policy_rows}
+        )
+        relevant_global_counts["execution_attestations"] = len(
+            {row["execution_attestation_id"] for row in live_policy_rows}
+        )
         for table_name in _STRICT_CANARY_GLOBAL_TABLES:
-            if execution_counts[table_name] != lineage_counts[table_name]:
+            if relevant_global_counts[table_name] != lineage_counts[table_name]:
                 reasons.append(f"UNRELATED_{table_name.upper()}_EVIDENCE_PRESENT")
     if stage == "RECOVERY_SOAK":
         recovery_events = (
