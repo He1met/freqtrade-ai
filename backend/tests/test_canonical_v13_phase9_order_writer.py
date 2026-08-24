@@ -1046,6 +1046,99 @@ def test_second_proven_absence_is_terminal_and_never_posts_third_time(
         assert shadow.lineage_evidence_counts["orders"] == 0
         assert shadow.execution_domain_counts["orders"] == 1
 
+        from hashlib import sha256
+
+        from app.canonical_v13.models import (
+            QUALIFICATION_DECISIONS_TABLE,
+            STRATEGY_ARTIFACTS_TABLE,
+            STRATEGY_VERSIONS_TABLE,
+        )
+        from app.canonical_v13.phase9_canary_policy import (
+            authorize_canary_risk_policy,
+            persist_canary_probe_receipt,
+        )
+        from app.canonical_v13.phase9_execution_authority import (
+            record_redacted_demo_attestation,
+        )
+        from tests.test_canonical_v13_phase9_canary_policy import (
+            STRATEGY_SOURCE,
+            _sealed_probe,
+        )
+
+        decision = (
+            canonical_connection.execute(
+                select(QUALIFICATION_DECISIONS_TABLE).where(
+                    QUALIFICATION_DECISIONS_TABLE.c.id
+                    == approval["qualification_decision_id"]
+                )
+            )
+            .mappings()
+            .one()
+        )
+        version = (
+            canonical_connection.execute(
+                select(STRATEGY_VERSIONS_TABLE).where(
+                    STRATEGY_VERSIONS_TABLE.c.id == decision["strategy_version_id"]
+                )
+            )
+            .mappings()
+            .one()
+        )
+        canonical_connection.execute(
+            STRATEGY_ARTIFACTS_TABLE.update()
+            .where(STRATEGY_ARTIFACTS_TABLE.c.id == version["artifact_id"])
+            .values(
+                normalized_content=STRATEGY_SOURCE,
+                content_digest=sha256(STRATEGY_SOURCE.encode()).hexdigest(),
+                size_bytes=len(STRATEGY_SOURCE.encode()),
+            )
+        )
+        renewed_at = NOW + timedelta(minutes=31)
+        fresh_probe = _sealed_probe(now=renewed_at)
+        fresh_attestation = record_redacted_demo_attestation(
+            canonical_connection,
+            deployment_id=successor.deployment_id,
+            instrument=fresh_probe.instrument,
+            account_fingerprint_digest=fresh_probe.account_fingerprint_digest,
+            credential_generation_digest=fresh_probe.credential_generation_digest,
+            permissions=fresh_probe.permissions,
+            observed_at=fresh_probe.observed_at,
+            expires_at=fresh_probe.expires_at,
+            evaluated_at=renewed_at,
+        )
+        fresh_receipt = persist_canary_probe_receipt(
+            canonical_connection,
+            probe=fresh_probe,
+            deployment_id=successor.deployment_id,
+            execution_attestation_id=fresh_attestation.attestation_id,
+            evaluated_at=renewed_at,
+        )
+        renewed_policy = authorize_canary_risk_policy(
+            canonical_connection,
+            qualification_decision_id=decision["id"],
+            deployment_approval_id=recovery.deployment_approval_id,
+            probe_receipt_id=fresh_receipt.probe_receipt_id,
+            actor_identity="operator:isolated-recovery",
+            idempotency_key="isolated-terminal-canary-recovery-policy-v1",
+            reason="renew only after exact generation-two recovery",
+            evaluated_at=renewed_at,
+        )
+        policy_rows = (
+            canonical_connection.execute(
+                select(EXECUTION_CANARY_RISK_POLICIES_TABLE).order_by(
+                    EXECUTION_CANARY_RISK_POLICIES_TABLE.c.accepted_at
+                )
+            )
+            .mappings()
+            .all()
+        )
+        assert renewed_policy.repeat_noop is False
+        assert [row["status"] for row in policy_rows] == ["EXPIRED", "ACTIVE"]
+        assert (
+            policy_rows[-1]["deployment_approval_id"]
+            == recovery.deployment_approval_id
+        )
+
 
 def test_explicit_post_rejection_is_terminal_and_audited(canonical_connection):
     with canonical_connection.begin():
