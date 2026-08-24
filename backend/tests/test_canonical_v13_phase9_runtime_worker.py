@@ -1197,8 +1197,9 @@ def test_supervisor_does_not_retry_stale_runtime_activation_receipt(
     ]
 
 
+@pytest.mark.parametrize("blocker_kind", ("stale_heartbeat", "prior_image_lineage"))
 def test_supervisor_allows_stale_runtime_bootstrap_after_exact_predecessor_stop(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, blocker_kind: str
 ) -> None:
     service = _load_script("canonical_phase9_worker_stale_activation_recovery")
     monkeypatch.setattr(service, "SUPPORT_ROOT", tmp_path / "support")
@@ -1256,6 +1257,11 @@ def test_supervisor_allows_stale_runtime_bootstrap_after_exact_predecessor_stop(
 
     class StaleActivationWorker:
         def heartbeat(self, **_kwargs):
+            if blocker_kind == "prior_image_lineage":
+                raise CanonicalPhase9CompositionBlocked(
+                    "BLOCKED_PHASE9_RUNTIME_EXACT_LINEAGE",
+                    "accepted next image is awaiting runtime observation",
+                )
             raise CanonicalPhase9RuntimeWorkerBlocked(
                 "BLOCKED_RUNTIME_WORKER_HEARTBEAT",
                 "production runtime observation is stale",

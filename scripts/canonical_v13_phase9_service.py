@@ -1434,6 +1434,12 @@ def _runtime_observation_pending(
             and observed.code == "BLOCKED_RUNTIME_WORKER_HEARTBEAT"
         ):
             return True
+        if (
+            allow_stale_bootstrap
+            and isinstance(observed, CanonicalPhase9CompositionBlocked)
+            and observed.code == "BLOCKED_PHASE9_RUNTIME_EXACT_LINEAGE"
+        ):
+            return True
         observed = observed.__cause__ or observed.__context__
     return False
 
