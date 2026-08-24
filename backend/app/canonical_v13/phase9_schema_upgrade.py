@@ -11,6 +11,9 @@ from uuid import uuid4
 
 from sqlalchemy import Connection, func, inspect, select, text
 
+from app.canonical_v13.canary_recovery_approval_upgrade import (
+    canary_recovery_predecessor_indexes,
+)
 from app.canonical_v13.genesis import (
     postgresql_acl_statements,
     postgresql_owner_table_grant_statements,
@@ -493,9 +496,12 @@ def verify_phase9_schema_upgrade(
             connection,
             accepted_manifest_digests=(manifest_digest,),
             allowed_predecessor_indexes=(
-                (CANONICAL_PREDECESSOR_RUNTIME_IDENTITY_INDEX,)
-                if manifest_digest != CANONICAL_MANIFEST_DIGEST
-                else ()
+                (
+                    (CANONICAL_PREDECESSOR_RUNTIME_IDENTITY_INDEX,)
+                    if manifest_digest != CANONICAL_MANIFEST_DIGEST
+                    else ()
+                )
+                + canary_recovery_predecessor_indexes(connection)
             ),
         )
         if not verification.accepted:

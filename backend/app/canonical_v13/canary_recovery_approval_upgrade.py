@@ -120,6 +120,22 @@ def _constraint_names(connection: Connection) -> set[str]:
     return {str(row["name"]) for row in rows if row.get("name")}
 
 
+def canary_recovery_predecessor_indexes(
+    connection: Connection,
+) -> tuple[str, ...]:
+    """Expose only the exact index allowance needed by older rollback layers."""
+
+    columns = _column_names(connection)
+    constraints = _constraint_names(connection)
+    if (
+        not (set(RECOVERY_COLUMNS) & columns)
+        and OLD_UNIQUE in constraints
+        and not (set(NEW_CONSTRAINTS) & constraints)
+    ):
+        return (OLD_UNIQUE,)
+    return ()
+
+
 def _privileges(
     connection: Connection, *, role_mapping: CanonicalRoleMapping
 ) -> dict[str, dict[str, bool]]:

@@ -11,6 +11,9 @@ from uuid import uuid4
 
 from sqlalchemy import Connection, func, inspect, select, text
 
+from app.canonical_v13.canary_recovery_approval_upgrade import (
+    canary_recovery_predecessor_indexes,
+)
 from app.canonical_v13.genesis import verify_canonical_genesis
 from app.canonical_v13.manifest import (
     CANONICAL_BUSINESS_SCHEMA,
@@ -148,9 +151,12 @@ def verify_runtime_reader_acl_upgrade(
             CANONICAL_MANIFEST_DIGEST,
         ),
         allowed_predecessor_indexes=(
-            (CANONICAL_PREDECESSOR_RUNTIME_IDENTITY_INDEX,)
-            if manifest_digest != CANONICAL_MANIFEST_DIGEST
-            else ()
+            (
+                (CANONICAL_PREDECESSOR_RUNTIME_IDENTITY_INDEX,)
+                if manifest_digest != CANONICAL_MANIFEST_DIGEST
+                else ()
+            )
+            + canary_recovery_predecessor_indexes(connection)
         ),
         allowed_missing_tables=(
             ("acceptance_signal_triggers",)

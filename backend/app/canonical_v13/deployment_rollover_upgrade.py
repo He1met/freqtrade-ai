@@ -9,6 +9,9 @@ from typing import Final
 
 from sqlalchemy import Connection, func, inspect, select, text
 
+from app.canonical_v13.canary_recovery_approval_upgrade import (
+    canary_recovery_predecessor_indexes,
+)
 from app.canonical_v13.genesis import (
     postgresql_acl_statements,
     verify_canonical_genesis,
@@ -347,6 +350,9 @@ def verify_deployment_rollover_upgrade(
         verification = verify_canonical_genesis(
             connection,
             accepted_manifest_digests=(manifest,),
+            allowed_predecessor_indexes=canary_recovery_predecessor_indexes(
+                connection
+            ),
             allowed_missing_tables=(
                 ("acceptance_signal_triggers",)
                 if manifest == DEPLOYMENT_ROLLOVER_ACCEPTED_MANIFEST_DIGEST
