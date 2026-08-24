@@ -1961,6 +1961,80 @@ def test_expired_linked_probe_saga_blocks_without_reprobe(monkeypatch, tmp_path)
     assert events == ["authenticated-get"]
 
 
+def test_phase9_service_preserves_real_sqlalchemy_connection_and_rejects_raw_wrapper(
+) -> None:
+    from sqlalchemy import create_engine
+
+    service = _load_script("canonical_phase9_sqlalchemy_connection_test")
+    engine = create_engine("sqlite://")
+    with engine.connect() as connection:
+        assert service._sqlalchemy_connection(connection) is connection
+        assert (
+            service._sqlalchemy_connection(SimpleNamespace(connection=connection))
+            is connection
+        )
+        with pytest.raises(
+            CanonicalPhase9SupervisorBlocked,
+            match="BLOCKED_PHASE9_DATABASE_CONNECTION",
+        ):
+            service._sqlalchemy_connection(
+                SimpleNamespace(connection=connection.connection)
+            )
+
+
+def test_phase9_service_connection_helper_covers_lock_and_probe_lookups() -> None:
+    service = _load_script("canonical_phase9_connection_lookup_test")
+    probe_id = UUID("00000000-0000-4000-8000-000000000097")
+    attestation_id = UUID("00000000-0000-4000-8000-000000000096")
+
+    class Result:
+        def __init__(self, row):
+            self.row = row
+
+        def first(self):
+            return self.row
+
+        def one_or_none(self):
+            return self.row
+
+    class SimulatedSqlAlchemyConnection:
+        dialect = SimpleNamespace(name="postgresql")
+
+        def __init__(self, row):
+            self.row = row
+            self.calls = []
+
+        def execute(self, statement, parameters=None):
+            self.calls.append((statement, parameters))
+            return Result(self.row)
+
+    linked_connection = SimulatedSqlAlchemyConnection((probe_id,))
+
+    @contextmanager
+    def linked_factory():
+        yield linked_connection
+
+    assert service._linked_probe_receipt_exists(linked_factory, DEPLOYMENT_ID) is True
+    service.lock_execution_boundary(
+        service._sqlalchemy_connection(linked_connection),
+        key="canary-risk-policy:test",
+    )
+    assert len(linked_connection.calls) == 2
+
+    existing_connection = SimulatedSqlAlchemyConnection(
+        (probe_id, attestation_id)
+    )
+    assert service._existing_policy_probe_identity(
+        existing_connection,
+        qualification_decision_id=UUID(
+            "00000000-0000-4000-8000-000000000099"
+        ),
+        deployment_approval_id=UUID("00000000-0000-4000-8000-000000000098"),
+        idempotency_key="phase9-policy-atomic-test",
+    ) == (probe_id, attestation_id)
+    assert len(existing_connection.calls) == 1
+
+
 def test_expired_policy_probe_saga_rotates_without_rewriting_history(
     monkeypatch, tmp_path
 ) -> None:
@@ -2034,6 +2108,7 @@ def test_probe_and_policy_commits_receipt_and_policy_in_one_approval_transaction
         lambda identity: "approval" if identity == "canonical_approval_writer" else "deployment",
     )
     monkeypatch.setattr(service, "_connection_factory", lambda name: lambda: connection_factory(name))
+    monkeypatch.setattr(service, "_sqlalchemy_connection", lambda value: value)
     monkeypatch.setattr(service, "lock_execution_boundary", lambda *_args, **_kwargs: events.append("lock"))
     monkeypatch.setattr(service, "_existing_policy_probe_identity", lambda *_args, **_kwargs: None)
     probe = _redacted_probe(observed_at=NOW, expires_at=NOW + timedelta(seconds=30))
@@ -2118,6 +2193,7 @@ def test_probe_and_policy_exact_replay_does_not_reprobe_exchange(monkeypatch) ->
     monkeypatch.setattr(service, "_require_release_checkout", lambda: None)
     monkeypatch.setattr(service, "_phase9_database_url", lambda identity: identity)
     monkeypatch.setattr(service, "_connection_factory", lambda _name: approval_factory)
+    monkeypatch.setattr(service, "_sqlalchemy_connection", lambda value: value)
     monkeypatch.setattr(service, "lock_execution_boundary", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         service,
