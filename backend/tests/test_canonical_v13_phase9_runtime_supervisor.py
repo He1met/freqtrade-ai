@@ -1622,6 +1622,12 @@ def test_cli_routes_sealed_runtime_and_canary_operator_commands(
     )
     monkeypatch.setattr(
         service,
+        "cancel_prepared_canary_order",
+        lambda order_id: observed.append(("cancel-order", order_id))
+        or {"status": "CANCELLED"},
+    )
+    monkeypatch.setattr(
+        service,
         "dispatch_canary",
         lambda digest, risk_id: observed.append(("dispatch", digest, risk_id))
         or {"status": "ACCEPTED"},
@@ -1680,6 +1686,15 @@ def test_cli_routes_sealed_runtime_and_canary_operator_commands(
     ) == 0
     assert service.main(
         [
+            "cancel-prepared-canary-order",
+            "--service",
+            "order_writer",
+            "--order-id",
+            str(order_id),
+        ]
+    ) == 0
+    assert service.main(
+        [
             "dispatch-canary",
             "--service",
             "order_writer",
@@ -1705,12 +1720,21 @@ def test_cli_routes_sealed_runtime_and_canary_operator_commands(
         ("accept-recovery", QUALIFICATION_ID),
         ("probe", DEPLOYMENT_ID),
         ("prepare-order", RELEASE_DIGEST, risk_id),
+        ("cancel-order", order_id),
         ("dispatch", RELEASE_DIGEST, risk_id),
         ("recover", RELEASE_DIGEST, order_id),
     ]
     assert [
         json.loads(line)["status"] for line in capsys.readouterr().out.splitlines()
-    ] == ["ACTIVE", "ACCEPTED", "READY", "READY", "ACCEPTED", "RECOVERED"]
+    ] == [
+        "ACTIVE",
+        "ACCEPTED",
+        "READY",
+        "READY",
+        "CANCELLED",
+        "ACCEPTED",
+        "RECOVERED",
+    ]
 
 
 def test_cli_supervise_enables_production_composition(monkeypatch) -> None:
@@ -1840,6 +1864,103 @@ def test_prepare_canary_order_persists_without_exchange_access(monkeypatch) -> N
     assert receipts[0].status == "CONFIRMED"
     assert receipts[0].details["exchange_access"] == "NONE"
     assert receipts[0].details["order_submission_enabled"] is False
+
+
+def test_cancel_prepared_canary_order_requires_stopped_services_and_no_exchange(
+    monkeypatch,
+) -> None:
+    service = _load_script("canonical_phase9_cancel_prepared_order_test")
+    order_id = UUID("00000000-0000-4000-8000-000000000092")
+    receipt_digest = "9" * 64
+    evidence_connection = object()
+    writer_connection = object()
+    calls = []
+
+    @contextmanager
+    def evidence_connection_context():
+        yield evidence_connection
+
+    @contextmanager
+    def writer_connection_context():
+        yield writer_connection
+
+    monkeypatch.setattr(service, "_require_release_checkout", lambda: None)
+    monkeypatch.setattr(
+        service,
+        "status",
+        lambda service_key: {"service_key": service_key, "loaded": False},
+    )
+    monkeypatch.setattr(
+        service,
+        "_phase9_database_url",
+        lambda capability: calls.append(("database", capability)) or "writer-url",
+    )
+    monkeypatch.setattr(
+        service,
+        "_control_database_url",
+        lambda: calls.append(("control-database",)) or "control-url",
+    )
+    monkeypatch.setattr(
+        service,
+        "_connection_factory",
+        lambda database_url: {
+            "control-url": evidence_connection_context,
+            "writer-url": writer_connection_context,
+        }[database_url],
+    )
+    monkeypatch.setattr(
+        service,
+        "assert_pre_dispatch_downstream_absent",
+        lambda observed_connection, **kwargs: calls.append(
+            ("evidence", observed_connection, kwargs)
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "cancel_prepared_demo_order",
+        lambda observed_connection, **kwargs: calls.append(
+            ("cancel", observed_connection, kwargs)
+        )
+        or SimpleNamespace(
+            status="CANCELLED",
+            order_id=order_id,
+            receipt_digest=receipt_digest,
+            repeat_noop=False,
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "_production_okx_session_factory",
+        lambda: pytest.fail("cancellation must not allocate an OKX session"),
+    )
+
+    assert service.cancel_prepared_canary_order(order_id) == {
+        "status": "CANCELLED",
+        "order_id": str(order_id),
+        "receipt_digest": receipt_digest,
+        "repeat_noop": False,
+        "exchange_access": "NONE",
+        "order_submission_enabled": False,
+    }
+    assert calls == [
+        ("control-database",),
+        ("evidence", evidence_connection, {"order_id": order_id}),
+        ("database", "canonical_order_writer"),
+        ("cancel", writer_connection, {"order_id": order_id}),
+        ("evidence", evidence_connection, {"order_id": order_id}),
+    ]
+
+    monkeypatch.setattr(
+        service,
+        "status",
+        lambda service_key: {
+            "service_key": service_key,
+            "loaded": service_key == "long_lived_runtime",
+        },
+    )
+    with pytest.raises(CanonicalPhase9SupervisorBlocked) as exc_info:
+        service.cancel_prepared_canary_order(order_id)
+    assert exc_info.value.code == "BLOCKED_PRE_DISPATCH_SUPERVISOR_LIVE"
 
 
 def test_get_only_order_replay_appends_server_sealed_noop_receipt(monkeypatch) -> None:

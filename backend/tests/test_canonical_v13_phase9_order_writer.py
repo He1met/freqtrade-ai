@@ -48,7 +48,10 @@ from app.canonical_v13.phase9_order_writer import (
     _acquire_writer_lease,
     _exchange_body,
     _persist_exchange_receipt,
+    assert_pre_dispatch_downstream_absent,
+    cancel_prepared_demo_order,
     dispatch_demo_order,
+    pre_dispatch_cancellation_receipt_digest,
     prepare_demo_order,
     recover_demo_order_get_only,
     terminal_rejected_canary_order_evidence,
@@ -1202,6 +1205,109 @@ def test_second_proven_absence_is_terminal_and_never_posts_third_time(
             invalid_archive.reason_codes
         )
         assert "NONZERO_ORDERS=1" in invalid_archive.reason_codes
+
+
+def test_pre_dispatch_cancellation_is_exact_replayable_and_archived(
+    canonical_connection,
+):
+    with canonical_connection.begin():
+        risk, attestation = _prepare_authority(canonical_connection)
+        prepared = prepare_demo_order(
+            canonical_connection,
+            risk_decision_id=risk.risk_decision_id,
+            attestation_id=attestation.attestation_id,
+            writer_identity="canonical_order_writer",
+            holder_identity="canonical-v13-order-writer-v1",
+            holder_token_digest="7" * 64,
+            idempotency_key="phase9-pre-dispatch-cancellation",
+            order_request=ORDER_BODY,
+            evaluated_at=NOW + timedelta(seconds=2),
+        )
+        deployment = canonical_connection.execute(
+            select(DEPLOYMENTS_TABLE)
+        ).mappings().one()
+        canonical_connection.execute(
+            RUNTIME_INSTANCES_TABLE.update()
+            .where(RUNTIME_INSTANCES_TABLE.c.deployment_id == deployment["id"])
+            .values(status="STOPPED")
+        )
+        canonical_connection.execute(
+            ORDER_WRITER_LEASES_TABLE.update().values(status="RELEASED")
+        )
+        from tests.test_canonical_v13_phase9_readiness import (
+            _handoff,
+            _qualified,
+            _seed_runtime_for_deployment,
+        )
+
+        fresh_qualification = _qualified(canonical_connection)
+        fresh_handoff = _handoff(canonical_connection, fresh_qualification)
+        disable_demo_deployment(
+            canonical_connection,
+            deployment_id=deployment["id"],
+            superseded_by_qualification_decision_id=(
+                fresh_qualification.qualification_decision_id
+            ),
+            actor_identity="operator:pre-dispatch-cancellation",
+            reason="archive one exact order that never crossed dispatch",
+        )
+        cancelled = cancel_prepared_demo_order(
+            canonical_connection, order_id=prepared.order_id
+        )
+        assert_pre_dispatch_downstream_absent(
+            canonical_connection, order_id=prepared.order_id
+        )
+        replay = cancel_prepared_demo_order(
+            canonical_connection, order_id=prepared.order_id
+        )
+        persisted = canonical_connection.execute(
+            select(ORDERS_TABLE).where(ORDERS_TABLE.c.id == prepared.order_id)
+        ).mappings().one()
+        assert cancelled.status == "CANCELLED"
+        assert cancelled.repeat_noop is False
+        assert replay == type(replay)(
+            order_id=prepared.order_id,
+            receipt_digest=cancelled.receipt_digest,
+            repeat_noop=True,
+        )
+        assert persisted["status"] == "CANCELLED"
+        assert persisted["exchange_order_id"] is None
+        assert persisted["receipt_digest"] == pre_dispatch_cancellation_receipt_digest(
+            persisted
+        )
+        assert canonical_connection.execute(
+            select(ORDER_DISPATCH_RECEIPTS_TABLE.c.id).where(
+                ORDER_DISPATCH_RECEIPTS_TABLE.c.order_id == prepared.order_id
+            )
+        ).scalar_one_or_none() is None
+
+        fresh_approval = approve_demo_deployment(
+            canonical_connection,
+            qualification_decision_id=(
+                fresh_qualification.qualification_decision_id
+            ),
+            actor_identity="operator:pre-dispatch-cancellation",
+            reason="continue only after exact local cancellation evidence",
+        )
+        fresh_deployment = create_demo_deployment(
+            canonical_connection,
+            deployment_approval_id=fresh_approval.deployment_approval_id,
+        )
+        _seed_runtime_for_deployment(
+            canonical_connection,
+            fresh_handoff,
+            fresh_deployment.deployment_id,
+        )
+        readiness = inspect_phase9_readiness(
+            canonical_connection,
+            qualification_handoff=fresh_handoff,
+            stage="NO_ORDER_SOAK",
+            evaluated_at=NOW + timedelta(seconds=20),
+        )
+
+    assert "CANARY_ARCHIVED_HISTORY_SCOPE_INVALID" not in readiness.reason_codes
+    assert readiness.execution_domain_counts["orders"] == 1
+    assert readiness.lineage_evidence_counts["orders"] == 0
 
 
 def test_explicit_post_rejection_is_terminal_and_audited(canonical_connection):

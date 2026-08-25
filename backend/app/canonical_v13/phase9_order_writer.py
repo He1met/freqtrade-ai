@@ -57,6 +57,9 @@ from app.canonical_v13.phase9_topology import PHASE9_SERVICE_SPECS
 CANONICAL_ORDER_WRITER_PROCESS_IDENTITY = PHASE9_SERVICE_SPECS[
     "order_writer"
 ].process_identity
+PRE_DISPATCH_CANCELLATION_CONTRACT = (
+    "canonical-v13-pre-dispatch-cancellation-receipt-v1"
+)
 
 
 class DemoOrderTransport(Protocol):
@@ -103,6 +106,14 @@ class DispatchedDemoOrder:
     retry_authorized: bool = False
 
 
+@dataclass(frozen=True)
+class CancelledPreparedDemoOrder:
+    order_id: UUID
+    receipt_digest: str
+    repeat_noop: bool
+    status: str = "CANCELLED"
+
+
 def _persisted_utc(value: datetime) -> datetime:
     return (
         value.replace(tzinfo=timezone.utc)
@@ -118,6 +129,150 @@ def _now(value: datetime | None) -> datetime:
             "BLOCKED_ORDER_TIMEZONE", "order evaluation time must be timezone-aware"
         )
     return resolved.astimezone(timezone.utc)
+
+
+def pre_dispatch_cancellation_receipt_digest(order: Mapping[str, object]) -> str:
+    """Seal an exact local-only cancellation with no exchange claim or POST."""
+
+    return canonical_execution_digest(
+        {
+            "contract": PRE_DISPATCH_CANCELLATION_CONTRACT,
+            "order_id": str(order["id"]),
+            "risk_decision_id": str(order["risk_decision_id"]),
+            "request_digest": str(order["request_digest"]),
+            "reason_code": "PRE_DISPATCH_NO_EXCHANGE_ACCESS",
+            "exchange_access": "NONE",
+            "order_submission_enabled": False,
+        }
+    )
+
+
+def assert_pre_dispatch_downstream_absent(
+    connection: Connection, *, order_id: UUID
+) -> None:
+    """Read-only control-plane fence for writers outside the order capability."""
+
+    for table in (FILLS_TABLE, RECONCILIATION_ITEMS_TABLE):
+        if connection.execute(
+            select(table.c.order_id).where(table.c.order_id == order_id).limit(1)
+        ).scalar_one_or_none() is not None:
+            raise CanonicalExecutionChainBlocked(
+                "BLOCKED_PRE_DISPATCH_SIDE_EFFECT_EVIDENCE", table.name
+            )
+
+
+def cancel_prepared_demo_order(
+    connection: Connection, *, order_id: UUID
+) -> CancelledPreparedDemoOrder:
+    """Cancel an exact prepared order only when no dispatch boundary was crossed."""
+
+    effective = require_canonical_execution(connection)
+    lock_execution_boundary(effective, key=f"demo-order-cancel:{order_id}")
+    order = (
+        effective.execute(
+            select(ORDERS_TABLE)
+            .where(ORDERS_TABLE.c.id == order_id)
+            .with_for_update()
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if order is None:
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_PRE_DISPATCH_ORDER_NOT_FOUND", str(order_id)
+        )
+    expected_receipt = pre_dispatch_cancellation_receipt_digest(order)
+    replay = order["status"] == "CANCELLED"
+    if replay and (
+        order["exchange_order_id"] is not None
+        or order["receipt_digest"] != expected_receipt
+    ):
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_PRE_DISPATCH_CANCELLATION_DRIFT", str(order_id)
+        )
+    if not replay and (
+        order["status"] != "SUBMITTED"
+        or order["exchange_order_id"] is not None
+        or order["receipt_digest"] is not None
+    ):
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_PRE_DISPATCH_ORDER_STATE", str(order["status"])
+        )
+    for table in (
+        ORDER_DISPATCH_RECEIPTS_TABLE,
+        ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE,
+    ):
+        if effective.execute(
+            select(table.c.order_id).where(table.c.order_id == order_id).limit(1)
+        ).scalar_one_or_none() is not None:
+            raise CanonicalExecutionChainBlocked(
+                "BLOCKED_PRE_DISPATCH_SIDE_EFFECT_EVIDENCE", table.name
+            )
+    deployment_status = effective.execute(
+        select(DEPLOYMENTS_TABLE.c.status)
+        .select_from(
+            ORDERS_TABLE.join(
+                RISK_DECISIONS_TABLE,
+                RISK_DECISIONS_TABLE.c.id == ORDERS_TABLE.c.risk_decision_id,
+            )
+            .join(
+                EXECUTION_RISK_RESERVATIONS_TABLE,
+                EXECUTION_RISK_RESERVATIONS_TABLE.c.trade_intent_id
+                == RISK_DECISIONS_TABLE.c.trade_intent_id,
+            )
+            .join(
+                EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE,
+                EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE.c.id
+                == EXECUTION_RISK_RESERVATIONS_TABLE.c.risk_budget_authorization_id,
+            )
+            .join(
+                EXECUTION_CANARY_RISK_POLICIES_TABLE,
+                EXECUTION_CANARY_RISK_POLICIES_TABLE.c.id
+                == EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE.c.execution_canary_risk_policy_id,
+            )
+            .join(
+                EXECUTION_ATTESTATIONS_TABLE,
+                EXECUTION_ATTESTATIONS_TABLE.c.id
+                == EXECUTION_CANARY_RISK_POLICIES_TABLE.c.execution_attestation_id,
+            )
+            .join(
+                DEPLOYMENTS_TABLE,
+                DEPLOYMENTS_TABLE.c.id
+                == EXECUTION_ATTESTATIONS_TABLE.c.deployment_id,
+            )
+        )
+        .where(ORDERS_TABLE.c.id == order_id)
+    ).scalar_one_or_none()
+    if deployment_status != "DISABLED":
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_PRE_DISPATCH_DEPLOYMENT_ACTIVE", str(deployment_status)
+        )
+    lease_status = effective.execute(
+        select(ORDER_WRITER_LEASES_TABLE.c.status).where(
+            ORDER_WRITER_LEASES_TABLE.c.execution_target == "OKX_DEMO"
+        )
+    ).scalar_one_or_none()
+    if lease_status not in {None, "RELEASED", "EXPIRED"}:
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_PRE_DISPATCH_WRITER_LEASE", str(lease_status)
+        )
+    if replay:
+        return CancelledPreparedDemoOrder(order_id, expected_receipt, True)
+    updated = effective.execute(
+        ORDERS_TABLE.update()
+        .where(
+            ORDERS_TABLE.c.id == order_id,
+            ORDERS_TABLE.c.status == "SUBMITTED",
+            ORDERS_TABLE.c.exchange_order_id.is_(None),
+            ORDERS_TABLE.c.receipt_digest.is_(None),
+        )
+        .values(status="CANCELLED", receipt_digest=expected_receipt)
+    )
+    if updated.rowcount != 1:
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_PRE_DISPATCH_CANCELLATION_RACE", str(order_id)
+        )
+    return CancelledPreparedDemoOrder(order_id, expected_receipt, False)
 
 
 def _exchange_body(
@@ -1864,10 +2019,15 @@ def release_demo_order_writer_lease(
 __all__ = [
     "CanonicalOrderRecoveryRequired",
     "CANONICAL_ORDER_WRITER_PROCESS_IDENTITY",
+    "CancelledPreparedDemoOrder",
     "DemoOrderTransport",
     "DispatchedDemoOrder",
+    "PRE_DISPATCH_CANCELLATION_CONTRACT",
     "PreparedDemoOrder",
+    "assert_pre_dispatch_downstream_absent",
+    "cancel_prepared_demo_order",
     "dispatch_demo_order",
+    "pre_dispatch_cancellation_receipt_digest",
     "prepare_demo_order",
     "release_demo_order_writer_lease",
     "recover_demo_order_get_only",
