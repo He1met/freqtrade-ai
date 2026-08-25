@@ -83,9 +83,16 @@ class AuthorityPort:
         self.expected = expected
         self.valid = valid
         self.calls: list[tuple[OrderWriterCanaryAuthority, datetime]] = []
+        self.recovery_calls: list[
+            tuple[OrderWriterCanaryAuthority, UUID, datetime]
+        ] = []
 
     def verify(self, authority, *, observed_at):
         self.calls.append((authority, observed_at))
+        return self.valid and authority == self.expected
+
+    def verify_recovery(self, authority, *, order_id, observed_at):
+        self.recovery_calls.append((authority, order_id, observed_at))
         return self.valid and authority == self.expected
 
 
@@ -107,7 +114,7 @@ def _writer_authority(*, expires_at=NOW + timedelta(seconds=60), **changes):
     return build_order_writer_canary_authority(**{**values, **changes})
 
 
-def _writer_plan(*, authority=None):
+def _writer_plan(*, authority=None, recovery_order_id=None):
     resolved = authority or _writer_authority()
     return build_launch_plan(
         service_key="order_writer",
@@ -119,8 +126,36 @@ def _writer_plan(*, authority=None):
         deployment_capability_digest=CAPABILITY_DIGEST,
         order_writer_enabled=True,
         order_writer_canary_authority=resolved,
+        recovery_order_id=recovery_order_id,
         plan_id=UUID("20000000-0000-4000-8000-000000000002"),
     )
+
+
+def test_recovery_writer_plan_binds_order_and_uses_immutable_verifier() -> None:
+    order_id = UUID("90000000-0000-4000-8000-000000000009")
+    authority = _writer_authority(expires_at=NOW + timedelta(seconds=1))
+    plan = _writer_plan(authority=authority, recovery_order_id=order_id)
+    normal = _writer_plan(authority=authority)
+    assert plan.recovery_order_id == order_id
+    assert plan.plan_digest != normal.plan_digest
+
+    port = MemoryLeasePort()
+    authority_port = AuthorityPort(authority)
+    lease, _receipt = claim_lease(
+        port,
+        plan=plan,
+        holder_token="r" * 48,
+        pid=4321,
+        now=NOW + timedelta(minutes=5),
+        ttl=timedelta(seconds=30),
+        process_probe=ProcessProbe(False),
+        authority_port=authority_port,
+    )
+    assert lease.recovery_order_id == order_id
+    assert authority_port.calls == []
+    assert authority_port.recovery_calls == [
+        (authority, order_id, NOW + timedelta(minutes=5))
+    ]
 
 
 def _runtime_plan(*, generation: int = 1):
@@ -2054,6 +2089,62 @@ def test_get_only_order_replay_appends_server_sealed_noop_receipt(monkeypatch) -
         "repeat_noop": True,
         "transport_mode": "GET_ONLY",
     }
+
+
+def test_retry_canary_requires_exact_recovery_plan_and_seals_two_attempt_limit(
+    monkeypatch,
+) -> None:
+    service = _load_script("canonical_phase9_order_retry_receipt_test")
+    order_id = UUID("00000000-0000-4000-8000-000000000095")
+    plan = _writer_plan(recovery_order_id=order_id)
+    lease = Phase9Lease(
+        service_key=plan.service_key,
+        generation=plan.generation,
+        plan_digest=plan.plan_digest,
+        release_digest=plan.release_digest,
+        deployment_id=plan.deployment_id,
+        deployment_capability_digest=plan.deployment_capability_digest,
+        image_digest=plan.image_digest,
+        holder_token_digest="8" * 64,
+        pid=321,
+        acquired_at=NOW - timedelta(seconds=5),
+        heartbeat_at=NOW - timedelta(seconds=1),
+        expires_at=NOW + timedelta(seconds=20),
+        order_writer_canary_authority=plan.order_writer_canary_authority,
+        recovery_order_id=order_id,
+    )
+    result = SimpleNamespace(
+        status="ACCEPTED",
+        order_id=order_id,
+        exchange_order_id="redacted-demo-order",
+        receipt_digest="9" * 64,
+        repeat_noop=False,
+    )
+    receipts = []
+    monkeypatch.setattr(service, "_require_release_checkout", lambda: None)
+    monkeypatch.setattr(
+        service, "_load_plan", lambda _service: (plan, {"status": "RUNNING"})
+    )
+    monkeypatch.setattr(service.FileLeasePort, "read", lambda _self, _service: lease)
+    monkeypatch.setattr(service.UnixProcessProbe, "is_alive", lambda _self, _pid: True)
+    monkeypatch.setattr(service, "_now", lambda: NOW)
+    monkeypatch.setattr(service, "_read_order_holder_token", lambda: "h" * 64)
+    monkeypatch.setattr(
+        service,
+        "_production_order_operator",
+        lambda **_kwargs: SimpleNamespace(
+            retry_canary=lambda **_inner_kwargs: result
+        ),
+    )
+    monkeypatch.setattr(service, "_append_receipt", receipts.append)
+
+    payload = service.retry_canary(plan.plan_digest, order_id)
+    assert payload["status"] == "ACCEPTED"
+    assert payload["maximum_attempts"] == 2
+    assert payload["third_post_allowed"] is False
+    assert receipts[0].action == "ORDER_RETRY"
+    assert receipts[0].details["attempt_ordinal"] == 2
+    assert receipts[0].details["third_post_allowed"] is False
 
 
 def test_cli_routes_independent_fill_ledger_reconciliation_workers(

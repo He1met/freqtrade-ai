@@ -478,6 +478,49 @@ backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py phase9-readi
   --stage OKX_DEMO_CANARY "${PHASE9_IDS[@]}"
 ```
 
+若唯一 POST 的结果不确定且 writer 已按 fail-closed trap 停止，禁止用新的普通 writer plan
+绕过过期 policy/attestation，也禁止创建第二个 order。先创建只绑定原 order 的 recovery plan；除新增
+`--recovery-order-id` 外，其余 authority 参数必须与原 dispatch claim 完全一致：
+
+```bash
+python scripts/canonical_v13_phase9_service.py prepare \
+  --service order_writer --stage OKX_DEMO_CANARY --enable-order-writer \
+  --recovery-order-id <exact-ambiguous-order-id> \
+  --release-digest <exact-current-release-digest> \
+  --deployment-id <exact-deployment-id> \
+  --deployment-capability-digest <exact-deployment-capability-digest> \
+  --execution-canary-risk-policy-id <original-policy-id> \
+  --execution-canary-risk-policy-digest <original-policy-digest> \
+  --attestation-id <original-attestation-id> \
+  --attestation-digest <original-attestation-digest> \
+  --attestation-expires-at <original-timezone-aware-expiry> \
+  --instrument-metadata-digest <original-instrument-resource-digest> \
+  --mark-price-snapshot-digest <original-mark-resource-digest> \
+  --strategy-max-leverage <original-artifact-cap> \
+  --effective-leverage <original-effective-leverage> \
+  --position-policy LONG_ONLY
+python scripts/canonical_v13_phase9_service.py confirm \
+  --service order_writer --plan-digest <exact-recovery-plan-digest>
+python scripts/canonical_v13_phase9_service.py recover-canary \
+  --service order_writer --plan-digest <exact-recovery-plan-digest> \
+  --order-id <exact-ambiguous-order-id>
+```
+
+recovery supervisor 只验证原 claim 当时处于 policy、attestation、probe、guard 和 lease 的有效窗口，
+并持续要求 exact order/risk/policy/attestation/digest 与零 fill/ledger/reconciliation；过期只允许 GET，
+不重新授予普通 POST 能力。若 GET 找到订单，沿同一 order 进入 fill/ledger/reconciliation；若返回正式
+`GET_NOT_FOUND` 且结果为 `RETRY_READY`，才允许同一 recovery plan 执行一次：
+
+```bash
+python scripts/canonical_v13_phase9_service.py retry-canary \
+  --service order_writer --plan-digest <exact-recovery-plan-digest> \
+  --order-id <exact-ambiguous-order-id>
+```
+
+第二次 POST 前仍必须重新建立 sealed private session，完成无网络 preflight，并重新读取 fresh
+flat/no-pending/maxBuy/leverage guard。preflight 失败不得写第二条 claim；第二次结果不确定时只能再次
+GET-only 收口。合同上 `maximum_attempts=2`、`third_post_allowed=false`，任何第三次 POST 都必须被拒绝。
+
 ## 7. D — recovery acceptance
 
 先停止 order writer 并释放 exact DB lease，再验证：runtime restart generation、GET-only order replay、

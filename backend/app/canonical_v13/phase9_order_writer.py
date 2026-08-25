@@ -18,7 +18,10 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import Connection, select
 
-from app.adapters.okx_demo.write_semantics import OkxDemoTransportError
+from app.adapters.okx_demo.write_semantics import (
+    OkxDemoPreDispatchBlocked,
+    OkxDemoTransportError,
+)
 from app.canonical_v13.execution_common import (
     CanonicalExecutionChainBlocked,
     canonical_execution_digest,
@@ -75,6 +78,8 @@ class DemoOrderTransport(Protocol):
 
     def place(self, body: Mapping[str, str]) -> Mapping[str, Any]: ...
 
+    def preflight_place(self, body: Mapping[str, str]) -> None: ...
+
     def query(self, *, instrument: str, client_order_id: str) -> Mapping[str, Any]: ...
 
     def prove_absent(
@@ -113,6 +118,16 @@ class CancelledPreparedDemoOrder:
     receipt_digest: str
     repeat_noop: bool
     status: str = "CANCELLED"
+
+
+@dataclass(frozen=True)
+class CanaryRecoveryOrder:
+    order_id: UUID
+    risk_decision_id: UUID
+    order_status: str
+    request_body: Mapping[str, str]
+    dispatch_attempt_count: int
+    negative_outcome_count: int
 
 
 def _persisted_utc(value: datetime) -> datetime:
@@ -914,6 +929,289 @@ def _negative_outcome_is_exact(
         and outcome["safe_response_digest"]
         == canonical_execution_digest(dict(safe))
         and outcome["receipt_digest"] == _outcome_receipt_digest(outcome)
+    )
+
+
+def validate_canary_recovery_order(
+    connection: Connection,
+    *,
+    order_id: UUID,
+    authority: object,
+    require_negative_outcome: bool = False,
+) -> CanaryRecoveryOrder:
+    """Verify an immutable ambiguous canary before GET-only recovery or retry.
+
+    This intentionally validates the authority at the original dispatch boundary,
+    not against wall-clock freshness.  A retry still requires a fresh private
+    dispatch guard and the existing two-attempt saga proof.
+    """
+
+    effective = require_canonical_execution(connection)
+    order, body = _load_dispatch(effective, order_id)
+    decision = effective.execute(
+        select(RISK_DECISIONS_TABLE).where(
+            RISK_DECISIONS_TABLE.c.id == order["risk_decision_id"]
+        )
+    ).mappings().one_or_none()
+    intent = (
+        effective.execute(
+            select(TRADE_INTENTS_TABLE).where(
+                TRADE_INTENTS_TABLE.c.id == decision["trade_intent_id"]
+            )
+        ).mappings().one_or_none()
+        if decision is not None
+        else None
+    )
+    reservation = (
+        effective.execute(
+            select(EXECUTION_RISK_RESERVATIONS_TABLE).where(
+                EXECUTION_RISK_RESERVATIONS_TABLE.c.trade_intent_id == intent["id"]
+            )
+        ).mappings().one_or_none()
+        if intent is not None
+        else None
+    )
+    budget = (
+        effective.execute(
+            select(EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE).where(
+                EXECUTION_RISK_BUDGET_AUTHORIZATIONS_TABLE.c.id
+                == reservation["risk_budget_authorization_id"]
+            )
+        ).mappings().one_or_none()
+        if reservation is not None
+        else None
+    )
+    policy = (
+        effective.execute(
+            select(EXECUTION_CANARY_RISK_POLICIES_TABLE).where(
+                EXECUTION_CANARY_RISK_POLICIES_TABLE.c.id
+                == budget["execution_canary_risk_policy_id"]
+            )
+        ).mappings().one_or_none()
+        if budget is not None
+        else None
+    )
+    attestation = (
+        effective.execute(
+            select(EXECUTION_ATTESTATIONS_TABLE).where(
+                EXECUTION_ATTESTATIONS_TABLE.c.id
+                == policy["execution_attestation_id"]
+            )
+        ).mappings().one_or_none()
+        if policy is not None
+        else None
+    )
+    probe = (
+        effective.execute(
+            select(EXECUTION_CANARY_PROBE_RECEIPTS_TABLE).where(
+                EXECUTION_CANARY_PROBE_RECEIPTS_TABLE.c.id
+                == policy["probe_receipt_id"]
+            )
+        ).mappings().one_or_none()
+        if policy is not None
+        else None
+    )
+    deployment = (
+        effective.execute(
+            select(DEPLOYMENTS_TABLE).where(
+                DEPLOYMENTS_TABLE.c.id == attestation["deployment_id"]
+            )
+        ).mappings().one_or_none()
+        if attestation is not None
+        else None
+    )
+    claims = effective.execute(
+        select(ORDER_DISPATCH_RECEIPTS_TABLE)
+        .where(ORDER_DISPATCH_RECEIPTS_TABLE.c.order_id == order_id)
+        .order_by(ORDER_DISPATCH_RECEIPTS_TABLE.c.attempt_ordinal)
+    ).mappings().all()
+    outcomes = effective.execute(
+        select(ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE)
+        .where(ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE.c.order_id == order_id)
+        .order_by(ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE.c.recorded_at)
+    ).mappings().all()
+    authority_fields = (
+        "deployment_id",
+        "deployment_capability_digest",
+        "execution_canary_risk_policy_id",
+        "execution_canary_risk_policy_digest",
+        "attestation_id",
+        "attestation_digest",
+        "attestation_expires_at",
+        "instrument_metadata_digest",
+        "mark_price_snapshot_digest",
+        "strategy_max_leverage",
+        "effective_leverage",
+        "position_policy",
+    )
+    if any(not hasattr(authority, field) for field in authority_fields):
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_ORDER_RECOVERY_AUTHORITY", "typed frozen authority is required"
+        )
+    if (
+        decision is None
+        or decision["status"] != "RISK_ACCEPTED"
+        or decision["decision_mode"] != "EXECUTION"
+        or intent is None
+        or intent["intent_mode"] != "EXECUTION"
+        or reservation is None
+        or reservation["status"] != "RISK_ACCEPTED"
+        or budget is None
+        or policy is None
+        or attestation is None
+        or probe is None
+        or deployment is None
+        or order["demo_only"] is not True
+        or order["allow_real_funds"] is not False
+        or order["exchange_order_id"] is not None
+        or order["receipt_digest"] is not None
+        or deployment["id"] != getattr(authority, "deployment_id")
+        or deployment["capability_digest"]
+        != getattr(authority, "deployment_capability_digest")
+        or deployment["demo_only"] is not True
+        or deployment["allow_real_funds"] is not False
+        or policy["id"] != getattr(authority, "execution_canary_risk_policy_id")
+        or policy["policy_digest"]
+        != getattr(authority, "execution_canary_risk_policy_digest")
+        or policy["execution_attestation_id"] != getattr(authority, "attestation_id")
+        or policy["attestation_digest"] != getattr(authority, "attestation_digest")
+        or policy["metadata_receipt_digest"]
+        != getattr(authority, "instrument_metadata_digest")
+        or policy["mark_price_receipt_digest"]
+        != getattr(authority, "mark_price_snapshot_digest")
+        or policy["position_policy"] != getattr(authority, "position_policy")
+        or Decimal(str(policy["strategy_max_leverage"]))
+        != Decimal(str(getattr(authority, "strategy_max_leverage")))
+        or Decimal(str(policy["effective_leverage"]))
+        != Decimal(str(getattr(authority, "effective_leverage")))
+        or attestation["id"] != getattr(authority, "attestation_id")
+        or attestation["attestation_digest"] != getattr(authority, "attestation_digest")
+        or _persisted_utc(attestation["expires_at"])
+        != _persisted_utc(getattr(authority, "attestation_expires_at"))
+        or attestation["execution_target"] != "OKX_DEMO"
+        or attestation["permissions_json"]
+        != {"read": True, "trade": True, "withdraw": False}
+        or probe["execution_attestation_id"] != attestation["id"]
+        or policy["instrument"] != body.get("instId")
+        or Decimal(str(policy["minimum_contract_size"])) != Decimal(body.get("sz", "0"))
+        or Decimal(str(policy["limit_price"])) != Decimal(body.get("px", "0"))
+        or not 1 <= len(claims) <= 2
+        or [int(row["attempt_ordinal"]) for row in claims] != list(range(1, len(claims) + 1))
+    ):
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_ORDER_RECOVERY_AUTHORITY",
+            "order, execution risk, policy, attestation, and frozen authority drifted",
+        )
+    negative_outcomes = []
+    outcomes_by_claim = {row["dispatch_claim_id"]: row for row in outcomes}
+    for index, claim in enumerate(claims):
+        claimed_at = _persisted_utc(claim["claimed_at"])
+        claim_payload = {
+            "contract": "canonical-v13-okx-demo-order-dispatch-claim-v1",
+            "order_id": str(order_id),
+            "attempt_ordinal": int(claim["attempt_ordinal"]),
+            "request_digest": order["request_digest"],
+            "holder_identity": claim["holder_identity"],
+            "holder_token_digest": claim["holder_token_digest"],
+            "lease_generation": int(claim["lease_generation"]),
+            "lease_digest": claim["lease_digest"],
+            "lease_acquired_at": _persisted_utc(claim["lease_acquired_at"]).isoformat(),
+            "lease_expires_at": _persisted_utc(claim["lease_expires_at"]).isoformat(),
+            "risk_decision_id": str(decision["id"]),
+            "canary_risk_policy_id": str(policy["id"]),
+            "probe_receipt_id": str(probe["id"]),
+            "execution_attestation_id": str(attestation["id"]),
+            "guard_digest": claim["guard_digest"],
+            "claimed_at": claimed_at.isoformat(),
+        }
+        if (
+            claim["risk_decision_id"] != decision["id"]
+            or claim["canary_risk_policy_id"] != policy["id"]
+            or claim["probe_receipt_id"] != probe["id"]
+            or claim["execution_attestation_id"] != attestation["id"]
+            or claim["request_digest"] != order["request_digest"]
+            or claim["guard_digest"] != canonical_execution_digest(dict(claim["guard_json"]))
+            or claim["claim_digest"] != canonical_execution_digest(claim_payload)
+            or not (
+                _persisted_utc(policy["accepted_at"])
+                <= claimed_at
+                < _persisted_utc(policy["expires_at"])
+                and _persisted_utc(attestation["observed_at"])
+                <= claimed_at
+                < _persisted_utc(attestation["expires_at"])
+                and _persisted_utc(probe["observed_at"])
+                <= claimed_at
+                < _persisted_utc(probe["expires_at"])
+                and _persisted_utc(claim["guard_observed_at"])
+                <= claimed_at
+                < _persisted_utc(claim["guard_expires_at"])
+            )
+        ):
+            raise CanonicalExecutionChainBlocked(
+                "BLOCKED_ORDER_RECOVERY_CLAIM", "dispatch claim evidence drifted"
+            )
+        outcome = outcomes_by_claim.get(claim["id"])
+        if outcome is not None:
+            if not _negative_outcome_is_exact(outcome=outcome, claim=claim, body=body):
+                raise CanonicalExecutionChainBlocked(
+                    "BLOCKED_ORDER_RECOVERY_OUTCOME",
+                    "only exact GET_NOT_FOUND evidence can authorize recovery retry",
+                )
+            negative_outcomes.append(outcome)
+        elif index != len(claims) - 1:
+            raise CanonicalExecutionChainBlocked(
+                "BLOCKED_ORDER_RECOVERY_OUTCOME", "only the latest claim may be unresolved"
+            )
+    fills = effective.execute(
+        select(FILLS_TABLE.c.id).where(FILLS_TABLE.c.order_id == order_id)
+    ).scalars().all()
+    ledger_entries = (
+        effective.execute(
+            select(LEDGER_ENTRIES_TABLE.c.id).where(
+                LEDGER_ENTRIES_TABLE.c.fill_id.in_(fills)
+            )
+        ).scalars().all()
+        if fills
+        else []
+    )
+    reconciliation_items = effective.execute(
+        select(RECONCILIATION_ITEMS_TABLE.c.id).where(
+            RECONCILIATION_ITEMS_TABLE.c.order_id == order_id
+        )
+    ).scalars().all()
+    active_shape = (
+        (order["status"] == "DISPATCHING" and len(outcomes) == len(claims) - 1)
+        or (
+            order["status"] == "SUBMITTED"
+            and len(claims) == 1
+            and len(negative_outcomes) == 1
+        )
+    )
+    retry_shape = (
+        order["status"] == "SUBMITTED"
+        and len(claims) == 1
+        and len(negative_outcomes) == 1
+        and policy["status"] == "ACTIVE"
+        and deployment["status"] == "ACTIVE"
+    )
+    if (
+        (require_negative_outcome and not retry_shape)
+        or (not require_negative_outcome and not active_shape)
+        or fills
+        or ledger_entries
+        or reconciliation_items
+    ):
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_ORDER_RECOVERY_STATE",
+            "one bounded ambiguous order with zero downstream effects is required",
+        )
+    return CanaryRecoveryOrder(
+        order_id=order_id,
+        risk_decision_id=UUID(str(decision["id"])),
+        order_status=str(order["status"]),
+        request_body=dict(body),
+        dispatch_attempt_count=len(claims),
+        negative_outcome_count=len(negative_outcomes),
     )
 
 
@@ -1828,6 +2126,13 @@ def dispatch_demo_order(
         effective_leverage=str(policy["effective_leverage"]),
         minimum_size=str(policy["minimum_contract_size"]),
     )
+    try:
+        transport.preflight_place(body)
+    except OkxDemoPreDispatchBlocked as exc:
+        raise CanonicalExecutionChainBlocked(
+            "BLOCKED_ORDER_PRE_DISPATCH",
+            f"order POST did not start: {exc.safe_diagnostic}",
+        ) from None
     with connection_factory() as connection:
         order, body = _claim_dispatch(
             connection,
@@ -1845,6 +2150,11 @@ def dispatch_demo_order(
         )
     except CanonicalOrderRecoveryRequired:
         raise
+    except OkxDemoPreDispatchBlocked as exc:
+        raise CanonicalOrderRecoveryRequired(
+            "BLOCKED_ORDER_RECOVERY_REQUIRED",
+            f"order outcome is unknown after preflight: {exc.safe_diagnostic}",
+        ) from None
     except OkxDemoTransportError as exc:
         raise CanonicalOrderRecoveryRequired(
             "BLOCKED_ORDER_RECOVERY_REQUIRED",
@@ -2023,6 +2333,7 @@ def release_demo_order_writer_lease(
 
 
 __all__ = [
+    "CanaryRecoveryOrder",
     "CanonicalOrderRecoveryRequired",
     "CANONICAL_ORDER_WRITER_PROCESS_IDENTITY",
     "CancelledPreparedDemoOrder",
@@ -2038,4 +2349,5 @@ __all__ = [
     "release_demo_order_writer_lease",
     "recover_demo_order_get_only",
     "terminal_rejected_canary_order_evidence",
+    "validate_canary_recovery_order",
 ]
