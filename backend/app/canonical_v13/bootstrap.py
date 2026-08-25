@@ -39,6 +39,11 @@ from app.canonical_v13.canary_recovery_approval_upgrade import (
     CanonicalCanaryRecoveryApprovalUpgradeBlocked,
     verify_canary_recovery_approval_upgrade,
 )
+from app.canonical_v13.order_recovery_evidence_acl_upgrade import (
+    ORDER_WRITER_RECOVERY_READ_DELTA,
+    CanonicalOrderRecoveryEvidenceAclUpgradeBlocked,
+    verify_order_recovery_evidence_acl_upgrade,
+)
 
 
 LOCAL_ROLE_PREFIX: Final = "freqtrade_ai_v13_"
@@ -163,6 +168,21 @@ def _accepted_additive_table_grants(
         accepted.update(
             (approval_writer, table_name, "SELECT")
             for table_name in APPROVAL_WRITER_READ_DELTA
+        )
+    try:
+        recovery_evidence_acl = verify_order_recovery_evidence_acl_upgrade(
+            connection, role_mapping=role_mapping
+        )
+    except CanonicalOrderRecoveryEvidenceAclUpgradeBlocked:
+        recovery_evidence_acl = None
+    if (
+        recovery_evidence_acl is not None
+        and recovery_evidence_acl.status == "ACCEPTED"
+    ):
+        order_writer = role_mapping.physical("canonical_order_writer")
+        accepted.update(
+            (order_writer, table_name, "SELECT")
+            for table_name in ORDER_WRITER_RECOVERY_READ_DELTA
         )
     return accepted
 
