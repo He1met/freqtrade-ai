@@ -1075,6 +1075,15 @@ class CanonicalOkxDemoSession:
             )
         return dict(payload)
 
+    def preflight_place(self, body: Mapping[str, str]) -> None:
+        """Validate and sign the exact POST request without sending it."""
+
+        if self.__closed:
+            raise CanonicalExecutionChainBlocked(
+                "BLOCKED_OKX_DEMO_SESSION_CLOSED", "session is closed"
+            )
+        self.__write.preflight(path="/api/v5/trade/order", body=body)
+
     def query(self, *, instrument: str, client_order_id: str) -> Mapping[str, Any]:
         if self.__closed:
             raise CanonicalExecutionChainBlocked(

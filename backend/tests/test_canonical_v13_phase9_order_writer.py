@@ -12,6 +12,7 @@ from sqlalchemy import select
 from app.canonical_v13.accounting import post_production_demo_ledger_entry
 from app.canonical_v13.execution_common import CanonicalExecutionChainBlocked
 from app.canonical_v13.execution_common import canonical_execution_digest
+from app.adapters.okx_demo.write_semantics import OkxDemoPreDispatchBlocked
 from app.canonical_v13.fill_service import record_production_demo_fill
 from app.canonical_v13.models import (
     DEPLOYMENT_APPROVALS_TABLE,
@@ -55,6 +56,10 @@ from app.canonical_v13.phase9_order_writer import (
     prepare_demo_order,
     recover_demo_order_get_only,
     terminal_rejected_canary_order_evidence,
+    validate_canary_recovery_order,
+)
+from app.canonical_v13.phase9_runtime_supervisor import (
+    build_order_writer_canary_authority,
 )
 from app.canonical_v13.phase9_readiness import (
     _dispatch_claim_is_exact,
@@ -138,6 +143,9 @@ class FakeTransport:
         if self.place_error is not None:
             raise self.place_error
         return self._payload()
+
+    def preflight_place(self, body):
+        assert dict(body) == ORDER_BODY
 
     def dispatch_guard(
         self, *, instrument, limit_price, effective_leverage, minimum_size
@@ -335,6 +343,53 @@ def _factory(engine):
             yield connection
 
     return factory
+
+
+def _frozen_recovery_authority(connection, order_id):
+    claim = connection.execute(
+        select(ORDER_DISPATCH_RECEIPTS_TABLE).where(
+            ORDER_DISPATCH_RECEIPTS_TABLE.c.order_id == order_id
+        )
+    ).mappings().one()
+    policy = connection.execute(
+        select(EXECUTION_CANARY_RISK_POLICIES_TABLE).where(
+            EXECUTION_CANARY_RISK_POLICIES_TABLE.c.id
+            == claim["canary_risk_policy_id"]
+        )
+    ).mappings().one()
+    attestation = connection.execute(
+        select(EXECUTION_ATTESTATIONS_TABLE).where(
+            EXECUTION_ATTESTATIONS_TABLE.c.id == claim["execution_attestation_id"]
+        )
+    ).mappings().one()
+    probe = connection.execute(
+        select(EXECUTION_CANARY_PROBE_RECEIPTS_TABLE).where(
+            EXECUTION_CANARY_PROBE_RECEIPTS_TABLE.c.id == claim["probe_receipt_id"]
+        )
+    ).mappings().one()
+    deployment = connection.execute(
+        select(DEPLOYMENTS_TABLE).where(
+            DEPLOYMENTS_TABLE.c.id == attestation["deployment_id"]
+        )
+    ).mappings().one()
+    return build_order_writer_canary_authority(
+        deployment_id=deployment["id"],
+        deployment_capability_digest=deployment["capability_digest"],
+        execution_canary_risk_policy_id=policy["id"],
+        execution_canary_risk_policy_digest=policy["policy_digest"],
+        attestation_id=attestation["id"],
+        attestation_digest=attestation["attestation_digest"],
+        attestation_expires_at=(
+            attestation["expires_at"].replace(tzinfo=timezone.utc)
+            if attestation["expires_at"].tzinfo is None
+            else attestation["expires_at"]
+        ),
+        instrument_metadata_digest=policy["metadata_receipt_digest"],
+        mark_price_snapshot_digest=policy["mark_price_receipt_digest"],
+        strategy_max_leverage=str(policy["strategy_max_leverage"]),
+        effective_leverage=str(policy["effective_leverage"]),
+        position_policy=policy["position_policy"],
+    )
 
 
 def test_prepare_then_single_post_and_exact_replay(canonical_connection):
@@ -694,6 +749,53 @@ def test_uncertain_post_never_reposts_and_get_only_recovers(canonical_connection
     assert recovered_outcome["outcome_mode"] == "GET_RECOVERY"
 
 
+def test_local_preflight_failure_spends_no_claim_and_starts_no_post(
+    canonical_connection,
+):
+    with canonical_connection.begin():
+        risk, attestation = _prepare_authority(canonical_connection)
+        prepared = prepare_demo_order(
+            canonical_connection,
+            risk_decision_id=risk.risk_decision_id,
+            attestation_id=attestation.attestation_id,
+            writer_identity="canonical_order_writer",
+            holder_identity="canonical-v13-order-writer-v1",
+            holder_token_digest="a" * 64,
+            idempotency_key="phase9-preflight-zero-claim",
+            order_request=ORDER_BODY,
+            evaluated_at=NOW + timedelta(seconds=2),
+        )
+
+    class BlockedBeforeNetwork(FakeTransport):
+        def preflight_place(self, body):
+            super().preflight_place(body)
+            raise OkxDemoPreDispatchBlocked("AUTH_SESSION_UNAVAILABLE")
+
+    transport = BlockedBeforeNetwork()
+    with pytest.raises(
+        CanonicalExecutionChainBlocked, match="BLOCKED_ORDER_PRE_DISPATCH"
+    ):
+        dispatch_demo_order(
+            _factory(canonical_connection.engine),
+            order_id=prepared.order_id,
+            transport=transport,
+            holder_identity="canonical-v13-order-writer-v1",
+            holder_token_digest="a" * 64,
+            lease_generation=prepared.lease_generation,
+            evaluated_at=NOW + timedelta(seconds=3),
+        )
+    assert transport.guard_calls == 1
+    assert transport.place_calls == 0
+    assert canonical_connection.execute(
+        select(ORDER_DISPATCH_RECEIPTS_TABLE.c.id).where(
+            ORDER_DISPATCH_RECEIPTS_TABLE.c.order_id == prepared.order_id
+        )
+    ).all() == []
+    assert canonical_connection.execute(
+        select(ORDERS_TABLE.c.status).where(ORDERS_TABLE.c.id == prepared.order_id)
+    ).scalar_one() == "SUBMITTED"
+
+
 def test_proven_absent_first_attempt_allows_one_same_order_retry(
     canonical_connection,
 ):
@@ -727,12 +829,29 @@ def test_proven_absent_first_attempt_allows_one_same_order_retry(
             lease_generation=prepared.lease_generation,
             evaluated_at=NOW + timedelta(seconds=3),
         )
+    authority = _frozen_recovery_authority(canonical_connection, prepared.order_id)
+    recovery_evidence = validate_canary_recovery_order(
+        canonical_connection,
+        order_id=prepared.order_id,
+        authority=authority,
+    )
+    assert recovery_evidence.dispatch_attempt_count == 1
+    assert recovery_evidence.negative_outcome_count == 0
     recovered = recover_demo_order_get_only(
         factory, order_id=prepared.order_id, transport=first_transport
     )
     assert recovered.status == "RETRY_READY"
     assert recovered.retry_authorized is True
     assert recovered.exchange_order_id is None
+    retry_evidence = validate_canary_recovery_order(
+        canonical_connection,
+        order_id=prepared.order_id,
+        authority=authority,
+        require_negative_outcome=True,
+    )
+    assert retry_evidence.order_status == "SUBMITTED"
+    assert retry_evidence.negative_outcome_count == 1
+    canonical_connection.rollback()
     absence_replay = recover_demo_order_get_only(
         factory, order_id=prepared.order_id, transport=first_transport
     )

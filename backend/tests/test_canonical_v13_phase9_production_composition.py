@@ -19,7 +19,11 @@ from app.canonical_v13.phase9_production_composition import (
     record_current_canary_attestation,
     record_current_canary_probe_receipt,
 )
-from app.canonical_v13.phase9_order_writer import PreparedDemoOrder
+from app.canonical_v13.phase9_order_writer import (
+    CanaryRecoveryOrder,
+    DispatchedDemoOrder,
+    PreparedDemoOrder,
+)
 from app.canonical_v13.phase9_canary_policy import CanaryProbeReceiptResult
 from app.canonical_v13.phase9_execution_authority import (
     RedactedExecutionAttestationResult,
@@ -83,7 +87,7 @@ def _factory(connection):
     return open_connection
 
 
-def _writer_plan():
+def _writer_plan(*, recovery_order_id=None):
     authority = build_order_writer_canary_authority(
         deployment_id=_uuid(1),
         deployment_capability_digest="1" * 64,
@@ -107,6 +111,7 @@ def _writer_plan():
         deployment_capability_digest="1" * 64,
         order_writer_enabled=True,
         order_writer_canary_authority=authority,
+        recovery_order_id=recovery_order_id,
     )
 
 
@@ -217,6 +222,98 @@ def test_order_prepare_persists_request_without_constructing_exchange_session(
         "px": "100000",
         "sz": "0.01",
     }
+
+
+def test_recovery_operator_retries_only_exact_negative_order(monkeypatch) -> None:
+    order_id = _uuid(20)
+    risk_id = _uuid(21)
+    plan = _writer_plan(recovery_order_id=order_id)
+    holder_token = "r" * 64
+    holder_digest = sha256(
+        json.dumps(
+            {"holder_token": holder_token},
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    lease = Phase9Lease(
+        service_key=plan.service_key,
+        generation=plan.generation,
+        plan_digest=plan.plan_digest,
+        release_digest=plan.release_digest,
+        deployment_id=plan.deployment_id,
+        deployment_capability_digest=plan.deployment_capability_digest,
+        image_digest=None,
+        holder_token_digest=holder_digest,
+        pid=321,
+        acquired_at=NOW - timedelta(seconds=5),
+        heartbeat_at=NOW - timedelta(seconds=1),
+        expires_at=NOW + timedelta(seconds=20),
+        order_writer_canary_authority=plan.order_writer_canary_authority,
+        recovery_order_id=order_id,
+    )
+    request_body = {
+        "instId": "BTC-USDT-SWAP",
+        "tdMode": "isolated",
+        "clOrdId": "v13recovery0000000000000000001",
+        "side": "buy",
+        "posSide": "long",
+        "ordType": "limit",
+        "sz": "1",
+        "px": "10000",
+    }
+    captured = {}
+
+    class AuthorityPort:
+        def verify_recovery(self, authority, *, order_id, observed_at):
+            captured["verified"] = (authority, order_id, observed_at)
+            return True
+
+    class Session:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    monkeypatch.setattr(
+        "app.canonical_v13.phase9_production_composition.validate_canary_recovery_order",
+        lambda _connection, **kwargs: captured.setdefault("validation", kwargs)
+        and CanaryRecoveryOrder(
+            order_id=order_id,
+            risk_decision_id=risk_id,
+            order_status="SUBMITTED",
+            request_body=request_body,
+            dispatch_attempt_count=1,
+            negative_outcome_count=1,
+        ),
+    )
+    monkeypatch.setattr(
+        "app.canonical_v13.phase9_production_composition.prepare_demo_order",
+        lambda _connection, **kwargs: captured.setdefault("prepare", kwargs)
+        and PreparedDemoOrder(order_id, "8" * 64, 2, True),
+    )
+    monkeypatch.setattr(
+        "app.canonical_v13.phase9_production_composition.dispatch_demo_order",
+        lambda _factory, **kwargs: captured.setdefault("dispatch", kwargs)
+        and DispatchedDemoOrder(order_id, "demo-order", "9" * 64, False),
+    )
+    operator = CanonicalOrderWriterOperator(
+        plan=plan,
+        supervisor_lease=lease,
+        authority_port=AuthorityPort(),
+        holder_token=holder_token,
+        connection_factory=_factory(object()),
+        session_factory=Session,
+    )
+
+    result = operator.retry_canary(order_id=order_id, evaluated_at=NOW)
+    assert result.exchange_order_id == "demo-order"
+    assert captured["validation"]["require_negative_outcome"] is True
+    assert captured["prepare"]["risk_decision_id"] == risk_id
+    assert captured["prepare"]["order_request"] == request_body
+    assert captured["dispatch"]["order_id"] == order_id
 
 
 def test_runtime_composition_fails_closed_without_sealed_factory() -> None:

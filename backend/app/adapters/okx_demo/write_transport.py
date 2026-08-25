@@ -18,6 +18,7 @@ from app.adapters.okx_demo.read_adapter import (
 )
 from app.adapters.okx_demo.secure_http import build_direct_no_redirect_opener
 from app.adapters.okx_demo.write_semantics import (
+    OkxDemoPreDispatchBlocked,
     OkxDemoTransportError,
     OkxDemoWriteBlocked,
 )
@@ -169,6 +170,15 @@ def _ambiguous_http_diagnostic(
 
 
 class OkxDemoWriteTransport(Protocol):
+    def preflight(
+        self,
+        *,
+        path: str,
+        body: Mapping[str, Any],
+        timeout_seconds: float = 10.0,
+    ) -> None:
+        """Validate and sign one request without starting network I/O."""
+
     def post(
         self,
         *,
@@ -199,61 +209,8 @@ class UrllibOkxDemoWriteTransport:
         body: Mapping[str, Any],
         timeout_seconds: float = 10.0,
     ) -> Any:
-        if path not in WRITE_PATHS:
-            raise OkxDemoWriteBlocked("OKX write path is not allowlisted")
-        if (
-            not isinstance(timeout_seconds, (int, float))
-            or isinstance(timeout_seconds, bool)
-            or timeout_seconds <= 0
-            or timeout_seconds > 30
-        ):
-            raise OkxDemoWriteBlocked("OKX write timeout must be within 0-30 seconds")
-        if not isinstance(body, Mapping) or not body:
-            raise OkxDemoWriteBlocked("OKX write body must be a non-empty object")
-        try:
-            body_text = json.dumps(
-                dict(body),
-                ensure_ascii=False,
-                separators=(",", ":"),
-                sort_keys=True,
-                allow_nan=False,
-            )
-        except (TypeError, ValueError):
-            raise OkxDemoWriteBlocked("OKX write body is not canonical JSON") from None
-        try:
-            auth_headers = self._credential_provider.authorization_headers(
-                method="POST",
-                request_path=path,
-                body=body_text,
-            )
-        except OkxDemoCredentialsUnavailable:
-            raise OkxDemoWriteBlocked(
-                "OKX_DEMO write requires an active #445 attested session"
-            ) from None
-        if (
-            set(auth_headers) != REQUIRED_AUTH_HEADERS
-            or any(
-                not isinstance(value, str)
-                or not value
-                or CONTROL_CHARACTER_PATTERN.search(value)
-                for value in auth_headers.values()
-            )
-        ):
-            raise OkxDemoWriteBlocked(
-                "OKX_DEMO attested session returned invalid authorization headers"
-            )
-        headers = {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "User-Agent": "freqtrade-ai-okx-demo-writer/1",
-            "x-simulated-trading": "1",
-            **dict(auth_headers),
-        }
-        request = Request(
-            self._base_url + path,
-            method="POST",
-            data=body_text.encode("utf-8"),
-            headers=headers,
+        request = self._authorized_request(
+            path=path, body=body, timeout_seconds=timeout_seconds
         )
         try:
             with self._opener.open(request, timeout=timeout_seconds) as response:
@@ -299,6 +256,79 @@ class UrllibOkxDemoWriteTransport:
                 http_status_code=200,
             ) from None
 
+    def preflight(
+        self,
+        *,
+        path: str,
+        body: Mapping[str, Any],
+        timeout_seconds: float = 10.0,
+    ) -> None:
+        """Prove request canonicalization and signing without network access."""
+
+        self._authorized_request(
+            path=path, body=body, timeout_seconds=timeout_seconds
+        )
+
+    def _authorized_request(
+        self,
+        *,
+        path: str,
+        body: Mapping[str, Any],
+        timeout_seconds: float,
+    ) -> Request:
+        if path not in WRITE_PATHS:
+            raise OkxDemoPreDispatchBlocked("PATH_NOT_ALLOWLISTED")
+        if (
+            not isinstance(timeout_seconds, (int, float))
+            or isinstance(timeout_seconds, bool)
+            or timeout_seconds <= 0
+            or timeout_seconds > 30
+        ):
+            raise OkxDemoPreDispatchBlocked("TIMEOUT_INVALID")
+        if not isinstance(body, Mapping) or not body:
+            raise OkxDemoPreDispatchBlocked("BODY_INVALID")
+        try:
+            body_text = json.dumps(
+                dict(body),
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+                allow_nan=False,
+            )
+        except (TypeError, ValueError):
+            raise OkxDemoPreDispatchBlocked("BODY_INVALID") from None
+        try:
+            auth_headers = self._credential_provider.authorization_headers(
+                method="POST",
+                request_path=path,
+                body=body_text,
+            )
+        except OkxDemoCredentialsUnavailable:
+            raise OkxDemoPreDispatchBlocked("AUTH_SESSION_UNAVAILABLE") from None
+        if (
+            set(auth_headers) != REQUIRED_AUTH_HEADERS
+            or any(
+                not isinstance(value, str)
+                or not value
+                or CONTROL_CHARACTER_PATTERN.search(value)
+                for value in auth_headers.values()
+            )
+        ):
+            raise OkxDemoPreDispatchBlocked("AUTH_HEADERS_INVALID")
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": "freqtrade-ai-okx-demo-writer/1",
+            "x-simulated-trading": "1",
+            **dict(auth_headers),
+        }
+        return Request(
+            self._base_url + path,
+            method="POST",
+            data=body_text.encode("utf-8"),
+            headers=headers,
+        )
+
 
 class OfflineOkxDemoWriteTransportHarness(UrllibOkxDemoWriteTransport):
     """Explicit recorded/offline seam; server code must never instantiate it."""
@@ -326,9 +356,7 @@ def _create_production_write_transport(
         type(credential_provider) is not _AttestedWriterCredentialHandle
         or not credential_provider.active()
     ):
-        raise OkxDemoWriteBlocked(
-            "OKX production write transport requires an attested session"
-        )
+        raise OkxDemoPreDispatchBlocked("AUTH_SESSION_UNAVAILABLE")
     transport = object.__new__(UrllibOkxDemoWriteTransport)
     transport._credential_provider = credential_provider
     transport._opener = build_direct_no_redirect_opener()

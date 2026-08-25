@@ -82,6 +82,7 @@ class Phase9LaunchPlan:
     runtime_image_acceptance_receipt_digest: str | None = None
     runtime_image_config_digest: str | None = None
     order_writer_canary_authority: OrderWriterCanaryAuthority | None = None
+    recovery_order_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -117,6 +118,7 @@ class Phase9Lease:
     runtime_image_acceptance_receipt_digest: str | None = None
     runtime_image_config_digest: str | None = None
     order_writer_canary_authority: OrderWriterCanaryAuthority | None = None
+    recovery_order_id: UUID | None = None
 
 
 class Phase9LeasePort(Protocol):
@@ -148,6 +150,14 @@ class OrderWriterCanaryAuthorityPort(Protocol):
 
     def verify(
         self, authority: OrderWriterCanaryAuthority, *, observed_at: datetime
+    ) -> bool: ...
+
+    def verify_recovery(
+        self,
+        authority: OrderWriterCanaryAuthority,
+        *,
+        order_id: UUID,
+        observed_at: datetime,
     ) -> bool: ...
 
 
@@ -297,6 +307,30 @@ def require_current_order_writer_canary_authority(
 
     if plan.service_key != "order_writer":
         return
+    if plan.recovery_order_id is not None:
+        observed = _utc(observed_at)
+        if plan.order_writer_canary_authority is None or port is None:
+            raise CanonicalPhase9SupervisorBlocked(
+                "BLOCKED_ORDER_WRITER_RECOVERY_AUTHORITY",
+                "exact recovery order and immutable canary verifier are required",
+            )
+        try:
+            verified = port.verify_recovery(
+                plan.order_writer_canary_authority,
+                order_id=plan.recovery_order_id,
+                observed_at=observed,
+            )
+        except Exception as exc:
+            raise CanonicalPhase9SupervisorBlocked(
+                "BLOCKED_ORDER_WRITER_RECOVERY_AUTHORITY",
+                f"recovery authority verification failed: {type(exc).__name__}",
+            ) from exc
+        if verified is not True:
+            raise CanonicalPhase9SupervisorBlocked(
+                "BLOCKED_ORDER_WRITER_RECOVERY_AUTHORITY",
+                "recovery order does not match the frozen writer authority",
+            )
+        return
     _require_current_order_writer_canary_authority(
         authority=plan.order_writer_canary_authority,
         observed_at=observed_at,
@@ -342,6 +376,7 @@ def build_launch_plan(
     runtime_image_authority: RuntimeImagePlanAuthority | None = None,
     order_writer_enabled: bool = False,
     order_writer_canary_authority: OrderWriterCanaryAuthority | None = None,
+    recovery_order_id: UUID | None = None,
     plan_id: UUID | None = None,
 ) -> Phase9LaunchPlan:
     """Prepare a frozen launch plan without starting or contacting anything."""
@@ -428,10 +463,15 @@ def build_launch_plan(
                 "BLOCKED_ORDER_WRITER_CANARY_AUTHORITY",
                 "writer canary authority is not canonical",
             )
-    elif order_writer_canary_authority is not None:
+        if recovery_order_id is not None and not isinstance(recovery_order_id, UUID):
+            raise CanonicalPhase9SupervisorBlocked(
+                "BLOCKED_ORDER_WRITER_RECOVERY_ORDER",
+                "recovery order must be an exact UUID",
+            )
+    elif order_writer_canary_authority is not None or recovery_order_id is not None:
         raise CanonicalPhase9SupervisorBlocked(
             "BLOCKED_RUNTIME_ORDER_WRITER_FORBIDDEN",
-            "runtime identity cannot bind order writer authority",
+            "runtime identity cannot bind order writer authority or recovery order",
         )
     if service_key == "long_lived_runtime" and order_writer_enabled:
         raise CanonicalPhase9SupervisorBlocked(
@@ -485,6 +525,8 @@ def build_launch_plan(
         "order_writer_enabled": order_writer_enabled,
         "order_writer_canary_authority": order_writer_canary_authority,
     }
+    if recovery_order_id is not None:
+        payload["recovery_order_id"] = recovery_order_id
     return Phase9LaunchPlan(
         plan_id=resolved_id,
         service_key=service_key,
@@ -505,6 +547,7 @@ def build_launch_plan(
         allow_real_funds=False,
         order_writer_enabled=order_writer_enabled,
         order_writer_canary_authority=order_writer_canary_authority,
+        recovery_order_id=recovery_order_id,
         plan_digest=_digest(payload),
     )
 
@@ -535,6 +578,7 @@ def verify_launch_plan(plan: Phase9LaunchPlan) -> None:
         runtime_image_authority=authority,
         order_writer_enabled=plan.order_writer_enabled,
         order_writer_canary_authority=plan.order_writer_canary_authority,
+        recovery_order_id=plan.recovery_order_id,
         plan_id=plan.plan_id,
     )
     if rebuilt != plan or not plan.demo_only or plan.allow_real_funds:
@@ -664,6 +708,7 @@ def claim_lease(
         runtime_image_acceptance_receipt_digest=plan.runtime_image_acceptance_receipt_digest,
         runtime_image_config_digest=plan.runtime_image_config_digest,
         order_writer_canary_authority=plan.order_writer_canary_authority,
+        recovery_order_id=plan.recovery_order_id,
         holder_token_digest=_digest({"holder_token": holder_token}),
         pid=pid,
         acquired_at=resolved_now,
@@ -689,6 +734,11 @@ def claim_lease(
             "runtime_image_acceptance_id": str(plan.runtime_image_acceptance_id),
             "runtime_image_acceptance_receipt_digest": plan.runtime_image_acceptance_receipt_digest,
             "runtime_image_config_digest": plan.runtime_image_config_digest,
+            **(
+                {"recovery_order_id": str(plan.recovery_order_id)}
+                if plan.recovery_order_id
+                else {}
+            ),
         },
     )
 
@@ -710,11 +760,34 @@ def heartbeat_lease(
             "BLOCKED_PHASE9_LEASE_FENCED", "lease owner or generation changed"
         )
     if lease.service_key == "order_writer":
-        _require_current_order_writer_canary_authority(
-            authority=lease.order_writer_canary_authority,
-            observed_at=resolved_now,
-            port=authority_port,
-        )
+        if lease.recovery_order_id is not None:
+            if lease.order_writer_canary_authority is None or authority_port is None:
+                raise CanonicalPhase9SupervisorBlocked(
+                    "BLOCKED_ORDER_WRITER_RECOVERY_AUTHORITY",
+                    "exact recovery order and immutable canary verifier are required",
+                )
+            try:
+                verified = authority_port.verify_recovery(
+                    lease.order_writer_canary_authority,
+                    order_id=lease.recovery_order_id,
+                    observed_at=resolved_now,
+                )
+            except Exception as exc:
+                raise CanonicalPhase9SupervisorBlocked(
+                    "BLOCKED_ORDER_WRITER_RECOVERY_AUTHORITY",
+                    f"recovery authority verification failed: {type(exc).__name__}",
+                ) from exc
+            if verified is not True:
+                raise CanonicalPhase9SupervisorBlocked(
+                    "BLOCKED_ORDER_WRITER_RECOVERY_AUTHORITY",
+                    "recovery order does not match the frozen writer authority",
+                )
+        else:
+            _require_current_order_writer_canary_authority(
+                authority=lease.order_writer_canary_authority,
+                observed_at=resolved_now,
+                port=authority_port,
+            )
     if (
         resolved_now < lease.heartbeat_at
         or resolved_now >= lease.expires_at
@@ -747,6 +820,11 @@ def heartbeat_lease(
             "runtime_image_acceptance_id": str(lease.runtime_image_acceptance_id),
             "runtime_image_acceptance_receipt_digest": lease.runtime_image_acceptance_receipt_digest,
             "runtime_image_config_digest": lease.runtime_image_config_digest,
+            **(
+                {"recovery_order_id": str(lease.recovery_order_id)}
+                if lease.recovery_order_id
+                else {}
+            ),
         },
     )
 

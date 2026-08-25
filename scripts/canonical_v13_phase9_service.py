@@ -312,6 +312,11 @@ class FileLeasePort:
                 order_writer_canary_authority=_authority_from_payload(
                     payload.get("order_writer_canary_authority")
                 ),
+                recovery_order_id=(
+                    UUID(str(payload["recovery_order_id"]))
+                    if payload.get("recovery_order_id")
+                    else None
+                ),
                 holder_token_digest=str(payload["holder_token_digest"]),
                 pid=int(payload["pid"]),
                 acquired_at=datetime.fromisoformat(payload["acquired_at"]),
@@ -659,6 +664,11 @@ def _load_plan(service_key: str) -> tuple[Phase9LaunchPlan, dict[str, object]]:
             order_writer_canary_authority=_authority_from_payload(
                 payload.get("order_writer_canary_authority")
             ),
+            recovery_order_id=(
+                UUID(str(payload["recovery_order_id"]))
+                if payload.get("recovery_order_id")
+                else None
+            ),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise CanonicalPhase9SupervisorBlocked(
@@ -860,6 +870,7 @@ def prepare(
     runtime_image_acceptance_id: UUID | None,
     enable_order_writer: bool,
     order_writer_canary_authority: OrderWriterCanaryAuthority | None = None,
+    recovery_order_id: UUID | None = None,
 ) -> dict[str, object]:
     observed_release_digest = _require_release_checkout()
     if observed_release_digest != release_digest:
@@ -893,6 +904,7 @@ def prepare(
                 or existing_plan.order_writer_enabled != enable_order_writer
                 or existing_plan.order_writer_canary_authority
                 != order_writer_canary_authority
+                or existing_plan.recovery_order_id != recovery_order_id
             ):
                 raise CanonicalPhase9SupervisorBlocked(
                     "BLOCKED_PHASE9_PREPARED_PLAN_EXISTS",
@@ -924,6 +936,7 @@ def prepare(
         runtime_image_authority=runtime_authority,
         order_writer_enabled=enable_order_writer,
         order_writer_canary_authority=order_writer_canary_authority,
+        recovery_order_id=recovery_order_id,
     )
     if FileLeasePort(SUPPORT_ROOT).read(service_key) is not None:
         raise CanonicalPhase9SupervisorBlocked(
@@ -946,6 +959,11 @@ def prepare(
             "label": plan.launch_agent_label,
             "stage": stage,
             "plist_secret_count": 0,
+            **(
+                {"recovery_order_id": str(recovery_order_id)}
+                if recovery_order_id
+                else {}
+            ),
         },
     )
     state = {
@@ -2353,6 +2371,58 @@ def recover_canary(plan_digest: str, order_id: UUID) -> dict[str, object]:
     }
 
 
+def retry_canary(plan_digest: str, order_id: UUID) -> dict[str, object]:
+    """Use the exact recovery plan for the saga-authorized second Demo POST."""
+
+    _require_release_checkout()
+    plan, state = _load_plan("order_writer")
+    lease = FileLeasePort(SUPPORT_ROOT).read("order_writer")
+    now = _now()
+    if (
+        state.get("status") != "RUNNING"
+        or plan.plan_digest != plan_digest
+        or plan.recovery_order_id != order_id
+        or lease is None
+        or lease.expires_at <= now
+        or not UnixProcessProbe().is_alive(lease.pid)
+    ):
+        raise CanonicalPhase9SupervisorBlocked(
+            "BLOCKED_PHASE9_ORDER_SUPERVISOR_FENCE",
+            "exact recovery writer plan/lease is unavailable",
+        )
+    result = _production_order_operator(
+        plan=plan, lease=lease, holder_token=_read_order_holder_token()
+    ).retry_canary(order_id=order_id, evaluated_at=now)
+    retry_receipt = build_lifecycle_receipt(
+        service_key="order_writer",
+        action="ORDER_RETRY",
+        status="ACCEPTED" if result.status == "ACCEPTED" else "BLOCKED",
+        generation=plan.generation,
+        observed_at=now,
+        plan_digest=plan.plan_digest,
+        details={
+            "order_id": str(result.order_id),
+            "order_receipt_digest": result.receipt_digest,
+            "repeat_noop": result.repeat_noop,
+            "attempt_ordinal": 2,
+            "maximum_attempts": 2,
+            "third_post_allowed": False,
+        },
+    )
+    _append_receipt(retry_receipt)
+    return {
+        "status": result.status,
+        "order_id": str(result.order_id),
+        "exchange_order_id": result.exchange_order_id,
+        "receipt_digest": result.receipt_digest,
+        "repeat_noop": result.repeat_noop,
+        "retry_authorized": False,
+        "maximum_attempts": 2,
+        "third_post_allowed": False,
+        "retry_evidence_receipt_digest": retry_receipt.receipt_digest,
+    }
+
+
 def collect_canary_fills(order_id: UUID) -> dict[str, object]:
     """GET-only fill collection under the independently resolved fill identity."""
 
@@ -2597,6 +2667,7 @@ def main(argv: list[str] | None = None) -> int:
             "cancel-prepared-canary-order",
             "dispatch-canary",
             "recover-canary",
+            "retry-canary",
             "collect-canary-fills",
             "post-canary-ledger",
             "reconcile-canary",
@@ -2637,6 +2708,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--position-policy", default="LONG_ONLY")
     parser.add_argument("--risk-decision-id", type=UUID)
     parser.add_argument("--order-id", type=UUID)
+    parser.add_argument("--recovery-order-id", type=UUID)
     parser.add_argument("--fill-id", type=UUID)
     parser.add_argument("--qualification-decision-id", type=UUID)
     parser.add_argument("--deployment-approval-id", type=UUID)
@@ -2688,15 +2760,20 @@ def main(argv: list[str] | None = None) -> int:
                     effective_leverage=args.effective_leverage,
                     position_policy=args.position_policy,
                 )
+            prepare_kwargs = {
+                "release_digest": args.release_digest,
+                "deployment_id": args.deployment_id,
+                "deployment_capability_digest": args.deployment_capability_digest,
+                "runtime_image_acceptance_id": args.runtime_image_acceptance_id,
+                "enable_order_writer": args.enable_order_writer,
+                "order_writer_canary_authority": writer_authority,
+            }
+            if args.recovery_order_id is not None:
+                prepare_kwargs["recovery_order_id"] = args.recovery_order_id
             payload = prepare(
                 args.service,
                 resolved_stage,
-                release_digest=args.release_digest,
-                deployment_id=args.deployment_id,
-                deployment_capability_digest=args.deployment_capability_digest,
-                runtime_image_acceptance_id=args.runtime_image_acceptance_id,
-                enable_order_writer=args.enable_order_writer,
-                order_writer_canary_authority=writer_authority,
+                **prepare_kwargs,
             )
         elif args.command == "confirm":
             if not args.plan_digest:
@@ -2836,6 +2913,17 @@ def main(argv: list[str] | None = None) -> int:
                     "order_writer, --plan-digest, and --order-id are required",
                 )
             payload = recover_canary(args.plan_digest, args.order_id)
+        elif args.command == "retry-canary":
+            if (
+                args.service != "order_writer"
+                or not args.plan_digest
+                or args.order_id is None
+            ):
+                raise CanonicalPhase9SupervisorBlocked(
+                    "BLOCKED_PHASE9_ORDER_COMMAND",
+                    "order_writer, --plan-digest, and --order-id are required",
+                )
+            payload = retry_canary(args.plan_digest, args.order_id)
         elif args.command == "collect-canary-fills":
             if args.service != "fill_writer" or args.order_id is None:
                 raise CanonicalPhase9SupervisorBlocked(

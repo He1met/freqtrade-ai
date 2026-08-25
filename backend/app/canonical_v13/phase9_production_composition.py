@@ -61,11 +61,13 @@ from app.canonical_v13.reconciliation import reconcile_production_demo_chain
 from app.canonical_v13.order_service import CANONICAL_ORDER_WRITER_IDENTITY
 from app.canonical_v13.phase9_order_writer import (
     CANONICAL_ORDER_WRITER_PROCESS_IDENTITY,
+    CanaryRecoveryOrder,
     DispatchedDemoOrder,
     PreparedDemoOrder,
     dispatch_demo_order,
     prepare_demo_order,
     recover_demo_order_get_only,
+    validate_canary_recovery_order,
 )
 from app.canonical_v13.phase9_runtime_supervisor import (
     OrderWriterCanaryAuthority,
@@ -91,6 +93,8 @@ class DemoSessionPort(Protocol):
     def probe(self, *, instrument: str) -> RedactedOkxDemoProbe: ...
 
     def place(self, body: Mapping[str, str]) -> Mapping[str, object]: ...
+
+    def preflight_place(self, body: Mapping[str, str]) -> None: ...
 
     def dispatch_guard(
         self,
@@ -562,6 +566,26 @@ class DatabaseOrderWriterAuthorityVerifier:
             and all(observed <= now and observed < expires for observed, expires in resource_windows)
         )
 
+    def verify_recovery(
+        self,
+        authority: OrderWriterCanaryAuthority,
+        *,
+        order_id: UUID,
+        observed_at: datetime,
+    ) -> bool:
+        if observed_at.tzinfo is None:
+            return False
+        try:
+            with self._connection_factory() as connection:
+                validate_canary_recovery_order(
+                    connection,
+                    order_id=order_id,
+                    authority=authority,
+                )
+        except Exception:
+            return False
+        return True
+
 
 class CanonicalOrderWriterOperator:
     """Execute one DB-authorized Demo order without caller-supplied order facts."""
@@ -595,6 +619,7 @@ class CanonicalOrderWriterOperator:
             or supervisor_lease.generation != plan.generation
             or supervisor_lease.order_writer_canary_authority
             != plan.order_writer_canary_authority
+            or supervisor_lease.recovery_order_id != plan.recovery_order_id
             or supervisor_lease.holder_token_digest != holder_digest
         ):
             raise CanonicalPhase9CompositionBlocked(
@@ -616,6 +641,11 @@ class CanonicalOrderWriterOperator:
         if evaluated_at.tzinfo is None:
             raise CanonicalPhase9CompositionBlocked(
                 "BLOCKED_PHASE9_ORDER_TIMEZONE", "evaluated_at must be aware"
+            )
+        if self._plan.recovery_order_id is not None:
+            raise CanonicalPhase9CompositionBlocked(
+                "BLOCKED_PHASE9_RECOVERY_PLAN_DISPATCH",
+                "recovery plan cannot prepare a new canary order",
             )
         require_current_order_writer_canary_authority(
             plan=self._plan,
@@ -721,6 +751,11 @@ class CanonicalOrderWriterOperator:
     ) -> DispatchedDemoOrder:
         """Resolve an uncertain POST by the saga's GET-only recovery path."""
 
+        if self._plan.recovery_order_id != order_id:
+            raise CanonicalPhase9CompositionBlocked(
+                "BLOCKED_PHASE9_RECOVERY_ORDER_DRIFT",
+                "GET recovery must match the exact frozen order",
+            )
         require_current_order_writer_canary_authority(
             plan=self._plan,
             observed_at=evaluated_at,
@@ -736,6 +771,62 @@ class CanonicalOrderWriterOperator:
                 self._connection_factory,
                 order_id=order_id,
                 transport=session,
+            )
+
+    def retry_canary(
+        self, *, order_id: UUID, evaluated_at: datetime
+    ) -> DispatchedDemoOrder:
+        """Use the saga-authorized second POST after exact GET_NOT_FOUND only."""
+
+        if self._plan.recovery_order_id != order_id:
+            raise CanonicalPhase9CompositionBlocked(
+                "BLOCKED_PHASE9_RECOVERY_ORDER_DRIFT",
+                "retry must match the exact frozen recovery order",
+            )
+        require_current_order_writer_canary_authority(
+            plan=self._plan,
+            observed_at=evaluated_at,
+            port=self._authority_port,
+        )
+        if self._supervisor_lease.expires_at <= evaluated_at.astimezone(timezone.utc):
+            raise CanonicalPhase9CompositionBlocked(
+                "BLOCKED_PHASE9_ORDER_SUPERVISOR_FENCE",
+                "supervisor lease is no longer fresh",
+            )
+        with self._connection_factory() as connection:
+            recovery = validate_canary_recovery_order(
+                connection,
+                order_id=order_id,
+                authority=self._plan.order_writer_canary_authority,
+                require_negative_outcome=True,
+            )
+            authority = self._plan.order_writer_canary_authority
+            assert authority is not None
+            prepared = prepare_demo_order(
+                connection,
+                risk_decision_id=recovery.risk_decision_id,
+                attestation_id=authority.attestation_id,
+                writer_identity=CANONICAL_ORDER_WRITER_IDENTITY,
+                holder_identity=CANONICAL_ORDER_WRITER_PROCESS_IDENTITY,
+                holder_token_digest=self._holder_digest,
+                idempotency_key=f"phase9-canary:{recovery.risk_decision_id}",
+                order_request=recovery.request_body,
+                evaluated_at=evaluated_at,
+            )
+        if prepared.order_id != order_id:
+            raise CanonicalPhase9CompositionBlocked(
+                "BLOCKED_PHASE9_RECOVERY_ORDER_DRIFT",
+                "prepared retry did not resolve to the frozen order",
+            )
+        with self._session_factory() as session:
+            return dispatch_demo_order(
+                self._connection_factory,
+                order_id=order_id,
+                transport=session,
+                holder_identity=CANONICAL_ORDER_WRITER_PROCESS_IDENTITY,
+                holder_token_digest=self._holder_digest,
+                lease_generation=prepared.lease_generation,
+                evaluated_at=evaluated_at,
             )
 
 

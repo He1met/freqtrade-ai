@@ -19,6 +19,37 @@ class OkxDemoWriteRejected(OkxDemoWriteBlocked):
     """The exchange explicitly rejected a single write."""
 
 
+class OkxDemoPreDispatchBlocked(OkxDemoWriteBlocked):
+    """A sanitized local failure that proves the HTTP POST never started."""
+
+    _FAILURE_KINDS = frozenset(
+        {
+            "PATH_NOT_ALLOWLISTED",
+            "TIMEOUT_INVALID",
+            "BODY_INVALID",
+            "AUTH_SESSION_UNAVAILABLE",
+            "AUTH_HEADERS_INVALID",
+        }
+    )
+
+    def __init__(self, failure_kind: str) -> None:
+        if failure_kind not in self._FAILURE_KINDS:
+            raise ValueError("invalid sanitized OKX pre-dispatch classification")
+        message = {
+            "PATH_NOT_ALLOWLISTED": "OKX Demo write path is not allowlisted",
+            "TIMEOUT_INVALID": "OKX Demo write timeout is invalid",
+            "BODY_INVALID": "OKX Demo write body is not canonical JSON",
+            "AUTH_SESSION_UNAVAILABLE": "OKX Demo attested session is unavailable",
+            "AUTH_HEADERS_INVALID": "OKX Demo invalid authorization headers",
+        }[failure_kind]
+        super().__init__(message)
+        self.failure_kind = failure_kind
+
+    @property
+    def safe_diagnostic(self) -> str:
+        return self.failure_kind
+
+
 class OkxDemoTransportError(RuntimeError):
     """A sanitized transport failure with write-outcome classification."""
 
