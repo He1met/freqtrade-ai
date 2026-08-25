@@ -596,6 +596,26 @@ def _digest(value: object) -> str:
     ).hexdigest()
 
 
+def _canonical_order_writer_lease_digest(row: Mapping[str, object]) -> str:
+    """Recompute a lease digest independent of the DB session timezone."""
+
+    expires_at = row["expires_at"]
+    if not isinstance(expires_at, datetime):
+        raise CanonicalPhase9ReadinessBlocked(
+            "ORDER_WRITER_LEASE_TIMESTAMP_INVALID",
+            "persisted order-writer lease expiry must be a datetime",
+        )
+    return _digest(
+        {
+            "execution_target": "OKX_DEMO",
+            "holder_identity": row["holder_identity"],
+            "holder_token_digest": row["holder_token_digest"],
+            "generation": row["generation"],
+            "expires_at": _persisted_utc(expires_at).isoformat(),
+        }
+    )
+
+
 def _decimal_text(value: object) -> str:
     decimal_value = Decimal(str(value))
     rendered = format(decimal_value, "f")
@@ -1684,18 +1704,7 @@ def _inspect_lineage(
     )
     exact_leases = []
     for row in leases:
-        expires_at = row["expires_at"]
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
-        expected_lease_digest = _digest(
-            {
-                "execution_target": "OKX_DEMO",
-                "holder_identity": row["holder_identity"],
-                "holder_token_digest": row["holder_token_digest"],
-                "generation": row["generation"],
-                "expires_at": expires_at.isoformat(),
-            }
-        )
+        expected_lease_digest = _canonical_order_writer_lease_digest(row)
         if (
             row["holder_identity"] == "canonical-v13-order-writer-v1"
             and row["generation"] > 0

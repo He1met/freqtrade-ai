@@ -457,8 +457,11 @@ python scripts/canonical_v13_phase9_service.py prepare-canary-order \
 
 `prepare-canary-order` 只在 DB durable prepare exact `ordType=limit`、`px=frozen limit_price`、
 `sz=minSz` request、idempotency key 与唯一 writer lease；它不得创建 sealed private session、访问 OKX
-或发送订单。该命令成功后必须先执行 `phase9-readiness --stage OKX_DEMO_CANARY`，确认所有 pre-dispatch
-证据 READY，才能调用 `dispatch-canary`。唯一 POST 紧前，同一 sealed private session必须再次 authenticated 读取 positions、
+或发送订单。该命令返回的 `status=READY`、`exchange_access=NONE`、
+`order_submission_enabled=false` 是正式的 pre-dispatch 证据；必须在同一 fresh policy/attestation 和 writer
+lease 窗口内立即调用一次 `dispatch-canary`。`phase9-readiness --stage OKX_DEMO_CANARY` 是
+post-dispatch 完整验收门，按合同要求 exact exchange order identity、dispatch claim/outcome、fill、ledger 与
+reconciliation，因此不得在唯一 POST 前调用并误判为 pre-dispatch 门。唯一 POST 紧前，同一 sealed private session必须再次 authenticated 读取 positions、
 pending orders、current leverage 与 `max-size`；只有 fresh flat/no-pending、current long leverage 仍等于
 policy effective leverage、`maxBuy>=minSz` 才可将 guard-bound exact-one claim 写入 immutable
 `order_dispatch_receipts`。claim digest 必须绑定 order/risk/policy/probe/attestation、credential generation、
