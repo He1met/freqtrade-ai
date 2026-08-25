@@ -64,6 +64,7 @@ CANONICAL_ORDER_WRITER_PROCESS_IDENTITY = PHASE9_SERVICE_SPECS[
 PRE_DISPATCH_CANCELLATION_CONTRACT = (
     "canonical-v13-pre-dispatch-cancellation-receipt-v1"
 )
+LEGACY_CLAIM_GUARD_CLOCK_SKEW = timedelta(seconds=5)
 
 
 class DemoOrderTransport(Protocol):
@@ -145,6 +146,76 @@ def _now(value: datetime | None) -> datetime:
             "BLOCKED_ORDER_TIMEZONE", "order evaluation time must be timezone-aware"
         )
     return resolved.astimezone(timezone.utc)
+
+
+def _recovery_claim_window_is_valid(
+    *,
+    claim: Mapping[str, object],
+    policy: Mapping[str, object],
+    attestation: Mapping[str, object],
+    probe: Mapping[str, object],
+    claimed_at: datetime,
+) -> bool:
+    """Accept current claims and the bounded pre-fix observation-clock order.
+
+    Historical production dispatch evaluated the command clock before collecting
+    the private guard, then persisted that earlier value as ``claimed_at``.  The
+    claim digest and all guard resource windows are still immutable.  Recovery
+    may therefore recognize only a first-attempt claim whose guard followed by
+    no more than five seconds and remained inside every original authority,
+    resource, and lease window.  New dispatches persist a time at or after the
+    aggregate guard observation and use the normal branch.
+    """
+
+    policy_start = _persisted_utc(policy["accepted_at"])
+    policy_end = _persisted_utc(policy["expires_at"])
+    attestation_start = _persisted_utc(attestation["observed_at"])
+    attestation_end = _persisted_utc(attestation["expires_at"])
+    probe_start = _persisted_utc(probe["observed_at"])
+    probe_end = _persisted_utc(probe["expires_at"])
+    guard_observed_at = _persisted_utc(claim["guard_observed_at"])
+    guard_expires_at = _persisted_utc(claim["guard_expires_at"])
+
+    if (
+        policy_start <= claimed_at < policy_end
+        and attestation_start <= claimed_at < attestation_end
+        and probe_start <= claimed_at < probe_end
+        and guard_observed_at <= claimed_at < guard_expires_at
+    ):
+        return True
+
+    resource_windows = (
+        (
+            _persisted_utc(claim["positions_observed_at"]),
+            _persisted_utc(claim["positions_expires_at"]),
+        ),
+        (
+            _persisted_utc(claim["pending_orders_observed_at"]),
+            _persisted_utc(claim["pending_orders_expires_at"]),
+        ),
+        (
+            _persisted_utc(claim["maximum_order_quantity_observed_at"]),
+            _persisted_utc(claim["maximum_order_quantity_expires_at"]),
+        ),
+        (
+            _persisted_utc(claim["guard_leverage_observed_at"]),
+            _persisted_utc(claim["guard_leverage_expires_at"]),
+        ),
+    )
+    legacy_skew = guard_observed_at - claimed_at
+    return (
+        int(claim["attempt_ordinal"]) == 1
+        and timedelta(0) < legacy_skew <= LEGACY_CLAIM_GUARD_CLOCK_SKEW
+        and _persisted_utc(claim["lease_acquired_at"])
+        <= claimed_at
+        < guard_observed_at
+        < _persisted_utc(claim["lease_expires_at"])
+        and policy_start <= guard_observed_at < policy_end
+        and attestation_start <= guard_observed_at < attestation_end
+        and probe_start <= guard_observed_at < probe_end
+        and guard_observed_at < guard_expires_at
+        and all(start <= guard_observed_at < end for start, end in resource_windows)
+    )
 
 
 def pre_dispatch_cancellation_receipt_digest(order: Mapping[str, object]) -> str:
@@ -1132,19 +1203,12 @@ def validate_canary_recovery_order(
             or claim["request_digest"] != order["request_digest"]
             or claim["guard_digest"] != canonical_execution_digest(dict(claim["guard_json"]))
             or claim["claim_digest"] != canonical_execution_digest(claim_payload)
-            or not (
-                _persisted_utc(policy["accepted_at"])
-                <= claimed_at
-                < _persisted_utc(policy["expires_at"])
-                and _persisted_utc(attestation["observed_at"])
-                <= claimed_at
-                < _persisted_utc(attestation["expires_at"])
-                and _persisted_utc(probe["observed_at"])
-                <= claimed_at
-                < _persisted_utc(probe["expires_at"])
-                and _persisted_utc(claim["guard_observed_at"])
-                <= claimed_at
-                < _persisted_utc(claim["guard_expires_at"])
+            or not _recovery_claim_window_is_valid(
+                claim=claim,
+                policy=policy,
+                attestation=attestation,
+                probe=probe,
+                claimed_at=claimed_at,
             )
         ):
             raise CanonicalExecutionChainBlocked(
@@ -2133,6 +2197,9 @@ def dispatch_demo_order(
             "BLOCKED_ORDER_PRE_DISPATCH",
             f"order POST did not start: {exc.safe_diagnostic}",
         ) from None
+    claim_evaluated_at = max(
+        _now(evaluated_at), _persisted_utc(guard.observed_at)
+    )
     with connection_factory() as connection:
         order, body = _claim_dispatch(
             connection,
@@ -2141,7 +2208,7 @@ def dispatch_demo_order(
             holder_token_digest=holder_token_digest,
             lease_generation=lease_generation,
             guard=guard,
-            evaluated_at=evaluated_at,
+            evaluated_at=claim_evaluated_at,
         )
     try:
         payload = transport.place(body)

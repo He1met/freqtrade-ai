@@ -511,6 +511,12 @@ recovery supervisor 只验证原 claim 当时处于 policy、attestation、probe
 不重新授予普通 POST 能力。若 GET 找到订单，沿同一 order 进入 fill/ledger/reconciliation；若返回正式
 `GET_NOT_FOUND` 且结果为 `RETRY_READY`，才允许同一 recovery plan 执行一次：
 
+早期 dispatch 版本在读取 private guard 前捕获命令时间，因此历史首个 claim 可能出现
+`claimed_at < guard_observed_at`。兼容恢复只接受不超过 5 秒的该顺序，并要求 guard observation
+仍同时落在原 policy、attestation、probe、四类 private resource 和 writer lease 窗口内；后续 claim
+一律持久化为不早于 aggregate guard observation 的时间。该兼容只识别首个 attempt，不放宽第二次
+POST、GET_NOT_FOUND 或第三次 POST 的边界。
+
 ```bash
 python scripts/canonical_v13_phase9_service.py retry-canary \
   --service order_writer --plan-digest <exact-recovery-plan-digest> \
