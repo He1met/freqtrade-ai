@@ -331,6 +331,9 @@ class FrozenIntradayLeverageEvaluator:
     FOUR_HOUR_FINAL_RETRY_REQUALIFICATION_ARTIFACT_DIGEST = (
         "b454acfa6576ec4e83fb7d7ed69762ad5bdca3f06c636836b4781954b0c3496c"
     )
+    FOUR_HOUR_FINAL_CANARY_REQUALIFICATION_ARTIFACT_DIGEST = (
+        "feca7b0112580b91edebdba6ef8f07899309ad41293069fed7ad169d58260c73"
+    )
 
     _INTRADAY_REQUIRED_SOURCE = (
         "class CanonicalIntradayLeverageBaseline",
@@ -370,27 +373,33 @@ class FrozenIntradayLeverageEvaluator:
             self.FOUR_HOUR_FINAL_REQUALIFICATION_ARTIFACT_DIGEST,
             self.FOUR_HOUR_RETRY_REQUALIFICATION_ARTIFACT_DIGEST,
             self.FOUR_HOUR_FINAL_RETRY_REQUALIFICATION_ARTIFACT_DIGEST,
+            self.FOUR_HOUR_FINAL_CANARY_REQUALIFICATION_ARTIFACT_DIGEST,
         }:
             required_source = self._FOUR_HOUR_REQUIRED_SOURCE
             signal_hours = frozenset({2, 6, 10, 14, 18, 22})
             effective_leverage = "12"
             evaluator_identity = (
-                "canonical-four-hour-natural-long-baseline-v5"
+                "canonical-four-hour-natural-long-baseline-v6"
                 if artifact_digest
-                == self.FOUR_HOUR_FINAL_RETRY_REQUALIFICATION_ARTIFACT_DIGEST
+                == self.FOUR_HOUR_FINAL_CANARY_REQUALIFICATION_ARTIFACT_DIGEST
                 else (
-                    "canonical-four-hour-natural-long-baseline-v4"
+                    "canonical-four-hour-natural-long-baseline-v5"
                     if artifact_digest
-                    == self.FOUR_HOUR_RETRY_REQUALIFICATION_ARTIFACT_DIGEST
+                    == self.FOUR_HOUR_FINAL_RETRY_REQUALIFICATION_ARTIFACT_DIGEST
                     else (
-                        "canonical-four-hour-natural-long-baseline-v3"
+                        "canonical-four-hour-natural-long-baseline-v4"
                         if artifact_digest
-                        == self.FOUR_HOUR_FINAL_REQUALIFICATION_ARTIFACT_DIGEST
+                        == self.FOUR_HOUR_RETRY_REQUALIFICATION_ARTIFACT_DIGEST
                         else (
-                            "canonical-four-hour-natural-long-baseline-v2"
+                            "canonical-four-hour-natural-long-baseline-v3"
                             if artifact_digest
-                            == self.FOUR_HOUR_REQUALIFICATION_ARTIFACT_DIGEST
-                            else "canonical-four-hour-natural-long-baseline-v1"
+                            == self.FOUR_HOUR_FINAL_REQUALIFICATION_ARTIFACT_DIGEST
+                            else (
+                                "canonical-four-hour-natural-long-baseline-v2"
+                                if artifact_digest
+                                == self.FOUR_HOUR_REQUALIFICATION_ARTIFACT_DIGEST
+                                else "canonical-four-hour-natural-long-baseline-v1"
+                            )
                         )
                     )
                 )
@@ -412,6 +421,7 @@ class FrozenIntradayLeverageEvaluator:
                 self.FOUR_HOUR_FINAL_REQUALIFICATION_ARTIFACT_DIGEST,
                 self.FOUR_HOUR_RETRY_REQUALIFICATION_ARTIFACT_DIGEST,
                 self.FOUR_HOUR_FINAL_RETRY_REQUALIFICATION_ARTIFACT_DIGEST,
+                self.FOUR_HOUR_FINAL_CANARY_REQUALIFICATION_ARTIFACT_DIGEST,
             }
             or any(token not in source for token in required_source)
             or "populate_entry_trend" not in source
