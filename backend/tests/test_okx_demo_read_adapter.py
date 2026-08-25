@@ -526,6 +526,85 @@ def test_history_snapshot_freshness_uses_authenticated_response_receipt(
     assert snapshot.metadata.expires_at == NOW + timedelta(seconds=30)
 
 
+def test_order_identity_freshness_uses_authenticated_response_receipt() -> None:
+    historical_timestamp = NOW - timedelta(days=30)
+    timestamp_ms = str(int(historical_timestamp.timestamp() * 1000))
+    instance, _transport = adapter(
+        [
+            envelope(
+                [
+                    {
+                        "instId": "BTC-USDT-SWAP",
+                        "ordId": "123",
+                        "clOrdId": "client123",
+                        "state": "filled",
+                        "side": "buy",
+                        "posSide": "long",
+                        "ordType": "limit",
+                        "px": "90",
+                        "sz": "1",
+                        "accFillSz": "1",
+                        "avgPx": "90",
+                        "fee": "-0.01",
+                        "feeCcy": "USDT",
+                        "cTime": timestamp_ms,
+                        "uTime": timestamp_ms,
+                    }
+                ]
+            )
+        ],
+        credentials=RecordedCredentialProvider(),
+    )
+
+    snapshot = instance.order("BTC-USDT-SWAP", order_id="123")
+
+    assert snapshot.metadata.fetched_at == NOW
+    assert snapshot.metadata.exchange_timestamp == historical_timestamp
+    assert snapshot.metadata.expires_at == NOW + timedelta(seconds=15)
+    assert datetime.fromisoformat(
+        snapshot.items[0]["updated_at"].replace("Z", "+00:00")
+    ) == historical_timestamp
+
+
+def test_order_identity_still_rejects_stale_response_receipt() -> None:
+    historical_timestamp = NOW - timedelta(days=30)
+    timestamp_ms = str(int(historical_timestamp.timestamp() * 1000))
+    response = OkxReadHttpResponse(
+        status_code=200,
+        payload=envelope(
+            [
+                {
+                    "instId": "BTC-USDT-SWAP",
+                    "ordId": "123",
+                    "clOrdId": "client123",
+                    "state": "filled",
+                    "side": "buy",
+                    "posSide": "long",
+                    "ordType": "limit",
+                    "px": "90",
+                    "sz": "1",
+                    "accFillSz": "1",
+                    "avgPx": "90",
+                    "fee": "-0.01",
+                    "feeCcy": "USDT",
+                    "cTime": timestamp_ms,
+                    "uTime": timestamp_ms,
+                }
+            ]
+        ),
+        received_at=NOW - timedelta(seconds=16),
+    )
+    instance = OkxDemoReadAdapter(
+        execution_target="OKX_DEMO",
+        recorded_responses=[response],
+        credential_provider=RecordedCredentialProvider(),
+        now_provider=lambda: NOW,
+    )
+
+    with pytest.raises(OkxReadAdapterError, match="snapshot is expired"):
+        instance.order("BTC-USDT-SWAP", order_id="123")
+
+
 def test_realtime_snapshot_still_rejects_old_exchange_timestamp(monkeypatch) -> None:
     instance, _transport = adapter([envelope([])])
     monkeypatch.setattr(

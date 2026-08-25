@@ -235,13 +235,13 @@
       "path": "backend/app/adapters/okx_demo/read_adapter.py",
       "line": 777,
       "symbol": "<module>.OkxDemoReadAdapter._request.assign:freshness_anchor",
-      "fingerprint": "sha256:48f3cff239a5de4a459cd44adb98c599115ca3a2af4fe4765363e9834e8af8cd",
+      "fingerprint": "sha256:0228e9abc693d55e683286f51976c04d8cfa3cc923e86a02088fc8f0b5da956c",
       "category": "EVIDENCE_FRESHNESS_PROFILE",
       "language": "python",
       "disposition": "BLOCKED",
-      "reason": "Existing V1.3 business literal awaiting frozen bundle/profile replacement.",
-      "owner": "issue-704-old-rule-removal",
-      "dependency": "Task1 frozen configuration bundle/resolver contract"
+      "reason": "Authenticated order identity and archive reads use response receipt freshness while preserving exchange event timestamps.",
+      "owner": "issue-724-phase9",
+      "dependency": "Exact terminal order GET-only replay contract"
     },
     {
       "path": "backend/app/adapters/okx_demo/read_adapter.py",

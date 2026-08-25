@@ -772,11 +772,11 @@ class OkxDemoReadAdapter:
             )
         # Historical records retain their exchange timestamps for ordering and
         # reconciliation watermarks, but those timestamps do not describe the
-        # freshness of a just-authenticated archive response.  Treat the HTTP
-        # receipt as the snapshot freshness evidence for archive streams.
+        # freshness of a just-authenticated identity/archive response. Treat
+        # the HTTP receipt as the snapshot freshness evidence for those reads.
         freshness_anchor = (
             received_at
-            if resource in {"orders_history", "fills_history"}
+            if resource in {"order", "orders_history", "fills_history"}
             else exchange_timestamp or received_at
         )
         expires_at = freshness_anchor + timedelta(
