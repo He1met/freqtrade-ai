@@ -518,8 +518,8 @@ GET-only 恢复未知 order → reconciliation → 验证 backup restore → 决
 
 若 order 仅完成本地 durable prepare、尚无 exchange order identity、dispatch claim/outcome、fill 或
 reconciliation item，并且所属 deployment 已 `DISABLED`、runtime/order writer 均已停止且 DB writer
-lease 已 `RELEASED|EXPIRED`，同时 fill/ledger/reconciliation writer 均未加载，可使用唯一正式的
-本地归档命令：
+lease 已 `RELEASED|EXPIRED`，可使用唯一正式的本地归档命令。fill/ledger/reconciliation writer
+不是长期 supervisor；命令通过独立 control-plane 只读连接在取消前后各核对一次下游记录为零：
 
 ```bash
 python scripts/canonical_v13_phase9_service.py cancel-prepared-canary-order \

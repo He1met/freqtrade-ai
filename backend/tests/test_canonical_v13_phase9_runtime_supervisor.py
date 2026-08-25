@@ -1875,6 +1875,7 @@ def test_cancel_prepared_canary_order_requires_stopped_services_and_no_exchange(
     evidence_connection = object()
     writer_connection = object()
     calls = []
+    status_calls = []
 
     @contextmanager
     def evidence_connection_context():
@@ -1888,7 +1889,8 @@ def test_cancel_prepared_canary_order_requires_stopped_services_and_no_exchange(
     monkeypatch.setattr(
         service,
         "status",
-        lambda service_key: {"service_key": service_key, "loaded": False},
+        lambda service_key: status_calls.append(service_key)
+        or {"service_key": service_key, "loaded": False},
     )
     monkeypatch.setattr(
         service,
@@ -1949,6 +1951,7 @@ def test_cancel_prepared_canary_order_requires_stopped_services_and_no_exchange(
         ("cancel", writer_connection, {"order_id": order_id}),
         ("evidence", evidence_connection, {"order_id": order_id}),
     ]
+    assert status_calls == ["long_lived_runtime", "order_writer"]
 
     monkeypatch.setattr(
         service,

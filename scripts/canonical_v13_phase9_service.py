@@ -2246,13 +2246,7 @@ def cancel_prepared_canary_order(order_id: UUID) -> dict[str, object]:
     """Archive one known-unsubmitted order without exchange or credential access."""
 
     _require_release_checkout()
-    for service_key in (
-        "long_lived_runtime",
-        "order_writer",
-        "fill_writer",
-        "ledger_writer",
-        "reconciliation_writer",
-    ):
+    for service_key in ("long_lived_runtime", "order_writer"):
         observed = status(service_key)
         if any(
             bool(observed.get(field))
