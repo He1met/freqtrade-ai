@@ -1255,44 +1255,138 @@ def validate_canary_recovery_order(
             raise CanonicalExecutionChainBlocked(
                 "BLOCKED_ORDER_RECOVERY_OUTCOME", "only the latest claim may be unresolved"
             )
-    fills = effective.execute(
-        select(FILLS_TABLE.c.id).where(FILLS_TABLE.c.order_id == order_id)
-    ).scalars().all()
+    fills = (
+        effective.execute(
+            select(FILLS_TABLE).where(FILLS_TABLE.c.order_id == order_id)
+        )
+        .mappings()
+        .all()
+    )
+    fill_ids = [row["id"] for row in fills]
     ledger_entries = (
         effective.execute(
-            select(LEDGER_ENTRIES_TABLE.c.id).where(
-                LEDGER_ENTRIES_TABLE.c.fill_id.in_(fills)
+            select(LEDGER_ENTRIES_TABLE).where(
+                LEDGER_ENTRIES_TABLE.c.fill_id.in_(fill_ids)
             )
-        ).scalars().all()
-        if fills
+        )
+        .mappings()
+        .all()
+        if fill_ids
         else []
     )
-    reconciliation_items = effective.execute(
-        select(RECONCILIATION_ITEMS_TABLE.c.id).where(
-            RECONCILIATION_ITEMS_TABLE.c.order_id == order_id
+    reconciliation_items = (
+        effective.execute(
+            select(RECONCILIATION_ITEMS_TABLE).where(
+                RECONCILIATION_ITEMS_TABLE.c.order_id == order_id
+            )
         )
-    ).scalars().all()
+        .mappings()
+        .all()
+    )
     if terminal_replay_shape:
-        from app.canonical_v13.phase9_canary_policy import (
-            validate_terminated_canary_risk_policy,
-        )
-
-        terminal = validate_terminated_canary_risk_policy(
-            effective, policy_id=UUID(str(policy["id"]))
-        )
         replay = _replay_persisted_exchange_receipt(effective, order_id=order_id)
+        exact_fills = []
+        exact_ledgers = []
+        exact_items = []
+        for fill in fills:
+            payload = fill["fill_json"]
+            if not isinstance(payload, Mapping):
+                continue
+            try:
+                fill_size = Decimal(str(payload["size"]))
+            except (KeyError, InvalidOperation, TypeError, ValueError):
+                continue
+            if (
+                fill_size <= 0
+                or payload.get("evidence_class") != "PRODUCTION_OKX_DEMO"
+                or payload.get("allow_real_funds") is not False
+                or payload.get("exchange_order_id") != order["exchange_order_id"]
+                or payload.get("exchange_fill_id") != fill["exchange_fill_id"]
+                or payload.get("instrument") != body.get("instId")
+                or payload.get("side") != body.get("side")
+                or body.get("side") != "buy"
+                or payload.get("position_side") != body.get("posSide")
+                or body.get("posSide") != "long"
+                or fill["receipt_digest"]
+                != canonical_execution_digest(
+                    {
+                        "contract": "canonical-v13-okx-demo-fill-v1",
+                        "order_id": str(order_id),
+                        "order_receipt_digest": order["receipt_digest"],
+                        "fill": dict(payload),
+                    }
+                )
+            ):
+                continue
+            matching_ledgers = [
+                row for row in ledger_entries if row["fill_id"] == fill["id"]
+            ]
+            matching_items = [
+                row for row in reconciliation_items if row["fill_id"] == fill["id"]
+            ]
+            if len(matching_ledgers) != 1 or len(matching_items) != 1:
+                continue
+            ledger = matching_ledgers[0]
+            item = matching_items[0]
+            ledger_payload = {
+                "contract": "canonical-v13-okx-demo-ledger-entry-v1",
+                "fill_id": str(fill["id"]),
+                "fill_receipt_digest": fill["receipt_digest"],
+                "entry_key": ledger["entry_key"],
+                "asset": ledger["asset"],
+                "amount": format(fill_size.normalize(), "f"),
+                "entry_type": ledger["entry_type"],
+                "evidence_class": "PRODUCTION_OKX_DEMO",
+                "allow_real_funds": False,
+            }
+            if (
+                ledger["entry_key"]
+                != f"okx-demo-fill:{fill['exchange_fill_id']}:long-contracts"
+                or ledger["asset"] != body.get("instId")
+                or Decimal(str(ledger["amount"])) != fill_size
+                or ledger["entry_type"] != "OKX_DEMO_LONG_FILL_CONTRACTS"
+                or ledger["entry_digest"]
+                != canonical_execution_digest(ledger_payload)
+                or item["ledger_entry_id"] != ledger["id"]
+                or item["status"] != "MATCHED"
+                or item["item_type"] != "OKX_DEMO_ORDER_FILL_LEDGER_CHAIN"
+                or item["evidence_digest"]
+                != canonical_execution_digest(dict(item["evidence_json"]))
+            ):
+                continue
+            exact_fills.append(fill)
+            exact_ledgers.append(ledger)
+            exact_items.append(item)
+        try:
+            requested_size = Decimal(str(body["sz"]))
+            filled_size = sum(
+                (Decimal(str(row["fill_json"]["size"])) for row in exact_fills),
+                Decimal(0),
+            )
+        except (KeyError, InvalidOperation, TypeError, ValueError):
+            requested_size = Decimal(0)
+            filled_size = Decimal(-1)
         if (
-            terminal.policy_id != policy["id"]
-            or terminal.termination_digest != policy["termination_digest"]
+            not isinstance(policy["termination_digest"], str)
+            or len(policy["termination_digest"]) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in policy["termination_digest"]
+            )
+            or policy["terminated_at"] is None
             or len(accepted_outcomes) != 1
             or len(outcomes) != len(claims)
             or len(negative_outcomes) != len(claims) - 1
             or replay.exchange_order_id != order["exchange_order_id"]
             or replay.receipt_digest != order["receipt_digest"]
             or replay.repeat_noop is not True
-            or not fills
-            or len(ledger_entries) != len(fills)
-            or len(reconciliation_items) != len(fills)
+            or not exact_fills
+            or len(exact_fills) != len(fills)
+            or len(exact_ledgers) != len(fills)
+            or len(exact_items) != len(fills)
+            or len({row["exchange_fill_id"] for row in exact_fills})
+            != len(exact_fills)
+            or filled_size != requested_size
         ):
             raise CanonicalExecutionChainBlocked(
                 "BLOCKED_ORDER_TERMINAL_REPLAY_STATE",
