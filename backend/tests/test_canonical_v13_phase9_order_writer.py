@@ -1961,6 +1961,38 @@ def test_exchange_fill_ledger_reconciliation_exact_replay(canonical_connection):
         assert terminated.repeat_noop is False
         assert repeated.repeat_noop is True
         assert repeated.termination_digest == terminated.termination_digest
+        authority = _frozen_recovery_authority(
+            canonical_connection, prepared.order_id
+        )
+        with pytest.raises(
+            CanonicalExecutionChainBlocked,
+            match="BLOCKED_ORDER_RECOVERY_AUTHORITY",
+        ):
+            validate_canary_recovery_order(
+                canonical_connection,
+                order_id=prepared.order_id,
+                authority=authority,
+            )
+        terminal_replay = validate_canary_recovery_order(
+            canonical_connection,
+            order_id=prepared.order_id,
+            authority=authority,
+            allow_terminal_replay=True,
+        )
+        assert terminal_replay.order_status == "ACCEPTED"
+        assert terminal_replay.dispatch_attempt_count == 1
+        assert terminal_replay.negative_outcome_count == 0
+
+    replay_transport = FakeTransport()
+    replay = recover_demo_order_get_only(
+        factory, order_id=prepared.order_id, transport=replay_transport
+    )
+    assert replay.exchange_order_id == dispatched.exchange_order_id
+    assert replay.receipt_digest == dispatched.receipt_digest
+    assert replay.repeat_noop is True
+    assert replay_transport.query_calls == 1
+    assert replay_transport.place_calls == 0
+    assert replay_transport.absence_calls == 0
 
 
 def test_policy_termination_requires_every_partial_fill_chain(canonical_connection):

@@ -840,8 +840,6 @@ def _load_dispatch(
     )
     if order is None:
         raise CanonicalExecutionChainBlocked("BLOCKED_ORDER_UNSET", str(order_id))
-    if order["receipt_digest"] is not None and order["exchange_order_id"]:
-        return dict(order), {}
     decision = (
         effective.execute(
             select(RISK_DECISIONS_TABLE).where(
@@ -1015,12 +1013,15 @@ def validate_canary_recovery_order(
     order_id: UUID,
     authority: object,
     require_negative_outcome: bool = False,
+    allow_terminal_replay: bool = False,
 ) -> CanaryRecoveryOrder:
-    """Verify an immutable ambiguous canary before GET-only recovery or retry.
+    """Verify an immutable canary before GET-only recovery, replay, or retry.
 
     This intentionally validates the authority at the original dispatch boundary,
-    not against wall-clock freshness.  A retry still requires a fresh private
-    dispatch guard and the existing two-attempt saga proof.
+    not against wall-clock freshness.  A terminal replay additionally requires
+    the exact terminated fill/ledger/reconciliation lineage.  A retry still
+    requires a fresh private dispatch guard and the existing two-attempt saga
+    proof.
     """
 
     effective = require_canonical_execution(connection)
@@ -1125,6 +1126,18 @@ def validate_canary_recovery_order(
         raise CanonicalExecutionChainBlocked(
             "BLOCKED_ORDER_RECOVERY_AUTHORITY", "typed frozen authority is required"
         )
+    terminal_replay_shape = bool(
+        allow_terminal_replay
+        and not require_negative_outcome
+        and order["status"] in {"ACCEPTED", "PARTIAL", "FILLED"}
+        and order["exchange_order_id"]
+        and order["receipt_digest"]
+        and policy is not None
+        and policy["status"] == "TERMINATED"
+    )
+    ambiguous_recovery_shape = bool(
+        order["exchange_order_id"] is None and order["receipt_digest"] is None
+    )
     if (
         decision is None
         or decision["status"] != "RISK_ACCEPTED"
@@ -1140,8 +1153,7 @@ def validate_canary_recovery_order(
         or deployment is None
         or order["demo_only"] is not True
         or order["allow_real_funds"] is not False
-        or order["exchange_order_id"] is not None
-        or order["receipt_digest"] is not None
+        or not (ambiguous_recovery_shape or terminal_replay_shape)
         or deployment["id"] != getattr(authority, "deployment_id")
         or deployment["capability_digest"]
         != getattr(authority, "deployment_capability_digest")
@@ -1180,6 +1192,7 @@ def validate_canary_recovery_order(
             "order, execution risk, policy, attestation, and frozen authority drifted",
         )
     negative_outcomes = []
+    accepted_outcomes = []
     outcomes_by_claim = {row["dispatch_claim_id"]: row for row in outcomes}
     for index, claim in enumerate(claims):
         claimed_at = _persisted_utc(claim["claimed_at"])
@@ -1222,33 +1235,171 @@ def validate_canary_recovery_order(
             )
         outcome = outcomes_by_claim.get(claim["id"])
         if outcome is not None:
-            if not _negative_outcome_is_exact(outcome=outcome, claim=claim, body=body):
+            if (
+                terminal_replay_shape
+                and outcome["outcome_mode"] in {"POST", "GET_RECOVERY"}
+                and index == len(claims) - 1
+            ):
+                accepted_outcomes.append(outcome)
+            elif not _negative_outcome_is_exact(
+                outcome=outcome, claim=claim, body=body
+            ):
                 raise CanonicalExecutionChainBlocked(
                     "BLOCKED_ORDER_RECOVERY_OUTCOME",
-                    "only exact GET_NOT_FOUND evidence can authorize recovery retry",
+                    "only an exact accepted terminal outcome or GET_NOT_FOUND "
+                    "evidence can authorize recovery",
                 )
-            negative_outcomes.append(outcome)
+            else:
+                negative_outcomes.append(outcome)
         elif index != len(claims) - 1:
             raise CanonicalExecutionChainBlocked(
                 "BLOCKED_ORDER_RECOVERY_OUTCOME", "only the latest claim may be unresolved"
             )
-    fills = effective.execute(
-        select(FILLS_TABLE.c.id).where(FILLS_TABLE.c.order_id == order_id)
-    ).scalars().all()
+    fills = (
+        effective.execute(
+            select(FILLS_TABLE).where(FILLS_TABLE.c.order_id == order_id)
+        )
+        .mappings()
+        .all()
+    )
+    fill_ids = [row["id"] for row in fills]
     ledger_entries = (
         effective.execute(
-            select(LEDGER_ENTRIES_TABLE.c.id).where(
-                LEDGER_ENTRIES_TABLE.c.fill_id.in_(fills)
+            select(LEDGER_ENTRIES_TABLE).where(
+                LEDGER_ENTRIES_TABLE.c.fill_id.in_(fill_ids)
             )
-        ).scalars().all()
-        if fills
+        )
+        .mappings()
+        .all()
+        if fill_ids
         else []
     )
-    reconciliation_items = effective.execute(
-        select(RECONCILIATION_ITEMS_TABLE.c.id).where(
-            RECONCILIATION_ITEMS_TABLE.c.order_id == order_id
+    reconciliation_items = (
+        effective.execute(
+            select(RECONCILIATION_ITEMS_TABLE).where(
+                RECONCILIATION_ITEMS_TABLE.c.order_id == order_id
+            )
         )
-    ).scalars().all()
+        .mappings()
+        .all()
+    )
+    if terminal_replay_shape:
+        replay = _replay_persisted_exchange_receipt(effective, order_id=order_id)
+        exact_fills = []
+        exact_ledgers = []
+        exact_items = []
+        for fill in fills:
+            payload = fill["fill_json"]
+            if not isinstance(payload, Mapping):
+                continue
+            try:
+                fill_size = Decimal(str(payload["size"]))
+            except (KeyError, InvalidOperation, TypeError, ValueError):
+                continue
+            if (
+                fill_size <= 0
+                or payload.get("evidence_class") != "PRODUCTION_OKX_DEMO"
+                or payload.get("allow_real_funds") is not False
+                or payload.get("exchange_order_id") != order["exchange_order_id"]
+                or payload.get("exchange_fill_id") != fill["exchange_fill_id"]
+                or payload.get("instrument") != body.get("instId")
+                or payload.get("side") != body.get("side")
+                or body.get("side") != "buy"
+                or payload.get("position_side") != body.get("posSide")
+                or body.get("posSide") != "long"
+                or fill["receipt_digest"]
+                != canonical_execution_digest(
+                    {
+                        "contract": "canonical-v13-okx-demo-fill-v1",
+                        "order_id": str(order_id),
+                        "order_receipt_digest": order["receipt_digest"],
+                        "fill": dict(payload),
+                    }
+                )
+            ):
+                continue
+            matching_ledgers = [
+                row for row in ledger_entries if row["fill_id"] == fill["id"]
+            ]
+            matching_items = [
+                row for row in reconciliation_items if row["fill_id"] == fill["id"]
+            ]
+            if len(matching_ledgers) != 1 or len(matching_items) != 1:
+                continue
+            ledger = matching_ledgers[0]
+            item = matching_items[0]
+            ledger_payload = {
+                "contract": "canonical-v13-okx-demo-ledger-entry-v1",
+                "fill_id": str(fill["id"]),
+                "fill_receipt_digest": fill["receipt_digest"],
+                "entry_key": ledger["entry_key"],
+                "asset": ledger["asset"],
+                "amount": format(fill_size.normalize(), "f"),
+                "entry_type": ledger["entry_type"],
+                "evidence_class": "PRODUCTION_OKX_DEMO",
+                "allow_real_funds": False,
+            }
+            if (
+                ledger["entry_key"]
+                != f"okx-demo-fill:{fill['exchange_fill_id']}:long-contracts"
+                or ledger["asset"] != body.get("instId")
+                or Decimal(str(ledger["amount"])) != fill_size
+                or ledger["entry_type"] != "OKX_DEMO_LONG_FILL_CONTRACTS"
+                or ledger["entry_digest"]
+                != canonical_execution_digest(ledger_payload)
+                or item["ledger_entry_id"] != ledger["id"]
+                or item["status"] != "MATCHED"
+                or item["item_type"] != "OKX_DEMO_ORDER_FILL_LEDGER_CHAIN"
+                or item["evidence_digest"]
+                != canonical_execution_digest(dict(item["evidence_json"]))
+            ):
+                continue
+            exact_fills.append(fill)
+            exact_ledgers.append(ledger)
+            exact_items.append(item)
+        try:
+            requested_size = Decimal(str(body["sz"]))
+            filled_size = sum(
+                (Decimal(str(row["fill_json"]["size"])) for row in exact_fills),
+                Decimal(0),
+            )
+        except (KeyError, InvalidOperation, TypeError, ValueError):
+            requested_size = Decimal(0)
+            filled_size = Decimal(-1)
+        if (
+            not isinstance(policy["termination_digest"], str)
+            or len(policy["termination_digest"]) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in policy["termination_digest"]
+            )
+            or policy["terminated_at"] is None
+            or len(accepted_outcomes) != 1
+            or len(outcomes) != len(claims)
+            or len(negative_outcomes) != len(claims) - 1
+            or replay.exchange_order_id != order["exchange_order_id"]
+            or replay.receipt_digest != order["receipt_digest"]
+            or replay.repeat_noop is not True
+            or not exact_fills
+            or len(exact_fills) != len(fills)
+            or len(exact_ledgers) != len(fills)
+            or len(exact_items) != len(fills)
+            or len({row["exchange_fill_id"] for row in exact_fills})
+            != len(exact_fills)
+            or filled_size != requested_size
+        ):
+            raise CanonicalExecutionChainBlocked(
+                "BLOCKED_ORDER_TERMINAL_REPLAY_STATE",
+                "one exact terminated Demo order chain is required for GET-only replay",
+            )
+        return CanaryRecoveryOrder(
+            order_id=order_id,
+            risk_decision_id=UUID(str(decision["id"])),
+            order_status=str(order["status"]),
+            request_body=dict(body),
+            dispatch_attempt_count=len(claims),
+            negative_outcome_count=len(negative_outcomes),
+        )
     active_shape = (
         (order["status"] == "DISPATCHING" and len(outcomes) == len(claims) - 1)
         or (
@@ -2267,6 +2418,28 @@ def recover_demo_order_get_only(
 ) -> DispatchedDemoOrder:
     with connection_factory() as connection:
         order, body = _load_dispatch(connection, order_id)
+        if order["receipt_digest"] is not None and order["exchange_order_id"]:
+            try:
+                payload = transport.query(
+                    instrument=body["instId"], client_order_id=body["clOrdId"]
+                )
+                exchange_order_id, _safe_response = _safe_exchange_identity(
+                    payload, client_order_id=body["clOrdId"]
+                )
+            except Exception as exc:
+                raise CanonicalOrderRecoveryRequired(
+                    "BLOCKED_ORDER_TERMINAL_REPLAY_INCOMPLETE",
+                    "GET-only terminal replay did not prove the persisted exchange "
+                    f"identity: {type(exc).__name__}",
+                ) from None
+            if exchange_order_id != order["exchange_order_id"]:
+                raise CanonicalOrderRecoveryRequired(
+                    "BLOCKED_ORDER_TERMINAL_REPLAY_DRIFT",
+                    "GET-only terminal replay returned a different exchange order",
+                )
+            return _replay_persisted_exchange_receipt(
+                connection, order_id=order_id
+            )
         latest_claim_id = connection.execute(
             select(ORDER_DISPATCH_RECEIPTS_TABLE.c.id)
             .where(ORDER_DISPATCH_RECEIPTS_TABLE.c.order_id == order_id)
@@ -2295,11 +2468,6 @@ def recover_demo_order_get_only(
                 order_id=order_id,
                 safe_response=dict(nonaccepted["safe_response_json"]),
                 outcome_mode=str(nonaccepted["outcome_mode"]),
-            )
-    if order["receipt_digest"] is not None and order["exchange_order_id"]:
-        with connection_factory() as connection:
-            return _replay_persisted_exchange_receipt(
-                connection, order_id=order_id
             )
     try:
         payload = transport.query(

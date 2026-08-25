@@ -581,6 +581,7 @@ class DatabaseOrderWriterAuthorityVerifier:
                     connection,
                     order_id=order_id,
                     authority=authority,
+                    allow_terminal_replay=True,
                 )
         except Exception:
             return False
