@@ -147,6 +147,8 @@ def test_invalid_write_response_is_always_unknown(raw_payload) -> None:
         transport.post(path="/api/v5/trade/order", body={"a": "b"})
 
     assert captured.value.unknown_write_outcome is True
+    assert captured.value.failure_kind == "RESPONSE_DECODE_ERROR"
+    assert captured.value.http_status_code == 200
 
 
 def test_explicit_http_rejection_is_redacted_and_returned_for_classification() -> None:
@@ -259,6 +261,46 @@ def test_unattributable_item_http_rejection_remains_unknown(item) -> None:
         )
 
     assert captured.value.unknown_write_outcome is True
+
+
+def test_ambiguous_http_rejection_exposes_only_safe_codes_and_identity_state() -> None:
+    error = HTTPError(
+        "https://offline.invalid/api/v5/trade/order",
+        400,
+        "raw reason must not cross the boundary",
+        {"Raw-Secret": "must-not-cross"},
+        BytesIO(
+            json.dumps(
+                {
+                    "code": "1",
+                    "msg": "raw exchange message must not cross",
+                    "data": [
+                        {
+                            "ordId": "",
+                            "clOrdId": "",
+                            "sCode": "51000",
+                            "sMsg": "raw item message must not cross",
+                        }
+                    ],
+                }
+            ).encode("utf-8")
+        ),
+    )
+    transport = OfflineOkxDemoWriteTransportHarness(
+        Provider(), opener=Opener(error)
+    )
+
+    with pytest.raises(OkxDemoTransportError) as captured:
+        transport.post(
+            path="/api/v5/trade/order",
+            body={"clOrdId": "V13ExactOrder001"},
+        )
+
+    assert captured.value.safe_diagnostic == (
+        "HTTP_ERROR_AMBIGUOUS:http_status=400:okx_code=1:"
+        "okx_s_code=51000:client_order_id=MISSING"
+    )
+    assert "raw" not in captured.value.safe_diagnostic.casefold()
 
 
 @pytest.mark.parametrize(

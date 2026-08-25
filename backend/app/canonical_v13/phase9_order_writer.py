@@ -18,6 +18,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import Connection, select
 
+from app.adapters.okx_demo.write_semantics import OkxDemoTransportError
 from app.canonical_v13.execution_common import (
     CanonicalExecutionChainBlocked,
     canonical_execution_digest,
@@ -1844,6 +1845,11 @@ def dispatch_demo_order(
         )
     except CanonicalOrderRecoveryRequired:
         raise
+    except OkxDemoTransportError as exc:
+        raise CanonicalOrderRecoveryRequired(
+            "BLOCKED_ORDER_RECOVERY_REQUIRED",
+            f"order outcome is unknown: {exc.safe_diagnostic}",
+        ) from None
     except Exception as exc:
         raise CanonicalOrderRecoveryRequired(
             "BLOCKED_ORDER_RECOVERY_REQUIRED",
