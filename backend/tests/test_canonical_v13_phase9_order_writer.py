@@ -49,6 +49,7 @@ from app.canonical_v13.phase9_order_writer import (
     _acquire_writer_lease,
     _exchange_body,
     _persist_exchange_receipt,
+    _recovery_claim_window_is_valid,
     assert_pre_dispatch_downstream_absent,
     cancel_prepared_demo_order,
     dispatch_demo_order,
@@ -94,6 +95,58 @@ ORDER_BODY = {
     "sz": "1",
     "px": "10000",
 }
+
+
+def test_recovery_accepts_only_bounded_first_attempt_legacy_claim_clock():
+    policy = {
+        "accepted_at": NOW,
+        "expires_at": NOW + timedelta(seconds=60),
+    }
+    attestation = {
+        "observed_at": NOW,
+        "expires_at": NOW + timedelta(seconds=60),
+    }
+    probe = {
+        "observed_at": NOW,
+        "expires_at": NOW + timedelta(seconds=60),
+    }
+    claim = {
+        "attempt_ordinal": 1,
+        "lease_acquired_at": NOW,
+        "lease_expires_at": NOW + timedelta(seconds=60),
+        "guard_observed_at": NOW + timedelta(seconds=3),
+        "guard_expires_at": NOW + timedelta(seconds=20),
+        "positions_observed_at": NOW + timedelta(seconds=1),
+        "positions_expires_at": NOW + timedelta(seconds=20),
+        "pending_orders_observed_at": NOW + timedelta(seconds=1),
+        "pending_orders_expires_at": NOW + timedelta(seconds=20),
+        "maximum_order_quantity_observed_at": NOW + timedelta(seconds=2),
+        "maximum_order_quantity_expires_at": NOW + timedelta(seconds=20),
+        "guard_leverage_observed_at": NOW + timedelta(seconds=2),
+        "guard_leverage_expires_at": NOW + timedelta(seconds=20),
+    }
+
+    assert _recovery_claim_window_is_valid(
+        claim=claim,
+        policy=policy,
+        attestation=attestation,
+        probe=probe,
+        claimed_at=NOW + timedelta(seconds=2),
+    )
+    assert not _recovery_claim_window_is_valid(
+        claim={**claim, "attempt_ordinal": 2},
+        policy=policy,
+        attestation=attestation,
+        probe=probe,
+        claimed_at=NOW + timedelta(seconds=2),
+    )
+    assert not _recovery_claim_window_is_valid(
+        claim=claim,
+        policy=policy,
+        attestation=attestation,
+        probe=probe,
+        claimed_at=NOW - timedelta(seconds=3),
+    )
 
 
 def test_missing_client_order_id_is_derived_from_exact_risk_identity():
@@ -794,6 +847,40 @@ def test_local_preflight_failure_spends_no_claim_and_starts_no_post(
     assert canonical_connection.execute(
         select(ORDERS_TABLE.c.status).where(ORDERS_TABLE.c.id == prepared.order_id)
     ).scalar_one() == "SUBMITTED"
+
+
+def test_dispatch_claim_clock_never_precedes_guard_observation(
+    canonical_connection,
+):
+    with canonical_connection.begin():
+        risk, attestation = _prepare_authority(canonical_connection)
+        prepared = prepare_demo_order(
+            canonical_connection,
+            risk_decision_id=risk.risk_decision_id,
+            attestation_id=attestation.attestation_id,
+            writer_identity="canonical_order_writer",
+            holder_identity="canonical-v13-order-writer-v1",
+            holder_token_digest="b" * 64,
+            idempotency_key="phase9-claim-clock-after-guard",
+            order_request=ORDER_BODY,
+            evaluated_at=NOW,
+        )
+
+    dispatch_demo_order(
+        _factory(canonical_connection.engine),
+        order_id=prepared.order_id,
+        transport=FakeTransport(),
+        holder_identity="canonical-v13-order-writer-v1",
+        holder_token_digest="b" * 64,
+        lease_generation=prepared.lease_generation,
+        evaluated_at=NOW + timedelta(seconds=1),
+    )
+    claim = canonical_connection.execute(
+        select(ORDER_DISPATCH_RECEIPTS_TABLE).where(
+            ORDER_DISPATCH_RECEIPTS_TABLE.c.order_id == prepared.order_id
+        )
+    ).mappings().one()
+    assert claim["claimed_at"] == claim["guard_observed_at"]
 
 
 def test_proven_absent_first_attempt_allows_one_same_order_retry(
