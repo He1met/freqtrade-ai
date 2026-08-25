@@ -51,6 +51,9 @@ from app.canonical_v13.phase9_execution_authority import (
     shadow_signal_source_accepted,
 )
 from app.canonical_v13.order_service import CANONICAL_ORDER_WRITER_IDENTITY
+from app.canonical_v13.phase9_order_writer import (
+    pre_dispatch_cancellation_receipt_digest,
+)
 from app.canonical_v13.phase9_topology import phase9_topology_digest
 from app.canonical_v13.research_evaluation import gate_optimization
 from app.canonical_v13.risk_service import (
@@ -360,12 +363,6 @@ def _exact_archived_history_scope(
     )
     archived_order_ids = {row["id"] for row in archived_orders}
     for order in archived_orders:
-        if (
-            order["status"] != "REJECTED"
-            or order["exchange_order_id"] is not None
-            or order["receipt_digest"] is not None
-        ):
-            return None
         claims = (
             connection.execute(
                 select(ORDER_DISPATCH_RECEIPTS_TABLE).where(
@@ -385,17 +382,29 @@ def _exact_archived_history_scope(
             .all()
         )
         ordinals = sorted(row["attempt_ordinal"] for row in claims)
-        if (
-            ordinals not in ([1], [1, 2])
-            or len(outcomes) != len(claims)
-            or {row["dispatch_claim_id"] for row in outcomes}
-            != {row["id"] for row in claims}
-            or any(
-                row["outcome_mode"] not in {"GET_NOT_FOUND", "POST_REJECTED"}
-                or row["exchange_order_id"] is not None
+        rejected_dispatch = (
+            order["status"] == "REJECTED"
+            and order["exchange_order_id"] is None
+            and order["receipt_digest"] is None
+            and ordinals in ([1], [1, 2])
+            and len(outcomes) == len(claims)
+            and {row["dispatch_claim_id"] for row in outcomes}
+            == {row["id"] for row in claims}
+            and all(
+                row["outcome_mode"] in {"GET_NOT_FOUND", "POST_REJECTED"}
+                and row["exchange_order_id"] is None
                 for row in outcomes
             )
-        ):
+        )
+        cancelled_before_dispatch = (
+            order["status"] == "CANCELLED"
+            and order["exchange_order_id"] is None
+            and order["receipt_digest"]
+            == pre_dispatch_cancellation_receipt_digest(order)
+            and not claims
+            and not outcomes
+        )
+        if not (rejected_dispatch or cancelled_before_dispatch):
             return None
 
     if active_approval["approval_generation"] == 2:

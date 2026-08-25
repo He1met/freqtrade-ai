@@ -515,3 +515,19 @@ LaunchAgent 均 unloaded、两个 file lease 均不存在、DB active order-writ
 任何阶段失败：停止后置 writer/runtime → 只读盘点 exact lineage/计数/leases → 撤销 credential session →
 GET-only 恢复未知 order → reconciliation → 验证 backup restore → 决定 forward retry 或 release rollback。
 不得删除 canonical receipt、改写既有 qualification/approval、重发 unknown order 或切换到 live funds。
+
+若 order 仅完成本地 durable prepare、尚无 exchange order identity、dispatch claim/outcome、fill 或
+reconciliation item，并且所属 deployment 已 `DISABLED`、runtime/order writer 均已停止且 DB writer
+lease 已 `RELEASED|EXPIRED`，同时 fill/ledger/reconciliation writer 均未加载，可使用唯一正式的
+本地归档命令：
+
+```bash
+python scripts/canonical_v13_phase9_service.py cancel-prepared-canary-order \
+  --service order_writer --order-id <exact-prepared-order-id>
+```
+
+该命令不得访问 Keychain/OKX，也不得发送订单；它只将 exact `SUBMITTED` prepared row 转为
+`CANCELLED`，写入 `canonical-v13-pre-dispatch-cancellation-receipt-v1` digest。第二次相同调用必须
+返回同一 order/receipt 且 `repeat_noop=true`。任何既有 dispatch/fill/reconciliation evidence、活跃
+deployment/service/lease 或 receipt drift 均 fail closed，必须按 unknown-order recovery 处理，禁止用
+本命令覆盖。

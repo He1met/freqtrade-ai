@@ -80,6 +80,8 @@ from app.canonical_v13.execution_common import (  # noqa: E402
 )
 from app.canonical_v13.phase9_order_writer import (  # noqa: E402
     CANONICAL_ORDER_WRITER_PROCESS_IDENTITY,
+    assert_pre_dispatch_downstream_absent,
+    cancel_prepared_demo_order,
     release_demo_order_writer_lease,
 )
 from app.canonical_v13.phase9_recovery_composition import (  # noqa: E402
@@ -2240,6 +2242,46 @@ def prepare_canary_order(
     }
 
 
+def cancel_prepared_canary_order(order_id: UUID) -> dict[str, object]:
+    """Archive one known-unsubmitted order without exchange or credential access."""
+
+    _require_release_checkout()
+    for service_key in (
+        "long_lived_runtime",
+        "order_writer",
+        "fill_writer",
+        "ledger_writer",
+        "reconciliation_writer",
+    ):
+        observed = status(service_key)
+        if any(
+            bool(observed.get(field))
+            for field in ("loaded", "holder_alive", "lease_present", "lease_fresh")
+        ):
+            raise CanonicalPhase9SupervisorBlocked(
+                "BLOCKED_PRE_DISPATCH_SUPERVISOR_LIVE", service_key
+            )
+    with _connection_factory(_control_database_url())() as evidence_connection:
+        assert_pre_dispatch_downstream_absent(
+            evidence_connection, order_id=order_id
+        )
+        with _connection_factory(
+            _phase9_database_url("canonical_order_writer")
+        )() as connection:
+            result = cancel_prepared_demo_order(connection, order_id=order_id)
+        assert_pre_dispatch_downstream_absent(
+            evidence_connection, order_id=order_id
+        )
+    return {
+        "status": result.status,
+        "order_id": str(result.order_id),
+        "receipt_digest": result.receipt_digest,
+        "repeat_noop": result.repeat_noop,
+        "exchange_access": "NONE",
+        "order_submission_enabled": False,
+    }
+
+
 def dispatch_canary(plan_digest: str, risk_decision_id: UUID) -> dict[str, object]:
     """Dispatch one exact persisted canary request through the canonical saga."""
 
@@ -2557,6 +2599,7 @@ def main(argv: list[str] | None = None) -> int:
             "probe-canary",
             "probe-authorize-canary-policy",
             "prepare-canary-order",
+            "cancel-prepared-canary-order",
             "dispatch-canary",
             "recover-canary",
             "collect-canary-fills",
@@ -2769,6 +2812,13 @@ def main(argv: list[str] | None = None) -> int:
                     "order_writer, --plan-digest, and --risk-decision-id are required",
                 )
             payload = prepare_canary_order(args.plan_digest, args.risk_decision_id)
+        elif args.command == "cancel-prepared-canary-order":
+            if args.service != "order_writer" or args.order_id is None:
+                raise CanonicalPhase9SupervisorBlocked(
+                    "BLOCKED_PRE_DISPATCH_CANCELLATION_COMMAND",
+                    "order_writer and --order-id are required",
+                )
+            payload = cancel_prepared_canary_order(args.order_id)
         elif args.command == "dispatch-canary":
             if (
                 args.service != "order_writer"
@@ -2859,6 +2909,7 @@ def main(argv: list[str] | None = None) -> int:
             "RESTARTED",
             "STOPPED",
             "RECOVERED",
+            "CANCELLED",
             "NO_OP",
             "ACTIVE",
             "ACCEPTED",
