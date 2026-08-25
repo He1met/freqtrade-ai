@@ -80,6 +80,7 @@ from app.canonical_v13.execution_common import (  # noqa: E402
 )
 from app.canonical_v13.phase9_order_writer import (  # noqa: E402
     CANONICAL_ORDER_WRITER_PROCESS_IDENTITY,
+    CanonicalOrderRecoveryRequired,
     assert_pre_dispatch_downstream_absent,
     cancel_prepared_demo_order,
     release_demo_order_writer_lease,
@@ -2877,6 +2878,7 @@ def main(argv: list[str] | None = None) -> int:
         CanonicalPhase9SupervisorBlocked,
         CanonicalPhase9CompositionBlocked,
         CanonicalPhase9RecoveryAcceptanceBlocked,
+        CanonicalOrderRecoveryRequired,
     ) as exc:
         payload = {"status": "BLOCKED", "reason": exc.code, "detail": exc.detail}
     except Exception as exc:

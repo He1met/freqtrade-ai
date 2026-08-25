@@ -49,6 +49,7 @@ def _explicit_http_rejection(
     exc: HTTPError,
     *,
     expected_client_order_id: object,
+    raw_payload: bytes | None = None,
 ) -> dict[str, object] | None:
     """Return only a redacted, explicit OKX rejection from an HTTP error.
 
@@ -59,10 +60,11 @@ def _explicit_http_rejection(
 
     if not 400 <= exc.code <= 599:
         return None
-    try:
-        raw_payload = exc.read(MAX_ERROR_RESPONSE_BYTES + 1)
-    except (OSError, TypeError):
-        return None
+    if raw_payload is None:
+        try:
+            raw_payload = exc.read(MAX_ERROR_RESPONSE_BYTES + 1)
+        except (OSError, TypeError):
+            return None
     if (
         not isinstance(raw_payload, bytes)
         or len(raw_payload) > MAX_ERROR_RESPONSE_BYTES
@@ -113,6 +115,57 @@ def _explicit_http_rejection(
             }
         ],
     }
+
+
+def _ambiguous_http_diagnostic(
+    exc: HTTPError,
+    *,
+    expected_client_order_id: object,
+    raw_payload: bytes | None = None,
+) -> dict[str, object]:
+    """Extract only numeric response codes and identity match state.
+
+    The raw body, message, headers, URL, and observed client-order ID never
+    cross this boundary.  This diagnostic does not turn an ambiguous response
+    into a rejection; the caller must still use GET-only recovery.
+    """
+
+    diagnostic: dict[str, object] = {
+        "failure_kind": "HTTP_ERROR_AMBIGUOUS",
+        "http_status_code": int(exc.code),
+        "client_order_id_state": "UNKNOWN",
+    }
+    if raw_payload is None:
+        try:
+            raw_payload = exc.read(MAX_ERROR_RESPONSE_BYTES + 1)
+        except (OSError, TypeError):
+            return diagnostic
+    if not isinstance(raw_payload, bytes) or len(raw_payload) > MAX_ERROR_RESPONSE_BYTES:
+        return diagnostic
+    try:
+        payload = json.loads(raw_payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return diagnostic
+    if not isinstance(payload, dict):
+        return diagnostic
+    code = payload.get("code")
+    if isinstance(code, str) and code.isdigit():
+        diagnostic["okx_code"] = code
+    data = payload.get("data")
+    if not isinstance(data, list) or len(data) != 1 or not isinstance(data[0], Mapping):
+        return diagnostic
+    item = data[0]
+    s_code = item.get("sCode")
+    if isinstance(s_code, str) and s_code.isdigit():
+        diagnostic["okx_s_code"] = s_code
+    observed_client_order_id = item.get("clOrdId")
+    if observed_client_order_id in (None, ""):
+        diagnostic["client_order_id_state"] = "MISSING"
+    elif observed_client_order_id == expected_client_order_id:
+        diagnostic["client_order_id_state"] = "MATCH"
+    else:
+        diagnostic["client_order_id_state"] = "MISMATCH"
+    return diagnostic
 
 
 class OkxDemoWriteTransport(Protocol):
@@ -207,21 +260,44 @@ class UrllibOkxDemoWriteTransport:
                 status_code = response.status
                 raw_payload = response.read()
         except HTTPError as exc:
+            try:
+                error_payload = exc.read(MAX_ERROR_RESPONSE_BYTES + 1)
+            except (OSError, TypeError):
+                error_payload = None
             explicit_rejection = _explicit_http_rejection(
                 exc,
                 expected_client_order_id=body.get("clOrdId"),
+                raw_payload=error_payload,
             )
             if explicit_rejection is not None:
                 return explicit_rejection
-            raise OkxDemoTransportError(unknown_write_outcome=True) from None
+            raise OkxDemoTransportError(
+                unknown_write_outcome=True,
+                **_ambiguous_http_diagnostic(
+                    exc,
+                    expected_client_order_id=body.get("clOrdId"),
+                    raw_payload=error_payload,
+                ),
+            ) from None
         except (TimeoutError, URLError, OSError):
-            raise OkxDemoTransportError(unknown_write_outcome=True) from None
+            raise OkxDemoTransportError(
+                unknown_write_outcome=True,
+                failure_kind="NETWORK_ERROR",
+            ) from None
         if status_code != 200:
-            raise OkxDemoTransportError(unknown_write_outcome=True)
+            raise OkxDemoTransportError(
+                unknown_write_outcome=True,
+                failure_kind="HTTP_STATUS_NON_200",
+                http_status_code=int(status_code),
+            )
         try:
             return json.loads(raw_payload.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
-            raise OkxDemoTransportError(unknown_write_outcome=True) from None
+            raise OkxDemoTransportError(
+                unknown_write_outcome=True,
+                failure_kind="RESPONSE_DECODE_ERROR",
+                http_status_code=200,
+            ) from None
 
 
 class OfflineOkxDemoWriteTransportHarness(UrllibOkxDemoWriteTransport):

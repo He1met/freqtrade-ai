@@ -1737,6 +1737,43 @@ def test_cli_routes_sealed_runtime_and_canary_operator_commands(
     ]
 
 
+def test_cli_preserves_only_sanitized_order_recovery_diagnostic(
+    monkeypatch, capsys
+) -> None:
+    service = _load_script("canonical_phase9_safe_order_diagnostic_test")
+    risk_id = UUID("00000000-0000-4000-8000-000000000091")
+
+    def blocked(_digest, _risk_id):
+        raise service.CanonicalOrderRecoveryRequired(
+            "BLOCKED_ORDER_RECOVERY_REQUIRED",
+            "order outcome is unknown: HTTP_ERROR_AMBIGUOUS:"
+            "http_status=400:okx_code=1:okx_s_code=51000:"
+            "client_order_id=MISSING",
+        )
+
+    monkeypatch.setattr(service, "dispatch_canary", blocked)
+
+    assert service.main(
+        [
+            "dispatch-canary",
+            "--service",
+            "order_writer",
+            "--plan-digest",
+            RELEASE_DIGEST,
+            "--risk-decision-id",
+            str(risk_id),
+        ]
+    ) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "status": "BLOCKED",
+        "reason": "BLOCKED_ORDER_RECOVERY_REQUIRED",
+        "detail": (
+            "order outcome is unknown: HTTP_ERROR_AMBIGUOUS:"
+            "http_status=400:okx_code=1:okx_s_code=51000:"
+            "client_order_id=MISSING"
+        ),
+    }
 def test_cli_supervise_enables_production_composition(monkeypatch) -> None:
     service = _load_script("canonical_phase9_production_supervise_test")
     observed = []
