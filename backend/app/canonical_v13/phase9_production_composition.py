@@ -62,6 +62,7 @@ from app.canonical_v13.order_service import CANONICAL_ORDER_WRITER_IDENTITY
 from app.canonical_v13.phase9_order_writer import (
     CANONICAL_ORDER_WRITER_PROCESS_IDENTITY,
     DispatchedDemoOrder,
+    PreparedDemoOrder,
     dispatch_demo_order,
     prepare_demo_order,
     recover_demo_order_get_only,
@@ -607,9 +608,11 @@ class CanonicalOrderWriterOperator:
         self._connection_factory = connection_factory
         self._session_factory = session_factory
 
-    def dispatch_canary(
+    def prepare_canary(
         self, *, risk_decision_id: UUID, evaluated_at: datetime
-    ) -> DispatchedDemoOrder:
+    ) -> PreparedDemoOrder:
+        """Durably prepare the exact request and DB lease without exchange I/O."""
+
         if evaluated_at.tzinfo is None:
             raise CanonicalPhase9CompositionBlocked(
                 "BLOCKED_PHASE9_ORDER_TIMEZONE", "evaluated_at must be aware"
@@ -693,6 +696,15 @@ class CanonicalOrderWriterOperator:
                 order_request={str(key): str(value) for key, value in request.items()},
                 evaluated_at=evaluated_at,
             )
+        return prepared
+
+    def dispatch_canary(
+        self, *, risk_decision_id: UUID, evaluated_at: datetime
+    ) -> DispatchedDemoOrder:
+        prepared = self.prepare_canary(
+            risk_decision_id=risk_decision_id,
+            evaluated_at=evaluated_at,
+        )
         with self._session_factory() as session:
             return dispatch_demo_order(
                 self._connection_factory,

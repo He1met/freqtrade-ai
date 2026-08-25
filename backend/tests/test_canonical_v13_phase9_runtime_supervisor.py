@@ -1616,6 +1616,12 @@ def test_cli_routes_sealed_runtime_and_canary_operator_commands(
     )
     monkeypatch.setattr(
         service,
+        "prepare_canary_order",
+        lambda digest, risk_id: observed.append(("prepare-order", digest, risk_id))
+        or {"status": "READY"},
+    )
+    monkeypatch.setattr(
+        service,
         "dispatch_canary",
         lambda digest, risk_id: observed.append(("dispatch", digest, risk_id))
         or {"status": "ACCEPTED"},
@@ -1663,6 +1669,17 @@ def test_cli_routes_sealed_runtime_and_canary_operator_commands(
     ) == 0
     assert service.main(
         [
+            "prepare-canary-order",
+            "--service",
+            "order_writer",
+            "--plan-digest",
+            RELEASE_DIGEST,
+            "--risk-decision-id",
+            str(risk_id),
+        ]
+    ) == 0
+    assert service.main(
+        [
             "dispatch-canary",
             "--service",
             "order_writer",
@@ -1687,12 +1704,13 @@ def test_cli_routes_sealed_runtime_and_canary_operator_commands(
         ("confirm-runtime", RELEASE_DIGEST),
         ("accept-recovery", QUALIFICATION_ID),
         ("probe", DEPLOYMENT_ID),
+        ("prepare-order", RELEASE_DIGEST, risk_id),
         ("dispatch", RELEASE_DIGEST, risk_id),
         ("recover", RELEASE_DIGEST, order_id),
     ]
     assert [
         json.loads(line)["status"] for line in capsys.readouterr().out.splitlines()
-    ] == ["ACTIVE", "ACCEPTED", "READY", "ACCEPTED", "RECOVERED"]
+    ] == ["ACTIVE", "ACCEPTED", "READY", "READY", "ACCEPTED", "RECOVERED"]
 
 
 def test_cli_supervise_enables_production_composition(monkeypatch) -> None:
@@ -1757,6 +1775,71 @@ def test_production_order_operator_reuses_one_connection_factory(monkeypatch) ->
     assert observed_urls == ["canonical_order_writer"]
     assert captured["connection_factory"] is connection_factory
     assert captured["authority_port"]._connection_factory is connection_factory
+
+
+def test_prepare_canary_order_persists_without_exchange_access(monkeypatch) -> None:
+    service = _load_script("canonical_phase9_prepare_canary_order_test")
+    plan = _writer_plan()
+    lease = Phase9Lease(
+        service_key=plan.service_key,
+        generation=plan.generation,
+        plan_digest=plan.plan_digest,
+        release_digest=plan.release_digest,
+        deployment_id=plan.deployment_id,
+        deployment_capability_digest=plan.deployment_capability_digest,
+        image_digest=plan.image_digest,
+        holder_token_digest="8" * 64,
+        pid=321,
+        acquired_at=NOW - timedelta(seconds=5),
+        heartbeat_at=NOW - timedelta(seconds=1),
+        expires_at=NOW + timedelta(seconds=20),
+        order_writer_canary_authority=plan.order_writer_canary_authority,
+    )
+    risk_id = UUID("00000000-0000-4000-8000-000000000091")
+    order_id = UUID("00000000-0000-4000-8000-000000000092")
+    events = []
+    receipts = []
+
+    monkeypatch.setattr(service, "_require_release_checkout", lambda: None)
+    monkeypatch.setattr(
+        service, "_load_plan", lambda _service: (plan, {"status": "RUNNING"})
+    )
+    monkeypatch.setattr(service.FileLeasePort, "read", lambda _self, _service: lease)
+    monkeypatch.setattr(service.UnixProcessProbe, "is_alive", lambda _self, _pid: True)
+    monkeypatch.setattr(service, "_now", lambda: NOW)
+    monkeypatch.setattr(service, "_read_order_holder_token", lambda: "h" * 64)
+    monkeypatch.setattr(
+        service,
+        "_production_order_operator",
+        lambda **_kwargs: SimpleNamespace(
+            prepare_canary=lambda **kwargs: events.append(kwargs)
+            or SimpleNamespace(
+                order_id=order_id,
+                request_digest="9" * 64,
+                lease_generation=4,
+                repeat_noop=False,
+            )
+        ),
+    )
+    monkeypatch.setattr(service, "_append_receipt", receipts.append)
+
+    payload = service.prepare_canary_order(plan.plan_digest, risk_id)
+
+    assert events == [{"risk_decision_id": risk_id, "evaluated_at": NOW}]
+    assert payload == {
+        "status": "READY",
+        "order_id": str(order_id),
+        "request_digest": "9" * 64,
+        "lease_generation": 4,
+        "repeat_noop": False,
+        "exchange_access": "NONE",
+        "order_submission_enabled": False,
+        "prepare_receipt_digest": receipts[0].receipt_digest,
+    }
+    assert receipts[0].action == "ORDER_PREPARE"
+    assert receipts[0].status == "CONFIRMED"
+    assert receipts[0].details["exchange_access"] == "NONE"
+    assert receipts[0].details["order_submission_enabled"] is False
 
 
 def test_get_only_order_replay_appends_server_sealed_noop_receipt(monkeypatch) -> None:

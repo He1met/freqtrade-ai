@@ -449,10 +449,16 @@ python scripts/canonical_v13_phase9_service.py prepare \
   --position-policy LONG_ONLY
 python scripts/canonical_v13_phase9_service.py confirm \
   --service order_writer --plan-digest <exact>
+python scripts/canonical_v13_phase9_service.py prepare-canary-order \
+  --service order_writer \
+  --plan-digest <exact> \
+  --risk-decision-id <exact-execution-risk-decision-id>
 ```
 
-先在 DB durable prepare exact `ordType=limit`、`px=frozen limit_price`、`sz=minSz` request 与
-idempotency key。唯一 POST 紧前，同一 sealed private session 必须再次 authenticated 读取 positions、
+`prepare-canary-order` 只在 DB durable prepare exact `ordType=limit`、`px=frozen limit_price`、
+`sz=minSz` request、idempotency key 与唯一 writer lease；它不得创建 sealed private session、访问 OKX
+或发送订单。该命令成功后必须先执行 `phase9-readiness --stage OKX_DEMO_CANARY`，确认所有 pre-dispatch
+证据 READY，才能调用 `dispatch-canary`。唯一 POST 紧前，同一 sealed private session必须再次 authenticated 读取 positions、
 pending orders、current leverage 与 `max-size`；只有 fresh flat/no-pending、current long leverage 仍等于
 policy effective leverage、`maxBuy>=minSz` 才可将 guard-bound exact-one claim 写入 immutable
 `order_dispatch_receipts`。claim digest 必须绑定 order/risk/policy/probe/attestation、credential generation、
