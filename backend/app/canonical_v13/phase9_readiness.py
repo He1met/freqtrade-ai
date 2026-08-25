@@ -52,6 +52,7 @@ from app.canonical_v13.phase9_execution_authority import (
 )
 from app.canonical_v13.order_service import CANONICAL_ORDER_WRITER_IDENTITY
 from app.canonical_v13.phase9_order_writer import (
+    canary_client_order_id,
     pre_dispatch_cancellation_receipt_digest,
 )
 from app.canonical_v13.phase9_topology import phase9_topology_digest
@@ -1830,6 +1831,12 @@ def _inspect_lineage(
     )
     if not isinstance(exchange_body, Mapping):
         exchange_body = {}
+    expected_client_order_id = exchange_body.get("clOrdId")
+    if (
+        not isinstance(expected_client_order_id, str)
+        or not expected_client_order_id
+    ):
+        expected_client_order_id = canary_client_order_id(accepted_risk["id"])
     outcomes = (
         connection.execute(
             select(ORDER_DISPATCH_OUTCOME_RECEIPTS_TABLE).where(
@@ -1865,7 +1872,7 @@ def _inspect_lineage(
         common = (
             outcome["order_id"] == order["id"]
             and outcome["claim_digest"] == claim["claim_digest"]
-            and outcome["client_order_id"] == exchange_body.get("clOrdId")
+            and outcome["client_order_id"] == expected_client_order_id
             and outcome["safe_response_digest"] == safe_response_digest
             and outcome["receipt_digest"] == outcome_digest
             and _persisted_utc(outcome["recorded_at"])
@@ -1910,7 +1917,7 @@ def _inspect_lineage(
                 and safe_response.get("execution_target") == "OKX_DEMO"
                 and safe_response.get("instrument") == exchange_body.get("instId")
                 and safe_response.get("client_order_id")
-                == exchange_body.get("clOrdId")
+                == expected_client_order_id
                 and safe_response.get("account_fingerprint_digest")
                 == claim["account_fingerprint_digest"]
                 and safe_response.get("credential_generation_digest")
