@@ -69,6 +69,7 @@ from app.canonical_v13.phase9_readiness import (
     CanonicalPhase9ReadinessBlocked,
     Phase9QualificationHandoff,
     _canonical_order_writer_lease_digest,
+    _recovery_acceptance_is_exact,
     inspect_phase9_readiness,
 )
 from app.canonical_v13.phase9_canary_policy import terminate_canary_risk_policy
@@ -1305,6 +1306,18 @@ def test_canary_readiness_recomputes_sealed_policy_and_execution_reservation(
             stage="RECOVERY_SOAK",
             evaluated_at=recovery_at + timedelta(seconds=1),
         )
+        terminal_recovery = inspect_phase9_readiness(
+            canonical_connection,
+            qualification_handoff=handoff,
+            stage="RECOVERY_SOAK",
+            evaluated_at=recovery_at + timedelta(hours=1),
+        )
+        stale_canary = inspect_phase9_readiness(
+            canonical_connection,
+            qualification_handoff=handoff,
+            stage="OKX_DEMO_CANARY",
+            evaluated_at=recovery_at + timedelta(hours=1),
+        )
         stray_run_id = uuid4()
         stray_scope_digest = "1" * 64
         canonical_connection.execute(
@@ -1342,6 +1355,98 @@ def test_canary_readiness_recomputes_sealed_policy_and_execution_reservation(
             stage="OKX_DEMO_CANARY",
             evaluated_at=probe.observed_at + timedelta(seconds=20),
         )
+        # A later deployment may legitimately reuse the same research target.
+        # Its historical order must not invalidate this qualification's
+        # immutable recovery acceptance.
+        unrelated_qualification = _qualified(canonical_connection)
+        unrelated_handoff = _handoff(
+            canonical_connection, unrelated_qualification
+        )
+        canonical_connection.execute(
+            RUNTIME_INSTANCES_TABLE.update()
+            .where(RUNTIME_INSTANCES_TABLE.c.id == runtime_id)
+            .values(status="STOPPED")
+        )
+        disable_demo_deployment(
+            canonical_connection,
+            deployment_id=deployment["id"],
+            superseded_by_qualification_decision_id=(
+                unrelated_handoff.qualification_decision_id
+            ),
+            actor_identity="phase9-unrelated-history-owner",
+            reason="complete prior terminal test lineage",
+        )
+        unrelated_approval = approve_demo_deployment(
+            canonical_connection,
+            qualification_decision_id=(
+                unrelated_handoff.qualification_decision_id
+            ),
+            actor_identity="phase9-unrelated-history-approver",
+            reason="prove exact recovery lineage ignores a reused target",
+        )
+        unrelated_deployment = create_demo_deployment(
+            canonical_connection,
+            deployment_approval_id=unrelated_approval.deployment_approval_id,
+        )
+        unrelated_runtime_id = launch_demo_runtime(
+            canonical_connection,
+            deployment_id=unrelated_deployment.deployment_id,
+            runtime_identity="phase9-unrelated-history-runtime",
+            image_digest="9" * 64,
+            service_account="canonical_runtime_reader",
+            credential_reference="test-reference-never-resolved",
+            launcher=_TestLauncher(),
+        )
+        unrelated_signal_id = record_simulated_signal(
+            canonical_connection,
+            deployment_id=unrelated_deployment.deployment_id,
+            runtime_instance_id=unrelated_runtime_id,
+            research_target_id=handoff.research_target_id,
+            signal_json={
+                "evidence_class": "TEST_SIMULATED",
+                "same_research_target_unrelated_history": True,
+            },
+        )
+        unrelated_intent_id = create_simulated_intent(
+            canonical_connection,
+            signal_id=unrelated_signal_id,
+            intent_json={
+                "evidence_class": "TEST_SIMULATED",
+                "same_research_target_unrelated_history": True,
+            },
+        )
+        unrelated_risk_id = decide_simulated_risk(
+            canonical_connection,
+            trade_intent_id=unrelated_intent_id,
+            accepted=True,
+            policy_snapshot_digest="8" * 64,
+        )
+        record_simulated_order(
+            canonical_connection,
+            risk_decision_id=unrelated_risk_id,
+            writer_identity="canonical_order_writer",
+            idempotency_key="phase9-unrelated-same-target-history",
+            outcome="ACCEPTED",
+        )
+        recovery_event = (
+            canonical_connection.execute(
+                select(AUDIT_EVENTS_TABLE).where(
+                    AUDIT_EVENTS_TABLE.c.aggregate_type
+                    == "canonical_phase9_recovery",
+                    AUDIT_EVENTS_TABLE.c.aggregate_id
+                    == str(handoff.qualification_decision_id),
+                    AUDIT_EVENTS_TABLE.c.event_type
+                    == "PHASE9_RECOVERY_SOAK_ACCEPTED",
+                )
+            )
+            .mappings()
+            .one()
+        )
+        shared_target_recovery_is_exact = _recovery_acceptance_is_exact(
+            canonical_connection,
+            recovery_event,
+            handoff=handoff,
+        )
 
     assert execution.status == "RISK_ACCEPTED", execution.reason_code
     assert receipt.lineage_evidence_counts["execution_canary_probe_receipts"] == 1
@@ -1358,9 +1463,20 @@ def test_canary_readiness_recomputes_sealed_policy_and_execution_reservation(
     assert recovery.status == "READY", recovery.reason_codes
     assert recovery.lineage_evidence_counts["reconciliation_runs"] == 1
     assert recovery.lineage_evidence_counts["recovery_acceptance_receipts"] == 1
+    assert terminal_recovery.status == "READY", terminal_recovery.reason_codes
+    assert terminal_recovery.reason_codes == ()
+    assert (
+        terminal_recovery.lineage_evidence_counts["recovery_acceptance_receipts"]
+        == 1
+    )
+    assert stale_canary.status == "BLOCKED"
+    assert "EXACT_PRODUCTION_RUNTIME_RECEIPT_EVIDENCE_UNSET" in (
+        stale_canary.reason_codes
+    )
     assert stray.status == "BLOCKED"
     assert "UNRELATED_RECONCILIATION_RUNS_EVIDENCE_PRESENT" in stray.reason_codes
     assert "CANONICAL_RISK_POLICY_PROBE_VALIDATION_BLOCKED" in drifted.reason_codes
+    assert shared_target_recovery_is_exact is True
 
 
 def test_unknown_phase9_stage_fails_closed(canonical_connection) -> None:

@@ -942,6 +942,7 @@ def _runtime_receipt_is_exact(
     runtime: Mapping[str, object],
     deployment: Mapping[str, object],
     evaluated_at: datetime,
+    require_fresh: bool = True,
 ) -> bool:
     observation = receipt["observation_json"]
     if not isinstance(observation, Mapping):
@@ -951,9 +952,15 @@ def _runtime_receipt_is_exact(
         return False
     if observed_at.tzinfo is None:
         observed_at = observed_at.replace(tzinfo=timezone.utc)
-    age = evaluated_at - observed_at.astimezone(timezone.utc)
-    return (
+    observed_at_utc = observed_at.astimezone(timezone.utc)
+    age = evaluated_at - observed_at_utc
+    time_is_exact = (
         -timedelta(seconds=5) <= age <= timedelta(minutes=5)
+        if require_fresh
+        else observed_at_utc <= evaluated_at
+    )
+    return (
+        time_is_exact
         and receipt["status"] == "HEALTHY"
         and receipt["evidence_class"] == "PRODUCTION_DEMO_RUNTIME"
         and receipt["runtime_instance_id"] == runtime["id"]
@@ -1091,6 +1098,12 @@ def _inspect_lineage(
             runtime=runtime,
             deployment=deployment,
             evaluated_at=evaluated_at,
+            # Recovery-soak is a terminal historical acceptance.  Its audit
+            # event independently pins the latest runtime receipt and proves
+            # that supervisors and writer leases are stopped, so requiring a
+            # live five-minute heartbeat would make an accepted terminal state
+            # decay back to BLOCKED solely because time passed.
+            require_fresh=stage != "RECOVERY_SOAK",
         )
     ]
     counts["runtime_receipts"] = len(receipts)
@@ -2206,7 +2219,10 @@ def _recovery_acceptance_is_exact(
     )
     exact_orders = (
         connection.execute(
-            select(ORDERS_TABLE.c.receipt_digest)
+            select(
+                ORDERS_TABLE.c.receipt_digest,
+                RUNTIME_INSTANCES_TABLE.c.id.label("runtime_instance_id"),
+            )
             .select_from(
                 ORDERS_TABLE.join(
                     RISK_DECISIONS_TABLE,
@@ -2220,29 +2236,52 @@ def _recovery_acceptance_is_exact(
                     SIGNALS_TABLE,
                     SIGNALS_TABLE.c.id == TRADE_INTENTS_TABLE.c.signal_id,
                 )
+                .join(
+                    RUNTIME_INSTANCES_TABLE,
+                    RUNTIME_INSTANCES_TABLE.c.id
+                    == SIGNALS_TABLE.c.runtime_instance_id,
+                )
+                .join(
+                    DEPLOYMENTS_TABLE,
+                    DEPLOYMENTS_TABLE.c.id == RUNTIME_INSTANCES_TABLE.c.deployment_id,
+                )
+                .join(
+                    DEPLOYMENT_APPROVALS_TABLE,
+                    DEPLOYMENT_APPROVALS_TABLE.c.id
+                    == DEPLOYMENTS_TABLE.c.deployment_approval_id,
+                )
             )
-            .where(SIGNALS_TABLE.c.research_target_id == handoff.research_target_id)
+            .where(
+                DEPLOYMENT_APPROVALS_TABLE.c.qualification_decision_id
+                == handoff.qualification_decision_id,
+                DEPLOYMENTS_TABLE.c.strategy_version_id == handoff.strategy_version_id,
+                DEPLOYMENTS_TABLE.c.configuration_bundle_id
+                == handoff.configuration_bundle_id,
+                DEPLOYMENTS_TABLE.c.configuration_bundle_digest
+                == handoff.configuration_bundle_digest,
+                DEPLOYMENTS_TABLE.c.market_snapshot_id == handoff.market_snapshot_id,
+                DEPLOYMENTS_TABLE.c.market_snapshot_digest
+                == handoff.market_snapshot_digest,
+                SIGNALS_TABLE.c.research_target_id == handoff.research_target_id,
+            )
         )
         .mappings()
         .all()
     )
     exact_order = exact_orders[0] if len(exact_orders) == 1 else None
-    latest_runtime_receipt = connection.execute(
-        select(RUNTIME_RECEIPTS_TABLE.c.receipt_digest)
-        .select_from(
-            RUNTIME_RECEIPTS_TABLE.join(
-                RUNTIME_INSTANCES_TABLE,
-                RUNTIME_INSTANCES_TABLE.c.id
-                == RUNTIME_RECEIPTS_TABLE.c.runtime_instance_id,
-            ).join(
-                DEPLOYMENTS_TABLE,
-                DEPLOYMENTS_TABLE.c.id == RUNTIME_INSTANCES_TABLE.c.deployment_id,
+    latest_runtime_receipt = (
+        connection.execute(
+            select(RUNTIME_RECEIPTS_TABLE.c.receipt_digest)
+            .where(
+                RUNTIME_RECEIPTS_TABLE.c.runtime_instance_id
+                == exact_order["runtime_instance_id"]
             )
-        )
-        .where(DEPLOYMENTS_TABLE.c.strategy_version_id == handoff.strategy_version_id)
-        .order_by(RUNTIME_RECEIPTS_TABLE.c.observed_at.desc())
-        .limit(1)
-    ).scalar_one_or_none()
+            .order_by(RUNTIME_RECEIPTS_TABLE.c.observed_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if exact_order is not None
+        else None
+    )
     return (
         event["event_type"] == "PHASE9_RECOVERY_SOAK_ACCEPTED"
         and event["aggregate_type"] == "canonical_phase9_recovery"
