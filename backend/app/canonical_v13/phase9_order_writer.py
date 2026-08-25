@@ -67,6 +67,12 @@ PRE_DISPATCH_CANCELLATION_CONTRACT = (
 LEGACY_CLAIM_GUARD_CLOCK_SKEW = timedelta(seconds=5)
 
 
+def canary_client_order_id(risk_decision_id: UUID) -> str:
+    """Return the immutable exchange client id for one canary risk decision."""
+
+    return f"v13{risk_decision_id.hex[:29]}"
+
+
 class DemoOrderTransport(Protocol):
     def dispatch_guard(
         self,
@@ -376,7 +382,7 @@ def _exchange_body(
     }
     observed = dict(order_request)
     if set(observed) == persisted:
-        observed["clOrdId"] = f"v13{risk_decision_id.hex[:29]}"
+        observed["clOrdId"] = canary_client_order_id(risk_decision_id)
     elif set(observed) != persisted | {"clOrdId"}:
         raise CanonicalExecutionChainBlocked(
             "BLOCKED_ORDER_REQUEST_FIELDS", "order request field set is not allowlisted"

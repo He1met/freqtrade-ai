@@ -54,6 +54,7 @@ from app.canonical_v13.phase9_execution_authority import (
 from app.canonical_v13.phase9_order_writer import (
     _claim_dispatch,
     _persist_exchange_receipt,
+    canary_client_order_id,
     prepare_demo_order,
     release_demo_order_writer_lease,
 )
@@ -1084,7 +1085,6 @@ def test_canary_readiness_recomputes_sealed_policy_and_execution_reservation(
         execution_body = {
             "instId": "BTC-USDT-SWAP",
             "tdMode": "isolated",
-            "clOrdId": "v13readinessexecution000000001",
             "side": "buy",
             "posSide": "long",
             "ordType": "limit",
@@ -1177,7 +1177,7 @@ def test_canary_readiness_recomputes_sealed_policy_and_execution_reservation(
             exchange_order_id="readiness-demo-order",
             safe_response={
                 "ordId": "readiness-demo-order",
-                "clOrdId": execution_body["clOrdId"],
+                "clOrdId": canary_client_order_id(execution.risk_decision_id),
                 "sCode": "0",
             },
             outcome_mode="POST",
