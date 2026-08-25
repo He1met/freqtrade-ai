@@ -60,6 +60,7 @@ from app.canonical_v13.phase9_order_writer import (
 )
 from app.canonical_v13.phase9_production_runtime import ReleaseBoundReceiptSeal
 from app.canonical_v13.phase9_recovery_acceptance import (
+    CanonicalPhase9RecoveryAcceptanceBlocked,
     Phase9RecoveryAcceptance,
     record_phase9_recovery_acceptance,
 )
@@ -963,7 +964,10 @@ def _historical_fixture_canary_and_recovery_chain(
         assert recovery_acceptance["repeat_noop"] is False
         repeated_acceptance = record_phase9_recovery_acceptance(
             canonical_connection,
-            evidence=acceptance_evidence,
+            evidence=replace(
+                acceptance_evidence,
+                observed_at=acceptance_evidence.observed_at + timedelta(seconds=1),
+            ),
             actor_identity="canonical-phase9-recovery-operator",
         )
         assert repeated_acceptance["repeat_noop"] is True
@@ -971,6 +975,19 @@ def _historical_fixture_canary_and_recovery_chain(
             repeated_acceptance["receipt_digest"]
             == recovery_acceptance["receipt_digest"]
         )
+        with pytest.raises(
+            CanonicalPhase9RecoveryAcceptanceBlocked,
+            match="BLOCKED_RECOVERY_REPLAY_DRIFT",
+        ):
+            record_phase9_recovery_acceptance(
+                canonical_connection,
+                evidence=replace(
+                    acceptance_evidence,
+                    observed_at=acceptance_evidence.observed_at
+                    + timedelta(seconds=2),
+                ),
+                actor_identity="different-phase9-recovery-operator",
+            )
         recovery = inspect_phase9_readiness(
             canonical_connection,
             qualification_handoff=handoff,
