@@ -12,6 +12,9 @@ import pytest
 
 from app.adapters.okx_demo import credential_preflight as preflight
 from app.adapters.okx_demo.secure_http import build_direct_no_redirect_opener
+from app.adapters.okx_demo.write_credentials import (
+    build_demo_write_authorization_headers,
+)
 
 
 def valid_environment() -> dict[str, str]:
@@ -97,6 +100,55 @@ def test_shared_signature_boundary_rejects_write_or_untrusted_request_contract(
 ) -> None:
     with pytest.raises(preflight.OkxDemoPreflightBlocked):
         preflight._build_demo_authorization_headers(
+            valid_environment(),
+            method=method,
+            request_path=request_path,
+            body=body,
+        )
+
+
+def test_sealed_writer_signature_boundary_signs_exact_canonical_demo_post() -> None:
+    body = '{"clOrdId":"V13ExactOrder001","instId":"BTC-USDT-SWAP"}'
+
+    headers = build_demo_write_authorization_headers(
+        valid_environment(),
+        method="POST",
+        request_path="/api/v5/trade/order",
+        body=body,
+        timestamp="2026-07-27T01:02:03.004Z",
+    )
+
+    assert set(headers) == {
+        "OK-ACCESS-KEY",
+        "OK-ACCESS-SIGN",
+        "OK-ACCESS-TIMESTAMP",
+        "OK-ACCESS-PASSPHRASE",
+    }
+    assert headers["OK-ACCESS-KEY"] == "test-api-key"
+    assert headers["OK-ACCESS-PASSPHRASE"] == "test-passphrase"
+    assert headers["OK-ACCESS-TIMESTAMP"] == "2026-07-27T01:02:03.004Z"
+    assert headers["OK-ACCESS-SIGN"]
+
+
+@pytest.mark.parametrize(
+    ("method", "request_path", "body"),
+    [
+        ("GET", "/api/v5/trade/order", "{}"),
+        ("POST", "/api/v5/trade/order?unsafe=1", "{}"),
+        ("POST", "/api/v5/asset/withdrawal", "{}"),
+        ("POST", "/api/v5/trade/order", ""),
+        ("POST", "/api/v5/trade/order", "[]"),
+        ("POST", "/api/v5/trade/order", '{"b":1,"a":2}'),
+        ("POST", "/api/v5/trade/order", '{"a":NaN}'),
+    ],
+)
+def test_sealed_writer_signature_boundary_rejects_untrusted_contract(
+    method: str,
+    request_path: str,
+    body: str,
+) -> None:
+    with pytest.raises(preflight.OkxDemoPreflightBlocked):
+        build_demo_write_authorization_headers(
             valid_environment(),
             method=method,
             request_path=request_path,

@@ -429,12 +429,30 @@ def test_real_attested_factory_result_builds_writer_bridge(monkeypatch) -> None:
     environment = ephemeral_environment(account)
     install_attestation(monkeypatch, account)
     monkeypatch.setattr(read_boundary, "_utc_now", lambda: NOW)
+    monkeypatch.setattr(
+        preflight,
+        "_timestamp",
+        lambda: "2026-07-27T01:02:03.004Z",
+    )
 
     read_client = create_attested_okx_demo_read_adapter(environment)
     bridge = _create_attested_writer_credential_bridge(read_client)
     transport = _create_production_write_transport(bridge)
 
     assert type(transport) is UrllibOkxDemoWriteTransport
+    transport.preflight(
+        path="/api/v5/trade/order",
+        body={"instId": "BTC-USDT-SWAP", "sz": "1"},
+    )
+    with pytest.raises(
+        OkxDemoCredentialsUnavailable,
+        match="credential provider is unavailable",
+    ):
+        read_client._attested_session.authorization_headers(
+            method="POST",
+            request_path="/api/v5/trade/order",
+            body='{"instId":"BTC-USDT-SWAP","sz":"1"}',
+        )
 
 
 def test_attested_read_client_exposes_complete_reconciliation_pagination(
