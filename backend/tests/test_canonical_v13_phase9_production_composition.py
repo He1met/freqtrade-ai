@@ -3,11 +3,14 @@ from __future__ import annotations
 from contextlib import contextmanager
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
+import json
 from uuid import UUID
 
 import pytest
 
 from app.canonical_v13.phase9_production_composition import (
+    CanonicalOrderWriterOperator,
     CanonicalPhase9CompositionBlocked,
     DatabaseOrderWriterAuthorityVerifier,
     compose_supervise_ports,
@@ -16,6 +19,7 @@ from app.canonical_v13.phase9_production_composition import (
     record_current_canary_attestation,
     record_current_canary_probe_receipt,
 )
+from app.canonical_v13.phase9_order_writer import PreparedDemoOrder
 from app.canonical_v13.phase9_canary_policy import CanaryProbeReceiptResult
 from app.canonical_v13.phase9_execution_authority import (
     RedactedExecutionAttestationResult,
@@ -115,6 +119,104 @@ def test_order_supervise_composition_never_returns_none_authority() -> None:
     )
     assert ports.worker_port is None
     assert isinstance(ports.authority_port, DatabaseOrderWriterAuthorityVerifier)
+
+
+def test_order_prepare_persists_request_without_constructing_exchange_session(
+    monkeypatch,
+) -> None:
+    plan = _writer_plan()
+    holder_token = "h" * 64
+    holder_digest = sha256(
+        json.dumps(
+            {"holder_token": holder_token},
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    lease = Phase9Lease(
+        service_key=plan.service_key,
+        generation=plan.generation,
+        plan_digest=plan.plan_digest,
+        release_digest=plan.release_digest,
+        deployment_id=plan.deployment_id,
+        deployment_capability_digest=plan.deployment_capability_digest,
+        image_digest=plan.image_digest,
+        holder_token_digest=holder_digest,
+        pid=321,
+        acquired_at=NOW - timedelta(seconds=5),
+        heartbeat_at=NOW - timedelta(seconds=1),
+        expires_at=NOW + timedelta(seconds=20),
+        order_writer_canary_authority=plan.order_writer_canary_authority,
+    )
+    risk_id = _uuid(10)
+    intent_id = _uuid(11)
+    budget_id = _uuid(12)
+    order_id = _uuid(13)
+    connection = _Connection(
+        [
+            {"id": risk_id, "status": "RISK_ACCEPTED", "trade_intent_id": intent_id},
+            {
+                "id": intent_id,
+                "intent_json": {
+                    "exchange_body": {
+                        "instId": "BTC-USDT-SWAP",
+                        "tdMode": "isolated",
+                        "side": "buy",
+                        "posSide": "long",
+                        "ordType": "limit",
+                        "px": "100000",
+                        "sz": "0.01",
+                    }
+                },
+            },
+            {"risk_budget_authorization_id": budget_id},
+            {"execution_canary_risk_policy_id": _uuid(2)},
+            {"execution_attestation_id": _uuid(3)},
+        ]
+    )
+    captured = {}
+
+    class AuthorityPort:
+        def verify(self, authority, *, observed_at):
+            captured["authority"] = authority
+            captured["observed_at"] = observed_at
+            return True
+
+    def prepare(_connection, **kwargs):
+        captured["prepare"] = kwargs
+        return PreparedDemoOrder(order_id, "9" * 64, 4, False)
+
+    monkeypatch.setattr(
+        "app.canonical_v13.phase9_production_composition.prepare_demo_order",
+        prepare,
+    )
+    operator = CanonicalOrderWriterOperator(
+        plan=plan,
+        supervisor_lease=lease,
+        authority_port=AuthorityPort(),
+        holder_token=holder_token,
+        connection_factory=_factory(connection),
+        session_factory=lambda: pytest.fail(
+            "prepare must not construct a private exchange session"
+        ),
+    )
+
+    result = operator.prepare_canary(risk_decision_id=risk_id, evaluated_at=NOW)
+
+    assert result == PreparedDemoOrder(order_id, "9" * 64, 4, False)
+    assert captured["authority"] == plan.order_writer_canary_authority
+    assert captured["prepare"]["risk_decision_id"] == risk_id
+    assert captured["prepare"]["attestation_id"] == _uuid(3)
+    assert captured["prepare"]["order_request"] == {
+        "instId": "BTC-USDT-SWAP",
+        "tdMode": "isolated",
+        "side": "buy",
+        "posSide": "long",
+        "ordType": "limit",
+        "px": "100000",
+        "sz": "0.01",
+    }
 
 
 def test_runtime_composition_fails_closed_without_sealed_factory() -> None:

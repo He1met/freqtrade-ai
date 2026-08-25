@@ -87,6 +87,13 @@ FOUR_HOUR_FINAL_CANARY_RETRY_REQUALIFICATION_SOURCE = (
     / "batch_20260825_13"
     / "canonical_four_hour_natural_long_acceptance_run_6_1.py"
 ).read_text(encoding="utf-8")
+FOUR_HOUR_ORDER_PREPARE_REQUALIFICATION_SOURCE = (
+    Path(__file__).resolve().parents[2]
+    / "research"
+    / "canonical_v13_qualified_baselines"
+    / "batch_20260825_14"
+    / "canonical_four_hour_natural_long_acceptance_run_7_1.py"
+).read_text(encoding="utf-8")
 
 
 def _uuid(value: int) -> UUID:
@@ -222,6 +229,11 @@ def test_frozen_evaluator_uses_exact_artifact_and_closed_candles() -> None:
             FOUR_HOUR_FINAL_CANARY_RETRY_REQUALIFICATION_SOURCE,
             "dc1e70a1e0b0fb91e162a5cac374316fcc1a615fd8eb5734fa21f55fb459d7f4",
             "canonical-four-hour-natural-long-baseline-v7",
+        ),
+        (
+            FOUR_HOUR_ORDER_PREPARE_REQUALIFICATION_SOURCE,
+            "03a76a9230cfc7dd74e348b3424f22c61136452f974bdcd699bb51b15150b469",
+            "canonical-four-hour-natural-long-baseline-v8",
         ),
     ),
 )

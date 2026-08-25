@@ -2188,6 +2188,58 @@ def probe_and_authorize_canary_policy(
         }
 
 
+def prepare_canary_order(
+    plan_digest: str, risk_decision_id: UUID
+) -> dict[str, object]:
+    """Persist the exact canary request and DB lease without exchange I/O."""
+
+    _require_release_checkout()
+    plan, state = _load_plan("order_writer")
+    lease = FileLeasePort(SUPPORT_ROOT).read("order_writer")
+    now = _now()
+    if (
+        state.get("status") != "RUNNING"
+        or plan.plan_digest != plan_digest
+        or lease is None
+        or lease.expires_at <= now
+        or not UnixProcessProbe().is_alive(lease.pid)
+    ):
+        raise CanonicalPhase9SupervisorBlocked(
+            "BLOCKED_PHASE9_ORDER_SUPERVISOR_FENCE", "writer supervisor is not live"
+        )
+    result = _production_order_operator(
+        plan=plan, lease=lease, holder_token=_read_order_holder_token()
+    ).prepare_canary(risk_decision_id=risk_decision_id, evaluated_at=now)
+    receipt = build_lifecycle_receipt(
+        service_key="order_writer",
+        action="ORDER_PREPARE",
+        status="CONFIRMED",
+        generation=plan.generation,
+        observed_at=now,
+        plan_digest=plan.plan_digest,
+        holder_token_digest=lease.holder_token_digest,
+        details={
+            "order_id": str(result.order_id),
+            "request_digest": result.request_digest,
+            "lease_generation": result.lease_generation,
+            "repeat_noop": result.repeat_noop,
+            "exchange_access": "NONE",
+            "order_submission_enabled": False,
+        },
+    )
+    _append_receipt(receipt)
+    return {
+        "status": "READY",
+        "order_id": str(result.order_id),
+        "request_digest": result.request_digest,
+        "lease_generation": result.lease_generation,
+        "repeat_noop": result.repeat_noop,
+        "exchange_access": "NONE",
+        "order_submission_enabled": False,
+        "prepare_receipt_digest": receipt.receipt_digest,
+    }
+
+
 def dispatch_canary(plan_digest: str, risk_decision_id: UUID) -> dict[str, object]:
     """Dispatch one exact persisted canary request through the canonical saga."""
 
@@ -2504,6 +2556,7 @@ def main(argv: list[str] | None = None) -> int:
             "confirm-runtime-stop-observation",
             "probe-canary",
             "probe-authorize-canary-policy",
+            "prepare-canary-order",
             "dispatch-canary",
             "recover-canary",
             "collect-canary-fills",
@@ -2705,6 +2758,17 @@ def main(argv: list[str] | None = None) -> int:
                 idempotency_key=args.idempotency_key,
                 reason=args.reason,
             )
+        elif args.command == "prepare-canary-order":
+            if (
+                args.service != "order_writer"
+                or not args.plan_digest
+                or args.risk_decision_id is None
+            ):
+                raise CanonicalPhase9SupervisorBlocked(
+                    "BLOCKED_PHASE9_ORDER_COMMAND",
+                    "order_writer, --plan-digest, and --risk-decision-id are required",
+                )
+            payload = prepare_canary_order(args.plan_digest, args.risk_decision_id)
         elif args.command == "dispatch-canary":
             if (
                 args.service != "order_writer"
