@@ -66,6 +66,7 @@ from app.canonical_v13.phase9_readiness import (
     EXECUTION_DOMAIN_TABLE_NAMES,
     CanonicalPhase9ReadinessBlocked,
     Phase9QualificationHandoff,
+    _canonical_order_writer_lease_digest,
     inspect_phase9_readiness,
 )
 from app.canonical_v13.phase9_canary_policy import terminate_canary_risk_policy
@@ -180,6 +181,40 @@ def _json_digest(value: object) -> str:
             sort_keys=True,
         ).encode()
     ).hexdigest()
+
+
+def test_order_writer_lease_digest_is_database_timezone_independent() -> None:
+    expires_utc = datetime(2026, 8, 25, 6, 30, 21, tzinfo=timezone.utc)
+    common = {
+        "holder_identity": "canonical-v13-order-writer-v1",
+        "holder_token_digest": "a" * 64,
+        "generation": 1,
+    }
+    expected = _json_digest(
+        {
+            "execution_target": "OKX_DEMO",
+            **common,
+            "expires_at": expires_utc.isoformat(),
+        }
+    )
+
+    assert (
+        _canonical_order_writer_lease_digest(
+            {**common, "expires_at": expires_utc}
+        )
+        == expected
+    )
+    assert (
+        _canonical_order_writer_lease_digest(
+            {
+                **common,
+                "expires_at": expires_utc.astimezone(
+                    timezone(timedelta(hours=8))
+                ),
+            }
+        )
+        == expected
+    )
 
 
 def _seed_runtime_for_deployment(
