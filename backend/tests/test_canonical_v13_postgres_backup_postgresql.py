@@ -28,6 +28,10 @@ from app.canonical_v13.shadow_risk_acl_upgrade import (
     apply_shadow_risk_acl_upgrade,
     verify_shadow_risk_acl_upgrade,
 )
+from app.canonical_v13.order_recovery_evidence_acl_upgrade import (
+    apply_order_recovery_evidence_acl_upgrade,
+    verify_order_recovery_evidence_acl_upgrade,
+)
 from app.canonical_v13.phase9_transition_upgrade import (
     apply_phase9_transition_upgrade,
     verify_phase9_transition_upgrade,
@@ -225,6 +229,10 @@ def test_restore_terminal_historical_gate_row_with_triggers_transactional(
                     connection, role_mapping=role_mapping
                 )
                 assert shadow_acl.status == "UPGRADED"
+                recovery_acl = apply_order_recovery_evidence_acl_upgrade(
+                    connection, role_mapping=role_mapping
+                )
+                assert recovery_acl.status == "UPGRADED"
                 transition = apply_phase9_transition_upgrade(connection)
                 assert transition.status == "UPGRADED"
                 canary_recovery = apply_canary_recovery_approval_upgrade(
@@ -372,6 +380,9 @@ def test_restore_terminal_historical_gate_row_with_triggers_transactional(
             )
             assert verify_gate_receipt_upgrade(connection).status == "ACCEPTED"
             assert verify_shadow_risk_acl_upgrade(
+                connection, role_mapping=role_mapping
+            ).status == "ACCEPTED"
+            assert verify_order_recovery_evidence_acl_upgrade(
                 connection, role_mapping=role_mapping
             ).status == "ACCEPTED"
             assert verify_phase9_transition_upgrade(connection).status == "ACCEPTED"

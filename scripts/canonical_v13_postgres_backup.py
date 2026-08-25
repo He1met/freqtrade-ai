@@ -84,6 +84,10 @@ from app.canonical_v13.shadow_risk_acl_upgrade import (  # noqa: E402
     CanonicalShadowRiskAclUpgradeBlocked,
     verify_shadow_risk_acl_upgrade,
 )
+from app.canonical_v13.order_recovery_evidence_acl_upgrade import (  # noqa: E402
+    CanonicalOrderRecoveryEvidenceAclUpgradeBlocked,
+    verify_order_recovery_evidence_acl_upgrade,
+)
 
 BACKUP_CONTRACT: Final = "canonical-v13-postgres-data-backup-v2"
 EXPECTED_TABLE_COUNT: Final = 58
@@ -632,6 +636,20 @@ def _verify_restore_trigger_boundary(
         raise CanonicalBackupBlocked(
             "BLOCKED_CANONICAL_RESTORE_SHADOW_RISK_ACL_CONTRACT",
             "shadow risk ACL verifier did not return ACCEPTED",
+        )
+    try:
+        recovery_evidence_acl = verify_order_recovery_evidence_acl_upgrade(
+            connection, role_mapping=local_role_mapping()
+        )
+    except CanonicalOrderRecoveryEvidenceAclUpgradeBlocked as exc:
+        raise CanonicalBackupBlocked(
+            "BLOCKED_CANONICAL_RESTORE_ORDER_RECOVERY_EVIDENCE_ACL_CONTRACT",
+            "order recovery evidence ACL contract is not accepted",
+        ) from exc
+    if recovery_evidence_acl.status != "ACCEPTED":
+        raise CanonicalBackupBlocked(
+            "BLOCKED_CANONICAL_RESTORE_ORDER_RECOVERY_EVIDENCE_ACL_CONTRACT",
+            "order recovery evidence ACL verifier did not return ACCEPTED",
         )
     try:
         dispatch_status = verify_order_dispatch_status_upgrade(connection)

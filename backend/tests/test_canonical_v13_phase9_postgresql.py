@@ -82,6 +82,13 @@ from app.canonical_v13.shadow_risk_acl_upgrade import (
     rollback_shadow_risk_acl_upgrade,
     verify_shadow_risk_acl_upgrade,
 )
+from app.canonical_v13.order_recovery_evidence_acl_upgrade import (
+    ORDER_WRITER_RECOVERY_READ_DELTA,
+    CanonicalOrderRecoveryEvidenceAclUpgradeBlocked,
+    apply_order_recovery_evidence_acl_upgrade,
+    rollback_order_recovery_evidence_acl_upgrade,
+    verify_order_recovery_evidence_acl_upgrade,
+)
 from app.canonical_v13.phase9_execution_authority import decide_signal_risk_shadow
 from app.canonical_v13.phase9_execution_authority import (
     authorize_demo_risk_budget,
@@ -306,6 +313,147 @@ def test_canary_recovery_approval_upgrade_is_reversible_and_acl_exact() -> None:
                 assert apply_canary_recovery_approval_upgrade(
                     connection, role_mapping=mapping
                 ).status == "UPGRADED"
+            finally:
+                transaction.rollback()
+    finally:
+        engine.dispose()
+
+
+def test_order_recovery_evidence_acl_is_exact_reversible_and_read_only() -> None:
+    assert DATABASE_URL is not None
+    mapping = CanonicalRoleMapping.from_prefix(
+        os.environ.get("CANONICAL_V13_ROLE_PREFIX", "freqtrade_ai_v13_ci_")
+    )
+    service_principals = _service_principals(
+        os.environ.get("CANONICAL_V13_ROLE_PREFIX", "freqtrade_ai_v13_ci_")
+    )
+    order_writer = mapping.physical("canonical_order_writer")
+    engine = create_engine(DATABASE_URL)
+    try:
+        with engine.connect() as connection:
+            transaction = connection.begin()
+            try:
+                for table_name in ORDER_WRITER_RECOVERY_READ_DELTA:
+                    connection.exec_driver_sql(
+                        "REVOKE SELECT ON TABLE "
+                        f"strategy_platform_v13.{table_name} FROM {order_writer}"
+                    )
+                previous = verify_order_recovery_evidence_acl_upgrade(
+                    connection, role_mapping=mapping
+                )
+                assert previous.status == "PREVIOUS_READY"
+                previous_composed = verify_postgresql_bootstrap(
+                    connection,
+                    role_mapping=mapping,
+                    require_zero_business_rows=False,
+                    service_principals=service_principals,
+                )
+
+                denied_read = connection.begin_nested()
+                connection.exec_driver_sql(f"SET LOCAL ROLE {order_writer}")
+                with pytest.raises(DBAPIError) as denied:
+                    connection.exec_driver_sql(
+                        "SELECT id FROM strategy_platform_v13.fills LIMIT 1"
+                    )
+                assert denied.value.orig.sqlstate == "42501"
+                denied_read.rollback()
+                connection.exec_driver_sql("RESET ROLE")
+
+                upgraded = apply_order_recovery_evidence_acl_upgrade(
+                    connection, role_mapping=mapping
+                )
+                assert upgraded.status == "UPGRADED"
+                assert upgraded.repeat_noop is False
+                assert set(upgraded.order_writer_privileges) == set(
+                    ORDER_WRITER_RECOVERY_READ_DELTA
+                )
+                assert all(
+                    privileges
+                    == {
+                        "SELECT": True,
+                        "INSERT": False,
+                        "UPDATE": False,
+                        "DELETE": False,
+                        "TRUNCATE": False,
+                        "REFERENCES": False,
+                        "TRIGGER": False,
+                    }
+                    for privileges in upgraded.order_writer_privileges.values()
+                )
+
+                connection.exec_driver_sql(f"SET LOCAL ROLE {order_writer}")
+                for table_name in ORDER_WRITER_RECOVERY_READ_DELTA:
+                    connection.exec_driver_sql(
+                        f"SELECT id FROM strategy_platform_v13.{table_name} LIMIT 1"
+                    )
+                    denied_dml = connection.begin_nested()
+                    with pytest.raises(DBAPIError) as denied:
+                        connection.exec_driver_sql(
+                            f"DELETE FROM strategy_platform_v13.{table_name} WHERE false"
+                        )
+                    assert denied.value.orig.sqlstate == "42501"
+                    denied_dml.rollback()
+                connection.exec_driver_sql("RESET ROLE")
+
+                replay = apply_order_recovery_evidence_acl_upgrade(
+                    connection, role_mapping=mapping
+                )
+                assert replay.status == "ACCEPTED"
+                assert replay.repeat_noop is True
+                assert replay.receipt_digest == (
+                    verify_order_recovery_evidence_acl_upgrade(
+                        connection, role_mapping=mapping
+                    ).receipt_digest
+                )
+
+                composed = verify_postgresql_bootstrap(
+                    connection,
+                    role_mapping=mapping,
+                    require_zero_business_rows=False,
+                    service_principals=service_principals,
+                )
+                assert composed.explicit_acl_count == (
+                    previous_composed.explicit_acl_count + 3
+                )
+                assert not any(
+                    problem.startswith(("missing table grants", "extra table grants"))
+                    for problem in composed.problems
+                )
+
+                rolled_back = rollback_order_recovery_evidence_acl_upgrade(
+                    connection, role_mapping=mapping
+                )
+                assert rolled_back.status == "ROLLED_BACK"
+                assert rolled_back.repeat_noop is False
+                assert rollback_order_recovery_evidence_acl_upgrade(
+                    connection, role_mapping=mapping
+                ).status == "PREVIOUS_READY"
+                assert apply_order_recovery_evidence_acl_upgrade(
+                    connection, role_mapping=mapping
+                ).status == "UPGRADED"
+
+                connection.exec_driver_sql(
+                    "GRANT UPDATE ON TABLE "
+                    "strategy_platform_v13.fills "
+                    f"TO {order_writer}"
+                )
+                with pytest.raises(
+                    CanonicalOrderRecoveryEvidenceAclUpgradeBlocked
+                ):
+                    verify_order_recovery_evidence_acl_upgrade(
+                        connection, role_mapping=mapping
+                    )
+                tampered = verify_postgresql_bootstrap(
+                    connection,
+                    role_mapping=mapping,
+                    require_zero_business_rows=False,
+                    service_principals=service_principals,
+                )
+                assert tampered.accepted is False
+                assert any(
+                    problem.startswith("extra table grants count=")
+                    for problem in tampered.problems
+                )
             finally:
                 transaction.rollback()
     finally:

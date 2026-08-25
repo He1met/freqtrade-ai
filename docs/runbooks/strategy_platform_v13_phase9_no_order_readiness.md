@@ -92,6 +92,8 @@ backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py acceptance-t
 backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py acceptance-trigger-verify
 backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py shadow-risk-acl-apply
 backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py shadow-risk-acl-verify
+backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py order-recovery-evidence-acl-apply
+backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py order-recovery-evidence-acl-verify
 backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py phase9-transition-apply
 backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py phase9-transition-verify
 backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py phase9-policy-renewal-apply
@@ -142,9 +144,13 @@ runtime-reader ACL rollover 的 rollback 入口为
 table/columns/functions，精确撤销 `canonical_signal_writer` 的四项后生 lineage `SELECT`；随后才允许
 deployment rollover、runtime-reader、runtime image 与 Phase 9 schema 依次反向 rollback。任一证据非零或
 ACL/trigger partial drift 都必须阻塞，禁止 `CASCADE`。
-shadow-risk ACL rollback 为独立入口
+order recovery evidence ACL rollback 必须先执行，入口为
+`canonical_v13_bootstrap.py order-recovery-evidence-acl-rollback`，仅撤销 order writer 对
+`fills`、`ledger_entries`、`reconciliation_items` 的三项 `SELECT`。它不授予 DML，目的是让
+恢复校验与第二次且最终一次 Demo POST 的持久化保持在同一事务边界；partial ACL 或额外权限必须
+fail closed。随后 shadow-risk ACL rollback 使用独立入口
 `canonical_v13_bootstrap.py shadow-risk-acl-rollback`，只撤销上述两项 risk writer `SELECT`；partial ACL、
-额外 DML 或 manifest drift 必须 fail closed。release rollback 时先撤销 shadow-risk ACL，再进入既有
+额外 DML 或 manifest drift 必须 fail closed。release rollback 时完成这两项 ACL rollback 后，再进入既有
 acceptance-trigger/deployment/runtime/schema 反向顺序。
 
 Phase B/C transition upgrade 将历史 intent/decision 按 immutable payload backfill 为

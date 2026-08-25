@@ -126,6 +126,12 @@ from app.canonical_v13.shadow_risk_acl_upgrade import (
     rollback_shadow_risk_acl_upgrade,
     verify_shadow_risk_acl_upgrade,
 )
+from app.canonical_v13.order_recovery_evidence_acl_upgrade import (
+    CanonicalOrderRecoveryEvidenceAclUpgradeBlocked,
+    apply_order_recovery_evidence_acl_upgrade,
+    rollback_order_recovery_evidence_acl_upgrade,
+    verify_order_recovery_evidence_acl_upgrade,
+)
 
 
 DATABASE_URL_ENV = "FREQTRADE_AI_CANONICAL_V13_PROVISIONER_DATABASE_URL"
@@ -193,6 +199,7 @@ def verify(
     engine = create_engine(_database_url(), pool_pre_ping=True)
     acceptance_trigger_status: str | None = None
     shadow_risk_acl_status: str | None = None
+    order_recovery_evidence_acl_status: str | None = None
     try:
         with engine.connect() as connection:
             if require_research_principals and not require_phase9_principals:
@@ -228,6 +235,14 @@ def verify(
                     ).status
                 except CanonicalShadowRiskAclUpgradeBlocked:
                     shadow_risk_acl_status = "BLOCKED"
+                try:
+                    order_recovery_evidence_acl_status = (
+                        verify_order_recovery_evidence_acl_upgrade(
+                            connection, role_mapping=mapping
+                        ).status
+                    )
+                except CanonicalOrderRecoveryEvidenceAclUpgradeBlocked:
+                    order_recovery_evidence_acl_status = "BLOCKED"
     finally:
         engine.dispose()
     problems = list(result.problems)
@@ -235,6 +250,11 @@ def verify(
         problems.append("acceptance trigger ACL receipt is not ACCEPTED")
     if require_phase9_principals and shadow_risk_acl_status != "ACCEPTED":
         problems.append("shadow risk ACL receipt is not ACCEPTED")
+    if (
+        require_phase9_principals
+        and order_recovery_evidence_acl_status != "ACCEPTED"
+    ):
+        problems.append("order recovery evidence ACL receipt is not ACCEPTED")
     return {
         "status": "ACCEPTED" if not problems else "BLOCKED",
         "problems": problems,
@@ -247,6 +267,9 @@ def verify(
         "require_phase9_principals": require_phase9_principals,
         "acceptance_trigger_status": acceptance_trigger_status,
         "shadow_risk_acl_status": shadow_risk_acl_status,
+        "order_recovery_evidence_acl_status": (
+            order_recovery_evidence_acl_status
+        ),
         "capability_role_count": result.capability_role_count,
         "explicit_acl_count": result.explicit_acl_count,
     }
@@ -732,6 +755,37 @@ def shadow_risk_acl(*, operation: str) -> dict[str, object]:
     return payload
 
 
+def order_recovery_evidence_acl(*, operation: str) -> dict[str, object]:
+    mapping = local_role_mapping()
+    engine = create_engine(_database_url(), pool_pre_ping=True)
+    try:
+        if operation == "verify":
+            with engine.connect() as connection:
+                with connection.begin():
+                    connection.exec_driver_sql("SET TRANSACTION READ ONLY")
+                    result = verify_order_recovery_evidence_acl_upgrade(
+                        connection, role_mapping=mapping
+                    )
+        else:
+            actor_identity = _upgrade_actor()
+            with engine.begin() as connection:
+                result = (
+                    apply_order_recovery_evidence_acl_upgrade(
+                        connection, role_mapping=mapping
+                    )
+                    if operation == "apply"
+                    else rollback_order_recovery_evidence_acl_upgrade(
+                        connection, role_mapping=mapping
+                    )
+                )
+    finally:
+        engine.dispose()
+    payload = asdict(result)
+    if operation != "verify":
+        payload["actor_identity"] = actor_identity
+    return payload
+
+
 def phase9_transition(*, operation: str) -> dict[str, object]:
     engine = create_engine(_database_url(), pool_pre_ping=True)
     try:
@@ -894,6 +948,9 @@ def main(argv: list[str] | None = None) -> int:
             "shadow-risk-acl-verify",
             "shadow-risk-acl-apply",
             "shadow-risk-acl-rollback",
+            "order-recovery-evidence-acl-verify",
+            "order-recovery-evidence-acl-apply",
+            "order-recovery-evidence-acl-rollback",
             "phase9-transition-verify",
             "phase9-transition-apply",
             "phase9-transition-rollback",
@@ -1026,6 +1083,12 @@ def main(argv: list[str] | None = None) -> int:
             payload = shadow_risk_acl(
                 operation=args.command.removeprefix("shadow-risk-acl-")
             )
+        elif args.command.startswith("order-recovery-evidence-acl-"):
+            payload = order_recovery_evidence_acl(
+                operation=args.command.removeprefix(
+                    "order-recovery-evidence-acl-"
+                )
+            )
         elif args.command.startswith("phase9-transition-"):
             payload = phase9_transition(
                 operation=args.command.removeprefix("phase9-transition-")
@@ -1065,6 +1128,8 @@ def main(argv: list[str] | None = None) -> int:
     except CanonicalAcceptanceSignalTriggerUpgradeBlocked as exc:
         payload = {"status": "BLOCKED", "reason": str(exc)}
     except CanonicalShadowRiskAclUpgradeBlocked as exc:
+        payload = {"status": "BLOCKED", "reason": str(exc)}
+    except CanonicalOrderRecoveryEvidenceAclUpgradeBlocked as exc:
         payload = {"status": "BLOCKED", "reason": str(exc)}
     except CanonicalPhase9TransitionUpgradeBlocked as exc:
         payload = {"status": "BLOCKED", "reason": str(exc)}
