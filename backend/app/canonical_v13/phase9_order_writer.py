@@ -840,8 +840,6 @@ def _load_dispatch(
     )
     if order is None:
         raise CanonicalExecutionChainBlocked("BLOCKED_ORDER_UNSET", str(order_id))
-    if order["receipt_digest"] is not None and order["exchange_order_id"]:
-        return dict(order), {}
     decision = (
         effective.execute(
             select(RISK_DECISIONS_TABLE).where(
@@ -1015,12 +1013,15 @@ def validate_canary_recovery_order(
     order_id: UUID,
     authority: object,
     require_negative_outcome: bool = False,
+    allow_terminal_replay: bool = False,
 ) -> CanaryRecoveryOrder:
-    """Verify an immutable ambiguous canary before GET-only recovery or retry.
+    """Verify an immutable canary before GET-only recovery, replay, or retry.
 
     This intentionally validates the authority at the original dispatch boundary,
-    not against wall-clock freshness.  A retry still requires a fresh private
-    dispatch guard and the existing two-attempt saga proof.
+    not against wall-clock freshness.  A terminal replay additionally requires
+    the exact terminated fill/ledger/reconciliation lineage.  A retry still
+    requires a fresh private dispatch guard and the existing two-attempt saga
+    proof.
     """
 
     effective = require_canonical_execution(connection)
@@ -1125,6 +1126,18 @@ def validate_canary_recovery_order(
         raise CanonicalExecutionChainBlocked(
             "BLOCKED_ORDER_RECOVERY_AUTHORITY", "typed frozen authority is required"
         )
+    terminal_replay_shape = bool(
+        allow_terminal_replay
+        and not require_negative_outcome
+        and order["status"] in {"ACCEPTED", "PARTIAL", "FILLED"}
+        and order["exchange_order_id"]
+        and order["receipt_digest"]
+        and policy is not None
+        and policy["status"] == "TERMINATED"
+    )
+    ambiguous_recovery_shape = bool(
+        order["exchange_order_id"] is None and order["receipt_digest"] is None
+    )
     if (
         decision is None
         or decision["status"] != "RISK_ACCEPTED"
@@ -1140,8 +1153,7 @@ def validate_canary_recovery_order(
         or deployment is None
         or order["demo_only"] is not True
         or order["allow_real_funds"] is not False
-        or order["exchange_order_id"] is not None
-        or order["receipt_digest"] is not None
+        or not (ambiguous_recovery_shape or terminal_replay_shape)
         or deployment["id"] != getattr(authority, "deployment_id")
         or deployment["capability_digest"]
         != getattr(authority, "deployment_capability_digest")
@@ -1180,6 +1192,7 @@ def validate_canary_recovery_order(
             "order, execution risk, policy, attestation, and frozen authority drifted",
         )
     negative_outcomes = []
+    accepted_outcomes = []
     outcomes_by_claim = {row["dispatch_claim_id"]: row for row in outcomes}
     for index, claim in enumerate(claims):
         claimed_at = _persisted_utc(claim["claimed_at"])
@@ -1222,12 +1235,22 @@ def validate_canary_recovery_order(
             )
         outcome = outcomes_by_claim.get(claim["id"])
         if outcome is not None:
-            if not _negative_outcome_is_exact(outcome=outcome, claim=claim, body=body):
+            if (
+                terminal_replay_shape
+                and outcome["outcome_mode"] in {"POST", "GET_RECOVERY"}
+                and index == len(claims) - 1
+            ):
+                accepted_outcomes.append(outcome)
+            elif not _negative_outcome_is_exact(
+                outcome=outcome, claim=claim, body=body
+            ):
                 raise CanonicalExecutionChainBlocked(
                     "BLOCKED_ORDER_RECOVERY_OUTCOME",
-                    "only exact GET_NOT_FOUND evidence can authorize recovery retry",
+                    "only an exact accepted terminal outcome or GET_NOT_FOUND "
+                    "evidence can authorize recovery",
                 )
-            negative_outcomes.append(outcome)
+            else:
+                negative_outcomes.append(outcome)
         elif index != len(claims) - 1:
             raise CanonicalExecutionChainBlocked(
                 "BLOCKED_ORDER_RECOVERY_OUTCOME", "only the latest claim may be unresolved"
@@ -1249,6 +1272,40 @@ def validate_canary_recovery_order(
             RECONCILIATION_ITEMS_TABLE.c.order_id == order_id
         )
     ).scalars().all()
+    if terminal_replay_shape:
+        from app.canonical_v13.phase9_canary_policy import (
+            validate_terminated_canary_risk_policy,
+        )
+
+        terminal = validate_terminated_canary_risk_policy(
+            effective, policy_id=UUID(str(policy["id"]))
+        )
+        replay = _replay_persisted_exchange_receipt(effective, order_id=order_id)
+        if (
+            terminal.policy_id != policy["id"]
+            or terminal.termination_digest != policy["termination_digest"]
+            or len(accepted_outcomes) != 1
+            or len(outcomes) != len(claims)
+            or len(negative_outcomes) != len(claims) - 1
+            or replay.exchange_order_id != order["exchange_order_id"]
+            or replay.receipt_digest != order["receipt_digest"]
+            or replay.repeat_noop is not True
+            or not fills
+            or len(ledger_entries) != len(fills)
+            or len(reconciliation_items) != len(fills)
+        ):
+            raise CanonicalExecutionChainBlocked(
+                "BLOCKED_ORDER_TERMINAL_REPLAY_STATE",
+                "one exact terminated Demo order chain is required for GET-only replay",
+            )
+        return CanaryRecoveryOrder(
+            order_id=order_id,
+            risk_decision_id=UUID(str(decision["id"])),
+            order_status=str(order["status"]),
+            request_body=dict(body),
+            dispatch_attempt_count=len(claims),
+            negative_outcome_count=len(negative_outcomes),
+        )
     active_shape = (
         (order["status"] == "DISPATCHING" and len(outcomes) == len(claims) - 1)
         or (
@@ -2267,6 +2324,28 @@ def recover_demo_order_get_only(
 ) -> DispatchedDemoOrder:
     with connection_factory() as connection:
         order, body = _load_dispatch(connection, order_id)
+        if order["receipt_digest"] is not None and order["exchange_order_id"]:
+            try:
+                payload = transport.query(
+                    instrument=body["instId"], client_order_id=body["clOrdId"]
+                )
+                exchange_order_id, _safe_response = _safe_exchange_identity(
+                    payload, client_order_id=body["clOrdId"]
+                )
+            except Exception as exc:
+                raise CanonicalOrderRecoveryRequired(
+                    "BLOCKED_ORDER_TERMINAL_REPLAY_INCOMPLETE",
+                    "GET-only terminal replay did not prove the persisted exchange "
+                    f"identity: {type(exc).__name__}",
+                ) from None
+            if exchange_order_id != order["exchange_order_id"]:
+                raise CanonicalOrderRecoveryRequired(
+                    "BLOCKED_ORDER_TERMINAL_REPLAY_DRIFT",
+                    "GET-only terminal replay returned a different exchange order",
+                )
+            return _replay_persisted_exchange_receipt(
+                connection, order_id=order_id
+            )
         latest_claim_id = connection.execute(
             select(ORDER_DISPATCH_RECEIPTS_TABLE.c.id)
             .where(ORDER_DISPATCH_RECEIPTS_TABLE.c.order_id == order_id)
@@ -2295,11 +2374,6 @@ def recover_demo_order_get_only(
                 order_id=order_id,
                 safe_response=dict(nonaccepted["safe_response_json"]),
                 outcome_mode=str(nonaccepted["outcome_mode"]),
-            )
-    if order["receipt_digest"] is not None and order["exchange_order_id"]:
-        with connection_factory() as connection:
-            return _replay_persisted_exchange_receipt(
-                connection, order_id=order_id
             )
     try:
         payload = transport.query(
