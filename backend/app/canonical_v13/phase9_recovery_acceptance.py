@@ -91,6 +91,12 @@ def _require_digest(name: str, value: str) -> None:
         )
 
 
+def _stable_replay_payload(payload: Mapping[str, object]) -> dict[str, object]:
+    """Exclude only the time at which identical terminal evidence was replayed."""
+
+    return {key: value for key, value in payload.items() if key != "observed_at"}
+
+
 def record_phase9_recovery_acceptance(
     connection: Connection,
     *,
@@ -262,13 +268,32 @@ def record_phase9_recovery_acceptance(
         .one_or_none()
     )
     if prior is not None:
-        if prior["request_digest"] != request_digest:
+        prior_payload = prior["evidence_json"]
+        prior_request_digest = prior["request_digest"]
+        prior_receipt_digest = prior["receipt_digest"]
+        prior_is_integral = (
+            isinstance(prior_payload, Mapping)
+            and _digest(prior_payload) == prior_request_digest
+            and _digest(
+                {
+                    "event_type": "PHASE9_RECOVERY_SOAK_ACCEPTED",
+                    "request_digest": prior_request_digest,
+                }
+            )
+            == prior_receipt_digest
+        )
+        stable_replay_matches = (
+            isinstance(prior_payload, Mapping)
+            and _digest(_stable_replay_payload(prior_payload))
+            == _digest(_stable_replay_payload(payload))
+        )
+        if not prior_is_integral or not stable_replay_matches:
             raise CanonicalPhase9RecoveryAcceptanceBlocked(
                 "BLOCKED_RECOVERY_REPLAY_DRIFT", "terminal acceptance already exists"
             )
         return {
             "status": "ACCEPTED",
-            "receipt_digest": prior["receipt_digest"],
+            "receipt_digest": prior_receipt_digest,
             "repeat_noop": True,
         }
     receipt_digest = _digest(
