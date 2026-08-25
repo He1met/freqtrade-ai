@@ -12,6 +12,7 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session
 
 from app.adapters.okx_demo import read_adapter as read_boundary
+from app.adapters.okx_demo import write_credentials as write_credential_boundary
 from app.adapters.okx_demo.errors import OkxReadAdapterError
 from app.adapters.okx_demo.transport import OkxReadHttpResponse
 from app.adapters.okx_demo.write_transport import (
@@ -1564,8 +1565,8 @@ def test_bound_attested_session_renews_across_multiple_ttl_windows(
         lambda environment: expected_fingerprint,
     )
     monkeypatch.setattr(
-        read_boundary,
-        "_build_demo_authorization_headers",
+        write_credential_boundary,
+        "build_demo_write_authorization_headers",
         lambda *args, **kwargs: {
             "OK-ACCESS-KEY": "temporary-key",
             "OK-ACCESS-SIGN": "signature",
@@ -1593,9 +1594,9 @@ def test_bound_attested_session_renews_across_multiple_ttl_windows(
     for elapsed_seconds in (55, 110):
         current[0] = now + timedelta(seconds=elapsed_seconds)
         headers = handle.authorization_headers(
-            method="GET",
-            request_path="/api/v5/account/config",
-            body="",
+            method="POST",
+            request_path="/api/v5/trade/order",
+            body='{"instId":"BTC-USDT-SWAP","sz":"1"}',
         )
         assert headers["OK-ACCESS-KEY"] == "temporary-key"
     with Session(postgres_engine) as db:

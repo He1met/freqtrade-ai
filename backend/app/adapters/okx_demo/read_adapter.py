@@ -1631,7 +1631,7 @@ def create_attested_okx_demo_read_adapter(
                 self._attested_session = session
                 self._writer_credential_handle = (
                     _AttestedWriterCredentialHandle._from_attested_session(
-                        session
+                        _AttestedWriterSigningProvider(session)
                     )
                 )
 
@@ -2577,3 +2577,51 @@ def _optional_boolean(value: Any) -> Optional[bool]:
     if value is False or value == "false":
         return False
     raise ValueError("boolean field is malformed")
+
+
+class _AttestedWriterSigningProvider:
+    """Expose POST signing only through the sealed writer credential handle."""
+
+    def __init__(self, attested_session: Any) -> None:
+        self.__session = attested_session
+
+    def bind_database(self, db: Session) -> None:
+        self.__session.bind_database(db)
+
+    def revoke(self, reason: str) -> None:
+        self.__session.revoke(reason)
+
+    def authorization_headers(
+        self,
+        *,
+        method: str,
+        request_path: str,
+        body: str,
+    ) -> Mapping[str, str]:
+        from app.adapters.okx_demo.write_credentials import (
+            build_demo_write_authorization_headers,
+        )
+
+        now = _utc_now()
+        if self.__session._revoked or not isinstance(now, datetime):
+            self.__session.revoke("EXPIRED")
+            raise OkxDemoCredentialsUnavailable(
+                "OKX_DEMO account attestation expired or revoked"
+            )
+        if now.tzinfo is None:
+            self.__session.revoke("EXPIRED")
+            raise OkxDemoCredentialsUnavailable(
+                "OKX_DEMO account attestation expired or revoked"
+            )
+        self.__session._renew_if_needed(now.astimezone(timezone.utc))
+        try:
+            return build_demo_write_authorization_headers(
+                self.__session._environment,
+                method=method,
+                request_path=request_path,
+                body=body,
+            )
+        except OkxDemoPreflightBlocked:
+            raise OkxDemoCredentialsUnavailable(
+                "OKX_DEMO writer credential provider is unavailable"
+            ) from None
