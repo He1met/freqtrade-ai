@@ -137,7 +137,7 @@ def test_drained_soak_fails_closed_when_runtime_stop_fails(
         "status": "STOPPED",
         "allow_real_funds": False,
     }
-    monkeypatch.setattr(service, "tick", lambda: stopped)
+    monkeypatch.setattr(service, "tick", lambda **_kwargs: stopped)
     monkeypatch.setattr(
         service,
         "_phase9",
@@ -245,3 +245,34 @@ def test_tick_rejects_prepared_plan_before_opening_private_session(
         assert str(exc) == "BLOCKED_SOAK_PLAN_NOT_RUNNING"
     else:
         raise AssertionError("prepared plan must fail closed")
+
+
+def test_run_reuses_one_operator_across_ticks(tmp_path, monkeypatch) -> None:
+    service = _load_script("canonical_continuous_demo_reuse_operator")
+    _configure_roots(service, tmp_path, monkeypatch)
+    operator = object()
+    constructed = []
+    observed = []
+    states = iter(
+        (
+            {"status": "RUNNING", "allow_real_funds": False},
+            {"status": "BLOCKED", "allow_real_funds": False},
+        )
+    )
+
+    monkeypatch.setattr(
+        service,
+        "_operator",
+        lambda: constructed.append(operator) or operator,
+    )
+
+    def tick(*, operator_factory):
+        observed.append(operator_factory())
+        return next(states)
+
+    monkeypatch.setattr(service, "tick", tick)
+    monkeypatch.setattr(service.time, "sleep", lambda _seconds: None)
+
+    assert service.run() == 1
+    assert constructed == [operator]
+    assert observed == [operator, operator]

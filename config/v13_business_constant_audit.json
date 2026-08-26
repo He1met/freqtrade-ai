@@ -7832,7 +7832,7 @@
     },
     {
       "path": "scripts/canonical_v13_continuous_demo_soak.py",
-      "line": 428,
+      "line": 437,
       "symbol": "<module>.status.dict:allow_real_funds",
       "fingerprint": "sha256:fc6ab4e4a4cf7378add43579005d863f85db41926cf015ebcc0792404419a5d8",
       "category": "SAFETY_INVARIANT",
@@ -7844,7 +7844,7 @@
     },
     {
       "path": "scripts/canonical_v13_continuous_demo_soak.py",
-      "line": 461,
+      "line": 470,
       "symbol": "<module>.finalize.dict:allow_real_funds",
       "fingerprint": "sha256:d3238d310985ed5c4a680a005b7761685cb1b9b1527f7219b12a6327bd4009b7",
       "category": "SAFETY_INVARIANT",
@@ -7856,7 +7856,7 @@
     },
     {
       "path": "scripts/canonical_v13_continuous_demo_soak.py",
-      "line": 492,
+      "line": 501,
       "symbol": "<module>.main.dict:allow_real_funds",
       "fingerprint": "sha256:52c3964bbc67ffaea8f6c27874c32ab6d69d2e49903173e53af132cf22d640ab",
       "category": "SAFETY_INVARIANT",
