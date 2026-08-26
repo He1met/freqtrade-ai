@@ -35,6 +35,8 @@ CONTINUOUS_RISK_WRITER_READ_DELTA: Final[tuple[str, ...]] = (
 CONTINUOUS_RECONCILIATION_WRITER_READ_DELTA: Final[tuple[str, ...]] = (
     "risk_decisions",
     "execution_canary_probe_receipts",
+    "execution_attestations",
+    "deployments",
 )
 ROLE_DELTAS: Final = {
     "canonical_risk_writer": CONTINUOUS_RISK_WRITER_READ_DELTA,
