@@ -449,7 +449,6 @@ class ContinuousDemoSoakOperator:
     def _fresh_flat_probe(self, *, deployment_id: UUID, now: datetime):
         with self._session_factory() as session:
             probe = session.probe(instrument=INSTRUMENT)
-        evaluated_at = max(now, _persisted_utc(probe.observed_at))
         with self._deployment_factory() as connection:
             attestation = record_redacted_demo_attestation(
                 connection,
@@ -460,7 +459,7 @@ class ContinuousDemoSoakOperator:
                 permissions=probe.permissions,
                 observed_at=probe.observed_at,
                 expires_at=probe.expires_at,
-                evaluated_at=evaluated_at,
+                evaluated_at=now,
             )
         with self._approval_factory() as connection:
             receipt = persist_canary_probe_receipt(
@@ -468,14 +467,14 @@ class ContinuousDemoSoakOperator:
                 probe=probe,
                 deployment_id=deployment_id,
                 execution_attestation_id=attestation.attestation_id,
-                evaluated_at=evaluated_at,
+                evaluated_at=now,
             )
-        return probe, attestation, receipt, evaluated_at
+        return probe, attestation, receipt
 
     def _reconcile(self, order: Mapping[str, object], *, now: datetime) -> ContinuousDemoSoakResult:
         flat_probe_id = None
         if order["decision_mode"] == INTENT_MODE_POSITION_EXIT:
-            _probe, _attestation, receipt, _evaluated_at = self._fresh_flat_probe(
+            _probe, _attestation, receipt = self._fresh_flat_probe(
                 deployment_id=self._active_deployment_id(), now=now
             )
             flat_probe_id = receipt.probe_receipt_id
@@ -690,7 +689,7 @@ class ContinuousDemoSoakOperator:
 
     def _grant_open(self, signal_id: UUID, *, now: datetime) -> ContinuousDemoSoakResult:
         deployment_id = self._active_deployment_id()
-        _probe, attestation, receipt, evaluated_at = self._fresh_flat_probe(
+        _probe, attestation, receipt = self._fresh_flat_probe(
             deployment_id=deployment_id, now=now
         )
         with self._risk_factory() as connection:
@@ -698,13 +697,13 @@ class ContinuousDemoSoakOperator:
                 connection,
                 signal_id=signal_id,
                 probe_receipt_id=receipt.probe_receipt_id,
-                evaluated_at=evaluated_at,
+                evaluated_at=now,
             )
         return self._prepare_and_dispatch(
             grant.risk_decision_id,
             attestation.attestation_id,
             signal_id=signal_id,
-            now=evaluated_at,
+            now=now,
         )
 
     def tick(
