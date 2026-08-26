@@ -67,7 +67,6 @@
     "frontend/src/pages/okxDemoDisplay.ts",
     "scripts/materialize_blueprint_research_candidates.py",
     "scripts/download_okx_research_market_data.py",
-    "scripts/configure_okx_demo_continuous.py",
     "config/app.yaml",
     "config/backtest_profiles.yaml",
     "config/exchange.yaml",
@@ -7785,7 +7784,7 @@
     },
     {
       "path": "scripts/canonical_v13_continuous_demo_soak.py",
-      "line": 214,
+      "line": 233,
       "symbol": "<module>.prepare.assign:plan",
       "fingerprint": "sha256:e11df7628404edeee677d31ad7e556928b496e2c49c07beb9d2a7fbf148050e8",
       "category": "RESEARCH_TARGET",
@@ -7797,7 +7796,7 @@
     },
     {
       "path": "scripts/canonical_v13_continuous_demo_soak.py",
-      "line": 221,
+      "line": 240,
       "symbol": "<module>.prepare.dict:instrument",
       "fingerprint": "sha256:7e1f397c67e8fc31712fc05bac7575e0ea89380843bf3dee52285b6c02b1260c",
       "category": "RESEARCH_TARGET",
@@ -7809,7 +7808,7 @@
     },
     {
       "path": "scripts/canonical_v13_continuous_demo_soak.py",
-      "line": 222,
+      "line": 241,
       "symbol": "<module>.prepare.dict:signal_timeframe",
       "fingerprint": "sha256:fffefbeb0d22850a2866200c730aaedfbd70ec4a855a20387e104591fbdaad0f",
       "category": "TIMEFRAME_DEFINITION",
@@ -7821,7 +7820,7 @@
     },
     {
       "path": "scripts/canonical_v13_continuous_demo_soak.py",
-      "line": 226,
+      "line": 245,
       "symbol": "<module>.prepare.dict:allow_real_funds",
       "fingerprint": "sha256:53141c4572412ab9e5a9def446129e9e5c03cf2e0e99d503e0d4f1962159bdd0",
       "category": "SAFETY_INVARIANT",
@@ -7833,7 +7832,7 @@
     },
     {
       "path": "scripts/canonical_v13_continuous_demo_soak.py",
-      "line": 400,
+      "line": 439,
       "symbol": "<module>.status.dict:allow_real_funds",
       "fingerprint": "sha256:fc6ab4e4a4cf7378add43579005d863f85db41926cf015ebcc0792404419a5d8",
       "category": "SAFETY_INVARIANT",
@@ -7845,7 +7844,7 @@
     },
     {
       "path": "scripts/canonical_v13_continuous_demo_soak.py",
-      "line": 433,
+      "line": 472,
       "symbol": "<module>.finalize.dict:allow_real_funds",
       "fingerprint": "sha256:d3238d310985ed5c4a680a005b7761685cb1b9b1527f7219b12a6327bd4009b7",
       "category": "SAFETY_INVARIANT",
@@ -7857,7 +7856,7 @@
     },
     {
       "path": "scripts/canonical_v13_continuous_demo_soak.py",
-      "line": 464,
+      "line": 503,
       "symbol": "<module>.main.dict:allow_real_funds",
       "fingerprint": "sha256:52c3964bbc67ffaea8f6c27874c32ab6d69d2e49903173e53af132cf22d640ab",
       "category": "SAFETY_INVARIANT",
@@ -7866,18 +7865,6 @@
       "reason": "Canonical Demo-only fail-closed invariant reviewed at this exact syntax node.",
       "owner": "issue-724-phase9-continuous-demo",
       "dependency": "Demo-only, no-real-funds, single-position execution safety contract"
-    },
-    {
-      "path": "scripts/configure_okx_demo_continuous.py",
-      "line": 82,
-      "symbol": "<module>.main.dict:allow_real_funds",
-      "fingerprint": "sha256:52c3964bbc67ffaea8f6c27874c32ab6d69d2e49903173e53af132cf22d640ab",
-      "category": "SAFETY_INVARIANT",
-      "language": "python",
-      "disposition": "TECHNICAL",
-      "reason": "V1.3 technical/safety invariant reviewed at this exact syntax node.",
-      "owner": "issue-704-old-rule-removal",
-      "dependency": "stable runtime safety and canonical bundle contract"
     },
     {
       "path": "scripts/download_okx_research_market_data.py",
