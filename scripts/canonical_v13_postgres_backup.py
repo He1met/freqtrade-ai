@@ -90,6 +90,7 @@ from app.canonical_v13.order_recovery_evidence_acl_upgrade import (  # noqa: E40
 )
 from app.canonical_v13.continuous_demo_upgrade import (  # noqa: E402
     CanonicalContinuousDemoUpgradeBlocked,
+    DISPATCH_MODE_GUARD_TRIGGER,
     verify_continuous_demo_upgrade,
 )
 from app.canonical_v13.continuous_demo_acl_upgrade import (  # noqa: E402
@@ -129,6 +130,7 @@ EXPECTED_LIFECYCLE_TRIGGERS: Final[tuple[tuple[str, str, str], ...]] = (
         "optimization_runs_terminal_observability_guard",
         "O",
     ),
+    ("order_dispatch_receipts", DISPATCH_MODE_GUARD_TRIGGER, "O"),
     ("research_gate_attempts", "research_gate_attempts_lifecycle", "O"),
     ("research_gate_receipts", "research_gate_receipts_append_only", "O"),
     ("risk_decisions", DECISION_MODE_GUARD_TRIGGER, "O"),
