@@ -329,7 +329,9 @@ def confirm() -> dict[str, object]:
     return {**running, "launch_agent_loaded": True, "repeat_noop": False}
 
 
-def tick(*, operator_factory=None) -> dict[str, object]:
+def tick(
+    *, operator: ContinuousDemoSoakOperator | None = None
+) -> dict[str, object]:
     plan = _read(PLAN_PATH)
     if plan.get("status") not in {"RUNNING", "DRAINING"}:
         raise ContinuousDemoSoakServiceBlocked("BLOCKED_SOAK_PLAN_NOT_RUNNING")
@@ -338,8 +340,9 @@ def tick(*, operator_factory=None) -> dict[str, object]:
     openings_enabled = now < end
     if openings_enabled and not _runtime_ready_for_openings():
         raise ContinuousDemoSoakServiceBlocked("BLOCKED_SOAK_NATURAL_RUNTIME_NOT_READY")
-    operator = (operator_factory or _operator)()
-    result = operator.tick(openings_enabled=openings_enabled, evaluated_at=now)
+    result = (operator or _operator()).tick(
+        openings_enabled=openings_enabled, evaluated_at=now
+    )
     payload = {
         "contract": CONTRACT,
         "observed_at": now.isoformat(),
@@ -363,17 +366,16 @@ def tick(*, operator_factory=None) -> dict[str, object]:
 
 
 def run() -> int:
-    operator = None
-
-    def process_operator():
-        nonlocal operator
-        if operator is None:
-            operator = _operator()
-        return operator
-
+    operator: ContinuousDemoSoakOperator | None = None
     while True:
         try:
-            state = tick(operator_factory=process_operator)
+            if operator is None:
+                # Each production connection factory owns one SQLAlchemy
+                # engine. Reuse the operator for the whole worker lifetime so
+                # repeated 15-second ticks cannot exhaust per-role PostgreSQL
+                # connection limits while old pools await garbage collection.
+                operator = _operator()
+            state = tick(operator=operator)
         except (CanonicalExecutionChainBlocked, CanonicalPhase9CompositionBlocked, CanonicalOrderRecoveryRequired, ContinuousDemoSoakServiceBlocked) as exc:
             now = _now()
             blocked = {
