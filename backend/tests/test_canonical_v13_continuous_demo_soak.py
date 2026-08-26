@@ -103,6 +103,139 @@ def test_prepared_order_releases_lease_when_private_session_cannot_open(
     assert released == [NOW]
 
 
+def test_private_snapshot_advances_the_transaction_clock(monkeypatch) -> None:
+    @contextmanager
+    def connection_factory():
+        yield object()
+
+    observed_at = NOW + timedelta(seconds=4)
+    probe = SimpleNamespace(
+        instrument="BTC-USDT-SWAP",
+        account_fingerprint_digest="a" * 64,
+        credential_generation_digest="b" * 64,
+        permissions={"read": True, "trade": True, "withdraw": False},
+        observed_at=observed_at,
+        expires_at=observed_at + timedelta(seconds=10),
+    )
+
+    class ProbeSession:
+        def probe(self, *, instrument):
+            assert instrument == "BTC-USDT-SWAP"
+            return probe
+
+    @contextmanager
+    def session_factory():
+        yield ProbeSession()
+
+    evaluated: list[object] = []
+    attestation_id = uuid4()
+    receipt_id = uuid4()
+    monkeypatch.setattr(
+        soak_module,
+        "record_redacted_demo_attestation",
+        lambda _connection, **kwargs: (
+            evaluated.append(kwargs["evaluated_at"])
+            or SimpleNamespace(attestation_id=attestation_id)
+        ),
+    )
+    monkeypatch.setattr(
+        soak_module,
+        "persist_canary_probe_receipt",
+        lambda _connection, **kwargs: (
+            evaluated.append(kwargs["evaluated_at"])
+            or SimpleNamespace(probe_receipt_id=receipt_id)
+        ),
+    )
+    operator = ContinuousDemoSoakOperator(
+        reader_factory=connection_factory,
+        deployment_factory=connection_factory,
+        approval_factory=connection_factory,
+        risk_factory=connection_factory,
+        order_factory=connection_factory,
+        fill_factory=connection_factory,
+        ledger_factory=connection_factory,
+        reconciliation_factory=connection_factory,
+        session_factory=session_factory,
+        holder_token_digest="e" * 64,
+    )
+
+    _probe, _attestation, _receipt, causal_now = operator._fresh_flat_probe(
+        deployment_id=uuid4(), now=NOW
+    )
+
+    assert causal_now == observed_at
+    assert evaluated == [observed_at, observed_at]
+
+
+def test_exit_guard_advances_grant_and_dispatch_clock(monkeypatch) -> None:
+    @contextmanager
+    def connection_factory():
+        yield object()
+
+    observed_at = NOW + timedelta(seconds=4)
+    guard = SimpleNamespace(
+        instrument="BTC-USDT-SWAP",
+        account_fingerprint_digest="a" * 64,
+        credential_generation_digest="b" * 64,
+        permissions={"read": True, "trade": True, "withdraw": False},
+        observed_at=observed_at,
+        expires_at=observed_at + timedelta(seconds=10),
+    )
+
+    class ExitSession:
+        def exit_guard(self, *, instrument, expected_contracts):
+            assert instrument == "BTC-USDT-SWAP"
+            assert expected_contracts == "1"
+            return guard
+
+    @contextmanager
+    def session_factory():
+        yield ExitSession()
+
+    operator = ContinuousDemoSoakOperator(
+        reader_factory=connection_factory,
+        deployment_factory=connection_factory,
+        approval_factory=connection_factory,
+        risk_factory=connection_factory,
+        order_factory=connection_factory,
+        fill_factory=connection_factory,
+        ledger_factory=connection_factory,
+        reconciliation_factory=connection_factory,
+        session_factory=session_factory,
+        holder_token_digest="e" * 64,
+    )
+    monkeypatch.setattr(operator, "_active_deployment_id", uuid4)
+    monkeypatch.setattr(operator, "_entry_order_id", uuid4)
+    monkeypatch.setattr(operator, "_ledger_net", lambda: soak_module.Decimal("1"))
+    evaluated: list[object] = []
+    attestation_id = uuid4()
+    risk_decision_id = uuid4()
+    monkeypatch.setattr(
+        soak_module,
+        "record_redacted_demo_attestation",
+        lambda _connection, **kwargs: (
+            evaluated.append(kwargs["evaluated_at"])
+            or SimpleNamespace(attestation_id=attestation_id)
+        ),
+    )
+    monkeypatch.setattr(
+        soak_module,
+        "grant_position_exit",
+        lambda _connection, **kwargs: (
+            evaluated.append(kwargs["evaluated_at"])
+            or SimpleNamespace(risk_decision_id=risk_decision_id)
+        ),
+    )
+    monkeypatch.setattr(
+        operator,
+        "_prepare_and_dispatch",
+        lambda *_args, **kwargs: evaluated.append(kwargs["now"]) or "advanced",
+    )
+
+    assert operator._grant_exit(now=NOW) == "advanced"
+    assert evaluated == [observed_at, observed_at, observed_at]
+
+
 def test_partial_market_fill_waits_before_ledger_or_reconciliation(
     canonical_connection,  # noqa: F811
 ) -> None:
