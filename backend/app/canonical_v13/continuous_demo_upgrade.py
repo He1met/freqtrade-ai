@@ -21,7 +21,7 @@ from app.canonical_v13.models import SCHEMA_METADATA_TABLE
 CONTRACT: Final = "canonical-v13-bounded-continuous-demo-upgrade-v1"
 INTENT_CHECK: Final = "ck_trade_intents_trade_intents_intent_mode_values"
 DECISION_CHECK: Final = "ck_risk_decisions_risk_decisions_decision_mode_values"
-OLD_DISPATCH_SHAPE: Final = "ck_order_dispatch_receipts_order_dispatch_receipts_flat_capacity"
+OLD_DISPATCH_SHAPE: Final = "ck_order_dispatch_receipts_order_dispatch_receipts_flat_85c4"
 # SQLAlchemy deterministically shortens overlength PostgreSQL identifiers with
 # a hash suffix. Keep those exact persisted names so fresh metadata-created
 # schemas and upgraded schemas verify identically.
