@@ -1,8 +1,8 @@
-.PHONY: help bootstrap doctor up status down logs verify operator-token-init operator-token-status okx-demo-pin-account okx-demo-preflight okx-demo-compatibility okx-demo-canary okx-demo-e2e-offline okx-demo-e2e-controlled natural-chain-preflight evaluator-receipt-preflight natural-risk-budget-preflight autostart-install autostart-status autostart-logs autostart-restart autostart-uninstall db-backup db-init db-verify db-attestation-harden test
-.PHONY: help bootstrap doctor up status down logs verify operator-token-init operator-token-status okx-demo-pin-account okx-demo-preflight okx-demo-canary okx-demo-e2e-offline okx-demo-e2e-controlled autostart-install autostart-status autostart-logs autostart-restart autostart-uninstall db-backup db-init db-verify db-attestation-harden db-reconciliation-compact-plan db-reconciliation-compact-apply db-reconciliation-compact-verify test
+.PHONY: help bootstrap doctor up status down logs verify operator-token-init operator-token-status okx-demo-pin-account okx-demo-preflight okx-demo-compatibility okx-demo-canary okx-demo-e2e-offline okx-demo-e2e-controlled natural-chain-preflight evaluator-receipt-preflight natural-risk-budget-preflight autostart-install autostart-status autostart-logs autostart-restart autostart-uninstall db-backup db-init db-verify db-attestation-harden db-reconciliation-compact-plan db-reconciliation-compact-apply db-reconciliation-compact-verify test-dev test-subsystem test-pg test-frontend test-milestone test
 
 DATABASE_URL ?= postgresql+psycopg://freqtrade:change_me@localhost:5432/freqtrade_ai
 CANONICAL_REPO ?= $(CURDIR)
+BACKEND_PYTHON ?= $(CURDIR)/backend/.venv/bin/python
 
 help:
 	@backend/.venv/bin/python scripts/local_runtime.py doctor --json >/dev/null || true
@@ -20,6 +20,7 @@ help:
 	@printf '%s\n' 'The managed runtime uses only local PostgreSQL database freqtrade_ai.'
 	@printf '%s\n' 'One-time peer-admin attestation ACL: make db-attestation-harden'
 	@printf '%s\n' 'Reconciliation maintenance: make down; make db-reconciliation-compact-plan; review; make db-reconciliation-compact-apply; make up; make db-reconciliation-compact-verify'
+	@printf '%s\n' 'Tests: make test-dev TEST=... | test-subsystem TESTS="..." | test-pg TEST=... POSTGRES_TEST_URL=... | test-frontend | test-milestone'
 
 bootstrap:
 	backend/.venv/bin/python scripts/local_runtime.py bootstrap
@@ -127,5 +128,36 @@ db-reconciliation-compact-apply:
 db-reconciliation-compact-verify:
 	backend/.venv/bin/python scripts/compact_okx_demo_reconciliation.py --database-url "$(DATABASE_URL)" --verify
 
-test:
-	cd backend && . .venv/bin/activate && pytest
+test-dev:
+	@test -n "$(TEST)" || (printf '%s\n' 'TEST is required, for example TEST=tests/test_health.py' >&2; exit 2)
+	@test -x "$(BACKEND_PYTHON)" || (printf '%s\n' 'BACKEND_PYTHON is not executable; run make bootstrap or point it at a compatible venv' >&2; exit 2)
+	cd backend && "$(BACKEND_PYTHON)" -m pytest -q $(TEST)
+	git diff --check
+
+test-subsystem:
+	@test -n "$(TESTS)" || (printf '%s\n' 'TESTS is required, for example TESTS="tests/test_health.py tests/test_runtime_contract.py"' >&2; exit 2)
+	@test -x "$(BACKEND_PYTHON)" || (printf '%s\n' 'BACKEND_PYTHON is not executable; run make bootstrap or point it at a compatible venv' >&2; exit 2)
+	cd backend && "$(BACKEND_PYTHON)" -m pytest -q $(TESTS)
+	git diff --check
+
+test-pg:
+	@test -n "$(TEST)" || (printf '%s\n' 'TEST is required' >&2; exit 2)
+	@test -n "$(POSTGRES_TEST_URL)" || (printf '%s\n' 'POSTGRES_TEST_URL is required and must name an isolated temporary database' >&2; exit 2)
+	@test -x "$(BACKEND_PYTHON)" || (printf '%s\n' 'BACKEND_PYTHON is not executable; run make bootstrap or point it at a compatible venv' >&2; exit 2)
+	@case "$(POSTGRES_TEST_URL)" in *'/freqtrade_ai_v13'|*'/freqtrade_ai') printf '%s\n' 'Refusing a shared/runtime database; use an isolated temporary database' >&2; exit 2;; esac
+	cd backend && POSTGRES_WORKER_URL="$(POSTGRES_TEST_URL)" CANONICAL_V13_POSTGRES_URL="$(POSTGRES_TEST_URL)" "$(BACKEND_PYTHON)" -m pytest -q $(TEST)
+	git diff --check
+
+test-frontend:
+	cd frontend && npm test
+	git diff --check
+
+test-milestone:
+	@test -x "$(BACKEND_PYTHON)" || (printf '%s\n' 'BACKEND_PYTHON is not executable; run make bootstrap or point it at a compatible venv' >&2; exit 2)
+	cd backend && "$(BACKEND_PYTHON)" -m pytest
+	python3 -m compileall backend/app backend/tests scripts
+	cd frontend && npm test && npm run build
+	git diff --check
+	python3 scripts/scan_secrets.py
+
+test: test-milestone
