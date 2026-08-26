@@ -562,7 +562,11 @@ class ContinuousDemoSoakOperator:
             guard = session.exit_guard(
                 instrument=INSTRUMENT, expected_contracts=format(size.normalize(), "f")
             )
-        evaluated_at = max(now, _persisted_utc(guard.observed_at))
+        # The authenticated exchange snapshots are observed after the tick's
+        # initial timestamp.  Bind every downstream decision to that newer
+        # observation instead of treating normal network latency as future
+        # evidence.
+        operation_now = max(now, guard.observed_at)
         with self._deployment_factory() as connection:
             attestation = record_redacted_demo_attestation(
                 connection,
@@ -573,7 +577,7 @@ class ContinuousDemoSoakOperator:
                 permissions=guard.permissions,
                 observed_at=guard.observed_at,
                 expires_at=guard.expires_at,
-                evaluated_at=evaluated_at,
+                evaluated_at=operation_now,
             )
         with self._risk_factory() as connection:
             grant = grant_position_exit(
@@ -581,13 +585,13 @@ class ContinuousDemoSoakOperator:
                 entry_order_id=entry_order_id,
                 attestation_id=attestation.attestation_id,
                 guard=guard,
-                evaluated_at=evaluated_at,
+                evaluated_at=operation_now,
             )
         return self._prepare_and_dispatch(
             grant.risk_decision_id,
             attestation.attestation_id,
             signal_id=None,
-            now=evaluated_at,
+            now=operation_now,
         )
 
     def _exit_due(self, entry_order_id: UUID, *, now: datetime) -> bool:

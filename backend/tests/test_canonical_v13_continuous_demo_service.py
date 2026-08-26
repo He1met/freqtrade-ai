@@ -80,6 +80,53 @@ def test_prepare_freezes_natural_signal_and_single_position_boundaries(
     )
 
 
+def test_prepare_replaces_a_stopped_blocked_worker_with_current_release(
+    tmp_path, monkeypatch
+) -> None:
+    service = _load_script("canonical_continuous_demo_prepare_recovery")
+    _configure_roots(service, tmp_path, monkeypatch)
+    service._atomic(
+        service.PLAN_PATH,
+        {
+            "contract": service.CONTRACT,
+            "status": "RUNNING",
+            "release_sha": "0" * 40,
+            "release_digest": "1" * 64,
+            "deployment_id": str(DEPLOYMENT_ID),
+            "allow_real_funds": False,
+        },
+    )
+    service._atomic(
+        service.STATE_PATH,
+        {
+            "contract": service.CONTRACT,
+            "status": "BLOCKED",
+            "reason_code": "BLOCKED_CONTINUOUS_EXIT_GUARD_DRIFT",
+            "allow_real_funds": False,
+        },
+    )
+    monkeypatch.setattr(service, "_release", lambda: ("a" * 40, "b" * 64))
+    monkeypatch.setattr(service, "_active_deployment_id", lambda: DEPLOYMENT_ID)
+    calls = []
+    monkeypatch.setattr(
+        service.subprocess,
+        "run",
+        lambda command, **_kwargs: calls.append(command)
+        or SimpleNamespace(returncode=0),
+    )
+
+    plan = service.prepare()
+
+    assert plan["status"] == "PREPARED"
+    assert plan["release_sha"] == "a" * 40
+    assert plan["release_digest"] == "b" * 64
+    assert plan["repeat_noop"] is False
+    assert service._read(service.STATE_PATH)["status"] == "PREPARED"
+    assert calls == [
+        ["launchctl", "bootout", f"gui/{service.os.getuid()}/{service.LABEL}"]
+    ]
+
+
 def test_drained_soak_fails_closed_when_runtime_stop_fails(
     tmp_path, monkeypatch
 ) -> None:

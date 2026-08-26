@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import timedelta
+from decimal import Decimal
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -18,6 +20,7 @@ from tests.test_canonical_v13_continuous_demo_order_writer import (
     FakeContinuousExitTransport,
     _continuous_exit_grant,
 )
+from tests.test_canonical_v13_continuous_demo_execution import _exit_guard
 from tests.test_canonical_v13_phase9_execution_authority import (
     _production_chain,
     canonical_connection,  # noqa: F401, F811 - shared fixture
@@ -29,6 +32,75 @@ from tests.test_canonical_v13_research_evaluation import NOW
 class ForbiddenSessionFactory:
     def __call__(self):
         raise AssertionError("private OKX session must not be opened while drained and flat")
+
+
+def test_exit_uses_authenticated_guard_observation_as_operation_clock(monkeypatch) -> None:
+    @contextmanager
+    def connection_factory():
+        yield object()
+
+    guard = replace(
+        _exit_guard(),
+        observed_at=NOW + timedelta(seconds=1),
+        expires_at=NOW + timedelta(seconds=20),
+    )
+
+    class ExitSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _traceback):
+            return None
+
+        def exit_guard(self, *, instrument, expected_contracts):
+            assert instrument == "BTC-USDT-SWAP"
+            assert expected_contracts == "1"
+            return guard
+
+    operator = ContinuousDemoSoakOperator(
+        reader_factory=connection_factory,
+        deployment_factory=connection_factory,
+        approval_factory=connection_factory,
+        risk_factory=connection_factory,
+        order_factory=connection_factory,
+        fill_factory=connection_factory,
+        ledger_factory=connection_factory,
+        reconciliation_factory=connection_factory,
+        session_factory=ExitSession,
+        holder_token_digest="e" * 64,
+    )
+    deployment_id = uuid4()
+    entry_order_id = uuid4()
+    attestation_id = uuid4()
+    risk_decision_id = uuid4()
+    observed_times = []
+    monkeypatch.setattr(operator, "_active_deployment_id", lambda: deployment_id)
+    monkeypatch.setattr(operator, "_entry_order_id", lambda: entry_order_id)
+    monkeypatch.setattr(operator, "_ledger_net", lambda: Decimal("1"))
+    monkeypatch.setattr(
+        soak_module,
+        "record_redacted_demo_attestation",
+        lambda *_args, **kwargs: (
+            observed_times.append(kwargs["evaluated_at"])
+            or SimpleNamespace(attestation_id=attestation_id)
+        ),
+    )
+    monkeypatch.setattr(
+        soak_module,
+        "grant_position_exit",
+        lambda *_args, **kwargs: (
+            observed_times.append(kwargs["evaluated_at"])
+            or SimpleNamespace(risk_decision_id=risk_decision_id)
+        ),
+    )
+    monkeypatch.setattr(
+        operator,
+        "_prepare_and_dispatch",
+        lambda *_args, **kwargs: observed_times.append(kwargs["now"]) or "advanced",
+    )
+
+    assert operator._grant_exit(now=NOW) == "advanced"
+    assert observed_times == [guard.observed_at] * 3
 
 
 def test_openings_disabled_and_flat_is_drained_without_private_okx(  # noqa: F811

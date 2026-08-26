@@ -208,9 +208,28 @@ def prepare() -> dict[str, object]:
     deployment_id = _active_deployment_id()
     existing = _read(PLAN_PATH) if PLAN_PATH.exists() else None
     if existing is not None and existing.get("status") in {"PREPARED", "RUNNING", "DRAINING"}:
-        if existing.get("release_sha") != sha or existing.get("deployment_id") != str(deployment_id):
-            raise ContinuousDemoSoakServiceBlocked("BLOCKED_SOAK_EXISTING_PLAN_DRIFT")
-        return {**existing, "repeat_noop": True}
+        state = _read(STATE_PATH) if STATE_PATH.exists() else None
+        if state is None or state.get("status") != "BLOCKED":
+            if existing.get("release_sha") != sha or existing.get("deployment_id") != str(deployment_id):
+                raise ContinuousDemoSoakServiceBlocked("BLOCKED_SOAK_EXISTING_PLAN_DRIFT")
+            return {**existing, "repeat_noop": True}
+
+        # A failed worker is not running, but launchd can retain its loaded
+        # one-shot job.  Unload that exact job before replacing the failed
+        # plan with a release-bound retry; the prior failure remains in the
+        # append-only receipts log.
+        target = f"gui/{os.getuid()}/{LABEL}"
+        completed = subprocess.run(
+            ["launchctl", "bootout", target], capture_output=True, check=False
+        )
+        if completed.returncode != 0:
+            still_loaded = subprocess.run(
+                ["launchctl", "print", target], capture_output=True, check=False
+            ).returncode == 0
+            if still_loaded:
+                raise ContinuousDemoSoakServiceBlocked(
+                    "BLOCKED_SOAK_FAILED_AGENT_LOADED"
+                )
     plan = {
         "contract": CONTRACT,
         "status": "PREPARED",
@@ -230,6 +249,15 @@ def prepare() -> dict[str, object]:
         "drain_until_flat": True,
     }
     _atomic(PLAN_PATH, plan)
+    if existing is not None:
+        _atomic(
+            STATE_PATH,
+            {
+                **plan,
+                "updated_at": now.isoformat(),
+                "last_result": None,
+            },
+        )
     LOG_ROOT.mkdir(parents=True, exist_ok=True)
     PLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
     plist = {
