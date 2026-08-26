@@ -137,7 +137,8 @@ def test_drained_soak_fails_closed_when_runtime_stop_fails(
         "status": "STOPPED",
         "allow_real_funds": False,
     }
-    monkeypatch.setattr(service, "tick", lambda: stopped)
+    monkeypatch.setattr(service, "_operator", object)
+    monkeypatch.setattr(service, "tick", lambda **_kwargs: stopped)
     monkeypatch.setattr(
         service,
         "_phase9",
@@ -153,6 +154,35 @@ def test_drained_soak_fails_closed_when_runtime_stop_fails(
     assert state["status"] == "BLOCKED"
     assert state["reason_code"] == "BLOCKED_RUNTIME_STOP"
     assert state["allow_real_funds"] is False
+
+
+def test_run_reuses_one_operator_across_ticks(tmp_path, monkeypatch) -> None:
+    service = _load_script("canonical_continuous_demo_reuse_operator")
+    _configure_roots(service, tmp_path, monkeypatch)
+    singleton = object()
+    created = []
+    observed = []
+    states = iter(
+        (
+            {"status": "RUNNING", "allow_real_funds": False},
+            {"status": "BLOCKED", "allow_real_funds": False},
+        )
+    )
+    monkeypatch.setattr(
+        service,
+        "_operator",
+        lambda: created.append(singleton) or singleton,
+    )
+    monkeypatch.setattr(
+        service,
+        "tick",
+        lambda *, operator: observed.append(operator) or next(states),
+    )
+    monkeypatch.setattr(service.time, "sleep", lambda _seconds: None)
+
+    assert service.run() == 1
+    assert created == [singleton]
+    assert observed == [singleton, singleton]
 
 
 def test_confirm_running_plan_is_exact_noop(tmp_path, monkeypatch) -> None:
