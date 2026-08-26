@@ -8,6 +8,7 @@ from urllib.error import URLError
 import pytest
 from sqlalchemy import create_engine
 
+from app.canonical_v13 import okx_public_market
 from app.canonical_v13.control_plane import (
     create_configuration_draft,
     validate_configuration_version,
@@ -235,6 +236,47 @@ def test_public_adapter_is_paged_deterministic_and_receipted() -> None:
         "2026-08-14T00:30:00+00:00",
         "2026-08-14T00:45:00+00:00",
     ]
+
+
+def test_public_fetch_does_not_require_content_length_and_stays_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested_sizes: list[int] = []
+
+    class ResponseWithoutContentLength:
+        headers: dict[str, str] = {}
+
+        def __init__(self, payload: bytes) -> None:
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def read(self, size: int) -> bytes:
+            requested_sizes.append(size)
+            return self.payload[:size]
+
+    monkeypatch.setattr(
+        okx_public_market,
+        "urlopen",
+        lambda _request, timeout: ResponseWithoutContentLength(b"{}"),
+    )
+    assert okx_public_market._default_fetch("https://www.okx.com/public", 3) == b"{}"
+    assert requested_sizes == [okx_public_market.MAXIMUM_RESPONSE_BYTES + 1]
+
+    monkeypatch.setattr(
+        okx_public_market,
+        "urlopen",
+        lambda _request, timeout: ResponseWithoutContentLength(
+            b"x" * (okx_public_market.MAXIMUM_RESPONSE_BYTES + 1)
+        ),
+    )
+    with pytest.raises(CanonicalMarketAcquisitionBlocked) as raised:
+        okx_public_market._default_fetch("https://www.okx.com/public", 3)
+    assert raised.value.code == "BLOCKED_OKX_RESPONSE_TOO_LARGE"
 
 
 @pytest.mark.parametrize(
