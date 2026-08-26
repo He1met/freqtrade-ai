@@ -67,7 +67,6 @@
     "frontend/src/pages/okxDemoDisplay.ts",
     "scripts/materialize_blueprint_research_candidates.py",
     "scripts/download_okx_research_market_data.py",
-    "scripts/configure_okx_demo_continuous.py",
     "config/app.yaml",
     "config/backtest_profiles.yaml",
     "config/exchange.yaml",
@@ -7866,18 +7865,6 @@
       "reason": "Canonical Demo-only fail-closed invariant reviewed at this exact syntax node.",
       "owner": "issue-724-phase9-continuous-demo",
       "dependency": "Demo-only, no-real-funds, single-position execution safety contract"
-    },
-    {
-      "path": "scripts/configure_okx_demo_continuous.py",
-      "line": 82,
-      "symbol": "<module>.main.dict:allow_real_funds",
-      "fingerprint": "sha256:52c3964bbc67ffaea8f6c27874c32ab6d69d2e49903173e53af132cf22d640ab",
-      "category": "SAFETY_INVARIANT",
-      "language": "python",
-      "disposition": "TECHNICAL",
-      "reason": "V1.3 technical/safety invariant reviewed at this exact syntax node.",
-      "owner": "issue-704-old-rule-removal",
-      "dependency": "stable runtime safety and canonical bundle contract"
     },
     {
       "path": "scripts/download_okx_research_market_data.py",
