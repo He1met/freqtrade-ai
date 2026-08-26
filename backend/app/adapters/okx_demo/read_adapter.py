@@ -64,7 +64,7 @@ from app.adapters.okx_demo.models import (
     TrustedSignalBundle,
     TrustedSnapshotReference,
 )
-from app.adapters.okx_demo.transport import OkxReadTransport, UrllibOkxReadTransport
+from app.adapters.okx_demo.transport import OkxReadHttpResponse, UrllibOkxReadTransport
 
 
 SWAP_ID_PATTERN = re.compile(r"^[A-Z0-9]+-[A-Z0-9]+-SWAP$")
@@ -772,11 +772,23 @@ class OkxDemoReadAdapter:
             )
         # Historical records retain their exchange timestamps for ordering and
         # reconciliation watermarks, but those timestamps do not describe the
-        # freshness of a just-authenticated identity/archive response. Treat
-        # the HTTP receipt as the snapshot freshness evidence for those reads.
+        # freshness of a just-authenticated identity/archive response. Position
+        # ``uTime`` likewise means "last position change", not "time of this
+        # authenticated account read"; an unchanged overnight position must not
+        # make a fresh private snapshot look stale. Pending-order rows have the
+        # same identity/history semantics. Treat the HTTP receipt as the
+        # snapshot freshness evidence for these reads while preserving the
+        # exchange timestamp in metadata and normalized items.
         freshness_anchor = (
             received_at
-            if resource in {"order", "orders_history", "fills_history"}
+            if resource
+            in {
+                "order",
+                "orders_history",
+                "fills_history",
+                "positions",
+                "pending_orders",
+            }
             else exchange_timestamp or received_at
         )
         expires_at = freshness_anchor + timedelta(

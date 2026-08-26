@@ -98,6 +98,18 @@ from app.canonical_v13.canary_recovery_approval_upgrade import (
     rollback_canary_recovery_approval_upgrade,
     verify_canary_recovery_approval_upgrade,
 )
+from app.canonical_v13.continuous_demo_upgrade import (
+    CanonicalContinuousDemoUpgradeBlocked,
+    apply_continuous_demo_upgrade,
+    rollback_continuous_demo_upgrade,
+    verify_continuous_demo_upgrade,
+)
+from app.canonical_v13.continuous_demo_acl_upgrade import (
+    CanonicalContinuousDemoAclUpgradeBlocked,
+    apply_continuous_demo_acl_upgrade,
+    rollback_continuous_demo_acl_upgrade,
+    verify_continuous_demo_acl_upgrade,
+)
 from app.canonical_v13.genesis import (
     assert_postgresql_acl_sql,
     postgresql_owner_table_grant_statements,
@@ -200,6 +212,8 @@ def verify(
     acceptance_trigger_status: str | None = None
     shadow_risk_acl_status: str | None = None
     order_recovery_evidence_acl_status: str | None = None
+    continuous_demo_schema_status: str | None = None
+    continuous_demo_acl_status: str | None = None
     try:
         with engine.connect() as connection:
             if require_research_principals and not require_phase9_principals:
@@ -243,6 +257,18 @@ def verify(
                     )
                 except CanonicalOrderRecoveryEvidenceAclUpgradeBlocked:
                     order_recovery_evidence_acl_status = "BLOCKED"
+                try:
+                    continuous_demo_schema_status = verify_continuous_demo_upgrade(
+                        connection
+                    ).status
+                except CanonicalContinuousDemoUpgradeBlocked:
+                    continuous_demo_schema_status = "BLOCKED"
+                try:
+                    continuous_demo_acl_status = verify_continuous_demo_acl_upgrade(
+                        connection, role_mapping=mapping
+                    ).status
+                except CanonicalContinuousDemoAclUpgradeBlocked:
+                    continuous_demo_acl_status = "BLOCKED"
     finally:
         engine.dispose()
     problems = list(result.problems)
@@ -255,6 +281,10 @@ def verify(
         and order_recovery_evidence_acl_status != "ACCEPTED"
     ):
         problems.append("order recovery evidence ACL receipt is not ACCEPTED")
+    if require_phase9_principals and continuous_demo_schema_status != "ACCEPTED":
+        problems.append("continuous Demo schema receipt is not ACCEPTED")
+    if require_phase9_principals and continuous_demo_acl_status != "ACCEPTED":
+        problems.append("continuous Demo ACL receipt is not ACCEPTED")
     return {
         "status": "ACCEPTED" if not problems else "BLOCKED",
         "problems": problems,
@@ -270,6 +300,8 @@ def verify(
         "order_recovery_evidence_acl_status": (
             order_recovery_evidence_acl_status
         ),
+        "continuous_demo_schema_status": continuous_demo_schema_status,
+        "continuous_demo_acl_status": continuous_demo_acl_status,
         "capability_role_count": result.capability_role_count,
         "explicit_acl_count": result.explicit_acl_count,
     }
@@ -913,6 +945,61 @@ def canary_recovery_approval(*, operation: str) -> dict[str, object]:
     return payload
 
 
+def continuous_demo_schema(*, operation: str) -> dict[str, object]:
+    engine = create_engine(_database_url(), pool_pre_ping=True)
+    try:
+        if operation == "verify":
+            with engine.connect() as connection:
+                with connection.begin():
+                    connection.exec_driver_sql("SET TRANSACTION READ ONLY")
+                    result = verify_continuous_demo_upgrade(connection)
+        else:
+            actor_identity = _upgrade_actor()
+            with engine.begin() as connection:
+                result = (
+                    apply_continuous_demo_upgrade(connection)
+                    if operation == "apply"
+                    else rollback_continuous_demo_upgrade(connection)
+                )
+    finally:
+        engine.dispose()
+    payload = asdict(result)
+    if operation != "verify":
+        payload["actor_identity"] = actor_identity
+    return payload
+
+
+def continuous_demo_acl(*, operation: str) -> dict[str, object]:
+    engine = create_engine(_database_url(), pool_pre_ping=True)
+    mapping = local_role_mapping()
+    try:
+        if operation == "verify":
+            with engine.connect() as connection:
+                with connection.begin():
+                    connection.exec_driver_sql("SET TRANSACTION READ ONLY")
+                    result = verify_continuous_demo_acl_upgrade(
+                        connection, role_mapping=mapping
+                    )
+        else:
+            actor_identity = _upgrade_actor()
+            with engine.begin() as connection:
+                result = (
+                    apply_continuous_demo_acl_upgrade(
+                        connection, role_mapping=mapping
+                    )
+                    if operation == "apply"
+                    else rollback_continuous_demo_acl_upgrade(
+                        connection, role_mapping=mapping
+                    )
+                )
+    finally:
+        engine.dispose()
+    payload = asdict(result)
+    if operation != "verify":
+        payload["actor_identity"] = actor_identity
+    return payload
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -966,6 +1053,12 @@ def main(argv: list[str] | None = None) -> int:
             "canary-recovery-approval-verify",
             "canary-recovery-approval-apply",
             "canary-recovery-approval-rollback",
+            "continuous-demo-verify",
+            "continuous-demo-apply",
+            "continuous-demo-rollback",
+            "continuous-demo-acl-verify",
+            "continuous-demo-acl-apply",
+            "continuous-demo-acl-rollback",
         ),
     )
     parser.add_argument(
@@ -1109,6 +1202,14 @@ def main(argv: list[str] | None = None) -> int:
             payload = canary_recovery_approval(
                 operation=args.command.removeprefix("canary-recovery-approval-")
             )
+        elif args.command.startswith("continuous-demo-acl-"):
+            payload = continuous_demo_acl(
+                operation=args.command.removeprefix("continuous-demo-acl-")
+            )
+        elif args.command.startswith("continuous-demo-"):
+            payload = continuous_demo_schema(
+                operation=args.command.removeprefix("continuous-demo-")
+            )
         else:
             payload = authority_apply(rollback=args.command == "authority-rollback")
     except BootstrapBlocked as exc:
@@ -1140,6 +1241,10 @@ def main(argv: list[str] | None = None) -> int:
     except CanonicalOrderDispatchRecoveryUpgradeBlocked as exc:
         payload = {"status": "BLOCKED", "reason": str(exc)}
     except CanonicalCanaryRecoveryApprovalUpgradeBlocked as exc:
+        payload = {"status": "BLOCKED", "reason": str(exc)}
+    except CanonicalContinuousDemoUpgradeBlocked as exc:
+        payload = {"status": "BLOCKED", "reason": str(exc)}
+    except CanonicalContinuousDemoAclUpgradeBlocked as exc:
         payload = {"status": "BLOCKED", "reason": str(exc)}
     except (SQLAlchemyError, ValueError):
         payload = {"status": "BLOCKED", "reason": "bootstrap verification failed"}

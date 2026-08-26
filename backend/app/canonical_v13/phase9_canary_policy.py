@@ -1006,6 +1006,7 @@ def validate_persisted_canary_probe_receipt(
     *,
     probe_receipt_id: UUID,
     evaluated_at: datetime,
+    strategy_max_leverage: Decimal | None = None,
 ) -> dict[str, object]:
     """Read and recompute one immutable probe receipt without creating evidence."""
 
@@ -1044,7 +1045,11 @@ def validate_persisted_canary_probe_receipt(
         .one_or_none()
     )
     return _validated_probe_receipt(
-        row, attestation=attestation, deployment=deployment, now=now
+        row,
+        attestation=attestation,
+        deployment=deployment,
+        now=now,
+        strategy_max_leverage=strategy_max_leverage,
     )
 
 

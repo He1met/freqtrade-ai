@@ -61,7 +61,6 @@ from app.canonical_v13.reconciliation import reconcile_production_demo_chain
 from app.canonical_v13.order_service import CANONICAL_ORDER_WRITER_IDENTITY
 from app.canonical_v13.phase9_order_writer import (
     CANONICAL_ORDER_WRITER_PROCESS_IDENTITY,
-    CanaryRecoveryOrder,
     DispatchedDemoOrder,
     PreparedDemoOrder,
     dispatch_demo_order,
@@ -258,15 +257,25 @@ class CanonicalFillWriterOperator:
             or decision is None
             or decision["status"] != "RISK_ACCEPTED"
             or not isinstance(decision_json, Mapping)
-            or decision_json.get("decision_mode") != "EXECUTION"
+            or decision_json.get("decision_mode")
+            not in {"EXECUTION", "CONTINUOUS_OPEN", "POSITION_EXIT"}
             or decision_json.get("execution_authorized") is not True
             or intent is None
             or intent["status"] != "INTENT_ACCEPTED"
             or not isinstance(intent_json, Mapping)
             or not isinstance(exchange_body, Mapping)
             or exchange_body.get("instId") != "BTC-USDT-SWAP"
-            or exchange_body.get("side") != "buy"
             or exchange_body.get("posSide") != "long"
+            or (
+                decision_json.get("decision_mode"),
+                exchange_body.get("side"),
+                exchange_body.get("ordType"),
+            )
+            not in {
+                ("EXECUTION", "buy", "limit"),
+                ("CONTINUOUS_OPEN", "buy", "market"),
+                ("POSITION_EXIT", "sell", "market"),
+            }
         ):
             raise CanonicalPhase9CompositionBlocked(
                 "BLOCKED_PHASE9_FILL_ORDER", "accepted Demo order is required"
@@ -320,6 +329,19 @@ class CanonicalFillWriterOperator:
                 "position_side": str(exchange_body["posSide"]),
                 "requested_size": str(requested_size),
             }
+            if decision_json.get("decision_mode") in {
+                "CONTINUOUS_OPEN",
+                "POSITION_EXIT",
+            }:
+                reference_price = _positive_decimal(
+                    decision_json.get("reference_price"), field="reference_price"
+                )
+                payload.update(
+                    reference_price=str(reference_price),
+                    slippage_bps=str(
+                        (abs(price - reference_price) / reference_price * Decimal("10000"))
+                    ),
+                )
             validated.append((exchange_fill_id, payload))
         persisted: list[UUID] = []
         for exchange_fill_id, payload in validated:
@@ -354,13 +376,15 @@ class CanonicalLedgerWriterOperator:
                 or not isinstance(payload, Mapping)
                 or payload.get("evidence_class") != "PRODUCTION_OKX_DEMO"
                 or payload.get("allow_real_funds") is not False
-                or payload.get("side") != "buy"
                 or payload.get("position_side") != "long"
+                or payload.get("side") not in {"buy", "sell"}
             ):
                 raise CanonicalPhase9CompositionBlocked(
                     "BLOCKED_PHASE9_LEDGER_FILL", "exact long Demo fill is required"
                 )
-            amount = _positive_decimal(payload.get("size"), field="size")
+            size = _positive_decimal(payload.get("size"), field="size")
+            side = str(payload.get("side"))
+            amount = size if side == "buy" else -size
             exchange_fill_id = str(payload.get("exchange_fill_id") or "").strip()
             instrument = str(payload.get("instrument") or "").strip()
             if not exchange_fill_id or instrument != "BTC-USDT-SWAP":
@@ -370,10 +394,18 @@ class CanonicalLedgerWriterOperator:
             return post_production_demo_ledger_entry(
                 connection,
                 fill_id=fill_id,
-                entry_key=f"okx-demo-fill:{exchange_fill_id}:long-contracts",
+                entry_key=(
+                    f"okx-demo-fill:{exchange_fill_id}:long-contracts"
+                    if side == "buy"
+                    else f"okx-demo-fill:{exchange_fill_id}:long-close-contracts"
+                ),
                 asset=instrument,
                 amount=amount,
-                entry_type="OKX_DEMO_LONG_FILL_CONTRACTS",
+                entry_type=(
+                    "OKX_DEMO_LONG_FILL_CONTRACTS"
+                    if side == "buy"
+                    else "OKX_DEMO_LONG_CLOSE_FILL_CONTRACTS"
+                ),
             )
 
 
@@ -383,7 +415,13 @@ class CanonicalReconciliationWriterOperator:
     def __init__(self, connection_factory: ConnectionFactory) -> None:
         self._connection_factory = connection_factory
 
-    def reconcile(self, *, order_id: UUID) -> tuple[UUID, ...]:
+    def reconcile(
+        self,
+        *,
+        order_id: UUID,
+        flat_probe_receipt_id: UUID | None = None,
+        evaluated_at: datetime | None = None,
+    ) -> tuple[UUID, ...]:
         with self._connection_factory() as connection:
             connection = _effective(connection)
             fills = connection.execute(
@@ -411,6 +449,8 @@ class CanonicalReconciliationWriterOperator:
                         order_id=order_id,
                         fill_id=fill["id"],
                         ledger_entry_id=ledger["id"],
+                        flat_probe_receipt_id=flat_probe_receipt_id,
+                        evaluated_at=evaluated_at,
                     )
                 )
             return tuple(runs)

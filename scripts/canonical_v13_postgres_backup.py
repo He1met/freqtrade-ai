@@ -88,6 +88,14 @@ from app.canonical_v13.order_recovery_evidence_acl_upgrade import (  # noqa: E40
     CanonicalOrderRecoveryEvidenceAclUpgradeBlocked,
     verify_order_recovery_evidence_acl_upgrade,
 )
+from app.canonical_v13.continuous_demo_upgrade import (  # noqa: E402
+    CanonicalContinuousDemoUpgradeBlocked,
+    verify_continuous_demo_upgrade,
+)
+from app.canonical_v13.continuous_demo_acl_upgrade import (  # noqa: E402
+    CanonicalContinuousDemoAclUpgradeBlocked,
+    verify_continuous_demo_acl_upgrade,
+)
 
 BACKUP_CONTRACT: Final = "canonical-v13-postgres-data-backup-v2"
 EXPECTED_TABLE_COUNT: Final = 58
@@ -650,6 +658,32 @@ def _verify_restore_trigger_boundary(
         raise CanonicalBackupBlocked(
             "BLOCKED_CANONICAL_RESTORE_ORDER_RECOVERY_EVIDENCE_ACL_CONTRACT",
             "order recovery evidence ACL verifier did not return ACCEPTED",
+        )
+    try:
+        continuous_schema = verify_continuous_demo_upgrade(connection)
+    except CanonicalContinuousDemoUpgradeBlocked as exc:
+        raise CanonicalBackupBlocked(
+            "BLOCKED_CANONICAL_RESTORE_CONTINUOUS_DEMO_SCHEMA_CONTRACT",
+            "continuous Demo schema contract is not accepted",
+        ) from exc
+    if continuous_schema.status != "ACCEPTED":
+        raise CanonicalBackupBlocked(
+            "BLOCKED_CANONICAL_RESTORE_CONTINUOUS_DEMO_SCHEMA_CONTRACT",
+            "continuous Demo schema verifier did not return ACCEPTED",
+        )
+    try:
+        continuous_acl = verify_continuous_demo_acl_upgrade(
+            connection, role_mapping=local_role_mapping()
+        )
+    except CanonicalContinuousDemoAclUpgradeBlocked as exc:
+        raise CanonicalBackupBlocked(
+            "BLOCKED_CANONICAL_RESTORE_CONTINUOUS_DEMO_ACL_CONTRACT",
+            "continuous Demo ACL contract is not accepted",
+        ) from exc
+    if continuous_acl.status != "ACCEPTED":
+        raise CanonicalBackupBlocked(
+            "BLOCKED_CANONICAL_RESTORE_CONTINUOUS_DEMO_ACL_CONTRACT",
+            "continuous Demo ACL verifier did not return ACCEPTED",
         )
     try:
         dispatch_status = verify_order_dispatch_status_upgrade(connection)

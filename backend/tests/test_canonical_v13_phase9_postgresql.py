@@ -131,6 +131,20 @@ from app.canonical_v13.canary_recovery_approval_upgrade import (
     rollback_canary_recovery_approval_upgrade,
     verify_canary_recovery_approval_upgrade,
 )
+from app.canonical_v13.continuous_demo_upgrade import (
+    CanonicalContinuousDemoUpgradeBlocked,
+    apply_continuous_demo_upgrade,
+    rollback_continuous_demo_upgrade,
+    verify_continuous_demo_upgrade,
+)
+from app.canonical_v13.continuous_demo_acl_upgrade import (
+    CONTINUOUS_RECONCILIATION_WRITER_READ_DELTA,
+    CONTINUOUS_RISK_WRITER_READ_DELTA,
+    CanonicalContinuousDemoAclUpgradeBlocked,
+    apply_continuous_demo_acl_upgrade,
+    rollback_continuous_demo_acl_upgrade,
+    verify_continuous_demo_acl_upgrade,
+)
 from app.canonical_v13.risk_service import create_production_demo_intent
 from app.canonical_v13.research_evaluation import qualify_target, score_target
 from app.canonical_v13.research_validation import (
@@ -1299,6 +1313,138 @@ def test_phase9_transition_upgrade_backfills_and_separates_shadow_execution(
                 )
                 assert acl_after.accepted is True
                 assert acl_after.explicit_acl_count == acl_before.explicit_acl_count
+            finally:
+                transaction.rollback()
+    finally:
+        engine.dispose()
+
+
+def test_continuous_demo_upgrade_fresh_apply_replay_rollback_and_tamper() -> None:
+    assert DATABASE_URL is not None
+    engine = create_engine(DATABASE_URL)
+    try:
+        with engine.connect() as connection:
+            transaction = connection.begin()
+            try:
+                previous = verify_continuous_demo_upgrade(connection)
+                assert previous.status == "PREVIOUS_READY"
+
+                upgraded = apply_continuous_demo_upgrade(connection)
+                assert upgraded.status == "UPGRADED"
+                assert upgraded.repeat_noop is False
+                assert upgraded.accepted_modes[-2:] == (
+                    "CONTINUOUS_OPEN",
+                    "POSITION_EXIT",
+                )
+                replay = apply_continuous_demo_upgrade(connection)
+                assert replay.status == "ACCEPTED"
+                assert replay.repeat_noop is True
+                assert replay.lineage_digest == upgraded.lineage_digest
+
+                connection.execute(
+                    text(
+                        "ALTER TABLE strategy_platform_v13.order_dispatch_receipts "
+                        "DISABLE TRIGGER order_dispatch_mode_immutable"
+                    )
+                )
+                with pytest.raises(
+                    CanonicalContinuousDemoUpgradeBlocked,
+                    match="dispatch_mode_guard=missing",
+                ):
+                    verify_continuous_demo_upgrade(connection)
+                connection.execute(
+                    text(
+                        "ALTER TABLE strategy_platform_v13.order_dispatch_receipts "
+                        "ENABLE TRIGGER order_dispatch_mode_immutable"
+                    )
+                )
+
+                rolled_back = rollback_continuous_demo_upgrade(connection)
+                assert rolled_back.status == "ROLLED_BACK"
+                assert verify_continuous_demo_upgrade(connection).status == "PREVIOUS_READY"
+                reapplied = apply_continuous_demo_upgrade(connection)
+                assert reapplied.status == "UPGRADED"
+                assert apply_continuous_demo_upgrade(connection).repeat_noop is True
+            finally:
+                transaction.rollback()
+    finally:
+        engine.dispose()
+
+
+def test_continuous_demo_acl_is_select_only_replayable_and_reversible() -> None:
+    assert DATABASE_URL is not None
+    mapping = CanonicalRoleMapping.from_prefix(
+        os.environ.get("CANONICAL_V13_ROLE_PREFIX", "freqtrade_ai_v13_ci_")
+    )
+    engine = create_engine(DATABASE_URL)
+    try:
+        with engine.connect() as connection:
+            transaction = connection.begin()
+            try:
+                assert apply_continuous_demo_upgrade(connection).status in {
+                    "UPGRADED",
+                    "ACCEPTED",
+                }
+                previous = verify_continuous_demo_acl_upgrade(
+                    connection, role_mapping=mapping
+                )
+                assert previous.status == "PREVIOUS_READY"
+                upgraded = apply_continuous_demo_acl_upgrade(
+                    connection, role_mapping=mapping
+                )
+                assert upgraded.status == "UPGRADED"
+                assert upgraded.repeat_noop is False
+                replay = apply_continuous_demo_acl_upgrade(
+                    connection, role_mapping=mapping
+                )
+                assert replay.status == "ACCEPTED"
+                assert replay.repeat_noop is True
+                for logical_role, tables in {
+                    "canonical_risk_writer": CONTINUOUS_RISK_WRITER_READ_DELTA,
+                    "canonical_reconciliation_writer": (
+                        CONTINUOUS_RECONCILIATION_WRITER_READ_DELTA
+                    ),
+                }.items():
+                    for table_name in tables:
+                        privileges = replay.privileges[logical_role][table_name]
+                        assert privileges["SELECT"] is True
+                        assert all(
+                            value is False
+                            for privilege, value in privileges.items()
+                            if privilege != "SELECT"
+                        )
+
+                risk_role = mapping.physical("canonical_risk_writer")
+                connection.execute(
+                    text(
+                        "GRANT UPDATE ON TABLE "
+                        "strategy_platform_v13.strategy_artifacts TO " + risk_role
+                    )
+                )
+                with pytest.raises(
+                    CanonicalContinuousDemoAclUpgradeBlocked,
+                    match="BLOCKED_PARTIAL_CONTINUOUS_DEMO_ACL_UPGRADE",
+                ):
+                    verify_continuous_demo_acl_upgrade(
+                        connection, role_mapping=mapping
+                    )
+                connection.execute(
+                    text(
+                        "REVOKE UPDATE ON TABLE "
+                        "strategy_platform_v13.strategy_artifacts FROM " + risk_role
+                    )
+                )
+
+                rolled_back = rollback_continuous_demo_acl_upgrade(
+                    connection, role_mapping=mapping
+                )
+                assert rolled_back.status == "ROLLED_BACK"
+                assert verify_continuous_demo_acl_upgrade(
+                    connection, role_mapping=mapping
+                ).status == "PREVIOUS_READY"
+                assert apply_continuous_demo_acl_upgrade(
+                    connection, role_mapping=mapping
+                ).status == "UPGRADED"
             finally:
                 transaction.rollback()
     finally:

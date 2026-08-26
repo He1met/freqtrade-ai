@@ -605,7 +605,7 @@ def test_order_identity_still_rejects_stale_response_receipt() -> None:
         instance.order("BTC-USDT-SWAP", order_id="123")
 
 
-def test_realtime_snapshot_still_rejects_old_exchange_timestamp(monkeypatch) -> None:
+def test_market_snapshot_still_rejects_old_exchange_timestamp(monkeypatch) -> None:
     instance, _transport = adapter([envelope([])])
     monkeypatch.setattr(
         instance,
@@ -615,13 +615,38 @@ def test_realtime_snapshot_still_rejects_old_exchange_timestamp(monkeypatch) -> 
 
     with pytest.raises(OkxReadAdapterError, match="snapshot is expired"):
         instance._request(
-            resource="pending_orders",
+            resource="ticker",
             path="/api/v5/test",
             query={},
             authenticated=False,
             parser=lambda _data: [],
             allow_empty=True,
         )
+
+
+@pytest.mark.parametrize("resource", ["positions", "pending_orders"])
+def test_private_account_state_freshness_uses_authenticated_response_receipt(
+    monkeypatch,
+    resource,
+) -> None:
+    instance, _transport = adapter(
+        [envelope([])], credentials=RecordedCredentialProvider()
+    )
+    historical_timestamp = NOW - timedelta(days=30)
+    monkeypatch.setattr(instance, "_latest_timestamp", lambda _items: historical_timestamp)
+
+    snapshot = instance._request(
+        resource=resource,
+        path="/api/v5/test",
+        query={},
+        authenticated=True,
+        parser=lambda _data: [],
+        allow_empty=True,
+    )
+
+    assert snapshot.metadata.fetched_at == NOW
+    assert snapshot.metadata.exchange_timestamp == historical_timestamp
+    assert snapshot.metadata.expires_at == NOW + timedelta(seconds=15)
 
 
 def test_official_trade_id_is_normalized_to_internal_fill_id() -> None:

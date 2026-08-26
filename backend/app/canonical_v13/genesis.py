@@ -47,14 +47,15 @@ CANONICAL_GUARD_FUNCTION_NAMES: Final = (
     "guard_acceptance_signals_immutable",
     "guard_optimization_runs_terminal_observability",
 )
-# These two functions belong to the reversible Phase B-to-C transition upgrade.
-# They are valid canonical user objects while that scoped upgrade is applied, but
-# are deliberately not part of the genesis owner/ACL plan because rollback removes
-# them.  Keeping the optional allowlist separate prevents fresh-genesis bootstrap
-# from attempting to ALTER functions that do not exist yet.
+# These functions belong to reversible scoped Phase 9 upgrades. They are valid
+# canonical user objects while their upgrade is applied, but are deliberately
+# not part of the genesis owner/ACL plan because rollback removes them. Keeping
+# the optional allowlist separate prevents fresh-genesis bootstrap from trying
+# to ALTER functions that do not exist yet.
 CANONICAL_OPTIONAL_GUARD_FUNCTION_NAMES: Final = (
     "guard_trade_intent_mode_immutable",
     "guard_risk_decision_mode_immutable",
+    "guard_order_dispatch_mode_immutable",
 )
 
 
