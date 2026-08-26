@@ -371,7 +371,7 @@ def cancel_prepared_demo_order(
 def _exchange_body(
     order_request: Mapping[str, str], *, risk_decision_id: UUID
 ) -> dict[str, str]:
-    persisted = {
+    opening = {
         "instId",
         "tdMode",
         "side",
@@ -380,18 +380,38 @@ def _exchange_body(
         "sz",
         "px",
     }
+    closing = opening - {"px"}
     observed = dict(order_request)
-    if set(observed) == persisted:
+    allowed = opening if "px" in observed else closing
+    if set(observed) == allowed:
         observed["clOrdId"] = canary_client_order_id(risk_decision_id)
-    elif set(observed) != persisted | {"clOrdId"}:
+    elif set(observed) != allowed | {"clOrdId"}:
         raise CanonicalExecutionChainBlocked(
             "BLOCKED_ORDER_REQUEST_FIELDS", "order request field set is not allowlisted"
         )
+    is_open_limit = (
+        observed["tdMode"] == "isolated"
+        and observed["side"] == "buy"
+        and observed["posSide"] == "long"
+        and observed["ordType"] == "limit"
+        and "px" in observed
+    )
+    is_open_market = (
+        observed["tdMode"] == "isolated"
+        and observed["side"] == "buy"
+        and observed["posSide"] == "long"
+        and observed["ordType"] == "market"
+        and "px" not in observed
+    )
+    is_close = (
+        observed["tdMode"] == "isolated"
+        and observed["side"] == "sell"
+        and observed["posSide"] == "long"
+        and observed["ordType"] == "market"
+        and "px" not in observed
+    )
     if (
-        observed["tdMode"] != "isolated"
-        or observed["side"] != "buy"
-        or observed["posSide"] != "long"
-        or observed["ordType"] != "limit"
+        not (is_open_limit or is_open_market or is_close)
         or not all(isinstance(value, str) and value for value in observed.values())
     ):
         raise CanonicalExecutionChainBlocked(
@@ -1902,6 +1922,7 @@ def _claim_dispatch(
             canary_risk_policy_id=policy["id"],
             probe_receipt_id=probe["id"],
             execution_attestation_id=attestation["id"],
+            dispatch_mode="CANARY_OPEN",
             attempt_ordinal=attempt_ordinal,
             request_digest=order["request_digest"],
             holder_identity=holder_identity,
@@ -1912,10 +1933,12 @@ def _claim_dispatch(
             lease_expires_at=lease["expires_at"],
             account_fingerprint_digest=guard.account_fingerprint_digest,
             credential_generation_digest=guard.credential_generation_digest,
+            reference_price=guard_limit,
             limit_price=guard_limit,
             effective_leverage=guard_leverage,
             minimum_size=guard_minimum,
             maximum_buy_contracts=guard_maximum,
+            maximum_close_contracts=None,
             long_contracts=guard_long,
             short_contracts=guard_short,
             active_position_count=guard.active_position_count,
@@ -1929,6 +1952,9 @@ def _claim_dispatch(
             maximum_order_quantity_digest=guard.maximum_order_quantity_digest,
             maximum_order_quantity_observed_at=guard.maximum_order_quantity_observed_at,
             maximum_order_quantity_expires_at=guard.maximum_order_quantity_expires_at,
+            close_capacity_digest=None,
+            close_capacity_observed_at=None,
+            close_capacity_expires_at=None,
             guard_leverage_digest=guard.leverage_digest,
             guard_leverage_observed_at=guard.leverage_observed_at,
             guard_leverage_expires_at=guard.leverage_expires_at,

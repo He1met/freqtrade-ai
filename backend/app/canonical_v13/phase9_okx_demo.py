@@ -161,6 +161,100 @@ class RedactedOkxDemoDispatchGuard:
         return _digest(redacted_dispatch_guard_payload(self))
 
 
+@dataclass(frozen=True)
+class RedactedOkxDemoExitGuard:
+    """Fresh, redacted authority to reduce one exact isolated long position."""
+
+    execution_target: str
+    instrument: str
+    account_fingerprint_digest: str
+    credential_generation_digest: str
+    permissions: Mapping[str, bool]
+    simulated_trading: bool
+    allow_real_funds: bool
+    reference_price: str
+    contract_value: str
+    effective_leverage: str
+    minimum_size: str
+    lot_size: str
+    close_contracts: str
+    available_contracts: str
+    long_contracts: str
+    short_contracts: str
+    active_position_count: int
+    pending_order_count: int
+    observed_at: datetime
+    expires_at: datetime
+    instrument_digest: str
+    instrument_observed_at: datetime
+    instrument_expires_at: datetime
+    mark_price_digest: str
+    mark_price_observed_at: datetime
+    mark_price_expires_at: datetime
+    account_config_digest: str
+    account_config_observed_at: datetime
+    account_config_expires_at: datetime
+    positions_digest: str
+    positions_observed_at: datetime
+    positions_expires_at: datetime
+    pending_orders_digest: str
+    pending_orders_observed_at: datetime
+    pending_orders_expires_at: datetime
+    leverage_digest: str
+    leverage_observed_at: datetime
+    leverage_expires_at: datetime
+
+    @property
+    def guard_digest(self) -> str:
+        return _digest(redacted_exit_guard_payload(self))
+
+
+def redacted_exit_guard_payload(
+    guard: RedactedOkxDemoExitGuard,
+) -> dict[str, object]:
+    return {
+        "contract": "canonical-v13-okx-demo-exit-guard-v1",
+        "execution_target": guard.execution_target,
+        "instrument": guard.instrument,
+        "account_fingerprint_digest": guard.account_fingerprint_digest,
+        "credential_generation_digest": guard.credential_generation_digest,
+        "permissions": dict(guard.permissions),
+        "simulated_trading": guard.simulated_trading,
+        "allow_real_funds": guard.allow_real_funds,
+        "reference_price": guard.reference_price,
+        "contract_value": guard.contract_value,
+        "effective_leverage": guard.effective_leverage,
+        "minimum_size": guard.minimum_size,
+        "lot_size": guard.lot_size,
+        "close_contracts": guard.close_contracts,
+        "available_contracts": guard.available_contracts,
+        "long_contracts": guard.long_contracts,
+        "short_contracts": guard.short_contracts,
+        "active_position_count": guard.active_position_count,
+        "pending_order_count": guard.pending_order_count,
+        "observed_at": guard.observed_at.isoformat(),
+        "expires_at": guard.expires_at.isoformat(),
+        "instrument_digest": guard.instrument_digest,
+        "instrument_observed_at": guard.instrument_observed_at.isoformat(),
+        "instrument_expires_at": guard.instrument_expires_at.isoformat(),
+        "mark_price_digest": guard.mark_price_digest,
+        "mark_price_observed_at": guard.mark_price_observed_at.isoformat(),
+        "mark_price_expires_at": guard.mark_price_expires_at.isoformat(),
+        "account_config_digest": guard.account_config_digest,
+        "account_config_observed_at": guard.account_config_observed_at.isoformat(),
+        "account_config_expires_at": guard.account_config_expires_at.isoformat(),
+        "positions_digest": guard.positions_digest,
+        "positions_observed_at": guard.positions_observed_at.isoformat(),
+        "positions_expires_at": guard.positions_expires_at.isoformat(),
+        "pending_orders_digest": guard.pending_orders_digest,
+        "pending_orders_observed_at": guard.pending_orders_observed_at.isoformat(),
+        "pending_orders_expires_at": guard.pending_orders_expires_at.isoformat(),
+        "leverage_digest": guard.leverage_digest,
+        "leverage_observed_at": guard.leverage_observed_at.isoformat(),
+        "leverage_expires_at": guard.leverage_expires_at.isoformat(),
+    }
+
+
 def redacted_dispatch_guard_payload(
     guard: RedactedOkxDemoDispatchGuard,
 ) -> dict[str, object]:
@@ -545,6 +639,7 @@ class CanonicalOkxDemoSession:
             or exchange_max.get("margin_mode") != "isolated"
             or exchange_max.get("position_side") != "long"
             or Decimal(exchange_min_leverage) > Decimal(exchange_max_leverage)
+            or Decimal(requested_leverage) < Decimal(exchange_min_leverage)
         ):
             raise CanonicalExecutionChainBlocked(
                 "BLOCKED_OKX_DEMO_EXCHANGE_MAX_LEVERAGE_IDENTITY", instrument
@@ -1063,6 +1158,331 @@ class CanonicalOkxDemoSession:
             leverage_expires_at=leverage_expires,
         )
 
+    def exit_guard(
+        self,
+        *,
+        instrument: str,
+        expected_contracts: str,
+        ttl: timedelta = timedelta(seconds=10),
+    ) -> RedactedOkxDemoExitGuard:
+        """Prove one exact isolated long can be reduced without adding exposure."""
+
+        if self.__closed:
+            raise CanonicalExecutionChainBlocked(
+                "BLOCKED_OKX_DEMO_SESSION_CLOSED", "session is closed"
+            )
+        if not timedelta(0) < ttl <= timedelta(seconds=15):
+            raise CanonicalExecutionChainBlocked(
+                "BLOCKED_OKX_DEMO_EXIT_GUARD_FRESHNESS", "invalid guard TTL"
+            )
+        close_contracts = Decimal(
+            _positive_decimal(
+                expected_contracts,
+                code="BLOCKED_OKX_DEMO_EXIT_GUARD_VALUE",
+                field="expected_contracts",
+            )
+        )
+        instrument_snapshot = self.__read.instruments(instrument)
+        mark_snapshot = self.__read.mark_price(instrument)
+        account_snapshot = self.__read.account_config()
+        positions_snapshot = self.__read.positions(instrument)
+        pending_snapshot = self.__read.pending_orders(instrument, limit=100)
+        leverage_snapshot = self.__read.leverage(instrument)
+        now = _utc(self.__now(), code="BLOCKED_OKX_DEMO_EXIT_GUARD_FRESHNESS")
+        instrument_items, instrument_observed, instrument_expires = _verified_snapshot(
+            instrument_snapshot,
+            resource="instruments",
+            authenticated=False,
+            now=now,
+        )
+        mark_items, mark_observed, mark_expires = _verified_snapshot(
+            mark_snapshot,
+            resource="mark_price",
+            authenticated=False,
+            now=now,
+        )
+        account_items, account_observed, account_expires = _verified_snapshot(
+            account_snapshot,
+            resource="account_config",
+            authenticated=True,
+            now=now,
+        )
+        positions, positions_observed, positions_expires = _verified_snapshot(
+            positions_snapshot,
+            resource="positions",
+            authenticated=True,
+            now=now,
+        )
+        pending, pending_observed, pending_expires = _verified_snapshot(
+            pending_snapshot,
+            resource="pending_orders",
+            authenticated=True,
+            now=now,
+        )
+        leverage_items, leverage_observed, leverage_expires = _verified_snapshot(
+            leverage_snapshot,
+            resource="leverage",
+            authenticated=True,
+            now=now,
+        )
+        if len(instrument_items) != 1:
+            raise CanonicalExecutionChainBlocked(
+                "BLOCKED_OKX_DEMO_EXIT_INSTRUMENT", "instrument must be singular"
+            )
+        instrument_item = instrument_items[0]
+        try:
+            minimum_size = Decimal(str(instrument_item.get("min_size")))
+            lot_size = Decimal(str(instrument_item.get("lot_size")))
+            contract_value = Decimal(str(instrument_item.get("contract_value")))
+        except InvalidOperation:
+            minimum_size = lot_size = contract_value = Decimal(0)
+        if (
+            instrument_item.get("inst_id") != instrument
+            or instrument_item.get("inst_type") != "SWAP"
+            or minimum_size <= 0
+            or lot_size <= 0
+            or contract_value <= 0
+            or close_contracts < minimum_size
+            or close_contracts % lot_size != 0
+        ):
+            raise CanonicalExecutionChainBlocked(
+                "BLOCKED_OKX_DEMO_EXIT_INSTRUMENT",
+                "close size must match the current SWAP lot contract",
+            )
+        if len(mark_items) != 1 or mark_items[0].get("inst_id") != instrument:
+            raise CanonicalExecutionChainBlocked(
+                "BLOCKED_OKX_DEMO_EXIT_MARK", "mark price identity drifted"
+            )
+        reference_price = Decimal(
+            _positive_decimal(
+                mark_items[0].get("price"),
+                code="BLOCKED_OKX_DEMO_EXIT_MARK",
+                field="mark_price",
+            )
+        )
+        if len(account_items) != 1:
+            raise CanonicalExecutionChainBlocked(
+                "BLOCKED_OKX_DEMO_EXIT_ACCOUNT", "account config must be singular"
+            )
+        account = account_items[0]
+        if (
+            account.get("account_level") != "2"
+            or account.get("position_mode") != "long_short_mode"
+            or account.get("auto_loan") is not False
+        ):
+            raise CanonicalExecutionChainBlocked(
+                "BLOCKED_OKX_DEMO_EXIT_ACCOUNT",
+                "Demo account must remain level 2 long_short_mode without auto-loan",
+            )
+        totals = {"long": Decimal(0), "short": Decimal(0)}
+        available_long = Decimal(0)
+        active_count = 0
+        position_leverage: Decimal | None = None
+        for item in positions:
+            side = item.get("position_side")
+            contracts = _nonnegative_decimal(
+                item.get("contracts"),
+                code="BLOCKED_OKX_DEMO_EXIT_POSITION_VALUE",
+                field="contracts",
+            )
+            available = _nonnegative_decimal(
+                item.get("available_contracts"),
+                code="BLOCKED_OKX_DEMO_EXIT_POSITION_VALUE",
+                field="available_contracts",
+            )
+            if (
+                item.get("inst_id") != instrument
+                or item.get("margin_mode") != "isolated"
+                or side not in totals
+                or available > contracts
+            ):
+                raise CanonicalExecutionChainBlocked(
+                    "BLOCKED_OKX_DEMO_EXIT_POSITION_IDENTITY", instrument
+                )
+            totals[str(side)] += contracts
+            active_count += int(contracts > 0)
+            if side == "long":
+                available_long += available
+                if contracts > 0:
+                    position_leverage = Decimal(
+                        _positive_decimal(
+                            item.get("leverage"),
+                            code="BLOCKED_OKX_DEMO_EXIT_POSITION_VALUE",
+                            field="position_leverage",
+                        )
+                    )
+        if (
+            totals["long"] != close_contracts
+            or totals["short"] != 0
+            or available_long < close_contracts
+            or active_count != 1
+            or position_leverage is None
+        ):
+            raise CanonicalExecutionChainBlocked(
+                "BLOCKED_OKX_DEMO_EXIT_POSITION_DRIFT",
+                "exit requires exactly one fully available isolated long position",
+            )
+        if pending:
+            raise CanonicalExecutionChainBlocked(
+                "BLOCKED_OKX_DEMO_EXIT_PENDING_ORDERS",
+                "exit requires zero pending orders",
+            )
+        leverage_by_side: dict[str, Decimal] = {}
+        for item in leverage_items:
+            side = item.get("position_side")
+            if (
+                item.get("inst_id") != instrument
+                or item.get("margin_mode") != "isolated"
+                or side not in {"long", "short"}
+                or side in leverage_by_side
+            ):
+                raise CanonicalExecutionChainBlocked(
+                    "BLOCKED_OKX_DEMO_EXIT_LEVERAGE", instrument
+                )
+            leverage_by_side[str(side)] = Decimal(
+                _positive_decimal(
+                    item.get("leverage"),
+                    code="BLOCKED_OKX_DEMO_EXIT_LEVERAGE",
+                    field=f"{side}_leverage",
+                )
+            )
+        if (
+            set(leverage_by_side) != {"long", "short"}
+            or leverage_by_side["long"] != position_leverage
+        ):
+            raise CanonicalExecutionChainBlocked(
+                "BLOCKED_OKX_DEMO_EXIT_LEVERAGE",
+                "current long leverage must match the exact open position",
+            )
+        safe_instrument = {
+            "instrument": instrument,
+            "instrument_type": "SWAP",
+            "minimum_size": format(minimum_size, "f"),
+            "lot_size": format(lot_size, "f"),
+            "contract_value": format(contract_value, "f"),
+        }
+        safe_mark = {"instrument": instrument, "mark_price": format(reference_price, "f")}
+        safe_account = {
+            "account_fingerprint_digest": self.__account_fingerprint_digest,
+            "account_level": "2",
+            "position_mode": "long_short_mode",
+            "auto_loan": False,
+            "permissions": {"read": True, "trade": True, "withdraw": False},
+        }
+        safe_positions = {
+            "instrument": instrument,
+            "margin_mode": "isolated",
+            "long_contracts": format(close_contracts, "f"),
+            "available_contracts": format(available_long, "f"),
+            "short_contracts": "0",
+            "active_position_count": active_count,
+        }
+        safe_pending = {"instrument": instrument, "pending_order_count": 0}
+        safe_leverage = {
+            "instrument": instrument,
+            "account_fingerprint_digest": self.__account_fingerprint_digest,
+            "long": format(leverage_by_side["long"].normalize(), "f"),
+            "short": format(leverage_by_side["short"].normalize(), "f"),
+        }
+        observed = max(
+            instrument_observed,
+            mark_observed,
+            account_observed,
+            positions_observed,
+            pending_observed,
+            leverage_observed,
+        )
+        expires = min(
+            instrument_expires,
+            mark_expires,
+            account_expires,
+            positions_expires,
+            pending_expires,
+            leverage_expires,
+            observed + ttl,
+        )
+        if expires <= now:
+            raise CanonicalExecutionChainBlocked(
+                "BLOCKED_OKX_DEMO_EXIT_GUARD_FRESHNESS",
+                "exit guard freshness window is empty",
+            )
+        return RedactedOkxDemoExitGuard(
+            execution_target="OKX_DEMO",
+            instrument=instrument,
+            account_fingerprint_digest=self.__account_fingerprint_digest,
+            credential_generation_digest=self.__credential_generation_digest,
+            permissions={"read": True, "trade": True, "withdraw": False},
+            simulated_trading=True,
+            allow_real_funds=False,
+            reference_price=format(reference_price, "f"),
+            contract_value=format(contract_value, "f"),
+            effective_leverage=format(position_leverage.normalize(), "f"),
+            minimum_size=format(minimum_size, "f"),
+            lot_size=format(lot_size, "f"),
+            close_contracts=format(close_contracts, "f"),
+            available_contracts=format(available_long, "f"),
+            long_contracts=format(close_contracts, "f"),
+            short_contracts="0",
+            active_position_count=active_count,
+            pending_order_count=0,
+            observed_at=observed,
+            expires_at=expires,
+            instrument_digest=_resource_digest(
+                resource="instruments",
+                observed_at=instrument_observed,
+                expires_at=instrument_expires,
+                authenticated=False,
+                facts=safe_instrument,
+            ),
+            instrument_observed_at=instrument_observed,
+            instrument_expires_at=instrument_expires,
+            mark_price_digest=_resource_digest(
+                resource="mark_price",
+                observed_at=mark_observed,
+                expires_at=mark_expires,
+                authenticated=False,
+                facts=safe_mark,
+            ),
+            mark_price_observed_at=mark_observed,
+            mark_price_expires_at=mark_expires,
+            account_config_digest=_resource_digest(
+                resource="account_config",
+                observed_at=account_observed,
+                expires_at=account_expires,
+                authenticated=True,
+                facts=safe_account,
+            ),
+            account_config_observed_at=account_observed,
+            account_config_expires_at=account_expires,
+            positions_digest=_resource_digest(
+                resource="positions",
+                observed_at=positions_observed,
+                expires_at=positions_expires,
+                authenticated=True,
+                facts=safe_positions,
+            ),
+            positions_observed_at=positions_observed,
+            positions_expires_at=positions_expires,
+            pending_orders_digest=_resource_digest(
+                resource="pending_orders",
+                observed_at=pending_observed,
+                expires_at=pending_expires,
+                authenticated=True,
+                facts=safe_pending,
+            ),
+            pending_orders_observed_at=pending_observed,
+            pending_orders_expires_at=pending_expires,
+            leverage_digest=_resource_digest(
+                resource="leverage",
+                observed_at=leverage_observed,
+                expires_at=leverage_expires,
+                authenticated=True,
+                facts=safe_leverage,
+            ),
+            leverage_observed_at=leverage_observed,
+            leverage_expires_at=leverage_expires,
+        )
+
     def place(self, body: Mapping[str, str]) -> Mapping[str, Any]:
         if self.__closed:
             raise CanonicalExecutionChainBlocked(
@@ -1281,9 +1701,11 @@ def create_canonical_okx_demo_session(
 __all__ = [
     "CanonicalOkxDemoSession",
     "RedactedOkxDemoDispatchGuard",
+    "RedactedOkxDemoExitGuard",
     "RedactedOkxDemoOrderAbsence",
     "RedactedOkxDemoProbe",
     "create_canonical_okx_demo_session",
     "redacted_dispatch_guard_payload",
+    "redacted_exit_guard_payload",
     "redacted_order_absence_payload",
 ]

@@ -58,7 +58,7 @@ def test_plan_is_offline_exact_and_never_executes() -> None:
 
 
 def test_restore_trigger_contract_includes_exact_phase9_transition_guards() -> None:
-    assert len(backup.EXPECTED_LIFECYCLE_TRIGGERS) == 10
+    assert len(backup.EXPECTED_LIFECYCLE_TRIGGERS) == 11
     assert backup.EXPECTED_LIFECYCLE_TRIGGERS == tuple(
         sorted(backup.EXPECTED_LIFECYCLE_TRIGGERS)
     )
@@ -70,6 +70,11 @@ def test_restore_trigger_contract_includes_exact_phase9_transition_guards() -> N
     assert (
         "trade_intents",
         "trade_intent_mode_immutable",
+        "O",
+    ) in backup.EXPECTED_LIFECYCLE_TRIGGERS
+    assert (
+        "order_dispatch_receipts",
+        "order_dispatch_mode_immutable",
         "O",
     ) in backup.EXPECTED_LIFECYCLE_TRIGGERS
 

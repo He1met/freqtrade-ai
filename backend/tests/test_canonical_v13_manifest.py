@@ -422,10 +422,10 @@ def test_postgresql_types_constraints_and_locking_compile_offline() -> None:
 
     assert len(tables) == 58
     assert len(foreign_keys) == 132
-    assert len(checks) == 88
+    assert len(checks) == 89
     assert len(uniques) == 82
     assert len(indexes) == 119
-    assert len(datetimes) == 101
+    assert len(datetimes) == 103
     assert len(json_columns) == 28
     assert all(key.deferrable is not True for key in foreign_keys)
     assert all(column.type.timezone is True for column in datetimes)
@@ -446,6 +446,9 @@ def test_postgresql_types_constraints_and_locking_compile_offline() -> None:
     assert "UNIQUE (order_id, attempt_ordinal)" in compiled_tables
     assert "GET_NOT_FOUND" in compiled_tables
     assert "POST_REJECTED" in compiled_tables
+    assert "CONTINUOUS_OPEN" in compiled_tables
+    assert "POSITION_EXIT" in compiled_tables
+    assert "CANARY_OPEN" in compiled_tables
 
     partial = next(
         index

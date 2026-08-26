@@ -248,4 +248,5 @@ def test_optional_guard_function_allowlist_is_exactly_phase9_transition() -> Non
     assert CANONICAL_OPTIONAL_GUARD_FUNCTION_NAMES == (
         "guard_trade_intent_mode_immutable",
         "guard_risk_decision_mode_immutable",
+        "guard_order_dispatch_mode_immutable",
     )

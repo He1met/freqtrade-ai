@@ -565,6 +565,91 @@ LaunchAgent 均 unloaded、两个 file lease 均不存在、DB active order-writ
 只有 D `READY`、post-execution backup/restore verifier 通过、所有 receipts 可重算、服务唯一且没有锁或
 未决 recovery，才可关闭 #724。然后汇总 Phase 0–9 current evidence，最后关闭 #714。
 
+## 8. Bounded continuous OKX_DEMO soak
+
+单次 canary 和 D 阶段验收通过后，连续模式仍是独立的后续授权面，不能循环使用
+`execution_canary_risk_policies.max_order_count=1`。它只消费 accepted release 上当前 ACTIVE Demo
+deployment 产生的、已收盘 `15m` `NATURAL_STRATEGY_SIGNAL`；不生成测试信号，不读取 legacy
+`configure_okx_demo_continuous.py`，也不调用旧 `app.db`/`app.services` 交易路径。
+
+连续模式必须保持以下边界：
+
+- `OKX_DEMO`、`demo_only=true`、`allow_real_funds=false`、`BTC-USDT-SWAP`、`LONG_ONLY`；
+- 全局最多一个持仓或挂单；仓位未平、订单未收口或 reconciliation 非 `MATCHED` 时禁止新开仓；
+- 同一 natural signal 只允许一个 `CONTINUOUS_OPEN` intent/decision/order；平仓使用同一 signal 下独立的
+  `POSITION_EXIT` intent/decision/order；两种 grant 都是 immutable 且 exact replay；
+- 开仓必须是 fresh flat probe 推导出的 `minSz` market order，并冻结 exact notional、artifact leverage cap、
+  authenticated effective leverage、bundle/snapshot/qualification/deployment lineage；
+- 平仓时间只来自 exact qualified artifact 的 `custom_exit` AST；fresh private guard 必须证明唯一 isolated
+  long position、零 short、零 pending、可平数量与 canonical ledger 完全一致；
+- 任一 private API、credential、freshness、lineage、writer lease、fill、ledger、reconciliation 或 slippage
+  异常立即 fail closed。未知 POST 结果只能走既有 GET-only recovery，禁止换 signal 重发；
+- 运行窗口结束后只停止新开仓；已有仓位继续进入 `DRAINING`，直到 exact exit、fill、负向 ledger 与 flat
+  reconciliation 全部完成，随后正式停止 long-lived runtime。
+
+### 8.1 Schema、ACL 与 release acceptance
+
+在 runtime/order writer 均停止、无 active writer lease 且 private flat/no-pending 已只读复核后，按固定
+顺序执行：pre-change backup → exact release cut → schema apply/replay → scoped ACL apply/replay →
+global verifier → exact-main backup/isolated restore → API/UI 各 restart 一次 → exact-main runtime image
+build/accept/replay。禁止手工 `ALTER TABLE`、`GRANT` 或跳过 restore。
+
+```bash
+backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py continuous-demo-verify
+backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py continuous-demo-apply
+backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py continuous-demo-verify
+backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py continuous-demo-apply
+
+backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py continuous-demo-acl-verify
+backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py continuous-demo-acl-apply
+backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py continuous-demo-acl-verify
+backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py continuous-demo-acl-apply
+
+backend/.venv/bin/python backend/scripts/canonical_v13_bootstrap.py verify-phase9-provisioned
+```
+
+schema upgrade 只扩展 immutable intent/decision mode 和 dispatch receipt 的 open/exit shape；已有 canary 行
+必须 backfill 为 `CANARY_OPEN` 且 digest、order identity、fill/ledger/reconciliation 不变。ACL upgrade 只给
+既有 risk/reconciliation capability 增加连续 grant 与 flat reconciliation 所需的 `SELECT`，不得增加 DML、
+LOGIN、CONNECT、endpoint 或 live capability。apply 第二次必须返回同一 receipt 且 `repeat_noop=true`。
+若 release acceptance 在首笔连续证据产生前失败，rollback 必须严格先执行
+`continuous-demo-acl-rollback`，再执行 `continuous-demo-rollback`；一旦已有任一
+`CONTINUOUS_OPEN`/`POSITION_EXIT` intent、decision 或 dispatch receipt，两层 rollback 都必须 fail
+closed，禁止为回退删除交易证据或手工 `REVOKE`/`ALTER TABLE`。
+
+### 8.2 启动、观察与停止
+
+先按本 runbook 的 B 阶段命令，以 exact accepted release/image/ACTIVE deployment 恢复
+`long_lived_runtime`，且始终保持 Phase 9 `order_writer` LaunchAgent unloaded。只有 fresh runtime
+observation 已证明 `HEALTHY`、order writer disabled 后，才准备并启动 soak：
+
+```bash
+python scripts/canonical_v13_continuous_demo_soak.py prepare
+python scripts/canonical_v13_continuous_demo_soak.py confirm
+python scripts/canonical_v13_continuous_demo_soak.py status
+```
+
+`prepare` 只写 secret-free LaunchAgent plan；`confirm` 再核对 clean exact release、唯一 ACTIVE Demo
+deployment 和 healthy natural runtime。worker 每个 tick 最多推进一个 durable step，不在 tick 间持有 DB
+writer lease；无 fresh natural signal 时只返回 `NO_ACTION`。所有凭据只通过既有 Keychain loader 在 sealed
+session 内读取，不写入 plist、state、receipt 或日志。
+
+人工提前结束只切换为 drain，不得在持仓时强制卸载：
+
+```bash
+python scripts/canonical_v13_continuous_demo_soak.py stop
+python scripts/canonical_v13_continuous_demo_soak.py status
+python scripts/canonical_v13_continuous_demo_soak.py finalize
+```
+
+`finalize` 只接受已经 flat-drained 且状态为 `STOPPED` 的 soak；它卸载 soak LaunchAgent 并删除 secret-free
+plist。`BLOCKED`、`RUNNING` 或 `DRAINING` 时一律拒绝，禁止用它掩盖未平仓位或未决订单。
+
+最终验收必须从同一 read-only snapshot 对账每一条 open/exit 的
+signal → intent → risk → order → dispatch/outcome → fill → ledger → reconciliation，并证明 private
+position/pending 均为零、canonical contract ledger 净额为零、writer lease 为零、soak 与 runtime
+LaunchAgent 均已卸载。private 状态无法读取时记为 `UNKNOWN`，不得据此报告完成。
+
 ## Fail-closed recovery order
 
 任何阶段失败：停止后置 writer/runtime → 只读盘点 exact lineage/计数/leases → 撤销 credential session →

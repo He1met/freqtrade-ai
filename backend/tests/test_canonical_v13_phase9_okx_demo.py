@@ -501,6 +501,103 @@ def test_dispatch_guard_is_typed_flat_current_capacity_evidence() -> None:
     ]
 
 
+def test_exit_guard_proves_one_exact_available_isolated_long() -> None:
+    read = FakeRead()
+    read.snapshots["positions"] = read._snapshot(
+        "positions",
+        [
+            {
+                "inst_id": "BTC-USDT-SWAP",
+                "margin_mode": "isolated",
+                "position_side": "long",
+                "contracts": "1",
+                "available_contracts": "1",
+                "average_price": "9900",
+                "mark_price": "10000.1",
+                "leverage": "14",
+                "unrealized_pnl": "1",
+                "timestamp": NOW - timedelta(days=1),
+            }
+        ],
+        authenticated=True,
+        exchange_timestamp=NOW - timedelta(days=1),
+    )
+    session, _read, write, _closed = _session(read)
+
+    guard = session.exit_guard(
+        instrument="BTC-USDT-SWAP", expected_contracts="1"
+    )
+
+    assert guard.execution_target == "OKX_DEMO"
+    assert guard.permissions == {"read": True, "trade": True, "withdraw": False}
+    assert guard.allow_real_funds is False
+    assert guard.close_contracts == guard.available_contracts == "1"
+    assert guard.long_contracts == "1"
+    assert guard.short_contracts == "0"
+    assert guard.active_position_count == 1
+    assert guard.pending_order_count == 0
+    assert guard.reference_price == "10000.1"
+    assert guard.contract_value == "0.01"
+    assert guard.effective_leverage == "14"
+    assert guard.observed_at == NOW - timedelta(seconds=1)
+    assert guard.expires_at > NOW
+    assert len(guard.guard_digest) == 64
+    assert write.calls == []
+
+
+@pytest.mark.parametrize(
+    "positions,pending,expected_code",
+    [
+        ([], [], "BLOCKED_OKX_DEMO_EXIT_POSITION_DRIFT"),
+        (
+            [
+                {
+                    "inst_id": "BTC-USDT-SWAP",
+                    "margin_mode": "isolated",
+                    "position_side": "long",
+                    "contracts": "2",
+                    "available_contracts": "2",
+                    "leverage": "14",
+                }
+            ],
+            [],
+            "BLOCKED_OKX_DEMO_EXIT_POSITION_DRIFT",
+        ),
+        (
+            [
+                {
+                    "inst_id": "BTC-USDT-SWAP",
+                    "margin_mode": "isolated",
+                    "position_side": "long",
+                    "contracts": "1",
+                    "available_contracts": "1",
+                    "leverage": "14",
+                }
+            ],
+            [{"order_id": "pending"}],
+            "BLOCKED_OKX_DEMO_EXIT_PENDING_ORDERS",
+        ),
+    ],
+)
+def test_exit_guard_fails_closed_on_position_or_pending_drift(
+    positions, pending, expected_code
+) -> None:
+    read = FakeRead()
+    read.snapshots["positions"] = read._snapshot(
+        "positions", positions, authenticated=True
+    )
+    read.snapshots["pending_orders"] = read._snapshot(
+        "pending_orders", pending, authenticated=True
+    )
+    session, _read, write, _closed = _session(read)
+
+    with pytest.raises(CanonicalExecutionChainBlocked) as blocked:
+        session.exit_guard(instrument="BTC-USDT-SWAP", expected_contracts="1")
+
+    assert blocked.value.code == expected_code
+    assert write.calls == []
+
+
 def test_dispatch_guard_canonicalizes_equivalent_leverage_scale() -> None:
     read = FakeRead()
     for item in read.snapshots["leverage"].items:

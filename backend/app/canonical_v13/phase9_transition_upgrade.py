@@ -23,6 +23,8 @@ INTENT_MODE_VALUES: Final[tuple[str, ...]] = (
     "TEST_SIMULATED",
     "SIGNAL_RISK_SHADOW",
     "EXECUTION",
+    "CONTINUOUS_OPEN",
+    "POSITION_EXIT",
 )
 DECISION_MODE_VALUES: Final[tuple[str, ...]] = INTENT_MODE_VALUES
 INTENT_MODE_UNIQUE: Final = "trade_intents_signal_mode_unique"
@@ -373,7 +375,8 @@ def apply_phase9_transition_upgrade(
         text(
             f"ALTER TABLE {schema}.trade_intents ALTER COLUMN intent_mode SET NOT NULL, "
             f"ADD CONSTRAINT {INTENT_MODE_CHECK} CHECK "
-            "(intent_mode IN ('TEST_SIMULATED','SIGNAL_RISK_SHADOW','EXECUTION')), "
+            "(intent_mode IN ('TEST_SIMULATED','SIGNAL_RISK_SHADOW','EXECUTION',"
+            "'CONTINUOUS_OPEN','POSITION_EXIT')), "
             f"ADD CONSTRAINT {INTENT_MODE_UNIQUE} UNIQUE (signal_id,intent_mode)"
         )
     )
@@ -381,7 +384,8 @@ def apply_phase9_transition_upgrade(
         text(
             f"ALTER TABLE {schema}.risk_decisions ALTER COLUMN decision_mode SET NOT NULL, "
             f"ADD CONSTRAINT {DECISION_MODE_CHECK} CHECK "
-            "(decision_mode IN ('TEST_SIMULATED','SIGNAL_RISK_SHADOW','EXECUTION')), "
+            "(decision_mode IN ('TEST_SIMULATED','SIGNAL_RISK_SHADOW','EXECUTION',"
+            "'CONTINUOUS_OPEN','POSITION_EXIT')), "
             f"ADD CONSTRAINT {DECISION_MODE_UNIQUE} UNIQUE (trade_intent_id,decision_mode)"
         )
     )

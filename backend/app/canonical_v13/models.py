@@ -1641,7 +1641,8 @@ TRADE_INTENTS_TABLE = _table(
         name="trade_intents_signal_mode_unique",
     ),
     CheckConstraint(
-        "intent_mode IN ('TEST_SIMULATED', 'SIGNAL_RISK_SHADOW', 'EXECUTION')",
+        "intent_mode IN ('TEST_SIMULATED', 'SIGNAL_RISK_SHADOW', 'EXECUTION', "
+        "'CONTINUOUS_OPEN', 'POSITION_EXIT')",
         name="trade_intents_intent_mode_values",
     ),
     _status_check(
@@ -1665,7 +1666,8 @@ RISK_DECISIONS_TABLE = _table(
         name="risk_decisions_intent_mode_unique",
     ),
     CheckConstraint(
-        "decision_mode IN ('TEST_SIMULATED', 'SIGNAL_RISK_SHADOW', 'EXECUTION')",
+        "decision_mode IN ('TEST_SIMULATED', 'SIGNAL_RISK_SHADOW', 'EXECUTION', "
+        "'CONTINUOUS_OPEN', 'POSITION_EXIT')",
         name="risk_decisions_decision_mode_values",
     ),
     _status_check("risk_decisions", "status", ("RISK_ACCEPTED", "BLOCKED", "REJECTED")),
@@ -1710,9 +1712,14 @@ ORDER_DISPATCH_RECEIPTS_TABLE = _table(
     _uuid_id(),
     _uuid_fk("order_id", "orders"),
     _uuid_fk("risk_decision_id", "risk_decisions"),
-    _uuid_fk("canary_risk_policy_id", "execution_canary_risk_policies"),
-    _uuid_fk("probe_receipt_id", "execution_canary_probe_receipts"),
+    _uuid_fk(
+        "canary_risk_policy_id", "execution_canary_risk_policies", nullable=True
+    ),
+    _uuid_fk(
+        "probe_receipt_id", "execution_canary_probe_receipts", nullable=True
+    ),
     _uuid_fk("execution_attestation_id", "execution_attestations"),
+    Column("dispatch_mode", String(32), nullable=False),
     Column("attempt_ordinal", Integer, nullable=False),
     _digest("request_digest"),
     Column("holder_identity", String(200), nullable=False),
@@ -1723,10 +1730,12 @@ ORDER_DISPATCH_RECEIPTS_TABLE = _table(
     Column("lease_expires_at", DateTime(timezone=True), nullable=False),
     _digest("account_fingerprint_digest"),
     _digest("credential_generation_digest"),
-    Column("limit_price", Numeric(36, 18), nullable=False),
+    Column("reference_price", Numeric(36, 18), nullable=False),
+    Column("limit_price", Numeric(36, 18), nullable=True),
     Column("effective_leverage", Numeric(36, 18), nullable=False),
     Column("minimum_size", Numeric(36, 18), nullable=False),
-    Column("maximum_buy_contracts", Numeric(36, 18), nullable=False),
+    Column("maximum_buy_contracts", Numeric(36, 18), nullable=True),
+    Column("maximum_close_contracts", Numeric(36, 18), nullable=True),
     Column("long_contracts", Numeric(36, 18), nullable=False),
     Column("short_contracts", Numeric(36, 18), nullable=False),
     Column("active_position_count", Integer, nullable=False),
@@ -1737,11 +1746,14 @@ ORDER_DISPATCH_RECEIPTS_TABLE = _table(
     _digest("pending_orders_digest"),
     _created_at("pending_orders_observed_at"),
     Column("pending_orders_expires_at", DateTime(timezone=True), nullable=False),
-    _digest("maximum_order_quantity_digest"),
-    _created_at("maximum_order_quantity_observed_at"),
+    _digest("maximum_order_quantity_digest", nullable=True),
+    Column("maximum_order_quantity_observed_at", DateTime(timezone=True), nullable=True),
     Column(
-        "maximum_order_quantity_expires_at", DateTime(timezone=True), nullable=False
+        "maximum_order_quantity_expires_at", DateTime(timezone=True), nullable=True
     ),
+    _digest("close_capacity_digest", nullable=True),
+    Column("close_capacity_observed_at", DateTime(timezone=True), nullable=True),
+    Column("close_capacity_expires_at", DateTime(timezone=True), nullable=True),
     _digest("guard_leverage_digest"),
     _created_at("guard_leverage_observed_at"),
     Column("guard_leverage_expires_at", DateTime(timezone=True), nullable=False),
@@ -1764,16 +1776,45 @@ ORDER_DISPATCH_RECEIPTS_TABLE = _table(
         name="order_dispatch_receipts_lease_fresh_at_claim",
     ),
     CheckConstraint(
-        "long_contracts = 0 AND short_contracts = 0 "
+        "(dispatch_mode = 'CANARY_OPEN' AND canary_risk_policy_id IS NOT NULL "
+        "AND probe_receipt_id IS NOT NULL) OR "
+        "(dispatch_mode = 'CONTINUOUS_OPEN' AND canary_risk_policy_id IS NULL "
+        "AND probe_receipt_id IS NOT NULL) OR "
+        "(dispatch_mode = 'POSITION_EXIT' AND canary_risk_policy_id IS NULL "
+        "AND probe_receipt_id IS NULL)",
+        name="order_dispatch_receipts_authority_mode",
+    ),
+    CheckConstraint(
+        "reference_price > 0 AND effective_leverage > 0 AND minimum_size > 0 AND "
+        "((dispatch_mode IN ('CANARY_OPEN','CONTINUOUS_OPEN') "
+        "AND long_contracts = 0 AND short_contracts = 0 "
         "AND active_position_count = 0 AND pending_order_count = 0 "
-        "AND maximum_buy_contracts >= minimum_size "
-        "AND limit_price > 0 AND effective_leverage > 0",
-        name="order_dispatch_receipts_flat_capacity",
+        "AND maximum_buy_contracts >= minimum_size AND maximum_close_contracts IS NULL "
+        "AND limit_price = reference_price "
+        "AND maximum_order_quantity_digest IS NOT NULL "
+        "AND maximum_order_quantity_observed_at IS NOT NULL "
+        "AND maximum_order_quantity_expires_at IS NOT NULL "
+        "AND close_capacity_digest IS NULL AND close_capacity_observed_at IS NULL "
+        "AND close_capacity_expires_at IS NULL) OR "
+        "(dispatch_mode = 'POSITION_EXIT' AND long_contracts = minimum_size "
+        "AND short_contracts = 0 AND active_position_count = 1 "
+        "AND pending_order_count = 0 AND maximum_buy_contracts IS NULL "
+        "AND maximum_close_contracts = minimum_size AND limit_price IS NULL "
+        "AND maximum_order_quantity_digest IS NULL "
+        "AND maximum_order_quantity_observed_at IS NULL "
+        "AND maximum_order_quantity_expires_at IS NULL "
+        "AND close_capacity_digest IS NOT NULL "
+        "AND close_capacity_observed_at IS NOT NULL "
+        "AND close_capacity_expires_at IS NOT NULL))",
+        name="order_dispatch_receipts_mode_shape",
     ),
     CheckConstraint(
         "positions_expires_at > positions_observed_at "
         "AND pending_orders_expires_at > pending_orders_observed_at "
-        "AND maximum_order_quantity_expires_at > maximum_order_quantity_observed_at "
+        "AND (maximum_order_quantity_observed_at IS NULL OR "
+        "maximum_order_quantity_expires_at > maximum_order_quantity_observed_at) "
+        "AND (close_capacity_observed_at IS NULL OR "
+        "close_capacity_expires_at > close_capacity_observed_at) "
         "AND guard_leverage_expires_at > guard_leverage_observed_at "
         "AND guard_expires_at > guard_observed_at",
         name="order_dispatch_receipts_guard_freshness",

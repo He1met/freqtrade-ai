@@ -40,6 +40,10 @@ from app.canonical_v13.canary_recovery_approval_upgrade import (
     apply_canary_recovery_approval_upgrade,
     verify_canary_recovery_approval_upgrade,
 )
+from app.canonical_v13.continuous_demo_acl_upgrade import (
+    apply_continuous_demo_acl_upgrade,
+)
+from app.canonical_v13.continuous_demo_upgrade import apply_continuous_demo_upgrade
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
@@ -239,6 +243,12 @@ def test_restore_terminal_historical_gate_row_with_triggers_transactional(
                     connection, role_mapping=role_mapping
                 )
                 assert canary_recovery.status == "UPGRADED"
+                continuous_schema = apply_continuous_demo_upgrade(connection)
+                assert continuous_schema.status == "UPGRADED"
+                continuous_acl = apply_continuous_demo_acl_upgrade(
+                    connection, role_mapping=role_mapping
+                )
+                assert continuous_acl.status == "UPGRADED"
 
         attempt_id = uuid4()
         optimization_run_id = uuid4()

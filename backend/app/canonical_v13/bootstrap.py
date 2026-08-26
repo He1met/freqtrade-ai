@@ -44,6 +44,12 @@ from app.canonical_v13.order_recovery_evidence_acl_upgrade import (
     CanonicalOrderRecoveryEvidenceAclUpgradeBlocked,
     verify_order_recovery_evidence_acl_upgrade,
 )
+from app.canonical_v13.continuous_demo_acl_upgrade import (
+    CONTINUOUS_RECONCILIATION_WRITER_READ_DELTA,
+    CONTINUOUS_RISK_WRITER_READ_DELTA,
+    CanonicalContinuousDemoAclUpgradeBlocked,
+    verify_continuous_demo_acl_upgrade,
+)
 
 
 LOCAL_ROLE_PREFIX: Final = "freqtrade_ai_v13_"
@@ -183,6 +189,25 @@ def _accepted_additive_table_grants(
         accepted.update(
             (order_writer, table_name, "SELECT")
             for table_name in ORDER_WRITER_RECOVERY_READ_DELTA
+        )
+    try:
+        continuous_demo_acl = verify_continuous_demo_acl_upgrade(
+            connection, role_mapping=role_mapping
+        )
+    except CanonicalContinuousDemoAclUpgradeBlocked:
+        continuous_demo_acl = None
+    if continuous_demo_acl is not None and continuous_demo_acl.status == "ACCEPTED":
+        risk_writer = role_mapping.physical("canonical_risk_writer")
+        reconciliation_writer = role_mapping.physical(
+            "canonical_reconciliation_writer"
+        )
+        accepted.update(
+            (risk_writer, table_name, "SELECT")
+            for table_name in CONTINUOUS_RISK_WRITER_READ_DELTA
+        )
+        accepted.update(
+            (reconciliation_writer, table_name, "SELECT")
+            for table_name in CONTINUOUS_RECONCILIATION_WRITER_READ_DELTA
         )
     return accepted
 
