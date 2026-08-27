@@ -989,6 +989,14 @@ def test_production_research_control_surface_binds_exact_attempt_and_projects_st
             "REQUIRED_WINDOW_GATE_FAILED"
         )
         assert completed["qualification"]["evidence_count"] == 1
+        strategy = client.get(
+            f"{API_PREFIX}/strategies/{submission['strategy_id']}"
+        ).json()
+        assert strategy["status"] == "REJECTED"
+        assert strategy["status_domain"] == "LATEST_QUALIFICATION_DECISION"
+        assert strategy["qualification_status"] == strategy["status"]
+        assert strategy["catalog_status"] == "DRAFT"
+        assert strategy["validation_status"] == "UNVALIDATED"
     finally:
         client.close()
         engine.dispose()

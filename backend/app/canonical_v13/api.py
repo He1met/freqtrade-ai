@@ -117,6 +117,8 @@ from app.canonical_v13.dto import (
     ResearchGateEvaluationProjectionDTO,
     ResearchQualificationProjectionDTO,
     ResearchQualificationWindowEvidenceProjectionDTO,
+    ResearchRunCatalogProjectionDTO,
+    ResearchRunProjectionDTO,
     ResearchPlanCatalogProjectionDTO,
     ResearchResultsProjectionDTO,
     ResearchScoreProjectionDTO,
@@ -291,6 +293,10 @@ from app.canonical_v13.models import (
     VALIDATION_PLAN_WINDOWS_TABLE,
     VALIDATION_WINDOW_RESULTS_TABLE,
 )
+from app.canonical_v13.research_catalog import (
+    get_research_result,
+    list_research_results,
+)
 
 
 API_PREFIX = "/api/canonical-v13"
@@ -422,7 +428,10 @@ def _qualification_status(connection: Connection, strategy_version_id: UUID) -> 
         .where(
             QUALIFICATION_DECISIONS_TABLE.c.strategy_version_id == strategy_version_id
         )
-        .order_by(QUALIFICATION_DECISIONS_TABLE.c.created_at.desc())
+        .order_by(
+            QUALIFICATION_DECISIONS_TABLE.c.created_at.desc(),
+            QUALIFICATION_DECISIONS_TABLE.c.id.desc(),
+        )
         .limit(1)
     ).scalar_one_or_none()
     return str(status) if status is not None else "NOT_EVALUATED"
@@ -469,6 +478,7 @@ def _strategy_projection(
             "BLOCKED_STRATEGY_ARTIFACT_MISSING",
             "current strategy version has no canonical artifact",
         )
+    qualification_status = _qualification_status(connection, version["id"])
     return StrategyProjectionDTO(
         strategy_id=strategy["id"],
         display_name=strategy["display_name"],
@@ -479,7 +489,8 @@ def _strategy_projection(
         artifact_id=artifact["id"],
         artifact_digest=artifact["content_digest"],
         validation_status=version["validation_status"],
-        qualification_status=_qualification_status(connection, version["id"]),
+        qualification_status=qualification_status,
+        status=qualification_status,
         execution_authorized=version["execution_authorized"],
         created_at=strategy["created_at"],
     )
@@ -1642,6 +1653,40 @@ def create_canonical_v13_app(
                     "BLOCKED_STRATEGY_NOT_FOUND", "canonical strategy is absent"
                 )
             return _strategy_projection(connection, dict(row))
+
+        return run_read(execute)
+
+    @app.get(
+        f"{API_PREFIX}/research-runs",
+        response_model=ResearchRunCatalogProjectionDTO,
+    )
+    def list_research_runs(
+        limit: int = Query(default=100, ge=1, le=200),
+    ) -> ResearchRunCatalogProjectionDTO:
+        def execute(connection: Connection) -> ResearchRunCatalogProjectionDTO:
+            items = [
+                ResearchRunProjectionDTO(**item.model_dump(mode="python"))
+                for item in list_research_results(connection, limit=limit)
+            ]
+            return ResearchRunCatalogProjectionDTO(
+                status="AVAILABLE" if items else "EMPTY", items=items
+            )
+
+        return run_read(execute)
+
+    @app.get(
+        f"{API_PREFIX}/research-runs/{{run_id}}",
+        response_model=ResearchRunProjectionDTO,
+    )
+    def get_research_run(run_id: str) -> ResearchRunProjectionDTO:
+        def execute(connection: Connection) -> ResearchRunProjectionDTO:
+            item = get_research_result(connection, run_id=run_id)
+            if item is None:
+                raise CanonicalAPIBlocked(
+                    "BLOCKED_RESEARCH_RUN_NOT_FOUND",
+                    "research run is absent from the minimal catalog",
+                )
+            return ResearchRunProjectionDTO(**item.model_dump(mode="python"))
 
         return run_read(execute)
 

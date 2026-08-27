@@ -22,7 +22,7 @@ CANONICAL_MANIFEST_KEY: Final = "canonical-v13-table-manifest-v1"
 CANONICAL_LEGACY_IMPORT_MODE: Final = "EXTERNAL_LATEST_ONLY"
 CANONICAL_TRADING_CAPABILITY: Final = "TRADING_DISABLED"
 CANONICAL_PRODUCTION_DEFAULT: Final = "UNSET"
-CANONICAL_AUTHORITY_REVISION: Final = "20260824_optimization_observability15"
+CANONICAL_AUTHORITY_REVISION: Final = "20260827_minimal_research_catalog16"
 CANONICAL_PREDECESSOR_RUNTIME_IDENTITY_INDEX: Final = (
     "uq_runtime_instances_runtime_identity"
 )
@@ -70,6 +70,7 @@ _DOMAIN_AUTHORITIES = {
     "validation": "EXACT_PLAN_WINDOW_AND_ATTEMPT_EVIDENCE",
     "scoring_qualification": "SEPARATE_SCORER_AND_QUALIFIER_AUTHORITIES",
     "optimization": "CONTROLLED_POST_BASELINE_EXPERIMENT",
+    "research_catalog": "OFFLINE_RESULT_CATALOG_ONLY",
     "approval_deployment": "INDEPENDENT_HUMAN_AND_RUNTIME_GATES",
     "execution": "SIGNAL_RISK_ORDER_FILL_LEDGER_LINEAGE",
 }
@@ -128,6 +129,7 @@ _TABLES_BY_DOMAIN = {
         "optimization_runs",
         "optimization_trials",
     ),
+    "research_catalog": ("research_run_catalog",),
     "approval_deployment": (
         "deployment_approvals",
         "deployments",
@@ -179,6 +181,7 @@ _WRITER_TABLE_ALLOWLIST = {
         *_TABLES_BY_DOMAIN["intake_catalog"],
         *_TABLES_BY_DOMAIN["control_plane"],
         *_TABLES_BY_DOMAIN["market"],
+        *_TABLES_BY_DOMAIN["research_catalog"],
     ),
     "canonical_validation_writer": _TABLES_BY_DOMAIN["validation"],
     "canonical_scoring_writer": ("target_scores",),
@@ -243,6 +246,7 @@ _RESEARCH_READER_TABLES = (
     "research_gate_receipts",
     "validation_plans",
     "validation_plan_windows",
+    "research_run_catalog",
 )
 _RUNTIME_READER_TABLES = (
     "schema_metadata",
