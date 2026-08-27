@@ -924,6 +924,29 @@ OPTIMIZATION_RUNS_TABLE = _table(
     ),
 )
 
+
+# Historical/offline research that cannot honestly satisfy formal canonical lineage.
+# Rows are descriptive only: they do not authorize qualification or trading.
+RESEARCH_RUN_CATALOG_TABLE = _table(
+    "research_run_catalog",
+    Column("run_id", String(160), primary_key=True),
+    Column("name", String(240), nullable=False),
+    Column("hypothesis", Text, nullable=False),
+    Column("universe", JSON, nullable=False),
+    Column("timeframe", String(32), nullable=False),
+    Column("status", String(48), nullable=False),
+    Column("reason_code", String(160), nullable=False),
+    _digest("dataset_digest"),
+    Column("artifact_path", Text, nullable=False),
+    _digest("result_digest"),
+    Column("train_validation_holdout_summary", JSON, nullable=False),
+    Column("metrics_summary", JSON, nullable=False),
+    _created_at(),
+    UniqueConstraint(
+        "result_digest", name="research_run_catalog_result_digest_unique"
+    ),
+)
+
 OPTIMIZATION_TRIALS_TABLE = _table(
     "optimization_trials",
     _uuid_id(),

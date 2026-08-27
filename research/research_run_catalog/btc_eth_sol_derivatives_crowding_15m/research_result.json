@@ -1,0 +1,23 @@
+{
+  "run_id": "btc-eth-sol-derivatives-crowding-4h1h15m-v13-20260825",
+  "name": "BTC ETH SOL derivatives crowding 15m",
+  "hypothesis": "Cross-asset crowding dislocations in basis, funding, open interest and price may mean-revert after realistic costs.",
+  "universe": ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "SOL-USDT-SWAP"],
+  "timeframe": "15m",
+  "status": "BOUNDED_NEGATIVE",
+  "reason_code": "TRAIN_NO_EDGE_STOP_WITHOUT_VALIDATION_PNL",
+  "dataset_digest": "72583638bc94532fa24cd2e5ac519a7d942b02f011a5884b09ce064080114a6c",
+  "artifact_path": "/Users/shenjianpeng/.codex/derivatives-crowding-results-WuEKyZPB/validation.json",
+  "result_digest": "f1c39f0ea628028e6a33e68bbe63ee89b50715a5f7054012eb2d81d9857b2eb2",
+  "train_validation_holdout_summary": {
+    "train": "NO_EDGE_STOP",
+    "validation": "NOT_EVALUATED",
+    "holdout": "SEALED_UNREAD"
+  },
+  "metrics_summary": {
+    "frozen_configuration_count": 6,
+    "finalist_count": 0,
+    "holdout_evaluation_count": 0
+  },
+  "created_at": "2026-08-27T01:25:32Z"
+}

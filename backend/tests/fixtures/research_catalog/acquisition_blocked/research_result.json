@@ -1,0 +1,15 @@
+{
+  "run_id": "public-acquisition-pre-value",
+  "name": "public acquisition pre value",
+  "hypothesis": "Representative historical import case for a transport blocker before economic evaluation.",
+  "universe": ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "SOL-USDT-SWAP"],
+  "timeframe": "15m",
+  "status": "DATA_ACQUISITION_BLOCKED_PRE_VALUE",
+  "reason_code": "BLOCKED_LIVE_CONTENT_LENGTH_NONE",
+  "dataset_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+  "artifact_path": "research/results/public-acquisition/blocked.json",
+  "result_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+  "train_validation_holdout_summary": {"train": "NOT_STARTED", "validation": "NOT_EVALUATED", "holdout": "SEALED_UNREAD"},
+  "metrics_summary": {"fixture_case": 2},
+  "created_at": "2026-08-26T17:41:00Z"
+}

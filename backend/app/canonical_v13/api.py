@@ -117,6 +117,8 @@ from app.canonical_v13.dto import (
     ResearchGateEvaluationProjectionDTO,
     ResearchQualificationProjectionDTO,
     ResearchQualificationWindowEvidenceProjectionDTO,
+    ResearchRunCatalogProjectionDTO,
+    ResearchRunProjectionDTO,
     ResearchPlanCatalogProjectionDTO,
     ResearchResultsProjectionDTO,
     ResearchScoreProjectionDTO,
@@ -290,6 +292,10 @@ from app.canonical_v13.models import (
     VALIDATION_PLANS_TABLE,
     VALIDATION_PLAN_WINDOWS_TABLE,
     VALIDATION_WINDOW_RESULTS_TABLE,
+)
+from app.canonical_v13.research_catalog import (
+    get_research_result,
+    list_research_results,
 )
 
 
@@ -1642,6 +1648,40 @@ def create_canonical_v13_app(
                     "BLOCKED_STRATEGY_NOT_FOUND", "canonical strategy is absent"
                 )
             return _strategy_projection(connection, dict(row))
+
+        return run_read(execute)
+
+    @app.get(
+        f"{API_PREFIX}/research-runs",
+        response_model=ResearchRunCatalogProjectionDTO,
+    )
+    def list_research_runs(
+        limit: int = Query(default=100, ge=1, le=200),
+    ) -> ResearchRunCatalogProjectionDTO:
+        def execute(connection: Connection) -> ResearchRunCatalogProjectionDTO:
+            items = [
+                ResearchRunProjectionDTO(**item.model_dump(mode="python"))
+                for item in list_research_results(connection, limit=limit)
+            ]
+            return ResearchRunCatalogProjectionDTO(
+                status="AVAILABLE" if items else "EMPTY", items=items
+            )
+
+        return run_read(execute)
+
+    @app.get(
+        f"{API_PREFIX}/research-runs/{{run_id}}",
+        response_model=ResearchRunProjectionDTO,
+    )
+    def get_research_run(run_id: str) -> ResearchRunProjectionDTO:
+        def execute(connection: Connection) -> ResearchRunProjectionDTO:
+            item = get_research_result(connection, run_id=run_id)
+            if item is None:
+                raise CanonicalAPIBlocked(
+                    "BLOCKED_RESEARCH_RUN_NOT_FOUND",
+                    "research run is absent from the minimal catalog",
+                )
+            return ResearchRunProjectionDTO(**item.model_dump(mode="python"))
 
         return run_read(execute)
 

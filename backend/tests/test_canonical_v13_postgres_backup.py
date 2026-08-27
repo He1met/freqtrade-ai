@@ -50,11 +50,11 @@ def test_plan_is_offline_exact_and_never_executes() -> None:
         "business_schema": CANONICAL_BUSINESS_SCHEMA,
         "canonical_manifest_digest": CANONICAL_MANIFEST_DIGEST,
         "authority_mapping_digest": backup.local_role_mapping().mapping_digest,
-        "table_count": 58,
+        "table_count": 59,
         "credential_values_recorded": False,
         "execution_performed": False,
     }
-    assert len(CANONICAL_TABLE_NAMES) == 58
+    assert len(CANONICAL_TABLE_NAMES) == 59
 
 
 def test_restore_trigger_contract_includes_exact_phase9_transition_guards() -> None:
@@ -167,7 +167,7 @@ def test_dump_command_is_exact_data_only_and_excludes_identity_data() -> None:
         f"--table={CANONICAL_BUSINESS_SCHEMA}.{name}"
         for name in CANONICAL_TABLE_NAMES
     ]
-    assert len(table_arguments) == 58
+    assert len(table_arguments) == 59
     rendered = " ".join(command)
     assert "secret" not in rendered
     assert "password" not in rendered
@@ -236,7 +236,7 @@ def test_create_backup_uses_fake_runner_and_writes_atomic_manifest(
         ),
     )
     assert result["status"] == "BACKED_UP"
-    assert result["table_count"] == 58
+    assert result["table_count"] == 59
     assert result["credential_values_recorded"] is False
     assert len(observed) == 1
     manifest = json.loads(Path(result["manifest_path"]).read_text(encoding="utf-8"))
