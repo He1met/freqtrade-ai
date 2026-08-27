@@ -103,6 +103,57 @@ def test_exit_uses_authenticated_guard_observation_as_operation_clock(monkeypatc
     assert observed_times == [guard.observed_at] * 3
 
 
+def test_open_uses_authenticated_probe_observation_as_operation_clock(monkeypatch) -> None:
+    @contextmanager
+    def connection_factory():
+        yield object()
+
+    probe = SimpleNamespace(observed_at=NOW + timedelta(seconds=1))
+    attestation_id = uuid4()
+    risk_decision_id = uuid4()
+    signal_id = uuid4()
+    receipt = SimpleNamespace(probe_receipt_id=uuid4())
+    observed_times = []
+    operator = ContinuousDemoSoakOperator(
+        reader_factory=connection_factory,
+        deployment_factory=connection_factory,
+        approval_factory=connection_factory,
+        risk_factory=connection_factory,
+        order_factory=connection_factory,
+        fill_factory=connection_factory,
+        ledger_factory=connection_factory,
+        reconciliation_factory=connection_factory,
+        session_factory=ForbiddenSessionFactory(),
+        holder_token_digest="e" * 64,
+    )
+    monkeypatch.setattr(operator, "_active_deployment_id", uuid4)
+    monkeypatch.setattr(
+        operator,
+        "_fresh_flat_probe",
+        lambda **_kwargs: (
+            probe,
+            SimpleNamespace(attestation_id=attestation_id),
+            receipt,
+        ),
+    )
+    monkeypatch.setattr(
+        soak_module,
+        "grant_continuous_open",
+        lambda *_args, **kwargs: (
+            observed_times.append(kwargs["evaluated_at"])
+            or SimpleNamespace(risk_decision_id=risk_decision_id)
+        ),
+    )
+    monkeypatch.setattr(
+        operator,
+        "_prepare_and_dispatch",
+        lambda *_args, **kwargs: observed_times.append(kwargs["now"]) or "advanced",
+    )
+
+    assert operator._grant_open(signal_id, now=NOW) == "advanced"
+    assert observed_times == [probe.observed_at] * 2
+
+
 def test_openings_disabled_and_flat_is_drained_without_private_okx(  # noqa: F811
     canonical_connection,  # noqa: F811
 ):

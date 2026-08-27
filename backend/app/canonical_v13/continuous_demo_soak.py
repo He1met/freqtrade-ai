@@ -689,21 +689,25 @@ class ContinuousDemoSoakOperator:
 
     def _grant_open(self, signal_id: UUID, *, now: datetime) -> ContinuousDemoSoakResult:
         deployment_id = self._active_deployment_id()
-        _probe, attestation, receipt = self._fresh_flat_probe(
+        probe, attestation, receipt = self._fresh_flat_probe(
             deployment_id=deployment_id, now=now
         )
+        # The authenticated exchange snapshots are observed after the tick's
+        # initial timestamp. Bind the grant and order authority checks to that
+        # newer observation, matching the position-exit path below.
+        operation_now = max(now, probe.observed_at)
         with self._risk_factory() as connection:
             grant = grant_continuous_open(
                 connection,
                 signal_id=signal_id,
                 probe_receipt_id=receipt.probe_receipt_id,
-                evaluated_at=now,
+                evaluated_at=operation_now,
             )
         return self._prepare_and_dispatch(
             grant.risk_decision_id,
             attestation.attestation_id,
             signal_id=signal_id,
-            now=now,
+            now=operation_now,
         )
 
     def tick(
