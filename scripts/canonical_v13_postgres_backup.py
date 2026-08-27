@@ -99,7 +99,7 @@ from app.canonical_v13.continuous_demo_acl_upgrade import (  # noqa: E402
 )
 
 BACKUP_CONTRACT: Final = "canonical-v13-postgres-data-backup-v2"
-EXPECTED_TABLE_COUNT: Final = 58
+EXPECTED_TABLE_COUNT: Final = 59
 IDENTITY_TABLE: Final = "schema_metadata"
 RESTORE_NAME_PATTERN: Final = re.compile(
     rf"{re.escape(LOCAL_DATABASE_NAME)}_restore_[a-z0-9][a-z0-9_]*"
@@ -200,7 +200,7 @@ def _require_exact_manifest() -> None:
     ):
         raise CanonicalBackupBlocked(
             "BLOCKED_CANONICAL_BACKUP_TABLE_MANIFEST",
-            "the reviewed canonical manifest must contain exactly 58 unique tables",
+            "the reviewed canonical manifest must contain exactly 59 unique tables",
         )
     forbidden = tuple(
         name

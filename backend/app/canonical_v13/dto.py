@@ -312,6 +312,12 @@ class StrategyProjectionDTO(CanonicalProjectionDTO):
         "NOT_EVALUATED", "PENDING", "QUALIFIED", "REJECTED", "BLOCKED", "FAILED"
     ]
     qualification_status_domain: Literal["OOS_PLAN"] = "OOS_PLAN"
+    status: Literal[
+        "NOT_EVALUATED", "PENDING", "QUALIFIED", "REJECTED", "BLOCKED", "FAILED"
+    ]
+    status_domain: Literal["LATEST_QUALIFICATION_DECISION"] = (
+        "LATEST_QUALIFICATION_DECISION"
+    )
     execution_authorized: bool
     created_at: datetime
 
@@ -319,6 +325,27 @@ class StrategyProjectionDTO(CanonicalProjectionDTO):
 class StrategyCatalogProjectionDTO(CanonicalProjectionDTO):
     status: Literal["EMPTY", "AVAILABLE"]
     items: list[StrategyProjectionDTO]
+
+
+class ResearchRunProjectionDTO(CanonicalProjectionDTO):
+    run_id: str
+    name: str
+    hypothesis: str
+    universe: list[str]
+    timeframe: str
+    status: str
+    reason_code: str
+    dataset_digest: str = Field(pattern=SHA256_PATTERN)
+    artifact_path: str
+    result_digest: str = Field(pattern=SHA256_PATTERN)
+    train_validation_holdout_summary: dict[str, Any]
+    metrics_summary: dict[str, Any]
+    created_at: datetime
+
+
+class ResearchRunCatalogProjectionDTO(CanonicalProjectionDTO):
+    status: Literal["EMPTY", "AVAILABLE"]
+    items: list[ResearchRunProjectionDTO]
 
 
 class ConfigurationDependencyCommandDTO(CanonicalCommandDTO):
