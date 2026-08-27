@@ -187,6 +187,97 @@ def _production_chain(
     return approval, deployment, runtime_id, intent_id, None
 
 
+def test_natural_signal_same_closed_candle_is_persisted_once(
+    canonical_connection,
+) -> None:
+    with canonical_connection.begin():
+        _approval, deployment, runtime_id, _intent_id, _ = _production_chain(
+            canonical_connection, create_intent=False
+        )
+        from app.canonical_v13.models import SIGNALS_TABLE
+
+        seed_signal = (
+            canonical_connection.execute(
+                select(SIGNALS_TABLE).where(
+                    SIGNALS_TABLE.c.runtime_instance_id == runtime_id
+                )
+            )
+            .mappings()
+            .one()
+        )
+        base_payload = {
+            "evidence_class": "PRODUCTION_OKX_DEMO",
+            "natural_signal": True,
+            "allow_real_funds": False,
+            "configuration_bundle_digest": seed_signal[
+                "configuration_bundle_digest"
+            ],
+            "market_snapshot_digest": seed_signal["market_snapshot_digest"],
+            "instrument": "BTC-USDT-SWAP",
+            "evaluator_identity": "canonical-four-hour-natural-long-baseline-v8",
+            "evaluation": {
+                "direction": "LONG",
+                "closed_candle": True,
+                "candle_opened_at": "2026-08-27T06:00:00+00:00",
+                "volume": "12.5",
+                "effective_strategy_leverage": "12",
+                "artifact_digest": "a" * 64,
+            },
+        }
+        first_payload = {
+            **base_payload,
+            "evaluated_at": (NOW + timedelta(seconds=2)).isoformat(),
+            "market_evidence_id": "evidence-first",
+            "market_evidence_digest": "b" * 64,
+        }
+        replay_payload = {
+            **base_payload,
+            "evaluated_at": (NOW + timedelta(seconds=3)).isoformat(),
+            "market_evidence_id": "evidence-replay",
+            "market_evidence_digest": "c" * 64,
+        }
+
+        first_id = record_production_demo_signal(
+            canonical_connection,
+            deployment_id=deployment.deployment_id,
+            runtime_instance_id=runtime_id,
+            research_target_id=seed_signal["research_target_id"],
+            signal_json=first_payload,
+            evaluated_at=NOW + timedelta(seconds=2),
+        )
+        replay_id = record_production_demo_signal(
+            canonical_connection,
+            deployment_id=deployment.deployment_id,
+            runtime_instance_id=runtime_id,
+            research_target_id=seed_signal["research_target_id"],
+            signal_json=replay_payload,
+            evaluated_at=NOW + timedelta(seconds=3),
+        )
+
+        assert replay_id == first_id
+        signal_count = canonical_connection.execute(
+            select(func.count()).select_from(SIGNALS_TABLE)
+        ).scalar_one()
+        assert signal_count == 2
+
+        drift_payload = {
+            **replay_payload,
+            "evaluation": {**base_payload["evaluation"], "volume": "12.6"},
+        }
+        with pytest.raises(
+            CanonicalExecutionChainBlocked,
+            match="BLOCKED_SIGNAL_REPLAY_DRIFT",
+        ):
+            record_production_demo_signal(
+                canonical_connection,
+                deployment_id=deployment.deployment_id,
+                runtime_instance_id=runtime_id,
+                research_target_id=seed_signal["research_target_id"],
+                signal_json=drift_payload,
+                evaluated_at=NOW + timedelta(seconds=4),
+            )
+
+
 def test_same_qualification_rollover_requires_exact_recovery_approval(
     canonical_connection,
 ) -> None:

@@ -215,6 +215,57 @@ def record_production_demo_signal(
             "natural Demo signal must bind the exact frozen deployment lineage",
         )
     signal_digest = canonical_execution_digest(payload)
+    candle_identity = _natural_signal_candle_identity(payload)
+    if candle_identity is not None:
+        lock_execution_boundary(
+            effective,
+            key=(
+                f"production-signal-candle:{deployment_id}:"
+                f"{research_target_id}:{candle_identity}"
+            ),
+        )
+        candle_matches = [
+            row
+            for row in (
+                effective.execute(
+                    select(SIGNALS_TABLE)
+                    .where(
+                        SIGNALS_TABLE.c.deployment_id == deployment_id,
+                        SIGNALS_TABLE.c.research_target_id == research_target_id,
+                        SIGNALS_TABLE.c.source_kind == "NATURAL_STRATEGY_SIGNAL",
+                    )
+                    .order_by(SIGNALS_TABLE.c.created_at, SIGNALS_TABLE.c.id)
+                )
+                .mappings()
+                .all()
+            )
+            if _natural_signal_candle_identity(row["signal_json"])
+            == candle_identity
+        ]
+        if candle_matches:
+            stable_projection = _natural_signal_stable_projection(payload)
+            if any(
+                row["strategy_version_id"] != deployment["strategy_version_id"]
+                or row["configuration_bundle_id"]
+                != deployment["configuration_bundle_id"]
+                or row["configuration_bundle_digest"]
+                != deployment["configuration_bundle_digest"]
+                or row["market_snapshot_id"] != deployment["market_snapshot_id"]
+                or row["market_snapshot_digest"]
+                != deployment["market_snapshot_digest"]
+                or _natural_signal_stable_projection(row["signal_json"])
+                != stable_projection
+                for row in candle_matches
+            ):
+                raise CanonicalExecutionChainBlocked(
+                    "BLOCKED_SIGNAL_REPLAY_DRIFT",
+                    "persisted natural candle signal semantics differ",
+                )
+            # Historical releases could append the same closed-candle signal on
+            # every heartbeat because evaluated_at and market evidence changed.
+            # Preserve those immutable rows, but converge every later replay on
+            # the earliest exact semantic signal.
+            return candle_matches[0]["id"]
     lock_execution_boundary(
         effective,
         key=f"production-signal:{runtime_instance_id}:{research_target_id}:{signal_digest}",
@@ -260,6 +311,67 @@ def record_production_demo_signal(
         )
     )
     return signal_id
+
+
+def _natural_signal_candle_identity(payload: Mapping[str, object]) -> str | None:
+    evaluation = payload.get("evaluation")
+    if not isinstance(evaluation, Mapping):
+        return None
+    instrument = payload.get("instrument")
+    candle_opened_at = evaluation.get("candle_opened_at")
+    if (
+        payload.get("natural_signal") is not True
+        or evaluation.get("closed_candle") is not True
+        or not isinstance(instrument, str)
+        or not instrument
+        or not isinstance(candle_opened_at, str)
+        or not candle_opened_at
+    ):
+        return None
+    return canonical_execution_digest(
+        {
+            "contract": "canonical-v13-natural-signal-candle-identity-v1",
+            "instrument": instrument,
+            "candle_opened_at": candle_opened_at,
+        }
+    )
+
+
+def _natural_signal_stable_projection(
+    payload: Mapping[str, object],
+) -> Mapping[str, object]:
+    evaluation = payload.get("evaluation")
+    evaluation_mapping = evaluation if isinstance(evaluation, Mapping) else {}
+    return {
+        "qualification_decision_id": payload.get("qualification_decision_id"),
+        "qualification_decision_digest": payload.get(
+            "qualification_decision_digest"
+        ),
+        "deployment_approval_id": payload.get("deployment_approval_id"),
+        "deployment_approval_digest": payload.get("deployment_approval_digest"),
+        "deployment_id": payload.get("deployment_id"),
+        "strategy_version_id": payload.get("strategy_version_id"),
+        "research_target_id": payload.get("research_target_id"),
+        "configuration_bundle_id": payload.get("configuration_bundle_id"),
+        "configuration_bundle_digest": payload.get(
+            "configuration_bundle_digest"
+        ),
+        "market_snapshot_id": payload.get("market_snapshot_id"),
+        "market_snapshot_digest": payload.get("market_snapshot_digest"),
+        "instrument": payload.get("instrument"),
+        "evaluator_identity": payload.get("evaluator_identity"),
+        "evaluation": {
+            field: evaluation_mapping.get(field)
+            for field in (
+                "direction",
+                "closed_candle",
+                "candle_opened_at",
+                "volume",
+                "effective_strategy_leverage",
+                "artifact_digest",
+            )
+        },
+    }
 
 
 __all__ = ["record_production_demo_signal", "record_simulated_signal"]
