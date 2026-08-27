@@ -76,6 +76,27 @@ export type StrategyCatalogProjection = {
   items: StrategyProjection[];
 };
 
+export type ResearchRunProjection = {
+  run_id: string;
+  name: string;
+  hypothesis: string;
+  universe: string[];
+  timeframe: string;
+  status: string;
+  reason_code: string;
+  dataset_digest: Sha256Digest;
+  artifact_path: string;
+  result_digest: Sha256Digest;
+  train_validation_holdout_summary: Record<string, unknown>;
+  metrics_summary: Record<string, unknown>;
+  created_at: IsoDateTime;
+};
+
+export type ResearchRunCatalogProjection = {
+  status: "EMPTY" | "AVAILABLE";
+  items: ResearchRunProjection[];
+};
+
 export type ConfigurationDependencyCommand = {
   version_id: CanonicalId;
   expected_kind: string;

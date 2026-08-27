@@ -74,6 +74,11 @@ PHASE9_EXTENSION_TABLE_NAMES: Final[tuple[str, ...]] = tuple(
 PREVIOUS_ACL_CONTRACT_DIGEST: Final = (
     "af302c492883a901798b7c86f4f0c9d457bd942037498571e0f8b962e1948263"
 )
+# Tables added after the frozen Phase 9 predecessor must not mutate that
+# historical ACL contract or be mistaken for Phase 9 rollback drift.
+_POST_PHASE9_TABLE_NAMES: Final[frozenset[str]] = frozenset(
+    {"research_run_catalog"}
+)
 # Frozen #781 delta on tables which survive a Phase 9 rollback.  Extension-table
 # grants disappear with their tables and therefore are deliberately absent.
 PHASE9_SURVIVING_TABLE_GRANT_DELTA: Final[tuple[tuple[str, str, str], ...]] = (
@@ -297,6 +302,7 @@ def _current_surviving_table_grants() -> set[tuple[str, str, str]]:
         set(CANONICAL_TABLE_NAMES)
         - set(PHASE9_EXTENSION_TABLE_NAMES)
         - {"runtime_image_acceptances", "acceptance_signal_triggers"}
+        - _POST_PHASE9_TABLE_NAMES
     )
     grants: dict[tuple[str, str], set[str]] = {}
     for writer, table_names in WRITER_TABLE_ALLOWLIST.items():
@@ -330,6 +336,7 @@ def _previous_acl_payload() -> dict[str, object]:
             set(CANONICAL_TABLE_NAMES)
             - set(PHASE9_EXTENSION_TABLE_NAMES)
             - {"runtime_image_acceptances", "acceptance_signal_triggers"}
+            - _POST_PHASE9_TABLE_NAMES
         )
     )
     previous_grants = tuple(
@@ -403,6 +410,7 @@ def _verify_previous_acl(
                 "owner": owner,
             },
         )
+        if str(row[1]) not in _POST_PHASE9_TABLE_NAMES
     }
     expected = {
         (resolved.physical(role), table_name, privilege)

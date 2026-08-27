@@ -39,7 +39,7 @@ def test_offline_upgrade_and_rollback_plans_are_exact_and_non_destructive() -> N
 
     assert plan["previous_manifest_digest"] == PREVIOUS_CANONICAL_MANIFEST_DIGEST
     assert plan["current_manifest_digest"] == CANONICAL_MANIFEST_DIGEST
-    assert plan["table_count"] == len(CANONICAL_TABLE_NAMES) == 58
+    assert plan["table_count"] == len(CANONICAL_TABLE_NAMES) == 59
     assert tuple(plan["research_tables"]) == RESEARCH_AUTHORITY_TABLES
     assert plan["destructive_table_operations"] == []
     assert "DROP " not in (upgrade + rollback).upper()

@@ -9,10 +9,10 @@ def _verification() -> bootstrap.BootstrapVerification:
     return bootstrap.BootstrapVerification(
         accepted=True,
         problems=(),
-        table_count=58,
+        table_count=59,
         business_row_count=None,
         capability_role_count=18,
-        explicit_acl_count=362,
+        explicit_acl_count=366,
     )
 
 

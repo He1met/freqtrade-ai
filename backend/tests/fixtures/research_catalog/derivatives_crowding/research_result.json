@@ -1,0 +1,15 @@
+{
+  "run_id": "derivatives-crowding-15m",
+  "name": "derivatives crowding 15m",
+  "hypothesis": "Representative historical import case for a bounded economic negative.",
+  "universe": ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "SOL-USDT-SWAP"],
+  "timeframe": "15m",
+  "status": "BOUNDED_NEGATIVE",
+  "reason_code": "TRAIN_NO_EDGE_STOP_WITHOUT_VALIDATION_PNL",
+  "dataset_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+  "artifact_path": "research/results/derivatives-crowding/validation.json",
+  "result_digest": "4444444444444444444444444444444444444444444444444444444444444444",
+  "train_validation_holdout_summary": {"train": "OBSERVED", "validation": "NOT_EVALUATED", "holdout": "SEALED_UNREAD"},
+  "metrics_summary": {"fixture_case": 1},
+  "created_at": "2026-08-26T17:40:00Z"
+}

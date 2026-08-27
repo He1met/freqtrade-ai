@@ -16,6 +16,7 @@ import {
   fetchCanonicalResearchGates,
   fetchCanonicalResearchChain,
   fetchCanonicalResearchPlans,
+  fetchCanonicalResearchRuns,
   fetchCanonicalResearchResults,
   fetchCanonicalRuntimeReadiness,
   fetchCanonicalStrategies,
@@ -148,10 +149,11 @@ test("the client exposes the canonical projection routes with one fetch each", a
   await fetchCanonicalOptimizations();
   await fetchCanonicalResearchChain(ID);
   await fetchCanonicalResearchPlans();
+  await fetchCanonicalResearchRuns();
   await fetchCanonicalResearchResults(ID);
   await fetchCanonicalResearchGates();
 
-  assert.equal(calls.length, 18);
+  assert.equal(calls.length, 19);
   assert.deepEqual(calls, [
     { input: `${CANONICAL_V13_API_ROOT}/submissions`, method: "POST" },
     { input: `${CANONICAL_V13_API_ROOT}/strategies`, method: "GET" },
@@ -169,6 +171,7 @@ test("the client exposes the canonical projection routes with one fetch each", a
     { input: `${CANONICAL_V13_API_ROOT}/optimizations`, method: "GET" },
     { input: `${CANONICAL_V13_API_ROOT}/research/validation-plans/${ID}`, method: "GET" },
     { input: `${CANONICAL_V13_API_ROOT}/research/validation-plans`, method: "GET" },
+    { input: `${CANONICAL_V13_API_ROOT}/research-runs`, method: "GET" },
     { input: `${CANONICAL_V13_API_ROOT}/research/validation-plans/${ID}/results`, method: "GET" },
     { input: `${CANONICAL_V13_API_ROOT}/research/gates`, method: "GET" },
   ]);
@@ -240,6 +243,26 @@ test("malformed 2xx payload is blocked at the runtime DTO boundary", async (cont
     }],
   });
   await assert.rejects(fetchCanonicalOptimizations(), /terminal_reason_codes has invalid shape/);
+
+  globalThis.fetch = async () => Response.json({
+    status: "AVAILABLE",
+    items: [{
+      run_id: "offline-run",
+      name: "Offline run",
+      hypothesis: "A falsifiable hypothesis",
+      universe: ["BTC-USDT-SWAP"],
+      timeframe: "15m",
+      status: "QUALIFIED",
+      reason_code: "INVALID_OFFLINE_PROMOTION",
+      dataset_digest: DIGEST,
+      artifact_path: "/tmp/result.json",
+      result_digest: DIGEST,
+      train_validation_holdout_summary: {},
+      metrics_summary: {},
+      created_at: "2026-08-27T00:00:00Z",
+    }],
+  });
+  await assert.rejects(fetchCanonicalResearchRuns(), /cannot claim QUALIFIED/);
 });
 
 test("client source contains no legacy fallback surface", async () => {

@@ -167,6 +167,7 @@ const emptyResponses: Record<string, unknown> = {
   },
   "/api/canonical-v13/optimizations": { status: "PENDING_FIRST_BACKTEST", items: [] },
   "/api/canonical-v13/research/gates": { status: "EMPTY", items: [] },
+  "/api/canonical-v13/research-runs": { status: "EMPTY", items: [] },
   "/api/canonical-v13/research/validation-plans": { status: "EMPTY", items: [] },
 };
 
@@ -246,6 +247,41 @@ test("seven canonical routes render true empty, blocked, and pending states with
   await expect(page.getByText("等待首次回测", { exact: true }).first()).toBeVisible();
   expect(calls.every((call) => call.includes("/api/canonical-v13/"))).toBe(true);
   expect(calls.some((call) => call.includes("/api/v1") || call.includes("/api/strategies"))).toBe(false);
+});
+
+test("research page shows offline history without promoting it into qualification", async ({ page }) => {
+  const calls = await installCanonicalMocks(page, {
+    "/api/canonical-v13/research-runs": {
+      status: "AVAILABLE",
+      items: [{
+        run_id: "cross-asset-crowding-current-main-20260827",
+        name: "跨资产拥挤反转 current-main 复跑",
+        hypothesis: "严格滞后确认后的衍生品拥挤反转。",
+        universe: ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "SOL-USDT-SWAP"],
+        timeframe: "15m",
+        status: "BOUNDED_NEGATIVE",
+        reason_code: "TRAIN_NO_EDGE_STOP_WITHOUT_VALIDATION_PNL",
+        dataset_digest: DIGEST,
+        artifact_path: "/tmp/research/RESULT.json",
+        result_digest: DIGEST,
+        train_validation_holdout_summary: {
+          train: "NO_EDGE_STOP",
+          validation: "NOT_EVALUATED",
+          holdout: "SEALED_UNREAD",
+        },
+        metrics_summary: { finalist_count: 0, f3_pooled_normal_return_pct: -1.414664 },
+        created_at: "2026-08-27T02:50:01Z",
+      }],
+    },
+  });
+  await page.goto("/v13/research");
+  await expect(page.getByRole("heading", { level: 2, name: "历史研究运行" })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 3, name: "跨资产拥挤反转 current-main 复跑" })).toBeVisible();
+  await expect(page.getByText("有界负结果", { exact: true })).toBeVisible();
+  await page.getByText("查看完整研究结果", { exact: true }).click();
+  await expect(page.locator(".canonical-v13-research-history-json").first()).toContainText("SEALED_UNREAD");
+  await expect(page.getByText("/tmp/research/RESULT.json", { exact: true })).toBeVisible();
+  expect(calls).toContain("GET /api/canonical-v13/research-runs");
 });
 
 test("default V1.3 pages expose selectors instead of manual internal identity inputs", async ({ page }) => {

@@ -1,0 +1,15 @@
+{
+  "run_id": "multi-asset-frozen-finalists",
+  "name": "multi asset frozen finalists",
+  "hypothesis": "Representative historical import case for frozen finalists awaiting formal validation.",
+  "universe": ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "SOL-USDT-SWAP"],
+  "timeframe": "15m",
+  "status": "FINALISTS_FROZEN",
+  "reason_code": "AWAITING_FORMAL_VALIDATION",
+  "dataset_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+  "artifact_path": "research/results/multi-asset/finalists.json",
+  "result_digest": "6666666666666666666666666666666666666666666666666666666666666666",
+  "train_validation_holdout_summary": {"train": "OBSERVED", "validation": "PENDING", "holdout": "SEALED_UNREAD"},
+  "metrics_summary": {"fixture_case": 3},
+  "created_at": "2026-08-26T17:42:00Z"
+}

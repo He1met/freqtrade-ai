@@ -1,0 +1,33 @@
+{
+  "run_id": "oi-contraction-closing-flow-exhaustion-reversal-v1-20260827",
+  "name": "OI 收缩与平仓流耗竭反转",
+  "hypothesis": "明显 OI 收缩、主动流和平仓价格位移共同出现时，拥挤平仓可能耗竭并在严格滞后确认后反转。",
+  "universe": [
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT"
+  ],
+  "timeframe": "15m",
+  "status": "BOUNDED_NEGATIVE",
+  "reason_code": "NO_DEVELOPMENT_SURVIVOR",
+  "dataset_digest": "8439617b3140f22c4d8296a2b7bc5205f2dca8ee8568c6ba14cd2a117dd2c26f",
+  "artifact_path": "/Users/shenjianpeng/.codex/worktrees/dda7/Freqtrade Ai/reports/research/fast-strategy-discovery/oi-contraction-closing-flow-exhaustion-reversal-v1/research_result.json",
+  "result_digest": "fdc16ca2f1e0915e3695d2d3a7e897ff690bb625cecd2412d8252393ab115d72",
+  "train_validation_holdout_summary": {
+    "train": "NO_DEVELOPMENT_SURVIVOR",
+    "development_fold_count": 2,
+    "development_survivor_count": 0,
+    "validation": "NOT_EVALUATED",
+    "validation_candidate_count": 0,
+    "holdout": "SEALED_UNREAD",
+    "holdout_evaluation_count": 0
+  },
+  "metrics_summary": {
+    "evaluated_candidate_count": 12,
+    "development_fold_evaluation_count": 24,
+    "finalist_count": 0,
+    "principal_failure": "ALL_CANDIDATE_FOLDS_FAILED_POST_COST_AND_CROSS_ASSET_GATES",
+    "experiment_key": "c6657591e1c7a16e3872bbedf85d98f0898415610c3fd04311b16d9ca548bc55"
+  },
+  "created_at": "2026-08-27T07:27:27Z"
+}

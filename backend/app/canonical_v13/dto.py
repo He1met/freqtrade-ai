@@ -321,6 +321,27 @@ class StrategyCatalogProjectionDTO(CanonicalProjectionDTO):
     items: list[StrategyProjectionDTO]
 
 
+class ResearchRunProjectionDTO(CanonicalProjectionDTO):
+    run_id: str
+    name: str
+    hypothesis: str
+    universe: list[str]
+    timeframe: str
+    status: str
+    reason_code: str
+    dataset_digest: str = Field(pattern=SHA256_PATTERN)
+    artifact_path: str
+    result_digest: str = Field(pattern=SHA256_PATTERN)
+    train_validation_holdout_summary: dict[str, Any]
+    metrics_summary: dict[str, Any]
+    created_at: datetime
+
+
+class ResearchRunCatalogProjectionDTO(CanonicalProjectionDTO):
+    status: Literal["EMPTY", "AVAILABLE"]
+    items: list[ResearchRunProjectionDTO]
+
+
 class ConfigurationDependencyCommandDTO(CanonicalCommandDTO):
     version_id: UUID
     expected_kind: str = Field(min_length=1, max_length=32)
