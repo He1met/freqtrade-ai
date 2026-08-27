@@ -16,6 +16,7 @@ import type { GateListProjection, Phase9AcceptanceStage, Phase9ReadinessProjecti
 import { CopyableValue, PageHeader } from "../../components/DisplayPrimitives";
 import { CanonicalResearchStepper } from "./CanonicalResearchStepper";
 import { CanonicalResearchResults } from "./CanonicalResearchResults";
+import { CanonicalResearchHistory } from "./CanonicalResearchHistory";
 import { CanonicalSearchSelect, type CanonicalSelectorAvailability } from "./CanonicalSearchSelect";
 import { CanonicalInlineReason, CanonicalQueryError, CanonicalStatePanel, CanonicalStatus, useCanonicalQuery } from "./CanonicalStatePanel";
 import { canonicalStatusesKnown, canonicalStatusPresentation, parseCanonicalUrlState, serializeCanonicalUrlState } from "./canonicalV13Model";
@@ -261,6 +262,7 @@ export function CanonicalResearchPage() {
   return (
     <div className="canonical-v13-page">
       <PageHeader description="Research 与 Runtime readiness 独立读取；所有选择来自 Canonical API，稳定标识只写入 URL。" eyebrow="V1.3 canonical-only" title="研究与 Runtime 状态" />
+      <CanonicalResearchHistory enabled={url.valid} />
       <section className="canonical-v13-selector-panel canonical-v13-selector-panel-wide" aria-label="研究上下文选择器">
         <CanonicalSearchSelect availability={configurationAvailability} label="Scope / Workflow 上下文" onChange={selectContext} options={contexts} value={contextValue} />
         <CanonicalSearchSelect availability={strategyAvailability} label="策略" onChange={selectStrategy} options={strategyOptions} value={selectedStrategyId ?? ""} />

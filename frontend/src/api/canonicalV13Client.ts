@@ -12,6 +12,7 @@ import type {
   Phase9AcceptanceStage,
   Phase9ReadinessProjection,
   ReadinessProjection,
+  ResearchRunCatalogProjection,
   ResearchPlanCatalogProjection,
   ResearchResultsProjection,
   ResearchChainProjection,
@@ -105,13 +106,15 @@ function validateSuccessDto(contract: string, value: unknown): void {
     researchChain: { validation_plan_id: "string", validation_plan_digest: "string", strategy_version_id: "string", research_target_id: "string", target_key: "string", plan_status: "string", validation_attempt_id: "nullable-string", attempt_status: "nullable-string", attempt_receipt_digest: "nullable-string", target_score_id: "nullable-string", overall_score: "nullable-string", score_digest: "nullable-string", qualification_decision_id: "nullable-string", qualification_status: "nullable-string", qualification_reason_code: "nullable-string", qualification_decision_digest: "nullable-string" },
     researchPlans: { status: "string", items: "array" },
     researchResults: { validation_plan_id: "string", validation_plan_digest: "string", strategy_version_id: "string", research_target_id: "string", target_key: "string", configuration_bundle_id: "string", configuration_bundle_digest: "string", market_snapshot_id: "string", market_snapshot_digest: "string", plan_status: "string", attempt: "nullable-object", windows: "array", score: "nullable-object", qualification: "nullable-object" },
+    researchRun: { run_id: "string", name: "string", hypothesis: "string", universe: "array", timeframe: "string", status: "string", reason_code: "string", dataset_digest: "string", artifact_path: "string", result_digest: "string", train_validation_holdout_summary: "object", metrics_summary: "object", created_at: "string" },
+    researchRuns: { status: "string", items: "array" },
     gates: { status: "string", items: "array" },
     phase9Readiness: { contract: "string", stage: "string", status: "string", reason_codes: "array", qualification_status_counts: "object", execution_domain_counts: "object", lineage_evidence_counts: "object", handoff: "nullable-object", topology_digest: "string", receipt_digest: "string" },
   };
   const shape = shapes[contract];
   if (!shape) throw new CanonicalV13ClientContractError("UNKNOWN_SUCCESS_DTO", contract);
   assertShape(contract, value, shape);
-  if (["strategies", "configurations", "marketInventory", "marketSnapshot", "optimizations", "researchPlans", "gates"].includes(contract)) {
+  if (["strategies", "configurations", "marketInventory", "marketSnapshot", "optimizations", "researchPlans", "researchRuns", "gates"].includes(contract)) {
     const itemsKey = contract === "marketInventory" ? "snapshots" : contract === "marketSnapshot" ? "members" : "items";
     assertRecordArray(`${contract}.${itemsKey}`, value[itemsKey]);
     if (contract === "configurations") {
@@ -178,6 +181,23 @@ function validateSuccessDto(contract: string, value: unknown): void {
     if (contract === "researchPlans") {
       for (const [index, plan] of (value.items as Record<string, unknown>[]).entries()) {
         assertShape(`researchPlans.items[${index}]`, plan, shapes.researchChain);
+      }
+    }
+    if (contract === "researchRuns") {
+      for (const [index, run] of (value.items as Record<string, unknown>[]).entries()) {
+        assertShape(`researchRuns.items[${index}]`, run, shapes.researchRun);
+        if (!(run.universe as unknown[]).every((member) => typeof member === "string" && member.trim())) {
+          throw new CanonicalV13ClientContractError(
+            "INVALID_SUCCESS_DTO",
+            `researchRuns.items[${index}].universe has invalid members`,
+          );
+        }
+        if (run.status === "QUALIFIED") {
+          throw new CanonicalV13ClientContractError(
+            "INVALID_SUCCESS_DTO",
+            `researchRuns.items[${index}] cannot claim QUALIFIED`,
+          );
+        }
       }
     }
   }
@@ -395,6 +415,10 @@ export function fetchCanonicalResearchChain(validationPlanId: string, signal?: A
 
 export function fetchCanonicalResearchPlans(signal?: AbortSignal) {
   return request<ResearchPlanCatalogProjection>("/research/validation-plans", "researchPlans", { signal });
+}
+
+export function fetchCanonicalResearchRuns(signal?: AbortSignal) {
+  return request<ResearchRunCatalogProjection>("/research-runs", "researchRuns", { signal });
 }
 
 export function fetchCanonicalResearchResults(validationPlanId: string, signal?: AbortSignal) {

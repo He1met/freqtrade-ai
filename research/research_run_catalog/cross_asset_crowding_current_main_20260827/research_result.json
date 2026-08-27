@@ -1,0 +1,37 @@
+{
+  "run_id": "cross-asset-crowding-impulse-reversal-current-main-20260827",
+  "name": "BTC ETH SOL 跨资产拥挤反转：current-main 复跑",
+  "hypothesis": "同方向 funding 变化与六小时 basis 异常、但 index 未确认时，代表局部衍生品拥挤；仅在闭合 4h regime 与 15m 确认一致时交易其反转。",
+  "universe": [
+    "BTC-USDT-SWAP",
+    "ETH-USDT-SWAP",
+    "SOL-USDT-SWAP"
+  ],
+  "timeframe": "15m",
+  "status": "BOUNDED_NEGATIVE",
+  "reason_code": "TRAIN_NO_EDGE_STOP_WITHOUT_VALIDATION_PNL",
+  "dataset_digest": "58937497e9042b014f2f0fa2652b789a2b7c59c9c285e50a274bff1c28758b32",
+  "artifact_path": "/Users/shenjianpeng/.codex/research-runs/narrow-current-main-20260827/RESULT.json",
+  "result_digest": "dd3ca0d48067cee7d76f9582d6f83d718da023f595427abb6b994ffdd35ba79f",
+  "train_validation_holdout_summary": {
+    "train": "NO_EDGE_STOP",
+    "train_fold_count": 4,
+    "train_winner_count": 0,
+    "validation": "NOT_EVALUATED",
+    "validation_pnl_read": false,
+    "holdout": "SEALED_UNREAD",
+    "holdout_evaluation_count": 0
+  },
+  "metrics_summary": {
+    "eligible_configuration_count": 3,
+    "economic_evaluation_count": 12,
+    "finalist_count": 0,
+    "f1_pooled_normal_return_pct": -6.140782,
+    "f2_pooled_normal_return_pct": -5.333525,
+    "f3_pooled_normal_return_pct": -1.414664,
+    "causal_panel_rows": 103806,
+    "dataset_digest_basis": "sha256(canonical RESULT.data)",
+    "baseline_sha": "49722c734861d6fea65ba9c92f8ab59996fc9ac7"
+  },
+  "created_at": "2026-08-27T02:50:01Z"
+}
