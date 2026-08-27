@@ -312,12 +312,6 @@ class StrategyProjectionDTO(CanonicalProjectionDTO):
         "NOT_EVALUATED", "PENDING", "QUALIFIED", "REJECTED", "BLOCKED", "FAILED"
     ]
     qualification_status_domain: Literal["OOS_PLAN"] = "OOS_PLAN"
-    status: Literal[
-        "NOT_EVALUATED", "PENDING", "QUALIFIED", "REJECTED", "BLOCKED", "FAILED"
-    ]
-    status_domain: Literal["LATEST_QUALIFICATION_DECISION"] = (
-        "LATEST_QUALIFICATION_DECISION"
-    )
     execution_authorized: bool
     created_at: datetime
 
