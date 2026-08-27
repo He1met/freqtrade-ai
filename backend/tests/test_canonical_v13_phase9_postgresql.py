@@ -647,7 +647,7 @@ def test_acceptance_signal_trigger_is_database_immutable() -> None:
                     role_mapping=mapping,
                     require_zero_business_rows=False,
                 )
-                assert composed.explicit_acl_count == 363
+                assert composed.explicit_acl_count == 367
                 assert not any(
                     "table grants" in problem for problem in composed.problems
                 )
@@ -1071,7 +1071,7 @@ def test_shadow_risk_acl_upgrade_is_exact_and_enables_lineage_replay(
                     service_principals=service_principals,
                 )
                 assert composed.accepted is True
-                assert composed.explicit_acl_count == 365
+                assert composed.explicit_acl_count == 369
 
                 connection.exec_driver_sql(
                     "GRANT UPDATE ON TABLE "
