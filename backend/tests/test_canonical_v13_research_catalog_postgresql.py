@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import os
+from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, func, select, text
@@ -17,6 +17,7 @@ from app.canonical_v13.research_catalog import (
     ResearchResult,
     apply_research_import,
     list_research_results,
+    load_research_result,
     plan_research_import,
 )
 from app.canonical_v13.research_catalog_upgrade import (
@@ -35,47 +36,17 @@ pytestmark = pytest.mark.skipif(
     reason="CANONICAL_V13_POSTGRES_URL is required for the isolated contract",
 )
 
+FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "research_catalog"
+FIXTURE_CASES = (
+    "derivatives_crowding",
+    "acquisition_blocked",
+    "finalists_frozen",
+)
+
 
 def _result(index: int) -> ResearchResult:
-    cases = (
-        (
-            "derivatives-crowding-15m",
-            "BOUNDED_NEGATIVE",
-            "TRAIN_NO_EDGE_STOP_WITHOUT_VALIDATION_PNL",
-            "research/results/derivatives-crowding/validation.json",
-        ),
-        (
-            "public-acquisition-pre-value",
-            "DATA_ACQUISITION_BLOCKED_PRE_VALUE",
-            "BLOCKED_LIVE_CONTENT_LENGTH_NONE",
-            "research/results/public-acquisition/blocked.json",
-        ),
-        (
-            "multi-asset-frozen-finalists",
-            "FINALISTS_FROZEN",
-            "AWAITING_FORMAL_VALIDATION",
-            "research/results/multi-asset/finalists.json",
-        ),
-    )
-    run_id, status, reason, artifact_path = cases[index]
-    return ResearchResult(
-        run_id=run_id,
-        name=run_id.replace("-", " "),
-        hypothesis=f"Representative historical import case {index + 1}.",
-        universe=["BTC-USDT-SWAP", "ETH-USDT-SWAP", "SOL-USDT-SWAP"],
-        timeframe="15m",
-        status=status,
-        reason_code=reason,
-        dataset_digest=f"{index + 1:x}" * 64,
-        artifact_path=artifact_path,
-        result_digest=f"{index + 4:x}" * 64,
-        train_validation_holdout_summary={
-            "train": "OBSERVED",
-            "validation": "NOT_EVALUATED",
-            "holdout": "SEALED_UNREAD",
-        },
-        metrics_summary={"fixture_case": index + 1},
-        created_at=datetime(2026, 8, 26, 17, 40 + index, tzinfo=timezone.utc),
+    return load_research_result(
+        FIXTURE_ROOT / FIXTURE_CASES[index] / "research_result.json"
     )
 
 

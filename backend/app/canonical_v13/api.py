@@ -428,10 +428,7 @@ def _qualification_status(connection: Connection, strategy_version_id: UUID) -> 
         .where(
             QUALIFICATION_DECISIONS_TABLE.c.strategy_version_id == strategy_version_id
         )
-        .order_by(
-            QUALIFICATION_DECISIONS_TABLE.c.created_at.desc(),
-            QUALIFICATION_DECISIONS_TABLE.c.id.desc(),
-        )
+        .order_by(QUALIFICATION_DECISIONS_TABLE.c.created_at.desc())
         .limit(1)
     ).scalar_one_or_none()
     return str(status) if status is not None else "NOT_EVALUATED"
@@ -478,7 +475,6 @@ def _strategy_projection(
             "BLOCKED_STRATEGY_ARTIFACT_MISSING",
             "current strategy version has no canonical artifact",
         )
-    qualification_status = _qualification_status(connection, version["id"])
     return StrategyProjectionDTO(
         strategy_id=strategy["id"],
         display_name=strategy["display_name"],
@@ -489,8 +485,7 @@ def _strategy_projection(
         artifact_id=artifact["id"],
         artifact_digest=artifact["content_digest"],
         validation_status=version["validation_status"],
-        qualification_status=qualification_status,
-        status=qualification_status,
+        qualification_status=_qualification_status(connection, version["id"]),
         execution_authorized=version["execution_authorized"],
         created_at=strategy["created_at"],
     )

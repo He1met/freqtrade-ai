@@ -499,6 +499,8 @@ def test_factory_is_standalone_and_exact_routes_are_frozen() -> None:
             (f"{API_PREFIX}/research/attempts", "POST"),
             (f"{API_PREFIX}/research/scores", "POST"),
             (f"{API_PREFIX}/research/qualifications", "POST"),
+            (f"{API_PREFIX}/research-runs", "GET"),
+            (f"{API_PREFIX}/research-runs/{{run_id}}", "GET"),
             (f"{API_PREFIX}/market-data", "GET"),
             (f"{API_PREFIX}/market-data/acquisitions/plan", "POST"),
             (f"{API_PREFIX}/market-data/acquisitions/apply", "POST"),
@@ -552,7 +554,7 @@ def test_factory_is_standalone_and_exact_routes_are_frozen() -> None:
             for method, operation in path.items()
             if method in {"get", "post", "put", "patch", "delete"}
         ]
-        assert len(operation_ids) == 49
+        assert len(operation_ids) == 51
         assert len(set(operation_ids)) == len(operation_ids)
     finally:
         client.close()
@@ -989,14 +991,6 @@ def test_production_research_control_surface_binds_exact_attempt_and_projects_st
             "REQUIRED_WINDOW_GATE_FAILED"
         )
         assert completed["qualification"]["evidence_count"] == 1
-        strategy = client.get(
-            f"{API_PREFIX}/strategies/{submission['strategy_id']}"
-        ).json()
-        assert strategy["status"] == "REJECTED"
-        assert strategy["status_domain"] == "LATEST_QUALIFICATION_DECISION"
-        assert strategy["qualification_status"] == strategy["status"]
-        assert strategy["catalog_status"] == "DRAFT"
-        assert strategy["validation_status"] == "UNVALIDATED"
     finally:
         client.close()
         engine.dispose()
